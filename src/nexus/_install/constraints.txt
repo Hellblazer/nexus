@@ -37,7 +37,7 @@ email-validator==2.3.0
 et-xmlfile==2.0.0
 fast-langdetect==0.2.5
 fastapi==0.162.0
-fastembed==0.8.1
+fastembed==0.9.1
 fasttext-predict==0.9.2.4
 ffmpeg-python==0.2.0
 filelock==4.2.4
@@ -116,7 +116,7 @@ packaging==26.3
 pandas==2.3.3
 pdfminer-six==20260107
 pdftext==0.6.3
-pillow==12.3.0
+pillow==13.0.0
 platformdirs==4.13.5
 propcache==0.5.4
 protobuf==7.36.2

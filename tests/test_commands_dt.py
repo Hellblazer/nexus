@@ -3039,23 +3039,53 @@ class TestAnUnexpectedExceptionFailsOneRecordNotTheBatch:
         assert "1 record(s) failed with an unexpected error" in result.output, result.output
 
     @pytest.mark.t2_tenant
-    @pytest.mark.parametrize("exc", [RuntimeError("extraction blew up"), ImportError("mineru is corrupt")],
-                             ids=["RuntimeError", "ImportError"])
-    def test_a_record_failed_by_runtime_or_import_error_also_exits_nonzero(
-        self, runner, monkeypatch, exc,
-    ) -> None:
+    def test_a_record_failed_by_runtime_or_import_error_also_exits_nonzero(self, runner, monkeypatch) -> None:
         """The (RuntimeError, ImportError) catch still fails only that record and the batch
         continues, but the run no longer exits 0 over a failed record: the same rule as the
         unexpected-exception path above, which would otherwise be the only way to a non-zero
-        exit from a defect."""
-        result, seq = self._file_backed(runner, monkeypatch, exc)
+        exit from a defect. Both errors run in one test so the pair mints one tenant (the
+        storage-touch ceiling, tests/storage_touch_ceiling.toml)."""
+        for exc in (RuntimeError("extraction blew up"), ImportError("mineru is corrupt")):
+            result, seq = self._file_backed(runner, monkeypatch, exc)
 
-        assert not seq, "U2 was never dispatched: the batch aborted after U1's exception"
-        assert "Indexed 1 record(s)" in result.output, result.output
-        assert "1 failed" in result.output, result.output
-        assert f"{type(exc).__name__}: {exc}" in result.output
-        assert result.exit_code == 1, result.output
-        assert "1 record(s) failed with RuntimeError or ImportError" in result.output, result.output
+            assert not seq, f"{type(exc).__name__}: U2 was never dispatched: the batch aborted after U1's exception"
+            assert "Indexed 1 record(s)" in result.output, result.output
+            assert "1 failed" in result.output, result.output
+            assert f"{type(exc).__name__}: {exc}" in result.output
+            assert result.exit_code == 1, result.output
+            assert "1 record(s) failed with RuntimeError or ImportError" in result.output, result.output
+
+    @pytest.mark.t2_tenant
+    def test_a_pdf_whose_every_page_failed_extraction_exits_nonzero_unlike_a_no_text_record(
+        self, runner, monkeypatch,
+    ) -> None:
+        """RDR-237 (nexus-q6nw0 item 9): an all-pages-unextracted PDF is MinerU failing, not a
+        document with nothing to index, so the run exits 1 over it. The record is still its own
+        failure (U2 is indexed). A plain UnextractableContentError (a blank or image-only file)
+        keeps its exit 0: that file has no text and a rerun changes nothing."""
+        from nexus.errors import UnextractableContentError
+        from nexus.pdf_extractor import AllPagesUnextractedError
+
+        failed_run, seq = self._file_backed(
+            runner, monkeypatch,
+            AllPagesUnextractedError("every page of a.pdf is unextracted: MinerU failed", total_pages=7),
+        )
+        assert not seq, "U2 was dispatched: one record's failure does not abort the batch"
+        assert "Indexed 1 record(s)" in failed_run.output, failed_run.output
+        assert "1 failed" in failed_run.output, failed_run.output
+        assert "AllPagesUnextractedError: every page of a.pdf is unextracted" in failed_run.output
+        assert failed_run.exit_code == 1, failed_run.output
+        assert "1 record(s) had every page unextracted" in failed_run.output, failed_run.output
+
+        # Non-vacuity: the same harness with a plain no-text record exits 0, so the exit above is
+        # the new type's doing and not the harness's.
+        plain_run, plain_seq = self._file_backed(
+            runner, monkeypatch, UnextractableContentError("a.pdf has no text layer"),
+        )
+        assert not plain_seq
+        assert "1 failed" in plain_run.output, plain_run.output
+        assert plain_run.exit_code == 0, plain_run.output
+        assert "had every page unextracted" not in plain_run.output
 
     @pytest.mark.t2_tenant
     def test_a_run_level_nexus_error_still_stops_the_run(self, runner, monkeypatch) -> None:

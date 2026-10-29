@@ -19,6 +19,8 @@ from nexus import _vcrt, health, pdf_stack
 from nexus.pdf_stack import InstallPlan, StackState
 from tests._module_seam import setattr_in
 
+pytestmark = pytest.mark.usefixtures("no_mineru_child_probe")  # nexus-vyy65: no real MinerU child import here
+
 _PLAN = InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND)
 
 
@@ -72,6 +74,24 @@ def test_absent_counts_the_pdfs_a_refusing_run_left_behind(monkeypatch, tmp_path
     pdf_stack.record_skipped([tmp_path / "a.pdf", tmp_path / "b.pdf", tmp_path / "c.pdf"], repo=tmp_path)
     (row,) = health._check_pdf_support()
     assert row.ok and "3 PDF(s)" in row.detail
+
+
+def test_absent_does_not_blame_the_stack_for_pdfs_held_on_a_mineru_limit(monkeypatch, tmp_path) -> None:
+    """nexus-tr1rj.26: a bounds hold writes the same record, and the absent-stack row used to say
+    those PDFs were waiting for the stack. Only a stack hold is the stack's."""
+    _stack(monkeypatch, "absent")
+    pdf_stack.record_skipped([tmp_path / "a.pdf", tmp_path / "b.pdf"], repo=tmp_path, cause=pdf_stack.SKIP_CAUSE_BOUNDS)
+    (row,) = health._check_pdf_support()
+    assert "waiting for it" not in row.detail and "PDF(s)" not in row.detail
+
+
+def test_absent_counts_only_the_stack_holds_when_both_causes_are_recorded(monkeypatch, tmp_path) -> None:
+    _stack(monkeypatch, "absent")
+    other = tmp_path / "other"
+    pdf_stack.record_skipped([tmp_path / "a.pdf"], repo=tmp_path)
+    pdf_stack.record_skipped([other / "b.pdf", other / "c.pdf"], repo=other, cause=pdf_stack.SKIP_CAUSE_BOUNDS)
+    (row,) = health._check_pdf_support()
+    assert "1 PDF(s)" in row.detail and "waiting for it" in row.detail
 
 
 def test_broken_is_red_with_the_repair_command(monkeypatch) -> None:

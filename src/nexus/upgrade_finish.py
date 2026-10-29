@@ -477,6 +477,10 @@ def _classify(command: str) -> str:
     # A shebang-wrapped entry point: the kernel rewrites argv to
     # [python, script, ...], so the SCRIPT is the real executable.
     if exe.startswith("python") and rest:
+        # The Windows mineru-api child is ``python -m nexus._mineru_api_child ...`` (nexus-vyy65):
+        # no console script in its argv, so the module name identifies it.
+        if rest[:2] == ["-m", "nexus._mineru_api_child"]:
+            return "mineru"
         exe = executable_stem(rest[0])
         rest = rest[1:]
 
@@ -495,6 +499,89 @@ def _classify(command: str) -> str:
         if rest[:2] == ["daemon", "service"]:
             return "service"
     return "other"
+
+
+def _classify_pid(pid: int, command: str) -> str:
+    """:func:`_classify` for the process *pid* whose *command* was read, with the one case
+    the command alone cannot decide (nexus-vyy65).
+
+    On Windows a command line that cannot be read comes back as the process IMAGE alone, and the
+    Windows MinerU server is ``python.exe -m nexus._mineru_api_child``: its image is a bare
+    ``python.exe``, which names no server (the old ``mineru-api.exe`` image did). Without this,
+    ``nx mineru stop`` and the replacement of a broken server would read their own server as
+    "no longer a mineru-api", drop its pid file and leave it running.
+
+    The narrowest rule that recovers it: *command* is exactly the interpreter the pid file
+    recorded for this same *pid*, and the file records that this server was launched as the child
+    module. A different pid, another interpreter's image, a pid file written before this shape
+    existed, or a command line that was readable (and so was judged by its argv) is unchanged.
+    """
+    kind = _classify(command)
+    if kind == "other" and _is_registered_server_image(pid, command):
+        return "mineru"
+    return kind
+
+
+def _is_registered_server_image(pid: int, command: str) -> bool:
+    """True when *command* is the bare image of the interpreter the MinerU pid file recorded for *pid*
+    as running the server child module (see :func:`_classify_pid`)."""
+    image = command.strip()
+    if not image:
+        return False
+    try:
+        from nexus._mineru_pid import read_pid_file  # noqa: PLC0415 — deferred, avoids an import cycle
+        from nexus._mineru_spawn import MINERU_SERVER_CHILD_MODULE  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        info = read_pid_file()
+    except Exception:  # noqa: BLE001 — no pid-file verdict: the command line stands alone
+        return False
+    if not isinstance(info, dict) or info.get("pid") != pid:
+        return False
+    python = info.get("python")
+    if info.get("server_module") != MINERU_SERVER_CHILD_MODULE or not isinstance(python, str) or not python:
+        return False
+    # normcase folds case and separators on Windows only; the recorded text is the one we launched.
+    if os.path.normcase(os.path.normpath(image)) != os.path.normcase(os.path.normpath(python)):
+        return False
+    # A stale pid file whose pid was reused by a bare run of the same interpreter (a REPL, or a
+    # process whose command line is unreadable) would match everything above; the server was
+    # created moments before the pid file stamped started_at, a reused pid was not. Unreadable
+    # either way means no match: leaving our server running beats stopping someone else's process.
+    started = _recorded_start_unix(info.get("started_at"))
+    created = _process_start_unix(pid)
+    if started is None or created is None:
+        return False
+    return abs(started - created) <= _SERVER_START_TOLERANCE_S
+
+
+#: How far a server's creation time may sit from the pid file's started_at (spawn, then the write).
+_SERVER_START_TOLERANCE_S: float = 60.0
+
+
+def _recorded_start_unix(value: object) -> float | None:
+    """The pid file's ``started_at`` (ISO 8601) as a Unix time, or None when absent or unparsable."""
+    if not isinstance(value, str) or not value:
+        return None
+    from datetime import datetime  # noqa: PLC0415 — only on the image-only path
+
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return None
+
+
+def _process_start_unix(pid: int) -> float | None:
+    """When *pid* was created, as a Unix time, or None when unreadable. Windows only: the
+    image-only command read this guards happens nowhere else."""
+    if sys.platform != "win32":
+        return None
+    try:
+        from nexus._install import winproc_core  # noqa: PLC0415 — Windows-only path, deferred
+
+        age = winproc_core.process_age_seconds(pid, winproc_core.ctypes_win_info_api())
+    except Exception:  # noqa: BLE001 — unreadable is no match, never a crash in a stop path
+        return None
+    return None if age is None else time.time() - age
 
 
 def install_dist_info() -> tuple[float, str, Path]:
@@ -683,7 +770,7 @@ def detect_stale_processes(
             stale = (now - age_s) < mtime
         if stale:
             report.stale.append(StaleProcess(
-                pid=pid, kind=_classify(command),
+                pid=pid, kind=_classify_pid(pid, command),
                 command=command, age_s=age_s,
             ))
     outside = _registered_mineru_outside_generation(current, now=now)
@@ -740,7 +827,7 @@ def _registered_mineru_outside_generation(
     # Liveness is not identity: a pid file left by an unclean death can name
     # a pid the OS has since handed to something else, and this row feeds an
     # automatic SIGTERM. Judge the live command, as the marker regime does.
-    if _classify(process_command(pid)) != "mineru":
+    if _classify_pid(pid, process_command(pid)) != "mineru":
         return None
     try:
         Path(python).relative_to(current)
@@ -919,7 +1006,7 @@ def restart_stale(
             # Same pid-recycle re-check as the aspect-worker branch: the
             # stop verb kills the pid file's process group, so confirm the
             # pid is still a mineru-api immediately before asking it to.
-            if _classify(process_command(proc.pid)) != "mineru":
+            if _classify_pid(proc.pid, process_command(proc.pid)) != "mineru":
                 actions.append(f"{proc.kind} pid {proc.pid}: gone or recycled; skipped")
                 continue
             # nexus-2k66t.4.2: `nx mineru start` ensures the PDF stack first, and on a

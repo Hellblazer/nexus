@@ -301,4 +301,42 @@ class ManifestLabelStageTest {
         assertThat(ManifestLabelStage.widen(1000)).isEqualTo(1200);
         assertThat(ManifestLabelStage.widen(5000)).isEqualTo(5000);
     }
+
+    // ── nexus-6pfgb.26: an owner's span replaces the chunk row's, field by field ──
+
+    private static ManifestLabelStage.Occurrence owner(Integer ls, Integer le, Integer cs, Integer ce) {
+        return new ManifestLabelStage.Occurrence("doc", 0, null, null, null, true, "file:///doc.md",
+            ls, le, cs, ce, Map.of());
+    }
+
+    @Test
+    void anOwnersSpan_replacesTheChunkRowsFields() {
+        Map<String, Object> row = w("line_start", 30, "line_end", 35, "chunk_start_char", 300, "chunk_end_char", 350);
+
+        ManifestLabelStage.putSpan(row, owner(10, 20, 100, 200));
+
+        assertThat(row).containsEntry("line_start", 10).containsEntry("line_end", 20)
+            .containsEntry("chunk_start_char", 100).containsEntry("chunk_end_char", 200);
+    }
+
+    @Test
+    void anOwnerWithNoSpan_leavesTheChunkRowsValuesAlone() {
+        Map<String, Object> row = w("line_start", 30, "line_end", 35, "chunk_start_char", 300, "chunk_end_char", 350);
+
+        ManifestLabelStage.putSpan(row, owner(null, null, null, null));
+
+        assertThat(row).containsOnly(org.assertj.core.api.Assertions.entry("line_start", 30),
+            org.assertj.core.api.Assertions.entry("line_end", 35),
+            org.assertj.core.api.Assertions.entry("chunk_start_char", 300),
+            org.assertj.core.api.Assertions.entry("chunk_end_char", 350));
+    }
+
+    @Test
+    void anOwnerWithOnlyLines_writesOnlyTheTwoLineFields_andNoCharField() {
+        Map<String, Object> row = w();
+
+        ManifestLabelStage.putSpan(row, owner(4, 9, null, null));
+
+        assertThat(row).containsOnlyKeys("line_start", "line_end");
+    }
 }

@@ -193,6 +193,66 @@ class TestResolveMineruApiBin:
         assert result is None
 
 
+class TestResolveMineruApiBinOnWindows:
+    """Windows keeps console scripts as ``<venv>\\Scripts\\mineru-api.exe`` (a generation's launcher
+    directory is ``<generation>\\bin``), so candidates (a) and (b) look for the ``.exe`` there. Before
+    nexus-vyy65 they looked for an extensionless ``bin/mineru-api`` and only PATH ever resolved it."""
+
+    @staticmethod
+    def _windows(monkeypatch, *, sys_exe: str, file_anchor: str) -> None:
+        setattr_in(monkeypatch, "nexus._vcrt", "sys.platform", "win32")
+        _resolver_ctx(monkeypatch, sys_exe=sys_exe, file_anchor=file_anchor)
+        monkeypatch.setattr(_mineru_mod, "which_off_cwd", lambda name: None)
+
+    def test_interpreter_sibling_scripts_dir_exe(self, tmp_path: Path, monkeypatch) -> None:
+        scripts = tmp_path / "venv" / "Scripts"
+        scripts.mkdir(parents=True)
+        exe = _make_executable(scripts / "mineru-api.exe")
+        self._windows(
+            monkeypatch,
+            sys_exe=str(scripts / "python.exe"),
+            file_anchor=str(tmp_path / "isolated" / "Lib" / "site-packages" / "nexus" / "_mineru_spawn.py"),
+        )
+        assert _mineru_mod._resolve_mineru_api_bin() == str(exe)
+
+    @pytest.mark.parametrize("bin_dir", ["Scripts", "bin"])
+    def test_file_anchored_walk_finds_the_exe(self, tmp_path: Path, monkeypatch, bin_dir: str) -> None:
+        venv = tmp_path / "gen"
+        (venv / bin_dir).mkdir(parents=True)
+        exe = _make_executable(venv / bin_dir / "mineru-api.exe")
+        other = tmp_path / "other" / "Scripts"
+        other.mkdir(parents=True)
+        self._windows(
+            monkeypatch,
+            sys_exe=str(other / "python.exe"),
+            file_anchor=str(venv / "Lib" / "site-packages" / "nexus" / "_mineru_spawn.py"),
+        )
+        assert _mineru_mod._resolve_mineru_api_bin() == str(exe)
+
+    def test_an_extensionless_file_is_not_a_windows_console_script(self, tmp_path: Path, monkeypatch) -> None:
+        scripts = tmp_path / "venv" / "Scripts"
+        scripts.mkdir(parents=True)
+        _make_executable(scripts / "mineru-api")
+        self._windows(
+            monkeypatch,
+            sys_exe=str(scripts / "python.exe"),
+            file_anchor=str(tmp_path / "isolated" / "Lib" / "site-packages" / "nexus" / "_mineru_spawn.py"),
+        )
+        assert _mineru_mod._resolve_mineru_api_bin() is None
+
+    def test_posix_does_not_look_for_an_exe(self, tmp_path: Path, monkeypatch) -> None:
+        bin_dir = tmp_path / "venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        _make_executable(bin_dir / "mineru-api.exe")
+        _resolver_ctx(
+            monkeypatch,
+            sys_exe=str(bin_dir / "python"),
+            file_anchor=str(tmp_path / "isolated" / "lib" / "site-packages" / "nexus" / "_mineru_spawn.py"),
+        )
+        monkeypatch.setattr(_mineru_mod, "which_off_cwd", lambda name: None)
+        assert _mineru_mod._resolve_mineru_api_bin() is None
+
+
 # ---------------------------------------------------------------------------
 # Call-site integration: commands/mineru.py `start` command
 # ---------------------------------------------------------------------------

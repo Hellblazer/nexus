@@ -1185,7 +1185,7 @@ def index_cmd(
         NexusError,
         PER_RECORD_SURVIVABLE_EXCEPTIONS,
     )
-    from nexus.pdf_extractor import MINERU_RUN_STOPPING  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
+    from nexus.pdf_extractor import MINERU_RUN_STOPPING, AllPagesUnextractedError  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
     # nexus-tr1rj.13: set by the first MinerU breaker trip / machine-resource error; PDF records after
     # it are listed in ``not_attempted`` and never dispatched.
     mineru_stop: _DtMineruStop | None = None
@@ -1197,6 +1197,10 @@ def index_cmd(
     # cases the per-record catch below has always survived). The batch continues, but a run with
     # failed records no longer exits 0 over them, the same rule as unexpected_failed.
     errored_failed = 0
+    # RDR-237 (nexus-q6nw0): PDFs on which MinerU failed every page and none has a text layer. A
+    # failed record like the ones above and an exit 1, unlike a plain UnextractableContentError (a
+    # file with nothing in it), which stays a skippable failed-record entry at exit 0.
+    all_unextracted_failed = 0
 
     # RDR-139 Layer D / nexus-fdk1x: probe DT reachability ONCE for
     # link-semantic/writeback/highlights (which now try HTTP then fall
@@ -1423,6 +1427,16 @@ def index_cmd(
                 )
                 refused_in_failed += 1
                 failed.append((uuid, path, _index_run_refused_message(exc, target_collection=resolved_collection)))
+            elif isinstance(exc, AllPagesUnextractedError):
+                _log.error(
+                    "dt_index_failed",
+                    uuid=uuid,
+                    path=path,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
+                all_unextracted_failed += 1
             else:
                 # Generic fallback: a PER_RECORD_SURVIVABLE_EXCEPTIONS
                 # member this dispatch does not know about yet. No
@@ -1689,7 +1703,7 @@ def index_cmd(
         # bead — only a POSITIVE engine verdict or a write/identity
         # failure fails the run.
         raise_identity_drop_exception(subject="record")
-    if unexpected_failed or errored_failed or mineru_stop is not None:
+    if unexpected_failed or errored_failed or all_unextracted_failed or mineru_stop is not None:
         parts = []
         if mineru_stop is not None:
             parts.append(
@@ -1700,6 +1714,11 @@ def index_cmd(
             parts.append(
                 f"{unexpected_failed} record(s) failed with an unexpected error (see Failures above; "
                 "the 'dt_index_unexpected_error' log event carries the traceback)."
+            )
+        if all_unextracted_failed:
+            parts.append(
+                f"{all_unextracted_failed} record(s) had every page unextracted: MinerU failed on all of "
+                "them (see Failures above; the 'dt_index_failed' log event names each)."
             )
         if errored_failed:
             parts.append(

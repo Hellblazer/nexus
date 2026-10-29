@@ -3035,7 +3035,9 @@ def _check_pdf_support() -> list[HealthResult]:
             *_check_mineru_importable(),
         ]
     plan = pdf_stack.install_plan()
-    held = pdf_stack.skipped_count()
+    # nexus-tr1rj.26: only the PDFs held for the stack wait for it; a MinerU-limit hold is the
+    # "PDF settings" row's to say.
+    held = pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK, existing_repos_only=True)
     held_note = (
         f"; {held} PDF(s) a background run could not index are waiting for it" if held else ""
     )
@@ -3090,6 +3092,58 @@ def _check_installer_rebuild() -> list[HealthResult]:
         label="Dependency lock", ok=False, warn=True, detail=note,
         fix_suggestions=[f"Rebuild with the release's lock: {pdf_stack.REBUILD_RETRY_COMMAND}"],
     )]
+
+
+def _check_pdf_config() -> list[HealthResult]:
+    """RDR-237 (nexus-489n1): the ``[pdf]`` settings the next PDF run would refuse.
+
+    A ``[pdf]`` integer setting that holds no integer (``PdfConfigError``, which names the key),
+    or a MinerU time limit whose ``mineru_page_timeout_s`` x ``mineru_page_batch`` is above the
+    240 s bound (:func:`nexus.pdf_stack.mineru_bounds_problem`, not asked of the text-only
+    extractor, which never reaches MinerU). Red: every PDF index stops on it. The MinerU server
+    row cannot say so (reading the server URL reads this same section and raises, and that row
+    swallows it), which is why this is its own row.
+
+    PDFs an ``nx index repo`` run held on the limit (nexus-tr1rj.26; the record names its cause, so
+    the PDF-support row does not blame the stack for them) are counted here: in the red row, and,
+    once the settings are usable again but no run has cleared the record, in a warning that names
+    the rerun. Not applicable, no row, when the settings can be used and nothing is held: a virgin
+    box and every box that never set one.
+    """
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+    from nexus.config import PdfConfigError, get_pdf_config  # noqa: PLC0415 — deferred import (startup cost)
+
+    held = pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS, existing_repos_only=True)
+    held_note = f" {held} PDF(s) a run held on it are not indexed." if held else ""
+    try:
+        extractor = get_pdf_config().extractor
+        problem = pdf_stack.mineru_bounds_problem(extractor)
+    except PdfConfigError as exc:
+        return [HealthResult(
+            label="PDF settings", ok=False,
+            detail=f"{exc}; every PDF index stops on it.{held_note}",
+            fix_suggestions=[f"Set it: nx config set pdf.{exc.key}=<integer>"],
+        )]
+    except Exception:  # noqa: BLE001 — an unreadable config is the config rows' finding, not this one's
+        return []
+    if problem is not None:
+        return [HealthResult(
+            label="PDF settings", ok=False,
+            detail=f"{problem} Every MinerU PDF index stops on it.{held_note}",
+            fix_suggestions=[
+                "Lower one: nx config set pdf.mineru_page_timeout_s=<seconds> (or pdf.mineru_page_batch=<pages>)",
+            ],
+        )]
+    if held:
+        return [HealthResult(
+            label="PDF settings", ok=False, warn=True,
+            detail=(
+                f"the MinerU time limits are usable now, but {held} PDF(s) a run held on them are "
+                "not indexed yet"
+            ),
+            fix_suggestions=["Index them: nx index repo <path> (a run that indexes them clears this)"],
+        )]
+    return []
 
 
 def _check_mineru_server() -> list[HealthResult]:
@@ -12228,6 +12282,7 @@ def run_health_checks(
     results.extend(_check_leftover_docling_cache())  # RDR-237; not applicable without a cache
     results.extend(_check_installer_rebuild())
     results.extend(_check_mineru_server())
+    results.extend(_check_pdf_config())  # RDR-237; not applicable unless a [pdf] setting is unusable
     results.extend(_check_t2_schema_applied())
     results.extend(_check_t2_dropped_writes())
     # RDR-207 (bead nexus-l3yuc.10): informational; not applicable where no

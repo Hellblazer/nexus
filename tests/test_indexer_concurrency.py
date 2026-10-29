@@ -377,13 +377,14 @@ class TestRunFileLoop:
         written = run_file_loop(
             self._files(3), index_one, concurrency=1,
             on_file=None, on_stage_timers=None,
-            on_skip=lambda file, reason: skips.append((file, reason)),
+            on_skip=lambda file, reason, error_class: skips.append((file, reason, error_class)),
         )
         assert written == 2
         assert len(skips) == 1
-        skipped_file, reason = skips[0]
+        skipped_file, reason, error_class = skips[0]
         assert skipped_file.name == "f1.py"
         assert "produced empty output" in reason
+        assert error_class == "UnextractableContentError"
 
     def test_survivable_exception_logged_loudly(self):
         """Skips are not silent — a structured event names the file and the

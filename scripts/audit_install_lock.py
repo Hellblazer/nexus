@@ -43,11 +43,6 @@ ACKNOWLEDGED: dict[str, str] = {}
 #: The acknowledgement holds only at that version: when the lock moves the package,
 #: the entry stops applying and any advisory then open turns the run red again.
 ACKNOWLEDGED_AT_VERSION: dict[str, tuple[str, str]] = {
-    "pillow": (
-        "12.3.0",
-        "every fix is in pillow 13.0.0 (released 2026-10-16); fastembed through 0.9.0 "
-        "declares pillow<13, so the lock cannot take it yet (nexus-13z79)",
-    ),
     "transformers": (
         "4.57.6",
         "the fixed versions are transformers 5.x; mineru[pipeline] 3.1.x requires transformers<5, "

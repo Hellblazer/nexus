@@ -38,6 +38,7 @@ import java.util.function.Supplier;
  *  "catalog_graph_scope_filter_supported":true,
  *  "catalog_manifest_row_limit_supported":true,
  *  "nx_answer_out_of_step_cost_supported":true,
+ *  "search_row_owner_span_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -383,6 +384,25 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-6pfgb.26 capability advertisement (RDR-236 Phase 3): does a chunk-level search row ({@code
+     * /v1/vectors/search}, {@code /hybrid-search}, the per-collection fan-out) carry {@code source_uri},
+     * {@code line_start}, {@code line_end}, {@code chunk_start_char} and {@code chunk_end_char} from ONE
+     * manifest owner, chosen deterministically inside the searched collection (lowest {@code doc_id} in the
+     * database's text collation, then position, tombstoned documents skipped), and name that owner ({@code
+     * doc_id}, {@code position}) on the row, where an older engine answers the span from the shared chunk
+     * row's last writer, {@code source_uri} from a tenant-wide last-row-wins join, and names no owner on an
+     * unfiltered row?
+     *
+     * <p>An independent flag, and the only evidence: both engines answer the same keys with HTTP 200, so a
+     * client that prints {@code file:line} beside a document it picked itself must read this flag first.
+     * Always present, always {@code true} on an engine carrying the change. Invisible to cloud clients until
+     * the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff).
+     */
+    static void appendSearchRowOwnerSpanCapabilityField(StringBuilder body) {
+        body.append(",\"search_row_owner_span_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -568,6 +588,8 @@ public final class VersionHandler implements HttpHandler {
         appendCatalogManifestRowLimitCapabilityField(body);
         // nexus-jypmj.5: the out-of-step cost column on the run row.
         appendNxAnswerOutOfStepCostCapabilityField(body);
+        // nexus-6pfgb.26: a search row's source_uri and span come from one collection-scoped manifest owner.
+        appendSearchRowOwnerSpanCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

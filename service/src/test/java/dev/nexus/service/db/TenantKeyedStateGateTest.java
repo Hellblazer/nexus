@@ -644,7 +644,7 @@ public class TenantKeyedStateGateTest {
                 "PgVectorRepository.ROUTED_EXACT",
                 "PgVectorRepository.ROUTED_HNSW",
                 "PgVectorRepository.existenceSelectCalls",
-                "PgVectorRepository.sourceUriJoinCalls",
+                "PgVectorRepository.ownerLookupCalls",
                 "RacedEmbedActivity.RACED_EMBEDS_TOTAL",
                 "RequestLedgerActivity.IN_FLIGHT",
                 "RequestLedgerActivity.KEY_REUSED",

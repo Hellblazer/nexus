@@ -266,8 +266,9 @@ def test_single_page_oom_on_both_rungs_is_no_longer_a_document_failure() -> None
         ext, "_mineru_run_isolated",
         side_effect=MineruMemoryError("page 1 OOM"),
     ):
-        with pytest.raises(UnextractableContentError, match="every page.*unextracted"):
+        with pytest.raises(UnextractableContentError, match="every page.*unextracted") as info:
             ext._extract_with_mineru(Path("/tmp/math.pdf"))
+        assert type(info.value).__name__ == "AllPagesUnextractedError", "the MinerU failure type, not a no-text file"
     page.get_text.assert_called_once()  # rung 3 read the page's text layer, and it was empty
     assert not [e for e in logs if e.get("event") == "mineru_page_text_layer_unreadable"], (
         "the page ended unextracted because it has no text, not because reading it raised"

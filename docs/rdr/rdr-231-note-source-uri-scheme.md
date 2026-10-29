@@ -254,8 +254,8 @@ an old artifact into the new spelling at the one place it reads one.
    Exempt, with the reason recorded in the gate test: `POST /v1/catalog/merge`
    (`mergeDocuments` moves a stored URI; no caller URI enters), the moves in step 4,
    and the `vectors` routes, which only return the catalog's stored `source_uri`
-   (`PgVectorRepository.sourceUrisByChash`, `enrichSearchRows` `:8162`, `:8224`,
-   `ManifestLabelStage`) and take none. `/list` and `/resolve` canonicalize inside
+   (`PgVectorRepository.ownersByChash`, which `enrichSearchRows` and `enrichGetEnvelope` call,
+   and `ManifestLabelStage`; `sourceUrisByChash` was replaced by the first-owner lookup in nexus-6pfgb.26) and take none. `/list` and `/resolve` canonicalize inside
    `documentsBySourceUri`, not in the handler, so a later caller of that method
    gets it too.
 

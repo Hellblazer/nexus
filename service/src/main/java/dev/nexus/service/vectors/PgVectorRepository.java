@@ -180,23 +180,24 @@ public final class PgVectorRepository {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     /**
-     * Test-visibility hook (S1, RDR-169 G5): counts invocations of {@link #sourceUrisByChash}
-     * so cross-package integration tests (e.g. {@code dev.nexus.service.BridgeAddressFieldsTest})
-     * can assert that the default path (includeSourceUri=false) runs ZERO catalog JOINs and the
-     * opt-in path runs ≥1. Private with read/reset accessors (wave review: as a public
-     * mutable field, any caller could {@code set()} it and corrupt whatever a concurrent
+     * Test-visibility hook (S1, RDR-169 G5; reshaped by nexus-6pfgb.26): counts invocations of {@link
+     * #ownersByChash}, the manifest owner lookup behind every chunk-level search row's span and {@code
+     * source_uri}. Cross-package integration tests (e.g. {@code dev.nexus.service.BridgeAddressFieldsTest})
+     * assert that one search window costs exactly ONE lookup, however many rows or collections it spans,
+     * and a get-envelope without {@code include_source_uri} none. Private with read/reset accessors (wave
+     * review: as a public mutable field, any caller could {@code set()} it and corrupt whatever a concurrent
      * test asserts). Production code never reads it.
      */
-    private final AtomicInteger sourceUriJoinCalls = new AtomicInteger();
+    private final AtomicInteger ownerLookupCalls = new AtomicInteger();
 
-    /** Test-only instrumentation read — see {@link #sourceUriJoinCalls}. */
-    public int sourceUriJoinCallCount() {
-        return sourceUriJoinCalls.get();
+    /** Test-only instrumentation read — see {@link #ownerLookupCalls}. */
+    public int ownerLookupCallCount() {
+        return ownerLookupCalls.get();
     }
 
-    /** Test-only instrumentation reset — see {@link #sourceUriJoinCalls}. */
-    public void resetSourceUriJoinCallsForTests() {
-        sourceUriJoinCalls.set(0);
+    /** Test-only instrumentation reset — see {@link #ownerLookupCalls}. */
+    public void resetOwnerLookupCallsForTests() {
+        ownerLookupCalls.set(0);
     }
 
     /**
@@ -206,7 +207,7 @@ public final class PgVectorRepository {
      * integration tests assert that {@code forceReEmbed=true} bypasses the
      * existence check ENTIRELY (count stays 0) rather than merely inferring it
      * from the embedder's call count. Same read/reset-accessor shape as
-     * {@link #sourceUriJoinCalls} — production code never reads it.
+     * {@link #ownerLookupCalls} — production code never reads it.
      */
     private final AtomicInteger existenceSelectCalls = new AtomicInteger();
 
@@ -239,7 +240,7 @@ public final class PgVectorRepository {
      * code. A package-private setter would not reach the test class — it lives in
      * {@code dev.nexus.service}, this repository in {@code dev.nexus.service.vectors} —
      * so the setter is {@code public}, following the same public-accessor shape already
-     * established by {@link #sourceUriJoinCalls} / {@link #existenceSelectCalls}.
+     * established by {@link #ownerLookupCalls} / {@link #existenceSelectCalls}.
      */
     private volatile Runnable afterExistencePartitionHookForTests;
 
@@ -1439,10 +1440,12 @@ public final class PgVectorRepository {
         // nexus-tko2w: section_title / section_type / page_number are answered per manifest occurrence.
         var labelSplit = ManifestLabelStage.split(where);
         if (!labelSplit.active()) {
-            return searchWithTokensUnlabelled(tenant, queryText, collectionNames, nResults, where, includeSourceUri);
+            return searchWithTokensUnlabelled(tenant, queryText, collectionNames, nResults, where, includeSourceUri,
+                                              false);
         }
         var wide = searchWithTokensUnlabelled(tenant, queryText, collectionNames,
-                                              ManifestLabelStage.widen(nResults), labelSplit.rest(), includeSourceUri);
+                                              ManifestLabelStage.widen(nResults), labelSplit.rest(), includeSourceUri,
+                                              true);
         return new Tokened<>(labelStage().apply(tenant, wide.value(), labelSplit.labels(), nResults),
                              wide.tokens(), wide.skippedCollections());
     }
@@ -1457,7 +1460,8 @@ public final class PgVectorRepository {
                                                                           List<String> collectionNames,
                                                                           int nResults,
                                                                           Map<String, Object> where,
-                                                                          boolean includeSourceUri) {
+                                                                          boolean includeSourceUri,
+                                                                          boolean labelStageFollows) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -1499,7 +1503,7 @@ public final class PgVectorRepository {
 
         List<Map<String, Object>> rows = plainSearchRows(result);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
-        enrichSearchRows(tenant, rows, includeSourceUri);
+        enrichSearchRows(tenant, rows, includeSourceUri, labelStageFollows);
         return new Tokened<>(rows, embedResult.tokens(), skippedCollections);
     }
 
@@ -2592,12 +2596,12 @@ public final class PgVectorRepository {
         if (!labelSplit.active() || !validBounds) {
             // An out-of-range K or limit is refused by the fan-out itself, with its own wording.
             return searchPerCollectionUnlabelled(tenant, queryText, collectionNames, perCollectionK, limit,
-                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings);
+                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings, false);
         }
         var wide = searchPerCollectionUnlabelled(tenant, queryText, collectionNames,
             Math.min(MAX_PER_COLLECTION_K, ManifestLabelStage.widen(perCollectionK)),
             Math.min(MAX_FANOUT_LIMIT, ManifestLabelStage.widen(limit)),
-            thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings);
+            thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings, true);
         var stage = labelStage();
         List<Map<String, Object>> rows = stage.apply(tenant, wide.rows(), labelSplit.labels(), limit);
         List<Map<String, Object>> lexicalRows = wide.lexicalRows().isEmpty()
@@ -2629,7 +2633,8 @@ public final class PgVectorRepository {
                                                               boolean includeSourceUri,
                                                               boolean includeEmbeddings,
                                                               boolean lexical,
-                                                              FanoutSettings settings) {
+                                                              FanoutSettings settings,
+                                                              boolean labelStageFollows) {
         final int parallelism = settings.parallelism();
         final long fanoutBudgetMs = settings.fanoutBudgetMs();
         final int searchBoundMs = settings.searchBoundMs();
@@ -2799,7 +2804,7 @@ public final class PgVectorRepository {
             served.addAll(lexicalRows);
         }
         long enrichStartNanos = System.nanoTime();
-        enrichSearchRows(tenant, served, includeSourceUri);
+        enrichSearchRows(tenant, served, includeSourceUri, labelStageFollows);
         final long enrichMs = (System.nanoTime() - enrichStartNanos) / 1_000_000L;
         long fillStartNanos = System.nanoTime();
         if (includeEmbeddings) {
@@ -3261,7 +3266,7 @@ public final class PgVectorRepository {
         // chunk into one row per document would have each of them overwritten with the same URI. The
         // stage re-points source_uri on the rows it expands, as searchWithTokens and
         // searchPerCollection do.
-        enrichSearchRows(tenant, rows, includeSourceUri);
+        enrichSearchRows(tenant, rows, includeSourceUri, labelSplit.active());
         if (labelSplit.active()) {
             rows = labelStage().apply(tenant, rows, labelSplit.labels(), nResults);
         }
@@ -3569,7 +3574,7 @@ public final class PgVectorRepository {
         // single-snapshot (see above) — never a race between two reads.
         envelope.put("count", matchedLive);
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
-        return enrichGetEnvelope(tenant, envelope, includeSourceUri);
+        return enrichGetEnvelope(tenant, collection, envelope, includeSourceUri);
     }
 
     /**
@@ -3789,7 +3794,7 @@ public final class PgVectorRepository {
             outMetas.add(fromJson(meta != null ? meta.data() : null));
         }
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
-        return enrichGetEnvelope(tenant,
+        return enrichGetEnvelope(tenant, collection,
             new LinkedHashMap<>(Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas)),
             includeSourceUri);
     }
@@ -3810,7 +3815,7 @@ public final class PgVectorRepository {
     public static final int GET_ALL_METADATA_MAX_ROWS = 200_000;
 
     /**
-     * Batch cap for the sourceUrisByChash IN-clause join — bounds the
+     * Batch cap for the ownersByChash IN-clause join — bounds the
      * per-query bind-parameter budget. Rehomed from
      * ChromaQuotaValidator.MAX_RECORDS_PER_WRITE at RDR-155 P4b P0e
      * (same own-the-constant precedent as RemapRepository.MAX_BATCH):
@@ -6786,7 +6791,7 @@ FROM scope s
      * {@code execute()} calls.
      *
      * <p>Chunked at {@link #SOURCE_URI_JOIN_BATCH} rows per JDBC batch — the same
-     * bind-param-budget constant {@link #sourceUrisByChash} already chunks its
+     * bind-param-budget constant {@link #ownersByChash} already chunks its
      * IN-clause at. A per-row UPDATE batch does not carry an unbounded-IN-clause risk
      * (each statement's bind params are independent of every other statement's), but
      * capping batch SIZE still bounds per-round-trip memory/driver overhead for an
@@ -7184,7 +7189,7 @@ FROM scope s
                                                                     org.jooq.Condition scope, List<String> chashes) {
         Map<String, String> out = new HashMap<>();
         // nexus-6yps0: bound the IN-clause bind-param budget at SOURCE_URI_JOIN_BATCH,
-        // the same constant sourceUrisByChash already chunks its own chash IN-clause
+        // the same constant ownersByChash already chunks its own chash IN-clause
         // at — an unbounded chash().in(chashes) here was the other half of the
         // 0.024s/chunk floor this bead closes (the per-row updateMetadataOneRow loop
         // was the other), on a call site RDR-181 added without this bound.
@@ -8004,63 +8009,35 @@ FROM scope s
     // ── RDR-169 G5: address-triple enrichment (chash / source_uri / span) ────────
 
     /**
-     * Fetch {@code source_uri} per chash in one round-trip (RDR-169 G5, bead nexus-jkv85).
+     * The manifest owner of each (collection, chash) a result window names, in one batched lookup per
+     * collection (RDR-169 G5, bead nexus-jkv85; reshaped by nexus-6pfgb.26, RDR-236 Phase 3).
      *
-     * <p>Joins {@code catalog_document_chunks} to {@code catalog_documents} to resolve
-     * the document's {@code source_uri} from each chunk's {@code chash}. Runs under the
-     * tenant's RLS so cross-tenant leaks are impossible. Returns a map from chash to
-     * source_uri (null entry when the chash has no catalog document row).
+     * <p>A chash held by several documents has several {@code catalog_document_chunks} rows. The row's
+     * {@code source_uri} and its span ({@code line_start}, {@code line_end}, {@code chunk_start_char},
+     * {@code chunk_end_char}) must come from ONE of them, the same one every time: the owner INSIDE the
+     * searched collection with the lowest {@code doc_id}, then the lowest position, over documents that are
+     * not tombstoned (nexus-mqd6t). It replaces a tenant-wide join folded into a map where the last row won,
+     * so a document in another collection, or whichever row the planner emitted last, could name the row's
+     * {@code source_uri} while the span came from the shared chunk row's last writer. A chash with no live
+     * manifest row has no entry: the caller keeps the chunk row's own values and a null {@code source_uri}.
      *
-     * <p>Runs as a SINGLE IN-clause query — not N+1. Chunks with no catalog entry
-     * map to null; the caller emits null in the response (graceful, never 500).
+     * <p>Runs under the tenant's RLS, chunked at {@link #SOURCE_URI_JOIN_BATCH} chashes per statement (the
+     * stage's {@code LOOKUP_BATCH}), joined to {@code catalog_documents} with an explicit tenant bind as
+     * defence in depth (fix #H2).
      *
-     * @param tenant  the tenant whose catalog rows to query (RLS-scoped)
-     * @param chashes the set of chunk chashes to resolve
-     * @return map from chash → source_uri (null value when not in catalog)
+     * @param tenant               the tenant whose catalog rows to query (RLS-scoped)
+     * @param chashesByCollection  the 64-hex chashes of the window, by the collection they were read from
+     * @return owner per {@link ManifestLabelStage#ownerKey}
      */
-    private Map<String, String> sourceUrisByChash(String tenant, Set<String> chashes) {
-        sourceUriJoinCalls.incrementAndGet();
-        if (chashes.isEmpty()) return Map.of();
-
-        // Batch into ≤300 chashes per IN-clause (SOURCE_URI_JOIN_BATCH)
-        // so large get-envelope id lists never overflow the bind-param budget.
-        List<String> chashList = new ArrayList<>(chashes);
-        Map<String, String> out = new HashMap<>(chashList.size() * 2);
-        int batchSize = SOURCE_URI_JOIN_BATCH;
-
-        for (int start = 0; start < chashList.size(); start += batchSize) {
-            List<String> batch = chashList.subList(start, Math.min(start + batchSize, chashList.size()));
-
-            // d.tenant_id = ? guards against cross-tenant source_uri leak when two tenants
-            // share a tumbler string. FORCE RLS scopes the chunks table; the explicit bind
-            // adds defense-in-depth on the catalog_documents side (fix #H2).
-            // Note: last-writer-wins when a chash appears in multiple catalog_document_chunks
-            // rows (shared chunk text across documents) — non-determinism accepted for now.
-            var result = tenantScope.withTenant(tenant, ctx ->
-                ctx.select(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH), CATALOG_DOCUMENTS.SOURCE_URI)
-                   .from(CATALOG_DOCUMENT_CHUNKS)
-                   .join(CATALOG_DOCUMENTS)
-                   // nexus-mqd6t (audit sibling): the twin of docsForChashes —
-                   // this maps a search-hit chash back to its document's
-                   // source_uri, so a tombstoned document must not be named.
-                   .on(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)
-                       .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
-                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
-                   .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                       .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).in(batch)))
-                   .fetch());
-
-            for (var rec : result) {
-                String chash     = rec.value1();
-                String sourceUri = rec.value2();
-                if (chash != null) out.put(chash, sourceUri);
-            }
-        }
-        return out;
+    private Map<String, ManifestLabelStage.Occurrence> ownersByChash(
+            String tenant, Map<String, Set<String>> chashesByCollection) {
+        ownerLookupCalls.incrementAndGet();
+        if (chashesByCollection.isEmpty()) return Map.of();
+        return labelStage().firstOwners(tenant, chashesByCollection);
     }
 
     /** Precompiled hex pattern for chunk_text_hash validation (fix #M1-cr: length+charset). */
-    private static final Pattern HEX64 = Pattern.compile("[0-9a-f]{64}");
+    static final Pattern HEX64 = Pattern.compile("[0-9a-f]{64}");
 
     // nexus-lgdel.l1: HEX32 / isLegacyHex32 (the auto-converge-window 32-hex
     // admission predicate) are RETIRED WITH nexus.chash_alias — the window
@@ -8115,7 +8092,20 @@ FROM scope s
      *
      * <p>Always adds {@code chash} and {@code span} to each row in-place (free — no I/O).
      * Adds {@code source_uri} only when {@code includeSourceUri} is {@code true} (opt-in,
-     * default false — gates the catalog JOIN so the default path pays zero extra I/O).
+     * default false).
+     *
+     * <p>nexus-6pfgb.26: every row also names its manifest owner, from ONE lookup per window ({@link
+     * #ownersByChash}) whether or not {@code source_uri} was asked for: {@code doc_id} and {@code position}
+     * of the owner's first live manifest row in the row's own collection, and that row's span ({@code
+     * line_start}, {@code line_end}, {@code chunk_start_char}, {@code chunk_end_char}) where the manifest
+     * has a value, so the document, the file and the lines on a citation are one owner's. A chunk with no
+     * live owner keeps its own span and gets neither key.
+     *
+     * <p>{@code labelStageFollows}: a {@link ManifestLabelStage} pass will expand each row to its owning
+     * documents, and writes each copy's own {@code doc_id}, {@code position}, {@code source_uri} and span,
+     * falling back, for a NULL manifest field, to the CHUNK ROW's value. This method then runs NO owner
+     * lookup and leaves those fields as the chunk row has them (a null {@code source_uri} when asked for),
+     * or an owner without a recorded span would inherit the first owner's.
      *
      * <p>Field-presence contract:
      * <ul>
@@ -8128,18 +8118,26 @@ FROM scope s
      * @param tenant           the tenant for the catalog JOIN (RLS-scoped)
      * @param rows             the chunk-level search result rows to enrich (mutated in-place)
      * @param includeSourceUri when true, resolves source_uri via a catalog JOIN
+     * @param labelStageFollows true when a label or document-key filter's stage runs over these rows next
      */
     private void enrichSearchRows(String tenant, List<Map<String, Object>> rows,
-                                  boolean includeSourceUri) {
+                                  boolean includeSourceUri, boolean labelStageFollows) {
         if (rows.isEmpty()) return;
-        Map<String, String> uriMap = Map.of();
-        if (includeSourceUri) {
-            Set<String> chashes = new LinkedHashSet<>(rows.size() * 2);
+        // nexus-6pfgb.26: ONE lookup per window, whether or not source_uri was asked for: the owner's
+        // doc_id, position and span come from the same row, so every chunk-level row needs it. Under a
+        // label or document-key filter none: the stage that runs next re-points source_uri, doc_id,
+        // position and span on every row that has an owner (ManifestLabelStage#expanded) from its own
+        // lookup, and a row with no owner keeps the chunk row's values and a null source_uri either way.
+        Map<String, ManifestLabelStage.Occurrence> owners = Map.of();
+        if (!labelStageFollows) {
+            Map<String, Set<String>> chashesByCollection = new LinkedHashMap<>();
             for (Map<String, Object> row : rows) {
-                Object id = row.get("id");
-                if (id instanceof String s) chashes.add(s);
+                if (row.get("id") instanceof String s && HEX64.matcher(s).matches()
+                        && row.get("collection") instanceof String c) {
+                    chashesByCollection.computeIfAbsent(c, k -> new LinkedHashSet<>()).add(s);
+                }
             }
-            uriMap = sourceUrisByChash(tenant, chashes);
+            owners = ownersByChash(tenant, chashesByCollection);
         }
         for (Map<String, Object> row : rows) {
             Object idVal = row.get("id");
@@ -8158,12 +8156,26 @@ FROM scope s
                     + "— only chunk-level search rows may be enriched");
             }
             row.put("chash", chashStr);
-            if (includeSourceUri) {
-                row.put("source_uri", uriMap.get(chashStr));
+            Object coll = row.get("collection");
+            ManifestLabelStage.Occurrence owner = coll instanceof String c
+                ? owners.get(ManifestLabelStage.ownerKey(c, chashStr)) : null;
+            if (owner != null) {
+                // The row names its owner, and that owner's span replaces the shared chunk row's (the last
+                // writer's); a NULL manifest field keeps the row's value (a legacy manifest row).
+                row.put("doc_id", owner.docId());
+                row.put("position", owner.position());
+                ManifestLabelStage.putSpan(row, owner);
             }
-            // spanFromMeta reads chunk_text_hash / line_start / line_end from the FLATTENED row:
-            // search rows include metadata keys at the top level (via row.putAll(fromJson(...))).
+            // spanFromMeta reads chunk_text_hash / line_start / line_end from the FLATTENED row (search rows
+            // include metadata keys at the top level, via row.putAll(fromJson(...))). It runs AFTER the
+            // owner's span lands: the chash form is text-determined, and the line form, its fallback for a
+            // row with no chunk_text_hash, then names the owner's lines, not the last writer's.
             row.put("span", spanFromMeta(row));
+            if (includeSourceUri) {
+                // Under a label filter owners is empty and the stage overwrites this null with the
+                // expanded row's own document URI; the key exists for it to do so.
+                row.put("source_uri", owner != null ? owner.sourceUri() : null);
+            }
         }
     }
 
@@ -8188,8 +8200,8 @@ FROM scope s
      * @return a new map containing all existing keys plus the new parallel lists
      */
     @SuppressWarnings("unchecked")
-    private Map<String, Object> enrichGetEnvelope(String tenant, Map<String, Object> envelope,
-                                                   boolean includeSourceUri) {
+    private Map<String, Object> enrichGetEnvelope(String tenant, String collection,
+                                                   Map<String, Object> envelope, boolean includeSourceUri) {
         Object idsRaw = envelope.get("ids");
         if (!(idsRaw instanceof List<?>)) return envelope;
         List<String> ids = (List<String>) idsRaw;
@@ -8199,9 +8211,15 @@ FROM scope s
         Object metasRaw = envelope.get("metadatas");
         List<Map<String, Object>> metas = (metasRaw instanceof List<?>) ? (List<Map<String, Object>>) metasRaw : null;
 
-        Map<String, String> uriMap = Map.of();
+        // nexus-6pfgb.26: the same collection-scoped, deterministic owner as a search row's source_uri.
+        // The span lists stay the chunk rows' own: this envelope returns the rows' metadata as stored.
+        Map<String, ManifestLabelStage.Occurrence> owners = Map.of();
         if (includeSourceUri) {
-            uriMap = sourceUrisByChash(tenant, new LinkedHashSet<>(ids));
+            Set<String> hexes = new LinkedHashSet<>();
+            for (String id : ids) {
+                if (id != null && HEX64.matcher(id).matches()) hexes.add(id);
+            }
+            owners = ownersByChash(tenant, hexes.isEmpty() ? Map.of() : Map.of(collection, hexes));
         }
 
         List<String> chashes   = new ArrayList<>(ids.size());
@@ -8212,7 +8230,9 @@ FROM scope s
             String chash = ids.get(i);
             chashes.add(chash);
             if (includeSourceUri) {
-                sourceUris.add(chash != null ? uriMap.get(chash) : null);
+                ManifestLabelStage.Occurrence owner = chash != null
+                    ? owners.get(ManifestLabelStage.ownerKey(collection, chash)) : null;
+                sourceUris.add(owner != null ? owner.sourceUri() : null);
             }
             Map<String, Object> meta = (metas != null && i < metas.size()) ? metas.get(i) : Map.of();
             spans.add(spanFromMeta(meta != null ? meta : Map.of()));

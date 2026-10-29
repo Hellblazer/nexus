@@ -310,6 +310,39 @@ text layer on any page. The 30-page Grossberg & Stone scan (RF-1) finished on bo
 hosts with no degraded page and gave 17 of its 20 numbered equations as LaTeX on both,
 the same 17 RF-1 found (equations 11, 12 and 20 are the misses).
 
+**RF-18 (Verified, source; nexus-489n1, 2026-10-29).** The restart rule reads the slot
+count from the live MinerU server's `/health` `max_concurrent_requests` (MinerU 3.1.11
+`fast_api.py:1562`), and falls back to the platform and environment guess (one slot on
+macOS, else `MINERU_API_MAX_CONCURRENT_REQUESTS`, else three) when the server does not
+answer or reports no positive integer.
+
+**RF-19 (Verified, source and tests; nexus-q6nw0).** Where the ladder as built differs from
+the Systemic failure paragraph, which stays as decided. The failure class keys on what the
+worker did, in this order: `timeout`; `signal:<n>` when the OS killed it (a negative return
+code; the stderr line is not part of the key, because a killed worker's last line is a
+progress-bar frame that differs from page to page and would give two pages killed alike two
+classes); `oom` for the in-process `MemoryError` exit; `oom:<returncode>:<line>` when a memory
+ceiling turned another non-zero exit into `MineruMemoryError`; `exit:<returncode>:<line>` for any
+other exit (the line has absolute paths, hex addresses and runs of three or more digits replaced, so a per-page temp path or pid does not give each page its own class); `unclassified` for a failure with no worker facts (a "produced no output" error, a
+dropped connection), which the breaker never counts. A stderr line that is a progress-bar frame
+is skipped when the last line is chosen. `http:<status>` was never reachable (a server error falls
+to the subprocess path) and does not exist. A dropped connection (`ConnectError`, `ConnectTimeout`, `ReadError`, `RemoteProtocolError`) is
+absorbed by the MinerU dispatch, which restarts the server, retries once and then runs the page in
+the subprocess, so in a real run the class the breaker sees is the subprocess's own. A page whose
+rung 1 drop does reach the ladder never counts toward the breaker, even when its subprocess retry
+then fails with a worker class of its own (the retry's class is logged); a normal run does not
+produce that case. A trip on `signal:9` or an `oom` class says the worker was killed by the OS,
+usually out of memory, and names `pdf.mineru_page_batch` and `pdf.mineru_memory_ceiling_mb`. A rule fixed in `_SystemicFailureCounter`: a page counts only when both rungs fail with the same
+class, and extends the run only when that class equals the previous counted page's. A document
+whose every page is `unextracted` raises `AllPagesUnextractedError`, a subclass of
+`UnextractableContentError` (so existing catches hold): `nx dt index` counts it among the
+records that fail the run's exit, `nx index pdf` already fails over it, and `nx index repo`
+still counts it as a skipped file by its per-file contract (nexus-deyd5), its `nx index failures`
+row carrying error class `AllPagesUnextractedError`. Rung 3 writes the page
+method `pymupdf-text` and the document method `mineru+degraded`, also when every page is on
+rung 3; only `--extractor pymupdf` writes `pymupdf`; nothing writes the legacy
+`pymupdf_normalized`.
+
 ### Critical Assumptions
 
 - [x] A1: MinerU honours `formula_enable=false` per request on the server path

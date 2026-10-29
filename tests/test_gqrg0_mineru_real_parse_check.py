@@ -44,6 +44,9 @@ from pathlib import Path
 import pytest
 
 
+pytestmark = pytest.mark.usefixtures("no_mineru_child_probe")  # nexus-vyy65: no real MinerU child import here
+
+
 @pytest.fixture()
 def _fixture_and_model_present(monkeypatch: pytest.MonkeyPatch) -> None:
     """Most tests below want the real-parse probe to actually run --

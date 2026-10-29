@@ -3079,7 +3079,7 @@ def _hold_pdfs_without_stack(
                 _log.error(
                     "pdf_not_indexed_mineru_bounds", path=str(path), repo=str(repo), problem=_bounds_problem,
                 )
-            pdf_stack.record_skipped([*already_held, *_needing], repo=repo)
+            pdf_stack.record_skipped([*already_held, *_needing], repo=repo, cause=pdf_stack.SKIP_CAUSE_BOUNDS)
             if on_phase is not None and not already_held:
                 on_phase(
                     f"{len(_needing)} PDF(s) NOT indexed this run (code and prose proceed): {_bounds_problem}"
@@ -5644,6 +5644,13 @@ def _run_index(
         if _pdf_held:
             _held = set(_pdf_held)
             pdf_files = [(sc, f) for sc, f in pdf_files if f not in _held]
+    elif delta_changed is None:
+        # nexus-tr1rj.26: a full walk that finds no PDF has nothing left to hold. A record an
+        # earlier run wrote for this repo (the PDFs were deleted, or the repo no longer has any)
+        # would otherwise stay, and the doctor row that names `nx index repo` as its remedy could
+        # never be cleared by it. A --since-head walk lists only the changed files, so "no PDF
+        # in it" says nothing about the repo and leaves the record alone.
+        _bounds_pdf_stack.record_skipped([], repo=repo)
 
     # GH #371 + #436: surface the oversize-skip set so the operator
     # knows what got dropped. Single structured log + on_phase line
@@ -6884,10 +6891,12 @@ def _run_index(
     # "systemic_extraction_failure" at the return dict.
     # Declared before the FIRST run_file_loop call (code files) since all
     # four loops below share this one collector.
-    _skipped_files: list[tuple[str, str]] = []
+    # Each entry is (path, reason, error_class): the class is the raised type's own name
+    # (``UnextractableContentError``, or its subclass ``AllPagesUnextractedError``).
+    _skipped_files: list[tuple[str, str, str]] = []
 
-    def _on_skip(file: Path, reason: str) -> None:
-        _skipped_files.append((str(file), reason))
+    def _on_skip(file: Path, reason: str, error_class: str) -> None:
+        _skipped_files.append((str(file), reason, error_class))
 
     # Index code files → code__ (voyage-code-3, AST chunking)
     # NOTE: calls _index_code_file (the module-level wrapper) so that tests
@@ -7151,7 +7160,7 @@ def _run_index(
         _log.error(
             "index_files_skipped_unextractable",
             count=len(_skipped_files),
-            files=sorted(f for f, _ in _skipped_files)[:20],
+            files=sorted(f for f, _, _ in _skipped_files)[:20],
         )
         if on_phase is not None:
             on_phase(
@@ -7540,14 +7549,12 @@ def _run_index(
     # above is written as one durable row (nexus.index_failures) in ONE
     # batch transaction, tagged with a fresh run_id so a later `nx index
     # failures --run-id ...` or `nx doctor --check-index-failures` can find
-    # exactly this run's backlog. error_class is hardcoded to
-    # UnextractableContentError's name rather than threaded through
-    # run_file_loop's on_skip callback: nexus-deyd5's classification
-    # boundary is the ONLY thing that ever sets skip_reason (see
-    # indexer_utils.run_file_loop._process), so it is the only class that
-    # can reach here — enriching the callback signature to derive it would
-    # touch the very classification this bead's scope fence excludes from
-    # change, for no behavioral gain today.
+    # exactly this run's backlog. error_class is the raised type's own name,
+    # threaded through run_file_loop's on_skip callback (nexus-q6nw0): the
+    # loop catches UnextractableContentError, which now has a subclass,
+    # AllPagesUnextractedError (MinerU failed on every page of a PDF), and a
+    # class-wide `nx index failures --acknowledge --error-class
+    # UnextractableContentError` must not silence that extractor failure.
     #
     # The write is advisory, matching every other telemetry call site's
     # posture (record_hook_failure et al.): a transport failure here must
@@ -7586,8 +7593,8 @@ def _run_index(
             _tel_store = HttpTelemetryStore(client=current_index_run_t2_client())
             _tel_store.record_index_failures_batch(
                 [
-                    (str(path), "UnextractableContentError", reason, "")
-                    for path, reason in _skipped_files
+                    (str(path), error_class, reason, "")
+                    for path, reason, error_class in _skipped_files
                 ],
                 run_id=_index_run_id,
             )

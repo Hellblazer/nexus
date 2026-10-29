@@ -288,14 +288,17 @@ class PgVectorManifestDocKeyFilterTest {
     // ── the pins ────────────────────────────────────────────────────────────
 
     @Test
-    void theMetaKeysAreStillAChunkRowFilter_theCatalogMetaIsNotConsulted_noDocId() {
+    void theMetaKeysAreStillAChunkRowFilter_theCatalogMetaIsNotConsulted_oneRowPerChunk() {
         // No writer puts tags on a catalog document yet, so tags is not an answered key: it is the chunk
-        // row's predicate inside the search, one row per chunk, no owner named. A's catalog meta says alpha
-        // and B's beta; the rows say beta (S, Q), stale-row (P) and legacy (L).
-        expect(where("tags", "beta"), "S@none", "Q@none");
-        expect(where("tags", "legacy"), "L@none");
+        // row's predicate inside the search, one row per chunk, each naming its first owner (nexus-6pfgb.26;
+        // this pin used to assert no doc_id at all, changed on purpose with the owner keys). A's catalog meta
+        // says alpha and B's beta; the rows say beta (S, Q), stale-row (P) and legacy (L).
+        expect(where("tags", "beta"), "S@A", "Q@B");
+        expect(where("tags", "legacy"), "L@C");
         expect(where("tags", "alpha"));
-        assertThat(search(where("tags", "beta"))).allSatisfy(r -> assertThat(r).doesNotContainKey("doc_id"));
+        var beta = search(where("tags", "beta"));
+        assertThat(beta.stream().map(r -> r.get("doc_id")).toList()).containsExactly(DOC_A, DOC_B);
+        assertThat(beta.stream().map(r -> (String) r.get("id")).distinct().count()).isEqualTo(beta.size());
     }
 
     @Test
@@ -435,11 +438,14 @@ class PgVectorManifestDocKeyFilterTest {
     }
 
     @Test
-    void aWhereWithoutDocumentOrLabelKeys_isUntouched_oneRowPerChunk_noDocId() {
+    void aWhereWithoutDocumentOrLabelKeys_isUntouched_oneRowPerChunk_namesItsFirstOwner() {
         var rows = search(null);
 
         assertThat(rows.stream().map(r -> (String) r.get("id")).collect(Collectors.toList()))
             .containsExactly(S, P, Q, L, R);
-        assertThat(rows).allSatisfy(r -> assertThat(r).doesNotContainKey("doc_id"));
+        // Changed on purpose by nexus-6pfgb.26 (it asserted no doc_id): the first live owner, lowest doc_id
+        // then position, so S (held by A and B) is A's.
+        assertThat(rows.stream().map(r -> r.get("doc_id")).toList())
+            .containsExactly(DOC_A, DOC_A, DOC_B, DOC_C, DOC_D);
     }
 }

@@ -5932,8 +5932,9 @@ def store_get(
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
         # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL for PDF
-        # chunks now (mineru/pymupdf/pymupdf_normalized, or the honest
-        # mixed aggregate mineru+degraded; a legacy value from before RDR-237) — display it when
+        # chunks now (mineru/pymupdf, or the honest mixed aggregate
+        # mineru+degraded; a legacy value from before RDR-237, pymupdf_normalized
+        # among them) — display it when
         # present. Absent for non-PDF chunks and for chunks indexed
         # before the fix shipped (new-writes-only, no backfill;
         # nexus-0qc4b — absence is "unknown", not "not mineru").

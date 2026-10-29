@@ -163,6 +163,8 @@ def test_run_index_under_refuse_holds_the_pdf_and_still_indexes_code(repo, monke
     assert run.housekeeping_keep == [repo / "paper.pdf"], "orphan housekeeping must still see the held PDF as present"
     assert any("NOT indexed" in p and pdf_stack.INSTALL_COMMAND in p for p in phases)
     assert pdf_stack.skipped_count() == 1
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK) == 1
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS) == 0
 
 
 def test_run_index_with_the_stack_present_indexes_the_pdf_and_holds_nothing(repo, monkeypatch) -> None:
@@ -585,6 +587,9 @@ def test_run_index_over_a_bad_mineru_limit_holds_the_pdf_and_still_indexes_code(
     assert run.housekeeping_keep == [repo / "paper.pdf"], "orphan housekeeping still sees the held PDF as present"
     assert any(_BOUNDS in p and "NOT indexed" in p for p in phases), phases
     assert pdf_stack.skipped_count() == 1
+    # nexus-tr1rj.26: the record carries WHY it holds the PDF, so nx doctor does not blame the stack.
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS) == 1
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK) == 0
 
 
 def test_run_index_with_usable_limits_holds_nothing_and_indexes_the_pdf(repo, monkeypatch) -> None:
@@ -681,3 +686,58 @@ def test_the_cli_lists_the_held_pdfs_exits_1_and_says_code_was_indexed(repo, bad
     assert "paper.pdf: held" in result.output
     assert "1 PDF(s) were NOT indexed" in result.output and "Code, prose and RDR files were indexed" in result.output
     assert "PDF support is not installed" not in result.output
+
+
+# ── a repo that no longer has PDFs clears its hold (nexus-tr1rj.26) ──────────
+
+
+@pytest.fixture
+def repo_without_pdfs(tmp_path: Path) -> Path:
+    r = tmp_path / "pdfless"
+    r.mkdir()
+    (r / "ok.py").write_text("x = 1\n")
+    return r
+
+
+@pytest.mark.parametrize("cause", [pdf_stack.SKIP_CAUSE_STACK, pdf_stack.SKIP_CAUSE_BOUNDS])
+def test_a_run_over_a_repo_with_no_pdfs_clears_that_repos_hold_and_only_that_repos(
+    repo_without_pdfs, tmp_path, monkeypatch, cause,
+) -> None:
+    """The user fixed the setting (or installed the stack) and then deleted the held PDFs: the doctor's
+    remedy, ``nx index repo``, finds nothing to hold, and the record that named them must go."""
+    from nexus.indexer import _run_index
+
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("present", ""))
+    other = tmp_path / "other-repo"
+    other.mkdir()
+    pdf_stack.record_skipped([repo_without_pdfs / "gone.pdf"], repo=repo_without_pdfs, cause=cause)
+    pdf_stack.record_skipped([other / "kept.pdf"], repo=other, cause=pdf_stack.SKIP_CAUSE_BOUNDS)
+    assert pdf_stack.skipped_count() == 2
+
+    with _doubles(_Run(), _db()) as mocks:
+        stats = _run_index(repo_without_pdfs, _reg())
+
+    mocks["_index_pdf_file"].assert_not_called()
+    assert stats["pdf_stack_held"] == 0
+    assert pdf_stack.skipped_count(cause) == (1 if cause == pdf_stack.SKIP_CAUSE_BOUNDS else 0)
+    assert pdf_stack.skipped_count() == 1, "the other repo's hold is not this run's to clear"
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS) == 1
+
+
+def test_a_since_head_run_that_sees_no_changed_pdf_leaves_the_hold_alone(
+    repo_without_pdfs, monkeypatch,
+) -> None:
+    """A delta walk lists only the changed files, so "no PDF in it" says nothing about the repo."""
+    from nexus import indexer as idx
+
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("present", ""))
+    monkeypatch.setattr(idx, "_get_owner_head_hash", lambda repo_: "BASE")
+    monkeypatch.setattr(idx, "_git_changed_since", lambda repo_, base: (["ok.py"], []))
+    pdf_stack.record_skipped(
+        [repo_without_pdfs / "held.pdf"], repo=repo_without_pdfs, cause=pdf_stack.SKIP_CAUSE_BOUNDS,
+    )
+
+    with _doubles(_Run(), _db()):
+        idx._run_index(repo_without_pdfs, _reg(), since_head=True)
+
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS) == 1
