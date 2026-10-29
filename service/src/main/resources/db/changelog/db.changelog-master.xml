@@ -1892,11 +1892,11 @@
     <include file="db/changelog/note-uri-001-backfill.xml"/>
 
     <!--
-        Bead nexus-jypmj.5 (RDR-232): nx_answer_runs.planner_cost_usd, one nullable DOUBLE PRECISION column holding
-        the inline planner's own dispatch cost for a plan-miss run. ADD COLUMN only, no DATA EFFECT, no backfill.
+        Bead nexus-jypmj.5 (RDR-232): nx_answer_runs.out_of_step_cost_usd, one nullable DOUBLE PRECISION column holding
+        the run's out-of-step dispatch cost (the inline planner call plus the request-extraction call). ADD COLUMN only, no DATA EFFECT, no backfill.
         After note-uri-001 (current tail), before the grants-nexus-svc.xml runAlways block.
     -->
-    <include file="db/changelog/telemetry-017-planner-cost.xml"/>
+    <include file="db/changelog/telemetry-017-out-of-step-cost.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

@@ -54,8 +54,8 @@ class TelemetrySchemaLiquibaseTest {
         "final_text", "cost_usd", "duration_ms", "created_at",
         // telemetry-016-1 (nexus-jypmj.3.4, RDR-232 Phase 3): the versioned run summary.
         "run_summary",
-        // telemetry-017-1 (nexus-jypmj.5): the inline planner's own dispatch cost.
-        "planner_cost_usd");
+        // telemetry-017-1 (nexus-jypmj.5): the run's out-of-step dispatch cost (planner + request extraction).
+        "out_of_step_cost_usd");
     private static final Set<String> HOOK_FAILURES_COLS = Set.of(
         "id", "tenant_id", "doc_id", "collection", "hook_name", "error", "occurred_at",
         "batch_doc_ids", "is_batch", "chain");
@@ -218,19 +218,19 @@ class TelemetrySchemaLiquibaseTest {
         }
     }
 
-    // ── nx_answer_runs.planner_cost_usd (nexus-jypmj.5) ───────────────────────
+    // ── nx_answer_runs.out_of_step_cost_usd (nexus-jypmj.5) ───────────────────────
 
     @Test
-    void nxAnswerRuns_plannerCostIsNullableDoubleNoDefault() throws Exception {
+    void nxAnswerRuns_outOfStepCostIsNullableDoubleNoDefault() throws Exception {
         try (Connection su = pg.createConnection("")) {
             PgCatalogProbes.ColumnInfo col = PgCatalogProbes.columnInfo(
-                DSL.using(su, SQLDialect.POSTGRES), "nexus", "nx_answer_runs", "planner_cost_usd");
-            assertThat(col).as("telemetry-017-1 must add nx_answer_runs.planner_cost_usd").isNotNull();
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "nx_answer_runs", "out_of_step_cost_usd");
+            assertThat(col).as("telemetry-017-1 must add nx_answer_runs.out_of_step_cost_usd").isNotNull();
             assertThat(col.udtName()).as("the same type as the run's own cost_usd, so the two compare").isEqualTo("float8");
             assertThat(col.nullable())
-                .as("NULLABLE: a plan-match hit has no planner dispatch and an old client sends none").isTrue();
+                .as("NULLABLE: a run with no out-of-step call and an old client send none").isTrue();
             assertThat(col.columnDefault())
-                .as("no default: a stored 0.0 would claim a free planner the run never measured").isNull();
+                .as("no default: a stored 0.0 would claim free out-of-step calls the run never measured").isNull();
         }
     }
 

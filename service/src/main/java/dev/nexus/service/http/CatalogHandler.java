@@ -1068,10 +1068,11 @@ public final class CatalogHandler implements HttpHandler {
      * POST /v1/catalog/traverse — BFS graph traversal.
      *
      * <p>Request: {"seeds": [...], "link_types": [...], "direction": "both", "depth": 1,
-     *           "scope_filter": {"kind": "corpus_prefix|collection|subtree", "value": "..."}}
+     *           "scope_filter": {"collections": ["name", ...]} or {"subtree": "1.2"}}
      * (nexus-jypmj.1.13: {@code scope_filter} optional)
      * Response: {"nodes": [...], "edges": [...]} plus, only when a {@code scope_filter} was sent,
-     * {@code "scope_filter": {"applied": true, "kind", "value", "dropped_out_of_scope": N}}
+     * {@code "scope_filter": {"applied": true, "kind": "collections|subtree", "collection_count": N
+     * (collections) or "subtree": "1.2" (subtree), "dropped_out_of_scope": N}}
      *
      * <p>{@code seeds} capped at {@value #MAX_BATCH_DOC_IDS} (found during
      * CatalogHandlerEnvelopeConformanceGateTest authorship): the BFS's first
@@ -1111,7 +1112,7 @@ public final class CatalogHandler implements HttpHandler {
         // flood for every service-mode user) and the opt-in became a no-op.
         // ABSENT means false, which is the correct default: exclude.
         boolean includeHeuristic = Boolean.TRUE.equals(body.get("include_heuristic"));
-        // nexus-jypmj.1.13 (RDR-232 s3): OPTIONAL {kind, value} scope predicate, applied before the
+        // nexus-jypmj.1.13 (RDR-232 s3): OPTIONAL {collections:[...]} or {subtree:"..."} scope predicate, applied before the
         // 500-node cut; the reply then carries a `scope_filter` marker. ABSENT means no predicate and a
         // reply byte-identical to before. A malformed value is a 400 (IllegalArgumentException), never a
         // silently unfiltered walk, because a caller that asked for containment must not get none.

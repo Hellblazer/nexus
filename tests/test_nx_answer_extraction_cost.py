@@ -7,7 +7,7 @@ running spend all came from the steps and the inline planner, so ``nx answer-run
 made the call and ``budget_usd`` ignored it.
 
 Tenant-free: the extraction dispatch, the planner and the operator tools are stubbed, the T2 and telemetry layers
-are mocks (the harness of ``tests/test_nx_answer_planner_cost.py``). The extraction dispatch is a fake that lands
+are mocks (the harness of ``tests/test_nx_answer_out_of_step_cost.py``). The extraction dispatch is a fake that lands
 a ``DispatchUsage`` in the sink it is handed, the way the real ``claude_dispatch`` does; nothing here is live.
 """
 from __future__ import annotations
@@ -163,7 +163,7 @@ async def test_an_extraction_that_alone_exhausts_the_budget_stops_the_run_before
 
 
 def test_every_record_arm_reads_its_cost_from_the_one_sink_the_extraction_reports_to() -> None:
-    """The extraction's usage joins ``_planner_usage_sink``, the sink every record arm and the budget seed already
+    """The extraction's usage joins ``_out_of_step_usage_sink``, the sink every record arm and the budget seed already
     read, rather than a second one each arm would have to remember."""
     tree = ast.parse(Path(core.__file__).read_text())
     nx_answer = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "nx_answer")
@@ -174,17 +174,44 @@ def test_every_record_arm_reads_its_cost_from_the_one_sink_the_extraction_report
     assert len(coverage_calls) == 1, f"the census examined {len(coverage_calls)} coverage call sites; there is one"
     (call,) = coverage_calls
     sinks = [k.value for k in call.keywords if k.arg == "usage_sink"]
-    assert len(sinks) == 1 and isinstance(sinks[0], ast.Name) and sinks[0].id == "_planner_usage_sink"
+    assert len(sinks) == 1 and isinstance(sinks[0], ast.Name) and sinks[0].id == "_out_of_step_usage_sink"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_hit_run_stores_the_extraction_cost_as_its_out_of_step_share() -> None:
+    """Both out-of-step calls land in one sink and one stored field, so a plan-match hit that made the extraction
+    call stores that call's cost, and the stored run is steps + share."""
+    _result, db, fake = await _run()
+    assert fake.calls == 1
+    written = _recorded(db)
+    assert written["out_of_step_cost_usd"] == pytest.approx(EXTRACT_COST)
+    assert written["cost_usd"] == pytest.approx(STEP_COST + written["out_of_step_cost_usd"])
+
+
+@pytest.mark.asyncio
+async def test_a_plan_miss_run_stores_planner_plus_extraction_as_its_share() -> None:
+    _result, db, _ = await _run(miss=True)
+    written = _recorded(db)
+    assert written["out_of_step_cost_usd"] == pytest.approx(PLANNER_COST + EXTRACT_COST)
+    assert written["cost_usd"] == pytest.approx(STEP_COST + written["out_of_step_cost_usd"])
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_reports_no_cost_stores_no_share() -> None:
+    _result, db, _ = await _run(extraction=_Extraction(cost=None))
+    assert "out_of_step_cost_usd" not in _recorded(db), "unknown is absent, never 0.0"
 
 
 # ── `nx answer-runs --steps` must not flag the extraction's share as a cost inconsistency ───────────────────
 
 
-def _row(plan_id, run_cost, step_costs, *, extraction_cost="absent"):
+def _row(plan_id, run_cost, step_costs, *, extraction_cost="absent", share="absent"):
     row = {
         "id": 1, "plan_id": plan_id, "cost_usd": run_cost,
         "steps": [{"operator": "summarize", "source": "llm", "cost_usd": c, "elapsed_ms": 10} for c in step_costs],
     }
+    if share != "absent":
+        row["out_of_step_cost_usd"] = share
     if extraction_cost != "absent":
         row["run_summary"] = {"request": {"extraction": {"outcome": "ok", "calls": 1, "cost_usd": extraction_cost}}}
     return row
@@ -224,16 +251,35 @@ def test_an_inline_planned_run_still_allows_its_planner_share_beside_the_extract
     assert len(_violations(_row(0, 0.01, [STEP_COST], extraction_cost=EXTRACT_COST))) == 1, "below its own steps is a drop"
 
 
+def test_a_stored_share_settles_the_check_for_a_library_plan_run_with_no_summary() -> None:
+    """The share is on the row itself, so a row whose summary was cut for size, or an engine that keeps none,
+    is checked exactly rather than flagged for an extraction cost the check cannot see."""
+    assert _violations(_row(7, STEP_COST + EXTRACT_COST, [STEP_COST], share=EXTRACT_COST)) == [], "no summary, stored share"
+    assert len(_violations(_row(7, STEP_COST + EXTRACT_COST + 0.5, [STEP_COST], share=EXTRACT_COST))) == 1, "over-count"
+    assert len(_violations(_row(7, STEP_COST, [STEP_COST], share=EXTRACT_COST))) == 1, "a share the run cost left out"
+
+
+def test_a_stored_share_wins_over_the_summarys_extraction_cost() -> None:
+    """With the field stored the summary fallback is not consulted: the one-sided allowance and the 7.88.0
+    either-or acceptance apply to rows without it only."""
+    assert _violations(_row(7, STEP_COST, [STEP_COST], extraction_cost=EXTRACT_COST, share=EXTRACT_COST)) != []
+    assert _violations(_row(7, STEP_COST + EXTRACT_COST, [STEP_COST], extraction_cost=EXTRACT_COST, share=EXTRACT_COST)) == []
+
+
 @pytest.mark.asyncio
-async def test_the_row_a_plan_hit_run_writes_passes_the_answer_runs_consistency_check() -> None:
-    """End to end: what ``nx_answer`` hands the telemetry store (run cost, steps, the run summary) is a row that
-    ``nx answer-runs --steps`` finds consistent, for a run that made the extraction call."""
+@pytest.mark.parametrize("with_summary", [True, False], ids=["with-summary", "no-summary"])
+async def test_the_row_a_plan_hit_run_writes_passes_the_answer_runs_consistency_check(with_summary) -> None:
+    """End to end: what ``nx_answer`` hands the telemetry store (run cost, steps, the stored share and, when one is
+    written, the run summary) is a row that ``nx answer-runs --steps`` finds consistent, for a run that made the
+    extraction call, with or without the summary."""
     result, db, _ = await _run(summary=True)
     written = _recorded(db)
     assert written["run_summary"]["request"]["extraction"]["cost_usd"] == pytest.approx(EXTRACT_COST)
     assert written["run_summary"]["run"]["cost_usd"] == pytest.approx(result["cost_usd"]), "the summary's run cost is the run's"
     row = {
         "id": 1, "plan_id": 1, "cost_usd": written["cost_usd"], "steps": written["steps"],
-        "run_summary": written["run_summary"],
+        "out_of_step_cost_usd": written["out_of_step_cost_usd"],
     }
+    if with_summary:
+        row["run_summary"] = written["run_summary"]
     assert _violations(row) == []

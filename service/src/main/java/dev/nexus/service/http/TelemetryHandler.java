@@ -422,10 +422,10 @@ public final class TelemetryHandler implements HttpHandler {
         List<TelemetryRepository.StepInput> steps = parseNxAnswerSteps(body.get("steps"));
         // RDR-232 P3 (nexus-jypmj.3.4): OPTIONAL run_summary — absent/null stores SQL NULL.
         String runSummary = parseRunSummary(body.get("run_summary"));
-        // nexus-jypmj.5: OPTIONAL planner_cost_usd — absent/null stores SQL NULL, never 0.0.
-        Double plannerCost = parsePlannerCost(body.get("planner_cost_usd"));
+        // nexus-jypmj.5: OPTIONAL out_of_step_cost_usd — absent/null stores SQL NULL, never 0.0.
+        Double outOfStepCost = parseOutOfStepCost(body.get("out_of_step_cost_usd"));
         repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, cost,
-            durationMsV, createdAt, steps, runSummary, plannerCost);
+            durationMsV, createdAt, steps, runSummary, outOfStepCost);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
     }
 
@@ -474,9 +474,9 @@ public final class TelemetryHandler implements HttpHandler {
         // it commits (and rolls back) with the steps and plan counters: no second write.
         String runSummary = parseRunSummary(body.get("run_summary"));
         // nexus-jypmj.5: a column of the same run row, so it commits with the steps and counters.
-        Double plannerCost = parsePlannerCost(body.get("planner_cost_usd"));
+        Double outOfStepCost = parseOutOfStepCost(body.get("out_of_step_cost_usd"));
         repo.recordNxAnswerRunComplete(tenant, question, planId, conf, stepCount, finalText, cost,
-            durationMsV, createdAt, steps, runSummary, plannerCost, success);
+            durationMsV, createdAt, steps, runSummary, outOfStepCost, success);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
     }
 
@@ -570,14 +570,14 @@ public final class TelemetryHandler implements HttpHandler {
     }
 
     /**
-     * nexus-jypmj.5: validate the optional {@code planner_cost_usd} and return it, or {@code null} when absent
+     * nexus-jypmj.5: validate the optional {@code out_of_step_cost_usd} and return it, or {@code null} when absent
      * or an explicit JSON {@code null} (stored as SQL NULL: "not recorded", never 0.0). A JSON number, or a
-     * numeric string as an ETL source may send it, that is finite and not negative. The client uses the value
-     * as an upper bound on the cost no step accounts for, so a negative or non-finite one would silently
-     * widen that bound; every failure is a 400 naming the field. Shared by {@code /record}, {@code /complete},
+     * numeric string as an ETL source may send it, that is finite and not negative. The client adds the value
+     * to the step sum as the run's exact out-of-step share, so a negative or non-finite one would silently
+     * skew that check; every failure is a 400 naming the field. Shared by {@code /record}, {@code /complete},
      * {@code /import} and {@code /import_batch}.
      */
-    private static Double parsePlannerCost(Object raw) {
+    private static Double parseOutOfStepCost(Object raw) {
         if (raw == null) return null;
         double value;
         if (raw instanceof Number n) {
@@ -586,13 +586,13 @@ public final class TelemetryHandler implements HttpHandler {
             try {
                 value = Double.parseDouble(text.strip());
             } catch (NumberFormatException e) {
-                throw new IllegalArgumentException("field 'planner_cost_usd' must be a number");
+                throw new IllegalArgumentException("field 'out_of_step_cost_usd' must be a number");
             }
         } else {
-            throw new IllegalArgumentException("field 'planner_cost_usd' must be a number");
+            throw new IllegalArgumentException("field 'out_of_step_cost_usd' must be a number");
         }
         if (Double.isNaN(value) || Double.isInfinite(value) || value < 0) {
-            throw new IllegalArgumentException("field 'planner_cost_usd' must be a finite number >= 0");
+            throw new IllegalArgumentException("field 'out_of_step_cost_usd' must be a finite number >= 0");
         }
         return value;
     }
@@ -1260,7 +1260,7 @@ public final class TelemetryHandler implements HttpHandler {
                     // RDR-232 P3: carried verbatim; absent stays NULL.
                     parseRunSummary(body.get("run_summary")),
                     // nexus-jypmj.5: carried verbatim; absent stays NULL, never 0.0.
-                    parsePlannerCost(body.get("planner_cost_usd")));
+                    parseOutOfStepCost(body.get("out_of_step_cost_usd")));
             }
             case "hook_failures" -> {
                 String batchDocIds = optStrNull(body, "batch_doc_ids");
@@ -1350,11 +1350,11 @@ public final class TelemetryHandler implements HttpHandler {
                     throw new IllegalArgumentException("rows[" + rowIndex + "]: " + e.getMessage(), e);
                 }
             }
-            // nexus-jypmj.5: planner_cost_usd is validated per row too (a finite number >= 0, or absent), and
+            // nexus-jypmj.5: out_of_step_cost_usd is validated per row too (a finite number >= 0, or absent), and
             // replaced by the number so the repository's batch insert reads one shape.
-            if ("nx_answer_runs".equals(table) && row.get("planner_cost_usd") != null) {
+            if ("nx_answer_runs".equals(table) && row.get("out_of_step_cost_usd") != null) {
                 try {
-                    row.put("planner_cost_usd", parsePlannerCost(row.get("planner_cost_usd")));
+                    row.put("out_of_step_cost_usd", parseOutOfStepCost(row.get("out_of_step_cost_usd")));
                 } catch (IllegalArgumentException e) {
                     throw new IllegalArgumentException("rows[" + rowIndex + "]: " + e.getMessage(), e);
                 }

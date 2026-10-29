@@ -77,6 +77,10 @@ from nexus.db.limits import QUOTAS
 
 _log = structlog.get_logger(__name__)
 
+#: Latch for ``nx_answer_out_of_step_cost_unsupported_by_engine`` (nexus-jypmj.5/.9): module-level because the
+#: store is built fresh per call in production, so an instance attribute would latch nothing.
+_OUT_OF_STEP_UNSUPPORTED_LOGGED = False
+
 
 def normalize_since_filter(since: str) -> str:
     """Normalize a caller-supplied ``since`` filter to full UTC ISO-8601.
@@ -557,29 +561,36 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         return self._version_capabilities().get("nx_answer_run_summary_supported") is True
 
-    def _supports_nx_answer_planner_cost(self) -> bool:
-        """nexus-jypmj.5: does the engine THIS store talks to keep a ``planner_cost_usd`` on the run row
-        (``GET /version``'s ``nx_answer_planner_cost_supported``, changeset telemetry-017-1)?
+    def _supports_nx_answer_out_of_step_cost(self) -> bool:
+        """nexus-jypmj.5: does the engine THIS store talks to keep an ``out_of_step_cost_usd`` on the run row
+        (``GET /version``'s ``nx_answer_out_of_step_cost_supported``, changeset telemetry-017-1)?
 
         The strict reading of :meth:`_supports_nx_answer_run_summary`: only a JSON ``true`` counts, because an
-        engine that predates the column answers HTTP 200 to a ``planner_cost_usd`` it silently discards. The
+        engine that predates the column answers HTTP 200 to an ``out_of_step_cost_usd`` it silently discards. The
         public cloud edge trims ``/version`` to an allowlist, so until it lists this flag a cloud client reads
         unsupported here too (engine-release pre-tag check 3e). Same cached body, same TTL. NEVER raises."""
-        return self._version_capabilities().get("nx_answer_planner_cost_supported") is True
+        return self._version_capabilities().get("nx_answer_out_of_step_cost_supported") is True
 
-    def _planner_cost_for_wire(self, planner_cost_usd: float | None, *, site: str) -> float | None:
-        """*planner_cost_usd* when it can go on the wire, else ``None``. ``None`` in means the run had no planner
-        dispatch (a plan-match hit) and nothing is sent or logged; a value for an engine that would drop it is
-        not sent and the loss is logged once the client knows it (the ``run_summary`` rule)."""
-        if planner_cost_usd is None:
+    def _out_of_step_cost_for_wire(self, out_of_step_cost_usd: float | None, *, site: str) -> float | None:
+        """*out_of_step_cost_usd* when it can go on the wire, else ``None``. ``None`` in means the run made no
+        out-of-step call (no inline planner, no request extraction) and nothing is sent or logged. A value for an
+        engine that would drop it is not sent, and the loss is logged ONCE per process (a store is built fresh
+        per call, so the latch is module-level): what it names is a standing property of the engine, not an
+        event of the run, and once the field carries the extraction call's cost too it applies to about two
+        thirds of all runs, so a line per run would bury the log."""
+        global _OUT_OF_STEP_UNSUPPORTED_LOGGED  # noqa: PLW0603 — process-wide latch, see its comment
+        if out_of_step_cost_usd is None:
             return None
-        if not self._supports_nx_answer_planner_cost():
-            _log.warning(
-                "nx_answer_planner_cost_unsupported_by_engine", site=site,
-                consequence="run row recorded without the planner's share of its cost",
-            )
+        if not self._supports_nx_answer_out_of_step_cost():
+            if not _OUT_OF_STEP_UNSUPPORTED_LOGGED:
+                _OUT_OF_STEP_UNSUPPORTED_LOGGED = True
+                _log.warning(
+                    "nx_answer_out_of_step_cost_unsupported_by_engine", site=site,
+                    consequence="run rows recorded without their out-of-step share of the cost "
+                                "(`nx answer-runs --steps` falls back to the one-sided allowance)",
+                )
             return None
-        return float(planner_cost_usd)
+        return float(out_of_step_cost_usd)
 
     def _run_summary_for_wire(self, run_summary: Mapping[str, Any] | None, *, site: str) -> dict[str, Any] | None:
         """*run_summary* as a plain dict when it can go on the wire, else ``None`` with the reason logged:
@@ -645,15 +656,15 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         steps: list[dict[str, Any]] | None = None,
         run_summary: Mapping[str, Any] | None = None,
         created_at: str | None = None,
-        planner_cost_usd: float | None = None,
+        out_of_step_cost_usd: float | None = None,
     ) -> None:
         """Record an nx_answer run. Calls ``POST /v1/telemetry/nx_answer_runs/record``.
 
-        ``planner_cost_usd`` (nexus-jypmj.5): the inline planner's own dispatch cost for a plan-miss run, the
-        share of ``cost_usd`` that is no step's. Sent ONLY when the run has one and
-        :meth:`_supports_nx_answer_planner_cost` says the engine stores it; ``None`` (a plan-match hit) adds no
-        key, never ``0.0``. It lets ``nx answer-runs`` check a ``plan_id`` 0 run's cost from above as well as
-        below.
+        ``out_of_step_cost_usd`` (nexus-jypmj.5): the run's out-of-step dispatch cost (the inline planner call on a
+        plan miss plus the structured request-extraction call), the share of ``cost_usd`` that is no step's. Sent
+        ONLY when the run made such a call and :meth:`_supports_nx_answer_out_of_step_cost` says the engine stores
+        it; ``None`` (no out-of-step call) adds no key, never ``0.0``. It lets ``nx answer-runs`` check any run's
+        cost from above as well as below.
 
         ``run_summary`` (RDR-232 Phase 3, nexus-jypmj.3.5): the version-1 summary object, put on the wire
         ONLY when :meth:`_supports_nx_answer_run_summary` says the engine keeps it and it fits the engine's
@@ -715,9 +726,9 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["run_summary"] = wire_summary
             if created_at:
                 payload["created_at"] = created_at
-        wire_planner = self._planner_cost_for_wire(planner_cost_usd, site="record")
+        wire_planner = self._out_of_step_cost_for_wire(out_of_step_cost_usd, site="record")
         if wire_planner is not None:
-            payload["planner_cost_usd"] = wire_planner
+            payload["out_of_step_cost_usd"] = wire_planner
         self._post("/v1/telemetry/nx_answer_runs/record", payload)
 
     def record_nx_answer_run_complete(
@@ -734,7 +745,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         steps: list[dict[str, Any]] | None,
         success: bool,
         run_summary: Mapping[str, Any] | None = None,
-        planner_cost_usd: float | None = None,
+        out_of_step_cost_usd: float | None = None,
     ) -> None:
         """RDR-203 D1/D5 (nexus-dt2tu.3): the one composite POST replacing the
         client's (run_start, record, run_outcome) triple against a
@@ -778,7 +789,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         when the engine keeps it and it fits the cap, and written in the run row's own INSERT, so it stays
         inside the one transaction.
 
-        ``planner_cost_usd`` (nexus-jypmj.5): as on :meth:`record_nx_answer_run`; a column of the same run row,
+        ``out_of_step_cost_usd`` (nexus-jypmj.5): as on :meth:`record_nx_answer_run`; a column of the same run row,
         so it commits (and rolls back) with the steps and counters.
         """
         payload: dict[str, Any] = {
@@ -796,9 +807,9 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         wire_summary = self._run_summary_for_wire(run_summary, site="complete")
         if wire_summary is not None:
             payload["run_summary"] = wire_summary
-        wire_planner = self._planner_cost_for_wire(planner_cost_usd, site="complete")
+        wire_planner = self._out_of_step_cost_for_wire(out_of_step_cost_usd, site="complete")
         if wire_planner is not None:
-            payload["planner_cost_usd"] = wire_planner
+            payload["out_of_step_cost_usd"] = wire_planner
         self._post("/v1/telemetry/nx_answer_runs/complete", payload)
 
     def _read_nx_answer_run_summary(

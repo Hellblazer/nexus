@@ -37,7 +37,7 @@ import java.util.function.Supplier;
  *  "nx_answer_run_summary_supported":true,
  *  "catalog_graph_scope_filter_supported":true,
  *  "catalog_manifest_row_limit_supported":true,
- *  "nx_answer_planner_cost_supported":true,
+ *  "nx_answer_out_of_step_cost_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -370,16 +370,16 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
-     * nexus-jypmj.5 capability advertisement: does this engine store the optional {@code planner_cost_usd}
+     * nexus-jypmj.5 capability advertisement: does this engine store the optional {@code out_of_step_cost_usd}
      * on {@code POST /v1/telemetry/nx_answer_runs/record} and {@code /complete} (column {@code
-     * nx_answer_runs.planner_cost_usd}, changeset telemetry-017-1) and return it from {@code /query}?
+     * nx_answer_runs.out_of_step_cost_usd}, changeset telemetry-017-1) and return it from {@code /query}?
      *
      * <p>An independent flag, for the reason {@link #appendNxAnswerRunSummaryCapabilityField} gives: an old
      * engine drops the key without an error, so HTTP 200 is no evidence of persistence. A client that reads
      * the flag absent omits the field. Invisible to cloud clients until the public conexus edge allowlists it.
      */
-    static void appendNxAnswerPlannerCostCapabilityField(StringBuilder body) {
-        body.append(",\"nx_answer_planner_cost_supported\":true");
+    static void appendNxAnswerOutOfStepCostCapabilityField(StringBuilder body) {
+        body.append(",\"nx_answer_out_of_step_cost_supported\":true");
     }
 
     /**
@@ -566,8 +566,8 @@ public final class VersionHandler implements HttpHandler {
         appendCatalogGraphScopeFilterCapabilityField(body);
         // nexus-jypmj.6: the manifest get_many per-document row limit.
         appendCatalogManifestRowLimitCapabilityField(body);
-        // nexus-jypmj.5: the planner cost column on the run row.
-        appendNxAnswerPlannerCostCapabilityField(body);
+        // nexus-jypmj.5: the out-of-step cost column on the run row.
+        appendNxAnswerOutOfStepCostCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

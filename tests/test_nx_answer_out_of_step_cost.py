@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-jypmj.1.20 (found by the RDR-232 canary): a plan-miss run's cost includes the inline planner.
+nexus-jypmj.5: the run's out-of-step share (planner plus request extraction) is stored beside it and makes
+``nx answer-runs --steps`` check the run cost from both sides.
 
 The planner dispatch's cost lands in an ambient usage sink that was read only for the budget check, so
 the envelope's ``cost_usd`` and the persisted ``nx_answer_runs.cost_usd`` summed plan steps alone.
@@ -86,7 +88,7 @@ def _persisted_cost(db) -> float | None:
 
 
 @pytest.mark.asyncio
-async def test_a_plan_miss_envelope_and_run_record_include_the_planner_cost() -> None:
+async def test_a_plan_miss_envelope_and_run_record_include_the_share() -> None:
     result, db = await _run(miss=True)
     assert db.plans.save_plan.called, "the inline planner ran: this is a plan miss"
     steps_cost = sum(s["cost_usd"] for s in result["steps"] if s["cost_usd"] is not None)
@@ -103,7 +105,7 @@ async def test_a_plan_hit_cost_is_the_steps_alone() -> None:
     assert _persisted_cost(db) == pytest.approx(STEP_COST)
 
 
-def test_every_run_record_call_in_nx_answer_passes_the_planner_cost() -> None:
+def test_every_run_record_call_in_nx_answer_passes_the_share() -> None:
     """The record arms are many; one that omitted the planner cost would store a lower bound for the
     runs it ends (a census, with a non-vacuity floor)."""
     import ast
@@ -119,11 +121,11 @@ def test_every_run_record_call_in_nx_answer_passes_the_planner_cost() -> None:
         and n.func.id in ("_nx_answer_record_complete", "_nx_answer_record_run")
     ]
     assert len(calls) >= 13, f"the census examined {len(calls)} call sites; the arms were 13 when it was written"
-    missing = [c.lineno for c in calls if not any(k.arg == "planner_cost_usd" for k in c.keywords)]
-    assert missing == [], f"record calls without planner_cost_usd at lines {missing}"
+    missing = [c.lineno for c in calls if not any(k.arg == "out_of_step_cost_usd" for k in c.keywords)]
+    assert missing == [], f"record calls without out_of_step_cost_usd at lines {missing}"
 
 
-# ── `nx answer-runs --steps` must not flag the planner's share as a cost inconsistency ───────────────────────
+# ── `nx answer-runs --steps` must not flag the out-of-step share as a cost inconsistency ───────────────────────
 
 
 def _row(plan_id, run_cost, step_costs):
@@ -147,7 +149,7 @@ def test_the_cost_consistency_check_allows_the_planner_share_on_an_ad_hoc_run_on
     assert violations(_row(None, None, [None])) == [], "both unknown still agrees"
 
 
-# ── nexus-jypmj.5: the planner's share is stored on the run, so the check is two-sided ───────────────────────
+# ── nexus-jypmj.5: the out-of-step share is stored on the run, so the check is two-sided ─────────────────────
 
 
 def _persisted_kwargs(db) -> dict:
@@ -159,21 +161,21 @@ def _persisted_kwargs(db) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_a_plan_miss_run_is_stored_with_the_planner_cost_and_a_plan_hit_without_one() -> None:
+async def test_a_plan_miss_run_is_stored_with_its_share_and_a_plan_hit_that_made_no_out_of_step_call_without_one() -> None:
     result, db = await _run(miss=True)
     kwargs = _persisted_kwargs(db)
-    assert kwargs["planner_cost_usd"] == pytest.approx(PLANNER_COST)
+    assert kwargs["out_of_step_cost_usd"] == pytest.approx(PLANNER_COST)
     steps_cost = sum(s["cost_usd"] for s in result["steps"] if s["cost_usd"] is not None)
-    assert kwargs["cost_usd"] == pytest.approx(kwargs["planner_cost_usd"] + steps_cost), "the stored parts add up to the stored whole"
+    assert kwargs["cost_usd"] == pytest.approx(kwargs["out_of_step_cost_usd"] + steps_cost), "the stored parts add up to the stored whole"
 
     _hit, db_hit = await _run(miss=False)
-    assert "planner_cost_usd" not in _persisted_kwargs(db_hit), "a plan-match hit has no planner dispatch: nothing is sent"
+    assert "out_of_step_cost_usd" not in _persisted_kwargs(db_hit), "a plan-match hit that made no planner or extraction call has no share: nothing is sent"
 
 
-def _planner_row(plan_id, run_cost, step_costs, planner_cost):
+def _share_row(plan_id, run_cost, step_costs, share):
     row = _row(plan_id, run_cost, step_costs)
-    if planner_cost is not _ABSENT:
-        row["planner_cost_usd"] = planner_cost
+    if share is not _ABSENT:
+        row["out_of_step_cost_usd"] = share
     return row
 
 
@@ -186,34 +188,44 @@ def _violations(*rows):
     return _step_breakdown(list(rows))["cost_consistency_violations"]
 
 
-def test_with_the_planner_cost_stored_the_check_is_two_sided() -> None:
+def test_with_the_share_stored_the_check_is_two_sided() -> None:
     both = PLANNER_COST + STEP_COST
-    assert _violations(_planner_row(0, both, [STEP_COST], PLANNER_COST)) == [], "planner + steps is the run cost"
-    assert len(_violations(_planner_row(0, both + 0.25, [STEP_COST], PLANNER_COST))) == 1, "an over-count the one-sided check accepted"
-    assert len(_violations(_planner_row(0, both - 0.10, [STEP_COST], PLANNER_COST))) == 1, "a run below planner + steps is a drop"
-    assert len(_violations(_planner_row(0, STEP_COST, [STEP_COST], PLANNER_COST))) == 1, "the planner's share is missing from the run cost"
+    assert _violations(_share_row(0, both, [STEP_COST], PLANNER_COST)) == [], "planner + steps is the run cost"
+    assert len(_violations(_share_row(0, both + 0.25, [STEP_COST], PLANNER_COST))) == 1, "an over-count the one-sided check accepted"
+    assert len(_violations(_share_row(0, both - 0.10, [STEP_COST], PLANNER_COST))) == 1, "a run below planner + steps is a drop"
+    assert len(_violations(_share_row(0, STEP_COST, [STEP_COST], PLANNER_COST))) == 1, "the planner's share is missing from the run cost"
 
 
-def test_with_the_planner_cost_stored_and_no_known_step_cost_the_run_cost_is_the_planner_cost() -> None:
-    assert _violations(_planner_row(0, PLANNER_COST, [None], PLANNER_COST)) == []
-    assert len(_violations(_planner_row(0, PLANNER_COST * 2, [None], PLANNER_COST))) == 1
-    assert len(_violations(_planner_row(0, None, [None], PLANNER_COST))) == 1, "a stored planner cost with no run cost disagrees"
+def test_with_the_share_stored_and_no_known_step_cost_the_run_cost_is_the_share() -> None:
+    assert _violations(_share_row(0, PLANNER_COST, [None], PLANNER_COST)) == []
+    assert len(_violations(_share_row(0, PLANNER_COST * 2, [None], PLANNER_COST))) == 1
+    assert len(_violations(_share_row(0, None, [None], PLANNER_COST))) == 1, "a stored planner cost with no run cost disagrees"
 
 
-def test_a_stored_zero_planner_cost_is_a_measured_free_planner_not_an_absent_one() -> None:
-    assert _violations(_planner_row(0, STEP_COST, [STEP_COST], 0.0)) == []
-    assert len(_violations(_planner_row(0, STEP_COST + 0.25, [STEP_COST], 0.0))) == 1, "zero pins the upper bound"
+def test_a_stored_zero_share_is_a_measured_free_planner_not_an_absent_one() -> None:
+    assert _violations(_share_row(0, STEP_COST, [STEP_COST], 0.0)) == []
+    assert len(_violations(_share_row(0, STEP_COST + 0.25, [STEP_COST], 0.0))) == 1, "zero pins the upper bound"
 
 
 @pytest.mark.parametrize("planner", [_ABSENT, None], ids=["key-absent", "null"])
-def test_a_run_with_no_stored_planner_cost_keeps_the_one_sided_check(planner) -> None:
+def test_a_run_with_no_stored_share_keeps_the_one_sided_check(planner) -> None:
     """Rows written before the field (or by an older client, or read from an older engine) have no planner cost."""
     both = PLANNER_COST + STEP_COST
-    assert _violations(_planner_row(0, both, [STEP_COST], planner)) == []
-    assert _violations(_planner_row(0, both + 0.25, [STEP_COST], planner)) == [], "no upper bound is sound without the field"
-    assert len(_violations(_planner_row(0, 0.01, [STEP_COST], planner))) == 1, "a run below its own steps is still a drop"
+    assert _violations(_share_row(0, both, [STEP_COST], planner)) == []
+    assert _violations(_share_row(0, both + 0.25, [STEP_COST], planner)) == [], "no upper bound is sound without the field"
+    assert len(_violations(_share_row(0, 0.01, [STEP_COST], planner))) == 1, "a run below its own steps is still a drop"
 
 
-def test_a_stored_planner_cost_on_a_library_plan_run_does_not_widen_its_exact_check() -> None:
-    assert len(_violations(_planner_row(7, PLANNER_COST + STEP_COST, [STEP_COST], PLANNER_COST))) == 1
-    assert _violations(_planner_row(7, STEP_COST, [STEP_COST], PLANNER_COST)) == []
+@pytest.mark.parametrize("plan_id", [0, 7, None], ids=["inline-planned", "library-plan", "planner-error"])
+def test_a_stored_share_makes_the_check_two_sided_for_any_plan_id(plan_id) -> None:
+    """A library-plan run has a share too (the request extraction runs for a plan-match hit), and when the row
+    stores it the check is exact: run == steps + share, whatever the plan_id."""
+    assert _violations(_share_row(plan_id, PLANNER_COST + STEP_COST, [STEP_COST], PLANNER_COST)) == [], "run == steps + share"
+    assert len(_violations(_share_row(plan_id, PLANNER_COST + STEP_COST + 0.25, [STEP_COST], PLANNER_COST))) == 1, "over-count"
+    assert len(_violations(_share_row(plan_id, STEP_COST, [STEP_COST], PLANNER_COST))) == 1, "the share is missing from the run cost"
+    assert len(_violations(_share_row(plan_id, 0.01, [STEP_COST], PLANNER_COST))) == 1, "below its own steps is a drop"
+
+
+def test_a_library_plan_run_without_a_stored_share_keeps_its_exact_step_check() -> None:
+    assert len(_violations(_share_row(7, PLANNER_COST + STEP_COST, [STEP_COST], _ABSENT))) == 1, "no share, no allowance"
+    assert _violations(_share_row(7, STEP_COST, [STEP_COST], _ABSENT)) == []

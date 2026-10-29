@@ -5436,11 +5436,13 @@ executed-failed with `--include-failed`; see above):
   row whose run summary records an extraction cost agrees at the step sum plus that
   cost (exact, so an over-count is still flagged) or, for a row written by a release
   that left the call out of the run cost, at the step sum alone. A plan-miss run
-  that stored its out-of-step share (`planner_cost_usd`, nexus-jypmj.5; the planner
-  call plus the extraction call) is checked from both sides: its run cost must equal
-  the step sum plus that share, so an over-count is flagged too. A row with no
-  stored share (written before the field, by an older client, or read from an
-  engine without the column) keeps the one-sided check above. `by_plan` medians
+  that stored its out-of-step share (`out_of_step_cost_usd`, nexus-jypmj.5; the inline
+  planner call plus the request-extraction call, so a plan-match hit that made the
+  extraction call has one too) is checked from both sides whatever its `plan_id`: its
+  run cost must equal the step sum plus that share, so an over-count is flagged too,
+  and the one-sided allowance and the run summary's extraction cost are not consulted.
+  A row with no stored share (written before the field, by an older client, or read
+  from an engine without the column) keeps the checks above. `by_plan` medians
   stay step sums, so they remain comparable with the predicted cost.
 
 A step's `cost_usd` of `None` ("unknown", not a measured cost — see

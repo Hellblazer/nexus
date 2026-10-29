@@ -118,11 +118,19 @@ def _within_epsilon(a: float, b: float) -> bool:
 def _costs_agree(
     run_cost: "float | None", step_sum: "float | None", *, planner_share_allowed: bool = False,
     extraction_cost: "float | None" = None,
-    planner_cost: "float | None" = None,
+    out_of_step_cost: "float | None" = None,
 ) -> bool:
     """Whether a row's own ``cost_usd`` and the sum of its step costs
     agree within the relative/sub-cent epsilon. Both ``None`` (unknown vs
     unknown) trivially agree; exactly one ``None`` never agrees.
+
+    *out_of_step_cost* (nexus-jypmj.5) is the run's out-of-step dispatch share as the run stored it
+    (``nx_answer_runs.out_of_step_cost_usd``: the inline planner call plus the request-extraction call, neither
+    a plan step's). When the row has it the check is TWO-SIDED for ANY ``plan_id``: the run cost must equal the
+    step sum plus the share (a step sum of nothing known counts as zero, the way the writer adds only what it
+    knows), so an over-count is caught for an inline-planned run, a library-plan run and a planner-error run
+    alike, and *planner_share_allowed* and *extraction_cost* are not consulted. The rest of this docstring is
+    the rule for a row WITHOUT the field (written before it, by an older client, or against an older engine).
 
     *extraction_cost* (nexus-jypmj.9) is the structured request extraction's cost as the row's run summary
     records it. The call is no step's, and since nexus-jypmj.9 the run's ``cost_usd`` carries it, so a run with
@@ -134,25 +142,13 @@ def _costs_agree(
     *planner_share_allowed* (an inline-planned run, ``plan_id`` 0; nexus-jypmj.1.20): the run's
     ``cost_usd`` also carries the planner dispatch's own cost, which is no step's, so a run cost
     at or above the step sum agrees, and a known run cost agrees with no known step cost. A run
-    cost below its steps is still a drop.
-
-    *planner_cost* (nexus-jypmj.5) is the planner's share as the run stored it
-    (``nx_answer_runs.planner_cost_usd``), and it makes the check TWO-SIDED for a ``plan_id`` 0 run: the run
-    cost must equal the step sum plus the planner share (a step sum of nothing known counts as zero, the
-    way the writer adds only what it knows). Without it (a row written before the field, by an older client,
-    or read from an older engine) the allowance above is one-sided on purpose: the planner's cost is not
-    stored, so ``run_cost - step_sum`` cannot be told from an over-count and no upper bound on it is sound.
-    A library-plan run has no planner share, so a stored one is not read for it.
+    cost below its steps is still a drop. The allowance is one-sided on purpose: without the stored share,
+    ``run_cost - step_sum`` cannot be told from an over-count and no upper bound on it is sound.
     """
-    if planner_share_allowed and planner_cost is not None:
+    if out_of_step_cost is not None:
         if run_cost is None:
             return False
-        run_cost_expected = (step_sum or 0.0) + planner_cost
-        epsilon = max(
-            _COST_EPSILON_ABS_FLOOR,
-            _COST_EPSILON_REL * max(abs(run_cost), abs(run_cost_expected)),
-        )
-        return abs(run_cost - run_cost_expected) <= epsilon
+        return _within_epsilon(run_cost, (step_sum or 0.0) + out_of_step_cost)
     if run_cost is None and step_sum is None:
         return True
     if planner_share_allowed and run_cost is not None:
@@ -779,12 +775,12 @@ def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
         plan_key = str(plan_id) if plan_id is not None else "fallback"
         run_cost = row.get("cost_usd")
         step_sum = _row_step_cost_sum(row)
-        planner_cost = row.get("planner_cost_usd")  # nexus-jypmj.5: None for a row that stored none
-        if isinstance(planner_cost, bool) or not isinstance(planner_cost, (int, float)):
-            planner_cost = None
+        out_of_step_cost = row.get("out_of_step_cost_usd")  # nexus-jypmj.5: None for a row that stored none
+        if isinstance(out_of_step_cost, bool) or not isinstance(out_of_step_cost, (int, float)) or out_of_step_cost != out_of_step_cost:
+            out_of_step_cost = None
         if not _costs_agree(
             run_cost, step_sum, planner_share_allowed=plan_id == 0, extraction_cost=_row_extraction_cost(row),
-            planner_cost=planner_cost,
+            out_of_step_cost=out_of_step_cost,
         ):
             violations.append({
                 "id": row.get("id"), "run_cost_usd": run_cost,

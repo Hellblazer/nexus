@@ -270,7 +270,7 @@ def _planner_run(monkeypatch, replies: list[dict]):
             return await core._nx_answer_plan_miss("a brand new question")
 
     match = asyncio.run(go())
-    return match, prompts, core._planner_cost_usd(sink)
+    return match, prompts, core._out_of_step_cost_usd(sink)
 
 
 def test_a_planner_plan_with_an_embedded_ref_is_re_prompted_once_with_the_error_text(

@@ -228,6 +228,31 @@ def test_get_manifests_sampled_is_none_when_the_engine_did_not_echo_the_limit() 
     assert _client(handler).get_manifests_sampled(["1.2.1"], 3) is None
 
 
+def test_get_manifests_sampled_is_none_when_a_returned_document_has_no_row_count() -> None:
+    """The echo is there, but the document the engine returned is missing from ``row_counts``: the engine did not
+    apply the limit to it (or answered in a shape this client does not know), and reading its rows as a whole
+    manifest would claim a sample is complete. The same fallback as a missing echo, and nothing is kept."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(200, json={
+            "manifests": {"1.2.1": [_wire_row("1.2.1", p) for p in range(9)]},
+            "count": 1, "max_rows_per_doc": body["max_rows_per_doc"], "row_counts": {},
+        })
+
+    assert _client(handler).get_manifests_sampled(["1.2.1"], 3) is None
+
+
+def test_get_manifests_sampled_is_none_when_one_of_two_documents_has_no_row_count() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(200, json={
+            "manifests": {"1.2.1": [_wire_row("1.2.1", p) for p in (0, 4, 8)], "1.2.2": [_wire_row("1.2.2", 0)]},
+            "count": 2, "max_rows_per_doc": body["max_rows_per_doc"], "row_counts": {"1.2.1": 9},
+        })
+
+    assert _client(handler).get_manifests_sampled(["1.2.1", "1.2.2"], 3) is None
+
+
 def test_get_manifests_sampled_refuses_a_page_whose_count_does_not_reconcile() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={

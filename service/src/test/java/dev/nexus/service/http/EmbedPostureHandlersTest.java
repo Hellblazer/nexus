@@ -332,13 +332,13 @@ class EmbedPostureHandlersTest {
     }
 
     @Test
-    void version_throughTheRealHandler_advertisesTheManifestRowLimitAndPlannerCostCapabilities() throws Exception {
+    void version_throughTheRealHandler_advertisesTheManifestRowLimitAndOutOfStepCostCapabilities() throws Exception {
         // nexus-jypmj.6 and nexus-jypmj.5: the fragment methods are unit-tested in
         // VersionHandlerReleaseVersionTest; this proves the handler's body actually calls them.
         JsonNode body = get("/version", new VersionHandler(refusingPool(),
                 router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
         assertThat(body.get("catalog_manifest_row_limit_supported").asBoolean()).isTrue();
-        assertThat(body.get("nx_answer_planner_cost_supported").asBoolean()).isTrue();
+        assertThat(body.get("nx_answer_out_of_step_cost_supported").asBoolean()).isTrue();
     }
 
     @Test

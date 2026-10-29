@@ -10098,22 +10098,23 @@ def _step_record_to_wire(step: Any) -> dict[str, Any]:
     }
 
 
-def _run_cost_usd(step_records: list[Any] | None, planner_cost_usd: float | None = None) -> float | None:
-    """The cost of one ``nx_answer`` run: every step's known cost plus the inline planner's own
-    dispatch cost (nexus-jypmj.1.20) and the structured request extraction's (nexus-jypmj.9), or ``None``
-    when none is known, never a fabricated zero.
+def _run_cost_usd(step_records: list[Any] | None, out_of_step_cost_usd: float | None = None) -> float | None:
+    """The cost of one ``nx_answer`` run: every step's known cost plus the run's out-of-step dispatch cost
+    (the inline planner's, nexus-jypmj.1.20, and the structured request extraction's, nexus-jypmj.9), or
+    ``None`` when none is known, never a fabricated zero.
 
     The envelope's ``cost_usd`` and the stored ``nx_answer_runs.cost_usd`` both come from here, so
-    they cannot disagree. *planner_cost_usd* is the out-of-step dispatch share (``_planner_cost_usd``):
-    ``None`` for a plan-match hit that made no extraction call.
+    they cannot disagree. *out_of_step_cost_usd* is the out-of-step dispatch share (``_out_of_step_cost_usd``),
+    stored beside the run cost as ``nx_answer_runs.out_of_step_cost_usd``: ``None`` when no out-of-step call
+    ran (a plan-match hit with extraction off or skipped).
     """
     known = [s.cost_usd for s in (step_records or []) if getattr(s, "cost_usd", None) is not None]
-    if planner_cost_usd is not None:
-        known.append(planner_cost_usd)
+    if out_of_step_cost_usd is not None:
+        known.append(out_of_step_cost_usd)
     return sum(known) if known else None
 
 
-def _planner_cost_usd(usage_sink: list[Any]) -> float | None:
+def _out_of_step_cost_usd(usage_sink: list[Any]) -> float | None:
     """The summed known cost of the dispatches captured in *usage_sink* (the inline planner's, and the
     structured request extraction's, nexus-jypmj.9), or ``None`` when none was captured or none reported a
     cost (a plan-match hit that made no extraction call dispatches nothing)."""
@@ -10132,7 +10133,7 @@ def _nx_answer_record_run(
     step_records: list[Any] | None,
     duration_ms: int,
     trace: bool,
-    planner_cost_usd: float | None = None,
+    out_of_step_cost_usd: float | None = None,
     run_summary: "RunSummaryRecorder | None" = None,
     summary_outcome: str = "recorded",
 ) -> None:
@@ -10150,11 +10151,12 @@ def _nx_answer_record_run(
 
     ``cost_usd`` (RDR-196 .p1d, nexus-nyry9.10 — replaces 9 former
     hardcoded-zero-cost literals, one per call site): the SUM of every step's
-    ``cost_usd`` that is not ``None``, PLUS *planner_cost_usd* when a plan-miss
-    run paid for the inline planner (nexus-jypmj.1.20; the planner dispatch is
-    no step's, so the run cost may exceed the step sum), or ``None`` when no
-    step and no planner reports a known cost — an empty *step_records* with no
-    planner cost trivially falls into the latter
+    ``cost_usd`` that is not ``None``, PLUS *out_of_step_cost_usd* when the run
+    made an out-of-step call (the inline planner on a plan miss, nexus-jypmj.1.20,
+    or the request extraction, nexus-jypmj.9; neither is a step's, so the run
+    cost may exceed the step sum), or ``None`` when no step and no out-of-step
+    call reports a known cost — an empty *step_records* with no
+    out-of-step cost trivially falls into the latter
     (sum of nothing is "unknown", never a fabricated zero). This is
     deliberately a BLANKET rule, not case-by-case: a call site with
     genuinely zero steps (e.g. the single-step fast path, which bypasses
@@ -10169,7 +10171,7 @@ def _nx_answer_record_run(
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
     steps = step_records or []
-    cost_usd = _run_cost_usd(steps, planner_cost_usd)
+    cost_usd = _run_cost_usd(steps, out_of_step_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
     summary = None
     created_at = None
@@ -10182,8 +10184,8 @@ def _nx_answer_record_run(
         if summary is not None:
             created_at = _utc_now_iso()
             extra = {"run_summary": summary, "created_at": created_at}
-    if planner_cost_usd is not None:
-        extra["planner_cost_usd"] = planner_cost_usd  # nexus-jypmj.5: absent for a plan-match hit, never 0.0
+    if out_of_step_cost_usd is not None:
+        extra["out_of_step_cost_usd"] = out_of_step_cost_usd  # nexus-jypmj.5: absent when no out-of-step call ran, never 0.0
     try:
         telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
@@ -10390,7 +10392,7 @@ async def _nx_answer_request_coverage(
     direct dispatch under its own timeout, inside *deadline*, with its latency and cost in the coverage's
     ``extraction`` report. Never raises: a failure leaves the first-pass result.
 
-    *usage_sink* (nexus-jypmj.9) is the run's out-of-step dispatch sink (``nx_answer``'s ``_planner_usage_sink``):
+    *usage_sink* (nexus-jypmj.9) is the run's out-of-step dispatch sink (``nx_answer``'s ``_out_of_step_usage_sink``):
     the extraction call's usage is added to it, so the run's ``cost_usd`` (envelope and stored row, through
     ``_run_cost_usd``) and the budget's running spend count the call like they count the inline planner's.
     """
@@ -11066,7 +11068,7 @@ def _nx_answer_record_complete(
     success: bool | None,
     composite_supported_at_start: bool,
     early_bump_fired: bool,
-    planner_cost_usd: float | None = None,
+    out_of_step_cost_usd: float | None = None,
     run_summary: "RunSummaryRecorder | None" = None,
 ) -> None:
     """RDR-203 P1/P3 choke point: the ``nx_answer_runs`` record and the plan
@@ -11195,7 +11197,7 @@ def _nx_answer_record_complete(
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
     steps = step_records or []
-    cost_usd = _run_cost_usd(steps, planner_cost_usd)
+    cost_usd = _run_cost_usd(steps, out_of_step_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
     # RDR-232 Phase 3: prepared once, before either attempt, so a 404 fallback re-sends the same summary
     # under the same stamp. None when there is no recorder, the engine cannot take it, or it could not be built.
@@ -11219,7 +11221,7 @@ def _nx_answer_record_complete(
                 step_count=step_count, final_text=text, cost_usd=cost_usd,
                 duration_ms=duration_ms, created_at=created_at, steps=wire_steps,
                 success=success, **({"run_summary": summary} if summary is not None else {}),
-                **({"planner_cost_usd": planner_cost_usd} if planner_cost_usd is not None else {}),
+                **({"out_of_step_cost_usd": out_of_step_cost_usd} if out_of_step_cost_usd is not None else {}),
             )
             if run_summary is not None:
                 run_summary.settle(
@@ -11271,8 +11273,8 @@ def _nx_answer_record_complete(
     if summary is not None:
         stamp = stamp or _utc_now_iso()
         extra = {"run_summary": summary, "created_at": stamp}
-    if planner_cost_usd is not None:
-        extra["planner_cost_usd"] = planner_cost_usd  # nexus-jypmj.5
+    if out_of_step_cost_usd is not None:
+        extra["out_of_step_cost_usd"] = out_of_step_cost_usd  # nexus-jypmj.5
     try:
         db.telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
@@ -12082,14 +12084,14 @@ async def nx_answer(
     # `BUDGET_ENFORCEMENT_ENABLED` -- the single gate for ALL
     # enforcement (bounds check, pre-flight refusal, mid-run stop).
     effective_budget_usd: "float | None" = None
-    #: Captures the inline planner's own claude_dispatch cost (D5 /
-    #: nexus-nyry9.21, closing the .r2 gap for the USD axis) via the
-    #: ambient sink wrapped around the Step 1 miss-path dispatch below.
-    #: Stays empty (spend 0.0) on a plan-match HIT — no planner dispatch
-    #: happens on that path, unless the structured request extraction made
-    #: its call: nexus-jypmj.9 adds that call's usage here too, so it is in
-    #: the run's cost_usd and the budget's running spend (the name predates it).
-    _planner_usage_sink: list = []
+    #: Captures the run's out-of-step dispatch usage: the inline planner's
+    #: own claude_dispatch (D5 / nexus-nyry9.21, closing the .r2 gap for the
+    #: USD axis) via the ambient sink wrapped around the Step 1 miss-path
+    #: dispatch below, and the structured request extraction's call
+    #: (nexus-jypmj.9). Stays empty (spend 0.0) on a plan-match HIT that made
+    #: no extraction call. Its sum is the run's ``out_of_step_cost_usd``
+    #: (stored, nexus-jypmj.5), in the run's cost_usd and the budget's running spend.
+    _out_of_step_usage_sink: list = []
     #: Set once, in the pre-Step-2 budget check below, to
     #: `effective_budget_usd` minus whatever the planner already spent.
     #: Threaded into `plan_run` at Step 4 as `budget_usd_remaining`.
@@ -12192,7 +12194,7 @@ async def nx_answer(
     _request_coverage = await _nx_answer_request_coverage(
         question=question, scope=scope, evidence_request=_evidence_request, explicit_kind=_kind_hint,
         deadline=deadline, trace=trace,
-        usage_sink=_planner_usage_sink,  # nexus-jypmj.9: the extraction call is part of the run's cost and budget spend
+        usage_sink=_out_of_step_usage_sink,  # nexus-jypmj.9: the extraction call is part of the run's cost and budget spend
     )
     # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
     # (bounded; nothing is guessed). The primary stream that reads the
@@ -12491,10 +12493,10 @@ async def nx_answer(
         # or any error/miss path before plan_run ever ran).
         # ``cost_usd`` comes from _run_cost_usd, the function
         # _nx_answer_record_run uses too: every step's non-None cost plus
-        # the inline planner's own dispatch cost on a plan-miss run, or
-        # None when neither is known — never a fabricated 0.0.
+        # the run's out-of-step dispatch cost (inline planner on a plan miss,
+        # request extraction), or None when neither is known — never a fabricated 0.0.
         _steps = step_records or []
-        cost_usd = _run_cost_usd(_steps, _planner_cost_usd(_planner_usage_sink))
+        cost_usd = _run_cost_usd(_steps, _out_of_step_cost_usd(_out_of_step_usage_sink))
         return {
             "final_text": _text,
             "chunks": chunks if chunks is not None else [],
@@ -12797,7 +12799,7 @@ async def nx_answer(
                     success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
-                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                     run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -13007,7 +13009,7 @@ async def nx_answer(
             from nexus.operators.dispatch import (  # noqa: PLC0415 — deferred; matches this function's convention
                 ambient_usage_sink as _ambient_usage_sink,
             )
-            with _ambient_usage_sink(_planner_usage_sink):
+            with _ambient_usage_sink(_out_of_step_usage_sink):
                 best = await _nx_answer_plan_miss(
                     question, scope=scope, max_steps=max_steps,
                     few_shot_matches=matches, coverage=_request_coverage,
@@ -13027,7 +13029,7 @@ async def nx_answer(
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
                         step_records=[], duration_ms=elapsed_ms, trace=trace,
-                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                         run_summary=_run_summary, summary_outcome="planner_failure",
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -13227,7 +13229,7 @@ async def nx_answer(
     # the wall-clock axis.
     if effective_budget_usd is not None:
         _planner_spent_usd = sum(
-            u.cost_usd for u in _planner_usage_sink if getattr(u, "cost_usd", None) is not None
+            u.cost_usd for u in _out_of_step_usage_sink if getattr(u, "cost_usd", None) is not None
         )
         _budget_remaining_usd = effective_budget_usd - _planner_spent_usd
         if _budget_remaining_usd <= 0:
@@ -13387,7 +13389,7 @@ async def nx_answer(
                             duration_ms=elapsed_ms, trace=trace, success=False,
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
-                            planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                            out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                             run_summary=_run_summary,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
@@ -13440,7 +13442,7 @@ async def nx_answer(
                             duration_ms=elapsed_ms, trace=trace, success=False,
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
-                            planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                            out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                             run_summary=_run_summary,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
@@ -13617,7 +13619,7 @@ async def nx_answer(
                         success=None if _fast_conflict else not _nx_answer_text_is_empty(str(result_text)),
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
-                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                         run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -13663,7 +13665,7 @@ async def nx_answer(
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
-                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                         run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -13739,7 +13741,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
-                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                     run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
@@ -13881,7 +13883,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
-                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                     run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -14097,7 +14099,7 @@ async def nx_answer(
                         step_count=len(result.steps),
                         final_text=_handoff_text, step_records=_result_step_records,
                         duration_ms=_continuation_elapsed_ms, trace=trace,
-                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                         run_summary=_run_summary, summary_outcome="handoff",
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -14161,7 +14163,7 @@ async def nx_answer(
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
-                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                         run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -14311,7 +14313,7 @@ async def nx_answer(
                     success=_nx_answer_empty_retrieval_outcome(result.steps),
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
-                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                     run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -14388,7 +14390,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
-                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                     run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the notice must still surface
@@ -14577,7 +14579,7 @@ async def nx_answer(
                 duration_ms=elapsed_ms, trace=trace, success=True,
                 composite_supported_at_start=composite_supported_at_start,
                 early_bump_fired=early_bump_fired,
-                planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                 run_summary=_run_summary,
             ),
             op="record_run",

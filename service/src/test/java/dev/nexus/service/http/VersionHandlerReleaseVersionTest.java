@@ -180,12 +180,12 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"catalog_manifest_row_limit_supported\":true");
     }
 
-    // ── nexus-jypmj.5: the planner cost on the run row ──
+    // ── nexus-jypmj.5: the out-of-step cost on the run row ──
 
     @Test
-    void versionAdvertisesThePlannerCostAsItsOwnFlag() {
+    void versionAdvertisesTheOutOfStepCostAsItsOwnFlag() {
         var body = new StringBuilder();
-        VersionHandler.appendNxAnswerPlannerCostCapabilityField(body);
-        assertThat(body.toString()).isEqualTo(",\"nx_answer_planner_cost_supported\":true");
+        VersionHandler.appendNxAnswerOutOfStepCostCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"nx_answer_out_of_step_cost_supported\":true");
     }
 }

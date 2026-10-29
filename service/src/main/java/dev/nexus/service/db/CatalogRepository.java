@@ -4569,8 +4569,10 @@ public final class CatalogRepository {
      * Seeds are never removed: they are the documents the walk starts from, and the client applies the
      * scope to them itself.
      *
-     * <p>THE MARKER. A non-null {@code scope} adds {@code scope_filter:{applied:true, kind, value,
-     * dropped_out_of_scope:N}} to the result; {@code N} counts the nodes the predicate removed. A null
+     * <p>THE MARKER. A non-null {@code scope} adds {@code scope_filter:{applied:true, kind, ...,
+     * dropped_out_of_scope:N}} to the result, where {@code kind} is {@code "collections"} with a
+     * {@code collection_count}, or {@code "subtree"} with the {@code subtree} value; {@code N} counts the nodes
+     * the predicate removed. A null
      * {@code scope} adds nothing, so a request without the predicate is byte-identical to before. An engine
      * that predates this method ignores the request key and returns no marker, which is how a client tells
      * "the predicate ran" from "the predicate was ignored" without trusting the HTTP status.

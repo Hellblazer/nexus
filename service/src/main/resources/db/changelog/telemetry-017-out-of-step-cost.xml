@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-jypmj.5 (RDR-232, follow-up of nexus-jypmj.4): nexus.nx_answer_runs gains one NULLABLE
+    DOUBLE PRECISION column, out_of_step_cost_usd.
+
+    WHAT. The cost of the run's out-of-step dispatches: the model calls the run made that are no plan step's,
+    that is the inline planner's own dispatch(es) on a plan miss (plan_id 0) plus the structured request
+    extraction call (nexus-jypmj.9), which runs for a plan-match hit as well. The run's cost_usd is the sum of
+    its steps' costs PLUS this share, so before this column the client could only check a run's cost from
+    below (cost_usd at or above the step sum) and an over-count was indistinguishable from an out-of-step
+    share. With the share stored, the check is two-sided for every plan_id: cost_usd must equal the step sum
+    plus out_of_step_cost_usd. The engine stores the value opaquely (the handler checks it is a finite number
+    >= 0) and reads no other column against it.
+
+    WHY A COLUMN ON THE RUN ROW. Same reasoning as telemetry-016-1 (run_summary): the run row is written once,
+    by POST /record or by RDR-203's one-transaction POST /complete, and a value on that row rides that write; a
+    follow-up UPDATE would be a second write that can fail between the two. /record, /complete, the single and
+    batch ETL imports and the /query readback all carry it.
+
+    DOUBLE PRECISION, to match the parent's cost_usd (telemetry-001 baseline), so the two values compare
+    without a NUMERIC-vs-float conversion in the client's check. (The step child's NUMERIC cost_usd is the
+    deliberate exception documented in telemetry-007.)
+
+    NO BACKFILL, NO DATA EFFECT, NO DEFAULT. Every existing row stays NULL, which is the true prior state: no
+    run before this change recorded an out-of-step share. A reader treats NULL as "not recorded" and never as
+    zero (a stored 0.0 would claim the run's out-of-step calls were free when the client measured them; a run
+    that made no out-of-step call, a plan-match hit with extraction off, also stays NULL). ADD COLUMN only, one statement, so no DATA EFFECT line applies
+    (scripts/data_effect_lint.py's own scope excludes ADD COLUMN), matching telemetry-016-run-summary.xml. A
+    nullable column with no default is a catalog-only change in PostgreSQL 11 and later. No new table, so no
+    RLS, grant or jOOQ reflection-registration change.
+
+    OLD ENGINE. An engine without this changeset ignores an out_of_step_cost_usd key in a request body (the handler
+    reads named fields), so a client must not take HTTP 200 as evidence of persistence. GET /version advertises
+    nx_answer_out_of_step_cost_supported for that reason (VersionHandler).
+
+    Placed after note-uri-001-backfill.xml (the tail when this landed) and before the grants-nexus-svc.xml
+    runAlways block (the established late-append convention, D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="telemetry-017-1" author="nexus-jypmj.5">
+        <comment>Adds out_of_step_cost_usd DOUBLE PRECISION (NULL) to nexus.nx_answer_runs -- the run's out-of-step dispatch cost (the inline planner call plus the request-extraction call, neither a plan step's), written with the run row by /record and /complete, carried by the ETL imports and returned by /query, so the client can check a run's cost from above as well as below. An additive ADD COLUMN only (no data mutation of any existing row), so no DATA EFFECT line applies per scripts/data_effect_lint.py's own scope. NULL is the true prior state of every existing row; no backfill.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.nx_answer_runs
+    ADD COLUMN out_of_step_cost_usd DOUBLE PRECISION NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                ALTER TABLE nexus.nx_answer_runs
+                    DROP COLUMN IF EXISTS out_of_step_cost_usd;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

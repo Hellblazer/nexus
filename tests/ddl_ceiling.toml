@@ -97,7 +97,7 @@ migration_wal_bytes_per_worker = 11038000
 # fresh migration: three ALTER TABLE ... NO FORCE ROW LEVEL SECURITY and the three FORCE restores, on catalog_documents,
 # document_aspects and document_highlights (the guard DO block and the three UPDATEs are not DDL). Measured on the
 # laptop (scoped substrate run of tests/test_scenario_journeys.py, ddl: migration=2146 before rebasing onto telemetry-016-1; 2147 re-measured after the rebase).
-# 2147 -> 2148 (2026-10-28): telemetry-017-1 (nexus-jypmj.5, RDR-232, nx_answer_runs.planner_cost_usd) adds one ALTER TABLE
+# 2147 -> 2148 (2026-10-28): telemetry-017-1 (nexus-jypmj.5, RDR-232, nx_answer_runs.out_of_step_cost_usd) adds one ALTER TABLE
 # (one ADD COLUMN) to a fresh migration, the shape telemetry-016-1 added. Measured: see the nexus-jypmj.5 bead comment (scoped
 # substrate run of tests/test_scenario_journeys.py).
 migration_ddl_per_worker = 2148

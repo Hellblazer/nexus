@@ -4,7 +4,7 @@
 Boots the gate jar on an ephemeral Postgres (the fixtures of ``test_http_telemetry_store_integration``) and
 drives the real clients. The Java tests pin the engine's side of each change (``CatalogRepositoryTest``,
 ``CatalogHandlerTraverseScopeFilterTest``, ``CatalogHandlerManifestEnvelopeTest``,
-``TelemetryHandlerPlannerCostTest``); the unit tests pin the client's side against fakes; this file pins that the
+``TelemetryHandlerOutOfStepCostTest``); the unit tests pin the client's side against fakes; this file pins that the
 two agree on the wire: the flag the client reads is the flag the engine sends, the predicate the client builds is
 accepted and answered with the marker the client requires, and a stored planner cost reads back as the number
 the two-sided cost check expects.
@@ -59,7 +59,7 @@ class TestTheFlagsTheClientReadsAreTheOnesTheEngineSends:
     def test_all_three_capabilities_read_true_from_the_real_version(self, catalog, tel_store):  # noqa: F811
         assert catalog.supports_graph_scope_filter() is True
         assert catalog.supports_manifest_row_limit() is True
-        assert tel_store._supports_nx_answer_planner_cost() is True
+        assert tel_store._supports_nx_answer_out_of_step_cost() is True
 
 
 class TestGraphScopeFilter:
@@ -126,30 +126,44 @@ class TestManifestRowLimit:
         assert caught.value.response.status_code == 400
 
 
-class TestPlannerCost:
-    def test_a_stored_planner_cost_reads_back_and_the_two_sided_check_accepts_the_row(self, tel_store):  # noqa: F811
+class TestOutOfStepCost:
+    def test_a_stored_out_of_step_cost_reads_back_and_the_two_sided_check_accepts_the_row(self, tel_store):  # noqa: F811
         from nexus.commands.answer_runs import _costs_agree
 
         tel_store.record_nx_answer_run(
             question="it-planner-record", plan_id=0, matched_confidence=None, step_count=0, final_text="t",
-            cost_usd=0.0125, duration_ms=5, planner_cost_usd=0.004,
+            cost_usd=0.0125, duration_ms=5, out_of_step_cost_usd=0.004,
         )
         tel_store.record_nx_answer_run_complete(
             question="it-planner-complete", plan_id=0, matched_confidence=None, step_count=0, final_text="t",
             cost_usd=0.0125, duration_ms=5, created_at="2026-10-28T15:00:01.250000+00:00", steps=None,
-            success=True, planner_cost_usd=0.0085,
+            success=True, out_of_step_cost_usd=0.0085,
         )
         rows = {r["question"]: r for r in tel_store.query_nx_answer_runs(limit=300)["rows"]}
 
-        assert rows["it-planner-record"]["planner_cost_usd"] == pytest.approx(0.004)
-        assert rows["it-planner-complete"]["planner_cost_usd"] == pytest.approx(0.0085)
-        assert _costs_agree(0.0125, 0.0085, planner_share_allowed=True, planner_cost=rows["it-planner-record"]["planner_cost_usd"])
-        assert not _costs_agree(0.0125, 0.0085, planner_share_allowed=True, planner_cost=0.001), "an over-count is now caught"
+        assert rows["it-planner-record"]["out_of_step_cost_usd"] == pytest.approx(0.004)
+        assert rows["it-planner-complete"]["out_of_step_cost_usd"] == pytest.approx(0.0085)
+        assert _costs_agree(0.0125, 0.0085, planner_share_allowed=True, out_of_step_cost=rows["it-planner-record"]["out_of_step_cost_usd"])
+        assert not _costs_agree(0.0125, 0.0085, planner_share_allowed=True, out_of_step_cost=0.001), "an over-count is now caught"
 
-    def test_a_run_with_no_planner_dispatch_reads_back_null_not_zero(self, tel_store):  # noqa: F811
+    def test_a_library_plan_run_stores_its_extraction_share_and_the_check_is_exact_for_it(self, tel_store):  # noqa: F811
+        from nexus.commands.answer_runs import _step_breakdown
+
+        tel_store.record_nx_answer_run(
+            question="it-oos-library", plan_id=7, matched_confidence=0.9, step_count=1, final_text="t",
+            cost_usd=0.034, duration_ms=5, out_of_step_cost_usd=0.004,
+            steps=[{"step_index": 0, "operator": "summarize", "source": "llm", "cost_usd": 0.03, "elapsed_ms": 1, "ok": True}],
+        )
+        (row,) = [r for r in tel_store.query_nx_answer_runs(limit=300, include_steps=True)["rows"] if r["question"] == "it-oos-library"]
+        assert row["out_of_step_cost_usd"] == pytest.approx(0.004)
+        assert _step_breakdown([row])["cost_consistency_violations"] == []
+        row["cost_usd"] = 0.5
+        assert len(_step_breakdown([row])["cost_consistency_violations"]) == 1
+
+    def test_a_run_with_no_out_of_step_call_reads_back_null_not_zero(self, tel_store):  # noqa: F811
         tel_store.record_nx_answer_run(
             question="it-planner-none", plan_id=3, matched_confidence=0.9, step_count=1, final_text="t",
             cost_usd=0.01, duration_ms=5,
         )
         (row,) = [r for r in tel_store.query_nx_answer_runs(limit=300)["rows"] if r["question"] == "it-planner-none"]
-        assert "planner_cost_usd" in row and row["planner_cost_usd"] is None
+        assert "out_of_step_cost_usd" in row and row["out_of_step_cost_usd"] is None

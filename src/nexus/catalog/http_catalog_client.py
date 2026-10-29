@@ -4061,7 +4061,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         row limit": the reply must echo ``max_rows_per_doc`` and carry ``row_counts``, because an engine that
         predates the field ignores the key and returns every row with an HTTP 200. The caller gates on
         :meth:`supports_manifest_row_limit` first; this check is the second, because a flag read minutes ago
-        is not proof of the engine answering now. Nothing from a page is kept once any page lacks the echo.
+        is not proof of the engine answering now. Nothing from a page is kept once any page lacks the echo, or once a
+        returned document has no entry in ``row_counts`` (the limit was not applied to it).
         """
         if not doc_ids:
             return {}, {}
@@ -4082,9 +4083,18 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     "manifest_get_many_row_limit_not_honoured", requested=len(batch), limit=int(max_rows_per_doc),
                 )
                 return None
-            for did, rows in self._reconciled_manifest_page(result, batch).items():
+            page = self._reconciled_manifest_page(result, batch)
+            if any(did not in row_counts for did in page):
+                # The echo is there but a returned document has no true count: the limit was not applied to it.
+                # Reading its rows as a whole manifest would pass a sample off as complete.
+                _log.warning(
+                    "manifest_get_many_row_count_missing", requested=len(batch), limit=int(max_rows_per_doc),
+                    missing=sum(1 for did in page if did not in row_counts),
+                )
+                return None
+            for did, rows in page.items():
                 merged[did] = [_manifest_row_from_dict(r) for r in rows]
-                counts[did] = int(row_counts.get(did, len(rows)))
+                counts[did] = int(row_counts[did])
         return merged, counts
 
     def get_chunk_chashes(self, doc_id: str) -> list[str]:
