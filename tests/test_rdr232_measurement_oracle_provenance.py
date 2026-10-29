@@ -89,9 +89,9 @@ def _drafted_entry(slug: str) -> dict[str, Any]:
 
 
 def test_a_drafted_file_fills_the_requests_the_hand_file_left_todo(tmp_path: Path) -> None:
-    hand_only = om.load_oracle(om.DEFAULT_ORACLE_PATH, ALL)
+    hand_only = om.load_oracle(om.DEFAULT_ORACLE_PATH, GOLDEN)
     drafted = _write(tmp_path, {"G04-lookup-min-confidence": _drafted_entry(BY_QID["G04-lookup-min-confidence"].required_facets[0])})
-    merged = om.load_oracle(om.DEFAULT_ORACLE_PATH, ALL, drafted_path=drafted)
+    merged = om.load_oracle(om.DEFAULT_ORACLE_PATH, GOLDEN, drafted_path=drafted)
     r = merged.requests["G04-lookup-min-confidence"]
     assert r.provenance == "drafted" and not r.todo
     assert merged.requests["G06-synthesis-art-rdr084"] == hand_only.requests["G06-synthesis-art-rdr084"], "hand labels are untouched"
@@ -104,7 +104,7 @@ def test_a_drafted_file_fills_the_requests_the_hand_file_left_todo(tmp_path: Pat
 def test_a_drafted_label_may_not_shadow_a_hand_label(tmp_path: Path) -> None:
     drafted = _write(tmp_path, {"G06-synthesis-art-rdr084": _drafted_entry("evidence")})
     with pytest.raises(ValueError, match="shadow"):
-        om.load_oracle(om.DEFAULT_ORACLE_PATH, ALL, drafted_path=drafted)
+        om.load_oracle(om.DEFAULT_ORACLE_PATH, GOLDEN, drafted_path=drafted)
 
 
 @pytest.mark.parametrize(
@@ -118,24 +118,24 @@ def test_a_drafted_label_may_not_shadow_a_hand_label(tmp_path: Path) -> None:
 def test_the_drafted_file_holds_only_drafted_entries_with_items(tmp_path: Path, entry, message) -> None:
     drafted = _write(tmp_path, {"G04-lookup-min-confidence": entry})
     with pytest.raises(ValueError, match=message):
-        om.load_oracle(om.DEFAULT_ORACLE_PATH, ALL, drafted_path=drafted)
+        om.load_oracle(om.DEFAULT_ORACLE_PATH, GOLDEN, drafted_path=drafted)
 
 
 def test_a_drafted_label_for_an_unknown_request_or_slug_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown request"):
-        om.load_oracle(om.DEFAULT_ORACLE_PATH, ALL, drafted_path=_write(tmp_path, {"G99": _drafted_entry("x")}))
+        om.load_oracle(om.DEFAULT_ORACLE_PATH, GOLDEN, drafted_path=_write(tmp_path, {"G99": _drafted_entry("x")}))
     with pytest.raises(ValueError, match="not a required facet"):
-        om.load_oracle(om.DEFAULT_ORACLE_PATH, ALL, drafted_path=_write(tmp_path, {"G04-lookup-min-confidence": _drafted_entry("no-such-slug")}, "d2.yaml"))
+        om.load_oracle(om.DEFAULT_ORACLE_PATH, GOLDEN, drafted_path=_write(tmp_path, {"G04-lookup-min-confidence": _drafted_entry("no-such-slug")}, "d2.yaml"))
 
 
 def test_a_named_drafted_file_that_does_not_exist_is_an_error_not_an_empty_set(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
-        om.load_oracle(om.DEFAULT_ORACLE_PATH, ALL, drafted_path=tmp_path / "absent.yaml")
+        om.load_oracle(om.DEFAULT_ORACLE_PATH, GOLDEN, drafted_path=tmp_path / "absent.yaml")
 
 
 def test_the_committed_drafted_file_is_a_loadable_empty_skeleton() -> None:
     assert om.DEFAULT_DRAFTED_PATH.name == "golden_oracle_labels_drafted_v1.yaml" and om.DEFAULT_DRAFTED_PATH.is_file()
-    assert om.load_oracle(om.DEFAULT_ORACLE_PATH, ALL, drafted_path=om.DEFAULT_DRAFTED_PATH).summary() == om.load_oracle(om.DEFAULT_ORACLE_PATH, ALL).summary()
+    assert om.load_oracle(om.DEFAULT_ORACLE_PATH, GOLDEN, drafted_path=om.DEFAULT_DRAFTED_PATH).summary() == om.load_oracle(om.DEFAULT_ORACLE_PATH, GOLDEN).summary()
 
 
 # ── document-level labels ────────────────────────────────────────────────────────────────────────────────
@@ -158,12 +158,12 @@ def test_a_level_that_contradicts_the_item_key_is_refused(tmp_path: Path) -> Non
     bad = tmp_path / "o.yaml"
     bad.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(ValueError, match="level"):
-        om.load_oracle(bad, ALL)
+        om.load_oracle(bad, GOLDEN)
 
 
 def _g01_scores(assessor_state: str) -> om.RunScore:
     """G01's one facet, a hand document-level label, an assessor that rightly found nothing in the chunk it was shown."""
-    o = om.load_oracle(om.DEFAULT_ORACLE_PATH, ALL).requests["G01-lookup-tumblers"]
+    o = om.load_oracle(om.DEFAULT_ORACLE_PATH, GOLDEN).requests["G01-lookup-tumblers"]
     cov = {"anchors": [{"item_id": "e1", "chash": _h(1), "tumbler": "1.1.2"}], "skip_generation": False,
            "findings": [{"facet_id": "f1", "state": assessor_state, "evidence_ids": [], "reason": "no_supporting_evidence"}]}
     res = FacetResolution(o.qid, {"f1": ("introducing-rdr",)}, {"introducing-rdr": ("f1",)}, (), (), {"f1": "sole_facet"})

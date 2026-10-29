@@ -58,6 +58,13 @@ is labelled and none supports or contradicts) or ``unknown`` (some anchor is unl
 
 Every rate carries its numerator, denominator and the count it could not score; a rate over an empty denominator is
 ``None``, never ``0.0``.
+
+**Two sets, four files.** The golden set's labels are ``golden_oracle_labels_v1.yaml`` (hand) and
+``golden_oracle_labels_drafted_v1.yaml`` (drafted); the held-out set's are ``golden_heldout_oracle_labels_v1.yaml`` and
+``golden_heldout_oracle_labels_drafted_v1.yaml``. :func:`load_oracle` reads one hand file (and its drafted file) against
+ONE set's queries, so a held-out qid in the golden file, or the reverse, is an unknown request. :func:`load_oracle_for_set`
+picks the files for a ``--set`` (``golden``, ``heldout`` or ``both``, which merges the two). ``bench.rdr232_oracle_drafts``
+turns a drafter's JSON into a drafted file.
 """
 from __future__ import annotations
 
@@ -96,6 +103,11 @@ PROVENANCES: tuple[str, ...] = ("fixture", "ground_truth", "human", "drafted")
 #: The provenances a person (or an authored fixture) produced; ``drafted`` is an agent's, spot-checked by a person.
 HAND_PROVENANCES: tuple[str, ...] = ("fixture", "ground_truth", "human")
 DEFAULT_DRAFTED_PATH = Path(__file__).resolve().parents[2] / "bench" / "queries" / "golden_oracle_labels_drafted_v1.yaml"
+#: The held-out set (``golden_heldout_v1.yaml``) has its own hand and drafted files. It versions itself with the SAME
+#: ``golden_set_version`` as the golden set (see its header), so both oracle files carry and the loader checks
+#: ``golden_set_version: 1`` (``GOLDEN_SET_VERSION``); what tells the two files apart is the qids each must cover.
+HELDOUT_ORACLE_PATH = Path(__file__).resolve().parents[2] / "bench" / "queries" / "golden_heldout_oracle_labels_v1.yaml"
+HELDOUT_DRAFTED_PATH = Path(__file__).resolve().parents[2] / "bench" / "queries" / "golden_heldout_oracle_labels_drafted_v1.yaml"
 LEVELS: tuple[str, ...] = ("chunk", "document")
 #: Finding reasons decided by a deterministic row, not by the assessor.
 DETERMINISTIC_REASONS: frozenset[str] = frozenset({"source_missing", "no_evidence", "scope_conflict"})
@@ -293,6 +305,64 @@ def load_oracle(path: Path, queries: Sequence[Query], *, drafted_path: Path | No
     return OracleSet(out)
 
 
+def merge_oracles(parts: Sequence[OracleSet]) -> OracleSet:
+    """One :class:`OracleSet` over several; a request named by two of them is refused (the sets are disjoint)."""
+    out: dict[str, RequestOracle] = {}
+    for part in parts:
+        clash = sorted(set(out) & set(part.requests))
+        if clash:
+            raise ValueError(f"requests {clash} are labelled by more than one oracle file")
+        out.update(part.requests)
+    return OracleSet(out)
+
+
+@dataclass(frozen=True)
+class OracleFiles:
+    """The files that label one query set: its requests, its hand labels, its drafted labels."""
+
+    queries: Path
+    hand: Path
+    drafted: Path
+
+
+SET_FILES: Mapping[str, OracleFiles] = {
+    "golden": OracleFiles(GOLDEN_PATH, DEFAULT_ORACLE_PATH, DEFAULT_DRAFTED_PATH),
+    "heldout": OracleFiles(HELDOUT_PATH, HELDOUT_ORACLE_PATH, HELDOUT_DRAFTED_PATH),
+}
+
+
+def sides_for_set(which: str) -> tuple[str, ...]:
+    """The oracle sides a ``--set`` value needs: ``heldout`` -> the held-out files, ``both`` -> both, and every other
+    set (``golden`` and the in-sample extras, which carry no labels of their own) -> the golden files."""
+    if which == "heldout":
+        return ("heldout",)
+    if which == "both":
+        return ("golden", "heldout")
+    return ("golden",)
+
+
+def load_oracle_for_set(
+    which: str, *, overrides: Mapping[str, tuple[Path | None, Path | None]] | None = None,
+) -> tuple[OracleSet, list[Path]]:
+    """The oracle for ``--set`` *which*, and the drafted files it merged.
+
+    *overrides* maps a side (``golden`` or ``heldout``) to ``(hand path, drafted path)``, either ``None`` for the
+    committed default. A drafted path that is given must exist (:func:`load_oracle` raises ``FileNotFoundError``); a
+    default drafted file is merged only when it exists."""
+    overrides = overrides or {}
+    parts: list[OracleSet] = []
+    drafted_used: list[Path] = []
+    for side in sides_for_set(which):
+        files = SET_FILES[side]
+        hand, drafted = overrides.get(side, (None, None))
+        if drafted is None and files.drafted.is_file():
+            drafted = files.drafted
+        parts.append(load_oracle(hand or files.hand, load_golden_set(files.queries), drafted_path=drafted))
+        if drafted is not None:
+            drafted_used.append(drafted)
+    return merge_oracles(parts), drafted_used
+
+
 # ── scaffold: labels derived mechanically from existing hand-labelled data ───────────────────────────────
 
 
@@ -368,8 +438,19 @@ class RunScore:
     skip_level: str = ""
 
 
-def _anchors_by_id(coverage: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
-    return {str(a.get("item_id")): a for a in coverage.get("anchors") or [] if isinstance(a, Mapping)}
+def _anchor_list(coverage: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Every anchor of the ledger, in order. NOT keyed by ``item_id``: a repair round's merged anchors can reuse
+    request-local ids (a held-out request listed ``e24``..``e33`` twice, each with another chunk), so an id-keyed map
+    would drop all but the last chunk of an id. An anchor is identified by its ``chash``."""
+    return [a for a in coverage.get("anchors") or [] if isinstance(a, Mapping)]
+
+
+def _anchors_by_id(coverage: Mapping[str, Any]) -> dict[str, list[Mapping[str, Any]]]:
+    """The anchors an evidence id names: a list, since one id may name several chunks (see :func:`_anchor_list`)."""
+    out: dict[str, list[Mapping[str, Any]]] = {}
+    for a in _anchor_list(coverage):
+        out.setdefault(str(a.get("item_id")), []).append(a)
+    return out
 
 
 def _labels(oracle: RequestOracle, anchor: Mapping[str, Any], slugs: Sequence[str], doc_path_of: DocPathOf | None) -> list[tuple[str | None, str]]:
@@ -385,7 +466,7 @@ def _roles(oracle: RequestOracle, anchor: Mapping[str, Any], slugs: Sequence[str
 def oracle_state(oracle: RequestOracle, coverage: Mapping[str, Any], slugs: Sequence[str], doc_path_of: DocPathOf | None = None) -> str:
     """``supported`` | ``contradicted`` | ``not_supported`` | ``unknown`` for a facet carrying *slugs*, over the anchors the
     run's final ledger held."""
-    anchors = list(_anchors_by_id(coverage).values())
+    anchors = _anchor_list(coverage)
     if not slugs or not anchors:
         return "unknown"
     all_roles = [_roles(oracle, a, slugs, doc_path_of) for a in anchors]
@@ -401,7 +482,7 @@ def oracle_support_level(oracle: RequestOracle, coverage: Mapping[str, Any], slu
     """``chunk`` when some held anchor is labelled ``supports`` by a chunk-level label, ``document`` when the only
     ``supports`` labels are document-level, ``""`` when nothing is labelled ``supports``."""
     levels = {
-        level for a in _anchors_by_id(coverage).values() for role, level in _labels(oracle, a, slugs, doc_path_of) if role == "supports"
+        level for a in _anchor_list(coverage) for role, level in _labels(oracle, a, slugs, doc_path_of) if role == "supports"
     }
     return "chunk" if "chunk" in levels else ("document" if "document" in levels else "")
 
@@ -421,7 +502,7 @@ def score_run(
             fn = state != "covered"
         spurious: bool | None = None
         if state == "contradicted" or (state == "covered" and reason == "conflicted"):
-            cited = [anchors[i] for i in f.get("evidence_ids") or [] if i in anchors]
+            cited = [a for i in f.get("evidence_ids") or [] for a in anchors.get(i, [])]
             cited_roles = [_roles(oracle, a, slugs, doc_path_of) for a in cited] if slugs else []
             if any("contradicts" in roles for roles in cited_roles):
                 spurious = False
@@ -612,7 +693,8 @@ def spot_check_sample(
             continue
         findings = {str(f.get("facet_id")): f for f in case.coverage.get("findings") or [] if isinstance(f, Mapping)}
         multi = len(o.slugs) > 1
-        for item_id, anchor in _anchors_by_id(case.coverage).items():
+        for anchor in _anchor_list(case.coverage):
+            item_id = str(anchor.get("item_id"))
             chash = str(anchor.get("chash") or "")
             path = doc_path_of(anchor) if doc_path_of is not None else ""
             for slug in o.slugs:
@@ -627,8 +709,8 @@ def spot_check_sample(
                     neutral_pool.append(SpotPair(o.qid, item_id, chash, slug, role, "neutral"))
     rng = random.Random(seed)
 
-    def key(p: SpotPair) -> tuple[str, str, str]:
-        return (p.qid, p.item_id, p.slug)
+    def key(p: SpotPair) -> tuple[str, str, str, str]:
+        return (p.qid, p.item_id, p.chash, p.slug)
 
     def draw(pool: list[SpotPair], k: int) -> list[SpotPair]:
         return sorted(rng.sample(sorted(pool, key=key), min(k, len(pool))), key=key)
@@ -714,22 +796,38 @@ FILE_HEADER = """\
 """
 
 
+HELDOUT_FILE_HEADER = """\
+# RDR-232 item-by-facet oracle labels for the HELD-OUT set v1 (nexus-jypmj.3.10). Format and scoring: scripts/bench/rdr232_oracle.py.
+#
+# The hand file for golden_heldout_v1.yaml (29 requests, H01 to H30 less H08). No hand labels exist: every request is
+# `todo: true`, so a run over the held-out set scores nothing against hand labels until a person fills `items`. Drafted
+# labels (an agent's, from a blind packet) live in golden_heldout_oracle_labels_drafted_v1.yaml and fill only the
+# requests this file leaves todo. The held-out set versions itself with the golden set's `golden_set_version`, hence
+# the key below. Regenerate with `python scripts/bench/rdr232_oracle.py scaffold --set heldout --write`.
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="RDR-232 oracle label scaffold: write, check or summarise the label file")
     ap.add_argument("action", choices=("summary", "scaffold", "spot-summary"))
-    ap.add_argument("--path", type=Path, default=DEFAULT_ORACLE_PATH, help="the label file (spot-summary: the marked spot-check file)")
+    ap.add_argument("--set", default="golden", choices=tuple(SET_FILES), help="which query set's label file (default: golden)")
+    ap.add_argument("--path", type=Path, help="the label file (default: the set's committed file; spot-summary: the marked spot-check file)")
     ap.add_argument("--write", action="store_true", help="scaffold: write the file (otherwise print it)")
     args = ap.parse_args(argv)
+    files = SET_FILES[args.set]
+    path = args.path or files.hand
     if args.action == "spot-summary":
-        click.echo(json.dumps(summarize_spot_check(args.path), indent=2))
+        click.echo(json.dumps(summarize_spot_check(path), indent=2))
         return 0
-    queries = [*load_golden_set(GOLDEN_PATH), *load_golden_set(HELDOUT_PATH)]
+    queries = load_golden_set(files.queries)
     if args.action == "summary":
-        click.echo(json.dumps(load_oracle(args.path, queries).summary(), indent=2))
+        click.echo(json.dumps(load_oracle(path, queries).summary(), indent=2))
         return 0
-    text = FILE_HEADER.replace(" \n", "\n") + yaml.safe_dump(scaffold(queries, fixture=_g06_fixture_pieces()), sort_keys=False, width=100)
+    header = HELDOUT_FILE_HEADER if args.set == "heldout" else FILE_HEADER.replace(" \n", "\n")
+    fixture = _g06_fixture_pieces() if args.set == "golden" else None
+    text = header + yaml.safe_dump(scaffold(queries, fixture=fixture), sort_keys=False, width=100)
     if args.write:
-        args.path.write_text(text, encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
     else:
         click.echo(text)
     return 0

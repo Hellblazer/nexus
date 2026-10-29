@@ -191,13 +191,13 @@ def test_the_loader_refuses_a_slug_the_request_does_not_require(tmp_path: Path) 
 
 @pytest.fixture(scope="module")
 def oracle() -> oracle_mod.OracleSet:
-    return oracle_mod.load_oracle(oracle_mod.DEFAULT_ORACLE_PATH, ALL)
+    return oracle_mod.load_oracle(oracle_mod.DEFAULT_ORACLE_PATH, GOLDEN)
 
 
 def test_the_committed_fixture_and_ground_truth_labels_are_the_mechanical_derivation(oracle) -> None:
     """Labels of provenance fixture or ground_truth are re-derived from their source (the authored pieces, the hand
     ground_truth grades) and must equal the file, so none of them was typed or read off a ledger."""
-    derived = oracle_mod.scaffold(ALL, fixture={"G06-synthesis-art-rdr084": list(ART_RDR_PIECES)})["requests"]
+    derived = oracle_mod.scaffold(GOLDEN, fixture={"G06-synthesis-art-rdr084": list(ART_RDR_PIECES)})["requests"]
     on_disk = yaml.safe_load(oracle_mod.DEFAULT_ORACLE_PATH.read_text(encoding="utf-8"))["requests"]
     mechanical = [qid for qid, r in on_disk.items() if r["provenance"] in ("fixture", "ground_truth")]
     assert set(mechanical) == {"G01-lookup-tumblers", "G02-lookup-chash", "G03-lookup-taxonomy", "G06-synthesis-art-rdr084"}
@@ -207,9 +207,9 @@ def test_the_committed_fixture_and_ground_truth_labels_are_the_mechanical_deriva
 
 def test_the_label_scaffold_counts_what_a_human_pass_still_owes(oracle) -> None:
     s = oracle.summary()
-    assert s == {"requests": 53, "requests_labelled": 4, "requests_todo": 49, "request_facet_pairs": 113,
-                 "pairs_labelled": 9, "pairs_todo": 104}
-    assert len(oracle.todo_pairs()) == 104 and ("G04-lookup-min-confidence", "default-min-confidence") in oracle.todo_pairs()
+    assert s == {"requests": 24, "requests_labelled": 4, "requests_todo": 20, "request_facet_pairs": 52,
+                 "pairs_labelled": 9, "pairs_todo": 43}
+    assert len(oracle.todo_pairs()) == 43 and ("G04-lookup-min-confidence", "default-min-confidence") in oracle.todo_pairs()
 
 
 def test_g06_labels_every_authored_piece_and_names_each_required_facet_once_or_more(oracle) -> None:
@@ -234,7 +234,7 @@ def test_the_loader_refuses_a_label_file_that_is_circular_incomplete_or_malforme
     bad = tmp_path / "oracle.yaml"
     bad.write_text(yaml.safe_dump(data))
     with pytest.raises(ValueError, match=message):
-        oracle_mod.load_oracle(bad, ALL)
+        oracle_mod.load_oracle(bad, GOLDEN)
 
 
 def test_there_is_no_provenance_that_reads_a_ledger() -> None:
@@ -382,7 +382,7 @@ def test_the_driver_runs_end_to_end_on_a_recorded_envelope(tmp_path: Path) -> No
     assert on["conflicted"]["facets_conflicted"] == 24 and on["repair"]["runs_entered"] == 24
     assert on["repair"]["by_facet_origin"]["clause"] == {"targeted": 24, "covered_after": 0, "yield": 0.0}
     assert report["compare_on_vs_off"]["pairs"] == 24 and report["compare_on_vs_off"]["latency_ms_delta"]["mean"] == 0.0
-    assert report["oracle_labels"]["pairs_todo"] == 104 and report["facet_map"]["requests_resolved"] == 24
+    assert report["oracle_labels"]["pairs_todo"] == 43 and report["facet_map"]["requests_resolved"] == 24
     assert report["mvv_g06"]["coverage_state"] == "partial" and report["mvv_g06"]["repair_outcome"] == "no_new_evidence"
     assert {"MAX_FACETS_PER_ASSESSMENT_CALL", "MAX_REPAIR_QUERIES"} <= set(report["config"])
     assert any("continuation_fallback" in n for n in report["not_measured"])
@@ -527,5 +527,5 @@ def test_the_catalog_path_resolver_maps_a_tumbler_to_its_file_path() -> None:
     with patch("nexus.catalog.http_catalog_client.HttpCatalogClient", FakeCatalog):
         paths = driver.catalog_doc_paths(["1.1.2", "1.1.2", ""])
     assert paths({"tumbler": "1.1.2"}) == "docs/rdr/rdr-049-catalog-tumblers.md" and paths({"tumbler": "9"}) == ""
-    o = oracle_mod.load_oracle(oracle_mod.DEFAULT_ORACLE_PATH, ALL).requests["G01-lookup-tumblers"]
+    o = oracle_mod.load_oracle(oracle_mod.DEFAULT_ORACLE_PATH, GOLDEN).requests["G01-lookup-tumblers"]
     assert o.role_of("", paths({"tumbler": "1.1.2"}), "introducing-rdr") == "supports"

@@ -15,7 +15,9 @@ replay over ``nx_answer_runs``):
 * the conflicted-facet rate;
 * cost and latency, coverage on versus off, and the deadline-skip incidence;
 * the assessor's false-negative rate, spurious-contradicts rate and false-skip rate against the ORACLE labels
-  (:mod:`bench.rdr232_oracle`), for the requests the oracle labels; ``todo`` requests are counted, not scored;
+  (:mod:`bench.rdr232_oracle`), for the requests the oracle labels; ``todo`` requests are counted, not scored.
+  ``--set golden`` reads the golden label files, ``--set heldout`` the held-out ones, ``--set both`` merges them;
+  ``--oracle``/``--drafted`` override the golden pair, ``--heldout-oracle``/``--heldout-drafted`` the held-out pair;
 * for the ART RDR-084 request (G06), the MVV checklist facts: plan, coverage state, ledger, repair, persistence.
 
 **This script spends money and writes telemetry when it runs live.** ``--live`` calls the real ``nx_answer`` (model
@@ -68,8 +70,6 @@ from bench.rdr232_envelope import (
 )
 from bench.rdr232_facet_map import DEFAULT_MAP_PATH, FacetResolution, load_facet_map, resolve_facets
 from bench.rdr232_oracle import (
-    DEFAULT_DRAFTED_PATH,
-    DEFAULT_ORACLE_PATH,
     GOLDEN_PATH,
     HELDOUT_PATH,
     DocPathOf,
@@ -77,8 +77,9 @@ from bench.rdr232_oracle import (
     SpotCase,
     SpotSample,
     aggregate,
-    load_oracle,
+    load_oracle_for_set,
     score_run,
+    sides_for_set,
     spot_check_sample,
     wilson_interval,
     write_spot_check,
@@ -672,9 +673,17 @@ async def _run(args: argparse.Namespace, caller: Caller | None, clock: Callable[
         }
         mode = "live" if args.live and not args.stub else "stub"
         plan_growth = "not_applicable_stub" if args.stub else ("disabled" if args.no_plan_growth else "enabled")
-    base_queries = [*load_golden_set(GOLDEN_PATH), *load_golden_set(HELDOUT_PATH)]
-    drafted = args.drafted if args.drafted is not None else (DEFAULT_DRAFTED_PATH if DEFAULT_DRAFTED_PATH.is_file() else None)
-    oracle = None if args.no_oracle else load_oracle(args.oracle, base_queries, drafted_path=drafted)
+    sides = sides_for_set(args.set)
+    stray = [flag for flag, side, value in (
+        ("--oracle", "golden", args.oracle), ("--drafted", "golden", args.drafted),
+        ("--heldout-oracle", "heldout", args.heldout_oracle), ("--heldout-drafted", "heldout", args.heldout_drafted),
+    ) if value is not None and side not in sides]
+    if stray:
+        return _fail(f"{', '.join(stray)} name label files of a set that --set {args.set} does not read")
+    oracle, drafted_used = (None, []) if args.no_oracle else load_oracle_for_set(
+        args.set, overrides={"golden": (args.oracle, args.drafted), "heldout": (args.heldout_oracle, args.heldout_drafted)},
+    )
+    drafted = None if not drafted_used else (str(drafted_used[0]) if len(drafted_used) == 1 else [str(p) for p in drafted_used])
     if doc_path_of is None and oracle is not None and ((args.live and not args.stub) or args.resolve_paths):
         doc_path_of = catalog_doc_paths([
             a.get("tumbler") for r in arms["on"] if r.envelope for a in (r.envelope.get("coverage") or {}).get("anchors") or []
@@ -689,7 +698,7 @@ async def _run(args: argparse.Namespace, caller: Caller | None, clock: Callable[
         negative_qids=frozenset(q.qid for q in load_golden_set(EXTRA_SET_PATHS["negative"])), spot_sample=spot,
         meta={"set": args.set, "requests": len(queries), "repeat": args.repeat, "engine": args.engine, "mode": mode, "plan_growth": plan_growth,
               "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "owners": dict(kv.split("=", 1) for kv in args.owner or []),
-              "drafted_labels": str(drafted) if drafted is not None and oracle is not None else None,
+              "drafted_labels": drafted if oracle is not None else None,
               **project_meta, **({"source_envelopes": str(args.from_envelopes)} if args.from_envelopes else {})},
     )
     text = json.dumps(report, indent=2, default=str)
@@ -727,8 +736,12 @@ def main(
                     f"--live defaults to this repository ({REPO_ROOT.name}). Each request's binding is in the report's meta.project_bindings")
     ap.add_argument("--no-project-dir", action="store_true", help="--live: run without a project (a number two projects carry stays ambiguous)")
     ap.add_argument("--engine", default="", help="the engine version the run is against, recorded in the report")
-    ap.add_argument("--oracle", type=Path, default=DEFAULT_ORACLE_PATH, help="oracle label file")
-    ap.add_argument("--drafted", type=Path, help=f"drafted oracle labels to merge (default: {DEFAULT_DRAFTED_PATH.name} when it exists)")
+    ap.add_argument("--oracle", type=Path, help="golden-set hand oracle label file (default: bench/queries/golden_oracle_labels_v1.yaml)")
+    ap.add_argument("--drafted", type=Path, help="golden-set drafted labels to merge (default: golden_oracle_labels_drafted_v1.yaml when it exists)")
+    ap.add_argument("--heldout-oracle", type=Path, help="held-out hand oracle label file, read for --set heldout or both "
+                    "(default: golden_heldout_oracle_labels_v1.yaml)")
+    ap.add_argument("--heldout-drafted", type=Path, help="held-out drafted labels to merge, read for --set heldout or both "
+                    "(default: golden_heldout_oracle_labels_drafted_v1.yaml when it exists)")
     ap.add_argument("--no-oracle", action="store_true", help="skip assessor scoring against the oracle")
     ap.add_argument("--resolve-paths", action="store_true", help="resolve document paths through the catalog (read-only) for the document-level labels, "
                     "also with --stub or --from-envelopes")

@@ -1,0 +1,126 @@
+# RDR-232 item-by-facet oracle labels for the HELD-OUT set v1 (nexus-jypmj.3.10). Format and scoring: scripts/bench/rdr232_oracle.py.
+#
+# The hand file for golden_heldout_v1.yaml (29 requests, H01 to H30 less H08). No hand labels exist: every request is
+# `todo: true`, so a run over the held-out set scores nothing against hand labels until a person fills `items`. Drafted
+# labels (an agent's, from a blind packet) live in golden_heldout_oracle_labels_drafted_v1.yaml and fill only the
+# requests this file leaves todo. The held-out set versions itself with the golden set's `golden_set_version`, hence
+# the key below. Regenerate with `python scripts/bench/rdr232_oracle.py scaffold --set heldout --write`.
+oracle_version: 1
+golden_set_version: 1
+requests:
+  H01:
+    provenance: human
+    todo: true
+    items: []
+  H02:
+    provenance: human
+    todo: true
+    items: []
+  H03:
+    provenance: human
+    todo: true
+    items: []
+  H04:
+    provenance: human
+    todo: true
+    items: []
+  H05:
+    provenance: human
+    todo: true
+    items: []
+  H06:
+    provenance: human
+    todo: true
+    items: []
+  H07:
+    provenance: human
+    todo: true
+    items: []
+  H09:
+    provenance: human
+    todo: true
+    items: []
+  H10:
+    provenance: human
+    todo: true
+    items: []
+  H11:
+    provenance: human
+    todo: true
+    items: []
+  H12:
+    provenance: human
+    todo: true
+    items: []
+  H13:
+    provenance: human
+    todo: true
+    items: []
+  H14:
+    provenance: human
+    todo: true
+    items: []
+  H15:
+    provenance: human
+    todo: true
+    items: []
+  H16:
+    provenance: human
+    todo: true
+    items: []
+  H17:
+    provenance: human
+    todo: true
+    items: []
+  H18:
+    provenance: human
+    todo: true
+    items: []
+  H19:
+    provenance: human
+    todo: true
+    items: []
+  H20:
+    provenance: human
+    todo: true
+    items: []
+  H21:
+    provenance: human
+    todo: true
+    items: []
+  H22:
+    provenance: human
+    todo: true
+    items: []
+  H23:
+    provenance: human
+    todo: true
+    items: []
+  H24:
+    provenance: human
+    todo: true
+    items: []
+  H25:
+    provenance: human
+    todo: true
+    items: []
+  H26:
+    provenance: human
+    todo: true
+    items: []
+  H27:
+    provenance: human
+    todo: true
+    items: []
+  H28:
+    provenance: human
+    todo: true
+    items: []
+  H29:
+    provenance: human
+    todo: true
+    items: []
+  H30:
+    provenance: human
+    todo: true
+    items: []

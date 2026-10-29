@@ -143,7 +143,7 @@ def test_the_driver_reads_the_negative_set_and_counts_the_assessors_false_covers
     assert neg["facets"] == 24 and neg["covered"] == 20 and neg["unsupported"] == 4
     assert neg["falsely_covered"] == pytest.approx(20 / 24) and neg["falsely_covered_ci95"][0] > 0.6
     assert neg["generation_skipped"] == 0 and neg["answer_shapes"] == {"insufficient_evidence": 4}
-    assert report["oracle_labels"]["requests"] == 53, "the oracle does not label negative controls"
+    assert report["oracle_labels"]["requests"] == 24, "the oracle does not label negative controls (an extra set reads the golden files)"
 
 
 def test_a_run_without_negative_controls_has_no_negative_section(tmp_path: Path) -> None:

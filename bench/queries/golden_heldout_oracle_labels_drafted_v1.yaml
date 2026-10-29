@@ -1,0 +1,12 @@
+# RDR-232 oracle labels for the HELD-OUT set, DRAFTED provenance (nexus-jypmj.3.10; Sam 2026-10-28, critique S3).
+#
+# The held-out twin of golden_oracle_labels_drafted_v1.yaml, with the same rules: labels an agent drafts from the retrieved
+# items of a measurement run WITHOUT seeing the assessor's ledger (the packet scripts/bench/rdr232_oracle_packet.py writes:
+# qid, question, facet slugs, and per item its item_id, chash and text), `provenance: drafted` on every entry, items keyed
+# by `chash`, and only requests golden_heldout_oracle_labels_v1.yaml leaves `todo`. Write it with
+# scripts/bench/rdr232_oracle_drafts.py from the drafter's JSON; do not edit it by hand.
+#
+# Empty until a held-out run has produced a packet and an agent has drafted from it.
+oracle_version: 1
+golden_set_version: 1
+requests: {}
