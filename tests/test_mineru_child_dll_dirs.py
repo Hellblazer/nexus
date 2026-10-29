@@ -768,7 +768,7 @@ def test_the_console_command_off_windows_is_the_plain_interpreter_in_posix_quoti
     import shlex  # noqa: PLC0415
 
     setattr_in(monkeypatch, "nexus._mineru_spawn", "sys.platform", "linux")
-    monkeypatch.setattr(sys, "executable", "/opt/my venv/bin/python")
+    setattr_in(monkeypatch, "nexus._mineru_spawn", "sys.executable", "/opt/my venv/bin/python")
     cmd = _mineru_spawn.mineru_console_command("mineru-models-download", "-s", "huggingface")
     assert cmd == shlex.join(
         ["/opt/my venv/bin/python", "-m", "nexus._mineru_console", "mineru-models-download", "-s", "huggingface"]
@@ -791,7 +791,7 @@ def test_the_console_command_on_windows_is_a_powershell_call_with_a_spaced_path(
     (``"C:\\a b\\python.exe" -m ...``) is a string expression there, not a command. The console
     interpreter is used: ``pythonw.exe`` has no console to print to."""
     setattr_in(monkeypatch, "nexus._mineru_spawn", "sys.platform", "win32")
-    monkeypatch.setattr(sys, "executable", r"C:\Program Files\Python 3\pythonw.exe")
+    setattr_in(monkeypatch, "nexus._mineru_spawn", "sys.executable", r"C:\Program Files\Python 3\pythonw.exe")
     cmd = _mineru_spawn.mineru_console_command("mineru-models-download", "-s", "huggingface", "-m", "pipeline")
     assert cmd == (
         r"& 'C:\Program Files\Python 3\python.exe' -m nexus._mineru_console "
@@ -801,7 +801,7 @@ def test_the_console_command_on_windows_is_a_powershell_call_with_a_spaced_path(
 
 def test_the_console_command_on_windows_escapes_a_quote_in_the_path(monkeypatch: pytest.MonkeyPatch) -> None:
     setattr_in(monkeypatch, "nexus._mineru_spawn", "sys.platform", "win32")
-    monkeypatch.setattr(sys, "executable", r"C:\Users\O'Neil\py\python.exe")
+    setattr_in(monkeypatch, "nexus._mineru_spawn", "sys.executable", r"C:\Users\O'Neil\py\python.exe")
     cmd = _mineru_spawn.mineru_console_command("mineru-models-download")
     assert cmd.startswith(r"& 'C:\Users\O''Neil\py\python.exe' -m "), cmd
 
@@ -811,7 +811,7 @@ def test_the_console_command_on_windows_escapes_a_typographic_quote_in_the_path(
 ) -> None:
     """PowerShell also ends a single-quoted string at U+2018..U+201B (a user folder like D’Arcy)."""
     setattr_in(monkeypatch, "nexus._mineru_spawn", "sys.platform", "win32")
-    monkeypatch.setattr(sys, "executable", "C:\\Users\\D\u2019Arcy\\py\\python.exe")
+    setattr_in(monkeypatch, "nexus._mineru_spawn", "sys.executable", "C:\\Users\\D\u2019Arcy\\py\\python.exe")
     cmd = _mineru_spawn.mineru_console_command("mineru-models-download")
     assert cmd.startswith("& 'C:\\Users\\D\u2019\u2019Arcy\\py\\python.exe' -m "), cmd
 

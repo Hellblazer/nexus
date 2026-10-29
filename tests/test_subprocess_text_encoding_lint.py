@@ -90,7 +90,7 @@ _KWARGS_READ: dict[str, str] = {
     ),
     "src/nexus/hooks/upgrade_auto.py:184": "same ``common`` dict as :181",
     "src/nexus/hooks/upgrade_auto.py:187": "same ``common`` dict as :181",
-    "src/nexus/_mineru_spawn.py:264": (
+    "src/nexus/_mineru_spawn.py:302": (
         "``stable`` is ``service_registry.detached_spawn_kwargs()`` minus its ``env``: a "
         "lone ``cwd`` key (nexus-x3m8e); stdout and stderr are the child log handle, "
         "binary, and the server is detached"
