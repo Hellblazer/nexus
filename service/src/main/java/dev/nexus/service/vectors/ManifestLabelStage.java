@@ -142,7 +142,7 @@ final class ManifestLabelStage {
     static final int OVERFETCH_CEILING = 1200;
 
     /** Chashes per manifest lookup (a bind-parameter budget well under PostgreSQL's 32767). */
-    private static final int LOOKUP_BATCH = 300;
+    private static final int LOOKUP_BATCH = PgVectorRepository.SOURCE_URI_JOIN_BATCH;
 
     private final TenantScope tenantScope;
 
@@ -350,8 +350,10 @@ final class ManifestLabelStage {
 
     /**
      * One live manifest occurrence of a chash: the owning document, the position and its own labels, the
-     * document's {@code source_uri} (a row that carries one is re-pointed at the document it speaks for), and
-     * the document's own answers on the document-level keys the filter names.
+     * document's {@code source_uri} (a row that carries one is re-pointed at the document it speaks for), the
+     * position's own span ({@code lineStart}, {@code lineEnd}, {@code charStart}, {@code charEnd}, each NULL
+     * for a row written before the manifest carried spans: nexus-6pfgb.26), and the document's own answers on
+     * the document-level keys the filter names.
      *
      * @param docValues the document's AUTHORITATIVE value for each document-level key the predicates name:
      *                  a key that is present answers for the document (a null value is an authoritative
@@ -359,7 +361,8 @@ final class ManifestLabelStage {
      *                  row (a legacy document). Empty when the filter names no document-level key.
      */
     record Occurrence(String docId, int position, String sectionTitle, String sectionType, Integer pageNumber,
-                      boolean labelsWritten, String sourceUri, Map<String, Object> docValues) {}
+                      boolean labelsWritten, String sourceUri, Integer lineStart, Integer lineEnd,
+                      Integer charStart, Integer charEnd, Map<String, Object> docValues) {}
 
     /** The document-level keys the predicates name. */
     static Set<String> docKeysOf(List<Predicate> predicates) {
@@ -472,6 +475,30 @@ final class ManifestLabelStage {
                 chashesByCollection.computeIfAbsent(c, k -> new LinkedHashSet<>()).add(chash);
             }
         }
+        return occurrences(tenant, chashesByCollection, docKeys);
+    }
+
+    /**
+     * The FIRST live owner of each (collection, chash): the occurrence of the lowest {@code doc_id}, then the
+     * lowest position, among documents that are not tombstoned (nexus-6pfgb.26). This is the one owner a
+     * chunk-level search row's {@code source_uri} and span speak for when no label filter has expanded the row
+     * per document; keyed by {@link #ownerKey}. A chash with no live manifest row has no entry.
+     */
+    Map<String, Occurrence> firstOwners(String tenant, Map<String, Set<String>> chashesByCollection) {
+        Map<String, Occurrence> first = new HashMap<>();
+        for (Map.Entry<String, List<Occurrence>> e : occurrences(tenant, chashesByCollection, Set.of()).entrySet()) {
+            first.put(e.getKey(), e.getValue().get(0));
+        }
+        return first;
+    }
+
+    /** The key {@link #firstOwners} answers under. */
+    static String ownerKey(String collection, String chash) {
+        return key(collection, chash);
+    }
+
+    private Map<String, List<Occurrence>> occurrences(String tenant, Map<String, Set<String>> chashesByCollection,
+                                                      Set<String> docKeys) {
         Map<String, List<Occurrence>> out = new HashMap<>();
         if (chashesByCollection.isEmpty()) {
             return out;
@@ -482,7 +509,9 @@ final class ManifestLabelStage {
             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
             CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
             CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
-            CATALOG_DOCUMENTS.SOURCE_URI));
+            CATALOG_DOCUMENTS.SOURCE_URI,
+            CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END,
+            CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END));
         docFields.addTo(select);
         tenantScope.withTenant(tenant, ctx -> {
             for (Map.Entry<String, Set<String>> e : chashesByCollection.entrySet()) {
@@ -514,6 +543,10 @@ final class ManifestLabelStage {
                                                r.get(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER),
                                                Boolean.TRUE.equals(r.get(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)),
                                                r.get(CATALOG_DOCUMENTS.SOURCE_URI),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.LINE_START),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.LINE_END),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_START),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_END),
                                                docFields.read(r)));
                     }
                 }
@@ -597,7 +630,28 @@ final class ManifestLabelStage {
     }
 
     /**
-     * A copy of {@code row} that speaks for one owning document: its id, position and own labels. A written
+     * Writes the owner's manifest span onto {@code row} (nexus-6pfgb.26): {@code line_start}, {@code line_end},
+     * {@code chunk_start_char} and {@code chunk_end_char} are the position's own, where the shared chunk row's
+     * are the last writer's. A NULL manifest value is "never recorded" (a row written before the manifest
+     * carried spans), not "no span": that field keeps the row's own value.
+     */
+    static void putSpan(Map<String, Object> row, Occurrence o) {
+        if (o.lineStart() != null) {
+            row.put("line_start", o.lineStart());
+        }
+        if (o.lineEnd() != null) {
+            row.put("line_end", o.lineEnd());
+        }
+        if (o.charStart() != null) {
+            row.put("chunk_start_char", o.charStart());
+        }
+        if (o.charEnd() != null) {
+            row.put("chunk_end_char", o.charEnd());
+        }
+    }
+
+    /**
+     * A copy of {@code row} that speaks for one owning document: its id, position, span and own labels. A written
      * occurrence replaces the chunk row's (foreign) labels outright: an empty title or type is sent as
      * {@code ""} (the chunkers' "none here"), and an unset page removes the key instead of leaving another
      * document's page behind. The document-level keys the filter named, where the document answers them,
@@ -611,6 +665,7 @@ final class ManifestLabelStage {
             // include_source_uri resolved one owner's URI for the shared chunk; this row speaks for o's document.
             copy.put("source_uri", o.sourceUri());
         }
+        putSpan(copy, o);
         if (o.labelsWritten()) {
             copy.put("section_title", o.sectionTitle() == null ? "" : o.sectionTitle());
             copy.put("section_type", o.sectionType() == null ? "" : o.sectionType());

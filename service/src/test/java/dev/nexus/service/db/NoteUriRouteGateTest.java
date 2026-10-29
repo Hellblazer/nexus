@@ -147,10 +147,9 @@ class NoteUriRouteGateTest {
         exempt(CAT, "moveTarget", Cls.MOVE, "picks the collection update's move: a field map setting physical_collection without a non-null source_uri (nexus-bivz3.3)"),
         exempt(CAT, "refuseCollectionMoveCollisions", Cls.MOVE, "the collection update's pre-check on stored URIs; a caller's own source_uri is canonicalized in buildUpdateDocumentQuery (nexus-bivz3.3)"),
         // ── VECTORS ───────────────────────────────────────────────────────
-        exempt(PGV, "sourceUrisByChash", Cls.VECTORS, "include_source_uri: reads the STORED catalog_documents.source_uri for a chunk"),
         exempt(PGV, "enrichSearchRows", Cls.VECTORS, "include_source_uri: attaches the stored URI to each search row"),
         exempt(PGV, "enrichGetEnvelope", Cls.VECTORS, "include_source_uri: attaches the stored URIs to a get envelope"),
-        exempt(MLS, "occurrences", Cls.VECTORS, "include_source_uri: reads each owning document's STORED source_uri"),
+        exempt(MLS, "occurrences", Cls.VECTORS, "include_source_uri: reads each owning document's STORED source_uri (also the first-owner lookup behind a search row's source_uri, nexus-6pfgb.26)"),
         exempt(MLS, "expanded", Cls.VECTORS, "re-points a row at the owning document's STORED source_uri; takes none from the caller"),
         // ── PASS_THROUGH: CatalogRepository ───────────────────────────────
         exempt(CAT, "EX_DOC_URI", Cls.PASS_THROUGH, "field: the EXCLUDED.source_uri column constant the upsert arms SET from"),
@@ -395,7 +394,9 @@ class NoteUriRouteGateTest {
         assertThat(perFile.keySet()).as("vectors files scanned").contains(PGV, MLS);
         assertThat(perFile.get(CAT).refCount()).as("CatalogRepository references seen").isGreaterThanOrEqualTo(45);
         assertThat(perFile.get(ASP).refCount()).as("AspectRepository references seen").isGreaterThanOrEqualTo(33);
-        assertThat(perFile.get(PGV).refCount()).as("PgVectorRepository references seen").isGreaterThanOrEqualTo(3);
+        // 3 until nexus-6pfgb.26 moved the stored-URI read (sourceUrisByChash) into ManifestLabelStage.firstOwners;
+        // the two enrichment methods are what is left here.
+        assertThat(perFile.get(PGV).refCount()).as("PgVectorRepository references seen").isGreaterThanOrEqualTo(2);
         assertThat(regionTotal).as("method regions examined").isGreaterThanOrEqualTo(1000);
         assertThat(listed).as("listed routes").isGreaterThanOrEqualTo(19);
         assertThat(ENTRIES.stream().filter(e -> e.cls() != Cls.LISTED && e.why().isBlank())).as("exempt entries without a reason").isEmpty();

@@ -342,6 +342,15 @@ class EmbedPostureHandlersTest {
     }
 
     @Test
+    void version_throughTheRealHandler_advertisesTheSearchRowOwnerSpanCapability() throws Exception {
+        // nexus-6pfgb.26: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves
+        // the handler's body actually calls it.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("search_row_owner_span_supported").asBoolean()).isTrue();
+    }
+
+    @Test
     void theTwoRoutesRenderTheSameThreeKeys() throws Exception {
         EmbedPosture posture = posture(false, true, EmbeddingProfile.BGE);
         JsonNode status = get("/v1/status", new StatusHandler(router(null, "pa-key", EmbeddingProfile.BGE))

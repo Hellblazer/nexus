@@ -188,4 +188,13 @@ class VersionHandlerReleaseVersionTest {
         VersionHandler.appendNxAnswerOutOfStepCostCapabilityField(body);
         assertThat(body.toString()).isEqualTo(",\"nx_answer_out_of_step_cost_supported\":true");
     }
+
+    // ── nexus-6pfgb.26: a search row's source_uri and span come from one manifest owner ──
+
+    @Test
+    void versionAdvertisesTheSearchRowOwnerSpanAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendSearchRowOwnerSpanCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"search_row_owner_span_supported\":true");
+    }
 }

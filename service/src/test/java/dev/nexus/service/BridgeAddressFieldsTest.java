@@ -698,31 +698,24 @@ class BridgeAddressFieldsTest {
     }
 
     /**
-     * S1 — Zero-JOIN proof: default path (includeSourceUri=false) must invoke ZERO catalog
-     * JOIN batches. Verified via {@link PgVectorRepository#sourceUriJoinCalls}, a
-     * package-private {@link java.util.concurrent.atomic.AtomicInteger} that
-     * {@code sourceUrisByChash} increments at entry. Package visibility (same package as
-     * this test) lets us read the counter directly — no subclassing required.
-     *
-     * <p>Two assertions lock the latency guarantee end-to-end:
-     * <ol>
-     *   <li>Default path (includeSourceUri=false): counter stays at its pre-call value → zero
-     *       catalog JOINs executed. A future refactor that inverts the guard fails this count.</li>
-     *   <li>Opt-in path (includeSourceUri=true) on a result set with catalog rows: counter
-     *       increments by ≥1 → the JOIN actually ran.</li>
-     * </ol>
+     * S1 — One-lookup proof (RDR-169 G5; reshaped by nexus-6pfgb.26). A chunk-level search window costs
+     * exactly ONE manifest owner lookup, on the default path and the opt-in path alike: the span fields
+     * come from the same owner row {@code source_uri} does, so the default path can no longer skip it. What
+     * the opt-in flag still gates is the {@code source_uri} KEY: absent from every default-path row.
+     * Verified via the repository's owner-lookup counter, incremented once per
+     * {@code ownersByChash} call. A get-envelope without {@code include_source_uri} resolves no owner.
      */
     @Test
     void defaultPath_producesNoSourceUri_optInProducesSourceUri() {
         // Reset counter to isolate this test from any prior calls in @BeforeAll setup
-        pgRepo.resetSourceUriJoinCallsForTests();
+        pgRepo.resetOwnerLookupCallsForTests();
 
-        // Default path: sourceUrisByChash must NOT be called
+        // Default path: one owner lookup for the whole window, and no source_uri key
         var defaultRows = pgRepo.searchWithTokens(TENANT, QUERY, List.of(COL), 10, null, false).value();
         assertThat(defaultRows).as("search must return rows").isNotEmpty();
-        assertThat(pgRepo.sourceUriJoinCallCount())
-            .as("default path (includeSourceUri=false): ZERO catalog JOIN calls")
-            .isEqualTo(0);
+        assertThat(pgRepo.ownerLookupCallCount())
+            .as("default path (includeSourceUri=false): exactly ONE owner lookup for the window")
+            .isEqualTo(1);
         for (var row : defaultRows) {
             assertThat(row).as("default path: chash always present").containsKey("chash");
             assertThat(row).as("default path: span always present").containsKey("span");
@@ -730,12 +723,19 @@ class BridgeAddressFieldsTest {
                            .doesNotContainKey("source_uri");
         }
 
-        // Opt-in path: sourceUrisByChash must be called ≥1 time
-        int callsBefore = pgRepo.sourceUriJoinCallCount();
+        // Opt-in path: still one lookup for the window
+        pgRepo.resetOwnerLookupCallsForTests();
         var optInRows = pgRepo.searchWithTokens(TENANT, QUERY, List.of(COL), 10, null, true).value();
-        assertThat(pgRepo.sourceUriJoinCallCount())
-            .as("opt-in path (includeSourceUri=true): ≥1 catalog JOIN call")
-            .isGreaterThan(callsBefore);
+        assertThat(pgRepo.ownerLookupCallCount())
+            .as("opt-in path (includeSourceUri=true): exactly ONE owner lookup for the window")
+            .isEqualTo(1);
+
+        // A get-envelope without include_source_uri resolves no owner at all.
+        pgRepo.resetOwnerLookupCallsForTests();
+        pgRepo.getWhere(TENANT, COL, null, 10, 0, false);
+        assertThat(pgRepo.ownerLookupCallCount())
+            .as("get envelope, includeSourceUri=false: ZERO owner lookups")
+            .isEqualTo(0);
         Map<String, Object> withUri = optInRows.stream()
             .filter(r -> CHASH_WITH_URI.equals(r.get("id")))
             .findFirst()
