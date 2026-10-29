@@ -9267,7 +9267,8 @@ def _engine_scope_filter(catalog: Any, scope: Any) -> "dict | None":
         return {"collections": [scope.value]}
     try:
         names = sorted({
-            str(row["name"]) for row in catalog.list_collections()
+            # Routing reads the live view only (nexus-bc7ps): a quarantine-<name> row must not reach the predicate.
+            str(row["name"]) for row in catalog.list_collections(lifecycle_state="live")
             if isinstance(row, dict) and row.get("name") and scope.admits(str(row["name"]))
         })
     except Exception as exc:  # noqa: BLE001 — no predicate we could not build is sent; the walk is disclosed as unscoped-by-engine

@@ -61,15 +61,20 @@ class _Engine:
         self._registry_error = registry_error
         self.graph_kwargs: list[dict] = []
         self.registry_calls = 0
+        self.registry_lifecycle_states: list[str | None] = []
+        self.quarantined: list[str] = []
 
     def supports_graph_scope_filter(self) -> bool:
         return self._advertise
 
     def list_collections(self, lifecycle_state=None, content_type=None):
         self.registry_calls += 1
+        self.registry_lifecycle_states.append(lifecycle_state)
         if self._registry_error is not None:
             raise self._registry_error
-        return [{"name": name} for name in self._registry]
+        rows = [{"name": name, "lifecycle_state": "live"} for name in self._registry]
+        rows += [{"name": name, "lifecycle_state": "quarantine"} for name in self.quarantined]
+        return [r for r in rows if lifecycle_state is None or r["lifecycle_state"] == lifecycle_state]
 
     def _walk(self, seeds, **kw):
         self.graph_kwargs.append(dict(kw))
@@ -140,6 +145,18 @@ def test_a_scoped_traverse_sends_the_predicate_and_the_in_scope_evidence_survive
     assert rep["engine_dropped_out_of_scope"] == 520
     assert rep["secondary_omitted"] is False
     assert rep["possibly_truncated"] is False and rep["contained"] is True, "13 nodes came back: a complete in-scope walk"
+
+
+def test_the_registry_is_read_through_the_live_view_so_a_quarantine_row_never_reaches_the_predicate() -> None:
+    """nexus-bc7ps: routing reads lifecycle_state=live; a quarantine-<name> row the scope would otherwise admit
+    by prefix is not sent to the engine."""
+    nodes, edges = _crowded()
+    cat = _Engine(nodes, edges, registry=[RDR])
+    cat.quarantined = ["rdr__1-9__bge-base-en-v15-768__v1"]
+    _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    assert cat.registry_lifecycle_states == ["live"]
+    (kw,) = cat.graph_kwargs
+    assert kw["scope_filter"] == {"collections": [RDR]}
 
 
 def test_without_the_predicate_the_same_walk_loses_its_in_scope_evidence_to_the_cut() -> None:
