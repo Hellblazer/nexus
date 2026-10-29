@@ -1025,19 +1025,46 @@ def record_skipped(paths: list[Path], *, repo: Path | None = None, cause: str = 
         _log.warning("pdf_stack_skipped_record_unwritable", error=str(exc))
 
 
-def skipped_count(cause: str | None = None) -> int:
+def _repo_still_exists(repo_key: object) -> bool:
+    """False only for a record keyed on a repo path that is gone (the empty key, a PDF with no
+    repo, has nothing to be gone)."""
+    if not isinstance(repo_key, str) or not repo_key:
+        return True
+    try:
+        return Path(repo_key).exists()
+    except (OSError, ValueError):
+        return False
+
+
+def skipped_count(cause: str | None = None, *, existing_repos_only: bool = False) -> int:
     """How many PDFs refusing runs left un-indexed (0 when none, or unreadable); with *cause*,
-    only those held for it (a record that names none is a stack hold)."""
+    only those held for it (a record that names none is a stack hold).
+
+    Never raises: the doctor calls it outside a guard, and the file is one a person can edit or a
+    crash can truncate. An entry that is not an object, or whose ``paths`` is not a list, holds
+    nothing; a path that is not a string is not counted. With *existing_repos_only* a record whose
+    repo directory is gone is ignored (nothing remains there for a rerun to index, and the rerun
+    the doctor would name cannot clear it, nexus-tr1rj.26).
+    """
     try:
         data = json.loads(_skipped_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return 0
     if not isinstance(data, dict):
         return 0
-    return sum(
-        len(v.get("paths", [])) for v in data.values()
-        if isinstance(v, dict) and (cause is None or v.get("cause", SKIP_CAUSE_STACK) == cause)
-    )
+    total = 0
+    for repo_key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        paths = entry.get("paths")
+        if not isinstance(paths, list):
+            continue
+        if cause is not None and entry.get("cause", SKIP_CAUSE_STACK) != cause:
+            continue
+        if existing_repos_only and not _repo_still_exists(repo_key):
+            continue
+        total += sum(1 for p in paths if isinstance(p, str))
+    return total
 
 
 # ── the upgrade rule: an existing install carries the stack forward ──────────

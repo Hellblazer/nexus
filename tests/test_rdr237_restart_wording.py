@@ -94,3 +94,32 @@ def test_a_restart_this_process_made_still_says_so(monkeypatch, capsys) -> None:
 
     err = capsys.readouterr().err
     assert "replaced it (old pid 31337)" in err and "another process" not in err
+
+
+def test_a_takeover_is_not_remembered_by_the_next_restart_on_the_same_extractor(monkeypatch, capsys) -> None:
+    """The takeover pid belongs to ONE restart. A second timed-out restart on the same extractor,
+    whose pid file names the timed-out server again, is this process's own replacement and must say
+    so; a stale takeover pid from the first would print the other-process line for it."""
+    ext = PDFExtractor()
+    ext._server_timeout_pages.append("3")
+    monkeypatch.setattr("nexus._mineru_spawn.spawn_server_process", MagicMock())
+    monkeypatch.setattr("nexus._mineru_spawn.stop_server_group", MagicMock())
+    with health_server(_health(max_concurrent_requests=1)) as url:
+        port = int(url.rsplit(":", 1)[1])
+        reads = iter([dict(TIMED_OUT), _peer(port)])
+        monkeypatch.setattr("nexus._mineru_pid.read_pid_file", lambda: next(reads))
+        ext._restart_timed_out_server()
+    assert ext._restart_taken_over_by == os.getpid(), "the setup: the first restart was a takeover"
+    capsys.readouterr()
+
+    # The second restart: the pid file names the timed-out server again; this process replaces it.
+    ext._server_timeout_pages.append("9")
+    monkeypatch.setattr("nexus._mineru_pid.read_pid_file", lambda: dict(TIMED_OUT))
+    monkeypatch.setattr("nexus._mineru_health.claim_broken_restart", lambda: True)
+    monkeypatch.setattr(ext, "_restart_mineru_server", MagicMock(return_value=True))
+    ext._restart_timed_out_server()
+
+    err = capsys.readouterr().err
+    assert "replaced it (old pid 31337)" in err
+    assert "another process" not in err
+    assert ext._restart_taken_over_by is None

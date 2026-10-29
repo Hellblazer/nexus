@@ -310,6 +310,12 @@ text layer on any page. The 30-page Grossberg & Stone scan (RF-1) finished on bo
 hosts with no degraded page and gave 17 of its 20 numbered equations as LaTeX on both,
 the same 17 RF-1 found (equations 11, 12 and 20 are the misses).
 
+**RF-18 (Verified, source; nexus-489n1, 2026-10-29).** The restart rule reads the slot
+count from the live MinerU server's `/health` `max_concurrent_requests` (MinerU 3.1.11
+`fast_api.py:1562`), and falls back to the platform and environment guess (one slot on
+macOS, else `MINERU_API_MAX_CONCURRENT_REQUESTS`, else three) when the server does not
+answer or reports no positive integer.
+
 ### Critical Assumptions
 
 - [x] A1: MinerU honours `formula_enable=false` per request on the server path

@@ -5644,6 +5644,13 @@ def _run_index(
         if _pdf_held:
             _held = set(_pdf_held)
             pdf_files = [(sc, f) for sc, f in pdf_files if f not in _held]
+    elif delta_changed is None:
+        # nexus-tr1rj.26: a full walk that finds no PDF has nothing left to hold. A record an
+        # earlier run wrote for this repo (the PDFs were deleted, or the repo no longer has any)
+        # would otherwise stay, and the doctor row that names `nx index repo` as its remedy could
+        # never be cleared by it. A --since-head walk lists only the changed files, so "no PDF
+        # in it" says nothing about the repo and leaves the record alone.
+        _bounds_pdf_stack.record_skipped([], repo=repo)
 
     # GH #371 + #436: surface the oversize-skip set so the operator
     # knows what got dropped. Single structured log + on_phase line

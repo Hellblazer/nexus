@@ -3037,7 +3037,7 @@ def _check_pdf_support() -> list[HealthResult]:
     plan = pdf_stack.install_plan()
     # nexus-tr1rj.26: only the PDFs held for the stack wait for it; a MinerU-limit hold is the
     # "PDF settings" row's to say.
-    held = pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK)
+    held = pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK, existing_repos_only=True)
     held_note = (
         f"; {held} PDF(s) a background run could not index are waiting for it" if held else ""
     )
@@ -3113,7 +3113,7 @@ def _check_pdf_config() -> list[HealthResult]:
     from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
     from nexus.config import PdfConfigError, get_pdf_config  # noqa: PLC0415 — deferred import (startup cost)
 
-    held = pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS)
+    held = pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS, existing_repos_only=True)
     held_note = f" {held} PDF(s) a run held on it are not indexed." if held else ""
     try:
         extractor = get_pdf_config().extractor
