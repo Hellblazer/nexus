@@ -5889,10 +5889,13 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
     when no operator consumed retrieved evidence (a handoff cut before it, a
     fast-path query, an error).
   - `source_check`: `{state, sources, reducer_input_recorded, unresolved}`.
-    `state` is the worst source's: `missing` (not resolved, ambiguous, nothing
+    `state` is the worst source's: `missing` (no document carries it, nothing
     read, no reduction handed it, none of its chunks reached the reducer, or
     every reserved chunk was dropped by an intermediate `rank` or `filter`
-    before the final reduction), `partial` (the document is over the primary
+    before the final reduction), `unresolved` (the source is ambiguous
+    (candidates), its candidate lookup hit the cap, or the lookup failed, timed
+    out or had no catalog; disclosed here and in `coverage.sources`, and it
+    blocks no facet; nexus-jypmj.3.17), `partial` (the document is over the primary
     budget, some selected chunks did not reach the reducer, or some reserved
     chunks were dropped before the final reduction) or `covered`;
     `not_applicable` when no source was named. Each source row is `{source,
@@ -6001,8 +6004,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   even when the ledger said `complete`. It adds `requested_facet_ids` and
   `covered_facet_ids`, `residual_gaps` (`{facet_id, state, reason}` for every
   facet not covered, an unassessed one included), `primary_source`
-  (`{state, sources}`; `state` is `not_named`, `covered`, `partial` or
-  `missing`) and `corpus_counts` (`{anchors, by_stream, by_collection}`, what the
+  (`{state, sources}`; `state` is `not_named`, `covered`, `partial`,
+  `unresolved` (ambiguous or not looked up; disclosed, blocks no facet) or
+  `missing`, worst first `missing`, `unresolved`, `partial`, `covered`) and `corpus_counts` (`{anchors, by_stream, by_collection}`, what the
   final reduction was handed); `repair` holds the repair attempt. A run no
   boundary assessed has the same keys, state `unassessed` and a `reason`:
   `switch_off` (`NX_ANSWER_COVERAGE` is not on, the default), `no_facets`,
@@ -6039,7 +6043,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `failure_cause` (`raised_call`, `unusable_reply`, `mixed` or `none`). The coverage
   object also has `facets_conflicted` (the conflicted subset of `facets.covered`),
   `unassessed_by_cause` (`unusable_reply`, `deadline_skip`, `budget_skip`,
-  `raised_call`, `other`) and `repair_entered`. With `trace=False` the source labels and the `detail` of
+  `raised_call`, `stopped_after_failure` (a group never attempted because an earlier call
+  raised or replied unusably), `other`) and `repair_entered`. With `trace=False` the source labels and the `detail` of
   `sources` and `scope` are blanked; ids, counts and closed names stay.
 
 - `traverse` under `nx_answer` (nexus-jypmj.1.5): `nx_answer` always supplies the

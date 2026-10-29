@@ -390,6 +390,7 @@
    "deadline_skip": 0,
    "other": 0,
    "raised_call": 0,
+   "stopped_after_failure": 0,
    "unusable_reply": 0
   }
  },
@@ -708,7 +709,7 @@
  "reserved_stream": null,
  "run_summary": {
   "detail": "digest_match",
-  "digest": "sha256:fb51c2ddb468d6e10c6f31532063639294b4d3f69cd105ef5be59b242d43cff4",
+  "digest": "sha256:d3b9be6bd5a8fb99a6fbcf61716103cee1ff1d4b83ded0d170d25b8f5d45522c",
   "persisted_coverage_state": "partial",
   "persistence": "persisted",
   "returned_coverage_state": "partial",
