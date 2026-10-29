@@ -1593,7 +1593,7 @@ def run_file_loop(
     concurrency: int,
     on_file: Callable[[Path, int, float], None] | None,
     on_stage_timers: Callable[[Path, object], None] | None,
-    on_skip: Callable[[Path, str], None] | None = None,
+    on_skip: Callable[[Path, str, str], None] | None = None,
 ) -> int:
     """Drive one per-file indexing loop, sequentially or with a bounded pool.
 
@@ -1637,7 +1637,10 @@ def run_file_loop(
       summary here with no mechanized gate to notice. Catching only the
       one type this loop actually needs removes that coupling entirely.
       Logged loudly (``index_file_skipped_unextractable``, naming the
-      file and the reason), reported via ``on_skip`` when given, the file
+      file and the reason), reported via ``on_skip(file, reason, error_class)``
+      when given (``error_class`` is the raised type's own name, so a
+      subclass such as ``AllPagesUnextractedError`` is not folded into its
+      parent), the file
       counted as 0 chunks written (identical to a staleness skip), and
       the loop CONTINUES — this file's failure never cancels not-yet-
       started files and never aborts the run. This is the "this file
@@ -1723,6 +1726,7 @@ def run_file_loop(
         t0 = time.monotonic()
         timers = _make_timers()
         skip_reason: str | None = None
+        skip_class = ""
         try:
             chunks = index_one(file, score, timers)
         except UnextractableContentError as exc:
@@ -1736,6 +1740,7 @@ def run_file_loop(
             )
             chunks = 0
             skip_reason = str(exc)
+            skip_class = type(exc).__name__
         except Exception as exc:
             # nexus-1jtob: NAME THE FILE. Both loop paths let an unrecognised
             # exception escape ``run_file_loop`` -- the sequential path by
@@ -1775,7 +1780,7 @@ def run_file_loop(
             if skip_reason is not None:
                 skipped[0] += 1
                 if on_skip is not None:
-                    on_skip(file, skip_reason)
+                    on_skip(file, skip_reason, skip_class)
             if chunks > 0:
                 written[0] += 1
             if on_file:

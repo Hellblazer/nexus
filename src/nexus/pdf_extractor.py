@@ -187,13 +187,20 @@ _STDERR_LINE_CAP = 300
 _STDERR_PROGRESS = re.compile(r"\d+%\||\d+/\d+ \[\d|\b\d+(?:\.\d+)?\s*(?:it/s|s/it)\b")
 
 
+#: RDR-237: one complete tqdm frame, up to its closing ``]``, with the short ``<description>:`` tqdm
+#: writes before the percentage. tqdm redraws with ``\r`` and no newline, so a real message written
+#: next can share the frame's physical line; removing the frame keeps the message.
+_STDERR_FRAME = re.compile(r"(?:[^|\[\]\r\n]{0,60}?:\s*)?\d+%\|[^|\r\n]*\|[^\[\]\r\n]*\[[^\]\r\n]*\]")
+
+
 def _last_stderr_line(tail: str) -> str:
     """The last non-empty line of a (redacted) stderr *tail* that is not a progress-bar frame;
-    ``""`` when there is none. ``splitlines`` also splits on the carriage returns tqdm redraws with."""
+    ``""`` when there is none. ``splitlines`` also splits on the carriage returns tqdm redraws with,
+    and a frame glued to a message on one line is cut out of it (see :data:`_STDERR_FRAME`)."""
     for line in reversed(tail.splitlines()):
-        stripped = line.strip()
-        if stripped and not _STDERR_PROGRESS.search(stripped):
-            return stripped[:_STDERR_LINE_CAP]
+        rest = _STDERR_FRAME.sub("", line).strip()
+        if rest and not _STDERR_PROGRESS.search(rest):
+            return rest[:_STDERR_LINE_CAP]
     return ""
 
 
@@ -333,6 +340,21 @@ class MineruMemoryError(MineruWorkerError):
 from nexus._mineru_health import MineruMachineResourceError  # noqa: E402
 
 
+#: RDR-237: what to do when the worker is killed by the OS (``signal:9``) or stopped at its memory
+#: ceiling (``oom*``). The install is fine, so "repair the install" would send the operator the wrong way.
+_MINERU_MEMORY_REMEDY = (
+    "the worker was killed by the OS, usually out of memory. Free memory or use a machine with more; "
+    "keep `pdf.mineru_page_batch` at 1 (more pages per worker run need more memory); on Linux "
+    "`pdf.mineru_memory_ceiling_mb` makes the worker fail with a memory error instead of being killed."
+)
+
+
+def _is_memory_class(failure_class: str) -> bool:
+    """True for the failure classes that mean the worker ran out of memory: ``signal:9`` (the
+    OOM-killer or macOS jetsam), ``oom`` and ``oom:<rc>:<line>``."""
+    return failure_class in ("signal:9", "oom") or failure_class.startswith("oom:")
+
+
 class MineruSystemicFailure(Exception):
     """Consecutive pages failed both MinerU rungs with one failure class (RDR-237).
 
@@ -350,18 +372,23 @@ class MineruSystemicFailure(Exception):
         self.pages = pages
         self.file_name = file_name
         shown = f"; the worker's last stderr line: {stderr_line!r}" if stderr_line else ""
+        memory = _is_memory_class(failure_class)
+        first = "free memory first" if memory else "repair the install first"
         kept = (
-            "No page was kept, and a rerun starts from page 1, so repair the install first."
+            f"No page was kept, and a rerun starts from page 1, so {first}."
             if pages[0] <= 1
             else f"The pages before page {pages[0]} stay in the kept buffer, so a rerun "
-            f"does not write them again, but MinerU runs over them again, so repair "
-            f"the install first."
+            f"does not write them again, but MinerU runs over them again, so {first}."
+        )
+        cause = (
+            f"That points at the machine's memory, not at the pages: {_MINERU_MEMORY_REMEDY}"
+            if memory
+            else "That points at the install or the machine, not at the pages: run `nx doctor`."
         )
         super().__init__(
             f"MinerU failed on {len(pages)} consecutive pages of {file_name} "
             f"(pages {pages[0]}-{pages[-1]}), with and without formulas, "
-            f"all with failure class {failure_class!r}{shown}. That points at the "
-            f"install or the machine, not at the pages: run `nx doctor`. {kept} "
+            f"all with failure class {failure_class!r}{shown}. {cause} {kept} "
             f"`pdf.ladder_breaker` sets how many pages stop a "
             f"document (0 turns the check off)."
         )
@@ -384,10 +411,11 @@ def mineru_stop_reason(exc: BaseException) -> tuple[str, str, str]:
     command prints on its ``Stopped:`` line: ``Stopped: <what> on <file> (<detail>); N remaining
     PDF(s) not attempted. <remedy>``."""
     if isinstance(exc, MineruSystemicFailure):
-        return (
-            "MinerU failed systemically", f"failure class {exc.failure_class}",
-            "Repair the install (`nx doctor`), then rerun.",
+        remedy = (
+            f"{_MINERU_MEMORY_REMEDY} Then rerun." if _is_memory_class(exc.failure_class)
+            else "Repair the install (`nx doctor`), then rerun."
         )
+        return ("MinerU failed systemically", f"failure class {exc.failure_class}", remedy)
     # MineruMachineResourceError has one raise site today (exhausted POSIX named semaphores), and its
     # message IS the platform's remedy (``nexus._mineru_health.semaphore_remedy``, about 400 characters).
     # The detail stays short and the remedy appears once, so the Stopped line stays one readable line.
@@ -472,10 +500,32 @@ class PageOutcome:
 #: Settled methods below rung 1, in rung order: the keys of ``extraction_pages``.
 _DEGRADED_METHODS: tuple[str, ...] = ("mineru-no-formula", "pymupdf-text", "unextracted")
 
-#: A dropped server connection (RDR-237): the page moves on, and the failure has no class.
-_DROPPED_CONNECTION = (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError)
+#: A dropped server connection (RDR-237): the page moves on, and the failure has no class. In a real
+#: run :meth:`PDFExtractor._mineru_run_isolated` absorbs these (restart, one retry, then the
+#: subprocess), so the failure the ladder and the breaker see is the subprocess's own; this tuple
+#: covers a drop that still reaches the ladder.
+_DROPPED_CONNECTION = (
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError, httpx.RemoteProtocolError,
+)
 
 _UNCLASSIFIED = "unclassified"
+
+#: RDR-237: values that differ from page to page inside an otherwise identical stderr line.
+_KEY_PATH = re.compile(r"""(?<![\w.])(?:/|[A-Za-z]:[\\/]|~/)[^\s'"),;]*""")
+_KEY_HEX = re.compile(r"\b0x[0-9a-fA-F]+\b")
+_KEY_DIGITS = re.compile(r"\d{3,}")
+
+
+def _key_line(line: str) -> str:
+    """*line* with the parts that change from page to page replaced, for use inside a failure class.
+
+    A per-page temp path, a pid, a hex address or a byte count in the worker's last stderr line would
+    give every page its own class and the breaker would never count two pages as alike. Absolute
+    and ``~`` paths become ``<path>``, hex addresses ``<addr>``, runs of three or more digits ``<n>``;
+    the exception type and the message words stay, and so do one- and two-digit numbers."""
+    line = _KEY_PATH.sub("<path>", line)
+    line = _KEY_HEX.sub("<addr>", line)
+    return _KEY_DIGITS.sub("<n>", line)
 
 
 def _failure_class(exc: BaseException) -> str:
@@ -493,6 +543,9 @@ def _failure_class(exc: BaseException) -> str:
       :class:`MineruMemoryError`; the line keeps a missing library apart from a real exhaustion.
     * ``exit:<returncode>:<stderr line>``: any other non-zero exit; the line names an ``ImportError``
       or a missing weight file.
+
+    The stderr line in the last two keys goes through :func:`_key_line` first, so a temp path, pid,
+    address or byte count that differs per page does not give each page its own class.
     * ``unclassified``: no worker facts (a "produced no output" ``RuntimeError``, a dropped server
       connection). The breaker never counts it (see :class:`_SystemicFailureCounter`).
 
@@ -507,9 +560,10 @@ def _failure_class(exc: BaseException) -> str:
         if isinstance(exc, MineruMemoryError):
             if exc.returncode == _MINERU_OOM_EXIT:
                 return "oom"
-            return f"oom:{exc.returncode}:{exc.stderr_last_line}" if exc.returncode is not None else f"oom:{exc.stderr_last_line}"
+            line = _key_line(exc.stderr_last_line)
+            return f"oom:{exc.returncode}:{line}" if exc.returncode is not None else f"oom:{line}"
         if exc.returncode is not None:
-            return f"exit:{exc.returncode}:{exc.stderr_last_line}"
+            return f"exit:{exc.returncode}:{_key_line(exc.stderr_last_line)}"
     return _UNCLASSIFIED
 
 

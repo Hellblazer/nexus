@@ -47,10 +47,25 @@ def _write_pdf_settings(cfg: Path, **pdf) -> None:
     (cfg / "config.yml").write_text(yaml.safe_dump({"pdf": pdf}))
 
 
+class _NoCollections:
+    """Stands in for the T3 client ``run_health_checks`` builds for its one collection listing."""
+
+    def list_collections(self, *a, **k) -> list:
+        return []
+
+
 def _only_other_checks_stubbed(monkeypatch: pytest.MonkeyPatch, *keep: str) -> None:
     for name in dir(health):
         if name.startswith("_check_") and name not in keep and callable(getattr(health, name)):
             monkeypatch.setattr(health, name, lambda *a, **k: [])
+    # ``run_health_checks`` also reaches storage outside any ``_check_*``: its shared collection listing
+    # (``make_t3().list_collections()``, which asks the engine for the collection stats), the catalog
+    # reader it opens for ``_check_catalog``, and the document walk that feeds two index-run rows. With
+    # no tenant active the storage-touch guard (nexus-j23ni) fails the test for each, so the sweep tests
+    # stub them too and never touch storage.
+    monkeypatch.setattr("nexus.db.make_t3", lambda *a, **k: _NoCollections())
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: None)
+    monkeypatch.setattr(health, "_walk_documents_for_doctor", lambda: None)
 
 
 # A record that is not what record_skipped writes: each is "nothing held" to the count and the rows.

@@ -44,6 +44,9 @@ pytestmark = pytest.mark.usefixtures("_quiet_progress")
 #: The real forced-timeout wait, taken at import, before the autouse fixture replaces it.
 _REAL_FAULT_WAIT = pdf_extractor._fault_wait
 
+#: Coarse-timer slack for a wall-clock lower bound (the older wait test allows 20%: 0.04 s of 0.05 s).
+_TIMER_SLACK_S = 0.08
+
 
 @pytest.fixture
 def _quiet_progress(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
@@ -315,12 +318,20 @@ def test_a_pdf_info_excess_still_stops_the_document(tmp_path: Path) -> None:
 # ── dropped connections ──────────────────────────────────────────────────────
 
 
+# A real run's dispatch (`_mineru_run_isolated`) absorbs a dropped connection: it restarts the server,
+# retries once, then runs the page on the subprocess, so the failure the ladder sees is the
+# subprocess's. The tests in this section cover the ladder's own handling of a drop that REACHES it
+# (`tests/test_rdr237_bounds.py` pins the dispatch's absorption).
+
+
 @pytest.mark.parametrize("dropped", [
-    httpx.ConnectError("refused"), httpx.ReadError("reset"), httpx.RemoteProtocolError("eof"),
-], ids=["connect", "read", "remote-protocol"])
-def test_a_dropped_connection_on_rung_1_retries_once_on_the_subprocess_with_formulas_on(
+    httpx.ConnectError("refused"), httpx.ConnectTimeout("nothing answered"), httpx.ReadError("reset"),
+    httpx.RemoteProtocolError("eof"),
+], ids=["connect", "connect-timeout", "read", "remote-protocol"])
+def test_a_dropped_connection_that_reaches_the_ladder_on_rung_1_retries_once_on_the_subprocess(
     tmp_path: Path, dropped,
 ) -> None:
+    """Covers a drop that reaches the ladder (the dispatch absorbs it in a real run)."""
     retry = MagicMock(return_value=("SUBPROCESS page 2", [], [{"page_idx": 0}]))
     plan = {(2, 1): dropped}
     result, delivered, fake, _ = run_ladder(tmp_path, TEXTS[:3], plan, subprocess_retry=retry)
@@ -353,8 +364,10 @@ def test_a_dropped_connection_on_rung_2_descends_to_rung_3_with_no_retry(tmp_pat
     assert result.metadata["extraction_pages"] == {"pymupdf-text": [2]}
 
 
-def test_a_dropped_connection_never_counts_toward_the_breaker(tmp_path: Path) -> None:
-    """Every page loses its connection on both rungs and its retry loses it too: unclassified."""
+def test_a_dropped_connection_that_reaches_the_ladder_never_counts_toward_the_breaker(tmp_path: Path) -> None:
+    """Every page loses its connection on both rungs and its retry loses it too: unclassified.
+    Covers a drop that reaches the ladder; in a real run the dispatch absorbs it and the
+    subprocess's own class is what the breaker sees."""
     retry = MagicMock(side_effect=httpx.ReadError("reset"))
     plan = {}
     for page in range(1, 6):
@@ -366,8 +379,8 @@ def test_a_dropped_connection_never_counts_toward_the_breaker(tmp_path: Path) ->
     assert result.metadata["extraction_pages"] == {"pymupdf-text": [1, 2, 3, 4, 5]}
 
 
-def test_a_page_whose_rung_1_dropped_the_connection_never_counts_toward_the_breaker(tmp_path: Path) -> None:
-    """RDR-237 Bounds: a dropped connection counts toward neither the restart rule nor the breaker,
+def test_a_page_whose_rung_1_drop_reached_the_ladder_never_counts_toward_the_breaker(tmp_path: Path) -> None:
+    """Covers a drop that reaches the ladder (a real run's dispatch absorbs it). RDR-237 Bounds: a dropped connection counts toward neither the restart rule nor the breaker,
     also when its subprocess retry then dies with a worker class of its own and rung 2 dies the same
     way. The control plan, with the drop replaced by that same worker failure, trips."""
     retry = MagicMock(side_effect=lambda *a, **k: (_ for _ in ()).throw(worker_exit(1, "ImportError: x")))
@@ -405,11 +418,60 @@ def test_a_page_whose_rung_1_dropped_the_connection_never_counts_toward_the_brea
     (MineruMemoryError("no facts"), "oom:"),
     (RuntimeError("MinerU produced no output at /tmp/x.md"), "unclassified"),
     (httpx.ConnectError("refused"), "unclassified"),
+    (httpx.ConnectTimeout("nothing answered"), "unclassified"),
     (httpx.ReadError("reset"), "unclassified"),
     (httpx.RemoteProtocolError("eof"), "unclassified"),
 ], ids=lambda v: v if isinstance(v, str) else type(v).__name__)
 def test_the_failure_class_is_built_from_attributes_not_message_text(error, expected) -> None:
     assert pdf_extractor._failure_class(error) == expected
+
+
+@pytest.mark.parametrize("line_a,line_b,expected_line", [
+    ("FileNotFoundError: /var/folders/zz/T/nx-mineru-aa11/page_0007.pdf",
+     "FileNotFoundError: /var/folders/yy/T/nx-mineru-bb22/page_0008.pdf", "FileNotFoundError: <path>"),
+    ("OSError: [Errno 28] No space left on device: '/tmp/nx-4821/out.md'",
+     "OSError: [Errno 28] No space left on device: '/tmp/nx-9930/out.md'",
+     "OSError: [Errno 28] No space left on device: '<path>'"),
+    ("RuntimeError: CUDA error at 0x7f3a9c001230", "RuntimeError: CUDA error at 0x7f3a9c00ffe0",
+     "RuntimeError: CUDA error at <addr>"),
+    ("ValueError: pid 48213 refused 1048576 bytes", "ValueError: pid 90417 refused 2097152 bytes",
+     "ValueError: pid <n> refused <n> bytes"),
+    (r"FileNotFoundError: C:\Users\x\AppData\Local\Temp\nx1\p.pdf",
+     r"FileNotFoundError: C:\Users\y\AppData\Local\Temp\nx2\p.pdf", "FileNotFoundError: <path>"),
+], ids=["tmp-path", "quoted-path", "hex-address", "pid-and-bytes", "windows-path"])
+def test_a_stderr_line_with_a_per_page_value_gives_both_pages_one_failure_class(
+    line_a, line_b, expected_line,
+) -> None:
+    """A temp path, pid, address or byte count differs from page to page. Keyed on it, two pages
+    failing alike were two classes and the breaker never counted them."""
+    for kind, make in (("exit", worker_exit), ("oom", lambda rc, line: MineruMemoryError(
+            "ceiling", returncode=rc, stderr_last_line=line))):
+        a = pdf_extractor._failure_class(make(1, line_a))
+        b = pdf_extractor._failure_class(make(1, line_b))
+        assert a == b == f"{kind}:1:{expected_line}"
+
+
+def test_normalising_the_key_keeps_the_exception_type_and_message_words() -> None:
+    keyed = pdf_extractor._failure_class(worker_exit(1, "ImportError: libGL.so.1: cannot open shared object file"))
+    assert keyed == "exit:1:ImportError: libGL.so.1: cannot open shared object file"
+    assert pdf_extractor._failure_class(worker_exit(1, "ModuleNotFoundError: No module named 'torch'")) == (
+        "exit:1:ModuleNotFoundError: No module named 'torch'"
+    )
+    assert pdf_extractor._failure_class(worker_exit(1, "KeyError: 7 of 12")) == "exit:1:KeyError: 7 of 12", (
+        "one- and two-digit numbers are message words, not per-page noise"
+    )
+
+
+def test_pages_whose_workers_fail_with_different_tmp_paths_trip_the_breaker(tmp_path: Path) -> None:
+    plan = {}
+    for page in (2, 3, 4):
+        err = worker_exit(1, f"FileNotFoundError: /var/folders/q{page}/T/nx-mineru-{page}{page}{page}/p.pdf")
+        plan[(page, 1)] = err
+        plan[(page, 2)] = worker_exit(1, f"FileNotFoundError: /var/folders/r{page}/T/nx-mineru-{page}{page}{page}9/p.pdf")
+    with pytest.raises(MineruSystemicFailure) as info:
+        run_ladder(tmp_path, TEXTS, plan, breaker=3)
+    assert info.value.failure_class == "exit:1:FileNotFoundError: <path>"
+    assert info.value.stderr_line.startswith("FileNotFoundError: /var/folders/"), "the shown line stays raw"
 
 
 def test_the_failure_class_ignores_the_message() -> None:
@@ -727,6 +789,31 @@ def test_a_stop_raised_while_the_window_is_flushed_ends_the_run_with_a_contiguou
     assert ("attempt", 5, 1) not in events, "the run ended at the stop"
 
 
+@pytest.mark.parametrize("failure_class", ["signal:9", "oom", "oom:1:MemoryError"])
+def test_a_trip_by_a_killed_worker_names_memory_not_the_install(failure_class: str) -> None:
+    from nexus.pdf_extractor import mineru_stop_reason
+
+    exc = MineruSystemicFailure(failure_class, "", [1, 2, 3], "doc.pdf")
+    text = str(exc)
+    assert "killed by the OS, usually out of memory" in text
+    assert "pdf.mineru_page_batch" in text and "pdf.mineru_memory_ceiling_mb" in text
+    assert "repair the install" not in text and "nx doctor" not in text
+    what, detail, remedy = mineru_stop_reason(exc)
+    assert detail == f"failure class {failure_class}"
+    assert "usually out of memory" in remedy and "pdf.mineru_page_batch" in remedy
+    assert "Repair the install" not in remedy and "nx doctor" not in remedy
+
+
+@pytest.mark.parametrize("failure_class", ["timeout", "signal:11", "exit:1:ImportError: libGL.so.1"])
+def test_a_trip_by_any_other_class_still_says_repair_the_install(failure_class: str) -> None:
+    from nexus.pdf_extractor import mineru_stop_reason
+
+    exc = MineruSystemicFailure(failure_class, "", [2, 3, 4], "doc.pdf")
+    assert "repair the install first" in str(exc) and "run `nx doctor`" in str(exc)
+    assert "out of memory" not in str(exc)
+    assert mineru_stop_reason(exc)[2] == "Repair the install (`nx doctor`), then rerun."
+
+
 def test_a_trip_that_starts_on_page_1_says_no_page_was_kept() -> None:
     first = MineruSystemicFailure("timeout", "", [1, 2, 3], "doc.pdf")
     later = MineruSystemicFailure("timeout", "", [4, 5, 6], "doc.pdf")
@@ -839,6 +926,19 @@ def test_a_progress_bar_frame_is_not_the_last_meaningful_stderr_line() -> None:
     assert pdf_extractor._last_stderr_line("ValueError: 50% of 12 pages failed\n") == "ValueError: 50% of 12 pages failed", (
         "a percentage in a real error line is not a progress bar"
     )
+
+
+def test_a_real_message_glued_after_a_progress_frame_survives_the_frame() -> None:
+    """tqdm redraws with ``\\r`` and no newline, so a message written next can share the frame's
+    physical line. The frame goes, the message stays (the review finding behind this test)."""
+    bar = "Predict:  45%|####5     | 9/20 [00:03<00:04,  2.9it/s]"
+    assert pdf_extractor._last_stderr_line(f"{bar}ImportError: libGL.so.1\n") == "ImportError: libGL.so.1"
+    assert pdf_extractor._last_stderr_line(f"{bar}{bar}ImportError: libGL.so.1") == "ImportError: libGL.so.1"
+    assert pdf_extractor._last_stderr_line(f"{bar}\r{bar}\rOSError: weights missing") == "OSError: weights missing"
+    assert pdf_extractor._last_stderr_line(f"Batch inference: 9%|# | 1/11 [00:01<00:09, 1.0s/it]KeyError: 'x'") == "KeyError: 'x'"
+    assert pdf_extractor._last_stderr_line(f"ImportError: x\n{bar}") == "ImportError: x", "a frame alone is still noise"
+    assert pdf_extractor._last_stderr_line(f"{bar}\n{bar}") == ""
+    assert pdf_extractor._last_stderr_line("45%|####5     | 9/20 [00:03<00:04") == "", "a cut frame with no close is noise"
 
 
 # ── pdf.ladder_breaker ───────────────────────────────────────────────────────
@@ -1248,7 +1348,8 @@ def test_the_fault_hook_timeout_mode_runs_the_real_wait_through_the_ladder(
     elapsed = time.monotonic() - started
 
     assert waits == [0.2, 0.2], "non-vacuity: the forced timeout reached the wait, once per rung"
-    assert elapsed >= 0.4, f"the real wait slept out both budgets (took {elapsed:.2f}s)"
+    # Two 0.2 s waits; allow the coarse-timer slack the older _fault_wait test allows.
+    assert elapsed >= 0.4 - _TIMER_SLACK_S, f"the real wait slept out both budgets (took {elapsed:.2f}s)"
     assert result.metadata["extraction_pages"] == {"pymupdf-text": [2]}
     assert (2, 1) not in fake.calls and (2, 2) not in fake.calls, "the forced failure stood in for MinerU"
 
