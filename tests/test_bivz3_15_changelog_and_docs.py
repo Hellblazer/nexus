@@ -15,9 +15,14 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def _unreleased() -> str:
-    """``## [Unreleased]`` plus the newest released section: the RDR-231 entry is pending on develop and
-    moves into the release section when that release is cut (7.88.0), and it must be in one of them."""
+    """The section that carries the RDR-231 entry: it shipped in 7.88.0, so once that section exists it is
+    the ``## [7.88.0]`` section (a later release adds a newer section above it, so "the newest release
+    section" stops being the right place); before it, ``## [Unreleased]`` plus the newest release section."""
     text = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    marker = "\n## [7.88.0]"
+    if marker in text:
+        start = text.index(marker)
+        return text[start:text.index("\n## [", start + 1)]
     start = text.index("## [Unreleased]")
     newest = text.index("\n## [", start + 1)
     return text[start:text.index("\n## [", newest + 1)]
