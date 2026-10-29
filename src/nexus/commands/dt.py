@@ -28,6 +28,7 @@ import click
 import structlog
 
 import nexus.devonthink as dt_mod
+from nexus.config import DEFAULT_EXTRACTOR, EXTRACTOR_CHOICES, get_pdf_extractor, resolve_extractor
 from nexus.devonthink import DTNotAvailableError, _is_darwin
 
 _log = structlog.get_logger(__name__)
@@ -208,6 +209,36 @@ def _fail_record_on_unexpected_error(
     failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
 
 
+class _DtMineruStop:
+    """The first MinerU stop of an ``nx dt index`` run (nexus-tr1rj.13): where it happened and the
+    words the run output uses. ``name`` is the record's file name."""
+
+    def __init__(self, name: str, what: str, detail: str, remedy: str) -> None:
+        self.name = name
+        self.what = what
+        self.detail = detail
+        self.remedy = remedy
+
+
+def _fail_record_on_mineru_stop(
+    exc: Exception, *, uuid: str, path: str, failed: list[tuple[str, str, str]],
+    stop: _DtMineruStop | None,
+) -> _DtMineruStop:
+    """nexus-tr1rj.13: a MinerU breaker trip or machine-resource error names the install or the
+    machine, not this record. Fail THIS record, with no traceback (it is not a defect), and return
+    the stop the rest of the run keys on: every later PDF record is listed as not attempted,
+    while markdown and web records, which never use MinerU, keep running. *stop* is the run's
+    earlier stop, kept when there is one."""
+    from nexus.pdf_extractor import mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
+
+    what, detail, remedy = mineru_stop_reason(exc)
+    _log.warning(
+        "dt_index_mineru_stop", uuid=uuid, path=path, error_type=type(exc).__name__, detail=detail,
+    )
+    failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
+    return stop or _DtMineruStop(Path(path).name, what, detail, remedy)
+
+
 def _index_record(
     uuid: str,
     path: str,
@@ -215,7 +246,7 @@ def _index_record(
     collection: str | None,
     corpus: str,
     dry_run: bool,
-    extractor: str = "auto",
+    extractor: str = DEFAULT_EXTRACTOR,
     force: bool = False,
     force_re_embed: bool = False,
 ) -> tuple[bool, int] | tuple[bool, int, list[int] | None, dict[str, list[int]], str]:
@@ -317,7 +348,7 @@ def _index_record(
     method = ""  # the extraction_method the run recorded (RDR-237)
     if ext == ".pdf":
         # nexus-pxxyn: thread the operator's --extractor choice through so the
-        # documented MinerU-failure recovery ("rerun with --extractor docling")
+        # documented text-only recovery ("rerun with --extractor pymupdf")
         # is actionable on the DT path. Markdown has no extractor backend.
         # nexus-i0cwh: return_metadata gives the pages that produced text,
         # the page-coverage check's input.
@@ -979,16 +1010,15 @@ def dt() -> None:
 )
 @click.option(
     "--extractor",
-    type=click.Choice(["auto", "docling", "mineru", "pymupdf"], case_sensitive=False),
-    default="auto",
-    show_default=True,
+    type=click.Choice(list(EXTRACTOR_CHOICES), case_sensitive=False),
+    default=None,
     help=(
-        "PDF extraction backend for file-backed records. ``mineru`` is "
-        "formula-aware but OOM-fails on some formula-dense pages; the recovery "
-        "is ``--extractor docling`` (formula-stripped, but always completes). "
-        "``auto`` picks mineru when formulas are detected, else docling. "
-        "``pymupdf`` reads only each page's text layer (no layout, tables or math) "
-        "and needs no PDF support; it is never chosen automatically."
+        "PDF extraction backend for file-backed records (default: from pdf.extractor in the "
+        "config, or 'mineru'). ``mineru`` reads layout, "
+        "tables and math; a page it cannot read is retried without formulas, then "
+        "taken from its text layer. ``pymupdf`` reads only each page's text layer "
+        "(no layout, tables or math) and needs no PDF support; it is never chosen "
+        "automatically. ``auto`` and ``docling`` are older names that run as ``mineru``."
     ),
 )
 @click.option(
@@ -1047,7 +1077,7 @@ def index_cmd(
     enrich: bool,
     dt_content: bool,
     highlights: bool,
-    extractor: str,
+    extractor: str | None,
     force: bool,
     re_embed: bool,
     allow_page_gap: bool = False,
@@ -1057,6 +1087,8 @@ def index_cmd(
     Exactly one selector flag must be provided: ``--selection``,
     ``--tag``, ``--group``, ``--smart-group``, or one or more ``--uuid``.
     """
+    # nexus-tr1rj.14: no flag means the `pdf.extractor` setting, like `nx index pdf`.
+    extractor = get_pdf_extractor() if extractor is None else resolve_extractor(extractor, source="--extractor")
     if re_embed and not force:
         raise click.UsageError(
             "--re-embed requires --force -- a record the staleness check "
@@ -1110,6 +1142,7 @@ def index_cmd(
     if any(Path(p).suffix.lower() == ".pdf" for _uuid, p in records):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
 
+        pdf_stack.refuse_bad_mineru_bounds(extractor)
         pdf_stack.ensure_or_exit("nx dt index", extractor=extractor)
 
     indexed = 0
@@ -1152,6 +1185,11 @@ def index_cmd(
         NexusError,
         PER_RECORD_SURVIVABLE_EXCEPTIONS,
     )
+    from nexus.pdf_extractor import MINERU_RUN_STOPPING  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
+    # nexus-tr1rj.13: set by the first MinerU breaker trip / machine-resource error; PDF records after
+    # it are listed in ``not_attempted`` and never dispatched.
+    mineru_stop: _DtMineruStop | None = None
+    not_attempted: list[tuple[str, str, str]] = []  # (uuid, path, why)
     # nexus-gjxkb: records failed by an exception that is not a NexusError (a defect); the run
     # finishes the batch and then exits non-zero.
     unexpected_failed = 0
@@ -1306,6 +1344,10 @@ def index_cmd(
             )
             skipped += 1
             continue
+        if mineru_stop is not None and ext == ".pdf":
+            # nexus-tr1rj.13: MinerU is down for this run; markdown records still go on.
+            not_attempted.append((uuid, path, f"not attempted (the run stopped at {mineru_stop.name})"))
+            continue
         resolved_collection = _resolve_dt_collection(collection, corpus, ext)
         try:
             _result = _index_record(
@@ -1393,6 +1435,9 @@ def index_cmd(
                     error=str(exc),
                 )
                 failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
+            continue
+        except MINERU_RUN_STOPPING as exc:
+            mineru_stop = _fail_record_on_mineru_stop(exc, uuid=uuid, path=path, failed=failed, stop=mineru_stop)
             continue
         except (RuntimeError, ImportError) as exc:
             # nexus-2fyb code-review R4-I2: a single indexing failure must
@@ -1523,6 +1568,8 @@ def index_cmd(
         summary += f", {highlighted} highlights ingested"
     if failed:
         summary += f", {len(failed)} failed"
+    if not_attempted:
+        summary += f", {len(not_attempted)} not attempted"
     if stamp_failed:
         # Stamp failure leaves the entry recoverable via
         # 'nx catalog update --source-uri x-devonthink-item://<UUID>'
@@ -1562,10 +1609,20 @@ def index_cmd(
             f"Page coverage unverified for {coverage_unverified} record(s): {'; '.join(reasons)}. "
             "Unverified is not covered.",
         )
+    if mineru_stop is not None and not_attempted:
+        click.echo(
+            f"Stopped: {mineru_stop.what} on {mineru_stop.name} ({mineru_stop.detail}); "
+            f"{len(not_attempted)} remaining PDF record(s) not attempted (markdown and web records "
+            f"were not affected). {mineru_stop.remedy}"
+        )
     if failed:
         click.echo("\nFailures:")
         for uuid, path, err in failed:
             click.echo(f"  {uuid}\t{Path(path).name}: {err}")
+    if not_attempted:
+        click.echo("\nNot attempted:")
+        for uuid, path, why in not_attempted:
+            click.echo(f"  {uuid}\t{Path(path).name}: {why}")
     if stamp_failed:
         click.echo(
             "Some records were indexed but their catalog entry still "
@@ -1632,8 +1689,13 @@ def index_cmd(
         # bead — only a POSITIVE engine verdict or a write/identity
         # failure fails the run.
         raise_identity_drop_exception(subject="record")
-    if unexpected_failed or errored_failed:
+    if unexpected_failed or errored_failed or mineru_stop is not None:
         parts = []
+        if mineru_stop is not None:
+            parts.append(
+                f"{mineru_stop.what} on {mineru_stop.name} ({mineru_stop.detail})"
+                + (f"; {len(not_attempted)} PDF record(s) not attempted." if not_attempted else ".")
+            )
         if unexpected_failed:
             parts.append(
                 f"{unexpected_failed} record(s) failed with an unexpected error (see Failures above; "
@@ -1967,11 +2029,12 @@ def _capture_is_pdf(url: str | None, doi: str | None, file_path: str | None, cap
 @click.option("--enrich", "enrich", is_flag=True, default=False,
               help="After indexing, run DT-CrossRef bib gap-fill over the collection (Layer C).")
 @click.option("--extractor",
-              type=click.Choice(["auto", "docling", "mineru", "pymupdf"], case_sensitive=False),
-              default="auto", show_default=True,
-              help="PDF extraction backend for the index step (docling = formula-stripped "
-                   "recovery when mineru OOM-fails on formula-dense PDFs; pymupdf = text layer "
-                   "only, needs no PDF support).")
+              type=click.Choice(list(EXTRACTOR_CHOICES), case_sensitive=False),
+              default=None,
+              help="PDF extraction backend for the index step (default: from pdf.extractor in the "
+                   "config, or mineru; mineru = layout, tables and "
+                   "math; pymupdf = text layer only, needs no PDF support; auto and docling "
+                   "are older names that run as mineru).")
 @click.pass_context
 def capture_cmd(
     ctx: click.Context,
@@ -1986,7 +2049,7 @@ def capture_cmd(
     writeback: bool,
     highlights: bool,
     enrich: bool,
-    extractor: str,
+    extractor: str | None,
 ) -> None:
     """Capture a URL, DOI, or file into DEVONthink and index it (RDR-139 Layer G).
 
@@ -1998,6 +2061,8 @@ def capture_cmd(
     degrade silently when DEVONthink is absent), ``nx dt capture`` reports
     DT-required and exits NON-ZERO, because capture is impossible without DT.
     """
+    # nexus-tr1rj.14: no flag means the `pdf.extractor` setting, like `nx index pdf`.
+    extractor = get_pdf_extractor() if extractor is None else resolve_extractor(extractor, source="--extractor")
     if not _is_darwin():
         raise click.ClickException("DEVONthink integration is macOS-only")
 
@@ -2027,6 +2092,7 @@ def capture_cmd(
     if _capture_is_pdf(url, doi, file_path, capture_type):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
 
+        pdf_stack.refuse_bad_mineru_bounds(extractor)
         pdf_stack.ensure_or_exit("nx dt capture", extractor=extractor)
 
     if url:

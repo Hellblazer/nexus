@@ -86,7 +86,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
         collection: str | None,
         corpus: str,
         dry_run: bool,
-        extractor: str = "auto",
+        extractor: str = "mineru",
         force: bool = False,
         # nexus-8143o: intentionally NO default -- a caller (index_cmd)
         # that forgets to forward force_re_embed must raise here, not
@@ -392,18 +392,32 @@ class TestPassthroughFlags:
     def test_extractor_passthrough(
         self, runner, fake_selectors, fake_dispatcher,
     ):
-        # nexus-pxxyn: --extractor reaches the PDF indexer so the MinerU-failure
-        # recovery (--extractor docling) is actionable on the DT path.
+        # nexus-pxxyn: --extractor reaches the PDF indexer so the text-only recovery
+        # (--extractor pymupdf) is actionable on the DT path.
         from nexus.cli import main
 
         fake_selectors["selection"].return_value = [("U", "/a.pdf")]
         result = runner.invoke(main, [
-            "dt", "index", "--selection", "--extractor", "docling",
+            "dt", "index", "--selection", "--extractor", "pymupdf",
         ])
         assert result.exit_code == 0, result.output
-        assert fake_dispatcher[0]["extractor"] == "docling"
+        assert fake_dispatcher[0]["extractor"] == "pymupdf"
 
-    def test_extractor_defaults_to_auto(
+    @pytest.mark.parametrize("name", ["auto", "docling"])
+    def test_an_older_extractor_name_reaches_the_indexer_as_mineru(
+        self, runner, fake_selectors, fake_dispatcher, name,
+    ):
+        # RDR-237: the two older names are aliases for mineru, resolved before any record is touched.
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, [
+            "dt", "index", "--selection", "--extractor", name,
+        ])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["extractor"] == "mineru"
+
+    def test_extractor_defaults_to_mineru(
         self, runner, fake_selectors, fake_dispatcher,
     ):
         from nexus.cli import main
@@ -411,7 +425,39 @@ class TestPassthroughFlags:
         fake_selectors["selection"].return_value = [("U", "/a.pdf")]
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output
-        assert fake_dispatcher[0]["extractor"] == "auto"
+        assert fake_dispatcher[0]["extractor"] == "mineru"
+
+    def test_extractor_defaults_to_the_pdf_extractor_setting_and_gates_the_stack_on_it(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        # nexus-tr1rj.14: no flag means `pdf.extractor`, like `nx index pdf`. On a host set to
+        # pymupdf the verb must neither run MinerU nor ask for the PDF stack.
+        from nexus import config as nx_config
+        from nexus.cli import main
+
+        real = nx_config.load_config
+        monkeypatch.setattr(nx_config, "load_config", lambda **kw: {**real(**kw), "pdf": {"extractor": "pymupdf"}})
+        gated: list[str] = []
+        monkeypatch.setattr("nexus.pdf_stack.ensure_or_exit", lambda *a, **kw: gated.append(kw["extractor"]))
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["extractor"] == "pymupdf"
+        assert gated == ["pymupdf"]
+
+    def test_an_explicit_extractor_flag_beats_the_pdf_extractor_setting(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus import config as nx_config
+        from nexus.cli import main
+
+        real = nx_config.load_config
+        monkeypatch.setattr(nx_config, "load_config", lambda **kw: {**real(**kw), "pdf": {"extractor": "pymupdf"}})
+        monkeypatch.setattr("nexus.pdf_stack.ensure_or_exit", lambda *a, **kw: None)
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection", "--extractor", "mineru"])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["extractor"] == "mineru"
 
     def test_force_passthrough(
         self, runner, fake_selectors, fake_dispatcher,
@@ -695,7 +741,7 @@ class TestStampFailedSummary:
         ]
 
         # Dispatcher returns False for the two that should fail to stamp.
-        def maybe_fail(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False, force_re_embed=False):
+        def maybe_fail(uuid, path, *, collection, corpus, dry_run, extractor="mineru", force=False, force_re_embed=False):
             return uuid == "U-OK", 1
 
         monkeypatch.setattr("nexus.commands.dt._index_record", maybe_fail)
@@ -975,7 +1021,7 @@ _MEMBER_KWARGS: dict[type, dict] = {
     ExtractionQualityError: {
         "message": (
             "PDF paper.pdf failed the post-extraction quality gate "
-            "(extraction_method=docling): whitespace_ratio=0.0114 < "
+            "(extraction_method=mineru): whitespace_ratio=0.0114 < "
             "floor 0.05."
         ),
     },
@@ -1004,7 +1050,7 @@ _MEMBER_KWARGS: dict[type, dict] = {
         ),
     },
     # nexus-deyd5: extraction completed but yielded zero usable text
-    # (pymupdf/docling both fail an image-only or damaged-text-layer
+    # (mineru/pymupdf both fail an image-only or damaged-text-layer
     # PDF). Reachability differs by branch (verified against production
     # call graphs, not assumed):
     #   - FILE-BACKED branch: REAL production path. doc_indexer.index_pdf
@@ -2556,7 +2602,7 @@ class TestLinkSemantic:
         wb_calls: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.dt._index_record",
-            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False, force_re_embed=False: (uuid == "U-OK", 1),
+            lambda uuid, path, *, collection, corpus, dry_run, extractor="mineru", force=False, force_re_embed=False: (uuid == "U-OK", 1),
         )
         monkeypatch.setattr(
             "nexus.commands.dt._link_semantic_record",
@@ -2809,7 +2855,7 @@ class TestPageCoverage:
         assert dt_mod._dt_record_facts("U1") is None
 
     def _dispatch(self, monkeypatch, pages: list[int]):
-        def record(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False, force_re_embed=False):
+        def record(uuid, path, *, collection, corpus, dry_run, extractor="mineru", force=False, force_re_embed=False):
             return True, 5, pages
         monkeypatch.setattr("nexus.commands.dt._index_record", record)
         monkeypatch.setattr("nexus.commands.dt._stamp_page_gap", lambda uuid, missing: True)
@@ -2858,7 +2904,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U", "/a.pdf")]
 
-        def record(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False, force_re_embed=False):
+        def record(uuid, path, *, collection, corpus, dry_run, extractor="mineru", force=False, force_re_embed=False):
             return True, 3, None
         monkeypatch.setattr("nexus.commands.dt._index_record", record)
         monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 5})
@@ -2898,7 +2944,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U-MD", "/n.md"), ("U-SAME", "/b.pdf")]
 
-        def record(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False, force_re_embed=False):
+        def record(uuid, path, *, collection, corpus, dry_run, extractor="mineru", force=False, force_re_embed=False):
             return (True, 2, []) if path.endswith(".md") else (True, 0, [])
         monkeypatch.setattr("nexus.commands.dt._index_record", record)
         calls: list[str] = []
@@ -3045,3 +3091,91 @@ class TestAnUnexpectedExceptionFailsOneRecordNotTheBatch:
         assert "KeyError" in result.output and "U-BAD" in result.output, result.output
         assert result.exit_code == 1, result.output
         assert "1 record(s) failed with an unexpected error" in result.output, result.output
+
+
+class TestAMineruStopSkipsOnlyThePdfRecords:
+    """nexus-tr1rj.13: a MinerU breaker trip (MineruSystemicFailure) or machine-resource error
+    names the machine, not the record. ``nx dt index`` classifies it as a breaker trip (not a
+    defect: no ``dt_index_unexpected_error``, no traceback), skips every PDF record after it and
+    lists them as not attempted, and keeps running markdown and web records, which never use
+    MinerU. The run still ends non-zero."""
+
+    @staticmethod
+    def _stop(kind: str, name: str):
+        from nexus.pdf_extractor import MineruSystemicFailure
+        from tests._mineru_machine_error import real_machine_error
+
+        if kind == "breaker-trip":
+            return MineruSystemicFailure("timeout", "", [1, 2, 3], name)
+        return real_machine_error()
+
+    def _run(self, runner, monkeypatch, records, kind):
+        from nexus.cli import main
+
+        dispatched: list[str] = []
+
+        def fake_index_record(uuid, path, **kw):
+            dispatched.append(uuid)
+            if uuid == "U2":
+                raise self._stop(kind, "b.pdf")
+            return True, 1
+
+        monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: records)
+        monkeypatch.setattr("nexus.commands.dt._index_record", fake_index_record)
+        return runner.invoke(main, ["dt", "index", "--uuid", records[0][0]]), dispatched
+
+    @pytest.mark.parametrize("kind", ["breaker-trip", "machine-resource"])
+    def test_file_backed_pdf_records_stop_and_markdown_keeps_running(self, runner, monkeypatch, kind) -> None:
+        records = [("U1", "/a.pdf"), ("U2", "/b.pdf"), ("U3", "/c.md"), ("U4", "/d.pdf"), ("U5", "/e.pdf")]
+        result, dispatched = self._run(runner, monkeypatch, records, kind)
+
+        assert dispatched == ["U1", "U2", "U3"], "U3 (markdown) still ran; U4 and U5 (PDFs) were never attempted"
+        what, detail = (
+            ("MinerU failed systemically", "failure class timeout") if kind == "breaker-trip"
+            else ("MinerU cannot run on this machine", "POSIX named semaphores exhausted")
+        )
+        assert f"Stopped: {what} on b.pdf ({detail}); 2 remaining PDF record(s) not attempted (markdown and web " \
+            "records were not affected)." in result.output, result.output
+        assert "U4\td.pdf: not attempted (the run stopped at b.pdf)" in result.output
+        assert "U5\te.pdf: not attempted (the run stopped at b.pdf)" in result.output
+        (stopped,) = [line for line in result.output.splitlines() if line.startswith("Stopped:")]
+        if kind == "machine-resource":
+            remedy = str(self._stop(kind, "b.pdf"))
+            assert stopped.endswith(f"were not affected). {remedy}"), stopped
+            assert stopped.count(remedy) == 1 and stopped.count("sysctl") == 1, "one remedy, not two"
+        assert "Indexed 2 record(s)" in result.output and "2 not attempted" in result.output, result.output
+        assert result.exit_code == 1, result.output
+        assert "unexpected error" not in result.output, "a breaker trip is not a defect"
+        # The CLI configures structlog to write to the stream, so the log events are in the output.
+        assert "dt_index_unexpected_error" not in result.output
+        assert "dt_index_mineru_stop" in result.output, "the trip is logged under its own event"
+        assert "Traceback" not in result.output, "no traceback is logged for a trip"
+
+    def test_a_trip_on_the_last_pdf_prints_no_stopped_line(self, runner, monkeypatch) -> None:
+        records = [("U1", "/a.pdf"), ("U2", "/b.pdf")]
+        result, dispatched = self._run(runner, monkeypatch, records, "breaker-trip")
+
+        assert dispatched == ["U1", "U2"]
+        assert "Stopped:" not in result.output and "not attempted" not in result.output, result.output
+        assert result.exit_code == 1, result.output
+        assert "MinerU failed systemically on b.pdf" in result.output, "the exit message still names the trip"
+
+    def test_an_ordinary_runtime_error_does_not_stop_later_pdfs(self, runner, monkeypatch) -> None:
+        """Control: only the stop exceptions stop the PDFs; one record's RuntimeError is that record's."""
+        from nexus.cli import main
+
+        dispatched: list[str] = []
+
+        def fake_index_record(uuid, path, **kw):
+            dispatched.append(uuid)
+            if uuid == "U2":
+                raise RuntimeError("this one file is broken")
+            return True, 1
+
+        monkeypatch.setattr("nexus.commands.dt._gather_records",
+                            lambda **kw: [("U1", "/a.pdf"), ("U2", "/b.pdf"), ("U3", "/c.pdf")])
+        monkeypatch.setattr("nexus.commands.dt._index_record", fake_index_record)
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1"])
+
+        assert dispatched == ["U1", "U2", "U3"]
+        assert "not attempted" not in result.output

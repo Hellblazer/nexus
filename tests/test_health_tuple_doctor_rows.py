@@ -416,7 +416,8 @@ class TestCheckTupleTableBloat:
         with patch("nexus.config.is_local_mode", return_value=False):
             r = h._check_tuple_table_bloat(creds_path=missing)[0]
         assert r.ok is False and r.warn is True
-        assert "server-side" in r.detail
+        assert r.detail.startswith("managed deployment")
+        assert "store operator" in r.detail
 
     def test_tables_absent_at_floor_is_loud_warn(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", h._TUPLE_ROUTE_FIRST_ENGINE_VERSION)

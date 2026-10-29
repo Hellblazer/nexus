@@ -25,11 +25,17 @@ def _setup_run() -> str:
     return text[start:] if end < 0 else text[start:end]
 
 
-def test_the_setup_run_shows_the_rules_for_user_settings_and_never_edits_them() -> None:
+def test_the_setup_run_offers_the_rules_and_edits_user_settings_only_on_the_authors_pick() -> None:
+    # nexus-scmcs, Sam 2026-10-28: the wizard asks (AskUserQuestion) and, on "Add them", merges the two rules with the
+    # Edit tool behind the harness's own approval prompt. It used to print the JSON and forbid any edit of the file.
     section = _setup_run()
     assert "BRIEF setup" in section
     assert "allow_rules.json" in section and "~/.claude/settings.json" in section
-    assert "Never edit that file yourself" in section
+    assert "Add the two temp-folder permission rules to ~/.claude/settings.json?" in section
+    assert "Add them (Recommended)" in section and "Show me the JSON" in section
+    assert "permissions.allow" in section and "Edit tool" in section
+    assert "never write `settings.local.json`" in section
+    assert "Change nothing else in the file" in section
     assert "`Read()`" in section and "`Edit()`" in section
 
 

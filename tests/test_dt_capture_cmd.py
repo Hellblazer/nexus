@@ -117,8 +117,8 @@ def test_doi_capture_downloads_pdf_and_indexes(runner, monkeypatch) -> None:
 
 
 def test_capture_forwards_extractor_to_index(runner, monkeypatch) -> None:
-    """nexus-pxxyn: nx dt capture --extractor docling reaches the PDF indexer
-    (so a formula-heavy captured PDF can use the docling recovery)."""
+    """nexus-pxxyn: nx dt capture --extractor reaches the PDF indexer (so a captured PDF
+    can use the text-only extractor)."""
     from nexus.cli import main
     monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
     monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page",
@@ -129,9 +129,87 @@ def test_capture_forwards_extractor_to_index(runner, monkeypatch) -> None:
     monkeypatch.setattr("nexus.commands.dt._index_record",
                         lambda uuid, path, **kw: (seen.update(kw) or True, 1))
     result = runner.invoke(main, ["dt", "capture", "https://e.com",
-                                  "--type", "pdf", "--extractor", "docling"])
+                                  "--type", "pdf", "--extractor", "pymupdf"])
     assert result.exit_code == 0, result.output
-    assert seen.get("extractor") == "docling"
+    assert seen.get("extractor") == "pymupdf"
+
+
+def test_capture_reads_the_pdf_extractor_setting_when_no_flag_is_given(runner, monkeypatch) -> None:
+    """nexus-tr1rj.14: no --extractor means `pdf.extractor`, like `nx index pdf`; a host set to
+    pymupdf neither asks for the PDF stack nor indexes with MinerU."""
+    from nexus import config as nx_config
+    from nexus.cli import main
+
+    real = nx_config.load_config
+    monkeypatch.setattr(nx_config, "load_config", lambda **kw: {**real(**kw), "pdf": {"extractor": "pymupdf"}})
+    gated: list[str] = []
+    monkeypatch.setattr("nexus.pdf_stack.ensure_or_exit", lambda *a, **kw: gated.append(kw["extractor"]))
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page", lambda url, **kw: "PDF-UUID")
+    monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: [(kw["uuids"][0], "/captured.pdf")])
+    seen = {}
+    monkeypatch.setattr("nexus.commands.dt._index_record", lambda uuid, path, **kw: (seen.update(kw) or True, 1))
+    result = runner.invoke(main, ["dt", "capture", "https://e.com", "--type", "pdf"])
+    assert result.exit_code == 0, result.output
+    assert seen.get("extractor") == "pymupdf"
+    assert gated and set(gated) == {"pymupdf"}, "both stack gates (capture's, then index's) key on the setting"
+
+
+def test_capture_stops_on_a_mineru_breaker_trip_without_calling_it_a_defect(runner, monkeypatch) -> None:
+    """nexus-tr1rj.13: capture hands its one record to `nx dt index`, which now classifies a trip
+    as a breaker trip, not an unexpected defect."""
+    from nexus.cli import main
+    from nexus.pdf_extractor import MineruSystemicFailure
+
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page", lambda url, **kw: "PDF-UUID")
+    monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: [(kw["uuids"][0], "/captured.pdf")])
+
+    def _trip(uuid, path, **kw):
+        raise MineruSystemicFailure("timeout", "", [1, 2, 3], "captured.pdf")
+
+    monkeypatch.setattr("nexus.commands.dt._index_record", _trip)
+    result = runner.invoke(main, ["dt", "capture", "https://e.com", "--type", "pdf", "--extractor", "mineru"])
+    assert result.exit_code != 0, result.output
+    assert "MinerU failed systemically on captured.pdf (failure class timeout)" in result.output
+    assert "unexpected error" not in result.output
+    assert "Recover with: nx dt index --uuid PDF-UUID" in result.output
+
+
+@pytest.mark.parametrize("name", ["auto", "docling"])
+def test_capture_runs_an_older_extractor_name_as_mineru(runner, monkeypatch, name) -> None:
+    """RDR-237: the older names are aliases for mineru, resolved before the capture starts."""
+    from nexus.cli import main
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page",
+                        lambda url, **kw: "PDF-UUID")
+    monkeypatch.setattr("nexus.commands.dt._gather_records",
+                        lambda **kw: [(kw["uuids"][0], "/captured.pdf")])
+    seen = {}
+    monkeypatch.setattr("nexus.commands.dt._index_record",
+                        lambda uuid, path, **kw: (seen.update(kw) or True, 1))
+    result = runner.invoke(main, ["dt", "capture", "https://e.com",
+                                  "--type", "pdf", "--extractor", name])
+    assert result.exit_code == 0, result.output
+    assert seen.get("extractor") == "mineru"
+
+
+def test_capture_prints_the_older_name_notice_before_it_touches_devonthink(runner, monkeypatch) -> None:
+    """The alias is resolved at the top of the verb, so a capture that stops at once (DEVONthink not
+    running) still told the user once that their older name now runs as mineru."""
+    from nexus import config as nexus_config
+    from nexus.cli import main
+
+    nexus_config._NOTICES_SHOWN.clear()
+    monkeypatch.setattr("nexus.commands.dt._is_darwin", lambda: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: False)
+    try:
+        result = runner.invoke(main, ["dt", "capture", "https://e.com", "--extractor", "docling"])
+    finally:
+        notices = [ln for ln in result.output.splitlines() if ln.startswith("notice:")]
+        nexus_config._NOTICES_SHOWN.clear()
+    assert result.exit_code != 0 and "requires DEVONthink" in result.output
+    assert len(notices) == 1 and "--extractor says 'docling'" in notices[0]
 
 
 def test_doi_without_email_warns(runner, monkeypatch) -> None:

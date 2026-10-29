@@ -7,9 +7,12 @@ neither vocabulary (``disable``, ``disabled``, ``off!``) is read as on, as it al
 turn a switch off and misspelled it would get the opposite and see nothing. It logs one warning per variable per
 process; the behaviour does not change.
 
-``NX_ANSWER_COVERAGE`` (nexus-jypmj.3.3) is the other way round: it is OFF unless set to an on value, until the
-Phase 3 measurement (nexus-jypmj.3.10) justifies flipping the default. A value in neither vocabulary is read as
-the default (off) and logs the same one warning, so a misspelled opt-in or opt-out never switches the gate on.
+``NX_ANSWER_COVERAGE`` (nexus-jypmj.3.3) is ON by default since Sam's decision of 2026-10-28 (nexus-jypmj.17): unset
+or blank reads as on, and ``0``/``false``/``off``/``no`` is the kill switch. Its unrecognised-value rule is the
+other way round from the two switches above: a value in neither vocabulary (``disable``, ``disabled``, ``off!``)
+is read as OFF and logs the same one warning. A typo of either intent therefore lands on the unassessed
+behaviour, which changes no answer; only an explicit on value (``1``, ``true``, ``yes``, ``on``) or leaving the
+variable unset runs the assessment.
 """
 from __future__ import annotations
 
@@ -31,16 +34,16 @@ __all__ = [
 
 #: The values that turn a switch off (any case, trimmed).
 OFF_VALUES: frozenset[str] = frozenset({"0", "false", "off", "no"})
-#: The values that say on out loud. Unset and blank are on too for the default-on switches (off for
-#: NX_ANSWER_COVERAGE), and are not unrecognised.
+#: The values that say on out loud. Unset and blank are on too (all three switches), and are not unrecognised.
 ON_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
 #: The kill switch of the Phase 3 coverage boundary (RDR-232 section 4, nexus-jypmj.3.3).
 ANSWER_COVERAGE_ENV = "NX_ANSWER_COVERAGE"
-#: What an unset, blank or unrecognised :data:`ANSWER_COVERAGE_ENV` means. One source for the default; a test flips it.
-#: Off until the Phase 3 measurement (nexus-jypmj.3.10) records tag adherence, assessor accuracy, cost and latency
-#: and Sam approves the flip (RDR-232 Phase 1 step 7: compare with the baseline before enabling).
-ANSWER_COVERAGE_ENABLED: bool = False
+#: What an unset or blank :data:`ANSWER_COVERAGE_ENV` means (an unrecognised value is off, whatever this is). One
+#: source for the default; a test flips it. On since Sam's decision of 2026-10-28 (nexus-jypmj.17), taken together
+#: with the concurrent per-stream assessment so the default does not carry the serial latency the Phase 3 canary
+#: measured (nexus-jypmj.3.10).
+ANSWER_COVERAGE_ENABLED: bool = True
 
 _warned: set[str] = set()
 
@@ -68,8 +71,8 @@ def reset_warned() -> None:
 def coverage_enabled(environ: Mapping[str, str]) -> bool:
     """Whether ``nx_answer`` runs the coverage boundary for a request, decided now from *environ*.
 
-    Unset or blank: :data:`ANSWER_COVERAGE_ENABLED` (``False``). A value in neither vocabulary: off whatever the
-    default, so a mistyped value can never switch the assessor on, and one warning per process. An on value
+    Unset or blank: :data:`ANSWER_COVERAGE_ENABLED` (``True``). A value in neither vocabulary: off whatever the
+    default, so a mistyped value never runs the assessor, and one warning per process. An on value
     (``1``, ``true``, ``yes``, ``on``): on.
     An off value (``0``, ``false``, ``off``, ``no``): off. Off means every run is unassessed and ``nx_answer``
     behaves exactly as before Phase 3 (no boundary is handed to the runner, so no assessment call, no repair, no

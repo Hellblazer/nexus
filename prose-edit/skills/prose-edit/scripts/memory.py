@@ -106,7 +106,8 @@ compete as the lowest layer, each with a prefix length of its own:
 
 "None" means the caller asks the author. Genre names are the six in GENRES (rdr,
 reference-doc, how-to, exploration-essay, changelog, commit-message); any other
-name is refused wherever a genre is given. `exemplar-add --rev REV` resolves REV
+name is refused wherever a genre is given, a genre_map entry in `add-entry` included (exit 1, nothing
+stored). `exemplar-add --rev REV` resolves REV
 (a branch, tag or sha) to a full commit sha, reads the passage from that commit,
 and records the sha; a file that is not UTF-8 text is refused. Line numbers count
 newline-separated lines.
@@ -997,6 +998,16 @@ def _check_entry_body(raw: Any) -> Obj:
     return body
 
 
+def _check_genre_map_items(items: list[Any]) -> None:
+    """A genre_map entry is `prefix=genre` with one of the six genres. Anything else stored here makes every later run
+    in that folder fail at `read` (nexus-scmcs: an "Other" answer to a genre question went in unchecked)."""
+    for item in items:
+        prefix, sep, genre = str(item).partition("=")
+        if not (sep and prefix and genre in GENRES):
+            raise UserError(f"add-entry: genre_map entry {item!r}: expected '<prefix>=<genre>' with the genre one of "
+                            f"{', '.join(GENRES)}")
+
+
 def cmd_add_entry(ctx: Ctx, a: argparse.Namespace) -> None:
     if a.level == "doc":
         if not a.path or a.path == "-":
@@ -1009,6 +1020,10 @@ def cmd_add_entry(ctx: Ctx, a: argparse.Namespace) -> None:
     body: Obj = _check_entry_body(_read_stdin_json("add-entry")) if a.from_stdin else {}
     if not a.from_stdin and (not a.key or a.value is None):
         raise UserError("add-entry needs --key and --value, or --from-stdin")
+    if a.from_stdin:
+        _check_genre_map_items(cast("list[Any]", (body.get("lists") or {}).get("genre_map") or []))
+    elif a.key == "genre_map" and a.list:
+        _check_genre_map_items([a.value])
     with ctx.locked(project, title):
         rec = _record(ctx.t2.get_json(project, title, kind))
         if a.from_stdin:

@@ -51,7 +51,7 @@ def _stub_keys() -> set[str]:
 
 @pytest.mark.parametrize("overridden", [True, False], ids=["gate-overridden", "gate-clean"])
 def test_stub_and_post_pass_touch_disjoint_keys(overridden: bool) -> None:
-    meta: dict[str, Any] = {"extraction_method": "docling", "page_count": 1, "pdf_author": "A"}
+    meta: dict[str, Any] = {"extraction_method": "mineru", "page_count": 1, "pdf_author": "A"}
     if overridden:
         meta["quality_gate_overridden"] = True
     t3 = _RecordingT3()

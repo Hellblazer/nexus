@@ -168,9 +168,60 @@ def test_a_managed_engine_that_reports_no_profile_is_not_applicable() -> None:
     assert r.ok is True and not r.warn and "not applicable" in r.detail
 
 
-def test_an_unrecognised_profile_value_is_not_applicable_never_a_guess() -> None:
-    r = _row({"embedding_profile": "minilm", "embedding_models": [_BGE]})
+def test_a_managed_dual_mode_engine_serving_both_families_is_green_and_says_so() -> None:
+    """nexus-njn1a finding 10: the cloud /version reports embedding_mode "dual" and models of both families but no
+    embedding_profile. Whichever profile the engine seeded, its family is served, so the row answers instead of
+    reading "could not be determined" on every managed box."""
+    body = {
+        "embedding_mode": "dual",
+        "embedding_models": [_BGE, "voyage-3"],
+    }
+    r = _row(body, local=False, client_profile="bge")
+    assert r.ok is True and not r.warn
+    assert "not applicable" not in r.detail
+    assert "dual" in r.detail and "both" in r.detail and _BGE in r.detail
+
+
+def test_the_both_families_pass_needs_the_engine_to_name_no_profile() -> None:
+    """The profile-free "both families are served" answer is for an engine that named no profile. One that named
+    a profile this client does not recognise, or a local client whose own profile is unrecognised, is "cannot
+    tell", whatever else the engine lists (the guard is "profile is None", not merely "no known prefix")."""
+    both = [_BGE, "voyage-3"]
+    r = _row({"embedding_mode": "dual", "embedding_profile": "minilm", "embedding_models": both})
+    assert r.ok is True and not r.warn and "not applicable" in r.detail and "both" not in r.detail
+    r = _row({"embedding_mode": "dual", "embedding_models": both}, local=True, client_profile="minilm")
+    assert r.ok is True and not r.warn and "not applicable" in r.detail and "both" not in r.detail
+
+
+def test_a_dual_mode_engine_missing_one_family_is_not_called_served() -> None:
+    """Both families must be in the served list for the profile-free answer: a degraded dual engine that lost
+    its Voyage key lists bge only, and the row cannot say whether the seeded profile was served."""
+    r = _row({"embedding_mode": "dual", "embedding_models": [_BGE]}, local=False, client_profile="bge")
     assert r.ok is True and not r.warn and "not applicable" in r.detail
+    assert "both" not in r.detail
+
+
+def test_the_not_applicable_detail_names_the_real_cause_on_a_managed_engine() -> None:
+    """It used to say "the embedding profile could not be determined for this engine" on every managed box. The
+    cause is that the engine's /version names no embedding_profile and a managed engine is never read against
+    this client's local profile."""
+    r = _row({"embedding_mode": "voyage", "embedding_models": ["voyage-3"]}, local=False, client_profile="bge")
+    assert r.ok is True and not r.warn and "not applicable" in r.detail
+    assert "embedding_profile" in r.detail
+    assert "embedding_mode voyage" in r.detail
+    assert "managed" in r.detail
+    assert "could not be determined" not in r.detail
+
+
+def test_an_unrecognised_profile_value_is_not_applicable_never_a_guess() -> None:
+    """An engine that NAMED a profile this client does not recognise is told apart from one that named none:
+    the detail used to say "reports no embedding_profile" for both (nexus-njn1a confirmation review)."""
+    for local in (False, True):
+        r = _row({"embedding_profile": "minilm", "embedding_models": [_BGE]}, local=local, client_profile="bge")
+        assert r.ok is True and not r.warn and "not applicable" in r.detail
+        assert "reports embedding_profile 'minilm'" in r.detail
+        assert "does not recognise" in r.detail
+        assert "reports no embedding_profile" not in r.detail
 
 
 @pytest.mark.t2_tenant

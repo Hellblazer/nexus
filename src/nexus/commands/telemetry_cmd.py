@@ -467,10 +467,14 @@ def _render_text(data: dict[str, Any]) -> None:
         total_clause = f"total={nar['total']} (+{nar['since_count']} {win})"
     else:
         total_clause = f"total={nar['total']} ({win})"
+    # nexus-njn1a finding 11: newest/oldest come from the windowed response, so with --since they are the
+    # window's, printed beside an all-time total=. Say so; unscoped, the window IS all time and the bare names
+    # are right. The JSON keys are unchanged.
+    scope = "_in_window" if isinstance(nar["window"], dict) else ""
     click.echo(
         f"  nx_answer runs: {total_clause}; hit={nar['hit_count']} / "
-        f"fallback={nar['fallback_count']}; newest={nar['newest_created_at']}; "
-        f"oldest={nar['oldest_created_at']}"
+        f"fallback={nar['fallback_count']}; newest{scope}={nar['newest_created_at']}; "
+        f"oldest{scope}={nar['oldest_created_at']}"
     )
     buckets = nar["latency_buckets"]
     if isinstance(buckets, dict) and buckets:

@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Regression guards for nexus-aold: silent zero-chunk indexing.
 
-A 71MB PDF (DEVONthink 4.2.2 user manual) caused ``nx index pdf
---extractor docling`` to exit silently with 0 chunks indexed. The
+A 71MB PDF (DEVONthink 4.2.2 user manual) caused an ``nx index pdf`` run
+to exit silently with 0 chunks indexed. The
 multiprocessing-leaked-semaphore warning at process shutdown was
 the only signal something went wrong. Acceptance: the indexer must
 either succeed or fail loud with an actionable error naming the
@@ -11,9 +11,9 @@ failure mode.
 
 Two guards cover the silent-zero case:
 
-1. ``_extract_normalized`` raises when PyMuPDF returns no text (the
-   silent fallback that used to mask Docling crashes). Tested in
-   ``test_pdf_extractor.py``.
+1. the PyMuPDF extractor raises when PyMuPDF returns no text (the
+   silent fallback that used to mask extractor crashes). Tested in
+   ``test_rdr237_pymupdf_extractor.py``.
 
 2. ``_pdf_chunks`` raises when extraction succeeded with non-empty
    text but the chunker returned zero chunks. The previous
@@ -46,7 +46,7 @@ def test_pdf_chunks_raises_when_text_present_but_chunker_empty(tmp_path: Path):
         ext_cls.return_value.extract.return_value = MagicMock(
             text="some real extracted text content",
             metadata={
-                "extraction_method": "docling",
+                "extraction_method": "mineru",
                 "page_count": 100,
                 "format": "markdown",
                 "page_boundaries": [],
@@ -72,7 +72,7 @@ def test_pdf_chunks_returns_empty_when_extraction_empty(tmp_path: Path):
     reached, so the contract is just 'no silent zero from this layer
     when extraction was empty too'.
 
-    Today _extract_with_docling and _extract_normalized both raise
+    Today _extract_pymupdf and the MinerU ladder both raise
     on empty extraction, so this case can only occur if a future
     extractor returns empty text without raising. Treat empty text
     + empty chunks as the legitimate (no-op) case so the new guard
@@ -89,7 +89,7 @@ def test_pdf_chunks_returns_empty_when_extraction_empty(tmp_path: Path):
         ext_cls.return_value.extract.return_value = MagicMock(
             text="",  # also empty; chunks will also be empty, no inconsistency
             metadata={
-                "extraction_method": "docling",
+                "extraction_method": "mineru",
                 "page_count": 0,
                 "format": "markdown",
                 "page_boundaries": [],

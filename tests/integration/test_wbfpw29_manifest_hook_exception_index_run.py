@@ -382,7 +382,7 @@ def _fake_pdf_extraction_result():
     return ExtractionResult(
         text=text,
         metadata={
-            "extraction_method": "docling", "page_count": 1,
+            "extraction_method": "mineru", "page_count": 1,
             "page_boundaries": [
                 {"page_number": 1, "start_char": 0, "page_text_length": len(text)}
             ],
@@ -392,7 +392,7 @@ def _fake_pdf_extraction_result():
 
 
 def _fake_pdf_extract_side_effect(result):
-    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, **kwargs):
+    def extract(pdf_path, *, extractor="mineru", on_page=None, **kwargs):
         if on_page:
             on_page(0, "Page 0 nexus-wbfpw29 channel-4 content.", {"page_number": 1})
         return result

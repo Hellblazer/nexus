@@ -1,25 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""PDF text extraction with auto-detect math routing.
+"""PDF text extraction: MinerU, with a per-page fallback ladder, and a text-only option.
 
-Extraction backends (selected by ``extractor`` param):
-1. Docling — neural layout model for multi-column academic PDFs, Type3 fonts,
-   and complex tables.  Enriched mode enables formula detection via FormulaItem.
-2. MinerU — math-aware extraction. Part of the on-demand ``pdf`` extra
-   (nexus-2k66t.4.2): a fresh install leaves it out and the first PDF index
-   fetches it (``nexus.pdf_stack``), an existing install keeps it. It was a
-   default dependency from nexus-2fyb, after an optional ``[mineru]`` extra
-   produced silent formula loss for weeks; the contract that came out of that
-   still holds, in a different place: no entry point ever falls back to a
-   plainer extractor, it installs the stack or stops with the command to run.
-   Used when auto mode detects formulas in the Docling probe pass.
-3. PyMuPDF normalized — fallback for the explicit ``extractor='docling'``
-   path when Docling itself fails.
+Extraction backends (selected by the ``extractor`` param):
 
-Auto mode (default): non-enriched Docling probe → if formulas detected, route
-to MinerU. If MinerU fails on a formula-bearing PDF, raise ``RuntimeError``
-rather than silently returning the formula-stripped probe (the original
-silent-corruption bug). Users who explicitly accept stripped extraction can
-opt out with ``--extractor docling``.
+1. MinerU (the default) is math- and layout-aware. It is part of the on-demand
+   ``pdf`` extra (nexus-2k66t.4.2): a fresh install leaves it out and the first
+   PDF index fetches it (``nexus.pdf_stack``), an existing install keeps it. No
+   entry point ever falls back to a plainer extractor on its own: it installs the
+   stack or stops with the command to run. A page whose MinerU attempt fails walks
+   the per-page ladder (RDR-237) instead of failing the document.
+2. PyMuPDF (``extractor='pymupdf'``) is the explicit text-only extractor: every
+   page's own text layer, no layout, tables or math, and none of the PDF stack.
+   It is never chosen automatically.
+
+The two values older configs and scripts may still carry are aliases for
+``mineru`` (``nexus.config.resolve_extractor``).
 """
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -38,6 +33,7 @@ import time
 import httpx
 import structlog
 
+from nexus.config import DEFAULT_EXTRACTOR, resolve_extractor
 from nexus.errors import ExtractionQualityError, UnextractableContentError
 from nexus.redact import redact_credentials
 
@@ -193,25 +189,12 @@ os._exit(0)
 
 _log = structlog.get_logger(__name__)
 
-# One docling converter per process for each configuration (nexus-l4kbc). Each
-# DocumentConverter loads the layout and table models (about 2 GB resident), and a
-# converter that is dropped does not give that memory back: measured on Linux,
-# six extractions of one PDF ended at 4.1 GB resident and still rising about
-# 250 MB per PDF with a new converter each time, against a 3.0 GB plateau with
-# one. Callers build a PDFExtractor per PDF, so the converter is shared here,
-# not on the instance. docling documents a DocumentConverter as reusable and
-# thread-safe. Keyed on the DocumentConverter class as well, so a test that
-# swaps in a fake docling module gets its own entry and never the real one.
-_SHARED_CONVERTERS: dict[tuple[Any, bool, str], Any] = {}
-_SHARED_CONVERTERS_LOCK = threading.Lock()
-
-
 class MineruWorkerStopped(BaseException):
     """The MinerU worker was killed by :func:`stop_mineru_workers` (nexus-4vx0a).
 
     The run was interrupted, so this is not a document failure: a
-    ``BaseException`` so the per-page OOM retry (``except RuntimeError``) and
-    the docling fallbacks never catch it and start more work."""
+    ``BaseException`` so the per-page OOM retry (``except RuntimeError``)
+    never catches it and starts more work."""
 
 
 class _LiveWorker:
@@ -330,6 +313,27 @@ class MineruSystemicFailure(Exception):
             f"`pdf.ladder_breaker` sets how many pages stop a "
             f"document (0 turns the check off)."
         )
+
+
+#: What stops a run's MinerU work (nexus-tr1rj.13). Both name the install or the machine, not the
+#: file, so every later PDF would fail the same way after its own timeouts. A batch command catches
+#: this tuple, stops the PDFs it has not started, lists them, and keeps its other work.
+MINERU_RUN_STOPPING: tuple[type[Exception], ...] = (MineruSystemicFailure, MineruMachineResourceError)
+
+
+def mineru_stop_reason(exc: BaseException) -> tuple[str, str, str]:
+    """``(what, detail, remedy)`` for a :data:`MINERU_RUN_STOPPING` exception, in the words a batch
+    command prints on its ``Stopped:`` line: ``Stopped: <what> on <file> (<detail>); N remaining
+    PDF(s) not attempted. <remedy>``."""
+    if isinstance(exc, MineruSystemicFailure):
+        return (
+            "MinerU failed systemically", f"failure class {exc.failure_class}",
+            "Repair the install (`nx doctor`), then rerun.",
+        )
+    # MineruMachineResourceError has one raise site today (exhausted POSIX named semaphores), and its
+    # message IS the platform's remedy (``nexus._mineru_health.semaphore_remedy``, about 400 characters).
+    # The detail stays short and the remedy appears once, so the Stopped line stays one readable line.
+    return ("MinerU cannot run on this machine", "POSIX named semaphores exhausted", str(exc))
 
 
 class MineruServerTimeout(MineruWorkerError):
@@ -541,7 +545,7 @@ def _http_error_text(exc: httpx.HTTPStatusError) -> str:
 
 
 # nexus-2fyb code-review R1-I3: progress messages are interactive UX for
-# long-running PDF extractions (Docling layout pass, MinerU per-page
+# long-running PDF extractions (MinerU per-page
 # inference). They MUST also go through structlog so non-interactive
 # callers (library use, MCP server, batch jobs) capture them in structured
 # logs. Setting NEXUS_PDF_PROGRESS_QUIET=1 disables the stderr write
@@ -566,6 +570,31 @@ def _progress(msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)  # noqa: T201 — gated interactive stderr progress; structured event emitted above via _log.info
 
 
+def _restart_skip_text(reason: str, pid: object) -> str:
+    """The progress sentence for a timed-out server that was NOT replaced (nexus-tr1rj.25).
+
+    *reason* is what ``PDFExtractor._restart_broken_mineru_server`` recorded. After a skip the old
+    server is still the registered one; the caller marks it down, so later pages run in a
+    subprocess until the re-check finds it answering.
+    """
+    from nexus._mineru_health import BROKEN_RESTART_COOLDOWN_S  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if reason == "failed":
+        head = f"tried to replace it (pid {pid}) and the replacement did not come up"
+    else:
+        why = {
+            "cooldown": (
+                f"a server was already replaced on this machine in the last "
+                f"{int(BROKEN_RESTART_COOLDOWN_S)} s"
+            ),
+            "refused": "this run's restart limit is spent or the spawn policy forbids a restart",
+            "no-pid": "its pid is not recorded",
+            "unreadable": "the process behind that pid could not be identified, so nothing was stopped",
+        }.get(reason, "no restart happened")
+        head = f"not replacing it (pid {pid}): {why}"
+    return f"{head}; later pages run in a subprocess for now."
+
+
 # nexus-2fyb code-review R5-I2: chained exceptions from MinerU/httpx can
 # include the configured pdf.mineru_server_url. If a user (mis-)configured
 # that URL with embedded credentials (http://user:pass@host/...), those
@@ -583,51 +612,6 @@ def _redact_url_credentials(text: str) -> str:
     a user may have configured into ``pdf.mineru_server_url``.
     """
     return _URL_CREDENTIALS_PATTERN.sub(r"\1[redacted]@", text)
-
-
-# Block-style formula delimiters — counted once per block.
-_FORMULA_BLOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\$\$.+?\$\$", re.DOTALL),                                  # $$...$$
-    re.compile(r"\\\(.+?\\\)", re.DOTALL),                                  # \(...\)
-    re.compile(r"\\\[.+?\\\]", re.DOTALL),                                  # \[...\]
-    re.compile(r"\\begin\{equation\*?\}.+?\\end\{equation\*?\}", re.DOTALL),
-    re.compile(r"\\begin\{align\*?\}.+?\\end\{align\*?\}", re.DOTALL),
-)
-
-# Command tokens — counted independently of containing blocks. Each
-# occurrence inside or outside a block is one marker. This is intentional:
-# the original nexus-2fyb bug shape was the alternation pattern below,
-# which used a single re.findall and let `\$\$.+?\$\$` consume the whole
-# block — `\frac` instances inside were never separately counted (4 markers
-# returned for a paper with 12 \frac calls). Counting commands independently
-# avoids that undercount and gives the routing decision a true signal.
-#
-# Patterns use \b (word boundary) rather than requiring an immediate `{`
-# because MinerU emits LaTeX with whitespace between the command and its
-# argument: ``\\frac { 1 } { m }`` (note spaces), so `\\frac\{` would
-# match zero of those. \b matches between the word `\\frac` and the
-# subsequent non-word character (space, `{`, `(`, etc.). This was an
-# adjacent regression to the C1 bug — the regex assumed Docling-shaped
-# LaTeX and silently undercounted on MinerU output.
-_FORMULA_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\\frac\b"),       # fraction
-    re.compile(r"\\sum\b"),        # summation
-    re.compile(r"\\int\b"),        # integral
-    re.compile(r"\\prod\b"),       # product
-    re.compile(r"\\partial\b"),    # partial derivative
-    re.compile(r"\\nabla\b"),      # nabla/gradient
-    re.compile(r"\\mathbb\b"),     # blackboard bold
-    re.compile(r"\\mathcal\b"),    # calligraphic
-)
-
-# Unicode math symbols that indicate formula content in raw PDF text.
-# These are present in the PDF's embedded text even without enrichment.
-#: Formula count at which auto mode routes a PDF to MinerU. One name for the
-#: quick screen's early exit and the routing decision, which used to carry
-#: the literal separately.
-_FORMULA_ROUTE_THRESHOLD = 5
-
-_MATH_UNICODE = frozenset("∑∫∏∀∃∈∉∪∩⊆⊇⊂⊃→←↔∧∨¬⇒⇔⇐∂∇≤≥≠±×÷√∞≈≡∝∅⊕⊗⊥∥")
 
 
 def _mineru_end_page_id(end: int | None) -> int:
@@ -702,13 +686,46 @@ def _normalize_page_text(raw: str) -> str:
     return _normalize_whitespace_edge_cases(page_text)
 
 
+def _pdf_info_fields(info: dict | None) -> dict[str, str]:
+    """The ``pdf_*`` metadata keys, from a PyMuPDF ``doc.metadata`` dict (empty when it has none)."""
+    info = info or {}
+    return {
+        "pdf_title": str(info.get("title") or ""),
+        "pdf_author": str(info.get("author") or ""),
+        "pdf_subject": str(info.get("subject") or ""),
+        "pdf_keywords": str(info.get("keywords") or ""),
+        "pdf_creator": str(info.get("creator") or ""),
+        "pdf_producer": str(info.get("producer") or ""),
+        "pdf_creation_date": str(info.get("creationDate") or ""),
+        "pdf_mod_date": str(info.get("modDate") or ""),
+    }
+
+
+def _read_pdf_info(pdf_path: Path) -> dict[str, str]:
+    """A PDF's own title, author and the rest of its document information, through PyMuPDF.
+
+    The MinerU result carries these so a document's title chain starts at the title the PDF
+    declares (then its first heading, then its file name) and ``source_author`` is the PDF's
+    author, as they are for the text-only extractor. Opening the file only reads its
+    information dictionary. A file PyMuPDF cannot open gives empty fields: MinerU has the text,
+    and the metadata is the one thing this adds.
+    """
+    try:
+        import pymupdf  # lazy  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+
+        with pymupdf.open(pdf_path) as doc:
+            return _pdf_info_fields(doc.metadata)
+    except Exception as exc:  # noqa: BLE001 — an unreadable information dictionary must not fail a document MinerU read
+        _log.debug("pdf_info_unreadable", path=str(pdf_path), error=f"{type(exc).__name__}: {exc}")
+        return _pdf_info_fields(None)
+
+
 def _pymupdf_page_text(page: Any) -> str:
     """One page's text layer through PyMuPDF, normalised (RDR-237 rung 3).
 
-    The same ``get_text(sort=True)`` and normalisation the whole-document
-    :meth:`PDFExtractor._extract_normalized` applies to every page, taken for a
-    single page: that method is built on this, and the explicit ``pymupdf``
-    extractor calls it for every page. ``""`` when the page has no text layer.
+    ``get_text(sort=True)`` and the whitespace normalisation, for a single page;
+    the explicit ``pymupdf`` extractor calls it for every page. ``""`` when the
+    page has no text layer.
     """
     return _normalize_page_text(page.get_text(sort=True))
 
@@ -719,55 +736,6 @@ def _pymupdf_page_text_at(pdf_path: Path, page_index: int) -> str:
 
     with pymupdf.open(pdf_path) as doc:
         return _pymupdf_page_text(doc[page_index])
-
-
-def _count_formula_markers(text: str) -> int:
-    """Count LaTeX formula markers in *text*.
-
-    Used as the routing heuristic in auto-mode extraction; ``count >=
-    _FORMULA_ROUTE_THRESHOLD`` escalates to MinerU. The count is the sum of two independent measures:
-
-    1. **Block delimiters** (``$$..$$``, ``\\(..\\)``, ``\\[..\\]``, equation
-       and align environments) — each delimited block contributes 1.
-    2. **Command tokens** (``\\frac``, ``\\sum``, ``\\int``, etc.) — each
-       occurrence contributes 1, *including* occurrences inside delimited
-       blocks. A ``$$..$$`` block with three ``\\frac`` calls inside
-       therefore contributes 4 (1 block + 3 fracs).
-
-    The deliberate double-counting of commands inside blocks is the fix for
-    nexus-2fyb's adjacent bug shape: prior versions used one alternation
-    pattern with ``re.findall``, which would consume the whole block as a
-    single match and skip the commands inside, undercounting by an order
-    of magnitude on math papers.
-    """
-    count = 0
-    for pat in _FORMULA_BLOCK_PATTERNS:
-        count += len(pat.findall(text))
-    for pat in _FORMULA_COMMAND_PATTERNS:
-        count += len(pat.findall(text))
-    return count
-
-
-def _has_formulas_quick(pdf_path: Path) -> int:
-    """Quick formula detection via raw PDF text Unicode math symbols.
-
-    Uses pymupdf to extract raw text (~0.1s) and counts Unicode math symbols.
-    Returns the count, stopping early at ``_FORMULA_ROUTE_THRESHOLD``: at
-    that point the auto path has decided on MinerU, so the exact total is
-    never consulted.
-    """
-    try:
-        import pymupdf  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-        with pymupdf.open(pdf_path) as doc:
-            count = 0
-            for page in doc:
-                text = page.get_text()
-                count += sum(1 for c in text if c in _MATH_UNICODE)
-                if count >= _FORMULA_ROUTE_THRESHOLD:
-                    return count  # early exit
-            return count
-    except Exception:  # noqa: BLE001 — best-effort page count; falls back to 0
-        return 0
 
 
 def _normalize_whitespace_edge_cases(text: str) -> str:
@@ -974,30 +942,21 @@ def _unwrap_mineru_font_tags(md: str) -> str:
 _MD_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
 _VISUAL_LABEL_RE = re.compile(r"^\s*((?:Table|Figure|Fig\.?)\s*[A-Za-z]?\d+[a-z]?|(?:Table|Figure)\s+[IVXLC]+)\b")
 
-#: Docling's own default markdown image placeholder (docling_core's
-#: ``export_to_markdown(..., image_placeholder="<!-- image -->")``), a
-#: different shape from MinerU's ``![](images/<sha>.jpg)`` -- an HTML
-#: comment with no path to look a content_list entry up by, because
-#: docling emits no content_list at all.
-_DOCLING_IMAGE_PLACEHOLDER_RE = re.compile(r"<!--\s*image\s*-->")
-
 #: The FIGURE-only shape of the caption-adjacency label (round-2 critique
-#: on nexus-9zly6). Deliberately excludes "Table": a bare "![...]" /
-#: "<!-- image -->" reference is presented to the reader as an image, so a
+#: on nexus-9zly6). Deliberately excludes "Table": a bare "![...]"
+#: reference is presented to the reader as an image, so a
 #: nearby "Table N" caption must never relabel it -- a wrong specific
 #: label ("Table 9 not extracted...") is worse than the generic marker.
-#: "Chart" is included because MinerU/docling captions use it for plots
+#: "Chart" is included because MinerU captions use it for plots
 #: that are not literally titled "Figure".
 _FIGURE_CAPTION_RE = re.compile(
     r"^\s*((?:Figure|Fig\.?|Chart)\s*[A-Za-z]?\d+[a-z]?|(?:Figure|Chart)\s+[IVXLC]+)\b"
 )
 
-#: A visual reference/placeholder (either shape) with nothing but
-#: whitespace after it, used to detect "this reference is immediately
-#: preceded by ANOTHER one" -- see :func:`_caption_label_after`.
-_TRAILING_VISUAL_REF_RE = re.compile(
-    r"(?:!\[[^\]]*\]\([^)\s]+\)|<!--\s*image\s*-->)\s*$"
-)
+#: A visual reference with nothing but whitespace after it, used to detect
+#: "this reference is immediately preceded by ANOTHER one" -- see
+#: :func:`_caption_label_after`.
+_TRAILING_VISUAL_REF_RE = re.compile(r"!\[[^\]]*\]\([^)\s]+\)\s*$")
 
 #: How far past a marker's position to look for an adjacent caption line
 #: (nexus-9zly6 GAP 1/2). Generous enough for a caption on the very next
@@ -1023,12 +982,12 @@ def _caption_label_after(text: str, start: int, end: int) -> str | None:
     """The FIGURE label (``"Fig. 2"``, ``"Chart 4"``) from the caption line
     immediately following *end* in *text*, or ``None``.
 
-    nexus-9zly6 GAP 1: when a content_list lookup misses (or, for docling,
-    never existed at all), the label the query-lands-on-the-gap contract in
-    :func:`_mark_unextracted_visuals` depends on would otherwise be lost.
-    Both MinerU and docling put an unrecognised visual's caption directly
-    under its own reference/placeholder in the page markdown, so the label
-    usually survives in the text even when the structured lookup does not.
+    nexus-9zly6 GAP 1: when a content_list lookup misses, the label the
+    query-lands-on-the-gap contract in :func:`_mark_unextracted_visuals`
+    depends on would otherwise be lost. MinerU puts an unrecognised visual's
+    caption directly under its own reference in the page markdown, so the
+    label usually survives in the text even when the structured lookup does
+    not.
 
     Two guards keep a WRONG specific label from ever being worse than the
     generic marker (round-2 critique):
@@ -1155,27 +1114,6 @@ def _mark_unextracted_visuals(md: str, content_list: list[dict]) -> str:
     if trailing:
         out = f"{out}\n\n" + "\n\n".join(trailing) if out else "\n\n".join(trailing)
     return out
-
-
-def _mark_unextracted_visuals_docling(md: str) -> str:
-    """The docling sibling of :func:`_mark_unextracted_visuals` (nexus-9zly6
-    GAP 2): ``_extract_with_docling`` never called any marker pass at all,
-    so a docling-extracted PDF's figures vanished with no signal, unlike
-    the MinerU path.
-
-    Docling emits no MinerU-shaped content_list, so there is no structured
-    lookup to try first -- every placeholder goes straight to the same
-    caption-derivation :func:`_caption_label_after` uses for a MinerU
-    reference the content_list lookup missed, sharing that helper rather
-    than duplicating the caption-line regex.
-    """
-    if not md or not _DOCLING_IMAGE_PLACEHOLDER_RE.search(md):
-        return md
-
-    def _repl(m: re.Match) -> str:
-        return _generic_visual_marker(_caption_label_after(md, m.start(), m.end()))
-
-    return _DOCLING_IMAGE_PLACEHOLDER_RE.sub(_repl, md)
 
 
 _TABLE_BLOCK_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.S)
@@ -1391,14 +1329,14 @@ class ExtractionResult:
 
 # ── Post-extraction quality gate (nexus-wi1uv) ──────────────────────────────
 #
-# Motivating incident (nexus-5xn3k, 2026-07-31): ``nx index pdf --extractor
-# docling`` completed on a real 69-page paper and reported success while
+# Motivating incident (nexus-5xn3k, 2026-07-31): an earlier extractor (since
+# removed) completed on a real 69-page paper and reported success while
 # producing SPACE-STRIPPED text — "istheasetofthe", "aspartofasequenceofinput"
 # — plus heavy raw-LaTeX noise. Nothing in the pipeline flagged it; the
-# garbage was indexed, embedded, and paid for. docling is documented as the
-# SAFE recovery when MinerU OOM-fails on formula-dense pages ("--extractor
-# docling: formula-stripped, but always completes"). A loud MinerU failure is
-# strictly safer than a silent quality collapse that then looks like success.
+# garbage was indexed, embedded, and paid for. That extractor was documented as
+# the SAFE recovery when MinerU OOM-fails on formula-dense pages. A loud MinerU
+# failure is strictly safer than a silent quality collapse that then looks like
+# success.
 #
 # Three cheap, dependency-free signals over the raw extracted text, computed
 # once per document before chunking:
@@ -1422,7 +1360,7 @@ class ExtractionResult:
 #   HEALTHY corpus (18 real/representative samples):
 #     - 5 fixture PDFs (tests/fixtures/{bft-to-smr,tc-sql,
 #       distributed-bloom-filter,virgo,fireflies-tocs}.pdf), extracted with
-#       BOTH docling and PyMuPDF (10 whole-document samples).
+#       BOTH the layout extractor of the time and PyMuPDF (10 whole-document samples).
 #     - 2 dense-notation regions carved out of those same fixtures
 #       (tc-sql's IES(FO) relational-calculus derivation; virgo's
 #       cryptographic-commitment section) — real extractor output, not
@@ -1718,10 +1656,9 @@ def _enforce_extraction_quality(
         )
     else:
         remedy = (
-            "Remedy: retry with `--extractor mineru` (formula-aware, often avoids the "
-            "corruption), or if this document is legitimately dense/unusual and you have "
-            "reviewed the extracted text, rerun with `--allow-degraded-extraction` to index "
-            "it anyway."
+            "Remedy: if this document is legitimately dense/unusual and you have reviewed "
+            "the extracted text, rerun with `--allow-degraded-extraction` to index it anyway; "
+            "otherwise fix the PDF (re-export it, or OCR a scan) and index it again."
         )
     raise ExtractionQualityError(
         f"PDF {pdf_path.name} failed the post-extraction quality gate "
@@ -1732,16 +1669,14 @@ def _enforce_extraction_quality(
 
 
 class PDFExtractor:
-    """Extract PDF text via Docling with PyMuPDF normalized fallback.
+    """Extract PDF text with MinerU (per-page fallback ladder) or, explicitly, PyMuPDF.
 
-    Docling uses a neural layout model to handle multi-column academic PDFs,
-    producing structured markdown with headings and correct reading order.
-    Falls back to PyMuPDF normalized extraction on any Docling failure.
+    MinerU is the default and the only layout- and math-aware extractor; a page it
+    cannot read descends the RDR-237 ladder. ``extractor="pymupdf"`` reads every
+    page's own text layer and needs none of the PDF stack.
     """
 
     def __init__(self) -> None:
-        self._converter = None  # lazy init — fast mode (no formula enrichment)
-        self._converter_enriched = None  # lazy init — enriched mode (formula enrichment)
         self._mineru_server_checked: bool = False
         self._mineru_server_up: bool = False
         # nexus-5ny9r: when the verdict was "no live server" (not skew), a
@@ -1766,6 +1701,12 @@ class PDFExtractor:
         # RDR-237: the pages of the consecutive rung-1 server requests that timed out, for the
         # restart rule (reset by any rung-1 server request that did not time out, and by a restart).
         self._server_timeout_pages: list[str] = []
+        # Why the last _restart_broken_mineru_server call replaced nothing (nexus-tr1rj.25); ""
+        # when it replaced the server or has not run.
+        self._restart_skipped: str = ""
+        # The line a restart prints once it is decided (nexus-tr1rj.25); set only around the
+        # timed-out-server restart, which knows the pages. None: nothing is announced.
+        self._restart_announce: Callable[[], None] | None = None
 
     def _beat(self) -> None:
         """Call the progress callback, if the caller gave one (RDR-237).
@@ -1787,8 +1728,7 @@ class PDFExtractor:
         self,
         pdf_path: Path,
         *,
-        extractor: str = "auto",
-        on_formula_oom: str = "fail",
+        extractor: str = DEFAULT_EXTRACTOR,
         on_page: Callable[[int, str, dict], None] | None = None,
         allow_degraded: bool = False,
         on_heartbeat: Callable[[], None] | None = None,
@@ -1796,20 +1736,15 @@ class PDFExtractor:
         """Extract text from *pdf_path*. Returns ExtractionResult.
 
         *extractor* selects the backend:
-        - ``"auto"`` — Docling pass (enriched, to detect formulas); if
-          formulas found, try MinerU then fall back to PyMuPDF normalized.
-        - ``"docling"`` — Docling with PyMuPDF normalized fallback.
-        - ``"mineru"`` — MinerU directly (no fallback).
+        - ``"mineru"`` (the default) — MinerU, each page down the per-page ladder when
+          its attempt fails.
         - ``"pymupdf"`` (RDR-237) — the explicit text-only extractor: every page's own
           text layer through PyMuPDF (the ladder's rung 3), no layout, tables or math. It
           needs none of the PDF stack, so it is the one choice that neither requires nor
-          installs it, and it never starts or probes MinerU. Never chosen by ``"auto"``.
-
-        *on_formula_oom* (RDR-148 Gap 5) is accepted and IGNORED for one release
-        (RDR-237, nexus-tr1rj.12): a page whose MinerU attempt fails now walks the
-        per-page ladder (rung 2 retries it without formulas, rung 3 takes its
-        PyMuPDF text layer) whatever the value, so ``"fail"`` no longer aborts the
-        document. The value is still validated (``"fail"`` or ``"docling"``).
+          installs it, and it never starts or probes MinerU. Never chosen automatically.
+        - The values older configs and scripts carry (``"auto"``, and the name of the
+          extractor RDR-237 removed) are aliases for ``"mineru"``, with one notice per
+          process (:func:`nexus.config.resolve_extractor`).
 
         *on_page* — optional streaming callback fired per extracted page (or
         per MinerU batch when ``mineru_page_batch > 1``):
@@ -1830,8 +1765,8 @@ class PDFExtractor:
 
         *allow_degraded* (nexus-wi1uv) bypasses the post-extraction quality
         gate (see :func:`assess_extraction_quality`). Every backend routes
-        through this one method, so the gate applies uniformly to MinerU,
-        Docling, and PyMuPDF output — no extractor is special-cased. Default
+        through this one method, so the gate applies uniformly to MinerU and
+        PyMuPDF output — no extractor is special-cased. Default
         ``False``: a document whose extracted text trips the gate's
         thresholds (the space-stripped-garbage signature — see the
         function's calibration docstring) raises
@@ -1840,18 +1775,12 @@ class PDFExtractor:
         degraded output deliberately for a specific document (surfaced as
         ``--allow-degraded-extraction`` on the CLI).
         """
-        if extractor not in ("auto", "docling", "mineru", "pymupdf"):
-            raise ValueError(
-                f"extractor must be 'auto', 'docling', 'mineru', or 'pymupdf'; got {extractor!r}"
-            )
-        if on_formula_oom not in ("fail", "docling"):
-            raise ValueError(
-                f"on_formula_oom must be 'fail' or 'docling'; got {on_formula_oom!r}"
-            )
+        # An unknown name raises ValueError here; an older name becomes "mineru" with the notice.
+        extractor = resolve_extractor(extractor, source="the extractor argument")
 
         # nexus-2fyb code-review R1-I2: validate the path is readable before
         # dispatching. Without this, a directory or dangling symlink reaches
-        # pymupdf/Docling and produces an opaque internal error that leaks
+        # pymupdf/MinerU and produces an opaque internal error that leaks
         # library paths through the message.
         if not pdf_path.is_file():
             raise FileNotFoundError(
@@ -1887,7 +1816,7 @@ class PDFExtractor:
         self._heartbeat = on_heartbeat
         try:
             result = self._extract_dispatch(
-                pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=_collect,
+                pdf_path, extractor=extractor, on_page=_collect,
             )
         except _HeartbeatStop as stop:
             # The callback's own exception, as it raised it (identity, cause and all).
@@ -1903,161 +1832,51 @@ class PDFExtractor:
         pdf_path: Path,
         *,
         extractor: str,
-        on_formula_oom: str,
         on_page: Callable[[int, str, dict], None] | None,
     ) -> ExtractionResult:
         """Backend routing for :meth:`extract`, pre-quality-gate.
 
-        Split out (nexus-wi1uv) so ``extract()`` has exactly one gated exit
-        point instead of gating each of this method's several ``return``
-        statements individually.
+        *extractor* is ``"mineru"`` or ``"pymupdf"`` here: :meth:`extract` has already
+        mapped the older values. Split out (nexus-wi1uv) so ``extract()`` has exactly
+        one gated exit point instead of gating each of this method's several
+        ``return`` statements individually.
         """
         if extractor == "pymupdf":
             _progress(f"  PyMuPDF (text layer only): extracting {pdf_path.name}…")
             return self._extract_pymupdf(pdf_path, on_page=on_page)
 
-        if extractor == "docling":
-            _progress(f"  Docling: extracting {pdf_path.name}…")
-            try:
-                return self._extract_with_docling(pdf_path, on_page=on_page)
-            except ImportError as exc:
-                raise self._docling_not_importable(pdf_path, exc) from exc
-            except Exception as exc:  # noqa: BLE001 — fallback path; logged, falls back to PyMuPDF extractor
-                _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
-                _log.debug("docling_extraction_failed", error=str(exc), path=str(pdf_path))
-                return self._extract_normalized(pdf_path, on_page=on_page)
+        _progress(f"  MinerU: extracting {pdf_path.name}…")
+        return self._extract_with_mineru_guarded(pdf_path, on_page=on_page)
 
-        if extractor == "mineru":
-            _progress(f"  MinerU: extracting {pdf_path.name}…")
-            return self._extract_with_mineru(
-                pdf_path, on_page=on_page, on_formula_oom=on_formula_oom,
-            )
-
-        # extractor == "auto"
-        # Step 1: Quick formula pre-screen via raw PDF text (~0.1s)
-        formula_count = _has_formulas_quick(pdf_path)
-
-        # The screen alone settles the math case. The Docling pass below is
-        # the extraction for the non-math case, not a probe, and the MinerU
-        # branch discards it: measured 2026-09-07, a 6-page paper the screen
-        # had already routed spent 24s in Docling ahead of a 32s MinerU run.
-        if formula_count >= _FORMULA_ROUTE_THRESHOLD:
-            # The Docling pass used to emit this on the math case; the
-            # short-circuit keeps the event so log readers see the same line.
-            _log.warning(
-                "formula_content_detected", formula_count=formula_count,
-                path=str(pdf_path), source="quick_screen",
-            )
-            return self._route_to_mineru(
-                pdf_path, formula_count, on_page=on_page, on_formula_oom=on_formula_oom,
-            )
-
-        # Step 2: Extract with non-enriched Docling (probe — no on_page callback
-        # to avoid double-firing if MinerU takes over for formula PDFs)
-        _progress(f"  Docling: extracting {pdf_path.name}…")
-        try:
-            fast_result = self._extract_with_docling(pdf_path, enriched=False)
-        except ImportError as exc:
-            raise self._docling_not_importable(pdf_path, exc) from exc
-        except Exception as exc:  # noqa: BLE001 — fallback path; logged, falls back to PyMuPDF extractor
-            _progress(f"  Docling failed ({type(exc).__name__}), falling back to PyMuPDF: {pdf_path.name}")
-            _log.debug("docling_auto_pass_failed", error=str(exc), path=str(pdf_path))
-            return self._extract_normalized(pdf_path, on_page=on_page)
-
-        # Also check the Docling markdown for LaTeX markers (catches formulas
-        # that Docling renders as LaTeX even without enrichment)
-        text_markers = _count_formula_markers(fast_result.text)
-        formula_count = max(formula_count, text_markers)
-
-        if formula_count < _FORMULA_ROUTE_THRESHOLD:
-            # Docling wins — replay on_page from page_boundaries since the
-            # probe pass didn't fire the callback.
-            if on_page is not None:
-                for boundary in fast_result.metadata.get("page_boundaries", []):
-                    page_num = boundary["page_number"]
-                    start = boundary["start_char"]
-                    length = boundary["page_text_length"] - 1  # -1 for \n separator
-                    page_text = fast_result.text[start : start + length]
-                    on_page(page_num - 1, page_text, {"page_number": page_num, "text_length": length})
-            return fast_result
-
-        return self._route_to_mineru(
-            pdf_path, formula_count, on_page=on_page, on_formula_oom=on_formula_oom,
-        )
-
-    @staticmethod
-    def _docling_not_importable(pdf_path: Path, exc: ImportError) -> RuntimeError:
-        """The error for a docling pass that died on an import.
-
-        A docling failure on one PDF falls back to PyMuPDF. An ImportError is
-        not that: docling and what its PDF pipeline loads are required
-        dependencies, so a missing module means the install is broken, and
-        the fallback would then quietly give every PDF the plain extraction
-        (no layout-aware reading order, headings or tables) with one
-        progress line to show for it. Seen 2026-10-11 in a development venv
-        whose ``cv2`` package directory was gone while its distribution was
-        still listed: every non-formula PDF came back ``pymupdf_normalized``.
-        Same reasoning as the MinerU branch of auto mode (nexus-2fyb).
-        """
-        _log.error("docling_import_failed", error=str(exc), path=str(pdf_path))
-        from nexus import install_advice, pdf_stack  # noqa: PLC0415 — deferred import
-
-        # nexus-2k66t.4.2: the stack is an extra now. An import that fails
-        # because it was never installed is a different message from one that
-        # fails over an installed-but-corrupt tree.
-        missing = pdf_stack.missing_message(f"PDF {pdf_path.name}")
-        if missing is not None:
-            return RuntimeError(f"PDF {pdf_path.name}: docling could not be loaded ({exc}). {missing}")
-
-        reinstall = install_advice.upgrade_command("uv tool install --reinstall conexus")
-        return RuntimeError(
-            f"PDF {pdf_path.name}: docling could not be loaded ({exc}). Docling is a "
-            f"required dependency, so the conexus install is broken; `nx doctor` names "
-            f"the missing module. Reinstall with `{reinstall}`. Nothing was extracted: "
-            f"falling back to plain PyMuPDF text here would hide the broken install."
-        )
-
-    def _route_to_mineru(
+    def _extract_with_mineru_guarded(
         self,
         pdf_path: Path,
-        formula_count: int,
         *,
         on_page: Callable[[int, str, dict], None] | None,
-        on_formula_oom: str,
     ) -> ExtractionResult:
-        """Auto mode's MinerU branch: a math paper, extracted formula-aware.
+        """MinerU extraction with failures named for the operator.
 
-        nexus-2fyb: previously, a MinerU failure here silently returned the
-        non-enriched Docling probe (formulas already stripped). That hid
-        extraction corruption from every caller — the result was
-        indistinguishable from a paper that legitimately had no math. Auto
-        mode now fails loudly so the user installs MinerU or explicitly opts
-        into formula-stripped extraction with --extractor docling.
+        nexus-2fyb: a MinerU failure is never answered with a plainer extraction, which
+        hid corruption from every caller. It fails loudly, and the message says which
+        kind of failure it is: an install that cannot import MinerU (reinstall, or
+        ``--extractor pymupdf`` for text only), or an operational failure on an install
+        that is fine (``nx doctor``).
         """
-        _progress(f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}")
         try:
-            return self._extract_with_mineru(
-                pdf_path, formula_count=formula_count, on_page=on_page,
-                on_formula_oom=on_formula_oom,
-            )
+            return self._extract_with_mineru(pdf_path, on_page=on_page)
         except ImportError as exc:
             # do_parse is None — mineru ships with the `pdf` extra (installed on demand, nexus-2k66t.4.2), so with the stack present a
             # missing import means the conexus install itself is corrupt.
-            _log.error(
-                "mineru_import_failed",
-                error=str(exc),
-                formula_count=formula_count,
-                path=str(pdf_path),
-            )
+            _log.error("mineru_import_failed", error=str(exc), path=str(pdf_path))
             from nexus import install_advice, pdf_stack  # noqa: PLC0415 — deferred import
 
-            # nexus-2k66t.4.2: see _docling_not_importable. Never fall back to
-            # formula-stripped output because the stack was never installed.
+            # nexus-2k66t.4.2: the stack is an extra now. An import that fails
+            # because it was never installed is a different message from one that
+            # fails over an installed-but-corrupt tree.
             missing = pdf_stack.missing_message(f"PDF {pdf_path.name}")
             if missing is not None:
                 raise RuntimeError(
-                    f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
-                    f"but MinerU is not importable: {exc}. {missing}"
+                    f"PDF {pdf_path.name}: MinerU is not importable: {exc}. {missing}"
                 ) from exc
 
             reinstall = install_advice.upgrade_command(
@@ -2068,12 +1887,11 @@ class PDFExtractor:
             repair = pdf_stack.repair_command()
             ways = f"`{reinstall}`" if repair == reinstall else f"`{reinstall}`, or `{repair}`"
             raise RuntimeError(
-                f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
-                f"but MinerU is not importable: {exc}. "
+                f"PDF {pdf_path.name}: MinerU is not importable: {exc}. "
                 f"MinerU is part of the pdf extra and the PDF stack reports itself "
                 f"installed, so this conexus install is corrupt — reinstall with "
-                f"{ways}. To bypass formula "
-                f"extraction entirely, rerun with `--extractor docling`."
+                f"{ways}. For text only (no layout, tables or math), "
+                f"rerun with `--extractor pymupdf`."
             ) from exc
         except (
             MineruMachineResourceError, MineruSystemicFailure, UnextractableContentError,
@@ -2098,232 +1916,21 @@ class PDFExtractor:
                 "mineru_extraction_failed",
                 error=sanitized_msg,
                 error_type=type(exc).__name__,
-                formula_count=formula_count,
                 path=str(pdf_path),
             )
             raise RuntimeError(
-                f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
-                f"but MinerU extraction failed: {type(exc).__name__}: {sanitized_msg}. "
-                f"Run `nx doctor` to check the MinerU install."
+                f"PDF {pdf_path.name}: MinerU extraction failed: {type(exc).__name__}: "
+                f"{sanitized_msg}. Run `nx doctor` to check the MinerU install. For text only "
+                f"(no layout, tables or math), rerun with `--extractor pymupdf` (or set `pdf.extractor: pymupdf`)."
             ) from exc
-
-    # ── internal extraction methods ───────────────────────────────────────────
-
-    def _get_converter(self, enriched: bool = False):
-        """Lazily initialise the Docling DocumentConverter.
-
-        *enriched* enables ``do_formula_enrichment`` for LaTeX extraction.
-        The fast and the enriched converter are separate, and each is built
-        once per process and shared by every extractor (see
-        ``_SHARED_CONVERTERS``); the instance keeps a reference to the one it
-        resolved.
-        """
-        attr = "_converter_enriched" if enriched else "_converter"
-        converter = getattr(self, attr)
-        if converter is None:
-            from docling.document_converter import DocumentConverter, PdfFormatOption  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-            from docling.datamodel.pipeline_options import PdfPipelineOptions  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-
-            opts = PdfPipelineOptions()
-            opts.do_ocr = False                 # digital PDFs have embedded text
-            opts.do_table_structure = True      # TableFormer for table detection
-            opts.generate_page_images = False
-            opts.generate_picture_images = False
-            opts.do_formula_enrichment = enriched
-            # Use PRE-DOWNLOADED models when a local artifacts directory is
-            # named, instead of letting docling fetch from HuggingFace at
-            # convert() time (docling loads layout/TableFormer/CodeFormula
-            # LAZILY, so the fetch happens mid-extraction).
-            #
-            # CI sets this to our own hosted mirror (release asset
-            # ci-assets-docling-v1) — runners keep no layer cache, so every
-            # build otherwise re-fetched ~1.1GB anonymously from HuggingFace and
-            # flaked on it: CAS data-processing errors, connection resets, 429s.
-            # It is the same reason the bge-768 ONNX is self-hosted as
-            # ci-assets-bge-768-v1. An offline or air-gapped install can point
-            # this at any directory produced by
-            # ``docling-tools models download -o <dir> layout tableformer code_formula``.
-            #
-            # Unset (the default) keeps docling's own resolution, so nothing
-            # changes for an ordinary local install.
-            artifacts = os.environ.get("NEXUS_DOCLING_ARTIFACTS_PATH", "").strip()
-            if artifacts:
-                artifacts_dir = Path(artifacts)
-                if not artifacts_dir.is_dir():
-                    raise ValueError(
-                        f"NEXUS_DOCLING_ARTIFACTS_PATH is set to {artifacts!r} but that "
-                        "is not a directory. Point it at a docling artifacts dir "
-                        "(docling-tools models download -o <dir> layout tableformer "
-                        "code_formula), or unset it to let docling resolve its own "
-                        "models."
-                    )
-                opts.artifacts_path = artifacts_dir
-            key = (DocumentConverter, enriched, artifacts)
-            with _SHARED_CONVERTERS_LOCK:
-                converter = _SHARED_CONVERTERS.get(key)
-                if converter is None:
-                    converter = DocumentConverter(
-                        format_options={"pdf": PdfFormatOption(pipeline_options=opts)}
-                    )
-                    _SHARED_CONVERTERS[key] = converter
-            setattr(self, attr, converter)
-        return converter
-
-    def _extract_with_docling(
-        self,
-        pdf_path: Path,
-        *,
-        enriched: bool = True,
-        on_page: Callable[[int, str, dict], None] | None = None,
-    ) -> ExtractionResult:
-        """Extract per-page markdown via Docling."""
-        result = self._get_converter(enriched=enriched).convert(str(pdf_path))
-        doc = result.document
-        page_count = doc.num_pages()
-
-        page_texts: list[str] = []
-        page_boundaries: list[dict] = []
-        current_pos = 0
-
-        for p in range(1, page_count + 1):
-            page_md = doc.export_to_markdown(page_no=p).strip()
-            # nexus-9zly6: mark unextracted figures HERE, before lengths are
-            # measured below -- page_boundaries / current_pos must describe
-            # the text actually stored, the same ordering rationale
-            # _extract_with_mineru's own marker call follows.
-            page_md = _mark_unextracted_visuals_docling(page_md)
-            if page_md:
-                page_boundaries.append(
-                    {
-                        "page_number": p,
-                        "start_char": current_pos,
-                        # +1 includes the \n separator from "\n".join so that
-                        # _page_for ranges are contiguous (same convention as the
-                        # former _extract_markdown implementation).
-                        "page_text_length": len(page_md) + 1,
-                    }
-                )
-                if on_page is not None:
-                    on_page(p - 1, page_md, {"page_number": p, "text_length": len(page_md)})
-                page_texts.append(page_md)
-                current_pos += len(page_md) + 1
-
-        text = "\n".join(page_texts)
-        if not text.strip():
-            # nexus-deyd5: this file could not be extracted (zero text) --
-            # not a "something is wrong" condition. UnextractableContentError
-            # is per-record survivable: run_file_loop skips this file and
-            # continues, instead of aborting the whole nx index repo run.
-            # The broad `except Exception` in _extract_dispatch's docling
-            # branches still catches this and falls through to the PyMuPDF
-            # fallback exactly as it did for the old bare RuntimeError.
-            raise UnextractableContentError("docling produced empty output")
-
-        # Collect TableItem regions and count formulas
-        table_regions: list[dict] = []
-        formula_count = 0
-        if enriched:
-            # Enriched mode: count FormulaItem objects (duck-typed, single pass)
-            for item, _ in doc.iterate_items():
-                item_type = type(item).__name__
-                if item_type == "FormulaItem":
-                    formula_count += 1
-                elif item_type == "TableItem":
-                    prov = getattr(item, "prov", [])
-                    page_no = prov[0].page_no if prov else 0
-                    table_regions.append({"page": page_no})
-        else:
-            # Non-enriched mode: scan text for LaTeX formula patterns
-            # This is 100x faster than running the enrichment pipeline
-            formula_count = _count_formula_markers(text)
-            for item, _ in doc.iterate_items():
-                if type(item).__name__ == "TableItem":
-                    prov = getattr(item, "prov", [])
-                    page_no = prov[0].page_no if prov else 0
-                    table_regions.append({"page": page_no})
-
-        if formula_count > 0:
-            _log.warning(
-                "formula_content_detected", formula_count=formula_count,
-                path=str(pdf_path), source="docling",
-            )
-
-        return ExtractionResult(
-            text=text,
-            metadata={
-                "extraction_method": "docling",
-                "page_count": page_count,
-                "format": "markdown",
-                "page_boundaries": page_boundaries,
-                "table_regions": table_regions,
-                "formula_count": formula_count,
-                "docling_title": self._extract_title(doc),
-                "pdf_title": "",  # XMP metadata not exposed by Docling
-                "pdf_author": "",
-                "pdf_subject": "",
-                "pdf_keywords": "",
-                "pdf_creator": "",
-                "pdf_producer": "",
-                "pdf_creation_date": "",
-                "pdf_mod_date": "",
-            },
-        )
 
     # Page batch size is read from config via get_mineru_page_batch() (default 1).
     # Formula-dense PDFs OOM during MFR prediction at larger batch sizes.
-
-    def _extract_page_via_docling(self, pdf_path: Path, page: int) -> str:
-        """Formula-stripped docling extraction of a SINGLE page (0-based).
-
-        RDR-148 Gap 5 ``on_formula_oom="docling"`` support: when one page
-        reproducibly OOM-kills MinerU's formula model, extract just that page
-        with docling (slicing it into a one-page temp PDF) so the rest of the
-        document still gets formula-aware MinerU extraction. Returns the page's
-        markdown (formulas rendered as best docling can, i.e. stripped).
-        """
-        import tempfile  # noqa: PLC0415 — deferred import — branch-local
-        import pymupdf  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-
-        # Create the temp file FIRST so it is always bound for cleanup even if
-        # pymupdf slicing raises (an insert_pdf failure must propagate as itself,
-        # not as an UnboundLocalError on a never-assigned tmp name).
-        fd, tmp_name = tempfile.mkstemp(suffix=".pdf")
-        _os.close(fd)
-        tmp_path = Path(tmp_name)
-        try:
-            with pymupdf.open(pdf_path) as doc:
-                one = pymupdf.open()
-                try:
-                    one.insert_pdf(doc, from_page=page, to_page=page)
-                    one.save(tmp_name)
-                finally:
-                    one.close()
-            return self._extract_with_docling(tmp_path).text
-        finally:
-            tmp_path.unlink(missing_ok=True)
-
-    def _degrade_page_to_docling(
-        self, pdf_path: Path, page: int, total_pages: int, fname: str,
-    ) -> tuple[str, list[dict], list[dict]]:
-        """Degrade ONE page to docling after a formula-OOM, returning the
-        ``(md, content_list, pdf_info)`` triple in MinerU's shape (empty
-        structured lists, since docling does not emit MinerU content_list)."""
-        _log.warning(
-            "mineru_formula_oom_degrade_to_docling",
-            page=page + 1, path=str(pdf_path),
-        )
-        _progress(
-            f"  MinerU page {page + 1}/{total_pages} OOM (formula model) — "
-            f"degrading THIS page to docling (formula-stripped, {fname})"
-        )
-        return self._extract_page_via_docling(pdf_path, page), [], []
 
     def _extract_with_mineru(
         self,
         pdf_path: Path,
         *,
-        formula_count: int = 0,
-        on_formula_oom: str = "fail",
         on_page: Callable[[int, str, dict], None] | None = None,
     ) -> ExtractionResult:
         """Extract text via MinerU (math-aware, optional dependency).
@@ -2352,8 +1959,7 @@ class PDFExtractor:
         document. The pages counted toward that rule are held back from ``on_page``
         until the window resolves: a trip drops them (so the kept buffer holds no
         degraded text for a rerun to keep), anything else delivers them in page
-        order before the page that resolved it. *on_formula_oom* has no effect here:
-        rung 2 replaced the docling degrade.
+        order before the page that resolved it.
 
         *on_page* fires once per batch (default batch size is 1 page via
         ``mineru_page_batch`` config).  The callback receives the batch start
@@ -2444,7 +2050,7 @@ class PDFExtractor:
             page: int, md: str, content_list: list[dict], pdf_info: list[dict], method: str,
         ) -> None:
             # Single append point so the batch-success, 1-page-retry, and
-            # degrade-to-docling paths produce identical bookkeeping. For
+            # ladder paths produce identical bookkeeping. For
             # batch_size > 1 the success path passes the batch start as `page`;
             # page-number metadata is only exact at batch_size == 1 (the
             # default the streaming pipeline relies on).
@@ -2742,7 +2348,6 @@ class PDFExtractor:
         return self._mineru_build_result(
             pdf_path, md_text, all_content_list, all_pdf_info,
             per_page_lengths=per_page_lengths,
-            formula_count_floor=formula_count,
             total_pages=total_pages,
             extraction_pages=extraction_pages,
             table_defects=table_defects,
@@ -2953,7 +2558,7 @@ class PDFExtractor:
             f"  warn: MinerU server unreachable after rediscovery "
             f"({reason}); falling back to in-process subprocess (slower, "
             f"OOM-risk on large math PDFs). Run `nx mineru start` to enable "
-            f"server mode, or pass --extractor docling."
+            f"server mode."
         )
         return self._mineru_server_up
 
@@ -3150,9 +2755,12 @@ class PDFExtractor:
 
                     identity = classify_server_pid(replace_pid)
                     if identity == "unreadable":
-                        # Inconclusive: signal nothing, keep the file.
+                        # Inconclusive: signal nothing, keep the file. Nothing was attempted, which
+                        # the caller's progress line says (nexus-tr1rj.25).
                         _log.warning("mineru_replace_pid_unreadable", pid=replace_pid)
+                        self._restart_skipped = "unreadable"
                         return False
+                    self._announce_restart()
                     if identity == "mineru":
                         outcome = stop_server_group(replace_pid)
                         _log.warning("mineru_broken_server_stopped",
@@ -3169,6 +2777,7 @@ class PDFExtractor:
                     if info is not None:
                         _pid_file_path().unlink(missing_ok=True)
                     port = get_mineru_configured_fixed_port() or _find_free_port()
+                    self._announce_restart()
                     proc = spawn_server_process(port)
                     if proc is None:
                         _log.warning("mineru_restart_failed",
@@ -3213,6 +2822,14 @@ class PDFExtractor:
         _log.info("mineru_server_restarted",
                   pid=proc.pid if proc is not None else info["pid"], port=port)
         return True
+
+    def _announce_restart(self) -> None:
+        """Print the restart's "replacing it" line, once, at the point where the stop and the
+        spawn are about to start: a restart skipped before this never prints it, and the health
+        wait that follows (up to 60 s) is no longer silent (nexus-tr1rj.25)."""
+        announce, self._restart_announce = self._restart_announce, None
+        if announce is not None:
+            announce()
 
     def _mark_mineru_server_down(self) -> None:
         """Stop using the server for now: pages take the subprocess path until the re-check
@@ -3278,12 +2895,29 @@ class PDFExtractor:
                 "mineru_server_timeout_restart", pages=timed_out, old_pid=info.get("pid"),
                 slots=_mineru_server_slots(),
             )
-            _progress(
-                f"  MinerU server timed out on page(s) {', '.join(timed_out)} — replacing it "
-                f"(pid {info.get('pid')})."
+            self._restart_skipped = ""
+            # "replacing it" is printed from inside the restart, once it is decided (after the
+            # budget, the spawn policy, the machine-wide cooldown and the pid check have let it
+            # through), so a skipped restart never says it and a long health wait is not silent.
+            # The outcome line follows (nexus-tr1rj.25).
+            pages = ", ".join(timed_out)
+            self._restart_announce = lambda: _progress(
+                f"  MinerU server timed out on page(s) {pages} — replacing it (pid {info.get('pid')})."
             )
-            if self._restart_broken_mineru_server(info):
+            try:
+                restarted = self._restart_broken_mineru_server(info)
+            finally:
+                self._restart_announce = None
+            if restarted:
+                _progress(
+                    f"  MinerU server timed out on page(s) {pages} — replaced it "
+                    f"(old pid {info.get('pid')})."
+                )
                 return
+            _progress(
+                f"  MinerU server timed out on page(s) {', '.join(timed_out)} — "
+                f"{_restart_skip_text(self._restart_skipped, info.get('pid'))}"
+            )
         else:
             _log.warning(
                 "mineru_server_timeout_not_restartable", pages=timed_out, url=url,
@@ -3413,15 +3047,22 @@ class PDFExtractor:
         that comes after it would burn the cooldown on a restart that never happens."""
         from nexus._mineru_health import claim_broken_restart  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+        self._restart_skipped = ""
         if info is None or not isinstance(info.get("pid"), int):
+            self._restart_skipped = "no-pid"
             return False
         if self._restart_refused():
+            self._restart_skipped = "refused"
             return False
         if not claim_broken_restart():
             _log.warning("mineru_broken_restart_in_cooldown")
+            self._restart_skipped = "cooldown"
             return False
         _log.warning("mineru_server_broken_restarting", pid=info["pid"])
-        return self._restart_mineru_server(replace_pid=info["pid"])
+        restarted = self._restart_mineru_server(replace_pid=info["pid"])
+        if not restarted and not self._restart_skipped:
+            self._restart_skipped = "failed"  # attempted: the pid check, the stop or the spawn ran
+        return restarted
 
     def _mineru_run_subprocess(
         self, pdf_path: Path, start: int, end: int | None, formula_enable: bool = True,
@@ -3675,7 +3316,6 @@ class PDFExtractor:
         content_list: list[dict], pdf_info: list[dict],
         *,
         per_page_lengths: list[tuple[int, int]] | None = None,
-        formula_count_floor: int = 0,
         total_pages: int | None = None,
         extraction_pages: dict[str, list[int]] | None = None,
         table_defects: list[dict] | None = None,
@@ -3689,13 +3329,6 @@ class PDFExtractor:
         (legacy callers, defensive), falls back to uniform char/page
         distribution — but logs a warning because that path produces
         wrong page_number metadata for any non-uniform document.
-
-        *formula_count_floor* (nexus-2fyb code-review R1): the count
-        produced by the auto-mode probe, used as a lower bound. If
-        MinerU's structured response is missing or empty (e.g. server
-        returned content_list=[] under degraded conditions), the
-        recomputed formula_count would otherwise be 0, breaking the
-        ``has_formulas`` flag downstream for confirmed math papers.
 
         *total_pages* (RDR-237): the PDF's own page count. The document's page
         count and page boundaries come from it and the per-page outcomes, not
@@ -3722,7 +3355,7 @@ class PDFExtractor:
                         if span.get("type") == "inline_equation":
                             inline_count += 1
 
-        formula_count = max(display_count + inline_count, formula_count_floor)
+        formula_count = display_count + inline_count
         page_count = total_pages if total_pages is not None else len(pdf_info)
 
         # md_text is already normalized: _extract_with_mineru applies
@@ -3776,7 +3409,7 @@ class PDFExtractor:
         extraction_method = "mineru+degraded" if extraction_pages else "mineru"
         # nexus-jd8fi: tables MinerU rendered as text, keyed by the page they
         # sit on, so PDFChunker tags their chunks ``table_page`` exactly as it
-        # does for docling. ``page_idx`` in a MinerU content_list is relative
+        # does for MinerU's own tables. ``page_idx`` in a MinerU content_list is relative
         # to the batch that produced it; _extract_with_mineru rebases it to
         # the document before it lands here (``doc_page_idx``).
         table_regions = [
@@ -3802,54 +3435,9 @@ class PDFExtractor:
                 "page_boundaries": page_boundaries,
                 "table_regions": table_regions,
                 "table_defects": table_defects or [],
-                "docling_title": "",
-                "pdf_title": "",
-                "pdf_author": "",
-                "pdf_subject": "",
-                "pdf_keywords": "",
-                "pdf_creator": "",
-                "pdf_producer": "",
-                "pdf_creation_date": "",
-                "pdf_mod_date": "",
+                **_read_pdf_info(pdf_path),
             },
         )
-
-    def _extract_title(self, doc) -> str:
-        """Extract a paper title from Docling document items on page 1.
-
-        Algorithm (verified on 19 corpus PDFs, 17/19 correct):
-        1. Iterate page-1 items, skip section labels (abstract, introduction, keywords).
-        2. Return first item with label containing 'title' or 'section_header'.
-        3. Fallback: first text-labelled item on page 1 with 10 ≤ len < 120.
-        """
-        _SKIP = {"abstract", "introduction", "1 introduction", "keywords"}
-
-        for item, _ in doc.iterate_items():
-            prov = getattr(item, "prov", [])
-            if not prov or prov[0].page_no != 1:
-                continue
-            text = (getattr(item, "text", "") or "").strip()
-            if not text or len(text) < 10:
-                continue
-            lower = text.lower()
-            if lower in _SKIP:
-                continue
-            if lower.startswith("abstract") and len(text) > 100:
-                continue
-            label = str(getattr(item, "label", ""))
-            if "title" in label or "section_header" in label:
-                return text
-
-        # Fallback: first short text block on page 1
-        for item, _ in doc.iterate_items():
-            prov = getattr(item, "prov", [])
-            if not prov or prov[0].page_no != 1:
-                continue
-            text = (getattr(item, "text", "") or "").strip()
-            if text and 10 <= len(text) < 120:
-                return text
-
-        return ""
 
     def _extract_pymupdf(
         self,
@@ -3859,8 +3447,8 @@ class PDFExtractor:
     ) -> ExtractionResult:
         """The explicit ``pymupdf`` extractor (RDR-237): every page's own text layer, nothing else.
 
-        Runs the ladder's one-page rung-3 read (:func:`_pymupdf_page_text`) on every page,
-        never the whole-document :meth:`_extract_normalized`. A page with a text layer settles
+        Runs the ladder's one-page rung-3 read (:func:`_pymupdf_page_text`) on every page.
+        A page with a text layer settles
         ``pymupdf-text``; a page without one (an image-only page, or one PyMuPDF cannot read)
         settles ``unextracted``. Like the MinerU ladder, ``on_page`` fires for EVERY page, an
         unextracted one with ``""``, each carrying ``page_method`` so the pipeline buffer can
@@ -3944,95 +3532,7 @@ class PDFExtractor:
                 "format": "normalized",
                 "page_boundaries": page_boundaries,
                 "table_regions": [],
-                "docling_title": "",
-                "pdf_title": doc_meta.get("title", ""),
-                "pdf_author": doc_meta.get("author", ""),
-                "pdf_subject": doc_meta.get("subject", ""),
-                "pdf_keywords": doc_meta.get("keywords", ""),
-                "pdf_creator": doc_meta.get("creator", ""),
-                "pdf_producer": doc_meta.get("producer", ""),
-                "pdf_creation_date": doc_meta.get("creationDate", ""),
-                "pdf_mod_date": doc_meta.get("modDate", ""),
-                "formula_count": 0,
-            },
-        )
-
-    def _extract_normalized(
-        self,
-        pdf_path: Path,
-        *,
-        on_page: Callable[[int, str, dict], None] | None = None,
-    ) -> ExtractionResult:
-        """Extract via raw PyMuPDF with whitespace normalization."""
-        import pymupdf  # lazy  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-
-        text_parts: list[str] = []
-        page_boundaries: list[dict] = []
-        current_pos = 0
-
-        with pymupdf.open(pdf_path) as doc:
-            page_count = len(doc)
-            doc_meta = doc.metadata or {}
-            for page_num, page in enumerate(doc):
-                # Normalize per-page so page_boundaries match character positions
-                # in the final joined text (global normalization after the fact
-                # would shift boundaries unpredictably).
-                page_text = _pymupdf_page_text(page)
-                if page_text:
-                    page_boundaries.append(
-                        {
-                            "page_number": page_num + 1,
-                            "start_char": current_pos,
-                            # +1 includes the \n separator from "\n".join (same
-                            # rationale as _extract_with_docling: contiguous ranges).
-                            "page_text_length": len(page_text) + 1,
-                        }
-                    )
-                    if on_page is not None:
-                        on_page(page_num, page_text, {"page_number": page_num + 1, "text_length": len(page_text)})
-                    text_parts.append(page_text)
-                    current_pos += len(page_text) + 1
-
-        text = "\n".join(text_parts)
-        if not text.strip():
-            # nexus-aold: silent zero-chunk indexing was the failure
-            # mode of large-PDF Docling crashes that cascaded into
-            # the PyMuPDF fallback returning an empty result. Make
-            # it a hard error here too, mirroring the equivalent
-            # guard in _extract_with_docling. The indexer's outer
-            # error path will surface this as a non-zero exit with
-            # a named failure mode (was: silent 0 chunks indexed).
-            # nexus-deyd5: reclassified from a bare RuntimeError. This is a
-            # per-file "cannot be extracted" condition, not a data-loss
-            # condition -- nothing was ever written for this file, so
-            # run_file_loop skips it (loud, counted, non-fatal) and
-            # continues the rest of the run instead of aborting it. Still a
-            # hard, LOUD failure for THIS file, per nexus-aold's original
-            # intent (no silent zero-chunk indexing) -- only the blast
-            # radius changed, not the visibility.
-            raise UnextractableContentError(
-                f"pymupdf produced empty output for {pdf_path.name} "
-                f"(page_count={page_count}); the PDF may be image-only "
-                "or have a damaged text layer. Try --extractor mineru "
-                "or rerun OCR before indexing."
-            )
-
-        return ExtractionResult(
-            text=text,
-            metadata={
-                "extraction_method": "pymupdf_normalized",
-                "page_count": page_count,
-                "format": "normalized",
-                "page_boundaries": page_boundaries,
-                "docling_title": "",
-                "pdf_title": doc_meta.get("title", ""),
-                "pdf_author": doc_meta.get("author", ""),
-                "pdf_subject": doc_meta.get("subject", ""),
-                "pdf_keywords": doc_meta.get("keywords", ""),
-                "pdf_creator": doc_meta.get("creator", ""),
-                "pdf_producer": doc_meta.get("producer", ""),
-                "pdf_creation_date": doc_meta.get("creationDate", ""),
-                "pdf_mod_date": doc_meta.get("modDate", ""),
+                **_pdf_info_fields(doc_meta),
                 "formula_count": 0,
             },
         )

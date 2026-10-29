@@ -1410,8 +1410,17 @@ def _poison_probe(config_dir: Path) -> PoisonProbe:
     # Unreachable from converge_engine today (detect_engine_convergence
     # pre-gates on the same creds file), but a second caller without that
     # pre-gate must not read it as clean.
+    #
+    # nexus-njn1a: reachable from ``nx daemon service install-binary`` on a
+    # managed box, where the row says the check was NOT run from this client.
+    # An unperformed check is unknown whatever its rendering, so the managed
+    # reason is read as a marker too, not only ``not r.ok``: a future change
+    # that draws that row as a pass cannot turn this gate clean.
+    from nexus.health import is_managed_not_probeable  # noqa: PLC0415 — deferred, CLI startup cost
+
     unverified = [
-        r for r in results if r.label == "Schema migrations" and not r.ok
+        r for r in results
+        if r.label == "Schema migrations" and (not r.ok or is_managed_not_probeable(r))
     ]
     if unverified:
         return PoisonProbe(unknown_reason=unverified[0].detail[:200])

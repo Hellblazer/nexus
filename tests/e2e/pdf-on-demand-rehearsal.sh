@@ -27,7 +27,7 @@
 # refuse legs need the SLIM install, and b installs the stack, so a leg that
 # asserts "refused" after b would find the stack present and fail (or pass by
 # doing nothing).
-#   a  Fresh install by the bootstrap route has NO torch, docling, mineru,
+#   a  Fresh install by the bootstrap route has NO torch, mineru,
 #      pdftext; the doctor row is informational, not red; `nx --version` and
 #      `nx doctor --check-mineru` work; the install's size is recorded.
 #      Proves: the slim default and that a missing stack is not an error.
@@ -181,7 +181,7 @@ stack_module_count() { local m; m="$(stack_modules_present)"; if [ -z "$m" ]; th
 stack_modules_present() {
     "$(gen_python)" -c "
 import importlib.util as u
-print(','.join(m for m in ('docling','mineru','torch','torchvision','pdftext') if u.find_spec(m)))"
+print(','.join(m for m in ('mineru','torch','torchvision','pdftext') if u.find_spec(m)))"
 }
 
 # ── build the release candidate wheel (and a successor for leg f) ───────────
@@ -371,7 +371,7 @@ leg_f() {
     grep -q "Installing PDF support" "$LOGS/f-index.log" && fail "the second PDF ran the installer again"
     dl_after="$(find "$CACHE" -type f -name '*.whl' 2>/dev/null | wc -l | tr -d ' ')"
     echo "uv cache files: $dl_before -> $dl_after (a rebuild is served from the cache; check $LOGS/f-upgrade.log for 'Downloaded')"
-    grep -qi "downloaded.*\(torch\|mineru\|docling\)" "$LOGS/f-upgrade.log" && fail "the upgrade re-downloaded the stack"
+    grep -qi "downloaded.*\(torch\|mineru\)" "$LOGS/f-upgrade.log" && fail "the upgrade re-downloaded the stack"
     return 0
 }
 

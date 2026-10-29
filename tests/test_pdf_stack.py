@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The PDF stack on demand. nexus-2k66t.4.2.
 
-docling, MinerU, torch, torchvision and pdftext are the ``pdf`` extra. A fresh
+MinerU, torch, torchvision and pdftext are the ``pdf`` extra. A fresh
 install goes without them; the first PDF index installs them; nothing ever
 falls back quietly (nexus-2fyb). These tests pin the state machine in
 ``nexus.pdf_stack`` against fakes (no generation is built, no network), the
@@ -54,7 +54,7 @@ def stack(monkeypatch: pytest.MonkeyPatch):
 
     class _Stack:
         status = "absent"
-        detail = "docling, MinerU and torch are not installed"
+        detail = "MinerU and torch are not installed"
         plan = pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND)
         installed = 0
         install_error: BaseException | None = None
@@ -94,7 +94,7 @@ def test_the_pdf_extra_holds_exactly_the_stack_and_the_core_holds_none_of_it() -
     assert extra == {canonicalize_name(d) for d in pdf_stack.STACK_DISTS}, extra
     core = names(data["project"]["dependencies"])
     assert not (core & extra), f"the slim install would still carry {sorted(core & extra)}"
-    # pymupdf stays: the formula screen and the doc indexer use it.
+    # pymupdf stays: the doc indexer and the text-only extractor use it.
     assert "pymupdf" in core
     # The suite, CI and `uv sync` keep the stack through the dev group.
     assert "conexus[pdf]" in data["dependency-groups"]["dev"]
@@ -102,7 +102,7 @@ def test_the_pdf_extra_holds_exactly_the_stack_and_the_core_holds_none_of_it() -
 
 def test_the_probe_modules_are_the_import_names_of_the_stack_dists() -> None:
     assert len(pdf_stack.STACK_MODULES) == len(pdf_stack.STACK_DISTS)
-    assert pdf_stack.STACK_MODULES[0] == "docling"  # docling-slim ships `docling`
+    assert pdf_stack.STACK_MODULES[0] == "mineru"
 
 
 # ── state() ──────────────────────────────────────────────────────────────────
@@ -190,7 +190,7 @@ def test_state_never_imports_torch() -> None:
         "from nexus import pdf_stack\n"
         "st = pdf_stack.state()\n"
         "assert st.status in ('present', 'absent', 'broken'), st\n"
-        "heavy = sorted(m for m in ('torch', 'torchvision', 'docling', 'mineru') if m in sys.modules)\n"
+        "heavy = sorted(m for m in ('torch', 'torchvision', 'mineru') if m in sys.modules)\n"
         "assert not heavy, heavy\n"
     )
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)

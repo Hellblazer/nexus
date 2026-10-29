@@ -242,8 +242,8 @@ _build_args=(--source "$BUILD_SOURCE")
 [ -n "$EXTRAS" ] && _build_args+=(--extras "$EXTRAS")
 
 # nexus-jd8fi drift: install what the lock says, not what PyPI says today.
-# Without this the generation resolved mineru 3.4.5 and docling 2.125.0 while
-# uv.lock and every gate on this box ran 3.1.11 and 2.76.0. `uv export` of
+# Without this the generation resolved mineru 3.4.5 while
+# uv.lock and every gate on this box ran 3.1.11. `uv export` of
 # the committed lock (frozen: never re-resolves) becomes a constraints file;
 # the builder hands it to `uv pip install -c`. Only a checkout carries a lock.
 CONSTRAINTS_FILE=""

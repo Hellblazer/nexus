@@ -190,8 +190,8 @@ def shared_venv_problems(spec: dict, script_text: str) -> list[str]:
             problems.append(f"the `uv sync` step must be skipped when F5 took the job, if: {steps[j].get('if')!r}")
 
     uv_steps = [j for j, o in enumerate(steps) if _runs_uv(o)]
-    if len(uv_steps) < 3:
-        problems.append(f"non-vacuity: expected the sync, docling and pytest steps to run uv, found {len(uv_steps)}")
+    if len(uv_steps) < 2:
+        problems.append(f"non-vacuity: expected the sync and pytest steps to run uv, found {len(uv_steps)}")
     for j in uv_steps:
         senv = steps[j].get("env", {}) or {}
         pe = str(senv.get("UV_PROJECT_ENVIRONMENT", ""))

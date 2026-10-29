@@ -7,6 +7,8 @@ store. The table rows each test pins are named in its docstring.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from nexus.plans.answer_shape import (
@@ -15,7 +17,7 @@ from nexus.plans.answer_shape import (
     AnswerShape,
     classify_answer_shape,
 )
-from nexus.plans.coverage_ledger import AssessmentReport, CoverageLedger, CoverageResult, FacetFinding
+from nexus.plans.coverage_ledger import AssessmentReport, CoverageLedger, CoverageResult, FacetFinding, SourceRow
 from nexus.plans.coverage_outcome import decide_outcome, render_insufficient_evidence
 
 
@@ -80,10 +82,19 @@ def test_prose_with_no_covered_facet_but_an_unassessed_one_keeps_the_prose_as_pa
 def test_prose_with_no_covered_facet_and_none_unassessed_is_uncovered() -> None:
     """Sam's ruling (nexus-jypmj.3.12): prose with no covered facet, every facet known, is unavailable and its shape
     is ``uncovered``. (Reached when the skip switch is off or a ledger was built by hand: the boundary skips first.)"""
-    cov = _cov("partial", "unresolved_facets", (UNSUPPORTED, CONTRADICTED))
+    cov = _cov("partial", "unresolved_facets", (UNSUPPORTED, FacetFinding("f3", "unsupported", (), "no_supporting_evidence")))
     v = decide_outcome(cov, AnswerShape.ANSWERED)
     assert v.shape is AnswerShape.UNCOVERED and not v.success and v.no_grow
     assert v.coverage is not None and (v.coverage.state, v.coverage.reason) == ("unavailable", "uncovered")
+
+
+def test_prose_whose_only_settled_facet_is_contradicted_is_a_partial_answer() -> None:
+    """Sam's ruling 2026-10-27 (nexus-jypmj.3.13): a contradicted facet counts toward a usable answer, so the prose
+    is kept behind the notice, which names the contradiction; a success, never grown."""
+    cov = _cov("partial", "unresolved_facets", (UNSUPPORTED, CONTRADICTED))
+    v = decide_outcome(cov, AnswerShape.ANSWERED)
+    assert v.shape is AnswerShape.INSUFFICIENT_EVIDENCE and v.success and v.no_grow
+    assert v.coverage is not None and v.coverage.state == "partial"
 
 
 def test_a_skipped_generation_is_uncovered_failure() -> None:
@@ -145,6 +156,19 @@ def test_a_covered_facet_with_conflicting_evidence_is_named_apart_from_the_unres
     assert prose == "The decision was X." and out.startswith("[insufficient-evidence: 1 unresolved]\n")
     assert "conflict" in head and "f1" in head and "what was decided" in head
     assert "f2 (no supporting evidence found)" in head
+
+
+def test_an_unresolved_named_source_is_disclosed_in_the_notice_and_not_counted_as_a_facet() -> None:
+    """nexus-jypmj.3.17: an ambiguous source blocks no facet, so the partial notice says it was not read."""
+    cov = _cov("partial", "unresolved_facets", (COVERED, UNSUPPORTED))
+    cov = replace(cov, ledger=replace(cov.ledger, sources=(
+        SourceRow("RDR-049", "unresolved", "the source is candidates: two projects carry this number"),
+        SourceRow("RDR-050", "covered"),
+    )))
+    head, _, prose = render_insufficient_evidence(cov, {"f2": "who approved it"}, "prose").partition("\n\n")
+    assert head.startswith("[insufficient-evidence: 1 unresolved]\n") and prose == "prose"
+    assert "RDR-049: the source is candidates: two projects carry this number" in head
+    assert "RDR-050" not in head
 
 
 def test_the_notice_marker_carries_no_facet_text() -> None:

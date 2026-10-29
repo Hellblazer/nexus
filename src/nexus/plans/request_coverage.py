@@ -65,6 +65,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -83,8 +84,10 @@ __all__ = [
     "Ambiguity",
     "Constraint",
     "ExtractionReport",
+    "FAILED_OUTCOMES",
     "Facet",
     "KIND_DECISIONS",
+    "PERSISTENT_FAILURE_THRESHOLD",
     "REQUEST_KINDS",
     "RequestCoverage",
     "SourceHint",
@@ -93,7 +96,9 @@ __all__ = [
     "extraction_enabled",
     "log_fields",
     "normalize_kind",
+    "note_extraction_outcome",
     "project_name_candidates",
+    "reset_extraction_health",
     "structured_extract",
 ]
 
@@ -826,10 +831,16 @@ def _strong_signals(text: str, facet_count: int, listed: bool) -> set[str]:
 
 def _weak_lookup(text: str, facet_count: int, certain: bool) -> bool:
     """A bare question word opening, with nothing stronger: ``lookup`` only for a question that asks ONE thing
-    (at most one facet, and a clause structure that was read). A question with more facets than one is a
-    request for several things, not a lookup, so a lookup plan must not be made eligible for it. A wh-clause
-    joined by ``and <wh-word>`` is a second question that the facet parse keeps inside the one item, so it
-    counts as a second facet here."""
+    (at most one facet, and a clause structure that was read). A wh-clause joined by ``and <wh-word>`` is a
+    second question that the facet parse keeps inside the one item, so it counts as a second facet here.
+
+    The boundary (RDR-232 section 1): a lookup includes several connected facts from one passage of one
+    source; a synthesis gathers aspects across sections, sources or history. This rule cannot see which of
+    the two a question with more than one facet is, since that depends on where the answer sits and the
+    first pass reads only the wording. So it does not guess: more than one facet is ``unknown`` here, the
+    request is sent to the structured extraction (``needs_structured_extract``), and the model, whose prompt
+    states the same boundary, decides. A deterministic ``lookup`` for two facets would override that
+    reading and lock in a wrong shape for every question that reads like a lookup and is not."""
     if facet_count > 1 or not certain or _AND_WH.search(text):
         return False
     lead = text.strip()
@@ -1246,9 +1257,11 @@ DEFAULT_EXTRACT_TIMEOUT_S = 20.0
 #: The model the structured call asks for: an alias (haiku, sonnet, opus) or a model id, passed to the
 #: ``--model`` flag as given. Unset or blank means :data:`DEFAULT_EXTRACT_MODEL`.
 EXTRACT_MODEL_ENV = "NX_ANSWER_STRUCTURED_EXTRACT_MODEL"
-#: The default extraction model (nexus-jypmj.2.8): the cheap tier, measured on 56 calls with no timeout or
-#: error. Always passed explicitly, so ``NX_OPERATOR_MODEL_TIERING`` (which only picks the model of a
-#: dispatch that names none) does not change it; a set ``EXTRACT_MODEL_ENV`` wins.
+#: The default extraction model (nexus-jypmj.2.8): the cheap tier. Measured first on 56 calls with no timeout or
+#: error, then re-taken on 2026-10-28 with the lookup/synthesis wording of nexus-jypmj.13: 98 calls (Haiku 67, Opus 31),
+#: no timeout, error or invalid reply, and all five Phase 2 gate thresholds unchanged (T2
+#: ``nexus/rdr232-jypmj13-remeasure-2026-10-28``). Always passed explicitly, so ``NX_OPERATOR_MODEL_TIERING`` (which
+#: only picks the model of a dispatch that names none) does not change it; a set ``EXTRACT_MODEL_ENV`` wins.
 DEFAULT_EXTRACT_MODEL = "haiku"
 
 def extraction_enabled(environ: Mapping[str, str]) -> bool:
@@ -1304,14 +1317,23 @@ EXTRACT_SCHEMA: dict[str, Any] = {
     },
 }
 
+#: The two kind definitions the prompt shares with RDR-232 section 1's shape table (tests/test_rdr232_lookup_
+#: boundary.py reads the table and fails if either phrase drifts). Sam decided on 2026-10-27 that the boundary
+#: between them is the source and the passage, not the number of facts asked for.
+_LOOKUP_DEFINITION = "a specific fact or small set of facts, including several connected facts from one passage of one source"
+_SYNTHESIS_DEFINITION = "a unified account of multiple requested aspects across sections, sources or history"
+
 _EXTRACT_PROMPT = (
     "Read the question below and return the shape of the answer it asks for. answer_kind is one of: lookup "
-    "(a specific fact), synthesis (a unified account of several aspects), discovery/listing (an inventory), "
-    "comparison, audit, debug, unknown. facets lists, in the question's own words, each topic that needs "
-    "evidence (one entry per requested aspect; never omit a requested aspect). constraints lists, in the "
-    "question's own words, each instruction about how to treat the evidence (cite sources, distinguish dates, "
-    "do not infer something, format limits); a constraint is never also a facet. Use answer_kind unknown when "
-    "the question does not settle one.\n\nQuestion:\n"
+    f"({_LOOKUP_DEFINITION}), synthesis ({_SYNTHESIS_DEFINITION}), discovery/listing (an inventory), "
+    "comparison, audit, debug, unknown. Asking for more than one fact does not make a question a synthesis: "
+    "when one passage of one source answers all of them, it is a lookup; it is a synthesis only when the "
+    "answer must be gathered from different sections, different sources or the history of a thing. facets "
+    "lists, in the question's own words, each fact or topic that needs evidence (one entry per requested "
+    "item; never omit a requested one; the number of facets does not decide the kind). constraints lists, in "
+    "the question's own words, each instruction about how to treat the evidence (cite sources, distinguish "
+    "dates, do not infer something, format limits); a constraint is never also a facet. Use answer_kind "
+    "unknown when the question does not settle one.\n\nQuestion:\n"
 )
 
 #: ``(prompt, schema, *, timeout, usage_sink) -> dict`` : the shape of ``claude_dispatch``.
@@ -1477,3 +1499,68 @@ async def structured_extract(
         coverage, answer_kind=new_kind, kind_decision=decision, facets=facets, facets_certain=certain,  # type: ignore[arg-type]
         extraction=report("ok" if changed else "unchanged"),
     )
+
+
+# ── a persistently failing extraction ────────────────────────────────────────────────────────────────────────
+
+#: Extraction outcomes that mean the call was made and gave nothing usable. ``ok`` and ``unchanged`` are the
+#: working outcomes; ``disabled``, ``not_needed`` and ``skipped_deadline`` made no call and say nothing.
+FAILED_OUTCOMES: frozenset[str] = frozenset({"error", "timeout", "invalid"})
+_WORKING_OUTCOMES: frozenset[str] = frozenset({"ok", "unchanged"})
+
+#: This many failed calls in a row, in one process, make the failure persistent (nexus-jypmj.16). One failure is a
+#: per-request event and stays silent: the request keeps its first-pass kind and the gate fails closed.
+PERSISTENT_FAILURE_THRESHOLD = 3
+
+_health_lock = threading.Lock()
+_consecutive_failures = 0
+_failing_warned = False
+
+
+def note_extraction_outcome(outcome: str, *, gate_enforcing: bool) -> bool:
+    """Count one request's extraction *outcome*; warn once per process when the failures are persistent.
+
+    A failed extraction leaves the request on its first-pass kind and the answer-kind gate keeps enforcing on it
+    (per-request fail-closed is the design). First-pass kinds alone are the regime that failed the held-out
+    lookup measurement, so a process in which the call fails every time (no ``claude`` CLI and no API key, an
+    ``openai_compat`` endpoint that answers outside the schema, a timeout every time) enforces in it with no
+    signal. After :data:`PERSISTENT_FAILURE_THRESHOLD` failures in a row this logs ``answer_kind_gate_extraction_failing``
+    once, the first time that happens while *gate_enforcing* (a gate in shadow loses nothing to it, and does not
+    use the warning up). A working outcome ends the run; an outcome with no call is ignored. Returns whether this
+    call logged the warning. Never raises.
+    """
+    global _consecutive_failures, _failing_warned  # noqa: PLW0603 — process-wide, like the other once-per-process latches
+    with _health_lock:
+        if outcome in _WORKING_OUTCOMES:
+            _consecutive_failures = 0
+            return False
+        if outcome not in FAILED_OUTCOMES:
+            return False
+        _consecutive_failures += 1
+        if _failing_warned or not gate_enforcing or _consecutive_failures < PERSISTENT_FAILURE_THRESHOLD:
+            return False
+        _failing_warned = True
+        failures = _consecutive_failures
+    _log.warning(
+        "answer_kind_gate_extraction_failing",
+        consecutive_failures=failures,
+        last_outcome=outcome,
+        consequence=(
+            "the answer-kind gate is enforcing on first-pass request kinds alone, the regime that lost "
+            "lookup recall in the held-out measurement; the latest extraction calls in this process all failed"
+        ),
+        remedy=(
+            "run `nx doctor` (row 'Answer-kind extraction') to see why; make an LLM backend available "
+            "(the claude CLI, or nx config set anthropic_api_key), or set NX_ANSWER_STRUCTURED_EXTRACT=0 "
+            "to run the gate in shadow, or NX_ANSWER_KIND_ELIGIBILITY=0 to switch it off"
+        ),
+    )
+    return True
+
+
+def reset_extraction_health() -> None:
+    """Forget the failure run and the spent warning (a test hook; the process-wide state is otherwise permanent)."""
+    global _consecutive_failures, _failing_warned  # noqa: PLW0603
+    with _health_lock:
+        _consecutive_failures = 0
+        _failing_warned = False

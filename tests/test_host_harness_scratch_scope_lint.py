@@ -235,8 +235,8 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
         9, "NX_LOCAL+SANDBOX: HOME=\"$HOME_DIR\" (L364, L395) + NX_LOCAL=1 "
            "(L367); the real `_nx store put` / `_nx index md` / `_nx index "
            "pdf` invocations target the scratch HOME's own bundled local "
-           "engine. The opt-in formula-PDF leg (nexus-gqrg0 round 2, "
-           "NX_MVV_FORMULA_PDF_CHECK=1) adds four more, all under the "
+           "engine. The formula-PDF leg (nexus-gqrg0 round 2, default-on in --published mode, "
+           "skippable with NX_MVV_FORMULA_PDF_CHECK=0 and a reason) adds four more, all under the "
            "identical `_nx` wrapper: two `_nx store list` chunk-id "
            "snapshots (before/after the index, a chunk-id-set-diff shape), one `_nx index pdf`, and one `_nx "
            "store get` for the post-hoc extractor-identity read-back. The "
@@ -281,6 +281,13 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
         1, "READ-ONLY: the hit is a docstring naming nx_answer; the script calls only "
            "_nx_answer_request_coverage (no answer, no store_put / index / collection path), reads nx_answer_runs "
            "and the plan list, and refuses to run with NX_ALLOW_PROD_WRITE set.",
+    ),
+    "scripts/bench/rdr232_phase3_measure.py": (
+        1, "READ-ONLY: the hit is live_caller's docstring naming the nexus.mcp.core import; the driver calls "
+           "nx_answer, which writes no catalog or T3 data (no store_put / index / collection path). Its T2 "
+           "writes are the nx_answer_runs telemetry row and, on a library-plan hit, that plan's success or "
+           "failure counter; plan growth (a saved plan) is off by default (--allow-plan-growth opts in), and "
+           "--live is run only on Sam's go (nexus-jypmj.3.10).",
     ),
     "scripts/bench/synthesis_tier_study.py": (
         2, "READ-ONLY: line 238 dispatches summarize/generate/compare/aggregate via "

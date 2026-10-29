@@ -24,8 +24,8 @@ class ExtractionQualityError(NexusError):
 
     Raised by :func:`nexus.pdf_extractor._enforce_extraction_quality` when
     extracted PDF text trips the calibrated whitespace/token-length
-    signals that flag the space-stripped-garbage failure mode (MinerU or
-    Docling completing but producing unsearchable output, e.g.
+    signals that flag the space-stripped-garbage failure mode (an extractor
+    completing but producing unsearchable output, e.g.
     "istheasetofthe"). The documented recovery is to retry with a
     different extractor, or pass ``--allow-degraded-extraction`` to accept
     the degraded output deliberately.
@@ -50,8 +50,7 @@ class UnextractableContentError(NexusError):
     """A source file was opened and read successfully by an extractor but
     produced ZERO usable text (nexus-deyd5) — e.g. an image-only PDF, a
     deliberately blank test fixture, or a PDF whose text layer is damaged
-    (``PDFExtractor._extract_normalized`` / ``_extract_with_docling``,
-    the "produced empty output" hard error nexus-aold added so this never
+    (the "produced empty output" hard error nexus-aold added so this never
     regresses to silent zero-chunk indexing).
 
     nexus-hg2dw extends this to ``prose_indexer.index_prose_file``'s

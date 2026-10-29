@@ -29,6 +29,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
+from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import index_model_for_collection, is_conformant_collection_name
 from nexus.db.limits import QUOTAS
 from nexus.retry import _vector_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
@@ -1175,8 +1176,16 @@ def _catalog_progress(
         write(stripped + "\n")
 
 
-def _register_time_meta(rel_path: str, file_hash: str) -> dict | None:
+#: Sentinel for "the registration's meta has no such key" in a stamp comparison.
+_STAMP_MISSING = object()
+
+
+def _register_time_meta(rel_path: str, file_hash: str, extra: dict | None = None) -> dict | None:
     """Build a register/update-time ``meta`` dict for *rel_path*.
+
+    *extra* (nexus-jypmj.7) carries stamps the caller read from the file's content: today the RDR frontmatter
+    id (:func:`nexus.catalog.rdr_canonical.rdr_frontmatter_meta`). It is merged in last and never replaces
+    the content hash.
 
     nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 3):
     stamps :data:`nexus.catalog.types.NON_EVIDENTIARY_META_KEY` for a
@@ -1196,6 +1205,8 @@ def _register_time_meta(rel_path: str, file_hash: str) -> dict | None:
         meta["content_hash"] = file_hash
     if is_fixture_path(rel_path):
         meta[NON_EVIDENTIARY_META_KEY] = True
+    for key, value in (extra or {}).items():
+        meta.setdefault(key, value)
     return meta or None
 
 
@@ -1530,9 +1541,22 @@ def _catalog_hook(
 
             # Per-file content hash for rename detection (RDR-060 E7)
             try:
-                file_hash = _hl.sha256(abs_path.read_bytes()).hexdigest()
+                raw_bytes = abs_path.read_bytes()
+                file_hash = _hl.sha256(raw_bytes).hexdigest()
             except OSError:
-                file_hash = ""
+                raw_bytes, file_hash = b"", ""
+
+            # nexus-jypmj.7: the RDR's frontmatter id is recorded on the catalog document, synchronously, so
+            # the named-source sibling rule does not wait for the aspect worker. The header is read from the
+            # bytes just hashed; a header that does not parse stamps nothing.
+            rdr_stamp: dict = {}
+            if content_type == "rdr" and raw_bytes:
+                from nexus.catalog import rdr_canonical  # noqa: PLC0415 — deferred: read at call time so a test can replace the stamp
+
+                try:
+                    rdr_stamp = rdr_canonical.rdr_frontmatter_meta(raw_bytes.decode("utf-8"))
+                except UnicodeDecodeError:
+                    rdr_stamp = {}
 
             try:
                 existing = (
@@ -1549,7 +1573,7 @@ def _catalog_hook(
                         "file_path": rel_path,
                         "physical_collection": collection_name,
                         "head_hash": head_hash,
-                        "meta": _register_time_meta(rel_path, file_hash),
+                        "meta": _register_time_meta(rel_path, file_hash, rdr_stamp),
                         "source_mtime": source_mtime,
                     }))
                 else:
@@ -1572,11 +1596,18 @@ def _catalog_hook(
                         bool(file_hash)
                         and existing.meta.get("content_hash", "") != file_hash
                     )
+                    # nexus-jypmj.7: a registration that lacks the RDR frontmatter stamp (made before the stamp
+                    # existed) or carries a different one is written once, so a plain re-index fills it; the
+                    # next run finds it equal and writes nothing.
+                    stamp_stale = any(
+                        existing.meta.get(k, _STAMP_MISSING) != v for k, v in rdr_stamp.items()
+                    )
                     changed = (
                         existing.head_hash != head_hash
                         or existing.physical_collection != collection_name
                         or existing.source_mtime != source_mtime
                         or content_hash_changed
+                        or stamp_stale
                     )
                     if content_type == "rdr" and content_hash_changed:
                         relink_rdr_tumblers.append(existing.tumbler)
@@ -1593,7 +1624,7 @@ def _catalog_hook(
                             "tumbler": str(existing.tumbler),
                             "head_hash": head_hash,
                             "physical_collection": collection_name,
-                            "meta": _register_time_meta(rel_path, file_hash),
+                            "meta": _register_time_meta(rel_path, file_hash, rdr_stamp),
                             "source_mtime": source_mtime,
                         }))
                     file_to_doc_id[abs_path] = str(existing.tumbler)
@@ -2580,6 +2611,11 @@ def index_repository(
                     # nexus-2k66t.4.2: a held PDF was not offered this run; the
                     # next --since-head diff must still contain it.
                     + stats.get("pdf_stack_held", 0)
+                    + stats.get("pdf_mineru_bounds_held", 0)
+                    # nexus-tr1rj.13: PDFs a MinerU stop failed or never reached are retried by
+                    # the next run once the install is repaired; the diff must still contain them.
+                    + stats.get("pdf_mineru_tripped", 0)
+                    + len(stats.get("pdf_mineru_not_attempted_paths") or ())
                 )
                 if _deferred_or_failed_files:
                     _log.warning(
@@ -2978,16 +3014,19 @@ def _repo_pdf_extractor(repo: Path) -> str:
     """The repo's ``pdf.extractor`` setting (RDR-237), for the stack gates and the PDF indexer.
 
     A ``[pdf]`` integer key that holds no integer raises ``PdfConfigError`` in the config loader.
-    The repo walk must not stop code and prose indexing for it, so it is logged and ``auto``
-    stands in: the extractor meets the same error on the first PDF it extracts and fails that
-    file, naming the key, exactly as before this read existed."""
+    The read itself must not stop the walk, so it is logged and the default extractor stands in.
+    Before nexus-tr1rj.24 the walk then indexed code and prose and aborted at the first PDF, when
+    extraction met the same error after that PDF's catalog row was written. Now the MinerU bounds
+    check in ``_hold_pdfs_without_stack`` finds the same error first: the PDFs that need indexing
+    are held (no catalog row, no chunk) and listed, the code, prose and RDR files are indexed,
+    and ``nx index repo`` exits non-zero at the end."""
     from nexus.config import PdfConfigError, get_pdf_extractor  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
 
     try:
         return get_pdf_extractor(repo)
     except PdfConfigError as exc:
         _log.warning("repo_pdf_extractor_config_unreadable", repo=str(repo), error=str(exc))
-        return "auto"
+        return DEFAULT_EXTRACTOR
 
 
 def _hold_pdfs_without_stack(
@@ -3013,6 +3052,12 @@ def _hold_pdfs_without_stack(
     the PDF fails, the run's other files do not. A network or installer failure
     exits at once, before anything is written.
 
+    An unusable MinerU time limit (``pdf_stack.mineru_bounds_problem``, nexus-tr1rj.24) takes the
+    same path ahead of the stack question: the PDFs that need extracting (all of them without a
+    *probe*) are returned held, each named in an ERROR line and the skipped record, and the CLI
+    ends the run non-zero once code, prose and RDR files are indexed. PDFs the *probe* clears are
+    not held.
+
     *already_held* is the set an earlier call of this run kept out: the late
     recheck passes it so the skipped record is the union (``record_skipped``
     replaces a repo's record) and the refusal line, already printed for those,
@@ -3020,11 +3065,31 @@ def _hold_pdfs_without_stack(
     """
     from nexus import pdf_stack  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
 
+    # nexus-tr1rj.24: an unusable MinerU time limit holds every PDF that needs extracting, before
+    # any is registered or written (the check inside extraction comes after the catalog row), and
+    # the run goes on with the rest and ends non-zero (``pdf_mineru_bounds_held``): the same rule
+    # as a missing stack and as a MinerU stop (nexus-tr1rj.13), a MinerU problem stops MinerU work
+    # and keeps the unrelated work. A walk whose PDFs are all current still passes.
+    _bounds_problem = pdf_stack.mineru_bounds_problem(extractor)
+    _needing: list[Path] | None = None
+    if _bounds_problem is not None:
+        _needing = list(pdf_paths) if probe is None else probe(pdf_paths)
+        if _needing:
+            for path in _needing:
+                _log.error(
+                    "pdf_not_indexed_mineru_bounds", path=str(path), repo=str(repo), problem=_bounds_problem,
+                )
+            pdf_stack.record_skipped([*already_held, *_needing], repo=repo)
+            if on_phase is not None and not already_held:
+                on_phase(
+                    f"{len(_needing)} PDF(s) NOT indexed this run (code and prose proceed): {_bounds_problem}"
+                )
+            return list(_needing)
     if probe is not None and pdf_stack.needs_stack(extractor) and not pdf_stack.state().present:
         # nexus-2k66t.4.8: the stack is absent, so settle first whether any PDF
         # needs extracting. A walk whose PDFs are all indexed and unchanged
         # must not cost the install; the PDFs the probe clears are not held.
-        pdf_paths = probe(pdf_paths)
+        pdf_paths = _needing if _needing is not None else probe(pdf_paths)
         if not pdf_paths:
             pdf_stack.record_skipped([*already_held], repo=repo)
             return []
@@ -3082,6 +3147,58 @@ def _contain_extraction_quality_gate(
             remedy=f"nx index pdf --allow-degraded-extraction {file}",
         )
         failed.append(str(file))
+        return 0
+
+
+class _MineruStop:
+    """What one ``nx index repo`` run knows about a MinerU stop (nexus-tr1rj.13).
+
+    A MinerU breaker trip or machine-resource error names the install or the machine, not the file,
+    so the PDF loop stops attempting PDFs once one is seen (code, prose and RDR files are other
+    loops and keep running). Shared by every worker of the PDF loop, so every write holds *lock*.
+    *tripped* are the files that raised it (more than one only when a concurrent worker was already
+    inside MinerU), *not_attempted* the PDFs the loop reached afterwards, *stopped_at* the first
+    file that tripped, *reason* its ``(what, detail, remedy)``.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.tripped: list[str] = []
+        self.not_attempted: list[str] = []
+        self.stopped_at: str | None = None
+        self.reason: tuple[str, str, str] | None = None
+
+
+def _contain_mineru_stop(fn: "Callable[[], int]", file: "Path", stop: _MineruStop) -> int:
+    """Run per-file PDF index ``fn``; on a MinerU stop (:data:`nexus.pdf_extractor.MINERU_RUN_STOPPING`),
+    record *file* as the one that tripped it and return 0 instead of propagating. Once a stop is
+    recorded, every later PDF is added to ``stop.not_attempted`` and ``fn`` is not called.
+
+    Pre-fix, ``run_file_loop``'s first-exception-cancels-all contract meant one trip aborted the
+    whole run (every code, prose and RDR file not yet started, with no list of what was skipped).
+    Same containment shape as :func:`_contain_extraction_quality_gate`; unlike it, the stop also
+    short-circuits the remaining PDFs, because each would trip the same breaker after its own
+    timeouts. Any other exception propagates unchanged.
+    """
+    from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
+
+    with stop.lock:
+        if stop.stopped_at is not None:
+            stop.not_attempted.append(str(file))
+            return 0
+    try:
+        return fn()
+    except MINERU_RUN_STOPPING as exc:
+        reason = mineru_stop_reason(exc)
+        with stop.lock:
+            stop.tripped.append(str(file))
+            if stop.stopped_at is None:
+                stop.stopped_at = str(file)
+                stop.reason = reason
+        _log.error(
+            "index_file_mineru_stopped",
+            file=str(file), error_type=type(exc).__name__, detail=reason[1], remedy=reason[2],
+        )
         return 0
 
 
@@ -3300,7 +3417,7 @@ def _index_pdf_file(
     hooks: "HookRegistry | None" = None,
     batcher: object | None = None,
     force_re_embed: bool = False,
-    extractor: str = "auto",
+    extractor: str = DEFAULT_EXTRACTOR,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
@@ -5510,7 +5627,13 @@ def _run_index(
     _pdf_held: list[Path] = []
     # RDR-237: the repo's ``pdf.extractor``, read once for the gates below and every PDF handed
     # to ``_index_pdf_file``. ``pymupdf`` needs none of the stack, so the gates let it by.
-    _pdf_extractor = _repo_pdf_extractor(repo) if pdf_files else "auto"
+    _pdf_extractor = _repo_pdf_extractor(repo) if pdf_files else DEFAULT_EXTRACTOR
+    # nexus-tr1rj.24: an unusable MinerU time limit holds the PDFs that need extracting, so a held
+    # PDF is a bounds hold (not a missing stack) exactly when this is set: the bounds question is
+    # asked first by the hold, and it returns held only for it.
+    from nexus import pdf_stack as _bounds_pdf_stack  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
+
+    _mineru_bounds_problem = _bounds_pdf_stack.mineru_bounds_problem(_pdf_extractor) if pdf_files else None
     if pdf_files:
         _pdf_held = _hold_pdfs_without_stack(
             [f for _, f in pdf_files], repo, on_phase=on_phase,
@@ -6145,7 +6268,13 @@ def _run_index(
     if _dispatch_pdf and docs_col is not None and not (force or force_re_embed):
         from nexus import pdf_stack as _late_pdf_stack  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
 
-        if _late_pdf_stack.needs_stack(_pdf_extractor) and not _late_pdf_stack.state().present:
+        # nexus-tr1rj.24: the early probe is the catalog fence, which has no embedding model. With an
+        # unusable MinerU time limit a PDF stale only by model passed it as current and would be
+        # extracted (and refused per file by index_pdf, after code and prose were written), so
+        # the recheck runs for a bounds problem as well as for a missing stack.
+        if _mineru_bounds_problem is not None or (
+            _late_pdf_stack.needs_stack(_pdf_extractor) and not _late_pdf_stack.state().present
+        ):
             def _late_pdf_is_stale(f: Path) -> bool:
                 try:
                     digest = _file_sha256(f)
@@ -6857,6 +6986,8 @@ def _run_index(
     # cancels-all contract. Collected here so the summary + stats key
     # below can report it (and index_repo_cmd can drive a non-zero exit).
     _quality_gate_failed: list[str] = []
+    # nexus-tr1rj.13: a MinerU stop is contained the same way, and also stops the remaining PDFs.
+    _mineru_stop = _MineruStop()
 
     def _index_one_pdf(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
@@ -6864,21 +6995,22 @@ def _run_index(
         # nexus-wi1uv: quality-gate containment nests inside — extraction
         # (where the gate fires) happens before the vector upload (where a
         # transient 5xx fires), so the inner wrapper sees it first.
-        return _contain_transient_upsert(lambda: _contain_extraction_quality_gate(lambda: _index_pdf_file(
-            file, repo, docs_collection, docs_model, docs_col, db,
-            voyage_key, git_meta, now_iso, score,
-            force=force,
-            force_re_embed=force_re_embed,
-            timeout=read_timeout_seconds,
-            chunk_chars=tuning.pdf_chunk_chars,
-            embed_fn=_embed_fn,
-            stage_timers=timers,
-            doc_id_resolver=_doc_id_resolver,
-            staleness_cache=docs_staleness,
-            hooks=hooks,
-            batcher=_batcher,
-            extractor=_pdf_extractor,
-        ), file, _quality_gate_failed), file)
+        return _contain_transient_upsert(lambda: _contain_extraction_quality_gate(
+            lambda: _contain_mineru_stop(lambda: _index_pdf_file(
+                file, repo, docs_collection, docs_model, docs_col, db,
+                voyage_key, git_meta, now_iso, score,
+                force=force,
+                force_re_embed=force_re_embed,
+                timeout=read_timeout_seconds,
+                chunk_chars=tuning.pdf_chunk_chars,
+                embed_fn=_embed_fn,
+                stage_timers=timers,
+                doc_id_resolver=_doc_id_resolver,
+                staleness_cache=docs_staleness,
+                hooks=hooks,
+                batcher=_batcher,
+                extractor=_pdf_extractor,
+            ), file, _mineru_stop), file, _quality_gate_failed), file)
 
     _pdf_written = run_file_loop(
         _dispatch_pdf, _index_one_pdf, concurrency=_concurrency,
@@ -6906,6 +7038,23 @@ def _run_index(
                 + ("…" if len(_quality_gate_failed) > 5 else "")
                 + " — retry with 'nx index pdf --allow-degraded-extraction "
                 "<file>' to accept the extraction deliberately."
+            )
+
+    if _mineru_stop.stopped_at is not None:
+        # nexus-tr1rj.13: the PDF loop stopped at a MinerU breaker trip / machine-resource error.
+        # Code, prose and RDR files are unaffected; index_repo_cmd lists the PDFs not attempted
+        # and ends non-zero once the rest of the run has finished.
+        _stop_what, _stop_detail, _stop_remedy = _mineru_stop.reason or ("MinerU stopped", "", "")
+        _log.error(
+            "index_pdf_mineru_stopped",
+            stopped_at=_mineru_stop.stopped_at, tripped=len(_mineru_stop.tripped),
+            not_attempted=len(_mineru_stop.not_attempted),
+        )
+        if on_phase is not None:
+            on_phase(
+                f"WARNING: {_stop_what} on {Path(_mineru_stop.stopped_at).name} ({_stop_detail}); "
+                f"{len(_mineru_stop.not_attempted)} remaining PDF(s) not attempted this run "
+                f"(code, prose and RDR files proceed). {_stop_remedy}"
             )
 
     # Index RDR markdown files → rdr__ (nexus-3lswy: 4th run_file_loop
@@ -7349,7 +7498,7 @@ def _run_index(
     # discarding already-staged-but-unflushed chunks (ChunkBatcher has no
     # __del__/atexit) and surfacing as an uncaught traceback instead of a
     # clean CLI exit — reachable on a routine corpus shape (a scanned-PDF
-    # archive: the default extractor never runs OCR, MinerU is opt-in).
+    # archive read while MinerU is missing or failing).
     # "Attempted" is the aggregate across all 4 categories, not just PDF —
     # a run-level verdict, matching how the skip count itself is already
     # aggregated via the shared _on_skip callback.
@@ -7576,9 +7725,30 @@ def _run_index(
         # index_repo_cmd uses this to drive a non-zero exit after
         # post-processing completes.
         "pdf_quality_gate_failed": len(_quality_gate_failed),
+        # nexus-tr1rj.13: a MinerU breaker trip / machine-resource error stopped the PDF loop.
+        # ``pdf_mineru_stop`` is None for a run that saw none; otherwise the first file that tripped
+        # and the words index_repo_cmd prints. The PDFs reached afterwards are listed, not indexed.
+        "pdf_mineru_tripped": len(_mineru_stop.tripped),
+        "pdf_mineru_stop": (
+            {
+                "file": _mineru_stop.stopped_at,
+                "what": (_mineru_stop.reason or ("", "", ""))[0],
+                "detail": (_mineru_stop.reason or ("", "", ""))[1],
+                "remedy": (_mineru_stop.reason or ("", "", ""))[2],
+            }
+            if _mineru_stop.stopped_at is not None else None
+        ),
+        "pdf_mineru_not_attempted_paths": sorted(_mineru_stop.not_attempted),
         # nexus-2k66t.4.2: PDFs held back because the PDF stack is missing and
         # the install was refused. index_repo_cmd exits 69 over a non-zero count.
-        "pdf_stack_held": len(_pdf_held),
+        "pdf_stack_held": 0 if _mineru_bounds_problem is not None else len(_pdf_held),
+        # nexus-tr1rj.24: PDFs held because the MinerU time limit is unusable (and the problem, in
+        # the words the extraction gives). index_repo_cmd lists them and exits non-zero.
+        "pdf_mineru_bounds_held": len(_pdf_held) if _mineru_bounds_problem is not None else 0,
+        "pdf_mineru_bounds_problem": _mineru_bounds_problem if _pdf_held else None,
+        "pdf_mineru_bounds_held_paths": (
+            sorted(str(p) for p in _pdf_held) if _mineru_bounds_problem is not None else []
+        ),
         # nexus-4s1ww / GH #1432: count of files whose chunk-batch flush
         # was REJECTED this run (ChunkBatcher.failed_files minus the throttled
         # ones — what is left after the bisect-retry, see chunk_batcher.py).

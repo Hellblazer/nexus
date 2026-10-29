@@ -16,7 +16,7 @@
 #   2. one platform unresolvable: FAILED, the target named, the others still run;
 #   3. a compile that exits 0 with an empty result, or only half the pins: FAILED;
 #   4. a torch backend that does not take effect (cu130/cu126 resolve +cpu): FAILED;
-#   5. a [pdf] compile without docling-slim or without mineru: FAILED;
+#   5. a [pdf] compile without pdftext or without mineru: FAILED;
 #   6. the macOS 13 control resolving (its own "floor moved" wording), failing for
 #      another reason, or failing mentioning onnxruntime without uv's platform-tag
 #      text: FAILED;
@@ -78,8 +78,8 @@ if [ -n "${STUB_EMPTY:-}" ]; then : >"$out"; exit 0; fi
 {
   # A real lock compiles to ~130 pins (default) and ~210 ([pdf]).
   total="${STUB_PINS:-230}"
-  if grep -q docling-slim "$req"; then
-    echo "docling-slim==2.0"
+  if grep -q mineru "$req"; then
+    [ -n "${STUB_NO_PDFTEXT:-}" ] || echo "pdftext==0.6.3"
     [ -n "${STUB_NO_MINERU:-}" ] || echo "mineru==3.0"
   fi
   i=0; while [ $i -lt "$total" ]; do echo "pkg$i==1.0"; i=$((i + 1)); done
@@ -87,7 +87,6 @@ if [ -n "${STUB_EMPTY:-}" ]; then : >"$out"; exit 0; fi
     if [ -n "${STUB_CUDA_AS_CPU:-}" ]; then echo "torch==2.8.0+cpu"; else echo "torch==2.8.0+$tb"; fi
   fi
 } >"$out"
-if [ -n "${STUB_NO_DOCLING:-}" ]; then grep -v '^docling-slim==' "$out" >"$out.tmp"; mv "$out.tmp" "$out"; fi
 exit 0
 STUB
 chmod +x "$SHIMS/uv"
@@ -125,13 +124,13 @@ expect_lacks "no GPU backend on a default-set compile" "$defaults" "--torch-back
 expect_lacks "no torch backend on windows/macOS" "$(grep -E 'PLAT=(x86_64-pc-windows-msvc|aarch64-apple-darwin)' "$ARGV_LOG")" "--torch-backend"
 reqs="$(cat "$REQ_COPY"/* 2>/dev/null)"
 expect_has "requirements include a runtime dependency" "$reqs" "onnxruntime"
-expect_has "the pdf variant includes the PDF stack" "$reqs" "docling-slim"
+expect_has "the pdf variant includes the PDF stack" "$reqs" "mineru"
 expect_lacks "requirements carry no uv index or sources" "$reqs" "download.pytorch.org"
 expect_lacks "requirements carry no tool.uv table" "$reqs" "tool.uv"
 # The default install must not carry the pdf stack, or "default" would equal "pdf".
 default_in=""
 for f in "$REQ_COPY"/default.in*; do [ -e "$f" ] && { default_in="${f##*/}"; break; }; done
-expect_lacks "the default requirements omit the PDF stack" "$(cat "$REQ_COPY/$default_in")" "docling-slim"
+expect_lacks "the default requirements omit the PDF stack" "$(cat "$REQ_COPY/$default_in")" "mineru"
 
 # ── 2. one platform unresolvable ─────────────────────────────────────────────
 echo "Test 2: an unresolvable platform fails the gate and is named"
@@ -169,14 +168,14 @@ expect_lacks "the cpu targets are not blamed" "$out" "FAIL linux-x86_64-py3.12-c
 expect_has "exit 1" "$out" "rc=1"
 
 # ── 5. the pdf stack must be in every pdf compile ────────────────────────────
-echo "Test 5: a pdf compile without mineru or without docling-slim fails"
+echo "Test 5: a pdf compile without mineru or without pdftext fails"
 out="$(run_gate "$GATE" STUB_NO_MINERU=1)"
 expect_has "missing mineru fails the pdf cells" "$out" "CONSTRAINTS RESOLVE GATE FAILED — 14 of 22 unresolvable"
 expect_has "says the pdf stack is missing" "$out" "the [pdf] stack is missing"
 expect_has "names the mineru pattern" "$out" "/^mineru==/"
 expect_lacks "the default cells are not blamed" "$out" "FAIL windows-x64-py3.12/default"
-out="$(run_gate "$GATE" STUB_NO_DOCLING=1)"
-expect_has "missing docling-slim fails the pdf cells" "$out" "none matches /^docling-slim==/"
+out="$(run_gate "$GATE" STUB_NO_PDFTEXT=1)"
+expect_has "missing pdftext fails the pdf cells" "$out" "none matches /^pdftext==/"
 expect_has "exit 1" "$out" "rc=1"
 
 # ── 6. the negative control ──────────────────────────────────────────────────

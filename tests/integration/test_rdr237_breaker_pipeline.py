@@ -55,7 +55,7 @@ class _TrippingExtractor(_FakeExtractor):
 
     trip_after: int | None = None
 
-    def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+    def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                 allow_degraded=False, on_heartbeat=None):
         if self.trip_after is None:
             return super().extract(pdf_path, extractor=extractor, on_page=on_page)
@@ -140,7 +140,7 @@ def test_a_breaker_trip_fails_the_row_keeps_the_buffer_and_a_rerun_resumes(
 
 
 class _FailingMineruExtractor(PDFExtractor):
-    """The real ``PDFExtractor`` (ladder, breaker window, ``_route_to_mineru``) over a fake MinerU.
+    """The real ``PDFExtractor`` (ladder, breaker window, ``_extract_with_mineru_guarded``) over a fake MinerU.
 
     Pages named in ``failing`` (1-based) fail both rungs with one class; every other page returns
     its line. The earlier test fakes ``extract`` wholesale, so it cannot see what ``extract`` does
@@ -181,9 +181,8 @@ def test_the_auto_path_trip_keeps_the_buffer_without_the_window_and_a_rerun_comp
     every = [_sha(x) for x in lines]
 
     with contextlib.ExitStack() as routed:
-        # A formula-routed PDF: extract(extractor="auto") takes _route_to_mineru, the hop that
+        # The default extractor takes _extract_with_mineru_guarded, the hop that
         # used to wrap the breaker in a RuntimeError.
-        routed.enter_context(patch("nexus.pdf_extractor._has_formulas_quick", return_value=10))
         routed.enter_context(patch("nexus.pdf_extractor.do_parse", object()))
         routed.enter_context(patch("nexus.pdf_stack.require"))
         routed.enter_context(patch("nexus.config.get_mineru_page_batch", return_value=1))

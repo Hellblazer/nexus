@@ -2923,8 +2923,15 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     real ``claude_dispatch``, except the Phase 3 coverage assessment (an ``operator_check`` call), which is refused
     the same way. A test about the extraction patches ``nexus.operators.dispatch.claude_dispatch``
     itself, which replaces this guard for the test. The switches are cleared so a developer's exported
-    ``NX_ANSWER_KIND_ELIGIBILITY=0``, ``NX_ANSWER_STRUCTURED_EXTRACT=0`` or ``NX_ANSWER_COVERAGE=0`` cannot change what a test sees, and the
-    process-wide memos of the gate (library check, warnings) start empty."""
+    ``NX_ANSWER_KIND_ELIGIBILITY=0`` or ``NX_ANSWER_STRUCTURED_EXTRACT=0`` cannot change what a test sees, and the
+    process-wide memos of the gate (library check, warnings) start empty.
+
+    ``NX_ANSWER_COVERAGE`` is the one switch the suite PINS (to ``0``) instead of clearing (nexus-jypmj.17). The
+    shipped default is ON, and a unit test that drives ``nx_answer`` over its own operator stubs would otherwise
+    reach the coverage boundary on every run: the refusal below would turn each into a failed assessment (state
+    ``unassessed``, an extra call per stream), changing outputs that hundreds of tests assert on for no reason of
+    theirs. A test about the boundary opts in with ``monkeypatch.setenv("NX_ANSWER_COVERAGE", "1")``, or
+    ``delenv`` to read the shipped default; the refusal below stays as the backstop for those tests."""
     import functools  # noqa: PLC0415 — test-only import
 
     from nexus.operators import dispatch as _dispatch  # noqa: PLC0415 — test-only import
@@ -2933,7 +2940,7 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.delenv("NX_ANSWER_STRUCTURED_EXTRACT", raising=False)
     monkeypatch.delenv("NX_ANSWER_KIND_ELIGIBILITY", raising=False)
-    monkeypatch.delenv("NX_ANSWER_COVERAGE", raising=False)
+    monkeypatch.setenv("NX_ANSWER_COVERAGE", "0")
     real = _dispatch.claude_dispatch
 
     @functools.wraps(real)
@@ -2957,6 +2964,11 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     _eligibility.reset_library_memo()
     _eligibility._warned_libraries.clear()
     _switches.reset_warned()
+    # nexus-jypmj.16: the guard above makes every extraction in the suite fail (outcome ``error``), which is the
+    # failure run the process-level warning counts; each test starts with no run counted and the warning unspent.
+    from nexus.plans import request_coverage as _request_coverage  # noqa: PLC0415 — test-only import
+
+    _request_coverage.reset_extraction_health()
 
 
 @pytest.fixture(autouse=True)
@@ -4600,9 +4612,8 @@ def _make_type3_pdf(path: Path) -> None:
     - Object 6 is the CharProcs stream for 'A' (d0 + filled box)
     - Object 4 is the page content stream (draws 'A' using /F1)
 
-    Docling handles Type3 fonts via its own text extraction layer.
     get_text() on a Type3 glyph returns '' or 'A' depending on pymupdf
-    version — used by pymupdf_normalized fallback if Docling fails.
+    version.
     """
     glyph_stream = b"100 0 d0\n0 0 100 100 re f\n"
     content_stream = b"BT /F1 12 Tf 100 700 Td (A) Tj ET\n"
@@ -4716,73 +4727,6 @@ def make_pg_bundle_txz():
         return archive
 
     return _factory
-
-
-# ── docling model availability (nexus-c7gnx) ─────────────────────────────────
-#
-# The docling PDF extractor loads its layout + TableFormer models from the
-# HuggingFace cache; when they are absent (offline, cold cache) docling raises
-# LocalEntryNotFoundError and the extractor SILENTLY falls back to PyMuPDF
-# (extraction_method='pymupdf_normalized'). Tests that assert
-# extraction_method=='docling' then fail with a confusing assertion rather than
-# a clear "models unavailable" signal. CI pre-fetches the models and HARD-FAILS
-# if it cannot (see .github/workflows/ci.yml), so in CI the models are always
-# present and these guards never skip. The skip only fires on a local run with a
-# cold HF cache — turning a baffling fallback-assertion failure into a clean skip.
-
-
-@pytest.fixture(scope="session")
-def docling_available(tmp_path_factory: pytest.TempPathFactory) -> bool:
-    """True iff docling actually performs the extraction (models present).
-
-    Faithful probe: docling loads models lazily at convert() time, so we run a
-    real extraction on a tiny generated PDF and check the SAME signal the tests
-    assert (extraction_method == 'docling'). A cold/offline model cache makes the
-    extractor fall back to PyMuPDF, which this detects as unavailable.
-
-    Known limitation: the probe CANNOT distinguish "models unavailable"
-    (environmental, skipping is correct) from "docling regressed in CODE so the
-    extractor fell back" (a real bug) — both surface as extraction_method !=
-    'docling'. This is acceptable because CI does NOT rely on the skip: the
-    pre-fetch step (scripts/ci_warm_docling.py) runs this same probe and
-    HARD-FAILS the job, so a docling code regression goes CI-red at pre-fetch.
-    The skip is a local-developer convenience only; see require_docling.
-    """
-    try:
-        import pymupdf
-
-        probe = tmp_path_factory.mktemp("docling-probe") / "probe.pdf"
-        doc = pymupdf.open()
-        page = doc.new_page()
-        page.insert_text((72, 72), "docling availability probe")
-        doc.save(str(probe))
-        doc.close()
-
-        from nexus.pdf_extractor import PDFExtractor
-
-        result = PDFExtractor().extract(probe)
-        return result.metadata.get("extraction_method") == "docling"
-    except Exception:
-        return False
-
-
-@pytest.fixture
-def require_docling(docling_available: bool) -> None:
-    """Skip the requesting test when docling did not perform the extraction.
-
-    Composes with the CI pre-fetch hard-fail: in CI the models are guaranteed
-    present so this never skips; locally it skips cleanly instead of failing on
-    the silent PyMuPDF fallback.
-    """
-    if not docling_available:
-        pytest.skip(
-            "docling did not perform the extraction. Locally this almost always "
-            "means a cold/offline HuggingFace model cache; it can ALSO indicate a "
-            "docling regression. CI does not rely on this skip — its pre-fetch step "
-            "runs the same probe and HARD-FAILS (red), which is what distinguishes a "
-            "genuine regression from a missing local cache. This skip only fires on "
-            "a local run."
-        )
 
 
 # --- nexus-1odsl: reap test daemons the suite leaked --------------------------

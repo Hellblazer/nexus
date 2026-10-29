@@ -35,8 +35,9 @@ On 2026-10-26 and 2026-10-27 Sam named three failures, all traced to
 Docling: extraction blocks for hours for reasons nobody can see, the parse
 of math and scanned papers is bad, and when extraction fails there is no
 fallback. He chose to remove Docling and make MinerU the only extractor,
-with a fallback that works one page at a time so a document always
-finishes. This RDR designs that.
+with a fallback that works one page at a time so a document finishes unless
+the install or the machine is failing (the systemic-failure rule). This RDR
+designs that.
 
 ### Enumerated gaps to close
 
@@ -263,10 +264,10 @@ is a `RuntimeError` (`:215`), `MineruMachineResourceError` is a plain `Exception
 (`pdf_extractor.py:165`).
 The quality gate passes an empty text without judging it
 (`pdf_extractor.py:1273-1281`). The Docling doctor row lists `cv2`, `torch` and
-`torchvision` (`health.py:2774-2776`). These six call sites require or install the
-PDF stack before any extractor runs, and RF-16 adds two more (`pdf_extractor.py:1510`,
-`doc_indexer.py:2742`, `commands/index.py:3177` and `:3221`, `commands/dt.py:1098`
-and `:1990`). The page count comes from `len(pdf_info)` (`pdf_extractor.py:2957`).
+`torchvision` (`health.py:2774-2776`). Six call sites require or install the
+PDF stack before any extractor runs (`pdf_extractor.py:1510`, `doc_indexer.py:2742`,
+`commands/index.py:3177` and `:3221`, `commands/dt.py:1098` and `:1990`), and RF-16
+adds two more (`indexer.py:3010`, `commands/collection.py:1234`): eight in all. The page count comes from `len(pdf_info)` (`pdf_extractor.py:2957`).
 `git grep -il docling` finds it in five `.github` files, six under `scripts/`
 (outside `scripts/spikes` and `scripts/experiments`; corrected in RF-16), 24 under
 `src/`, nine docs
@@ -290,9 +291,24 @@ are on the extraction path: `indexer.py:3010` (`nx index repo`) and
 `meta` with `jsonb_concat` and never removes a key
 (`CatalogRepository.java:2102-2109`, nexus-ke45f). `prime-mineru` runs only in
 the nightly gate (`local-service-gate-nightly.yml:346`), and MinerU end-to-end
-coverage belongs to the release shakedown's step 3b (nightly lines 358-368,
-nexus-jy4hd). `git grep -il docling` counts 24 files under `src/` and six under
-`scripts/` (outside spikes and experiments), not RF-15's 31 and seven.
+coverage belongs to the release's post-publish run of `fresh-install-mvv.sh --published`,
+whose formula-PDF check is default-on and required (release skill Step 11c, nexus-tr1rj.20);
+the shakedown step that once held it was deleted (the decision is recorded in the
+nightly gate's slow-marked step comment, nexus-jy4hd). `git grep -il docling` counts 24 files under `src/` and six under
+`scripts/` (outside spikes and experiments); the T2 record of RF-15 states 31 and seven,
+and RF-15's text above carries the corrected counts.
+
+**RF-17 (Verified, MVV; T2 `nexus_rdr/237-mvv-2026-10-28`).** On develop
+`7e749db83`, in a virgin HOME with Docling not importable, the default extractor
+finished every run on the laptop and on chas (`lab-m`, CPU only). The 19-page scan
+took 12.5 s per page on the laptop on a cold cache (58 s on chas). The 300-page
+manual took 1.42 s per page on the laptop and 3.2 s on chas. The longest gap between
+progress writes was 180 s, on the forced timeouts; no run tripped the breaker. A forced
+rung-1 failure settled `mineru-no-formula`. A forced rung-1 and rung-2 timeout settled
+`pymupdf-text` on a page with a text layer and `unextracted` on the scan, which has no
+text layer on any page. The 30-page Grossberg & Stone scan (RF-1) finished on both
+hosts with no degraded page and gave 17 of its 20 numbered equations as LaTeX on both,
+the same 17 RF-1 found (equations 11, 12 and 20 are the misses).
 
 ### Critical Assumptions
 
@@ -362,9 +378,17 @@ buffer, and chunks of them that already reached T3 stay there, as an interrupted
 run's do; the pages counted toward the trip are held until the window resolves
 and are dropped, so none is stored as degraded text. A rerun after the install is
 repaired does not write the kept pages again, but MinerU still runs over every
-earlier page. Under `nx index pdf --dir` a trip stops the whole run, since every later PDF
+earlier page. A `--extractor pymupdf` rerun over that buffer starts clean instead (Sam
+delegated, 2026-10-28): it wipes the kept pages and extracts every page from the text
+layer, so the document is uniformly text-only and recorded `pymupdf`, never a
+mixture. Under `nx index pdf --dir` a trip stops the whole run, since every later PDF
 would trip it again after its own timeouts: the remaining PDFs are listed as not
-attempted and the run exits non-zero. A document whose every
+attempted and the run exits non-zero. The rule (Sam delegated, 2026-10-28): a trip, and
+`MineruMachineResourceError`, name the machine, so they stop MinerU work and keep
+unrelated work. `nx dt index` skips the remaining PDF records and lists them as not
+attempted while markdown and web records run; `nx index repo` contains the trip like the
+quality gate, lists the PDFs it did not reach, and keeps code, prose and RDR files
+running. A document whose every
 page is `unextracted` also fails with a named reason rather than indexing nothing.
 
 Docling is removed: code, dependency, configuration value, CLI choice, CI steps,
@@ -452,7 +476,9 @@ A new setting, `pdf.ladder_breaker` (a `PdfConfig` field, default 3), is the
 systemic-failure threshold: 0 turns the rule off, and any other value below 3, or
 a value that is not an integer, warns at load and falls back to 3, as the loader
 does for the other keys, so the breaker never preempts the server restart.
-`--on-formula-oom` is retired, since the ladder handles that case.
+`--on-formula-oom` is retired, since the ladder handles that case; the flag stays
+accepted and ignored for one release, with a notice (Sam, nexus-tr1rj.12), and is
+hidden from `--help`.
 
 **`pymupdf`, the explicit text-only extractor (Sam, 2026-10-27).** For a host that
 cannot run MinerU, `--extractor pymupdf` (or `pdf.extractor: pymupdf`) runs only
@@ -466,7 +492,8 @@ and `:1990`, `indexer.py:3010` for `nx index repo`, and
 `commands/collection.py:1234` for `nx collection reindex`; RF-16) take the
 extractor and neither require nor install the stack for `pymupdf`, and it skips
 the MinerU server probe (`commands/index.py:3242`). It is never chosen
-automatically.
+automatically. `nx dt index` and `nx dt capture` read `pdf.extractor` when no flag is
+given, as `nx index pdf` does (Sam delegated, 2026-10-28).
 
 **No MinerU at all.** With the default `mineru`, a missing MinerU fails the run
 at once and names both fixes: install the PDF stack (`pdf_stack` already words
@@ -556,8 +583,8 @@ the install, CI and tests; Docling's whole-document convert stays silent.
 - A document finishes unless the install or machine is failing; degraded pages
   are named and countable.
 - The install loses Docling and its models; PR CI loses the Docling priming action
-  and its non-vacuity step, with MinerU end-to-end coverage left in the release
-  shakedown and the nightly gate.
+  and its non-vacuity step, with MinerU end-to-end coverage left in the release's
+  post-publish formula-PDF check (required) and the nightly gate.
 
 ### Risks and Mitigations
 
@@ -569,8 +596,8 @@ the install, CI and tests; Docling's whole-document convert stays silent.
   pin; the MVV settles a page on rung 2 on the laptop.
 - **Risk**: users scripted `--extractor docling` or `--on-formula-oom docling`.
   **Mitigation**: `docling` maps to `mineru` with a notice; `--on-formula-oom` is
-  retired from the documented interface but stays accepted and ignored for one
-  release, with a notice, so scripts do not break.
+  retired from the documented interface but stays accepted, hidden and ignored for
+  one release, with a notice, so scripts do not break.
 
 ### Failure Modes
 
@@ -632,8 +659,9 @@ the start-of-run check of `mineru_page_timeout_s` × `mineru_page_batch` against
 #### Step 3: Remove Docling
 
 Router, Docling code paths, `pdf_stack` entries, constraints pins, the `pdf`
-extra entry, `--on-formula-oom`; the doctor row retargeted; `auto` and `docling`
-become aliases with a notice; the six stack gates made extractor-aware for
+extra entry, `--on-formula-oom` (kept hidden, accepted and ignored for one release,
+with a notice); the doctor row retargeted; `auto` and `docling`
+become aliases with a notice; the eight stack gates (RF-15, RF-16) made extractor-aware for
 `pymupdf`; recovery and help text that points at Docling (`commands/index.py`,
 `commands/dt.py`, the quality-gate remedy in `pdf_extractor.py`); title chain;
 docs and size text. The surface, by `git grep -i docling` (RF-15): `.github`
@@ -645,9 +673,10 @@ docs and size text. The surface, by `git grep -i docling` (RF-15): `.github`
 `.claude/skills/release/SKILL.md` and test fixtures under `service/`. CI: unit
 tests that assert real Docling extraction become fake-backed, and the Docling
 priming and non-vacuity steps leave PR CI without a MinerU replacement. MinerU
-end-to-end coverage stays where it is decided to live (nexus-jy4hd): the release
-shakedown's step 3b and the nightly gate's `prime-mineru` table test (RF-16), so
-PR CI cost does not grow.
+end-to-end coverage stays where it is decided to live (nexus-jy4hd): the release's
+post-publish `fresh-install-mvv.sh --published` formula-PDF check, default-on and
+required (release skill Step 11c; a skip needs a recorded reason; nexus-tr1rj.20), and
+the nightly gate's `prime-mineru` table test (RF-16), so PR CI cost does not grow.
 
 ### Day 2 Operations
 
@@ -785,8 +814,8 @@ The MVV is in scope and runs before the RDR closes.
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: `auto`/`docling` aliases and a retired `--on-formula-oom`, each
-  with a notice for one release.
+- **Versioning**: `auto`/`docling` aliases and a retired `--on-formula-oom` (hidden, accepted
+  and ignored), each with a notice for one release.
 - **Build tool compatibility**: N/A.
 - **Licensing**: removing a dependency only.
 - **Deployment model**: client change; no engine change.
@@ -831,3 +860,6 @@ a candidate for trimming.
 - 2026-10-27: Accept residual dispositions (gate record `nexus_rdr/237-gate-latest`): residual 1 nexus-489n1 (Sam's choice, Phase 1 Step 2); residuals 2 and 5 nexus-q6nw0 (Step 1); residuals 3 and 6 nexus-489n1 (Step 2); residual 4 nexus-tv1w3 (Step 3).
 - 2026-10-27: Amended by Sam's decision (beads nexus-q6nw0, nexus-489n1) to match the code: a breaker trip keeps the pages before the failing window and drops the window; the batch path passes no heartbeat; macOS is one MinerU slot whatever the environment says; a connect timeout or dropped connection is a lost server, not a page timeout.
 - 2026-10-27: By Sam's decision (nexus-q6nw0), a breaker trip stops the whole `nx index pdf --dir` run; the remaining PDFs are listed as not attempted.
+- 2026-10-28: Text corrections after the Docling removal (nexus-tr1rj.17): the Problem Statement qualifies "a document finishes"; the RF-15 stack-gate list and count; eight stack gates; `--on-formula-oom` accepted and ignored for one release.
+- 2026-10-28: The release's MinerU end-to-end coverage is the post-publish `fresh-install-mvv.sh --published` formula-PDF check, default-on with a recorded-reason skip (nexus-tr1rj.20, decision delegated by Sam).
+- 2026-10-28: By decisions Sam delegated (nexus-tr1rj.13, nexus-tr1rj.14): a breaker trip or a machine-resource error in `nx dt index` and `nx index repo` skips and lists the remaining PDFs and keeps other work; a `pymupdf` rerun over a MinerU buffer starts clean; `nx dt index` and `nx dt capture` read `pdf.extractor`.

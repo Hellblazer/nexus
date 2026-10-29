@@ -4,7 +4,7 @@
 forward. nexus-2k66t.4.2, Sam 2026-10-23.
 
 The OLD `nx self install` that moves a box to the first post-split release
-builds the NEW package, which no longer requires docling or MinerU, and it
+builds the NEW package, which no longer requires the PDF stack, and it
 cannot know the rule. So the first code of the new release to run (`nx upgrade`,
 from the SessionStart lockstep) sees a receipt written before the split and
 builds the generation that adds `pdf`. The generation-build half of the rule
@@ -203,7 +203,7 @@ def test_carry_forward_no_longer_refuses_on_a_windows_runtime_gap_it_builds_slim
 def test_the_refusal_and_the_slim_line_name_the_same_cause(bed, monkeypatch) -> None:
     gap = ("none", None)
     monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: gap)
-    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "no docling"))
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "no stack"))
     with pytest.raises(pdf_stack.PdfStackMissingError) as exc:
         pdf_stack.ensure("nx index repo")
     _kept, line = pdf_stack.drop_pdf_on_runtime_gap(["pdf"])

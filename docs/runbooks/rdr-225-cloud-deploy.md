@@ -610,7 +610,7 @@ that the data survived.
    engine that reports a mode. Must end with its pass sentinel and `violations=0` with B3 asserted.
 5. **The deploy gate's parity and recall legs** (engine-release Step 5b.4), run by conexus.
 6. **Doctor rows, and what the cloud has instead.** The tenant, model and leaf rows of `nx doctor` (nexus-3wh8d.16) read
-   the database through local admin credentials, so on a cloud-mode box they report "not applicable"; the engine runs
+   the database through local admin credentials, so on a cloud-mode box they warn that the check was not run from this client; the engine runs
    no equivalent. Its boot check (`ChunksIsolationCheck`) covers the RLS structure of both trees and nothing about
    token tenants or registered models, and the engine's `/v1/status` field `chunks_tenant_isolation_intact` mirrors
    that. A tenant with a token and no leaf is otherwise found by a 500 `tenant_partition_missing` on its first write.

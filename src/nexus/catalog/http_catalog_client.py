@@ -3005,6 +3005,47 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             )
         return errors
 
+    #: nexus-jypmj.1.13 / nexus-jypmj.6: the longest a probed ``GET /version`` body is trusted. A cached flag is
+    #: not durable proof across an engine rollback; the same bound the telemetry store's probe uses.
+    _CAPABILITY_TTL_S: float = 300.0
+    _version_flags_cache: dict[str, Any] | None = None
+    _version_flags_fetched_at: float | None = None
+    #: The clock the interval is measured on; a test replaces it on the instance.
+    _capability_clock = staticmethod(time.monotonic)
+
+    def _version_flags(self) -> dict[str, Any]:
+        """The engine's ``GET /version`` body, cached for :attr:`_CAPABILITY_TTL_S`. NEVER raises: a failed or
+        unreachable probe caches ``{}``, so every capability reads unsupported, which is the safe direction
+        (the public cloud edge trims ``/version`` to an allowlist, so a flag it does not list reads the same)."""
+        cached = self._version_flags_cache
+        if cached is not None:
+            fetched_at = self._version_flags_fetched_at
+            if fetched_at is None or self._capability_clock() - fetched_at < self._CAPABILITY_TTL_S:
+                return cached
+        try:
+            body = super()._get("/version")
+        except Exception as exc:  # noqa: BLE001 — a capability probe never raises; the caller takes the unsupported path
+            _log.warning("http_catalog_client.version_probe_failed", error=str(exc))
+            flags: dict[str, Any] = {}
+        else:
+            flags = body if isinstance(body, dict) else {}
+        self._version_flags_cache = flags
+        self._version_flags_fetched_at = self._capability_clock()
+        return flags
+
+    def supports_graph_scope_filter(self) -> bool:
+        """Does the engine apply ``scope_filter`` on ``/traverse`` before its 500-node cut (``GET /version``'s
+        ``catalog_graph_scope_filter_supported``, RDR-232 section 3, nexus-jypmj.1.13)? Only a JSON ``true``
+        counts. An engine without it answers HTTP 200 to the key and ignores it, so the flag is read BEFORE the
+        key is sent and the reply's ``scope_filter`` marker is still required afterwards."""
+        return self._version_flags().get("catalog_graph_scope_filter_supported") is True
+
+    def supports_manifest_row_limit(self) -> bool:
+        """Does the engine accept ``max_rows_per_doc`` on ``/manifest/get_many`` (``GET /version``'s
+        ``catalog_manifest_row_limit_supported``, nexus-jypmj.6)? Only a JSON ``true`` counts; an engine
+        without it ignores the key and returns every row of every document."""
+        return self._version_flags().get("catalog_manifest_row_limit_supported") is True
+
     def _traverse(self, payload: dict) -> dict:
         """POST /v1/catalog/traverse and convert wire dicts to typed objects.
 
@@ -3031,7 +3072,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         for e in result.get("edges", []):
             link = _link_from_dict(e)
             edges.setdefault((str(link.from_tumbler), str(link.to_tumbler), link.link_type), link)
-        return {"nodes": list(nodes.values()), "edges": list(edges.values())}
+        out: dict = {"nodes": list(nodes.values()), "edges": list(edges.values())}
+        # nexus-jypmj.1.13: the engine's scoped-result marker, passed through untouched when the reply has
+        # one. It is the only evidence the predicate ran (an engine that predates it ignores the request key
+        # and answers 200), so a reply without it carries no key here and the caller reads that as "not run".
+        marker = result.get("scope_filter")
+        if isinstance(marker, dict):
+            out["scope_filter"] = marker
+        return out
 
     def graph(
         self,
@@ -3041,6 +3089,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         link_type: str = "",
         link_types: list[str] | None = None,
         include_heuristic: bool = False,
+        scope_filter: dict | None = None,
     ) -> dict:
         """BFS traversal from a single seed — POST /v1/catalog/traverse."""
         payload: dict = {
@@ -3062,6 +3111,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # flood and the opt-in did nothing.
         if include_heuristic:
             payload["include_heuristic"] = True
+        # nexus-jypmj.1.13: the scope predicate the engine applies before its 500-node cut, sent only when the
+        # caller holds one (an engine that predates it ignores the key; the caller gates on
+        # :meth:`supports_graph_scope_filter` and requires the ``scope_filter`` marker in the reply).
+        if scope_filter is not None:
+            payload["scope_filter"] = scope_filter
         return self._traverse(payload)
 
     def graph_many(
@@ -3072,6 +3126,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         link_type: str = "",
         link_types: list[str] | None = None,
         include_heuristic: bool = False,
+        scope_filter: dict | None = None,
     ) -> dict:
         """BFS traversal from multiple seeds — POST /v1/catalog/traverse."""
         payload: dict = {
@@ -3093,6 +3148,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # flood and the opt-in did nothing.
         if include_heuristic:
             payload["include_heuristic"] = True
+        # nexus-jypmj.1.13: the scope predicate the engine applies before its 500-node cut, sent only when the
+        # caller holds one (an engine that predates it ignores the key; the caller gates on
+        # :meth:`supports_graph_scope_filter` and requires the ``scope_filter`` marker in the reply).
+        if scope_filter is not None:
+            payload["scope_filter"] = scope_filter
         return self._traverse(payload)
 
     def link_audit(self, *, t3: Any = None) -> dict:
@@ -3948,39 +4008,94 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         for start in range(0, len(doc_ids), _MANIFEST_GET_MANY_PAGE):
             batch = doc_ids[start : start + _MANIFEST_GET_MANY_PAGE]
             result = self._post("/manifest/get_many", {"doc_ids": batch}, mutates=False)
-            result = result if isinstance(result, dict) else {}
-            manifests = result.get("manifests", {}) if result else {}
-            manifests = manifests if isinstance(manifests, dict) else {}
-            if "count" not in result:
-                _log.error(
-                    "manifest_get_many_count_missing",
-                    requested=len(batch),
-                    received=len(manifests),
-                    response_keys=sorted(result),
-                )
-                raise RuntimeError(
-                    "manifest/get_many response carried no `count` field — "
-                    "the engine emits it unconditionally (floor >= v0.1.61), "
-                    "so something interposed on the read path; refusing to "
-                    "merge an unverifiable page "
-                    f"(response keys: {sorted(result)})"
-                )
-            count = int(result["count"])
-            if len(manifests) != count:
-                _log.error(
-                    "manifest_get_many_count_mismatch",
-                    requested=len(batch),
-                    received=len(manifests),
-                    count=count,
-                )
-                raise RuntimeError(
-                    f"manifest/get_many truncated: page carries "
-                    f"{len(manifests)} doc_ids but count says {count} — "
-                    "refusing to merge a partial page"
-                )
-            for did, rows in manifests.items():
+            for did, rows in self._reconciled_manifest_page(result, batch).items():
                 merged[did] = [_manifest_row_from_dict(r) for r in rows]
         return merged
+
+    @staticmethod
+    def _reconciled_manifest_page(result: Any, batch: list[str]) -> dict[str, Any]:
+        """The ``manifests`` map of one ``/manifest/get_many`` reply, after the nexus-b9puj reconciliation:
+        the reply must carry ``count`` and it must equal the number of documents delivered, or the page is
+        refused whole (a silently truncated page is indistinguishable from "no rows for this doc")."""
+        result = result if isinstance(result, dict) else {}
+        manifests = result.get("manifests", {}) if result else {}
+        manifests = manifests if isinstance(manifests, dict) else {}
+        if "count" not in result:
+            _log.error(
+                "manifest_get_many_count_missing",
+                requested=len(batch),
+                received=len(manifests),
+                response_keys=sorted(result),
+            )
+            raise RuntimeError(
+                "manifest/get_many response carried no `count` field — "
+                "the engine emits it unconditionally (floor >= v0.1.61), "
+                "so something interposed on the read path; refusing to "
+                "merge an unverifiable page "
+                f"(response keys: {sorted(result)})"
+            )
+        count = int(result["count"])
+        if len(manifests) != count:
+            _log.error(
+                "manifest_get_many_count_mismatch",
+                requested=len(batch),
+                received=len(manifests),
+                count=count,
+            )
+            raise RuntimeError(
+                f"manifest/get_many truncated: page carries "
+                f"{len(manifests)} doc_ids but count says {count} — "
+                "refusing to merge a partial page"
+            )
+        return manifests
+
+    def get_manifests_sampled(
+        self, doc_ids: list[str], max_rows_per_doc: int,
+    ) -> tuple[dict[str, list[ManifestRow]], dict[str, int]] | None:
+        """:meth:`get_manifests` with a per-document row limit (nexus-jypmj.6): a document longer than
+        *max_rows_per_doc* comes back as an even sample of that many rows (first and last included), and the
+        second result maps every returned document to its TRUE live row count, so a caller can tell a sample
+        from a whole manifest. Same paging and count reconciliation as :meth:`get_manifests`.
+
+        ``None`` when the engine did not honour the limit, which the caller reads as "this engine has no
+        row limit": the reply must echo ``max_rows_per_doc`` and carry ``row_counts``, because an engine that
+        predates the field ignores the key and returns every row with an HTTP 200. The caller gates on
+        :meth:`supports_manifest_row_limit` first; this check is the second, because a flag read minutes ago
+        is not proof of the engine answering now. Nothing from a page is kept once any page lacks the echo, or once a
+        returned document has no entry in ``row_counts`` (the limit was not applied to it).
+        """
+        if not doc_ids:
+            return {}, {}
+        merged: dict[str, list[ManifestRow]] = {}
+        counts: dict[str, int] = {}
+        for start in range(0, len(doc_ids), _MANIFEST_GET_MANY_PAGE):
+            batch = doc_ids[start : start + _MANIFEST_GET_MANY_PAGE]
+            result = self._post(
+                "/manifest/get_many", {"doc_ids": batch, "max_rows_per_doc": int(max_rows_per_doc)}, mutates=False,
+            )
+            row_counts = result.get("row_counts") if isinstance(result, dict) else None
+            if (
+                not isinstance(result, dict)
+                or result.get("max_rows_per_doc") != int(max_rows_per_doc)
+                or not isinstance(row_counts, dict)
+            ):
+                _log.warning(
+                    "manifest_get_many_row_limit_not_honoured", requested=len(batch), limit=int(max_rows_per_doc),
+                )
+                return None
+            page = self._reconciled_manifest_page(result, batch)
+            if any(did not in row_counts for did in page):
+                # The echo is there but a returned document has no true count: the limit was not applied to it.
+                # Reading its rows as a whole manifest would pass a sample off as complete.
+                _log.warning(
+                    "manifest_get_many_row_count_missing", requested=len(batch), limit=int(max_rows_per_doc),
+                    missing=sum(1 for did in page if did not in row_counts),
+                )
+                return None
+            for did, rows in page.items():
+                merged[did] = [_manifest_row_from_dict(r) for r in rows]
+                counts[did] = int(row_counts[did])
+        return merged, counts
 
     def get_chunk_chashes(self, doc_id: str) -> list[str]:
         """Return chashes for all chunks of doc_id.

@@ -190,7 +190,7 @@ class TestCheckStorageServiceHealth:
         detail must say so, not the misleading "not configured" message.
         Still ok=False/warn=True: a managed box's check was NOT performed
         from this client, and doctor's checkmark must never render for an
-        unperformed check."""
+        unperformed check (Sam, 2026-10-28, nexus-njn1a / nexus-g7ijj)."""
         missing_creds = tmp_path / "pg_credentials"  # does not exist
 
         with patch("nexus.config.is_local_mode", return_value=False):
@@ -204,7 +204,8 @@ class TestCheckStorageServiceHealth:
         assert r.ok is False
         assert r.warn is True
         assert r.fatal is False
-        assert "server-side" in r.detail
+        assert r.detail.startswith("managed deployment")
+        assert "store operator" in r.detail
         assert "y3wuu" in r.detail
         assert "not configured" not in r.detail
 
@@ -748,7 +749,8 @@ class TestCheckMigrationState:
     def test_no_pg_credentials_managed_mode_names_server_side_contract(self, tmp_path):
         """nexus-g7ijj: managed deployment -> server-side contract detail
         (nexus-y3wuu), never the misleading "not configured" message.
-        ok=False/warn=True preserved — the check still was not performed."""
+        ok=False/warn=True — the check was not performed, so doctor's
+        checkmark must never render for it (nexus-njn1a / nexus-g7ijj)."""
         missing_creds = tmp_path / "pg_credentials"  # does not exist
 
         with patch("nexus.config.is_local_mode", return_value=False):
@@ -758,7 +760,8 @@ class TestCheckMigrationState:
         assert r.ok is False
         assert r.warn is True
         assert not r.fatal
-        assert "server-side" in r.detail
+        assert r.detail.startswith("managed deployment")
+        assert "store operator" in r.detail
         assert "y3wuu" in r.detail
         assert "not configured" not in r.detail
 
@@ -1252,7 +1255,8 @@ class TestCheckRlsPresent:
     def test_no_pg_credentials_managed_mode_names_server_side_contract(self, tmp_path):
         """nexus-g7ijj: managed deployment -> server-side contract detail
         (nexus-y3wuu), never the misleading "not configured" message.
-        ok=False/warn=True preserved — the check still was not performed."""
+        ok=False/warn=True — the check was not performed, so doctor's
+        checkmark must never render for it (nexus-njn1a / nexus-g7ijj)."""
         missing_creds = tmp_path / "pg_credentials"  # does not exist
 
         with patch("nexus.config.is_local_mode", return_value=False):
@@ -1262,7 +1266,8 @@ class TestCheckRlsPresent:
         assert r.ok is False
         assert r.warn is True
         assert not r.fatal
-        assert "server-side" in r.detail
+        assert r.detail.startswith("managed deployment")
+        assert "store operator" in r.detail
         assert "y3wuu" in r.detail
         assert "not configured" not in r.detail
 

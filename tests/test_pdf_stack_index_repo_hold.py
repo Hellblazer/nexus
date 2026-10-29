@@ -66,7 +66,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 def _hide_stack(monkeypatch: pytest.MonkeyPatch, *, policy: str = "refuse") -> None:
     monkeypatch.setenv(pdf_stack.POLICY_ENV, policy)
-    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "docling, MinerU and torch are not installed"))
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "MinerU and torch are not installed"))
     monkeypatch.setattr(
         pdf_stack, "install_plan",
         lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND),
@@ -548,3 +548,136 @@ def test_the_install_policy_at_the_late_site_is_not_reached_when_the_pdf_is_curr
 
     assert calls == [] and stats["pdf_stack_held"] == 0
     assert mocks["_index_pdf_file"].call_count == 1
+
+
+# ── an unusable MinerU time limit holds the PDFs and keeps the rest (nexus-tr1rj.24) ──
+#
+# pdf.mineru_page_timeout_s x pdf.mineru_page_batch above 240 s used to refuse the whole repo run
+# at the first PDF's hold (and before that, per file, after code and prose were written). A MinerU
+# problem stops MinerU work only (nexus-tr1rj.13): the PDFs that need extracting are held and listed,
+# code, prose and RDR files are indexed, and the run ends non-zero. No catalog row and no T3 write
+# happens for a held PDF, a PDF stale only by embedding model included.
+
+_BOUNDS = "pdf.mineru_page_timeout_s (180 s) x pdf.mineru_page_batch (2) = 360 s"
+
+
+@pytest.fixture
+def bad_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nexus.config.get_mineru_page_timeout_s", lambda repo_root=None: 180)
+    monkeypatch.setattr("nexus.config.get_mineru_page_batch", lambda repo_root=None: 2)
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("present", ""))
+
+
+def test_run_index_over_a_bad_mineru_limit_holds_the_pdf_and_still_indexes_code(repo, bad_bounds) -> None:
+    from nexus.indexer import _run_index
+
+    run, phases = _Run(), []
+    with _doubles(run, _db()) as mocks, patch("nexus.indexer._pdfs_needing_index", return_value=[repo / "paper.pdf"]):
+        stats = _run_index(repo, _reg(), on_phase=phases.append)
+
+    assert stats["pdf_mineru_bounds_held"] == 1
+    assert stats["pdf_mineru_bounds_held_paths"] == [str(repo / "paper.pdf")]
+    assert _BOUNDS in stats["pdf_mineru_bounds_problem"]
+    assert stats["pdf_stack_held"] == 0, "the stack is present; the exit-69 message about it would be false"
+    mocks["_index_pdf_file"].assert_not_called()
+    assert run.registered == [repo / "ok.py"], "no catalog row for the held PDF"
+    assert mocks["_index_code_file"].call_count == 1, "code is indexed past the held PDF"
+    assert run.housekeeping_keep == [repo / "paper.pdf"], "orphan housekeeping still sees the held PDF as present"
+    assert any(_BOUNDS in p and "NOT indexed" in p for p in phases), phases
+    assert pdf_stack.skipped_count() == 1
+
+
+def test_run_index_with_usable_limits_holds_nothing_and_indexes_the_pdf(repo, monkeypatch) -> None:
+    """The control for the test above: the same repo and doubles, default limits."""
+    from nexus.indexer import _run_index
+
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("present", ""))
+    run = _Run()
+    with _doubles(run, _db()) as mocks, patch("nexus.indexer._pdfs_needing_index", return_value=[repo / "paper.pdf"]):
+        stats = _run_index(repo, _reg())
+    assert stats["pdf_mineru_bounds_held"] == 0 and stats["pdf_mineru_bounds_held_paths"] == []
+    assert mocks["_index_pdf_file"].call_count == 1
+
+
+def test_a_pdf_stale_only_by_embedding_model_is_held_before_any_write(repo, bad_bounds) -> None:
+    """The early probe is the catalog fence, which has no embedding model: it calls this PDF
+    current. The late recheck reads the real staleness cache and holds it too, so the PDF is never
+    handed to the indexer (whose backstop would refuse it per file, after code and prose were
+    written and the catalog row was registered)."""
+    from nexus.indexer import _run_index
+
+    run, phases = _Run(), []
+    with _doubles(run, _db()) as mocks, patch("nexus.indexer._pdfs_needing_index", return_value=[]), \
+            patch("nexus.indexer.check_staleness", return_value=False):
+        stats = _run_index(repo, _reg(), on_phase=phases.append)
+
+    assert stats["pdf_mineru_bounds_held"] == 1
+    mocks["_index_pdf_file"].assert_not_called()
+    assert mocks["_index_code_file"].call_count == 1
+    assert pdf_stack.skipped_count() == 1
+    assert any(_BOUNDS in p for p in phases)
+
+
+def test_a_current_pdf_passes_a_bad_mineru_limit_and_is_dispatched(repo, bad_bounds) -> None:
+    from nexus.indexer import _run_index
+
+    run = _Run()
+    with _doubles(run, _db()) as mocks, patch("nexus.indexer._pdfs_needing_index", return_value=[]), \
+            patch("nexus.indexer.check_staleness", return_value=True):
+        stats = _run_index(repo, _reg())
+    assert stats["pdf_mineru_bounds_held"] == 0
+    assert repo / "paper.pdf" in run.registered
+    assert mocks["_index_pdf_file"].call_count == 1
+
+
+def test_force_holds_every_pdf_on_a_bad_mineru_limit(repo, bad_bounds) -> None:
+    from nexus.indexer import _run_index
+
+    run = _Run()
+    with _doubles(run, _db()) as mocks, patch("nexus.indexer._pdfs_needing_index", return_value=[]):
+        stats = _run_index(repo, _reg(), force=True)
+    assert stats["pdf_mineru_bounds_held"] == 1
+    mocks["_index_pdf_file"].assert_not_called()
+
+
+def test_an_early_and_a_late_bounds_hold_are_counted_together(repo, bad_bounds) -> None:
+    from nexus.indexer import _run_index
+
+    early = repo / "a.pdf"
+    early.write_bytes(b"%PDF-1.4 early")
+    run, phases = _Run(), []
+    with _doubles(run, _db()) as mocks, patch("nexus.indexer._pdfs_needing_index", return_value=[early]), \
+            patch("nexus.indexer.check_staleness", return_value=False):
+        stats = _run_index(repo, _reg(), on_phase=phases.append)
+    assert stats["pdf_mineru_bounds_held"] == 2
+    mocks["_index_pdf_file"].assert_not_called()
+    assert pdf_stack.skipped_count() == 2
+    assert sum("NOT indexed" in p for p in phases) == 1, phases
+    assert run.housekeeping_keep == [early], "the early-held PDF stays visible to orphan housekeeping"
+
+
+def test_the_since_head_base_does_not_advance_past_a_pdf_held_for_the_mineru_limit(repo, monkeypatch) -> None:
+    from nexus import indexer as idx
+
+    advanced: list[str] = []
+    monkeypatch.setattr(idx, "_set_owner_head_hash", lambda repo_, head, **kw: advanced.append(head))
+    monkeypatch.setattr(idx, "_current_head", lambda repo_: "HEAD1")
+    monkeypatch.setattr(idx, "_relink_changed_pdfs", lambda state: None)
+    monkeypatch.setattr(idx, "_run_index", lambda *a, **kw: {"pdf_mineru_bounds_held": 1, "files_changed": 1})
+    idx.index_repository(repo, _reg(), since_head=True)
+    assert advanced == [], "the base moved past a commit whose PDF was held"
+
+
+def test_the_cli_lists_the_held_pdfs_exits_1_and_says_code_was_indexed(repo, bad_bounds, monkeypatch) -> None:
+    """The whole path through `nx index repo`: hold, code indexed, `Done.`, the held PDFs listed, exit 1."""
+    with patch("nexus.indexer._pdfs_needing_index", return_value=[repo / "paper.pdf"]):
+        result, mocks = _index_repo_cli(repo, monkeypatch)
+
+    assert result.exit_code == 1, result.output
+    assert mocks["_index_code_file"].call_count == 1, "code is indexed before the exit"
+    mocks["_index_pdf_file"].assert_not_called()
+    assert "Done." in result.output
+    assert f"Held: 1 PDF(s) NOT indexed, {_BOUNDS}" in result.output
+    assert "paper.pdf: held" in result.output
+    assert "1 PDF(s) were NOT indexed" in result.output and "Code, prose and RDR files were indexed" in result.output
+    assert "PDF support is not installed" not in result.output

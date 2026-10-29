@@ -43,23 +43,42 @@ _WARN = "✗"
 _SOFT_WARN = "⚠"
 
 # nexus-g7ijj fix round: the managed/local "not probeable from here" detail
-# strings were duplicated verbatim across the three service-check skip
-# sites (_check_storage_service_health, _check_migration_state,
-# _check_rls_present) — extracted once so a future wording change can't
-# drift between them.
-_MANAGED_DEPLOYMENT_SKIP_DETAIL = (
-    "managed deployment — this check runs server-side with the "
-    "store operator's credentials (nexus-y3wuu); not probeable "
-    "from this client; skipping"
+# strings were duplicated verbatim across the service-check skip sites —
+# extracted once so a future wording change can't drift between them.
+# nexus-njn1a finding 10: one text now serves all eight rows that read the
+# database through local credentials (Storage service health, Schema
+# migrations, RLS policies, tuples.dead_tuple_ratio, tuples.sweep_freshness
+# and the three RDR-225 partition rows). A managed box renders it through
+# ``_managed_not_probeable`` (a warning, never a checkmark); a local box with
+# no pg_credentials through ``_LOCAL_MODE_NOT_CONFIGURED_DETAIL`` (also a warning).
+_MANAGED_NOT_PROBEABLE_DETAIL = (
+    "managed deployment — not probeable from this client, so this check was not run: it reads the database "
+    "with local admin credentials, which a managed deployment keeps with the store operator, and the "
+    "client-side diagnostic path is local-only by design (nexus-y3wuu); skipping. For the RDR-225 "
+    "partition rows the operator's read-only query is in docs/runbooks/rdr-225-cloud-deploy.md"
 )
 _LOCAL_MODE_NOT_CONFIGURED_DETAIL = "service mode not configured (pg_credentials absent); skipping"
-# The RDR-225 partition rows read the database through local admin credentials. A managed engine has no
-# server-side equivalent of them (nexus-3wh8d.18 review), so the shared "runs server-side" text would be false.
-_MANAGED_PARTITION_ROWS_SKIP_DETAIL = (
-    "managed deployment — these rows read the database through local admin credentials and the engine runs no "
-    "equivalent; the operator verifies tenant leaves and model partitions with the read-only query in "
-    "docs/runbooks/rdr-225-cloud-deploy.md; skipping"
-)
+
+
+def _managed_not_probeable(label: str) -> HealthResult:
+    """The one rendering of "this row reads local pg_credentials and a managed deployment has none"
+    (nexus-njn1a finding 10; Sam's decision of 2026-10-28, recorded on nexus-g7ijj).
+
+    A soft warning, ``ok=False, warn=True``, never a checkmark: the check was not performed, and doctor's
+    checkmark must never render for an unperformed check. A pass here is how a gate that reads these rows
+    (``upgrade_finish._poison_probe``) would take an unverified store for a clean one. Before this the five
+    storage rows warned on every cloud box while the three partition rows, for the same fact, passed as
+    "not applicable". The reason is :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, the same on all eight; recognise it
+    with :func:`is_managed_not_probeable`. A local box with no ``pg_credentials`` is a different fact (service
+    mode is not configured) and keeps its own text.
+    """
+    return HealthResult(label=label, ok=False, warn=True, detail=_MANAGED_NOT_PROBEABLE_DETAIL)
+
+
+def is_managed_not_probeable(row: HealthResult) -> bool:
+    """True for a row that is the managed "check not run from this client" warning, whatever its ok/warn
+    rendering: the reason text is the marker, so a gate keyed on it does not depend on how the row is drawn."""
+    return row.detail == _MANAGED_NOT_PROBEABLE_DETAIL
 
 
 @dataclass
@@ -2769,27 +2788,26 @@ def _check_orphan_pipelines() -> list[HealthResult]:
     )]
 
 
-#: What docling's PDF pipeline imports when it runs. `nx doctor` looks these up
-#: without importing them (torch alone costs seconds).
-_DOCLING_PIPELINE_MODULES: tuple[str, ...] = (
-    "docling", "docling_core", "docling_parse", "docling_ibm_models", "cv2", "torch", "torchvision",
-)
+#: What MinerU's pipeline backend imports when it runs. `nx doctor` looks these up
+#: without importing them (torch alone costs seconds). ``cv2`` is the module whose
+#: package directory goes missing when two OpenCV distributions own it.
+_MINERU_PIPELINE_MODULES: tuple[str, ...] = ("mineru", "cv2", "torch", "torchvision")
 
 
-def _check_docling_importable(
+def _check_mineru_importable(
     find_spec: Callable[[str], object | None] | None = None,
 ) -> list[HealthResult]:
-    """Every PDF without formulas is extracted by docling, and a docling
-    pass that dies on an import is an error, not a fallback
-    (``PDFExtractor._docling_not_importable``). This row says so before an
+    """Every PDF is extracted by MinerU unless the user chose ``--extractor pymupdf``, and a
+    MinerU pass that dies on an import is an error, not a fallback
+    (``PDFExtractor._extract_with_mineru_guarded``). This row says so before an
     index run does. It resolves each module with ``find_spec`` and imports
     nothing, which is enough for the failure seen in the field shape: a
     distribution still listed while its package directory is gone (two
     distributions owning ``cv2/``, one uninstalled).
 
-    Always applicable: these are required dependencies, so a fresh install
-    has them and the row is a pass there. *find_spec* is the resolver, for
-    tests; the default is ``importlib.util.find_spec``.
+    Only emitted once the PDF stack is present (``_check_pdf_support`` gates it): the stack
+    is an on-demand extra, so a box without it has its own row. *find_spec* is the resolver,
+    for tests; the default is ``importlib.util.find_spec``.
     """
     if find_spec is None:
         import importlib.util  # noqa: PLC0415 — deferred: only this check needs it
@@ -2797,7 +2815,7 @@ def _check_docling_importable(
         find_spec = importlib.util.find_spec
 
     missing: list[str] = []
-    for name in _DOCLING_PIPELINE_MODULES:
+    for name in _MINERU_PIPELINE_MODULES:
         try:
             found = find_spec(name) is not None
         except (ImportError, ValueError):
@@ -2806,19 +2824,125 @@ def _check_docling_importable(
             missing.append(name)
     if not missing:
         return [HealthResult(
-            label="PDF extraction (docling)", ok=True,
-            detail=f"{len(_DOCLING_PIPELINE_MODULES)} pipeline modules present",
+            label="PDF extraction (mineru)", ok=True,
+            detail=f"{len(_MINERU_PIPELINE_MODULES)} pipeline modules present",
         )]
     from nexus import install_advice  # noqa: PLC0415 — deferred import
 
     reinstall = install_advice.upgrade_command("uv tool install --reinstall conexus")
     return [HealthResult(
-        label="PDF extraction (docling)", ok=False,
-        detail=f"cannot find {', '.join(missing)}: indexing a PDF without formulas will fail",
+        label="PDF extraction (mineru)", ok=False,
+        detail=f"cannot find {', '.join(missing)}: indexing a PDF will fail",
         fix_suggestions=[
             f"Reinstall: {reinstall}",
             "In a source checkout: uv sync --reinstall-package opencv-python-headless (for a missing cv2)",
+            "For text only (no layout, tables or math) until it is repaired: --extractor pymupdf",
         ],
+    )]
+
+
+#: Directory-name prefixes the Docling extractor left in the Hugging Face hub cache
+#: (RDR-237 removed the extractor; nothing deletes its models).
+_LEFTOVER_DOCLING_CACHE_PREFIXES: tuple[str, ...] = (
+    "models--ds4sd--docling", "models--ds4sd--CodeFormula", "models--docling-project--",
+)
+
+
+def _expand_cache_setting(value: str, environ: dict[str, str], home: Path) -> Path:
+    """*value* with a leading ``~`` and ``$VAR`` / ``${VAR}`` expanded, as ``huggingface_hub`` does.
+
+    Expanded against *environ* and *home* (not the process's own) so the answer is the caller's.
+    An unset variable is left as written, the way ``os.path.expandvars`` leaves it.
+    """
+    if value == "~" or value.startswith(("~/", "~\\")):
+        value = str(home) + value[1:]
+    return Path(re.sub(
+        r"\$(?:(\w+)|\{(\w+)\})",
+        lambda m: environ.get(m.group(1) or m.group(2), m.group(0)),
+        value,
+    ))
+
+
+def _hf_hub_cache_dir(environ: dict[str, str], home: Path) -> Path:
+    """Where ``huggingface_hub`` keeps downloaded models, by its own precedence.
+
+    ``HF_HUB_CACHE``, then the legacy ``HUGGINGFACE_HUB_CACHE``, then ``$HF_HOME/hub``, then
+    ``$XDG_CACHE_HOME/huggingface/hub``, then ``~/.cache/huggingface/hub``. ``~`` and ``$VAR`` in
+    ``HF_HOME`` and in the two cache variables are expanded.
+    """
+    for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        if environ.get(name):
+            return _expand_cache_setting(environ[name], environ, home)
+    if environ.get("HF_HOME"):
+        return _expand_cache_setting(environ["HF_HOME"], environ, home) / "hub"
+    if environ.get("XDG_CACHE_HOME"):
+        return Path(environ["XDG_CACHE_HOME"]) / "huggingface" / "hub"
+    return home / ".cache" / "huggingface" / "hub"
+
+
+def _check_leftover_docling_cache(
+    environ: dict[str, str] | None = None, home: Path | None = None,
+) -> list[HealthResult]:
+    """RDR-237: a Docling model cache left behind by the extractor it removed.
+
+    Not applicable (no row) unless one exists, which is the case on a virgin box and on any
+    box that never ran Docling. When one does, a warning row (never red) gives its size and where
+    it is; nothing deletes it on its own. Looks in the Hugging Face hub cache (by ``HF_HUB_CACHE``,
+    ``HUGGINGFACE_HUB_CACHE``, ``HF_HOME``, ``XDG_CACHE_HOME``, else ``~/.cache/huggingface/hub``),
+    in ``docling-tools``' own default ``~/.cache/docling/models``, and at
+    ``NEXUS_DOCLING_ARTIFACTS_PATH`` when set. The first two are directories Docling made, and the
+    row prints the command that deletes them. ``NEXUS_DOCLING_ARTIFACTS_PATH`` is a directory the
+    user chose and may share, so the row names it and prints no delete command for it.
+    """
+    env = dict(os.environ) if environ is None else environ
+    try:
+        base = home if home is not None else Path.home()
+    except (RuntimeError, KeyError):
+        return []
+    found: list[Path] = []  # directories Docling created: safe to name in a delete command
+    cache = _hf_hub_cache_dir(env, base)
+    try:
+        if cache.is_dir():
+            found.extend(
+                sorted(
+                    entry for entry in cache.iterdir()
+                    if entry.is_dir() and entry.name.startswith(_LEFTOVER_DOCLING_CACHE_PREFIXES)
+                )
+            )
+    except OSError:
+        pass
+    tools_models = base / ".cache" / "docling" / "models"
+    user_set: list[Path] = []  # a directory the user named: reported, never in a delete command
+    try:  # an unreadable directory must not stop the doctor run
+        if tools_models.is_dir():
+            found.append(tools_models)
+        artifacts = env.get("NEXUS_DOCLING_ARTIFACTS_PATH", "").strip()
+        if artifacts:
+            path = _expand_cache_setting(artifacts, env, base)
+            if path.is_dir() and path not in found:
+                user_set.append(path)
+    except OSError:
+        pass
+    if not found and not user_set:
+        return []
+    size_gb = sum(_tree_bytes(path)[0] for path in (*found, *user_set)) / 1e9
+    where = ", ".join(str(path) for path in (*found, *user_set))
+    fixes: list[str] = []
+    if found:
+        if sys.platform == "win32":
+            delete = "; ".join(f'Remove-Item -Recurse -Force "{path}"' for path in found)
+        else:
+            delete = "rm -rf " + " ".join(shlex.quote(str(path)) for path in found)
+        fixes.append(f"Delete it: {delete}")
+    for path in user_set:
+        fixes.append(
+            f"{path} is the directory NEXUS_DOCLING_ARTIFACTS_PATH names, one you set: check that it holds "
+            "only Docling models before you delete anything in it."
+        )
+    return [HealthResult(
+        label="Docling model cache", ok=False, warn=True,
+        detail=f"{size_gb:.1f} GB left from the removed Docling extractor, unused: {where}",
+        fix_suggestions=fixes,
     )]
 
 
@@ -2846,8 +2970,8 @@ def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
 
     nexus-11x9o: both write ``site-packages/cv2/``, so whichever installed last
     owns the directory. The non-headless build needs a system ``libGL.so.1``; on a
-    Linux box without it ``import cv2`` fails and every PDF (docling and MinerU
-    both import cv2) fails with it. The release's install overrides keep only the
+    Linux box without it ``import cv2`` fails and every PDF (MinerU
+    imports cv2) fails with it. The release's install overrides keep only the
     headless build, so a box with both was installed by a route that ignores uv
     overrides (a bare ``uv tool install``, pip, pipx). Red on Linux, a warning
     elsewhere (the non-headless build loads there, but the pair is still two
@@ -2881,7 +3005,7 @@ def _check_pdf_support() -> list[HealthResult]:
     use. One row says where this box stands.
 
     * present (every module resolves, every version is on its pin): a pass,
-      followed by the docling pipeline-module row, which is only meaningful
+      followed by the MinerU pipeline-module row, which is only meaningful
       once the stack is here.
     * not installed: informational, never red. A fresh install has no PDF
       stack by design; the first PDF index installs it. The row names the
@@ -2908,7 +3032,7 @@ def _check_pdf_support() -> list[HealthResult]:
             )]
         return [
             _pdf_support_row_with_opencv(st.detail),
-            *_check_docling_importable(),
+            *_check_mineru_importable(),
         ]
     plan = pdf_stack.install_plan()
     held = pdf_stack.skipped_count()
@@ -2969,13 +3093,13 @@ def _check_installer_rebuild() -> list[HealthResult]:
 
 
 def _check_mineru_server() -> list[HealthResult]:
-    """nexus-far1c: report whether math PDFs will GET a MinerU server —
+    """nexus-far1c: report whether PDFs will GET a MinerU server —
     not whether one happens to be running at this instant.
 
     nexus-h1jk wrote this check against the pre-nexus-1qdb9 model, in
     which MinerU was a long-lived server the operator started by hand
     and kept up; "not reachable" therefore meant "the in-process
-    subprocess fallback will run, and math PDFs will OOM". nexus-1qdb9
+    subprocess fallback will run, and large PDFs will OOM". nexus-1qdb9
     made the server spawn ON DEMAND during extraction
     (``ensure_mineru_running``) and this check was never reconciled with
     it. A correctly-idle server rendered a red ✗ asserting a fallback
@@ -3065,7 +3189,7 @@ def _check_mineru_server() -> list[HealthResult]:
             label="MinerU server", ok=False,
             detail=(
                 f"{url} unreachable and mineru-api is not installed here; "
-                "math PDFs fall back to the in-process subprocess (OOM-risk)"
+                "PDFs fall back to the in-process subprocess (OOM-risk)"
             ),
             fix_suggestions=[
                 # nexus-pffc4: layout-aware — the uv form rebuilds over the
@@ -3090,7 +3214,7 @@ def _check_mineru_server() -> list[HealthResult]:
     return [HealthResult(
         label="MinerU server", ok=False,
         detail=(
-            f"not running and will not autostart ({reason}); math PDFs "
+            f"not running and will not autostart ({reason}); PDFs "
             "fall back to the in-process subprocess (OOM-risk)"
         ),
         fix_suggestions=[
@@ -3757,6 +3881,70 @@ def _check_llm_key_persistence() -> list[HealthResult]:
     )]
 
 
+def _check_answer_kind_extraction() -> list[HealthResult]:
+    """nexus-jypmj.16 (RDR-232): can the structured request extraction that feeds the answer-kind gate run here?
+
+    ``nx_answer`` makes one cheap model call (Haiku, measured) on the requests its deterministic pass leaves
+    open, and the answer-kind gate enforces on whatever kind comes back. When the call fails the request keeps
+    its first-pass kind and the gate keeps enforcing (per request, by design), and the first-pass-only regime is
+    the one that failed the held-out lookup measurement. A process in which the call fails every time warns once
+    in its log (``answer_kind_gate_extraction_failing``); this row reads the same preconditions without a model
+    call. Never prints a key.
+
+    * The extraction or the gate is switched off, or the box has no LLM backend at all (search and storage only;
+      the "LLM backend" row says so): not applicable, a pass. The fresh-install bar is zero warnings.
+    * A usable ``cli`` or ``anthropic`` backend: a pass naming the backend and the model.
+    * An ``openai_compat`` endpoint (it runs its configured model, not the measured one) or a backend setting
+      that cannot serve: a soft warning with the reason and the switches.
+    """
+    from nexus.operators.llm_backend import NO_BACKEND_MESSAGE, backend_status  # noqa: PLC0415 - deferred: keeps doctor startup light
+    from nexus.plans import eligibility as eligibility_mod  # noqa: PLC0415 - deferred, as above
+    from nexus.plans import request_coverage as coverage_mod  # noqa: PLC0415 - deferred, as above
+
+    label = "Answer-kind extraction"
+    try:
+        if not coverage_mod.extraction_enabled(os.environ):
+            return [HealthResult(
+                label=label, ok=True,
+                detail=f"not applicable: {coverage_mod.EXTRACT_ENV} is off, so the answer-kind gate runs in shadow",
+            )]
+        if not eligibility_mod.eligibility_enforced(os.environ):
+            return [HealthResult(
+                label=label, ok=True,
+                detail=f"not applicable: the answer-kind gate is off ({eligibility_mod.ANSWER_KIND_ELIGIBILITY_ENV})",
+            )]
+        status = backend_status()
+        model = coverage_mod.extraction_model(os.environ)
+    except Exception as exc:  # noqa: BLE001 - a doctor row must not crash `nx doctor`
+        return [HealthResult(label=label, ok=False, warn=True, detail=f"could not determine: {exc}")]
+    switches = [
+        f"set {coverage_mod.EXTRACT_ENV}=0 to run the answer-kind gate in shadow",
+        f"or set {eligibility_mod.ANSWER_KIND_ELIGIBILITY_ENV}=0 to switch it off",
+    ]
+    if status.available and status.name in ("cli", "anthropic"):
+        return [HealthResult(label=label, ok=True, detail=f"runs on {status.name} ({status.reason}), model {model}")]
+    if status.available:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"{status.name} backend ({status.reason}): the extraction runs on the endpoint's configured model, "
+                   f"not the measured {coverage_mod.DEFAULT_EXTRACT_MODEL}; a model that answers outside the closed "
+                   "schema leaves the request on its first-pass kind while the gate keeps enforcing on it "
+                   "(the regime that lost lookup recall in the held-out measurement)",
+            fix_suggestions=switches,
+        )]
+    if status.reason == NO_BACKEND_MESSAGE:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable: no LLM backend (no claude CLI, no anthropic_api_key); nx_answer's LLM steps are off",
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=f"{status.reason}. The extraction cannot run, so requests keep their first-pass kind while the "
+               "answer-kind gate keeps enforcing on it (the regime that lost lookup recall in the held-out measurement)",
+        fix_suggestions=["nx config set anthropic_api_key <key>", "or set llm.backend in ~/.config/nexus/config.yml", *switches],
+    )]
+
+
 def _check_mint_token() -> list[HealthResult]:
     """RDR-005 2a self-minting credential (nexus-wrwb7).
 
@@ -4158,14 +4346,12 @@ def _check_storage_service_health(
             # nexus-y3wuu: a managed deployment has no local pg_credentials
             # by design — the store operator holds those. Never claim "not
             # configured" for a box that IS configured, just not probeable
-            # from here.
-            detail = _MANAGED_DEPLOYMENT_SKIP_DETAIL
-        else:
-            detail = _LOCAL_MODE_NOT_CONFIGURED_DETAIL
+            # from here (nexus-njn1a finding 10: one shared warning).
+            return [_managed_not_probeable("Storage service health")]
         return [HealthResult(
             label="Storage service health",
             ok=False,
-            detail=detail,
+            detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL,
             warn=True,
         )]
 
@@ -5032,8 +5218,10 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
     the profile against that list and warns when the profile's family is absent.
 
     The profile is the engine's own ``embedding_profile`` from the same ``/version`` body (what it seeded); an engine
-    that does not report one is read against this client's ``local_embed_profile()``, in local mode only, because a
-    managed engine has no bge files by design and the client's local intent says nothing about it. An engine that
+    that does not report one is read against this client's ``local_embed_profile()``, in local mode only, because
+    this client's local intent says nothing about what a managed engine was told. An engine that reports no
+    profile but lists models of both families is read as serving whichever profile it seeded (the managed cloud
+    engine does, measured on the live cloud on 2026-10-28; a managed engine in another mode may not). An engine that
     reports ``embedding_mode`` ``voyage`` and no profile is voyage-only whatever the client intends, so it reads as
     cannot tell. The fetch uses a short timeout (``_EMBEDDING_FAMILY_PROBE_TIMEOUT_S``).
 
@@ -5079,8 +5267,30 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
         profile = local_embed_profile() if is_local_mode() else None
     prefix = _PROFILE_FAMILY_PREFIX.get(profile) if isinstance(profile, str) else None
     if prefix is None:
+        served = ", ".join(models) or "no model"
+        if profile is None and all(any(m.startswith(p) for m in models) for p in _PROFILE_FAMILY_PREFIX.values()):
+            # No profile to read, but both families are served, so whichever profile the engine seeded is served.
+            return [HealthResult(label=label, ok=True, detail=(
+                f"embedding_mode {body.get('embedding_mode')}: the engine serves both families ({served}), "
+                "so the profile it seeded is served"))]
+        # The engine named no embedding_profile and there is no client intent to read it against: in local mode
+        # an unrecognised local profile, on a managed engine the client's local profile is never evidence.
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+        engine_profile = body.get("embedding_profile")
+        if engine_profile is not None:
+            return [HealthResult(label=label, ok=True, detail=(
+                f"not applicable: the engine reports embedding_profile {engine_profile!r} "
+                f"(embedding_mode {body.get('embedding_mode')}), which this client does not recognise"))]
+        if not is_local_mode():
+            why = "a managed engine is not read against this client's local profile"
+        elif body.get("embedding_mode") == "voyage":
+            why = "an engine in voyage mode is not read against this client's local profile"
+        else:
+            why = "this client's local embedding profile is not one it recognises"
         return [HealthResult(label=label, ok=True, detail=(
-            "not applicable: the embedding profile could not be determined for this engine"))]
+            f"not applicable: the engine's /version reports no embedding_profile "
+            f"(embedding_mode {body.get('embedding_mode')}) and {why}"))]
 
     from nexus.corpus import _SERVICE_RESTART_COMMAND  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -5775,10 +5985,10 @@ def _settle_setup_row(results: list[HealthResult]) -> list[HealthResult]:
 
 
 def _benign_warning(row: HealthResult) -> bool:
-    """A soft warning that says nothing is wrong: the managed deployment's storage row, which cannot be probed
-    from a client by design (nexus-y3wuu) and so warns on every cloud box. Without this a cloud box never
-    reaches the "every other row is fine" that lets the setup row stand down."""
-    return row.warn and not row.ok and row.detail == _MANAGED_DEPLOYMENT_SKIP_DETAIL
+    """A soft warning that says nothing is wrong: a managed deployment's row that cannot be probed from a
+    client by design (nexus-y3wuu), which warns on every cloud box. Without this a cloud box never reaches the
+    "every other row is fine" that lets the setup row stand down."""
+    return row.warn and not row.ok and is_managed_not_probeable(row)
 
 
 def _setup_failed_row(status: dict, log: Path) -> HealthResult:
@@ -6224,13 +6434,11 @@ def _check_migration_state(
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
         if not is_local_mode():
-            detail = _MANAGED_DEPLOYMENT_SKIP_DETAIL
-        else:
-            detail = _LOCAL_MODE_NOT_CONFIGURED_DETAIL
+            return [_managed_not_probeable("Schema migrations")]
         return [HealthResult(
             label="Schema migrations",
             ok=False,
-            detail=detail,
+            detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL,
             warn=True,
         )]
 
@@ -6943,13 +7151,11 @@ def _check_rls_present(
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
         if not is_local_mode():
-            detail = _MANAGED_DEPLOYMENT_SKIP_DETAIL
-        else:
-            detail = _LOCAL_MODE_NOT_CONFIGURED_DETAIL
+            return [_managed_not_probeable("RLS policies")]
         return [HealthResult(
             label="RLS policies",
             ok=False,
-            detail=detail,
+            detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL,
             warn=True,
         )]
 
@@ -7290,10 +7496,12 @@ def _check_tenant_model_partitions(
     Reads the SAME local-only admin-psql path as ``_check_rls_present``, so no engine route or wire field is
     involved. These rows run on a local install only: a managed deployment has no ``pg_credentials`` here and the
     engine has no server-side equivalent (its boot check, ``ChunksIsolationCheck``, covers the RLS structure of
-    both trees and nothing about token tenants or registered models), so on a managed install they report "not
-    applicable" and the comparison is conexus's read-only query (docs/runbooks/rdr-225-cloud-deploy.md). Not applicable (ok, "not applicable: ...",
-    never a warning) where there is nothing to compare: no ``pg_credentials`` (a virgin box, or a managed
-    deployment), parents that are not partitioned (an engine that predates RDR-225), no token tenant, or no
+    both trees and nothing about token tenants or registered models), so on a managed install all three are a
+    warning, ``ok=False, warn=True`` with the shared :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, because the check was
+    not run (Sam, 2026-10-28, nexus-g7ijj: a checkmark never renders for an unperformed check); the comparison is
+    conexus's read-only query (docs/runbooks/rdr-225-cloud-deploy.md). Not applicable (ok, "not applicable: ...",
+    never a warning) where there is nothing to compare: no ``pg_credentials`` on a local box (a virgin box),
+    parents that are not partitioned (an engine that predates RDR-225), no token tenant, or no
     registered model. A finding is evaluated first; not applicable replaces only the outcome "nothing to
     check".
     """
@@ -7305,8 +7513,9 @@ def _check_tenant_model_partitions(
     if not creds_path.exists():
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
-        skip = _MANAGED_PARTITION_ROWS_SKIP_DETAIL if not is_local_mode() else _LOCAL_MODE_NOT_CONFIGURED_DETAIL
-        return _partition_rows(True, f"not applicable: {skip}")
+        if not is_local_mode():
+            return _partition_rows(False, _MANAGED_NOT_PROBEABLE_DETAIL, warn=True)
+        return _partition_rows(True, f"not applicable: {_LOCAL_MODE_NOT_CONFIGURED_DETAIL}")
 
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
         _read_credentials,
@@ -8279,8 +8488,9 @@ def _check_tuple_table_bloat(
     ``HttpTupleStore``'s ten RDR-205 operations expose or should — reads
     the SAME local-only ``pg_credentials`` admin-psql path
     ``_check_migration_state``/``_check_rls_present`` already use for
-    structural PG facts (LOCAL-ONLY by design, nexus-y3wuu; managed
-    deployments run this server-side and this check skips here). The
+    structural PG facts (LOCAL-ONLY by design, nexus-y3wuu; a managed
+    deployment has no ``pg_credentials`` here, so on one this row is a warning
+    that the check was not run, never a checkmark: nexus-njn1a finding 10). The
     query targets ``pg_stat_user_tables`` directly (a system view, always
     queryable) rather than the two tables themselves, so an engine whose
     Liquibase changesets predate ``tuples-001-baseline.xml`` reports zero
@@ -8297,8 +8507,9 @@ def _check_tuple_table_bloat(
 
     if not creds_path.exists():
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
-        detail = _MANAGED_DEPLOYMENT_SKIP_DETAIL if not is_local_mode() else _LOCAL_MODE_NOT_CONFIGURED_DETAIL
-        return [HealthResult(label=label, ok=False, warn=True, detail=detail)]
+        if not is_local_mode():
+            return [_managed_not_probeable(label)]
+        return [HealthResult(label=label, ok=False, warn=True, detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL)]
 
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
         _read_credentials,
@@ -8431,8 +8642,9 @@ def _check_tuple_sweep_freshness(
 
     if not creds_path.exists():
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
-        detail = _MANAGED_DEPLOYMENT_SKIP_DETAIL if not is_local_mode() else _LOCAL_MODE_NOT_CONFIGURED_DETAIL
-        return [HealthResult(label=label, ok=False, warn=True, detail=detail)]
+        if not is_local_mode():
+            return [_managed_not_probeable(label)]
+        return [HealthResult(label=label, ok=False, warn=True, detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL)]
 
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
         _read_credentials,
@@ -11878,6 +12090,7 @@ def run_health_checks(
     results.extend(_check_credential_persistence())
     results.extend(_check_llm_backend())  # nexus-2k66t.3 P2
     results.extend(_check_llm_key_persistence())  # nexus-2k66t.3 P2
+    results.extend(_check_answer_kind_extraction())  # nexus-jypmj.16
     results.extend(_check_mint_token())
     results.extend(_check_static_service_token())  # nexus-xzeml
 
@@ -11970,6 +12183,7 @@ def run_health_checks(
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
     results.extend(_check_pdf_support())
+    results.extend(_check_leftover_docling_cache())  # RDR-237; not applicable without a cache
     results.extend(_check_installer_rebuild())
     results.extend(_check_mineru_server())
     results.extend(_check_t2_schema_applied())

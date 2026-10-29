@@ -48,9 +48,8 @@ QUESTION = "what did RDR-084 decide, and who approved it?"
 
 @pytest.fixture(autouse=True)
 def _coverage_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The boundary ships OFF (RDR-232 Phase 3 fix round: the default flips only after the nexus-jypmj.3.10
-    measurement), so every test here that drives the boundary opts in the way a caller does. The tests of the
-    default itself delete the variable."""
+    """The boundary ships ON (Sam, 2026-10-28, nexus-jypmj.17), and the suite pins it off (tests/conftest.py), so every
+    test here that drives the boundary opts in explicitly. The tests of the shipped default delete the variable."""
     monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "1")
 
 
@@ -219,26 +218,41 @@ class TestBoundaryWiring:
         assert run.out["answer_shape"] == "answered"
 
     @pytest.mark.asyncio
-    async def test_the_switch_is_off_by_default_and_every_run_is_unassessed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_the_switch_is_on_by_default_and_the_runner_is_handed_the_boundary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """nexus-jypmj.17 (Sam, 2026-10-28): an unset variable runs the coverage check. Failing before the flip:
+        the call carried no boundary and the envelope said ``switch_off``."""
         monkeypatch.delenv(switches.ANSWER_COVERAGE_ENV, raising=False)
         run = await _drive(plan_result=PlanResult(steps=[{"text": "ok"}]), request=_request(2))
         [kw] = run.plan_run_calls
-        assert "coverage_boundary" not in kw, "an unset switch leaves the plan_run call exactly as before Phase 3"
-        assert run.out["run_summary"]["returned_coverage_state"] == "unassessed"
-        assert run.out["coverage"]["state"] == "unassessed" and run.out["coverage"]["reason"] == "switch_off"
-        assert run.out["answer_shape"] == "answered"
+        assert isinstance(kw["coverage_boundary"], CoverageBoundary)
+        assert run.out["coverage"].get("reason") != "switch_off"
 
     @pytest.mark.asyncio
-    async def test_an_unset_switch_runs_no_assessment_no_repair_and_one_generation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """nx_answer with the switch unset behaves as it did before Phase 3: the real runner is driven over the stub
+    async def test_a_blank_switch_is_the_default_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "  ")
+        run = await _drive(plan_result=PlanResult(steps=[{"text": "ok"}]), request=_request(2))
+        assert isinstance(run.plan_run_calls[0]["coverage_boundary"], CoverageBoundary)
+
+    @pytest.mark.asyncio
+    async def test_a_zero_switch_runs_no_assessment_no_repair_and_one_generation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """nx_answer with the switch at 0 behaves as it did before Phase 3: the real runner is driven over the stub
         dispatcher and no operator_check or repair call is made, even for a request nothing covers."""
-        monkeypatch.delenv(switches.ANSWER_COVERAGE_ENV, raising=False)
+        monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "0")
         d = Dispatcher(check=supports_nothing)
         run = await _drive(plan_id=7, dispatcher=d, request=_request(2))
         assert "operator_check" not in d.tools and d.tools.count("generate") == 1
         assert d.tools.count("search") == 1, "no repair retrieval"
         assert run.out["answer_shape"] == "answered" and run.write["success"] is True
         assert run.summary["coverage_state"] == "unassessed"
+
+    @pytest.mark.asyncio
+    async def test_an_unset_switch_runs_the_assessment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The shipped default end to end: unset, the real runner makes the assessment calls over the stub dispatcher."""
+        monkeypatch.delenv(switches.ANSWER_COVERAGE_ENV, raising=False)
+        d = Dispatcher(check=supports_f1_only)
+        run = await _drive(plan_id=7, dispatcher=d, request=_request(2))
+        assert d.tools.count("operator_check") >= 1
+        assert run.summary["coverage_state"] != "unassessed"
 
     @pytest.mark.asyncio
     async def test_the_opt_in_value_hands_the_runner_the_boundary(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,8 +262,8 @@ class TestBoundaryWiring:
 
     @pytest.mark.asyncio
     async def test_an_unrecognised_switch_value_warns_once_and_stays_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A value in neither vocabulary is read as the default, which is now off: a misspelled opt-in or opt-out
-        never switches the destructive gate on. It warns once so the typo is visible."""
+        """A value in neither vocabulary is read as off, whatever the default (on since nexus-jypmj.17): a misspelled
+        opt-out lands on the unassessed behaviour, which changes no answer. It warns once so the typo is visible."""
         monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "disable")
         with structlog.testing.capture_logs() as logs:
             first = await _drive(plan_result=PlanResult(steps=[{"text": "ok"}]), request=_request(1))
@@ -440,11 +454,11 @@ class TestScenario5Uncovered:
     @pytest.mark.asyncio
     async def test_prose_with_no_covered_facet_and_none_unassessed_is_withheld_and_uncovered(self) -> None:
         """Generation ran (the skip was off) and every facet is known uncovered: the prose is withheld."""
-        contradicted = FacetFinding("f3", "contradicted", ("e1",), "contradicted")
+        unsupported_too = FacetFinding("f3", "unsupported", (), "no_supporting_evidence")
         pr = PlanResult(
             steps=[{"ids": ["c1"], "collections": ["rdr__1-1"], "chunk_text_hash": ["h1"], "chunk_collections": ["rdr__1-1"]},
                    {"text": "A fluent answer built on nothing."}],
-            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, contradicted),
+            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, unsupported_too),
         )
         run = await _drive(plan_id=0, plan_result=pr, request=_request(2))
         assert run.out["answer_shape"] == "uncovered" and "fluent answer" not in run.out["final_text"]
@@ -583,7 +597,8 @@ class TestCountersAndPlanHygiene:
 
 OFF_VALUES = ["0", "false", "off", "no", "OFF", " False ", "No"]
 ON_VALUES = ["1", "true", "yes", "on", "ON", " Yes "]
-DEFAULT_VALUES = ["", "   ", "anything-else", "disable", "enabled"]
+DEFAULT_VALUES = ["", "   "]
+UNRECOGNISED_VALUES = ["anything-else", "disable", "enabled", "off!"]
 
 
 @pytest.mark.parametrize("value", ON_VALUES)
@@ -592,14 +607,22 @@ def test_each_opt_in_value_turns_the_boundary_on(value: str) -> None:
 
 
 @pytest.mark.parametrize("value", DEFAULT_VALUES)
-def test_unset_blank_and_unrecognised_values_are_the_default_which_is_off(value: str) -> None:
-    assert switches.ANSWER_COVERAGE_ENABLED is False
+def test_unset_and_blank_values_are_the_default_which_is_on(value: str) -> None:
+    """nexus-jypmj.17: on by default (Sam, 2026-10-28)."""
+    assert switches.ANSWER_COVERAGE_ENABLED is True
+    assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: value}) is True
+
+
+@pytest.mark.parametrize("value", UNRECOGNISED_VALUES)
+def test_an_unrecognised_value_is_off_not_the_default(value: str) -> None:
+    """The safe direction for a typo: it never runs the assessor, and it is not the default either."""
+    assert switches.ANSWER_COVERAGE_ENABLED is True
     assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: value}) is False
 
 
 def test_the_switch_name_and_the_unset_default() -> None:
     assert switches.ANSWER_COVERAGE_ENV == "NX_ANSWER_COVERAGE"
-    assert switches.coverage_enabled({}) is False
+    assert switches.coverage_enabled({}) is True
 
 
 @pytest.mark.parametrize("value", OFF_VALUES)
@@ -608,6 +631,9 @@ def test_each_off_value_is_the_kill_switch(value: str) -> None:
 
 
 def test_the_default_has_one_source_the_module_constant(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(switches, "ANSWER_COVERAGE_ENABLED", False)
+    assert switches.coverage_enabled({}) is False
+    assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: "1"}) is True
     monkeypatch.setattr(switches, "ANSWER_COVERAGE_ENABLED", True)
     assert switches.coverage_enabled({}) is True
     assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: "0"}) is False

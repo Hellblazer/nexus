@@ -11,7 +11,7 @@ Two layers are exercised:
 
 * the library: ``PDFExtractor.extract`` refuses by name, in every extractor
   mode, before any backend runs (the in-process fakes below);
-* the real CLI in a real interpreter that cannot see docling, MinerU or torch
+* the real CLI in a real interpreter that cannot see MinerU or torch
   (a meta-path finder hides them), which is the absent path the dev
   environment, with the stack installed, cannot otherwise show.
 """
@@ -37,7 +37,7 @@ def _reset() -> None:
 
 @pytest.fixture
 def absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pdf_stack, "state", lambda: StackState("absent", "docling, MinerU and torch are not installed"))
+    monkeypatch.setattr(pdf_stack, "state", lambda: StackState("absent", "MinerU and torch are not installed"))
     monkeypatch.setattr(
         pdf_stack, "install_plan",
         lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND),
@@ -51,13 +51,12 @@ def dummy_pdf(tmp_path: Path) -> Path:
     return p
 
 
-@pytest.mark.parametrize("mode", ["auto", "docling", "mineru"])
+@pytest.mark.parametrize("mode", ["auto", "mineru"])
 def test_extract_refuses_before_any_backend_runs(absent, dummy_pdf, monkeypatch, mode) -> None:
     ex = PDFExtractor()
     ran: list[str] = []
-    for name in ("_extract_with_docling", "_extract_with_mineru", "_extract_normalized", "_route_to_mineru"):
+    for name in ("_extract_with_mineru", "_extract_with_mineru_guarded", "_extract_pymupdf"):
         monkeypatch.setattr(ex, name, lambda *a, _n=name, **k: ran.append(_n))
-    monkeypatch.setattr("nexus.pdf_extractor._has_formulas_quick", lambda p: ran.append("screen") or 0)
     with pytest.raises(PdfStackMissingError) as err:
         ex.extract(dummy_pdf, extractor=mode)
     assert ran == [], f"a backend ran before the refusal: {ran}"
@@ -65,33 +64,46 @@ def test_extract_refuses_before_any_backend_runs(absent, dummy_pdf, monkeypatch,
     assert err.value.exit_code == 69
 
 
-def test_a_formula_pdf_is_not_routed_to_pymupdf_when_the_stack_is_absent(absent, dummy_pdf, monkeypatch) -> None:
-    """The nexus-2fyb shape: formulas detected, MinerU unavailable. The old
-    failure was a quiet pymupdf_normalized result."""
+def test_a_pdf_is_not_read_as_plain_text_when_the_stack_is_absent(absent, dummy_pdf, monkeypatch) -> None:
+    """The nexus-2fyb shape: MinerU unavailable. The old failure was a quiet plain-text PyMuPDF result."""
     ex = PDFExtractor()
-    monkeypatch.setattr("nexus.pdf_extractor._has_formulas_quick", lambda p: 50)
-    normalized = []
-    monkeypatch.setattr(ex, "_extract_normalized", lambda *a, **k: normalized.append(1))
+    ran: list[str] = []
+    monkeypatch.setattr(ex, "_extract_pymupdf", lambda *a, **k: ran.append("pymupdf"))
     with pytest.raises(PdfStackMissingError):
         ex.extract(dummy_pdf)
-    assert normalized == []
+    assert ran == []
 
 
 def test_an_import_error_deep_in_extraction_says_not_installed_when_it_is_not(absent, dummy_pdf) -> None:
-    err = PDFExtractor._docling_not_importable(dummy_pdf, ModuleNotFoundError("No module named 'docling'"))
-    msg = str(err)
-    assert "docling could not be loaded" in msg
+    ex = PDFExtractor()
+
+    def _boom(*a, **k):
+        raise ModuleNotFoundError("No module named 'mineru'")
+
+    ex._extract_with_mineru = _boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError) as err:
+        ex._extract_with_mineru_guarded(dummy_pdf, on_page=None)
+    msg = str(err.value)
+    assert "MinerU is not importable" in msg
     assert "PDF support is not installed" in msg and pdf_stack.INSTALL_COMMAND in msg
-    assert "install is broken" not in msg and "Reinstall with" not in msg
+    assert "install is corrupt" not in msg and "reinstall with" not in msg.lower()
 
 
 def test_an_import_error_with_the_stack_present_keeps_the_corrupt_install_message(dummy_pdf, monkeypatch) -> None:
     monkeypatch.setattr(pdf_stack, "state", lambda: StackState("present", ""))
-    msg = str(PDFExtractor._docling_not_importable(dummy_pdf, ModuleNotFoundError("No module named 'cv2'")))
-    assert "Reinstall with `" in msg and "nx doctor" in msg
+    ex = PDFExtractor()
+
+    def _boom(*a, **k):
+        raise ModuleNotFoundError("No module named 'cv2'")
+
+    monkeypatch.setattr(ex, "_extract_with_mineru", _boom)
+    with pytest.raises(RuntimeError) as err:
+        ex._extract_with_mineru_guarded(dummy_pdf, on_page=None)
+    msg = str(err.value)
+    assert "this conexus install is corrupt" in msg and "reinstall with `" in msg
 
 
-def test_the_mineru_import_branch_refuses_instead_of_advising_formula_stripped_output(absent, dummy_pdf, monkeypatch) -> None:
+def test_the_mineru_import_branch_refuses_instead_of_advising_another_extractor(absent, dummy_pdf, monkeypatch) -> None:
     ex = PDFExtractor()
 
     def _boom(*a, **k):
@@ -99,10 +111,10 @@ def test_the_mineru_import_branch_refuses_instead_of_advising_formula_stripped_o
 
     monkeypatch.setattr(ex, "_extract_with_mineru", _boom)
     with pytest.raises(RuntimeError) as err:
-        ex._route_to_mineru(dummy_pdf, 12, on_page=None, on_formula_oom="fail")
+        ex._extract_with_mineru_guarded(dummy_pdf, on_page=None)
     msg = str(err.value)
     assert "PDF support is not installed" in msg and pdf_stack.INSTALL_COMMAND in msg
-    assert "--extractor docling" not in msg, "never suggest the formula-stripping opt-out for a missing stack"
+    assert "formula" not in msg, "the removed screen's wording must not come back"
 
 
 # ── the real CLI in an interpreter that cannot see the stack ─────────────────
@@ -112,7 +124,7 @@ _HIDE = textwrap.dedent(
     import importlib.abc, sys
 
     class _Hide(importlib.abc.MetaPathFinder):
-        _names = {"docling", "mineru", "torch", "torchvision", "pdftext"}
+        _names = {"mineru", "torch", "torchvision", "pdftext"}
 
         def find_spec(self, name, path=None, target=None):
             if name.split(".")[0] in self._names:

@@ -140,7 +140,7 @@ Two related output lines are new since the RUNFENCE arc (nexus-5xn3k): `skipped:
 
 The cause after each name is `register_failed` (the per-file register raised), `catalog_hook_failed` (the registration step itself raised, for example a catalog outage), `oversize_no_catalog_document` (an oversize file whose document id was lost after the run dispatched it, so its oversize write had no owner; the net under the up-front refusal) or `unexplained`. Up to 10 files are named; the rest are counted. **The run exits non-zero** when this happens, where a per-file register failure or a catalog outage used to exit 0 with ownerless chunks hidden from search. A script that gated on `rc=0` against a real catalog can now see a failure it never saw before. The remedy is to fix the registration failure (`nx doctor`, the service health) and re-run; nothing was written, so there is nothing for `nx catalog reconcile` to repair. The same files are recorded in the durable per-file failure record (`nx index failures`) under error class `IdentityLessFile` with the cause, so the going-forward count does not depend on rotating logs. Because `nx doctor` fails on any unacknowledged row of that record, every `IdentityLessFile` row is a file that was lost: `nx doctor` names it with its cause and says to fix the registration failure, re-run `nx index repo`, and clear the run's rows (`nx index failures --clear --run-id ...`). Files that registration refused on purpose (a worktree or temp-dir path) are NOT recorded there: they keep their own `skipped — not registered` summary line and do not fail the run, hold the `--since-head` base or turn `nx doctor` red. If the durable write itself fails the run prints `WARNING: N dropped file(s) could not be durably recorded` (the files are still named in the summary and the run still exits non-zero for the drop); `nx doctor` will not report them. A refused file does not count toward the extraction-skip ratio of the systemic-skip verdict, and the progress total shrinks by it. A file dropped by the oversize backstop (`oversize_no_catalog_document`) is counted as dropped and never as `skipped: index fresh`, holds the `--since-head` base like the others, and is listed and recorded the same way.
 
-**Deferred-file exit code (nexus-z0o2p.14): a file whose write hit a transient error fails the run.** A file whose write to the engine hits a transient condition (an HTTP 429, 502, 503 or 504, the embed timeout, or a connection-level failure the client's own retries could not outlast) is deferred: nothing was indexed for it this run, and the run goes on with the rest. After the rest has finished, `nx index repo` prints `Warning: N/M file(s) deferred on a transient write error (nothing was indexed for them this run): <paths> [and K more]. Re-run 'nx index repo' to retry.` (the first ten paths are named) and EXITS NON-ZERO. Earlier a deferred file left one log line and `rc=0`, a clean-looking run that had not indexed the file. Re-run the command to retry; a deferred file is stale, so the next run picks it up. Two consequences to plan for. A file that always times out (an oversize file behind a gateway that cuts its requests short) makes every run exit non-zero until it succeeds or is excluded (`.nexus.yml` `server.ignorePatterns`). And `--since-head`'s base stays pinned at its previous commit while any file is deferred, so the next `--since-head` run re-walks the same delta instead of advancing. When a run has several failures, every warning line prints first and the command exits once, with the message of the first failure (manifest problems, quality gate, systemic skips, chunk flush, deferred files, taxonomy assignment, in that order).
+**Deferred-file exit code (nexus-z0o2p.14): a file whose write hit a transient error fails the run.** A file whose write to the engine hits a transient condition (an HTTP 429, 502, 503 or 504, the embed timeout, or a connection-level failure the client's own retries could not outlast) is deferred: nothing was indexed for it this run, and the run goes on with the rest. After the rest has finished, `nx index repo` prints `Warning: N/M file(s) deferred on a transient write error (nothing was indexed for them this run): <paths> [and K more]. Re-run 'nx index repo' to retry.` (the first ten paths are named) and EXITS NON-ZERO. Earlier a deferred file left one log line and `rc=0`, a clean-looking run that had not indexed the file. Re-run the command to retry; a deferred file is stale, so the next run picks it up. Two consequences to plan for. A file that always times out (an oversize file behind a gateway that cuts its requests short) makes every run exit non-zero until it succeeds or is excluded (`.nexus.yml` `server.ignorePatterns`). And `--since-head`'s base stays pinned at its previous commit while any file is deferred, so the next `--since-head` run re-walks the same delta instead of advancing. When a run has several failures, every warning line prints first and the command exits once, with the message of the first failure (manifest problems, quality gate, a MinerU stop, systemic skips, chunk flush, deferred files, taxonomy assignment, in that order). A MinerU stop prints its `Stopped:` line and the PDFs it did not attempt even when an earlier failure in that list wins the exit message.
 
 **Unextractable-file exit code (nexus-deyd5): a single skip stays clean, a systemic skip does not.** A file that raises `UnextractableContentError` during `nx index repo` is skipped and counted, but no longer fails the run by itself (`rc=0`) — nothing was ever written for that file, so skipping it alone costs no data; a `Note:` line on stderr names the count and points at the WARNING/ERROR log line(s) for the affected path(s). Separately, after the run's drain and post-processing have all already completed and committed, the AGGREGATE skip population across the whole run is checked against a systemic-skip floor: 100% of attempted files skipped, or at least 20 files attempted with 50% or more skipped. Crossing that floor raises a `ClickException` (non-zero exit) naming the skipped/attempted counts and percentage, even though the run itself finished and its successful work was already committed — nothing is discarded by this check, it only decides the exit code. The message suggests the most likely legitimate cause: scanned/image-only PDFs, since the default extractor does not run OCR (retry with `--extractor mineru` or set `pdf.extractor: mineru` in `.nexus.yml`).
 
@@ -168,37 +168,25 @@ catalog identity.
 |------|-------------|
 | `--dir DIR` | Index all PDFs in a directory (mutually exclusive with `PATH`) |
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich bib <collection>` for bulk backfill |
-| `--extractor [auto\|docling\|mineru\|pymupdf]` | PDF extraction backend (default: `pdf.extractor` from `.nexus.yml`, else `auto`). `pymupdf` reads each page's own text layer and needs no PDF support (no layout, tables or math; an image-only page is `unextracted`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
-| `--on-formula-oom [fail\|docling]` | Accepted and ignored for one release (RDR-237). A page whose MinerU attempt fails is retried without formulas, then taken from its PyMuPDF text layer, whatever the value; the document no longer aborts for it (see the MinerU ladder below) |
+| `--extractor [mineru\|pymupdf]` | PDF extraction backend (default: `pdf.extractor` from `.nexus.yml`, else `mineru`). `auto` and `docling` are still accepted and run as `mineru`, with a one-line notice. `pymupdf` reads each page's own text layer and needs no PDF support (no layout, tables or math; an image-only page is `unextracted`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
 | `--dry-run` | Preview extraction and chunking only — nothing is embedded, stored, or written (no API keys needed). Prints a chunk preview. Also registers no catalog document (nexus-uxg4u) — a preview never mints a Document row a subsequent refusal would leave behind. A real (non-dry) run that fails after registering a brand-new document rolls that registration back automatically; re-indexing a pre-existing document is left exactly as the completion fence marked it |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs: pages and chunks are staged on the engine as they are produced, so a killed run (even a hard kill) is resumed by the next run without extracting the PDF again and without embedding anything twice (the rerun re-sends the document from its first chunk through a fresh write; the engine skips chunks it already holds), and a run that finished uploading and died before the completion stamp sends only the stamp; `never` forces the in-process path (extract and chunk the whole document first, then write it in batches with the same chunk-plus-owner write; a killed run restarts from the first chunk, extracts again, and re-embeds nothing) |
 | `--allow-degraded-extraction` | Accept extracted text that fails the post-extraction quality gate (nexus-wi1uv, see [Post-Extraction Quality Gate](#post-extraction-quality-gate) below) instead of failing the run |
 
 ### PDF Extraction Backends
 
-Most PDFs work fine with the default (`auto`). You only need to think about this if you're indexing **math-heavy academic papers** with equations.
+MinerU is the default and the only layout- and math-aware extractor. Every PDF goes straight to MinerU: there is no formula pre-screen and no second extractor to route to. If MinerU is not installed the run stops (see the exit codes below) rather than falling back to another extractor. `auto` and `docling` are still accepted for `pdf.extractor` and `--extractor`; both run as `mineru` and print a one-line notice once per process. Any other `pdf.extractor` value in a config file falls back to `mineru`. Every PDF now runs MinerU, about 4 to 10 s per page, and the first PDF on a box downloads about 1.2 GB of model weights. `nx index repo`, `nx collection reindex` and `nx dt index` run MinerU on every PDF they index; `--extractor pymupdf` (or `pdf.extractor: pymupdf`) is the fast, text-only choice.
 
-**How `auto` works:**
+MinerU reads the document in page batches. A page whose MinerU attempt fails is retried without formulas (rung 2), then read from its PDF text layer through PyMuPDF (rung 3), then recorded `unextracted` (rung 4). One bad page no longer aborts the document; see MinerU OOM resilience below for the details. Math-heavy PDFs get a `has_formulas: true` flag on their chunks (useful for filtering).
 
-1. Docling extracts the PDF and counts formula regions
-2. If **no formulas found** → done (uses Docling output as-is, zero overhead)
-3. If **formulas found** → tries MinerU for better LaTeX extraction
-4. If MinerU isn't installed → returns the Docling result anyway
+**Text only (`pymupdf`).** `--extractor pymupdf` (or `pdf.extractor: pymupdf`) reads each page's own text layer through PyMuPDF, a core dependency, so it installs, starts and probes nothing from the PDF stack. There is no layout, no table structure and no math. A page with no text layer (a scan) is recorded `unextracted`; a PDF with no text layer on any page fails. Nothing chooses it automatically. The run summary of `nx index pdf` and `nx dt index` names the extractor and lists the unextracted pages (`nx index repo` and `nx collection reindex` print no extraction summary); the catalog document records `extraction_method: pymupdf`. A `pymupdf` rerun over the pipeline buffer a tripped MinerU run kept does not resume over it: it wipes that buffer and extracts every page from the text layer, so the document is uniformly text-only and recorded `pymupdf` (a buffer an earlier `pymupdf` run left is resumed).
 
-**What you get without MinerU installed:**
-- All PDFs extract normally via Docling
-- Math-heavy PDFs get a `has_formulas: true` flag on their chunks (useful for filtering)
-- Formula regions are detected but not re-extracted with MinerU
+**What MinerU gives you:**
+- LaTeX extraction for display and inline equations, plus layout and tables
+- Large PDFs are split into page batches, each processed in an isolated
+  subprocess to prevent OOM on formula-dense documents
 
-**Text only (`pymupdf`).** `--extractor pymupdf` (or `pdf.extractor: pymupdf`) reads each page's own text layer through PyMuPDF, a core dependency, so it installs, starts and probes nothing from the PDF stack. There is no layout, no table structure and no math. A page with no text layer (a scan) is recorded `unextracted`; a PDF with no text layer on any page fails. `auto` never chooses it. The run summary of `nx index pdf` and `nx dt index` names the extractor and lists the unextracted pages (`nx index repo` and `nx collection reindex` print no extraction summary); the catalog document records `extraction_method: pymupdf`, and a `pymupdf` rerun over pages a MinerU run left is recorded `mineru+degraded`, with its text-layer pages listed.
-
-**What MinerU adds (optional):**
-- Superior LaTeX extraction for display and inline equations
-- ~2.9x faster than Docling's formula enrichment mode on equation-heavy papers
-- Large PDFs are automatically split into 5-page batches, each processed in
-  an isolated subprocess to prevent OOM on formula-dense documents
-
-**PDF support is the `pdf` extra, installed on demand** (nexus-2k66t.4.2). docling, MinerU, torch, torchvision and pdftext are 57 to 65% of the download and 49% of the installed size, and search and store never import them, so a fresh install leaves them out. The first PDF index installs them: [`nx index pdf`](#nx-index), `nx dt index` of a PDF record, `nx index repo` when its walk finds a PDF, and `nx mineru start` check first, before any catalog or T3 write, and either install the stack or stop. An install builds a new generation with the `pdf` extra at the version already running (never an upgrade) through the generation builder's own arguments: CPU torch on Linux, the packaged overrides, the constraints shipped in the wheel. The command then re-runs inside that generation, so it needs no second invocation. The receipt records the extra, so every later `nx self install` keeps it. MinerU's models download on its first use, about 1.2 GB (the unimernet formula model 776 MB, the layout model 205 MB, OCR about 180 MB; measured 2026-10-23).
+**PDF support is the `pdf` extra, installed on demand** (nexus-2k66t.4.2). MinerU, torch, torchvision and pdftext are 57 to 65% of the download and 49% of the installed size, and search and store never import them, so a fresh install leaves them out. The first PDF index installs them: [`nx index pdf`](#nx-index), `nx dt index` of a PDF record, `nx index repo` when its walk finds a PDF, and `nx mineru start` check first, before any catalog or T3 write, and either install the stack or stop. An install builds a new generation with the `pdf` extra at the version already running (never an upgrade) through the generation builder's own arguments: CPU torch on Linux, the packaged overrides, the constraints shipped in the wheel. The command then re-runs inside that generation, so it needs no second invocation. The receipt records the extra, so every later `nx self install` keeps it. MinerU's models download on its first use, about 1.2 GB (the unimernet formula model 776 MB, the layout model 205 MB, OCR about 180 MB; measured 2026-10-23).
 
 A PDF index never degrades quietly (nexus-2fyb: an opt-in extra once produced silent formula loss). When the stack is missing and cannot be installed, the command exits before writing anything:
 
@@ -222,7 +210,7 @@ Or add to `.nexus.yml` (per-repo) or `~/.config/nexus/config.yml` (global) direc
 
 ```yaml
 pdf:
-  extractor: mineru   # auto | docling | mineru | pymupdf
+  extractor: mineru   # mineru | pymupdf (auto and docling are accepted and run as mineru)
   mineru_page_batch: 1          # pages per MinerU subprocess (memory isolation)
   mineru_page_timeout_s: 180    # per-page wall-clock budget (× pages-in-range); × mineru_page_batch must be at most 240
   mineru_memory_ceiling_mb: 0   # 0 = disabled; Linux-only RLIMIT_AS cap (see below)
@@ -231,7 +219,7 @@ pdf:
 
 The `--extractor` flag overrides the config when passed explicitly.
 
-**Which commands read `pdf.extractor`.** `nx index pdf` (flag first, then the setting), `nx index repo` and `nx collection reindex` (the setting only; they have no flag). The last two used to run `auto` whatever the setting said; they now honour it, so a repo configured `mineru` sends every new or changed PDF to MinerU alone (strict, no Docling routing for papers without formulas) and one configured `docling` gets formula-stripped extraction. Already-indexed, unchanged PDFs are not re-extracted either way. `nx dt index` and `nx dt capture` read the `--extractor` flag only.
+**Which commands read `pdf.extractor`.** `nx index pdf` (flag first, then the setting), `nx index repo` and `nx collection reindex` (the setting only; they have no flag). A repo configured `pymupdf` indexes every new or changed PDF from its text layer alone, and the default sends every one to MinerU. Already-indexed, unchanged PDFs are not re-extracted either way. `nx dt index` and `nx dt capture` do the same as `nx index pdf` (flag first, then the setting), so a host configured `pymupdf` neither runs MinerU nor asks for the PDF stack there.
 
 **Time limit of one MinerU attempt (RDR-237).** `mineru_page_timeout_s` times
 `mineru_page_batch` is the longest one attempt runs without a progress write, and a
@@ -252,16 +240,19 @@ error, a dropped server connection) is retried without formulas
 (`formula_enable=false`, recorded `mineru-no-formula`), then read from the PDF's
 own text layer (`pymupdf-text`), then recorded `unextracted`; the document
 finishes and `extraction_method` reads `mineru+degraded`, with the pages by rung
-in `extraction_pages`. `--on-formula-oom` is accepted and ignored for one
-release, and no longer changes this. When
-`pdf.ladder_breaker` consecutive pages (default 3) fail both MinerU attempts with
+in `extraction_pages`. When `pdf.ladder_breaker` consecutive pages (default 3) fail both MinerU attempts with
 the same cause (a timeout, or the same worker exit and stderr line) the install or
 the machine is failing, not the PDF: the document stops, naming the cause. The
 pages before that window stay in the kept buffer, so a rerun does not write them
 again, but MinerU runs over every earlier page again (the buffer only spares the
-writes), so repair the install first. Under `nx index pdf --dir` such a stop ends
-the whole run: the remaining PDFs are listed as not attempted, since each would
-trip the same check after its own timeouts. On **Linux** you can additionally set
+writes), so repair the install first. A breaker trip, and the machine-resource error
+(POSIX semaphores exhausted), name the machine and not the file, so each stops the
+MinerU work of the run and nothing else. `nx index pdf --dir` ends the whole run: the
+remaining PDFs are listed as not attempted, since each would trip the same check after
+its own timeouts. `nx dt index` skips the remaining PDF records and lists them under
+`Not attempted:` (markdown and web records keep running), and `nx index repo` stops its
+PDF loop and lists the PDFs not reached (code, prose and RDR files keep running and
+the `--since-head` base is held back); both exit non-zero. On **Linux** you can additionally set
 `mineru_memory_ceiling_mb` to cap the worker's address space (RLIMIT_AS) so a
 runaway page fails fast and catchably instead of thrashing; macOS does not honour
 RLIMIT_AS (the knob logs a warning and is ignored there). Note RLIMIT_AS caps
@@ -271,21 +262,19 @@ aggressively, so set it generously (several GB).
 **Forcing a specific backend (one-off):**
 
 ```bash
-nx index pdf paper.pdf --extractor docling   # Always Docling (no MinerU attempt)
-nx index pdf paper.pdf --extractor mineru    # Always MinerU (fails if not installed)
+nx index pdf paper.pdf --extractor mineru    # MinerU (the default; stops if the PDF stack is not installed)
+nx index pdf paper.pdf --extractor pymupdf   # Page text layer only (no layout, tables or math)
 ```
 
 #### Post-extraction quality gate
 
-`--extractor docling` is the documented recovery when MinerU OOM-fails on a
-formula-dense page — but on some pages Docling (and, less often, MinerU)
-can complete "successfully" while producing **space-stripped, unsearchable
-text**: words run together (`istheasetofthe`), with heavy raw-LaTeX noise.
+An extractor can complete "successfully" on some pages while producing
+**space-stripped, unsearchable text**: words run together (`istheasetofthe`), with heavy raw-LaTeX noise.
 Nothing about the run looked wrong — it reported success, the chunks were
 indexed and embedded — the document just could not be found by search
 (nexus-wi1uv).
 
-Every extraction (MinerU, Docling, and the PyMuPDF fallback alike) now
+Every extraction (MinerU and the PyMuPDF text layer alike) now
 passes through one post-extraction sanity gate before chunking: three cheap
 signals — whitespace ratio, mean token length, and the fraction of
 abnormally long tokens — computed on the raw extracted text and compared
@@ -296,19 +285,22 @@ algorithm-heavy). A document whose signals cross the thresholds **fails the
 run** naming the failing signal(s), the measured value, and the remedy:
 
 ```
-PDF paper.pdf failed the post-extraction quality gate (extraction_method=docling):
+PDF paper.pdf failed the post-extraction quality gate (extraction_method=mineru):
 whitespace_ratio=0.0114 < floor 0.05. This is the space-stripped-garbage failure
 mode (nexus-wi1uv) — the extracted text is likely unsearchable if indexed.
-Remedy: retry with `--extractor mineru` (formula-aware, often avoids the
-corruption), or if this document is legitimately dense/unusual and you have
-reviewed the extracted text, rerun with `--allow-degraded-extraction` to
-index it anyway.
+Remedy: if this document is legitimately dense/unusual and you have reviewed
+the extracted text, rerun with `--allow-degraded-extraction` to index it anyway;
+otherwise fix the PDF (re-export it, or OCR a scan) and index it again.
 ```
+
+When the extractor was `pymupdf`, the remedy instead says to rerun with
+`--allow-degraded-extraction` if the extracted text is acceptable, and that
+`--extractor mineru` reads the page images and needs the PDF stack.
 
 **Blast radius of a failure differs by command.** `nx index pdf` (single
 file or `--dir`) fails just that invocation/file — `--dir` continues the
 rest of the batch and exits non-zero listing every failure, except after a
-MinerU breaker trip (RDR-237), which stops the batch and lists the PDFs it did
+MinerU breaker trip or machine-resource error (RDR-237), which stops the batch and lists the PDFs it did
 not attempt. `nx dt index`
 contains a gate failure to the offending record (per-record batch
 isolation, same as any other recoverable indexing error) and continues the
@@ -341,7 +333,7 @@ nx search "" --corpus docs --where quality_gate_overridden=true --files
 
 **Querying by extractor identity (`extraction_method`, nexus-1oguj).** Every
 PDF chunk's metadata carries which backend actually produced its text:
-`docling` | `mineru` | `pymupdf` | `pymupdf_normalized`, or the honest mixed aggregate
+`mineru` | `pymupdf`, or the honest mixed aggregate
 `mineru+degraded` when a page settled below the first MinerU attempt (RDR-237;
 the pages by rung are the catalog document's `meta.extraction_pages`, a map from rung
 to 1-based pages that the PDF hook writes on every extraction, `{}` when clean, so a
@@ -360,9 +352,10 @@ rung, so its rung cannot be known; such a resume logs `resume_provenance_unknown
 document and the count of buffered pages with no rung) and keeps the method at
 `mineru+degraded` rather than claim a clean `mineru`, and the map lists only the pages
 whose rung is known.
-Chunks written before RDR-237 may
-carry `mineru+docling-degraded` (a page degraded to Docling by
-`--on-formula-oom docling`, a flag that is now accepted and ignored for one release). This is what makes an extractor
+Documents indexed before RDR-237 keep the values they were written with:
+`docling`, `pymupdf_normalized`, and `mineru+docling-degraded` (a page degraded to
+Docling by an earlier release). They stay readable and
+queryable. This is what makes an extractor
 regression scopeable after the fact (e.g. "which documents did MinerU
 extract, so I can re-index just those").
 
@@ -373,10 +366,11 @@ nx search "" --corpus knowledge --where extraction_method=mineru --files
 - **Scoping "any mineru-touched document" is two queries today, not one.**
   `--where` equality has no single-key OR/`$in` yet (repeating the same key
   with different values is a caller error and now raises loudly — see
-  `--where` above) — `mineru` and `mineru+docling-degraded` are two distinct
-  exact values. Run one query per value and union the results client-side:
+  `--where` above) — `mineru`, `mineru+degraded` and, on documents indexed before
+  RDR-237, `mineru+docling-degraded` are distinct exact values. Run one query per
+  value and union the results client-side:
   `--where extraction_method=mineru` and
-  `--where extraction_method=mineru+docling-degraded` separately. Single-key
+  `--where extraction_method=mineru+degraded` separately. Single-key
   `$in` support is tracked as nexus-4gzc8.
 - **Absence of the key is not evidence of "not mineru."** `extraction_method`
   is a NEW-WRITES-ONLY field — chunks indexed before this fix carry no such
@@ -500,7 +494,7 @@ nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force --re-embed
 | `--collection <name>` | T3 collection override. Wins over the extension-based default (e.g. `--collection knowledge__delos`) |
 | `--corpus <name>` | Corpus name used to derive the default collection (default: `dt`). PDFs route to `knowledge__<corpus>-papers` (paper-shaped, aspect-eligible); markdown notes route to `docs__<corpus>` |
 | `--dry-run` | Print records that would be indexed; make no T3 writes |
-| `--extractor [auto\|docling\|mineru\|pymupdf]` | PDF extraction backend for file-backed records (default `auto`; `nx dt` reads this flag only, never `pdf.extractor`). `pymupdf` reads each page's own text layer and needs no PDF support; a page with no text layer is left out, so page coverage fails unless `--allow-page-gap`. `mineru` is formula-aware but can OOM-fail on formula-dense pages; the recovery is `--extractor docling` (formula-stripped, always completes) |
+| `--extractor [mineru\|pymupdf]` | PDF extraction backend for file-backed records (default `mineru`; `auto` and `docling` are still accepted and run as `mineru`; `nx dt index` and `nx dt capture` use the flag when passed, else `pdf.extractor`). `pymupdf` reads each page's own text layer and needs no PDF support; a page with no text layer is left out, so page coverage fails unless `--allow-page-gap`. `mineru` is formula-aware; a page whose MinerU attempt fails is retried without formulas, then read from its text layer, so the record still completes |
 | `--force` | Force re-indexing every record, bypassing the staleness check (re-chunks and re-sends every chunk in place) — same decoupled semantics as `nx index pdf --force` (nexus-8143o): does NOT by itself force a Voyage re-embed. Forwarded to `index_pdf`/`index_markdown`'s own `force` kwarg for both file-backed records and, with `--dt-content`, non-file-backed ones; catalog identity and tumbler are preserved (nexus-gup3b). Without it, an unchanged record prints `skipped: index fresh (use --force)` |
 | `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-nexus-8143o `--force` behaviour). Forwarded to `index_pdf`/`index_markdown`'s own `force_re_embed` kwarg, same split as `nx index pdf`/`md`/`rdr`/`repo` |
 | `--allow-page-gap` | Accept a PDF whose extracted pages do not cover DEVONthink's `pageCount` (nexus-i0cwh). By default a gap is a per-record failure listed under `Failures:` with the missing page numbers, and the run exits non-zero; either way the gap is recorded on the catalog row as `meta.page_gap` (cleared on the next full-coverage run) |
@@ -2953,8 +2947,9 @@ nexus-gjv9b PART 3. Used at the 30-day soak review
 matchers (zero fires), or overly broad blocks (high block rate).
 
 **Writer swap (nexus-gjv9b PART 2, 2026-09):** the routing hooks record
-to the engine's `routing_events` table now (best-effort, ~250ms POST via
-`urllib`, no `nexus` import — see `conexus/hooks/scripts/routing/_lib.py`'s
+to the engine's `routing_events` table now (best-effort POST via
+`urllib` from a detached child, so a guard's decision never waits on the
+engine; no `nexus` import — see `conexus/hooks/scripts/routing/_lib.py`'s
 `log_routing_event`), not the JSONL log this command reads by default. Use
 `--from-store` to read the table instead — an unreachable service exits
 non-zero with `UNAVAILABLE: <reason>`, never a fabricated empty report. A
@@ -3505,7 +3500,7 @@ only; `--json` output shape is unchanged.
 
 Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and (local-service mode only) the service cross-encoder reranker model.
 
-**LLM backend (nexus-2k66t.3).** The "LLM backend" row names the backend the LLM steps use and why (`cli: claude is on PATH`, `anthropic: claude is not on PATH; the anthropic API is used (anthropic_api_key is set)`, `openai_compat: ...`) and never prints a key. A box with neither `claude` nor a key is reported as not applicable (a pass: search and storage work). It warns when `llm.backend` names a backend that cannot serve (`anthropic` without a key, an `openai_compat` without a base_url and model, an unknown value). The "LLM key persistence (GUI spawn)" row warns when the key the chosen backend would use is in shell env only, naming `nx config set anthropic_api_key "$ANTHROPIC_API_KEY"`; it stays silent when `claude` is the backend, so exporting `ANTHROPIC_API_KEY` for other reasons is not nagged.
+**LLM backend (nexus-2k66t.3).** The "LLM backend" row names the backend the LLM steps use and why (`cli: claude is on PATH`, `anthropic: claude is not on PATH; the anthropic API is used (anthropic_api_key is set)`, `openai_compat: ...`) and never prints a key. A box with neither `claude` nor a key is reported as not applicable (a pass: search and storage work). It warns when `llm.backend` names a backend that cannot serve (`anthropic` without a key, an `openai_compat` without a base_url and model, an unknown value). The "Answer-kind extraction" row (nexus-jypmj.16) says whether the structured request extraction that feeds the answer-kind gate can run here: it names the backend and model (`runs on cli (claude is on PATH), model haiku`), is not applicable (a pass) when `NX_ANSWER_STRUCTURED_EXTRACT` or `NX_ANSWER_KIND_ELIGIBILITY` is off or the box has no LLM backend at all, and warns for an `openai_compat` endpoint (it runs its configured model, not the measured Haiku) or a backend setting that cannot serve, because every request then keeps its first-pass kind while the gate enforces on it. It makes no model call. A process whose extraction calls keep failing also logs one `answer_kind_gate_extraction_failing` warning. The "LLM key persistence (GUI spawn)" row warns when the key the chosen backend would use is in shell env only, naming `nx config set anthropic_api_key "$ANTHROPIC_API_KEY"`; it stays silent when `claude` is the backend, so exporting `ANTHROPIC_API_KEY` for other reasons is not nagged.
 
 Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + reachability check that always runs (not behind a `--check-*` flag). Unconfigured (the default — most installs) reports a loud-but-passing skip line, since self-minting is optional and the static `service_token` path runs unchanged. When `mint_token` IS configured it routes through `DataTokenManager`'s own process-wide, TTL-cached singleton (never a throwaway manager — nexus-ssqk9 fixed a residue-discipline bug where the check used to mint a FRESH token on every single `nx doctor` invocation) and reports which of three things happened on success, plus the granted TTL: MINTED a fresh token, REUSED one already live in-process, or REUSED one borrowed from the cross-process lease file (nexus-9c7t9, below). A real `nx doctor` invocation is its own fresh subprocess with an empty in-process cache, so its own two outcomes are "minted a fresh" (no lease existed yet, or it had gone stale) or "reused the cached (lease file)" (a prior `nx` invocation's mint is still fresh); "reused the cached (in-process)" is observable only inside a long-lived process such as the MCP server. Degrades to a soft warning (never fatal, never a silent "ok") on an unresolvable endpoint or a rejected mint. If the credential is bound to a tenant other than `"default"` (see `mint_tenant` above), configure `mint_tenant` too — the doctor check mints against `mint_tenant` (or `"default"`) exactly like every other call site; an unconfigured `mint_tenant` against a mint-locked credential bound to a different tenant surfaces as the same 403 the `mint_tenant` table entry above documents. The managed edge forwards the client's `Authorization` on `/v1` unvalidated (conexus-qomd), so a successful mint means the engine checked this credential and its tenant.
 
@@ -3513,7 +3508,7 @@ Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + rea
 
 Then, corpus-integrity checks (both modes, all read-only, all degrade to a skip rather than crash `nx doctor`): dimension-orphaned collections (nexus-9tsdf, remedy `nx collection prune`); the embedding-profile rows (RDR-204 Day 2, nexus-ft04v.31, 7.38.0): the engine's install-scoped profile per content type (`GET /v1/catalog/embedding_profile`), the client's intent (`local.embed_model` plus key state) against it (a disagreement names the service restart, since the engine reads the model only at spawn), off-profile live collections (informational), and `disputed`, `dormant` and `quarantine` rows each with their remedy; an engine below the route reports the row as unread rather than clean; the re-embed job rows (nexus-s08oe): the off-profile row follows the job's rule and the *Re-embed jobs* row reports running and failed jobs (local mode; see [the re-embed job](#nx-collection-re-embed-job)); **the dangling-manifest ROW census RETIRED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15)** — `nx doctor` used to run a corpus-wide "populated manifest whose ROWS no longer resolve to a T3 chunk" sweep via the engine's `manifest_verify_all()`; that function is DROPPED, and the check is removed entirely, because the manifest-chunk FK (`catalog_document_chunks -> nexus.chunks`, VALIDATEd) now REJECTS the dangling state at write time — there is no longer anything for a corpus-wide sweep to find. The per-document form (formerly `nx catalog manifest-verify`) is [retired](#nx-catalog-manifest-verify--retired) the same way; use `nx catalog verify --collection NAME` for the one surviving damaged-manifest detection surface (client-side, per document, independent of the retired engine function — see [nx catalog verify](#nx-catalog-verify)). The pre-backfill NULL-collection census (`manifest pre-backfill rows (collection IS NULL)`) is UNAFFECTED and still runs — the FK does not cover NULL-collection rows (`MATCH SIMPLE` exempts them), so that census remains live. **The `--check-dangling-links` / `--strict-dangling-links` flags are RETIRED (RDR-194 Phase P1, bead nexus-tk070.p1, 2026-08-15)**, the identical shape as the manifest-verify retirement above: `nx doctor` used to report `catalog_links` rows whose `from_tumbler`/`to_tumbler` resolved to no document at all (nexus-ysrwi, GH #1419 issue 7) via the engine's `GET /v1/catalog/links/orphaned`; the flags are gone because `fk_catalog_links_from_document`/`fk_catalog_links_to_document` (`catalog-032-links-tumbler-fk.xml`, ON DELETE CASCADE) now REJECT a link naming a tumbler with no `catalog_documents` row at write time, so that state is unreachable by construction. The underlying `GET /v1/catalog/links/orphaned` route and the `HttpCatalogClient.orphaned_links()` method are NOT retired — they still report the one case the FK deliberately does not cover (a link whose endpoint document exists but is TOMBSTONED, since soft delete does not fire `ON DELETE CASCADE`); there is simply no `nx doctor` flag surfacing it any more. `nx catalog purge-trash`'s stranded-chunk count (the opposite direction: existing T3 chunks with no live manifest referrer) is unrelated to any of the above and still runs; stale index-run fences — documents stranded in `index_state='indexing'` beyond 6 hours (safe but wasteful: every intervening `nx index` re-chunks and re-embeds at full cost; remedy `nx index repo <path> --force`; nexus-5xn3k.6); failed index runs with hidden chunks — documents stamped `index_state='failed'` whose run stored chunks but never wrote their manifest rows, so live(c) hides those chunks from every read (since RDR-223 every writer sends a chunk with its owner row, so a failed run no longer leaves such chunks and a failed run does not rebuild a manifest, nexus-z0o2p.35; this row finds the debris of runs made before that, or killed outright); remedy `nx catalog reconcile`, then re-index the source; PDF chunk metadata — PDF chunks still carrying the streaming uploader's placeholder metadata (empty `title`, no `extraction_method`), which means the extraction post-pass never landed or a late write overwrote it; readers keyed on the chunk title skip them silently (`nx enrich bib` is not one since nexus-6pfgb.21: it selects chunks through the catalog document's manifest). Scans every `knowledge__`/`docs__` collection with an engine-side filter, names each affected document by source URI (chunks whose source URI does not resolve, which includes chunks no manifest names, are listed apart by content hash), and names a collection it could not read as NOT CHECKED rather than counting it clean; remedy a `--force` re-index of the named document, then `nx enrich bib` (nexus-rte90, the detection half of nexus-w94eo); chash width-conformance — width-non-conformant chash rows (the GH #1414 class, `octet_length(chash) <> 32`) via the engine's tenant-scoped `GET /v1/catalog/chash/conformance` route (nexus-du2dw, RDR-180): reports per-dim (`embedding_<dim>` column of the unified `nexus.chunks` table) total/non-conformant/sample counts, names collections it cannot route to a dim instead of silently skipping them, and degrades honestly (loud skip, never a false clean) on a pre-route engine; and tumbler-allocator ("next_seq") drift — owners whose sequence counter has fallen at or below their own highest child. Self-heals per-owner on that owner's next registration (`nx index <path>`, the only remedy this check names); the engine also exposes an all-owners `sweepNextSeqDrift` converge route for the same drift class, not yet wired to a `nx` client verb (nexus-0ehwe).
 
-Then: Voyage AI key, git binary, git hooks status for registered repos, the MinerU server (as of 6.16.0 probed only when actually provisioned — an explicit non-default `pdf.mineru_server_url` or a live `nx mineru start` pid; unprovisioned fresh boxes render the not-configured skip instead of a red ✗), index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, PDF extraction (docling) (the modules docling's PDF pipeline imports, among them `cv2` and `torch`, are present; a missing one is a hard failure, because a docling pass that cannot import is an indexing error, not a PyMuPDF fallback), T2 schema applied, T2 best-effort writes (the meter's only producer — the RDR-129 chash dual-write hook — is retired by RDR-187, so a nonzero count is reported as a frozen HISTORICAL count, never a warning), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). (The RDR-129 T2 daemon-singleton check is retired along with the T2 daemon it guarded — nexus-i711w Stage 2 sub-stage B; the single-writer invariant it enforced now belongs to Postgres, not to a pid count.) The Voyage credential line (`VOYAGE_API_KEY`) is informational only: it describes enrichment/engine-bootstrap config, never a serving requirement, and is never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. (The `CHROMA_*` credential rows retired with the migration machinery at RDR-155 P4b.)
+Then: Voyage AI key, git binary, git hooks status for registered repos, the MinerU server (as of 6.16.0 probed only when actually provisioned — an explicit non-default `pdf.mineru_server_url` or a live `nx mineru start` pid; unprovisioned fresh boxes render the not-configured skip instead of a red ✗), index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, PDF extraction (mineru) (the modules MinerU imports, `mineru`, `cv2`, `torch` and `torchvision`, are present; a missing one is a hard failure, because a MinerU pass that cannot import is an indexing error, not a PyMuPDF fallback), a `Docling model cache` warning that appears only when a leftover Docling model cache (about 1.1 GB, in the Hugging Face hub cache or at `NEXUS_DOCLING_ARTIFACTS_PATH`) exists and prints the `rm -rf` command to remove it (nothing deletes it automatically), T2 schema applied, T2 best-effort writes (the meter's only producer — the RDR-129 chash dual-write hook — is retired by RDR-187, so a nonzero count is reported as a frozen HISTORICAL count, never a warning), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). (The RDR-129 T2 daemon-singleton check is retired along with the T2 daemon it guarded — nexus-i711w Stage 2 sub-stage B; the single-writer invariant it enforced now belongs to Postgres, not to a pid count.) The Voyage credential line (`VOYAGE_API_KEY`) is informational only: it describes enrichment/engine-bootstrap config, never a serving requirement, and is never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. (The `CHROMA_*` credential rows retired with the migration machinery at RDR-155 P4b.)
 
 Migration-report checks retired (RDR-155 P4b): the RDR-178 migration-report / write-divergence doctor rows died with the migration machinery; `<config>/migration-reports/*.json` files on disk remain as inert audit artifacts.
 
@@ -3849,7 +3844,9 @@ from it).
 
 **Partition rows (RDR-225, nexus-3wh8d.16).** Four `nx doctor` rows cover the per-model, per-tenant layout of
 `nexus.chunks` and `nexus.taxonomy_centroids`. They read the engine's PostgreSQL through the same local admin
-`psql` path as "RLS policies" (a managed deployment runs them server-side), so they need no engine route.
+`psql` path as "RLS policies", so they need no engine route. A managed deployment has no `pg_credentials` on the
+client, so on one all three rows are a warning (`⚠`) that says the check was not run from this client; they never
+show a checkmark for a check nobody performed.
 
 - "RLS policies" also walks both partition trees and is fatal on any model partition or leaf whose
   row security is off or not forced, or whose permissive policies are not the parent's.
@@ -3865,8 +3862,11 @@ from it).
   table and a `mint`-scoped credential can create tenants, so `mint` is an operator credential.
 
 The new rows read "not applicable" (green, never a warning) where there is nothing to compare: no
-`pg_credentials` (a virgin box, or a managed deployment), tables that are not partitioned (an engine that
-predates RDR-225), no token tenant, or no registered model. A finding is evaluated first.
+`pg_credentials` on a local box (a virgin box), tables that are not partitioned (an engine that predates
+RDR-225), no token tenant, or no registered model. A finding is evaluated first. On a managed deployment the
+rows are not "not applicable" but a warning, the same one `Storage service health`, `Schema migrations`,
+`RLS policies`, `tuples.dead_tuple_ratio` and `tuples.sweep_freshness` show there: the check was not
+run from this client, and the operator's read-only query is in `docs/runbooks/rdr-225-cloud-deploy.md`.
 
 After the ownerless-write release, restart every long-lived `nx-mcp` server and hook-spawned `nx`; the steps are under [`nx upgrade`](#nx-upgrade).
 
@@ -4471,7 +4471,7 @@ uv tool run --python 3.12 --from conexus==<version> nx self install --bootstrap 
 nexus-2k66t.4.9, so a new install has PDF support as 7.85.0 did; the throwaway
 environment that runs the command stays slim, and only the generation gets the
 extra. Leave it off, or pass `--slim` to the installers, for an install without
-docling, MinerU and torch; the first PDF index then fetches them.)
+MinerU and torch; the first PDF index then fetches them.)
 
 With the flag the command installs the released package from the package
 index, at the version of the `nx` that is running it, into a new
@@ -5364,7 +5364,7 @@ every row is split three ways:
     `ranking_only`, `operator_payload` (filter, check, verify or groupby
     payload), `retrieval_only` (a search/query/traverse result payload),
     `listing`, `empty`, and, from RDR-232 Phase 3 (nexus-jypmj.3.3), `uncovered`
-    (evidence was retrieved and covered no requested part) and `no_evidence`
+    (evidence was retrieved and neither supported nor contradicted any requested part) and `no_evidence`
     (nothing usable reached the reduction). A row
     written by a post-fix client carries the `[non-answer: <shape>]`
     notice as its `final_text` and is named by that prefix; a pre-fix row
@@ -5419,8 +5419,14 @@ executed-failed with `--include-failed`; see above):
 - **by plan** (keyed by `plan_id` as a string, or `"fallback"` for a
   genuine planner-error miss with no `plan_id` at all — `plan_id=0`, the
   ad-hoc inline-planner sentinel, gets its OWN `"0"` key, distinct from
-  `"fallback"`): `run_count`, `median_cost_usd`, `median_elapsed_ms`. The
-  key is the run log's matched plan, so a run that grew and saved a plan
+  `"fallback"`): `run_count`, `median_cost_usd`, `median_elapsed_ms`. A run's
+  elapsed time is the sum of its steps' `elapsed_ms` with the coverage assessment
+  counted once: the assessment's calls run concurrently, each its own
+  `operator_check` step past the plan's own steps, so a row whose run summary
+  carries `coverage.assessment_latency_ms` counts those steps as `min(sum of their
+  elapsed_ms, assessment_latency_ms)`, and a row without it keeps the plain sum
+  (an upper bound). `by_operator` and `by_source` entries still report each
+  call's own time. The key is the run log's matched plan, so a run that grew and saved a plan
   still lands under `"0"` even though its `nx_answer` envelope reported the
   saved id.
 - **cost-consistency violations**: rows where a row's own `cost_usd`
@@ -5431,8 +5437,19 @@ executed-failed with `--include-failed`; see above):
   planner (`plan_id` 0) also carries the planner dispatch's cost, which
   belongs to no step (nexus-jypmj.1.20): for those rows a run cost at or above
   the step sum agrees, and a known run cost agrees with no known step cost; a
-  run cost below its steps is still flagged. `by_plan` medians stay step sums,
-  so they remain comparable with the predicted cost.
+  run cost below its steps is still flagged. The structured request extraction's
+  call is part of the run's cost too (nexus-jypmj.9) and belongs to no step: a
+  row whose run summary records an extraction cost agrees at the step sum plus that
+  cost (exact, so an over-count is still flagged) or, for a row written by a release
+  that left the call out of the run cost, at the step sum alone. A plan-miss run
+  that stored its out-of-step share (`out_of_step_cost_usd`, nexus-jypmj.5; the inline
+  planner call plus the request-extraction call, so a plan-match hit that made the
+  extraction call has one too) is checked from both sides whatever its `plan_id`: its
+  run cost must equal the step sum plus that share, so an over-count is flagged too,
+  and the one-sided allowance and the run summary's extraction cost are not consulted.
+  A row with no stored share (written before the field, by an older client, or read
+  from an engine without the column) keeps the checks above. `by_plan` medians
+  stay step sums, so they remain comparable with the predicted cost.
 
 A step's `cost_usd` of `None` ("unknown", not a measured cost — see
 `StepRecord`'s own docstring, `plans/runner.py`) is excluded from every
@@ -5487,16 +5504,23 @@ recorded as a failure, and no plan is grown from it (nexus-zy0kj). Of those,
 `planner_error` and `error` are set on a failure path; `no_evidence` means
 nothing usable reached the reduction (every retrieval step returned zero
 results, or a scope conflict removed it all); and `uncovered`
-(nexus-jypmj.3.12) means retrieval returned evidence and none of it covered a
-requested part, so no answer is given (terminal generation is skipped when the
-check has assessed every facet and found none covered, and prose generated
-anyway is withheld; while any facet is unassessed the prose is kept as
-`insufficient_evidence`). `None` on
+(nexus-jypmj.3.12) means retrieval returned evidence and none of it supported
+or contradicted a requested part, so no answer is given. Terminal generation is
+skipped when the check has assessed every facet and found each unsupported, and
+prose generated anyway is withheld. A contradicted part does not count as
+uncovered: it is reported ahead of the prose as `insufficient_evidence`
+(nexus-jypmj.3.13), as is prose while any facet is unassessed. `None` on
 paths that never classified: the single-step fast path, a continuation
-handoff and a budget-exhausted stop. The coverage check is off unless
-`NX_ANSWER_COVERAGE=1` is set (the default flips only after the Phase 3
-measurement, nexus-jypmj.3.10); with it off every run is unassessed and
-`answer_shape` is what it was before RDR-232 Phase 3.
+handoff and a budget-exhausted stop. The coverage check is on by default
+(Sam, 2026-10-28, nexus-jypmj.17); `NX_ANSWER_COVERAGE=0` (or `false`, `off`,
+`no`) turns it off, and with it off every run is unassessed and `answer_shape`
+is what it was before RDR-232 Phase 3. A value that is neither an on nor an off
+word (`disable`, `off!`) reads as off, not as the default: the safe direction
+for a typo. With the check on, a run adds model calls, latency and a small USD
+cost, and can come back `uncovered`; one live run of the earlier serial design
+took 147.3 s and 0.430 USD against 29.4 s and 0.433 USD with it off (the
+assessment: 118 s, 0.0166 USD), and the concurrent design has no live figure yet
+(see `docs/configuration.md`, `NX_ANSWER_COVERAGE`).
 Grown plans are additionally gated on identifier agreement at match time
 (nexus-wj12p): a grown plan whose originating question named identifiers
 (RDR/JDR ids, bead ids, engine tags, client versions, GH/PR numbers) is
@@ -5814,8 +5838,14 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   wins. `library_not_reseeded` means the plan library holds builtin templates with no
   answer-kind declaration: `library_check` is `checked`, `builtins_checked` is how
   many builtin rows a reseed can fix were examined, `undeclared_builtins` how many
-  of them lack the declaration and `undeclared_builtin_names` names up to 8 (run
-  `nx plan reseed`, or upgrade, which reconciles them). A builtin-tagged orphan that
+  of them lack the declaration and `undeclared_builtin_names` names up to 8, each as
+  `<name> (id <n>)` (several builtin rows share a name). Run `nx plan reseed`, or upgrade,
+  which reconciles them. If the state outlives a reseed, the reseed's own warnings say
+  why: a `seed load error` for a template means the installed conexus rejects it, and
+  only an upgraded conexus clears it; a `not reconciled` warning (`description already
+  belongs to library row id=N`) clears when row N is deleted (`nx plan delete N`) and
+  `nx plan reseed` is run again. The once-per-process warning in the log carries the same
+  text as its `remedy`. A builtin-tagged orphan that
   no shipped template describes is not counted: the seed loader leaves it in place, so
   a reseed could not fix it. A library with no such row enforces and says
   `builtins_checked` 0. `library_check` is `unreadable` (and the gate keeps enforcing)
@@ -5871,10 +5901,13 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
     when no operator consumed retrieved evidence (a handoff cut before it, a
     fast-path query, an error).
   - `source_check`: `{state, sources, reducer_input_recorded, unresolved}`.
-    `state` is the worst source's: `missing` (not resolved, ambiguous, nothing
+    `state` is the worst source's: `missing` (no document carries it, nothing
     read, no reduction handed it, none of its chunks reached the reducer, or
     every reserved chunk was dropped by an intermediate `rank` or `filter`
-    before the final reduction), `partial` (the document is over the primary
+    before the final reduction), `unresolved` (the source is ambiguous
+    (candidates), its candidate lookup hit the cap, or the lookup failed, timed
+    out or had no catalog; disclosed here and in `coverage.sources`, and it
+    blocks no facet; nexus-jypmj.3.17), `partial` (the document is over the primary
     budget, some selected chunks did not reach the reducer, or some reserved
     chunks were dropped before the final reduction) or `covered`;
     `not_applicable` when no source was named. Each source row is `{source,
@@ -5925,8 +5958,14 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   - `traversals`: one summary per `traverse` step (`policy_applied`,
     `policy_failed`, `possibly_truncated`, `contained`, `nodes_walked`,
     `nodes_retained`, `dropped_out_of_scope`, `dropped_out_of_owner`, `owners`,
-    `owner_unattributed`, `dropped_role`, `dropped_cap`, `scope_conflict`, `widened`); `capped_traversals`: how many came back at the engine's 500-node
-    cap (the count nexus-jypmj.1.12 posts on nexus-jypmj.1.13).
+    `owner_unattributed`, `dropped_role`, `dropped_cap`, `scope_conflict`, `scope_prefilter`,
+    `engine_dropped_out_of_scope`, `secondary_omitted`, `widened`); `capped_traversals`: how many came back at the
+    engine's 500-node cap (the count nexus-jypmj.1.12 posts on nexus-jypmj.1.13). `scope_prefilter` is `applied` when
+    the engine ran the caller's scope before its cut (it advertises `catalog_graph_scope_filter_supported` and its
+    reply carried the `scope_filter` marker; `engine_dropped_out_of_scope` counts what it removed), `not_scoped` for a
+    run with no restricting scope, and `unavailable` otherwise: an engine without the predicate, or an edge that
+    trims the flag. An `unavailable` scoped walk that may have been cut at the cap sets `secondary_omitted` and
+    returns only its seed documents as graph evidence, never `contained`; one that was not cut is unchanged.
   - `reserved`: `{items, merged, over_share_dropped, deduped_secondary,
     secondary_cut, capped, dropped_before_terminal}`, the `reserved_stream`
     report in brief; `null` when no stream was built.
@@ -5946,8 +5985,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   stored. `{version, persistence, detail, returned_coverage_state,
   persisted_coverage_state, digest}`; always an object. The summary (version 1:
   coverage counts and state, request kind, eligibility, per-stream counts, scope,
-  repair, cost and latency; no question text, and with `trace=False` no facet text
-  or source hint) rides on the run's `/record` and `/complete` write, in the same
+  repair, cost and latency, and the same assessment counters the `coverage` object
+  carries, additive to version 1; no question text, so a `whole_question` facet is listed
+  without its text, and with `trace=False` no facet text or source hint) rides on the run's `/record` and `/complete` write, in the same
   row, and is sent only when the engine's `/version` advertises
   `nx_answer_run_summary_supported` (engine-service-v0.1.167 and later).
   `persistence` is `persisted` (the run row was read back and carries a summary
@@ -5976,11 +6016,12 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   even when the ledger said `complete`. It adds `requested_facet_ids` and
   `covered_facet_ids`, `residual_gaps` (`{facet_id, state, reason}` for every
   facet not covered, an unassessed one included), `primary_source`
-  (`{state, sources}`; `state` is `not_named`, `covered`, `partial` or
-  `missing`) and `corpus_counts` (`{anchors, by_stream, by_collection}`, what the
+  (`{state, sources}`; `state` is `not_named`, `covered`, `partial`,
+  `unresolved` (ambiguous or not looked up; disclosed, blocks no facet) or
+  `missing`, worst first `missing`, `unresolved`, `partial`, `covered`) and `corpus_counts` (`{anchors, by_stream, by_collection}`, what the
   final reduction was handed); `repair` holds the repair attempt. A run no
   boundary assessed has the same keys, state `unassessed` and a `reason`:
-  `switch_off` (`NX_ANSWER_COVERAGE` is not on, the default), `no_facets`,
+  `switch_off` (`NX_ANSWER_COVERAGE` is off), `no_facets`,
   `terminal_reduction_not_reached` (an error before the final reduction, the
   single-query fast path, a run whose reduction raised) or `boundary_not_run`;
   its facet lists are empty. A `partial` state goes with `answer_shape`
@@ -5996,7 +6037,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   skip_generation, facets_required, facets, rounds, findings, anchors, sources,
   scope, assessment, repair, ...}`. `state` is `complete` (every required facet
   covered), `partial`, `unavailable` or `unassessed` (no facets, the assessor
-  failed, or `NX_ANSWER_COVERAGE` is not on); `reason` says why. `facets` counts
+  failed, or `NX_ANSWER_COVERAGE` is off); `reason` says why. `facets` counts
   findings by state (`covered`, `unsupported`, `contradicted`, `unassessed`);
   `findings` has one `{facet_id, state, evidence_ids, reason}` per required
   facet (a facet with both supporting and contradicting evidence is `covered`
@@ -6006,7 +6047,17 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   tumbler, t2_record_id}` and carries identity only, never evidence text;
   `sources` and `scope` are the deterministic source and scope rows; `assessment`
   and `repair` report calls, facets per call, latency and outcome, with counts and
-  closed names only. With `trace=False` the source labels and the `detail` of
+  closed names only. `assessment` also reports what each call came back as
+  (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
+  `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
+  `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,
+  rejected]`, `accepted_records`, `unusable_calls`, `raised_calls` and
+  `failure_cause` (`raised_call`, `unusable_reply`, `mixed` or `none`). The coverage
+  object also has `facets_conflicted` (the conflicted subset of `facets.covered`),
+  `unassessed_by_cause` (`unusable_reply`, `deadline_skip`, `budget_skip`,
+  `raised_call`, `stopped_after_failure` (always 0 since nexus-jypmj.17: the assessment
+  calls run concurrently and a call that raised or replied unusably no longer stops the others, so
+  the key stays for older records), `other`) and `repair_entered`. With `trace=False` the source labels and the `detail` of
   `sources` and `scope` are blanked; ids, counts and closed names stay.
 
 - `traverse` under `nx_answer` (nexus-jypmj.1.5): `nx_answer` always supplies the
@@ -6147,7 +6198,11 @@ figures were hand-assembled by composing several existing readers on
    hit vs. inline-planner fallback, the fixed-edge latency histogram
    (`answer-runs`'s own `_BUCKET_ORDER` — one definition), and the
    oldest/newest event timestamp — the instrument behind the 08-27
-   capture's headline "zero rows since \<ts\>" finding.
+   capture's headline "zero rows since \<ts\>" finding. With `--since`
+   these two are the oldest and newest rows inside the window, not the
+   all-time ones; the text form prints them as `oldest_in_window=` and
+   `newest_in_window=` beside the all-time `total=` (the JSON keys stay
+   `oldest_created_at` and `newest_created_at`).
 2. **Tier writes** since `--since` (or all-time) — by tier, by tool, by
    agent, plus the null-agent share as a number.
 3. **relevance_log** — row count, oldest/newest event timestamp (`GET

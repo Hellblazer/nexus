@@ -1,0 +1,81 @@
+# RDR-232 negative controls v1 (nexus-jypmj.3.10 fix round; critique S4).
+#
+# What this is: 4 requests whose facets NOTHING in the corpus bears on. Each asks about a system the nexus RDRs never
+# describe (Cassandra, Elasticsearch, SAML with Istio, Redis Sentinel with a canary-release pipeline); the presence of
+# each marker term is pinned absent from docs/ and src/ by tests/test_rdr232_measurement_preconditions.py. They are the
+# bead's missing precondition for turning the coverage check on: with a request nothing answers, a correct assessor
+# says `neutral` for every item and the facet comes out `unsupported` (so the run is `uncovered`, or `partial` beside
+# a facet that is covered); a facet reported `covered` here is a FALSE COVER, and an `unassessed` one costs a call for
+# nothing. build_check_request asks for a record per item with no tag, so a model that did not read the items can
+# answer neutral and make the check a silent no-op; this set is where that shows.
+#
+# Retrieval still returns related-sounding RDR chunks (canary, paging, search, auth): the test is that the assessor
+# does not call them support. There is no oracle entry for these requests: absence is by construction, so the driver
+# counts the assessor's facet states directly (report key `negative_controls`). The measurement reads this set with
+# `--set negative` (bench.rdr232_phase3_measure). Same label fields and golden_set_version as golden_v1.
+#
+# Provenance: written 2026-10-28 by the conexus developer agent. IN-SAMPLE and 4 requests: a presence check for false
+# coverage, not a rate. No model has run on it. Scope is rdr with no named source, so no source binding decides a
+# facet before the assessor sees it.
+golden_set_version: 1
+queries:
+  - qid: N01
+    category: factual
+    text: "What does the Cassandra tombstone compaction policy in the nexus catalog design say about gc_grace_seconds?"
+    scope: rdr
+    answer_kind: lookup
+    required_sources: []
+    required_facets: ["gc-grace-seconds"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"
+
+  - qid: N02
+    category: factual
+    text: "Which Elasticsearch index template does the nexus search service use for RDR documents, and how are its shard counts chosen?"
+    scope: rdr
+    answer_kind: lookup
+    required_sources: []
+    required_facets: ["index-template", "shard-count-rule"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"
+
+  - qid: N03
+    category: compositional
+    text: "Summarize how the nexus gateway validates SAML assertions, how Istio sidecars forward the caller identity, and what the SAML session-expiry policy is."
+    scope: rdr
+    answer_kind: synthesis
+    required_sources: []
+    required_facets: ["saml-assertion-validation", "istio-identity-forwarding", "saml-session-expiry"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+      - "research:document-discovery"
+
+  - qid: N04
+    category: factual
+    text: "Where does the nexus canary release pipeline publish its Redis Sentinel failover metrics, and who is paged when a Sentinel quorum is lost?"
+    scope: rdr
+    answer_kind: lookup
+    required_sources: []
+    required_facets: ["failover-metrics-destination", "quorum-loss-paging"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"

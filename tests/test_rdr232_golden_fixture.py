@@ -153,7 +153,17 @@ def _assert_graph_stream_contained(fx, run) -> dict[str, int]:
     # a seed only if one of its chunks won a slot among the 40.
     nexus_seeded = any(fx.chunks[c][0] == g.NEXUS_REF for c in set(run.search_ids))
     reached_code = g.ART_CODE_DOCS + (g.NEXUS_CODE_DOCS if nexus_seeded else 0)
-    assert rep["dropped_out_of_scope"] == reached_code and rep["dropped_by_corpus"] == {"code": reached_code}, rep
+    # nexus-jypmj.1.13: the engine the fixture runs against applies the scope before its node cut and says so
+    # (`scope_prefilter` applied), so the code documents never reach the client: the engine counts them
+    # (`engine_dropped_out_of_scope`) and the client's own filter finds none. Against an engine without the
+    # predicate the client drops them itself, as before. Either way every reached code document is accounted
+    # for exactly once and none of them is kept.
+    engine_dropped = rep["engine_dropped_out_of_scope"]
+    assert rep["dropped_out_of_scope"] + engine_dropped == reached_code, rep
+    if rep["scope_prefilter"] == "applied":
+        assert rep["dropped_out_of_scope"] == 0 and rep["dropped_by_corpus"] == {}, rep
+    else:
+        assert rep["scope_prefilter"] == "unavailable" and rep["dropped_by_corpus"] == {"code": reached_code}, rep
     assert rep["corpus_counts"].get("rdr", 0) >= 1 and "code" not in rep["corpus_counts"], rep
     assert rep["possibly_truncated"] is False and rep["contained"] is True and rep["nodes_walked"] < 500, rep
     assert len(run.traverse_chunk_collections) == len(run.traverse_ids), "one collection per id"

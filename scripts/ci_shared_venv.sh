@@ -50,7 +50,7 @@
 # OUTPUTS (GITHUB_OUTPUT; printed to stdout when it is unset). Nothing goes to GITHUB_ENV: a
 # job-wide UV_PROJECT_ENVIRONMENT would make every other project's `uv run` in the job (the mcpb
 # project, anything a test spawns) sync into this venv, so the workflow sets it in the `env:` of the
-# steps that need it (uv sync, docling warm, pytest) and nowhere else.
+# steps that need it (uv sync, pytest) and nowhere else.
 #   used=true|false   true: the thin venv is ready; the workflow skips its own `uv sync` and the F3
 #                     bytecode-prefix step (the shared entry is precompiled; the project's pyc
 #                     lands in tmpfs).

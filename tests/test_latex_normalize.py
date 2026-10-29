@@ -506,14 +506,13 @@ def test_unwrap_idempotent_and_case_insensitive() -> None:
 
 # ── PDF title resolution: H1 fallback before filename stem (2026-08-19) ──────
 
-def test_resolve_pdf_title_prefers_extractor_then_h1_then_stem() -> None:
+def test_resolve_pdf_title_prefers_xmp_then_h1_then_stem() -> None:
     p = Path("/data/2512.11001.pdf")
     body = "# Rethinking Query Optimization for Multi-Agent Systems [Vision]\n\nZoi Kaoudi\n"
-    # extractor metadata wins
-    assert resolve_pdf_title({"docling_title": "Docling Title"}, p, body) == "Docling Title"
-    assert resolve_pdf_title({"docling_title": "", "pdf_title": "XMP Title"}, p, body) == "XMP Title"
-    # MinerU path: both empty -> first H1 of the markdown body
-    assert resolve_pdf_title({"docling_title": "", "pdf_title": ""}, p, body) == (
+    # XMP metadata wins
+    assert resolve_pdf_title({"pdf_title": "XMP Title"}, p, body) == "XMP Title"
+    # MinerU path: the title is empty -> first H1 of the markdown body
+    assert resolve_pdf_title({"pdf_title": ""}, p, body) == (
         "Rethinking Query Optimization for Multi-Agent Systems [Vision]"
     )
     # no H1 anywhere -> normalised stem

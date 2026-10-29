@@ -692,8 +692,7 @@ class TestAdaptivePageRanges:
         """RDR-237: a page failing both rungs descends (rung 3, rung 4) instead of
         failing the document. Here every page fails with a failure that carries no
         worker facts (class ``unclassified``, never counted by the breaker) and
-        none has a text layer, so the document ends with a named reason, and
-        Docling is nowhere on the path."""
+        none has a text layer, so the document ends with a named reason."""
         from structlog.testing import capture_logs
 
         from nexus.errors import UnextractableContentError
@@ -704,12 +703,9 @@ class TestAdaptivePageRanges:
             patch("nexus.config.get_mineru_page_batch", return_value=1),
             patch.object(extractor, "_mineru_run_isolated",
                          side_effect=RuntimeError("MinerU subprocess exited with code -9")),
-            patch.object(extractor, "_extract_with_docling",
-                         side_effect=RuntimeError("Docling fallback also failed")) as docling,
         ):
             with pytest.raises(UnextractableContentError, match="every page.*unextracted"):
                 extractor._extract_with_mineru(dummy_pdf)
-        docling.assert_not_called()
         assert not [e for e in logs if e.get("event") == "mineru_page_text_layer_unreadable"], (
             "the pages ended unextracted because they have no text, not because reading raised"
         )

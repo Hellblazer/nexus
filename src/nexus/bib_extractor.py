@@ -74,8 +74,8 @@ _REFERENCES_HEADING_RE = re.compile(
 )
 
 # nexus-kho0p. The load-bearing discriminator. Position alone cannot
-# separate "the paper's own banner" from "a cited paper's DOI": Docling's
-# chunk order can place the references section ABOVE the page-1 banner
+# separate "the paper's own banner" from "a cited paper's DOI": a layout
+# extractor's chunk order can place the references section ABOVE the page-1 banner
 # (that reordering is the whole reason nexus-liir exists, and its
 # regression test encodes it). What DOES separate them is that a
 # reference DOI sits inside a numbered bibliography entry, while a banner
@@ -126,7 +126,7 @@ def _text_above_references(text: str) -> str:
     the bibliography and some templates emit "References" more than once.
 
     This region is a PREFERENCE, not a hard cut. Extracted text is not
-    reliably in reading order -- Docling can emit the references above the
+    reliably in reading order -- a layout extractor can emit the references above the
     page-1 banner -- so excluding everything below the heading would lose
     real DOIs (see TestDoiLabelPreference). Citation membership, not
     position, is what actually rejects a reference DOI; see

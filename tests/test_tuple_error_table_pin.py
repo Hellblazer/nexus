@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-0miq7.7: one source for the thirteen RDR-205-family typed tuple-space errors.
+"""nexus-0miq7.7: one source for the fourteen RDR-205-family typed tuple-space errors.
 
-Three places name the thirteen ``TupleException`` subtypes and their HTTP
+Three places name the fourteen ``TupleException`` subtypes and their HTTP
 status, and all three must agree:
 
 1. The engine — ``service/src/main/java/dev/nexus/service/db/*Exception.java``
    files that ``extends TupleException``, each calling
    ``super("<Code>", <status>, ...)`` in its constructor.
-2. The client — ``nexus.db.t2.http_tuple_store``'s thirteen ``TupleError``
+2. The client — ``nexus.db.t2.http_tuple_store``'s fourteen ``TupleError``
    subclasses, each carrying a ``code = "<Code>"`` class attribute
    (:data:`_ERROR_CLASSES_BY_CODE`'s keys).
 3. The doc — docs/tuple-space.md's ``## Errors`` section, one

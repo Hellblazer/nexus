@@ -198,7 +198,7 @@ def test_an_interrupt_during_the_drain_after_a_stage_failure_propagates_and_keep
     uploader_may_finish = threading.Event()
 
     class _FailingExtractor:
-        def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+        def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                     allow_degraded=False, on_heartbeat=None):
             for i in range(2):
                 on_page(i, f"page {i}", {"page_number": i + 1, "text_length": 6})
@@ -254,7 +254,7 @@ def test_a_straggler_stage_after_an_interrupted_drain_never_writes_over_a_wiped_
     in_flight, release = threading.Event(), threading.Event()
 
     class _Extractor:
-        def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+        def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                     allow_degraded=False, on_heartbeat=None):
             time.sleep(1.0)  # the chunker seeds its empty cache and enters its poll loop first
             for i in range(2):

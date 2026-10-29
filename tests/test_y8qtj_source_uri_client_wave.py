@@ -266,7 +266,7 @@ class TestIndexPdfIncrementalDocIdReuse:
              patch("nexus.doc_indexer._fence_complete", lambda *a, **k: None):
             ext_cls.return_value.extract.return_value = MagicMock(
                 text="x" * 5000,
-                metadata={"extraction_method": "docling", "page_count": 50,
+                metadata={"extraction_method": "mineru", "page_count": 50,
                           "format": "markdown", "page_boundaries": []},
             )
             chk_cls.return_value.chunk.return_value = mock_chunks

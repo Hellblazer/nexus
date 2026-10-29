@@ -3,7 +3,7 @@
 """A slim install imports. nexus-2k66t.4.2.
 
 Search and store never use the PDF stack, and the slim install does not ship it.
-So no nexus module may need docling, MinerU, torch, torchvision or pdftext at
+So no nexus module may need MinerU, torch, torchvision or pdftext at
 IMPORT time: a top-level `import torch` anywhere would break `nx` for every
 fresh install, and nothing in the dev environment (which has the stack) would
 notice. This imports every module under `nexus` in a fresh interpreter whose
@@ -28,7 +28,7 @@ _PROBE = textwrap.dedent(
     import importlib, importlib.abc, json, os, pkgutil, sys
 
     HIDDEN = set(json.loads(os.environ["NX_SLIM_HIDDEN"]))
-    STACK = {"docling", "mineru", "torch", "torchvision", "pdftext"}
+    STACK = {"mineru", "torch", "torchvision", "pdftext"}
 
     class _Hide(importlib.abc.MetaPathFinder):
         def find_spec(self, name, path=None, target=None):
@@ -62,7 +62,7 @@ _PROBE = textwrap.dedent(
 _FLOOR = 250  # nexus has ~370 importable modules; a floor, not a count
 _HIDDEN_FLOOR = 40  # the pdf extra's lock closure beyond the default closure is ~60 distributions
 
-_STACK_NAMES = ("docling", "mineru", "torch", "torchvision", "pdftext")
+_STACK_NAMES = ("mineru", "torch", "torchvision", "pdftext")
 
 
 def _norm(name: str) -> str:

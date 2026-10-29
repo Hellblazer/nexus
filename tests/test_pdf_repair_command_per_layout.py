@@ -128,7 +128,7 @@ def test_a_refused_index_run_names_the_working_repair(legacy_layout, monkeypatch
     line it prints for the held PDFs must name the command that works there."""
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv(pdf_stack.POLICY_ENV, "refuse")
-    monkeypatch.setattr(pdf_stack, "state", lambda: StackState("absent", "docling, MinerU and torch are not installed"))
+    monkeypatch.setattr(pdf_stack, "state", lambda: StackState("absent", "MinerU and torch are not installed"))
     pdf = tmp_path / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.4")
     phases: list[str] = []
@@ -149,7 +149,7 @@ def test_a_corrupt_mineru_install_names_the_working_repair(legacy_layout, monkey
 
     monkeypatch.setattr(extractor, "_extract_with_mineru", _no_do_parse)
     with pytest.raises(RuntimeError) as err:
-        extractor._route_to_mineru(tmp_path / "p.pdf", 3, on_page=None, on_formula_oom="fail")
+        extractor._extract_with_mineru_guarded(tmp_path / "p.pdf", on_page=None)
     message = str(err.value)
     assert "this conexus install is corrupt" in message
     assert GENERATION_ONLY not in message, message

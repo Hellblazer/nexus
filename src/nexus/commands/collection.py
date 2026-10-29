@@ -10,6 +10,7 @@ import click
 import structlog
 
 from nexus.commands.store import _t3
+from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import (
     CANONICAL_EMBEDDING_MODELS,
     LOCAL_EMBEDDING_MODELS,
@@ -1222,7 +1223,7 @@ def reindex_cmd(name: str, force: bool) -> None:
 
     # 2c. The PDF stack (nexus-2k66t.4.2), BEFORE the purge below. The loop
     # that follows indexes each existing .pdf source through index_pdf, which
-    # needs docling and MinerU; on a slim install every one of them fails, and
+    # needs MinerU; on a slim install every one of them fails, and
     # the failure used to be a per-file warning AFTER the collection was gone:
     # "Re-indexed: N -> 0 chunks", exit 0, the data deleted. ensure_or_exit
     # installs (and re-runs this command) or exits 69/75/70 with nothing deleted.
@@ -1237,6 +1238,8 @@ def reindex_cmd(name: str, force: bool) -> None:
         from nexus.config import get_pdf_extractor  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         pdf_extractor = get_pdf_extractor()
+        # nexus-tr1rj.24: before the purge, with the stack gate.
+        pdf_stack.refuse_bad_mineru_bounds(pdf_extractor)
         pdf_stack.ensure_or_exit("nx collection reindex", extractor=pdf_extractor)
 
     # 3. Delete collection — via the canonical cascade, exactly like
@@ -1381,7 +1384,7 @@ def reindex_cmd(name: str, force: bool) -> None:
             try:
                 # nexus-8143o: force_re_embed left at its default False -- the collection was just DELETED above, so every chash here is new and there is nothing to skip.
                 if p.suffix.lower() == ".pdf":
-                    index_pdf(p, corpus=corpus, collection_name=name, force=True, extractor=pdf_extractor or "auto")
+                    index_pdf(p, corpus=corpus, collection_name=name, force=True, extractor=pdf_extractor or DEFAULT_EXTRACTOR)
                 else:
                     index_markdown(p, corpus=corpus, collection_name=name, force=True)
                 indexed += 1

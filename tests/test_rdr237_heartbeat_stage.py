@@ -26,7 +26,7 @@ _HASH = "h" * 64
 
 def _loop(monkeypatch, db, script, *, cancel: threading.Event | None = None) -> ExtractionResult:
     class Extractor:
-        def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+        def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                     allow_degraded=False, on_heartbeat=None):
             assert on_heartbeat is not None
             script(on_page, on_heartbeat)

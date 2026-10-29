@@ -73,7 +73,7 @@ Typing this command is your consent to install the command-line tool, so the
 script does not ask about that. It installs uv first when uv is missing, using
 the uv project's own installer. When nx is already installed it skips the build
 and says so. By default the build installs everything, PDF support included
-(docling, MinerU and torch): it downloads about 0.5 GB on macOS and 0.6 GB on Linux
+(MinerU and torch): it downloads about 0.5 GB on macOS and 0.6 GB on Linux
 for the command-line tool, and the service adds the rest of the --local figure. The
 sizes were measured on 7.86.0 on macOS and Linux (2026-10-25). Disk use is about 2.0 to
 2.3 GB for the command-line tool and 2.8 to 3.0 GB with --local. Windows sizes were not

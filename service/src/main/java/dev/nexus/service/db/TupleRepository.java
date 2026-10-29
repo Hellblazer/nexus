@@ -15,6 +15,7 @@ import org.jooq.JSONB;
 import org.jooq.Record1;
 import org.jooq.Record9;
 import org.jooq.ResultQuery;
+import org.jooq.SelectConditionStep;
 import org.jooq.SelectLimitStep;
 import org.jooq.impl.DSL;
 import org.jooq.types.DayToSecond;
@@ -140,6 +141,13 @@ public final class TupleRepository {
      * failure -- see {@link #release}.
      */
     private static final String TRANSITION_RELEASE = "release";
+    /**
+     * nexus-5r2sc.2.2 (RDR-235 E4): an {@code ack} of a claim whose row {@code out mode=replace}
+     * marked dirty. The row is NOT consumed: it returns to available with the new body, exactly the
+     * shape of {@link #release} (attempts unchanged), under its own name so the claim log tells the
+     * two apart. {@code tuple_claim_log.transition} is plain TEXT with no CHECK constraint.
+     */
+    private static final String TRANSITION_ACK_DIRTY = "ack_dirty";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {
@@ -524,12 +532,13 @@ public final class TupleRepository {
     private record PreparedOut(TemplateSchema template, String subspace,
                                Map<String, String> keys, Map<String, String> dims,
                                JSONB keysJsonb, JSONB dimsJsonb,
-                               DayToSecond ttlInterval, DayToSecond retentionInterval) {
+                               DayToSecond ttlInterval, DayToSecond retentionInterval,
+                               DayToSecond delayInterval) {
     }
 
     private PreparedOut prepareOut(String subspace, Map<String, String> keys,
                                    Map<String, String> dims, String body, Long ttlSecondsOrNull,
-                                   String nonce, boolean nonceDeferred) {
+                                   String nonce, boolean nonceDeferred, Long delaySecondsOrNull) {
         // Size checks first (bead nexus-r7xao, RDR-205 amendment): subspace, keys, dims,
         // nonce, body vs the global cap, body vs the template's own (possibly lower) cap
         // -- ALL of it before the existing schema validation below, which is what lets
@@ -570,9 +579,34 @@ public final class TupleRepository {
         if (ttlSeconds > t.retentionSeconds()) {
             throw new TtlTooLongException(ttlSeconds, t.retentionSeconds(), t.name());
         }
+        // nexus-5r2sc.2.1 (RDR-235 E1): delay_s is validated with the other out fields, before
+        // any write. Absent or 0 is no delay (available_at stays NULL).
+        checkDelaySeconds("delay_s", delaySecondsOrNull, t);
+        DayToSecond delayInterval = delaySecondsOrNull == null || delaySecondsOrNull == 0
+                ? null : interval(delaySecondsOrNull);
         JSONB dimsJsonb = dimsSafe.isEmpty() ? null : toJsonb(dimsSafe);
         return new PreparedOut(t, subspace, keysSafe, dimsSafe, toJsonb(keysSafe), dimsJsonb,
-                interval(ttlSeconds), interval(t.retentionSeconds()));
+                interval(ttlSeconds), interval(t.retentionSeconds()), delayInterval);
+    }
+
+    /**
+     * Shared check of a delayed-visibility field ({@code delay_s} on out, {@code retry_after_s}
+     * on nack; nexus-5r2sc.2.1, RDR-235 E1): absent is fine, negative is a
+     * {@link SchemaViolationException}, and a value above the template's {@code
+     * retention_seconds} is a {@link SchemaViolationException} naming both numbers -- a row
+     * that stays hidden for longer than its own retention would expire unclaimed.
+     */
+    private static void checkDelaySeconds(String field, Long seconds, TemplateSchema t) {
+        if (seconds == null) {
+            return;
+        }
+        if (seconds < 0) {
+            throw new SchemaViolationException(field, "must be non-negative");
+        }
+        if (seconds > t.retentionSeconds()) {
+            throw new SchemaViolationException(field, seconds + " exceeds template '" + t.name()
+                    + "' retention_seconds " + t.retentionSeconds());
+        }
     }
 
     /** One tuple field's UTF-8 byte length against *limitBytes*; a {@code null} value is
@@ -646,10 +680,21 @@ public final class TupleRepository {
      * absent from every {@code DO UPDATE} (keys refire, lock refire and the lock's reset
      * of an expired row, keys+nonce sameWrite) and from the nonce {@code sameWrite}
      * comparison, so the stamp always names the writer of the stored body and dims: a
-     * retry from another session neither overwrites it nor turns into a conflict.
+     * retry from another session neither overwrites it nor turns into a conflict. The one rewrite
+     * that does move it is {@link #outReplace}'s ({@code writeReplace} stamps the replacing writer on
+     * every branch), because a replace changes the body and dims the stamp describes.
      */
     private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id,
                             String senderSession) {
+        // nexus-5r2sc.2.1 (RDR-235 E1): available_at is, like senderSession, set in the INSERT
+        // values only -- a refire of an existing row (keys refire, keys+nonce sameWrite) never moves
+        // it, so a retry of the same write cannot extend or cancel the delay the first write set.
+        // The one exception is the lock template's reset of an EXPIRED row below, which makes the
+        // row a fresh one and so takes this write's value (NULL without a delay). The database
+        // clock, never the JVM's: now() + delay_s, RDR-163's next_retry_at idiom.
+        Field<OffsetDateTime> availableAt = p.delayInterval() == null
+                ? DSL.val((OffsetDateTime) null, TUPLES.AVAILABLE_AT)
+                : DSL.currentOffsetDateTime().add(p.delayInterval());
         Long maxLiveRows = p.template().maxLiveRows();
         if (maxLiveRows != null) {
             // nexus-rplay.17 (code-review-expert finding 4): every other query in
@@ -662,13 +707,7 @@ public final class TupleRepository {
             boolean rowAlreadyExists = ctx.fetchExists(
                     ctx.selectOne().from(TUPLES).where(TUPLES.ID.eq(id).and(TUPLES.TENANT_ID.eq(tenant))));
             if (!rowAlreadyExists) {
-                Condition live = TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime()));
-                Integer liveCount = ctx.selectCount().from(TUPLES)
-                        .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq(p.subspace())).and(live))
-                        .fetchOne(0, Integer.class);
-                if (liveCount != null && liveCount >= maxLiveRows) {
-                    throw new MaxLiveRowsExceededException(p.subspace(), maxLiveRows);
-                }
+                enforceMaxLiveRows(ctx, tenant, p);
             }
         }
         Field<OffsetDateTime> candidateExpiry = DSL.currentOffsetDateTime().add(p.ttlInterval());
@@ -684,11 +723,13 @@ public final class TupleRepository {
         var insertStep = ctx.insertInto(TUPLES,
                         TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
                         TUPLES.KEYS, TUPLES.DIMS, TUPLES.BODY,
-                        TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT, TUPLES.SENDER_SESSION)
+                        TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT, TUPLES.SENDER_SESSION,
+                        TUPLES.AVAILABLE_AT)
                 .values(DSL.val(id), DSL.val(tenant), DSL.val(p.subspace()), DSL.val(p.template().name()),
                         DSL.val(p.keysJsonb()), dimsField, DSL.val(body),
                         DSL.val(0), DSL.currentOffsetDateTime().add(p.ttlInterval()),
-                        DSL.currentOffsetDateTime(), DSL.val(senderSession, TUPLES.SENDER_SESSION))
+                        DSL.currentOffsetDateTime(), DSL.val(senderSession, TUPLES.SENDER_SESSION),
+                        availableAt)
                 .onConflict(TUPLES.ID)
                 .doUpdate();
         if (p.template().lock()) {
@@ -722,6 +763,9 @@ public final class TupleRepository {
                     .set(TUPLES.CLAIMED_AT,
                             DSL.when(expired, DSL.val((OffsetDateTime) null, TUPLES.CLAIMED_AT))
                                     .otherwise(TUPLES.CLAIMED_AT))
+                    // nexus-5r2sc.2.1: the reset row is a fresh one, so it takes this write's delay.
+                    .set(TUPLES.AVAILABLE_AT,
+                            DSL.when(expired, availableAt).otherwise(TUPLES.AVAILABLE_AT))
                     .execute();
         } else {
             // A refire touches expires_at ONLY -- never body, claim state or
@@ -757,6 +801,26 @@ public final class TupleRepository {
         return id;
     }
 
+    /**
+     * The {@code max_live_rows} refusal, shared by {@code writeOut} (a genuinely new identity) and
+     * {@code writeReplace} (a new row, and the revival of a row that was NOT live). A no-op for a
+     * template without a cap. Live is {@code consumed_at IS NULL AND expires_at > now()}: a dead row
+     * is live (unconsumed, unexpired), a consumed or expired one is not.
+     */
+    private void enforceMaxLiveRows(DSLContext ctx, String tenant, PreparedOut p) {
+        Long maxLiveRows = p.template().maxLiveRows();
+        if (maxLiveRows == null) {
+            return;
+        }
+        Condition live = TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime()));
+        Integer liveCount = ctx.selectCount().from(TUPLES)
+                .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq(p.subspace())).and(live))
+                .fetchOne(0, Integer.class);
+        if (liveCount != null && liveCount >= maxLiveRows) {
+            throw new MaxLiveRowsExceededException(p.subspace(), maxLiveRows);
+        }
+    }
+
     /** {@code out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> id}. */
     public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
                        String body, String nonce, Long ttlSecondsOrNull) {
@@ -771,7 +835,22 @@ public final class TupleRepository {
      */
     public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
                        String body, String nonce, Long ttlSecondsOrNull, String senderSession) {
-        PreparedOut prepared = prepareOut(subspace, keys, dims, body, ttlSecondsOrNull, nonce, false);
+        return out(tenant, subspace, keys, dims, body, nonce, ttlSecondsOrNull, senderSession, null);
+    }
+
+    /**
+     * {@link #out(String, String, Map, Map, String, String, Long, String)} with {@code delaySecondsOrNull}
+     * (bead nexus-5r2sc.2.1, RDR-235 E1): the new row is hidden from the claim until the DATABASE
+     * clock reaches {@code now() + delay_s}. {@code null} or 0 leaves {@code available_at} NULL, the
+     * pre-E1 behaviour; negative, or above the template's {@code retention_seconds}, is a {@link
+     * SchemaViolationException} before any write. Only a first write stamps it: see the comment at
+     * the top of {@code writeOut}. A delayed row still counts as available in {@link #subspaceStats}.
+     */
+    public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
+                       String body, String nonce, Long ttlSecondsOrNull, String senderSession,
+                       Long delaySecondsOrNull) {
+        PreparedOut prepared = prepareOut(subspace, keys, dims, body, ttlSecondsOrNull, nonce, false,
+                delaySecondsOrNull);
         byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
                 prepared.keys(), prepared.dims(), nonce, body);
         byte[] result = tenantScope.withTenant(tenant,
@@ -779,6 +858,179 @@ public final class TupleRepository {
         // Signal AFTER the transaction lambda returns (the commit) -- never from inside it.
         waitRegistry.signalAll(tenant, subspace);
         return result;
+    }
+
+    /** What an {@code out} with {@code mode=replace} did (bead nexus-5r2sc.2.2, RDR-235 E4). */
+    public enum OutOutcome {
+        /** No row held the id: a new row was written, as a plain out writes it. */
+        CREATED("created"),
+        /** A consumed, expired, dead, available or lapsed-claim row took the new body. */
+        REPLACED("replaced"),
+        /** A live-claimed row took the new body and was marked dirty; its holder's ack returns it to available. */
+        DIRTIED("dirtied");
+
+        private final String wire;
+
+        OutOutcome(String wire) {
+            this.wire = wire;
+        }
+
+        /** The value of the {@code outcome} field on the HTTP response. */
+        public String wire() {
+            return wire;
+        }
+    }
+
+    /** The id and what {@link #outReplace} did to it. */
+    public record OutResult(byte[] id, OutOutcome outcome) {
+    }
+
+    /**
+     * {@code out(..., mode="replace")} (bead nexus-5r2sc.2.2, RDR-235 E4): the newest content wins on the
+     * deterministic id, where a plain out would refuse a changed body under a used nonce
+     * ({@link NonceReuseConflictException}). Allowed only on {@code id_from: keys+nonce} templates, so the
+     * id is the caller's (for the aspect queue, the doc_id); any other template is a
+     * {@link SchemaViolationException} on field {@code mode} naming the template. Validation (size, shape,
+     * ttl, delay_s) is exactly {@link #out}'s and runs before any write.
+     *
+     * <p>What happens to a row that already holds the id, decided under a row lock inside one
+     * transaction, against the database clock:
+     * <ul>
+     *   <li><b>consumed, expired, or dead</b> (outcome {@link OutOutcome#REPLACED}): reset to available
+     *       with the new body and dims, attempts 0, dirty false, claim columns and consumed_at/by NULL,
+     *       announce state cleared, {@code created_at} and {@code expires_at} restarted (a refire is
+     *       clamped to created_at plus retention, so an old dead row would otherwise expire soon after
+     *       its revival), {@code sender_session} the new writer's, and {@code available_at} taken from
+     *       THIS write's {@code delay_s} (NULL without one). A row that was not live (consumed or
+     *       expired) counts against {@code max_live_rows} and is refused with
+     *       {@link MaxLiveRowsExceededException} when over; a dead row is already live, so its revival
+     *       adds nothing and is never refused (bead decision, fix-check item 5).</li>
+     *   <li><b>available</b>, or a claimed row whose lease has lapsed (outcome {@link OutOutcome#REPLACED}):
+     *       the body and dims are replaced and nothing else moves. Attempts and {@code available_at} are
+     *       kept: a pending retry's backoff is worker state, and a bulk re-index must not defeat it.</li>
+     *   <li><b>claimed with a live lease</b> (outcome {@link OutOutcome#DIRTIED}): the body and dims are
+     *       replaced and {@code dirty} is set; nothing else changes, and {@code available_at} is never
+     *       stamped on a claimed row. The holder's {@code ack} then returns the row to available
+     *       instead of consuming it.</li>
+     * </ul>
+     * No row at all is written as a plain out writes it (outcome {@link OutOutcome#CREATED}), under the
+     * same {@code max_live_rows} check. Every replace branch stamps {@code sender_session} with THIS
+     * writer's, because the stamp names the writer of the stored body and dims and a replace rewrites
+     * both (unlike a refire, which leaves the body alone and so keeps the first writer's stamp).
+     * {@code out mode=replace} is refused on a {@code lock: true} template whatever its {@code id_from}.
+     */
+    public OutResult outReplace(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
+                                String body, String nonce, Long ttlSecondsOrNull, String senderSession,
+                                Long delaySecondsOrNull) {
+        PreparedOut prepared = prepareOut(subspace, keys, dims, body, ttlSecondsOrNull, nonce, false,
+                delaySecondsOrNull);
+        if (prepared.template().idFrom() != TemplateSchema.IdFrom.KEYS_NONCE) {
+            throw new SchemaViolationException("mode", "replace is allowed only on an id_from=keys+nonce "
+                    + "template, because the caller's nonce names the row to replace; template '"
+                    + prepared.template().name() + "' is id_from=" + prepared.template().idFrom().wire());
+        }
+        if (prepared.template().lock()) {
+            // A lock template resets and refires on its own rules (writeOut's lock arms); a replace would
+            // rewrite a held lock's row from under its holder. Refused whatever the template's id_from.
+            throw new SchemaViolationException("mode", "replace is refused on a lock template; template '"
+                    + prepared.template().name() + "' is lock: true");
+        }
+        byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
+                prepared.keys(), prepared.dims(), nonce, body);
+        OutOutcome outcome = tenantScope.withTenant(tenant,
+                ctx -> writeReplace(ctx, tenant, prepared, body, id, senderSession));
+        // Signal AFTER the commit, like out. A dirtied row adds nothing claimable; the wake is harmless.
+        waitRegistry.signalAll(tenant, subspace);
+        return new OutResult(id, outcome);
+    }
+
+    private OutOutcome writeReplace(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id,
+                                    String senderSession) {
+        Field<OffsetDateTime> availableAt = p.delayInterval() == null
+                ? DSL.val((OffsetDateTime) null, TUPLES.AVAILABLE_AT)
+                : DSL.currentOffsetDateTime().add(p.delayInterval());
+        TuplesRecord existing = null;
+        // Two passes at most in practice: absent -> insert; a racing writer that committed the id first
+        // makes the insert a no-op, and the second pass finds and locks its row.
+        for (int pass = 0; pass < 3 && existing == null; pass++) {
+            existing = ctx.selectFrom(TUPLES)
+                    .where(TUPLES.ID.eq(id).and(TUPLES.TENANT_ID.eq(tenant)))
+                    .forUpdate()
+                    .fetchOne();
+            if (existing != null) {
+                break;
+            }
+            enforceMaxLiveRows(ctx, tenant, p);
+            int inserted = ctx.insertInto(TUPLES,
+                            TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
+                            TUPLES.KEYS, TUPLES.DIMS, TUPLES.BODY,
+                            TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT, TUPLES.SENDER_SESSION,
+                            TUPLES.AVAILABLE_AT)
+                    .values(DSL.val(id), DSL.val(tenant), DSL.val(p.subspace()), DSL.val(p.template().name()),
+                            DSL.val(p.keysJsonb()), dimsValue(p), DSL.val(body),
+                            DSL.val(0), DSL.currentOffsetDateTime().add(p.ttlInterval()),
+                            DSL.currentOffsetDateTime(), DSL.val(senderSession, TUPLES.SENDER_SESSION),
+                            availableAt)
+                    .onConflict(TUPLES.ID)
+                    .doNothing()
+                    .execute();
+            if (inserted == 1) {
+                maintainTenant(ctx, tenant);
+                return OutOutcome.CREATED;
+            }
+        }
+        if (existing == null) {
+            throw new IllegalStateException("out mode=replace could not settle on id "
+                    + HexFormat.of().formatHex(id) + " in subspace " + p.subspace());
+        }
+        OffsetDateTime now = ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class);
+        boolean consumed = existing.getConsumedAt() != null;
+        boolean expired = !existing.getExpiresAt().isAfter(now);
+        boolean dead = CLAIM_STATE_DEAD.equals(existing.getClaimState());
+        boolean liveClaim = CLAIM_STATE_CLAIMED.equals(existing.getClaimState())
+                && existing.getLeaseUntil() != null && existing.getLeaseUntil().isAfter(now);
+        if (consumed || expired || dead) {
+            if (consumed || expired) {
+                // Not live before, live after: the revival counts. A dead row is already live.
+                enforceMaxLiveRows(ctx, tenant, p);
+            }
+            ctx.update(TUPLES)
+                    .set(TUPLES.BODY, body)
+                    .set(TUPLES.DIMS, p.dimsJsonb())
+                    .set(TUPLES.ATTEMPTS, 0)
+                    .set(TUPLES.DIRTY, false)
+                    .set(TUPLES.CLAIM_STATE, (String) null)
+                    .set(TUPLES.CLAIMANT, (String) null)
+                    .set(TUPLES.CLAIM_ID, (String) null)
+                    .set(TUPLES.CLAIMED_AT, (OffsetDateTime) null)
+                    .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
+                    .set(TUPLES.CONSUMED_AT, (OffsetDateTime) null)
+                    .set(TUPLES.CONSUMED_BY, (String) null)
+                    .set(TUPLES.ANNOUNCED_AT, (OffsetDateTime) null)
+                    .set(TUPLES.ANNOUNCE_COUNT, 0)
+                    .set(TUPLES.CREATED_AT, DSL.currentOffsetDateTime())
+                    .set(TUPLES.EXPIRES_AT, DSL.currentOffsetDateTime().add(p.ttlInterval()))
+                    .set(TUPLES.AVAILABLE_AT, availableAt)
+                    .set(TUPLES.SENDER_SESSION, senderSession)
+                    .where(TUPLES.ID.eq(id).and(TUPLES.TENANT_ID.eq(tenant)))
+                    .execute();
+            maintainTenant(ctx, tenant);
+            return OutOutcome.REPLACED;
+        }
+        var update = ctx.update(TUPLES)
+                .set(TUPLES.BODY, body)
+                .set(TUPLES.DIMS, p.dimsJsonb())
+                .set(TUPLES.SENDER_SESSION, senderSession);
+        if (liveClaim) {
+            update.set(TUPLES.DIRTY, true);
+        }
+        update.where(TUPLES.ID.eq(id).and(TUPLES.TENANT_ID.eq(tenant))).execute();
+        maintainTenant(ctx, tenant);
+        return liveClaim ? OutOutcome.DIRTIED : OutOutcome.REPLACED;
+    }
+
+    private static Field<JSONB> dimsValue(PreparedOut p) {
+        return p.dimsJsonb() == null ? DSL.castNull(org.jooq.impl.SQLDataType.JSONB) : DSL.val(p.dimsJsonb());
     }
 
     private void maintainTenant(DSLContext ctx, String tenant) {
@@ -1142,6 +1394,32 @@ public final class TupleRepository {
     }
 
     /**
+     * The "claimable" narrowing the two announce-mode queries share, mirroring {@link #claimOnce}'s own
+     * claim-loop predicate (minus the consumed/expired/key-pattern terms, which {@code baseCond}
+     * already carries): not dead-lettered, and either never claimed or claimed with a lapsed lease --
+     * and, since bead nexus-5r2sc.2.1 (RDR-235 E1), {@code available_at} NULL or already reached on
+     * the database clock.
+     *
+     * <p>Decision, per mirror, for the delayed-visibility arm: this one HAS it. An announce-mode
+     * wait tells a subscriber "there is work for you" and spends one of the row's {@code max}
+     * announcements doing so; announcing a task nobody can claim yet would burn that budget on a
+     * row the subscriber's {@code in} then comes back empty from, and a parked waiter woken by it
+     * would loop without progress. The row is announced the first time it is both due and
+     * claimable. The mirrors that do NOT get the arm: {@link #subspaceStats}/{@link
+     * #subspaceListPage}'s counts, where a delayed task counts as available (gate observation O5 of
+     * RDR-235, which keeps the drain test conservative: a queue is not drained while retries are
+     * pending); and the sweep's lapse release, which selects CLAIMED rows (a claim was only ever
+     * granted at or after {@code available_at}) and clears {@code available_at} when it releases.
+     * The {@code in} park loop has no predicate of its own: it re-runs {@link #claimOnce}, so it
+     * inherits the arm and a delayed row never makes it spin.
+     */
+    private static Condition claimableMirror() {
+        return TUPLES.CLAIM_STATE.isDistinctFrom(CLAIM_STATE_DEAD)
+                .and(TUPLES.CLAIM_STATE.isNull().or(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())))
+                .and(TUPLES.AVAILABLE_AT.isNull().or(TUPLES.AVAILABLE_AT.le(DSL.currentOffsetDateTime())));
+    }
+
+    /**
      * Announce-mode branch of {@link #queryOnce} (bead nexus-vsipz): {@code
      * baseCond} (tenant, subspace, {@code consumed_at IS NULL}, {@code expires_at >
      * now()}, the caller's key pattern) is narrowed to CLAIMABLE rows -- {@code
@@ -1167,8 +1445,7 @@ public final class TupleRepository {
      */
     private List<TupleRow> queryOnceAnnounce(DSLContext ctx, Condition baseCond, int limit,
                                               WaitSpec.Announce announce) {
-        Condition claimable = TUPLES.CLAIM_STATE.isDistinctFrom(CLAIM_STATE_DEAD)
-                .and(TUPLES.CLAIM_STATE.isNull().or(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())));
+        Condition claimable = claimableMirror();
         Condition due = TUPLES.ANNOUNCED_AT.isNull()
                 .or(TUPLES.ANNOUNCED_AT.lt(DSL.currentOffsetDateTime().sub(interval(announce.intervalSeconds())))
                         .and(TUPLES.ANNOUNCE_COUNT.lt(announce.max())));
@@ -1307,8 +1584,7 @@ public final class TupleRepository {
                                                         WaitSpec.Announce announce, String tenant,
                                                         String subspace, ReadCursor since) {
         String subscriber = announce.subscriber();
-        Condition claimable = TUPLES.CLAIM_STATE.isDistinctFrom(CLAIM_STATE_DEAD)
-                .and(TUPLES.CLAIM_STATE.isNull().or(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())));
+        Condition claimable = claimableMirror();
         // Due iff no delivery row for this subscriber blocks it: a row blocks
         // while it is younger than the interval, or once its count has reached
         // the cap. NOT EXISTS over the blocking shape is the whole due test.
@@ -1885,7 +2161,15 @@ public final class TupleRepository {
                                 .and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime()))
                                 .and(TUPLES.CLAIM_STATE.isDistinctFrom(CLAIM_STATE_DEAD))
                                 .and(TUPLES.CLAIM_STATE.isNull()
-                                        .or(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime()))))
+                                        .or(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())))
+                                // nexus-5r2sc.2.1 (RDR-235 E1): a row whose available_at is still in the
+                                // future is not claimable yet. The DATABASE clock (the same now() as the
+                                // lease and expiry arms above), never the JVM's. NULL is the true state
+                                // of every row written without a delay: claimed exactly as before. The
+                                // same-claimant retake SELECT above needs no such arm: a row that is
+                                // already claimed by this claimant is past its delay by construction.
+                                .and(TUPLES.AVAILABLE_AT.isNull()
+                                        .or(TUPLES.AVAILABLE_AT.le(DSL.currentOffsetDateTime()))))
                         .orderBy(TUPLES.CREATED_AT.asc())
                         .limit(1)
                         .forNoKeyUpdate()
@@ -1913,6 +2197,9 @@ public final class TupleRepository {
                                 .set(TUPLES.CLAIMANT, (String) null)
                                 .set(TUPLES.CLAIM_ID, (String) null)
                                 .set(TUPLES.CLAIMED_AT, (OffsetDateTime) null)
+                                // nexus-5r2sc.2.1: cleared with claim_id, like every path that clears it.
+                                .set(TUPLES.AVAILABLE_AT, (OffsetDateTime) null)
+                                .set(TUPLES.DIRTY, false)
                                 .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
                                 .set(TUPLES.ATTEMPTS, attempts)
                                 .where(TUPLES.ID.eq(row.getId()))
@@ -1955,6 +2242,10 @@ public final class TupleRepository {
                         .set(TUPLES.CLAIM_ID, newClaimId)
                         .set(TUPLES.CLAIMED_AT, claimedAt)
                         .set(TUPLES.LEASE_UNTIL, leaseUntil)
+                        // nexus-5r2sc.2.2 (gate observation O2): a claim starts with dirty clear. A lapsed
+                        // holder's mark must not carry to the next holder, who is handed the row with the
+                        // new body already in it and whose ack must consume.
+                        .set(TUPLES.DIRTY, false)
                         .set(TUPLES.ATTEMPTS, attempts);
                 if (t.lock()) {
                     claimUpdate.set(TUPLES.EXPIRES_AT, expiresAtForClaim);
@@ -2006,7 +2297,7 @@ public final class TupleRepository {
      * nothing a caller of this method still needs. A reply written by {@code
      * ackWithReply} is a separate row (via {@code writeOut}) and keeps its own body.
      */
-    private TuplesRecord consumeClaim(DSLContext ctx, String tenant, String claimId, String claimant) {
+    private ConsumeOutcome consumeClaim(DSLContext ctx, String tenant, String claimId, String claimant) {
         TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
         if (row == null) {
             throw new ClaimNotFoundException(claimId);
@@ -2042,24 +2333,67 @@ public final class TupleRepository {
         // makes a stale ack fail ClaimNotFound instead of consuming a row this
         // claimant no longer holds. The log row is written only after a one-row
         // update.
+        //
+        // nexus-5r2sc.2.2 (RDR-235 E4): the consume matches only a CLEAN row (dirty = false). The dirty
+        // flag was read without a lock above, and an out mode=replace may mark the row dirty between
+        // that read and this UPDATE; consuming then would lose content the holder never saw. So a
+        // consume that matches nothing falls through to the dirty arm below, whose own compare-and-swap
+        // matches only a DIRTY row; only when both match nothing is the claim gone. Each arm is one
+        // statement, so Postgres's row lock orders them against the replace.
         int updated = ctx.update(TUPLES)
                 .set(TUPLES.CONSUMED_AT, now)
                 .set(TUPLES.CONSUMED_BY, claimant)
                 .set(TUPLES.BODY, (String) null)
-                .where(liveClaimCondition(row.getId(), claimId))
+                .where(liveClaimCondition(row.getId(), claimId).and(TUPLES.DIRTY.isFalse()))
                 .execute();
         if (updated == 0) {
-            throw new ClaimNotFoundException(claimId);
+            // The release shape (see releaseOrDeadLetter with the release arguments): the claim ends,
+            // attempts stay as they are, the body (the NEW body) stays, available_at is cleared with the
+            // claim, and the dirty mark is spent. Not a nack: nothing failed, so no attempt is counted.
+            int returned = ctx.update(TUPLES)
+                    .set(TUPLES.CLAIM_STATE, (String) null)
+                    .set(TUPLES.CLAIMANT, (String) null)
+                    .set(TUPLES.CLAIM_ID, (String) null)
+                    .set(TUPLES.CLAIMED_AT, (OffsetDateTime) null)
+                    .set(TUPLES.AVAILABLE_AT, (OffsetDateTime) null)
+                    .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
+                    .set(TUPLES.DIRTY, false)
+                    .where(liveClaimCondition(row.getId(), claimId).and(TUPLES.DIRTY.isTrue()))
+                    .execute();
+            if (returned == 0) {
+                throw new ClaimNotFoundException(claimId);
+            }
+            insertClaimLog(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
+                    claimId, claimant, TRANSITION_ACK_DIRTY, now);
+            return new ConsumeOutcome(row, true);
         }
         insertClaimLog(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
                 claimId, claimant, TRANSITION_ACK, now);
-        return row;
+        return new ConsumeOutcome(row, false);
     }
 
-    /** {@code ack(claim_id, claimant)}. */
+    /**
+     * What {@link #consumeClaim} did. {@code row} is the claim as read BEFORE the update (its body is the
+     * pre-update body, and a caller may rely only on its id and subspace). {@code returnedToAvailable} is
+     * true when the row was dirty, so the ack returned it to available instead of consuming it, and the
+     * caller must signal the subspace's waiters after the commit.
+     */
+    private record ConsumeOutcome(TuplesRecord row, boolean returnedToAvailable) {
+    }
+
+    /**
+     * {@code ack(claim_id, claimant)}. If {@code out mode=replace} marked the claimed row dirty while
+     * the holder worked (bead nexus-5r2sc.2.2, RDR-235 E4), the ack does NOT consume it: the row returns
+     * to available with the new body, attempts unchanged and the dirty mark cleared, a
+     * {@value #TRANSITION_ACK_DIRTY} claim-log row is written, and the subspace's waiters are signalled
+     * (after the commit, as {@link #release} does), so the next claim extracts the new content.
+     */
     public void ack(String tenant, String claimId, String claimant) {
         checkClaimIdentifiers(claimId, claimant);
-        tenantScope.withTenant(tenant, ctx -> consumeClaim(ctx, tenant, claimId, claimant));
+        ConsumeOutcome outcome = tenantScope.withTenant(tenant, ctx -> consumeClaim(ctx, tenant, claimId, claimant));
+        if (outcome.returnedToAvailable()) {
+            waitRegistry.signalAll(tenant, outcome.row().getSubspace());
+        }
     }
 
     /**
@@ -2102,6 +2436,10 @@ public final class TupleRepository {
      * would collide on one id and {@code out}'s refire clamp would silently discard the
      * second one's body -- exactly the class of silent loss this RDR exists to close, so
      * it is refused rather than documented.
+     *
+     * <p>A dirty claim (bead nexus-5r2sc.2.2) is acked the dirty way even when it carries a reply: the
+     * reply is written as always, and the request is returned to available instead of consumed, as
+     * {@link #ack} does. The reply answers the work the holder did; the new content still waits.
      */
     public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec reply) {
         return ackWithReply(tenant, claimId, claimant, reply, null);
@@ -2120,7 +2458,7 @@ public final class TupleRepository {
             return null;
         }
         PreparedOut prepared = prepareOut(reply.subspace(), reply.keys(), reply.dims(), reply.body(),
-                reply.ttlSeconds(), null, /* nonceDeferred */ true);
+                reply.ttlSeconds(), null, /* nonceDeferred */ true, /* delaySecondsOrNull */ null);
         if (prepared.template().idFrom() != TemplateSchema.IdFrom.KEYS_NONCE) {
             throw new SchemaViolationException("reply.subspace",
                     "reply target template '" + prepared.template().name() + "' is id_from="
@@ -2129,9 +2467,13 @@ public final class TupleRepository {
                     + "request it answers and a keys-only template would collapse two "
                     + "replies onto one id");
         }
+        boolean[] returnedToAvailable = new boolean[1];
+        String[] requestSubspace = new String[1];
         byte[] replyId = tenantScope.withTenant(tenant, ctx -> {
-            TuplesRecord consumed = consumeClaim(ctx, tenant, claimId, claimant);
-            String nonce = HexFormat.of().formatHex(consumed.getId());
+            ConsumeOutcome outcome = consumeClaim(ctx, tenant, claimId, claimant);
+            returnedToAvailable[0] = outcome.returnedToAvailable();
+            requestSubspace[0] = outcome.row().getSubspace();
+            String nonce = HexFormat.of().formatHex(outcome.row().getId());
             byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
                     prepared.keys(), prepared.dims(), NonceLabel.REPLY, nonce, reply.body());
             return writeOut(ctx, tenant, prepared, reply.body(), id, senderSession);
@@ -2139,12 +2481,63 @@ public final class TupleRepository {
         // Signal AFTER the commit, and only for the reply's subspace: a parked reader
         // there must not be woken by a transaction that rolled back.
         waitRegistry.signalAll(tenant, reply.subspace());
+        if (returnedToAvailable[0]) {
+            waitRegistry.signalAll(tenant, requestSubspace[0]);
+        }
         return replyId;
     }
 
     /** {@code nack(claim_id, claimant)} — releases the claim; counts an attempt. */
     public void nack(String tenant, String claimId, String claimant) {
+        nack(tenant, claimId, claimant, null);
+    }
+
+    /**
+     * {@code nack(claim_id, claimant, retry_after_s?)} — releases the claim and counts an attempt,
+     * exactly as the two-argument form does; with {@code retryAfterSecondsOrNull} (bead
+     * nexus-5r2sc.2.1, RDR-235 E1) the row returns to available but stays hidden from the claim
+     * until the DATABASE clock reaches {@code now() + retry_after_s}. The stamp is written inside
+     * {@link #releaseOrDeadLetter}'s compare-and-swap UPDATE, so there is no window in which the
+     * row is released and visible before the delay lands. {@code null} or 0 is a plain nack
+     * (available_at NULL, claimable at once); a negative value, or one above the template's
+     * {@code retention_seconds}, is a {@link SchemaViolationException} before any write, and the
+     * claim stays live. A nack that dead-letters (attempts reach {@code max_attempts}) leaves
+     * {@code available_at} NULL whatever {@code retry_after_s} was: a dead row is never retried.
+     *
+     * <p><b>What wakes a parked {@code in} when a delayed task becomes claimable: no signal,
+     * but the park loop's own timer.</b> The instant {@code available_at} passes, no event
+     * fires: {@code nack} (unlike {@code out} and {@code release}) signals no waiter at all, and
+     * a delay expiring is not a write. A parked {@code in}, however, re-runs {@link #claimOnce}
+     * on every wake, and {@link TupleWaitRegistry} wakes it on a signal OR a one-second timer
+     * ({@code awaitSignalOrTimer}), so the task is picked up within about a second of
+     * {@code available_at} passing, never as late as the caller's {@code timeout_s}. That is
+     * well inside what a retry ladder measured in minutes needs
+     * ({@code TupleDelayedVisibilityTest.aParkedIn_claimsADelayedRowWithinAboutASecondOfItsDelayPassing}).
+     */
+    public void nack(String tenant, String claimId, String claimant, Long retryAfterSecondsOrNull) {
+        nack(tenant, claimId, claimant, retryAfterSecondsOrNull, false);
+    }
+
+    /**
+     * {@link #nack(String, String, String, Long)} with {@code dead} (bead nexus-5r2sc.2.3, RDR-235 E4):
+     * {@code true} dead-letters the claim at once, for a failure no retry will fix (a non-retryable
+     * exception, a row the worker cannot attribute). The attempt is counted and the claim log shows
+     * {@value #TRANSITION_NACK} then {@value #TRANSITION_DEAD}, the rows the {@code max_attempts} path
+     * writes, because it IS that path: {@link #releaseOrDeadLetter}'s test is
+     * {@code forceDead || attempts >= maxAttempts}, so a task becomes dead at the same two code sites as
+     * ever. It works under a template with no {@code max_attempts}. Ownership and liveness are checked
+     * first (403, 404 as before). A {@code dead} nack that also carries {@code retry_after_s} dead-letters
+     * and leaves {@code available_at} NULL: a dead row is never retried, so the delay has nothing to delay.
+     * {@code false} is a plain nack. {@code dead: true} on a claim of a {@code lock: true} template is a
+     * {@link SchemaViolationException} naming {@code release}, as {@link #ack} is refused on one: a lock
+     * must never dead-letter. The claim stays live.
+     */
+    public void nack(String tenant, String claimId, String claimant, Long retryAfterSecondsOrNull,
+                     boolean dead) {
         checkClaimIdentifiers(claimId, claimant);
+        if (retryAfterSecondsOrNull != null && retryAfterSecondsOrNull < 0) {
+            throw new SchemaViolationException("retry_after_s", "must be non-negative");
+        }
         tenantScope.withTenant(tenant, ctx -> {
             TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
             if (row == null) {
@@ -2154,6 +2547,15 @@ public final class TupleRepository {
                 throw new ClaimOwnershipException(claimId, claimant);
             }
             TemplateSchema t = resolveOrThrow(row.getSubspace());
+            if (dead && t.lock()) {
+                // A lock must never dead-letter: a dead lock row is unobtainable until the sweep purges it,
+                // the same reason ack is refused on one. The claim stays live (nothing is written yet).
+                throw new SchemaViolationException("dead",
+                        "template '" + t.name() + "' is a lock template; nack with dead is refused because a "
+                        + "dead-lettered lock row would be unobtainable until the sweep purges it -- call "
+                        + "release instead to return the lock");
+            }
+            checkDelaySeconds("retry_after_s", retryAfterSecondsOrNull, t);
             long maxAttempts = t.take().maxAttempts() == null ? Long.MAX_VALUE : t.take().maxAttempts();
             int attempts = row.getAttempts() + 1;
             // TEST-ONLY (nexus-h61dl.2): see ack.
@@ -2161,7 +2563,8 @@ public final class TupleRepository {
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
             ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
-                    row.getId(), claimId, claimant, TRANSITION_NACK, now, attempts, maxAttempts);
+                    row.getId(), claimId, claimant, TRANSITION_NACK, now, attempts, maxAttempts,
+                    retryAfterSecondsOrNull, dead);
             if (outcome == ReleaseOutcome.NOT_LIVE) {
                 // The compare-and-swap matched nothing: the sweep or a re-take moved the
                 // row between liveClaimRow's read and this update (RDR-206 Step 1).
@@ -2211,7 +2614,8 @@ public final class TupleRepository {
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
             ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
-                    row.getId(), claimId, claimant, TRANSITION_RELEASE, now, row.getAttempts(), Long.MAX_VALUE);
+                    row.getId(), claimId, claimant, TRANSITION_RELEASE, now, row.getAttempts(), Long.MAX_VALUE,
+                    null, false);
             if (outcome == ReleaseOutcome.NOT_LIVE) {
                 // The compare-and-swap matched nothing: the sweep or a re-take moved the
                 // row between liveClaimRow's read and this update (RDR-206 Step 1).
@@ -2347,7 +2751,10 @@ public final class TupleRepository {
     enum ReleaseOutcome {
         /** Released back to available; one {@code releaseTransition} log row. */
         RELEASED,
-        /** Dead-lettered at {@code max_attempts}; {@code releaseTransition} then {@code dead} log rows. */
+        /**
+         * Dead-lettered at {@code max_attempts}, or at once by {@code nack}'s {@code dead: true};
+         * {@code releaseTransition} then {@code dead} log rows.
+         */
         DEAD_LETTERED,
         /**
          * The compare-and-swap matched zero rows: the row is no longer claimed under
@@ -2379,14 +2786,26 @@ public final class TupleRepository {
     private ReleaseOutcome releaseOrDeadLetter(DSLContext ctx, String tenant, String subspace, String template,
                                                byte[] tupleId, String claimId, String claimant,
                                                String releaseTransition, OffsetDateTime now,
-                                               int attempts, long maxAttempts) {
-        boolean dead = attempts >= maxAttempts;
+                                               int attempts, long maxAttempts, Long retryAfterSecondsOrNull,
+                                               boolean forceDead) {
+        // nexus-5r2sc.2.3 (RDR-235 E4): forceDead is nack's dead:true. release and the sweep pass false.
+        boolean dead = forceDead || attempts >= maxAttempts;
+        // nexus-5r2sc.2.1 (RDR-235 E1): available_at is part of THIS compare-and-swap UPDATE, on
+        // the database clock. Every caller that is not a nack with retry_after_s (release, the
+        // sweep) passes null, which CLEARS it with claim_id; a dead-letter outcome clears it too.
+        Field<OffsetDateTime> availableAt = dead || retryAfterSecondsOrNull == null || retryAfterSecondsOrNull == 0
+                ? DSL.val((OffsetDateTime) null, TUPLES.AVAILABLE_AT)
+                : DSL.currentOffsetDateTime().add(interval(retryAfterSecondsOrNull));
         int updated = ctx.update(TUPLES)
                 .set(TUPLES.CLAIM_STATE, dead ? CLAIM_STATE_DEAD : null)
                 .set(TUPLES.CLAIMANT, (String) null)
                 .set(TUPLES.CLAIM_ID, (String) null)
                 .set(TUPLES.CLAIMED_AT, (OffsetDateTime) null)
+                .set(TUPLES.AVAILABLE_AT, availableAt)
                 .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
+                // nexus-5r2sc.2.2: a claim ends here, so the dirty mark is spent with it: the row holds
+                // the new body, and whoever claims it next must consume it.
+                .set(TUPLES.DIRTY, false)
                 .set(TUPLES.ATTEMPTS, attempts)
                 .where(liveClaimCondition(tupleId, claimId))
                 .execute();
@@ -2535,7 +2954,7 @@ public final class TupleRepository {
                 try {
                     outcome = withRowSavepoint(ctx, () -> releaseOrDeadLetter(ctx, tenant, row.getSubspace(),
                             row.getTemplate(), row.getId(), row.getClaimId(), row.getClaimant(),
-                            TRANSITION_EXPIRE, now, attempts, maxAttempts));
+                            TRANSITION_EXPIRE, now, attempts, maxAttempts, null, false));
                 } catch (RuntimeException ex) {
                     log.warn("event=tuple_sweep_release_row_failed tenant={} subspace={} tuple_id={} "
                                     + "claim_id={} error={}",
@@ -2669,13 +3088,40 @@ public final class TupleRepository {
      * The ack/nack claim_id lookup's SELECT (nexus-cbo4a), built once so {@link #liveClaimRow} and the plan-shape
      * test share it. Package-private for that test.
      */
-    static ResultQuery<TuplesRecord> liveClaimRowQuery(DSLContext ctx, String tenant, String claimId) {
+    static SelectConditionStep<TuplesRecord> liveClaimRowQuery(DSLContext ctx, String tenant, String claimId) {
         return ctx.selectFrom(TUPLES)
                 .where(TUPLES.TENANT_ID.eq(tenant)
                         .and(TUPLES.CLAIM_ID.eq(claimId))
                         .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
                         .and(TUPLES.CONSUMED_AT.isNull())
                         .and(TUPLES.LEASE_UNTIL.gt(DSL.currentOffsetDateTime())));
+    }
+
+    /**
+     * nexus-5r2sc.2.5 (RDR-235 E5): the claim fence of {@code POST /v1/aspects/upsert}. Looks the claim up with
+     * {@link #liveClaimRowQuery} (the lookup {@code ack}, {@code nack}, {@code renew} and {@code release} use) and
+     * LOCKS the row {@code FOR NO KEY UPDATE}, the level {@code claimOnce} takes with {@code SKIP LOCKED}, so a
+     * re-take of a claim that lapses an instant after this check skips the row until the caller's transaction
+     * commits. The lock is held by the caller's transaction, so {@code ctx} must be the one the caller's write
+     * runs in. Answers what {@code consumeClaim} (ack) answers for the same claim, in the same order: no live
+     * claim is {@link ClaimNotFoundException} (404), a live claim of another claimant is
+     * {@link ClaimOwnershipException} (403), so the write and the ack that follows it agree. Identifier sizes
+     * are checked as {@code ack} checks them. Returns the locked row so the caller can check what the claim is
+     * a claim ON; nothing is written.
+     */
+    static TuplesRecord lockLiveClaimRow(DSLContext ctx, String tenant, String claimId, String claimant) {
+        checkClaimIdentifiers(claimId, claimant);
+        TuplesRecord row = liveClaimRowQuery(ctx, tenant, claimId).forNoKeyUpdate().fetchOne();
+        if (row == null) {
+            throw new ClaimNotFoundException(claimId);
+        }
+        if (!row.getClaimant().equals(claimant)) {
+            throw new ClaimOwnershipException(claimId, claimant);
+        }
+        // TEST-ONLY: the window between the claim read and the mutation it guards; a no-op on every
+        // production path. Here the mutation is the caller's write, which runs after this returns.
+        TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY.run();
+        return row;
     }
 
     /**
@@ -2923,6 +3369,12 @@ public final class TupleRepository {
      * total counts LIVE rows only (available+claimed+dead); the two timestamps span
      * ALL rows including expired/consumed (the census needs the newest write, not the
      * newest live row) — RDR-205 §Technical Design "Operations".
+     *
+     * <p>nexus-5r2sc.2.1 (RDR-235 E1), decision: {@code available} does NOT subtract rows hidden by
+     * {@code available_at}. A delayed or retry-pending task counts as available (gate observation O5
+     * of RDR-235), so depth and the drain test stay conservative: a queue holding only retries that
+     * have not come due is not reported empty. {@link #subspaceListPage}'s GROUP BY counts the same
+     * way; the two are kept in step.
      */
     private static SubspaceCensus computeCensus(DSLContext ctx, String tenant, String subspace) {
         Field<OffsetDateTime> now = DSL.currentOffsetDateTime();

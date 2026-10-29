@@ -92,8 +92,8 @@ arc exists to kill.
   all use ``streaming="always"``/prepared-chunk injection specifically to
   avoid depending on a real extractor/parser). Residual gap; register a
   follow-up if a real small-PDF fixture becomes cheap.
-- AC8 (``col.get(where=...)`` non-determinism), the ``--extractor
-  docling`` silent quality collapse, and nexus-mok9x boilerplate ingest
+- AC8 (``col.get(where=...)`` non-determinism), the space-stripped silent quality
+  collapse, and nexus-mok9x boilerplate ingest
   are explicitly OUT of scope per the design memo §8 and the bead's own
   "Explicitly OUT of scope" section — separate beads, not absorbed here.
 - Genuine UNCAUGHT-crash recovery (a real process death — SIGKILL, OOM —
@@ -353,7 +353,7 @@ def service_env(
     return base_url, token
 
 
-# ── Fake extraction/chunking helpers (no real MinerU/docling/pymupdf) ───────
+# ── Fake extraction/chunking helpers (no real MinerU/pymupdf) ───────
 
 
 def _extraction_result(page_count: int = 2):
@@ -367,7 +367,7 @@ def _extraction_result(page_count: int = 2):
     return ExtractionResult(
         text="\n".join(pages),
         metadata={
-            "extraction_method": "docling", "page_count": page_count,
+            "extraction_method": "mineru", "page_count": page_count,
             "page_boundaries": bounds, "table_regions": [], "format": "markdown",
         },
     )
@@ -380,7 +380,7 @@ def _extract_side_effect(page_count: int, result):
     # it here so this fake keeps matching the real call shape — this
     # gate's PDF-quality-gate behavior is out of scope (module docstring's
     # "Registered items explicitly NOT covered here").
-    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
+    def extract(pdf_path, *, extractor="mineru", on_page=None, allow_degraded=False, on_heartbeat=None):
         for i in range(page_count):
             if on_page:
                 on_page(i, f"Page {i} runfence gate content.", {"page_number": i + 1})
@@ -405,7 +405,7 @@ def _fresh_pdf(tmp_path: Path, name: str = "doc.pdf", *, marker: str = "") -> Pa
     # Deliberately NOT a real PDF: every scenario in this file drives PDF
     # collaborators with `streaming="always"` and/or prepared-chunk
     # injection, so pymupdf.open()/real extraction is never on the path —
-    # keeping the fixture file-content-only avoids a MinerU/docling
+    # keeping the fixture file-content-only avoids a MinerU
     # dependency for this gate.
     #
     # *marker* MUST be unique per scenario. The T2 pipeline buffer (module-

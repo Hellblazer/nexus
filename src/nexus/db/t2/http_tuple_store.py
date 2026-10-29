@@ -47,7 +47,7 @@ Two things no other T2 domain store needs, both new code (RDR-205
   :func:`_check_request_size` — before any network call, and refuses
   before sending.
 - **Typed-error mapping** (:func:`_raise_typed`): the engine renders
-  each of its thirteen RDR-205-family typed errors (``TupleException`` and its
+  each of its fourteen RDR-205-family typed errors (``TupleException`` and its
   subtypes) as ``{"error": "<code>", "detail": "<message>"}`` at the
   error's own HTTP status. Some codes SHARE a status (``UnknownSubspace``
   and ``ClaimNotFound`` are both 404), so classification reads the
@@ -190,11 +190,11 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
-# ── Typed errors (mirrors dev.nexus.service.db.TupleException's thirteen subtypes) ──
+# ── Typed errors (mirrors dev.nexus.service.db.TupleException's fourteen subtypes) ──
 
 
 class TupleError(RuntimeError):
-    """Base of the thirteen RDR-205-family typed tuple-space client errors.
+    """Base of the fourteen RDR-205-family typed tuple-space client errors.
 
     ``code`` matches the engine's ``TupleException#code()`` verbatim
     (e.g. ``"UnknownSubspace"``); the exception's message is the
@@ -238,6 +238,16 @@ class ClaimOwnershipError(TupleError):
     """``ack``/``nack`` against a live claim held by a different claimant."""
 
     code = "ClaimOwnership"
+
+
+class ClaimTaskMismatchError(TupleError):
+    """A claim-fenced aspects upsert named a claim that is live and the
+    caller's, but that is not the ``aspects`` task for the written
+    ``doc_id`` (or whose body is not an identity body). 403; nothing was
+    written. RDR-235 E5: the engine raises it only from
+    ``POST /v1/aspects/upsert`` when ``claim_id`` and ``claimant`` are sent."""
+
+    code = "ClaimTaskMismatch"
 
 
 class ParkCapExceededError(TupleError):
@@ -308,6 +318,7 @@ _ERROR_CLASSES_BY_CODE: dict[str, type[TupleError]] = {
         TimeoutTooLongError,
         ClaimNotFoundError,
         ClaimOwnershipError,
+        ClaimTaskMismatchError,
         ParkCapExceededError,
         MaxLiveRowsExceededError,
         NonceReuseConflictError,
@@ -444,7 +455,7 @@ def _check_request_size(payload: dict[str, Any]) -> None:
 
 
 def _raise_typed(exc: httpx.HTTPStatusError) -> NoReturn:
-    """Re-raise *exc* as one of the thirteen typed :class:`TupleError`
+    """Re-raise *exc* as one of the fourteen typed :class:`TupleError`
     subclasses when the engine's response body names one; otherwise
     re-raise *exc* unchanged.
 
@@ -1065,7 +1076,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         404 with ``{"error": "unknown tuples op: /renew"}`` (the route
         switch's default branch, verified at ``engine-service-v0.1.116``).
         The body DOES carry an ``error`` field; its value is simply not one
-        of the thirteen recognised codes, so ``_raise_typed`` finds no class for
+        of the fourteen recognised codes, so ``_raise_typed`` finds no class for
         it and re-raises the bare ``httpx.HTTPStatusError`` -- loud by
         design. A silent no-op here would let a caller believe its lease was
         extended while the claim lapses underneath it. (An earlier version
@@ -1113,7 +1124,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Against an engine predating ``/release`` the unknown route answers
         404 with ``{"error": "unknown tuples op: /release"}`` (the route
         switch's default branch) -- the body's ``error`` field is not one
-        of the thirteen recognised codes, so ``_raise_typed`` finds no class
+        of the fourteen recognised codes, so ``_raise_typed`` finds no class
         for it and re-raises the bare ``httpx.HTTPStatusError``, loud by
         design, exactly as :meth:`renew` behaves against the same old
         engine: a silent no-op here would let a caller believe a claim was

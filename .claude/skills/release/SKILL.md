@@ -27,6 +27,15 @@ ran. The battery is now the fresh-install MVV, the package-upgrade convergence
 MVV and the local-service gate, behind one preflight. Steps that remain:
 0, 0c, 1, 2, 3, 4, 4a, 5, 6d, 7, 8, 8a, 9, 10, 11, 11b, 11c, 12.
 
+**RDR-237 prerequisite (the release that first carries MinerU-only extraction).**
+That release (every PDF through MinerU, the old extractor removed, no default-on MinerU
+end-to-end check in PR CI) has one more prerequisite, checked before Step 1 and not
+discovered at Step 11c: the RDR-237 Minimum Viable Validation (nexus-tr1rj.6, real
+MinerU on the laptop and chas, numbers in T2 `nexus_rdr/237-mvv-<date>`) must be done
+and its bead closed before the tag. After the publish, Step 11c's formula-PDF check on
+the published bytes is required as well (default-on; a skip needs a recorded reason).
+Later releases need only Step 11c's check.
+
 ### Where to run the battery
 
 In the release worktree, on the release branch — never in the shared primary
@@ -597,23 +606,35 @@ a real user would actually install. Must end
 `-> working tree` here on a post-publish run means `NEXUS_TARGET_RELEASE`
 was not set and the loop was NOT actually closed.
 
-**Formula-PDF / MinerU coverage (opt-in; nexus-gqrg0, GH #1533).** The
-pre-tag battery's resolver-bound lint (`tests/test_install_source_wiring_pins.py`)
-covers the LOCAL wheel's dependency resolution only. To also prove the
+**Formula-PDF / MinerU coverage (default-on, required; nexus-gqrg0 GH #1533,
+nexus-tr1rj.20 RDR-237).** The pre-tag battery's resolver-bound lint
+(`tests/test_install_source_wiring_pins.py`) covers the LOCAL wheel's dependency
+resolution only. The `--published` invocation above also proves that the
 PUBLISHED dependency resolution indexes a real formula PDF through MinerU
-and keeps its LaTeX, set `NX_MVV_FORMULA_PDF_CHECK=1` on the fresh-install-mvv
-invocation above:
+(`tests/fixtures/bft-to-smr.pdf`, `--extractor mineru`) and that the added chunk's
+`extraction_method` is literally `mineru`. It installs `conexus[pdf]` for that, so the
+plain command above runs it; the summary block above the PASSED sentinel (two lines up,
+with the leg 9b line between) reads `formula-PDF check (MinerU, published bytes): ran`.
+
+Since RDR-237 every PDF goes to MinerU, PR CI carries no MinerU end-to-end check by
+decision, and the shakedown that used to cover it was deleted in cleanup step 11.
+This run is the release's only MinerU end-to-end coverage, so a release is not closed
+out without it. It runs against the published bytes, after the tag and publish, so a red
+result cannot stop the ship: it means yank or fix forward, and it goes to Sam. It pays a MinerU pipeline model download (~2-3 GB) on a cold cache.
+
+A skip is allowed only with a recorded reason, the way a skipped slim leg is named in
+the summary and a pass-by-default gate is named in the ship record:
 
 ```bash
-NX_MVV_FORMULA_PDF_CHECK=1 tests/e2e/fresh-install-mvv.sh --published X.Y.Z
+NX_MVV_FORMULA_PDF_CHECK=0 NX_MVV_FORMULA_PDF_SKIP_REASON='<why>' \
+    tests/e2e/fresh-install-mvv.sh --published X.Y.Z
 ```
 
-Off by default (including in the plain command above) because it pays a
-MinerU pipeline model download (~2-3 GB) that would dominate every default
-MVV run. Run it whenever a release touches `mineru`/`pdftext`/`pypdfium2`
-pins, or on a cadence of your choosing. The sandbox shakedown that used to
-exercise MinerU end-to-end against the LOCAL wheel was deleted in cleanup
-step 11, so this opt-in run is now the only MinerU formula-PDF coverage.
+Without the reason the script refuses (exit 2) before it does anything. With it, the
+summary line reads `formula-PDF check (MinerU, published bytes): SKIPPED (reason: <why>)`;
+copy that line and the reason into the ship record. A skip is a release decision: take
+it to Sam. The first release that carries RDR-237 also needs the Minimum Viable
+Validation done before the tag (see the prerequisite near the top of this file).
 
 ### 12. Reinstall local tool and verify
 
@@ -636,7 +657,7 @@ Local-mode boxes skip this gate — their engine converges from
 `PINNED_SERVICE_TAG` at reinstall.
 
 ```bash
-scripts/reinstall-tool.sh    # preserves [local] and other extras; the PDF stack (mineru, docling, torch) is the on-demand [pdf] extra: NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh keeps it
+scripts/reinstall-tool.sh    # preserves [local] and other extras; the PDF stack (mineru, torch) is the on-demand [pdf] extra: NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh keeps it
 nx --version                 # must print X.Y.Z
 ```
 

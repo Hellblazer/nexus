@@ -95,7 +95,7 @@ _IN_SCOPE_EXTRAS: dict[str, str] = {
         'resolved by the documented `uv tool install "conexus[local]"` path '
         "and carried into every generation by `nx self install --extras local`"
     ),
-    # nexus-2k66t.4.2: the PDF stack (docling-slim, mineru, torch, torchvision,
+    # nexus-2k66t.4.2: the PDF stack (mineru, torch, torchvision,
     # pdftext) left the default dependencies. Every PDF index installs it fresh
     # through `nx self install --extras pdf`, so its floors and caps reach a
     # real install exactly as the default dependencies' did.
@@ -349,7 +349,6 @@ def test_live_pyproject_dependencies_all_parse() -> None:
 # together, on a green ``-m slow`` MinerU run and shakedown.
 _SHAPE_SENSITIVE: dict[str, str] = {
     "mineru": "MinerU markdown shape locks tests/test_pdf_subsystem.py's slow fixtures and the visual-marker regexes",
-    "docling-slim": "docling (declared as docling-slim[convert-core,format-pdf,models-local], nexus-jpsn1) is the auto-mode formula screen and the fallback extractor; its table export and markdown shape are gated by the MVV and shakedown",
 }
 
 _LOCK = _REPO_ROOT / "uv.lock"

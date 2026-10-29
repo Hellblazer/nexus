@@ -36,11 +36,25 @@ REGISTRY_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "re
 README_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "README.md"
 
 
-def _load_lib():
+def _load_lib(*, detached: bool = False):
+    """Load the routing library fresh.
+
+    By default the poster runs INLINE: ``_spawn_poster`` is replaced by a function that hands the event to
+    ``_poster_main`` in this process, so the many tests that mock ``urlopen`` in-process or read the drop
+    meter right after ``log_routing_event`` keep exercising endpoint discovery, cause classification and the
+    metered drop. ``detached=True`` keeps the real seam (a detached child process; nexus-njn1a.1), for the
+    tests of that contract.
+    """
     spec = importlib.util.spec_from_file_location("nx_routing_lib", LIB_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    if not detached:
+        def _inline(record, base_url, token):
+            module._poster_main(json.dumps({"record": record, "base_url": base_url, "token": token}).encode())
+            return True
+
+        module._spawn_poster = _inline
     return module
 
 
@@ -1173,3 +1187,239 @@ def test_parity_cause_vocabulary_matches_dropped_writes():
         "registry (nexus.dropped_writes.NAMED_DROP_CAUSES) -- update "
         "whichever side is missing the other's causes"
     )
+
+
+# ---------------------------------------------------------------------------
+# nexus-njn1a finding 9 / nexus-njn1a.1: the routing_events POST is made by a
+# DETACHED child, and the hook never waits on the network.
+#
+# History. A 0.25 s per-socket-operation timeout sat below one cold HTTPS round
+# trip to the managed edge: a shakedown box's drop meter held 646 `timeout`
+# entries in 650 rows, 641 of them routing_events. The first fix (a 1.5 s
+# in-hook join) stopped the drops but made every logged guard event, a deny or
+# a routing-allow escape, wait up to 1.5 s for the engine before the decision
+# was emitted (measured: median 1.58 s against a stalled engine, 0.35 s at the
+# old 0.25 s). The POST now runs in a child started with its own session and
+# stdout/stderr on the null device; the hook emits its decision and exits.
+# Sam directive 2026-08-20 (nexus-gjv9b) stands: a metered drop, never a JSONL
+# spool or retry file.
+# ---------------------------------------------------------------------------
+
+_ROUTING_DIR = LIB_PATH.parent
+_DENY_CMD = "cat /proc/1234/environ"  # credential_print_guard denies this
+
+
+def _engine(delay: float):
+    """A loopback engine answering the routing_events POST after *delay*; returns (server, bodies)."""
+    import http.server
+    import threading
+
+    bodies: list[dict] = []
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            _time.sleep(delay)
+            try:
+                bodies.append(json.loads(raw))
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except OSError:
+                pass
+
+        def log_message(self, *a):  # noqa: ARG002
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, bodies
+
+
+def _refused_port() -> int:
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _hook_env(tmp_path, port: int) -> dict:
+    env = dict(os.environ)
+    env.update({
+        "NEXUS_CONFIG_DIR": str(tmp_path / "isolated-nexus-config"),
+        "NX_DROPPED_WRITES_LOG_PATH": str(tmp_path / "dropped_writes.jsonl"),
+        "NX_SERVICE_HOST": "127.0.0.1",
+        "NX_SERVICE_PORT": str(port),
+        "NX_SERVICE_TOKEN": "t",
+    })
+    env.pop("NX_SERVICE_URL", None)
+    return env
+
+
+def _run_deny_hook(env: dict) -> tuple[subprocess.CompletedProcess, float]:
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": _DENY_CMD}, "session_id": "s-1"})
+    t0 = _time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, str(_ROUTING_DIR / "credential_print_guard.py")],
+        input=payload, capture_output=True, text=True, env=env, timeout=30,
+    )
+    return proc, _time.monotonic() - t0
+
+
+def _wait_for(predicate, timeout: float = 15.0, step: float = 0.05) -> bool:
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if predicate():
+            return True
+        _time.sleep(step)
+    return predicate()
+
+
+def test_the_hook_returns_promptly_while_the_childs_post_is_slow(tmp_path):
+    """The deny is emitted without waiting for the engine. The engine here takes 3 s to answer; the hook,
+    run with captured pipes (so a child that inherited stdout would hold the call open), returns in well
+    under a second with exactly the protocol JSON on stdout. The event still arrives, from the child."""
+    srv, bodies = _engine(3.0)
+    try:
+        proc, elapsed = _run_deny_hook(_hook_env(tmp_path, srv.server_address[1]))
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)  # the whole of stdout is one JSON object
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert elapsed < 1.0, f"the hook took {elapsed:.2f}s against an engine that answers in 3 s"
+        assert _wait_for(lambda: len(bodies) == 1), "the detached child never delivered the event"
+        assert bodies[0]["outcome"] == "deny" and bodies[0]["session_id"] == "s-1"
+    finally:
+        srv.shutdown()
+    assert _drop_records(tmp_path / "dropped_writes.jsonl") == []
+
+
+def test_a_failed_post_still_lands_exactly_one_drop_record(tmp_path):
+    """Nothing is spooled and nothing is retried, but nothing is lost silently either: an engine that refuses
+    the connection leaves one metered drop, written by the child, carrying the rule and outcome."""
+    drops = tmp_path / "dropped_writes.jsonl"
+    proc, _ = _run_deny_hook(_hook_env(tmp_path, _refused_port()))
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert _wait_for(lambda: len(_drop_records(drops)) >= 1), "the child recorded no drop"
+    _time.sleep(0.5)  # a second record from a retry or a double write would land by now
+    records = _drop_records(drops)
+    assert len(records) == 1, records
+    assert records[0]["hook"] == "routing_events" and records[0]["cause"] == "connect"
+    assert records[0]["outcome"] == "deny" and records[0]["rule"]
+    assert not any(p.suffix == ".jsonl" and p != drops for p in tmp_path.rglob("*.jsonl")), "a spool file"
+
+
+def test_the_poster_child_prints_nothing(tmp_path):
+    """The child's stdout and stderr are empty on success and on failure: stdout is the hook's protocol channel."""
+    srv, bodies = _engine(0.0)
+    env = _hook_env(tmp_path, 1)
+    try:
+        for port in (srv.server_address[1], _refused_port()):
+            job = json.dumps({
+                "record": {"rule": "r", "outcome": "deny"}, "base_url": f"http://127.0.0.1:{port}", "token": "t",
+            }).encode()
+            p = subprocess.run(
+                [sys.executable, str(LIB_PATH), "--post-routing-event"], input=job,
+                capture_output=True, env=env, timeout=30,
+            )
+            assert p.returncode == 0
+            assert p.stdout == b"" and p.stderr == b"", (p.stdout, p.stderr)
+    finally:
+        srv.shutdown()
+    assert len(bodies) == 1
+    assert len(_drop_records(tmp_path / "dropped_writes.jsonl")) == 1
+
+
+def test_the_childs_late_answer_is_a_single_outcome_never_a_success_and_a_drop(tmp_path, monkeypatch):
+    """The child records a drop only on a real failure. An answer inside its deadline records nothing; one
+    past it records exactly one timeout drop (the former in-hook join could count a late success as a drop and
+    the row as delivered)."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drops = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drops))
+    lib = _load_lib()
+    srv, bodies = _engine(0.5)
+    try:
+        job = json.dumps({
+            "record": {"rule": "r", "outcome": "deny"},
+            "base_url": f"http://127.0.0.1:{srv.server_address[1]}", "token": "t",
+        }).encode()
+        lib._ROUTING_POST_BUDGET_S = 3.0
+        lib._poster_main(job)
+        assert len(bodies) == 1 and _drop_records(drops) == []
+        lib._ROUTING_POST_BUDGET_S = 0.2
+        lib._poster_main(job)
+    finally:
+        srv.shutdown()
+    (rec,) = _drop_records(drops)
+    assert rec["cause"] == "timeout" and rec["rule"] == "r"
+
+
+def test_a_child_that_cannot_start_is_metered_and_the_deny_is_still_emitted(tmp_path):
+    """Fail-closed is unchanged: whatever happens to the child, the hook emits its deny. Here the interpreter
+    path the child would be started with does not exist."""
+    drops = tmp_path / "dropped_writes.jsonl"
+    stub = (
+        f"import sys; sys.path.insert(0, {str(_ROUTING_DIR)!r}); import _lib\n"
+        "sys.executable = '/nonexistent/python'\n"
+        "def body(p):\n"
+        "    _lib.log_routing_event(rule='r', outcome='deny')\n"
+        "    _lib.deny('refused')\n"
+        "_lib.run_hook(body, fail_closed=True, rule_name='r')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", stub], input=json.dumps({"session_id": "s"}),
+        capture_output=True, text=True, env=_hook_env(tmp_path, 1), timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    (rec,) = _drop_records(drops)
+    assert rec["cause"] == "other" and "could not be started" in rec["error"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in child is a POSIX shell script")
+def test_the_bearer_token_goes_to_the_child_over_stdin_never_argv(tmp_path):
+    """``ps`` shows argv to every user on the box, so the token must travel over stdin (nexus-njn1a.1
+    confirmation review). The stand-in interpreter records what the hook started it with."""
+    seen_argv, seen_stdin = tmp_path / "argv.txt", tmp_path / "stdin.txt"
+    fake = tmp_path / "fake-python"
+    fake.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > {seen_argv}\ncat > {seen_stdin}\n")
+    fake.chmod(0o755)
+    stub = (
+        f"import sys; sys.path.insert(0, {str(_ROUTING_DIR)!r}); import _lib\n"
+        f"sys.executable = {str(fake)!r}\n"
+        "_lib.log_routing_event(rule='r', outcome='deny')\n"
+    )
+    env = _hook_env(tmp_path, 1)
+    env["NX_SERVICE_TOKEN"] = "tok-SENTINEL-njn1a"
+    proc = subprocess.run([sys.executable, "-c", stub], capture_output=True, text=True, env=env, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    deadline = _time.monotonic() + 10
+    while not (seen_stdin.exists() and seen_stdin.read_text()) and _time.monotonic() < deadline:
+        _time.sleep(0.05)
+    argv = seen_argv.read_text()
+    assert "--post-routing-event" in argv, argv
+    assert "tok-SENTINEL-njn1a" not in argv
+    assert "tok-SENTINEL-njn1a" in seen_stdin.read_text()
+
+
+def test_an_unresolvable_endpoint_is_metered_by_the_hook_without_a_child(tmp_path, monkeypatch):
+    """No endpoint is a local fact: it is metered synchronously, and no child is started for it."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drops = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drops))
+    for name in ("NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    lib = _load_lib(detached=True)
+    started: list[tuple] = []
+    lib._spawn_poster = lambda *a: started.append(a) or True
+    lib.log_routing_event(rule="r", outcome="allow")
+    assert started == []
+    (rec,) = _drop_records(drops)
+    assert rec["cause"] == "unresolvable"
+
+

@@ -33,6 +33,14 @@ a live document, so after the cut only a dead or missing seed can disappear, and
 nodes with one missing seed may have been a 500-node walk. It is a detector, not a bound: the
 engine's scoped-result marker (nexus-jypmj.1.13) is what stops the cut from reaching the client.
 
+When the engine advertises ``catalog_graph_scope_filter_supported`` the scope also goes to it as a predicate
+(``scope_filter``) that runs BEFORE that cut, and its reply carries a ``scope_filter`` marker
+(nexus-jypmj.1.13). The client requires the marker. Without it (an engine that predates the predicate, an edge
+that trims the flag, a reply that dropped the key) a scoped walk that may have been cut is a DISCLOSED
+incomplete traversal: no secondary graph evidence is returned, only the seed documents, and it is never
+reported as contained. A walk that was not cut is complete, so the client's own scope filter over it is exact
+and its secondary evidence is kept.
+
 A policy that cannot be applied omits the graph stream with a warning. It never falls back to an
 unrestricted walk.
 
@@ -52,6 +60,12 @@ from nexus.plans.evidence import ScopeConstraint
 #: Java constant is private, and ``tests/test_rdr232_traversal_policy.py`` reads the Java source
 #: and fails if the two drift.
 MAX_GRAPH_NODES: int = 500
+
+#: The most collections one ``scope_filter`` may name, ``GraphScopeFilter.MAX_COLLECTIONS``. A hand-kept copy
+#: pinned to the Java source by ``tests/test_rdr232_graph_scope_filter.py``. A corpus prefix that resolves to
+#: more registered collections than this is not sent (the engine would answer 400); the walk then takes the
+#: old-engine path.
+MAX_SCOPE_FILTER_COLLECTIONS: int = 2000
 
 #: Secondary (non-seed) documents a policy keeps when the caller gave a scope. NOT calibrated: no
 #: measurement of real ``nx_answer`` traversals exists yet (nexus-jypmj.1.12 records the first).
@@ -320,9 +334,16 @@ def _distance_and_role(
     return dist, best
 
 
+def is_scoped(scope: ScopeConstraint) -> bool:
+    """Whether *scope* restricts anything (a subtree, a corpus prefix or one collection): the cases the
+    engine predicate exists for. ``none`` and ``all`` admit everything."""
+    return scope.kind != "none" and scope.value != "all"
+
+
 def select_documents(
     nodes: Sequence[Any], edges: Sequence[Any], seeds: Sequence[Any], policy: TraversalPolicy,
     *, direction: str = "both", collection_kinds: Mapping[str, str] | None = None,
+    engine_scope: Mapping[str, Any] | None = None,
 ) -> Selection:
     """Apply *policy* to one engine walk: scope, role, rank, cap. Reads no manifest.
 
@@ -331,6 +352,12 @@ def select_documents(
     injects it). The owner filter drops only ``project_owned`` documents; it is required when the policy
     has ``allowed_owners``, and its absence is an error (the traverse step then fails closed) rather than
     an owner filter that silently applies to nothing or to everything.
+
+    *engine_scope* is the engine's ``scope_filter`` marker when the predicate ran before its node cut
+    (nexus-jypmj.1.13), else ``None``. A scoped walk that may have been cut without it
+    (``scope_prefilter`` ``unavailable``) keeps its seed documents and no secondary ones: the cut was made
+    over out-of-scope nodes too, so what survived it is an arbitrary sample of the in-scope neighbourhood,
+    not a bounded one. The report says so (``secondary_omitted``).
     """
     if policy.allowed_owners and collection_kinds is None:
         raise ValueError("a policy with allowed_owners needs collection_kinds")
@@ -367,7 +394,19 @@ def select_documents(
         -1 if t in seed_ids else _ROLE_RANK.get(role.get(t, "related"), 2),
         dist.get(t, MAX_GRAPH_NODES), _tumbler_key(t),
     ))
-    secondary = candidates[: policy.max_documents]
+    # The engine slices the walk to MAX_GRAPH_NODES, then drops dead seeds (graphBFS joins every
+    # other node to a live document), so a missing seed is the one thing a cut can hide. A reply
+    # short of the cap by no more than its missing seeds may have been cut.
+    missing_seeds = len({str(t) for t in seeds} - set(collection_of))
+    capped = len(nodes) + missing_seeds >= MAX_GRAPH_NODES
+    scoped = is_scoped(scope)
+    prefilter = "not_scoped" if not scoped else "applied" if engine_scope is not None else "unavailable"
+    secondary_omitted = prefilter == "unavailable" and capped
+    # With the secondary stream omitted a seed that competes as an ordinary candidate (preserve_seed_documents
+    # false) is still a seed: the walk starts from it, so it is not "secondary evidence".
+    secondary = (
+        [t for t in candidates if t in seed_ids] if secondary_omitted else candidates[: policy.max_documents]
+    )
     dropped_cap = len(candidates) - len(secondary)
     kept = tuple(kept_seeds + secondary)
 
@@ -391,11 +430,6 @@ def select_documents(
             "caller_scope": scope.value, "scope_kind": scope.kind,
             "link_role": policy.require_link_role, "dropped_by_corpus": dict(dropped_by_corpus),
         }
-    # The engine slices the walk to MAX_GRAPH_NODES, then drops dead seeds (graphBFS joins every
-    # other node to a live document), so a missing seed is the one thing a cut can hide. A reply
-    # short of the cap by no more than its missing seeds may have been cut.
-    missing_seeds = len({str(t) for t in seeds} - set(collection_of))
-    capped = len(nodes) + missing_seeds >= MAX_GRAPH_NODES
     report = {
         "policy_applied": True,
         "policy_failed": False,
@@ -411,6 +445,11 @@ def select_documents(
         "corpus_counts": _count(type_of[t] for t in kept),
         "possibly_truncated": capped,
         "contained": not capped,
+        "scope_prefilter": prefilter,
+        "engine_dropped_out_of_scope": (
+            int(engine_scope.get("dropped_out_of_scope") or 0) if engine_scope is not None else 0
+        ),
+        "secondary_omitted": secondary_omitted,
         "widened": widened,
         "scope_conflict": conflict,
     }

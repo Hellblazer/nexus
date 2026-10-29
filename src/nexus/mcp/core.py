@@ -106,6 +106,7 @@ from nexus.mcp.operator_requests import (
     build_summarize_request,
     build_verify_request,
 )
+from nexus.metadata_schema import ttl_listing_label
 from nexus.ttl import parse_ttl
 from nexus.tuple_directory import (
     DirectoryResolutionError,
@@ -5931,8 +5932,8 @@ def store_get(
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
         # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL for PDF
-        # chunks now (docling/mineru/pymupdf_normalized, or the honest
-        # mixed aggregate mineru+degraded; legacy mineru+docling-degraded) — display it when
+        # chunks now (mineru/pymupdf/pymupdf_normalized, or the honest
+        # mixed aggregate mineru+degraded; a legacy value from before RDR-237) — display it when
         # present. Absent for non-PDF chunks and for chunks indexed
         # before the fix shipped (new-writes-only, no backfill;
         # nexus-0qc4b — absence is "unknown", not "not mineru").
@@ -6754,23 +6755,14 @@ def store_list(
         ]
         if also:
             lines.append(also)
-        from datetime import datetime, timedelta  # noqa: PLC0415 — stdlib deferred to call site (datetime)
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
             title = (e.get("title") or "")[:40]
             tags = e.get("tags") or ""
-            ttl_days = e.get("ttl_days", 0)
             indexed_at_full = e.get("indexed_at") or ""
             indexed_at = indexed_at_full[:10]
-            if ttl_days and ttl_days > 0 and indexed_at_full:
-                try:
-                    exp = (datetime.fromisoformat(indexed_at_full)
-                           + timedelta(days=ttl_days)).date().isoformat()
-                    ttl_str = f"expires {exp}"
-                except ValueError:
-                    ttl_str = f"ttl {ttl_days}d"
-            else:
-                ttl_str = "permanent"
+            # Same reading as `nx store list` (nexus-njn1a): a ttl_days that cannot lapse is permanent.
+            ttl_str = ttl_listing_label(e.get("ttl_days"), indexed_at_full)
             tag_str = f"  [{tags}]" if tags else ""
             lines.append(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
         shown_end = offset + len(page)
@@ -7780,7 +7772,8 @@ def tuple_out(
         description=(
             "Caller-minted nonce, its own parameter: never a key or a dim. Required "
             "when the template's id_from is keys+nonce (mailbox/<address>, "
-            "board/<topic>, board/ci/<topic>, queue/<name>, directory/<name>); omit "
+            "board/<topic>, board/ci/<topic>, queue/<name>, directory/<name>, "
+            "aspects); omit "
             "for a keys-only one (ledger, lock). An id ingredient only, never echoed "
             "back on a read."
         ),
@@ -9178,6 +9171,11 @@ def traverse(
         warnings.append(f"traverse: dropped unparseable seeds {unparsed!r}")
 
     kw = dict(depth=depth, direction=direction, link_types=effective_types or None)
+    if parsed_policy is not None:
+        # nexus-jypmj.1.13: hand the engine the scope as a predicate it applies before its node cut.
+        scope_filter = _engine_scope_filter(catalog, parsed_policy.allowed_collections)
+        if scope_filter is not None:
+            kw["scope_filter"] = scope_filter
     if len(seed_tumblers) == 1:
         result = catalog.graph(seed_tumblers[0], **kw)
     else:
@@ -9185,9 +9183,13 @@ def traverse(
 
     nodes = result.get("nodes") or []
     if parsed_policy is not None:
+        marker = result.get("scope_filter") if isinstance(result, dict) else None
         return _traverse_with_policy(
             catalog, nodes, result.get("edges") or [], seed_tumblers, parsed_policy,
             direction=direction, warnings=warnings,
+            # The marker is the only evidence the predicate ran: a 200 from an engine that ignored the key
+            # carries none, and then the walk is reported as the old engine's.
+            engine_scope=marker if isinstance(marker, dict) and marker.get("applied") is True else None,
         )
     tumblers = [str(n.tumbler) for n in nodes if hasattr(n, "tumbler")]
     collections = sorted({
@@ -9236,6 +9238,49 @@ def traverse(
     return out
 
 
+def _engine_scope_filter(catalog: Any, scope: Any) -> "dict | None":
+    """The ``scope_filter`` predicate for the engine's ``/traverse``, or ``None`` when none can or need be sent.
+
+    None for an unrestricting scope (none, ``all``), for a catalog that does not advertise
+    ``catalog_graph_scope_filter_supported`` (an engine, or an edge that trims ``/version``, without the
+    predicate; a catalog handle with no probe at all; a test double: only a real ``True`` counts), and for a
+    scope that cannot be expressed as one request. A subtree is sent as its tumbler prefix and one full
+    collection name as itself. A corpus prefix is resolved against the registry to the registered collections
+    it admits (``ScopeConstraint.admits``, the one place the prefix rule lives), so the engine only ever compares
+    names. A registry that cannot be read, or one that names more collections than the engine accepts, sends
+    nothing: the walk is then the old engine's and is disclosed as such.
+    """
+    from nexus.plans import traversal_policy as tp  # noqa: PLC0415 — deferred, like traverse's other imports
+
+    if not tp.is_scoped(scope):
+        return None
+    try:
+        probe = getattr(catalog, "supports_graph_scope_filter", None)
+        supported = callable(probe) and probe() is True
+    except Exception as exc:  # noqa: BLE001 — a capability probe never fails the walk; the old-engine path is the answer
+        _log.warning("traverse_scope_filter_probe_failed", error=str(exc))
+        return None
+    if not supported:
+        return None
+    if scope.kind == "subtree":
+        return {"subtree": scope.value}
+    if scope.kind == "collection":
+        return {"collections": [scope.value]}
+    try:
+        names = sorted({
+            # Routing reads the live view only (nexus-bc7ps): a quarantine-<name> row must not reach the predicate.
+            str(row["name"]) for row in catalog.list_collections(lifecycle_state="live")
+            if isinstance(row, dict) and row.get("name") and scope.admits(str(row["name"]))
+        })
+    except Exception as exc:  # noqa: BLE001 — no predicate we could not build is sent; the walk is disclosed as unscoped-by-engine
+        _log.warning("traverse_scope_filter_registry_failed", scope=scope.value, error=str(exc))
+        return None
+    if len(names) > tp.MAX_SCOPE_FILTER_COLLECTIONS:
+        _log.warning("traverse_scope_filter_too_many_collections", scope=scope.value, collections=len(names))
+        return None
+    return {"collections": names}
+
+
 def _traverse_policy_failed(reason: str, *, warnings: list[str] | None = None) -> dict:
     """The graph stream a failed traversal policy leaves: nothing, with a warning (RDR-232 s3).
 
@@ -9252,7 +9297,7 @@ def _traverse_policy_failed(reason: str, *, warnings: list[str] | None = None) -
 
 def _traverse_with_policy(
     catalog: Any, nodes: list, edges: list, seeds: list, policy: Any,
-    *, direction: str, warnings: list[str],
+    *, direction: str, warnings: list[str], engine_scope: "dict | None" = None,
 ) -> dict:
     """``traverse`` under a :class:`~nexus.plans.traversal_policy.TraversalPolicy` (RDR-232 s3).
 
@@ -9270,7 +9315,9 @@ def _traverse_with_policy(
             from nexus.plans.owner_narrowing import collection_kind  # noqa: PLC0415 — deferred, like traverse's other imports
 
             kinds = {c: collection_kind(c) for c in {str(getattr(n, "physical_collection", "") or "") for n in nodes}}
-        selection = tp.select_documents(nodes, edges, seeds, policy, direction=direction, collection_kinds=kinds)
+        selection = tp.select_documents(
+            nodes, edges, seeds, policy, direction=direction, collection_kinds=kinds, engine_scope=engine_scope,
+        )
     except Exception as exc:  # noqa: BLE001 — any policy failure omits the graph stream; it never widens
         return _traverse_policy_failed(f"{type(exc).__name__}: {exc}", warnings=warnings)
     report = selection.report
@@ -9284,6 +9331,13 @@ def _traverse_with_policy(
         warnings.append(
             f"traverse: the engine returned {report['nodes_walked']} nodes, its {tp.MAX_GRAPH_NODES}-node cap; "
             "the walk is possibly truncated and is not reported as contained"
+        )
+    if report["secondary_omitted"]:
+        warnings.append(
+            "traverse: the engine cut this scoped walk at its node cap without the scope predicate "
+            "(catalog_graph_scope_filter_supported absent, or its scope_filter marker missing from the reply), "
+            "so the cut may have spent its slots on out-of-scope documents; secondary graph evidence omitted, "
+            "only the seed documents are returned"
         )
 
     manifests: dict[str, list] = {}
@@ -10046,22 +10100,26 @@ def _step_record_to_wire(step: Any) -> dict[str, Any]:
     }
 
 
-def _run_cost_usd(step_records: list[Any] | None, planner_cost_usd: float | None = None) -> float | None:
-    """The cost of one ``nx_answer`` run: every step's known cost plus the inline planner's own
-    dispatch cost (nexus-jypmj.1.20), or ``None`` when neither is known, never a fabricated zero.
+def _run_cost_usd(step_records: list[Any] | None, out_of_step_cost_usd: float | None = None) -> float | None:
+    """The cost of one ``nx_answer`` run: every step's known cost plus the run's out-of-step dispatch cost
+    (the inline planner's, nexus-jypmj.1.20, and the structured request extraction's, nexus-jypmj.9), or
+    ``None`` when none is known, never a fabricated zero.
 
     The envelope's ``cost_usd`` and the stored ``nx_answer_runs.cost_usd`` both come from here, so
-    they cannot disagree. A plan-match hit has no planner dispatch (``planner_cost_usd`` is ``None``).
+    they cannot disagree. *out_of_step_cost_usd* is the out-of-step dispatch share (``_out_of_step_cost_usd``),
+    stored beside the run cost as ``nx_answer_runs.out_of_step_cost_usd``: ``None`` when no out-of-step call
+    ran (a plan-match hit with extraction off or skipped).
     """
     known = [s.cost_usd for s in (step_records or []) if getattr(s, "cost_usd", None) is not None]
-    if planner_cost_usd is not None:
-        known.append(planner_cost_usd)
+    if out_of_step_cost_usd is not None:
+        known.append(out_of_step_cost_usd)
     return sum(known) if known else None
 
 
-def _planner_cost_usd(usage_sink: list[Any]) -> float | None:
-    """The summed known cost of the inline planner's dispatches captured in *usage_sink*, or ``None``
-    when none was captured or none reported a cost (a plan-match hit never dispatches a planner)."""
+def _out_of_step_cost_usd(usage_sink: list[Any]) -> float | None:
+    """The summed known cost of the dispatches captured in *usage_sink* (the inline planner's, and the
+    structured request extraction's, nexus-jypmj.9), or ``None`` when none was captured or none reported a
+    cost (a plan-match hit that made no extraction call dispatches nothing)."""
     known = [u.cost_usd for u in usage_sink if getattr(u, "cost_usd", None) is not None]
     return sum(known) if known else None
 
@@ -10077,7 +10135,7 @@ def _nx_answer_record_run(
     step_records: list[Any] | None,
     duration_ms: int,
     trace: bool,
-    planner_cost_usd: float | None = None,
+    out_of_step_cost_usd: float | None = None,
     run_summary: "RunSummaryRecorder | None" = None,
     summary_outcome: str = "recorded",
 ) -> None:
@@ -10095,11 +10153,12 @@ def _nx_answer_record_run(
 
     ``cost_usd`` (RDR-196 .p1d, nexus-nyry9.10 — replaces 9 former
     hardcoded-zero-cost literals, one per call site): the SUM of every step's
-    ``cost_usd`` that is not ``None``, PLUS *planner_cost_usd* when a plan-miss
-    run paid for the inline planner (nexus-jypmj.1.20; the planner dispatch is
-    no step's, so the run cost may exceed the step sum), or ``None`` when no
-    step and no planner reports a known cost — an empty *step_records* with no
-    planner cost trivially falls into the latter
+    ``cost_usd`` that is not ``None``, PLUS *out_of_step_cost_usd* when the run
+    made an out-of-step call (the inline planner on a plan miss, nexus-jypmj.1.20,
+    or the request extraction, nexus-jypmj.9; neither is a step's, so the run
+    cost may exceed the step sum), or ``None`` when no step and no out-of-step
+    call reports a known cost — an empty *step_records* with no
+    out-of-step cost trivially falls into the latter
     (sum of nothing is "unknown", never a fabricated zero). This is
     deliberately a BLANKET rule, not case-by-case: a call site with
     genuinely zero steps (e.g. the single-step fast path, which bypasses
@@ -10114,7 +10173,7 @@ def _nx_answer_record_run(
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
     steps = step_records or []
-    cost_usd = _run_cost_usd(steps, planner_cost_usd)
+    cost_usd = _run_cost_usd(steps, out_of_step_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
     summary = None
     created_at = None
@@ -10127,6 +10186,8 @@ def _nx_answer_record_run(
         if summary is not None:
             created_at = _utc_now_iso()
             extra = {"run_summary": summary, "created_at": created_at}
+    if out_of_step_cost_usd is not None:
+        extra["out_of_step_cost_usd"] = out_of_step_cost_usd  # nexus-jypmj.5: absent when no out-of-step call ran, never 0.0
     try:
         telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
@@ -10320,6 +10381,7 @@ async def _nx_answer_request_coverage(
     explicit_kind: object,
     deadline: float | None,
     trace: bool,
+    usage_sink: "list[Any] | None" = None,
 ) -> "RequestCoverage":
     """Build the request's :class:`~nexus.plans.request_coverage.RequestCoverage` before ``plan_match``.
 
@@ -10331,6 +10393,10 @@ async def _nx_answer_request_coverage(
     The structured extraction (``NX_ANSWER_STRUCTURED_EXTRACT``, on by default, ``0`` turns it off) makes at most one
     direct dispatch under its own timeout, inside *deadline*, with its latency and cost in the coverage's
     ``extraction`` report. Never raises: a failure leaves the first-pass result.
+
+    *usage_sink* (nexus-jypmj.9) is the run's out-of-step dispatch sink (``nx_answer``'s ``_out_of_step_usage_sink``):
+    the extraction call's usage is added to it, so the run's ``cost_usd`` (envelope and stored row, through
+    ``_run_cost_usd``) and the budget's running spend count the call like they count the inline planner's.
     """
     from dataclasses import replace  # noqa: PLC0415 — stdlib, branch-local
     from nexus.plans.request_coverage import (  # noqa: PLC0415 — deferred; matches this module's convention
@@ -10372,6 +10438,8 @@ async def _nx_answer_request_coverage(
             coverage, question, dispatch=_dispatch, timeout=timeout, enabled=True, usage_sink=sink,
             seconds_left=left, cleanup_grace=_TIMEOUT_CLEANUP_GRACE_SECONDS + 1.0,
         )
+        if usage_sink is not None:
+            usage_sink.extend(sink)  # a call that failed after the model answered was still billed
     else:
         coverage = replace(coverage, extraction=ExtractionReport("disabled"))
     # A logger fetched per call (as nx_answer does), so a test's log capture sees the event.
@@ -10776,6 +10844,23 @@ async def _nx_answer_lifecycle_stream(
         return LifecycleStream.unavailable(resolution, f"{type(exc).__name__} opening T2")
 
 
+def _manifest_sampler(cat: Any) -> "Callable[[list[str], int], Any] | None":
+    """The catalog's per-document manifest row limit (nexus-jypmj.6), or ``None`` when it has none to offer:
+    the catalog must advertise ``catalog_manifest_row_limit_supported`` (a real ``True``: a handle with no
+    probe, a test double and an edge that trims ``/version`` all read as an engine without it) and expose
+    ``get_manifests_sampled``. The named-source read then keeps its smallest-first order."""
+    if cat is None:
+        return None
+    try:
+        probe = getattr(cat, "supports_manifest_row_limit", None)
+        sample = getattr(cat, "get_manifests_sampled", None)
+        if callable(probe) and callable(sample) and probe() is True:
+            return sample
+    except Exception as exc:  # noqa: BLE001 — a capability probe never fails the read; the old path is the answer
+        _log.warning("nx_answer_manifest_sampler_probe_failed", error=str(exc))
+    return None
+
+
 async def _nx_answer_primary_stream(
     resolution: NamedSourceResolution | None,
     lifecycle: "LifecycleStream | None" = None,
@@ -10809,8 +10894,15 @@ async def _nx_answer_primary_stream(
     try:
         cat = _get_catalog()
         fetch = t3_chunk_fetcher(_get_t3())
+
+        def _read() -> "PrimaryEvidence":
+            # The capability probe is a (cached) HTTP read, so it runs here with the rest of the blocking I/O.
+            return select_primary_evidence(
+                resolution, cat=cat, fetch_chunks=fetch, deadline=deadline, manifest_sampler=_manifest_sampler(cat),
+            )
+
         evidence = await asyncio.wait_for(
-            asyncio.to_thread(select_primary_evidence, resolution, cat=cat, fetch_chunks=fetch, deadline=deadline),
+            asyncio.to_thread(_read),
             timeout=_nx_answer_seconds_left(resolution.caps.max_seconds, deadline),
         )
     except asyncio.TimeoutError:
@@ -10978,7 +11070,7 @@ def _nx_answer_record_complete(
     success: bool | None,
     composite_supported_at_start: bool,
     early_bump_fired: bool,
-    planner_cost_usd: float | None = None,
+    out_of_step_cost_usd: float | None = None,
     run_summary: "RunSummaryRecorder | None" = None,
 ) -> None:
     """RDR-203 P1/P3 choke point: the ``nx_answer_runs`` record and the plan
@@ -11107,7 +11199,7 @@ def _nx_answer_record_complete(
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
     steps = step_records or []
-    cost_usd = _run_cost_usd(steps, planner_cost_usd)
+    cost_usd = _run_cost_usd(steps, out_of_step_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
     # RDR-232 Phase 3: prepared once, before either attempt, so a 404 fallback re-sends the same summary
     # under the same stamp. None when there is no recorder, the engine cannot take it, or it could not be built.
@@ -11131,6 +11223,7 @@ def _nx_answer_record_complete(
                 step_count=step_count, final_text=text, cost_usd=cost_usd,
                 duration_ms=duration_ms, created_at=created_at, steps=wire_steps,
                 success=success, **({"run_summary": summary} if summary is not None else {}),
+                **({"out_of_step_cost_usd": out_of_step_cost_usd} if out_of_step_cost_usd is not None else {}),
             )
             if run_summary is not None:
                 run_summary.settle(
@@ -11182,6 +11275,8 @@ def _nx_answer_record_complete(
     if summary is not None:
         stamp = stamp or _utc_now_iso()
         extra = {"run_summary": summary, "created_at": stamp}
+    if out_of_step_cost_usd is not None:
+        extra["out_of_step_cost_usd"] = out_of_step_cost_usd  # nexus-jypmj.5
     try:
         db.telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
@@ -11875,17 +11970,15 @@ async def nx_answer(
 ) -> "str | dict":
     """Answer a knowledge question via plan-match-first, multi-step retrieval.
 
-    Use `search`/`query` directly for a single-step, already-known-shape
-    lookup: this tool reduces from many documents and is NOT sub-second
-    (p50 ~80s, p95 ~217s). Matches the question to a saved retrieval plan
-    (an inline planner grows one on a miss), runs it, and returns the
-    synthesized answer.
+    Use `search`/`query` directly for a single-step, known-shape lookup:
+    this tool reduces from many documents and is NOT sub-second
+    (p50 ~80s, p95 ~217s). Matches a saved plan (an inline planner grows
+    one on a miss), runs it, and returns the synthesized answer.
 
     Returns the final step's output as a string, or with `structured=True`
     an envelope (`{final_text, chunks, plan_id, step_count, answer_shape,
-    coverage, run_summary, ...}`). `plan_id` is the matched library plan or, on a
-    miss, the plan this call grew and saved; 0 when no row exists (ttl 0,
-    a failed save, or a run that ended first).
+    coverage, run_summary, ...}`). `plan_id` is the matched plan or, on a
+    miss, the plan this call grew and saved; 0 when no row exists.
 
     Constraints:
     - `budget_usd` is a soft cost guide (warns, can overshoot);
@@ -11893,18 +11986,20 @@ async def nx_answer(
     - A corpus or collection `scope` narrows each retrieval step's plan-
       declared corpus; a step with nothing under it is skipped and named
       in `scope_diagnostics` (text mode: a `[scope conflict: ...]` line).
-    - `continuation=True` is live for eligible plan cuts and needs a
-      matching `nx_answer_report` call afterward.
+    - `continuation=True` needs a matching `nx_answer_report` call.
+    - The coverage check is on by default: it adds model calls (latency,
+      about 0.02 USD a run; the times above predate it) and can withhold
+      an answer as "uncovered". `NX_ANSWER_COVERAGE=0` turns it off.
     - `answer_shape` says what `final_text` is. Prose follows for
       "answered" and "insufficient_evidence" (opens with
       `[insufficient-evidence: <n> unresolved]`, names each unsettled
-      part, then answers the rest). Any other value, "uncovered" (none of
-      the evidence covers a requested part; only with NX_ANSWER_COVERAGE=1)
-      included, is a one-line notice, never the raw payload.
+      part, then answers). Any other value, "uncovered" (no
+      part is covered) included, is a one-line notice, never the
+      raw payload.
     - `run_summary.persistence` (persisted, dropped, unsupported,
       unverified, not_recorded): only "persisted" means the engine kept
       the run's coverage summary.
-    - Text mode starts a degraded answer with `[budget exhausted ...]`,
+    - Text mode opens a degraded answer with `[budget exhausted ...]`,
       `[non-answer: <shape>]` or `[insufficient-evidence: ...]`.
     """
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
@@ -11938,6 +12033,7 @@ async def nx_answer(
     )
     from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — call-time module read so a test's patch of the constant is honored (RDR-232 nexus-jypmj.2.3)
     from nexus.plans.request_coverage import extraction_enabled as _extraction_enabled  # noqa: PLC0415 — deferred; the gate follows the extraction switch (nexus-jypmj.2.8)
+    from nexus.plans.request_coverage import note_extraction_outcome as _note_extraction_outcome  # noqa: PLC0415 — deferred; the process-level signal of a failing extraction (nexus-jypmj.16)
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.verb_infer import infer_verb as _infer_verb  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -11990,12 +12086,14 @@ async def nx_answer(
     # `BUDGET_ENFORCEMENT_ENABLED` -- the single gate for ALL
     # enforcement (bounds check, pre-flight refusal, mid-run stop).
     effective_budget_usd: "float | None" = None
-    #: Captures the inline planner's own claude_dispatch cost (D5 /
-    #: nexus-nyry9.21, closing the .r2 gap for the USD axis) via the
-    #: ambient sink wrapped around the Step 1 miss-path dispatch below.
-    #: Stays empty (spend 0.0) on a plan-match HIT — no planner dispatch
-    #: happens on that path.
-    _planner_usage_sink: list = []
+    #: Captures the run's out-of-step dispatch usage: the inline planner's
+    #: own claude_dispatch (D5 / nexus-nyry9.21, closing the .r2 gap for the
+    #: USD axis) via the ambient sink wrapped around the Step 1 miss-path
+    #: dispatch below, and the structured request extraction's call
+    #: (nexus-jypmj.9). Stays empty (spend 0.0) on a plan-match HIT that made
+    #: no extraction call. Its sum is the run's ``out_of_step_cost_usd``
+    #: (stored, nexus-jypmj.5), in the run's cost_usd and the budget's running spend.
+    _out_of_step_usage_sink: list = []
     #: Set once, in the pre-Step-2 budget check below, to
     #: `effective_budget_usd` minus whatever the planner already spent.
     #: Threaded into `plan_run` at Step 4 as `budget_usd_remaining`.
@@ -12098,6 +12196,7 @@ async def nx_answer(
     _request_coverage = await _nx_answer_request_coverage(
         question=question, scope=scope, evidence_request=_evidence_request, explicit_kind=_kind_hint,
         deadline=deadline, trace=trace,
+        usage_sink=_out_of_step_usage_sink,  # nexus-jypmj.9: the extraction call is part of the run's cost and budget spend
     )
     # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
     # (bounded; nothing is guessed). The primary stream that reads the
@@ -12158,6 +12257,12 @@ async def nx_answer(
         shadow_reason=(
             "disabled_by_setting" if not _gate_on else None if _extract_on else "extraction_disabled"
         ),
+    )
+    # nexus-jypmj.16: a failed extraction leaves THIS request on its first-pass kind (the gate keeps enforcing,
+    # by design); a run of failures in one process is that regime every time, so it warns once per process.
+    _nx_answer_isolated(
+        "extraction_health", False, _note_extraction_outcome, _request_coverage.extraction.outcome,
+        gate_enforcing=_plan_eligibility.enforce,
     )
     # Set by the single_query fast path, which has no primary evidence stream: the
     # named-source notice then says so instead of implying the document was read.
@@ -12390,10 +12495,10 @@ async def nx_answer(
         # or any error/miss path before plan_run ever ran).
         # ``cost_usd`` comes from _run_cost_usd, the function
         # _nx_answer_record_run uses too: every step's non-None cost plus
-        # the inline planner's own dispatch cost on a plan-miss run, or
-        # None when neither is known — never a fabricated 0.0.
+        # the run's out-of-step dispatch cost (inline planner on a plan miss,
+        # request extraction), or None when neither is known — never a fabricated 0.0.
         _steps = step_records or []
-        cost_usd = _run_cost_usd(_steps, _planner_cost_usd(_planner_usage_sink))
+        cost_usd = _run_cost_usd(_steps, _out_of_step_cost_usd(_out_of_step_usage_sink))
         return {
             "final_text": _text,
             "chunks": chunks if chunks is not None else [],
@@ -12696,7 +12801,7 @@ async def nx_answer(
                     success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
-                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                     run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -12906,7 +13011,7 @@ async def nx_answer(
             from nexus.operators.dispatch import (  # noqa: PLC0415 — deferred; matches this function's convention
                 ambient_usage_sink as _ambient_usage_sink,
             )
-            with _ambient_usage_sink(_planner_usage_sink):
+            with _ambient_usage_sink(_out_of_step_usage_sink):
                 best = await _nx_answer_plan_miss(
                     question, scope=scope, max_steps=max_steps,
                     few_shot_matches=matches, coverage=_request_coverage,
@@ -12926,7 +13031,7 @@ async def nx_answer(
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
                         step_records=[], duration_ms=elapsed_ms, trace=trace,
-                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                         run_summary=_run_summary, summary_outcome="planner_failure",
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -13126,7 +13231,7 @@ async def nx_answer(
     # the wall-clock axis.
     if effective_budget_usd is not None:
         _planner_spent_usd = sum(
-            u.cost_usd for u in _planner_usage_sink if getattr(u, "cost_usd", None) is not None
+            u.cost_usd for u in _out_of_step_usage_sink if getattr(u, "cost_usd", None) is not None
         )
         _budget_remaining_usd = effective_budget_usd - _planner_spent_usd
         if _budget_remaining_usd <= 0:
@@ -13286,7 +13391,7 @@ async def nx_answer(
                             duration_ms=elapsed_ms, trace=trace, success=False,
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
-                            planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                            out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                             run_summary=_run_summary,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
@@ -13339,7 +13444,7 @@ async def nx_answer(
                             duration_ms=elapsed_ms, trace=trace, success=False,
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
-                            planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                            out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                             run_summary=_run_summary,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
@@ -13516,7 +13621,7 @@ async def nx_answer(
                         success=None if _fast_conflict else not _nx_answer_text_is_empty(str(result_text)),
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
-                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                         run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -13562,7 +13667,7 @@ async def nx_answer(
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
-                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                         run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -13638,7 +13743,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
-                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                     run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
@@ -13674,7 +13779,7 @@ async def nx_answer(
     # RDR-232 Phase 3 (nexus-jypmj.3.3): the coverage boundary, built from the inputs this call already holds (the
     # ones `_evidence_diagnostics_now` hands build_evidence_diagnostics) and given to the runner, which assesses the
     # terminal reduction's evidence before dispatching it. It rides `_plan_run_kwargs`, so the continuation
-    # fallback re-run below gets the same one. With NX_ANSWER_COVERAGE off (the default until nexus-jypmj.3.10) none
+    # fallback re-run below gets the same one. With NX_ANSWER_COVERAGE off (on by default since nexus-jypmj.17) none
     # is passed: every run is then unassessed and this call is what it was before Phase 3. The single_query fast path
     # never gets here (no reduction).
     from nexus.plans.switches import coverage_enabled as _coverage_enabled  # noqa: PLC0415 — deferred; matches this module's convention
@@ -13780,7 +13885,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
-                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                     run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -13996,7 +14101,7 @@ async def nx_answer(
                         step_count=len(result.steps),
                         final_text=_handoff_text, step_records=_result_step_records,
                         duration_ms=_continuation_elapsed_ms, trace=trace,
-                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                         run_summary=_run_summary, summary_outcome="handoff",
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -14060,7 +14165,7 @@ async def nx_answer(
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
-                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                         run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -14210,7 +14315,7 @@ async def nx_answer(
                     success=_nx_answer_empty_retrieval_outcome(result.steps),
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
-                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                     run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -14287,7 +14392,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
-                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                     run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the notice must still surface
@@ -14476,7 +14581,7 @@ async def nx_answer(
                 duration_ms=elapsed_ms, trace=trace, success=True,
                 composite_supported_at_start=composite_supported_at_start,
                 early_bump_fired=early_bump_fired,
-                planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                out_of_step_cost_usd=_out_of_step_cost_usd(_out_of_step_usage_sink),
                 run_summary=_run_summary,
             ),
             op="record_run",

@@ -1838,6 +1838,20 @@
     <include file="db/changelog/tuples-009-claimed-at.xml"/>
 
     <!--
+        Bead nexus-5r2sc.2.1 (RDR-235 E1): nexus.tuples.available_at, the delayed-visibility instant
+        (NULL = claimable now). ADD COLUMN only, no DATA EFFECT, no index. After tuples-009-claimed-at.xml,
+        before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/tuples-010-available-at.xml"/>
+
+    <!--
+        Bead nexus-5r2sc.2.2 (RDR-235 E4): nexus.tuples.dirty, set by out mode=replace on a live-claimed row and
+        honoured by ack. ADD COLUMN only, no DATA EFFECT. After tuples-010-available-at.xml, before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/tuples-011-dirty.xml"/>
+
+    <!--
         Bead nexus-gacz0: partial index on catalog_documents (tenant_id, md5(title)) for the exact-title
         lookup GET /v1/catalog/by_title. CREATE INDEX only, no DATA EFFECT. After tuples-009-claimed-at.xml
         (current tail), before the grants-nexus-svc.xml runAlways block.
@@ -1890,6 +1904,13 @@
         telemetry-016 (nexus-jypmj.3.4), before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/note-uri-001-backfill.xml"/>
+
+    <!--
+        Bead nexus-jypmj.5 (RDR-232): nx_answer_runs.out_of_step_cost_usd, one nullable DOUBLE PRECISION column holding
+        the run's out-of-step dispatch cost (the inline planner call plus the request-extraction call). ADD COLUMN only, no DATA EFFECT, no backfill.
+        After note-uri-001 (current tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/telemetry-017-out-of-step-cost.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

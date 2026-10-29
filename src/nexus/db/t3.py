@@ -38,6 +38,7 @@ from nexus.corpus import (
     index_model_for_collection,
 )
 from nexus.db.limits import QUOTAS
+from nexus.ttl import refuse_ttl_over_cap
 from nexus.metadata_schema import (
     ALLOWED_TOP_LEVEL,
     CONTENT_TYPES,
@@ -883,6 +884,7 @@ class T3Database:
                 "None for a permanent entry — ttl_days must be a positive "
                 "integer number of days (0 does NOT mean permanent; None does)"
             )
+        refuse_ttl_over_cap(ttl_days)
 
         # MCP-stored docs are single-chunk: chunk_text == content, so the
         # natural ID (the FULL chunk_text_hash, RDR-180 / nexus-jxizy.3)

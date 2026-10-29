@@ -127,11 +127,11 @@ public final class ReembedSourceReader {
      * delete would also take are met earlier, as {@code kept_tombstoned} and the parity check ({@link Parity}),
      * which no flag lifts.)
      */
-    public record Residue(long aspects, long queue, long highlights) {
+    public record Residue(long aspects, long queue, long highlights, long aspectTasks) {
 
         /** The rows still naming the source: what {@code force_delete} lets the delete take. */
         public long satelliteRows() {
-            return aspects + queue + highlights;
+            return aspects + queue + highlights + aspectTasks;
         }
 
         /** A sentence for {@code last_error}: the satellite rows, by table. */
@@ -139,6 +139,7 @@ public final class ReembedSourceReader {
             List<String> parts = new ArrayList<>();
             if (aspects > 0) parts.add(aspects + " document_aspects row(s)");
             if (queue > 0) parts.add(queue + " aspect_extraction_queue row(s)");
+            if (aspectTasks > 0) parts.add(aspectTasks + " aspects task(s)");
             if (highlights > 0) parts.add(highlights + " document_highlights row(s)");
             return String.join(", ", parts);
         }
@@ -151,7 +152,9 @@ public final class ReembedSourceReader {
             ctx.fetchCount(ASPECT_EXTRACTION_QUEUE,
                 ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))),
             ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
-                DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source)))));
+                DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))),
+            // RDR-235 (nexus-5r2sc.2.6): the unconsumed aspects tasks naming the source; the source's purge deletes them.
+            AspectTaskRefs.countNaming(ctx, tenant, source)));
     }
 
     /**
@@ -379,7 +382,9 @@ public final class ReembedSourceReader {
                 .and(DSL.not(moved.apply(ASPECT_EXTRACTION_QUEUE.DOC_ID))))
             + ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)
                 .and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))
-                .and(DSL.not(moved.apply(DOCUMENT_HIGHLIGHTS.DOC_ID))));
+                .and(DSL.not(moved.apply(DOCUMENT_HIGHLIGHTS.DOC_ID))))
+            // RDR-235 (nexus-5r2sc.2.6): and the unconsumed aspects tasks naming the source whose document the job does not move.
+            + AspectTaskRefs.countNamingWhereDoc(ctx, tenant, source, docId -> DSL.not(moved.apply(docId)));
         return new DeleteCounts(quarantine, foreignAssignments, links, unmatched);
     }
 

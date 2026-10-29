@@ -35,6 +35,9 @@ import java.util.function.Supplier;
  *  "process_start_time":"2026-09-12T09:00:00Z",
  *  "nx_answer_run_complete_supported":true,
  *  "nx_answer_run_summary_supported":true,
+ *  "catalog_graph_scope_filter_supported":true,
+ *  "catalog_manifest_row_limit_supported":true,
+ *  "nx_answer_out_of_step_cost_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -334,6 +337,52 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * RDR-232 section 3 (nexus-jypmj.1.13) capability advertisement: does {@code POST /v1/catalog/traverse}
+     * apply an optional {@code scope_filter} to the walk BEFORE its 500-node cut, and answer with a
+     * {@code scope_filter} marker?
+     *
+     * <p>An independent flag. An engine without the predicate ignores the request key (the handler reads
+     * named fields), cuts the unfiltered walk at 500 and returns no marker, so a client must not send the
+     * key and trust the HTTP 200: it reads this flag first, and still requires the marker in the reply.
+     * Always present, always {@code true} on an engine carrying the predicate, like the older flags.
+     *
+     * <p>Like every new {@code /version} field it stays invisible to cloud clients until the public conexus
+     * edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release
+     * pre-tag check 3e); a client that reads it absent takes the disclosed old-engine path, never a
+     * containment claim.
+     */
+    static void appendCatalogGraphScopeFilterCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_graph_scope_filter_supported\":true");
+    }
+
+    /**
+     * nexus-jypmj.6 capability advertisement: does {@code POST /v1/catalog/manifest/get_many} accept an
+     * optional {@code max_rows_per_doc} (a document longer than it is returned as an even sample) and answer
+     * with the {@code max_rows_per_doc} echo and per-document {@code row_counts}?
+     *
+     * <p>An independent flag: an engine without the limit ignores the request key and returns every row of
+     * every document, so a client that relied on the limit to keep a read inside its row budget would blow
+     * the budget without an error. It reads this flag before it sends the key and still requires the echo.
+     * Invisible to cloud clients until the public conexus edge allowlists it (nexus-04sff precedent).
+     */
+    static void appendCatalogManifestRowLimitCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_manifest_row_limit_supported\":true");
+    }
+
+    /**
+     * nexus-jypmj.5 capability advertisement: does this engine store the optional {@code out_of_step_cost_usd}
+     * on {@code POST /v1/telemetry/nx_answer_runs/record} and {@code /complete} (column {@code
+     * nx_answer_runs.out_of_step_cost_usd}, changeset telemetry-017-1) and return it from {@code /query}?
+     *
+     * <p>An independent flag, for the reason {@link #appendNxAnswerRunSummaryCapabilityField} gives: an old
+     * engine drops the key without an error, so HTTP 200 is no evidence of persistence. A client that reads
+     * the flag absent omits the field. Invisible to cloud clients until the public conexus edge allowlists it.
+     */
+    static void appendNxAnswerOutOfStepCostCapabilityField(StringBuilder body) {
+        body.append(",\"nx_answer_out_of_step_cost_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -513,6 +562,12 @@ public final class VersionHandler implements HttpHandler {
         appendNxAnswerStepsCapabilityField(body);
         // RDR-232 P3 (nexus-jypmj.3.4): its own flag, true on any engine with the run_summary column.
         appendNxAnswerRunSummaryCapabilityField(body);
+        // RDR-232 s3 (nexus-jypmj.1.13): the traverse scope predicate that runs before the node cut.
+        appendCatalogGraphScopeFilterCapabilityField(body);
+        // nexus-jypmj.6: the manifest get_many per-document row limit.
+        appendCatalogManifestRowLimitCapabilityField(body);
+        // nexus-jypmj.5: the out-of-step cost column on the run row.
+        appendNxAnswerOutOfStepCostCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

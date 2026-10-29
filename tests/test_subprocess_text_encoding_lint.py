@@ -100,7 +100,7 @@ _KWARGS_READ: dict[str, str] = {
         "an ``env`` copy carrying NEXUS_REPO_ROOT (nexus-x3m8e); stdio is the null "
         "device and nothing reads the child as text"
     ),
-    "src/nexus/commands/index.py:2596": (
+    "src/nexus/commands/index.py:2608": (
         "``**isolation_popen_kwargs()`` (inert flags) plus ``**detached_spawn_kwargs()``, "
         "which holds only ``cwd`` (and an ``env`` copy when NEXUS_CONFIG_DIR is relative; "
         "nexus-x3m8e); stdout and stderr are a binary log handle, nothing reads it as text"

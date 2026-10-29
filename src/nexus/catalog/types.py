@@ -127,6 +127,13 @@ _CROSS_PROJECT_OVERRIDE_ENV = "NEXUS_CATALOG_ALLOW_CROSS_PROJECT"
 # of blast radius a per-document, operator-controlled stamp avoids.
 NON_EVIDENTIARY_META_KEY: str = "non_evidentiary"
 
+#: Catalog document ``meta`` key holding the RDR file's frontmatter ``id`` exactly as the file's header gives
+#: it (``"RDR-200"``, ``200``, ``"companion-note"``; ``""`` when the header parsed and has no ``id``). Stamped by
+#: the indexer at registration (nexus-jypmj.7) so the named-source sibling rule does not wait for the aspect
+#: worker; absent when the header did not parse or the document predates the stamp. Read through
+#: ``nexus.plans.primary_evidence.recorded_frontmatter_id``.
+RDR_FRONTMATTER_ID_META_KEY: str = "rdr_frontmatter_id"
+
 #: Path-segment marker (POSIX-style, no leading/trailing slash) identifying
 #: fixture DATA directories auto-stamped at register time. Segment-anchored
 #: — matched via :func:`is_fixture_path`, never a bare substring test, so

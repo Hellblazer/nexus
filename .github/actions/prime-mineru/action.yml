@@ -7,15 +7,15 @@ description: >-
   Actions cache; on a miss, downloads and extracts OUR self-hosted GitHub
   release asset (no HuggingFace dependency), sha256-verifies it before
   extraction — same pattern as prime-bge-onnx / prime-crossencoder-onnx —
-  then extracts. Same shape as prime-docling.
+  then extracts. Same shape as prime-bge-onnx.
 
   History (nexus-ggonw): tests/test_pdf_subsystem.py's
   TestFormulaPreservationOnRealPdf::test_mineru_path_indexes_table_values_as_text
   (the nightly slow leg's MinerU coverage) left MINERU_MODEL_SOURCE at its
   "huggingface" default, so a cold job downloaded ~1-3GB of pipeline weights
   straight from the HuggingFace hub on every cache miss — run 34975576187
-  timed out at 45 minutes inside that download. This action mirrors the
-  docling fix: fetch our own release asset once behind actions/cache, write
+  timed out at 45 minutes inside that download. This action fetches
+  our own release asset once behind actions/cache, write
   MinerU's local-models config, and export MINERU_MODEL_SOURCE=local so the
   MinerU client (mineru/utils/models_download_utils.py) never resolves
   through the hub at all.
@@ -86,7 +86,7 @@ runs:
   steps:
     - name: Restore MinerU pipeline models cache
       id: cache
-      # Keyed on the ASSET TAG (mirrors prime-docling): the extracted models
+      # Keyed on the ASSET TAG (mirrors prime-bge-onnx): the extracted models
       # are an immutable export of that tag, so they download once per tag
       # and restore thereafter; cutting a new asset tag invalidates the
       # cache by construction, with no separate key bump to forget.

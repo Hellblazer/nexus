@@ -100,8 +100,8 @@ def _rows(*chashes: str, **labels: Any) -> list[ManifestRow]:
 
 def _extraction(**meta: Any) -> ExtractionResult:
     return ExtractionResult(
-        text="body", metadata={"page_count": 3, "pdf_author": "Ann A.", "extraction_method": "docling",
-                              "docling_title": "A Title", **meta})
+        text="body", metadata={"page_count": 3, "pdf_author": "Ann A.", "extraction_method": "mineru",
+                              "pdf_title": "A Title", **meta})
 
 
 def test_the_post_pass_updates_every_chunk_of_the_manifest_and_none_it_does_not_own(manifests) -> None:
@@ -125,7 +125,7 @@ def test_the_post_pass_updates_every_chunk_of_the_manifest_and_none_it_does_not_
     ids = [i for u in store.updates for i in u[0]]
     metas = [m for u in store.updates for m in u[1]]
     assert sorted(ids) == ["a1", "a2", "s"], "exactly the manifest's chunks, the shared one included"
-    assert all(m["title"] == "A Title" and m["extraction_method"] == "docling" for m in metas)
+    assert all(m["title"] == "A Title" and m["extraction_method"] == "mineru" for m in metas)
     assert store.rows["b_x"]["title"] == "B Paper", "a row A does not own is untouched"
     assert store.rows["b1"]["title"] == "B Paper"
     assert store.rows["s"]["title"] == "A Title"
@@ -179,7 +179,7 @@ def _shared_with_b(**extra: Any) -> _Store:
         "own": {"content_hash": _H_A, "quality_gate_overridden": True, "source_author": "old", "extraction_method": "old",
                 "page_number": 3, "chunk_type": "text"},
         "s": {"content_hash": _H_B, "title": "B Paper", "source_author": "B Author",
-              "extraction_method": "mineru+docling-degraded", "quality_gate_overridden": True,
+              "extraction_method": "mineru+degraded", "quality_gate_overridden": True,
               "page_number": 3, "chunk_type": "text", **extra},
     })
 
@@ -209,7 +209,7 @@ def test_a_retry_never_blanks_a_value_a_co_owner_wrote(manifests) -> None:
         _H_A, _extraction(pdf_author="", extraction_method=""), Path("/x/a.pdf"), store, store, _COLLECTION,
         doc_id="doc-a") is True
     assert store.rows["s"]["source_author"] == "B Author"
-    assert store.rows["s"]["extraction_method"] == "mineru+docling-degraded"
+    assert store.rows["s"]["extraction_method"] == "mineru+degraded"
     assert store.rows["s"]["title"] == "A Title"
     assert store.rows["own"]["source_author"] == "" and store.rows["own"]["extraction_method"] == ""
 

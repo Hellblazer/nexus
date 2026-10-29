@@ -16,6 +16,17 @@ reduction, so a reader can sum them across runs; all four are 0 for a run that n
 whose source the run never had is ``None``. A summary that had to be cut to fit the size cap carries
 ``truncated``, the names of the blocks it dropped. Additive keys keep the version; a change in meaning bumps it.
 
+**Measurement counters (nexus-jypmj.3.10), additive to version 1.** ``coverage`` gains ``reply_classes``,
+``reply_by_stream``, ``assessment_call_log`` (``[stream, facets, reply_class]`` per call, at most 40, and
+``assessment_call_log_truncated``), ``accepted_records``, ``unusable_calls``, ``raised_calls``, ``failure_cause``
+(``raised_call``, ``unusable_reply``, ``mixed`` or ``none``), ``facets_conflicted`` (the conflicted subset of
+``facets.covered``), ``unassessed_by_cause`` and ``repair_entered``; ``repair`` gains ``entered``. No existing key
+changed meaning, so the version stays 1. The engine stores ``run_summary`` as opaque JSONB and checks only that it is an
+object, holds no U+0000 and fits the size cap (``TelemetryHandler.parseRunSummary``), so no engine change is needed.
+The cut ladder drops ``coverage.assessment_call_log`` before ``eligibility`` and ``request``; the aggregates survive
+until ``coverage`` itself goes. All of it is closed names and counts: no question, facet or evidence text, with or
+without ``trace``.
+
 **Redaction.** The question never appears. ``trace=False`` also drops facet text, source hints, the topic
 sentence and every source label; ids, counts and closed names stay. The summary is built from the same
 objects the envelope reports and takes the same ``trace`` the run log does.
@@ -78,6 +89,9 @@ PersistenceState = Literal["persisted", "dropped", "unsupported", "unverified", 
 _MAX_FACETS_LISTED = 24
 _MAX_HINTS_LISTED = 20
 _MAX_TEXT_CHARS = 200
+#: Assessment calls listed in ``coverage.assessment_call_log``. A run makes at most streams x facet groups x 2 rounds
+#: (20 at the shipped caps); the cap only bounds a pathological report. The aggregates count every call.
+_MAX_CALLS_LISTED = 40
 #: Integral numbers below this are integers under the canonical number rule (the range a double holds exactly).
 _EXACT_INT_LIMIT = 2**53
 
@@ -89,7 +103,8 @@ _unsupported_warned = False
 
 #: Optional blocks, cheapest to lose first, for :func:`fit_summary`.
 _CUT_LADDER: tuple[str, ...] = (
-    "request.source_hints", "request.facets", "streams", "eligibility", "request", "coverage",
+    "request.source_hints", "request.facets", "streams", "coverage.assessment_call_log", "eligibility", "request",
+    "coverage",
 )
 #: What survives the last-resort cut.
 _KEEP_ALWAYS = (
@@ -179,6 +194,17 @@ def _coverage_block(coverage: Any) -> dict[str, Any] | None:
     assessment = coverage.ledger.assessment
     block["assessment_latency_ms"] = assessment.latency_ms
     block["assessment_skipped_items"] = assessment.skipped_items
+    # nexus-jypmj.3.10, additive to version 1: what each assessment call came back as (closed names and counts),
+    # the failed outcome split into an unusable reply and a raised call. ``assessment_call_log`` lists
+    # ``[stream, facets, reply_class]`` per call, in order.
+    block["reply_classes"] = assessment.reply_classes()
+    block["reply_by_stream"] = assessment.reply_by_stream()
+    block["accepted_records"] = assessment.accepted_records
+    block["unusable_calls"] = assessment.unusable_calls
+    block["raised_calls"] = assessment.raised_calls
+    block["failure_cause"] = assessment.failure_cause
+    block["assessment_call_log"] = [[c.stream, c.facets, c.reply] for c in assessment.call_log[:_MAX_CALLS_LISTED]]
+    block["assessment_call_log_truncated"] = len(assessment.call_log) > _MAX_CALLS_LISTED
     return block
 
 
@@ -191,7 +217,10 @@ def _request_block(request: Any, trace: bool) -> dict[str, Any] | None:
     for f in facets[:_MAX_FACETS_LISTED]:
         item: dict[str, Any] = {"id": f.id, "origin": f.origin, "topics": list(f.topics)}
         if trace:
-            item["text"] = _text(f.text)
+            # A whole_question facet's text is the question itself, which the summary never carries
+            # (nexus-jypmj.3.16); the row's own question column holds it on a traced run.
+            if f.origin != "whole_question":
+                item["text"] = _text(f.text)
             item["source_hints"] = [_text(h) for h in f.source_hints[:_MAX_HINTS_LISTED]]
         listed.append(item)
     block: dict[str, Any] = {
@@ -279,6 +308,7 @@ def build_run_summary(
         "repair": {
             "attempts": attempts,
             "facets_repairable": len(coverage.repair_facet_ids) if coverage is not None else 0,
+            "entered": coverage.repair_entered if coverage is not None else False,
         },
         "run": {
             "plan_id": plan_id, "step_count": step_count, "duration_ms": duration_ms,

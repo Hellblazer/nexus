@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-5r2sc.2.1 (RDR-235 E1, delayed visibility on tuples).
+
+    nexus.tuples.available_at TIMESTAMPTZ NULL: the instant from which the row may be
+    claimed. NULL means "claimable now" (the claim predicate's pre-E1 behaviour); a
+    non-NULL value in the future hides the row from the claim, and from the rd/in
+    claimable mirrors, until the DATABASE clock reaches it. It is stamped on the database
+    clock (now() + delay) by out (delay_s) and by nack (retry_after_s), the way RDR-163
+    stamps next_retry_at, and cleared wherever claim_id is cleared (release, a nack without
+    retry_after_s, a lapse reclaimed or dead-lettered). A dead-letter outcome leaves it NULL.
+
+    No index (RDR-235 finding F26 / assumption A1): the claim loop already narrows on the
+    subspace scan index and the filter is one more cheap arm, so an index on available_at
+    would only add write cost.
+
+    NULL is the true prior state of every existing row. There is no backfill.
+
+    ADD COLUMN only (no UPDATE, no ALTER ... TYPE ... USING), so there is no DATA
+    EFFECT line, matching tuples-009-claimed-at.xml: scripts/data_effect_lint.py's own
+    scope excludes ADD COLUMN. DDL is unaffected by FORCE ROW LEVEL SECURITY on
+    nexus.tuples.
+
+    Placed after tuples-009-claimed-at.xml and before the grants-nexus-svc.xml runAlways
+    block (the established late-append convention, D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="tuples-010-1" author="nexus-5r2sc.2.1">
+        <comment>Adds nexus.tuples.available_at TIMESTAMPTZ NULL -- an additive column only (ADD COLUMN, no data mutation of any existing row), so no DATA EFFECT line applies per scripts/data_effect_lint.py's own scope. NULL is the true prior state of every existing row. Stamped on the database clock by TupleRepository.out (delay_s) and nack (retry_after_s), read by the claim predicate, cleared with claim_id.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tuples
+    ADD COLUMN available_at TIMESTAMPTZ NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                ALTER TABLE nexus.tuples DROP COLUMN IF EXISTS available_at;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

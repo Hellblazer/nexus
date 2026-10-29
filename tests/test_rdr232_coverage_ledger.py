@@ -47,6 +47,7 @@ from nexus.plans.primary_evidence import (
     PrimaryEvidence,
     ResolvedSource,
     SelectedChunk,
+    SourceCandidate,
 )
 from nexus.plans.request_coverage import Facet, RequestCoverage, _MAX_FACETS
 from nexus.plans.reserved_stream import ReservedStream
@@ -289,14 +290,14 @@ async def test_scenario_3_a_failed_first_assessment_call_leaves_the_state_unasse
     result = await _run(d, boundary, reserved_stream=_reserved())
     cov = _cov(result)
     assert cov.state == "unassessed" and cov.reason == "assessment_failed" and not cov.skip_generation
-    assert len(d.args_of("operator_check")) == 1, "the first failure stops further assessment calls"
+    assert len(d.args_of("operator_check")) == 3, "a failed call does not stop the others (nexus-jypmj.17): primary, vector and graph each ran"
     assert result.final == {"text": "the answer"}, "the answer is returned, not a notice in its place"
     assert all(f.state == "unassessed" for f in cov.ledger.findings), "no facet defaults to covered"
     assert cov.ledger.assessment.outcome == "failed"
     assert cov.ledger.scope is not None and [(s.source, s.state) for s in cov.ledger.sources] == [("RDR-084", "covered")], (
         "the deterministic checks still ran")
     failed = [r for r in result.step_records if r.operator == "operator_check"]
-    assert len(failed) == 1 and not failed[0].ok
+    assert len(failed) == 3 and not any(r.ok for r in failed)
 
 
 def _resolved_source() -> NamedSourceResolution:
@@ -395,6 +396,66 @@ async def test_scenario_6_mixed_one_facet_blocked_one_unassessed_is_partial_not_
     assert by_id["f1"].state == "unsupported" and by_id["f1"].reason == "source_missing"
     assert by_id["f2"].state == "unassessed", "no facet is defaulted to covered"
     assert result.final == {"text": "the answer"}
+
+
+def _ambiguous(ref: str = "RDR-049") -> NamedSourceResolution:
+    """The G01 shape: the number is carried by two projects, so resolution returns candidates and picks nothing."""
+    def cand(tumbler: str) -> SourceCandidate:
+        return SourceCandidate(
+            tumbler=tumbler, title=ref, file_path=f"docs/rdr/{ref.lower()}.md", owner=tumbler.rsplit(".", 1)[0],
+            content_type="rdr", collection=RDR_COLL)
+
+    return NamedSourceResolution(sources=(ResolvedSource(
+        ref=SourceRef.parse(ref), status="candidates", candidates=(cand("1.1.49"), cand("1.2.49")),
+        detail="two projects carry this number; pass owner or project to choose"),))
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_named_source_does_not_block_the_facet_and_is_disclosed() -> None:
+    """nexus-jypmj.3.17: candidates are an unresolved source, not a missing one. The facet is assessed on the evidence
+    that was read (here the secondary streams) and the answer is generated; the ambiguity stays in coverage.sources."""
+    d = Dispatcher(check=supports_first_item)
+    request = _request(1, hints={"f1": ("RDR-049",)})
+    result = await _run(d, CoverageBoundary(request=request, named_sources=_ambiguous()))
+    cov = _cov(result)
+    assert not cov.skip_generation and cov.state == "complete", (cov.state, cov.reason)
+    assert d.tools.count("generate") == 1 and d.args_of("operator_check"), "the facet went through the assessment"
+    assert [(f.facet_id, f.state) for f in cov.ledger.findings] == [("f1", "covered")]
+    [row] = cov.ledger.sources
+    assert (row.source, row.state) == ("RDR-049", "unresolved") and "candidates" in row.detail
+    wire = cov.to_wire()
+    assert wire["primary_source"] == {"state": "unresolved", "sources": 1}
+    assert wire["sources"][0]["state"] == "unresolved"
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_source_with_no_supporting_evidence_is_repairable_not_source_missing() -> None:
+    d = Dispatcher(check=supports_nothing)
+    request = _request(1, hints={"f1": ("RDR-049",)})
+    cov = _cov(await _run(d, CoverageBoundary(request=request, named_sources=_ambiguous())))
+    [finding] = cov.ledger.findings
+    assert finding.state == "unsupported" and finding.reason != "source_missing"
+    assert cov.repair_facet_ids == ("f1",), "an assessed gap is a repair target; a missing source never is"
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_that_could_not_be_trusted_is_unresolved_and_does_not_block() -> None:
+    sources = NamedSourceResolution.failed([SourceRef.parse("RDR-049")], "TimeoutError")
+    request = _request(1, hints={"f1": ("RDR-049",)})
+    cov = _cov(await _run(Dispatcher(), CoverageBoundary(request=request, named_sources=sources)))
+    assert [(s.source, s.state) for s in cov.ledger.sources] == [("RDR-049", "unresolved")]
+    assert not cov.skip_generation and cov.ledger.findings[0].state == "covered"
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_source_does_not_hide_a_missing_one_beside_it() -> None:
+    sources = NamedSourceResolution(sources=(*_ambiguous().sources, *_unresolved("RDR-084").sources))
+    request = _request(2, hints={"f1": ("RDR-049",), "f2": ("RDR-084",)})
+    cov = _cov(await _run(Dispatcher(), CoverageBoundary(request=request, named_sources=sources)))
+    by_id = {f.facet_id: f for f in cov.ledger.findings}
+    assert by_id["f1"].state == "covered", "the ambiguous source blocks nothing"
+    assert (by_id["f2"].state, by_id["f2"].reason) == ("unsupported", "source_missing")
+    assert cov.primary_source_state["state"] == "missing", "missing outranks unresolved in the one-word state"
 
 
 # ── scenario 7: a returned id outside the input is rejected ─────────────────────────────────────────────────
@@ -584,23 +645,20 @@ async def test_contradicting_evidence_without_support_is_still_contradicted() ->
 
 
 def test_the_all_contradicted_rule_is_one_named_predicate_both_sides_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Sam is deciding whether a facet with only contradicting evidence lets generation proceed. Both the
-    pre-generation skip (``state_for``) and the post-generation withhold (``decide_outcome``) ask
-    ``counts_toward_a_usable_answer``, so either answer is a change to ``USABLE_ANSWER_FINDING_STATES``."""
-    assert coverage_ledger.USABLE_ANSWER_FINDING_STATES == frozenset({"covered"}), "today's behaviour: skip, uncovered"
-    assert state_for(("contradicted",), assessment_outcome="ok", anchors=3, observed=True) == ("unavailable", "uncovered", True)
-    cov = CoverageResult("partial", "unresolved_facets", False, coverage_ledger.CoverageLedger(
-        findings=(coverage_ledger.FacetFinding("f1", "contradicted", ("e1",), "contradicted"),
-                  coverage_ledger.FacetFinding("f2", "unassessed", (), "assessment_failed"))))
-    assert decide_outcome(cov, AnswerShape.ANSWERED).shape is AnswerShape.INSUFFICIENT_EVIDENCE, "unassessed facets keep the prose"
-
-    monkeypatch.setattr(coverage_ledger, "USABLE_ANSWER_FINDING_STATES", frozenset({"covered", "contradicted"}))
+    """Sam ruled 2026-10-27 (nexus-jypmj.3.13): a facet with only contradicting evidence counts toward a usable
+    answer. Both the pre-generation skip (``state_for``) and the post-generation withhold (``decide_outcome``)
+    ask ``counts_toward_a_usable_answer``, so the rule is ``USABLE_ANSWER_FINDING_STATES`` alone."""
+    assert coverage_ledger.USABLE_ANSWER_FINDING_STATES == frozenset({"covered", "contradicted"})
     assert coverage_ledger.counts_toward_a_usable_answer("contradicted") and not coverage_ledger.counts_toward_a_usable_answer("unsupported")
     assert state_for(("contradicted",), assessment_outcome="ok", anchors=3, observed=True) == ("partial", "unresolved_facets", False)
     none_settled = CoverageResult("partial", "unresolved_facets", False, coverage_ledger.CoverageLedger(
         findings=(coverage_ledger.FacetFinding("f1", "contradicted", ("e1",), "contradicted"),
                   coverage_ledger.FacetFinding("f2", "unsupported", (), "no_supporting_evidence"))))
     assert decide_outcome(none_settled, AnswerShape.ANSWERED).shape is AnswerShape.INSUFFICIENT_EVIDENCE
+
+    monkeypatch.setattr(coverage_ledger, "USABLE_ANSWER_FINDING_STATES", frozenset({"covered"}))
+    assert state_for(("contradicted",), assessment_outcome="ok", anchors=3, observed=True) == ("unavailable", "uncovered", True), \
+        "control: the one set is what both sides read"
 
 
 # ── check.ok is not coverage ────────────────────────────────────────────────────────────────────────────────
@@ -622,7 +680,7 @@ async def test_check_ok_is_never_read_as_coverage() -> None:
     assert supports.ledger.findings[0].state == "covered" and supports.state == "complete"
 
 
-# ── contradicted facets are retained, not repaired; a ledger with nothing covered still skips ────────────────
+# ── contradicted facets are retained for the reduction and never repaired ────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -642,9 +700,10 @@ async def test_a_contradicted_facet_beside_a_covered_one_is_retained_for_the_red
 
 
 @pytest.mark.asyncio
-async def test_only_contradicted_facets_cover_nothing_and_skip_generation() -> None:
-    """RDR-232 section 4: a usable answer needs at least one covered facet; Sam's 3.12 ruling skips
-    generation when the ledger covers no facet. Contradicted is not covered."""
+async def test_only_contradicted_facets_still_generate_as_a_partial_answer() -> None:
+    """Sam's ruling 2026-10-27 (nexus-jypmj.3.13): contradicting evidence is evidence the reduction must state
+    (RDR section 4, "contradicted is retained for the reduction"), so a ledger whose only finding is a
+    contradiction is partial and generation runs; the notice names the contradiction ahead of the prose."""
     def contradicts(items: str, instruction: str) -> dict:
         first = json.loads(items)[0]["id"]
         return {"ok": False, "evidence": [{"item_id": first, "quote": "[f1] the opposite", "role": "contradicts"}]}
@@ -652,8 +711,9 @@ async def test_only_contradicted_facets_cover_nothing_and_skip_generation() -> N
     d = Dispatcher(check=contradicts)
     cov = _cov(await _run(d, CoverageBoundary(request=_request(1))))
     assert cov.ledger.findings[0].state == "contradicted" and cov.ledger.findings[0].evidence_ids
-    assert (cov.state, cov.reason) == ("unavailable", "uncovered") and cov.skip_generation
-    assert d.tools.count("generate") == 0
+    assert (cov.state, cov.reason) == ("partial", "unresolved_facets") and not cov.skip_generation
+    assert d.tools.count("generate") == 1
+    assert cov.unresolved_facet_ids == ("f1",)
     assert cov.repair_facet_ids == (), "repair does not search until it finds agreement"
 
 
@@ -819,8 +879,8 @@ async def test_the_terminal_step_is_hydrated_once_under_the_real_default_dispatc
         (("covered", "covered"), "ok", 3, ("complete", "all_covered", False)),
         (("covered", "unsupported"), "ok", 3, ("partial", "unresolved_facets", False)),
         (("covered", "contradicted"), "ok", 3, ("partial", "unresolved_facets", False)),
-        (("contradicted",), "ok", 3, ("unavailable", "uncovered", True)),
-        (("contradicted", "unsupported"), "ok", 3, ("unavailable", "uncovered", True)),
+        (("contradicted",), "ok", 3, ("partial", "unresolved_facets", False)),
+        (("contradicted", "unsupported"), "ok", 3, ("partial", "unresolved_facets", False)),
         (("unsupported", "unsupported"), "ok", 3, ("unavailable", "uncovered", True)),
         (("unassessed", "unassessed"), "failed", 3, ("unassessed", "assessment_failed", False)),
         (("unassessed", "unassessed"), "skipped_deadline", 3, ("unassessed", "assessment_skipped_deadline", False)),

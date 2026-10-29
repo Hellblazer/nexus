@@ -55,6 +55,16 @@ def _isolated_tmpdir(tmp_path_factory, monkeypatch):
     assert sentinel.read_text() == "keep\n", "a test or the script wiped the TMPDIR"
 
 
+@pytest.fixture(autouse=True)
+def _formula_pdf_check_skipped_unless_a_test_asks(monkeypatch):
+    """nexus-tr1rj.20: the formula-PDF check is default-on in --published mode and
+    installs ``conexus[pdf]``. The stub-driven tests here exercise the install, propagation
+    and OpenCV logic with a stub `uv`, not MinerU, so they run with the recorded-reason
+    skip. The tests that cover the default and the skip rule delete or set these."""
+    monkeypatch.setenv("NX_MVV_FORMULA_PDF_CHECK", "0")
+    monkeypatch.setenv("NX_MVV_FORMULA_PDF_SKIP_REASON", "unit test: stub uv, no MinerU")
+
+
 def _remove_evidence(stderr: str) -> None:
     """Remove the failure-evidence dir the script printed, and ONLY that.
 
@@ -258,6 +268,17 @@ def test_the_summary_prints_the_slim_leg_status_just_before_the_sentinel() -> No
     sentinel = text.index('echo "FRESH-INSTALL MVV PASSED', summary)
     assert 0 < sentinel - summary < 200, "the status line must sit directly before the sentinel"
     assert text.rindex('echo "FRESH-INSTALL MVV PASSED') > summary
+
+
+def test_the_summary_names_the_formula_pdf_check_status_before_the_sentinel() -> None:
+    """nexus-tr1rj.20: a skipped formula-PDF check must read as skipped in the summary
+    (with its reason), never as a covered one; the PASSED sentinel stays last."""
+    text = _text()
+    status = text.index('echo "FRESH-INSTALL MVV formula-PDF check (MinerU, published bytes): $FORMULA_PDF_STATUS"')
+    sentinel = text.index('echo "FRESH-INSTALL MVV PASSED', status)
+    assert status < sentinel
+    assert 'FORMULA_PDF_STATUS="SKIPPED (reason: $NX_MVV_FORMULA_PDF_SKIP_REASON)"' in text
+    assert text.rindex('echo "FRESH-INSTALL MVV PASSED') > status
 
 
 def test_passed_line_names_the_layer_honestly_in_both_modes() -> None:
@@ -1254,3 +1275,60 @@ def test_local_wheel_install_applies_the_wheels_own_overrides() -> None:
     local_block = local_block[: local_block.index("MCP entry-point handshake")]
     assert 'nexus/_install/overrides.txt' in local_block
     assert '--overrides "$OVERRIDES_FILE" "$WHEEL"' in local_block
+
+
+# ── the formula-PDF check is default-on; a skip needs a recorded reason (nexus-tr1rj.20) ──
+
+
+def test_a_published_run_installs_the_pdf_extra_by_default(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("NX_MVV_FORMULA_PDF_CHECK", raising=False)
+    monkeypatch.delenv("NX_MVV_FORMULA_PDF_SKIP_REASON", raising=False)
+    result, _probes, installs = _run_propagation_branch(tmp_path, _FAST_PROPAGATION_ENV, 0, 0)
+    try:
+        assert installs >= 1, result.stdout + result.stderr
+        argv = (tmp_path / "install-argv.log").read_text()
+        assert "conexus[pdf]==1.2.3" in argv, f"the default run must install the pdf extra: {argv}"
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_skipping_the_formula_check_without_a_reason_is_refused(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("NX_MVV_FORMULA_PDF_CHECK", "0")
+    monkeypatch.delenv("NX_MVV_FORMULA_PDF_SKIP_REASON", raising=False)
+    result, _probes, installs = _run_propagation_branch(tmp_path, _FAST_PROPAGATION_ENV, 0, 0)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "NX_MVV_FORMULA_PDF_SKIP_REASON" in result.stderr
+    assert installs == 0, "the refusal must come before any install"
+
+
+def test_skipping_the_formula_check_with_a_reason_runs_slim(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("NX_MVV_FORMULA_PDF_CHECK", "0")
+    monkeypatch.setenv("NX_MVV_FORMULA_PDF_SKIP_REASON", "chas has no model cache today")
+    result, _probes, installs = _run_propagation_branch(tmp_path, _FAST_PROPAGATION_ENV, 0, 0)
+    try:
+        assert installs >= 1, result.stdout + result.stderr
+        argv = (tmp_path / "install-argv.log").read_text()
+        assert "conexus==1.2.3" in argv and "[pdf]" not in argv, argv
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_the_local_wheel_layer_needs_no_skip_reason(tmp_path, monkeypatch) -> None:
+    """The check applies to published bytes only: a local-wheel run with the check off and NO
+    reason is not refused. A stub `uv` fails the first build step, so the run stops there,
+    on an ordinary failure rather than the exit-2 refusal."""
+    monkeypatch.setenv("NX_MVV_FORMULA_PDF_CHECK", "0")
+    monkeypatch.delenv("NX_MVV_FORMULA_PDF_SKIP_REASON", raising=False)
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    (stub_dir / "uv").write_text("#!/bin/sh\nexit 1\n")
+    (stub_dir / "uv").chmod(0o755)
+    _write_stub_git(stub_dir, "yes")
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
+    result = subprocess.run([str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60)
+    try:
+        assert "refusing to skip the formula-PDF check" not in result.stderr, result.stderr
+        assert result.returncode not in (0, 2), result.stdout + result.stderr
+    finally:
+        _remove_evidence(result.stderr)

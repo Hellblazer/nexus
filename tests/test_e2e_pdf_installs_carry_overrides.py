@@ -11,7 +11,7 @@ published-artifact gate had never exercised the route users take.
 
 A pdf-capable install here is a ``uv tool|pip install`` statement (continuations
 joined, comments dropped) that names ``[pdf]`` or the harness's ``$PKG_SPEC``
-(``conexus[pdf]`` under NX_MVV_FORMULA_PDF_CHECK=1). A ``--no-deps`` fetch resolves
+(``conexus[pdf]`` unless the formula-PDF check is skipped with a reason). A ``--no-deps`` fetch resolves
 no OpenCV, so it is exempt. ``nx self install --extras pdf`` is not a ``uv``
 statement: install_generation.sh applies the overrides on that route.
 """

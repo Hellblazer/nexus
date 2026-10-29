@@ -23,7 +23,9 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+from nexus.catalog.types import make_relative
 from nexus.checkpoint import delete_checkpoint
+from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import embedding_model_row_preferred, ensure_collection_registered, index_model_for_collection
 from nexus.db import make_t3
 from nexus.embed_window import window_for_collection
@@ -684,6 +686,73 @@ def _stamp_finished_upload(doc_id: str, content_hash: str, chunk_count: int) -> 
             close()
 
 
+def _curator_identity(file_path: Path, base_path: Path | None) -> tuple[str, str, str]:
+    """``(fp, legacy_fp, source_uri)`` a CURATOR-owned document registers and is looked up by.
+
+    nexus-njn1a (finding 12). A curator owner has no ``repo_root``, so a path relative to *base_path*
+    gave the engine nothing to derive a ``source_uri`` from, and ``nx enrich aspects`` skipped the
+    document as ``unattributable_identity``. With a *base_path* the document now registers the way
+    ``nx index md`` / ``nx index pdf`` register one: by its ABSOLUTE path, and the engine derives the
+    raw ``file://<abspath>`` itself (``CatalogRepository.deriveSourceUri``). *source_uri* here is that
+    same raw spelling, never ``Path.as_uri()``'s percent-encoded one, so a backfill and
+    :func:`_doc_id_for_path` agree with the engine. An absolute path also keeps two directories with
+    the same basename (and so the same curator owner) apart, which a relative one did not.
+
+    *legacy_fp* is the relative path a document registered under before this change, ``""`` when there
+    is no *base_path*. With no *base_path* nothing changes: ``fp`` is ``str(file_path)`` and the
+    engine derives the URI for an absolute one.
+    """
+    if not base_path:
+        return str(file_path), "", ""
+    absolute = str(Path(file_path).resolve())
+    return absolute, make_relative(file_path, base_path), "file://" + absolute
+
+
+def _find_curator_document(reader, owner, fp: str, legacy_fp: str, source_uri: str, writer=None):
+    """The existing curator Document for *fp*, or one registered under *legacy_fp* before njn1a.
+
+    A non-git document's identity is its location, as for ``nx index md``: one registered by absolute
+    path that later moves is a new document at its new path, and the old one is left for
+    ``nx catalog reconcile-stale``. A LEGACY relative-path row is the one case the new location can
+    still claim. It is adopted when it holds no ``source_uri``, or this file's own, or a ``file://``
+    path that no longer exists on disk (it was this directory before a move, and nothing else uses
+    the row). With *writer* the row is re-stamped with this file's *source_uri* in the last case.
+
+    It is left as it is, with a warning that names what is known, when the path it holds still exists
+    (another directory with the same basename shares the curator owner and the relative path,
+    nexus-njn1a) or is not a ``file://`` URI that can be checked.
+    """
+    existing = reader.by_file_path(owner, fp)
+    if existing is not None or not legacy_fp:
+        return existing
+    legacy = reader.by_file_path(owner, legacy_fp)
+    if legacy is None:
+        return None
+    held = getattr(legacy, "source_uri", "") or ""
+    if held in ("", source_uri):
+        return legacy
+    held_path = held[len("file://"):] if held.startswith("file://") else ""
+    if held_path and not Path(held_path).exists():
+        _log.info(
+            "curator_legacy_document_adopted_after_move",
+            tumbler=str(legacy.tumbler), file_path=legacy_fp, held_source_uri=held, this_source_uri=source_uri,
+        )
+        if writer is not None:
+            try:
+                writer.update(legacy.tumbler, source_uri=source_uri)
+            except Exception:  # noqa: BLE001 — boundary catch: advisory re-stamp, never discards the adopted tumbler
+                _log.warning(
+                    "doc_source_uri_restamp_failed", tumbler=str(legacy.tumbler), file_path=legacy_fp, exc_info=True,
+                )
+        return legacy
+    _log.warning(
+        "curator_legacy_document_not_adopted",
+        tumbler=str(legacy.tumbler), file_path=legacy_fp, held_source_uri=held, this_source_uri=source_uri,
+        held_path_exists=True if held_path else None,
+    )
+    return None
+
+
 def _repo_owner_document_for(reader, abs_path):
     """An existing catalog Document for *abs_path* under its REPO owner, if any.
 
@@ -954,7 +1023,6 @@ def _register_or_lookup_doc_id(
     reader = None
     writer = None
     try:
-        from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.types)
         from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             make_catalog_reader,
             make_catalog_writer,
@@ -1011,6 +1079,7 @@ def _register_or_lookup_doc_id(
                 f"it from there (nx index repo <primary>, or this command on the "
                 f"primary's path)."
             )
+        derived_source_uri = legacy_fp = ""  # set only for a curator owner given a base_path (nexus-njn1a)
         if home is not None:
             owner, fp, content_type = home
             if corpus:
@@ -1026,7 +1095,10 @@ def _register_or_lookup_doc_id(
                 owner = owner_t
             else:
                 owner = writer.register_owner(owner_name, "curator")
-            fp = make_relative(file_path, base_path) if base_path else str(file_path)
+            # nexus-njn1a (finding 12): register by the absolute path, as `nx index md` does (see
+            # _curator_identity). Never stamp the ``source_uri`` argument below, which is a lookup key
+            # that fails loud on a miss (nexus-y8qtj).
+            fp, legacy_fp, derived_source_uri = _curator_identity(file_path, base_path)
 
         # nexus-y8qtj: source_uri-keyed resolution takes priority over the
         # file_path lookup below, and is fail-loud rather than falling
@@ -1059,14 +1131,27 @@ def _register_or_lookup_doc_id(
                 )
             return (str(existing_by_uri.tumbler), False) if with_created else str(existing_by_uri.tumbler)
 
-        existing = reader.by_file_path(owner, fp)
+        existing = _find_curator_document(reader, owner, fp, legacy_fp, derived_source_uri, writer)
+        from_repo_owner = False
         if existing is None:
             # nexus-tqudo: the curator namespace cannot see a row a
             # prior `nx index repo` registered under the REPO owner.
             # Look there before minting, or one physical file ends up
             # with two catalog Documents.
             existing = _repo_owner_document_for(reader, file_path)
+            from_repo_owner = existing is not None
         if existing is not None:
+            if derived_source_uri and not from_repo_owner and not getattr(existing, "source_uri", ""):
+                # nexus-njn1a: a document an earlier release registered without its source_uri
+                # (the same curator-owner case) gets it on the next run. Advisory, like the
+                # reconcile write below: the tumbler is already resolved.
+                try:
+                    writer.update(existing.tumbler, source_uri=derived_source_uri)
+                except Exception:  # noqa: BLE001 — boundary catch: advisory backfill, never discards a resolved tumbler
+                    _log.warning(
+                        "doc_source_uri_backfill_failed",
+                        tumbler=str(existing.tumbler), file_path=fp, exc_info=True,
+                    )
             # nexus-2t63u: reconcile a stale ``physical_collection`` EARLY,
             # before the tumbler is returned and threaded into this run's
             # chunk/manifest writes. Without this, a path-based re-index
@@ -1214,6 +1299,19 @@ def _register_or_lookup_doc_id(
             tumbler_from_register_result,
         )
         _conflict = find_cross_owner_conflict(reader, fp)
+        # nexus-jypmj.7: an RDR is registered with its frontmatter id on the document (the same stamp the repo
+        # indexer writes), so the named-source sibling rule reads it without the aspect worker. Passed only
+        # when there is one, so a writer double that predates ``meta`` is untouched for every other type.
+        _register_extra: dict = {}
+        if content_type == "rdr":
+            from nexus.catalog.rdr_canonical import rdr_frontmatter_meta  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+
+            try:
+                _stamp = rdr_frontmatter_meta(file_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                _stamp = {}
+            if _stamp:
+                _register_extra["meta"] = _stamp
         _write_result = writer.register(
             owner=owner,
             title=title or file_path.stem,
@@ -1225,8 +1323,9 @@ def _register_or_lookup_doc_id(
             year=year,
             author=author,
             source_mtime=source_mtime,
-            source_uri=source_uri,
+            source_uri=source_uri or derived_source_uri,
             with_created=True,
+            **_register_extra,
         )
         # created_from_register_result/tumbler_from_register_result handle
         # a test double's ``writer.register`` fake (several exist, predating
@@ -2306,8 +2405,7 @@ def _pdf_chunks(
     *,
     chunk_chars: int | None = None,
     bib_enrich_enabled: bool = False,
-    extractor: str = "auto",
-    on_formula_oom: str = "fail",
+    extractor: str = DEFAULT_EXTRACTOR,
     git_meta: dict | None = None,
     doc_id: str = "",
     allow_degraded_extraction: bool = False,
@@ -2344,8 +2442,9 @@ def _pdf_chunks(
     bibliographic metadata (year, venue, authors, citation count).  Disable
     for offline/air-gapped environments or bulk indexing.
 
-    *extractor* selects the PDF extraction backend (``"auto"``, ``"docling"``,
-    ``"mineru"``, or the explicit text-only ``"pymupdf"``).
+    *extractor* selects the PDF extraction backend (``"mineru"``, the default, or
+    the explicit text-only ``"pymupdf"``; ``"auto"`` and the retired name of the
+    removed extractor run as ``"mineru"``).
 
     *allow_degraded_extraction* (nexus-wi1uv) forwarded to
     :meth:`PDFExtractor.extract` — bypasses the post-extraction quality
@@ -2368,7 +2467,7 @@ def _pdf_chunks(
     # says both callers pass one; the bead (nexus-tr1rj.2) records the decision that there is
     # nothing to stamp.
     result = PDFExtractor().extract(
-        pdf_path, extractor=extractor, on_formula_oom=on_formula_oom,
+        pdf_path, extractor=extractor,
         allow_degraded=allow_degraded_extraction,
     )
     if extraction_stats is not None:
@@ -2555,8 +2654,7 @@ def index_pdf(
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     enrich: bool = False,
-    extractor: str = "auto",
-    on_formula_oom: str = "fail",
+    extractor: str = DEFAULT_EXTRACTOR,
     streaming: str = "auto",
     hooks: "HookRegistry | None" = None,
     source_uri: str = "",
@@ -2657,7 +2755,7 @@ def index_pdf(
     Pass *allow_degraded_extraction=True* (nexus-wi1uv) to bypass the
     post-extraction text-quality gate (see
     :func:`nexus.pdf_extractor.assess_extraction_quality`) that otherwise
-    fails loud on space-stripped/garbage extraction output — e.g. docling
+    fails loud on space-stripped/garbage extraction output — e.g. an extractor
     completing "successfully" on a formula-dense page but running every
     word together. Default ``False``; surfaced as
     ``--allow-degraded-extraction`` on ``nx index pdf``. Threaded to both
@@ -2744,7 +2842,7 @@ def index_pdf(
     # looks_like_binary_content (a UTF-8 text sniff) does not apply
     # here -- every real PDF would misclassify as "binary" under that
     # check, which is not the defect this bead is about. Malformed-but-
-    # nonempty PDF extraction failures (docling/mineru/pymupdf errors)
+    # nonempty PDF extraction failures (mineru/pymupdf errors)
     # are a separate, already-handled concern (ExtractionQualityError /
     # IndexingError below) and are out of scope for this guard.
     from nexus.errors import IndexRunVerifyRefused, UnchunkableContentError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
@@ -2757,7 +2855,7 @@ def index_pdf(
             f"{pdf_path} is empty (0 bytes) and cannot be chunked"
         )
 
-    # nexus-2k66t.4.2, the library backstop: the PDF stack (docling, MinerU,
+    # nexus-2k66t.4.2, the library backstop: the PDF stack (MinerU,
     # torch) is an on-demand extra, and a slim install lacks it. Refuse HERE,
     # before the collection is created and before the pre-flight registration
     # below mints a catalog row, so a caller that skipped the CLI gates
@@ -2766,6 +2864,14 @@ def index_pdf(
 
     # The explicit ``pymupdf`` extractor (RDR-237) needs none of it: PyMuPDF is a core dependency.
     pdf_stack.require("index_pdf", extractor=extractor)
+    # nexus-tr1rj.24: the same for an unusable MinerU time limit (RDR-237). The check at the start
+    # of extraction runs after the pre-flight registration below, so a --force re-index of a
+    # complete document would flip it to failed and delete its chunks before the refusal.
+    _bounds_problem = pdf_stack.mineru_bounds_problem(extractor)
+    if _bounds_problem is not None:
+        from nexus.pdf_extractor import MineruBoundsError  # noqa: PLC0415 — circular-dep avoidance, deferred
+
+        raise MineruBoundsError(_bounds_problem)
     content_hash = _sha256(pdf_path)
     # RDR-152 Seam B: resolve the write client BEFORE the collection-name
     # fallback below (moved up, nexus-o5x2c) — see _index_document /
@@ -2966,7 +3072,7 @@ def index_pdf(
             try:
                 count = pipeline_index_pdf(
                     pdf_path, content_hash, col_name, db,
-                    embed_fn=embed_fn, extractor=extractor, on_formula_oom=on_formula_oom,
+                    embed_fn=embed_fn, extractor=extractor,
                     corpus=corpus, target_model=target_model,
                     force=force,
                     force_re_embed=force_re_embed,
@@ -3189,7 +3295,7 @@ def index_pdf(
     # Extract and chunk the entire document
     now_iso = datetime.now(UTC).isoformat()
     chunk_fn = partial(
-        _pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor, on_formula_oom=on_formula_oom,
+        _pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor,
         doc_id=doc_id, allow_degraded_extraction=allow_degraded_extraction,
         extraction_stats=_extraction_stats, title_override=title_override,
         collection_name=col_name,
@@ -3521,7 +3627,6 @@ def _catalog_markdown_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         # nexus-e9ru2 (sibling of nexus-f1itv): no local is_initialized
@@ -3547,7 +3652,8 @@ def _catalog_markdown_hook(
         else:
             owner = writer.register_owner(owner_name, "curator")
 
-        fp = make_relative(md_path, base_path) if base_path else str(md_path)
+        # nexus-njn1a: the same absolute identity the pre-flight registered (_curator_identity).
+        fp, legacy_fp, derived_source_uri = _curator_identity(md_path, base_path)
         # Known TOCTOU window (Reviewer B/I-3): this stat happens AFTER the
         # markdown content was read for chunking earlier in the pipeline.
         # A concurrent write between content-read and this stat stores an
@@ -3576,10 +3682,12 @@ def _catalog_markdown_hook(
         # identity and would mint a second Document for the same source).
         existing = reader.by_source_uri(source_uri) if source_uri else None
         if existing is None:
-            existing = reader.by_file_path(owner, fp)
+            existing = _find_curator_document(reader, owner, fp, legacy_fp, derived_source_uri, writer)
+        from_repo_owner = False
         if existing is None:
             # nexus-tqudo: same cross-owner blind spot as the pre-flight.
             existing = _repo_owner_document_for(reader, md_path)
+            from_repo_owner = existing is not None
         if existing is not None:
             # nexus-t952k half 2: mirror pipeline_stages._catalog_pdf_hook —
             # a real repoint (old != new, old non-empty so a never-indexed
@@ -3605,6 +3713,19 @@ def _catalog_markdown_hook(
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
             writer.update(existing.tumbler, **update_kwargs)
+            if derived_source_uri and not from_repo_owner and not getattr(existing, "source_uri", ""):
+                # nexus-njn1a: a curator document an earlier release registered by a relative path has
+                # no source_uri; the absolute one the engine derives for a new document goes on it.
+                # A separate, advisory write: another live document may already hold that URI
+                # (catalog-016), and the refusal must not drop the chunk_count / indexed_at above. Never
+                # on a repo-owner document, whose URI is the repo's (a worktree path is not its own).
+                try:
+                    writer.update(existing.tumbler, source_uri=derived_source_uri)
+                except Exception:  # noqa: BLE001 — boundary catch: advisory backfill, the update above already landed
+                    _log.warning(
+                        "doc_source_uri_backfill_failed",
+                        tumbler=str(existing.tumbler), file_path=fp, exc_info=True,
+                    )
             if old_physical_collection and old_physical_collection != collection_name:
                 _log.warning(
                     "catalog_physical_collection_repointed",
@@ -3760,7 +3881,9 @@ def index_markdown(
     (i.e. produced under a heading).  Default False preserves existing int behavior.
 
     When *base_path* is provided, ``source_path`` in T3 chunk metadata is
-    stored relative to *base_path* instead of absolute (RDR-060).
+    stored relative to *base_path* instead of absolute (RDR-060). The catalog ``file_path`` follows the
+    owner: relative for a repo owner, the ABSOLUTE path for a curator owner (nexus-njn1a, see
+    :func:`_curator_identity`).
 
     Pass *source_uri* (nexus-y8qtj) to resolve catalog identity by URI
     INSTEAD of by file path — see :func:`index_pdf` for the full
@@ -3944,8 +4067,7 @@ def batch_index_pdfs(
     *,
     force: bool = False,
     on_file: Callable[[Path, int, float], None] | None = None,
-    extractor: str = "auto",
-    on_formula_oom: str = "fail",
+    extractor: str = DEFAULT_EXTRACTOR,
     hooks: "HookRegistry | None" = None,
 ) -> dict[str, str]:
     """Index multiple PDFs sequentially, returning per-file status.
@@ -3964,7 +4086,7 @@ def batch_index_pdfs(
         count: int = 0
         t0 = time.monotonic()
         try:
-            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor, on_formula_oom=on_formula_oom, hooks=hooks)
+            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor, hooks=hooks)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
@@ -4015,8 +4137,9 @@ def batch_index_markdowns(
     ``on_file(path, chunks, elapsed_s)`` where *chunks* is the number of
     chunks upserted (0 for skipped/failed) and *elapsed_s* is wall time.
 
-    When *base_path* is provided, ``source_path`` in T3 chunk metadata and
-    catalog ``file_path`` are stored relative to *base_path* (RDR-060).
+    When *base_path* is provided, ``source_path`` in T3 chunk metadata is stored relative to *base_path*
+    (RDR-060). The catalog ``file_path`` is relative only for a repo owner; a curator owner registers the
+    absolute path (nexus-njn1a, see :func:`_curator_identity`).
     """
     results: dict[str, str] = {}
     for path in paths:

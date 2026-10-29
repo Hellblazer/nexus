@@ -159,4 +159,33 @@ class VersionHandlerReleaseVersionTest {
             .as("the older flags' fragment is unchanged")
             .doesNotContain("run_summary");
     }
+
+    // ── RDR-232 (nexus-jypmj.1.13): the engine pre-cap graph-scope filter ──
+
+    @Test
+    void versionAdvertisesTheGraphScopeFilterAsItsOwnFlag() {
+        // Its own flag: a client that sends a scope_filter to an engine without the predicate gets an
+        // unfiltered, possibly cut walk and no marker, so it must know before it sends.
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogGraphScopeFilterCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_graph_scope_filter_supported\":true");
+    }
+
+    // ── nexus-jypmj.6: the manifest get_many per-document row limit ──
+
+    @Test
+    void versionAdvertisesTheManifestRowLimitAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogManifestRowLimitCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_manifest_row_limit_supported\":true");
+    }
+
+    // ── nexus-jypmj.5: the out-of-step cost on the run row ──
+
+    @Test
+    void versionAdvertisesTheOutOfStepCostAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendNxAnswerOutOfStepCostCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"nx_answer_out_of_step_cost_supported\":true");
+    }
 }

@@ -102,6 +102,7 @@ __all__ = [
     "GROWN_TAG",
     "LIBRARY_CHECKS",
     "LIBRARY_CHECK_TTL_S",
+    "LIBRARY_REMEDY",
     "PROTECTED_TAGS",
     "REASONS",
     "SHADOW_REASONS",
@@ -163,6 +164,20 @@ def eligibility_enforced(environ: Mapping[str, str]) -> bool:
     return True
 
 
+#: What clears ``library_not_reseeded`` (nexus-jypmj.16). ``nx plan reseed`` rewrites every builtin it can, and
+#: that is the whole remedy for a library seeded before the declarations. Two things leave a row undeclared
+#: through a reseed, both reported by the reseed itself (``seed_plan_templates`` echoes them): a template the
+#: installed conexus rejects (a ``seed load error``; the row is never written, so only a build whose template
+#: validates clears it) and a template whose description another row already holds (``not reconciled``; the seed
+#: loader refuses to overwrite that row, so it clears when that row is deleted). The words in quotes are the
+#: reseed's own; tests/test_rdr232_library_remedy.py runs the seed loader through each case.
+LIBRARY_REMEDY = (
+    "nx plan reseed. If the gate stays in shadow, read the reseed's warnings: a 'seed load error' for a template "
+    "means the installed conexus rejects it, and only an upgraded conexus clears it; a 'not reconciled' warning "
+    "(description already belongs to library row id=N) clears when row N is deleted (nx plan delete N) and "
+    "nx plan reseed is run again."
+)
+
 _warned_libraries: set[tuple[int, tuple[str, ...]]] = set()
 
 
@@ -177,7 +192,7 @@ def warn_library_not_reseeded(check: "BuiltinCheck") -> None:
         undeclared_builtins=check.undeclared,
         builtins_checked=check.checked,
         undeclared_builtin_names=list(check.undeclared_names),
-        remedy="nx plan reseed",
+        remedy=LIBRARY_REMEDY,
     )
 
 
@@ -298,7 +313,8 @@ class BuiltinCheck:
 
     ``checked`` is the number of such rows examined (declared or not), so a count of zero with ``checked`` of 0
     reads as "nothing to examine", not "examined and clean". ``undeclared_names`` are at most
-    :data:`_MAX_LISTED_NAMES` names (the row's name, else ``id <n>``) of the undeclared ones.
+    :data:`_MAX_LISTED_NAMES` labels of the undeclared ones, each ``<name> (id <n>)`` or, for a row with no name,
+    ``id <n>`` (several builtin rows share a name, so the name alone would repeat).
     """
 
     checked: int
@@ -353,6 +369,12 @@ def reseedable_dimensions() -> frozenset[str] | None:
     return _reseedable
 
 
+def _row_label(row: Mapping[str, Any]) -> str:
+    """``<name> (id <n>)``, or ``id <n>`` for a row with no name (builtin rows can share a name)."""
+    name = row.get("name")
+    return f"{name} (id {row.get('id')})" if name else f"id {row.get('id')}"
+
+
 def check_builtins(rows: Iterable[Mapping[str, Any]]) -> BuiltinCheck | None:
     """Examine the builtin rows of *rows* that a reseed can fix, and count those without a valid declaration.
 
@@ -374,7 +396,9 @@ def check_builtins(rows: Iterable[Mapping[str, Any]]) -> BuiltinCheck | None:
         tokens = {t.strip() for t in tags.split(",") if t.strip()} if isinstance(tags, str) else set()
         if BUILTIN_TAG not in tokens or tokens & PROTECTED_TAGS:
             continue
-        if (row.get("project") or "") != "" or row.get("dimensions") not in fixable:
+        # str(): a dimensions value that is not a string (a dict or list is unhashable) is simply not a shipped
+        # template's canonical JSON, so the row is not examined; it must not raise.
+        if (row.get("project") or "") != "" or str(row.get("dimensions")) not in fixable:
             continue
         try:
             standing = classify_plan(tags, row.get("plan_json"))
@@ -384,7 +408,7 @@ def check_builtins(rows: Iterable[Mapping[str, Any]]) -> BuiltinCheck | None:
         if standing.flag == "undeclared_builtin":
             undeclared += 1
             if len(names) < _MAX_LISTED_NAMES:
-                names.append(str(row.get("name") or f"id {row.get('id')}"))
+                names.append(_row_label(row))
     return BuiltinCheck(checked, undeclared, tuple(names))
 
 

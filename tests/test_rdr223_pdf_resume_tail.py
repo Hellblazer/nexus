@@ -57,12 +57,12 @@ def writer(monkeypatch):
     return install_streaming_writer(monkeypatch)
 
 
-def _extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
+def _extract(pdf_path, *, extractor="mineru", on_page=None, allow_degraded=False, on_heartbeat=None):
     if on_page:
         on_page(0, "Page 0 content.", {"page_number": 1, "text_length": 15})
     return ExtractionResult(
         text="Page 0 content.",
-        metadata={"extraction_method": "docling", "page_count": 1,
+        metadata={"extraction_method": "mineru", "page_count": 1,
                   "page_boundaries": [{"page_number": 1, "start_char": 0, "page_text_length": 16}],
                   "table_regions": [], "format": "markdown"})
 

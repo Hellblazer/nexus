@@ -116,9 +116,12 @@ def test_a_repository_without_a_site_page_builds_a_how_to_brief_with_no_site_lay
     assert gone.returncode == 1 and "no site-page style sheet" in gone.stderr
 
 
-def test_setup_lists_what_no_genre_reaches_as_keys_a_genre_map_entry_takes(
+def test_setup_offers_what_no_genre_reaches_as_keys_a_genre_map_entry_takes(
     prose: Prose,
 ) -> None:
+    # nexus-scmcs, 2026-10-28: the `no_genre` census (every unmapped folder, about 180 in nexus) became
+    # `genre_candidates` (at most eight documentation-looking folders, each with a suggestion);
+    # test_guided_setup.py covers the filtering.
     git(prose.cwd, "rm", "-q", str(SITE_PAGE_REL))
     (prose.cwd / "notes").mkdir()
     (prose.cwd / "notes" / "a.md").write_text("a\n", encoding="utf-8")
@@ -129,12 +132,16 @@ def test_setup_lists_what_no_genre_reaches_as_keys_a_genre_map_entry_takes(
     assert report["nexus"]["found"] is True and report["t2"] == {"reachable": True}
     # docs/x.md is top-level docs, a reference-doc by default; a root file is keyed by its own name, since no
     # folder prefix reaches the root
-    assert report["no_genre"] == {"notes/": 2, "README.md": 1}
+    assert {c["key"]: c["files"] for c in report["genre_candidates"]} == {
+        "notes/": 2,
+        "README.md": 1,
+    }
+    assert report["unmapped_other"] == 0 and "no_genre" not in report
     assert report["site_page"] is False
-    entries = [f"{key}=how-to" for key in report["no_genre"]]
+    entries = [f"{c['key']}=how-to" for c in report["genre_candidates"]]
     seed(prose, "repo", lists={"genre_map": entries})
     mapped = json.loads(brief_ok(prose, "setup"))
-    assert mapped["no_genre"] == {}
+    assert mapped["genre_candidates"] == []
     assert mapped["genre_map"]["repo"] == entries
     for doc in ("notes/a.md", "README.md"):
         assert prose.ok("genre-for", doc)["genre"] == "how-to", doc

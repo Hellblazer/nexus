@@ -1,0 +1,3891 @@
+# RDR-232 oracle labels, DRAFTED provenance (nexus-jypmj.3.10). Written by scripts/bench/rdr232_oracle_drafts.py from a
+# drafter's JSON and the blind packet it read; do not edit by hand. Items are keyed by chash; an item with no facets is
+# neutral for every facet (the drafter read it and found nothing). Rates over these labels are reported apart from hand
+# labels (scripts/bench/rdr232_oracle.py).
+oracle_version: 1
+golden_set_version: 1
+requests:
+  H01:
+    provenance: drafted
+    items:
+    - chash: 4405259ce56e92cdd515c5dbdb6cda3d5d2f2ea74ee3846d3bce8fcf0649e054
+      closed: true
+      note: "# RDR-064: nx console \u2014 Process Monitor for Agentic Nexus"
+      facets:
+        introducing-rdr: supports
+    - chash: 05b90cfe26c041054b2a774b7bee1b0ee3c89f9e206c8806755b5eb917764a9b
+      closed: true
+      note: '## Mental Model'
+      facets: {}
+    - chash: 806037aa219dcd4c0bac12761545efa131406f58da95c7b15b089416354474c2
+      closed: true
+      note: '## Proposed Approach'
+      facets: {}
+    - chash: 91fe514e1f21787efe214b93f755781c412bb553dd0fd2fb4d5014f86f510332
+      closed: true
+      note: '### Architecture Overview'
+      facets: {}
+    - chash: 5133672414f4d7b7c116133d7605e52c6b123f3d21b338d384c5e4aef325d8da
+      closed: true
+      note: '### Package Layout'
+      facets: {}
+    - chash: 7f9d79f7420aea948dee19f6dfd666aaf61fad9d453fae5dda8404bb36326b84
+      closed: true
+      note: '### Scope Model'
+      facets: {}
+    - chash: 84f597434eb83d0f4b587c232ff9e1e5696c3a6e3326f0c25d430d3221895791
+      closed: true
+      note: '### Session Binding'
+      facets: {}
+    - chash: 7c352b1d986fb0bd1f36d7d96b7865aea958fea58db3ed5e96aab3decb8bcd07
+      closed: true
+      note: "## Phase 0 \u2014 Logging Prerequisite (Reduced Scope)"
+      facets: {}
+    - chash: 56ad992a6f16011e72d5c778ab1cbf80222e99d0f0de6c84e20d2f6d1cde6c2b
+      closed: true
+      note: '### Panel 1: Activity Stream (Landing Page)'
+      facets: {}
+    - chash: c69bd7e3b56fb85b03df7dd1897cd231a190415f2da098db30ecb8a5901139a1
+      closed: true
+      note: '### Panel 3: Campaigns & Provenance'
+      facets: {}
+    - chash: 5988f444d5e9016a3d32a1029806a0149f33b4f5712597ddd30d2b526e959541
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: fa674e59a0f742e08ce31d9b2f5ed5833a0628a38c525e88ae646422b2533d37
+      closed: true
+      note: '### RF-064-2: Xanadu-inspired systems share a consistent failure mode'
+      facets: {}
+    - chash: a382c5bd90e19ced3a248da7ffb3569b21f82c0abfbcc0fcaad5d0987d0be957
+      closed: true
+      note: "### RF-064-4: No existing HTTP UI server \u2014 `nx serve` explicitly removed"
+      facets: {}
+    - chash: 1b3d8e942d915b326657c56df0f23cd63e2f566624386c939066aaaf85f443cb
+      closed: true
+      note: '### RF-064-5: FastAPI is a MinerU optional-extra dependency, not core (CORRECTED'
+      facets: {}
+    - chash: 4c26cbcc6739d3ae7f312a4b1d3d4372556ce58d98275013f31cd6b5aeabf5b7
+      closed: true
+      note: '### RF-064-8: HTMX + server-rendered templates matches the workman ethos'
+      facets: {}
+    - chash: 6b3c4a3bef737bb70a542908acef7763d2f2d0096e8ec9bcbc671f5a473536d7
+      closed: true
+      note: '### RF-064-9: SSE stability on localhost is not a risk'
+      facets: {}
+    - chash: 45a40be69c9a0c8e4d04c67408084488e78dff0780c8f04e40da22353ab51eed
+      closed: true
+      note: '### RF-064-12: Named agent campaigns are first-class data in the catalog'
+      facets: {}
+    - chash: ac8bd43631441d02d37b470f17005ae3e3dfad3bc4a34c5e4e854bccce848828
+      closed: true
+      note: '### RF-064-14: Five process-monitor adopt/reject pairs with specific behaviors'
+      facets: {}
+    - chash: bd8d95ebf7bc43dba83c79c47c7078a28a59d92d13647cf6264a6a54689d8856
+      closed: true
+      note: "### RF-064-16: Eight LLM observability tools solve a different problem \u2014 two UI "
+      facets: {}
+    - chash: 83b45472d3b38ca88b2a96a1189214b0bd2aa349149bc4cc3f0fb9fd8a7746fd
+      closed: true
+      note: "### RF-064-18: T1 scratch probe \u2014 use TCP liveness + deferred count, not synchro"
+      facets: {}
+    - chash: 90cda928028b482a8b5264c3f1a3c232170950a1fae015af0aa944eebd816951
+      closed: true
+      note: "### RF-064-19: Chroma Cloud has no documented rate/request quota \u2014 \"2,880 calls/"
+      facets: {}
+    - chash: 34af3ce949e54dd156ce683ae031eacfbb469056737ff5bf0f1fe33db173f8f7
+      closed: true
+      note: '## Risks'
+      facets: {}
+    - chash: 6e1ee5506d28ea105e2177c30825ecb41a2b5663392b640a743c7055ef9a32e7
+      closed: true
+      note: '## Success Criteria for v0.1'
+      facets: {}
+    - chash: 21b48f8ed9b9ad3001de704328342c67c37869fcd29a30ed83e2afef502452e6
+      closed: true
+      note: '## Next Steps'
+      facets: {}
+    - chash: 10de13e26946dc69edef22a9782fe872e68cf5a5b1d3ed8d1ba4ecdc1c13bc59
+      closed: true
+      note: "# \u2500\u2500 nx-scratch:// reader (RDR-096 P4.1) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+      facets: {}
+    - chash: 0c2c16f55358b873a17c2cdde593c826c848060781a5b0c1f095d1a5482ddc61
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets: {}
+    - chash: 76a1b2bb3e6f2d71e6766cece1a73c47a788913fc2dac3f50e40fb6b61ed7b8a
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets: {}
+    - chash: 85cd033b73c5c0a775976764ed34327829c0a8cd6ae9015e7d8f9e9f46e799c5
+      closed: true
+      note: "# picks different RDRs each run \u2014 false-failed when neither title appeared). Ass"
+      facets: {}
+    - chash: cd3f2b7cf3f5b14cab884eaa64665ae320f3693c9ebd3423f72c51ff5a6090bb
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets: {}
+    - chash: b4d8243996eb4b13b4da29badd86f63fde39f349479ddb5b2e3ef51e52ad151c
+      closed: true
+      note: 'def console(port: int, host: str) -> None:'
+      facets: {}
+    - chash: 10f4110052c7561146e25408eb5d4fd1386a47f8da3cdf848029ed2b097c1cba
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets: {}
+    - chash: 1b19ee14c2d2258ad6c00d82b7cea6b7896dece072468e4e0f39eeaccc48aded
+      closed: true
+      note: '#!/usr/bin/env bash'
+      facets: {}
+  H02:
+    provenance: drafted
+    items:
+    - chash: 421a94576f8bce70f87240de87a658ee3654c44e3b40a9f2608057e1e7105d58
+      closed: true
+      note: '# RDR-205: Linda Tuple Space over Postgres'
+      facets: {}
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: 0a0db37c6a7a8d171d74fadfc90adf755967b90ae15bda61289106e1577ca81d
+      closed: true
+      note: '## Proposed Solution'
+      facets: {}
+    - chash: 25a53f2508f1a9e08015ad5c6c96f38640ecaf2376949ac5a557ddcc9ee82480
+      closed: true
+      note: '### Consequences'
+      facets: {}
+    - chash: 25000a1f70bd7a07ae3a91316d79c7ce4442d5be44f66b8a1ff7c46d010d6915
+      closed: true
+      note: '### Risks and Mitigations'
+      facets: {}
+    - chash: 13b7615b8e8e2905ce5ef94acaf68448bc7c0a7980eb8dd9f6014d1306c5d5f8
+      closed: true
+      note: '## Implementation Plan'
+      facets: {}
+    - chash: 45a7785421b64d662fcc9c5d5579875a6c606821c473a4598e7c2e9425bb18c6
+      closed: true
+      note: '### Testing Strategy'
+      facets: {}
+    - chash: 57b6bb235c2a585a1e70507495b697dadc064b0c14f5d047b866d84b941649b4
+      closed: true
+      note: "### 2026-09-10 \u2014 Accepted"
+      facets: {}
+    - chash: 08518bae70ece66e4a3eb6c8975abddcb414bb3133bf4d076b41068b9f1973b2
+      closed: true
+      note: '# RDR-206: Tuple Space Claim Renewal and Reply-in-Ack'
+      facets: {}
+    - chash: 1d9550a9ad0c16dd0c594568d67c7b032737da765532667bcc73faa68e60da50
+      closed: true
+      note: '#### Gap 1: A claim cannot be extended, so long work loses its message silently'
+      facets:
+        claim-renew-reply-in-ack: supports
+    - chash: 37861e2e14013ad7c69dfa0ecab17370a0a0e6cf9631382cdc23dff2fa1ba904
+      closed: true
+      note: '## Context'
+      facets: {}
+    - chash: d5dd98f0ad5955d7170ed8eb1581e541fdd0c18b3222a6156bcdf482ca827801
+      closed: true
+      note: '### Technical Environment'
+      facets: {}
+    - chash: b2758b034f75ea3bf62bec89417ef0c46f94cb4e3208680e2513feb540e3cb92
+      closed: true
+      note: '### Key Discoveries'
+      facets:
+        claim-renew-reply-in-ack: supports
+    - chash: f27dec9534c21e04ca7d6d3d2aa3f0c6653ed49caecdc4e09fafd2dc73d9212b
+      closed: true
+      note: '### Technical Design'
+      facets: {}
+    - chash: 08a6ff70a1d171ee19eea611d341d029c98bb16330109971c4998d129f019dfe
+      closed: true
+      note: '# RDR-211: Broadcast Board, Work Queue, and Lock as Tuple-Space Templates'
+      facets:
+        board-queue-lock-templates: supports
+        linda-operations: supports
+    - chash: 5ed3e9909b3f591345e95b9d2d079e53b9af5dc6413585cc94f8a79ae9a02270
+      closed: true
+      note: '### Scale and Limits'
+      facets: {}
+    - chash: 7aeb3fd7c2063221cd52d821b91c28d291041a42a4c788ca097dc1a7123c76d0
+      closed: true
+      note: '### Risks and Mitigations'
+      facets:
+        board-queue-lock-templates: supports
+    - chash: ff13ef0e1fa628fde1818acc6749f495757698b95e1cf7b47815d8eb3d2b13b9
+      closed: true
+      note: '#### Step 4: Documentation'
+      facets: {}
+    - chash: 43a5c797694e86ab10cb414347a8f223590445fe8dff65240dec4d639da0b2dd
+      closed: true
+      note: '## Revision History'
+      facets: {}
+    - chash: 6ccff4e635f72b463ae4afe5fa636600e9a0b38510a30b310ae052390aa8a948
+      closed: true
+      note: '# RDR-211: Broadcast Board, Work Queue, and Lock as Tuple-Space Templates'
+      facets:
+        claim-renew-reply-in-ack: supports
+        linda-operations: supports
+    - chash: 5bd76e31e47ec2e3ffdc8070e669a68c911eba124727f9d94eb51b4aa5d15774
+      closed: true
+      note: '## Problem Statement'
+      facets:
+        claim-renew-reply-in-ack: supports
+    - chash: bdd7afe00455c57d767ce2285698df54b968da0d51d4bd6b3760a0f83d92377a
+      closed: true
+      note: '## What the RDR set out to do'
+      facets:
+        claim-renew-reply-in-ack: supports
+    - chash: dc72b033b945a45d392008a74b37d0e9779d4ea334d3063b36dc04a1539b2241
+      closed: true
+      note: '### Key Discoveries'
+      facets:
+        linda-operations: supports
+    - chash: cf07ddb1bf792e81db45e88c667a189e3270fbe3cd268033fbdfbfcf50f76224
+      closed: true
+      note: '### Technical Design'
+      facets: {}
+    - chash: c73615bef76b5138c3d4f2678e3f2801a0664b17494e5ecf1aa835ece541dc53
+      closed: true
+      note: '### Technical Design'
+      facets:
+        linda-operations: supports
+    - chash: 3da4a8d603b7089894c93e7ecdf3637212b00dcc2a8958091f0a6429d1c98a57
+      closed: true
+      note: '### Relationship to RDR-110'
+      facets: {}
+    - chash: d5e10d3aa0dc9132ca569fa5d4069d809a3acdb56b5def60d9854c4cb538d02c
+      closed: true
+      note: '### Key Discoveries'
+      facets:
+        claim-renew-reply-in-ack: supports
+    - chash: b1e1855c791617cd07723090a4f5fc27ab9c921dbe543aee26c19cd7135f70c1
+      closed: true
+      note: '### Technical Design'
+      facets:
+        claim-renew-reply-in-ack: supports
+    - chash: 53a23c4a412f3ef6535fa02a915fbae627a9e07d31e60e8e7dc58d7d60219586
+      closed: true
+      note: '### Technical Design'
+      facets: {}
+    - chash: 3509a21e0ee7d19f546f0f07d84ce9f02f992a3d9f9038ccb9aae93aa5e0c2c2
+      closed: true
+      note: '### Technical Design'
+      facets:
+        claim-renew-reply-in-ack: supports
+    - chash: 73c2a61a48c3e0ebd9953697a3e286808797cb57de8686074f3399ff6e806fbc
+      closed: true
+      note: '### Background'
+      facets:
+        claim-renew-reply-in-ack: supports
+    - chash: f80de16a9c2692ca02933f5c287c6cbc1ad8ed98703f5842c3fb160119c8ecef
+      closed: true
+      note: '### Tuple space ([RDR-205](rdr/rdr-205-linda-tuple-space-over-postgres.md), [RDR'
+      facets:
+        board-queue-lock-templates: supports
+        claim-renew-reply-in-ack: supports
+        linda-operations: supports
+    - chash: 81673dd8c403ffa911d166daead5fa911b54b5aa38bcdd828261ead5ecb27b40
+      closed: true
+      note: '## What it is'
+      facets:
+        board-queue-lock-templates: supports
+        linda-operations: supports
+    - chash: fc94944eb36102c0c1803dbdb1ab90e37f2b194cca225a298a8de1c4bd42a79b
+      closed: true
+      note: '## What the RDR set out to do'
+      facets:
+        board-queue-lock-templates: supports
+    - chash: 92dbe49c216fedfd7955427f8a71eb83f67f796a08ad5bc445e72a6136f4a58e
+      closed: true
+      note: '### Added'
+      facets:
+        board-queue-lock-templates: supports
+    - chash: d1953584f66f687ada158ae7e4c75e5e75c293b4ed5be91f49eb32d6663c4fdc
+      closed: true
+      note: '### Approach'
+      facets:
+        board-queue-lock-templates: supports
+    - chash: 337e6c31f21ca044e0b07c419e942e0344d9b5120e08e2944b7ffa93f7721c7a
+      closed: true
+      note: '### Registered shapes'
+      facets:
+        board-queue-lock-templates: supports
+    - chash: bc3531fc2517b48d54ebdc400570b935b1e8ec547a81c55280781f6c52f817c2
+      closed: true
+      note: '## Further reading'
+      facets: {}
+    - chash: 419a37d746314f8957cd55d7d2789531dab4852b509e46bdc737899aec318ce6
+      closed: true
+      note: '## Tuple Space (RDR-205)'
+      facets:
+        board-queue-lock-templates: supports
+    - chash: 2ea52ce75eab2efbc64e3aa0578a9c1ab75fc4c3ad702e445dd8a7ac7edb22fa
+      closed: true
+      note: '### Background'
+      facets: {}
+    - chash: 19a1e105281ed759eaed22116a64f5739558e7ef5c3eb0f97e362a7cb0e12bcb
+      closed: true
+      note: '## Problem Statement'
+      facets:
+        board-queue-lock-templates: supports
+  H04:
+    provenance: drafted
+    items:
+    - chash: f599365e1733336eaa602c74c5c86348a56291718897292079bbc5e666ea8a6e
+      closed: true
+      note: '**TOMBSTONE 2026-05-19.** This RDR is preserved as historical reference. The arc'
+      facets: {}
+    - chash: 4b14691a8ca0536359ef9cc5488fae5b581f6684eb62b0a964d978b93ad8db2a
+      closed: true
+      note: '### Enumerated gaps to close'
+      facets: {}
+    - chash: b0cf653a8e88c5fc007e9069a153c26e71245e9777b42fc443664db35e1305e7
+      closed: true
+      note: '#### Gap 2: Three parallel implementations of the same abstraction'
+      facets: {}
+    - chash: 640ebb9d64a4b648d92e3720148158743ade8683931e52acad8093b18d9967d8
+      closed: true
+      note: '#### Gap 5: No coordination layer for cross-process agentic patterns'
+      facets: {}
+    - chash: 1e44727bb458648088da20b406c65d126cfb016c778190721fdb3e590b13c5b3
+      closed: true
+      note: '### Technical Environment'
+      facets:
+        semantic-tuple-space-design: supports
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: 65019bd14be6cc56305f96608dd83454848ebe5b6c3b1ac0d0c9b75ecab79f4a
+      closed: true
+      note: '### Critical Assumptions'
+      facets:
+        semantic-tuple-space-design: supports
+    - chash: 04def87ead9c3a853fb6168a631fb72fae1da41b0187658bddcea2fccd17613a
+      closed: true
+      note: '### RF-3: CONTEXT_PROTOCOL is the single highest-leverage prompt surface'
+      facets:
+        semantic-tuple-space-design: supports
+    - chash: 8d533ef27117025fa13be24474e77e4a4c7a10de00a687e981f0f37296457798
+      closed: true
+      note: "### RF-7: Compatibility contract for the v1 \u2192 v3 transition"
+      facets: {}
+    - chash: 63eee4389365600232553b975944122f7029213e16c24b67d009b18864375c86
+      closed: true
+      note: "### RF-8: One open question \u2014 should `take` ship in the v2 wrappers?"
+      facets: {}
+    - chash: 0a0db37c6a7a8d171d74fadfc90adf755967b90ae15bda61289106e1577ca81d
+      closed: true
+      note: '## Proposed Solution'
+      facets: {}
+    - chash: 1094d16916708262183dc0b6f10f9ec65e9b3e880a886510dc86a4ff76401209
+      closed: true
+      note: '### Technical Design'
+      facets:
+        semantic-tuple-space-design: supports
+    - chash: 421a94576f8bce70f87240de87a658ee3654c44e3b40a9f2608057e1e7105d58
+      closed: true
+      note: '# RDR-205: Linda Tuple Space over Postgres'
+      facets: {}
+    - chash: 065fcd630e773d02de065e055d8b49b864c3658c400e87ebcd33b81a096d55e0
+      closed: true
+      note: '### Technical Environment'
+      facets:
+        linda-over-postgres-design: supports
+    - chash: c096aa583b19e418498b665634db9551c9bbf1f89793338dd0fb58c0d39c8c4a
+      closed: true
+      note: '### Alternative 3: Use T2 memory or T1 scratch with polling'
+      facets:
+        linda-over-postgres-design: supports
+    - chash: 25000a1f70bd7a07ae3a91316d79c7ce4442d5be44f66b8a1ff7c46d010d6915
+      closed: true
+      note: '### Risks and Mitigations'
+      facets:
+        linda-over-postgres-design: supports
+    - chash: 13b7615b8e8e2905ce5ef94acaf68448bc7c0a7980eb8dd9f6014d1306c5d5f8
+      closed: true
+      note: '## Implementation Plan'
+      facets: {}
+    - chash: 9e53202d7d3797f96afdc6932271e5848a3882edbe7c45b8a5b8f7ef11d5a96c
+      closed: true
+      note: '#### Step 4: Repository and handler'
+      facets:
+        linda-over-postgres-design: supports
+    - chash: b23436c23dfc49a240757f7828809c7ceee16918aff80f5b65f3fa1c17f8f6a8
+      closed: true
+      note: '### Phase 4: Consumer one, the ledger'
+      facets:
+        linda-over-postgres-design: supports
+    - chash: 2f14871bd7e4ff5133d99baa050bb3427ddfd5a02dde574e94037ee86d1cf461
+      closed: true
+      note: '### Assumption Verification'
+      facets: {}
+    - chash: 8ddf1bd128a59f169b07ad463496a7040a56b8e48c75ab71525995ac391a34bc
+      closed: true
+      note: "### 2026-09-09 \u2014 Fix check on the third fix (FAIL), fourth fix: the sweep redesi"
+      facets:
+        linda-over-postgres-design: supports
+    - chash: 57b6bb235c2a585a1e70507495b697dadc064b0c14f5d047b866d84b941649b4
+      closed: true
+      note: "### 2026-09-10 \u2014 Accepted"
+      facets: {}
+    - chash: 29c10dda0b6a4a972671ef3df3632ba3f51c7a9304e286835f5ccde62ec054b8
+      closed: true
+      note: '## What we left out'
+      facets:
+        differences: supports
+        linda-over-postgres-design: supports
+        semantic-tuple-space-design: supports
+    - chash: 2e3e8bc2bfaced4a2ee38497344a914e0c94935d6daadd4a648d7d9a476d801e
+      closed: true
+      note: /**
+      facets:
+        linda-over-postgres-design: supports
+    - chash: beb227320c1b05010c6344df405b9dda95924ca1de367bdca1252c6171ceb957
+      closed: true
+      note: '{'
+      facets:
+        linda-over-postgres-design: supports
+    - chash: d6c629bde6d13cf6ecb0ddb8e6f8fd8239e4471f1dc13073091025baea2f2b62
+      closed: true
+      note: "HttpTupleStore \u2014 thin HTTP client over the RDR-205 Java tuple-space service."
+      facets:
+        linda-over-postgres-design: supports
+    - chash: b13e33424521d5503fa40d28b3010d94da4ee2e78fa75ae018985ea9f2c2235d
+      closed: true
+      note: '#: shape. Two Liquibase changesets (tuples-001-baseline.xml,'
+      facets: {}
+    - chash: 72d4cd491b163ad0b0ab3f5d082fd4cf603d08f25f36693e310f02a0f10a0eb8
+      closed: true
+      note: HttpTupleStore (bead nexus-em75s.9, RDR-205 Phase 2 Step 1) against the
+      facets:
+        linda-over-postgres-design: supports
+    - chash: ec1438ef7c460e17a6b3038088c3861822b60bafc1bbe6162fae36a470670325
+      closed: true
+      note: NEW_XANADU_ALWAYS = (
+      facets: {}
+    - chash: 00bbae15a158fc0c6bd130c8a9e12b43363db8b24304a9fffa424c2e6d6e5ff4
+      closed: true
+      note: '"""RDR-205 Linda tuple-space client over ``/v1/tuples``.'
+      facets: {}
+    - chash: dacbdf48050a629944f2a5b3dea52d96e7ea7948cbc8c07457ec7d8f08da58d9
+      closed: true
+      note: '#: RDR-211 tuple templates (board/queue/lock), the release claim operation'
+      facets: {}
+    - chash: 3840d7153bc1a9c1ad9a661b71e54e3d8f7dd13a437a0150112b3d188dda8b92
+      closed: true
+      note: 'class TestTupleOutRd:'
+      facets: {}
+    - chash: 1dae7143acbec57cf3a39299b0b03e7958266d996990f2a8f152bd3b61b70f22
+      closed: true
+      note: '"""CLI command group for the RDR-205 Linda tuple space (bead nexus-em75s.10).'
+      facets:
+        linda-over-postgres-design: supports
+    - chash: cb12ff5aa8defa1c1790f64c869d46280fced225b0d5f0e40ad6fb1a60f80090
+      closed: true
+      note: "# \u2500\u2500 rd / rdp \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500"
+      facets: {}
+    - chash: 9268598d9d7fe37c1cc899c6e2ec03420f6091741785e785e335f1e5ff2229c3
+      closed: true
+      note: '#: v0.1.95. One Liquibase changeset pair, so the PITR fork walk WAS run'
+      facets:
+        linda-over-postgres-design: supports
+    - chash: 3d03f21ba67c421095567671d39d519fc5adac272593b5ad685098b53d023d96
+      closed: true
+      note: '@pytest.mark.t2_tenant'
+      facets: {}
+    - chash: b96fd447059850c5daa2778ef18bcc6ff733a89c9088f00413cebb0c878a8a68
+      closed: true
+      note: /**
+      facets:
+        linda-over-postgres-design: supports
+    - chash: 40a14068e5b925bc1c9bb95ee431c1ab06ef69720b9fe9275f7a0004ab528902
+      closed: true
+      note: "RDR-205 Phase 3 Step 3 (bead nexus-em75s.16) \u2014 MVV run 2, engine-direct legs."
+      facets:
+        differences: supports
+        linda-over-postgres-design: supports
+        semantic-tuple-space-design: supports
+    - chash: 5363a08e1624ea82830b5417c2be41028afedc5f3e15ad195b3f8dfd0a681319
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets: {}
+    - chash: 3c632f23e31f3045026de991e83d18787e03d32abe90b19930d2cd7cbc985ffd
+      closed: true
+      note: '{'
+      facets: {}
+    - chash: f6dcd7edccc5b8140f3b15a3c55419b01a6e1f2f4ca881d63708fe71b32e6dfb
+      closed: true
+      note: '"""Read a subspace without claiming rows (`rd`); use `tuple_in` instead to claim'
+      facets:
+        linda-over-postgres-design: supports
+    - chash: ebfb9d75a761791a7d003222ce0a66680cfd25fd583688b1247286e1de4609d3
+      closed: true
+      note: parks with NO claimant, one global slot regardless of subspace count; a
+      facets:
+        linda-over-postgres-design: supports
+    - chash: f7d3b6950ed4ddbcb3896b0d9e0257b7db283866f5ff1b118f6d826005aa8e65
+      closed: true
+      note: er order is a 400.
+      facets: {}
+    - chash: 96179f47493769ea40118d28512b793e5e3e631fbef332d4132b08b72baa8058
+      closed: true
+      note: iber]}`` field, and the engine returns a row only when it
+      facets: {}
+    - chash: 05e1a528f54fcb6c960b106b845be247c75b294c48684599f61e8c5ccccab6e3
+      closed: true
+      note: 'class TestTupleOutRd:'
+      facets: {}
+    - chash: e1a55d38b93aacdbb263aeb07bd759842da09d482cac07574e59dc56057a4915
+      closed: true
+      note: def tuple_rd(
+      facets:
+        linda-over-postgres-design: supports
+    - chash: 7c4569b9e374e57b3d31e5d92be15238c3119fbea6d743bafe65160964ff6ec3
+      closed: true
+      note: lobal,
+      facets: {}
+    - chash: 55025145c73834b8cb8e3945af43fa7e887afe2e6861ad2cab376ca56db09d29
+      closed: true
+      note: '@dataclass(frozen=True)'
+      facets: {}
+  H05:
+    provenance: drafted
+    items:
+    - chash: 4e3b3c0a32f6bb436aa9a87bd2561a0bb058f66616be51c340476584c6ad9f11
+      closed: true
+      note: '**Backend scope (read first).** The aspect queue has two backends. The'
+      facets: {}
+    - chash: af1e94ab0917962f11e536dd5aa980aca3ccabc56a147c9320ff3511bb3da2f6
+      closed: true
+      note: '## Problem Statement'
+      facets: {}
+    - chash: e1e825fc6cbf6c90dc30da5729efea01418d29ff31d9649b9cda97adc3c34dcb
+      closed: true
+      note: '#### Gap 1: Sustained-transient failures terminal-fail with manual-only recovery'
+      facets: {}
+    - chash: f8dbd3edb82105cc3329022c0568f6036b6f17b28728fa0f3456d5e01d5ad7a6
+      closed: true
+      note: '#### Gap 2: The mark_retry primitive is built but dormant; no backend has next_r'
+      facets: {}
+    - chash: ffc5faf3ce8bdb284c51ef3e1fc3722aff437c9581334429d9ecd50e08f8441b
+      closed: true
+      note: '#### What is NOT broken (preserved, out of scope)'
+      facets: {}
+    - chash: 72c1852cb1269e7455a551ba5f6b1381b0ea19e240538f10e042cd60a5be87f5
+      closed: true
+      note: '## Decision'
+      facets:
+        backoff-ladder: supports
+    - chash: 078f773d5d9a25aea6475e67c589752bf243f570f9daf6d48026675de0df6ea9
+      closed: true
+      note: '## Decision'
+      facets:
+        backoff-ladder: supports
+    - chash: 5f1807fb2776238c8c1e11332a744feedee4e1dadc5f6af3bbfd2e832694844f
+      closed: true
+      note: '## Approach (phased)'
+      facets:
+        backoff-ladder: supports
+    - chash: 931c5027cc43a3f52949641a6dd07d0091cbc8c479de85ea2f0ee543524ddb81
+      closed: true
+      note: '## Alternatives Considered'
+      facets: {}
+    - chash: c97ced851f7af2960b7a2ecd777952c213b244d696574680a7debffc0ddaf44c
+      closed: true
+      note: '## Consequences / Risks'
+      facets:
+        backoff-ladder: supports
+        queue-stall-symptom: supports
+        root-cause: supports
+    - chash: 878a64b0cd5d51b8d1c39f200b31fdf2b88a30fd01598c1f8c26b8e27fd5718b
+      closed: true
+      note: '## Open Questions'
+      facets:
+        backoff-ladder: supports
+    - chash: e762a612c1d3425cb7f4db014456186d3e68739c8bcad44d2970f8d7f6bf2fb9
+      closed: true
+      note: '## Related'
+      facets: {}
+    - chash: 041e3d40133f19fcede8f6b0ac9e6dd121d6bc4c320ce75da7ca6f8bb8aa51bb
+      closed: true
+      note: '# RDR-172: Service-Mode Aspect-Enqueue Silent Failure: store_put''s Enqueue 500s '
+      facets: {}
+    - chash: 44a8ce233d5a9c473f8756f0f4fd89ed555270ca1af481faf3d53cd3ce562d3d
+      closed: true
+      note: '#### Gap 1: the service returns a bare HTTP 500 on a constraint violation it sho'
+      facets: {}
+    - chash: aeb45c54d1a39829057f4d2b6824eb96c7d956985b1e118734fa4ab67bfb3e87
+      closed: true
+      note: '#### Gap 3: the client passes the wrong identity (chunk id, not the registered c'
+      facets: {}
+    - chash: 7e5bb08b93bcefe667774a0ad7cd79eaad20d1d36f7464de05375c378252fb0a
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: 953a916b194dd5f61c078b757df5bcd58ee1fbe238879c1a37dd90f7c9ccc55f
+      closed: true
+      note: '### RF-1 (Verified): `store_put` is the *only* `fire_document` caller passing th'
+      facets: {}
+    - chash: cf178c3bbe48f3c1aa5e5fb37790f30fe16e9067bdb2e7e82a090a20567e3caa
+      closed: true
+      note: "### RF-3 (Verified): the server *already* NULL-coerces blank `doc_id` \u2014 that is "
+      facets: {}
+    - chash: 911c2395aaec8c9cc2b89a550fae2a620a47580417c2ee306c0f7a4936ce5c63
+      closed: true
+      note: '### RF-6 (Verified): telemetry infra exists for the tripwire; `--fullstack` alre'
+      facets: {}
+    - chash: 7501e8fbed9f874660be4026fa0198755d5ffdfdf2eed72edcba2c51e0ccb870
+      closed: true
+      note: "### RF-7 (Assumed \u2192 risk): without the loudness arm, the class silently recurs"
+      facets: {}
+    - chash: 5c0ae5841fdca8bf88ddee556c0a8d74e62ca98b324a72ed0b1087a33207eed6
+      closed: true
+      note: '### RF-9 (Verified): `store_put` of a `knowledge__` note *does* reach the enqueu'
+      facets: {}
+    - chash: e950316b55d54ae261eaaf288ef5fe425595dc5a7da636027e599b4863698c74
+      closed: true
+      note: '### Net effect on the Approach'
+      facets: {}
+    - chash: 6cbc193887084ef90c8a415b1be17ac32fc8099cabeda373a6299e3916b32905
+      closed: true
+      note: '## Approach'
+      facets: {}
+    - chash: 4b4368259ad8f779188f34e84968d27bb5503a31ccc2e54ebf1f0a3223a6e412
+      closed: true
+      note: '## Alternatives Considered'
+      facets: {}
+    - chash: b01dba652fc137890cbc87ffa1b293b88b1c4177ccaf767bbd09ca35db025190
+      closed: true
+      note: '@Test @Order(49)'
+      facets: {}
+    - chash: 58866e2944d5db7e14d1c26292c62e2d6bf8fd4d7d2f3a753e3e9092b06f6cde
+      closed: true
+      note: '@Test @Order(49)'
+      facets: {}
+    - chash: 97db3311b0e162f0ffb97cdf2c75a6fab2772f79b8df5303c8354e17cae8d05a
+      closed: true
+      note: '@Test @Order(49)'
+      facets: {}
+    - chash: bd1edcbec17175a7662dccbf3a5474b3758a78450f40bf328e5100eb3d0ab6bd
+      closed: true
+      note: 'public void markRetry(String tenant, String collection, String sourcePath, long '
+      facets: {}
+    - chash: 0871759d555f9a0e1528b806356c52284e51f15e63fda8b67049260349c5dade
+      closed: true
+      note: '@Test @Order(49)'
+      facets: {}
+    - chash: e5deb197a3f968925bf6b1ca6444459778ae3383b88438464d69ce6c751cf889
+      closed: true
+      note: 'if pending == 0:'
+      facets:
+        queue-stall-symptom: supports
+        root-cause: supports
+    - chash: 3ff2aee483ddd83fa9340f8993377c4cb855cf925b4dd69da722814d327090e8
+      closed: true
+      note: '@Test @Order(49)'
+      facets: {}
+    - chash: 69d99fe23fd8f19d06b162cfbeab6d7a5ce3836aae83948fd71e94ff577d37ae
+      closed: true
+      note: '@Test @Order(30)'
+      facets: {}
+    - chash: ba463291b3d883c0ca772da0bc4525b6fadc227be3346d0fee0acb817076ef27
+      closed: true
+      note: 'def _poll(t2):'
+      facets: {}
+    - chash: f825674603e9351ff9e5b5157cf5f42fa12477b3e9427c8129947d0284b211f3
+      closed: true
+      note: '{'
+      facets: {}
+    - chash: 91bea9e0b3ffb33a158bf91b0242a5bdf354d6d4c7d9b31f00665afc9490032a
+      closed: true
+      note: from __future__ import annotations
+      facets:
+        backoff-ladder: supports
+    - chash: b6094b8e620a45f8201eb04c9df4b21824b19a134edded6c88893b43048dfa13
+      closed: true
+      note: ('records the scheduled delay before retrying the request',
+      facets: {}
+    - chash: 75ee96b5d9031a86410acb82ef7ecc282a1c2ce4f20d824dd0cdeefd7c0c5a09
+      closed: true
+      note: '"""`_mark_retry_or_fail_routed` decision: retry vs terminal."""'
+      facets:
+        backoff-ladder: supports
+    - chash: 848cc40bbc76bf5d0f381513b058d48db42c702b7eb910c48a9f3428d173426d
+      closed: true
+      note: 'ies as a hard failure: ONE'
+      facets: {}
+    - chash: 5e1e5b058cd75a991947cff948570814cfa074f4b522f379639fce63d2a0678d
+      closed: true
+      note: '_RETRY_MAX_ATTEMPTS: int = 5          # terminal mark_failed once retry_count >='
+      facets:
+        backoff-ladder: supports
+    - chash: d94a696e49e56d109cf937909c346ec847b3ff5c025f8bfe105ab34e767430a0
+      closed: true
+      note: citly separated
+      facets: {}
+    - chash: 8206e7bcc4f312effa646928cdcd81180017b70c9c42cc3b542ffaea6b304462
+      closed: true
+      note: '@Test'
+      facets: {}
+    - chash: 6e2b61e44151386394d1b05386921ffe43e51e27fd627399af3a7b1b01e699b7
+      closed: true
+      note: '@Test @Order(49)'
+      facets: {}
+    - chash: cc165ae6eafb29786c315dd6849740090eb4f6412ef088bfb762097fd6b69f9b
+      closed: true
+      note: 'def test_caps_retries_at_three_attempts(self, monkeypatch) -> None:'
+      facets: {}
+    - chash: e480d078030ef205e849332a0f9a92c6f71a470cd8300d3594158a8cd3c4eedc
+      closed: true
+      note: def test_three_429s_cost_three_requests_not_nine(self, api_backend, _env) -> Non
+      facets: {}
+    - chash: 21a9922a22b734f36c254b3760a062fe100ada7828ad8aba6e0583f0f581ecef
+      closed: true
+      note: '### Key Discoveries'
+      facets:
+        backoff-ladder: supports
+    - chash: 39a12c61fb6914ec714a4c4a2ccd58094af219dfe462e41c380fca980a2041f5
+      closed: true
+      note: '#### Gap 4: The tuple queue template cannot carry the aspect queue today'
+      facets: {}
+    - chash: a82819bed1e99de515413a554ba3662cde122115ffd26785324577e36083dd72
+      closed: true
+      note: '### q18 [clean, score 0.0] (pool h21, rdr-research)'
+      facets: {}
+    - chash: 76525d666ef01f405e20e654ba941f85fc9ac8b9b9bc1a0438327fce365d3973
+      closed: true
+      note: '## Consequences / Risks'
+      facets:
+        backoff-ladder: supports
+        queue-stall-symptom: supports
+        root-cause: supports
+    - chash: 0d6320d302da2ea3deca95061c8b0e87fb05489b34172045616f9477352eb014
+      closed: true
+      note: '### Approach'
+      facets: {}
+  H06:
+    provenance: drafted
+    items:
+    - chash: 957300e7a7f7c986a0d58ca1e87021d2de1ec63fcc9d9112f52dbcf7f029ce42
+      closed: true
+      note: '# RDR-201: Closed Vocabularies as Checked Tables'
+      facets: {}
+    - chash: 984093c577b7297c9957e4c23e3e76dc2515c3598069f9ca32a27ee76bb10c86
+      closed: true
+      note: '## Problem Statement'
+      facets: {}
+    - chash: fc14194e4ed4f9b1779f521c6dfce830734ab1a48cee5a443f2ee0603a5d2ec3
+      closed: true
+      note: '## Problem Statement'
+      facets: {}
+    - chash: 4b14691a8ca0536359ef9cc5488fae5b581f6684eb62b0a964d978b93ad8db2a
+      closed: true
+      note: '### Enumerated gaps to close'
+      facets: {}
+    - chash: 2d4d2a097f47b891f5a6c8bc5137c9c4afa2f6284ac374d57c5742c1d9b55800
+      closed: true
+      note: '#### Gap 1: The record lifecycle has no transition table'
+      facets: {}
+    - chash: 31e599a43c951c72bfd529c3299af3228f6780cbc65ac27284c762d6cf1fadac
+      closed: true
+      note: '#### Gap 2: The paired-release choreography is a state machine written as contro'
+      facets: {}
+    - chash: 28195d6eaee55f1f7b394a3f065e3ca62bf9b49a9a60396661f7c7c83b8a66b8
+      closed: true
+      note: '#### Gap 3: Decisions have no memory across amendment'
+      facets: {}
+    - chash: fb46e843cadcc1fe0bd611aa9557f0c76978dd47bf408a2e968847f7e918dacc
+      closed: true
+      note: '## Relationship to Prior RDRs'
+      facets: {}
+    - chash: 37861e2e14013ad7c69dfa0ecab17370a0a0e6cf9631382cdc23dff2fa1ba904
+      closed: true
+      note: '## Context'
+      facets: {}
+    - chash: ca5ebd5277bfa5b1ea4d3197383bccfeb3543b77a64cc1bb529418a533e9cc2c
+      closed: true
+      note: '### Background'
+      facets: {}
+    - chash: 66b7e45f75084fd6653a7e58545d6603c34aa79a6405e6db5422a2da4e888c7b
+      closed: true
+      note: '### Technical Environment'
+      facets: {}
+    - chash: 7b1bc65a3285f4c89588ae7b42acbd0045d92856882c49f3186d288f31f1155f
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: 09ec34e7de4a3bfe5c4c97edefde7800a382655923edb396c6c85edd7c5ed56b
+      closed: true
+      note: '### Finding 1: the record lifecycle, as implemented (Verified)'
+      facets: {}
+    - chash: 6d752064de5beda473eb25f869b5d21e123a87157662123fcbe59524f00ccb8f
+      closed: true
+      note: '### Finding 2: the release choreography, as implemented (Verified)'
+      facets: {}
+    - chash: 6350688d301f66df79079e65aaf295887500b0dd0f61ec79ce381988b75b25c0
+      closed: true
+      note: '### Finding 3: an enum-only checker is small, and intrastate is not a dependency'
+      facets: {}
+    - chash: 7ac27a2a5b49792fb2b9bebe57385185718659be80d01fc2572f42a8110896d7
+      closed: true
+      note: '### Finding 4: the catalog gives dependency tracking its primitives and nothing '
+      facets: {}
+    - chash: f8167d342add24e078ea237be38c3c6c4adac8dd9e202ebcf2003386f686d59a
+      closed: true
+      note: '### Critical Assumptions'
+      facets: {}
+    - chash: 0a0db37c6a7a8d171d74fadfc90adf755967b90ae15bda61289106e1577ca81d
+      closed: true
+      note: '## Proposed Solution'
+      facets: {}
+    - chash: 06888fc38bbbddc7ca2b1304790f8f9caf0982e583ead918607c11565f05b24a
+      closed: true
+      note: '### Approach'
+      facets:
+        checked-table-claim: supports
+    - chash: b6fa4f4fee5280a5234fbd6bf8a061decddbbe5fd56e37ba1469e8cdba7069fa
+      closed: true
+      note: '### Technical Design'
+      facets: {}
+    - chash: 2891950f49b7ff52c4d46b57692e1a27535e38217a4822b6d155e9f364711481
+      closed: true
+      note: '### Technical Design'
+      facets: {}
+    - chash: 13b7615b8e8e2905ce5ef94acaf68448bc7c0a7980eb8dd9f6014d1306c5d5f8
+      closed: true
+      note: '## Implementation Plan'
+      facets: {}
+    - chash: 62ef22d7647f7d39f4f65557f80a4f2711f1c8a0370a0fdb1a834ccfe8ccdea3
+      closed: true
+      note: '## Finalization Gate'
+      facets: {}
+    - chash: 767e815f01288f38c197a9f179df4157f15a6104349cc27300c73bfb02372746
+      closed: true
+      note: '## Revision History'
+      facets: {}
+    - chash: 47790fb96c6136af081c9f48cdc65da19dfd2e74750ad01edf1a2267dd5f79ce
+      closed: true
+      note: '"""'
+      facets: {}
+    - chash: b1d64b092a5c5988979908f11e932655a8b9242e2a43f55ee30f6b58c34b6e54
+      closed: true
+      note: "\"\"\"nexus.tables \u2014 closed-vocabulary tables as checked state machines and"
+      facets:
+        checked-table-claim: supports
+    - chash: 40bf4d60f50c2a174d1260e505602caa6af7ab5d64787aad59c5b39891eacf7e
+      closed: true
+      note: 'def test_the_table_covers_every_builtin_file() -> None:'
+      facets:
+        remaining-hand-kept-vocabularies: supports
+    - chash: b461c92ee0be30a036b60394bc587922d77cd9784e1cd82f6a77822c5e1b36c1
+      closed: true
+      note: '# unknown-literal is a LOAD-time refusal (nexus.tables.load.UnknownLiteralError)'
+      facets: {}
+    - chash: b6fab8bcf69ff2344e524095185a5fe891004423204a56d4a10e148e0ee9a2e7
+      closed: true
+      note: def _normalize_literal_block(
+      facets: {}
+    - chash: 41c14bc46deb1a595ac95b3630115dd3d264bf2336b011ff56564599dbfc1cae
+      closed: true
+      note: '"""Tests for nexus.tables.load / nexus.tables.check (RDR-201 P1.1).'
+      facets: {}
+    - chash: fe9d39569bbd246434d8757e4d58ce324562b1292aef310bd6c256237dc50254
+      closed: true
+      note: '@dataclass(frozen=True)'
+      facets: {}
+    - chash: 25ee8091ba81551fafac8e241df7b27aefe1e299727f253da15809ac34a043d9
+      closed: true
+      note: 'def _read_lifecycle_vocabulary() -> tuple[tuple[str, ...], tuple[str, ...]]:'
+      facets:
+        checked-table-claim: supports
+        remaining-hand-kept-vocabularies: supports
+    - chash: fdb8a825921f69e0d0710b9cb93191395be9a35ea77b7f7fe6ed036efe4389fb
+      closed: true
+      note: 'def test_clean_table_discovery_is_non_vacuous():'
+      facets:
+        checked-table-claim: supports
+    - chash: b35b6d3fc1757101870b9218f7216d0ad97bc0ec37a66d992db53c7bb5c9dd80
+      closed: true
+      note: '# the loader''s only promised refusal class, and the only one'
+      facets: {}
+    - chash: 46465bf2f4d72d5284d47c27b89ea5f9c4b23e491d416462bf96ff1c141f8bce
+      closed: true
+      note: 'CONTENT_TYPES: tuple[str, ...] = _CONTENT_TYPES'
+      facets:
+        remaining-hand-kept-vocabularies: supports
+    - chash: 1539b4715bb3fe360cefb126bd355f3784d909f6b9ac6211dfe0a40318414940
+      closed: true
+      note: '@pytest.mark.lint'
+      facets:
+        checked-table-claim: supports
+        remaining-hand-kept-vocabularies: supports
+    - chash: d848905f4f2ce73e5665b592db3f7d7261ae38aa73c9ea3eb76cfee0158cbab9
+      closed: true
+      note: '@dataclass(frozen=True)'
+      facets: {}
+    - chash: e49b5b8b1bc716ad2546735288bfbbc3836a4891df34be2f5029d7c0d451ab73
+      closed: true
+      note: '"""'
+      facets: {}
+    - chash: c1658c271e1dce48c4328c59dba8d55e776765e1dc05d7d9af9fa71912f53c40
+      closed: true
+      note: 'VALID_STORE_NAMES: frozenset[str] = frozenset('
+      facets:
+        remaining-hand-kept-vocabularies: supports
+  H07:
+    provenance: drafted
+    items:
+    - chash: 46e772f81991b77467062ecd0fb19d356fd9f21158fcdb9c3a2539c821e977f6
+      closed: true
+      note: "# RDR-188: Server-Side Reranking \u2014 Retire the Last Client-Side Voyage Consumer"
+      facets:
+        rerank-location: supports
+    - chash: 5c8b484c84fd158190024ff182291135537587a8eeb23c940720ebb8174a7364
+      closed: true
+      note: '## Problem Statement'
+      facets: {}
+    - chash: 9de51f9a70909e9c3824b2b9ad66ee9029559035880b4ce43a9f1c246cfe8a15
+      closed: true
+      note: '#### Gap 1: The reranker is the last genuine runtime client-side Voyage consumer'
+      facets: {}
+    - chash: 2a22ad62aabac71582a841bd6192dbea337c69d13d48a69aae0507752285da60
+      closed: true
+      note: "#### Gap 2: Dead-key silent degradation \u2014 rerank quietly reverts to distance ord"
+      facets: {}
+    - chash: 28621adf997523c0663b0852e1061c3fe5e9205db7678073746338c67e8b0a14
+      closed: true
+      note: "#### Gap 3: Client behavior signals are inferred from key presence \u2014 retirement "
+      facets: {}
+    - chash: fef09b22c522f9eab82a39521e8f35e656032bab47a0a6ec2ed06500ec82ea69
+      closed: true
+      note: '## Context'
+      facets: {}
+    - chash: 1b76d7c900304bbd87dd939193fa4ad3ee7c8c8613c272f603229697965f441e
+      closed: true
+      note: '## Desired End State'
+      facets:
+        rerank-location: supports
+    - chash: 3a5d13c1363020fe89cfba2391e6ba9c40c5e6335c771a89a5d28e23f6b85386
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: 529dbe54ae791d6f2d6ad72a8f010a9d54d37e6c9f9cc083097c3d204041fa1c
+      closed: true
+      note: "### R1 \u2014 Client call graph: ONE production caller"
+      facets: {}
+    - chash: febdb2234ba19024d362a97bc599370c53bdc9e49f1e66e54dd6934f2a2504d2
+      closed: true
+      note: "### R2 \u2014 Engine placement: fused stage (Option A) wins"
+      facets:
+        rerank-location: supports
+    - chash: 4305d9d90bf625c6dcabe40395ec79ab871a78ed20449cbca9c2f74acee8625e
+      closed: true
+      note: "### R3 \u2014 Voyage rerank-2.5 limits (docs.voyageai.com, 2026-07-22)"
+      facets: {}
+    - chash: 93ae4da62be0f4512b41c3431f0b5f56c861f39f640c7931966b3b5535884b4d
+      closed: true
+      note: "### R4 \u2014 Local-mode story: server-side cross-encoder is buildable"
+      facets: {}
+    - chash: 5204b0ccbc4d8c1f1fbd07d81e63cf439c222818e0dd134c8ae75456d4198d2c
+      closed: true
+      note: "### R5 \u2014 Credential-retirement blast radius: three categories"
+      facets: {}
+    - chash: 2c654a2a0d9ca7552bbc043d47a1845f80cd80937bec621b347dd5a0ae913cd8
+      closed: true
+      note: "### R5 \u2014 Credential-retirement blast radius: three categories"
+      facets: {}
+    - chash: 26c579631f3a3399c7b9b342e5f025cd13ed3923d8b22aa37a5c06b622f96774
+      closed: true
+      note: '## Proposed Solution'
+      facets:
+        rerank-location: supports
+    - chash: 848b0f6556c2975efb4a0f479177df058775353fd179f25e122d081c955b6f93
+      closed: true
+      note: '## Proposed Solution'
+      facets:
+        rerank-location: supports
+    - chash: 9145e609c33e43c6df3d34d0e7177603a59a31157806ed30e37cf3160d89d140
+      closed: true
+      note: '## Alternatives Considered'
+      facets: {}
+    - chash: 4a5d42bb9d0bb4ef50a71f7af6daf2c4dabb4c27f0750d3f57327dba4c282332
+      closed: true
+      note: '## Trade-offs'
+      facets:
+        rerank-location: supports
+    - chash: 73b9a588bdba283403eceab57d3f0557bf782260d2e3978a1450b93076aad43a
+      closed: true
+      note: '## Implementation Plan'
+      facets: {}
+    - chash: 863b0a5ae961b6f39370f92f998e3973c4687a38bf32a88c63c744b52d41cb98
+      closed: true
+      note: '## Test Plan'
+      facets:
+        rerank-location: supports
+    - chash: 6697434982b940e36da49fb191886f89817242fd0e859caa06e61cc18fd621de
+      closed: true
+      note: '## Validation'
+      facets: {}
+    - chash: 544484a4850ac06981de2028161867486c92422291c11702fb32c8409fb76ae8
+      closed: true
+      note: '## Finalization Gate'
+      facets: {}
+    - chash: 0175ae6e2e6e26ec5baa11346a6dc173dd2e6d5d10a20795b64f054a075a9448
+      closed: true
+      note: '## References'
+      facets: {}
+    - chash: eb78f1d4b91506aff5286b3f359931976456b3fecb9eaaefb01806ddd311563c
+      closed: true
+      note: '## Revision History'
+      facets:
+        rerank-location: supports
+    - chash: 637165a4ac3ad9d27b25e5da8a726377df5ab40b1e7f1f3d71f70c0e9399ae78
+      closed: true
+      note: '### q19 [clean, score 0.0] (pool h22, rdr-research)'
+      facets: {}
+    - chash: 7e2dc0b09cc816b99d0c1ad0e6657c891f8ee17d327e7e8404e1c7a818cbec33
+      closed: true
+      note: '#### Step 1: Extend `src/nexus/plans/matcher.py`'
+      facets: {}
+    - chash: 0a036e2ad7b5ac6685d94e35866df690b726b284265ce17b4dcddc1c1cfb617f
+      closed: true
+      note: '## Reranking Scores'
+      facets: {}
+    - chash: fa7d9304c2db6539f3c5733dda082dc6dc05ac705b4fb11ed5dacdd79530b344
+      closed: true
+      note: '#### Step 4: Rerank, banner and status'
+      facets: {}
+    - chash: 64fb756c916bddfaf264b165dbe8cec0c5bffd62cff6fc0769e35cfd8b6bee2d
+      closed: true
+      note: '### R8: Scoring pipeline integration point (Confirmed)'
+      facets: {}
+    - chash: 77042a507f5b69b00be516155bbbfa7fd5bdf7e5042ad42706b399e3924cd37b
+      closed: true
+      note: '### Technical Design'
+      facets: {}
+    - chash: 286ef63baa911063f834a146190ea39f558a5a84db0e0d6e019f9a74221ce671
+      closed: true
+      note: '### Technical Design'
+      facets: {}
+    - chash: 697fd39cbbe075086f12a855e70a8184d6b0440b259867435a2ff20faaa87161
+      closed: true
+      note: '### E. Keep the current embedding, add a re-ranker'
+      facets: {}
+    - chash: d6fae7eab301e4a7ebff64d4f3fef32baa740457311530f3005ae9a5bf09f4ca
+      closed: true
+      note: '### Phase 3: Cross-encoder scoring substrate (nexus-2wc1 prerequisite)'
+      facets: {}
+    - chash: 432e1f1f7b10ec734fe7c6fea88a7a66f0857e42393fc3dc3f4c5a2562e95b73
+      closed: true
+      note: '### Critical Assumptions'
+      facets: {}
+  H10:
+    provenance: drafted
+    items:
+    - chash: bd8a6ae87b8c1cee0de35ab04c77095d86b9f1b50747b8842e25b44fe8628447
+      closed: true
+      note: '# RDR-158: Retire the SQLite T2 Backend'
+      facets: {}
+    - chash: e707cc939f3a15ae803e6b9188588a5a2fe2a281eb0b01a0d9cf5c7cea77916f
+      closed: true
+      note: '## Problem Statement'
+      facets:
+        replacement-backend: supports
+    - chash: 1181d762e92478a3f4e2c1b8599ca83fab7bf42701b9b694f868246ba2989563
+      closed: true
+      note: '#### Gap 2: SQLite is the migration source'
+      facets: {}
+    - chash: c971db6c5d2690183921e2eccb3d2a5fd5d78ce8cbac0304f09774f82197a37e
+      closed: true
+      note: '#### Gap 3: `CatalogTaxonomy` is the parity oracle (subtle, load-bearing at runt'
+      facets: {}
+    - chash: 0555058c44fd076dfda137fbdf38a5d2d912377d609e94f57dd26bdcb9cc9abc
+      closed: true
+      note: '### Evidence'
+      facets: {}
+    - chash: 13bf5debb4e410358c9ae1c8abd24331275e0478fba502bec28bac1287d0c573
+      closed: true
+      note: "## Decision (draft \u2014 options to resolve in research)"
+      facets:
+        replacement-backend: supports
+    - chash: 99ad9497ef813aafe7589b4c3f21b788158982291fb2a71d848479e7c5b75bb7
+      closed: true
+      note: '## Approach (phased, draft)'
+      facets:
+        replacement-backend: supports
+    - chash: 16b1684603adf341b94db70cbb597cb6aa1eed90c3b57e1e742b0f92e3110be3
+      closed: true
+      note: '## Consequences'
+      facets:
+        motivation: supports
+    - chash: 4f2ee2bb190e6b0decad3e8c1578f2859cc1cef2689335f0e70ed913e4b06475
+      closed: true
+      note: '## Open Questions'
+      facets: {}
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: 928874c932862b7d264288bd486e7997cadf1e51fc6af626b8df426a387c6a0f
+      closed: true
+      note: '### RF-158-2 (VERIFIED, local): the runtime-delegated `CatalogTaxonomy` surface '
+      facets: {}
+    - chash: 85b9b9313d47b2658ec64e28771404a27c5401921e3ce446adea7c1f25635c09
+      closed: true
+      note: '### RF-158-3 (VERIFIED, local): the deprecation-window constraint matches the RD'
+      facets: {}
+    - chash: 0ca7c6ab24b40fa17ccfa2a3a54dd2ad17ab688a6ac0ea23488e68afd29128f4
+      closed: true
+      note: "# RDR-186: Client-Persistence Closure \u2014 PG in Every Mode"
+      facets: {}
+    - chash: 109d474fb89d38a2dfdbfe82b609c69b8ed8df1011deec1492955700d690351c
+      closed: true
+      note: "#### Gap 1: Scope hole with no mechanical resistance \u2014 anything outside RDR-158'"
+      facets: {}
+    - chash: 99594cd9874b97ddaea92663046910ca3e72cfcc1c15204dc3177eb13658cdb9
+      closed: true
+      note: '#### Gap 3: Stray data outside every migration path'
+      facets: {}
+    - chash: 1d3b5ec473cc7a914fa418ce820f8579017e9d402d1f0980a79f9fc9dcf96109
+      closed: true
+      note: '### Evidence'
+      facets:
+        client-side-closure: supports
+    - chash: 9f22824472e9ed89651dfa0b996f5051e5b3005aa4f6911aa149bf129e3d2c13
+      closed: true
+      note: "## Decision (draft \u2014 options to resolve in research)"
+      facets:
+        client-side-closure: supports
+    - chash: 8654a3119fea17a2d8a2c587272906ae96e90a0f3bc90318f351d3aa1e0bfbea
+      closed: true
+      note: '## Approach (phased, draft)'
+      facets:
+        client-side-closure: supports
+    - chash: b958534c3f29ba184dffcfac6cbb6ace8ece89d68fa073a56b35a9dda6d5f2e2
+      closed: true
+      note: '## Consequences'
+      facets:
+        client-side-closure: supports
+        replacement-backend: supports
+    - chash: 5233387d495faf5c281245ee9ddcfac4b69b0b6208b829cc8e4e76283dc2f2ee
+      closed: true
+      note: '## Open Questions'
+      facets:
+        client-side-closure: supports
+    - chash: 7e1ffbcb78720b052986dcfc4f79b54f809b5d091921d4672d7ac8ac36b87218
+      closed: true
+      note: "### Epsilon-allow census (43 files, 118 overrides \u2014 `EPSILON_CENSUS`)"
+      facets: {}
+    - chash: 9f7e26d60c25cfbcd5566235b776ef88a7ad61d685d7921d76dcfaafed0107b9
+      closed: true
+      note: '### Q6 resolution (cold-start state audit)'
+      facets:
+        client-side-closure: supports
+    - chash: 90ecb3ea3db08b95d1daf2f7308638fb1b330da17a95ee026aaeb9ae724519fa
+      closed: true
+      note: '### RF-186-2 (VERIFIED, agent analyst-186-q1): every rung''s completion is re-der'
+      facets:
+        client-side-closure: supports
+    - chash: fe8f671089e618f01ce2345ee060dd1a5d5306a03b2a5c6a0cfc6d2859c6665e
+      closed: true
+      note: '## What shipped'
+      facets:
+        client-side-closure: supports
+        replacement-backend: supports
+    - chash: 57331249c37d6a340a1727a525600b080ffb2ed7bf2321476a4e46aaa4552d90
+      closed: true
+      note: '## Decisions'
+      facets:
+        replacement-backend: supports
+    - chash: 515eb46ae6c290b4aa10b8333df4ce5f25b36d59649d00afca1985c41e38ea99
+      closed: true
+      note: '## Context'
+      facets:
+        motivation: supports
+        replacement-backend: supports
+    - chash: 43161a8d3d36938263fcf41264b5a2ba81216add2b71c57e682e881376e0be66
+      closed: true
+      note: "### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2) \u2014 HIST"
+      facets:
+        replacement-backend: supports
+    - chash: a16a0bd9b40318f4b7a52baa4b67977e928bdf7cd462c40cb7f9dd8cd566a5c4
+      closed: true
+      note: '### Cross-process single writer ([RDR-120](rdr/rdr-120-storage-substrate-split.m'
+      facets:
+        motivation: supports
+        replacement-backend: supports
+    - chash: fd40be2b51ecda8166840547d206be609249089bacf0484b09ac787cbdd31b0a
+      closed: true
+      note: '#### Gap 2: The T2-daemon step is vestigial in the default install'
+      facets:
+        replacement-backend: supports
+    - chash: 3effefaab8d0e710232a8900583a4fd9192557b6bfdbfbbfb76910b56cb4b88c
+      closed: true
+      note: '## Problem Statement'
+      facets:
+        client-side-closure: supports
+    - chash: 29179129845077ce9a188f4c41a57a99578e6de6d78d4334639e45ec1935c123
+      closed: true
+      note: '## Problem Statement'
+      facets:
+        motivation: supports
+    - chash: a8a8748a816fce8772e12e39a35f73102f97f3049cfdde7b9d719a07b017c7e8
+      closed: true
+      note: def test_t2database_service_backend_uses_http_memory_store(
+      facets:
+        replacement-backend: supports
+    - chash: f352fd8ec545d216adf4cf58b0c31854170141e246e53ef890f5c41902ed4d03
+      closed: true
+      note: '"""AC2 tombstone (nexus-i711w Stage 2 sub-stage A3).'
+      facets:
+        replacement-backend: supports
+    - chash: 834a6a9f41b23b1d23c34276052110cbe497c2896f32f23fea24ea90160d1a70
+      closed: true
+      note: def test_get_t1_database_hard_errors_on_explicit_sqlite_opt_out(
+      facets: {}
+    - chash: 97596245116124c96ad753b816726248fe7a2f8a0c2b334917b633bc78b0f49e
+      closed: true
+      note: '@pytest.mark.t2_tenant'
+      facets:
+        replacement-backend: supports
+    - chash: 2fb884be097c313f57fda33182a08411d07ba0931d5d3e04f2048fc790c0e567
+      closed: true
+      note: "\"\"\"The T2 schema stage of ``nx upgrade`` \u2014 a service-mode no-op."
+      facets:
+        client-side-closure: supports
+        replacement-backend: supports
+    - chash: cbf52f51adf054c24004cf22ae2375d2d68f39bee253d1bc1e5d341ba682ea11
+      closed: true
+      note: 'def _serve(handler_cls) -> tuple[HTTPServer, str]:'
+      facets: {}
+    - chash: 645cafbc8fe363b0ad840f5cdf479cac24f01bc18181077f933d5edef18a2a12
+      closed: true
+      note: '# a service-backed T2Database (its ``.memory`` is an HttpMemoryStore with'
+      facets:
+        replacement-backend: supports
+    - chash: e2bca1f2e8c3792e625bd24117d2d7ee1020291df50bfcbc87f1235c11ab9ee3
+      closed: true
+      note: 'def _seed_legacy_db(tmp_path: Path) -> Path:'
+      facets: {}
+    - chash: fa64c8a61f815a5d2974cce9b0aa982f704ce0e7a8bb2f672778994171bf6e6e
+      closed: true
+      note: def _migrate_store(
+      facets: {}
+    - chash: 15b47fa1da1757320b98b156ff2d0a401dfa50c708b07949bd1ddb97cda4829d
+      closed: true
+      note: "import httpx  # noqa: PLC0415 \u2014 deferred to keep CLI startup fast"
+      facets: {}
+  H14:
+    provenance: drafted
+    items:
+    - chash: bd8a6ae87b8c1cee0de35ab04c77095d86b9f1b50747b8842e25b44fe8628447
+      closed: true
+      note: '# RDR-158: Retire the SQLite T2 Backend'
+      facets: {}
+    - chash: e707cc939f3a15ae803e6b9188588a5a2fe2a281eb0b01a0d9cf5c7cea77916f
+      closed: true
+      note: '## Problem Statement'
+      facets: {}
+    - chash: 1181d762e92478a3f4e2c1b8599ca83fab7bf42701b9b694f868246ba2989563
+      closed: true
+      note: '#### Gap 2: SQLite is the migration source'
+      facets: {}
+    - chash: c971db6c5d2690183921e2eccb3d2a5fd5d78ce8cbac0304f09774f82197a37e
+      closed: true
+      note: '#### Gap 3: `CatalogTaxonomy` is the parity oracle (subtle, load-bearing at runt'
+      facets: {}
+    - chash: 0555058c44fd076dfda137fbdf38a5d2d912377d609e94f57dd26bdcb9cc9abc
+      closed: true
+      note: '### Evidence'
+      facets: {}
+    - chash: 13bf5debb4e410358c9ae1c8abd24331275e0478fba502bec28bac1287d0c573
+      closed: true
+      note: "## Decision (draft \u2014 options to resolve in research)"
+      facets: {}
+    - chash: 99ad9497ef813aafe7589b4c3f21b788158982291fb2a71d848479e7c5b75bb7
+      closed: true
+      note: '## Approach (phased, draft)'
+      facets: {}
+    - chash: 16b1684603adf341b94db70cbb597cb6aa1eed90c3b57e1e742b0f92e3110be3
+      closed: true
+      note: '## Consequences'
+      facets: {}
+    - chash: 4f2ee2bb190e6b0decad3e8c1578f2859cc1cef2689335f0e70ed913e4b06475
+      closed: true
+      note: '## Open Questions'
+      facets: {}
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: 928874c932862b7d264288bd486e7997cadf1e51fc6af626b8df426a387c6a0f
+      closed: true
+      note: '### RF-158-2 (VERIFIED, local): the runtime-delegated `CatalogTaxonomy` surface '
+      facets: {}
+    - chash: 85b9b9313d47b2658ec64e28771404a27c5401921e3ce446adea7c1f25635c09
+      closed: true
+      note: '### RF-158-3 (VERIFIED, local): the deprecation-window constraint matches the RD'
+      facets: {}
+    - chash: 0ca7c6ab24b40fa17ccfa2a3a54dd2ad17ab688a6ac0ea23488e68afd29128f4
+      closed: true
+      note: "# RDR-186: Client-Persistence Closure \u2014 PG in Every Mode"
+      facets: {}
+    - chash: 109d474fb89d38a2dfdbfe82b609c69b8ed8df1011deec1492955700d690351c
+      closed: true
+      note: "#### Gap 1: Scope hole with no mechanical resistance \u2014 anything outside RDR-158'"
+      facets: {}
+    - chash: 99594cd9874b97ddaea92663046910ca3e72cfcc1c15204dc3177eb13658cdb9
+      closed: true
+      note: '#### Gap 3: Stray data outside every migration path'
+      facets: {}
+    - chash: 1d3b5ec473cc7a914fa418ce820f8579017e9d402d1f0980a79f9fc9dcf96109
+      closed: true
+      note: '### Evidence'
+      facets: {}
+    - chash: 9f22824472e9ed89651dfa0b996f5051e5b3005aa4f6911aa149bf129e3d2c13
+      closed: true
+      note: "## Decision (draft \u2014 options to resolve in research)"
+      facets: {}
+    - chash: 8654a3119fea17a2d8a2c587272906ae96e90a0f3bc90318f351d3aa1e0bfbea
+      closed: true
+      note: '## Approach (phased, draft)'
+      facets: {}
+    - chash: b958534c3f29ba184dffcfac6cbb6ace8ece89d68fa073a56b35a9dda6d5f2e2
+      closed: true
+      note: '## Consequences'
+      facets: {}
+    - chash: 5233387d495faf5c281245ee9ddcfac4b69b0b6208b829cc8e4e76283dc2f2ee
+      closed: true
+      note: '## Open Questions'
+      facets: {}
+    - chash: 7e1ffbcb78720b052986dcfc4f79b54f809b5d091921d4672d7ac8ac36b87218
+      closed: true
+      note: "### Epsilon-allow census (43 files, 118 overrides \u2014 `EPSILON_CENSUS`)"
+      facets: {}
+    - chash: 9f7e26d60c25cfbcd5566235b776ef88a7ad61d685d7921d76dcfaafed0107b9
+      closed: true
+      note: '### Q6 resolution (cold-start state audit)'
+      facets: {}
+    - chash: 90ecb3ea3db08b95d1daf2f7308638fb1b330da17a95ee026aaeb9ae724519fa
+      closed: true
+      note: '### RF-186-2 (VERIFIED, agent analyst-186-q1): every rung''s completion is re-der'
+      facets: {}
+    - chash: 3d5d2144a033099d03c774f4f9dc938ef44ab9e9cc664c259c68f4e9d9221e18
+      closed: true
+      note: '## Relationship to Prior RDRs'
+      facets: {}
+    - chash: d0da8a70626133a8a7421d707822a51db72ad093508384a0c79222e8431e583f
+      closed: true
+      note: '#### Step 2: Permanent tier (T3)'
+      facets: {}
+    - chash: 8d2ed25015f8d8663cef92a2276ff84c3c3176de6af83ff68a27e25d155ea552
+      closed: true
+      note: '## Relationship to Prior RDRs'
+      facets: {}
+    - chash: 31a65d5b0c1a27652d203855e7a64b385b2c85b1ed33870457dc781d0a787544
+      closed: true
+      note: '## Relationship to Prior RDRs'
+      facets: {}
+    - chash: 2e73fd478a661dd0ebf18ab111e8abb55dd12d9244a857a41b406b6736454c7b
+      closed: true
+      note: '# RDR-209: Heat-Based Graduation Between Memory Tiers'
+      facets: {}
+    - chash: 6c8bccd228177542e29f6ed1dc08d37b18665eca1f69ced09c8e70a863c8a7ab
+      closed: true
+      note: 'def _write_rdr(repo_root: Path, slug: str, *, status: str) -> None:'
+      facets: {}
+    - chash: 621766206f749592c638ebe78ef1fc96397548f04a3486d6e91d27751ddf203b
+      closed: true
+      note: "# RDR-196 \xA7Approach's ORIGINAL proposed split (lines 239-240 of"
+      facets: {}
+    - chash: 8f1722f9376084aba653015a032d857047e1de959b993adee3e18e89f30d6ccf
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets: {}
+    - chash: af80d5700b21285c4d088118ebe68f32270bd87dc7b51d83d7b03fc72d5bd44d
+      closed: true
+      note: def test_t2_leg_already_migrated_companion_with_no_t2_status_proposes_nothing(mo
+      facets: {}
+    - chash: 4a05483163ba6672b26776647f40396cbd2fb0442bef6ffbcf682829aa817d3d
+      closed: true
+      note: 'def test_reference_tier_passes_every_gap_another_tier_fails(self) -> None:'
+      facets: {}
+    - chash: fbc8cd0d134bb488ed7da2c0b6bec4defde483c66642de920dee7404e2df6996
+      closed: true
+      note: 'class FakeT2Client:'
+      facets: {}
+    - chash: 6fd1b0a619d3a1c55dc222ce8a5d426cffd339b8477081835e0c482ea3403dda
+      closed: true
+      note: 'def test_t2_leg_already_canonical_status_is_drift_not_migrate(mod, rdr_tree: Pat'
+      facets: {}
+    - chash: efdc8e1206f4b2f4a9e2fff6bd4388de078e1785ee081446bc6dae6743c55a5d
+      closed: true
+      note: 'def test_t2_leg_reports_ambiguous_number_collisions(mod, rdr_tree: Path) -> None'
+      facets: {}
+    - chash: 8a2ac2ab0d12f527eb0f040f01a8ae00cddc0f227d92164a27fbac2b23ffe0bd
+      closed: true
+      note: '{'
+      facets: {}
+    - chash: a4ababfabad9b56d2f39812369d4961969fb4a7dbe36741657a4c1c1ad9b5121
+      closed: true
+      note: _NX_TIERS = (
+      facets: {}
+    - chash: 09f77847d9a8f79b5613a4c962c23eb457656cdf9639c9e9e1ad262369091271
+      closed: true
+      note: "Frozen T2 store contract \u2014 the parity oracle for RDR-158 P2 (nexus-jkzyq)."
+      facets: {}
+    - chash: b33871a2ab9fd980198b7b31c6ddd1b532cdd80326fbc0f50b5a8e86bb23b335
+      closed: true
+      note: 'def test_t2_leg_apply_preserves_numeric_ttl(mod, rdr_tree: Path) -> None:'
+      facets: {}
+    - chash: 49aa5bd964042f7d0836defc7f6ee5ea39e727fc99da52f68a4d24008a4969a8
+      closed: true
+      note: 'def test_last_n_sessions_and_since(self, client):'
+      facets: {}
+  H15:
+    provenance: drafted
+    items:
+    - chash: 965e63ead3185322700ec1e825188f3de01391c4d62f2d43180786ad2db4add4
+      closed: true
+      note: '# RDR-077: Descriptive Curriculum and Multi-Item Response Generation'
+      facets: {}
+    - chash: 4ef0d35a77e37843cb34b9314d20e25fc0395e61dbc28c038513352a5ab22015
+      closed: true
+      note: '## Status'
+      facets:
+        acceptance-date: supports
+    - chash: 2b15b85b0b610ac84e9899e634796a07f9ff3719618b19c69529bde921386d0d
+      closed: true
+      note: '## Constraints and Prerequisites'
+      facets: {}
+    - chash: 8ad3b4fc078b42aace8e4c6eddc56b5874bee9b608eeb89f8ebd8cd1b7d1f92a
+      closed: true
+      note: '### Binder vocabulary coverage'
+      facets: {}
+    - chash: 30b93c1d9afe5883d3f0e6ec7cbe7a98f73e1b6c501683f0ebf4829b0beb0d93
+      closed: true
+      note: '### What must be built'
+      facets: {}
+    - chash: 0a0db37c6a7a8d171d74fadfc90adf755967b90ae15bda61289106e1577ca81d
+      closed: true
+      note: '## Proposed Solution'
+      facets: {}
+    - chash: 08cfe2359a0b71bc6f6257f0e67c462fb1a81e853cce4d493b74b3a79329308c
+      closed: true
+      note: '### Phase 3 Curriculum'
+      facets: {}
+    - chash: 7c49e378b1e24cfff97a5ce6d50dd97dee1f609ba74df00e1bcc3f7aab1633b2
+      closed: true
+      note: '### Components'
+      facets: {}
+    - chash: 20805315e0f80c690d36a38de67ef352d75fee034008b2d3843646ab71eb3098
+      closed: true
+      note: "#### C2 \u2014 semWinnerForWord accessor (modified, chatsome-language)"
+      facets: {}
+    - chash: 9fdeddcde22b831fae8298cb767d42bf5c6e866114d992d7c426ab71e3d49827
+      closed: true
+      note: "#### C4 \u2014 Phase3GateEvaluator (new, chatsome-language)"
+      facets: {}
+    - chash: cddc09b6297e378b1bed8dc313953589a69c422f5dc9d5c7ee6d4b6fe3f2d911
+      closed: true
+      note: "#### C5 \u2014 GroundedLanguageSystem.trainPhase3() (new, chatsome-cortex)"
+      facets: {}
+    - chash: ec74688759cde450e62cb9182fa55d802e41a1883cdd1078ce643c7770e26e56
+      closed: true
+      note: '## Acceptance Criteria (quantitative, gatable)'
+      facets: {}
+    - chash: f1a95d01d1a4a29505a5ebf75a3672ed75672c2f208717c93c92e1672aa75137
+      closed: true
+      note: "### AC-2 \u2014 Tautology non-regression"
+      facets: {}
+    - chash: 38e09caebfc34d56608ec3bdd52393564e39ce5f61677bc66af5cc874b6089b3
+      closed: true
+      note: "### AC-4 \u2014 Presentation order preserved"
+      facets: {}
+    - chash: 244a9815328c2c617ca2c82ad8150f2c8084fa6b26aea02e595932cc4963eb46
+      closed: true
+      note: "### AC-6 \u2014 Untrained properties not emitted"
+      facets: {}
+    - chash: 2130708f08ca561d9235f37e0c5152873b4bf34bf39fba300128fd92b0a79546
+      closed: true
+      note: "### AC-7 \u2014 No new Maven edges"
+      facets: {}
+    - chash: a28970118b587ccdcfafb56f8ead47d7c87efb91592888deadb4448842e01738
+      closed: true
+      note: '## Steel Thread Walkthrough'
+      facets: {}
+    - chash: 1d9eb55d8012c26dc36896cd5c9b14ea81557de14fab186d5f0e76bdd109d03c
+      closed: true
+      note: '### Query'
+      facets: {}
+    - chash: b7cede047f71440eb364e02c1ce16a7fd9f554566565d9563ce4f519c923e448
+      closed: true
+      note: '## Implementation Phases'
+      facets: {}
+    - chash: f73664604baf3987f8e3c2e5667e576cc792ad1b726c421fdeeca8d7fd8dd6cb
+      closed: true
+      note: '### Phase 2: Review + CLI demo'
+      facets: {}
+    - chash: 5fa2d0fe79241f429c061042709ddc6e281520e8a42f92d3682eeddfc1deb13f
+      closed: true
+      note: '## Non-goals'
+      facets: {}
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: b1735ce246cff80eb053fd3c6bda03375092166d54d8afb4df23cd3e0fd3381e
+      closed: true
+      note: '### RF-077-01: Codebase Verification (2026-04-12)'
+      facets: {}
+    - chash: d0a48f8568dffab26128fe585fa9aef167f3f36df5c9399a07ab16569d6ad315
+      closed: true
+      note: '## References'
+      facets: {}
+    - chash: d5460196042a93765898077469573198b4c8b4453d7c14e87326d9e77cd7d4d1
+      closed: true
+      note: '## Metadata'
+      facets: {}
+    - chash: 29f2fcdf5e0da3288e110f6fa9d15fd3348a4f36fe9b2c99dc548e1365441ced
+      closed: true
+      note: '## Revision History'
+      facets: {}
+    - chash: d8c10d2313db3f9ac494a504dac273a68a6047caf0b89727272a3129b61f44d4
+      closed: true
+      note: '### Where We Are (updated 2026-03-30)'
+      facets: {}
+    - chash: 759b8b66cfdb1d025222bce978ce6913e13355cd81c511dc1f8fae1c87cd9474
+      closed: true
+      note: '#### Step 3: Lock the Approach, gate, accept'
+      facets: {}
+    - chash: 92df53a16947ea62f4935e1c21f51589e07167199b452f3bd15921004d797ac5
+      closed: true
+      note: '## RDRs'
+      facets: {}
+    - chash: 934fad1564c366a9d3e4f90ea5d35145facaddee3be8829634c61280b409f474
+      closed: true
+      note: '## What Was Implemented'
+      facets: {}
+    - chash: 36275253505142d6c12f29f427b2aab0ad1cc94bcaf478fc683119a470fac265
+      closed: true
+      note: '# RDR-028 Post-Mortem: Cognitive Language Agent'
+      facets: {}
+    - chash: a9b5d7629e2c006a6d0c7831bf3ed406c2c6f780197248c7fd1d9aebf198980e
+      closed: true
+      note: '## Original Close-Time Record (preserved verbatim)'
+      facets: {}
+    - chash: 1fb1ed701d76605448afca59d074e80ae6885c6eaf0c48392fc55dace09a6b3f
+      closed: true
+      note: '## Outcome: IMPLEMENTED'
+      facets: {}
+  H16:
+    provenance: drafted
+    items:
+    - chash: ba2d757ca86dfebae49a08a8437e2aba973e6186e1f6dd1a03fd6b0d5775f9eb
+      closed: true
+      note: "# RDR-070: Incremental Taxonomy & Clustered Search \u2014 Making the Catalog Navigabl"
+      facets: {}
+    - chash: c91e59f79b5c93e96bfa2e3e6ce12f86707c683ac99de4fbac93f92b477ca78d
+      closed: true
+      note: '## Problem Statement'
+      facets: {}
+    - chash: a5a90ba75006c1a7042cf8ed217ec5426805d8927f150f8a01938109eb256aab
+      closed: true
+      note: '## Problem Statement'
+      facets: {}
+    - chash: fd5aae17c8815b6b364e0cc3ed92553f9484557c84a85672c1d97156aac21218
+      closed: true
+      note: '## Mental Model'
+      facets: {}
+    - chash: 2841bf1cc03c167a7569df6f6c7d1f226c1fbde61ea9281a45d71380dd75a0ce
+      closed: true
+      note: '## Non-Goals'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 806037aa219dcd4c0bac12761545efa131406f58da95c7b15b089416354474c2
+      closed: true
+      note: '## Proposed Approach'
+      facets: {}
+    - chash: 06d1447dba5fb96f4bab17523acd5c254b8d3da7303c46022933765cb4ad2c0a
+      closed: true
+      note: '### Tooling: sklearn HDBSCAN + ChromaDB Centroids (RF-070-9, RF-070-11)'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 724c4a4e55ce4858f35ef2d81ea4c7719ced346e4541a66e5026df182eaad86f
+      closed: true
+      note: '### Existing Code: Replace, Don''t Migrate'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 2a6c679b822bb47fecb0fd26f04ba46915bb534aec636f4531d545cf058aeaba
+      closed: true
+      note: '### Phase 1: Batch Discovery + Incremental Assignment'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 39af7dfc3d740eafe99448fdcf1603d2eed75876b730a20e99821b989df9c111
+      closed: true
+      note: '### Phase 1: Batch Discovery + Incremental Assignment'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 81eb7ab4cc763285dfe91511204463581874386831d930d1c0dd90503de79840
+      closed: true
+      note: '### Phase 2: Operator Review + Rebalance'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 39dc9987880b0bb1e3274f937f740e9b0bd6af1f3956f4099bc63bbca7f6652b
+      closed: true
+      note: '### Phase 2: Operator Review + Rebalance'
+      facets:
+        taxonomy-clustering: supports
+    - chash: a5a5710b1f9c8b5762d48a6dcbe5661465259625a435b22a66a8f3eb6754c513
+      closed: true
+      note: '### Phase 2: Operator Review + Rebalance'
+      facets: {}
+    - chash: 3c75486f7400e0ab54fdfabd645ba2411c52acb9d7447f12675e9021ed06cc7c
+      closed: true
+      note: '### Phase 4: Link Graph Integration (the enrichment part)'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 4479169a96311cea23760db753b4347396c2c8333283c4a8359cacd49643755f
+      closed: true
+      note: '### Source of Truth: T2 SQLite (durable) + ChromaDB centroids (rebuildable)'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 92497c517a942b3c7e077b788db3d70555fe5a0464c39da7a7c05237c2971351
+      closed: true
+      note: '### Centroid Persistence (ChromaDB collection, not pickle files)'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 32724ee2eafbf5745c179dc1ce08246e83592c5d8723825be56fde0f6bc333d8
+      closed: true
+      note: '## CLI Commands'
+      facets:
+        taxonomy-clustering: supports
+    - chash: b1402eacacf12a69fdfc9c8bd3c1094050506daba302f53a45203a2ae097fbdf
+      closed: true
+      note: '## Phasing'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: 7fae2c66cd80549cfea183699788c24d3d81ad87b2a5949781f9aad6d3e6f841
+      closed: true
+      note: '### RF-070-2: Existing Infrastructure'
+      facets:
+        taxonomy-clustering: supports
+    - chash: c64e4200802c4365a4d9cae58d186ab7ad46a889cd8b4399f4b87de5b60747e1
+      closed: true
+      note: '### RF-070-4: Cross-Model Embedding Incompatibility (HIGH confidence)'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 9d235258144a1531ea619d78b23f3813bb7e56df83d2743ac477a93feb727c4c
+      closed: true
+      note: '### RF-070-6: Hook Point for Incremental Assignment (HIGH confidence)'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 9f206cee753b26e6fdb8a51ac19fb48f6abc07b7f7e60dd1bf466af6ffe3ed04
+      closed: true
+      note: '### RF-070-9: Taxonomy Tool Survey (HIGH confidence, UPDATED)'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 98f6c953f09cbe92814c6a2c3f48b15cbe3d5578510e1f92dcfb27ab8c61296d
+      closed: true
+      note: '## Downstream consumers'
+      facets: {}
+    - chash: 97d5e479ff62f0d37a7e93103bcc3cd72463d86d12e274832b12e519dbbb92c9
+      closed: true
+      note: '"""When >50% of results have topic assignments, group by topic label."""'
+      facets: {}
+    - chash: 40d3875ca9670c736ffe4c3b7b11f1a5be33b6606ec766ff8533acce3566ee64
+      closed: true
+      note: "\"\"\"Cluster + c-TF-IDF \u2014 the chroma-free, T2-free COMPUTE half of"
+      facets:
+        taxonomy-clustering: supports
+    - chash: 87bf0677e21038a078af90eb734a7bd9bc55d807e0ba6823d07172b526914fbf
+      closed: true
+      note: 'def test_topic_grouping_when_majority_assigned(self) -> None:'
+      facets:
+        taxonomy-clustering: supports
+    - chash: 055e86526b6bc64dad8765e4de6ab1bac3cf87fb87d0b934ef2b2e46dd093cf6
+      closed: true
+      note: '"""Complete taxonomy pipeline with EphemeralClient (in-memory HNSW)."""'
+      facets: {}
+    - chash: 82788b916b987f2038fb53f1e7f3f65df0d6659ce6d1c947a2e6e6956a64ed91
+      closed: true
+      note: '# Per design Approach A: the heavy compute statics (cluster / c-TF-IDF /'
+      facets: {}
+    - chash: 2c288241e70c6c6c2d85019ead4e74b3250dabad8be78d44263eb4ff4dd13c77
+      closed: true
+      note: '# It drove CatalogTaxonomy.compute_assignments, a category-(c) static that'
+      facets: {}
+    - chash: 8e483686c9789156f975b27721d06b85042a29d9035e719c9bb16c99b247b6cd
+      closed: true
+      note: def test_assigned_by_column_populated(
+      facets: {}
+    - chash: 30fbd8551d0c009da3c91570790d178a4d732c56b667714479aae550340e4e07
+      closed: true
+      note: '@taxonomy.command("assign")'
+      facets: {}
+    - chash: a4e3a0c0c72c7316dce47a20d5a7b652cdea2c6a02047eb17ff7d54ae9aa5db3
+      closed: true
+      note: "\"\"\"Cluster + merge-labels + manual-transfer resolution \u2014 the"
+      facets:
+        taxonomy-clustering: supports
+    - chash: 6e75bb87730fdaf7a883124e1e177384114e7c1940955895d2e501f3f931cc74
+      closed: true
+      note: '"""discover_topics persists topics to T2 and upserts centroids to ChromaDB."""'
+      facets: {}
+    - chash: 737933fba466b82c830980dd688bd5e63d28ac9bc6084572dc74de16b3d045a9
+      closed: true
+      note: 'if clustered:'
+      facets: {}
+    - chash: 027d81dc2169a1e66b0e287618ee8791686f652aa7fd63a1aef485b819e61ff4
+      closed: true
+      note: '# with the CLI (search_cmd.py), which has applied both since'
+      facets: {}
+    - chash: eb6b1cb1166f7fd893ea4852b813727764f77ea60754b37ee6520579e4464868
+      closed: true
+      note: "# \u2500\u2500 Cluster output (RDR-056) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+      facets: {}
+    - chash: 2d104054013eee0b262cd28cec8e85e6a3bbf558d2f073adbbf72c328a625d3c
+      closed: true
+      note: 'def _search_clustered(results, corpus="knowledge,docs", cluster_by="semantic"):'
+      facets: {}
+    - chash: 469d6364904113f3312fa5683ff63981e8854c4c678d806790a99aac15ec8986
+      closed: true
+      note: "# Topic boost (RDR-070, nexus-aym) \u2014 applied AFTER grouping so"
+      facets:
+        taxonomy-clustering: supports
+    - chash: d3d0f335ae18236c27e30f7e5c689c2e7803062dfb87076b7bb05d26001f2b82
+      closed: true
+      note: 'if lexical_rerank:'
+      facets: {}
+    - chash: e4e8a4bbcefe5166f2225c5f4561700ed09049928bc4497931e465c92b75b212
+      closed: true
+      note: def apply_topic_boost(
+      facets:
+        taxonomy-clustering: supports
+    - chash: 698b811e565a3f6c96343d0d9ed68a75439bb39eff2ef23f12da8e043faf631c
+      closed: true
+      note: mputed but its reordering is fully discarded to keep same-
+      facets:
+        taxonomy-clustering: supports
+    - chash: 00ec24bb4005a58f1350aafca836672d011cafa3938d9a60c534a30a32d48831
+      closed: true
+      note: c:`_desired_candidate_count`'s docstring for the full caveat.
+      facets:
+        taxonomy-clustering: supports
+  H17:
+    provenance: drafted
+    items:
+    - chash: d543a95b22ab03312e12bf22ee7d8cffbdc981ec783b7503726f3b2427911e0d
+      closed: true
+      note: "# RDR-143: Plugin\u2194CLI Version Lockstep: a SessionStart Version-Marker Hook That "
+      facets:
+        version-marker-hook: supports
+    - chash: 5c8b484c84fd158190024ff182291135537587a8eeb23c940720ebb8174a7364
+      closed: true
+      note: '## Problem Statement'
+      facets: {}
+    - chash: edd3192ed58a3955c28fb0b9af12557b4a7331c8212c3044de0d0c6c2b3c2a9a
+      closed: true
+      note: '## Context'
+      facets:
+        version-marker-hook: supports
+    - chash: 80819073d61e86d177e5e630473a0482acaa02c7bebc8d6d78ed6c2e93d1e7ba
+      closed: true
+      note: '### Capability finding (claude-code-guide, current docs)'
+      facets:
+        version-marker-hook: supports
+    - chash: 7ace2b70b6ada5e4babe082e2c997ea42ae603b7f54ab8b983b00f2073e378d9
+      closed: true
+      note: '## Dominant Hazard'
+      facets:
+        version-marker-hook: supports
+    - chash: 838e2fcd2d09bf4cc84f5ca2ee0cd729f0e2533d4b4d8807270ce03f5aa18533
+      closed: true
+      note: '## Proposed Solution'
+      facets:
+        version-marker-hook: supports
+    - chash: 05db86552ffd769e5b6f7729b2ec363930d4eccf4a62b8c21a9a3556f0aa6625
+      closed: true
+      note: '## Decision'
+      facets:
+        version-marker-hook: supports
+    - chash: 28b968622407ffa3f1358d84716d5c674fcf9bd511eae122f700dce129bd4877
+      closed: true
+      note: '## Implementation Plan'
+      facets:
+        version-marker-hook: supports
+    - chash: 042e043801b9906fcebd218934e890a08f596e4603596213a46b7beaa49e3374
+      closed: true
+      note: '## Critical Assumptions'
+      facets: {}
+    - chash: 2ae442631ee73b1f05da27525ed4920d10ccbcca710103c8b223f54686a7c8ff
+      closed: true
+      note: '## Research Findings'
+      facets:
+        version-marker-hook: supports
+    - chash: 0c475f2042b0491b156dbeb396c2c28cd85bf81e1cf1c6e40e20774b5a891591
+      closed: true
+      note: '## References'
+      facets: {}
+    - chash: 46f7d96940636e10ae404836ea06957613049843801649a59cadbc2b3b36ede3
+      closed: true
+      note: '## Revision History'
+      facets:
+        version-marker-hook: supports
+    - chash: 127aea84458eb19bfb927e79faa08f4d80eb3f3896f6098e230cc521f2e99ceb
+      closed: true
+      note: '# RDR-228: The Plugin Installs the CLI'
+      facets:
+        plugin-installs-cli: supports
+    - chash: 37861e2e14013ad7c69dfa0ecab17370a0a0e6cf9631382cdc23dff2fa1ba904
+      closed: true
+      note: '## Context'
+      facets: {}
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: 0a0db37c6a7a8d171d74fadfc90adf755967b90ae15bda61289106e1577ca81d
+      closed: true
+      note: '## Proposed Solution'
+      facets: {}
+    - chash: df830aa27dc65d06e87bb8b31d5d19c23756316d291c494a6abf776611a0ad16
+      closed: true
+      note: '### Decision Rationale'
+      facets:
+        plugin-installs-cli: supports
+    - chash: 04e57bf18a65978aaca8991016acbefa7d31e3662ad45de880281fce0969796c
+      closed: true
+      note: '### Risks and Mitigations'
+      facets: {}
+    - chash: a8578a64b851ebfed51f7f80da769b9000f07778186e72e49c69db791e0dab0b
+      closed: true
+      note: '### Failure Modes'
+      facets: {}
+    - chash: 13b7615b8e8e2905ce5ef94acaf68448bc7c0a7980eb8dd9f6014d1306c5d5f8
+      closed: true
+      note: '## Implementation Plan'
+      facets: {}
+    - chash: c9bcac6c54b8c80ade18c42fa4b3fd8b8a91a32d54584bbb82cf5fc4281b0479
+      closed: true
+      note: '#### Step 4: Entries and defects'
+      facets: {}
+    - chash: 01ed1154c6ed4cac6bd073d34e4dea1e033448688136d1bc7f26bb3a7ee73fc8
+      closed: true
+      note: '### Phase 4: Install pages'
+      facets:
+        plugin-installs-cli: supports
+    - chash: 62ef22d7647f7d39f4f65557f80a4f2711f1c8a0370a0fdb1a834ccfe8ccdea3
+      closed: true
+      note: '## Finalization Gate'
+      facets: {}
+    - chash: d93e023b702434c845f011bda56db7c299fd672f934e1c647e21c6162b7a5b46
+      closed: true
+      note: '## Revision History'
+      facets:
+        plugin-installs-cli: supports
+    - chash: dd90e4ebf68ea3c0060c7fec712d2c04ac150d62d612d318a225afb3a1e2b75f
+      closed: true
+      note: 'RDR-143 SessionStart hook: plugin<->CLI version lockstep (Shape B).'
+      facets:
+        version-marker-hook: supports
+    - chash: 2e68f57d6c7c840320a035cd1268f93b9968d13a38250ca08cb14b1b86e0ebd0
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets:
+        plugin-installs-cli: supports
+        version-marker-hook: supports
+    - chash: 1937c890479607a8a87d5f6e23949bd99d10a3700307ac11de8744f2ff6829a4
+      closed: true
+      note: '"""nexus-ehg1y (found in RDR-228 MVV row 4). A hand install'
+      facets:
+        version-marker-hook: supports
+    - chash: c84e90eb21df1cfa404215136b25d67c039c9559841e0d8ee029d28b947f0dec
+      closed: true
+      note: '"""Detect skew (version mismatch, and separately, nexus-konsk ref'
+      facets:
+        version-marker-hook: supports
+    - chash: 5fbac8f6cb483db3fd65ec5c317d12833786e79bb9403bcff33eae439b9701cb
+      closed: true
+      note: his action is where those run. See :func:`start_background_upgrade`.
+      facets:
+        version-marker-hook: supports
+    - chash: 00218573f10ac7df90a6d5b1e3bf9d96d82002a210c3ff5c49a27e4d4d25e56c
+      closed: true
+      note: 'if not cli_present():'
+      facets:
+        version-marker-hook: supports
+    - chash: fe51e55a204f6efa839e7f4ff86450997cca68b3afced132d23e37d8c199e147
+      closed: true
+      note: RDR-143 detached upgrade action for the plugin<->CLI version lockstep.
+      facets:
+        version-marker-hook: supports
+    - chash: 43d9a7be2534b54bb64b82d3b9ac8e76d4365a9db97e42185674d110656ac25a
+      closed: true
+      note: '#!/usr/bin/env bash'
+      facets: {}
+    - chash: 4284e373421eb588134cf573a5f9837d38cd511029a6a761de8ae133b52554f7
+      closed: true
+      note: 'def _nx_after_build(run: _Run) -> str | None:'
+      facets: {}
+    - chash: 3d9fae11046f71e899ec0bc6a02d845e204bc0967794d1bd110575dfb7318954
+      closed: true
+      note: sys.stdout.write(
+      facets: {}
+    - chash: 5b33dcd3ca99a10e03b693c4533f220d031563b98793525f814dbda82f681cc7
+      closed: true
+      note: '#!/usr/bin/env python3'
+      facets: {}
+    - chash: 43859e9aa510f6c1a6ad8f6748789bad8d47b74541eed6d0a35d4cbaedf3d1ab
+      closed: true
+      note: k,
+      facets:
+        version-marker-hook: supports
+    - chash: 0aba39646108d68d851e6b7bcaf55691c714f486611a5010e6e463838ed909e6
+      closed: true
+      note: install updates ``installed_plugins.json``'s own ``gitCommitSha``, so
+      facets:
+        version-marker-hook: supports
+    - chash: bf223169b11c41a76f6ea230049e405cf6b3583be9f1c5d3b0b6c3dbca9145d3
+      closed: true
+      note: ight.py``) -- the ref-drift functions below
+      facets: {}
+    - chash: 8cd09b9336f69af624ff698a30340fd9f151c070bcd59ed5a084e45567d46ae9
+      closed: true
+      note: from __future__ import annotations
+      facets: {}
+    - chash: 68efe005390dbb71304a05a76ebdced64bba9c4e3b45d6ce7123be1eeffc491b
+      closed: true
+      note: '# scope, above) and the >=3.12 guard right after it has already passed --'
+      facets: {}
+    - chash: 8112c24bc547c56ed8630af9dcf8abee8b9a2d474c140d2d8547a0319e042d90
+      closed: true
+      note: '#: worst case grew linearly with the plugin count (measured 4s for'
+      facets: {}
+    - chash: 120029944202bd772c411fa6e46ecba5b043ac519ef189e4825ecc93fb3f1a34
+      closed: true
+      note: 'def marker_path() -> Path:'
+      facets:
+        version-marker-hook: supports
+    - chash: 9b8f6a608276a1ae931a8a5155958b87bb596b2e103b7e8871c80515df205016
+      closed: true
+      note: '"""The marketplace.json that lists the plugin set this process''s'
+      facets: {}
+    - chash: e9b08d98523882e01f83491c049623dd90fade4cc2169ea616a8d1d3ede7d1c5
+      closed: true
+      note: root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+      facets: {}
+    - chash: 40eb6d6e6dcd4130672446676bafbef08cd57291f4b83ccea443fe0043a57f7f
+      closed: true
+      note: 'def _warn_fallback(reason: str) -> None:'
+      facets: {}
+    - chash: 02ffd040b1bd6addd1242d4243e122b743290ed58113bb7a612a99842f2c6992
+      closed: true
+      note: '"""Plugin short names ``.claude-plugin/marketplace.json`` currently'
+      facets: {}
+    - chash: 71af8abe7e154e5dfdbe0b7a9c2fbaa0921411923d51b0975bd74f94f540d415
+      closed: true
+      note: 'if path is None:'
+      facets: {}
+    - chash: 17f4324e42e36236e4b811662726dc6799f34fff76287c778c92c83588d8242d
+      closed: true
+      note: 'def read_marker() -> str | None:'
+      facets: {}
+    - chash: f74a0d0b5a7564eda3c5f3bb4e5bfca6489ec113d4e493a4776438e015b415a8
+      closed: true
+      note: 'def satisfies(installed: str | None, target: str) -> bool:'
+      facets:
+        version-marker-hook: supports
+    - chash: 78010ad78982895860cfa95c4520477b54f5111405e68b0c62ad3257dc17b5fb
+      closed: true
+      note: 'def read_cli_version() -> str | None:'
+      facets:
+        version-marker-hook: supports
+    - chash: 69cc31ac31db5fe5cb7d876d89103d8daf22c68348cf3a9a1f00cab9ebd93178
+      closed: true
+      note: 'def _wrap_context(msg: str) -> str:'
+      facets:
+        version-marker-hook: supports
+    - chash: 4546e705624d3ba0adc2059c31a7165dfded7457fccec534cf9ff0b7b4bfcb98
+      closed: true
+      note: 'def dispatch_action(target_version: str) -> None:'
+      facets:
+        version-marker-hook: supports
+    - chash: e98742d8d9e8811b5ec5655f8ec01ec69077b04af052da8009b42383ae6976d4
+      closed: true
+      note: '"""``{"<plugin>@<marketplace>": (marketplace_name, git_commit_sha)}``'
+      facets: {}
+    - chash: 062b46bcb0da9edc1651638f2f61a4714c7d95404988c5f4ae752b49c7072338
+      closed: true
+      note: 'def _marketplace_install_location(marketplace_name: str) -> Path | None:'
+      facets: {}
+    - chash: d610df1bfb82e8356f71bd31c12428708cffacf0b5d1186f36217cec2ffcb104
+      closed: true
+      note: 'def _pinned_ref_for_plugin(plugin_short: str, install_location: Path) -> str | N'
+      facets: {}
+    - chash: b9c1c09368765a12fe3e47114e4c0d6db3cccd7507b5f6f01d22738dd92a5e44
+      closed: true
+      note: 'def _resolve_ref_sha(install_location: Path, ref: str, timeout: float) -> str | '
+      facets: {}
+    - chash: 89d383e257ec14e0d115fc1f895405ef095b77dd9c92b802fffb22a029dd6a1c
+      closed: true
+      note: '``[(plugin_id, was_sha, now_sha), ...]`` for every installed'
+      facets:
+        version-marker-hook: supports
+    - chash: 09a600fd7306737096c10a2ce127cf2c149733385f32601371103641e3b75460
+      closed: true
+      note: 'drift: list[tuple[str, str, str]] = []'
+      facets: {}
+    - chash: 678e5c47339bbe9d14984c427f0f758e62ea34e5b5788d86a0909429354e237b
+      closed: true
+      note: 'def build_ref_drift_context(drift: list[tuple[str, str, str]]) -> str:'
+      facets: {}
+    - chash: 3189d2da6a427511d82bac90ec9bac8c222dc9c3d924f39f1b3ad100b1942941
+      closed: true
+      note: 'def _combined_context(target_version: str, drift: list[tuple[str, str, str]]) ->'
+      facets: {}
+    - chash: dc3e675be9c3ba07a57c8e084745ac1b3862bd053144a702f177bbd4abd160b5
+      closed: true
+      note: 'def ref_drift_marker_path() -> Path:'
+      facets: {}
+    - chash: 5da68118f5b221d6833cce0e07437181cec166865d95318320176fa0639a853b
+      closed: true
+      note: 'def write_ref_drift_marker(entries: dict[str, str]) -> None:'
+      facets:
+        version-marker-hook: supports
+    - chash: 697f2fc91d7b55c32c86691dbd7a729e6c3a9389ddef9838d5c828ad73cf6ce6
+      closed: true
+      note: '"""Fire the detached ref-drift reinstall and return immediately'
+      facets:
+        version-marker-hook: supports
+    - chash: 1931e334f807f8639b2c33ed116815b2799f8374b75076df42963b9c8dd6ddf7
+      closed: true
+      note: 'try:'
+      facets: {}
+    - chash: 6add45c2ccea0efde07adc731294333528fc4c24942c9ec695bcc7e0a0d03b1c
+      closed: true
+      note: 'def cli_present() -> bool:'
+      facets:
+        version-marker-hook: supports
+    - chash: 668d7075dc4d891a555244e0d642a867ca14f1bfdf55883cac8744ef3efabafb
+      closed: true
+      note: '# already matches the ref-drift marker''s recorded attempt was'
+      facets: {}
+    - chash: 9deca560141f5692aa42bdc5e9ae0d72f5235698efeddb8835deb17679fe99db
+      closed: true
+      note: 'except Exception as exc:  # noqa: BLE001 - hook must never raise'
+      facets: {}
+    - chash: ef251a9d00c7c51f7d17910590d69a23288937815b3a5ce787e5422befde87e6
+      closed: true
+      note: 'def marker_path() -> Path:'
+      facets: {}
+    - chash: 06378a8f1bfb2d1dc3d53606978dc5c64be6a6e7b8bfc1dec998de69e3f0641e
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets:
+        version-marker-hook: supports
+    - chash: 93db86be06ed880dba8de4be5abb48758e4ea59d710f469a3803985d61d7f1d1
+      closed: true
+      note: SCRIPT = (
+      facets: {}
+    - chash: b52fe78a1d0fecc56838d6b2c4bbb86a02fa65830d4db2927198869c38d43005
+      closed: true
+      note: 'class TestReadPluginVersion:'
+      facets: {}
+    - chash: 40ca3b90983b4b4bbdbd668e836a0849932383b92ae0f4934bcde3af22a5a9f2
+      closed: true
+      note: 'class TestMarker:'
+      facets: {}
+    - chash: 0e423de91ad8de5def44223e46fba3c64d353cb6eeacc51b1daf7a81538a6753
+      closed: true
+      note: 'class TestNudgeContract:'
+      facets: {}
+    - chash: b4fc6142c092e3ee922e9b7e6b6ff363c3fef3833a395f24b05bad39da39a0a9
+      closed: true
+      note: def test_match_is_silent_and_no_dispatch(
+      facets:
+        version-marker-hook: supports
+    - chash: dde9e5295ab23b302a4438efb836dc86b672885b6b34672adfdfda777454a935
+      closed: true
+      note: def test_missing_marker_treated_as_mismatch(
+      facets:
+        version-marker-hook: supports
+    - chash: 64b990e00f4ed0ebb4fb1d641f28c1356af2c22bb5e05aff2b1626bd3d257b23
+      closed: true
+      note: def test_unreadable_plugin_version_is_silent_no_dispatch(
+      facets: {}
+    - chash: 64eac61282d30ff359541a53ad024379a5274923ce78d582d7673e350e01b7fa
+      closed: true
+      note: def test_matching_cli_without_marker_is_silent_and_dispatches_nothing(
+      facets:
+        version-marker-hook: supports
+    - chash: 6bec995c613b9322b2581fda13b73eb0116c2d0d21809e725ff8164909e15389
+      closed: true
+      note: def test_stale_marker_with_satisfying_cli_is_silent_and_dispatches_nothing(
+      facets:
+        version-marker-hook: supports
+    - chash: 87cc829884d50dcf63998b3e98568ced32eda3268ac03fceeafc4d2654576139
+      closed: true
+      note: '@pytest.mark.parametrize("marker_text", [None, "1.0.0"])'
+      facets:
+        version-marker-hook: supports
+    - chash: ea78ac22de85a7d48bd163a9039ce975eb8c478adb3d3cfb8a08fa59d691db8d
+      closed: true
+      note: def test_matching_marker_does_not_ask_the_cli(
+      facets: {}
+    - chash: bc330429342857e24a8b4cdb6148c2c2e7bc21ce2ff2ea4fffb6939cbe0f6501
+      closed: true
+      note: '@pytest.fixture()'
+      facets: {}
+    - chash: 7c30a9b135656ec3dc1109a53fd72211a47baa8b72b5c142b1a102f3dc8652fa
+      closed: true
+      note: '@pytest.mark.parametrize("windows, flags", [(True, 0x08000000), (False, 0)])'
+      facets: {}
+    - chash: 74e5ec8a882de4de719173e378a4291931edd77c3453d93f4a1d8c113a5fa416
+      closed: true
+      note: '@pytest.mark.parametrize("exc", [OSError("boom"), subprocess.TimeoutExpired("nx"'
+      facets: {}
+    - chash: 4837fc7422f86a962aaacd796ebe2d64cf55411fa80866176635dc945984ddf2
+      closed: true
+      note: 'def _load_action():'
+      facets: {}
+    - chash: 0c21de19013cc457a554d63fe66a4cb78cff50f4523ec06852dd578cf745bf34
+      closed: true
+      note: 'class TestVersionRuleCopiesMatchTheAction:'
+      facets: {}
+    - chash: 20c4fbf1999f87df784c7e5346dd41084f93b3de62f78993e7a34d2a1be03e7b
+      closed: true
+      note: 'class TestParserReadsTheRealCliOutput:'
+      facets: {}
+    - chash: a249c376984d6e5ff7f65284821dcb46fdf55d13abe581c1224d3ce8c27705a2
+      closed: true
+      note: '"""RDR-228 Gap 2 (nexus-sv2wx.8, residual nexus-j8ebc item 4). With no CLI'
+      facets:
+        version-marker-hook: supports
+    - chash: 52fb831907b3c8fc139f0ed50d7d0a5d084829ca67589a59bc8b844c9c9b7e8a
+      closed: true
+      note: '@pytest.mark.parametrize("drift", [False, True], ids=["version-path", "ref-drift'
+      facets: {}
+    - chash: 471783275d42932ef2da03d1793a8d525f5fd413d11fdb3932e2f73b0b28acfd
+      closed: true
+      note: def test_cli_present_is_the_launcher_s_lookup(self, tmp_path, monkeypatch) -> No
+      facets: {}
+    - chash: 481ede751c1ec1c068da6293af04a9212d724e22f94a8d181cd78518a03e6f2d
+      closed: true
+      note: '"""The generation layout, then PATH: an install made after the application'
+      facets: {}
+    - chash: 85a178bb2f0c0fed94d66acaa9d33b09783dc47a5dc12dea299733e20281bf3b
+      closed: true
+      note: def test_dispatch_returns_immediately_for_slow_action(
+      facets: {}
+    - chash: 0def1b9f00659ab1adcf9ffa66b0df6d17413199525c2584ea1bb1c7979cb78d
+      closed: true
+      note: '"""dispatch_action must detach (not wait). We stub Popen and assert'
+      facets:
+        version-marker-hook: supports
+    - chash: 16ced84d105b4f0fbe1eb2b5c3a74c69ea656c34aaeaac2cf34d1e261879b79e
+      closed: true
+      note: flat = " ".join(map(str, calls["args"])) if isinstance(calls["args"], (list, tup
+      facets: {}
+    - chash: 9dbc20a4c49cf1bb6515b4a8cb5e78a304e7f8a2825cf139535d8fa7c51319d5
+      closed: true
+      note: '"""RDR-197 P1e (nexus-a2wmi.5) pinned Critical Assumption 2 as'
+      facets:
+        version-marker-hook: supports
+    - chash: c04be36ecb777304340a2fd70dcac90951186cd81762b298f3e289b5a85c5ff9
+      closed: true
+      note: '"""A fixture repo layout mimicking a plugin-channel cut: a'
+      facets: {}
+  H18:
+    provenance: drafted
+    items:
+    - chash: 7fa4975bc9064948b32f9fcfb48d00d221c351cc258f05edd9854440565316c6
+      closed: true
+      note: "# RDR-218: Windows Platform Support \u2014 a Low-Friction Plugin Install for the CLI "
+      facets:
+        windows-docs-and-rdrs: supports
+    - chash: e6fcd7455aab60f8f8ca814250e73cf421ebe785a80a227ee131d684cba4f6fd
+      closed: true
+      note: '#### Gap 5: the desktop bundle is a shim, not a bundle, and it excludes Windows '
+      facets: {}
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: a83fb7575842e8742f23f2eafd6162294bdae4f11be0460bfc1f21e300852f53
+      closed: true
+      note: '### Investigation'
+      facets: {}
+    - chash: 0a0db37c6a7a8d171d74fadfc90adf755967b90ae15bda61289106e1577ca81d
+      closed: true
+      note: '## Proposed Solution'
+      facets: {}
+    - chash: 396a69c22fe7a7cbb1a92bc75776bac21d69b463bed4e84d240874f6c9885a7b
+      closed: true
+      note: '### Code and data are separate, and both locations are already configurable'
+      facets: {}
+    - chash: 77b2b3545075d3aabb84f8a2aafdf6bc4cb4bc6fec4977186336683d6d3da818
+      closed: true
+      note: '## Trade-offs'
+      facets: {}
+    - chash: b2a78f767819206af8d6d8c5c6d1e0b2aa1b15c604c1cafc2c83d3b19c2c945f
+      closed: true
+      note: '## Implementation Plan'
+      facets: {}
+    - chash: 040cdf77b1e5d39ffed73b3267f80037aef1d4bccda165c2e3ed6399b725a725
+      closed: true
+      note: "### Boundary half \u2014 release battery, real Windows hardware"
+      facets: {}
+    - chash: e2e3d11c44fb15df46cea0710c7262142d59231995a16c093dc08b0dc3bae74a
+      closed: true
+      note: '## Open Questions'
+      facets: {}
+    - chash: 108b8a73bf876a86db2de4d8936e2f4f77cd3b1af3520701974fdea169a736d9
+      closed: true
+      note: '### Run, and passed at round 2'
+      facets: {}
+    - chash: 7a2f49e3650c4814c09570b913f9e67f27281a684c0022bb074902c857d2682e
+      closed: true
+      note: '## Revision History'
+      facets: {}
+    - chash: d4eb92a3722f2b9f3734541e588b88337d5189f21c32a515145cd00ef8a6cc09
+      closed: true
+      note: '# RDR-224: Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Cli'
+      facets:
+        windows-docs-and-rdrs: supports
+    - chash: 746eea29174c2fbc2de0aff862741a0b5176d3dfc8a0b83969c2812dd32219a0
+      closed: true
+      note: '## Relationship to Prior RDRs'
+      facets:
+        windows-docs-and-rdrs: supports
+    - chash: 8f845bc2db49a35e766cb2d1a5b66049c899ebf260a18644ff6c70a927a8ca3b
+      closed: true
+      note: '### Technical Design'
+      facets: {}
+    - chash: 41b307858fe3c2f5c1a505f7945dbe551a7603da0e5c321e4609c831d6278384
+      closed: true
+      note: '### Consequences'
+      facets: {}
+    - chash: fbc40b0ebb4bf73dfafd20cacee1f6bf2a1168fe83f52f6cf5f6d0215b9c9b7b
+      closed: true
+      note: '### Risks and Mitigations'
+      facets: {}
+    - chash: 13b7615b8e8e2905ce5ef94acaf68448bc7c0a7980eb8dd9f6014d1306c5d5f8
+      closed: true
+      note: '## Implementation Plan'
+      facets: {}
+    - chash: aaa92f53308ab6e155f9438bd6c12a5503903b187dd72f9b4ce7b7a3bd358e76
+      closed: true
+      note: '#### Step 0.6: VC++ redistribution terms'
+      facets: {}
+    - chash: a9e4954d8dc8821d564bf32d6a4e9c1600e43420885a12815e455a953ae26369
+      closed: true
+      note: '#### Step 3: Autostart'
+      facets: {}
+    - chash: 2795faf4b75d58ce31d0486cd1c736ab807a2bedf59b8598aa62b84d549436ec
+      closed: true
+      note: '### Performance Expectations'
+      facets: {}
+    - chash: 129aaa9fe53d8916f930663050e279d20a98c9e60d08707e2f7af7b5d2e7a099
+      closed: true
+      note: '## Revision History'
+      facets: {}
+    - chash: 27f20eb3c6a9941da6a9d5b74b44b79a87bb0d4235b987dc434c2c2f7ed7b9b4
+      closed: true
+      note: '### Fixed'
+      facets:
+        windows-docs-and-rdrs: supports
+    - chash: e67333229550217ffe63d01fe9965310388e3034445d0a489025d978ac354419
+      closed: true
+      note: '### Fixed'
+      facets: {}
+    - chash: 834edfbc57ffa464f35e69d0e4a60c4da5e6c3ca5ca0d6562bfaa8a6fd7f8037
+      closed: true
+      note: '### 1. The script'
+      facets: {}
+    - chash: aefeb542f6e77c49d999381af17e8f88e676810db7027b56f4b9e2eb551a8ad4
+      closed: true
+      note: '### Added'
+      facets:
+        windows-docs-and-rdrs: supports
+    - chash: 28d7b36548cf49681ac203b2702f0fa7161ccd5ab0530eec5271bced1f592f8b
+      closed: true
+      note: '### Application control'
+      facets: {}
+    - chash: 2ff1132cd596ae77f3519cb43f74ae16c5a6e78b509673ee824641a8dae710cc
+      closed: true
+      note: '## Install'
+      facets: {}
+    - chash: 695d5fc9baf9bc2872421e4c124c0f1c15399f1e087cdb99940971f3426d2e51
+      closed: true
+      note: '### Added'
+      facets:
+        windows-docs-and-rdrs: supports
+    - chash: d6342c992473ab38624c72dfc6ce0e6eeed04cb5f4f1570160fedaf48876085d
+      closed: true
+      note: '### Fixed'
+      facets: {}
+    - chash: 44b7a18280f7bc6310cc7e6b2883b5735a8cce11da6bf07c7f1c237ad8a2001d
+      closed: true
+      note: '### Added'
+      facets: {}
+    - chash: f266deaf7bdd101bdc628602fc3e2829da14587ada1de840f32bd65b34ddfc90
+      closed: true
+      note: '## Install'
+      facets: {}
+    - chash: f60adb886a48407803391aef7c7514e934e841660368a9660d6d915615ea60f3
+      closed: true
+      note: '## 1. Install uv'
+      facets:
+        windows-docs-and-rdrs: supports
+    - chash: 1382ba46b9a2faef6cba5ab025b2c24ea399a3eff25c75998f4172aef15b43cc
+      closed: true
+      note: '## Install'
+      facets: {}
+    - chash: a20ad5857fb7b8f3de3ca973314ea2fa0c2cd9069bb22a44da236e74e19694a5
+      closed: true
+      note: '## Behavior'
+      facets: {}
+    - chash: 173c36a7c94bee0762891d930f276a3e3fb29e3de8e74250ce229a983ed5a341
+      closed: true
+      note: '## Install'
+      facets: {}
+    - chash: 735d14fc562b389b233f8fb40a2e3cd5b690026d51452f07a3e66d812a1bb08e
+      closed: true
+      note: '## nx self install'
+      facets: {}
+    - chash: 775a7ad586734d8971874e17ca4096f9d5781d39fa55403e5a2be8e5fcff1f05
+      closed: true
+      note: '### Key Discoveries'
+      facets: {}
+    - chash: 435a73d9dd321b27c158f179afa152749b8ffda60033a3018de42e5eee543940
+      closed: true
+      note: '### Key Discoveries'
+      facets: {}
+    - chash: 6d8120152adbb8d403942acf754b3c66190c9604be692559b261695cd1df7096
+      closed: true
+      note: '### Existing Infrastructure Audit'
+      facets: {}
+    - chash: 0c4898c8b8f312ff73f7e183be874170e9de5f00031d54c34b2492c3eb8a9cec
+      closed: true
+      note: "### L2 \u2014 `0025:C4` / `0025:\xA7failure-modes`: the Windows refusal has no home and "
+      facets: {}
+    - chash: 69ddf35945fa35db99ca918a23bc05bc39c5cc12672293d41b2e07d838752226
+      closed: true
+      note: '### Key Discoveries'
+      facets: {}
+    - chash: e6e2b8d661d9135a2263a2afcc56b390af64d9be603ff273d3638b23d890ae02
+      closed: true
+      note: '#### Gap 7: No gate on real Windows hardware'
+      facets: {}
+    - chash: 475436fc377d30c6d1f7dcb4f106dbe6b476deca9127608e899512501f05e9ae
+      closed: true
+      note: "## Step 3 \u2014 Findings"
+      facets: {}
+    - chash: 434b6810af8501abbc911227f1560e7069bf1ef25fbadc53ff427a5bb145a098
+      closed: true
+      note: '### Cross-Cutting Concerns'
+      facets: {}
+    - chash: 0b553df608c69cac47a6485985edfb87bfe8b0be0331c8545a5cacf36015179e
+      closed: true
+      note: '### Critical Assumptions'
+      facets: {}
+    - chash: d62d65f87ce5a3729d8fc8e6e4d3fc7815d61216001c99bb0cc93876bdf4d172
+      closed: true
+      note: '#### Step 0.5: Windows CI placement and clean-machine host'
+      facets: {}
+    - chash: 60bf7a8c60b047b7be856a52814cb485c4f34460a15ca14c06e7ba97b40a77d7
+      closed: true
+      note: '#### Gap 5: The plugin and desktop surface refuse or break on Windows'
+      facets: {}
+    - chash: 2cabac44a480ee14a30ea3ffd48af067645a7e5983e9491a1b9a846d797d327e
+      closed: true
+      note: '### Key Discoveries'
+      facets: {}
+    - chash: 40b88e7410dca0c76e5535da57062ac3f3ad7368704adbc0ed075f2074dc60dc
+      closed: true
+      note: '### Key Discoveries'
+      facets: {}
+  H19:
+    provenance: drafted
+    items:
+    - chash: f654a4278d3783e52fe3b1df593e2e50433b7b5e1d71d175a4bfdd63e3245590
+      closed: true
+      note: 'def test_a_missing_jar_exits_75_at_session_start(tmp_path: Path) -> None:'
+      facets:
+        remedy: supports
+    - chash: d1d4627407a73770785c1fa4d4717b270edb8d8b2d38d6d68a6c9ce1b7355720
+      closed: true
+      note: '# The session-start notice (nexus-zryqm) used to be a stderr banner here. It is'
+      facets: {}
+    - chash: 595f4e2a8cb77ec6bfeecff6870fba5b7e747245e7a18f1f2a068bcd6411cf34
+      closed: true
+      note: TARGET = "tests/scripts/test_git_push_develop_sh.py"
+      facets: {}
+    - chash: 45b90e75ee495b180699b0cd59ea7ac4502cb549f9102a812f1bd75584d1931c
+      closed: true
+      note: '#: harness does not want to weaken -- but it means a harness run can queue'
+      facets: {}
+    - chash: 3a1bfb96689f2b36673a5ca2706b9a4589edbea8a8c9d52e87c4c17cbb0e59a1
+      closed: true
+      note: if (
+      facets: {}
+    - chash: cc51df04a7f719875188b11a9ad8b7207f01a87c8080c335e64f18c9132457a2
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets:
+        root-cause: supports
+        setup-error-wall: supports
+    - chash: 85f8a23831e543332f3c08886b63e88e963e443d0e5f69cdd0d67ed74ae1d43a
+      closed: true
+      note: _GATE_JAR_LIB = Path(__file__).resolve().parents[2] / "scripts" / "lib" / "gate-
+      facets: {}
+    - chash: 8812dea2951b558a0b1d5ba2dfd3fe756f79479397c08a4406e2ec2334b6f751
+      closed: true
+      note: if [ -n "${NEXUS_SERVICE_BIN:-}" ]; then
+      facets: {}
+    - chash: cb226e50e159e363502d8e1117e0b83145468a4b66bbb2a681daaad97cde03b6
+      closed: true
+      note: 'def test_unreadable_jar_reports_rather_than_raising(tmp_path: Path) -> None:'
+      facets: {}
+    - chash: 05734014d23d25ba098749a0a45e582156a09c1425e18cccc7f6ddd5da1c2bf2
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets:
+        root-cause: supports
+        setup-error-wall: supports
+    - chash: a02d2116dc3f8544ae3219e928f0cd311e9b2c67d0a009ffd581f84d23a8974a
+      closed: true
+      note: '## A fresh test host: what it needs, and what the suite provisions itself'
+      facets: {}
+    - chash: 8a0fa1e6d8deefe1ec283267f2b28f4574bced7c0e76b614ebdb97887d5cf39c
+      closed: true
+      note: '## Worktrees: one session, one worktree (2026-09-19)'
+      facets:
+        remedy: supports
+        root-cause: supports
+    - chash: 04cfad0979b7981534c79aa707513a35b7122be5c665c220d441269333b2bfee
+      closed: true
+      note: '## Dev loop'
+      facets:
+        remedy: supports
+        root-cause: supports
+        setup-error-wall: supports
+    - chash: aad935530a4d1f792671eedd4dde5904c9d375a9c9ce515c38feca5292cb9ff5
+      closed: true
+      note: "### Engine-service release (a SECOND lifecycle \u2014 decoupled from the PyPI release"
+      facets: {}
+    - chash: 9ada6b41b1952cf6d0f2b5304eb157870d73b258a16e317f47745da8a138eee7
+      closed: true
+      note: '## Quick start'
+      facets:
+        remedy: supports
+        root-cause: supports
+        setup-error-wall: supports
+    - chash: 9b30a10a66e2c5c421876dca71da5a0fedcf661fca4f22c74f4077332e5803c5
+      closed: true
+      note: '## Self-hosted runners and fork PRs'
+      facets: {}
+    - chash: af757d10fea037f59c58d62783a81dc7ba79ac881e5498d8970198c3abed990b
+      closed: true
+      note: '## Worktrees: one session, one worktree'
+      facets:
+        remedy: supports
+        root-cause: supports
+    - chash: 3a0abeb9b6614f4b2d475c67f68e165c31488a60dac467449f0685b3573b8243
+      closed: true
+      note: '## Self-hosted runners and fork PRs'
+      facets: {}
+    - chash: fa462da81616f2e618b25966ceba4e492ee529d8fc3efbc8408449b5b8c8a4fa
+      closed: true
+      note: '# Test running details'
+      facets:
+        remedy: supports
+        root-cause: supports
+        setup-error-wall: supports
+    - chash: 952b7bedac979ed90b94345d1e0a835cbed8a26a52e0cd3d917d18f5b265b79b
+      closed: true
+      note: '## Quick start'
+      facets:
+        remedy: supports
+        root-cause: supports
+  H20:
+    provenance: drafted
+    items:
+    - chash: 85b4d1eb70b12c44adfcf5cb37f14876e52ffe87ad0e4c32b6792762ee2aa973
+      closed: true
+      note: '# Lost in the Middle: How Language Models Use Long Contexts'
+      facets:
+        lost-in-the-middle-explanation: supports
+    - chash: 12cb834c53a8bfe721ee555712f43e2cf2cabf72894c40837a604537dc9dd856
+      closed: true
+      note: in retrieval-augmented generation), and (ii) control the position of the relevan
+      facets:
+        lost-in-the-middle-explanation: supports
+    - chash: 9c0e6ac5fcacd9b2e0e6e1ce158318845f8c5f6054b961598dd9ef8e4abce5c1
+      closed: true
+      note: "cially when contexts have 140 or 300 key-value pairs\u2014 although the synthetic key"
+      facets:
+        lost-in-the-middle-explanation: supports
+    - chash: 14e373ba0b467852992825112e595a5a6c9e91c1c7aca74005d800a0a8e8a562
+      closed: true
+      note: inue to exhibit a U-shaped performance curve.
+      facets:
+        lost-in-the-middle-explanation: supports
+    - chash: d8d55c85f8346622b2eddcff7be26deadf68bbe8075efc2371ecfc94bbf2ec51
+      closed: true
+      note: r-decoder models (Flan-UL2 and Flan-T5-XXL) evaluated on sequences that are shor
+      facets:
+        lost-in-the-middle-explanation: supports
+    - chash: 92b16d4479ee009539621de9c72abacb4ed8cc622514afe8f75852cb8713b473
+      closed: true
+      note: ens (Figure 8; center and right), Flan-UL2 performance begins to degrade when re
+      facets:
+        lost-in-the-middle-explanation: supports
+    - chash: 388c4694556a15ae9999cdd4daa2488b544c74928dabe6e40858f9823635f076
+      closed: true
+      note: dels have a U-shaped performance curve, where performance is much higher when re
+      facets:
+        lost-in-the-middle-explanation: supports
+    - chash: 655311ef6a18f19f74e397093539e8051cd88ad111e3e67d12fd8eb11a04e411
+      closed: true
+      note: that extended-context models are not necessarily better at using their input con
+      facets:
+        lost-in-the-middle-explanation: supports
+    - chash: a3ce8a635748d8a98597e5208b5bb6a9e2516c1566e030ffe966ddbbc2ba0364
+      closed: true
+      note: 'ery beginning of the input context, but slightly decreases performance in other '
+      facets:
+        lost-in-the-middle-explanation: supports
+    - chash: f11f6f8af74629350be24e6a8b8fdc4f3512f24e07ad018f8b940716eeeb2d4b
+      closed: true
+      note: lposition effect (Ebbinghaus, 1913; Murdock Jr, 1962), that states that in free-
+      facets:
+        lost-in-the-middle-explanation: supports
+    - chash: 152f74968bdb548c4f6d0b534953c27e6ac04841e98c2d57b7fb70dfef829df0
+      closed: true
+      note: tween evidence and question, as existing works (Li et al., 2024a; An et al., 202
+      facets:
+        agreement: supports
+        context-length-explanation: supports
+    - chash: 96d9be2d31dbdc8891b061034b48547574714f0e14dcf1793ab401be81f3bc7d
+      closed: true
+      note: 'and closed-source models on math, question answering, and code generation tasks '
+      facets:
+        context-length-explanation: supports
+    - chash: a91e56c6d84d974fbd871b4c12e51603165b1a543485eaf149172a680e6a56f3
+      closed: true
+      note: across 5 open- and closedsource LLMs on math, question answering, and coding tas
+      facets:
+        context-length-explanation: supports
+    - chash: 4b4bcae6b84a383cedf8d3518cd66c52855d6df4f7cc87bebdbd14b3d1b8a5ae
+      closed: true
+      note: itespace already provides initial implication that with minimal distraction, the
+      facets:
+        context-length-explanation: supports
+    - chash: 9dce05eb09c9f2587887c74c33c58c83a82fcdb44bbe4383a5c1e96aeb29ec0b
+      closed: true
+      note: long-context tasks as effectively as short-context ones? We observe a consistent
+      facets:
+        context-length-explanation: supports
+    - chash: 21019afe0fb4dd98b189a0239fc3d5096c97f0ed780baa153c58de7846b7eaf2
+      closed: true
+      note: source counterparts. They experience a smaller drop across increased context len
+      facets:
+        context-length-explanation: supports
+    - chash: ff0594d2eedb558bccf2c8db4b3db0be1778408b7da2771263accc0a5049a45b
+      closed: true
+      note: 'resh insights. Existing conclusions often entangle retrieval accuracy with task '
+      facets:
+        context-length-explanation: supports
+    - chash: ca4230e13a84d42043393288c867be4747324228c36f06e2b82f5c2d307a05c5
+      closed: true
+      note: are no retrieval failures on the actual problem-solving tasks. Others, which inv
+      facets:
+        context-length-explanation: supports
+    - chash: bfbe847905e837a78d5040daea3c01284c6223197dc1501dd439c85725166d2f
+      closed: true
+      note: 'al to those in the short-context setting except for the longer distance between '
+      facets:
+        context-length-explanation: supports
+    - chash: cbf36bdec04a31c904ff490c3ad1abb93669491f13604eb6052dbfed85345862
+      closed: true
+      note: iong et al., 2024; Jin et al., 2024; Fu et al., 2024; Ge et al., 2024; Chen et a
+      facets:
+        context-length-explanation: supports
+  H21:
+    provenance: drafted
+    items:
+    - chash: 69293d02c6c51b4295d9d2e011f00cece4c1ff9d147cef0ad8a7fa360a0f9547
+      closed: true
+      note: '# RDR-197: Independent Plugin Release Channel (plugin-vX.Y.Z-n)'
+      facets: {}
+    - chash: fc7a010797e6b4a1a576cb5ad93cee21efaa2e384e86c9f261c23c507eb16b80
+      closed: true
+      note: '## Problem Statement'
+      facets: {}
+    - chash: d878718d9e83146da7fabae860a0b5b5d4056b7853c038589daadeea11da862a
+      closed: true
+      note: '#### Gap 1: Plugin functionality cannot ship without re-releasing the wheel'
+      facets: {}
+    - chash: e00233cea3a7a0b200fdca1c56368f9365a80cbc5aa8a225ed36a96013d6ef2f
+      closed: true
+      note: '#### Gap 2: Every coupling that enforces the pin assumes one release channel'
+      facets: {}
+    - chash: 37861e2e14013ad7c69dfa0ecab17370a0a0e6cf9631382cdc23dff2fa1ba904
+      closed: true
+      note: '## Context'
+      facets: {}
+    - chash: 703a763a73d31384d7ce9c95fea46403daf7337b475f28949bd9c11eaf357558
+      closed: true
+      note: '### Background'
+      facets: {}
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: e3350d517b0aec47ac14be27a7c5cbe9bedff892acd47e72355c015c9c937fcb
+      closed: true
+      note: '### Investigation'
+      facets: {}
+    - chash: 9ed3fbbdcff18a9dbdb5aba2c21e3d979b52410f2aa95cbe75028d7fed315a01
+      closed: true
+      note: '#### Dependency Source Verification'
+      facets: {}
+    - chash: 4d55067d478e5e1fb47dc6d20803caa348edd93e2526ba29ed3c67455d5707e2
+      closed: true
+      note: '### Critical Assumptions'
+      facets:
+        decision-by-decision-status: supports
+        evidence: supports
+    - chash: 0a0db37c6a7a8d171d74fadfc90adf755967b90ae15bda61289106e1577ca81d
+      closed: true
+      note: '## Proposed Solution'
+      facets: {}
+    - chash: 124c536dd0c36a03ee26870e1b3aca719cea18b03033bf865cb0f742ef339dc9
+      closed: true
+      note: '### Approach'
+      facets: {}
+    - chash: 34d58ae7edab17bb4b095a6836805c4eb6bc63005c5a954420c67d42ae254587
+      closed: true
+      note: '### Existing Infrastructure Audit'
+      facets: {}
+    - chash: 014f98dfd38c0fb88a5498ac9953109d9e20133d54266d5c27a4413889136cbf
+      closed: true
+      note: '### Decision Rationale'
+      facets: {}
+    - chash: 8064d46dfe98f577596cf757b0369b27700fad864eb1f70a4f8221791dfbca49
+      closed: true
+      note: '### Alternative 1: Unanchored plugin-vN counter channel (this RDR''s first draft)'
+      facets: {}
+    - chash: 8e24c598fbf40998dec174f25c4620cd212797ad6516c9bdb2cec6ecb00e85c0
+      closed: true
+      note: '### Alternative 2: Separate plugin repository'
+      facets: {}
+    - chash: afa7da7ab746ff3ac5f7175aee23d398093088ada6933fd4109987e74721fb7b
+      closed: true
+      note: '### Alternative 3: Do nothing (batching + drift ledger, status quo)'
+      facets: {}
+    - chash: 77b2b3545075d3aabb84f8a2aafdf6bc4cb4bc6fec4977186336683d6d3da818
+      closed: true
+      note: '## Trade-offs'
+      facets: {}
+    - chash: 10dee8257a5df11f0e1459b907b90266b11029612eaac9c5dd21caa58a9c1f74
+      closed: true
+      note: '### Consequences'
+      facets: {}
+    - chash: 61dd2a292662cb39ac8e39e1fb8674232c53085fde5c80b5eb6baef46d9d7f49
+      closed: true
+      note: '### Risks'
+      facets: {}
+    - chash: 14cca1d58902074527f21aa34b801dffe6fc7313b8e0ba9d2248af55143ee276
+      closed: true
+      note: '## Test Plan'
+      facets: {}
+    - chash: 5dc77ef1083fe55976df8dd2999a88bef5fe30a4a9b3815dd2c665111edc77e9
+      closed: true
+      note: '## Validation'
+      facets:
+        decision-by-decision-status: supports
+        evidence: supports
+    - chash: ee9ba7a8b57dc31efc3f08d35098e43b5fdad0a13d57b25c0c9f89f538c10318
+      closed: true
+      note: '## References'
+      facets: {}
+    - chash: 2e9d9aa2a67eb531d60b58bd44df421f2049e7884beae300df1e28af26c4da72
+      closed: true
+      note: '## Revision History'
+      facets:
+        decision-by-decision-status: supports
+        evidence: supports
+    - chash: 9dbc20a4c49cf1bb6515b4a8cb5e78a304e7f8a2825cf139535d8fa7c51319d5
+      closed: true
+      note: '"""RDR-197 P1e (nexus-a2wmi.5) pinned Critical Assumption 2 as'
+      facets:
+        decision-by-decision-status: supports
+        evidence: supports
+    - chash: f359a04c76d02fd11eea66350d127fc964ab29022a4d879097da026f4f1daddf
+      closed: true
+      note: Primitives for the plugin-only release channel (RDR-197, nexus-a2wmi.1).
+      facets:
+        evidence: supports
+    - chash: cb3583fb60090dc83e82e242cc4fd0477bb354829a773aac7169b44c5a92ba08
+      closed: true
+      note: '# ---------------------------------------------------------------------------'
+      facets:
+        evidence: supports
+    - chash: 3398742a5f3e40d8e74cea27fe1b58a6198077cbad10480a14eed6c9ee2a979c
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets:
+        evidence: supports
+    - chash: a44836f36a84111b26294ec60b6de0423f67f0e32582bf0e76e5b0bc2e415320
+      closed: true
+      note: '# RDR-197''s channel moves a plugin''s release ref without ever moving the'
+      facets:
+        evidence: supports
+    - chash: 9b23525a9d57322c983ca7b2631bc5f838bb0225d027dfe7c9a01d101c4285c9
+      closed: true
+      note: from __future__ import annotations
+      facets: {}
+    - chash: ed4e92258b8785e37640b1a3e4a80df3678717cc681c0881ed9d2c3b07aab401
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets:
+        decision-by-decision-status: supports
+        evidence: supports
+    - chash: 66b5d4b89e627fe5ae3156b849296e7a0cff718f5bae64e9b38be4dbd7ee1117
+      closed: true
+      note: '"""RDR-197 (nexus-a2wmi.14): drift is judged per plugin, ref by ref.'
+      facets:
+        evidence: supports
+    - chash: b339396e7b8626adace35bda26a02d56cdcb21d57227ed071df9c404c1c73004
+      closed: true
+      note: '#!/usr/bin/env bash'
+      facets:
+        decision-by-decision-status: supports
+        evidence: supports
+    - chash: b12cb627f3ebd5c3b2929d69b6fab7b3e39c544ad7833695bb32071a9f26eb66
+      closed: true
+      note: '"""RDR-197 P1b (nexus-a2wmi.3), steps 7-12: the mixed-state truth'
+      facets:
+        evidence: supports
+    - chash: e1474dd2904c7b2e81f0d293340f77b190a81c3d496183ca88376556063a5be8
+      closed: true
+      note: 'ranch that tracks ongoing development either: on'
+      facets:
+        decision-by-decision-status: supports
+        evidence: supports
+    - chash: b9c11da1c5e45b59cebf6bd39ec806c270a49d1adb2ac1310aa140f13e910397
+      closed: true
+      note: '@Test'
+      facets: {}
+    - chash: d4fc22ea8d29a5d71e094dd48da1fa22bc820bd994537eb11bd524df851f952b
+      closed: true
+      note: 'def test_names_the_development_channel_launch_flag_and_dialog(self) -> None:'
+      facets: {}
+    - chash: 0b46fff7d367d39ac89501ba6495670d971972fa9437964dc396501f69ef3998
+      closed: true
+      note: 'def _deferred_declared_paths() -> set[str]:'
+      facets: {}
+    - chash: 1c2e32d67d3585e460bce583d5285d8e12e18a721ccd6e73873fe7e67dfba4ac
+      closed: true
+      note: def _pending_declarations(
+      facets: {}
+    - chash: 86a1bf4ebc62eeb333ffd93137164d2464e97d97cd2b539412b00ce0191294fb
+      closed: true
+      note: def test_phase2_plugin_parts_are_deferred_until_the_client_release_carries_them(
+      facets: {}
+    - chash: 703ef682c0faaf6678dfb2c7baa1f4905e87c0d5cbff137a0d74275c66a3f1cf
+      closed: true
+      note: '# ---------------------------------------------------------------------------'
+      facets:
+        evidence: supports
+    - chash: 4c4d225b5b18fe848ed9fb64a8e6c6cd06882a1c35867e8e03519758ec2f3d7c
+      closed: true
+      note: /*
+      facets: {}
+    - chash: d140fa607218491680bb0fc3999bd4cfb66b9e91026b3e5cdef0a63fef5e4eef
+      closed: true
+      note: Plugin changes that are not live yet must be DECLARED, not assumed active.
+      facets: {}
+    - chash: 63b6254bc38088a1666b5838c2c20b6696fec6ac3b6314e4b530a78aabe5176b
+      closed: true
+      note: '"""plugin_in_release_window, one condition isolated per test.'
+      facets: {}
+    - chash: e50abd1425a4a16081c9124b6011b14cea57b7b25d50e71a34c143a06e6329e9
+      closed: true
+      note: 'def test_condition_d_wrong_branch_refused(self) -> None:'
+      facets: {}
+    - chash: 3ef89fe3a425958402945de6b5310f0df1f4886397c0d5acb7265d4321b68508
+      closed: true
+      note: def test_behind_plugin_at_newest_published_still_gets_the_ref_drift_check(
+      facets:
+        evidence: supports
+    - chash: f0a234b4ad458b4ade41e44c1884e9dd6919f5572a82525a56abe9a6419338b0
+      closed: true
+      note: 'def test_every_marketplace_plugin_has_a_surface() -> None:'
+      facets: {}
+    - chash: 047acda16426dec47aebee60f45a1f42e7b47fba46781cc59cd2ed668c627656
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets:
+        decision-by-decision-status: supports
+        evidence: supports
+    - chash: 2792a494b9aa17af593dd0af29621dec8d214012520830ebf716e439263b7179
+      closed: true
+      note: d have to load first.
+      facets: {}
+    - chash: 7587fdc84814525ed6c4e0f72a525e9e8a3ca3569a09e974877182787e8af14b
+      closed: true
+      note: 'def _cell_r9_admission(state: str, world: dict) -> None:'
+      facets: {}
+    - chash: 2b26aa52502a36adcf370ab6804fc183e2ba404fddbafb8bc2bb1c44ef2460b0
+      closed: true
+      note: def test_plugin_cut_with_unchanged_version_is_silent(
+      facets:
+        evidence: supports
+    - chash: af57513c8896c22c78f8b9a83c359b5d6620fd043369f77ea6fb224353a331b8
+      closed: true
+      note: '# (nexus-f2g8u: a gate that fails with no text is the class a parallel group'
+      facets: {}
+    - chash: 11034ffc191c3c39c118ff2489ec2316362a614c0678ae508aa16ed1bde8d2ad
+      closed: true
+      note: "# \u2500\u2500 nexus-rbmja.3: --plugin-only vX.Y.Z \u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+      facets: {}
+    - chash: 9ad85be67a2d5f933f27f58147f8a6ec0b42bcc5f7d4575ee92a05fef50c5fc8
+      closed: true
+      note: 'def _cell_r2_window(state: str, world: dict) -> None:'
+      facets: {}
+  H22:
+    provenance: drafted
+    items:
+    - chash: 96d9be2d31dbdc8891b061034b48547574714f0e14dcf1793ab401be81f3bc7d
+      closed: true
+      note: 'and closed-source models on math, question answering, and code generation tasks '
+      facets:
+        performance-drop-magnitude: supports
+    - chash: 5f07bf84a92b9622290f8f4778e2cbebcd75c3a8fe6027f3657e834e46530862
+      closed: true
+      note: '## Context Length Alone Hurts LLM Performance Despite Perfect Retrieval'
+      facets:
+        performance-drop-magnitude: supports
+    - chash: a91e56c6d84d974fbd871b4c12e51603165b1a543485eaf149172a680e6a56f3
+      closed: true
+      note: across 5 open- and closedsource LLMs on math, question answering, and coding tas
+      facets:
+        performance-drop-magnitude: supports
+    - chash: 840f624fab56997e311e666a1b902f074f838354ff011db54d4d5fce1b5a3b3d
+      closed: true
+      note: ong baseline.
+      facets: {}
+    - chash: b369851fa59efacc0400eac62655dd4d4259462119cc02f0e6be56d97cd8baca
+      closed: true
+      note: 'st that LLMs approach longcontext tasks through two interleaved processes: (1) i'
+      facets: {}
+  H23:
+    provenance: drafted
+    items:
+    - chash: b41ab381aef86a57e489ae0185fc25e023602a6f5ff96c4fa3ed3491707a23e6
+      closed: true
+      note: '# RDR-227: Per-Collection HNSW Indexes Above the Router Threshold'
+      facets: {}
+    - chash: 08da883b21eb7799fc3ba67fad1461b9ff9f878923a73eef4db6dd4eeccef544
+      closed: true
+      note: '### Enumerated gaps to close'
+      facets: {}
+    - chash: 84dbdcb5618c5c2b9438f3faac820b0aa306d1975fb787f3a97835ef9761ed67
+      closed: true
+      note: '#### Gap 1: A filtered leaf walk loses a large collection''s nearest rows'
+      facets:
+        hnsw-claims: supports
+    - chash: 3448d552ba6aaf895832b90931c113c1ec622ebbc0552476ba8b0f47a3a701c5
+      closed: true
+      note: '#### Gap 3: A cold HNSW index is slow on first touch'
+      facets:
+        hnsw-claims: supports
+    - chash: 37861e2e14013ad7c69dfa0ecab17370a0a0e6cf9631382cdc23dff2fa1ba904
+      closed: true
+      note: '## Context'
+      facets: {}
+    - chash: 855f33f51922081de9ff3f25bef35c304bd3dfb8119251e1ddf71df4615ef44c
+      closed: true
+      note: '### Background'
+      facets:
+        hnsw-claims: supports
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: cd2d91bbd91c910d20b3a4363e716a47e67ca0bb67a7ab24c178a5cab9c2b167
+      closed: true
+      note: '### Investigation'
+      facets: {}
+    - chash: 406f9e37afff448ef9be3da92cd2d9e393c4f5cab11788ae17f1cd5d13f718cd
+      closed: true
+      note: '### Key Discoveries'
+      facets:
+        hnsw-claims: supports
+    - chash: 0a0db37c6a7a8d171d74fadfc90adf755967b90ae15bda61289106e1577ca81d
+      closed: true
+      note: '## Proposed Solution'
+      facets: {}
+    - chash: 3f066e5f61191f8eb4c11d50e33c53ed8165f8eade37b662111a17f3166d31f7
+      closed: true
+      note: '### Approach'
+      facets: {}
+    - chash: 6d787e5cbfa765bcb76dbdaa46ed6d9c66cacccfeb94e39da6a126e26c465d41
+      closed: true
+      note: '### Existing Infrastructure Audit'
+      facets: {}
+    - chash: 9d85781f674438093a1a726b2c49cad68b21379e0fd20060d902bbc6f382450b
+      closed: true
+      note: '### Decision Rationale'
+      facets: {}
+    - chash: e7c8af2399c4ef0e5e67eb6a00b4b924670538e07a10d862158a1b20f3dce02b
+      closed: true
+      note: '### Alternative 1: Keep T = 60000 (exact for all)'
+      facets: {}
+    - chash: 1525041aa10abcdd81372aae1076f27b09faf64fc29b7b469b061b6bc631bf46
+      closed: true
+      note: '### Alternative 3: Sub-partition the leaf by collection for large collections'
+      facets: {}
+    - chash: 7fd6a23556a1042cedb0220fcc4f7d8df05fd7cfcf940b8ea5b58bd7983cb931
+      closed: true
+      note: '### Alternative 4: More walk effort for single-collection arms'
+      facets:
+        hnsw-claims: supports
+    - chash: 77b2b3545075d3aabb84f8a2aafdf6bc4cb4bc6fec4977186336683d6d3da818
+      closed: true
+      note: '## Trade-offs'
+      facets: {}
+    - chash: a113a99b0f96464d24394f1c1212d23068ab7cf42dbcbf41b38f4d673472fbcc
+      closed: true
+      note: '### Consequences'
+      facets: {}
+    - chash: 1dd61be42ddab800b64ec3b6aea72fcbfb604114fae3444763c7afcee1ac96a0
+      closed: true
+      note: '### Risks and Mitigations'
+      facets: {}
+    - chash: 13b7615b8e8e2905ce5ef94acaf68448bc7c0a7980eb8dd9f6014d1306c5d5f8
+      closed: true
+      note: '## Implementation Plan'
+      facets: {}
+    - chash: 3264ab77ed0e88f5143343f69e3f67be4db9482910a62cc714b35c244be3179f
+      closed: true
+      note: '### Prerequisites'
+      facets: {}
+    - chash: 1660a44933b2a1f457d63c7edbd2dbba48b0f6c956bfb82f3c24f08f28433880
+      closed: true
+      note: "### Phase 0: Measure (decides the approach, may stop the work) \u2014 done 2026-10-09"
+      facets: {}
+    - chash: cc9857174a1c05e9cf68652bbb18ce016d92fe6b944dfe3e059bdd29a4e65b09
+      closed: true
+      note: '### Phase 1: Engine'
+      facets: {}
+    - chash: 7576f95c83f9638bdef840862602cf9b25da235aeb82d5ff14b9d5b6afc0e7d7
+      closed: true
+      note: '### Day 2 Operations'
+      facets: {}
+    - chash: 30a9794a14b9a15af182d2e2c384f34cd5736289daa6529b7df7d1651b2c093a
+      closed: true
+      note: '## Research Findings'
+      facets:
+        hnsw-claims: supports
+    - chash: 1dda610d3f7f7b6649572773d019d5ad6f3c2716c7d918033a2a1c9d31d39966
+      closed: true
+      note: '### Technical Environment'
+      facets: {}
+    - chash: eef3f169bedae59295c02131890b92fb82aed685e6b4dd7de359aab41666ef2c
+      closed: true
+      note: '### RF-3: Hybrid Vector+Relational Filtered Search'
+      facets:
+        hnsw-claims: supports
+    - chash: 2986f6c0e0022b0d68b88c5958829510be012ad5cce8e8095735bcebb5779911
+      closed: true
+      note: '## What the RDR set out to do'
+      facets:
+        hnsw-claims: supports
+    - chash: 93fb15bc63b8cc10e4a91777c20a3990ebdd0b55c9e1f622a644fe5374e161d3
+      closed: true
+      note: '## Research Findings'
+      facets:
+        hnsw-claims: supports
+    - chash: 4f8f38ab420355f77f1ec947be1949c6d9e65b2d4b115a7268cea72e0da6e4e7
+      closed: true
+      note: rdr rdr-019-halfvec.md <<'MD'
+      facets: {}
+    - chash: cef6b8c189469f98699317c1d9ce07fdb13808279c6c2f7690d19f15122484b6
+      closed: true
+      note: public class HNSWIndex
+      facets: {}
+    - chash: 0e78f0e9df067982325d2cba2798e6798b7172e6c8bd61e3f318c81070b0eb5a
+      closed: true
+      note: /**
+      facets:
+        hnsw-claims: supports
+    - chash: 4b473cef1f9f3d0302076ec99cbf6fa560cbe63e79e31ca2a4852af34a9e89ae
+      closed: true
+      note: fly loosened this to a strict-pair-plus-
+      facets: {}
+    - chash: 22cd35669254754f55f89dee9136db4608ef079dce78f0be5c56047e0034e936
+      closed: true
+      note: /**
+      facets: {}
+    - chash: a3bf89d0b475b2937790d9df647daad5ed010360c6cff05402bb06e93255e2a8
+      closed: true
+      note: '# ---------------------------------------------------------------------------'
+      facets: {}
+    - chash: b877c395969ba3743d1ee9b583c425188b71c226d41a3b5a08ea164fe91985c3
+      closed: true
+      note: rdr rdr-014-ivfflat-for-cold-tenants.md <<'MD'
+      facets: {}
+    - chash: 5f547afd9912feca3c54793c9270c37cac6ff759a205d91fb316dd8af69f24bd
+      closed: true
+      note: /**
+      facets: {}
+    - chash: 0e16fd587fa4f2bcd140f80a6d7ccbd1bf4c78966c5806b9e02684156aa58adf
+      closed: true
+      note: '# plain_search_<dim> takes (query, collections, where, where_path, n, embedding_'
+      facets: {}
+    - chash: 0d82705e4b4cad7cfd1a14434d37af11c701a054036a418afaa9cbc47fc2d8a9
+      closed: true
+      note: 'def cosine_distance(a, b) -> float:'
+      facets: {}
+    - chash: af7e62da8e2204cafff0a74fe37ecc3dd1437d3b4d355458d3a78e746082182a
+      closed: true
+      note: '#!/bin/bash'
+      facets: {}
+    - chash: 318cd03f0b73017463c27881f4558e4d80ddfe5bf861bc4025c7c69a614a4dc8
+      closed: true
+      note: cat > src/cli.py <<'PY'
+      facets: {}
+    - chash: d1c559f54ab5f2528a79a43cc15220b2a89f2f795abfd29d90773d2321ac7bc0
+      closed: true
+      note: package com.hellblazer.art.chatsome.language.forge.ann;
+      facets: {}
+    - chash: dd29d177e07c9ffe6b294b7f0926c72e6fc410b1e0b398bc351d028739f9e5ab
+      closed: true
+      note: '{'
+      facets: {}
+    - chash: 7ed2660254ef9515516b8fbb23ac96196940398fd654e283ab4be93e98e3aa1b
+      closed: true
+      note: public HNSWIndex(float[][] embeddings)
+      facets: {}
+    - chash: 19ea99ecd6127a350aed47d8716342a644f5e21b6b8f1108a1752f239f907cc1
+      closed: true
+      note: '{'
+      facets: {}
+    - chash: 074278bdfe54643c4cc34dd3e5618759b7c94996dc51abc7456d63617ba69e25
+      closed: true
+      note: var scoreProvider = BuildScoreProvider.randomAccessScoreProvider(
+      facets: {}
+    - chash: 2c3ead3a4d0d325319131c90e7a1cd6e18b43342127f662544e9fb325a29ef26
+      closed: true
+      note: /**
+      facets: {}
+    - chash: c9632a9e4e97485dfcd5cdf15e1baf176e0196942ec1681de181bb5de6f3587e
+      closed: true
+      note: public List<SearchResult.NodeScore> search(float[] query, int k) {
+      facets: {}
+    - chash: b090a38360e82f89e7563e8e2da1eeab155b874e0ed0010ee8c3bea93f99076c
+      closed: true
+      note: public int getDimension() {
+      facets: {}
+    - chash: cd510f7022de613c5f73ea322d29876cc88c18561e7f632b5d6e19f1563c4508
+      closed: true
+      note: public void save(Path outputPath) throws IOException {
+      facets: {}
+    - chash: 40072e6ac05a311e7b7851bc7078ab403bc20d1791fe10ed0ebbabfa783753dd
+      closed: true
+      note: public static HNSWIndex load(Path inputPath) throws IOException {
+      facets: {}
+    - chash: fb45e4e13eec7f9a96abebc1bcdaf554196f4c15596ad23ff142cbf9e1cad538
+      closed: true
+      note: '/* SPDX-License-Identifier: AGPL-3.0-or-later */'
+      facets: {}
+    - chash: 0c0a067cecf89a2f5357848ad354119bcb0b9ec839830ea0bbf730b1447e34e9
+      closed: true
+      note: '{'
+      facets: {}
+    - chash: 6308915ea727dc8f9b030568c8ac192cf64e301d254f1315b8b4a4d001f28dfe
+      closed: true
+      note: '{'
+      facets: {}
+    - chash: 42ed805bc3c89c96aea2ca795e87f2d09d08f9db7c73da4fdc10af6411416d2c
+      closed: true
+      note: try (Stream<Path> files = Files.walk(root)) {
+      facets: {}
+    - chash: 997d99d14095f97837b447faca44d6fd15ac5d040b27f9d80022e675a951c3a1
+      closed: true
+      note: catch (IOException e) {
+      facets: {}
+    - chash: 8911c5eef5a71ab21391ff8c906f5756891b857eeb7bf2d0a91204911d47cded
+      closed: true
+      note: assertThat(unpaired)
+      facets: {}
+    - chash: 49f6a2d7b8253cc2afd67bce6b2e08be36ef5622c0357b612b9fd5cd5195893c
+      closed: true
+      note: private static int count(String haystack, String needle) {
+      facets: {}
+    - chash: 67044c99786f098d1c75f6d5261f80e569686e2d5aa85fa9d78ddffe1476ca6c
+      closed: true
+      note: /**
+      facets: {}
+    - chash: 0d1ad0e35c0680e6205673c5a6750ccaa7c4f9fd93f9138a3d53b2b8fa0b0a22
+      closed: true
+      note: HANS.call(...))}) that never need these GUCs and would otherwise
+      facets: {}
+    - chash: ac81833ee97bc61ba25a2e367875bd74c1d5a7e82a69a65384e79766ceaf47b8
+      closed: true
+      note: '@Test'
+      facets: {}
+    - chash: 83586548c9eff51dd91f81a06994fa72ee172f9bd3811c9c2aa411780a6ffb8c
+      closed: true
+      note: '{'
+      facets: {}
+    - chash: 5aa4f387727b6d12fbd3016f43f20557dda1cb375863225128cc10ce25c09d1a
+      closed: true
+      note: try (Stream<Path> files = Files.walk(root)) {
+      facets: {}
+    - chash: 9ce33ebfdaac2db7aaae830a07130dd1afa23ffbe4f5caea31441479e45a6b17
+      closed: true
+      note: assertThat(unbounded)
+      facets: {}
+    - chash: f0a552048853896b37aba5232f8ed740a7c827fba04d0dce1d76713e8d49bfa3
+      closed: true
+      note: '@Test'
+      facets: {}
+    - chash: bb138f914c4dbfb7bbdd57f93e11b262c08efc61e21b8454fbdcb8b2fda1df4c
+      closed: true
+      note: '{'
+      facets: {}
+    - chash: b4d40abd2d0a3a32a35c97a29e7a951e5b5af7860e0a89cc07f93c8ab77d8899
+      closed: true
+      note: try (Stream<Path> files = Files.walk(root)) {
+      facets: {}
+    - chash: 9e68ff1cbc39c57c788f754e6f2d5ec31980e860e0d32b18d622803bbe60d78b
+      closed: true
+      note: assertThat(misordered)
+      facets: {}
+    - chash: dc026c7ed43d34f3a4a9f43d1cba43c373d118be013d6a67c84aafb677794c49
+      closed: true
+      note: private static int firstIndexOfAnyFrom(String haystack, int from, String... need
+      facets: {}
+    - chash: 895da2be56c067b97b32a5e40ad543abf6cf9b2c99887dcb005e6c5db7833f43
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets: {}
+    - chash: 8704958a9e5048b696f8aaf0fc5014f2c56842f5a9879e7b24deab21cc902756
+      closed: true
+      note: k; deleting set_filtered_ann_mode from _knn_query
+      facets: {}
+    - chash: d31020372162382aef66e82b5cce540b12ff0ddb3c077e8acbe47ced8d0ed37e
+      closed: true
+      note: from __future__ import annotations
+      facets: {}
+    - chash: b18769b0dfe8c23faa1508aabcaa6af97794987f044c892333a46d917c5c2d91
+      closed: true
+      note: '# Sibling collection in the SAME tenant (so the same leaf and HNSW index) holdin'
+      facets: {}
+    - chash: ad3e8c6940f7e2ddb09dbe77a6c2e31b733640a050bd8bff98772ae495f89683
+      closed: true
+      note: 'def _cosine_distance(a: list[float], b: list[float]) -> float:'
+      facets: {}
+    - chash: 98526949f04f007d120967ff0265c0c0c4257e4bea4af141305c8ffc8ec8250f
+      closed: true
+      note: 'def _cleanup() -> None:'
+      facets: {}
+    - chash: 87b79eceb39f9b3ad95f104bcc8b6ab2b85644c68e2767736f0c2b5e9175957b
+      closed: true
+      note: 'def _seed_vectors(tenant: str, vectors: list[list[float]], collection: str = _CO'
+      facets: {}
+    - chash: 557148365aee827b65ddcd003f686968449c443eab8da326d7b5cc0a3bda43f6
+      closed: true
+      note: 'def _leaf_hnsw_index(tenant: str) -> str:'
+      facets: {}
+    - chash: 2b177b2dedf6554f6451b2222880d8c66efa89270e4f2bf61ff75e02e00f1bdf
+      closed: true
+      note: 'def _plan_index_names(plan: dict) -> set[str]:'
+      facets: {}
+    - chash: ae799a4fa4ec5cd2904e061d7aaaa7ad02abff66256fc815219f4834e9cfcf9b
+      closed: true
+      note: 'def _knn_query(tenant: str, query_vec: list[float], k: int) -> list[tuple]:'
+      facets: {}
+    - chash: 08ea58093c681e13c73b364e5c9433dff13ed770f95215ab4afc6ba4c581c1c7
+      closed: true
+      note: '"""Run pgvector KNN over _COLLECTION as nexus_svc under tenant''s SET LOCAL, on t'
+      facets: {}
+    - chash: 329fec277076928454e5e554dfb8330dab540bb9dad9141eacc9c55d1a5f2554
+      closed: true
+      note: _set_tenant(cur, tenant)
+      facets: {}
+    - chash: d0c0207556b0be76fd4898bb19fe90b427c4e28e6c3c446e912263cc8247e5cd
+      closed: true
+      note: assert not other_leaves, (
+      facets: {}
+    - chash: 09719adce67669a995f1cefbbfce7c76d353b08dede558a987165a36fc9a49f1
+      closed: true
+      note: 'def _count_visible(tenant: str, collection: str | None = None) -> int:'
+      facets: {}
+    - chash: c05952c118106808c3f89e83d661fdba04f97c390c6c87eede6861b5321ffe1f
+      closed: true
+      note: '"""Filtered-vector recall + tenant-isolation gate at SLICE scale.'
+      facets: {}
+    - chash: fdc60924cd891f0b4956de186b63bc999e38731e6c28aa373e1f30eee3f9f9b9
+      closed: true
+      note: '@pytest.fixture(autouse=True)'
+      facets: {}
+    - chash: 733667a33f12c9b2f877807b6efd392b03fef7071d557d19787e21d720134de8
+      closed: true
+      note: 'def test_broad_baseline_non_empty(self):'
+      facets: {}
+    - chash: 1cfc77a1c403c5aae9f0eb45ac1aead653ff999b38fdad521d1497bb98331a5f
+      closed: true
+      note: '"""Each KNN query''s _COLLECTION holds fewer than k of the ef_search nearest rows'
+      facets: {}
+    - chash: 852ba52d43eed9d93f95a3fbe7f6e83e0172b5c865deeea0a58a0ebabe5cebb9
+      closed: true
+      note: for tenant, seed_offset, k in (
+      facets: {}
+    - chash: 6eefb84180495f40456f94fe1a6e3e1599afb92e477cdd0c6c2e153916ac8530
+      closed: true
+      note: '# -----------------------------------------------------------------------'
+      facets: {}
+    - chash: f3fa8b92fcf01d87f0fd4e300495f24384ada55458cb3997f8d357b230ffde7b
+      closed: true
+      note: 'def test_recall_narrow_tenant(self):'
+      facets: {}
+    - chash: 500e129a5ff4871ac72677d45d241f8f14f96930b9a3d9717104222d07eddf9e
+      closed: true
+      note: 'def test_tenant_isolation_broad_cannot_see_narrow(self):'
+      facets: {}
+    - chash: 91e8dfd0ec4e1fcbf66c95f2bba7470fc3b847b9fb35cd9e6c190ccaed7a6350
+      closed: true
+      note: 'def test_tenant_isolation_narrow_cannot_see_broad(self):'
+      facets: {}
+  H24:
+    provenance: drafted
+    items:
+    - chash: d039032334a14e2cd24a569ed35a8951cd80b8ccbeee09d89aaf1194928e169a
+      closed: true
+      note: n smaller models (13B, akin to trends shown when comparing MPT-30B and MPT-30B-I
+      facets:
+        effect-of-more-context: supports
+    - chash: bfbe847905e837a78d5040daea3c01284c6223197dc1501dd439c85725166d2f
+      closed: true
+      note: 'al to those in the short-context setting except for the longer distance between '
+      facets:
+        effect-of-more-context: supports
+        retrieval-quality-versus-length: supports
+    - chash: 3f599995ed331b2d56e8db48cf201d6d8a2199fb2123555966c830eaf03b6bb5
+      closed: true
+      note: h the highest relevance score. To condition language models on these retrieved d
+      facets:
+        effect-of-more-context: supports
+        position-effects: supports
+        retrieval-quality-versus-length: supports
+    - chash: 3c3253b26355cc961a22cd3aee0617d39a48181935197c0483e63b3f57cb9cd3
+      closed: true
+      note: rmation may help it perform the downstream task, but it also increases the amoun
+      facets:
+        effect-of-more-context: supports
+        retrieval-quality-versus-length: supports
+    - chash: 845e89ea3350122ae84410d81c46c48b1ec7f4ac4c66b82b6e0252fdbc11b2d6
+      closed: true
+      note: '--------|-----------|-------|-------|-------|------|------|'
+      facets:
+        effect-of-more-context: supports
+        retrieval-quality-versus-length: supports
+    - chash: 14e373ba0b467852992825112e595a5a6c9e91c1c7aca74005d800a0a8e8a562
+      closed: true
+      note: inue to exhibit a U-shaped performance curve.
+      facets:
+        effect-of-more-context: supports
+        position-effects: supports
+    - chash: bf55a69e6748f7970740fdab00385e3e855f671eef4bc11760f978668c7e7ffc
+      closed: true
+      note: ontiguous text, a setting where language models minimally benefit from long-rang
+      facets:
+        position-effects: supports
+    - chash: c979bc3deb6bb4bfd5b69693da52afdbb39513a023810437f6de7f279f04c321
+      closed: true
+      note: g observation in retrieval-augmented generation (RAG) that performance often sat
+      facets:
+        effect-of-more-context: supports
+        retrieval-quality-versus-length: supports
+    - chash: ff0594d2eedb558bccf2c8db4b3db0be1778408b7da2771263accc0a5049a45b
+      closed: true
+      note: 'resh insights. Existing conclusions often entangle retrieval accuracy with task '
+      facets:
+        effect-of-more-context: supports
+        retrieval-quality-versus-length: supports
+    - chash: 51ae6641dcadb62cb35052bb93d7f6d6b8b93ae681ade18535f4309f29495a9b
+      closed: true
+      note: 'rieving more chunks is not a panacea. Jin et al. [13] shows that increasing the '
+      facets:
+        effect-of-more-context: supports
+    - chash: 3331125d1c0ba3bc247cb3afd60e4831359d5a98ee42cb4465417341620b3db9
+      closed: true
+      note: e method where the model is directly asked to answer the question based on the i
+      facets:
+        effect-of-more-context: supports
+    - chash: 252ea6e675cfdc1e67a18abc78f0061f2e5f2ac284fc7d8df1f7cb9dd45a299b
+      closed: true
+      note: Baseline Ours | 70.6 |   49.3 |   43.4 |    41.6 |    35.5 |
+      facets:
+        effect-of-more-context: supports
+        retrieval-quality-versus-length: supports
+    - chash: a91e56c6d84d974fbd871b4c12e51603165b1a543485eaf149172a680e6a56f3
+      closed: true
+      note: across 5 open- and closedsource LLMs on math, question answering, and coding tas
+      facets:
+        effect-of-more-context: supports
+        position-effects: supports
+        retrieval-quality-versus-length: supports
+    - chash: 4a4221fb55d0272864915ee8ec5d594716bd4d096649236299be4f166147146b
+      closed: true
+      note: analysis to precisely separate each failure mode.
+      facets:
+        effect-of-more-context: supports
+        retrieval-quality-versus-length: supports
+    - chash: 0bf73c41bf62727b745070af56c489f55f3dad9bb1a32fa9282c3ba1ee76e263
+      closed: true
+      note: et al., 2024; An et al., 2024, inter alia ), suggesting a different conclusion t
+      facets:
+        position-effects: supports
+    - chash: 19e141887954b00e123cc2666dd91224fc52d36f0ce757d2f1e4b5bcc3b45a0a
+      closed: true
+      note: asks, by a larger margin as opposed to the retrieval score across almost all tas
+      facets:
+        effect-of-more-context: supports
+        retrieval-quality-versus-length: supports
+    - chash: 26e5640572f00b1d782ab15a334acc1bd331191267b01c90919780005bf827b4
+      closed: true
+      note: r budgets, the marginal gains diminish, and the curves begin to plateau. Concret
+      facets:
+        effect-of-more-context: supports
+        retrieval-quality-versus-length: supports
+    - chash: 152f74968bdb548c4f6d0b534953c27e6ac04841e98c2d57b7fb70dfef829df0
+      closed: true
+      note: tween evidence and question, as existing works (Li et al., 2024a; An et al., 202
+      facets:
+        effect-of-more-context: supports
+        position-effects: supports
+    - chash: 2a170c04c2e0ab66f6dfc5686aecafc6c2908f2a6640085722f4a89cae939433
+      closed: true
+      note: '% to 73% as more text was supplied. The advantage is a model-general reading-qua'
+      facets:
+        effect-of-more-context: supports
+    - chash: 12cb834c53a8bfe721ee555712f43e2cf2cabf72894c40837a604537dc9dd856
+      closed: true
+      note: in retrieval-augmented generation), and (ii) control the position of the relevan
+      facets:
+        position-effects: supports
+    - chash: 953b3a4ff1d73c89e5dd652b83ed8d1b3d975a06f6326b284c527c7d3df8bc5b
+      closed: true
+      note: then concatenated with the original problem statement to form a new, shorter pro
+      facets: {}
+    - chash: ef22a1916c2195237e5155c2a27d5515dfb6f34dcdfb3d422258defa04676062
+      closed: true
+      note: n 3.2).
+      facets:
+        effect-of-more-context: supports
+    - chash: d8d55c85f8346622b2eddcff7be26deadf68bbe8075efc2371ecfc94bbf2ec51
+      closed: true
+      note: r-decoder models (Flan-UL2 and Flan-T5-XXL) evaluated on sequences that are shor
+      facets:
+        position-effects: supports
+    - chash: 96d9be2d31dbdc8891b061034b48547574714f0e14dcf1793ab401be81f3bc7d
+      closed: true
+      note: 'and closed-source models on math, question answering, and code generation tasks '
+      facets:
+        effect-of-more-context: supports
+        position-effects: supports
+        retrieval-quality-versus-length: supports
+    - chash: 28d5022bfcfa3d73a83b6585ec472307b4ebf724b1e7c89ac423eee2bab5a103
+      closed: true
+      note: prior experience (Zhao et al., 2024). More recently, ReUseIt synthesizes reusabl
+      facets:
+        effect-of-more-context: supports
+        retrieval-quality-versus-length: supports
+    - chash: f2c8dfc568e564375439e410daff008860c8e7567003333dcf73309e5356e1af
+      closed: true
+      note: tion immediately follows its evidence or evidence is pinpointed, longer input ma
+      facets:
+        effect-of-more-context: supports
+    - chash: ec40faaf1c19ba907c513b29477d67d1412f2a1326f9721a7776589e4db815cb
+      closed: true
+      note: 'if iteration_quality_json and str(iteration_quality_json).strip():'
+      facets: {}
+    - chash: 2bb27b1b7039c5250bc93443fcd37e705d253e8ff72612b7c47ce7956262fdc7
+      closed: true
+      note: '"""A document whose text overflows the model''s context window got'
+      facets: {}
+    - chash: 3b5e32b8c9383fc28ac7469d10c27eb4bdb95813e8794429574f86dc419525ed
+      closed: true
+      note: 'def _gen_prompt(title: str, text: str, per_paper: int) -> str:'
+      facets: {}
+    - chash: 16f95f5a6c2646315a69b9779f21aa6fffb9d542377a12bc01493093e073e0dd
+      closed: true
+      note: _SCHOLARLY_PAPER_PROMPT = """\
+      facets: {}
+  H26:
+    provenance: drafted
+    items:
+    - chash: ae44044039984420596f965f9bb1c53d02808a4f33f08024f134704e7b60d399
+      closed: true
+      note: '# RDR-151: Daemon Event-Loop Selector Busy-Loop and Write-Lock Contention'
+      facets: {}
+    - chash: 77fbf06d190f81ed4c1fa2df400e47a7789f9e0a71484a6530fdd4125da25d26
+      closed: true
+      note: '#### Gap 1 (RC-alpha, the peg): asyncio kqueue selector busy-loop from a leaked '
+      facets:
+        root-cause: contradicts
+        selector-spin-symptom: supports
+    - chash: b7bfe950b0c180e8fbf482c3a2c870d6cfe1e14ce9bdca95ea4820d43bf42144
+      closed: true
+      note: '#### Gap 3 (RC-2, the cascade trigger): `stop()` never marks the lease shutting-'
+      facets: {}
+    - chash: 377f5728b348accae020f6e6955858c89af6cddeb50ba38c8d7b23b96ff5ab91
+      closed: true
+      note: '#### Gap 5 (RC-beta, the database-is-locked burn): intra-daemon SQLite write-loc'
+      facets:
+        write-contention: supports
+    - chash: 2f5da1d467d83878e42d2c1a510215044746866590bd9b4290cfb699c1bd516c
+      closed: true
+      note: '### Background'
+      facets: {}
+    - chash: 6fc8b977d2fc16db46ede99558d286be5a2425b2e68cc62bcb12d6d3d9fe56c6
+      closed: true
+      note: '## Revised Plan (2026-06-06, post-live-capture)'
+      facets: {}
+    - chash: f0a4296e6b4edb0272a77eb53d3a4e1af57ebbbf673bba5b337fc058d25b5230
+      closed: true
+      note: '### Revised phases'
+      facets:
+        root-cause: supports
+        write-contention: supports
+    - chash: eb9669e6d896254269f4e5862034242437450001d5da6b2862f516310888233a
+      closed: true
+      note: '## Research Findings'
+      facets:
+        root-cause: supports
+        selector-spin-symptom: supports
+        write-contention: supports
+    - chash: 34eaf9ff8e6c072631bbe428346dd1470bd69f77d2e4d849e7dfe5eedc6e4682
+      closed: true
+      note: "### RF-2: does Gap 4's flock stall exceed the 3.0s TTL in production? \u2014 OPEN"
+      facets: {}
+    - chash: 758d2f7db0a4e08690a4fe6b37496367ec80079dd186e1207548b1db402106e7
+      closed: true
+      note: '## Open Questions'
+      facets: {}
+    - chash: f462d531568782881fe4c3325f509165b18a6e4a17db1c32fdd5b4a538b801d9
+      closed: true
+      note: '## Critical Assumptions'
+      facets:
+        root-cause: contradicts
+    - chash: b68c3d798d914432e1635fb8a5d2f900edc96bb6027f21b4b155058abb50ff05
+      closed: true
+      note: '## References'
+      facets: {}
+    - chash: 8db9f367f1b78bc795750afc262b159a2a187c6edc571af4893e8c09a5953661
+      closed: true
+      note: '# RDR-129: T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement '
+      facets: {}
+    - chash: 88ea04891a0a587aafe957d1888830b49257e7d0372a42bd0f0104c7432a3c00
+      closed: true
+      note: '### Layer A: single-daemon enforcement is layered-best-effort, not a hard invari'
+      facets: {}
+    - chash: 752e652f0237ef809d063ec96a73f92568df48e68bcaad8dace57f582f861282
+      closed: true
+      note: '#### Gap 2: (Layer A) predecessor reap only covers the addr-file pid, not side-o'
+      facets: {}
+    - chash: 954fc7c1e132b196141fce7ef3d4563bc70a376e1b8f0ea484988fd61ba71613
+      closed: true
+      note: '#### Gap 4: (Layer B) best-effort writes drop silently on contention'
+      facets: {}
+    - chash: 5a5946df1cf7108d8ae6362f9445db218300c9830f66d23d02f9aec917e5d990
+      closed: true
+      note: '## Context'
+      facets:
+        write-contention: supports
+    - chash: e2e45eb0ed23a53f5d98a8aea44b44da7b2f84196cb690dbd80742453273fa73
+      closed: true
+      note: '## Research Findings (verified 2026-05-27 against the daemon code)'
+      facets: {}
+    - chash: ddeaece8cf4509d3fdcf7ab65c1bf4c57de264758aaca070ec2c4ca7557d1ff2
+      closed: true
+      note: '## Proposed Solution'
+      facets: {}
+    - chash: 7fb97b642ed07413fac58e11d36307ea36df5c74fb2ed8fd429501553abb0c1f
+      closed: true
+      note: '### Layer B: the one daemon is internally single-writer'
+      facets: {}
+    - chash: ca6088c595afea5f2504e3468e620299a8dbd80e2fb5f947ef700d86d5c30520
+      closed: true
+      note: '## Implementation Plan'
+      facets: {}
+    - chash: f1b7f07596436e8882ad0c37be3600bfaa4c46b63a8c25ad1283f5f9fc6c3df8
+      closed: true
+      note: '## Test Plan'
+      facets: {}
+    - chash: fcd289068f9276dff9e6dc36e3770f0e6e9534abba934d4c986d2cbd4bd8feaa
+      closed: true
+      note: '## Finalization Gate'
+      facets: {}
+    - chash: 823e6c77be45f3d2a447b7fa4fa87d45432857f9c769211efb215dccfb383802
+      closed: true
+      note: '## Revision History'
+      facets:
+        root-cause: supports
+        selector-spin-symptom: supports
+        write-contention: supports
+    - chash: 9151774fae3d4389ffbc9b6b885295ead94eaad8a361b473faa660d3b897999f
+      closed: true
+      note: '### Fixed'
+      facets:
+        root-cause: supports
+        selector-spin-symptom: supports
+        write-contention: supports
+    - chash: 3f406456ff5710faa75afe547b9254349c8c4c0c372514ef38a2c3bbd47bdbda
+      closed: true
+      note: '### Validation gate (replaces the old soak signal)'
+      facets:
+        selector-spin-symptom: supports
+        write-contention: supports
+    - chash: f75bd47fe8a6fa7469a0c26df021f71b4c29587359f8821ec6ee5367c84c012a
+      closed: true
+      note: '## RDR Summary'
+      facets: {}
+    - chash: c621d005ea13b7b0cc3a6099ac93dbab6503439bd04106eda42882b0ca2b11ba
+      closed: true
+      note: '### Changed'
+      facets: {}
+    - chash: 055c2083ab78b7b94b3ecf13b0aaca23a2153d5a48fa4e87d69c12876eeea383
+      closed: true
+      note: '### Fixed: T2 single-writer enforcement, root-cause fix for the daemon crash-loo'
+      facets:
+        root-cause: supports
+        selector-spin-symptom: supports
+        write-contention: supports
+    - chash: 89286ba82c58c1504034cfda0f55c57b43147f2d93b3a80fac8acaa612f12c02
+      closed: true
+      note: '### Revised thesis'
+      facets:
+        root-cause: supports
+        write-contention: supports
+    - chash: 190561e2adfcb67b0c0f4ba8ded6fe03c6c5a7d870cc8d5e488359760480d0ac
+      closed: true
+      note: '### Fixed'
+      facets:
+        selector-spin-symptom: supports
+    - chash: 10dd3d4d0de6c48b5f32cd0591f7322eb035a280b28c038c0b8105fcfac9e92d
+      closed: true
+      note: '### Validation gate (replaces the old soak signal)'
+      facets:
+        write-contention: supports
+    - chash: d46411c70ab4fc0097552da9b97d7953f9f38d4fb9ea83d48ec1edcae3f7ebda
+      closed: true
+      note: '### Fixed'
+      facets: {}
+  H27:
+    provenance: drafted
+    items:
+    - chash: 405513da7644cec4a0e0138c64bc1bc8f3864a255130a5940633c48cfaf6e170
+      closed: true
+      note: "# \u2500\u2500 docs/cli-reference.md \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\
+        \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+      facets: {}
+    - chash: 5b55ffb72959d51834ac11613beaaf1a732985345e3fbbed6b0b8bc25f79d4fc
+      closed: true
+      note: 'def _command_documented(path: str, doc: str) -> bool:'
+      facets: {}
+    - chash: afbae939b0a37d22b4a13140e35cf9eaeeb8efb24395e4d329d4906854e08678
+      closed: true
+      note: '# SPDX-License-Identifier: AGPL-3.0-or-later'
+      facets: {}
+    - chash: 69d4985a728007408743e7e8d03d2edc00adac16af0d1dbc0db9b4413fc96727
+      closed: true
+      note: '#!/usr/bin/env bash'
+      facets: {}
+    - chash: 7137559389a42ab6641876e4fadb2efa1345bbba652ff94b0084a5a0e3fad269
+      closed: true
+      note: 'COMMAND_ALLOWLIST: dict[str, str] = {'
+      facets:
+        mismatches: supports
+    - chash: b3ec8060e4c23086ea2ed0f22ad23446aed8394f7813e0d07d8df9f6300dc0fc
+      closed: true
+      note: '"""Guard that every CLI subcommand and flag appears in the CLI reference.'
+      facets: {}
+    - chash: ce2d14ce98820f10e2a5a63e67478cdcc68cb420965fd05ed0a18add97b6daa5
+      closed: true
+      note: '#: Commands with no ``nx`` shell line, each with the reason. A command here must'
+      facets: {}
+    - chash: b9e03d8ea0b84c448ec4c714bc094a6f1f2afcb21232a3113fcc20040ea9a06d
+      closed: true
+      note: 'def test_the_upgrade_story_is_one_verb(runner: CliRunner) -> None:'
+      facets: {}
+    - chash: 6a29fd70b9ef07a6c0f319e657ae313c14f2b8261421ca2c4ba25b994d19c418
+      closed: true
+      note: '#         Single-quoting is behaviourally identical (the preamble re-joins'
+      facets: {}
+    - chash: 1b6bbc04c08dd3638dd80a3ef1f603aefd62719b7c6a186f42600ea81f3d4a12
+      closed: true
+      note: for cmd in \
+      facets: {}
+  H30:
+    provenance: drafted
+    items:
+    - chash: 70cfd2ef6763fa18a7f0f3b27b0ec369e54f4e59db202110fd334971cc4ac69a
+      closed: true
+      note: '# RDR-208: Session-Id Mail Addressing'
+      facets: {}
+    - chash: 37380d702d8bcef685009d27b27554256dece38b8d6b304776399ebc50ea8c21
+      closed: true
+      note: '#### Gap 1: mail to a renamed session''s old name is never read'
+      facets: {}
+    - chash: 639191351c50191a751e7970881fa58aec01a155214ad1205d5e481d6f777b76
+      closed: true
+      note: '#### Gap 3: `/clear` strands the previous session''s mail'
+      facets: {}
+    - chash: 37861e2e14013ad7c69dfa0ecab17370a0a0e6cf9631382cdc23dff2fa1ba904
+      closed: true
+      note: '## Context'
+      facets: {}
+    - chash: b90348176c00d6e6e3de04a433f87ce14237ffb875b9c3c673e25dae4155fee2
+      closed: true
+      note: '### Technical Environment'
+      facets: {}
+    - chash: 642d3e9b5a6c4c3b2d7c2cfbcfe73994a808cbda698c7d74eb68bc190743d1e4
+      closed: true
+      note: '## Research Findings'
+      facets: {}
+    - chash: a275096d52cdf55e33f8cfc4cdeed8890c7c6784d74796feba689632d7c5d118
+      closed: true
+      note: '### Critical Assumptions'
+      facets: {}
+    - chash: 0a0db37c6a7a8d171d74fadfc90adf755967b90ae15bda61289106e1577ca81d
+      closed: true
+      note: '## Proposed Solution'
+      facets: {}
+    - chash: 7d98ce3e69609496b538efb3fb1cb05729885ace53544f338f9f6821a5baee27
+      closed: true
+      note: '### Technical Design'
+      facets:
+        mailbox-addressing: supports
+    - chash: 4824749d250c30ac7d0d3b75dd866d8a845308adcba154f5372cf74980c63d83
+      closed: true
+      note: '## Alternatives Considered'
+      facets: {}
+    - chash: ef3679359e080a56c180d28262b32e46d2c390d5264f5d081afc44a3535f2855
+      closed: true
+      note: '### Briefly Rejected'
+      facets: {}
+    - chash: 0faf50425af5cf1e43d711cb6772ea05caedbd1bf933bd35b991de7a0266b2e7
+      closed: true
+      note: '### Consequences'
+      facets:
+        mailbox-addressing: supports
+    - chash: e791c72055fe87d2a900cb697897cdb97a9c410ab19267e78e3ca09b0ef657f6
+      closed: true
+      note: '### Risks and Mitigations'
+      facets: {}
+    - chash: 13b7615b8e8e2905ce5ef94acaf68448bc7c0a7980eb8dd9f6014d1306c5d5f8
+      closed: true
+      note: '## Implementation Plan'
+      facets: {}
+    - chash: 125f48c3af4b1622f1e027fcef3b32dafde15c253049451d6c56c3ffcd1b012a
+      closed: true
+      note: '### Minimum Viable Validation'
+      facets: {}
+    - chash: 37ee7f0a6b11190a6a405c6cfd1aae4724ab55f1ef7720a881cad076a9274dba
+      closed: true
+      note: '#### Step 1: directory template'
+      facets: {}
+    - chash: 6dc7b7fa6f4c206171b44ca10f55756c24c8cdf9cc7b3b7a4ba990b788fcf353
+      closed: true
+      note: '#### Step 1: the watcher writes its directory entry at arm and re-sends it on a '
+      facets: {}
+    - chash: 088e57876ef305f1f82a7b73b4a2741e9311bcf3bcc8275fcc2f912059ff099c
+      closed: true
+      note: '### Phase 3: Transition'
+      facets:
+        mailbox-addressing: supports
+    - chash: 281c1388b220b3fe7b89045b4a54e30c09f88eddcd3ab697f434448d669e3e86
+      closed: true
+      note: '### New Dependencies'
+      facets: {}
+    - chash: fb760e4e136fc7edda46dfbc013f3522e665e52669589760f62d532a1f9acfa2
+      closed: true
+      note: '### Testing Strategy'
+      facets: {}
+    - chash: 8212c6bc82fe263f57316e4f41474c475e2824fc1389f7a1cb3e984a9c5598c3
+      closed: true
+      note: '### Contradiction Check'
+      facets: {}
+    - chash: 1cb7afe6f212fdb704dd4c968f9e9fa7c2cb20ab05a75b66f6c0388e436f0412
+      closed: true
+      note: '### Cross-Cutting Concerns'
+      facets: {}
+    - chash: 3e884a1dce5f4c9b459c860d6ba35a976c241066b2de717b38c72bbad0f55d8e
+      closed: true
+      note: '## References'
+      facets: {}
+    - chash: 1daecc0da6def1397c0d3255fe95b9312f6258a89ebe38a5d331dc601d790746
+      closed: true
+      note: "### 2026-09-14 \u2014 Research pass (four records, T2 `nexus_rdr/208-research-1` to `"
+      facets: {}
+    - chash: eafc8a04ce0585f8428055bc462a3ae76665163d2e4f9814079f5de986883238
+      closed: true
+      note: '## Rules'
+      facets:
+        mailbox-addressing: supports
+    - chash: 791021eceb35001bda71fd3fa82d2515f803c05436e0adf657e9334a46c598b8
+      closed: true
+      note: '## Session-id mail addressing (RDR-208)'
+      facets:
+        mailbox-addressing: supports
+    - chash: 1829074acce10a36c898be015c67a8178967fbbdf3b33e1531c8e21643b75211
+      closed: true
+      note: '# Mailbox'
+      facets:
+        mailbox-addressing: supports
+    - chash: 574d1e05d1f2a9ef10d9601015742667ad6a09589ec6a5f149a67fd58c8d6a7a
+      closed: true
+      note: '### Technical Design'
+      facets:
+        mailbox-addressing: supports
+    - chash: 23460e072fc1f0d8e9609dd408d2bb1791eb7cd40be991091b5b8fda8e44cd01
+      closed: true
+      note: '## Session-id mail addressing (RDR-208)'
+      facets:
+        mailbox-addressing: supports
+    - chash: 40cb1742d40a14f5203ef20f951f81bed7324517fb0faa471bbcdaf613f120ec
+      closed: true
+      note: '## Session-id mail addressing (RDR-208)'
+      facets:
+        mailbox-addressing: supports
+    - chash: 9eb9a5e8487a871c26c88b87ef6a23bfc0bbcee516b8f33e089f1eaad856799b
+      closed: true
+      note: '### Tuple space (T2, RDR-205, RDR-206)'
+      facets:
+        mailbox-addressing: supports
+    - chash: 7721aa0bc19d7d2fdd45840dc594fc9b971b23a68ddf750c50b1ad8ca73193e2
+      closed: true
+      note: '## Cross-instance request and ack'
+      facets:
+        mailbox-addressing: supports
+    - chash: 0f291023bf0bfcde4edd7dca5254affa022291a38eb147796d162f08329df17f
+      closed: true
+      note: '## Session-id mail addressing (RDR-208)'
+      facets:
+        mailbox-addressing: supports
+    - chash: 8f265dbb4f5aafd538bcb90db224dacecaf4dfe32f89af4fda0c1601407ff4e1
+      closed: true
+      note: '## Rules'
+      facets:
+        mailbox-addressing: supports
+    - chash: 084db57eed1ef3321bb26089a81dd37610fce2eb95c8231b84483eda810b14ad
+      closed: true
+      note: '# RDR-208 Post-Mortem: Session-Id Mail Addressing'
+      facets:
+        mailbox-addressing: supports
+    - chash: cdbf2399cfc421f7e26dde386cd0ab643cb4c4ad68e69f659ce2a83144ff87e0
+      closed: true
+      note: '## Cited by'
+      facets: {}
+    - chash: 831006196000986a63653bb73195b74be5c52e49a7dd49f3e4537fc1733dbf44
+      closed: true
+      note: '### Approach'
+      facets:
+        mailbox-addressing: supports
+    - chash: 152c38a4f375bb9d01e2732314d6107f64878fe460d75deeb58ac20cf0b81f09
+      closed: true
+      note: '## Session-id mail addressing (RDR-208)'
+      facets:
+        mailbox-addressing: supports
+    - chash: bf3db21f844c3771946044fb61fad1e18b24ad34a0b2a8b0e6db0d1b2851c036
+      closed: true
+      note: '## Problem Statement'
+      facets: {}
+    - chash: 93316f7436da29fbef0bd841c92a02f22c1ecae47cd4fb98090b57386651db9e
+      closed: true
+      note: '## [7.46.0] - 2026-09-14'
+      facets:
+        mailbox-addressing: supports
+    - chash: 0386da9592a9ed923a81aeb586216d78436dfca97f29d1514f0fba35c0af79e3
+      closed: true
+      note: 'def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:'
+      facets:
+        mailbox-addressing: supports
+    - chash: 0b2fe51a486671f238838fba67e650827a35b3c63bfb20be7c64ee8a57298dfc
+      closed: true
+      note: def mailbox_send(
+      facets:
+        mailbox-addressing: supports
+    - chash: d3d2d8afa058b953fa4de808117fc8cb1cea8ffe703804a98a1ccb9c6400090b
+      closed: true
+      note: box
+      facets:
+        mailbox-addressing: supports
+    - chash: 374df95afa8825e57c71e17aea3a77957cf0cc374c4a85a64a7814b407b15f4d
+      closed: true
+      note: nly says it is there.
+      facets:
+        mailbox-addressing: supports
+    - chash: 1577f09184747d92dd7ddb702ca241d619a01aca77235c298d3b77d05fb6ed08
+      closed: true
+      note: '@mcp.tool('
+      facets: {}
+    - chash: bb923d07a7588cf4e8ff978da0f1a5d101eced0621507e3771e2a7f59e629053
+      closed: true
+      note: "import time  # noqa: PLC0415 \u2014 deferred: only this path needs a clock"
+      facets: {}
+    - chash: c752590247b552d759ebdb1f2ef7edede2fada4f3557b9f2f04725fc3e11e962
+      closed: true
+      note: ever learns the message existed at
+      facets:
+        mailbox-addressing: supports
+    - chash: a7cd76abe38fa0fcb5b9edeb72a8108c2772972246cdce6e919c7a9b02cf9b63
+      closed: true
+      note: d mailbox alike), so this clamp applies
+      facets: {}
+    - chash: a666f0bf08842d863b73180d9942e514d290856296c05b911b1faf72c305aa26
+      closed: true
+      note: def _mailbox_notification_content(
+      facets: {}
+    - chash: ed8a2c9bc558228656373af739fe10b4151dfcd3612f1228d83a8c17f67cbee8
+      closed: true
+      note: def test_agent_id_delivers_directly_with_address_kind_agent(
+      facets:
+        mailbox-addressing: supports
+    - chash: 5534f7fb3c0b562a5fdb3210d1ebc58ad2c3877718e5bfb6e832298a5f1ed5bd
+      closed: true
+      note: def test_invalid_from_address_shape_is_refused_and_writes_nothing(
+      facets: {}
+    - chash: 5a0af4df5dafe52d517b348ca07c7fbfc78f917e03383315d8a115e8ab01b7a2
+      closed: true
+      note: '"""Mailbox scenarios against the fake store''s announce-mode branch'
+      facets: {}

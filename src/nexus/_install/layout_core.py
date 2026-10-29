@@ -1076,7 +1076,7 @@ def _known_constraints(raw: Any) -> str:
 def receipt_predates_pdf_split(receipt: Receipt) -> bool:
     """True when *receipt* was written before ``pdf`` became an extra.
 
-    Such a generation was built with docling, MinerU and torch in every
+    Such a generation was built with the PDF stack (MinerU, torch) in every
     install, so the box it describes has had the PDF stack. The upgrade rule
     (Sam, 2026-10-23) is that an existing install ALWAYS carries the stack
     forward; only a fresh install goes without it. This is the one place the

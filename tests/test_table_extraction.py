@@ -2,10 +2,11 @@
 """TDD tests for structured table extraction (nexus-pjz7).
 
 Tests cover:
-- table_regions metadata from Docling extraction
+- table_regions metadata from MinerU extraction
 - chunk_type tagging in PDFChunker (page-level granularity)
 - PyMuPDF fallback produces no table_regions
 """
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,108 +25,41 @@ def _make_page_boundaries(*pages: tuple[int, int, int]) -> list[dict]:
     ]
 
 
-def _make_table_item(page_no: int, html: str = "<table><tr><td>A</td></tr></table>") -> MagicMock:
-    """Return a mock Docling TableItem on the given page."""
-    item = MagicMock()
-    item.__class__.__name__ = "TableItem"
-    prov = MagicMock()
-    prov.page_no = page_no
-    item.prov = [prov]
-    item.export_to_html.return_value = html
-    return item
+# ── ExtractionResult: table_regions from MinerU ──────────────────────────────
 
-
-def _make_text_item(page_no: int, text: str = "Some text.") -> MagicMock:
-    """Return a mock Docling text item (non-table)."""
-    item = MagicMock()
-    item.__class__.__name__ = "TextItem"
-    prov = MagicMock()
-    prov.page_no = page_no
-    item.prov = [prov]
-    item.text = text
-    return item
-
-
-# ── ExtractionResult: table_regions from Docling ─────────────────────────────
-
-def test_extract_with_docling_includes_table_regions(tmp_path):
-    """Docling extraction produces table_regions when TableItems are present."""
-    pdf_path = tmp_path / "test.pdf"
-    pdf_path.write_bytes(b"fake")
-
-    table_item = _make_table_item(page_no=2)
-    text_item = _make_text_item(page_no=1)
-
-    mock_doc = MagicMock()
-    mock_doc.num_pages.return_value = 2
-    mock_doc.export_to_markdown.side_effect = lambda page_no: (
-        "Page one text." if page_no == 1 else "Page two text."
+def _build(content_list):
+    return PDFExtractor._mineru_build_result(
+        Path("/fake/test.pdf"), "Page one text.\nPage two text.", content_list, [],
+        per_page_lengths=[(0, 14), (1, 14)], total_pages=2,
     )
-    # iterate_items yields (item, level) tuples
-    mock_doc.iterate_items.return_value = [
-        (text_item, 0),
-        (table_item, 0),
-    ]
-
-    mock_result = MagicMock()
-    mock_result.document = mock_doc
-
-    extractor = PDFExtractor()
-    with patch.object(extractor, "_get_converter") as mock_conv_getter:
-        mock_converter = MagicMock()
-        mock_converter.convert.return_value = mock_result
-        mock_conv_getter.return_value = mock_converter
-
-        result = extractor.extract(pdf_path)
-
-    assert "table_regions" in result.metadata
-    regions = result.metadata["table_regions"]
-    assert len(regions) == 1
-    assert regions[0]["page"] == 2
 
 
-def test_table_regions_contain_only_page(tmp_path):
+def test_mineru_result_includes_table_regions_for_tables_rendered_as_text():
+    """A table MinerU rendered as text (it has a ``table_body``) is a table region on its page."""
+    result = _build([
+        {"type": "text", "page_idx": 0},
+        {"type": "table", "table_body": "<table><tr><td>A</td></tr></table>", "page_idx": 0, "doc_page_idx": 1},
+    ])
+    assert result.metadata["table_regions"] == [{"page": 2}]
+
+
+def test_a_table_mineru_could_not_render_is_not_a_table_region():
+    result = _build([{"type": "table", "img_path": "images/x.jpg", "page_idx": 0, "doc_page_idx": 1}])
+    assert result.metadata["table_regions"] == []
+
+
+def test_table_regions_contain_only_page():
     """nexus-dqe86: each table_region entry carries only 'page'.
 
-    A 'html' key used to be written here too (and at the MinerU write
-    site, pdf_extractor.py's other table_regions builder) but was never
-    read anywhere — pdf_chunker.py and pipeline_stages.py, the only two
-    consumers, read only ['page']. The dead field cost a real
-    ``export_to_html()`` call per table on the docling path; deleted
-    rather than preserved, per project directive (dead writes get
-    deleted unless an accepted RDR plans a reader — none does; a table
-    HTML validator, nexus-stkek, reads table HTML out of the extracted
-    TEXT, not out of this field). This test now pins the field's
-    ABSENCE so it does not silently come back.
+    An 'html' key used to be written here too but was never read anywhere:
+    pdf_chunker.py and pipeline_stages.py, the only two consumers, read only
+    ['page']. The dead field was deleted rather than preserved (dead writes get
+    deleted unless an accepted RDR plans a reader; a table HTML validator,
+    nexus-stkek, reads table HTML out of the extracted TEXT, not out of this
+    field). This test pins the field's ABSENCE so it does not silently come back.
     """
-    pdf_path = tmp_path / "test.pdf"
-    pdf_path.write_bytes(b"fake")
-
-    table_item = _make_table_item(page_no=3)
-    text_item = _make_text_item(page_no=1)
-
-    mock_doc = MagicMock()
-    mock_doc.num_pages.return_value = 3
-    mock_doc.export_to_markdown.return_value = "Some text on the page."
-    mock_doc.iterate_items.return_value = [
-        (text_item, 0),
-        (table_item, 0),
-    ]
-
-    mock_result = MagicMock()
-    mock_result.document = mock_doc
-
-    extractor = PDFExtractor()
-    with patch.object(extractor, "_get_converter") as mock_conv_getter:
-        mock_converter = MagicMock()
-        mock_converter.convert.return_value = mock_result
-        mock_conv_getter.return_value = mock_converter
-
-        result = extractor.extract(pdf_path)
-
-    region = result.metadata["table_regions"][0]
-    assert region == {"page": 3}
-    table_item.export_to_html.assert_not_called()
+    result = _build([{"type": "table", "table_body": "<table/>", "page_idx": 0, "doc_page_idx": 2}])
+    assert result.metadata["table_regions"][0] == {"page": 3}
 
 
 # ── PDFChunker: chunk_type tagging ───────────────────────────────────────────
@@ -256,32 +190,24 @@ def test_no_tables_all_text():
 
 
 def test_pymupdf_fallback_all_text(tmp_path):
-    """PyMuPDF fallback path produces no table_regions; all chunks tagged as text."""
+    """The text-only PyMuPDF extractor produces no table_regions; all chunks tagged as text."""
+    import pymupdf
+
     pdf_path = tmp_path / "test.pdf"
-    pdf_path.write_bytes(b"fake pdf")
+    doc = pymupdf.open()
+    for _ in range(2):
+        doc.new_page().insert_text((72, 72), "Fallback text content. " * 8)
+    doc.save(str(pdf_path))
+    doc.close()
 
-    # Mock pymupdf so we don't need a real PDF
-    page_text = "Fallback text content. " * 50
+    result = PDFExtractor()._extract_pymupdf(pdf_path)
 
-    mock_page = MagicMock()
-    mock_page.get_text.return_value = page_text
-
-    mock_doc_ctx = MagicMock()
-    mock_doc_ctx.__enter__ = MagicMock(return_value=mock_doc_ctx)
-    mock_doc_ctx.__exit__ = MagicMock(return_value=False)
-    mock_doc_ctx.__len__ = MagicMock(return_value=1)
-    mock_doc_ctx.__iter__ = MagicMock(return_value=iter([mock_page]))
-    mock_doc_ctx.metadata = {}
-
-    extractor = PDFExtractor()
-    with patch("pymupdf.open", return_value=mock_doc_ctx):
-        result = extractor._extract_normalized(pdf_path)
-
-    assert result.metadata["extraction_method"] == "pymupdf_normalized"
-    assert "table_regions" not in result.metadata
+    assert result.metadata["extraction_method"] == "pymupdf"
+    assert result.metadata["table_regions"] == []
 
     # When fed to the chunker with no table_regions, all chunks are text
     chunker = PDFChunker(chunk_chars=400)
     chunks = chunker.chunk(result.text, result.metadata)
+    assert chunks
     for c in chunks:
         assert c.metadata.get("chunk_type") == "text"

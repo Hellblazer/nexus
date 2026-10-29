@@ -100,6 +100,36 @@ class TestCoverageDecidedNonAnswers:
         ok, failed, handed, degenerate, reports = _split_four_way([row])
         assert ok == [] and failed == [] and list(degenerate) == [f"non_answer/{shape}"]
 
+    @pytest.mark.parametrize(("reason", "cls"), [
+        ("uncovered", "non_answer/uncovered"),
+        ("no_evidence", "non_answer/no_evidence"),
+        ("scope_conflict", "non_answer/no_evidence"),
+        ("no_usable_answer", "non_answer/no_usable_answer"),
+    ])
+    def test_a_redacted_row_whose_summary_says_unavailable_is_degenerate_not_executed_ok(self, reason: str, cls: str) -> None:
+        """Shakedown 2026-10-28 finding 4 (nexus-jypmj.3.15): run 744 (trace=False, uncovered) counted executed-ok
+        while its trace=True twin 745 was degenerate, because the redacted text was classified before the summary
+        was read."""
+        summary = {**_summary(partial=0, trace=False), "coverage_complete": 0, "coverage_unavailable": 1,
+                   "coverage_state": "unavailable", "coverage": {"state": "unavailable", "reason": reason}}
+        row = _row(redacted=True, summary=summary, steps=5)
+        assert _classify_degenerate_row(row) == cls
+        ok, failed, handed, degenerate, reports = _split_four_way([row])
+        assert ok == [] and failed == [] and list(degenerate) == [cls]
+
+    def test_a_redacted_unavailable_row_whose_coverage_block_was_cut_is_still_degenerate(self) -> None:
+        """fit_summary may cut the ``coverage`` block; the kept ``coverage_state`` still says unavailable."""
+        summary = {**_summary(partial=0, trace=False), "coverage_complete": 0, "coverage_unavailable": 1,
+                   "coverage_state": "unavailable"}
+        ok, _, _, degenerate, _ = _split_four_way([_row(redacted=True, summary=summary, steps=5)])
+        assert ok == [] and list(degenerate) == ["non_answer/no_usable_answer"]
+
+    def test_a_redacted_complete_row_stays_redacted_and_executed_ok(self) -> None:
+        """Control: only an unavailable summary moves a redacted row."""
+        row = _row(redacted=True, summary=_summary(partial=0, trace=False), steps=5)
+        assert _classify_degenerate_row(row) == "redacted"
+        assert _split_four_way([row])[0] == [row]
+
 
 class TestTheReport:
     @staticmethod

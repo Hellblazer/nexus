@@ -42,7 +42,7 @@ def _extraction_result(page_count: int = 1):
     return ExtractionResult(
         text="\n".join(pages),
         metadata={
-            "extraction_method": "docling", "page_count": page_count,
+            "extraction_method": "mineru", "page_count": page_count,
             "page_boundaries": bounds, "table_regions": [], "format": "markdown",
         },
     )
@@ -52,7 +52,7 @@ def _extract_side_effect(page_count: int, result):
     # **kwargs: absorb newer PDFExtractor.extract keyword args (e.g.
     # nexus-wi1uv's allow_degraded) so this local double does not break on
     # every signature extension (nexus-rzoqx).
-    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, **kwargs):
+    def extract(pdf_path, *, extractor="mineru", on_page=None, **kwargs):
         for i in range(page_count):
             if on_page:
                 on_page(i, f"Page {i} tp8yk gate content.", {"page_number": i + 1})

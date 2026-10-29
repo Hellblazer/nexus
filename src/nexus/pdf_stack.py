@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The PDF stack on demand (nexus-2k66t.4.2).
 
-docling, MinerU, torch, torchvision and pdftext are the ``pdf`` extra. A fresh
+MinerU, torch, torchvision and pdftext are the ``pdf`` extra. A fresh
 install goes without them (57-65% of the download, 49% of the installed size);
 the first PDF index fetches them. An EXISTING install carries them forward on
 its first post-split upgrade (``install_layout.receipt_predates_pdf_split``).
@@ -63,8 +63,8 @@ _log = structlog.get_logger(__name__)
 #: Distributions that make up the stack, with the module a ``find_spec`` probe
 #: resolves for each. Pinned against ``pyproject.toml``'s ``pdf`` extra by
 #: ``tests/test_pdf_stack.py``.
-STACK_DISTS: tuple[str, ...] = ("docling-slim", "mineru", "torch", "torchvision", "pdftext")
-STACK_MODULES: tuple[str, ...] = ("docling", "mineru", "torch", "torchvision", "pdftext")
+STACK_DISTS: tuple[str, ...] = ("mineru", "torch", "torchvision", "pdftext")
+STACK_MODULES: tuple[str, ...] = ("mineru", "torch", "torchvision", "pdftext")
 
 POLICY_ENV = "NX_PDF_STACK"
 REEXEC_ENV = "NX_PDF_STACK_REEXEC"
@@ -96,10 +96,10 @@ ENTRY_EXTRACTOR_CHOICE: dict[str, str] = {
     "nx index pdf --dir": CHOICE_FLAG_AND_SETTING,
     "nx index repo": CHOICE_SETTING,
     "nx collection reindex": CHOICE_SETTING,
-    # `nx dt index` and `nx dt capture` read the flag only (default `auto`, never `pdf.extractor`);
-    # if they come to read the setting, change these two to CHOICE_FLAG_AND_SETTING.
-    "nx dt index": CHOICE_FLAG,
-    "nx dt capture": CHOICE_FLAG,
+    # `nx dt index` and `nx dt capture` take `--extractor` (default: unset) and fall back to
+    # `get_pdf_extractor()`, the `pdf.extractor` setting, like `nx index pdf` (nexus-tr1rj.14).
+    "nx dt index": CHOICE_FLAG_AND_SETTING,
+    "nx dt capture": CHOICE_FLAG_AND_SETTING,
     "nx mineru start": CHOICE_NONE,
 }
 
@@ -152,8 +152,8 @@ VCRT_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 #: Said once, on stderr, before uv starts (the design's wording).
 INSTALL_NOTICE = (
     "Installing PDF support for conexus {version}: about 285 MB (macOS) / 390 MB (Linux) "
-    "download, 1.0 GB (macOS) / 1.3 GB (Linux) on disk, kept by future upgrades. Model weights follow on first "
-    "use: about 0.5 GB, plus 1.2 GB for the first PDF with formulas."
+    "download, 1.0 GB (macOS) / 1.3 GB (Linux) on disk, kept by future upgrades. Model weights follow with "
+    "the first PDF you index: about 1.2 GB."
 )
 
 _SKIPPED_RECORD = "pdf-stack-skipped.json"
@@ -315,7 +315,7 @@ def state() -> StackState:
                 "broken", "the receipt lists the pdf extra but none of the stack is installed",
                 tuple(missing),
             )
-        return StackState("absent", "docling, MinerU and torch are not installed")
+        return StackState("absent", "MinerU and torch are not installed")
     if missing:
         return StackState("broken", f"missing: {', '.join(missing)}", tuple(missing))
     pins = _pins(STACK_DISTS)
@@ -549,7 +549,7 @@ def _remedy(entry: str, st: StackState, plan: InstallPlan | None) -> str:
     why = plan.why[:1].upper() + plan.why[1:] if plan.why else ""
     text_only = text_only_remedy(entry)
     return (
-        f"{head}: {entry} needs docling and MinerU, and nothing was written. "
+        f"{head}: {entry} needs MinerU, and nothing was written. "
         f"{why + '. ' if why else ''}Run: {plan.command}" + (f"\n{text_only}" if text_only else "")
     )
 
@@ -580,6 +580,32 @@ def require(entry: str = "PDF extraction", *, extractor: str = "") -> None:
         _present_cache = True  # only reached with no gap: a refusal is never cached
         return
     raise PdfStackMissingError(_remedy(entry, st, None))
+
+
+def mineru_bounds_problem(extractor: str = "") -> str | None:
+    """Why the MinerU time limits cannot be used as set, or ``None`` (RDR-237, nexus-tr1rj.24).
+
+    ``None`` when *extractor* is the explicit ``pymupdf`` (MinerU is never reached) or when
+    ``pdf.mineru_page_timeout_s`` x ``pdf.mineru_page_batch`` is usable. Read at call time through
+    :func:`nexus.config.mineru_attempt_bound_problem`, the one place the pair is judged. The same
+    rule runs at the start of a MinerU extraction, but by then the catalog row is written: this
+    is the question every PDF entry asks first, before it writes anything.
+    """
+    if not needs_stack(extractor):
+        return None
+    import nexus.config as _config  # noqa: PLC0415 — deferred; module attribute so a patched check is seen
+
+    return _config.mineru_attempt_bound_problem()
+
+
+def refuse_bad_mineru_bounds(extractor: str = "") -> None:
+    """The CLI form of :func:`mineru_bounds_problem`: print ``Error: <problem>`` on stderr and exit 1,
+    the message and status an unusable setting always had, before anything is registered or
+    written. Returns at once for ``pymupdf`` and for settings that can be used."""
+    problem = mineru_bounds_problem(extractor)
+    if problem is not None:
+        _say(f"Error: {problem}")
+        raise SystemExit(1)
 
 
 def _windows_runtime_gap(

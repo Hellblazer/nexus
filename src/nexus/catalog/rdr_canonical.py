@@ -61,7 +61,7 @@ import structlog
 
 from nexus.catalog.catalog_protocol import CatalogReader
 from nexus.catalog.tumbler import Tumbler
-from nexus.catalog.types import CatalogEntry
+from nexus.catalog.types import RDR_FRONTMATTER_ID_META_KEY, CatalogEntry
 
 _log = structlog.get_logger()
 
@@ -301,3 +301,33 @@ def rdr_source_prefix(repo_root: Path | str) -> str:
     """
     rdr_dir = os.path.normpath(str(Path(repo_root).resolve() / "docs" / "rdr"))
     return f"file://{rdr_dir}{os.sep}"
+
+
+def rdr_frontmatter_id(text: str) -> tuple[bool, object]:
+    """``(parsed, raw id)`` of an RDR file's header, read by the aspect extractor's own splitter.
+
+    ``parsed`` is ``False`` for an opening fence with no closing one (nothing is known); otherwise the id is
+    the header's ``id`` value as written (``None`` when absent). A file with no header at all is parsed with
+    no id. The one rule behind the aspect row's ``rdr_id``, the file fallback and the registration stamp, so
+    the three can never disagree. Raises whatever the splitter raises; callers decide what that means.
+    """
+    from nexus.aspect_extractor import _split_rdr_frontmatter  # noqa: PLC0415 — deferred: the extractor module is heavy; the one parser the aspect row uses
+
+    data, body = _split_rdr_frontmatter(text)
+    if text.lstrip().startswith("---") and not data and body == text:
+        return False, None
+    return True, data.get("id")
+
+
+def rdr_frontmatter_meta(text: str) -> dict:
+    """The catalog ``meta`` entry that records an RDR file's frontmatter id at registration (nexus-jypmj.7):
+    ``{RDR_FRONTMATTER_ID_META_KEY: id}`` (``""`` for a header with no id), or ``{}`` when the header did not
+    parse or the parser failed. Never raises: registration must not fail because a header is odd."""
+    try:
+        parsed, raw = rdr_frontmatter_id(text)
+    except Exception as exc:  # noqa: BLE001 — an unparseable header is unknown, never a registration failure
+        _log.warning("rdr_frontmatter_meta_parse_failed", error=type(exc).__name__)
+        return {}
+    if not parsed:
+        return {}
+    return {RDR_FRONTMATTER_ID_META_KEY: "" if raw is None else raw}

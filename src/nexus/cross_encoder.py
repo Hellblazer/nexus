@@ -32,7 +32,7 @@ Stack:
 - ``tokenizers``     HuggingFace Rust tokenizer (first-class core dep,
   same P0b change).
 - ``huggingface_hub``  pulls the ONNX + tokenizer.json artifacts on
-  first call. Already a core dep via chromadb / docling.
+  first call. Already a core dep.
 
 Default model: ``cross-encoder/ms-marco-MiniLM-L-6-v2`` (~80MB). The
 download is lazy; importing this module does not touch the network.

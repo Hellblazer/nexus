@@ -165,7 +165,7 @@ def _make_pdf_mocks():
     mock_extract_result = MagicMock()
     mock_extract_result.text = "extracted text"
     mock_extract_result.metadata = {
-        "extraction_method": "docling",
+        "extraction_method": "mineru",
         "page_count": 1,
         "format": "markdown",
         "page_boundaries": [],
@@ -1927,7 +1927,7 @@ def pdf_extract_patches_ctx():
             chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 18, "page_number": 1}
             ext_cls.return_value.extract.return_value = MagicMock(
                 text="extracted text",
-                metadata={"extraction_method": "docling", "page_count": 1,
+                metadata={"extraction_method": "mineru", "page_count": 1,
                           "format": "markdown", "page_boundaries": []},
             )
             chk_cls.return_value.chunk.return_value = [chunk]
@@ -2359,7 +2359,7 @@ def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, c
                     chunk.chunk_index = 0
                     chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 1}
                     ext_cls.return_value.extract.return_value = MagicMock(
-                        text="text", metadata={"extraction_method": "docling", "page_count": 1,
+                        text="text", metadata={"extraction_method": "mineru", "page_count": 1,
                                                "format": "markdown", "page_boundaries": []})
                     chk_cls.return_value.chunk.return_value = [chunk]
                     result = index_pdf(path, corpus="mybook", t3=mock_t3, force=True, embed_fn=_fake_embed)
@@ -2423,7 +2423,7 @@ def test_index_pdf_small_doc_force_re_embed_true_forwards_true(sample_pdf, monke
                 chunk.chunk_index = 0
                 chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 1}
                 ext_cls.return_value.extract.return_value = MagicMock(
-                    text="text", metadata={"extraction_method": "docling", "page_count": 1,
+                    text="text", metadata={"extraction_method": "mineru", "page_count": 1,
                                            "format": "markdown", "page_boundaries": []})
                 chk_cls.return_value.chunk.return_value = [chunk]
                 result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3, force=True,
@@ -2445,7 +2445,7 @@ def test_index_pdf_small_doc_force_without_re_embed_forwards_false(sample_pdf, m
                 chunk.chunk_index = 0
                 chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 1}
                 ext_cls.return_value.extract.return_value = MagicMock(
-                    text="text", metadata={"extraction_method": "docling", "page_count": 1,
+                    text="text", metadata={"extraction_method": "mineru", "page_count": 1,
                                            "format": "markdown", "page_boundaries": []})
                 chk_cls.return_value.chunk.return_value = [chunk]
                 result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3, force=True,
@@ -2784,7 +2784,7 @@ def incr_setup(sample_pdf, monkeypatch, cloud_mode, owner_write):
                     with patch("nexus.doc_indexer.PDFChunker") as chk_cls:
                         ext_cls.return_value.extract.return_value = MagicMock(
                             text="x" * 5000,
-                            metadata={"extraction_method": "docling", "page_count": 50,
+                            metadata={"extraction_method": "mineru", "page_count": 50,
                                       "format": "markdown", "page_boundaries": []})
                         chk_cls.return_value.chunk.return_value = mock_chunks
                         # nexus-sghyo (2026-08-06): explicit t3= bypasses the
@@ -2911,7 +2911,7 @@ def test_index_pdf_incremental_prune_deleted_as_dead_code(incr_setup) -> None:
             with patch("nexus.doc_indexer.PDFChunker") as chk_cls:
                 ext_cls.return_value.extract.return_value = MagicMock(
                     text="x" * 5000,
-                    metadata={"extraction_method": "docling", "page_count": 50,
+                    metadata={"extraction_method": "mineru", "page_count": 50,
                               "format": "markdown", "page_boundaries": []})
                 chk_cls.return_value.chunk.return_value = mock_chunks
                 result = index_pdf(incr_setup.path, corpus="test", t3=t3, embed_fn=_fake_embed)
@@ -2975,7 +2975,7 @@ def test_index_pdf_incremental_dry_run_puts_the_chunks_in_the_throwaway_store(in
     with patch("nexus.doc_indexer.PDFExtractor") as ext_cls, patch("nexus.doc_indexer.PDFChunker") as chk_cls:
         ext_cls.return_value.extract.return_value = MagicMock(
             text="x" * 5000,
-            metadata={"extraction_method": "docling", "page_count": 50,
+            metadata={"extraction_method": "mineru", "page_count": 50,
                       "format": "markdown", "page_boundaries": []})
         chk_cls.return_value.chunk.return_value = _make_n_chunks(n)
         result = index_pdf(incr_setup.path, corpus="test", t3=t3, embed_fn=_fake_embed,

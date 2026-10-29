@@ -82,7 +82,7 @@ class TestExtractDoi:
 class TestDoiLabelPreference:
     """nexus-liir: when a document contains both a labeled paper-DOI
     AND bare reference-DOIs, the labeled form wins. This eliminates
-    the wrong-paper class where Docling's chunk order placed the
+    the wrong-paper class where a layout extractor's chunk order placed the
     references section before the page-1 banner."""
 
     def test_labeled_doi_wins_over_earlier_bare_doi(self) -> None:

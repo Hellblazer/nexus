@@ -61,7 +61,7 @@ def _er(page_count: int = 3) -> ExtractionResult:
         pos += len(p) + 1
     return ExtractionResult(
         text="\n".join(pages),
-        metadata={"extraction_method": "docling", "page_count": page_count,
+        metadata={"extraction_method": "mineru", "page_count": page_count,
                   "page_boundaries": bounds, "table_regions": [{"page": 2, "html": "<table/>"}],
                   "format": "markdown"},
     )
@@ -69,7 +69,7 @@ def _er(page_count: int = 3) -> ExtractionResult:
 
 def _fx(n: int = 3, result: ExtractionResult | None = None, text_fn=None):
     r = result or _er(n)
-    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
+    def extract(pdf_path, *, extractor="mineru", on_page=None, allow_degraded=False, on_heartbeat=None):
         for i in range(n):
             txt = text_fn(i) if text_fn else f"Page {i} content."
             if on_page:
@@ -165,7 +165,7 @@ def _pop_killed_upload(
     db.create_pipeline(h, "/a.pdf", "docs__test")
     for i in range(2):
         db.write_page(h, i, f"Page {i} content.", metadata={"page_number": i + 1, "text_length": 15})
-    db.store_extraction_metadata(h, {"page_count": 2, "table_regions": [], "extraction_method": "docling"})
+    db.store_extraction_metadata(h, {"page_count": 2, "table_regions": [], "extraction_method": "mineru"})
     db.update_progress(h, total_pages=2, pages_extracted=2, chunks_created=n, chunks_embedded=n)
     for i in range(n if embedded_rows is None else embedded_rows):
         db.write_chunk(h, i, f"chunk {i} text", f"{h[:16]}_{i}",
@@ -281,7 +281,7 @@ class TestExtractorLoop:
         result = _er(3)
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         with patch(_P_EXT) as ME:
-            def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
+            def f(pdf_path, *, extractor="mineru", on_page=None, allow_degraded=False, on_heartbeat=None):
                 for i in range(3):
                     if on_page:
                         on_page(i, f"Page {i} text content.",
@@ -296,7 +296,7 @@ class TestExtractorLoop:
     def test_cancel_raises_pipeline_cancelled(self, db: HttpPipelineDB) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         cancel = threading.Event()
-        def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
+        def f(pdf_path, *, extractor="mineru", on_page=None, allow_degraded=False, on_heartbeat=None):
             for i in range(10):
                 if on_page:
                     on_page(i, f"Page {i}", {"page_number": i + 1, "text_length": 6})
@@ -348,7 +348,7 @@ class TestExtractorLoop:
         """
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         with patch(_P_EXT) as ME:
-            def fail_mid(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
+            def fail_mid(pdf_path, *, extractor="mineru", on_page=None, allow_degraded=False, on_heartbeat=None):
                 for i in range(10):
                     if i == 6:
                         raise RuntimeError("boom mid-extraction")
@@ -869,7 +869,9 @@ class TestPipelineIndexPdf:
         assert total == 2
         mock_t3.upsert_chunks_with_embeddings.assert_not_called()
         (w,) = writer.instances
-        assert [len(r) for r, _ in w.batches] == [2]
+        # The uploader polls while the chunker still writes, so a poll between the two chunks'
+        # buffer writes sends them as two batches; the split is timing, the order is the contract.
+        assert [row["position"] for rows, _ in w.batches for row in rows] == [0, 1]
         # The stamp is the orchestrator's, after the post-passes: the writer finished, then it was
         # stamped complete.
         assert writer.events[-2:] == [("finish",), ("complete",)]
@@ -1381,7 +1383,7 @@ class TestPipelineIndexPdf:
         metadata. ``source_title`` was collapsed into ``title``; the
         post-pass now writes ``title`` only."""
         fr = _er(1)
-        fr.metadata["docling_title"] = "My Paper Title"
+        fr.metadata["pdf_title"] = "My Paper Title"
         fr.metadata["pdf_author"] = "Jane Doe"
         t3, _ = _run_with_col(
             db,
@@ -1398,8 +1400,8 @@ class TestPipelineIndexPdf:
                 assert m["source_author"] == "Jane Doe"
                 # nexus-1oguj: the post-pass also backfills the extractor
                 # identity from ExtractionResult.metadata once extraction
-                # completes — ``_er()`` defaults to "docling".
-                assert m["extraction_method"] == "docling"
+                # completes — ``_er()`` defaults to "mineru".
+                assert m["extraction_method"] == "mineru"
                 break
         else:
             pytest.fail("metadata enrichment post-pass not called")
@@ -1412,7 +1414,7 @@ class TestPipelineIndexPdf:
         ``quality_gate_overridden`` from an earlier degraded run — omitting
         the key from this write's dict is no longer enough to clear it."""
         fr = _er(1)
-        fr.metadata["docling_title"] = "My Paper Title"
+        fr.metadata["pdf_title"] = "My Paper Title"
         t3, _ = _run_with_col(
             db,
             col_get_return={"ids": ["abc_0"], "metadatas": [{"content_hash": "abc123"}]},
@@ -1439,7 +1441,7 @@ class TestPipelineIndexPdf:
         """The inverse of the test above: when THIS run's extraction DID trip
         the quality gate, the post-pass sets the key (not delete_keys)."""
         fr = _er(1)
-        fr.metadata["docling_title"] = "My Paper Title"
+        fr.metadata["pdf_title"] = "My Paper Title"
         fr.metadata["quality_gate_overridden"] = True
         t3, _ = _run_with_col(
             db,
@@ -1683,7 +1685,7 @@ class TestPipelineIndexPdf:
         """
         pages_done: list[int] = []
 
-        def slow_extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
+        def slow_extract(pdf_path, *, extractor="mineru", on_page=None, allow_degraded=False, on_heartbeat=None):
             for i in range(8):
                 time.sleep(0.05)
                 on_page(i, f"page {i} text.", {"page_number": i + 1, "text_length": 12})
@@ -1746,7 +1748,7 @@ class TestPipelineIndexPdfDryRun:
         preview, and the preview's post-pass must still do its work in the throwaway store."""
         fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
         fr = _er(1)
-        fr.metadata["docling_title"] = "Preview Title"
+        fr.metadata["pdf_title"] = "Preview Title"
         with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
                 patch("nexus.pipeline_stages._own_manifest_rows") as manifest, \
                 patch("nexus.pipeline_stages._catalog_pdf_hook"):
@@ -1943,7 +1945,7 @@ def test_pipeline_data_kept_on_enrichment_failure(db) -> None:
     col.get.return_value = {"ids": ["id1"], "metadatas": [{"content_hash": "h1"}]}
     t3.update_chunks.side_effect = Exception("quota exceeded")
     ro = MagicMock(spec=ExtractionResult)
-    ro.text, ro.metadata, ro.title = "some text", {"page_count": 1, "docling_title": "Test"}, "Test"
+    ro.text, ro.metadata, ro.title = "some text", {"page_count": 1, "pdf_title": "Test"}, "Test"
     assert _enrich_metadata_from_extraction("h1", ro, Path("/test.pdf"), t3, col, "docs__test", doc_id="") is False
 
 
@@ -1956,7 +1958,7 @@ def test_enrich_metadata_title_override_wins_over_resolve_pdf_title() -> None:
     t3, col = MagicMock(), MagicMock()
     col.get.return_value = {"ids": ["id1"], "metadatas": [{"content_hash": "h1"}]}
     ro = MagicMock(spec=ExtractionResult)
-    ro.text, ro.metadata = "some text", {"page_count": 1, "docling_title": "Fragment Only"}
+    ro.text, ro.metadata = "some text", {"page_count": 1, "pdf_title": "Fragment Only"}
     override = "Self-Aware Vector Embeddings for Retrieval-Augmented Generation"
 
     assert _enrich_metadata_from_extraction(
@@ -1970,7 +1972,7 @@ def test_enrich_metadata_title_override_wins_over_resolve_pdf_title() -> None:
 @pytest.mark.t2_tenant
 class TestStreamingCatalogHookTitle:
     """The streaming tail used to read ``metadata["title"]`` / ``["author"]``
-    — keys no extractor writes (they are ``docling_title`` / ``pdf_title`` /
+    — keys no extractor writes (they are ``pdf_title`` /
     ``pdf_author``) — so every streamed PDF reached ``_catalog_pdf_hook``
     with ``title=stem, author=""``. Resolve through the one shared chain
     (``resolve_pdf_title``) and the real author key (2026-08-19,
@@ -1978,7 +1980,7 @@ class TestStreamingCatalogHookTitle:
 
     def test_hook_receives_resolved_title_and_author(self, db) -> None:
         fr = _er(1)
-        fr.metadata["docling_title"] = "My Paper Title"
+        fr.metadata["pdf_title"] = "My Paper Title"
         fr.metadata["pdf_author"] = "Jane Doe"
         with patch("nexus.pipeline_stages._catalog_pdf_hook") as hook:
             _run_with_col(
@@ -1994,10 +1996,9 @@ class TestStreamingCatalogHookTitle:
         assert kw["author"] == "Jane Doe"
 
     def test_hook_falls_back_to_h1_when_extractor_titles_empty(self, db) -> None:
-        """MinerU path: both metadata titles empty, markdown opens with # H1."""
+        """MinerU path: the metadata title is empty, markdown opens with # H1."""
         fr = _er(1)
         fr.text = "# Rethinking Query Optimization\n\n" + fr.text
-        fr.metadata["docling_title"] = ""
         fr.metadata["pdf_title"] = ""
         with patch("nexus.pipeline_stages._catalog_pdf_hook") as hook:
             _run_with_col(
@@ -2174,7 +2175,7 @@ class TestDoneSignalsMeanSuccess:
         monkeypatch.setattr(stages, "wait", _slow_wait)
         six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
 
-        def _extract_then_fail(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+        def _extract_then_fail(pdf_path, *, extractor="mineru", on_page=None,
                                allow_degraded=False, on_heartbeat=None):
             # Pages arrive over time, as a real extraction delivers them, so the chunker sees new
             # pages while extraction is still pending and chunks the stable prefix.

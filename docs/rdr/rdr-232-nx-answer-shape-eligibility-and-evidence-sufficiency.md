@@ -400,9 +400,152 @@ listed under Critical Assumptions before gate.
   from an ART session, an ambiguity with its reason from a host without a
   project, and an explicit owner when the call binds the project. Not settled:
   Haiku reads compound single-paper questions as lookup where Opus says
-  synthesis, and no labelled set covers that class.
+  synthesis, and no labelled set covers that class. [Correction 2026-10-28:
+  a labelled set now covers that class, `bench/queries/golden_compound_lookup_v1.yaml`
+  (six requests, in-sample); the next entry records the re-measure.]
   *Source: extraction measurement and live proof. T2:
   `nexus_rdr/232-research-23`.*
+
+- **✅ Verified** (spike) — A5, the lookup boundary after nexus-jypmj.13. The
+  extraction prompt now says what section 1 says: several connected facts from
+  one passage of one source are a `lookup`, and a `synthesis` spans sections,
+  sources or history. Re-measured on 98 calls (Haiku 67, Opus 31; no timeout,
+  error or invalid reply). With extraction, Haiku reads golden 22 of 24 as
+  labelled (G23 and G24, both labelled unknown), held-out 28 of 29, and the six
+  compound single-passage requests 5 of 6 as lookup (C02 reads synthesis); Opus
+  reads golden 21 of 24, held-out 27 of 29 and the compound six 6 of 6 as
+  lookup. The failure that opened the bead, Opus reading compound single-passage
+  questions as synthesis, is closed on this set. All five Phase 2 gate
+  thresholds read as they did when Sam approved them (golden wrong-shape
+  admission 4 of 24 to 0; held-out 1 of 29 before and after; lookup recall 5 of
+  5 on golden and 2 of 5 held-out; held-out recall 0.724 to 0.690; 0 of 98
+  timeouts or errors). `_weak_lookup` was left unchanged on purpose: the first
+  pass sees the question text and no passage or source, so a deterministic rule
+  that calls a two-facet question `lookup` would override the model on exactly
+  the case the model is there to decide, and where extraction is off or fails the
+  right fallback is the inline planner, not the lookup plan. Not settled: the
+  compound set is in-sample (written with the boundary in view) and has six
+  requests. Its control, six one-source synthesis requests whose parts live in
+  different sections (`bench/queries/golden_near_miss_synthesis_v1.yaml`), is
+  authored and has not been run, so whether the new wording reads synthesis as
+  lookup is unmeasured.
+  *Source: extraction measurement and gate matrix. T2:
+  `nexus/rdr232-jypmj13-remeasure-2026-10-28`,
+  `nexus/rdr232-phase2-thresholds`.*
+
+- **✅ Verified** (spike) — the pre-cap graph scope filter (nexus-jypmj.1.13)
+  departs from the section 3 text in one place. The text says an engine that does
+  not report the filter yields no secondary graph evidence. The client applies
+  that only when the walk may have been cut, that is when the nodes returned plus
+  the seeds the walk lost reach the engine's 500-node cap, because that cut is the
+  only silent cap in the walk. A walk below the cap is complete, so filtering it
+  by scope on the client is exact and omitting it would discard good evidence; the
+  reason for the rule, a cut spent on out-of-scope nodes, does not apply to it.
+  Consequence: against the deployed engine (0.1.167, which does not report the
+  filter) and a cloud edge that has not allowlisted the flag, a capped walk (G06
+  was capped at 500 in the 2026-10-26 canary) returns seed documents only, so the
+  client must not ship ahead of the engine tag and the edge allowlist for that
+  request class.
+  *Source: engine wire change and its review. T2:
+  `nexus/rdr232-engine-wire-three-changes-2026-10-28`,
+  `nexus/review-rdr232-finish-critique-2026-10-28`.*
+
+- **✅ Verified** (spike) — the live canary of the coverage check is slow, and
+  latency is its cost. ART RDR-084 (G06), owner 1.2, engine 0.1.167, 2026-10-28:
+  with coverage off the run answered in 29.4 s for 0.433 USD; with coverage on it
+  answered in 147.3 s for 0.430 USD (assessment 0.0166 USD), 118 s longer. The
+  assessment made four serial calls, one per evidence stream, 118.2 s in all.
+  The primary, T2 and vector streams answered (30, 11 and 16 accepted records)
+  and the graph stream, 65 anchors, timed out at the 60 s call limit, so the
+  outcome was `partial_failure` with cause `raised_call`; the facets were still
+  covered by the other streams (6 of 6, one conflicted). The serial design is
+  recorded as provisional in `src/nexus/plans/coverage_ledger.py`. The summarize
+  step's `elapsed_ms` (140.8 s) includes the assessment wait, so per-step
+  latency in `nx answer-runs` over-attributes to summarize until assessment
+  latency is split out of it. Follow-up nexus-jypmj.17 covers concurrent
+  per-stream calls under the stage deadline, continuing after a raised call and
+  the 65-anchor pack; this finding said turning the check on by default waited
+  on it, and on 2026-10-28 Sam turned it on together with that work (the next
+  finding). This is one request on one run.
+  *Source: live canary of 2026-10-28, recorded in the bead nexus-jypmj.3.10
+  comment of that date (the 2026-10-26 Phase 1 canary is T2
+  `nexus/rdr232-canary-phase1`).*
+
+- **⚠️ Defect found and fixed** (2026-10-28, live golden run) — With the
+  coverage check on, an ambiguous named source was counted as a missing one.
+  G01, G02 and G04 each name an RDR number that two projects carry (nexus 1.1
+  and ART 1.2), so source resolution returned candidates; the coverage source
+  check reported `missing`, the facet was blocked as `source_missing`, and
+  generation was skipped at zero cost while the coverage-off arm answered all
+  three. Per Failure Modes ("Primary source unresolved: return candidates or a
+  disclosed unresolved state") and section 4 (only a missing named source
+  counts as uncovered), an ambiguous source, or one whose lookup failed, timed
+  out or hit its candidate cap, now has its own coverage state `unresolved`:
+  disclosed in `coverage.sources` and the notice, blocking no facet. A source no
+  document carries stays `missing`. The resolver's own `unresolved` status
+  (nothing found) still maps to coverage `missing`, so the word means different
+  things on the two sides. The golden latency and cost deltas recorded for that
+  run include the three withheld pairs, so they read low; they are re-taken on
+  the fixed tree.
+  *Source: bead nexus-jypmj.3.17; bead nexus-jypmj.3.10 comment of 2026-10-28.*
+
+- **❓ Assumed** (unit-test timing model; no live run; the code behaviour is
+  tested, the latency and accuracy are not measured) — the coverage check is on
+  by default as of 2026-10-28, by Sam's decision, taken together with the latency
+  fix the canary above asked for (nexus-jypmj.17). The assessment calls now run
+  at most 4 at a time, fewer when an API backend's configured
+  `NX_LLM_MAX_CONCURRENCY` is lower (the `claude -p` backend has no gate and its 4
+  concurrent subprocesses are unmeasured), each cut at the stage's 0.4 share of
+  the deadline left, the cut killing the `claude -p` process tree and reporting an
+  unknown cost; a stream over 20 anchors is split
+  into balanced packs, so the canary's 65-anchor graph stream is four calls of 16
+  to 17; a call that raises or replies unusably costs only its own facets, so
+  `stopped_after_failure` is no longer produced; and the terminal step's
+  `elapsed_ms` no longer carries the assessment. The tests model the canary at
+  1/100 scale (a call takes 0.15 s plus 7 ms per anchor; 99 anchors in four
+  streams of 12, 12, 65 and 10): the serial, unsplit stage takes 130
+  model-seconds, with the graph call cut at the 60 s limit as in the canary
+  (measured live: 118 s), and the concurrent split stage takes 50 model-seconds
+  in two waves of calls, with no call cut. That 50 s is the model's figure under
+  assumed per-call latencies, not a measurement: the live latency with the check
+  on is re-taken on the next canary, and the 20-anchor pack size and the
+  per-anchor latency are unmeasured as accuracy and latency. An unrecognised
+  `NX_ANSWER_COVERAGE` value (`disable`, `off!`) reads as off, not as the default:
+  the safe direction for a typo.
+  *Source: bead nexus-jypmj.17; `tests/test_rdr232_coverage_concurrent.py`; bead
+  nexus-jypmj.3.10 comment of 2026-10-28.*
+
+- **✅ Verified** (spike, live) — The concurrent default-on coverage check on
+  production (develop 6dd75ec3f, engine 0.1.168, 2026-10-29). G06 canary:
+  assessment 54.3 s for 8 concurrent calls (graph in 4 packs), against 118 s for
+  4 serial calls on 2026-10-28; 0 cut, 0 raised, 6 of 6 facets covered; wall 87.7 s
+  on, 30.0 s off. Held-out set, 29 requests with the check off and on: 0 errors,
+  0 answers withheld, 2 partial, 0 unassessed facets, wall latency p50 +16.8 s and
+  p90 +33.9 s, assessment 0.021 USD a run. The ambiguous-source fix
+  (nexus-jypmj.3.17) holds live, with and without a project context; G18, still
+  withheld, is a correct withhold (retrieval returned test code, and the
+  coverage-off answer addresses a different question).
+  *Source: bead nexus-jypmj.3.10 comments of 2026-10-29; research 24.*
+
+- **✅ Verified** (spike, live) — Facet reliability against labels drafted blind
+  from the items the assessor saw (21 held-out requests): false negative 1 of 31
+  facets (3.2 percent, 95 percent interval 0.6 to 16), false skip 0 of 21 runs.
+  Sam spot-checked 15 drafted pairs: the drafter was wrong on 4, all drafted
+  neutral where Sam read supports, and on the 3 sampled disagreements Sam sided
+  with the assessor. So the drafted supports labels, and the false-negative rate
+  built on them, hold at screening grade; the drafted neutrals under-count support
+  and cannot show the assessor over-covers or over-flags conflicts. Not measured:
+  the five largest held-out requests and the negative-control set.
+  *Source: bead nexus-jypmj.3.10 comments of 2026-10-29; T2
+  `nexus/rdr232-3.10-live-measurement-2026-10-29`; research 24.*
+
+- **✅ Verified** (spike, live) — The run summary and the out-of-step cost column
+  in production: engine 0.1.168 (telemetry-017-1, one nullable column) deployed
+  after a fork rehearsal, STEP-6 green, the cloud client-path gate 13 of 13; every
+  measurement row persisted and read back its summary, and 48 of 71 rows carry a
+  value (1.603811 USD), matched by a read-only production recount. The old-engine
+  and cached-capability rollback legs remain simulated only.
+  *Source: beads nexus-0gc7m, nexus-jypmj.3.10; research 25.*
 
 ### Critical Assumptions
 
@@ -437,16 +580,16 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   selector derives labels from chunk content in manifest order and never
   trusts stored labels unvalidated. Production resolver/runner integration,
   candidate paging, and more than two real documents remain unverified.
-- [ ] **A3 — existing dispatch can support facet coverage at a new runner-owned
-  pre-reduction boundary.** **Status**: Partially verified (research 8).
+- [x] **A3 — existing dispatch can support facet coverage at a new runner-owned
+  pre-reduction boundary.** **Status**: Verified live 2026-10-29 (research 24); earlier, partially verified (research 8).
   **Method**: Source Search plus deterministic boundary spike using real
   `plan_run` and real bundle composition/dispatch with fake model output.
   Plain `check → generate` hid its intermediate; the proposed boundary preserved
   anchors, executed one prefix/repair/reduction, shared budget/deadline, and
   disclosed failure/scope/continuation states correctly. Production runner
   integration and live-model facet reliability remain unverified.
-- [ ] **A4 — a nullable versioned run summary can extend existing telemetry
-  compatibly.** **Status**: Partially verified (research 9). **Method**: Source
+- [x] **A4 — a nullable versioned run summary can extend existing telemetry
+  compatibly.** **Status**: Verified live 2026-10-29 except the old-engine and cached-capability rollback legs, which stay simulated (research 25); earlier, partially verified (research 9). **Method**: Source
   Search plus private-engine and isolated `TenantScope`/jOOQ repository spike.
   Old-engine silent drop, one-write current completion, nullable JSONB summary
   persistence, rollback, plan counters, imports/readback, and old-client null
@@ -471,7 +614,10 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   active-project tier live on the unmodified RDR-084 call (research 23).
   Still open: compound single-paper questions are lookups only because Haiku
   departs from the extraction prompt; the prompt and `_weak_lookup` are
-  aligned with the approved lookup definition in nexus-jypmj.13.
+  aligned with the approved lookup definition in nexus-jypmj.13. [Correction
+  2026-10-28: only the prompt was aligned; `_weak_lookup` was left unchanged on
+  purpose, and the compound set closes the Opus divergence for six requests. See
+  the Key Discoveries entry on the lookup boundary.]
 - [ ] **A6 — traversal can apply scope before its chunk cap without losing
   alignment.** **Status**: Partially verified (research 10). **Method**: Source
   Search plus synthetic graph fixture with >300 out-of-scope ids preceding
@@ -992,12 +1138,15 @@ independent of prose fluency.
 | --- | --- | --- | --- | --- | --- |
 | `complete` | every required facet has evidence | `answered` | the answer | `success_count` | allowed |
 | `partial` | at least one required facet is unsupported or contradicted, and a usable answer exists | `insufficient_evidence` | a notice naming each unresolved facet, followed by the answer | `success_count` | blocked |
-| `unavailable` | no usable answer can be produced | `uncovered` when retrieval returned evidence and none of it covered a required facet (prose with no covered facet included); `no_evidence` when no retrieval result reached the reduction | the existing non-answer notice and chunk references | `failure_count` | blocked |
+| `unavailable` | no usable answer can be produced | `uncovered` when retrieval returned evidence and none of it supported or contradicted a required facet (prose with no such facet included); `no_evidence` when no retrieval result reached the reduction | the existing non-answer notice and chunk references | `failure_count` | blocked |
 | `unassessed` | the request has no facets, or the coverage assessment itself failed | `answered` | the answer, as today | `success_count` | as today |
 
 A **usable answer** exists when the terminal generation returned prose that
 `classify_answer_shape` reads as `answered` and at least one required facet
-is covered. Prose with no covered facet is `unavailable`. A repair or
+is covered or contradicted: contradicting evidence is evidence the reduction
+must state, so a contradiction is reported ahead of the prose rather than
+withheld (Sam, 2026-10-27, nexus-jypmj.3.13). Prose with no such facet is
+`unavailable`. A repair or
 reassessment call that fails after the first assessment succeeded leaves the
 first ledger in force, so the result is `partial` (or `complete`), not
 `unassessed`. A missing named source, or a scope conflict that removed all
@@ -1010,8 +1159,11 @@ the counter column applies; for an inline-planned run the growth column does.
 
 The partial notice opens with a stable marker, `[insufficient-evidence:
 <n> unresolved]`, so `nx answer-runs`, which classifies rows by their
-recorded text (`commands/answer_runs.py:226`), can bucket them; the marker
-survives `trace=False` redaction because it carries no question text.
+recorded text (`commands/answer_runs.py:226`), can bucket them. As built, a
+row is bucketed from its run summary's `coverage_partial` count when the
+summary is present, for either `trace` value; without a summary only a
+`trace=True` row can be bucketed by its marker, because a `trace=False` row's
+recorded text is redacted whole.
 `nx_answer` sets `answer_shape` from the coverage state, not by classifying
 the final text.
 
@@ -1059,7 +1211,20 @@ Assessment cost is bounded independently of facet count. Group facets into one
 structured assessment per evidence stream, with a calibrated cap on facets per
 call and one repair/reassessment cycle. The motivating six-facet request must
 not imply six unconditional model calls. Record assessment calls, facets per
-call, and incremental cost/latency in the run summary.
+call, and assessment latency in the run summary. As built, assessment USD is
+not a summary field: it is in the run's step records (the `operator_check`
+steps numbered past the plan's own steps).
+
+*Departure, 2026-10-28 (nexus-jypmj.17).* The call count is no longer one per
+evidence stream. A stream of more than 20 anchors is split into balanced packs
+of at most 20, each its own call over the same facet group, and the calls run
+concurrently, at most 4 at a time (fewer when an API backend's
+`NX_LLM_MAX_CONCURRENCY` is lower). The number of calls is the sum over streams
+of the packs times the facet groups, and no constant caps it: what bounds the
+stage is its 0.4 share of the deadline left and the USD stop-line, not the
+design. Under a tight allowance the later streams in plan order (graph, other)
+are the ones left unassessed. The 20-anchor pack size and the 4 concurrent calls
+are unmeasured as accuracy and latency.
 
 The boundary must be runner-owned, before terminal reduction. Two adjacent
 operator steps bundle and expose only their terminal result, so adding
@@ -1091,7 +1256,10 @@ The repair path gets its own allowance inside the original monotonic deadline
 and one shared USD accumulator spanning prefix, assessment, repair, and
 reduction. It is not a second full plan budget. Existing USD enforcement checks
 before segments and is a stop-line rather than a hard ceiling; unknown-cost
-steps remain a disclosed accounting limitation. Record coverage/repair usage in
+steps remain a disclosed accounting limitation. As built, the continuation
+fallback re-run, which re-executes the plan without the cut, repays the prefix,
+assessment and repair against the same remaining USD; this is logged, not
+prevented. Record coverage/repair usage in
 the existing step accounting vocabulary rather than inventing an unversioned
 step source. If repair is unaffordable, skip it and generate once from the
 evidence already held; the result then follows the coverage-state table above
@@ -1131,7 +1299,9 @@ becomes `persistence=dropped` with a warning, never silent success. New client
 existing record, and exposes `persistence=unsupported` in the live envelope.
 An old engine may silently discard unknown keys, so HTTP 200 is not evidence
 of persistence. Old client + new engine is unchanged because the column and
-wire field are nullable. Returned coverage and persisted coverage are distinct
+wire field are nullable. As built, two further states: `unverified` when a
+summary was sent and no readback was requested (a text-mode call never reads
+back), and `not_recorded` when no run record was written. Returned coverage and persisted coverage are distinct
 states. Readback is a read, not a second telemetry write or update.
 
 #### 5. Evaluation before tuning
@@ -1504,6 +1674,30 @@ first phase that claims the complete motivating behavior.
    Phase 1. Keep the deterministic containment and eligibility gates even if
    model-assisted repair does not justify its cost.
 
+As run (2026-10-27): steps 1 to 3 are built (nexus-jypmj.3.1 to .3.6); step 4
+is nexus-jypmj.3.10. The coverage check shipped off and `NX_ANSWER_COVERAGE=1`
+opted in: the Phase 3 review found that turning it on before step 4 measured
+it contradicted Phase 1 step 7 and the Phase 2 precedent, so the default was to
+flip only after nexus-jypmj.3.10 and Sam's approval. **Amended 2026-10-28:** Sam
+decided on 2026-10-28 (nexus-jypmj.17) that the check is on by default, ahead
+of the step 4 measurement and together with the concurrent assessment calls; it
+shipped off in 7.88.0 and on in the release after it, and `NX_ANSWER_COVERAGE=0`
+turns it off. The step 4 measurements of the shipped call shape (the Key
+Discoveries and Performance Expectations list what is still outstanding) were
+not taken before the flip. Departures from section 4, each
+stated in the code and the published docs: an assessor reply with no usable
+evidence record leaves its facets `unassessed`, not `unsupported`; a facet
+with both supporting and contradicting evidence is covered and marked
+`conflicted`; prose is kept as `insufficient_evidence` while any facet is
+unassessed, so `uncovered` needs every facet known; the reassessment after the
+repair reads only the evidence the repair added; a partial ledger hands
+generation a coverage note naming the unresolved facets, which is how the
+"explicit list" of step 4 reaches it; ids that come back but hydrate to
+nothing give `no_evidence` and a failure; the envelope's `coverage` object
+carries the state after the post-generation decision. The run summary
+persists only on engine-service-v0.1.166 and later; the deployed engine
+reports `unsupported`.
+
 ### Day 2 Operations
 
 No new collection, database table, or credential is proposed. One additive
@@ -1583,7 +1777,7 @@ library, and composite telemetry surfaces.
 - **Scenario**: Execution succeeds but required evidence is missing —
   **Verify**: `answer_shape="insufficient_evidence"`, coverage is `partial`,
   the text opens with the `[insufficient-evidence: ...]` marker followed by
-  the prose, the run-summary outcome is `coverage_partial`, and the run is not
+  the prose, the run summary's `coverage_partial` count is 1, and the run is not
   a quality exemplar. On a library plan `success_count` increments; on an
   inline-planned run the no-grow flag blocks growth. `nx answer-runs` puts the
   row in its own bucket.
@@ -1672,6 +1866,25 @@ runs. Request extraction is deterministic-first; the single structured call
 evidence stream, with the repair and reassessment bounded to one cycle. Measure
 invocation rates, facets per call, incremental latency, and cost against the
 current run records. No throughput target is asserted without a baseline.
+
+Coverage check on (default from 2026-10-28), what is measured and what is not.
+Measured, one request on one run (ART RDR-084 G06, engine 0.1.167, 2026-10-28,
+the serial design, one `operator_check` call per stream): check off 29.4 s and
+0.433 USD; check on 147.3 s and 0.430 USD, of which the assessment took 118 s
+(four serial calls, one cut at the 60 s limit) and 0.0166 USD. The concurrent
+design with 20-anchor packs has no live figure. Its timing is a unit-test model
+of the canary at 1/100 scale (a call takes 0.15 s plus 7 ms per anchor), under
+which the stage takes 50 model-seconds against 130 for the serial one: a model of
+assumed per-call latencies, not a measurement, and not a prediction to cite.
+Outstanding, in order: the canary on and off on the shipped tree (wall clock, not
+summed step time; calls, peak in flight, cut calls, backend and
+`NX_LLM_MAX_CONCURRENCY`); reply classes per pack against the one-call-per-stream
+baseline (0 unusable of 40 calls); G18 (withheld after assessment while the off
+arm answered), G01, G02 and G04 on the fixed tree; the full golden set on and off
+for latency and cost; a small `budget_usd` and `budget_seconds` for first-wave
+overshoot and cut calls; a persisted run through `nx answer-runs --steps`. The
+`claude -p` backend runs 4 concurrent subprocesses with rate-limit and host-load
+behaviour unmeasured.
 
 ## Finalization Gate
 
@@ -1842,3 +2055,7 @@ remain coherent without it.
 - 2026-10-26: Section 1 states how the active-project tier decides (reliability, the project-name and title veto, the fallback notice, question-text sources, the range disclosure) and the Phase 2 proof states what "otherwise" means for the unmodified call (nexus-jypmj.2.4), approved by Sam.
 - 2026-10-27: Phase 2 measured and enabled (nexus-jypmj.2.8, nexus-jypmj.12), approved by Sam. Section 1: a lookup includes several connected facts from one passage of one source; the directional rule is recorded as a measured limit; request extraction is on by default with Haiku and turning it off puts the gate in shadow. Trade-offs and Performance Expectations carry the measured fall-through and extraction cost. Phase 2 step 6 records that the thresholds were set after measuring, and why.
 - 2026-10-27: Section 4's coverage-state table row for `unavailable` names the new `uncovered` shape for evidence that covered no facet and keeps `no_evidence` for zero retrieval results, per Sam's ruling (nexus-jypmj.3.12), added with the shape in nexus-jypmj.3.3.
+- 2026-10-27: Section 4 counts a contradicted facet toward a usable answer: the definition and the `unavailable` row say covered or contradicted, so a contradiction-only result is `partial` with the contradiction named ahead of the prose, per Sam's ruling (nexus-jypmj.3.13).
+- 2026-10-27: Phase 3 As run recorded (the coverage check ships off until nexus-jypmj.3.10 and Sam's approval; the section 4 departures as built), and section 4 and the Test Plan corrected where they misdescribed the build (marker bucketing under trace=False, assessment USD in step records, the continuation fallback repay, the unverified and not_recorded persistence states, the coverage_partial count), approved by Sam.
+- 2026-10-28: Key Discoveries record the lookup-boundary re-measure (nexus-jypmj.13), the pre-cap filter's old-engine departure (nexus-jypmj.1.13) and the live canary latency (nexus-jypmj.3.10); two A5 statements are corrected as findings. No decision text changed.
+- 2026-10-28: The coverage check is on by default (Sam's decision, nexus-jypmj.17), with concurrent assessment calls. Decision text changed: Phase 3 As run (the check no longer ships off; the amendment names Sam and the date), section 4 (a dated departure: packs of at most 20 anchors, at most 4 concurrent calls, the call count bounded by the stage share and the USD stop-line, not by design) and Performance Expectations (the measured canary figures, the unit-test timing model labelled as a model, the outstanding measurements). The Key Discovery for the timing model is tagged Assumed.

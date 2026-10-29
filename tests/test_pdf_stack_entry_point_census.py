@@ -199,7 +199,7 @@ def test_index_pdf_on_a_slim_box_refuses_and_touches_neither_store_nor_catalog(m
 
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
     pdf_stack.reset_cache()
-    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "docling, MinerU and torch are not installed"))
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "MinerU and torch are not installed"))
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"%PDF-1.4 not empty")
     register = MagicMock(side_effect=AssertionError("registered a catalog row before the stack check"))
@@ -296,3 +296,55 @@ def test_the_repo_walks_two_hold_calls_pass_the_extractor_and_the_late_recheck_a
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "needs_stack"
     ]
     assert asks, "the late recheck must skip the stack probe for an extractor that needs none"
+
+
+# ── the bounds question goes with the gate (nexus-tr1rj.24) ──────────────────
+
+_BOUNDS_ATTRS = frozenset({"refuse_bad_mineru_bounds", "mineru_bounds_problem"})
+
+
+def _bounds_calls(fn: ast.AST) -> int:
+    return sum(
+        1 for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in _BOUNDS_ATTRS
+        and isinstance(n.func.value, ast.Name) and n.func.value.id.endswith("pdf_stack")
+    )
+
+
+def _gates_and_bounds_per_holder() -> dict[tuple[str, str], tuple[list[str], int]]:
+    """``(file, outermost holding function)`` -> (the gate labels it holds, its bounds-call count)
+    for the seven gates other than ``PDFExtractor.extract``'s own backstop."""
+    held: dict[tuple[str, str], list[str]] = {}
+    bounds: dict[tuple[str, str], int] = {}
+    for rel, line, label, _takes in _gate_calls():
+        if (rel, label) not in _EIGHT_GATES or rel == "pdf_extractor.py":
+            continue
+        tree = ast.parse((_SRC / rel).read_text(encoding="utf-8"))
+        fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        # the outermost function whose span holds the gate call
+        holders = [n for n in fns if n.lineno <= line <= (n.end_lineno or n.lineno)]
+        outer = min(holders, key=lambda n: n.lineno)
+        held.setdefault((rel, outer.name), []).append(label)
+        bounds[(rel, outer.name)] = _bounds_calls(outer)
+    return {k: (v, bounds[k]) for k, v in held.items()}
+
+
+def test_every_extraction_entry_asks_the_mineru_bounds_once_per_stack_gate_it_holds() -> None:
+    """An unusable ``pdf.mineru_page_timeout_s`` x ``pdf.mineru_page_batch`` is refused inside
+    extraction, after the catalog row is written, so each entry that can reach MinerU asks first.
+    ``PDFExtractor.extract`` is the backstop and carries its own check; the other seven gates (the
+    ``_EIGHT_GATES`` list) must each have a call to ``pdf_stack.refuse_bad_mineru_bounds`` or
+    ``mineru_bounds_problem`` in the function that holds them: ``index_pdf_cmd`` holds two gates
+    (a file and ``--dir``), so one call there leaves the other unasked. A new entry, or a deleted
+    call, fails here."""
+    per_holder = _gates_and_bounds_per_holder()
+    short = [
+        f"{rel}:{fn}() holds {len(labels)} stack gate(s) {labels} and asks the bounds {asked} time(s)"
+        for (rel, fn), (labels, asked) in sorted(per_holder.items())
+        if asked < len(labels)
+    ]
+    assert not short, "stack gate with no MinerU bounds question beside it:\n  " + "\n  ".join(short)
+    gates = sum(len(labels) for labels, _asked in per_holder.values())
+    asked = sum(asked for _labels, asked in per_holder.values())
+    assert gates == 7 and asked >= 7, f"non-vacuity: {asked} bounds call(s) for {gates} of the seven gates"
+    assert per_holder[("commands/index.py", "index_pdf_cmd")][0] == ["nx index pdf", "nx index pdf --dir"]

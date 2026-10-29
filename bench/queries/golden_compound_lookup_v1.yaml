@@ -1,0 +1,106 @@
+# RDR-232 compound-lookup class probe v1 (nexus-jypmj.13).
+#
+# What this is: 6 labelled requests, all answer_kind lookup, each asking for two connected facts that one
+# passage of one source answers (RDR-232 section 1: a lookup is "a specific fact or small set of facts,
+# including several connected facts from one passage of one source"; a synthesis spans sections, sources or
+# history). Same label fields and golden_set_version as golden_v1, so
+# scripts/bench/schema.py::load_golden_set loads it strictly.
+#
+# Why a separate file: the earlier 56-call measurement reports and the gate matrix cite golden_v1 and
+# golden_heldout_v1 by size and content; adding a request to either changes its size and bumps
+# golden_set_version, which would invalidate those recorded figures for no gain. The measurement reads this
+# set with `--set compound` (bench.rdr232_extract_measure).
+#
+# Provenance and what it can prove: written 2026-10-28 by the conexus developer agent for nexus-jypmj.13 WITH
+# the boundary in view. It is IN-SAMPLE (not blind, not held out): it checks that the extraction prompt gives
+# the lookup reading to this class of request, and that a later change to the prompt or a different model
+# moves them out of lookup visibly. It does not estimate a rate. Every RDR id named exists under docs/rdr/;
+# the first-pass classifier leaves all six `unknown` with two clause facets, so every one is sent to the
+# structured extraction (tests/test_rdr232_lookup_boundary.py pins that). Sam should spot-check the labels.
+#
+# Kind mix: lookup 6. unacceptable_plans are the wrong-shape builtins for a lookup, as in golden_v1.
+golden_set_version: 1
+queries:
+  - qid: C01
+    category: factual
+    text: "In RDR-064, what default port does nx console listen on and what host does it bind to?"
+    answer_kind: lookup
+    required_sources: ["RDR-064"]
+    required_facets: ["default-port", "bind-host"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"
+
+  - qid: C02
+    category: factual
+    text: "What does RDR-180 say the old chunk natural-ID width was in hex characters and in bits, and what width does the catalog citation grammar use?"
+    answer_kind: lookup
+    required_sources: ["RDR-180"]
+    required_facets: ["natural-id-width", "citation-width"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"
+
+  - qid: C03
+    category: factual
+    text: "Which four segments make up the conformant collection name in RDR-103, and what does the owner_id segment hold?"
+    answer_kind: lookup
+    required_sources: ["RDR-103"]
+    required_facets: ["name-segments", "owner-id-meaning"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"
+
+  - qid: C04
+    category: factual
+    text: "In RDR-155, which database does T3 move into and what happens to ChromaDB?"
+    answer_kind: lookup
+    required_sources: ["RDR-155"]
+    required_facets: ["t3-database", "chromadb-fate"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"
+
+  - qid: C05
+    category: factual
+    text: "Which declared plan kinds can serve a lookup request in RDR-232, and what does the unknown request kind admit?"
+    answer_kind: lookup
+    required_sources: ["RDR-232"]
+    required_facets: ["lookup-eligible-kinds", "unknown-request-admits"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"
+
+  - qid: C06
+    category: factual
+    text: "What does RDR-103 say about where the rdr_postmortem meaning is encoded, and which collection shape do post-mortems collapse into?"
+    answer_kind: lookup
+    required_sources: ["RDR-103"]
+    required_facets: ["postmortem-encoding", "postmortem-collection-shape"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"

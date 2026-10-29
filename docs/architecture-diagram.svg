@@ -292,7 +292,7 @@
       <text x="130" y="93"  text-anchor="middle" class="box-sub">tree-sitter · 31 languages</text>
       <text x="130" y="112" text-anchor="middle" class="box-text">code_indexer · prose_indexer</text>
       <text x="130" y="127" text-anchor="middle" class="box-text">pdf_extractor</text>
-      <text x="130" y="142" text-anchor="middle" class="box-sub">Docling → MinerU → PyMuPDF</text>
+      <text x="130" y="142" text-anchor="middle" class="box-sub">MinerU → PyMuPDF text</text>
       <text x="130" y="158" text-anchor="middle" class="box-text">bib_enricher</text>
     </g>
 

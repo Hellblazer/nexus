@@ -97,10 +97,10 @@ def test_config_set_updates_existing(runner, fake_home) -> None:
 
 def test_config_set_dotted_preserves_existing(runner, fake_home) -> None:
     runner.invoke(main, ["config", "set", "voyage_api_key=abc"])
-    runner.invoke(main, ["config", "set", "pdf.extractor=docling"])
+    runner.invoke(main, ["config", "set", "pdf.extractor=pymupdf"])
     data = _read_config(fake_home)
     assert data["credentials"]["voyage_api_key"] == "abc"
-    assert data["pdf"]["extractor"] == "docling"
+    assert data["pdf"]["extractor"] == "pymupdf"
 
 
 def test_config_set_dotted_overwrites(runner, fake_home) -> None:
@@ -113,9 +113,10 @@ def test_config_set_dotted_overwrites(runner, fake_home) -> None:
 
 
 @pytest.mark.parametrize("config_data,repo_root,expected", [
-    (None, None, "auto"),
+    (None, None, "mineru"),
     ({"pdf": {"extractor": "mineru"}}, None, "mineru"),
-    ({"pdf": {"extractor": "bogus"}}, None, "auto"),
+    ({"pdf": {"extractor": "pymupdf"}}, None, "pymupdf"),
+    ({"pdf": {"extractor": "bogus"}}, None, "mineru"),
 ])
 def test_get_pdf_extractor(fake_home, config_data, repo_root, expected) -> None:
     from nexus.config import get_pdf_extractor
@@ -135,11 +136,11 @@ def test_get_pdf_extractor_repo_overrides_global(fake_home, tmp_path) -> None:
 
 
 @pytest.mark.parametrize("extra_args,expected_extractor", [
-    ([], "docling"),
+    ([], "pymupdf"),
     (["--extractor", "mineru"], "mineru"),
 ])
 def test_index_pdf_extractor(runner, fake_home, extra_args, expected_extractor) -> None:
-    _write_config(fake_home, {"pdf": {"extractor": "docling"}})
+    _write_config(fake_home, {"pdf": {"extractor": "pymupdf"}})
     pdf = fake_home / "test.pdf"
     pdf.write_bytes(b"dummy")
     with patch("nexus.doc_indexer.index_pdf",
@@ -196,10 +197,10 @@ def test_config_get_dotted_key_returns_default(runner, fake_home) -> None:
 
 
 def test_config_get_dotted_show_not_masked(runner, fake_home) -> None:
-    runner.invoke(main, ["config", "set", "pdf.extractor=docling"])
+    runner.invoke(main, ["config", "set", "pdf.extractor=pymupdf"])
     result = runner.invoke(main, ["config", "get", "--show", "pdf.extractor"])
     assert result.exit_code == 0
-    assert "docling" in result.output
+    assert "pymupdf" in result.output
 
 
 def test_config_get_mint_tenant_not_masked_without_show(runner, fake_home) -> None:

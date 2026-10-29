@@ -26,7 +26,7 @@ from nexus import install_layout, pdf_stack
 from nexus.commands import self_cmd
 from nexus.pdf_stack import Outcome
 
-_STUBS = ("docling", "mineru", "torch", "torchvision", "pdftext")
+_STUBS = ("mineru", "torch", "torchvision", "pdftext")
 
 
 def _write_generation(
@@ -50,7 +50,7 @@ def _write_generation(
             (stubs / mod).mkdir()
             (stubs / mod / "__init__.py").write_text("")
     python = gen / "bin" / "python"
-    # -S: no site-packages, so the dev venv's real docling cannot leak into a
+    # -S: no site-packages, so the dev venv's real MinerU cannot leak into a
     # generation that is meant not to have the stack; the stubs come in by PYTHONPATH.
     python.write_text(f'#!/bin/sh\nPYTHONPATH="{stubs}" exec "{sys.executable}" -S "$@"\n')
     python.chmod(python.stat().st_mode | stat.S_IXUSR)

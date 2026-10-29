@@ -6,7 +6,7 @@ the parent's in-memory pipeline stand-in, served over a loopback port
 (``NX_4VX0A_PIPELINE_URL``), so the parent's retry reads the same store across
 the process boundary. The extractor streams three pages, prints ``READY`` and
 then blocks in a call SIGTERM cannot interrupt (an untimed wait on its own
-thread, the shape of a long in-process docling conversion). The catalog fence
+thread, the shape of a long in-process conversion). The catalog fence
 write is recorded to ``NX_4VX0A_FENCE_LOG`` instead of reaching a catalog. The
 parent sends SIGTERM after ``READY``. Exits 99 if the run ever returns.
 """
@@ -30,7 +30,7 @@ _FENCE_LOG = Path(os.environ["NX_4VX0A_FENCE_LOG"])
 
 
 class _Extractor:
-    def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+    def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                 allow_degraded=False, on_heartbeat=None):
         for i in range(3):
             on_page(i, f"page {i} of the nexus-4vx0a sigterm child", {"page_number": i + 1, "text_length": 40})

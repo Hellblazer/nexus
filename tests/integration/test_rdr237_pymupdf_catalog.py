@@ -11,11 +11,12 @@ trip wire; only the chunker is the journey's fake (one chunk per page line, so e
   catalog document, and the chunks carry ``pymupdf``;
 * ``nx store get`` and the MCP ``store_get`` print ``Extractor:  pymupdf`` and a ``Degraded:`` line for
   the page with no text layer only (the text-layer pages are the extractor's normal output);
-* a ``pymupdf`` rerun over the kept buffer of a MinerU run that tripped its breaker writes only the pages
-  the buffer lacked and records the document as the mixture it is, ``mineru+degraded``.
+* a ``pymupdf`` rerun over the kept buffer of a MinerU run that tripped its breaker starts clean
+  (nexus-tr1rj.14): every page is written from the text layer and the document is recorded as ``pymupdf``.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pymupdf
@@ -33,6 +34,7 @@ from tests.integration.test_rdr223_pdf_journey import (
     _COLLECTION,
     _FakeChunker,
     _index,
+    _manifest,
     _register,
     _sha,
     _traffic,
@@ -144,19 +146,27 @@ def test_store_get_calls_only_the_page_with_no_text_layer_degraded(tmp_path, hid
     assert mcp[mcp.index(expected[0]) + 1] == expected[1]
 
 
-def test_a_pymupdf_rerun_over_a_tripped_mineru_run_records_the_mixture(tmp_path, hidden_stack, monkeypatch) -> None:
+def test_a_pymupdf_rerun_over_a_tripped_mineru_run_starts_clean_and_records_pymupdf(
+    tmp_path, hidden_stack, monkeypatch,
+) -> None:
     """Run 1 is a MinerU ladder that buffers pages 1 and 2 and trips its breaker, which keeps the buffer.
-    The rerun is ``--extractor pymupdf``: it writes only pages 3 to 5,
-    and the catalog says the document is MinerU's pages 1-2 plus the text layer for the rest."""
+    The rerun is ``--extractor pymupdf``: it wipes that buffer and writes all five pages from the text
+    layer, and the catalog says the document is ``pymupdf`` throughout.
+
+    The MinerU text of pages 1 and 2 DIFFERS from the text layer, so a rerun that kept any of it (or whose
+    chunker had read it before the wipe) cannot pass: the final chunks are asserted by text and count. The
+    wipe is slowed down so that a wipe that runs beside the chunker (the first design, inside the extractor
+    stage) loses the race for certain; one done before the stages start is unaffected by the delay."""
     marker = "tr1rj4-resume"
     texts = _lines(marker, 5)
+    mineru_texts = [f"{marker} MINERU page {i + 1}, text that only the MinerU run produced." for i in (0, 1)]
     path = _write_real_pdf(tmp_path, marker, [texts[0], texts[1], texts[2], None, texts[4]])
 
     class _TrippingMineru:
-        def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+        def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                     allow_degraded=False, on_heartbeat=None):
             for i in (0, 1):
-                on_page(i, texts[i], {"page_number": i + 1, "text_length": len(texts[i]), "page_method": "mineru"})
+                on_page(i, mineru_texts[i], {"page_number": i + 1, "text_length": len(mineru_texts[i]), "page_method": "mineru"})
             raise MineruSystemicFailure("exit:1:boom", "boom", [3, 4, 5], "doc.pdf")
 
     with monkeypatch.context() as run1:
@@ -172,19 +182,31 @@ def test_a_pymupdf_rerun_over_a_tripped_mineru_run_records_the_mixture(tmp_path,
 
     written: list[int] = []
     real_write_page = HttpPipelineDB.write_page
+    real_clear = HttpPipelineDB.clear_orphan_wal
+    wipes: list[float] = []
 
     def _record(self, content_hash, page_index, page_text, metadata=None):
         written.append(page_index)
         return real_write_page(self, content_hash, page_index, page_text, metadata=metadata)
 
+    def _slow_clear(self, content_hash):
+        time.sleep(1.5)  # long enough for a chunker started beside the wipe to read the old pages
+        wipes.append(time.monotonic())
+        return real_clear(self, content_hash)
+
     with monkeypatch.context() as rerun:
         bound_the_polling(rerun)
         rerun.setattr(HttpPipelineDB, "write_page", _record)
+        rerun.setattr(HttpPipelineDB, "clear_orphan_wal", _slow_clear)
         assert _index_pymupdf(path, marker, streaming="always") == 4
 
-    assert sorted(written) == [2, 3, 4], "pages 1 and 2 came from the kept buffer"
+    assert len(wipes) == 1, "the kept MinerU buffer was wiped once"
+    assert sorted(written) == [0, 1, 2, 3, 4], "no page came from the kept MinerU buffer"
+    doc, _created = _register(path, marker)
+    expected = [texts[0], texts[1], texts[2], texts[4]]
+    assert _manifest(doc) == [(i, _sha(x)) for i, x in enumerate(expected)], "the final chunks are the text layer's, in order"
     meta = _meta(path, marker)
-    assert meta["extraction_method"] == "mineru+degraded"
-    assert meta["extraction_pages"] == {"pymupdf-text": [3, 5], "unextracted": [4]}
-    assert {_chunk_method(x) for x in (texts[0], texts[1], texts[2], texts[4])} == {"mineru+degraded"}
+    assert meta["extraction_method"] == "pymupdf"
+    assert meta["extraction_pages"] == {"pymupdf-text": [1, 2, 3, 5], "unextracted": [4]}
+    assert {_chunk_method(x) for x in expected} == {"pymupdf"}
     assert hidden_stack == []

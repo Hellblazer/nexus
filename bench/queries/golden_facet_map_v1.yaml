@@ -1,0 +1,102 @@
+# RDR-232 runtime-facet -> golden-slug map v1 (nexus-jypmj.3.10).
+#
+# nx_answer derives runtime facet ids (f1..fN) from the request text; the golden sets label each request with
+# stable slugs (required_facets). The two are not the same list: a request can derive fewer facets than it has
+# slugs (one clause asking for three things), or more. This file is the join, written by hand from what
+# `derive_request_coverage(text)` returns for each golden question (the deterministic first pass), read against
+# the slugs. It is a hand LABEL of facet text, not a product of any assessment: it never reads a coverage ledger.
+#
+# Each entry: `match` is a case-insensitive substring of the runtime facet's text (so the join survives a change
+# in facet numbering or order); `slugs` are the golden required_facets that facet carries. One facet may carry
+# several slugs (a clause that asks for three things) and one slug may be carried by several facets.
+#
+# Two rules need no entry (scripts/bench/rdr232_facet_map.py): a request whose runtime facets are exactly one
+# (a whole_question fallback or a single clause) carries every required slug of the request; and an entry
+# overrides that rule. A runtime facet no entry or rule maps is reported as unmapped, never guessed.
+#
+# Requests absent below are mapped by the sole-facet rule or are TODO for a human pass (the report counts them):
+# H02 (three loosely worded clauses, no clean slug per clause).
+golden_set_version: 1
+facet_map_version: 1
+requests:
+  G05-lookup-hybridrag-cap:
+    - {match: "which paper reported", slugs: [reporting-paper]}
+    - {match: "what split did it recommend", slugs: [recommended-split]}
+  G06-synthesis-art-rdr084:
+    - {match: "locked architecture", slugs: [locked-architecture]}
+    - {match: "numerical conventions", slugs: [numerical-conventions]}
+    - {match: "the evidence", slugs: [evidence]}
+    - {match: "gate history", slugs: [gate-history]}
+    - {match: "implementation work", slugs: [implementation-state]}
+    - {match: "open by design", slugs: [open-by-design]}
+  G07-synthesis-rdr155:
+    - {match: "storage modes", slugs: [storage-modes]}
+    - {match: "what was removed", slugs: [removed-components]}
+    - {match: "migration path", slugs: [migration-path]}
+    - {match: "what remains open", slugs: [open-items]}
+  G08-synthesis-tiers:
+    - {match: "divide responsibility", slugs: [t1-role, t2-role, t3-role]}
+    - {match: "what each stores", slugs: [t1-role, t2-role, t3-role]}
+    - {match: "how long each lives", slugs: [lifetimes]}
+  G14-comparison-embedders:
+    - {match: "their dimensions", slugs: [dimensions, cost]}
+    - {match: "when each is used", slugs: [when-used]}
+  G16-audit-rdr210:
+    - {match: "which decisions are implemented", slugs: [implemented-decisions]}
+    - {match: "still pending", slugs: [pending-decisions]}
+    - {match: "code diverge", slugs: [divergences]}
+  G17-audit-nx-answer-docs:
+    - {match: "documentation for nx_answer", slugs: [documented-behavior, code-behavior]}
+    - {match: "the gaps", slugs: [gaps]}
+  H04:
+    - {match: "both tuple space designs", slugs: [semantic-tuple-space-design, linda-over-postgres-design]}
+    - {match: "differ in what they store", slugs: [differences]}
+    - {match: "how they match", slugs: [differences]}
+    - {match: "gives up", slugs: [differences]}
+  H06:
+    - {match: "closed vocabularies live in checked tables", slugs: [checked-table-claim]}
+    - {match: "is that true today", slugs: [remaining-hand-kept-vocabularies]}
+  H09:
+    - {match: "u-shaped curve", slugs: [u-shaped-curve]}
+    - {match: "passages in the middle", slugs: [middle-position-result]}
+  H10:
+    - {match: "retired the sqlite t2 backend", slugs: [motivation]}
+    - {match: "what took its place", slugs: [replacement-backend]}
+    - {match: "client side that still used sqlite", slugs: [client-side-closure]}
+  H12:
+    - {match: "returns nothing for a collection", slugs: [empty-search-symptom]}
+    - {match: "why would search come back empty", slugs: [index-versus-search-path, root-cause]}
+  H13:
+    - {match: "auto-chunking compare", slugs: [manticore-chunking, nexus-chunking]}
+    - {match: "where do they split", slugs: [manticore-chunking, nexus-chunking]}
+    - {match: "boundary loss", slugs: [boundary-loss-handling]}
+  H14:
+    - {match: "still accurate", slugs: [storage-tiers-claims]}
+    - {match: "gone stale", slugs: [storage-tiers-claims, stale-statements]}
+  H15:
+    - {match: "art rdr-077", slugs: [acceptance-date]}
+    - {match: "when was it accepted", slugs: [acceptance-date]}
+  H16:
+    - {match: "taxonomy", slugs: [taxonomy-clustering]}
+    - {match: "clustered search", slugs: [taxonomy-clustering]}
+  H17:
+    - {match: "version marker hook", slugs: [version-marker-hook]}
+    - {match: "plugin installs the cli", slugs: [plugin-installs-cli]}
+  H19:
+    - {match: "wall of setup errors", slugs: [setup-error-wall]}
+    - {match: "what is going wrong", slugs: [root-cause, remedy]}
+  H21:
+    - {match: "actually been implemented", slugs: [decision-by-decision-status]}
+    - {match: "for each decision", slugs: [decision-by-decision-status, evidence]}
+  H26:
+    - {match: "selector loop", slugs: [selector-spin-symptom, write-contention]}
+    - {match: "actual cause", slugs: [root-cause]}
+  H27:
+    - {match: "list every nx subcommand", slugs: [documented-subcommands, actual-subcommands]}
+    - {match: "report the mismatches", slugs: [mismatches]}
+  H28:
+    - {match: "compare rdr-146", slugs: [catalog-behind-daemon, service-mode-conformance]}
+    - {match: "contract that callers see", slugs: [caller-contract-change]}
+  H30:
+    - {match: "mailbox addressing", slugs: [mailbox-addressing]}
+    - {match: "what do i need to know", slugs: [mailbox-addressing]}

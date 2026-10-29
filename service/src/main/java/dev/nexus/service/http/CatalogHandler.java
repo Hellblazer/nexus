@@ -11,6 +11,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.GraphScopeFilter;
 import dev.nexus.service.db.QuarantineOrigin;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -1066,8 +1067,12 @@ public final class CatalogHandler implements HttpHandler {
     /**
      * POST /v1/catalog/traverse — BFS graph traversal.
      *
-     * <p>Request: {"seeds": [...], "link_types": [...], "direction": "both", "depth": 1}
-     * Response: {"nodes": [...], "edges": [...]}
+     * <p>Request: {"seeds": [...], "link_types": [...], "direction": "both", "depth": 1,
+     *           "scope_filter": {"collections": ["name", ...]} or {"subtree": "1.2"}}
+     * (nexus-jypmj.1.13: {@code scope_filter} optional)
+     * Response: {"nodes": [...], "edges": [...]} plus, only when a {@code scope_filter} was sent,
+     * {@code "scope_filter": {"applied": true, "kind": "collections|subtree", "collection_count": N
+     * (collections) or "subtree": "1.2" (subtree), "dropped_out_of_scope": N}}
      *
      * <p>{@code seeds} capped at {@value #MAX_BATCH_DOC_IDS} (found during
      * CatalogHandlerEnvelopeConformanceGateTest authorship): the BFS's first
@@ -1107,7 +1112,12 @@ public final class CatalogHandler implements HttpHandler {
         // flood for every service-mode user) and the opt-in became a no-op.
         // ABSENT means false, which is the correct default: exclude.
         boolean includeHeuristic = Boolean.TRUE.equals(body.get("include_heuristic"));
-        var result = repo.graphBFS(tenant, seeds, linkTypes, direction, depth, includeHeuristic);
+        // nexus-jypmj.1.13 (RDR-232 s3): OPTIONAL {collections:[...]} or {subtree:"..."} scope predicate, applied before the
+        // 500-node cut; the reply then carries a `scope_filter` marker. ABSENT means no predicate and a
+        // reply byte-identical to before. A malformed value is a 400 (IllegalArgumentException), never a
+        // silently unfiltered walk, because a caller that asked for containment must not get none.
+        GraphScopeFilter scope = GraphScopeFilter.parse(body.get("scope_filter"));
+        var result = repo.graphBFS(tenant, seeds, linkTypes, direction, depth, includeHeuristic, scope);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
@@ -1735,6 +1745,11 @@ public final class CatalogHandler implements HttpHandler {
      *
      * <p>Doc_ids with no manifest rows are absent from the response map.
      *
+     * <p>nexus-jypmj.6 (ADDITIVE): optional {@code "max_rows_per_doc": N} returns a document longer than N
+     * rows as an even sample of N (first and last included; {@link dev.nexus.service.db.ManifestRowSample}),
+     * and adds {@code "max_rows_per_doc": N} (the echo) and {@code "row_counts": {doc_id: true row count}} to
+     * the reply. Absent, the reply is unchanged.
+     *
      * <p>nexus-kzso5 (RDR-191 follow-up, ADDITIVE wire change): each row now
      * also carries the row's own {@code collection} — same field, same
      * rationale as {@link #handleManifestGet}'s javadoc above. Old clients
@@ -1760,13 +1775,35 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"too many doc_ids (max "
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
         }
-        var manifests = repo.getManifestMany(tenant, docIds);
+        // nexus-jypmj.6: OPTIONAL per-document row limit. A JSON integer >= 1 or absent; anything else is a
+        // 400 (a limit the engine would silently ignore reads to the caller as a full manifest it asked to
+        // have cut).
+        Integer maxRowsPerDoc = null;
+        if (body.containsKey("max_rows_per_doc")) {
+            Object limit = body.get("max_rows_per_doc");
+            if (!(limit instanceof Integer || limit instanceof Long) || ((Number) limit).longValue() < 1
+                || ((Number) limit).longValue() > Integer.MAX_VALUE) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"'max_rows_per_doc' must be a positive integer\"}"); return;
+            }
+            maxRowsPerDoc = ((Number) limit).intValue();
+        }
+        Map<String, Integer> rowCounts = new LinkedHashMap<>();
+        var manifests = repo.getManifestMany(tenant, docIds, maxRowsPerDoc, rowCounts);
         // nexus-b9puj: same union-guard chain as nexus-ocf52 (handleDocsForChashes),
         // one hop deeper — get_manifests fails loud on a page FAILURE (500) but
         // cannot detect a silently truncated page. The count lets the client
         // reconcile manifests.size() == count before trusting a page as complete.
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
-            Map.of("manifests", manifests, "count", manifests.size())));
+        Map<String, Object> reply = new LinkedHashMap<>();
+        reply.put("manifests", manifests);
+        reply.put("count", manifests.size());
+        if (maxRowsPerDoc != null) {
+            // The marker: an engine without this field never echoes it, so a client tells "the limit ran"
+            // from "the limit was ignored" without trusting the status. row_counts is the true live row
+            // count of each returned document (a sample is shorter than its document).
+            reply.put("max_rows_per_doc", maxRowsPerDoc);
+            reply.put("row_counts", rowCounts);
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(reply));
     }
 
     /**

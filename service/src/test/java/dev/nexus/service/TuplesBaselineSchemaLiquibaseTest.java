@@ -83,7 +83,11 @@ class TuplesBaselineSchemaLiquibaseTest {
         // nexus-fetre (F3 step 2): the server-written sender stamp, tuples-008-sender-session.xml.
         "sender_session",
         // nexus-x907o: when the current claim started, tuples-009-claimed-at.xml.
-        "claimed_at");
+        "claimed_at",
+        // nexus-5r2sc.2.1 (RDR-235 E1): the delayed-visibility instant, tuples-010-available-at.xml.
+        "available_at",
+        // nexus-5r2sc.2.2 (RDR-235 E4): the replace-on-a-claimed-row mark, tuples-011-dirty.xml.
+        "dirty");
 
     private static final Set<String> TUPLE_CLAIM_LOG_EXPECTED_COLUMNS = Set.of(
         "log_id", "tenant_id", "subspace", "template", "tuple_id",
@@ -700,6 +704,114 @@ class TuplesBaselineSchemaLiquibaseTest {
             }
             try (Connection su = dedicated.createConnection("")) {
                 assertThat(columnNames(su, "tuples")).contains("claimed_at");
+            }
+        } finally {
+            dedicated.stop();
+        }
+    }
+
+    // ── tuples-010: available_at, upgrade from tuples-009 and rollback ───────
+
+    /**
+     * Bead nexus-5r2sc.2.1 (RDR-235 E1): a schema AT tuples-009 has no {@code available_at};
+     * applying the rest of the changelog adds it. Then {@code tuples-010-1}'s own rollback
+     * removes exactly that column (leaving {@code claimed_at}) and the re-apply restores it.
+     */
+    @Test
+    void availableAtColumn_addedOnTopOfTuples009_andRollsBackAndReapplies() throws Exception {
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startEmptyDatabase();
+        try {
+            try (Connection su = dedicated.createConnection("")) {
+                migrateUpTo(su, "tuples-009-1", true);
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).as("at tuples-009 the column does not exist")
+                    .doesNotContain("available_at");
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                migrateUpTo(su, "tuples-010-1", true);
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).contains("available_at");
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                Database database = DatabaseFactory.getInstance()
+                    .findCorrectDatabaseImplementation(new JdbcConnection(su));
+                try (Liquibase liquibase = new Liquibase(
+                        MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
+                    liquibase.rollback(1, new Contexts(), new LabelExpression());
+                }
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).as("rollback drops only available_at")
+                    .doesNotContain("available_at")
+                    .contains("claimed_at", "sender_session", "announced_at");
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                applyFullChangelog(su);
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).contains("available_at");
+            }
+        } finally {
+            dedicated.stop();
+        }
+    }
+
+    // ── tuples-011: dirty, upgrade from tuples-010 and rollback ──────────────
+
+    /**
+     * Bead nexus-5r2sc.2.2 (RDR-235 E4): a schema AT tuples-010 has no {@code dirty}; applying the
+     * rest of the changelog adds it with every existing row FALSE. Then {@code tuples-011-1}'s own
+     * rollback removes exactly that column (leaving {@code available_at}) and the re-apply restores it.
+     */
+    @Test
+    void dirtyColumn_addedOnTopOfTuples010_defaultsFalse_andRollsBackAndReapplies() throws Exception {
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startEmptyDatabase();
+        try {
+            try (Connection su = dedicated.createConnection("")) {
+                migrateUpTo(su, "tuples-010-1", true);
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).as("at tuples-010 the column does not exist")
+                    .doesNotContain("dirty");
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                migrateUpTo(su, "tuples-011-1", true);
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).contains("dirty");
+                // information_schema has no jOOQ codegen: typed names, not SQL text (RawSqlGateTest).
+                var col = DSL.using(su, SQLDialect.POSTGRES)
+                    .select(DSL.field(DSL.name("column_default"), String.class),
+                            DSL.field(DSL.name("is_nullable"), String.class))
+                    .from(DSL.table(DSL.name("information_schema", "columns")))
+                    .where(DSL.field(DSL.name("table_schema"), String.class).eq("nexus")
+                        .and(DSL.field(DSL.name("table_name"), String.class).eq("tuples"))
+                        .and(DSL.field(DSL.name("column_name"), String.class).eq("dirty")))
+                    .fetchOne();
+                assertThat(col).as("the dirty column is described").isNotNull();
+                assertThat(col.value1()).as("default").isEqualTo("false");
+                assertThat(col.value2()).as("nullable").isEqualTo("NO");
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                Database database = DatabaseFactory.getInstance()
+                    .findCorrectDatabaseImplementation(new JdbcConnection(su));
+                try (Liquibase liquibase = new Liquibase(
+                        MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
+                    liquibase.rollback(1, new Contexts(), new LabelExpression());
+                }
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).as("rollback drops only dirty")
+                    .doesNotContain("dirty")
+                    .contains("available_at", "claimed_at", "sender_session", "announced_at");
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                applyFullChangelog(su);
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).contains("dirty");
             }
         } finally {
             dedicated.stop();

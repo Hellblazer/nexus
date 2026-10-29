@@ -1,0 +1,66 @@
+# RDR-235 E3 (bead nexus-5r2sc.2.4): the aspect extraction queue, a LITERAL
+# one-segment template. There is exactly one queue per tenant (tenancy is
+# the row-level security of RDR-235 F12b) and the collection is a field of
+# the task body, not part of the queue name, so a worker parks one in() and
+# a collection rename is a body rewrite. It is not a retune of queue/<name>:
+# the board, ledger and ad-hoc queues keep RDR-211's sizing.
+#
+# keys: queue, in the mapping form with one allowed value. out refuses any
+# queue value other than "aspects", and in/inp refuse a call that does not
+# pin every template key, so the producer and the worker both pin
+# queue = aspects.
+#
+# id_from: keys+nonce, with the nonce set to the doc_id (a tumbler fits the
+# 128-byte nonce ceiling). No dimensions and no id_dims: queue.yaml needs
+# "from" in its id because its nonce is minted; here the id comes from the
+# doc_id alone.
+#
+# take.enabled: true -- any free worker claims the oldest available task
+# with in(), as in queue.yaml.
+#
+# take.max_attempts: 6 -- the worker's retry-ladder cap (5) plus one. One
+# count serves both a nack (a ladder retry) and a lapsed lease (a crash or
+# a stalled worker), so a crash spends one of the ladder's retries.
+#
+# take.max_lease_seconds: 900 -- at least the worker's 600 s lease; a longer
+# lease request throws LeaseTooLongException.
+#
+# take.default_lease_seconds: 600 -- NOT in the RDR's literal block; added
+# by this bead (RDR-235 fix-check item 3). The worker's inp claims and
+# renews send no lease_s, and without a default the engine answers 400. 600
+# is the worker's own lease and is under max_lease_seconds.
+#
+# retention_seconds: 7776000 (90 days) -- the lifetime of a backlog task, of
+# a dead task and of an acked row alike: long enough that no backlog expires
+# before a worker reaches it, and a dead task stays 90 days. Chosen, not
+# measured.
+#
+# max_live_rows: 10000 -- the measured backlog proposal (RDR-235 F29, bead
+# nexus-5r2sc.1.3). It counts the tenant's backlog and its dead tasks
+# together, because a dead task is unconsumed.
+#
+# claim_log_ttl_seconds: 8640000 (100 days). The boot check requires the
+# effective TTL to exceed retention plus the 21,600 s sweep interval
+# (7,797,600 s), and a template may only shorten the engine default of
+# 15,552,000 s. So the engine's NX_TUPLE_CLAIM_LOG_TTL_DAYS must be at least
+# 100 (unset is 180 and passes); a host that lowered it below 100 makes the
+# engine refuse to boot with this template, naming the variable.
+name: aspects
+
+keys:
+  queue:
+    values: [aspects]
+
+id_from: keys+nonce
+
+take:
+  enabled: true
+  default_lease_seconds: 600
+  max_attempts: 6
+  max_lease_seconds: 900
+
+retention_seconds: 7776000
+
+max_live_rows: 10000
+
+claim_log_ttl_seconds: 8640000

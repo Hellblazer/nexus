@@ -5218,7 +5218,7 @@ class TestContinuationGoLive:
             "the prefix's real extract StepRecord must be visible to "
             "the fallback-decision event"
         )
-        # RDR-232 Phase 3 (nexus-jypmj.3.3): with the coverage check on (NX_ANSWER_COVERAGE=1; it is off by default)
+        # RDR-232 Phase 3 (nexus-jypmj.3.3): with the coverage check on (NX_ANSWER_COVERAGE=1; the suite pins it off)
         # nx_answer hands the runner a coverage boundary, which assesses the terminal step's input before the cut. The
         # summarize step's literal `content` is evidence it can read, so the prefix-only run made one assessment call
         # (the unit-test guard refuses the live model, so it failed) and that call is a second billable record the

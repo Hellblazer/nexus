@@ -41,7 +41,17 @@ import java.util.Optional;
  * simple-reads / POST-for-everything-else convention — these two carry a
  * query-string parameter, not a JSON pattern body):
  * <pre>
- *   POST /v1/tuples/out             {subspace, keys, dims?, body?, nonce?, ttl_seconds?} -&gt; {"id": "&lt;hex&gt;"}
+ *   POST /v1/tuples/out             {subspace, keys, dims?, body?, nonce?, ttl_seconds?, delay_s?} -&gt; {"id": "&lt;hex&gt;"}
+ *                                   delay_s (bead nexus-5r2sc.2.1, RDR-235 E1): optional whole seconds, 0 &lt;= delay_s &lt;=
+ *                                   the template's retention_seconds; the new row cannot be claimed (in/inp) until the
+ *                                   database clock reaches now() + delay_s. Absent or 0 is no delay. A negative,
+ *                                   fractional or non-numeric value is a 400; above retention is a 400 SchemaViolation.
+ *                                   mode (bead nexus-5r2sc.2.2, RDR-235 E4): optional, absent or "replace", any other
+ *                                   value is a 400. "replace" is allowed only on an id_from=keys+nonce template (else a
+ *                                   400 naming it) and answers {"id": "&lt;hex&gt;", "outcome": "created"|"replaced"|"dirtied"}:
+ *                                   the newest body wins on the deterministic id; a claimed row is marked dirty and its
+ *                                   holder's ack returns it to available instead of consuming it. A plain out (no mode)
+ *                                   keeps the {"id": ...} response.
  *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?, order?} -&gt; {"tuples": [...], "order"?, "limit"?}
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?, order?} -&gt; {"tuples": [...], "order"?, "limit"?}
  *                                   order (bead nexus-kp5q3): "asc" (default) or "desc". desc returns the
@@ -71,7 +81,14 @@ import java.util.Optional;
  *   POST /v1/tuples/inp             {subspace, keys_pattern, claimant, lease_s?} -&gt; same shape as /in
  *   POST /v1/tuples/ack             {claim_id, claimant, reply?{subspace, keys, dims?, body?, ttl_seconds?}}
  *                                   -&gt; {"acked": true, "reply_id": "&lt;hex&gt;"|null}
- *   POST /v1/tuples/nack            {claim_id, claimant} -&gt; {"nacked": true}
+ *   POST /v1/tuples/nack            {claim_id, claimant, retry_after_s?, dead?} -&gt; {"nacked": true}
+ *                                   retry_after_s (bead nexus-5r2sc.2.1): optional whole seconds, validated as delay_s;
+ *                                   the task returns to available but cannot be claimed until now() + retry_after_s
+ *                                   on the database clock. The attempt counts as it does without the field; a
+ *                                   dead-lettering nack ignores it.
+ *                                   dead (bead nexus-5r2sc.2.3, RDR-235 E4): optional boolean, default false; a
+ *                                   non-boolean value is a 400. true dead-letters the claim at once (the attempt
+ *                                   counted, claim log nack then dead), and wins over retry_after_s.
  *   POST /v1/tuples/renew           {claim_id, claimant, lease_s} -&gt; {"lease_until": "&lt;ISO-8601&gt;"}
  *   POST /v1/tuples/release         {claim_id, claimant} -&gt; {"released": true}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
@@ -101,7 +118,7 @@ import java.util.Optional;
  * uses at every other bytea-identity boundary); {@code keys}/{@code dims}
  * are plain JSON objects of string values.
  *
- * <p>Errors: the thirteen RDR-205/RDR-211-family typed errors ({@link TupleException} and its
+ * <p>Errors: the fourteen RDR-205/RDR-211/RDR-235-family typed errors ({@link TupleException} and its
  * subtypes) are caught ahead of the generic ladder and rendered as {@code
  * {"error": "<code>", "detail": "<message>"}} at each exception's own
  * {@link TupleException#httpStatus()} — {@code ParkCapExceeded} additionally
@@ -235,12 +252,27 @@ public final class TupleHandler implements HttpHandler {
         String tupleBody = (String) body.get("body");
         String nonce = (String) body.get("nonce");
         Long ttlSeconds = numberOrNull(body.get("ttl_seconds"));
+        // nexus-5r2sc.2.1 (RDR-235 E1): optional, whole seconds. Range checks live in the repository.
+        Long delaySeconds = wholeSecondsOrNull("delay_s", body.get("delay_s"));
+        // nexus-5r2sc.2.2 (RDR-235 E4): absent or "replace" only. The value is not echoed back.
+        Object modeRaw = body.get("mode");
+        if (modeRaw != null && !"replace".equals(modeRaw)) {
+            throw new SchemaViolationException("mode", "must be absent or \"replace\"");
+        }
 
         // nexus-fetre (F3 step 2, JDR-002): sender_session is a server-written fact. It comes
         // ONLY from the minted session AuthFilter resolved, never from the request body (a
         // "sender_session" body field is not read), and its absence is not a refusal.
         String senderSession = RequestContext.isMintedSession() ? RequestContext.session() : null;
-        byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession);
+        if (modeRaw != null) {
+            var res = repo.outReplace(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
+                    delaySeconds);
+            HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(res.id()))
+                    + ",\"outcome\":" + HttpUtil.jsonString(res.outcome().wire()) + "}");
+            return;
+        }
+        byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
+                delaySeconds);
         HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(id)) + "}");
     }
 
@@ -453,7 +485,16 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         Map<String, Object> body = readBody(ex);
-        repo.nack(tenant, requireString(body, "claim_id"), requireString(body, "claimant"));
+        // nexus-5r2sc.2.1 (RDR-235 E1): optional, whole seconds, read as lease_s is. Range checks
+        // (negative, above retention) are the repository's SchemaViolation, answered 400 by the ladder.
+        // nexus-5r2sc.2.3 (RDR-235 E4): dead is an optional JSON boolean; anything else is a 400, never
+        // coerced ("yes", "true" and 1 are refused rather than guessed at).
+        Object deadRaw = body.get("dead");
+        if (deadRaw != null && !(deadRaw instanceof Boolean)) {
+            throw new IllegalArgumentException("dead must be a boolean");
+        }
+        repo.nack(tenant, requireString(body, "claim_id"), requireString(body, "claimant"),
+                wholeSecondsOrNull("retry_after_s", body.get("retry_after_s")), Boolean.TRUE.equals(deadRaw));
         HttpUtil.send(ex, 200, "{\"nacked\":true}");
     }
 
@@ -808,6 +849,20 @@ public final class TupleHandler implements HttpHandler {
             out.put(e.getKey(), e.getValue() == null ? null : String.valueOf(e.getValue()));
         }
         return out;
+    }
+
+    /** {@link #numberOrNull} for a field that must be a whole number of seconds (nexus-5r2sc.2.1): a
+     *  fractional JSON number is refused rather than truncated, so {@code delay_s: 1.5} is a 400
+     *  and not a silent 1. A non-numeric string fails in {@code parseLong} as every field here does.
+     *  Both surface as {@link IllegalArgumentException} -&gt; 400. */
+    private static Long wholeSecondsOrNull(String field, Object v) {
+        if (v instanceof Double || v instanceof Float || v instanceof java.math.BigDecimal) {
+            double d = ((Number) v).doubleValue();
+            if (d != Math.rint(d) || Double.isInfinite(d)) {
+                throw new IllegalArgumentException(field + " must be a whole number of seconds");
+            }
+        }
+        return numberOrNull(v);
     }
 
     private static Long numberOrNull(Object v) {

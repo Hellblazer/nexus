@@ -227,57 +227,6 @@ def _one_page_pdf_ctx(pages: int = 1) -> MagicMock:
     return ctx
 
 
-def _make_mock_docling(pages: list[str]):
-    mock_doc = MagicMock()
-    mock_doc.num_pages.return_value = len(pages)
-    mock_doc.export_to_markdown.side_effect = pages
-    mock_doc.iterate_items.return_value = iter([])
-    mock_result = MagicMock()
-    mock_result.document = mock_doc
-    mock_converter = MagicMock()
-    mock_converter.convert.return_value = mock_result
-    return mock_converter, mock_doc
-
-
-class TestDoclingExtractionMarksUnextractedFigures:
-    """nexus-9zly6 GAP 2: ``_extract_with_docling`` never called the marker
-    pass at all, so a docling-extracted PDF's figures vanished with no
-    signal, unlike the MinerU path. Docling has no MinerU content_list, and
-    its own documented image placeholder is ``<!-- image -->``
-    (docling_core.types.doc.document's ``export_to_markdown(... ,
-    image_placeholder="<!-- image -->")`` default), not MinerU's
-    ``![](images/<sha>.jpg)`` -- a different shape, mocked here the same
-    way every other docling test in this suite mocks
-    ``doc.export_to_markdown`` rather than booting the real model.
-    """
-
-    def test_docling_page_with_an_image_placeholder_and_caption_is_labelled(self, tmp_path) -> None:
-        page_md = "Prose before.\n\n<!-- image -->\n\nFig. 7. A labelled chart.\n\nProse after."
-        mock_converter, _ = _make_mock_docling([page_md])
-        ext = PDFExtractor()
-        ext._converter_enriched = mock_converter
-
-        with patch.object(ext, "_extract_title", return_value=""):
-            result = ext._extract_with_docling(tmp_path / "doc.pdf")
-
-        assert "<!-- image -->" not in result.text
-        assert "[Fig. 7 is an image; not indexed as text]" in result.text
-        assert "Prose before." in result.text
-        assert "Prose after." in result.text
-
-    def test_docling_page_with_an_image_placeholder_and_no_caption_gets_generic_marker(self, tmp_path) -> None:
-        page_md = "Prose.\n\n<!-- image -->\n\nNo caption follows."
-        mock_converter, _ = _make_mock_docling([page_md])
-        ext = PDFExtractor()
-        ext._converter_enriched = mock_converter
-
-        with patch.object(ext, "_extract_title", return_value=""):
-            result = ext._extract_with_docling(tmp_path / "doc.pdf")
-
-        assert "<!-- image -->" not in result.text
-        assert "[image not indexed as text]" in result.text
-
-
 class TestMineruExtractionCarriesMarkersAndTableRegions:
     """Through ``_extract_with_mineru`` with the isolated runner patched, so
     the marker pass and the ``table_regions`` population are exercised where

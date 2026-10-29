@@ -12,7 +12,7 @@ from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.commands._helpers import read_stdin_utf8, t2_handle
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
-from nexus.ttl import parse_ttl
+from nexus.ttl import MAX_TTL_DAYS, parse_ttl
 
 _log = structlog.get_logger(__name__)
 
@@ -560,11 +560,17 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             base_ts = datetime.fromisoformat(entry["timestamp"])
             if base_ts.tzinfo is None:
                 base_ts = base_ts.replace(tzinfo=timezone.utc)
-            remaining = (
-                base_ts + timedelta(days=ttl_days)
-                - datetime.now(timezone.utc)
-            )
-            ttl_days = max(1, math.ceil(remaining / timedelta(days=1)))
+            try:
+                remaining = (
+                    base_ts + timedelta(days=ttl_days)
+                    - datetime.now(timezone.utc)
+                )
+                ttl_days = max(1, math.ceil(remaining / timedelta(days=1)))
+            except OverflowError:
+                # an expiry past year 9999, or a ttl a timedelta cannot hold: far past the cap (nexus-njn1a)
+                ttl_days = MAX_TTL_DAYS
+            # the MCP memory_put takes any integer ttl; put_note refuses above the 36500-day cap (nexus-njn1a)
+            ttl_days = min(ttl_days, MAX_TTL_DAYS)
 
         # RDR-223 P2.7 (nexus-z0o2p.17): the promoted note goes to the engine
         # as ONE write_manifest_many request through note_write.put_note (the

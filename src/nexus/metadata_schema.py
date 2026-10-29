@@ -29,6 +29,7 @@ quota that this module keeps us under.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from typing import Any
 
 import structlog
@@ -133,11 +134,11 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # DT-sourced chunks spend the extra key — file chunks stay under the cap.
     "extraction_source",
     # nexus-1oguj: which PDF-extraction BACKEND actually produced this
-    # chunk's text (``docling`` | ``mineru`` | ``pymupdf`` | ``pymupdf_normalized``, or
+    # chunk's text (``mineru`` | ``pymupdf`` | ``pymupdf_normalized``, or
     # the honest degraded-aggregate ``mineru+degraded`` when any page settled
     # below the first rung of RDR-237's per-page ladder; documents indexed
-    # before it carry ``mineru+docling-degraded`` for RDR-148 Gap 5's degrade
-    # to docling). Load-bearing for retroactively scoping extractor
+    # before RDR-237 can carry the values of the extractor it removed, which
+    # stay readable). Load-bearing for retroactively scoping extractor
     # regressions (e.g. nexus-gtltb's mineru-corruption blast radius) —
     # previously produced at extraction time and asserted in tests but
     # discarded before storage. Empty for non-PDF content_types
@@ -298,8 +299,8 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
         normalised.pop("extraction_source", None)
 
     # Step 2d: drop the nexus-1oguj extraction_method key when empty.
-    # Only PDF chunks pass a real value (docling / mineru / pymupdf /
-    # pymupdf_normalized / mineru+degraded / legacy mineru+docling-degraded);
+    # Only PDF chunks pass a real value (mineru / pymupdf /
+    # pymupdf_normalized / mineru+degraded, or a legacy value from before RDR-237);
     # markdown/code/prose chunks never set it and must not spend a metadata
     # slot on "".
     if not normalised.get("extraction_method", ""):
@@ -485,6 +486,36 @@ def make_chunk_metadata(
 # ── Expiry helper (replaces the dropped ``expires_at`` field) ────────────────
 
 
+def chunk_ttl_days(value: Any) -> int | float | None:
+    """A chunk row's ``ttl_days`` as a TTL that can lapse, else ``None`` (read it as permanent).
+
+    A row's ``ttl_days`` is whatever a writer stored. Anything that is not a plain positive number
+    (absent, ``0``, negative, a string, a list, a bool, NaN) or is past ``timedelta``'s range
+    (``10**10``, ``inf``, ``1e300``) is not a TTL that has lapsed, and no reader may abort on it
+    (nexus-6pfgb.15, nexus-njn1a). Every reader that does date arithmetic on a chunk row's
+    ``ttl_days`` goes through here, so the rule is written once.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value <= 0 or value > timedelta.max.days:  # NaN, non-positive, past timedelta
+        return None
+    return value
+
+
+def ttl_listing_label(ttl_days: Any, indexed_at: str) -> str:
+    """The TTL column of a ``store list`` row: ``expires YYYY-MM-DD``, or ``permanent`` when the row
+    carries no TTL that can lapse (see :func:`chunk_ttl_days`) or no ``indexed_at`` to count from."""
+    days = chunk_ttl_days(ttl_days)
+    if days is None or not indexed_at:
+        return "permanent"
+    try:
+        return f"expires {(datetime.fromisoformat(indexed_at) + timedelta(days=days)).date().isoformat()}"
+    except OverflowError:  # an expiry date past datetime's range (about 2.9M days on): it never lapses
+        return "permanent"
+    except ValueError:  # an unparseable stamp: the TTL is real but cannot be dated
+        return f"ttl {days}d"
+
+
 def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
     """Return ``True`` when *metadata* has elapsed its TTL.
 
@@ -522,18 +553,15 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
                 "by a caller outside those two methods)"
             ),
         )
-    # A row's ttl_days is whatever a writer stored. Anything that is not a plain positive number
-    # (a string, a list, a bool, NaN) or is past timedelta's range (10**10, inf, 1e300) is not a
-    # TTL that has lapsed: the expiry sweep must not abort on one bad row (nexus-6pfgb.15).
-    if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not ttl or ttl <= 0:
+    days = chunk_ttl_days(ttl)
+    if days is None:
         return False
     indexed_at = metadata.get("indexed_at", "")
     if not indexed_at:
         return False
-    from datetime import datetime, timedelta  # noqa: PLC0415 — branch-local; only reached on TTL-bearing metadata
     try:
         idx_dt = datetime.fromisoformat(indexed_at)
         now_dt = datetime.fromisoformat(now_iso)
-        return (now_dt - idx_dt) >= timedelta(days=ttl)
+        return (now_dt - idx_dt) >= timedelta(days=days)
     except (TypeError, ValueError, OverflowError):  # an unparseable or mixed naive/aware stamp, a ttl past timedelta
         return False

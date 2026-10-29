@@ -13,6 +13,7 @@ import structlog
 from tqdm import tqdm
 
 from nexus.bounded_subprocess import run_bounded
+from nexus.config import EXTRACTOR_CHOICES
 
 from nexus import pdf_stack
 
@@ -27,7 +28,7 @@ class _PdfStackHeldFailure(click.ClickException):
 
 
 def _registry_path() -> Path:
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
 
     return nexus_config_dir() / "repos.json"
 
@@ -1918,6 +1919,11 @@ def index_repo_cmd(
                 f"installing it here. Code and prose were indexed. "
                 f"Run: {pdf_stack.repair_command()}   then re-run `nx index repo`."
             )
+        # nexus-tr1rj.24: PDFs held because the MinerU time limit is unusable. Code, prose and RDR
+        # files were indexed; the held PDFs are listed and the run ends non-zero (a MinerU problem
+        # stops MinerU work only, like the stop of nexus-tr1rj.13).
+        _bounds_failure = _report_mineru_bounds_hold(stats or {})
+        _run_failure = _run_failure or _bounds_failure
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
             # nexus-wbfpw.29 round 3 (round 6: same VERIFIED set the
@@ -1942,6 +1948,11 @@ def index_repo_cmd(
                 f"the extraction deliberately, or 'nx index pdf <file>' after "
                 f"fixing the underlying extraction (e.g. --extractor mineru)."
             )
+        # nexus-tr1rj.13 (Sam delegated, 2026-10-28): a MinerU breaker trip or machine-resource
+        # error stopped the PDF loop. It was contained inside index_repository, so code, prose
+        # and RDR files were indexed; the PDFs it did not reach are listed here and the run ends
+        # non-zero, like `nx index pdf --dir`.
+        _run_failure = _fold_in_mineru_stop(_run_failure, stats or {})
         # nexus-deyd5 round 3 (coordinator directive, closing the round-2
         # HIGH finding): the run-level systemic-skip verdict. Checked HERE
         # — after drain/RDR-loop/post-processing have all already run and
@@ -1953,19 +1964,20 @@ def index_repo_cmd(
         # population across every category, not a single file's quality.
         # The message names the numbers per the coordinator's explicit
         # ask, plus the most likely legitimate cause traced by code review
-        # (round 2): scanned/image-only PDFs, since the default extractor
-        # never runs OCR and MinerU is opt-in.
+        # (round 2): scanned/image-only PDFs, which only MinerU can read
+        # and which a missing or failing MinerU leaves with nothing.
         if (stats or {}).get("systemic_extraction_failure", False):
             _attempted = (stats or {}).get("files_attempted_total", 0)
             _pct = f"{skipped_unextractable_files / _attempted:.0%}" if _attempted else "?"
             _run_failure = _run_failure or click.ClickException(
                 f"skipped {skipped_unextractable_files} of {_attempted} files "
                 f"({_pct}) — extraction may be broken (nexus-deyd5). If this "
-                f"corpus contains scanned/image-only PDFs, the default "
-                f"extractor does not run OCR — retry the PDF-heavy portion "
-                f"with 'nx index pdf --dir <path> --extractor mineru' "
-                f"(OCR-capable), or set 'pdf.extractor: mineru' in .nexus.yml "
-                f"for future runs. See the WARNING/ERROR log line(s) above "
+                f"corpus contains scanned/image-only PDFs, only MinerU reads "
+                f"them (the text-only 'pymupdf' extractor extracts nothing from "
+                f"an image-only page): run 'nx doctor' to check the MinerU install, "
+                f"then retry the PDF-heavy portion with "
+                f"'nx index pdf --dir <path> --extractor mineru'. "
+                f"See the WARNING/ERROR log line(s) above "
                 f"for the affected path(s) and reason(s)."
             )
         # nexus-4s1ww / GH #1432: when every (or some) file's chunk-batch
@@ -2400,7 +2412,7 @@ def _collections_from_registry_info(info: dict) -> list[str]:
     """
     from fnmatch import fnmatch  # noqa: PLC0415 — deliberate function-local import (stdlib, branch-local use)
 
-    from nexus.config import is_local_mode, load_config as _load_cfg  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.config import is_local_mode, load_config as _load_cfg  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
 
     cfg = _load_cfg()
     exclude_patterns = (
@@ -2663,7 +2675,7 @@ def run_collection_postprocessing(
     if not collections:
         return
 
-    from nexus.config import load_config as _load_cfg  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.config import load_config as _load_cfg  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
     from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-local import (heavy T3 dep deferred to call time)
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import (heavy T2 dep deferred to call time)
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deliberate function-local import (daemon write proxy deferred to call time)
@@ -2833,6 +2845,60 @@ def _refresh_derived_taxonomy(
             # raw-handle break for weeks (SessionStart Knowledge
             # Map permanently stale). Still non-fatal — but LOUD.
             _log.warning("context_l1_refresh_failed", exc_info=True)
+
+
+def _report_mineru_stop(stats: dict) -> click.ClickException | None:
+    """nexus-tr1rj.13: print the ``Stopped:`` line and the PDFs ``nx index repo`` did not attempt
+    after a MinerU stop (``stats['pdf_mineru_stop']``, set by ``indexer._contain_mineru_stop``), and
+    return the exception that ends the run non-zero, or ``None`` when there was no stop. The listing
+    names the first 20; the rest are counted."""
+    stop = stats.get("pdf_mineru_stop")
+    if not stop:
+        return None
+    stop_name = Path(stop["file"]).name
+    unattempted = [Path(p).name for p in stats.get("pdf_mineru_not_attempted_paths") or ()]
+    if unattempted:
+        click.echo(
+            f"Stopped: {stop['what']} on {stop_name} ({stop['detail']}); "
+            f"{len(unattempted)} remaining PDF(s) not attempted. {stop['remedy']}"
+        )
+        for name in unattempted[:20]:
+            click.echo(f"  {name}: not attempted (the run stopped at {stop_name})")
+        if len(unattempted) > 20:
+            click.echo(f"  ... and {len(unattempted) - 20} more")
+    return click.ClickException(
+        f"{stop['what']} on {stop_name} ({stop['detail']}); {len(unattempted)} PDF(s) not attempted. "
+        f"Code, prose and RDR files were indexed. {stop['remedy']}"
+    )
+
+
+def _report_mineru_bounds_hold(stats: dict) -> click.ClickException | None:
+    """nexus-tr1rj.24: list the PDFs ``nx index repo`` held because ``pdf.mineru_page_timeout_s`` x
+    ``pdf.mineru_page_batch`` is unusable (``stats['pdf_mineru_bounds_held_paths']``, set by
+    ``indexer._run_index``), and return the exception that ends the run non-zero, or ``None`` when
+    nothing was held. The listing names the first 20; the rest are counted."""
+    held = [Path(p).name for p in stats.get("pdf_mineru_bounds_held_paths") or ()]
+    if not held:
+        return None
+    problem = (stats.get("pdf_mineru_bounds_problem") or "the MinerU time limit is unusable").rstrip(". ")
+    click.echo(f"Held: {len(held)} PDF(s) NOT indexed, {problem}")
+    for name in held[:20]:
+        click.echo(f"  {name}: held (not registered, not indexed)")
+    if len(held) > 20:
+        click.echo(f"  ... and {len(held) - 20} more")
+    return click.ClickException(
+        f"{len(held)} PDF(s) were NOT indexed: {problem}. Code, prose and RDR files were indexed. "
+        f"Fix the setting (or use pdf.extractor pymupdf) and re-run `nx index repo`."
+    )
+
+
+def _fold_in_mineru_stop(run_failure: click.ClickException | None, stats: dict) -> click.ClickException | None:
+    """nexus-tr1rj.13: report a MinerU stop and combine it with the run's earlier failure, the first
+    one winning the exit. The report is called FIRST and always: ``run_failure or _report_mineru_stop(...)``
+    skips it whenever a quality-gate, manifest or PDF-stack failure is already set, and the run then
+    names neither the stop nor the PDFs it did not attempt."""
+    stop_failure = _report_mineru_stop(stats)
+    return run_failure or stop_failure
 
 
 def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str = "") -> str:
@@ -3037,27 +3103,24 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
                    "Off by default. Use 'nx enrich <collection>' for bulk backfill.")
 @click.option(
     "--extractor",
-    type=click.Choice(["auto", "docling", "mineru", "pymupdf"]),
+    type=click.Choice(list(EXTRACTOR_CHOICES)),
     default=None,
     help=(
-        "PDF extraction backend (default: from .nexus.yml pdf.extractor, or 'auto'). "
-        "'auto' detects formulas via Docling and switches to MinerU when found. "
-        "'docling' forces Docling (formula-stripped — opt-out of math handling). "
-        "'mineru' forces MinerU. "
+        "PDF extraction backend (default: from .nexus.yml pdf.extractor, or 'mineru'). "
+        "'mineru' reads layout, tables and math; a page it cannot read is retried without "
+        "formulas, then taken from its text layer. "
         "'pymupdf' reads only each page's own text layer (no layout, tables or math; an "
         "image-only page is not extracted) and needs no PDF support: the choice for a host "
-        "that cannot run MinerU. It is never chosen automatically."
+        "that cannot run MinerU. It is never chosen automatically. "
+        "'auto' and 'docling' are older names that run as 'mineru'."
     ),
 )
 @click.option(
     "--on-formula-oom",
     type=click.Choice(["fail", "docling"]),
-    default="fail",
-    help=(
-        "Accepted and ignored for one release (RDR-237). A page whose MinerU "
-        "attempt fails is retried without formulas, then taken from its PyMuPDF "
-        "text layer, whatever the value; the document no longer aborts for it."
-    ),
+    default=None,
+    hidden=True,
+    help="Retired (RDR-237): accepted and ignored for one release, with a notice.",
 )
 @click.option(
     "--streaming",
@@ -3087,7 +3150,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
     default=False,
     help=(
         "Accept extracted text that fails the post-extraction quality gate "
-        "(nexus-wi1uv) — e.g. docling completing on a formula-dense page "
+        "(nexus-wi1uv) — e.g. an extractor completing on a formula-dense page "
         "but running words together ('istheasetofthe'). By default that "
         "gate FAILS the run rather than silently indexing unsearchable "
         "garbage. Pass this flag only after reviewing the extraction (or "
@@ -3095,7 +3158,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
         "run is marked loudly in the summary when this override is used."
     ),
 )
-def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str, streaming: str, source_uri: str | None, allow_degraded_extraction: bool) -> None:
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str | None, streaming: str, source_uri: str | None, allow_degraded_extraction: bool) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
 
@@ -3103,7 +3166,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
     _log = structlog.get_logger(__name__)
 
-    from nexus.config import get_pdf_extractor  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.config import get_pdf_extractor, note_formula_oom_ignored, resolve_extractor  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
@@ -3118,7 +3181,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         UnextractableContentError,
         CatalogIdentityMissingError,
     )
-    from nexus.pdf_extractor import MineruSystemicFailure  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
+    from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
 
     # Local wrapper: convert the typed credential/identity errors into a
     # Click exception so the CLI shows a friendly message + exits non-zero
@@ -3160,6 +3223,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
     if extractor is None:
         extractor = get_pdf_extractor()
+    else:
+        extractor = resolve_extractor(extractor, source="--extractor")
+    if on_formula_oom is not None:
+        note_formula_oom_ignored()
 
     if force and dry_run:
         raise click.UsageError("--force and --dry-run are mutually exclusive.")
@@ -3179,6 +3246,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     # asks after it knows there is at least one PDF to index. The explicit
     # ``--extractor pymupdf`` (RDR-237) needs none of it: the gate returns at once.
     if dir_path is None:
+        # nexus-tr1rj.24: an unusable MinerU time limit stops here, before the catalog row or a
+        # chunk is touched (the check inside extraction comes after the row is written).
+        pdf_stack.refuse_bad_mineru_bounds(extractor)
         pdf_stack.ensure_or_exit("nx index pdf", extractor=extractor)
 
     # ── Batch mode (--dir) ──────────────────────────────────────────────
@@ -3223,6 +3293,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         if skipped:
             click.echo(f"Filtered {skipped} PDF(s) via gitignore/.nexus.yml patterns")
 
+        pdf_stack.refuse_bad_mineru_bounds(extractor)
         pdf_stack.ensure_or_exit("nx index pdf --dir", extractor=extractor)
 
         if collection is not None:
@@ -3246,7 +3317,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # Check if MinerU server is available for batch performance. The probe can START a
         # server (PDFExtractor._mineru_server_available autostarts), so the text-only
         # ``pymupdf`` extractor (RDR-237) stays out of it: MinerU is never probed or started.
-        if extractor in ("auto", "mineru"):
+        if extractor == "mineru":
             from nexus.pdf_extractor import PDFExtractor  # noqa: PLC0415 — deliberate function-local import (heavy PDF-extractor dep deferred; rare branch)
             _extractor = PDFExtractor()
             server_up = _extractor._mineru_server_available()
@@ -3324,7 +3395,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                     n = index_pdf(
                         pdf, corpus=corpus, collection_name=collection,
                         force=force, force_re_embed=re_embed, enrich=enrich, extractor=extractor,
-                        on_formula_oom=on_formula_oom, streaming=streaming,
+                        streaming=streaming,
                         allow_degraded_extraction=allow_degraded_extraction,
                         on_extraction=file_extraction.append,
                     )
@@ -3364,25 +3435,26 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                     failures.append((pdf, msg))
                     _log.warning("batch_index_failed", path=str(pdf), error=msg)
                     click.echo(f" — FAILED ({elapsed:.1f}s): {exc}")
-                    if isinstance(exc, MineruSystemicFailure):
-                        # RDR-237 (Sam, 2026-10-27): the breaker says the install or the
-                        # machine is failing, not this file, so every later PDF would trip it
-                        # again after its own timeouts. Stop the whole run; list the rest as
-                        # not attempted so the summary and the exit code say so.
+                    if isinstance(exc, MINERU_RUN_STOPPING):
+                        # RDR-237 (Sam, 2026-10-27; nexus-tr1rj.13 adds the machine-resource
+                        # error): the breaker or the machine says the install is failing, not
+                        # this file, so every later PDF would fail again after its own timeouts.
+                        # Stop the whole run; list the rest as not attempted so the summary and
+                        # the exit code say so.
+                        what, detail, remedy = mineru_stop_reason(exc)
                         remaining = pdfs[i:]
                         for rest in remaining:
                             failures.append((rest, f"not attempted (the run stopped at {pdf.name})"))
                         not_attempted += len(remaining)
                         _log.warning(
                             "batch_index_stopped_on_systemic_failure", path=str(pdf),
-                            failure_class=exc.failure_class, not_attempted=len(remaining),
+                            failure_class=getattr(exc, "failure_class", type(exc).__name__),
+                            not_attempted=len(remaining),
                         )
                         if remaining:
                             click.echo(
-                                f"Stopped: MinerU failed systemically on {pdf.name} "
-                                f"(failure class {exc.failure_class}); {len(remaining)} "
-                                f"remaining PDF(s) not attempted. Repair the install "
-                                f"(`nx doctor`), then rerun."
+                                f"Stopped: {what} on {pdf.name} ({detail}); {len(remaining)} "
+                                f"remaining PDF(s) not attempted. {remedy}"
                             )
                         break
                 finally:
@@ -3499,8 +3571,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # `embed_unavailable` instead of doing that discarded work quietly.
         click.echo(f"Indexing {path}…")
         try:
-            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction, dry_run=True)
-        except (ImportError, RuntimeError, ExtractionQualityError, MineruSystemicFailure, UnextractableContentError) as e:
+            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction, dry_run=True)
+        except (ImportError, RuntimeError, ExtractionQualityError, *MINERU_RUN_STOPPING, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -3586,7 +3658,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         try:
             meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
                              force_re_embed=re_embed,
-                             return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
+                             return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, streaming=streaming,
                              source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
                              allow_degraded_extraction=allow_degraded_extraction,
                              on_extraction=extraction_holder.append)
@@ -3598,7 +3670,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # completion stamp. Clean fail-loud ClickException, never
             # folded into a success summary.
             raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "", corpus=corpus)) from e
-        except (ImportError, RuntimeError, ExtractionQualityError, MineruSystemicFailure, UnextractableContentError) as e:
+        except (ImportError, RuntimeError, ExtractionQualityError, *MINERU_RUN_STOPPING, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -3618,7 +3690,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo(f"\n  {'  '.join(parts)}")
     else:
         try:
-            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, force_re_embed=re_embed, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
+            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, force_re_embed=re_embed, enrich=enrich, extractor=extractor, streaming=streaming,
                           source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
                           allow_degraded_extraction=allow_degraded_extraction,
                           on_extraction=extraction_holder.append)
@@ -3626,7 +3698,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): see
             # the identical rationale on the monitor branch above.
             raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "", corpus=corpus)) from e
-        except (ImportError, RuntimeError, ExtractionQualityError, MineruSystemicFailure, UnextractableContentError) as e:
+        except (ImportError, RuntimeError, ExtractionQualityError, *MINERU_RUN_STOPPING, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -3997,7 +4069,7 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
     # The doc_indexer embed_fn contract is `(texts, model) → (embeddings, model)`.
     # LocalEmbeddingFunction's __call__ is a ChromaDB EF — `(input) → embeddings`.
     # We wrap it to match the indexer contract.
-    from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
     # nexus-b7s8t: only when the vector backend is opted OUT of service
     # mode. In service mode (local included) the engine embeds and the
     # client's vectors are discarded; batch_index_markdowns's own gate

@@ -349,6 +349,63 @@ class CatalogHandlerManifestEnvelopeTest {
         assertThat(((Number) body.get("count")).intValue()).isEqualTo(0);
     }
 
+    // ── nexus-jypmj.6: get_many max_rows_per_doc ───────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    private static List<Integer> positions(Object rows) {
+        return ((List<Map<String, Object>>) rows).stream().map(r -> ((Number) r.get("position")).intValue()).toList();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getMany_maxRowsPerDoc_returnsAnEvenSampleOfALongDocument_andTheTrueRowCounts() throws Exception {
+        var coll = "knowledge__jypmj6-owner__v1";
+        var big = registerDoc("jypmj6.owner", "jypmj6 big", "file:///jypmj6/big.md");
+        var small = registerDoc("jypmj6.owner", "jypmj6 small", "file:///jypmj6/small.md");
+        writeManifestRows(big, coll, IntStream.range(0, 9).mapToObj(i -> ch("jypmj6-big-" + i)).toList());
+        writeManifestRows(small, coll, List.of(ch("jypmj6-small-0"), ch("jypmj6-small-1")));
+
+        var resp = post("/v1/catalog/manifest/get_many",
+            mapper.writeValueAsString(Map.of("doc_ids", List.of(big, small), "max_rows_per_doc", 4)));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        var manifests = (Map<String, Object>) body.get("manifests");
+        assertThat(positions(manifests.get(big))).as("9 rows sampled to 4: first, last and two between")
+            .containsExactly(0, 2, 5, 8);
+        assertThat(positions(manifests.get(small))).as("a document within the limit is whole").containsExactly(0, 1);
+        assertThat((Map<String, Object>) body.get("row_counts"))
+            .as("the true live row count of every returned document, so the caller can tell a sample from a whole")
+            .containsEntry(big, 9).containsEntry(small, 2);
+        assertThat(body.get("max_rows_per_doc")).as("the echo is the marker an engine without the field never sends").isEqualTo(4);
+        assertThat(((Number) body.get("count")).intValue()).isEqualTo(manifests.size());
+    }
+
+    @Test
+    void getMany_withoutMaxRowsPerDoc_isTheWholeManifestAndCarriesNoSamplingKeys() throws Exception {
+        var t = registerDoc("jypmj6b.owner", "jypmj6b doc", "file:///jypmj6b/doc.md");
+        writeManifestRows(t, "knowledge__jypmj6b-owner__v1",
+            IntStream.range(0, 6).mapToObj(i -> ch("jypmj6b-" + i)).toList());
+
+        var body = mapper.readValue(post("/v1/catalog/manifest/get_many",
+            mapper.writeValueAsString(Map.of("doc_ids", List.of(t)))).body(), MAP_T);
+        @SuppressWarnings("unchecked")
+        var manifests = (Map<String, Object>) body.get("manifests");
+        assertThat(positions(manifests.get(t))).containsExactly(0, 1, 2, 3, 4, 5);
+        assertThat(body).as("a request without the field is answered as before")
+            .doesNotContainKeys("row_counts", "max_rows_per_doc");
+    }
+
+    @Test
+    void getMany_maxRowsPerDoc_mustBeAPositiveInteger() throws Exception {
+        var t = registerDoc("jypmj6c.owner", "jypmj6c doc", "file:///jypmj6c/doc.md");
+        for (Object bad : new Object[] {0, -3, "4", 1.5, true, List.of(2)}) {
+            var resp = post("/v1/catalog/manifest/get_many", mapper.writeValueAsString(
+                Map.of("doc_ids", List.of(t), "max_rows_per_doc", bad)));
+            assertThat(resp.statusCode()).as("max_rows_per_doc=" + bad).isEqualTo(400);
+            assertThat(resp.body()).contains("max_rows_per_doc");
+        }
+    }
+
     // ── nexus-zewg3: manifest/chashes's tombstone_protected_count is OPT-IN ────
 
     @Test

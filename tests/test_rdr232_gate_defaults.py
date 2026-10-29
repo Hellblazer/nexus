@@ -155,7 +155,7 @@ def test_check_builtins_examines_only_the_builtin_rows_a_reseed_can_fix() -> Non
     ]
     check = el.check_builtins(rows)
     assert check == el.BuiltinCheck(checked=4, undeclared=3, undeclared_names=(
-        Path(SHIPPED[1]).stem, Path(SHIPPED[2]).stem, "retired-one"))
+        f"{Path(SHIPPED[1]).stem} (id 2)", f"{Path(SHIPPED[2]).stem} (id 3)", "retired-one (id 8)"))
 
 
 def test_check_builtins_names_at_most_eight_rows_and_falls_back_to_the_id() -> None:
@@ -163,6 +163,25 @@ def test_check_builtins_names_at_most_eight_rows_and_falls_back_to_the_id() -> N
     check = el.check_builtins(rows)
     assert check.undeclared == check.checked == len(SHIPPED) > 8
     assert len(check.undeclared_names) == 8 and check.undeclared_names[0] == "id 100"
+
+
+def test_rows_that_share_a_name_are_listed_apart_by_id() -> None:
+    """Live: four builtin rows are all named ``default`` (one per verb), so the name alone repeats."""
+    rows = [dict(r, name="default") for r in _library_rows(undeclared=4, declared=0)]
+    check = el.check_builtins(rows)
+    assert check.undeclared == 4
+    assert check.undeclared_names == ("default (id 100)", "default (id 101)", "default (id 102)", "default (id 103)")
+    assert len(set(check.undeclared_names)) == 4, "each listed row is told apart from the others"
+
+
+@pytest.mark.parametrize("dimensions", [{"scope": "global", "verb": "x"}, ["scope"], 7, None])
+def test_check_builtins_does_not_raise_on_dimensions_that_are_not_a_string(dimensions) -> None:
+    """The docstring promises a row that cannot be read is not examined; an unhashable value used to raise TypeError."""
+    unreadable = dict(_builtin_row(1, SHIPPED[0], declared=False), dimensions=dimensions)
+    readable = _builtin_row(2, SHIPPED[1], declared=False)
+    assert el.check_builtins([unreadable, readable]) == el.BuiltinCheck(
+        checked=1, undeclared=1, undeclared_names=(f"{Path(SHIPPED[1]).stem} (id 2)",),
+    )
 
 
 def test_a_library_with_no_builtin_to_examine_checks_zero_and_is_not_undeclared() -> None:
@@ -199,7 +218,8 @@ def test_a_cache_population_examines_the_builtins_from_the_rows_it_already_loads
     cache = PlanSessionCache(client=make_vector_test_client(), session_id="gate-defaults")
     assert cache.library_check is None, "unknown until a population has run"
     cache.populate(Lib())
-    assert cache.library_check == el.BuiltinCheck(3, 2, (Path(SHIPPED[1]).stem, Path(SHIPPED[2]).stem)) and Lib.calls == 1
+    assert cache.library_check == el.BuiltinCheck(
+        3, 2, (f"{Path(SHIPPED[1]).stem} (id 101)", f"{Path(SHIPPED[2]).stem} (id 102)")) and Lib.calls == 1
 
 
 def test_the_precondition_reads_the_cache_check_and_makes_no_t2_call_when_it_has_one() -> None:
@@ -320,14 +340,14 @@ def test_an_unreseeded_library_runs_the_request_in_shadow_with_a_named_reason_an
     assert wire["enforced"] is False
     assert wire["shadow_reason"] == "library_not_reseeded" and wire["library_check"] == "checked"
     assert (wire["builtins_checked"], wire["undeclared_builtins"]) == (3, 1)
-    assert wire["undeclared_builtin_names"] == [Path(SHIPPED[2]).stem]
+    assert wire["undeclared_builtin_names"] == [f"{Path(SHIPPED[2]).stem} (id 102)"]
     assert seen[0]["eligibility"].enforce is False
     assert env["plan_id"] == 473, "shadow: nothing was removed, the lookup plan is still selected"
     assert wire["branches"]["cosine"]["excluded"] == 1, "and the verdicts are still reported"
     warnings = [e for e in logs if e["event"] == "answer_kind_gate_shadowed_library_not_reseeded"]
     assert len(warnings) == 1 and warnings[0]["log_level"] == "warning"
-    assert warnings[0]["remedy"] == "nx plan reseed" and warnings[0]["undeclared_builtins"] == 1
-    assert warnings[0]["builtins_checked"] == 3 and warnings[0]["undeclared_builtin_names"] == [Path(SHIPPED[2]).stem]
+    assert warnings[0]["remedy"] == el.LIBRARY_REMEDY and warnings[0]["undeclared_builtins"] == 1
+    assert warnings[0]["builtins_checked"] == 3 and warnings[0]["undeclared_builtin_names"] == [f"{Path(SHIPPED[2]).stem} (id 102)"]
 
 
 def test_the_not_reseeded_warning_is_logged_once_per_library_state_not_once_per_request() -> None:
@@ -633,6 +653,17 @@ def test_operator_model_tiering_zero_does_not_strip_the_default_model(monkeypatc
     assert fake.extra[0]["model"] == "haiku"
 
 
+def test_the_suite_pins_coverage_off_while_the_shipped_default_is_on() -> None:
+    """nexus-jypmj.17: ``NX_ANSWER_COVERAGE`` ships ON, and tests/conftest.py pins it to ``0`` for every test (unlike the
+    two other switches, which it leaves at their defaults) so a unit test over its own operator stubs does not reach
+    the coverage boundary unless it opts in. A test of the shipped default deletes the variable."""
+    import os
+
+    assert os.environ.get(switches.ANSWER_COVERAGE_ENV) == "0", "the suite-wide pin is not in force"
+    assert switches.coverage_enabled(os.environ) is False
+    assert switches.ANSWER_COVERAGE_ENABLED is True and switches.coverage_enabled({}) is True
+
+
 def test_the_suite_wide_default_keeps_unit_tests_off_the_live_model() -> None:
     """The autouse fixture in conftest: the setting stays at its default (so the gate enforces in every test) and
     the dispatch refuses the extraction operator, so a test that does not mean to call a model never does."""
@@ -642,5 +673,16 @@ def test_the_suite_wide_default_keeps_unit_tests_off_the_live_model() -> None:
 
     assert os.environ.get(rc.EXTRACT_ENV) is None and os.environ.get(el.ANSWER_KIND_ELIGIBILITY_ENV) is None
     assert rc.extraction_enabled(os.environ) is True and el.eligibility_enforced(os.environ) is True
-    with pytest.raises(RuntimeError, match="live structured extraction"):
-        asyncio.run(dispatch.claude_dispatch("p", {}, operator="request_coverage_extract"))
+    # The assertion is on the wrapper, not on a call that would reach the live model if the guard regressed:
+    # the autouse fixture wraps the real dispatcher with functools.wraps, so ``__wrapped__`` is the real one.
+    guard = dispatch.claude_dispatch
+    real = getattr(guard, "__wrapped__", None)
+    assert real is not None and real is not guard, "claude_dispatch is not the conftest guard: the suite-wide fixture is not in force"
+    assert asyncio.iscoroutinefunction(guard) and asyncio.iscoroutinefunction(real)
+    assert guard.__module__ == real.__module__ and guard.__qualname__ == real.__qualname__, "the guard wraps claude_dispatch itself"
+    # And the refusal itself, with no way to spend a model call even if the guard forwarded: an unknown backend
+    # setting makes the real dispatcher raise OperatorError before it picks a backend or spawns anything.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("NX_LLM_BACKEND", "no-such-backend")
+        with pytest.raises(RuntimeError, match="live structured extraction"):
+            asyncio.run(guard("p", {}, operator="request_coverage_extract"))

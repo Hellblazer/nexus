@@ -110,23 +110,45 @@ _COST_EPSILON_REL = 0.005
 _COST_EPSILON_ABS_FLOOR = 1e-6
 
 
+def _within_epsilon(a: float, b: float) -> bool:
+    epsilon = max(_COST_EPSILON_ABS_FLOOR, _COST_EPSILON_REL * max(abs(a), abs(b)))
+    return abs(a - b) <= epsilon
+
+
 def _costs_agree(
     run_cost: "float | None", step_sum: "float | None", *, planner_share_allowed: bool = False,
+    extraction_cost: "float | None" = None,
+    out_of_step_cost: "float | None" = None,
 ) -> bool:
     """Whether a row's own ``cost_usd`` and the sum of its step costs
     agree within the relative/sub-cent epsilon. Both ``None`` (unknown vs
     unknown) trivially agree; exactly one ``None`` never agrees.
 
+    *out_of_step_cost* (nexus-jypmj.5) is the run's out-of-step dispatch share as the run stored it
+    (``nx_answer_runs.out_of_step_cost_usd``: the inline planner call plus the request-extraction call, neither
+    a plan step's). When the row has it the check is TWO-SIDED for ANY ``plan_id``: the run cost must equal the
+    step sum plus the share (a step sum of nothing known counts as zero, the way the writer adds only what it
+    knows), so an over-count is caught for an inline-planned run, a library-plan run and a planner-error run
+    alike, and *planner_share_allowed* and *extraction_cost* are not consulted. The rest of this docstring is
+    the rule for a row WITHOUT the field (written before it, by an older client, or against an older engine).
+
+    *extraction_cost* (nexus-jypmj.9) is the structured request extraction's cost as the row's run summary
+    records it. The call is no step's, and since nexus-jypmj.9 the run's ``cost_usd`` carries it, so a run with
+    a recorded extraction cost agrees at ``step_sum + extraction_cost`` (an exact share, not a one-sided
+    allowance: a library plan has no planner share, so an over-count is still caught) or, for a row written
+    by a release that left the call out of the run cost (7.88.0 recorded it in the summary only), at
+    ``step_sum``. Without a recorded extraction cost the rule is unchanged.
+
     *planner_share_allowed* (an inline-planned run, ``plan_id`` 0; nexus-jypmj.1.20): the run's
     ``cost_usd`` also carries the planner dispatch's own cost, which is no step's, so a run cost
     at or above the step sum agrees, and a known run cost agrees with no known step cost. A run
-    cost below its steps is still a drop.
-
-    The allowance is one-sided on purpose (nexus-jypmj.4): the planner's own cost is not stored, so
+    cost below its steps is still a drop. The allowance is one-sided on purpose: without the stored share,
     ``run_cost - step_sum`` cannot be told from an over-count and no upper bound on it is sound.
-    Catching an over-count needs ``planner_cost_usd`` persisted on the run, a stored-run schema
-    change that was ruled out for this bead.
     """
+    if out_of_step_cost is not None:
+        if run_cost is None:
+            return False
+        return _within_epsilon(run_cost, (step_sum or 0.0) + out_of_step_cost)
     if run_cost is None and step_sum is None:
         return True
     if planner_share_allowed and run_cost is not None:
@@ -134,13 +156,25 @@ def _costs_agree(
             return True
         if run_cost >= step_sum:
             return True
+    if extraction_cost is not None and extraction_cost > 0 and not planner_share_allowed and run_cost is not None:
+        base = step_sum or 0.0
+        return _within_epsilon(run_cost, base) or _within_epsilon(run_cost, base + extraction_cost)
     if run_cost is None or step_sum is None:
         return False
-    epsilon = max(
-        _COST_EPSILON_ABS_FLOOR,
-        _COST_EPSILON_REL * max(abs(run_cost), abs(step_sum)),
-    )
-    return abs(run_cost - step_sum) <= epsilon
+    return _within_epsilon(run_cost, step_sum)
+
+
+def _row_extraction_cost(row: dict) -> "float | None":
+    """The structured request extraction's cost a row's run summary records (``request.extraction.cost_usd``),
+    or ``None`` when the row has no summary, the summary lacks the block (cut for size) or the call reported no
+    cost."""
+    summary = row.get("run_summary")
+    request = summary.get("request") if isinstance(summary, dict) else None
+    extraction = request.get("extraction") if isinstance(request, dict) else None
+    cost = extraction.get("cost_usd") if isinstance(extraction, dict) else None
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost != cost:
+        return None
+    return float(cost)
 
 
 def _row_step_cost_sum(row: dict) -> "float | None":
@@ -249,7 +283,27 @@ _WELL_FORMED_DEGENERATE_CLASSES: frozenset[str] = frozenset({
     # RDR-232 Phase 3 (nexus-jypmj.3.3): the coverage-decided non-answers carry the notice too. Without these
     # a row with executed steps would fall through to executed-ok.
     "non_answer/uncovered", "non_answer/no_evidence",
+    # A redacted row whose summary says unavailable because the generated prose was no usable answer: the
+    # text that named the shape was not recorded (nexus-jypmj.3.15).
+    "non_answer/no_usable_answer",
 })
+
+
+def _redacted_coverage_class(summary: object) -> str | None:
+    """The coverage-decided non-answer class of a redacted row, read from its run summary; ``None`` unless the
+    summary is an ``nx_answer`` run whose coverage state is ``unavailable``. ``fit_summary`` may cut the
+    ``coverage`` block (and its reason), so a missing reason falls back to ``no_usable_answer``."""
+    if not isinstance(summary, dict) or summary.get("kind") != "nx_answer":
+        return None
+    if summary.get("coverage_state") != "unavailable":
+        return None
+    block = summary.get("coverage")
+    reason = block.get("reason") if isinstance(block, dict) else None
+    if reason == "uncovered":
+        return "non_answer/uncovered"
+    if reason in ("no_evidence", "scope_conflict"):
+        return "non_answer/no_evidence"
+    return "non_answer/no_usable_answer"
 
 _NON_ANSWER_NOTICE_RE = _re.compile(r"^\[non-answer: ([a-z_]+)\]")
 
@@ -319,7 +373,9 @@ def _classify_degenerate_row(row: dict) -> str:
     final_text = str(row.get("final_text") or "")
     question = str(row.get("question") or "")
     if final_text == "[redacted]" or question == "[redacted]":
-        return "redacted"
+        # A trace=False row's text cannot carry the coverage notice, so its run summary decides
+        # (nexus-jypmj.3.15): unavailable coverage means the call returned a non-answer.
+        return _redacted_coverage_class(row.get("run_summary")) or "redacted"
     if final_text.startswith("Planner error:"):
         return "planner_error"
     if final_text.startswith("Error:"):
@@ -648,6 +704,30 @@ def _continuation_pairing_stats(
     }
 
 
+def _run_step_elapsed_ms(row: dict, steps: "list[dict]") -> int:
+    """A run's step time: the sum of its steps' ``elapsed_ms``, with the coverage assessment counted once.
+
+    The assessment's calls run concurrently (nexus-jypmj.17), each its own ``operator_check`` step numbered past the
+    plan's own ``step_count`` steps, so their ``elapsed_ms`` overlap and a plain sum reports more than the run took.
+    When the row's run summary carries ``coverage.assessment_latency_ms`` (the stage's wall time), the assessment
+    steps contribute ``min(their sum, that latency)``: the latency when the calls overlapped, their sum when they did
+    not (the stage's own time also covers repair and queueing, so it can exceed a serial sum). A row without the
+    summary value keeps the plain sum, which is then an upper bound.
+    """
+    total = sum(int(s.get("elapsed_ms") or 0) for s in steps)
+    summary = row.get("run_summary")
+    coverage = summary.get("coverage") if isinstance(summary, dict) else None
+    latency = coverage.get("assessment_latency_ms") if isinstance(coverage, dict) else None
+    plan_steps = row.get("step_count")
+    if isinstance(latency, bool) or not isinstance(latency, (int, float)) or latency != latency or isinstance(plan_steps, bool) or not isinstance(plan_steps, int):
+        return total
+    assessment = sum(
+        int(s.get("elapsed_ms") or 0) for s in steps
+        if s.get("operator") == "operator_check" and isinstance(s.get("step_index"), int) and s["step_index"] >= plan_steps
+    )
+    return total - assessment + min(assessment, int(latency))
+
+
 def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
     """Per-operator / per-source cost+elapsed aggregates (count, sum,
     median), per-plan cost/elapsed medians, and run-vs-sum(steps)
@@ -719,7 +799,13 @@ def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
         plan_key = str(plan_id) if plan_id is not None else "fallback"
         run_cost = row.get("cost_usd")
         step_sum = _row_step_cost_sum(row)
-        if not _costs_agree(run_cost, step_sum, planner_share_allowed=plan_id == 0):
+        out_of_step_cost = row.get("out_of_step_cost_usd")  # nexus-jypmj.5: None for a row that stored none
+        if isinstance(out_of_step_cost, bool) or not isinstance(out_of_step_cost, (int, float)) or out_of_step_cost != out_of_step_cost:
+            out_of_step_cost = None
+        if not _costs_agree(
+            run_cost, step_sum, planner_share_allowed=plan_id == 0, extraction_cost=_row_extraction_cost(row),
+            out_of_step_cost=out_of_step_cost,
+        ):
             violations.append({
                 "id": row.get("id"), "run_cost_usd": run_cost,
                 "step_cost_sum_usd": step_sum,
@@ -733,9 +819,7 @@ def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
             _bump(by_source_raw, src, cost=cost, elapsed_ms=elapsed)
         if step_sum is not None:
             by_plan_costs.setdefault(plan_key, []).append(step_sum)
-        by_plan_elapsed.setdefault(plan_key, []).append(
-            sum(int(s.get("elapsed_ms") or 0) for s in steps)
-        )
+        by_plan_elapsed.setdefault(plan_key, []).append(_run_step_elapsed_ms(row, steps))
 
     by_plan: dict[str, dict[str, Any]] = {}
     for plan_key in set(by_plan_costs) | set(by_plan_elapsed):
@@ -949,6 +1033,9 @@ def answer_runs_cmd(
     ``no_evidence`` (nothing usable reached the reduction), are not in this
     bucket: they carry the ``[non-answer: <shape>]`` notice and are counted as
     degenerate classes ``non_answer/uncovered`` and ``non_answer/no_evidence``.
+    A ``trace=False`` row cannot carry the notice; when its run summary says
+    coverage ``unavailable`` it is counted in the same classes, or as
+    ``non_answer/no_usable_answer`` when the prose was no usable answer.
     """
     # nexus-spbay: validate/normalize --since BEFORE the service try-block —
     # a bad value must fail as a usage error naming the value, never fall

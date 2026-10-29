@@ -2255,6 +2255,34 @@ class TestPoisonProbe:
         assert probe.unknown_reason is not None
         assert "service mode not configured" in probe.unknown_reason
 
+    def test_the_real_managed_schema_migrations_row_is_unknown_not_clean(self, tmp_path, monkeypatch):
+        # nexus-njn1a round 2 (code-review ship-blocker): on a managed box the real "Schema migrations" row
+        # says the check was not run from this client. A pass there made this probe return CLEAN after
+        # examining nothing, and `nx daemon service install-binary` reported its poison gate clean. The row is
+        # the real one (empty config dir, NX_LOCAL=0), not a synthetic stand-in.
+        import nexus.db.pg_provision as pgp
+        empty = tmp_path / "config-without-pg-credentials"
+        empty.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(empty))
+        monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.setattr(pgp, "backfill_diag_role_best_effort", lambda: None)
+        from nexus.upgrade_finish import _poison_probe
+        probe = _poison_probe(empty)
+        assert probe.playbook is None
+        assert probe.unknown_reason is not None, "an unexamined store read as CLEAN"
+        assert "managed deployment" in probe.unknown_reason
+
+    def test_an_unperformed_managed_row_is_unknown_whatever_its_rendering(self, tmp_path):
+        # The 4th arm keys on the managed reason as well as on `not r.ok`: even a row drawn as a pass
+        # (ok=True) with the reason "check was not run" is unknown, never clean.
+        from nexus.health import _MANAGED_NOT_PROBEABLE_DETAIL
+        probe = self._probe(tmp_path, results=[
+            self._result("Schema migrations", _MANAGED_NOT_PROBEABLE_DETAIL, ok=True),
+        ])
+        assert probe.playbook is None
+        assert probe.unknown_reason is not None
+        assert "not probeable from this client" in probe.unknown_reason
+
     def test_unknown_reason_is_truncated(self, tmp_path):
         # Round-2 critique LOW-1: reasons longer than 200 chars are capped
         # (they render inline in a single action line).

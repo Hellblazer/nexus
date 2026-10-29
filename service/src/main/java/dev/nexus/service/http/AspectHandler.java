@@ -9,6 +9,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.AspectRepository;
+import dev.nexus.service.db.TupleException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,6 +27,12 @@ import java.util.Optional;
  * <p>Routes (all under {@code /v1/aspects/}):
  * <pre>
  *   POST  /v1/aspects/upsert                      upsert aspect record (400 {"error":"doc_id required"} on missing/blank doc_id — hygiene-001)
+ *                                                 optional claim_id + claimant (nexus-5r2sc.2.5, RDR-235 E5), both or neither (else 400
+ *                                                 naming both fields): the claim is looked up and its tuples row locked FOR NO KEY UPDATE
+ *                                                 in the upsert's transaction, BEFORE the retired-collection check, so a 409 means the
+ *                                                 claim was live at that instant. 404 ClaimNotFound (no live claim: lapsed, released,
+ *                                                 acked, re-taken), 403 ClaimOwnership (another claimant) or 403 ClaimTaskMismatch (not
+ *                                                 the aspects task for this doc_id); nothing is written on any of them
  *   GET   /v1/aspects/get                         get by collection= &amp; source_path=
  *   GET   /v1/aspects/get_by_doc_id               get by doc_id=
  *   GET   /v1/aspects/list_by_collection          list by collection= (limit=, offset=)
@@ -145,6 +152,14 @@ public final class AspectHandler implements HttpHandler {
             }
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + HttpUtil.jsonString(e.getMessage()) + "}");
+        } catch (TupleException e) {
+            // nexus-5r2sc.2.5 (RDR-235 E5): a fenced /upsert's claim refusals (ClaimNotFound 404, ClaimOwnership
+            // and ClaimTaskMismatch 403) render with the exception's own status and code, as TupleHandler
+            // renders them, not as a 500.
+            log.warn("event=aspects_handler_typed_error op={} code={} detail={}", op, e.code(), e.getMessage());
+            HttpUtil.send(exchange, e.httpStatus(),
+                    "{\"error\":" + HttpUtil.jsonString(e.code())
+                            + ",\"detail\":" + HttpUtil.jsonString(e.getMessage()) + "}");
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
