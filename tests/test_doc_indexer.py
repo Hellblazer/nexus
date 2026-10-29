@@ -431,7 +431,6 @@ class TestIndexMarkdownUnchunkableGuard:
                 index_markdown(p, corpus="test")
         mock_register.assert_not_called()
 
-    @pytest.mark.t2_tenant  # index_markdown now reads the registered document's catalog path (class e)
     def test_real_markdown_file_still_registers(self, sample_md):
         from nexus.doc_indexer import index_markdown
 

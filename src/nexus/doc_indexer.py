@@ -306,8 +306,9 @@ def _catalog_absolute_identity(doc_id: str) -> str:
     (:func:`_curator_identity`, nexus-njn1a), while a repo document registers relative to its repo root.
     The post-store document hook must be handed the path the catalog holds: the aspect queue row keys on
     it, and a relative spelling of an absolute identity made ``nx index rdr <dir>`` outside a repo
-    write a second aspect row beside the one ``nx enrich aspects`` writes (shakedown 7.89.0 class e).
-    Read-only and best-effort: "" means the caller keeps the spelling it already had.
+    write a second aspect row beside the one ``nx enrich aspects`` writes (nexus-b0y6w, shakedown 7.89.0 class e).
+    Read-only and best-effort: "" means the caller keeps the spelling it already had; a failed read logs a
+    warning that says so.
     """
     if not doc_id:
         return ""
@@ -320,11 +321,27 @@ def _catalog_absolute_identity(doc_id: str) -> str:
         fp = str(getattr(entry, "file_path", "") or "") if entry is not None else ""
         return fp if fp and Path(fp).is_absolute() else ""
     except Exception:  # noqa: BLE001 — best-effort: a failed read keeps the caller's existing spelling
-        _log.debug("catalog_absolute_identity_lookup_failed", doc_id=doc_id, exc_info=True)
+        _log.warning(
+            "catalog_absolute_identity_lookup_failed_relative_key_used", doc_id=doc_id, exc_info=True,
+        )
         return ""
     finally:
         if reader is not None:
             reader.close()
+
+
+def _hook_source_key(md_path: Path, base_path: Path | None, doc_id: str) -> str | None:
+    """The path the post-store document hook is keyed on, or ``None`` to key on ``str(md_path)``.
+
+    Only a caller with a *base_path* (``nx index rdr`` through ``batch_index_markdowns``, which pays one catalog
+    read per document) has a relative spelling to get wrong; every other caller (``nx index md``, ``nx dt index``,
+    collection reindex) makes no catalog read. With a *base_path* the key is the catalog's own absolute path when
+    the document registered under one (a curator-owned document outside any repo), else the *base_path*-relative
+    path the repo owner registered.
+    """
+    if not base_path:
+        return None
+    return _catalog_absolute_identity(doc_id) or make_relative(md_path, base_path)
 
 
 def _doc_id_for_path(file_path: Path) -> str:
@@ -4027,12 +4044,8 @@ def index_markdown(
         collection_name=col_name,
     )
     # The hook chain keys the aspect queue on this path, so it is the catalog's own spelling of the
-    # document: a curator-owned document (outside any repo) registered by its absolute path, so a
-    # base_path-relative key would be a second identity for it (shakedown 7.89.0 class e).
-    source_key = (
-        None if _catalog_absolute_identity(doc_id)
-        else make_relative(md_path, base_path) if base_path else None
-    )
+    # document (nexus-b0y6w class e); only a base_path caller pays the catalog read.
+    source_key = _hook_source_key(md_path, base_path, doc_id)
     # The write's completion stamp is sent below, after the catalog enrichment (RDR-223,
     # nexus-z0o2p.34): _index_document hands it back instead of sending it.
     _stamps: "list[_DeferredOwnerWrite]" = []
