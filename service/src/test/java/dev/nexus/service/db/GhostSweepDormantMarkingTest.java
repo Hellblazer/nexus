@@ -425,6 +425,82 @@ class GhostSweepDormantMarkingTest {
         }
     }
 
+    private String lifecycleStateOf(String tenant, String coll) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            return ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))
+                .fetchOne().value1();
+        }
+    }
+
+    // nexus-b0y6w class d: nothing in the engine sets a dormant row back to live when chunks arrive (the
+    // collection upsert leaves lifecycle_state out of its SET list), so the sweep that marks a row dormant
+    // is also the one that clears it once the collection holds chunks again. Without this, only deleting the
+    // collection cleared the doctor's dormant warning after a re-index.
+    @Test @Order(27)
+    void dormantRowThatNowHoldsChunks_isPromotedBackToLive_andADryRunOnlyReportsNothing() throws Exception {
+        String tenant = "ghost-sweep-dormant-regains-chunks";
+        String coll = "knowledge__gs-dormant-regains__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
+        }
+        repo.sweepGhostsAndMarkDormant(tenant);
+        assertThat(lifecycleStateOf(tenant, coll)).as("precondition: marked dormant").isEqualTo("dormant");
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertChunk384(DSL.using(su, SQLDialect.POSTGRES), tenant, coll, chashBytes(coll), vector(384));
+        }
+
+        CatalogRepository.GhostSweepResult dry = repo.sweepGhostsAndMarkDormant(tenant, true);
+        assertThat(dry.markedDormant()).isEqualTo(0);
+        assertThat(lifecycleStateOf(tenant, coll)).as("a dry run changes nothing").isEqualTo("dormant");
+
+        CatalogRepository.GhostSweepResult applied = repo.sweepGhostsAndMarkDormant(tenant);
+        assertThat(applied.markedDormant()).as("promotion is not a dormant marking").isEqualTo(0);
+        assertThat(applied.ghostsDeleted()).isEqualTo(0);
+        assertThat(lifecycleStateOf(tenant, coll)).as("the collection holds chunks again").isEqualTo("live");
+        try (Connection su = pg.createConnection("")) {
+            Integer dimension = DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.DIMENSION)
+                .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(CATALOG_COLLECTIONS.NAME.eq(coll)).fetchOne().value1();
+            assertThat(dimension).as("a dormant row carries no dimension; the stored one fills it").isEqualTo(384);
+        }
+
+        CatalogRepository.GhostSweepResult again = repo.sweepGhostsAndMarkDormant(tenant);
+        assertThat(again.markedDormant()).isEqualTo(0);
+        assertThat(lifecycleStateOf(tenant, coll)).isEqualTo("live");
+    }
+
+    // nexus-b0y6w class d: only a LIVE row is marked dormant. A disputed row that has lost its chunks keeps its
+    // flag (RDR-204: disputed means the name and the stored dimension disagree, remedy re-index); relabelling it
+    // dormant would hide that and make the dormant promotion above turn it live.
+    @Test @Order(28)
+    void disputedRowWithNoChunks_isNotRelabelledDormant() throws Exception {
+        String tenant = "ghost-sweep-disputed-no-chunks";
+        String coll = "knowledge__gs-disputed-nochunks__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "disputed")
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll)).execute();
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.markedDormant()).as("a disputed row is not marked dormant").isEqualTo(0);
+        assertThat(result.dormantNames()).isEmpty();
+        assertThat(lifecycleStateOf(tenant, coll)).isEqualTo("disputed");
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // MULTI-TENANT: each tenant is swept at its OWN first request; neither
     // is swept by the other's (TESTS bullet 3).

@@ -1890,7 +1890,11 @@ Two dispositions, per row:
   somewhere but with no `collection_vector_stats` row (nothing to embed or
   read). `--apply` flips `lifecycle_state` to `dormant`; the row itself is
   NOT deleted — `nx doctor`'s "Collections dormant" row (see [nx doctor](#nx-doctor))
-  is how an operator later decides to re-index or remove the references.
+  is how an operator later decides to re-index or remove the references. Only a
+  live row is marked: a row already dormant is not listed again by a later sweep
+  or dry run, and a disputed row keeps its flag. After a re-index, an `--apply`
+  sweep sets a dormant row that holds chunks again back to live (the engine logs
+  it; the report has no field for it).
 
 A quarantine row still referenced by something is held unconditionally
 (reported as a count only, never a name, since nothing about it changed).

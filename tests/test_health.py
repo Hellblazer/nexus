@@ -1007,6 +1007,7 @@ def test_embedding_profile_dormant_is_a_warn_naming_the_state_with_remedy(monkey
     assert name in r.detail and "dormant" in r.detail and "marked by the ghost sweep" in r.detail
     assert any("referenced but empty" in s for s in r.fix_suggestions)
     assert any("remove the references" in s for s in r.fix_suggestions)
+    assert any("sweep-ghosts --apply" in s for s in r.fix_suggestions), "the remedy names what clears the mark"
 
 
 @pytest.mark.usefixtures("cloud_mode")

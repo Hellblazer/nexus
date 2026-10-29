@@ -9751,8 +9751,9 @@ def _check_embedding_profile() -> list[HealthResult]:
                 f"(marked by the ghost sweep): {_name_list(dormant)}"
             ),
             fix_suggestions=[
-                "referenced but empty: re-index it (nx collection reindex <name>) "
-                "or remove the references",
+                "referenced but empty: re-index it (nx collection reindex <name>), then "
+                "nx catalog sweep-ghosts --apply sets it live again (an engine before the "
+                "nexus-b0y6w sweep leaves it dormant), or remove the references",
             ],
         ) if dormant else HealthResult(label=_DORMANT_LABEL, ok=True, detail="none")
     )

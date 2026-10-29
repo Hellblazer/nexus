@@ -773,6 +773,12 @@ registered.
   re-embedding, informational; `disputed` and `dormant` rows are listed
   red with their remedies. `nx collection shape` already reports the
   pre-RDR view of the same population and stays the curation tool.
+  *Amendment 2026-10-29 (Sam, nexus-b0y6w): `nx doctor`'s "Collections dormant"
+  row is a warning, not red. A dormant row is a state the ghost sweep itself
+  marked, and the sweep cannot clear it; the red `disputed` row is unchanged.
+  The sweep now also marks only a `live` row dormant (a `disputed` row keeps its
+  flag) and sets a dormant row back to `live` once the collection holds chunks
+  again.*
 - `nx collection list` prints the columns, not a parsed name.
 
 ### New Dependencies

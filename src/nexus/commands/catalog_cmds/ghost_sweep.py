@@ -31,6 +31,10 @@ Two dispositions this verb reports, per row:
   ``--apply`` flips ``lifecycle_state`` to ``'dormant'``; the row itself
   is NOT deleted (``nx doctor``'s "Collections dormant" row is how an
   operator later decides whether to re-index or remove the references).
+  Only a live row is marked: a row already dormant is not listed again by
+  a later sweep or dry run, and a disputed row keeps its flag. A dormant
+  row whose collection holds chunks again is set back to live by an
+  ``--apply`` sweep (the engine logs it; the report has no field for it).
 
 A quarantine row still referenced by something is HELD unconditionally
 (never relitigated into dormant) -- reported as a count only, no names,
