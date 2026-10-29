@@ -2434,6 +2434,34 @@ class TestTupleVerdictMap:
         side.process(claims)
         return tuples, db
 
+    @pytest.mark.parametrize(
+        "result, op",
+        [(None, "ack"), (ValueError("bad"), "nack"), (_record_for("knowledge__delos", "/p0.md"), "persist-ack")],
+        ids=["acked-as-dropped", "dead", "persisted"],
+    )
+    def test_a_terminal_verdict_forgets_the_tasks_409_memory(
+        self, tuple_env, monkeypatch, result, op,  # noqa: ANN001
+    ) -> None:
+        """nexus-5r2sc.3.9 L3: only a successful persist popped the task id, so a
+        task acked or dead-lettered after one 409 left its entry, and a later
+        unrelated 409 for the same task in this process went straight to dead."""
+        tuples = _FakeTuples([_task_body(0)], attempts=0)
+        db = _FakeTupleDb(tuples)
+        tuple_env.install(db)
+        if isinstance(result, BaseException):
+            def raiser(**kw):  # noqa: ANN001, ANN202
+                raise result
+            monkeypatch.setattr("nexus.aspect_worker._extract_aspects", raiser)
+        else:
+            monkeypatch.setattr("nexus.aspect_worker._extract_aspects", lambda **kw: result)
+        side = _tuple_worker()._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        (claim,) = claims
+        side._superseded[claim.task_id] = 1  # an earlier 409 for this task
+        side.process(claims)
+        assert tuples.ops("ack") or tuples.ops("nack") or db.completed, "a verdict was reached"
+        assert claim.task_id not in side._superseded
+
     def test_a_record_is_persisted_with_the_claim_pair_and_the_persist_call_acks(
         self, tuple_env, monkeypatch,  # noqa: ANN001
     ) -> None:

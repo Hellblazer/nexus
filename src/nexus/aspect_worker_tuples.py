@@ -39,6 +39,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import structlog
 
 from nexus.collection_errors import SupersededCollectionWriteError
@@ -480,6 +481,19 @@ class TupleQueueSide:
             else:
                 self._retry_or_dead(claim)
             return
+        except httpx.HTTPStatusError as exc:
+            # A bare engine 5xx on the persist call: the extraction is good and the
+            # engine is unwell. The generic retry predicate accepts only
+            # 429/502/503/504, so a 500 was dead-lettered (nexus-5r2sc.3.9). Any
+            # other status keeps the old route (raise -> _route_failure -> dead).
+            if exc.response.status_code < 500:
+                raise
+            _log.warning(
+                "aspect_worker_persist_server_error",
+                task_id=claim.task_id, status=exc.response.status_code, attempts=claim.attempts,
+            )
+            self._retry_or_dead(claim)
+            return
         self._superseded.pop(claim.task_id, None)
         self._forget(claim)
 
@@ -583,15 +597,21 @@ class TupleQueueSide:
         return True
 
     def _ack(self, claim: HeldClaim) -> bool:
-        return self._finish(claim, "ack", lambda t: t.ack(claim.claim_id, claim.claimant))
+        done = self._finish(claim, "ack", lambda t: t.ack(claim.claim_id, claim.claimant))
+        if done:
+            self._superseded.pop(claim.task_id, None)  # terminal: no later 409 is a repeat
+        return done
 
     def _nack(
         self, claim: HeldClaim, *, retry_after_s: int | None = None, dead: bool = False,
     ) -> bool:
-        return self._finish(
+        done = self._finish(
             claim, "nack",
             lambda t: t.nack(claim.claim_id, claim.claimant, retry_after_s=retry_after_s, dead=dead),
         )
+        if done and dead:
+            self._superseded.pop(claim.task_id, None)
+        return done
 
     def _release(self, claim: HeldClaim) -> bool:
         return self._finish(claim, "release", lambda t: t.release(claim.claim_id, claim.claimant))

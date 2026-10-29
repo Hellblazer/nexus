@@ -179,6 +179,24 @@ class TestScenario15ParkCap:
             db.tuples.ack(c.claim_id, c.claimant)
         assert _tasks(db) == []
 
+        # While parked (read it from the engine, mid-park): exactly ONE parked in,
+        # under the slot-0 claimant. A worker that parked on every slot under five
+        # claimants would pass the refusal counters below and fail this
+        # (nexus-5r2sc.3.10).
+        side_p = _worker(park_timeout_s=3)._tuple_side
+        base = db.tuples.park_stats().global_in_use
+        holder: list = []
+        t = threading.Thread(target=lambda: holder.append(side_p.claim_batch(park=True)), daemon=True)
+        t.start()
+        try:
+            _wait(lambda: db.tuples.park_stats().per_claimant, timeout=10)
+            stats = db.tuples.park_stats()
+            assert set(stats.per_claimant) == {side_p.claimant(0)}, stats.per_claimant
+            assert stats.global_in_use - base == 1, (stats.global_in_use, base)
+        finally:
+            t.join(timeout=15)
+        assert holder and holder[0] == ([], False)
+
         # Idle: slots 1..4 probe and slot 0 parks, once; several rounds never
         # exceed the engine's per-claimant park cap of 4.
         for _ in range(3):
@@ -358,6 +376,47 @@ class TestTransportReadFailureIsRetried:
         rows = self._run(db, monkeypatch, t3)
         assert t3.calls >= 1
         assert rows == [], "an empty read is acked as dropped"
+
+
+class TestPersistServerErrorIsRetried:
+    """nexus-5r2sc.3.9 M2: an engine 5xx on the fenced upsert is a bare
+    ``httpx.HTTPStatusError``; the retry predicate accepts only 429/502/503/504,
+    so a computed extraction was dead-lettered (and held a max_live_rows slot for
+    90 days). A 5xx on the persist call is the ladder's retry; a 4xx stays dead."""
+
+    @staticmethod
+    def _status(code: int) -> httpx.HTTPStatusError:
+        req = httpx.Request("POST", "http://engine/v1/aspects/upsert")
+        return httpx.HTTPStatusError(str(code), request=req, response=httpx.Response(code, request=req))
+
+    def _run(self, db: Any, extracted: list[dict], monkeypatch: pytest.MonkeyPatch, code: int) -> list:
+        from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
+
+        _out(db, _doc(f"p{code}"), source=f"/p{code}.md")
+        calls: list[int] = []
+
+        def fail_once(self_: Any, *a: Any, **k: Any) -> Any:
+            calls.append(1)
+            raise self._status(code)
+
+        monkeypatch.setattr(HttpDocumentAspectsStore, "upsert", fail_once)
+        side = _worker()._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+        assert calls == [1], "the persist call was reached exactly once"
+        return _tasks(db)
+
+    def test_a_500_on_the_persist_call_is_a_ladder_nack_not_dead(
+        self, db: Any, extracted: list[dict], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (row,) = self._run(db, extracted, monkeypatch, 500)
+        assert row.attempts == 1 and row.claim_state is None, (row.attempts, row.claim_state)
+
+    def test_control_a_400_on_the_persist_call_is_still_dead(
+        self, db: Any, extracted: list[dict], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (row,) = self._run(db, extracted, monkeypatch, 400)
+        assert row.claim_state == "dead" and row.attempts == 1
 
 
 class TestScenario7Renewal:
