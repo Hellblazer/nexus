@@ -429,6 +429,29 @@ def test_coerce_bool_reads_the_strings_config_set_writes() -> None:
     assert cfgmod._coerce_bool("maybe", key="k", default=True) is True  # malformed -> default, as before
 
 
+def test_a_malformed_pdf_boolean_warns_once_per_key_and_value_per_process(home: Path) -> None:
+    """nexus-b0y6w: the accessors re-read the config on every call, so a malformed pdf.mineru_autostart used to
+    warn on every read. One warning per distinct (key, value); a different bad value or key warns again."""
+    import structlog.testing
+
+    cfgmod._BOOL_INVALID_WARNED.clear()
+    try:
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(5):
+                assert cfgmod._coerce_bool(
+                    "maybe", key="pdf.mineru_autostart", default=True, event="pdf_config_malformed",
+                ) is True
+            cfgmod._coerce_bool("perhaps", key="pdf.mineru_autostart", default=True, event="pdf_config_malformed")
+            cfgmod._coerce_bool("maybe", key="pdf.mineru_table_enable", default=True, event="pdf_config_malformed")
+            cfgmod._coerce_bool("maybe", key="pdf.mineru_table_enable", default=True, event="pdf_config_malformed")
+        warned = [(r["key"], r["value"]) for r in logs if r["event"] == "pdf_config_malformed"]
+        assert warned == [
+            ("pdf.mineru_autostart", "maybe"), ("pdf.mineru_autostart", "perhaps"), ("pdf.mineru_table_enable", "maybe"),
+        ]
+    finally:
+        cfgmod._BOOL_INVALID_WARNED.clear()
+
+
 def test_empty_sections_read_as_empty_dicts(home: Path) -> None:
     """A section whose children are all commented out parses as None and
     made five readers raise AttributeError at CLI and MCP startup,

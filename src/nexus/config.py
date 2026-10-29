@@ -162,6 +162,9 @@ EXTRACTOR_CHOICES: tuple[str, ...] = (*EXTRACTORS, *EXTRACTOR_ALIASES)
 #: ``repr`` of every unknown ``pdf.extractor`` value already warned about (tests clear it).
 _EXTRACTOR_INVALID_WARNED: set[str] = set()
 
+#: ``(key, repr(value))`` of every malformed boolean config value already warned about (tests clear it).
+_BOOL_INVALID_WARNED: set[tuple[str, str]] = set()
+
 #: Keys of the one-line notices already printed in this process (tests clear it).
 _NOTICES_SHOWN: set[str] = set()
 _NOTICES_LOCK = threading.Lock()
@@ -398,6 +401,9 @@ def _coerce_bool(
     CHANGELOG) so the telemetry caller's log line is byte-identical; a
     second caller passes its own rather than emitting a warning that names
     the wrong subsystem.
+
+    A malformed value warns once per distinct ``(key, value)`` per process (nexus-b0y6w): the accessors
+    re-read the config on every call.
     """
     if isinstance(value, bool):
         return value
@@ -412,12 +418,19 @@ def _coerce_bool(
             return False
     elif isinstance(value, int) and value in (0, 1):
         return bool(value)
-    _log.warning(
-        event,
-        key=key,
-        value=value,
-        fell_back_to=default,
-    )
+    # The accessors re-read the config on every call, so a malformed value would warn on every read (as the
+    # unknown pdf.extractor did, 13 times in one `nx index pdf`): once per distinct (key, value) per process.
+    seen = (key, repr(value))
+    with _NOTICES_LOCK:
+        first = seen not in _BOOL_INVALID_WARNED
+        _BOOL_INVALID_WARNED.add(seen)
+    if first:
+        _log.warning(
+            event,
+            key=key,
+            value=value,
+            fell_back_to=default,
+        )
     return default
 
 
