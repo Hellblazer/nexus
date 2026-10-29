@@ -266,6 +266,76 @@ def test_a_registry_that_cannot_be_read_falls_back_to_the_old_engine_path() -> N
     assert rep["scope_prefilter"] == "unavailable" and rep["secondary_omitted"] is True and rep["contained"] is False
 
 
+def _clock(start: float = 1000.0):
+    """A hand-set monotonic clock for the registry cache: ``clock.now`` is read, ``clock.now += n`` advances."""
+    return SimpleNamespace(now=start)
+
+
+def _with_clock(clock):
+    return patch("nexus.mcp.core._scope_registry_clock", lambda: clock.now)
+
+
+def test_a_multi_step_run_lists_the_registry_once() -> None:
+    """nexus-jypmj.19: every corpus-prefix scoped traverse step used to list every collection. Steps of one run
+    share one listing, across prefixes too, since the cached view is the live registry and not one scope's slice."""
+    nodes, edges = _crowded()
+    cat = _Engine(nodes, edges, registry=[RDR, CODE])
+    clock = _clock()
+    with _with_clock(clock):
+        for scope in ("rdr", "rdr", "code", "rdr"):
+            out = _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy(scope))
+            assert out["traversal"]["scope_prefilter"] == "applied"
+    assert cat.registry_calls == 1, "four scoped steps, one registry read"
+    assert [kw["scope_filter"] for kw in cat.graph_kwargs] == [
+        {"collections": [RDR]}, {"collections": [RDR]}, {"collections": [CODE]}, {"collections": [RDR]},
+    ]
+
+
+def test_the_cached_registry_is_not_served_past_its_bound() -> None:
+    from nexus.mcp.core import _SCOPE_REGISTRY_TTL_S  # noqa: PLC0415 — deferred, like this file's other imports of nexus.mcp.core
+
+    nodes, edges = _crowded()
+    cat = _Engine(nodes, edges, registry=[RDR])
+    clock = _clock()
+    new_rdr = "rdr__1-9__bge-base-en-v15-768__v1"
+    with _with_clock(clock):
+        _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+        cat._registry = [RDR, new_rdr]  # a collection registered while the cache is warm
+        clock.now += _SCOPE_REGISTRY_TTL_S - 1
+        _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+        assert cat.registry_calls == 1 and cat.graph_kwargs[-1]["scope_filter"] == {"collections": [RDR]}
+        clock.now += 1  # the bound is reached
+        _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    assert cat.registry_calls == 2, "the entry expired at the TTL and the registry was read again"
+    assert cat.graph_kwargs[-1]["scope_filter"] == {"collections": sorted([RDR, new_rdr])}
+
+
+def test_a_failed_registry_read_is_not_cached() -> None:
+    nodes, edges = _crowded()
+    cat = _Engine(nodes, edges, registry=[RDR], registry_error=RuntimeError("catalog down"))
+    clock = _clock()
+    with _with_clock(clock):
+        _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+        assert "scope_filter" not in cat.graph_kwargs[0]
+        cat._registry_error = None
+        out = _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    assert cat.registry_calls == 2, "the failure left nothing behind to serve"
+    assert cat.graph_kwargs[1]["scope_filter"] == {"collections": [RDR]}
+    assert out["traversal"]["scope_prefilter"] == "applied"
+
+
+def test_two_catalog_handles_do_not_share_a_cached_registry() -> None:
+    nodes, edges = _crowded()
+    a = _Engine(nodes, edges, registry=[RDR])
+    b = _Engine(nodes, edges, registry=[RDR, "rdr__1-9__bge-base-en-v15-768__v1"])
+    clock = _clock()
+    with _with_clock(clock):
+        _run(a, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+        _run(b, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    assert (a.registry_calls, b.registry_calls) == (1, 1)
+    assert b.graph_kwargs[0]["scope_filter"] == {"collections": sorted(b._registry)}
+
+
 def test_a_scope_naming_more_collections_than_the_engine_accepts_is_not_sent() -> None:
     from nexus.plans.traversal_policy import MAX_SCOPE_FILTER_COLLECTIONS
 
