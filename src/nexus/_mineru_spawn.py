@@ -186,19 +186,31 @@ MINERU_SERVER_CHILD_MODULE = "nexus._mineru_api_child"
 MINERU_CONSOLE_MODULE = "nexus._mineru_console"
 
 
-def mineru_console_command(script: str) -> str:
-    """A command line a user can paste to run MinerU console *script* (``mineru-models-download``)
-    under nx's own console interpreter with nx's DLL directories in place.
+def mineru_console_command(script: str, *args: str) -> str:
+    """A command line a user can paste to run MinerU console *script* (``mineru-models-download``) with
+    *args*, under nx's own interpreter with nx's DLL directories in place.
 
     The console script is a launcher that never imports nexus, so on Windows with no VC++
     redistributable it dies with WinError 126 on torch's ``c10.dll``; this form is the same
-    program run through :data:`MINERU_CONSOLE_MODULE`. It works on every platform."""
+    program run through :data:`MINERU_CONSOLE_MODULE`.
+
+    On Windows the line is for PowerShell (the Windows 11 default): the interpreter path is
+    single-quoted behind the call operator (``& 'C:\\a b\\python.exe' -m ...``), because
+    ``list2cmdline``'s double-quoted form is a string expression there, not a command. The
+    interpreter is the console one (``pythonw.exe`` maps to ``python.exe``). Elsewhere it is
+    ``sys.executable`` as it is, quoted for a POSIX shell."""
+    import re  # noqa: PLC0415 -- stdlib-only
     import shlex  # noqa: PLC0415 -- stdlib-only
 
-    argv = [console_python(sys.executable), "-m", MINERU_CONSOLE_MODULE, script]
-    if sys.platform == "win32":
-        return subprocess.list2cmdline(argv)
-    return shlex.join(argv)
+    if sys.platform != "win32":
+        return shlex.join([sys.executable, "-m", MINERU_CONSOLE_MODULE, script, *args])
+
+    def quote(token: str) -> str:
+        return token if re.fullmatch(r"[A-Za-z0-9_.:=/\\-]+", token) else "'" + token.replace("'", "''") + "'"
+
+    rest = " ".join(quote(t) for t in ("-m", MINERU_CONSOLE_MODULE, script, *args))
+    exe = console_python(sys.executable).replace("'", "''")
+    return f"& '{exe}' {rest}"
 
 
 def mineru_server_argv(mineru_bin: str, port: int, platform: str | None = None) -> list[str]:

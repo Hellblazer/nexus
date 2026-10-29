@@ -8,7 +8,8 @@ is per process, so a stub on a box with no VC++ redistributable dies with ``WinE
 torch's ``c10.dll`` or ``DLL load failed while importing onnxruntime_pybind11_state``. Importing
 nexus first (the package init runs ``_add_vc_runtime_dirs``) puts nx's app-local copies on this
 process's search path before mineru is imported. The entry point is resolved through
-``importlib.metadata``, so a mineru release that moves a script's function still runs.
+``importlib.metadata`` from the ``console_scripts`` the ``mineru`` distribution itself declares (no
+other package's script is launchable), so a mineru release that moves a script's function still runs.
 
 Nothing here may import mineru, torch, onnxruntime or magika above the ``import nexus`` line.
 """
@@ -22,14 +23,23 @@ import nexus  # noqa: F401 -- runs _add_vc_runtime_dirs() before any import belo
 
 
 def console_entry(name: str) -> Callable[[], object] | None:
-    """The function the installed mineru declares for console script *name*, or ``None``."""
-    for entry_point in importlib.metadata.entry_points(group="console_scripts", name=name):
-        return entry_point.load()
+    """The function the installed ``mineru`` distribution declares for console script *name*, or ``None``
+    (also when mineru is not installed)."""
+    try:
+        distribution = importlib.metadata.distribution("mineru")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    for entry_point in distribution.entry_points:
+        if entry_point.group == "console_scripts" and entry_point.name == name:
+            return entry_point.load()
     return None
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Run ``argv[0]`` (a mineru console script) with ``argv[1:]`` and exit with its status."""
+    """Run ``argv[0]`` (a mineru console script) with ``argv[1:]`` and exit with its status.
+
+    ``sys.argv`` becomes ``[script, *arguments]``, as a console-script stub leaves it. (click's usage line
+    does not come from it under ``python -m``: it reads ``python -m nexus.<script>``, which is cosmetic.)"""
     args = sys.argv[1:] if argv is None else argv
     if not args or not (args[0] == "mineru" or args[0].startswith("mineru-")):
         sys.stderr.write("usage: python -m nexus._mineru_console <mineru-console-script> [args...]\n")

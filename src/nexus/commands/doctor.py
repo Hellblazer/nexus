@@ -1935,16 +1935,63 @@ def _synthesize_mineru_probe_pdf(directory: Path) -> Path:
     return pdf_path
 
 
+#: What the English (``p_lang_list=["en"]``) pipeline loads from each ``ModelPath`` entry, keyed by the
+#: attribute name in ``mineru.utils.enum_class.ModelPath``. A tuple is the files that must exist, non-empty,
+#: in that directory; ``()`` means the path is itself a file (an ``.onnx``). Directories are downloaded file
+#: by file, so an interrupted first-use fetch leaves a directory present and incomplete: each file the load
+#: opens is required on its own. The names come from the loaders, in mineru 3.1.11:
+#:
+#: - ``pp_doclayout_v2``: ``from_pretrained`` reads ``config.json`` and the weights
+#:   (``model/layout/pp_doclayoutv2.py`` lines 908-909); ``preprocessor_config.json`` is optional (line 167).
+#: - ``unimernet_small``: ``from_pretrained`` reads the config and weights, and ``AutoTokenizer`` the
+#:   tokenizer files (``model/mfr/unimernet/unimernet_hf/modeling_unimernet.py`` lines 80, 99).
+#: - ``pp_formulanet_plus_m``: opens the ``.pth`` and ``_inference.yml``
+#:   (``model/mfr/pp_formulanet_plus_m/predict_formula.py`` lines 29-45).
+#: - ``pytorch_paddle``: only the detector and recognizer ``models_config.yml`` names for ``lang.en``
+#:   (``model/ocr/pytorch_paddle.py`` lines 184-193); the directory holds whichever languages were fetched.
+#: - the four ``.onnx`` paths are opened as they are (``model/table/...``, ``model/ori_cls/paddle_ori_cls.py``).
+#:
+#: ``tests/test_mineru_child_dll_dirs.py`` compares this table with ``download_pipeline_models`` (every path
+#: it fetches is a key here) and with mineru's own sources, so a mineru bump that moves either side fails
+#: there.
+_MINERU_PIPELINE_FILES: dict[str, tuple[str, ...]] = {
+    "pp_doclayout_v2": ("config.json", "model.safetensors"),
+    "unimernet_small": ("config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"),
+    "pp_formulanet_plus_m": ("PP-FormulaNet_plus-M.pth", "PP-FormulaNet_plus-M_inference.yml"),
+    "pytorch_paddle": ("ch_PP-OCRv5_det_infer.pth", "en_PP-OCRv5_rec_infer.pth"),
+    "slanet_plus": (),
+    "unet_structure": (),
+    "paddle_table_cls": (),
+    "paddle_orientation_classification": (),
+}
+
+#: ``MINERU_FORMULA_CH_SUPPORT`` values mineru reads as on / off (``backend/pipeline/model_init.py``,
+#: ``MFR_MODEL``, case-insensitive); anything else it warns about and treats as off.
+_MINERU_FORMULA_CH_ON = ("true", "1", "yes")
+_MINERU_FORMULA_CH_OFF = ("false", "0", "no")
+
+#: The ``-s`` choices of ``mineru-models-download`` (``REMOTE_MODEL_SOURCES`` in ``mineru/cli/models_download.py``).
+_MINERU_DOWNLOAD_SOURCES = ("huggingface", "modelscope")
+
+
+def _mineru_formula_model() -> str:
+    """The ``ModelPath`` attribute of the formula (MFR) model mineru loads, per ``MINERU_FORMULA_CH_SUPPORT``."""
+    import os  # noqa: PLC0415 — deferred local import — module has no top-level os import
+
+    value = os.environ.get("MINERU_FORMULA_CH_SUPPORT", "False").lower()
+    return "pp_formulanet_plus_m" if value in _MINERU_FORMULA_CH_ON else "unimernet_small"
+
+
 def _mineru_pipeline_weights_cached() -> bool:
-    """Are the pipeline weights in the Hugging Face cache, found without any network access?
+    """Are the weights the English pipeline loads in the Hugging Face cache, found without any network access?
 
     MinerU's own first-use download (``nx index pdf``) writes no ``mineru.json``: it calls
     ``huggingface_hub.snapshot_download(ModelPath.pipeline_root_hf, allow_patterns=...)`` and uses the
     returned snapshot folder (``mineru/utils/models_download_utils.py``). The same call with
-    ``local_files_only=True`` returns that folder from the cache or raises, and downloads and
-    looks up nothing; the files MinerU names in ``ModelPath`` (``models/...``) must then exist under
-    it. One MFR (formula) model is enough: which one loads depends on ``MINERU_FORMULA_CH_SUPPORT``.
-    Only ``huggingface`` (MinerU's default source) is probed; no other source's cache layout is guessed."""
+    ``local_files_only=True`` returns that folder from the cache or raises, and downloads and looks up
+    nothing. Under it, every file in :data:`_MINERU_PIPELINE_FILES` must exist and be non-empty, with the
+    one formula model ``MINERU_FORMULA_CH_SUPPORT`` selects. Only ``huggingface`` (MinerU's default
+    source) is probed; no other source's cache layout is guessed."""
     import os  # noqa: PLC0415 — deferred local import — module has no top-level os import
 
     if os.environ.get("MINERU_MODEL_SOURCE", "huggingface") != "huggingface":
@@ -1953,15 +2000,41 @@ def _mineru_pipeline_weights_cached() -> bool:
         from huggingface_hub import snapshot_download  # noqa: PLC0415 — optional/heavy dependency deferred (mineru's)
         from mineru.utils.enum_class import ModelPath  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
 
-        weights = [v for k, v in vars(ModelPath).items() if not k.startswith("_") and isinstance(v, str) and v.startswith("models/")]
-        formula = [w for w in weights if w.startswith("models/MFR/")]
-        required = [w for w in weights if w not in formula]
-        if not required or not formula:
-            return False
+        unselected = ({"unimernet_small", "pp_formulanet_plus_m"} - {_mineru_formula_model()}).pop()
         root = Path(snapshot_download(ModelPath.pipeline_root_hf, local_files_only=True))
-        return all((root / w).exists() for w in required) and any((root / w).exists() for w in formula)
+        for name, files in _MINERU_PIPELINE_FILES.items():
+            if name == unselected:
+                continue
+            base = root / getattr(ModelPath, name)
+            for path in (base / f for f in files) if files else (base,):
+                if not path.is_file() or path.stat().st_size == 0:
+                    return False
+        return True
     except Exception:  # noqa: BLE001 — best-effort probe; an absent cache or a mineru that moved ModelPath reads as unprovisioned
         return False
+
+
+def _mineru_weights_skip_line() -> str:
+    """The real-parse skip line: the weights are not found, and the command that fetches them.
+
+    The command runs through ``nexus._mineru_console`` (the plain ``mineru-models-download`` script never
+    imports nexus and can die with WinError 126 on bare Windows), names ``-s <source>`` and ``-m pipeline``
+    so it never stops at mineru's prompts and fetches only the pipeline weights nx parses with (not the
+    VLM ones), and uses ``MINERU_MODEL_SOURCE`` when mineru's download accepts it, else ``huggingface``.
+    A source other than ``huggingface`` is not searched for cached weights: the line says so."""
+    import os  # noqa: PLC0415 — deferred local import — module has no top-level os import
+    from nexus._mineru_spawn import mineru_console_command  # noqa: PLC0415 — deferred import (startup cost)
+
+    configured = os.environ.get("MINERU_MODEL_SOURCE")
+    source = configured if configured in _MINERU_DOWNLOAD_SOURCES else "huggingface"
+    command = mineru_console_command("mineru-models-download", "-s", source, "-m", "pipeline")
+    where = "from PowerShell " if command.startswith("& ") else ""  # the Windows form is a PowerShell call
+    caveat = (
+        f" MINERU_MODEL_SOURCE={configured} is not searched for cached weights; the download records them in mineru.json."
+        if configured and configured != "huggingface"
+        else ""
+    )
+    return f"  (MinerU pipeline weights not found; real-parse check skipped. Fetch them {where}with `{command}`.{caveat})"
 
 
 def _mineru_pipeline_model_dir_configured() -> bool:
@@ -2297,16 +2370,7 @@ def _run_check_mineru() -> bool:
         if child_error is not None:
             pass  # reported above, with the real-parse skip
         elif not _mineru_pipeline_model_dir_configured():
-            from nexus._mineru_spawn import mineru_console_command  # noqa: PLC0415 — deferred import (startup cost)
-
-            click.echo(
-                "  (MinerU pipeline model weights not found; real-parse check skipped. MinerU fetches its "
-                "weights on first use, and this check runs once they are in the Hugging Face cache or a models "
-                "dir is configured (mineru.json). To fetch them now, run "
-                f"`{mineru_console_command('mineru-models-download')}`, which works on every platform; off "
-                "Windows the plain `mineru-models-download` script works too. On Windows use the first form: "
-                "the plain script never imports nexus and can fail with WinError 126.)"
-            )
+            click.echo(_mineru_weights_skip_line())
         else:
             if _run_check_mineru_parse():
                 failed = True
