@@ -2084,6 +2084,82 @@ class AspectRepositoryTest {
             .isFalse();
     }
 
+    private void enqueueWaitingFixture(String tenant, String coll, String path, String docId, String enqueuedAt) throws Exception {
+        registerFixtureDoc(tenant, docId);
+        registerFixtureCollection(tenant, coll);
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection",  coll);
+        body.put("source_path", path);
+        body.put("doc_id",      docId);
+        body.put("content",     "must-not-come-back");
+        body.put("enqueued_at", enqueuedAt);
+        repo.enqueue(tenant, body);
+    }
+
+    @Test @Order(77)
+    void listWaiting_returnsPendingAndInProgress_withStatusAndDatabaseClockDelay() throws Exception {
+        // nexus-5r2sc.3.6: the ladder rung reads this. pending AND in_progress, never failed;
+        // delay_s = whole seconds (rounded up) to next_retry_at on the DB clock, 0 when NULL;
+        // no content field; FIFO; limit honoured.
+        String t = "waiting-tenant-" + System.nanoTime();
+        enqueueWaitingFixture(t, "w-coll", "w1.pdf", "w-doc-1", "2026-06-01T00:00:00.000000Z");
+        enqueueWaitingFixture(t, "w-coll", "w2.pdf", "w-doc-2", "2026-06-02T00:00:00.000000Z");
+        enqueueWaitingFixture(t, "w-coll", "w3.pdf", "w-doc-3", "2026-06-03T00:00:00.000000Z");
+        enqueueWaitingFixture(t, "w-coll", "w4.pdf", "w-doc-4", "2026-06-04T00:00:00.000000Z");
+        // w1 -> in_progress (oldest, so claimNext takes it)
+        assertThat(repo.claimNext(t)).isPresent();
+        // w2 -> pending, backed off 600 s
+        repo.markRetry(t, "w-coll", "w2.pdf", 600);
+        // w4 -> failed
+        repo.markFailed(t, "w-coll", "w4.pdf", "boom");
+
+        List<Map<String, Object>> waiting = repo.listWaiting(t, 0);
+        assertThat(waiting).as("failed rows are not waiting").hasSize(3);
+        assertThat(waiting.stream().map(r -> (String) r.get("source_path")).toList())
+            .as("FIFO by enqueued_at").containsExactly("w1.pdf", "w2.pdf", "w3.pdf");
+
+        Map<String, Object> w1 = waiting.get(0);
+        assertThat(w1.get("status")).isEqualTo("in_progress");
+        assertThat(((Number) w1.get("delay_s")).longValue()).as("in_progress, no next_retry_at").isZero();
+        assertThat(w1.get("doc_id")).isEqualTo("w-doc-1");
+        assertThat(w1).as("identity only: no content").doesNotContainKey("content");
+        assertThat(w1.keySet()).containsExactlyInAnyOrder(
+            "collection", "source_path", "content_hash", "retry_count", "doc_id", "status", "delay_s");
+
+        Map<String, Object> w2 = waiting.get(1);
+        assertThat(w2.get("status")).isEqualTo("pending");
+        assertThat(((Number) w2.get("retry_count")).intValue()).isEqualTo(1);
+        long delay = ((Number) w2.get("delay_s")).longValue();
+        assertThat(delay).as("600 s backoff, whole seconds rounded up, on the DB clock")
+            .isBetween(590L, 600L);
+
+        Map<String, Object> w3 = waiting.get(2);
+        assertThat(w3.get("status")).isEqualTo("pending");
+        assertThat(((Number) w3.get("delay_s")).longValue()).isZero();
+
+        assertThat(repo.listWaiting(t, 2)).as("limit honoured").hasSize(2);
+        assertThat(repo.listWaiting("waiting-other-" + System.nanoTime(), 0))
+            .as("tenant isolation (RLS)").isEmpty();
+    }
+
+    @Test @Order(78)
+    void listWaiting_pastNextRetryAt_isZero_andDoesNotFlipInProgress() throws Exception {
+        String t = "waiting-past-tenant-" + System.nanoTime();
+        enqueueWaitingFixture(t, "wp-coll", "wp1.pdf", "wp-doc-1", "2026-06-01T00:00:00.000000Z");
+        repo.markRetry(t, "wp-coll", "wp1.pdf", 0);   // next_retry_at = now(), already past by the read
+        enqueueWaitingFixture(t, "wp-coll", "wp2.pdf", "wp-doc-2", "2026-06-02T00:00:00.000000Z");
+        // claimNext takes wp1 (oldest, retry gate open)
+        assertThat(repo.claimNext(t)).isPresent();
+
+        List<Map<String, Object>> first = repo.listWaiting(t, 0);
+        List<Map<String, Object>> second = repo.listWaiting(t, 0);
+        assertThat(second).as("a read changes nothing").isEqualTo(first);
+        Map<String, Object> wp1 = first.stream()
+            .filter(r -> "wp1.pdf".equals(r.get("source_path"))).findFirst().orElseThrow();
+        assertThat(wp1.get("status")).as("the in_progress row stays in_progress").isEqualTo("in_progress");
+        assertThat(((Number) wp1.get("delay_s")).longValue()).as("past next_retry_at clamps to 0").isZero();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {

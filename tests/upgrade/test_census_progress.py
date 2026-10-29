@@ -157,8 +157,8 @@ class Sessions:
         return healed
 
     def rung(self) -> tuple[LadderRegistry, Rdr192ManifestBackfillRung]:
-        registry = default_registry()
-        (rung,) = list(registry)
+        (rung,) = [r for r in default_registry() if isinstance(r, Rdr192ManifestBackfillRung)]
+        registry = LadderRegistry((rung,))  # these sessions are about the RDR-192 rung alone
         rung.record_fn = lambda: self.ledger.completions().get(rung.name)
         rung.installed_version_fn = lambda: _V
         rung.memo = self.residual
