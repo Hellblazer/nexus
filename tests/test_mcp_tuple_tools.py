@@ -210,6 +210,45 @@ class TestTupleInAckNack:
         assert claim2 is not None
         assert claim2["tuple"]["body"] == "retry-me"
 
+    def test_nack_dead_and_retry_after_reach_the_engine(self, t2_service_env) -> None:
+        """RDR-235 transport: the MCP tool passes ``dead`` and ``retry_after_s``."""
+        doc = _uniq("doc")
+        claimant = _uniq("claimant")
+        tuple_out("aspects", {"queue": "aspects"}, None, "{}", nonce=doc)
+        claim = tuple_in("aspects", {"queue": "aspects"}, claimant=claimant, lease_s=30)
+        assert claim is not None
+        assert "Nacked" in tuple_nack(claim["claim_id"], claimant, retry_after_s=3600)
+        assert tuple_in("aspects", {"queue": "aspects"}, claimant=claimant, lease_s=30) is None, (
+            "retry_after_s held the task back"
+        )
+        stats = tuple_stats("aspects")
+        assert stats["total"] == 1 and stats["dead"] == 0
+
+        doc2 = _uniq("doc")
+        tuple_out("aspects", {"queue": "aspects"}, None, "{}", nonce=doc2, delay_s=0)
+        claim2 = tuple_in("aspects", {"queue": "aspects"}, claimant=claimant, lease_s=30)
+        assert claim2 is not None
+        assert "Nacked" in tuple_nack(claim2["claim_id"], claimant, dead=True)
+        assert tuple_stats("aspects")["dead"] == 1
+
+    def test_out_mode_replace_reports_the_outcome(self, t2_service_env) -> None:
+        doc = _uniq("doc")
+        first = tuple_out("aspects", {"queue": "aspects"}, None, '{"v":1}', nonce=doc, mode="replace")
+        second = tuple_out("aspects", {"queue": "aspects"}, None, '{"v":2}', nonce=doc, mode="replace")
+        (id1, outcome1), (id2, outcome2) = first.split(), second.split()
+        assert (outcome1, outcome2) == ("created", "replaced")
+        assert id1 == id2
+        rows = tuple_rd("aspects", {"queue": "aspects"})
+        assert len(rows) == 1 and rows[0]["body"] == '{"v":2}'
+
+    def test_out_mode_replace_without_a_nonce_is_an_error(self, t2_service_env) -> None:
+        msg = tuple_out("aspects", {"queue": "aspects"}, None, "{}", mode="replace")
+        assert "Error" in msg and "nonce" in msg
+
+    def test_out_delay_s_holds_the_task_back(self, t2_service_env) -> None:
+        tuple_out("aspects", {"queue": "aspects"}, None, "{}", nonce=_uniq("doc"), delay_s=3600)
+        assert tuple_in("aspects", {"queue": "aspects"}, claimant=_uniq("c"), lease_s=30) is None
+
     def test_ack_unknown_claim_returns_error(self, t2_service_env) -> None:
         msg = tuple_ack("0" * 64, "nobody")
         assert "Error" in msg

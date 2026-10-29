@@ -1664,10 +1664,15 @@ def aspect_extraction_enqueue_hook(
         # nexus-w8lg1: one-line warning at the CLI surface; the full
         # traceback goes to debug (it previously spammed raw structlog
         # tracebacks to the user's terminal on every enqueue failure).
+        # RDR-235: doc_id and the error class are named, so a refusal that
+        # repeats (MaxLiveRowsExceeded, an over-long source_path) is countable
+        # per document; the hook_failures row below is the persistent count.
         _log.warning(
             "aspect_extraction_enqueue_failed",
             source_path=source_path,
             collection=collection,
+            doc_id=doc_id,
+            error_type=type(exc).__name__,
             error=str(exc)[:500],
         )
         _log.debug(
@@ -1719,6 +1724,31 @@ def aspect_extraction_enqueue_hook(
         "0", "false", "False", "no", "",
     ):
         _ensure_aspect_worker()
+
+
+def record_batch_enqueue_failure(collection: str, count: int, exc: BaseException) -> None:
+    """Persist a ``hook_failures`` row for a batched enqueue that failed (RDR-235).
+
+    The batch form of the single-document tripwire in
+    :func:`aspect_extraction_enqueue_hook`: the indexer's flush hook swallows the
+    failure to keep ingest moving, which would hide a ``MaxLiveRowsExceeded`` or
+    a retired collection from the recorder. Best-effort: a telemetry-write
+    failure never blocks ingest."""
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+    try:
+        t2_index_write(
+            lambda t2: t2.telemetry.record_hook_failure(
+                doc_id=f"<batch of {count}>",
+                collection=collection,
+                hook_name="aspect_extraction_enqueue_hook",
+                error=f"{type(exc).__name__}: {exc}"[:2000],
+                chain="document",
+            )
+        )
+    except Exception:  # noqa: BLE001 — tripwire persist is best-effort; never block ingest
+        _log.warning(
+            "aspect_enqueue_tripwire_persist_failed", collection=collection, exc_info=True,
+        )
 
 
 def _best_effort_queue_depth() -> int | None:

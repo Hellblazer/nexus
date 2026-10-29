@@ -13,9 +13,12 @@ Three consumers ship with this design and no others: the RDR-184 dispatch ledger
 Fourteen HTTP routes under `/v1/tuples`. Signatures are the contract; the handler is the implementation.
 
 ```text
-out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
+out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None, delay_s=None, mode=None) -> tuple_id
                                                             # nonce required where id_from is keys+nonce;
                                                             # ttl_seconds defaults to the template's retention
+                                                            # delay_s (RDR-235 E1): whole seconds before the tuple is claimable
+                                                            # mode="replace" (RDR-235 E4, keys+nonce only): the response adds
+                                                            # outcome = created | replaced | dirtied (client: out_replace)
 rd (subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0, order="asc") -> [Tuple]   # non-destructive; blocks up to timeout_s
 rdp(subspace, keys_pattern=None, *, n=1, since=None, order="asc") -> [Tuple]                # probe
                                                             # order="desc" (bead nexus-kp5q3): the NEWEST n rows after
@@ -52,7 +55,9 @@ inp(subspace, keys_pattern, *, claimant, lease_s=None) -> (Tuple, claim_id) | No
 ack(claim_id, claimant, *, reply=None) -> reply_id | None  # ownership checked; reply is {subspace, keys, dims,
                                                             # body, ttl_seconds}, written and the request
                                                             # consumed in one transaction (RDR-206)
-nack(claim_id, claimant)                                   # ownership checked; counts an attempt
+nack(claim_id, claimant, *, retry_after_s=None, dead=False)  # ownership checked; counts an attempt
+                                                            # retry_after_s (RDR-235 E1): hold the task back that many seconds
+                                                            # dead=True (RDR-235 E4): dead-letter at once
 renew(claim_id, claimant, lease_s) -> lease_until          # ownership checked; extends a live claim, clamped
                                                             # to expires_at, refused above the template's
                                                             # max_lease_seconds; never counts an attempt (RDR-206)

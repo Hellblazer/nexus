@@ -7781,6 +7781,12 @@ def tuple_out(
     ttl_seconds: Annotated[int | None, Field(
         description="Optional explicit TTL, capped at the template's retention ceiling.",
     )] = None,
+    delay_s: Annotated[int | None, Field(
+        description="Whole seconds before the tuple can be claimed; at most the template's retention.",
+    )] = None,
+    mode: Annotated[str | None, Field(
+        description="`replace` rewrites the same-id task (keys+nonce templates only); the result adds the outcome.",
+    )] = None,
 ) -> str:
     """Write a tuple into the RDR-205 Linda tuple space (`out`).
 
@@ -7794,7 +7800,9 @@ def tuple_out(
     Returns the tuple id, lowercase hex. On a keys+nonce template a nonce
     names one write: the same nonce with a different body or dims is
     refused as `NonceReuseConflict`, naming the id; mint a fresh nonce for
-    a new message.
+    a new message. With `mode="replace"` a repeat of the nonce rewrites the
+    task instead, and the result is `<id> <outcome>` (`created`, `replaced`
+    or `dirtied`).
 
     Size limits (refused with the `TooLarge` typed error before any write):
     - `body`: at most 4096 bytes UTF-8 (a template may set a lower cap; the
@@ -7804,9 +7812,19 @@ def tuple_out(
     - `nonce`: at most 128 bytes UTF-8.
     """
     try:
+        if mode == "replace":
+            tuple_id, outcome = _t2_index_write(
+                lambda db: db.tuples.out_replace(
+                    subspace, keys, dims, body, nonce=nonce or "",
+                    ttl_seconds=ttl_seconds, delay_s=delay_s,
+                ),
+                op="tuple_out",
+            )
+            return f"{tuple_id} {outcome}"
         tuple_id = _t2_index_write(
             lambda db: db.tuples.out(
                 subspace, keys, dims, body, nonce=nonce, ttl_seconds=ttl_seconds,
+                delay_s=delay_s, mode=mode,
             ),
             op="tuple_out",
         )
@@ -8027,6 +8045,12 @@ def tuple_ack(
 def tuple_nack(
     claim_id: Annotated[str, Field(description="The claim id returned by `tuple_in`.")],
     claimant: Annotated[str, Field(description="Must match the identity that made the claim.")],
+    retry_after_s: Annotated[int | None, Field(
+        description="Whole seconds to hold the task back before it can be claimed again.",
+    )] = None,
+    dead: Annotated[bool, Field(
+        description="Dead-letter the task at once instead of returning it to available.",
+    )] = False,
 ) -> str:
     """Release a claimed tuple back to available (`nack`).
 
@@ -8036,7 +8060,10 @@ def tuple_nack(
     """
     try:
         _t2_index_write(
-            lambda db: db.tuples.nack(claim_id, claimant), op="tuple_nack",
+            lambda db: db.tuples.nack(
+                claim_id, claimant, retry_after_s=retry_after_s, dead=dead,
+            ),
+            op="tuple_nack",
         )
         return f"Nacked claim {claim_id}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
