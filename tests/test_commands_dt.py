@@ -3039,23 +3039,21 @@ class TestAnUnexpectedExceptionFailsOneRecordNotTheBatch:
         assert "1 record(s) failed with an unexpected error" in result.output, result.output
 
     @pytest.mark.t2_tenant
-    @pytest.mark.parametrize("exc", [RuntimeError("extraction blew up"), ImportError("mineru is corrupt")],
-                             ids=["RuntimeError", "ImportError"])
-    def test_a_record_failed_by_runtime_or_import_error_also_exits_nonzero(
-        self, runner, monkeypatch, exc,
-    ) -> None:
+    def test_a_record_failed_by_runtime_or_import_error_also_exits_nonzero(self, runner, monkeypatch) -> None:
         """The (RuntimeError, ImportError) catch still fails only that record and the batch
         continues, but the run no longer exits 0 over a failed record: the same rule as the
         unexpected-exception path above, which would otherwise be the only way to a non-zero
-        exit from a defect."""
-        result, seq = self._file_backed(runner, monkeypatch, exc)
+        exit from a defect. Both errors run in one test so the pair mints one tenant (the
+        storage-touch ceiling, tests/storage_touch_ceiling.toml)."""
+        for exc in (RuntimeError("extraction blew up"), ImportError("mineru is corrupt")):
+            result, seq = self._file_backed(runner, monkeypatch, exc)
 
-        assert not seq, "U2 was never dispatched: the batch aborted after U1's exception"
-        assert "Indexed 1 record(s)" in result.output, result.output
-        assert "1 failed" in result.output, result.output
-        assert f"{type(exc).__name__}: {exc}" in result.output
-        assert result.exit_code == 1, result.output
-        assert "1 record(s) failed with RuntimeError or ImportError" in result.output, result.output
+            assert not seq, f"{type(exc).__name__}: U2 was never dispatched: the batch aborted after U1's exception"
+            assert "Indexed 1 record(s)" in result.output, result.output
+            assert "1 failed" in result.output, result.output
+            assert f"{type(exc).__name__}: {exc}" in result.output
+            assert result.exit_code == 1, result.output
+            assert "1 record(s) failed with RuntimeError or ImportError" in result.output, result.output
 
     @pytest.mark.t2_tenant
     def test_a_pdf_whose_every_page_failed_extraction_exits_nonzero_unlike_a_no_text_record(
