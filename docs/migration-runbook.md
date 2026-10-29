@@ -19,9 +19,9 @@ nx upgrade
 ```
 
 It converges a set of PRECONDITIONS and then walks the data ladder.
-`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds one rung:
-`rdr192-manifest-backfill`, described below the table. Everything else in
-`nx upgrade` is precondition work:
+`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds two rungs:
+`rdr192-manifest-backfill` and `aspect-queue-tuples`, each described below the
+table. Everything else in `nx upgrade` is precondition work:
 
 | Precondition | Converges |
 |---|---|
@@ -103,6 +103,33 @@ credential-only tenant needs no `nx upgrade` of its own
   older version stays open even if a later census finds a residual. The record
   is an attestation, not proof; the reaper's own in-engine census (nexus-2x9xa)
   is what covers that case.
+
+### The `aspect-queue-tuples` rung
+
+RDR-235 moves aspect extraction from the `aspect_extraction_queue` table to the
+engine's `aspects` tuple queue, selected by `NX_ASPECT_QUEUE=tuples`. This rung
+moves the rows the table already holds, so none wait for the table side of the
+worker or strand.
+
+- It applies only when `NX_ASPECT_QUEUE` is `tuples`, the engine has the
+  `aspects` template, and the engine answers
+  `GET /v1/aspects/queue/list_waiting` (`engine-service-v0.1.170`; older
+  engines answer 404). Any other case is reported as not applicable, nothing is
+  recorded, and the rung is detected again at each `nx upgrade`, including the
+  first one after the default flips to `tuples`. With the variable unset or
+  `table` it sends no request.
+- Each `pending` or `in_progress` row becomes one `aspects` task (an `out` with
+  `mode=replace`, nonce = `doc_id`, an identity body), then the table row is
+  deleted. A crash between the two leaves the row in both places; the re-run
+  replaces the same task. `pending` rows keep their wait as `delay_s` (seconds to
+  `next_retry_at` on the database clock, clamped to 0 through 7,776,000);
+  `in_progress` rows move with no delay.
+- `failed` rows stay in the table (`nx aspects requeue-failed` re-enqueues
+  them). A row with an empty `doc_id` also stays, for the table worker to drain;
+  a log line counts them.
+- Migrated rows restart at attempts 0: `retry_count` does not travel.
+- `verify()` passes only when it read the waiting rows and none can move; an
+  unreachable read fails the rung with the reason.
 
 ### Restoring chunks the reaper quarantined
 

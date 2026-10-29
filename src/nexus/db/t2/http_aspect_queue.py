@@ -13,7 +13,7 @@ Config:
 Interface parity (bead nexus-gmiaf.15, RDR-152 P2.5):
     enqueue, claim_next, claim_batch, mark_done, mark_failed,
     mark_retry, reclaim_stale, pending_count, is_drained,
-    list_pending, rename_collection, close
+    list_pending, list_waiting, rename_collection, close
 
 Queue claim strategy: the Java service uses
 ``SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`` — eliminates WAL contention
@@ -101,6 +101,36 @@ class AspectTupleCounts:
 class AspectQueueEngineUnsupportedError(RuntimeError):
     """``NX_ASPECT_QUEUE=tuples`` against an engine with no ``aspects``
     template (it predates ``engine-service-v0.1.169``)."""
+
+
+#: The engine release that carries ``GET /v1/aspects/queue/list_waiting``
+#: (RDR-235 Phase 1 step 3, nexus-5r2sc.3.6): the read the table-to-tuples
+#: migration rung uses. An engine older than this answers 404.
+LIST_WAITING_ENGINE_RELEASE: str = "engine-service-v0.1.170"
+
+
+class AspectQueueListWaitingUnsupportedError(RuntimeError):
+    """The engine has no ``/v1/aspects/queue/list_waiting`` route (it predates
+    ``engine-service-v0.1.170``)."""
+
+
+@dataclass(frozen=True)
+class WaitingRow:
+    """One row of ``list_waiting``: a queue row still owed a worker.
+
+    ``status`` is ``pending`` or ``in_progress``. ``delay_s`` is the whole
+    seconds until the row's ``next_retry_at``, rounded up, computed on the
+    DATABASE clock; 0 when it has none or it has passed. There is no content:
+    the body of a tuples task is identity only.
+    """
+
+    collection: str
+    source_path: str
+    content_hash: str
+    doc_id: str
+    retry_count: int
+    status: str
+    delay_s: int
 
 
 _warned_no_aspects_template: list[bool] = []
@@ -704,6 +734,39 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             params["limit"] = limit
         rows: list[dict] = self._get("/list_pending", params)
         return [_body_to_queue_row(r) for r in rows]
+
+    def list_waiting(self, limit: int | None = None) -> list[WaitingRow]:
+        """Return the rows still owed a worker, ``pending`` AND ``in_progress``,
+        in claim order, each with ``status`` and ``delay_s`` (RDR-235 Phase 1
+        step 3). Read-only: it flips nothing, so a row a live worker holds stays
+        as it is.
+
+        Raises :class:`AspectQueueListWaitingUnsupportedError` on an engine that
+        predates ``engine-service-v0.1.170`` (the route answers 404)."""
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = limit
+        try:
+            rows: list[dict] = self._get("/list_waiting", params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise AspectQueueListWaitingUnsupportedError(
+                    f"the engine has no aspects queue list_waiting route; it predates "
+                    f"{LIST_WAITING_ENGINE_RELEASE}"
+                ) from exc
+            raise
+        return [
+            WaitingRow(
+                collection=r.get("collection", ""),
+                source_path=r.get("source_path", ""),
+                content_hash=r.get("content_hash", "") or "",
+                doc_id=r.get("doc_id", "") or "",
+                retry_count=int(r.get("retry_count", 0)),
+                status=r.get("status", ""),
+                delay_s=int(r.get("delay_s", 0)),
+            )
+            for r in rows
+        ]
 
     def list_failed(self, collection: str | None = None) -> list[QueueRow]:
         """Return terminal-failed rows, optionally scoped to one collection."""
