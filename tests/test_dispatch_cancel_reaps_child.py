@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.operators.dispatch import claude_dispatch
+from nexus.operators.dispatch import CliBackend, claude_dispatch
 from tests._module_seam import patch_in
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "killpg"), reason="needs a POSIX process group")
@@ -87,7 +87,7 @@ async def test_a_call_cut_by_wait_for_kills_the_whole_process_tree(tmp_path: Pat
     try:
         with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=_spawn_fake(script, pid_file)):
             # the dispatcher's own timeout is long: the OUTER cut is what ends this call, as in the assessment stage
-            task = asyncio.ensure_future(claude_dispatch("prompt", _SCHEMA, timeout=60.0))
+            task = asyncio.ensure_future(claude_dispatch("prompt", _SCHEMA, timeout=60.0, backend=CliBackend()))
             pids = await _wait_for_pids(pid_file)
             assert all(_alive(p) for p in pids), "the fake claude must be running before it is cut"
             with pytest.raises(asyncio.TimeoutError):
@@ -109,7 +109,7 @@ async def test_a_cancelled_call_kills_its_child_and_reraises_cancellation(tmp_pa
     pids: tuple[int, ...] = ()
     try:
         with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=_spawn_fake(script, pid_file)):
-            task = asyncio.ensure_future(claude_dispatch("prompt", _SCHEMA, timeout=60.0))
+            task = asyncio.ensure_future(claude_dispatch("prompt", _SCHEMA, timeout=60.0, backend=CliBackend()))
             pids = await _wait_for_pids(pid_file)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):

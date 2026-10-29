@@ -81,7 +81,7 @@ lower; the ``claude -p`` backend's four concurrent subprocesses are unmeasured),
 :data:`ASSESSMENT_CALL_COST_PRIOR_USD` before any call reported one; one call always starts when none is in flight and
 the allowance is above zero) and the stage allowance left decide whether it runs
 and what timeout it draws, and it is cut from outside at that timeout, so the stage cannot outlast its share
-whatever the check does with the timeout it is given. A call cut that way has its process tree killed
+(beyond a cut call's bounded cleanup grace of about 1 s) whatever the check does with the timeout it is given. A call cut that way has its process tree killed
 (:class:`nexus.operators.dispatch.CliBackend`) and its ``StepRecord`` is ``ok=False`` with an UNKNOWN cost: the CLI reports
 spend only in its result event, which a killed call never writes, so what it spent before the cut is not knowable and is
 not counted against the USD allowance. The replies are read after all calls end, in plan order, so
@@ -210,9 +210,9 @@ MIN_ASSESSMENT_CALL_S: float = 5.0
 MAX_CONCURRENT_ASSESSMENT_CALLS: int = 4
 #: What one assessment call is assumed to cost until a call has reported a cost (nexus-jypmj.17). Without it the
 #: first wave of up to ``MAX_CONCURRENT_ASSESSMENT_CALLS`` calls starts whenever the USD allowance is above zero. Source:
-#: the live canary of 2026-10-28 (nexus-jypmj.3.10) ran 4 calls for 0.0166 USD (about 0.004 each) and the 40-call
-#: golden run averaged 0.018 USD for a whole run's calls; 0.02 is that whole-run mean for ONE call, several times the
-#: measured per-call cost, so the prior errs towards starting fewer calls, not more. A call that reported its cost
+#: the live canary of 2026-10-28 (nexus-jypmj.3.10) ran 4 calls for 0.0166 USD (about 0.004 each), and the golden
+#: run's assessment spent 0.331 USD over 40 calls in 18 assessed runs (about 0.008 a call, 0.018 a run), both on the
+#: serial design; 0.02 is about 2.4 times the golden per-call cost, so the prior errs towards starting fewer calls. A call that reported its cost
 #: replaces the prior with the mean of the known costs.
 ASSESSMENT_CALL_COST_PRIOR_USD: float = 0.02
 #: Anchors one assessment call reads (nexus-jypmj.17). A stream with more is split into balanced packs of at most this
