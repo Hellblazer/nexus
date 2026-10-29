@@ -88,6 +88,37 @@ class AspectQueueEngineUnsupportedError(RuntimeError):
     template (it predates ``engine-service-v0.1.169``)."""
 
 
+_warned_no_aspects_template: list[bool] = []
+
+
+def aspects_census(store: Any, *, timeout: float | None = None) -> Any:
+    """The ``aspects`` subspace's census from *store* (an ``HttpTupleStore``),
+    or ``None`` when the engine has no ``aspects`` template.
+
+    The readers of the old table (queue-depth hook, drain, requeue-failed)
+    count this side beside the table's (RDR-235). An engine that predates
+    ``engine-service-v0.1.169`` has no such template, and every reader must go
+    on working there exactly as it did: ``None`` means "no tuple side", the
+    caller reads it as zero, and one log line per process says so. Any other
+    failure propagates; a caller decides what an unreadable side means.
+
+    *timeout* caps the one request (seconds); ``None`` sends it unchanged."""
+    from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: table mode never loads it
+
+    try:
+        if timeout is None:
+            return store.subspace_stats(ASPECTS_SUBSPACE)
+        return store.subspace_stats(ASPECTS_SUBSPACE, timeout=timeout)
+    except UnknownSubspaceError:
+        if not _warned_no_aspects_template:
+            _warned_no_aspects_template.append(True)
+            _log.info(
+                "aspects_tuple_template_absent_reading_table_only",
+                needs=ASPECTS_ENGINE_RELEASE,
+            )
+        return None
+
+
 def _identity_body(collection: str, source_path: str, doc_id: str, content_hash: str) -> str:
     """The task body (RDR-235 E2): the queue row's identity, never text. The
     worker re-reads the document from T3 chunks or the file."""

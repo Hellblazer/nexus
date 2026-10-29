@@ -1930,9 +1930,12 @@ class TestBestEffortQueueDepthSharedClient:
 
         _best_effort_queue_depth()  # return value not asserted -- may be None on a slow/absent daemon; the CONSTRUCTION shape is what's under test
 
-        assert len(tally) == 1, (
-            f"expected the diagnostic to build exactly 1 dedicated "
-            f"httpx.Client() outside an active index run; got {len(tally)}"
+        # RDR-235: one dedicated client per store it reads, the table queue
+        # and the `aspects` tuple store (each 2 s, never shared with a run).
+        assert len(tally) == 2, (
+            f"expected the diagnostic to build exactly 2 dedicated "
+            f"httpx.Client() (queue + tuple store) outside an active index "
+            f"run; got {len(tally)}"
         )
 
     def test_inside_an_index_run_shares_the_run_client_and_keeps_its_cap(
