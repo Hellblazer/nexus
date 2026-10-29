@@ -147,10 +147,14 @@ dependencies = [
 # incident release); embedding output for BAAI/bge-base-en-v1.5 was compared
 # 0.7.4 vs 0.8.1, with onnxruntime also moving 1.24.2 -> 1.31.0: max abs diff
 # 1.3e-4, min cosine 0.9999996 (not bit-identical; stored vectors come from the
-# engine's own ONNX runtime, which is unaffected, so nothing re-embeds). pillow 13
-# stays out of reach: every fastembed through 0.9.0 caps
-# pillow<13.
-local = ["fastembed>=0.8.1,<0.9"]
+# engine's own ONNX runtime, which is unaffected, so nothing re-embeds).
+# nexus-tr1rj.21 (2026-10-29): now >=0.9.1,<0.10. Every fastembed through 0.9.0
+# capped pillow<13; 0.9.1 (2026-10-24, "allow Pillow 13", fastembed #830) admits
+# pillow<14, so the lock takes pillow 13.0.0, which fixes the 37 advisories that
+# stayed open on 12.3.0. 0.9.0 is skipped for that reason. Nexus uses fastembed
+# for one thing: TextEmbedding for the local bge-base embedder in
+# src/nexus/db/local_ef.py.
+local = ["fastembed>=0.9.1,<0.10"]
 # nexus-2k66t.4.2 (Sam, 2026-10-23): the PDF stack is an extra, fetched on demand.
 # mineru, torch, torchvision and pdftext, with the layout extractor RDR-237 later
 # removed, were 57-65% of the download and 49% of the installed size (T2 nexus/install-weight-measurement-2026-10-23), and
@@ -225,9 +229,8 @@ pdf = [
     # lock stays on transformers 4.57.6. Nine advisories remain on it (three
     # have no fixed release; the rest are fixed only in 5.x), so they stay
     # until a mineru release both admits transformers 5 and passes the gates
-    # above. Pillow stays on 12.3.0 for a different reason: every fastembed
-    # through 0.9.0 cap pillow<13, and 13.0.0 (2026-10-16) is
-    # the only release that fixes the 37 advisories left on 12.3.0.
+    # above. Pillow no longer stays behind: fastembed 0.9.1 admits pillow 13
+    # (nexus-tr1rj.21), and the lock is on 13.0.0.
     "mineru[pipeline]>=3.1.11,<3.1.12",
     # nexus-gqrg0 (GH #1533) round 2: the override below only reaches an
     # invoking-project resolve (uv sync in this checkout, or a generation
