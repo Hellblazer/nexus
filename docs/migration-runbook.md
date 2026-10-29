@@ -413,8 +413,31 @@ rewrote none. (Changesets of the same engine tag that sit before
 used only to merge, then stopped.)
 
 **1. List the pairs.** Run this as a role that bypasses row-level security: the
-`postgres` superuser of the nx-managed cluster locally, the operator's
-diagnostic role in the cloud. It is the guard's own test, one row per pair:
+superuser of the nx-managed cluster locally, the operator's diagnostic role in
+the cloud. It is the guard's own test, one row per pair.
+
+Locally the cluster listens only on TCP at `127.0.0.1` (no Unix socket) and
+every `pg_hba.conf` line is `scram-sha-256`. The superuser role is named for the
+OS login that provisioned the cluster (`$USER`; on Windows, a name derived from
+the service account), not `postgres`. Its password is `PG_SUPERUSER_PASS` and
+the port is `PG_PORT`, both in `<config>/pg_credentials` (`~/.config/nexus`
+unless `NEXUS_CONFIG_DIR` says otherwise). Use the PostgreSQL client nx
+extracted under `<config>/pg-bundle`; nx never falls back to a host `psql`. The
+cluster keeps running when the service stops, so this works while the engine is
+halted. This opens a session without printing the password or putting it on a
+command line:
+
+```bash
+CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
+PGPASSWORD="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")" \
+  "$CFG/pg-bundle/bundle/bin/psql" -h 127.0.0.1 \
+  -p "$(sed -n 's/^PG_PORT=//p' "$CFG/pg_credentials")" -U "$USER" -d nexus
+```
+
+Paste the query below at its prompt. Liquibase's own tables are in the `public`
+schema, not `nexus`; `SELECT id, exectype FROM public.databasechangelog WHERE
+id = 'note-uri-001-1'` returns no row while the backfill has not run and
+`EXECUTED` after it has (`nexus.databasechangelog` does not exist).
 
 ```sql
 WITH o AS (
@@ -436,11 +459,23 @@ SELECT o.tenant_id, o.tumbler AS chroma_row, t.tumbler AS nx_note_row, o.source_
  ORDER BY o.tenant_id, o.tumbler;
 ```
 
-**2. Merge each pair on the previous engine.** For each row pick the one to
-keep (the canonical; usually the `nx_note_row`, which already has the new
-spelling) and merge the other (the duplicate) into it, in the tenant that owns
-both. The merge frees the duplicate's `source_uri`, aliases it to the canonical
-and moves its links, in one transaction. The CLI call is
+**2. Merge each pair on the previous engine.** The merge moves identity, not
+content. In one transaction it clears the duplicate's `source_uri`, gives that
+`source_uri` to the canonical only if the canonical has none (a canonical that
+already has one keeps its own), sets the duplicate's `alias_of` to the canonical,
+and re-points the duplicate's links at the canonical (`CatalogRepository.mergeDocuments`).
+It touches only `catalog_documents` and `catalog_links`: it does not move the
+duplicate's chunks and does not change either row's collection.
+
+So choose the canonical by content before you merge. Run
+`nx catalog show <tumbler>` on both rows of a pair and compare `Chunks` and
+`Collection`. Keep, as the canonical, the row that holds the content you want to
+keep. That is usually the `nx_note_row` (the newer write), but a note stored by
+`nx store put` before the upgrade has its chunks on the `chroma_row`, and a
+`nx_note_row` registered without content shows `Chunks: 0` and an empty
+`Collection`. Merging the chunk-holding row into such an empty one leaves the
+note's lookups resolving to a row with no chunks. Then merge the other row (the
+duplicate) into it, in the tenant that owns both. The CLI call is
 `nx catalog merge <duplicate> <canonical>` and the engine route is
 `POST /v1/catalog/merge` with `{"duplicate": "<tumbler>", "canonical": "<tumbler>"}`.
 Run the query again: it must return no rows.
@@ -468,15 +503,39 @@ in the previous client release's changelog entry (`engine-service-v0.1.165` for
 the client release before RDR-231).
 
 ```bash
-nx daemon service stop                                   # stops the supervisor retrying the halted engine
+nx daemon service stop                                   # normally prints "already stopped" (the supervisor exited with the halted engine); harmless, and makes sure
 nx daemon service install-binary engine-service-v0.1.165 --no-pg-bundle   # the PREVIOUS engine tag, binary only
 nx daemon service start                                  # previous engine, same database
-# step 1: list the pairs (psql against the nx-managed cluster, see "Restoring a pg_dump" for its socket)
+# step 1: list the pairs (psql over TCP as the superuser, see step 1 above)
 nx catalog merge <duplicate> <canonical>                 # step 2, once per pair
 nx daemon service stop
 nx daemon service install-binary <the new engine tag>    # the tag in the new client release's changelog entry
 nx daemon service start                                  # the backfill passes; check logs/storage_service_native.log
 ```
+
+**How the halt first shows up.** On a local install you usually meet it in the
+output of the upgrade itself. The first `nx` command after `uv tool upgrade`
+runs the upgrade-finish pass, and `nx daemon restart-stale` repeats it: both
+install the pinned engine and start it, and a halted engine never answers. The
+finish line then reads like this (the reason is the engine's own, carried up to
+about 1,000 characters):
+
+```text
+NEEDS HUMAN: the storage service did not start (`nx daemon service start` exited 2);
+the engine is NOT converged to v0.1.167. Its reason: Storage service supervisor
+exited with code 2 before the service became ready. RDR-231 note-URI backfill
+halted and nothing was changed: 1 live chroma:// note row(s) have a live nx-note://
+twin. ... https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup ...
+```
+
+and `nx daemon restart-stale` ends its engine leg with `engine: not converged —
+installed engine is v0.1.167 (the release dependency), but no discoverable
+storage-service lease. Start it with ...`. Clients before this fix printed
+`engine: converged` there, from the installed binary alone, and said the service
+"restarted but its version could not be confirmed" while it had not started. If
+you see those lines and `nx daemon service status` finds no service, read the
+engine log (`logs/storage_service_native.log`) for the halt text, then follow
+the steps above.
 
 `install-binary` also swaps the PostgreSQL bundle by default (`--pg-bundle`), and
 the previous tag ships the bundle it was built with, which can be an older
