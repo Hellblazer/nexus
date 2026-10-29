@@ -789,7 +789,7 @@ def test_a_stop_raised_while_the_window_is_flushed_ends_the_run_with_a_contiguou
     assert ("attempt", 5, 1) not in events, "the run ended at the stop"
 
 
-@pytest.mark.parametrize("failure_class", ["signal:9", "oom", "oom:1:MemoryError"])
+@pytest.mark.parametrize("failure_class", ["signal:9", "oom", "oom:1:MemoryError", "oom:1:RuntimeError: Cannot allocate memory"])
 def test_a_trip_by_a_killed_worker_names_memory_not_the_install(failure_class: str) -> None:
     from nexus.pdf_extractor import mineru_stop_reason
 
@@ -804,7 +804,11 @@ def test_a_trip_by_a_killed_worker_names_memory_not_the_install(failure_class: s
     assert "Repair the install" not in remedy and "nx doctor" not in remedy
 
 
-@pytest.mark.parametrize("failure_class", ["timeout", "signal:11", "exit:1:ImportError: libGL.so.1"])
+@pytest.mark.parametrize(
+    "failure_class",
+    # oom:1:ImportError: a broken install run under a memory ceiling, which turns any exit into an oom class
+    ["timeout", "signal:11", "exit:1:ImportError: libGL.so.1", "oom:1:ImportError: libGL.so.1"],
+)
 def test_a_trip_by_any_other_class_still_says_repair_the_install(failure_class: str) -> None:
     from nexus.pdf_extractor import mineru_stop_reason
 
@@ -939,6 +943,9 @@ def test_a_real_message_glued_after_a_progress_frame_survives_the_frame() -> Non
     assert pdf_extractor._last_stderr_line(f"ImportError: x\n{bar}") == "ImportError: x", "a frame alone is still noise"
     assert pdf_extractor._last_stderr_line(f"{bar}\n{bar}") == ""
     assert pdf_extractor._last_stderr_line("45%|####5     | 9/20 [00:03<00:04") == "", "a cut frame with no close is noise"
+    assert pdf_extractor._last_stderr_line(f"ImportError: x\n{bar[:-1]}, loss=[0.1]]") == "ImportError: x", (
+        "a frame whose postfix holds a ] leaves only punctuation, which is not a message"
+    )
 
 
 # ── pdf.ladder_breaker ───────────────────────────────────────────────────────

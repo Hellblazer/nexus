@@ -199,7 +199,8 @@ def _last_stderr_line(tail: str) -> str:
     and a frame glued to a message on one line is cut out of it (see :data:`_STDERR_FRAME`)."""
     for line in reversed(tail.splitlines()):
         rest = _STDERR_FRAME.sub("", line).strip()
-        if rest and not _STDERR_PROGRESS.search(rest):
+        # what is left of a frame whose postfix held a ``]`` is punctuation, not a message
+        if any(ch.isalnum() for ch in rest) and not _STDERR_PROGRESS.search(rest):
             return rest[:_STDERR_LINE_CAP]
     return ""
 
@@ -351,8 +352,15 @@ _MINERU_MEMORY_REMEDY = (
 
 def _is_memory_class(failure_class: str) -> bool:
     """True for the failure classes that mean the worker ran out of memory: ``signal:9`` (the
-    OOM-killer or macOS jetsam), ``oom`` and ``oom:<rc>:<line>``."""
-    return failure_class in ("signal:9", "oom") or failure_class.startswith("oom:")
+    OOM-killer or macOS jetsam), ``oom``, and ``oom:<rc>:<line>`` when the line is about memory.
+    Under a memory ceiling every non-zero exit becomes ``MineruMemoryError``, so an
+    ``oom:1:ImportError ...`` is a broken install that happened to run with a ceiling set."""
+    if failure_class in ("signal:9", "oom"):
+        return True
+    if failure_class.startswith("oom:"):
+        line = failure_class.split(":", 2)[2] if failure_class.count(":") >= 2 else ""
+        return bool(re.search(r"memory|alloc", line, re.IGNORECASE))
+    return False
 
 
 class MineruSystemicFailure(Exception):
