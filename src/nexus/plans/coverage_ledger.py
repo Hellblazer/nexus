@@ -22,7 +22,8 @@ What the boundary does, in order:
    or whose lookup could not run is ``unresolved``, not missing: disclosed in the sources, blocking no facet
    (nexus-jypmj.3.17).
 3. **Facet assessment.** One ``operator_check`` call per evidence stream (primary, t2, vector, graph,
-   other), carrying at most :data:`MAX_FACETS_PER_ASSESSMENT_CALL` facets; more facets split into groups.
+   other), carrying at most :data:`MAX_FACETS_PER_ASSESSMENT_CALL` facets; more facets split into groups, and a
+   stream of more than :data:`MAX_ANCHORS_PER_ASSESSMENT_CALL` anchors into balanced packs (nexus-jypmj.17).
    ``check.ok`` is never read as coverage. Coverage comes from the evidence records only: each record's
    ``item_id`` must be one of the call's input ids and its ``quote`` must open with the facet tag
    (``[f2] ...``, any case) of a facet in that call; anything else is rejected and counted
@@ -35,14 +36,15 @@ What the boundary does, in order:
    ``assessment_unusable``, outcome ``failed`` or ``partial_failure``, detail ``assessor_unusable``), never
    ``unsupported``, so a model that ignores the tag convention cannot make a withheld answer. "The items were
    read and nothing bears on the facet" is the assessor's neutral record (the instruction asks for one).
-   A call that raises stops the assessment; no facet is then defaulted to covered.
+   A call that raises or comes back malformed costs only its own facets (nexus-jypmj.17): the other calls ran and
+   count, and no facet is defaulted to covered.
    **The measurement counters** (nexus-jypmj.3.10): every attempted call is logged as an :class:`AssessmentCall` with
    a reply class (:data:`REPLY_CLASSES`: ``support``, ``neutral_or_contradict``, ``all_rejected``, ``no_records``,
    ``raised``), so the classes can be counted per call and per stream; ``failure_cause`` splits a failed outcome into an
    unusable reply and a raised call; an unassessed facet carries the reason it is unassessed
-   (``assessment_unusable``, ``assessment_skipped_deadline`` / ``_budget``, ``assessment_raised``,
-   ``assessment_stopped_after_failure`` for a group never attempted because an earlier call raised or came back
-   malformed, or the older ``assessment_incomplete`` for an item the cap left unread), counted in
+   (``assessment_unusable``, ``assessment_skipped_deadline`` / ``_budget``, ``assessment_raised``, or
+   ``assessment_incomplete`` for an item the cap left unread; ``assessment_stopped_after_failure`` is kept in the
+   closed list for older records but no pass emits it since nexus-jypmj.17, which does not stop at a failure), counted in
    :attr:`CoverageResult.unassessed_by_cause`;
    a conflicted facet is counted in ``facets_conflicted`` (a subset of ``facets.covered``); and
    :attr:`CoverageResult.repair_entered` says the run went into the repair step at all. None of this changes a
@@ -71,8 +73,16 @@ groups together, so the terminal reduction is not starved by its own pre-check, 
 Each call draws its timeout from what is left of that allowance, capped by :data:`ASSESSMENT_CALL_TIMEOUT_S`;
 a call is not started when what is left falls under :data:`MIN_ASSESSMENT_CALL_S` or the USD allowance is
 spent, and its facets are then ``unassessed`` (outcome ``skipped_deadline`` / ``skipped_budget`` when no call
-was made, ``partial_failure`` after some were). Calls are serial; making them concurrent is a later
-decision. These values are unmeasured starting points. Assessment
+was made, ``partial_failure`` after some were).
+
+**The calls run concurrently** (nexus-jypmj.17), at most :data:`MAX_CONCURRENT_ASSESSMENT_CALLS` at a time, each started
+in plan order (stream order, then facet group, then pack). Each call decides when it STARTS: the USD allowance
+(spent so far plus the calls in flight at the mean known cost) and the stage allowance left decide whether it runs
+and what timeout it draws, and it is cut from outside at that timeout, so the stage cannot outlast its share
+whatever the check does with the timeout it is given. The replies are read after all calls end, in plan order, so
+the ledger, ``call_log``, reply classes and unassessed causes do not depend on which call finished first. The 2026-10-28 canary
+measured the serial design at +118 s with a 65-anchor call over the 60 s limit. These values are unmeasured starting
+points. Assessment
 calls are ``StepRecord``s past the plan's own step indices, so the shared USD accumulator and the
 ``nx_answer_steps`` primary key see them without a new step source.
 
@@ -98,8 +108,10 @@ Pure apart from the injected ``check`` callable: stdlib, ``structlog`` and the R
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -145,6 +157,8 @@ __all__ = [
     "ASSESSMENT_STAGE_DEADLINE_SHARE",
     "CONFLICTED_REASON",
     "INSTRUCTION_MARKER",
+    "MAX_ANCHORS_PER_ASSESSMENT_CALL",
+    "MAX_CONCURRENT_ASSESSMENT_CALLS",
     "MAX_FACETS_PER_ASSESSMENT_CALL",
     "MIN_ASSESSMENT_CALL_S",
     "RAISED_REASON",
@@ -180,6 +194,20 @@ ASSESSMENT_CALL_TIMEOUT_S: float = 60.0
 ASSESSMENT_STAGE_DEADLINE_SHARE: float = 0.4
 #: No call is started with less than this allowance.
 MIN_ASSESSMENT_CALL_S: float = 5.0
+#: Assessment calls in flight at once (nexus-jypmj.17). The operator dispatch has no process-wide gate of its own for
+#: a ``claude -p`` call; the direct-API backend gates HTTP attempts at ``NX_LLM_MAX_CONCURRENCY`` (default 4,
+#: ``operators/llm_api.DEFAULT_MAX_CONCURRENCY``), and a call past that waits for a permit inside its own timeout. So
+#: the stage never asks for more than that default at once: more would only queue behind the gate and spend the
+#: call's timeout waiting. The canary's four streams fit in one wave.
+MAX_CONCURRENT_ASSESSMENT_CALLS: int = 4
+#: Anchors one assessment call reads (nexus-jypmj.17). A stream with more is split into balanced packs of at most this
+#: many, each its own call over the same facet group, so a 65-anchor graph stream is four calls of 16-17 and not
+#: one call that outran the 60 s timeout (nexus-jypmj.3.10 canary: the 10-15 anchor streams answered in about 20 s
+#: each, the 65-anchor one did not in 60). Splitting rather than lengthening the timeout keeps every call close to a
+#: size already seen to finish, lets the packs run concurrently, and loses one pack's anchors, not the stream's, when a
+#: call fails. It sends each item once per facet group either way, so the input tokens barely change; only the
+#: per-call instruction repeats. Unmeasured as accuracy or latency-per-anchor (same status as the facet cap).
+MAX_ANCHORS_PER_ASSESSMENT_CALL: int = 20
 #: Characters of item text one call carries (the bundle prompt guard is 200,000 for the whole prompt).
 #: Items past it are not assessed; a facet that no assessed item supports is then ``unassessed``.
 ASSESSMENT_MAX_ITEM_CHARS: int = 120_000
@@ -767,6 +795,8 @@ class CoverageBoundary:
     call_timeout_s: float = ASSESSMENT_CALL_TIMEOUT_S
     stage_share: float = ASSESSMENT_STAGE_DEADLINE_SHARE
     min_call_s: float = MIN_ASSESSMENT_CALL_S
+    max_concurrent_calls: int = MAX_CONCURRENT_ASSESSMENT_CALLS
+    max_anchors_per_call: int = MAX_ANCHORS_PER_ASSESSMENT_CALL
 
     def stage_allowance(self, remaining: float | None) -> float | None:
         """Seconds the whole assessment stage may use out of *remaining* deadline seconds: ``stage_share`` of
@@ -1136,20 +1166,64 @@ class CoverageBoundary:
     async def _assess(
         self, facets: Sequence[Facet], anchors: Sequence[EvidenceAnchor], view: BoundaryView, reserve: float | None = None,
     ) -> tuple[dict[str, FacetFinding], AssessmentReport]:
-        """One serial assessment pass. *reserve* is the seconds of deadline the stage must leave untouched (see
-        :meth:`_stage_reserve`; ``None``: no deadline), so every call draws its timeout from what is left of
-        the one stage allowance, however many calls the streams and facet groups make."""
+        """One concurrent assessment pass (nexus-jypmj.17). *reserve* is the seconds of deadline the stage must leave
+        untouched (see :meth:`_stage_reserve`; ``None``: no deadline), so every call draws its timeout from what is
+        left of the one stage allowance, however many calls the streams, facet groups and packs make.
+
+        The planned calls are (stream, facet group, pack) in that nesting order, and they run at most
+        ``max_concurrent_calls`` at a time, each started in plan order. A call decides at the moment it starts
+        whether it may: the USD allowance (net of the calls in flight, at the mean cost of those finished) and the
+        stage's remaining time (a call's timeout is what is left of the stage, capped by ``call_timeout_s``, and the
+        call is cut at that timeout from outside, so no stage overruns its share however the check behaves). One
+        call that raises or replies unusably affects only its own facets; the others still count. The replies are
+        read after all calls finish, in plan order, so the ledger, the call log and every count are the same
+        whatever order the calls finish in."""
         cap = max(1, self.max_facets_per_call)
-        groups = [list(facets[i:i + cap]) for i in range(0, len(facets), cap)]
+        groups = [tuple(facets[i:i + cap]) for i in range(0, len(facets), cap)]
         by_stream = {s: [a for a in anchors if a.stream == s] for s in STREAM_ORDER}
-        planned = [(s, g) for s in STREAM_ORDER if by_stream[s] for g in groups]
+        planned: list[_PlannedCall] = []
+        for s in STREAM_ORDER:
+            if not by_stream[s]:
+                continue
+            _payload, included, omitted = _pack(by_stream[s])
+            packs = _balanced_chunks(included, self.max_anchors_per_call)
+            for g in groups:
+                for k, pack in enumerate(packs):
+                    planned.append(_PlannedCall(
+                        s, g, [{"id": a.item_id, "text": a.content} for a in pack], frozenset(a.item_id for a in pack),
+                        omitted if k == len(packs) - 1 else 0,
+                    ))
         tag_of = {f.id.lower(): f.id for f in facets}
         supports: dict[str, set[str]] = {f.id: set() for f in facets}
         contradicts: dict[str, set[str]] = {f.id: set() for f in facets}
         incomplete: dict[str, str] = {}  # facet id -> the finding reason for why it is not known
-        calls, rejected, skipped_items = 0, 0, 0
-        accepted_total, unusable_n, raised_n = 0, 0, 0
-        call_log: list[AssessmentCall] = []
+        started = time.monotonic()
+        gate = asyncio.Semaphore(max(1, self.max_concurrent_calls))
+        in_flight = 0
+
+        async def run_one(call: _PlannedCall) -> _CallOutcome:
+            nonlocal in_flight
+            async with gate:
+                usd = view.remaining_usd()
+                remaining = view.remaining_seconds()
+                stage_left = None if reserve is None or remaining is None else remaining - reserve
+                timeout = self.call_timeout(stage_left)
+                estimate = view.assessment_cost_estimate()
+                if usd is not None and (usd <= 0 or (estimate is not None and usd - estimate * in_flight <= 0)):
+                    return _CallOutcome(skipped="skipped_budget", why="the USD allowance was spent")
+                if timeout <= 0:
+                    return _CallOutcome(skipped="skipped_deadline", why="too little of the assessment's share of the deadline was left")
+                args = {"items": json.dumps(call.payload), "check_instruction": _instruction(call.group)}
+                in_flight += 1
+                try:
+                    reply = await asyncio.wait_for(view.check(args, timeout=timeout), timeout=timeout)
+                    return _CallOutcome(records=_records(reply))
+                except Exception as exc:  # noqa: BLE001 — a failed assessment leaves the answer; its facets stay unassessed
+                    return _CallOutcome(error=exc)
+                finally:
+                    in_flight -= 1
+
+        outcomes = await asyncio.gather(*(run_one(c) for c in planned))
 
         def mark(group: Sequence[Facet], reason: str, *, override: bool = False) -> None:
             for f in group:
@@ -1158,45 +1232,34 @@ class CoverageBoundary:
                 else:
                     incomplete.setdefault(f.id, reason)
 
+        calls, rejected, skipped_items = 0, 0, 0
+        accepted_total, unusable_n, raised_n = 0, 0, 0
+        call_log: list[AssessmentCall] = []
         per_call: list[int] = []
         used_streams: list[str] = []
-        outcome: AssessmentOutcome = "ok"
-        detail = ""
-        started = time.monotonic()
         completed = 0  # calls whose reply carried at least one accepted record
-        for pos, (stream, group) in enumerate(planned):
-            usd = view.remaining_usd()
-            remaining = view.remaining_seconds()
-            stage_left = None if reserve is None or remaining is None else remaining - reserve
-            timeout = self.call_timeout(stage_left)
-            stop, why = "", ""
-            if usd is not None and usd <= 0:
-                stop, why = "skipped_budget", "the USD allowance was spent"
-            elif timeout <= 0:
-                stop, why = "skipped_deadline", "too little of the assessment's share of the deadline was left"
-            if stop:
-                outcome = stop if calls == 0 else "partial_failure"  # type: ignore[assignment]
-                detail = why
-                for _s, g in planned[pos:]:
-                    mark(g, _UNASSESSED_REASON[stop])
-                break
-            payload, included, omitted = _pack(by_stream[stream])
-            skipped_items += omitted
-            ids = {a.item_id for a in included}
-            args = {"items": json.dumps(payload), "check_instruction": _instruction(group)}
+        detail = ""
+        skip_outcome: AssessmentOutcome | None = None
+        skip_detail = ""
+        raise_detail = ""
+        for call, res in zip(planned, outcomes, strict=True):
+            stream, group = call.stream, call.group
+            if res.skipped:
+                if skip_outcome is None:
+                    skip_outcome, skip_detail = res.skipped, res.why  # type: ignore[assignment]
+                mark(group, _UNASSESSED_REASON[res.skipped])
+                continue
             calls += 1
+            skipped_items += call.omitted
             per_call.append(len(group))
             if stream not in used_streams:
                 used_streams.append(stream)
-            try:
-                reply = await view.check(args, timeout=timeout)
-                records = _records(reply)
-            except Exception as exc:  # noqa: BLE001 — a failed assessment leaves the answer; the facets stay unassessed
+            if res.error is not None:
+                exc = res.error
                 _log.warning("nx_answer_coverage_assessment_failed", stream=stream, error=type(exc).__name__)
-                outcome = "failed" if completed == 0 else "partial_failure"
-                detail = f"call {calls} on the {stream} stream failed: {type(exc).__name__}"
-                # A reply that is not the check shape is an unusable reply that stops the assessment; any other
-                # failure is a call that raised.
+                raise_detail = f"call {calls} on the {stream} stream failed: {type(exc).__name__}"
+                # A reply that is not the check shape is an unusable reply; any other failure is a call that raised.
+                # Either way only this call's facets are unknown: the other calls ran and are read on their own.
                 if isinstance(exc, _MalformedReply):
                     unusable_n += 1
                     call_log.append(AssessmentCall(stream, len(group), "no_records"))
@@ -1205,11 +1268,9 @@ class CoverageBoundary:
                     raised_n += 1
                     call_log.append(AssessmentCall(stream, len(group), "raised"))
                     mark(group, RAISED_REASON)
-                # The groups after this call were never attempted: the stop rule left them unknown, which is not this
-                # call's failure. A facet that already has a reason (its own group failed earlier, or just now) keeps it.
-                for _s, g in planned[pos + 1:]:
-                    mark(g, STOPPED_REASON)
-                break
+                detail = raise_detail
+                continue
+            records = res.records or []
             accepted = 0
             rejected_here = 0
             call_supports = False
@@ -1220,7 +1281,7 @@ class CoverageBoundary:
                 m = _TAG.match(quote) if isinstance(quote, str) else None
                 tag = m.group(1).lower() if m is not None else None
                 facet_id = tag_of.get(tag) if tag in call_tags else None
-                if item_id not in ids or role not in _ROLES or facet_id is None:
+                if item_id not in call.ids or role not in _ROLES or facet_id is None:
                     rejected += 1
                     rejected_here += 1
                     continue
@@ -1247,9 +1308,16 @@ class CoverageBoundary:
                 )
                 continue
             completed += 1
-            if omitted:
+            if call.omitted:
                 mark(group, "assessment_incomplete")
-        if unusable_n and outcome == "ok":
+        outcome: AssessmentOutcome = "ok"
+        if skip_outcome is not None:
+            outcome = skip_outcome if calls == 0 else "partial_failure"
+            detail = skip_detail
+        if raised_n:
+            outcome = "failed" if completed == 0 else "partial_failure"
+            detail = raise_detail
+        elif unusable_n and outcome == "ok":
             outcome = "failed" if completed == 0 else "partial_failure"
         findings: dict[str, FacetFinding] = {}
         for f in facets:
@@ -1277,6 +1345,46 @@ class CoverageBoundary:
 
 
 _WS = re.compile(r"\s+")
+
+
+@dataclass(frozen=True)
+class _PlannedCall:
+    """One assessment call before it runs: the evidence stream, the facet group, the pack of items it reads (as the
+    check's payload and the ids a record may cite) and the items the character cap left out of this stream, carried by
+    the stream's last pack only so each is counted once per facet group."""
+
+    stream: str
+    group: tuple[Facet, ...]
+    payload: list[dict[str, str]]
+    ids: frozenset[str]
+    omitted: int = 0
+
+
+@dataclass
+class _CallOutcome:
+    """What one planned call came to: skipped before it started (``skipped`` is ``skipped_budget`` or
+    ``skipped_deadline``), raised (``error``), or replied (``records``)."""
+
+    skipped: str = ""
+    why: str = ""
+    records: list[Mapping[str, Any]] | None = None
+    error: Exception | None = None
+
+
+def _balanced_chunks[T](items: Sequence[T], cap: int) -> list[list[T]]:
+    """*items* in order as the fewest packs of at most *cap*, with sizes differing by at most one (65 at 20 is
+    17, 16, 16, 16: no short tail pack and no pack past the cap)."""
+    if not items:
+        return []
+    n = math.ceil(len(items) / max(1, cap))
+    base, extra = divmod(len(items), n)
+    out: list[list[T]] = []
+    at = 0
+    for i in range(n):
+        size = base + (1 if i < extra else 0)
+        out.append(list(items[at:at + size]))
+        at += size
+    return out
 
 
 def _instruction(group: Sequence[Facet]) -> str:

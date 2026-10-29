@@ -11993,8 +11993,8 @@ async def nx_answer(
       "answered" and "insufficient_evidence" (opens with
       `[insufficient-evidence: <n> unresolved]`, names each unsettled
       part, then answers the rest). Any other value, "uncovered" (none of
-      the evidence covers a requested part; only with NX_ANSWER_COVERAGE=1)
-      included, is a one-line notice, never the raw payload.
+      the evidence covers a requested part) included, is a one-line
+      notice, never the raw payload.
     - `run_summary.persistence` (persisted, dropped, unsupported,
       unverified, not_recorded): only "persisted" means the engine kept
       the run's coverage summary.
@@ -13778,7 +13778,7 @@ async def nx_answer(
     # RDR-232 Phase 3 (nexus-jypmj.3.3): the coverage boundary, built from the inputs this call already holds (the
     # ones `_evidence_diagnostics_now` hands build_evidence_diagnostics) and given to the runner, which assesses the
     # terminal reduction's evidence before dispatching it. It rides `_plan_run_kwargs`, so the continuation
-    # fallback re-run below gets the same one. With NX_ANSWER_COVERAGE off (the default until nexus-jypmj.3.10) none
+    # fallback re-run below gets the same one. With NX_ANSWER_COVERAGE off (on by default since nexus-jypmj.17) none
     # is passed: every run is then unassessed and this call is what it was before Phase 3. The single_query fast path
     # never gets here (no reduction).
     from nexus.plans.switches import coverage_enabled as _coverage_enabled  # noqa: PLC0415 — deferred; matches this module's convention

@@ -2923,8 +2923,15 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     real ``claude_dispatch``, except the Phase 3 coverage assessment (an ``operator_check`` call), which is refused
     the same way. A test about the extraction patches ``nexus.operators.dispatch.claude_dispatch``
     itself, which replaces this guard for the test. The switches are cleared so a developer's exported
-    ``NX_ANSWER_KIND_ELIGIBILITY=0``, ``NX_ANSWER_STRUCTURED_EXTRACT=0`` or ``NX_ANSWER_COVERAGE=0`` cannot change what a test sees, and the
-    process-wide memos of the gate (library check, warnings) start empty."""
+    ``NX_ANSWER_KIND_ELIGIBILITY=0`` or ``NX_ANSWER_STRUCTURED_EXTRACT=0`` cannot change what a test sees, and the
+    process-wide memos of the gate (library check, warnings) start empty.
+
+    ``NX_ANSWER_COVERAGE`` is the one switch the suite PINS (to ``0``) instead of clearing (nexus-jypmj.17). The
+    shipped default is ON, and a unit test that drives ``nx_answer`` over its own operator stubs would otherwise
+    reach the coverage boundary on every run: the refusal below would turn each into a failed assessment (state
+    ``unassessed``, an extra call per stream), changing outputs that hundreds of tests assert on for no reason of
+    theirs. A test about the boundary opts in with ``monkeypatch.setenv("NX_ANSWER_COVERAGE", "1")``, or
+    ``delenv`` to read the shipped default; the refusal below stays as the backstop for those tests."""
     import functools  # noqa: PLC0415 — test-only import
 
     from nexus.operators import dispatch as _dispatch  # noqa: PLC0415 — test-only import
@@ -2933,7 +2940,7 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.delenv("NX_ANSWER_STRUCTURED_EXTRACT", raising=False)
     monkeypatch.delenv("NX_ANSWER_KIND_ELIGIBILITY", raising=False)
-    monkeypatch.delenv("NX_ANSWER_COVERAGE", raising=False)
+    monkeypatch.setenv("NX_ANSWER_COVERAGE", "0")
     real = _dispatch.claude_dispatch
 
     @functools.wraps(real)

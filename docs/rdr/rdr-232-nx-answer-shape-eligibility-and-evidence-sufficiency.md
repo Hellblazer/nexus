@@ -488,6 +488,28 @@ listed under Critical Assumptions before gate.
   the fixed tree.
   *Source: bead nexus-jypmj.3.17; bead nexus-jypmj.3.10 comment of 2026-10-28.*
 
+- **✅ Verified** (unit-test timing model; no live run) — the coverage check is on
+  by default as of 2026-10-28, by Sam's decision, taken together with the latency
+  fix the canary above asked for (nexus-jypmj.17). The assessment calls now run
+  at most 4 at a time (the direct-API backend's own concurrency default), each cut
+  at the stage's 0.4 share of the deadline left; a stream over 20 anchors is split
+  into balanced packs, so the canary's 65-anchor graph stream is four calls of 16
+  to 17; a call that raises or replies unusably costs only its own facets, so
+  `stopped_after_failure` is no longer produced; and the terminal step's
+  `elapsed_ms` no longer carries the assessment. The tests model the canary at
+  1/100 scale (a call takes 0.15 s plus 7 ms per anchor; 99 anchors in four
+  streams of 12, 12, 65 and 10): the serial, unsplit stage takes 130
+  model-seconds, with the graph call cut at the 60 s limit as in the canary
+  (measured live: 118 s), and the concurrent split stage takes 50 model-seconds
+  in two waves of calls, with no call cut. That 50 s is the model's figure under
+  assumed per-call latencies, not a measurement: the live latency with the check
+  on is re-taken on the next canary, and the 20-anchor pack size and the
+  per-anchor latency are unmeasured as accuracy and latency. An unrecognised
+  `NX_ANSWER_COVERAGE` value (`disable`, `off!`) reads as off, not as the default:
+  the safe direction for a typo.
+  *Source: bead nexus-jypmj.17; `tests/test_rdr232_coverage_concurrent.py`; bead
+  nexus-jypmj.3.10 comment of 2026-10-28.*
+
 ### Critical Assumptions
 
 Research 6–10 executed prototypes for A1–A6; A7 has none yet. They establish
@@ -1963,3 +1985,4 @@ remain coherent without it.
 - 2026-10-27: Section 4 counts a contradicted facet toward a usable answer: the definition and the `unavailable` row say covered or contradicted, so a contradiction-only result is `partial` with the contradiction named ahead of the prose, per Sam's ruling (nexus-jypmj.3.13).
 - 2026-10-27: Phase 3 As run recorded (the coverage check ships off until nexus-jypmj.3.10 and Sam's approval; the section 4 departures as built), and section 4 and the Test Plan corrected where they misdescribed the build (marker bucketing under trace=False, assessment USD in step records, the continuation fallback repay, the unverified and not_recorded persistence states, the coverage_partial count), approved by Sam.
 - 2026-10-28: Key Discoveries record the lookup-boundary re-measure (nexus-jypmj.13), the pre-cap filter's old-engine departure (nexus-jypmj.1.13) and the live canary latency (nexus-jypmj.3.10); two A5 statements are corrected as findings. No decision text changed.
+- 2026-10-28: Key Discoveries record that the coverage check is on by default (Sam) with concurrent assessment calls and the unit-test timing model of the latency before and after (nexus-jypmj.17). No decision text changed.

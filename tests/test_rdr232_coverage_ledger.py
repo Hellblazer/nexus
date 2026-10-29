@@ -290,14 +290,14 @@ async def test_scenario_3_a_failed_first_assessment_call_leaves_the_state_unasse
     result = await _run(d, boundary, reserved_stream=_reserved())
     cov = _cov(result)
     assert cov.state == "unassessed" and cov.reason == "assessment_failed" and not cov.skip_generation
-    assert len(d.args_of("operator_check")) == 1, "the first failure stops further assessment calls"
+    assert len(d.args_of("operator_check")) == 3, "a failed call does not stop the others (nexus-jypmj.17): primary, vector and graph each ran"
     assert result.final == {"text": "the answer"}, "the answer is returned, not a notice in its place"
     assert all(f.state == "unassessed" for f in cov.ledger.findings), "no facet defaults to covered"
     assert cov.ledger.assessment.outcome == "failed"
     assert cov.ledger.scope is not None and [(s.source, s.state) for s in cov.ledger.sources] == [("RDR-084", "covered")], (
         "the deterministic checks still ran")
     failed = [r for r in result.step_records if r.operator == "operator_check"]
-    assert len(failed) == 1 and not failed[0].ok
+    assert len(failed) == 3 and not any(r.ok for r in failed)
 
 
 def _resolved_source() -> NamedSourceResolution:

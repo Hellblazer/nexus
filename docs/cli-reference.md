@@ -5505,10 +5505,12 @@ prose generated anyway is withheld. A contradicted part does not count as
 uncovered: it is reported ahead of the prose as `insufficient_evidence`
 (nexus-jypmj.3.13), as is prose while any facet is unassessed. `None` on
 paths that never classified: the single-step fast path, a continuation
-handoff and a budget-exhausted stop. The coverage check is off unless
-`NX_ANSWER_COVERAGE=1` is set (the default flips only after the Phase 3
-measurement, nexus-jypmj.3.10); with it off every run is unassessed and
-`answer_shape` is what it was before RDR-232 Phase 3.
+handoff and a budget-exhausted stop. The coverage check is on by default
+(Sam, 2026-10-28, nexus-jypmj.17); `NX_ANSWER_COVERAGE=0` (or `false`, `off`,
+`no`) turns it off, and with it off every run is unassessed and `answer_shape`
+is what it was before RDR-232 Phase 3. A value that is neither an on nor an off
+word (`disable`, `off!`) reads as off, not as the default: the safe direction
+for a typo.
 Grown plans are additionally gated on identifier agreement at match time
 (nexus-wj12p): a grown plan whose originating question named identifiers
 (RDR/JDR ids, bead ids, engine tags, client versions, GH/PR numbers) is
@@ -6009,7 +6011,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `missing`, worst first `missing`, `unresolved`, `partial`, `covered`) and `corpus_counts` (`{anchors, by_stream, by_collection}`, what the
   final reduction was handed); `repair` holds the repair attempt. A run no
   boundary assessed has the same keys, state `unassessed` and a `reason`:
-  `switch_off` (`NX_ANSWER_COVERAGE` is not on, the default), `no_facets`,
+  `switch_off` (`NX_ANSWER_COVERAGE` is off), `no_facets`,
   `terminal_reduction_not_reached` (an error before the final reduction, the
   single-query fast path, a run whose reduction raised) or `boundary_not_run`;
   its facet lists are empty. A `partial` state goes with `answer_shape`
@@ -6025,7 +6027,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   skip_generation, facets_required, facets, rounds, findings, anchors, sources,
   scope, assessment, repair, ...}`. `state` is `complete` (every required facet
   covered), `partial`, `unavailable` or `unassessed` (no facets, the assessor
-  failed, or `NX_ANSWER_COVERAGE` is not on); `reason` says why. `facets` counts
+  failed, or `NX_ANSWER_COVERAGE` is off); `reason` says why. `facets` counts
   findings by state (`covered`, `unsupported`, `contradicted`, `unassessed`);
   `findings` has one `{facet_id, state, evidence_ids, reason}` per required
   facet (a facet with both supporting and contradicting evidence is `covered`
@@ -6043,8 +6045,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `failure_cause` (`raised_call`, `unusable_reply`, `mixed` or `none`). The coverage
   object also has `facets_conflicted` (the conflicted subset of `facets.covered`),
   `unassessed_by_cause` (`unusable_reply`, `deadline_skip`, `budget_skip`,
-  `raised_call`, `stopped_after_failure` (a group never attempted because an earlier call
-  raised or replied unusably), `other`) and `repair_entered`. With `trace=False` the source labels and the `detail` of
+  `raised_call`, `stopped_after_failure` (always 0 since nexus-jypmj.17: the assessment
+  calls run concurrently and a call that raised or replied unusably no longer stops the others, so
+  the key stays for older records), `other`) and `repair_entered`. With `trace=False` the source labels and the `detail` of
   `sources` and `scope` are blanked; ids, counts and closed names stay.
 
 - `traverse` under `nx_answer` (nexus-jypmj.1.5): `nx_answer` always supplies the

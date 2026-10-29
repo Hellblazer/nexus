@@ -110,7 +110,7 @@ def conflicted(items: str, instruction: str) -> dict:
         (contradicts_only, _classes(neutral_or_contradict=2), 2, 0, 0),
         (untagged, _classes(all_rejected=2), 0, 2, 0),
         (returns_no_records, _classes(no_records=2), 0, 2, 0),
-        (raises, _classes(raised=1), 0, 0, 1),  # a raised call stops the assessment: one call, not two
+        (raises, _classes(raised=2), 0, 0, 2),  # a raised call stops nothing (nexus-jypmj.17): both streams' calls ran
     ],
     ids=["support", "neutral", "contradict_only", "all_rejected", "no_records", "raised"],
 )
@@ -355,21 +355,22 @@ def _reasons(cov: CoverageResult) -> dict[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_groups_never_attempted_after_a_raised_call_are_stopped_after_failure_not_raised() -> None:
-    """Three facets, two per call: the first call (vector, f1 and f2) raises and ends the pass, so f3's group (and every
-    later stream's) was never attempted. f1 and f2 are the failing call's own facets; f3 is the stop rule's."""
+async def test_a_raised_call_stops_no_other_call_so_no_group_is_stopped_after_failure() -> None:
+    """Three facets, two per call, every call raises (nexus-jypmj.17): all four calls (two streams, two groups) are
+    attempted, each facet carries its own call's cause, and nothing is ``stopped_after_failure`` -- that cause is no
+    longer emitted because a pass no longer stops at a failure. Failing before: one call ran and f3 was stopped."""
     d = Dispatcher(raises)
     cov = _cov(await _run(d, CoverageBoundary(request=_request(3), max_facets_per_call=2)))
-    assert d.tools.count("operator_check") == 1, "the pass stops at the first raise"
-    assert _reasons(cov) == {"f1": "assessment_raised", "f2": "assessment_raised", "f3": "assessment_stopped_after_failure"}
-    assert _summary(cov)["coverage"]["unassessed_by_cause"] == _causes(raised_call=2, stopped_after_failure=1)
+    assert d.tools.count("operator_check") == 4, "every planned call is attempted"
+    assert _reasons(cov) == {"f1": "assessment_raised", "f2": "assessment_raised", "f3": "assessment_raised"}
+    assert _summary(cov)["coverage"]["unassessed_by_cause"] == _causes(raised_call=3)
 
 
 @pytest.mark.asyncio
-async def test_groups_never_attempted_after_a_malformed_reply_are_stopped_after_failure_not_unusable() -> None:
+async def test_a_malformed_reply_stops_no_other_call_either() -> None:
     cov = _cov(await _run(Dispatcher(not_the_check_shape), CoverageBoundary(request=_request(3), max_facets_per_call=2)))
-    assert _reasons(cov) == {"f1": "assessment_unusable", "f2": "assessment_unusable", "f3": "assessment_stopped_after_failure"}
-    assert _summary(cov)["coverage"]["unassessed_by_cause"] == _causes(unusable_reply=2, stopped_after_failure=1)
+    assert _reasons(cov) == {"f1": "assessment_unusable", "f2": "assessment_unusable", "f3": "assessment_unusable"}
+    assert _summary(cov)["coverage"]["unassessed_by_cause"] == _causes(unusable_reply=3)
 
 
 @pytest.mark.asyncio
@@ -381,9 +382,10 @@ async def test_a_stop_after_failure_cause_is_absent_when_every_group_was_attempt
 
 
 @pytest.mark.asyncio
-async def test_a_facet_whose_own_group_raised_is_raised_even_though_later_streams_were_never_reached() -> None:
-    """Call 1 (vector, f1 and f2) supports; call 2 (vector, f3) raises. f3's own call failed, so f3 is ``raised_call``;
-    the graph groups never ran but every facet in them already has a state, so nothing is ``stopped_after_failure``."""
+async def test_a_facet_whose_own_group_raised_is_raised_and_the_others_keep_their_state() -> None:
+    """Call 1 (vector, f1 and f2) supports; the calls after it raise (vector f3, then the graph groups). f1 and f2 keep
+    the support they were given; f3 has none, so its own failed call is its cause: ``raised_call``. Nothing is
+    ``stopped_after_failure``: every call ran."""
     calls = {"n": 0}
 
     def support_then_raise(items: str, instruction: str):

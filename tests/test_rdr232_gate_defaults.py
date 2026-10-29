@@ -653,6 +653,17 @@ def test_operator_model_tiering_zero_does_not_strip_the_default_model(monkeypatc
     assert fake.extra[0]["model"] == "haiku"
 
 
+def test_the_suite_pins_coverage_off_while_the_shipped_default_is_on() -> None:
+    """nexus-jypmj.17: ``NX_ANSWER_COVERAGE`` ships ON, and tests/conftest.py pins it to ``0`` for every test (unlike the
+    two other switches, which it leaves at their defaults) so a unit test over its own operator stubs does not reach
+    the coverage boundary unless it opts in. A test of the shipped default deletes the variable."""
+    import os
+
+    assert os.environ.get(switches.ANSWER_COVERAGE_ENV) == "0", "the suite-wide pin is not in force"
+    assert switches.coverage_enabled(os.environ) is False
+    assert switches.ANSWER_COVERAGE_ENABLED is True and switches.coverage_enabled({}) is True
+
+
 def test_the_suite_wide_default_keeps_unit_tests_off_the_live_model() -> None:
     """The autouse fixture in conftest: the setting stays at its default (so the gate enforces in every test) and
     the dispatch refuses the extraction operator, so a test that does not mean to call a model never does."""

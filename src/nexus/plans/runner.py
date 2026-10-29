@@ -3257,6 +3257,11 @@ async def _plan_run_impl(
     _terminal_seg = segments[-1] if segments else None
     coverage_result: CoverageResult | None = None
     _coverage_calls = 0
+    #: Seconds the last boundary run took (assessment, repair, the reassessment). The terminal step's own
+    #: ``elapsed_ms`` starts after it (nexus-jypmj.17): the assessment calls are their own StepRecords, and the run
+    #: summary carries ``assessment_latency_ms``, so counting them in the terminal step's time too would charge the
+    #: generation with a pre-check it did not run.
+    _boundary_s = 0.0
 
     def _at_boundary(seg: Any) -> bool:
         if coverage_boundary is None or seg is not _terminal_seg:
@@ -3295,7 +3300,9 @@ async def _plan_run_impl(
                     ref=ASSESSMENT_OPERATOR,
                     reason=f"returned {type(result).__name__}; expected dict",
                 )
-        except Exception:
+        except (Exception, asyncio.CancelledError):
+            # A cancelled call counts too (nexus-jypmj.17): the boundary cuts each concurrent call at its own timeout
+            # from outside, and a call cut that way still spent what it spent.
             _record_step(
                 step_index=step_index, operator=ASSESSMENT_OPERATOR, source="llm",
                 elapsed_ms=int((time.monotonic() - started) * 1000), ok=False, usage=_rollup_step_usage(usage),
@@ -3386,11 +3393,12 @@ async def _plan_run_impl(
     ) -> CoverageResult | None:
         """Evaluate the boundary (the ledger and its one repair) on the terminal input; a failure is logged
         and leaves the run alone. *rehydrate* re-reads that input after the repair merged its evidence."""
-        nonlocal coverage_result
+        nonlocal coverage_result, _boundary_s
         from nexus.plans.coverage_ledger import BoundaryView  # noqa: PLC0415 — deferred, as above
 
         assert coverage_boundary is not None
         can_repair = rehydrate is not None and active_supplement() is not None
+        _boundary_started = time.monotonic()
         try:
             coverage_result = await coverage_boundary.run(BoundaryView(
                 evidence_texts=texts, observed=observed, step_outputs=list(step_outputs),
@@ -3404,6 +3412,7 @@ async def _plan_run_impl(
         except Exception as exc:  # noqa: BLE001 — the boundary never fails an answer
             _log.warning("nx_answer_coverage_boundary_failed", error=type(exc).__name__)  # the type only: an exception's text can carry prompt text
             coverage_result = None
+        _boundary_s = time.monotonic() - _boundary_started
         return coverage_result
 
     def _cut_here(at_index: int) -> None:
@@ -3609,6 +3618,7 @@ async def _plan_run_impl(
                     _cov = await _run_coverage_boundary(
                         _boundary_texts, _boundary_observed, seg.plan_indices[0], _rehydrate_bundle,
                     )
+                    _seg_started_at += _boundary_s
                     if _cov is not None and _cov.skip_generation:
                         for _ in range(len(seg.plan_indices) - 1):
                             step_outputs.append(dict(BUNDLED_INTERMEDIATE))
@@ -4028,6 +4038,7 @@ async def _plan_run_impl(
                     return _boundary_evidence(again, again_captured)
 
                 _cov = await _run_coverage_boundary(_step_texts, _step_observed, index, _rehydrate_isolated)
+                _seg_started_at += _boundary_s
                 if _cov is not None and _cov.skip_generation:
                     step_outputs.append(_coverage_skipped_output())
                     _log.info(
