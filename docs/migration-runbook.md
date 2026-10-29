@@ -383,9 +383,11 @@ interrupted — the ETL paths are idempotent and re-converge on
 
 ## If the RDR-231 note-URI backfill halts startup
 
-**Symptom.** The new engine does not come up. `nx daemon service start` exits 2
-within a few seconds, and the upgrade's own finish pass reports a service that
-did not start (see "How the halt first shows up" below for the exact text). The
+**Symptom.** The new engine does not come up. `nx daemon service start` exits 2,
+within a few seconds when it starts the supervisor directly and after 60 seconds
+when it starts it through an autostart unit (launchd, systemd, Task Scheduler),
+and the upgrade's own finish pass reports a service that did not start or is not
+answering (see "How the halt first shows up" below for the exact text). The
 engine's native log (`~/.config/nexus/logs/storage_service_native.log` on a local
 install, the deployment's engine log in the cloud) contains the reason: the
 message below appears in it several times, once for each link of the exception
@@ -602,6 +604,20 @@ again, read the engine log, and check `nx doctor`. [cycle] stop rc=0: Storage se
 or at /usr/bin/systemctl, /bin/systemctl); starting the supervisor directly. Error: Storage
 service supervisor exited with code 2 before the service became ready. S
 ```
+
+On a box whose service runs under an autostart unit (launchd on macOS, systemd
+on Linux, Task Scheduler on Windows), `start` goes through the unit and waits 60
+seconds for the service, so its first line is instead `The autostart unit
+<unit> was started but the storage service did not become ready within 60s;
+the service manager keeps restarting the unit.` (on Windows: `Task Scheduler
+restarts the task when it fails.`), followed by `The supervisor reported:
+Schema migration failed ...` and the same `The engine reported: RDR-231
+note-URI backfill halted ...` line, then the log paths. Because that start only
+timed out waiting, the finish pass cannot tell a halt from a slow migration and
+says so: its line reads `NEEDS HUMAN: ... nothing answers yet; the service may
+still be migrating ... UNVERIFIED`, with the same reason text. The `The engine
+reported:` line is the one that decides it: if it names the RDR-231 halt, the
+engine is not migrating, it has stopped, and the steps below apply.
 
 A later `nx daemon restart-stale` installs and starts nothing: the pinned engine
 is already on disk, and a stopped service is an ordinary state that command does
