@@ -83,7 +83,9 @@ class TuplesBaselineSchemaLiquibaseTest {
         // nexus-fetre (F3 step 2): the server-written sender stamp, tuples-008-sender-session.xml.
         "sender_session",
         // nexus-x907o: when the current claim started, tuples-009-claimed-at.xml.
-        "claimed_at");
+        "claimed_at",
+        // nexus-5r2sc.2.1 (RDR-235 E1): the delayed-visibility instant, tuples-010-available-at.xml.
+        "available_at");
 
     private static final Set<String> TUPLE_CLAIM_LOG_EXPECTED_COLUMNS = Set.of(
         "log_id", "tenant_id", "subspace", "template", "tuple_id",
@@ -700,6 +702,54 @@ class TuplesBaselineSchemaLiquibaseTest {
             }
             try (Connection su = dedicated.createConnection("")) {
                 assertThat(columnNames(su, "tuples")).contains("claimed_at");
+            }
+        } finally {
+            dedicated.stop();
+        }
+    }
+
+    // ── tuples-010: available_at, upgrade from tuples-009 and rollback ───────
+
+    /**
+     * Bead nexus-5r2sc.2.1 (RDR-235 E1): a schema AT tuples-009 has no {@code available_at};
+     * applying the rest of the changelog adds it. Then {@code tuples-010-1}'s own rollback
+     * removes exactly that column (leaving {@code claimed_at}) and the re-apply restores it.
+     */
+    @Test
+    void availableAtColumn_addedOnTopOfTuples009_andRollsBackAndReapplies() throws Exception {
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startEmptyDatabase();
+        try {
+            try (Connection su = dedicated.createConnection("")) {
+                migrateUpTo(su, "tuples-009-1", true);
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).as("at tuples-009 the column does not exist")
+                    .doesNotContain("available_at");
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                migrateUpTo(su, "tuples-010-1", true);
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).contains("available_at");
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                Database database = DatabaseFactory.getInstance()
+                    .findCorrectDatabaseImplementation(new JdbcConnection(su));
+                try (Liquibase liquibase = new Liquibase(
+                        MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
+                    liquibase.rollback(1, new Contexts(), new LabelExpression());
+                }
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).as("rollback drops only available_at")
+                    .doesNotContain("available_at")
+                    .contains("claimed_at", "sender_session", "announced_at");
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                applyFullChangelog(su);
+            }
+            try (Connection su = dedicated.createConnection("")) {
+                assertThat(columnNames(su, "tuples")).contains("available_at");
             }
         } finally {
             dedicated.stop();

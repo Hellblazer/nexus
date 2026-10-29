@@ -100,7 +100,9 @@ migration_wal_bytes_per_worker = 11038000
 # 2147 -> 2148 (2026-10-28): telemetry-017-1 (nexus-jypmj.5, RDR-232, nx_answer_runs.out_of_step_cost_usd) adds one ALTER TABLE
 # (one ADD COLUMN) to a fresh migration, the shape telemetry-016-1 added. Measured: see the nexus-jypmj.5 bead comment (scoped
 # substrate run of tests/test_scenario_journeys.py).
-migration_ddl_per_worker = 2148
+# 2148 -> 2149 (2026-10-29): tuples-010-1 (nexus-5r2sc.2.1, RDR-235 E1, nexus.tuples.available_at) adds one ALTER TABLE ADD COLUMN
+# to a fresh migration, the shape tuples-009-1 added.
+migration_ddl_per_worker = 2149
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

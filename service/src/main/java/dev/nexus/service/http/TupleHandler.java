@@ -41,7 +41,11 @@ import java.util.Optional;
  * simple-reads / POST-for-everything-else convention — these two carry a
  * query-string parameter, not a JSON pattern body):
  * <pre>
- *   POST /v1/tuples/out             {subspace, keys, dims?, body?, nonce?, ttl_seconds?} -&gt; {"id": "&lt;hex&gt;"}
+ *   POST /v1/tuples/out             {subspace, keys, dims?, body?, nonce?, ttl_seconds?, delay_s?} -&gt; {"id": "&lt;hex&gt;"}
+ *                                   delay_s (bead nexus-5r2sc.2.1, RDR-235 E1): optional whole seconds, 0 &lt;= delay_s &lt;=
+ *                                   the template's retention_seconds; the new row cannot be claimed (in/inp) until the
+ *                                   database clock reaches now() + delay_s. Absent or 0 is no delay. A negative,
+ *                                   fractional or non-numeric value is a 400; above retention is a 400 SchemaViolation.
  *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?, order?} -&gt; {"tuples": [...], "order"?, "limit"?}
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?, order?} -&gt; {"tuples": [...], "order"?, "limit"?}
  *                                   order (bead nexus-kp5q3): "asc" (default) or "desc". desc returns the
@@ -71,7 +75,11 @@ import java.util.Optional;
  *   POST /v1/tuples/inp             {subspace, keys_pattern, claimant, lease_s?} -&gt; same shape as /in
  *   POST /v1/tuples/ack             {claim_id, claimant, reply?{subspace, keys, dims?, body?, ttl_seconds?}}
  *                                   -&gt; {"acked": true, "reply_id": "&lt;hex&gt;"|null}
- *   POST /v1/tuples/nack            {claim_id, claimant} -&gt; {"nacked": true}
+ *   POST /v1/tuples/nack            {claim_id, claimant, retry_after_s?} -&gt; {"nacked": true}
+ *                                   retry_after_s (bead nexus-5r2sc.2.1): optional whole seconds, validated as delay_s;
+ *                                   the task returns to available but cannot be claimed until now() + retry_after_s
+ *                                   on the database clock. The attempt counts as it does without the field; a
+ *                                   dead-lettering nack ignores it.
  *   POST /v1/tuples/renew           {claim_id, claimant, lease_s} -&gt; {"lease_until": "&lt;ISO-8601&gt;"}
  *   POST /v1/tuples/release         {claim_id, claimant} -&gt; {"released": true}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
@@ -235,12 +243,15 @@ public final class TupleHandler implements HttpHandler {
         String tupleBody = (String) body.get("body");
         String nonce = (String) body.get("nonce");
         Long ttlSeconds = numberOrNull(body.get("ttl_seconds"));
+        // nexus-5r2sc.2.1 (RDR-235 E1): optional, whole seconds. Range checks live in the repository.
+        Long delaySeconds = wholeSecondsOrNull("delay_s", body.get("delay_s"));
 
         // nexus-fetre (F3 step 2, JDR-002): sender_session is a server-written fact. It comes
         // ONLY from the minted session AuthFilter resolved, never from the request body (a
         // "sender_session" body field is not read), and its absence is not a refusal.
         String senderSession = RequestContext.isMintedSession() ? RequestContext.session() : null;
-        byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession);
+        byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
+                delaySeconds);
         HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(id)) + "}");
     }
 
@@ -453,7 +464,10 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         Map<String, Object> body = readBody(ex);
-        repo.nack(tenant, requireString(body, "claim_id"), requireString(body, "claimant"));
+        // nexus-5r2sc.2.1 (RDR-235 E1): optional, whole seconds, read as lease_s is. Range checks
+        // (negative, above retention) are the repository's SchemaViolation, answered 400 by the ladder.
+        repo.nack(tenant, requireString(body, "claim_id"), requireString(body, "claimant"),
+                wholeSecondsOrNull("retry_after_s", body.get("retry_after_s")));
         HttpUtil.send(ex, 200, "{\"nacked\":true}");
     }
 
@@ -808,6 +822,20 @@ public final class TupleHandler implements HttpHandler {
             out.put(e.getKey(), e.getValue() == null ? null : String.valueOf(e.getValue()));
         }
         return out;
+    }
+
+    /** {@link #numberOrNull} for a field that must be a whole number of seconds (nexus-5r2sc.2.1): a
+     *  fractional JSON number is refused rather than truncated, so {@code delay_s: 1.5} is a 400
+     *  and not a silent 1. A non-numeric string fails in {@code parseLong} as every field here does.
+     *  Both surface as {@link IllegalArgumentException} -&gt; 400. */
+    private static Long wholeSecondsOrNull(String field, Object v) {
+        if (v instanceof Double || v instanceof Float || v instanceof java.math.BigDecimal) {
+            double d = ((Number) v).doubleValue();
+            if (d != Math.rint(d) || Double.isInfinite(d)) {
+                throw new IllegalArgumentException(field + " must be a whole number of seconds");
+            }
+        }
+        return numberOrNull(v);
     }
 
     private static Long numberOrNull(Object v) {

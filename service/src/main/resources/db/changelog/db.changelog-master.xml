@@ -1838,6 +1838,13 @@
     <include file="db/changelog/tuples-009-claimed-at.xml"/>
 
     <!--
+        Bead nexus-5r2sc.2.1 (RDR-235 E1): nexus.tuples.available_at, the delayed-visibility instant
+        (NULL = claimable now). ADD COLUMN only, no DATA EFFECT, no index. After tuples-009-claimed-at.xml,
+        before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/tuples-010-available-at.xml"/>
+
+    <!--
         Bead nexus-gacz0: partial index on catalog_documents (tenant_id, md5(title)) for the exact-title
         lookup GET /v1/catalog/by_title. CREATE INDEX only, no DATA EFFECT. After tuples-009-claimed-at.xml
         (current tail), before the grants-nexus-svc.xml runAlways block.
