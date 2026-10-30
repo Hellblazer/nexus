@@ -30,9 +30,12 @@ its chash-membership filter in both modes.
 * ``traverse``: confined by the existing catalog ``scope_filter`` at document depth (the policy scope is the
   document's tumbler; ``ScopeConstraint.admits`` matches by equality, the engine's ``GraphScopeFilter.ofSubtree``
   the same). It needs no chash filter. In ``steps_not_run`` mode it is not run either.
-* ``store_get_many``: its ids are cut to the document's chash set (a tumbler id must be the document's own).
-  A sampled set (a manifest past :data:`CHASH_ALLOW_MAX` rows) cuts nothing, since a chunk the sample missed
-  would be dropped wrongly.
+* ``store_get_many``: its ids are cut to the document's chash set (a tumbler id must be the document's own), in
+  every form the tool takes (a comma string, a flat list, a list of lists), with an aligned ``collections`` list
+  cut together with the ids; an ``ids`` value it cannot parse becomes an empty list. A SAMPLED set cuts too: an id
+  outside the sample is dropped, because the alternative is to let any sibling's chunk through. Every id a confined
+  run holds came from a step confined to that same set (or from the primary read, which is inside the document),
+  so the cut loses nothing a sample could have kept.
 
 Pure apart from the context variables; stdlib only.
 """
@@ -80,7 +83,8 @@ _UNCONFINABLE_TOOLS = frozenset({
     "search_metadata_scoped", "search_topic_scoped", "search_graph_hop", "search_aspect_scoped",
 })
 
-#: Every tool the confinement acts on, for a census test.
+#: Every tool the confinement acts on. Census: ``tests/test_rdr232_document_confinement.py`` pins that this equals
+#: ``runner._RETRIEVAL_TOOLS | {"traverse"}``, so a retrieval tool added to the runner cannot run unconfined unnoticed.
 CONFINED_TOOLS: frozenset[str] = _CHASH_TOOLS | _UNCONFINABLE_TOOLS | {"traverse", "store_get_many"}
 
 
@@ -107,8 +111,14 @@ class DocumentConfinement:
     mode: ConfinementMode
     #: The document's manifest chunk hashes (distinct, at most :data:`CHASH_ALLOW_MAX`).
     chashes: tuple[str, ...] = ()
-    #: How many manifest rows the document has (M); ``chashes`` is a sample when it is shorter.
+    #: How many manifest rows the document has (M).
     manifest_rows: int = 0
+    #: Rows the read left out of ``chashes`` because of a cap (the read cap, the engine's own sampling or
+    #: :data:`CHASH_ALLOW_MAX`). Duplicate chunk text and malformed hashes are not sampling and are not counted.
+    rows_dropped: int = 0
+    #: The engine advertised ``vector_search_chash_allow_supported``. ``mode`` is ``steps_not_run`` either because it
+    #: did not, or because it did and the manifest gave no hash to send; this tells the two apart.
+    engine_filter_available: bool = False
     _set: frozenset[str] = field(default=frozenset(), repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -116,8 +126,9 @@ class DocumentConfinement:
 
     @property
     def sampled(self) -> bool:
-        """The chash set is a sample of the manifest (a manifest past the cap, or rows without a usable hash)."""
-        return self.manifest_rows > len(self.chashes)
+        """The chash set is a sample of the manifest: a cap left rows out of it. Not a manifest whose rows repeat a
+        chunk's text (fewer distinct hashes than rows) or carry a malformed hash."""
+        return self.rows_dropped > 0
 
     @property
     def sends_filter(self) -> bool:
@@ -159,8 +170,12 @@ def build_confinement(
     held = evidence.chashes_of(tumbler) if evidence is not None and hasattr(evidence, "chashes_of") else None
     chashes = tuple(held.chashes) if held is not None else ()
     rows = int(held.manifest_rows) if held is not None else 0
+    dropped = int(getattr(held, "rows_dropped", 0) or 0) if held is not None else 0
     mode: ConfinementMode = "engine_filter" if engine_filter and chashes else "steps_not_run"
-    return DocumentConfinement(tumbler, collection, mode, chashes, max(rows, len(chashes)))
+    return DocumentConfinement(
+        tumbler, collection, mode, chashes, max(rows, len(chashes)), rows_dropped=dropped,
+        engine_filter_available=bool(engine_filter),
+    )
 
 
 def confine_step(tool: str, args: Mapping[str, Any], c: DocumentConfinement | None) -> Confinement:
@@ -183,16 +198,51 @@ def confine_step(tool: str, args: Mapping[str, Any], c: DocumentConfinement | No
     return Confinement(out)
 
 
+_TUMBLER = re.compile(r"\d+(\.\d+)+")
+
+
 def _cut_ids(args: dict[str, Any], c: DocumentConfinement) -> dict[str, Any]:
-    ids = args.get("ids")
-    if c.sampled or not isinstance(ids, list):
-        return args
+    """*args* of a ``store_get_many`` step with its ids cut to the document, in every form the tool takes.
+
+    A tumbler id must be the document's own, any other id must be one of its chunk hashes. ``ids`` may be a comma
+    string, a flat list or a list of lists (parallel streams; each stream is cut, the stream count and any
+    ``collections`` aligned to it stay). When ``collections`` is aligned 1:1 with the flat ids (the tool's per-id
+    routing) it is cut together with them, so no id is read from another id's collection. Anything else in ``ids``
+    (missing, a dict, a number) fails closed to an empty list."""
 
     def keep(i: Any) -> bool:
-        s = str(i)
-        return s == c.tumbler if re.fullmatch(r"\d+(\.\d+)+", s) else c.contains(s)
+        s = str(i).strip()
+        return s == c.tumbler if _TUMBLER.fullmatch(s) else c.contains(s)
 
-    return {**args, "ids": [i for i in ids if keep(i)]}
+    ids = args.get("ids")
+    if isinstance(ids, list) and ids and all(isinstance(stream, list) for stream in ids):
+        return {**args, "ids": [[i for i in stream if i and keep(i)] for stream in ids]}
+    if isinstance(ids, list):
+        id_list = [str(i) for i in ids if i]
+    elif isinstance(ids, str):
+        id_list = [p.strip() for p in ids.split(",") if p.strip()]
+    else:
+        return {**args, "ids": []}
+    limit = args.get("limit_per_source")
+    if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 0:
+        id_list = id_list[:limit]  # the tool truncates before it routes; align on the same list it will
+    mask = [keep(i) for i in id_list]
+    out = {**args, "ids": [i for i, k in zip(id_list, mask, strict=True) if k]}
+    collections = args.get("collections")
+    if isinstance(collections, list):
+        coll_list = [str(x) for x in collections if x]
+    elif isinstance(collections, str):
+        coll_list = [x.strip() for x in collections.split(",") if x.strip()]
+    else:
+        coll_list = []
+    if coll_list and len(coll_list) == len(id_list):
+        kept = [x for x, k in zip(coll_list, mask, strict=True) if k]
+        out["collections"] = kept if isinstance(collections, list) else ",".join(kept)
+    elif len(coll_list) > 1 and len(out["ids"]) == len(coll_list):
+        # A broadcast over several collections that the cut would turn into per-id routing (the tool reads equal
+        # lengths as aligned): the document lives in one collection, so name only that one.
+        out["collections"] = c.collection
+    return out
 
 
 def empty_confined_output(tool: str, step_index: int, c: DocumentConfinement, reason: str) -> dict[str, Any]:

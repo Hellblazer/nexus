@@ -1319,6 +1319,10 @@ class DocumentChashes:
     doc_id: str
     chashes: tuple[str, ...]
     manifest_rows: int
+    #: Rows left out of ``chashes`` by a cap: the read cap or the engine's own sampling (``manifest_rows`` minus the
+    #: rows held) and :data:`CHASH_ALLOW_MAX`. Duplicate chunk text and malformed hashes are not counted: they are
+    #: not sampling, the set still names every distinct chunk the document has.
+    rows_dropped: int = 0
 
 
 @dataclass(frozen=True)
@@ -1670,9 +1674,12 @@ def select_primary_evidence(
     document_chashes: list[DocumentChashes] = []
     for k, d in enumerate(docs):
         held, _bad = valid_chashes([r.chash for r in all_rows[k]])
+        read_cut = max(engine_total[k] - len(all_rows[k]), 0)
+        wire_cut = 0
         if len(held) > CHASH_ALLOW_MAX:
+            wire_cut = len(held) - CHASH_ALLOW_MAX
             held = tuple(held[i] for i in _spread(range(len(held)), CHASH_ALLOW_MAX))
-        document_chashes.append(DocumentChashes(d.tumbler or "", held, engine_total[k]))
+        document_chashes.append(DocumentChashes(d.tumbler or "", held, engine_total[k], read_cut + wire_cut))
     allowance = _water_fill(caps.max_manifest_rows, [len(r) for r in all_rows])
     sampled: list[list[ManifestRow]] = []
     for rows, allow in zip(all_rows, allowance, strict=True):

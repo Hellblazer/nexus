@@ -124,6 +124,10 @@ class SearchDiagnostics:
     #: Last field so positional construction stays additive. Empty for a
     #: hand-built struct; :meth:`kept_for` then falls back to ``raw - dropped``.
     kept: dict[str, int] = field(default_factory=dict)
+    #: nexus-jypmj: rows the engine returned that were NOT in the active ``chash_allow`` list, dropped client-side. A
+    #: non-zero count means the engine ignored the key (a rollback, or a replica older than the cached capability
+    #: flag), so the run's document confinement did not hold at the engine.
+    chash_allow_dropped: int = 0
 
     def kept_for(self, name: str) -> int:
         """Rows *name* contributes to the engine's candidate pool.
@@ -1276,6 +1280,15 @@ def _record_poisoned_collection(name: str, exc: Exception) -> None:
 _CLUSTER_DEFAULT = "semantic"
 
 
+def _row_chash(r: "SearchResult") -> str:
+    """The chunk hash a result row stands for: its ``chunk_text_hash`` metadata, else its id (a T3 chunk's natural id
+    is its hash). Lower-cased; ``""`` when neither is a string."""
+    h = r.metadata.get("chunk_text_hash") if r.metadata else None
+    if not (isinstance(h, str) and h):
+        h = r.id
+    return h.lower() if isinstance(h, str) else ""
+
+
 def search_cross_corpus(
     query: str,
     collections: list[str],
@@ -1437,6 +1450,8 @@ def search_cross_corpus(
 
     _allow = active_chash_allow()
     chash_kw: dict[str, Any] = {"chash_allow": list(_allow)} if _allow is not None else {}
+    _allow_set: frozenset[str] | None = frozenset(h.lower() for h in _allow) if _allow is not None else None
+    chash_allow_dropped = 0
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
     cfg_cluster = cfg.get("search", {}).get("cluster_by")
@@ -2253,7 +2268,15 @@ def search_cross_corpus(
                     error=part["error"],
                 )
             continue
-        all_results.extend(part["results"])
+        part_results = part["results"]
+        if _allow_set is not None:
+            # nexus-jypmj: verify the engine honoured the filter. The capability flag is cached for minutes, so a
+            # rollback or an older replica can answer 200 and ignore the key; a row outside the allow list is then
+            # another document's text in a document-confined run. Fail closed: drop it and count it.
+            held = [r for r in part_results if _row_chash(r) in _allow_set]
+            chash_allow_dropped += len(part_results) - len(held)
+            part_results = held
+        all_results.extend(part_results)
         pool_lexical_ids.update(part.get("lexical_ids", ()))
         for rid, raw in part.get("embeddings", {}).items():
             prefetched_embeddings[(col, rid)] = raw
@@ -2274,6 +2297,12 @@ def search_cross_corpus(
                 dropped=part["dropped"],
                 threshold=part["threshold"],
             )
+
+    if chash_allow_dropped:
+        _log.warning(
+            "chash_allow_ignored_by_engine", dropped=chash_allow_dropped, allow=len(_allow_set or ()),
+            collections=sorted(diag_per_collection),
+        )
 
     if dim_mismatch_cols:
         # nexus-vply6 fix round 2: unconditional WARNING now -- the old
@@ -2338,6 +2367,7 @@ def search_cross_corpus(
             total_dropped=total_dropped,
             total_raw=total_raw,
             failed_collections=failed_collections,
+            chash_allow_dropped=chash_allow_dropped,
         ))
 
     # RDR-087 Phase 2.2: persist per-call threshold-filter telemetry.

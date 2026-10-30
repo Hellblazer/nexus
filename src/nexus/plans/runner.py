@@ -4336,6 +4336,14 @@ async def _plan_run_impl(
     # The concurrent assessment calls (nexus-jypmj.17) are appended as they finish, in no fixed order; step_index is
     # unique and assigned in plan order, so listing by it makes the envelope's step order the same on every run.
     step_records.sort(key=lambda r: r.step_index)
+    # nexus-jypmj: a filtered step whose engine returned rows outside the document's hashes (it ignored the key) says
+    # so in the run's scope diagnostics, beside the step's ``document_filtered`` outcome.
+    for _diag in scope_diagnostics:
+        if _diag.get("scope_kind") == "document" and _diag.get("outcome") == "document_filtered":
+            _i = _diag.get("step_index")
+            _out = step_outputs[_i] if isinstance(_i, int) and 0 <= _i < len(step_outputs) else None
+            if isinstance(_out, dict) and _out.get("chash_allow_dropped"):
+                _diag["rows_outside_allow"] = int(_out["chash_allow_dropped"])
     return PlanResult(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,

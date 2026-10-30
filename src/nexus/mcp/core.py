@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
 import json
 import re
 import threading
@@ -2932,6 +2933,23 @@ def _append_fanout_excluded_note(text: str, excluded: list[str]) -> str:
     return f"{text}\n[excluded below fan-out floor: {', '.join(excluded)}]"
 
 
+def _chash_allow_dropped(diagnostics: list) -> int:
+    """Rows a document-confined search dropped because the engine returned them outside ``chash_allow`` (nexus-jypmj:
+    the engine ignored the key). 0 for an unconfined search."""
+    return sum(int(getattr(d, "chash_allow_dropped", 0) or 0) for d in diagnostics or ())
+
+
+def _chash_allow_note(diagnostics: list) -> str:
+    """The sentence that tells a reader the engine did not honour the document filter, or ""."""
+    n = _chash_allow_dropped(diagnostics)
+    if not n:
+        return ""
+    return (
+        f"Note: {n} row(s) the engine returned were outside the document filter (chash_allow) and were dropped; "
+        "the engine did not apply the filter on this call."
+    )
+
+
 def _failed_collections_note(diagnostics: list) -> str:
     """The "N collection(s) excluded by service errors" sentence, or ""
     when nothing was excluded (nexus-vply6 fix round 2, point 2 — Sam's
@@ -2977,6 +2995,9 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
     # not searched — a zero-hit must say so or it reads as a genuine miss.
     failed_note = _failed_collections_note(diagnostics)
     suffix = f" {failed_note}" if failed_note else ""
+    allow_note = _chash_allow_note(diagnostics)  # nexus-jypmj: every row the engine returned was outside the filter
+    if allow_note:
+        suffix += f" {allow_note}"
     worst = diagnostics[0].worst_offender()
     if worst is None:
         return base + suffix
@@ -3015,6 +3036,8 @@ def _structured_no_results(diagnostics: list, *, base: str = "No results.") -> d
         # A caller must not have to parse prose to branch on this.
         "threshold_dropped": worst is not None,
     }
+    if _chash_allow_dropped(diagnostics):
+        out["chash_allow_dropped"] = _chash_allow_dropped(diagnostics)
     if worst is not None:
         name, threshold, top_distance = worst
         out["closest_dropped"] = {
@@ -3147,9 +3170,21 @@ def _search_render(
         # retrieved, so a lexical call that reused a vector-only page would be
         # served silently-wrong results inside the 120s TTL.
         # Found by the RDR-217 enrichment pass before the parameter existed.
+        #
+        # The document confinement's chunk-hash restriction (nexus-jypmj,
+        # ``active_chash_allow``) changes WHICH rows come back just as
+        # ``lexical`` does, so it is in the key: a confined call must never
+        # be served an unconfined page (or another document's), and an
+        # unconfined call must never be served the confined one. A digest of
+        # the sorted set, with ``None`` (no restriction) distinct from an
+        # empty list (a restriction that admits nothing).
+        from nexus.plans.document_confinement import active_chash_allow  # noqa: PLC0415 — leaf stdlib module; deferred like this function's other imports
+
+        _allow = active_chash_allow()
+        allow_key = None if _allow is None else hashlib.sha256("\n".join(sorted(_allow)).encode()).hexdigest()
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
-            topic or "", threshold, lexical, boost_window,
+            topic or "", threshold, lexical, boost_window, allow_key,
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -3384,8 +3419,9 @@ def _search_render(
                 "chunk_text_hash": [
                     r.metadata.get("chunk_text_hash", "") for r in page
                 ],
-                **({"warnings": [w for w in (_failed_collections_note(diag), rerank_note) if w]}
-                   if (_failed_collections_note(diag) or rerank_note) else {}),
+                **({"warnings": [w for w in (_failed_collections_note(diag), rerank_note, _chash_allow_note(diag)) if w]}
+                   if (_failed_collections_note(diag) or rerank_note or _chash_allow_note(diag)) else {}),
+                **({"chash_allow_dropped": _chash_allow_dropped(diag)} if _chash_allow_dropped(diag) else {}),
             }
 
         # nexus-onn7s: the reader instruction leads every text render, and
@@ -5275,6 +5311,9 @@ def query(
                     r.metadata.get("chunk_text_hash", "") for r in page
                 ],
             }
+            if _chash_allow_dropped(qdiag):
+                structured_result["chash_allow_dropped"] = _chash_allow_dropped(qdiag)
+                structured_result["warnings"] = [_chash_allow_note(qdiag)]
             if graph_batch_info is not None:
                 # nexus-descendants-seed-n1 / substantive critique finding 2:
                 # disclose possible graph-traversal truncation — never

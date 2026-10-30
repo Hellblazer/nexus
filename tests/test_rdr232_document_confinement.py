@@ -107,8 +107,14 @@ def _tenant_free():
 IN_A, IN_B, OUT = _h("in a"), _h("in b"), _h("a sibling document's chunk")
 
 
-def _confinement(mode: str = "engine_filter", chashes: tuple[str, ...] = (IN_A, IN_B), rows: int | None = None) -> DocumentConfinement:
-    return DocumentConfinement(ART_DOC, ART_COL, mode, chashes, len(chashes) if rows is None else rows)  # type: ignore[arg-type]
+def _confinement(
+    mode: str = "engine_filter", chashes: tuple[str, ...] = (IN_A, IN_B), rows: int | None = None, *,
+    dropped: int = 0, available: bool | None = None,
+) -> DocumentConfinement:
+    return DocumentConfinement(
+        ART_DOC, ART_COL, mode, chashes, len(chashes) if rows is None else rows,  # type: ignore[arg-type]
+        rows_dropped=dropped, engine_filter_available=(mode == "engine_filter") if available is None else available,
+    )
 
 
 # ── the step rules ───────────────────────────────────────────────────────────────────────────────────────
@@ -151,19 +157,81 @@ def test_a_traverse_step_runs_in_engine_filter_mode_and_every_other_tool_is_unto
     assert confine_step("traverse", {"seeds": ["1.2.4686"]}, c).run
     assert confine_step("generate", {"context": "x"}, c).args == {"context": "x"}
     assert confine_step("search", {"query": "q"}, None).args == {"query": "q"}
-    assert CONFINED_TOOLS == {
-        "search", "query", "search_metadata_scoped", "search_topic_scoped", "search_graph_hop", "search_aspect_scoped",
-        "traverse", "store_get_many",
-    }
 
 
-def test_store_get_many_ids_are_cut_to_the_document_unless_its_set_is_a_sample() -> None:
+
+def test_the_confined_tools_are_every_retrieval_tool_the_runner_knows_plus_the_walk() -> None:
+    # The census: a retrieval tool added to the runner's set is a tool the confinement must decide on. Pinned to the
+    # runner's own set, not to a literal, so adding one without a rule here fails this test instead of running
+    # unconfined.
+    assert CONFINED_TOOLS == runner._RETRIEVAL_TOOLS | {"traverse"}
+
+
+def test_store_get_many_ids_are_cut_to_the_document_even_when_its_set_is_a_sample() -> None:
     c = _confinement()
     args = {"ids": [IN_A, OUT, IN_B, ART_DOC, NEXUS_DOC], "collections": "rdr"}
     assert confine_step("store_get_many", args, c).args["ids"] == [IN_A, IN_B, ART_DOC]
     assert confine_step("store_get_many", args, _confinement("steps_not_run")).args["ids"] == [IN_A, IN_B, ART_DOC]
-    sampled = _confinement(rows=3000)
-    assert sampled.sampled and confine_step("store_get_many", args, sampled).args["ids"] == args["ids"]
+    sampled = _confinement(rows=3000, dropped=2900)
+    assert sampled.sampled and confine_step("store_get_many", args, sampled).args["ids"] == [IN_A, IN_B, ART_DOC], (
+        "a sample still cuts: the alternative is to let any sibling's chunk through"
+    )
+
+
+@pytest.mark.parametrize("ids, want", [
+    (f"{IN_A},{OUT},{IN_B}", [IN_A, IN_B]),                      # a comma string
+    (f" {OUT} , {IN_A} ,, ", [IN_A]),                             # spaces and empty parts
+    ([IN_A, "", OUT, IN_B], [IN_A, IN_B]),  # a flat list with a blank
+    ([[IN_A, OUT], [NEXUS_DOC, IN_B], []], [[IN_A], [IN_B], []]),  # parallel streams keep their count
+    ([IN_A, [OUT]], [IN_A]),                                      # mixed: the nested list is not an id and is cut
+])
+def test_store_get_many_cuts_ids_in_every_form_the_tool_accepts(ids: Any, want: Any) -> None:
+    out = confine_step("store_get_many", {"ids": ids, "collections": "rdr"}, _confinement()).args["ids"]
+    assert out == want
+
+
+@pytest.mark.parametrize("ids", [None, 7, {"a": 1}, object()])
+def test_store_get_many_ids_it_cannot_parse_fail_closed(ids: Any) -> None:
+    assert confine_step("store_get_many", {"ids": ids, "collections": "rdr"}, _confinement()).args["ids"] == []
+
+
+def test_store_get_many_cuts_an_aligned_collections_list_together_with_the_ids() -> None:
+    c = _confinement()
+    listed = confine_step(
+        "store_get_many", {"ids": [IN_A, OUT, IN_B], "collections": ["rdr__a", "rdr__b", "rdr__c"]}, c).args
+    assert listed["ids"] == [IN_A, IN_B] and listed["collections"] == ["rdr__a", "rdr__c"], "the sibling's collection goes"
+    csv = confine_step("store_get_many", {"ids": f"{OUT},{IN_A}", "collections": "rdr__a,rdr__b"}, c).args
+    assert csv["ids"] == [IN_A] and csv["collections"] == "rdr__b"
+    # parallel streams: collections align to STREAMS, which keep their count
+    streams = confine_step("store_get_many", {"ids": [[OUT], [IN_B]], "collections": ["rdr__a", "rdr__b"]}, c).args
+    assert streams["ids"] == [[], [IN_B]] and streams["collections"] == ["rdr__a", "rdr__b"]
+
+
+def test_store_get_many_aligns_on_the_list_the_tool_will_route_after_its_own_limit() -> None:
+    # limit_per_source truncates first; the tool then reads equal lengths as per-id routing
+    c = _confinement()
+    args = {"ids": [OUT, IN_A, IN_B, OUT], "collections": ["rdr__a", "rdr__b", "rdr__c"], "limit_per_source": 3}
+    out = confine_step("store_get_many", args, c).args
+    assert out["ids"] == [IN_A, IN_B] and out["collections"] == ["rdr__b", "rdr__c"]
+
+
+def test_a_broadcast_over_several_collections_is_not_turned_into_per_id_routing_by_the_cut() -> None:
+    # three ids over two collections is a broadcast; cut to two ids it would read as 1:1 and send each id to ONE collection
+    c = _confinement()
+    out = confine_step("store_get_many", {"ids": [IN_A, OUT, IN_B], "collections": "rdr__a,rdr__b"}, c).args
+    assert out["ids"] == [IN_A, IN_B] and out["collections"] == ART_COL
+
+
+@pytest.mark.asyncio
+async def test_a_string_ids_hydration_step_is_cut_in_a_real_run() -> None:
+    # the plan runner end to end: ids written as a comma string (a form the tool accepts) were passed through whole
+    plan = {"steps": [
+        {"tool": "store_get_many", "args": {"ids": f"{IN_A},{OUT},{IN_B}", "collections": ART_COL}},
+        {"tool": "generate", "args": {"context": "$step1.contents", "question": "q"}},
+    ]}
+    d = CountingDispatcher()
+    await plan_run(_match(plan), BINDINGS, dispatcher=d, bundle_operators=False, document_confinement=_confinement())
+    assert d.of("store_get_many")[0]["ids"] == [IN_A, IN_B]
 
 
 def test_valid_chashes_drops_malformed_and_repeated_hashes() -> None:
@@ -262,11 +330,62 @@ def test_the_disclosure_names_the_document_the_confinement_the_primary_read_and_
     assert "The primary read holds 57 of its 58 chunks" in text
     assert f"a coverage repair may add up to {MAX_REPAIR_ITEMS} more chunks of the same document" in text
     assert engine.to_wire()["confinement"] == "engine_filter" and engine.to_wire()["allow_chunks"] == 58
-    sampled = n.with_primary(primary, _confinement(chashes=(IN_A,), rows=58)).disclosure()
+    sampled = n.with_primary(primary, _confinement(chashes=(IN_A,), rows=58, dropped=57)).disclosure()
     assert "a filter of 1 chunk hashes, a sample of its 58 manifest rows" in sampled
     off = n.with_primary(primary, _confinement("steps_not_run")).disclosure()
     assert "does not apply the document filter, so no secondary retrieval step (search, query, traverse) was run" in off
     assert "the other documents were not read" not in off and "by the engine" not in off
+    # the engine HAS the filter and the manifest gave no hash: its own sentence, not "does not apply"
+    nohash = n.with_primary(primary, _confinement("steps_not_run", chashes=(), available=True)).disclosure()
+    assert "The engine applies the document filter, but the document's manifest gave no chunk hash to filter by" in nohash
+    assert "no secondary retrieval step (search, query, traverse) was run" in nohash
+    assert "does not apply the document filter" not in nohash
+
+
+def test_build_confinement_records_that_the_engine_had_the_filter_when_the_manifest_gave_no_hash() -> None:
+    bare = build_confinement(tumbler=ART_DOC, collection=ART_COL, evidence=PrimaryEvidence(), engine_filter=True)
+    assert bare.mode == "steps_not_run" and bare.engine_filter_available is True
+    old_engine = build_confinement(tumbler=ART_DOC, collection=ART_COL, evidence=PrimaryEvidence(), engine_filter=False)
+    assert old_engine.engine_filter_available is False
+
+
+# ── `sampled` counts rows a cap dropped, nothing else ────────────────────────────────────────────────────
+
+
+def test_a_manifest_that_repeats_a_chunks_text_is_not_a_sample() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, ["alpha", "beta", "alpha", "gamma", "beta"])  # 5 rows, 3 distinct chunks
+    _res, primary = _select(cat, t3, [RDR084], one_source=True, narrowed=True)
+    held = primary.chashes_of(ART_DOC)
+    assert held is not None and held.manifest_rows == 5 and len(held.chashes) == 3 and held.rows_dropped == 0
+    built = build_confinement(tumbler=ART_DOC, collection=ART_COL, evidence=primary, engine_filter=True)
+    assert built.sampled is False and built.to_wire()["sampled"] is False
+    assert confine_step("store_get_many", {"ids": ["alpha"]}, built).args["ids"] == []  # still cut by hash
+    text = SingleSourceNarrowing(True, "RDR-084", tumbler=ART_DOC).with_primary(primary, built).disclosure()
+    assert "a sample of its" not in text, "duplicate chunk text is not sampling"
+
+
+def test_a_manifest_row_with_a_malformed_hash_is_not_a_sample() -> None:
+    from nexus.catalog.http_catalog_client import _manifest_row_from_dict
+
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, ["alpha", "beta"])
+    cat.manifests[ART_DOC].append(_manifest_row_from_dict(
+        {"position": 2, "chash": "not-a-hash", "chunk_index": 2, "collection": ART_COL}))
+    _res, primary = _select(cat, t3, [RDR084], one_source=True, narrowed=True)
+    held = primary.chashes_of(ART_DOC)
+    assert held is not None and held.manifest_rows == 3 and len(held.chashes) == 2 and held.rows_dropped == 0
+    assert build_confinement(tumbler=ART_DOC, collection=ART_COL, evidence=primary, engine_filter=True).sampled is False
+
+
+def test_a_read_cap_that_leaves_rows_out_is_a_sample() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, [f"chunk {i}" for i in range(30)])
+    caps = PrimaryEvidenceCaps(max_manifest_rows_read=12)
+    _res, primary = _select(cat, t3, [RDR084], caps=caps, one_source=True, narrowed=True)
+    held = primary.chashes_of(ART_DOC)
+    assert held is not None and len(held.chashes) == 12 and held.rows_dropped == 18
+    assert build_confinement(tumbler=ART_DOC, collection=ART_COL, evidence=primary, engine_filter=True).sampled is True
 
 
 # ── the runner: a counting dispatcher over a real plan_run ───────────────────────────────────────────────
@@ -810,3 +929,235 @@ def test_the_narrowed_share_and_the_repair_supplement_fill_the_reducers_slots_ex
     assert RESERVED_SHARE_NARROWED == 88 and DEFAULT_CAPS.max_narrowed_source_items == 82
     assert DEFAULT_CAPS.max_narrowed_source_items + LifecycleCaps().max_records == RESERVED_SHARE_NARROWED
     assert RESERVED_SHARE_NARROWED + MAX_REPAIR_ITEMS == runner._OPERATOR_MAX_INPUTS == 100
+
+
+# ── the search tool's page cache never serves across a confinement (nexus-jypmj code review, blocker 1) ────
+
+
+def _honouring_engine(fake) -> None:
+    """Make the route double apply ``chash_allow`` the way the engine does: only the named chunks are candidates."""
+    serve = fake._serve_route
+
+    def honour(body: dict) -> dict:
+        allow = body.get("chash_allow")
+        saved = fake.data
+        if allow is not None:
+            keep = set(allow)
+            fake.data = {c: [r for r in rows if r[0] in keep] for c, rows in saved.items()}
+        try:
+            envelope = serve(body)
+        finally:
+            fake.data = saved
+        for row in envelope["results"]:
+            row["chunk_text_hash"] = row["id"]  # the engine row carries its chunk's hash
+        return envelope
+
+    fake._serve_route = honour
+
+
+def _make_hash_engine(monkeypatch, *, honour: bool):
+    """A route engine holding three chunks named by their hash (two of document A, one of document B), reached through
+    the REAL ``core.search`` wrapper and the REAL runner dispatcher: nothing of the tool or the dispatcher is patched,
+    only the transport, the tenant singletons (catalog, taxonomy, telemetry) and the page cache."""
+    import nexus.search_engine as se
+    from nexus.mcp import core
+    from tests.test_search_per_collection_route import _BGE, _FakeEngine, _cols
+
+    monkeypatch.setattr(se, "_mixed_model_groups", {})
+    monkeypatch.setattr(hvc, "_per_collection_absent_warned", False)
+    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
+    (col,) = _cols("rdr", _BGE, 1)
+    fake = _FakeEngine(monkeypatch, {col: [(IN_A, 0.10), (IN_B, 0.11), (OUT, 0.12)]})
+    if honour:
+        _honouring_engine(fake)
+    else:  # an engine that ignores the key (an older replica behind the cached capability flag)
+        plain = fake._serve_route
+
+        def ignore(body: dict) -> dict:
+            envelope = plain(body)
+            for row in envelope["results"]:
+                row["chunk_text_hash"] = row["id"]
+            return envelope
+
+        fake._serve_route = ignore
+    serve = fake._request
+
+    def request(method, path, **kw):
+        if path.startswith("/v1/vectors/stats"):  # the corpus resolver's routing listing
+            return [{"name": col, "content_type": "rdr", "owner_id": "c0", "embedding_model": _BGE, "lifecycle_state": "live"}]
+        return serve(method, path, **kw)
+
+    monkeypatch.setattr(hvc, "_request", request)
+    monkeypatch.setattr(core, "_get_t3", lambda: fake.client)
+    monkeypatch.setattr(core, "_get_catalog", lambda: None)
+    monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
+    monkeypatch.setattr(core, "_search_telemetry_sink", lambda: None)
+    monkeypatch.setattr(core, "_get_t1", lambda: (MagicMock(session_id=""), None))  # the search-trace write is skipped
+    core._reset_page_cache_for_tests()
+    return fake, col
+
+
+@pytest.fixture
+def hash_engine(monkeypatch):
+    from nexus.mcp import core
+
+    yield _make_hash_engine(monkeypatch, honour=True)
+    core._reset_page_cache_for_tests()
+
+
+@pytest.fixture
+def ignoring_engine(monkeypatch):
+    from nexus.mcp import core
+
+    yield _make_hash_engine(monkeypatch, honour=False)
+    core._reset_page_cache_for_tests()
+
+
+async def _dispatch_search(col: str, allow: list[str] | None, query: str = "q") -> dict:
+    args: dict[str, Any] = {"query": query, "corpus": col, "limit": 5, "threshold": float("inf")}
+    if allow is not None:
+        args["chash_allow"] = allow
+    return await runner._default_dispatcher("search", args)
+
+
+@pytest.mark.asyncio
+async def test_an_unconfined_search_then_a_confined_one_with_the_same_arguments_reaches_the_engine_with_the_filter(
+    hash_engine,
+) -> None:
+    fake, col = hash_engine
+    first = await _dispatch_search(col, None)
+    assert set(first["chunk_text_hash"]) == {IN_A, IN_B, OUT}, "non-vacuity: the unconfined page holds the sibling's chunk"
+    second = await _dispatch_search(col, [IN_A, IN_B])
+    calls = fake.route_calls()
+    assert len(calls) == 2, "the confined call was not served from the unconfined call's cache entry"
+    assert "chash_allow" not in calls[0] and calls[1]["chash_allow"] == [IN_A, IN_B]
+    assert set(second["chunk_text_hash"]) == {IN_A, IN_B}
+
+
+@pytest.mark.asyncio
+async def test_a_confined_search_then_an_unconfined_one_does_not_return_the_confined_rows(hash_engine) -> None:
+    fake, col = hash_engine
+    confined = await _dispatch_search(col, [IN_A])
+    assert confined["chunk_text_hash"] == [IN_A]
+    plain = await _dispatch_search(col, None)
+    assert set(plain["chunk_text_hash"]) == {IN_A, IN_B, OUT}, "a user search after a confined run is not cut to the document"
+    assert len(fake.route_calls()) == 2
+
+
+@pytest.mark.asyncio
+async def test_two_confined_searches_for_different_documents_do_not_share_an_entry(hash_engine) -> None:
+    fake, col = hash_engine
+    a = await _dispatch_search(col, [IN_A])
+    b = await _dispatch_search(col, [OUT])
+    assert a["chunk_text_hash"] == [IN_A] and b["chunk_text_hash"] == [OUT]
+    assert [c["chash_allow"] for c in fake.route_calls()] == [[IN_A], [OUT]]
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_confined_search_for_the_same_document_is_still_served_from_the_cache(hash_engine) -> None:
+    # the control: the key distinguishes sets, it does not turn the cache off for a confined run (page turns)
+    fake, col = hash_engine
+    await _dispatch_search(col, [IN_B, IN_A])
+    await _dispatch_search(col, [IN_A, IN_B])
+    assert len(fake.route_calls()) == 1, "the allow set is keyed sorted, so the same document hits"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_allow_list_is_a_different_page_from_no_restriction(hash_engine) -> None:
+    fake, col = hash_engine
+    plain = await _dispatch_search(col, None)
+    nothing = await _dispatch_search(col, [])
+    assert plain["chunk_text_hash"] and not nothing["chunk_text_hash"]
+    assert len(fake.route_calls()) == 2
+
+
+# ── the engine's answer is checked against the allow list (the cached capability flag can be stale) ──────────
+
+
+def test_rows_an_engine_returns_outside_the_allow_list_are_dropped_and_counted(ignoring_engine) -> None:
+    from nexus.search_engine import search_cross_corpus
+
+    fake, col = ignoring_engine
+    diag: list = []
+    with chash_allow_scope([IN_A, IN_B]):
+        rows = search_cross_corpus(
+            "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag)
+    assert fake.route_calls()[0]["chash_allow"] == sorted([IN_A, IN_B]), "the key was sent; the engine ignored it"
+    assert {r.id for r in rows} == {IN_A, IN_B}, "the sibling's chunk the engine returned is not handed on"
+    assert diag[0].chash_allow_dropped == 1
+
+
+def test_a_row_identified_by_its_chunk_text_hash_metadata_is_checked_by_that_hash(ignoring_engine) -> None:
+    from nexus.search_engine import search_cross_corpus
+
+    fake, col = ignoring_engine
+    plain = fake._serve_route
+
+    def other_id(body: dict) -> dict:
+        envelope = plain(body)
+        for row in envelope["results"]:
+            row["id"] = "chunk-" + row["id"][:8]  # an id that is not the hash; the metadata still names it
+        return envelope
+
+    fake._serve_route = other_id
+    diag: list = []
+    with chash_allow_scope([IN_A]):
+        rows = search_cross_corpus(
+            "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag)
+    assert [r.metadata["chunk_text_hash"] for r in rows] == [IN_A] and diag[0].chash_allow_dropped == 2
+
+
+def test_the_flat_search_and_the_lexical_leg_are_checked_too(ignoring_engine) -> None:
+    from nexus.search_engine import search_cross_corpus
+
+    fake, col = ignoring_engine
+    fake.route = False
+    fake.lexical_rows = [{"id": OUT, "content": "t", "distance": 0.5, "collection": col, "chunk_text_hash": OUT}]
+    diag: list = []
+    with chash_allow_scope([IN_A]):
+        rows = search_cross_corpus(
+            "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, lexical=True,
+            diagnostics_out=diag)
+    assert {r.id for r in rows} <= {IN_A}, "neither the flat rows nor the lexical row outside the list survive"
+    assert diag[0].chash_allow_dropped >= 2
+
+
+def test_an_unconfined_search_drops_nothing(ignoring_engine) -> None:
+    from nexus.search_engine import search_cross_corpus
+
+    fake, col = ignoring_engine
+    diag: list = []
+    rows = search_cross_corpus(
+        "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag)
+    assert len(rows) == 3 and diag[0].chash_allow_dropped == 0
+
+
+@pytest.mark.asyncio
+async def test_the_search_tool_says_the_engine_ignored_the_filter(ignoring_engine) -> None:
+    fake, col = ignoring_engine
+    out = await _dispatch_search(col, [IN_A, IN_B])
+    assert set(out["chunk_text_hash"]) == {IN_A, IN_B}
+    assert out["chash_allow_dropped"] == 1 and "outside the document filter" in out["warnings"][0]
+    clean = await _dispatch_search(col, None)
+    assert "chash_allow_dropped" not in clean and "warnings" not in clean, "an unconfined page carries neither key"
+
+
+@pytest.mark.asyncio
+async def test_a_page_the_filter_emptied_names_the_cause(ignoring_engine) -> None:
+    fake, col = ignoring_engine
+    out = await _dispatch_search(col, [_h("a hash the engine does not hold")])
+    assert out["ids"] == [] and out["chash_allow_dropped"] == 3
+    assert "outside the document filter" in out["no_results_reason"]
+
+
+@pytest.mark.asyncio
+async def test_the_run_diagnostics_carry_the_count_beside_the_steps_document_outcome(ignoring_engine) -> None:
+    fake, col = ignoring_engine
+    plan = {"steps": [{"tool": "search", "args": {"query": "q", "corpus": col, "threshold": 10.0}}]}
+    result = await plan_run(
+        _match(plan), {"_nx_scope": col}, bundle_operators=False,
+        document_confinement=DocumentConfinement(ART_DOC, col, "engine_filter", (IN_A, IN_B), 2),
+    )
+    (diag,) = [x for x in result.scope_diagnostics if x.get("scope_kind") == "document"]
+    assert diag["outcome"] == "document_filtered" and diag["rows_outside_allow"] == 1, diag
+    assert set(result.steps[0]["chunk_text_hash"]) == {IN_A, IN_B}

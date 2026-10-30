@@ -101,6 +101,9 @@ class SingleSourceNarrowing:
     manifest_chunks: int = 0
     allow_chunks: int = 0
     allow_sampled: bool = False
+    #: The engine advertised the chunk filter. ``confinement`` is ``steps_not_run`` either for lack of it or, with it,
+    #: because the manifest gave no hash to send; the disclosure says which. Not on the wire.
+    engine_filter_available: bool = False
     #: Chunks of this document a coverage repair may add.
     repair_cap: int = MAX_REPAIR_ITEMS
 
@@ -136,6 +139,7 @@ class SingleSourceNarrowing:
             confinement=confinement.mode if confinement is not None else self.confinement,
             allow_chunks=len(confinement.chashes) if confinement is not None and confinement.sends_filter else 0,
             allow_sampled=confinement.sampled if confinement is not None and confinement.sends_filter else False,
+            engine_filter_available=confinement.engine_filter_available if confinement is not None else False,
         )
 
     def disclosure(self) -> str:
@@ -153,6 +157,11 @@ class SingleSourceNarrowing:
             how = (
                 f"Secondary retrieval was confined to it by the engine (search and query by a filter of {held}; "
                 "traversal by the document's address); a step on a route that takes no such filter was not run."
+            )
+        elif self.engine_filter_available:
+            how = (
+                "The engine applies the document filter, but the document's manifest gave no chunk hash to filter "
+                "by, so no secondary retrieval step (search, query, traverse) was run."
             )
         else:
             how = (
