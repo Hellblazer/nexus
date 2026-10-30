@@ -90,3 +90,38 @@ def test_a_one_source_citation_shaped_synthesis_loses_citation_traversal_and_a_t
         assert two.candidates == control.candidates, "a request naming two sources keeps the plan"
     finally:
         reset_plan_cache_for_tests()
+
+
+ABSTRACT = "query:abstract-themes"
+#: Names exactly one source and asks for the themes of the whole, the shape abstract-themes' description offers.
+THEME_SHAPED = "What are the main themes and key findings across RDR-084? Give an overview of the whole document."
+
+
+@pytest.mark.parametrize("kind", ["synthesis", "unknown"])
+def test_a_one_source_theme_shaped_request_loses_abstract_themes_and_a_two_source_one_keeps_it(t2_service_env, kind) -> None:
+    # nexus-4xmpv (re-measure, Sam 2026-10-30): abstract-themes is excluded alongside citation-traversal, for a
+    # synthesis request and for an unknown one (an extraction failure leaves single-source requests unknown).
+    from nexus.mcp_infra import reset_plan_cache_for_tests
+    from nexus.plans import eligibility as el
+
+    assert _named(THEME_SHAPED) == 1
+    library = g.seed_builtin_plans()
+
+    def select(count: int):
+        reset_plan_cache_for_tests()
+        filt = el.EligibilityFilter(kind, "model-assisted", enforce=True, named_source_count=count)
+        return g.observe_plan_selection(library, THEME_SHAPED, scope="", bindings=None, eligibility=filt), filt
+
+    try:
+        control, _ = select(0)
+        assert ABSTRACT in control.candidates, (
+            "non-vacuity: without the rule the offline library offers abstract-themes here", control.candidates,
+        )
+        rule, filt = select(1)
+        assert ABSTRACT not in rule.candidates and rule.selected != ABSTRACT, rule.candidates
+        assert set(control.candidates) - {ABSTRACT, CITATION} <= set(rule.candidates), rule.candidates
+        assert sum(b["reasons"].get("single_source_synthesis", 0) for b in filt.to_wire()["branches"].values()) >= 1
+        two, _ = select(2)
+        assert two.candidates == control.candidates, "a request naming two sources keeps the plan"
+    finally:
+        reset_plan_cache_for_tests()

@@ -471,6 +471,115 @@ def test_nx_answer_wires_the_named_source_count_g06_gets_the_other_plan_and_a_ba
     miss.assert_awaited()
 
 
+# nexus-4xmpv (re-measure, Sam 2026-10-30): abstract-themes is excluded alongside citation-traversal, and the
+# rule covers an `unknown` request too -------------------------------------------------------------------------
+
+#: Plan 465 as seeded: a builtin synthesis plan, ``verb: query``, ``strategy: abstract-themes``.
+ABSTRACT_465 = _row(
+    465, "abstract-themes", kind=S, tags="builtin-template,rdr-098", verb="query", strategy="abstract-themes",
+)
+_EXCLUDED_ROWS = {"citation-traversal": CITATION_467, "abstract-themes": ABSTRACT_465}
+
+
+def test_the_shipped_templates_that_declare_an_excluded_strategy_are_exactly_the_two_decided_ones() -> None:
+    import yaml
+
+    from tests._rdr232_golden import BUILTIN_PLANS
+
+    declared = {}
+    dims_of = {}
+    for path in sorted(BUILTIN_PLANS.glob("*.yml")):
+        dims = (yaml.safe_load(path.read_text()) or {}).get("dimensions") or {}
+        dims_of[path.stem] = dims
+        declared[path.stem] = dims.get("strategy")
+    assert len(declared) >= 10, f"non-vacuity: {len(declared)} templates read"
+    hit = sorted(n for n, strategy in declared.items() if strategy in el.SINGLE_SOURCE_EXCLUDED_STRATEGIES)
+    assert hit == ["abstract-themes", "citation-traversal"], "no plan that should stay eligible shares a strategy value"
+    # the fixture row carries the dimensions the shipped template declares
+    shipped = json.loads(ABSTRACT_465["dimensions"])
+    assert {k: shipped[k] for k in ("verb", "strategy")} == {k: dims_of["abstract-themes"][k] for k in ("verb", "strategy")}
+
+
+@pytest.mark.parametrize("text", _single_source_requests())
+@pytest.mark.parametrize("kind", [S, U], ids=["synthesis", "unknown"])
+def test_a_one_source_request_is_offered_neither_citation_traversal_nor_abstract_themes(text: str, kind: K) -> None:
+    # G06, S02 and S05 ran 465 after 467 was excluded; S01, S03, S05, S06 read as unknown when extraction fails.
+    filt = el.EligibilityFilter(kind, "model-assisted", enforce=True, named_source_count=_named(text))
+    out = real_plan_match("q", library=_Library([CITATION_467, ABSTRACT_465, SYNTH_12]),
+                          cache=_Cache([(467, 0.05), (465, 0.1), (12, 0.4)]), eligibility=filt, n=5)
+    assert _ids(out) == [12], "both are refused even though they outscore the other curated synthesis plan"
+    assert sorted(filt.excluded_plan_ids) == [465, 467]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"single_source_synthesis": 2}
+
+
+@pytest.mark.parametrize("kind", [S, U], ids=["synthesis", "unknown"])
+def test_a_one_source_request_with_nothing_else_eligible_goes_inline(kind: K) -> None:
+    filt = el.EligibilityFilter(kind, "model-assisted", enforce=True, named_source_count=1)
+    out = real_plan_match("q", library=_Library([ABSTRACT_465], fts=[465]), cache=_Cache([(465, 0.05)]),
+                          eligibility=filt, n=5)
+    assert out == []
+    assert filt.to_wire()["branches"]["fts"]["reasons"] == {"single_source_synthesis": 1}
+    assert el.fallback_reason(force_dynamic=False, matches=out, hit=False, filt=filt) == "all_candidates_ineligible"
+
+
+@pytest.mark.parametrize("named", [0, 2, 3])
+@pytest.mark.parametrize("kind", [S, U], ids=["synthesis", "unknown"])
+@pytest.mark.parametrize("name", sorted(_EXCLUDED_ROWS))
+def test_a_request_naming_no_source_or_several_still_admits_both_plans(name: str, kind: K, named: int) -> None:
+    row = _EXCLUDED_ROWS[name]
+    filt = el.EligibilityFilter(kind, "heuristic", enforce=True, named_source_count=named)
+    out = real_plan_match("q", library=_Library([row, SYNTH_12]), cache=_Cache([(row["id"], 0.05), (12, 0.4)]),
+                          eligibility=filt, n=5)
+    assert _ids(out)[0] == row["id"] and filt.excluded_plan_ids == []
+
+
+def test_a_lookup_is_unaffected_by_the_widened_rule() -> None:
+    filt = el.EligibilityFilter(L, "heuristic", enforce=True, named_source_count=1)
+    out = real_plan_match("q", library=_Library([ABSTRACT_465, LOOKUP_473]),
+                          cache=_Cache([(465, 0.05), (473, 0.3)]), eligibility=filt, n=5)
+    assert _ids(out) == [473]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"kind_mismatch": 1}
+
+
+def test_an_unknown_request_still_admits_a_curated_synthesis_plan_when_it_names_one_source() -> None:
+    filt = el.EligibilityFilter(U, "model-assisted", enforce=True, named_source_count=1)
+    out = real_plan_match("q", library=_Library([SYNTH_12]), cache=_Cache([(12, 0.4)]), eligibility=filt, n=5)
+    assert _ids(out) == [12] and filt.excluded_plan_ids == []
+
+
+def test_the_rule_reads_abstract_themes_by_declared_strategy_not_by_id_or_name() -> None:
+    renumbered = _row(9002, "abstract-themes-v2", kind=S, tags="builtin-template", verb="query",
+                      strategy="abstract-themes")
+    namesake = _row(465, "abstract-themes", kind=S, tags="builtin-template", verb="query")  # no strategy
+    for row, excluded in ((renumbered, True), (namesake, False)):
+        filt = el.EligibilityFilter(U, "model-assisted", enforce=True, named_source_count=1)
+        out = real_plan_match("q", library=_Library([row]), cache=_Cache([(row["id"], 0.05)]), eligibility=filt, n=5)
+        assert (out == []) is excluded, row["name"]
+
+
+def test_the_planner_few_shots_leave_both_out_for_a_one_source_unknown_request() -> None:
+    def match(row) -> Match:
+        return Match(plan_id=row["id"], name=row["name"], description="d", confidence=0.5,
+                     dimensions=json.loads(row["dimensions"]), tags=row["tags"], plan_json=row["plan_json"],
+                     required_bindings=[], optional_bindings=[], default_bindings={}, parent_dims=None)
+
+    rows = [match(CITATION_467), match(ABSTRACT_465), match(SYNTH_12)]
+    for kind in (S, U):
+        assert [m.plan_id for m in el.eligible_matches(kind, rows, 1)] == [12], kind
+        assert [m.plan_id for m in el.eligible_matches(kind, rows, 2)] == [467, 465, 12], kind
+
+
+def test_nx_answer_gives_g06_the_other_plan_and_a_bare_465_goes_inline(enabled) -> None:
+    env, miss, _ = _drive(G06, [ABSTRACT_465, SYNTH_12], [(465, 0.05), (12, 0.4)])
+    wire = env["plan_eligibility"]
+    assert wire["excluded_plan_ids"] == [465] and wire["selected"]["plan_id"] == 12
+    assert wire["branches"]["cosine"]["reasons"] == {"single_source_synthesis": 1}
+    miss.assert_not_awaited()
+    env, miss, _ = _drive(G06, [ABSTRACT_465], [(465, 0.05)], fts=[465])
+    assert env["plan_eligibility"]["fallback_reason"] == "all_candidates_ineligible"
+    miss.assert_awaited()
+
+
 # Scenario 3: no plan has a compatible shape ------------------------------------------------------------------
 
 

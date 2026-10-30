@@ -24,12 +24,16 @@ request kind          eligible declared plan kinds
 A ``lookup`` request admits no synthesis plan (Sam, 2026-10-30, nexus-jypmj.11): a synthesis plan outscored the
 lookup plan and cost 8.9 times as much on H09. The rows of the other kinds are unchanged.
 
-A ``synthesis`` request that names exactly ONE source does not admit a citation-traversal plan (Sam, 2026-10-30,
-nexus-4xmpv): the request wants the parts of one document read, and the plan walks the reference graph around it
-(plan 467 on G06 and on two of the six near-miss requests). The plan is named by what it declares, the
-``strategy`` dimension of a curated (builtin) row, listed in :data:`SINGLE_SOURCE_EXCLUDED_STRATEGIES`, so a
-re-seeded library with new plan ids is still covered. Nothing else changes: a synthesis request naming two
-sources or none still admits it, and the matrix rows above are untouched. The request is not left without a
+A ``synthesis`` request, or an ``unknown`` one, that names exactly ONE source does not admit a citation-traversal
+plan (Sam, 2026-10-30, nexus-4xmpv): the request wants the parts of one document read, and the plan walks the
+reference graph around it (plan 467 on G06 and on two of the six near-miss requests). It does not admit an
+abstract-themes plan either (Sam, 2026-10-30, the re-measure): that plan partitions a whole collection into
+themes, and on one-document requests its search pulled in code anchors from other owners. The ``unknown`` request
+is included because an extraction failure leaves single-source requests unknown, and the unknown row admits
+curated synthesis plans. The plans are named by what they declare, the ``strategy`` dimension of a curated
+(builtin) row, listed in :data:`SINGLE_SOURCE_EXCLUDED_STRATEGIES`, so a re-seeded library with new plan ids is
+still covered. Nothing else changes: a request naming two sources or none still admits them, and the matrix rows
+above are untouched. The request is not left without a
 plan: the matcher offers its other eligible synthesis plans and otherwise ``nx_answer`` plans inline.
 
 ``unknown`` plan kinds are limited by provenance, as the RDR says: a curated (reviewed builtin) unknown
@@ -262,12 +266,19 @@ _COMPATIBLE: dict[PlanAnswerKind, frozenset[PlanAnswerKind]] = {
     _B: frozenset({_B, _S}),
 }
 
-#: The ``strategy`` dimensions of curated plans that a synthesis request naming exactly one source does not
-#: admit (nexus-4xmpv; Sam, 2026-10-30). ``citation-traversal`` (``conexus/plans/builtin/citation-traversal.yml``,
+#: The ``strategy`` dimensions of curated plans that a synthesis or unknown request naming exactly one source does
+#: not admit (nexus-4xmpv; Sam, 2026-10-30). ``citation-traversal`` (``conexus/plans/builtin/citation-traversal.yml``,
 #: dimensions ``verb: research``, ``strategy: citation-traversal``) traces the references AROUND a document; a
 #: request that names one source and asks for its parts to be put together needs that document read, and the
-#: plan's seed step is a semantic query over every corpus. Matched on the declared dimension, never on a plan id.
-SINGLE_SOURCE_EXCLUDED_STRATEGIES: frozenset[str] = frozenset({"citation-traversal"})
+#: plan's seed step is a semantic query over every corpus. ``abstract-themes``
+#: (``conexus/plans/builtin/abstract-themes.yml``, ``verb: query``, ``strategy: abstract-themes``; no other
+#: builtin declares that strategy) is a corpus-theme plan ("v1 scope: single-collection abstract QA"). Matched on
+#: the declared dimension, never on a plan id.
+SINGLE_SOURCE_EXCLUDED_STRATEGIES: frozenset[str] = frozenset({"citation-traversal", "abstract-themes"})
+
+#: Request kinds the single-source rule applies to: synthesis, and unknown (an extraction failure leaves a
+#: single-source synthesis request unknown, and the unknown row admits curated synthesis plans).
+_SINGLE_SOURCE_REQUESTS = frozenset({_S, _U})
 
 #: Request kinds an untrusted unknown-kind plan may still serve.
 _UNKNOWN_PLAN_REQUESTS = frozenset({_L, _D})
@@ -512,7 +523,7 @@ def _judge(
     if not verdict.eligible and standing.flag is not None:
         verdict = Verdict(False, standing.flag)
     if (
-        verdict.eligible and request_kind is _S and named_source_count == 1 and standing.provenance == "curated"
+        verdict.eligible and request_kind in _SINGLE_SOURCE_REQUESTS and named_source_count == 1 and standing.provenance == "curated"
         and declared_strategy(dimensions) in SINGLE_SOURCE_EXCLUDED_STRATEGIES
     ):
         verdict = Verdict(False, "single_source_synthesis")
