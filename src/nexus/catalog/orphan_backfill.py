@@ -393,6 +393,12 @@ def _content_type_for_collection(collection: str) -> str:
     return prefix or "knowledge"
 
 
+# nexus-jz86a: the manifest rows below carry NO section label keys and no ``labels_written``, on
+# purpose. The engine reads that as legacy (NULL labels, ``labels_written`` false), which is the true
+# state: the positions are synthesised, so the shared chunk row's label (a former owner's) is not this
+# row's own answer, and "" would assert "no heading" for good. nexus-1nrcu's one-time rung copies the
+# chunk row's label onto the row where the chash has exactly one manifest row.
+
 def register_dt_linked(
     catalog: "CatalogReader",
     owner: "Tumbler",
@@ -779,6 +785,7 @@ def _append_after_existing(
     start_pos = max((r.position for r in catalog.get_manifest(tumbler)), default=-1) + 1
     # nexus-w5zv: stable sort by chunk_index (see register_dt_linked).
     ordered_chunks = sorted(chunks, key=lambda c: c.chunk_index)
+    # legacy rows on purpose: no label keys (nexus-jz86a, see the note above register_dt_linked)
     catalog.append_manifest_chunks(tumbler, [
         {
             "chash": c.chash,

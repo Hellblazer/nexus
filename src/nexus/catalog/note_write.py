@@ -227,7 +227,12 @@ def note_manifest_rows(manifest_metadatas: Sequence[dict]) -> list[dict]:
     """Manifest rows for a note, from :func:`~nexus.catalog.store_hook.note_manifest_metadata`.
 
     The fields a note's manifest row carries: ``chash``, ``position`` (the piece's
-    ``chunk_index``, else its index), ``chunk_index``, the note-relative character span.
+    ``chunk_index``, else its index), ``chunk_index``, the note-relative character span, and the three
+    section label keys, always empty (nexus-jz86a): a note piece has no heading, and the PRESENCE of the
+    keys is what tells the engine the row's labels are the document's own answer (``labels_written``).
+    Without them the row is legacy and a reader falls back to the shared chunk row's label, which is
+    whichever document wrote the chunk last. ``page_number`` is ``None`` for "no page", as
+    :func:`nexus.mcp_infra._manifest_chunk_rows` sends it.
     """
     rows = [
         {
@@ -238,6 +243,9 @@ def note_manifest_rows(manifest_metadatas: Sequence[dict]) -> list[dict]:
             "line_end": m.get("line_end") or None,
             "char_start": m.get("chunk_start_char") or None,
             "char_end": m.get("chunk_end_char") or None,
+            "section_title": "",
+            "section_type": "",
+            "page_number": None,
         }
         for i, m in enumerate(manifest_metadatas or [])
     ]

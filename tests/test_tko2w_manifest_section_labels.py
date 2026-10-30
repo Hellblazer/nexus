@@ -274,3 +274,25 @@ def test_the_manifest_backfill_sends_no_label_keys_so_its_rows_stay_legacy() -> 
 
     assert row["chash"] == X
     assert not ({"section_title", "section_type", "page_number", "labels_written"} & row.keys())
+
+
+# ── nexus-jz86a: a note's rows are written, unlabelled ───────────────────────
+
+def test_note_manifest_rows_are_written_unlabelled_not_legacy() -> None:
+    """nexus-jz86a: a note piece has no heading, so its row is the document's own answer "no label",
+    sent as the three keys with nothing in them. A row with NO label keys is legacy to the engine
+    (``labels_written`` false) and a reader then takes the SHARED chunk row's label, which belongs to
+    whichever document wrote the chunk last. Every row, whatever the piece."""
+    from nexus.catalog.note_write import note_manifest_rows
+
+    rows = note_manifest_rows([
+        {"chunk_text_hash": X, "chunk_index": 0, "chunk_start_char": 0, "chunk_end_char": 10},
+        {"chunk_text_hash": Y, "chunk_index": 1, "chunk_start_char": 10, "chunk_end_char": 20,
+         "section_title": "ignored", "section_type": "ignored", "page_number": 3},
+    ])
+
+    assert len(rows) == 2
+    for row in rows:
+        assert {"section_title", "section_type", "page_number"} <= row.keys()
+        assert (row["section_title"], row["section_type"], row["page_number"]) == ("", "", None)
+        assert "labels_written" not in row, "the engine infers written from the keys; none is sent"
