@@ -3756,7 +3756,9 @@ def _catalog_markdown_hook(
         # pre-flight registration, nexus-ivzw8).
         title, year, author = _parse_md_frontmatter(md_path)
         # The document keys of this registration (RDR-236 Phase 1): sent with a real value only.
-        doc_meta: dict[str, Any] = {"extraction_source": extraction_source or "file"}
+        # nexus-6pfgb.8: plus the tags and category the markdown row writer stamps, a JSON array of one tag.
+        from nexus.catalog.indexed_meta import markdown_tags_category  # noqa: PLC0415 — deferred like the hook's other catalog imports
+        doc_meta: dict[str, Any] = {**markdown_tags_category(), "extraction_source": extraction_source or "file"}
 
         owner_name = corpus if corpus else "standalone-docs"
         # Curator-only lookup — see _register_or_lookup_doc_id for

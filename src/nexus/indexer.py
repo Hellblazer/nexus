@@ -29,6 +29,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
+from nexus.catalog.indexed_meta import document_tags_category
 from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import index_model_for_collection, is_conformant_collection_name
 from nexus.db.limits import QUOTAS
@@ -1563,6 +1564,10 @@ def _catalog_hook(
             # the named-source sibling rule does not wait for the aspect worker. The header is read from the
             # bytes just hashed; a header that does not parse stamps null (nexus-jypmj.20), which overwrites an earlier id.
             rdr_stamp = _rdr_register_stamp(content_type, raw_bytes)
+            # nexus-6pfgb.8 (RDR-236): the document's own tags and category, as its row writer stamps them
+            # on every chunk. Rides the same stamp, so a registration made before it existed is written
+            # once and the next run finds it equal (the rdr id's rule, nexus-jypmj.7).
+            rdr_stamp = {**rdr_stamp, **document_tags_category(content_type, rel_path)}
 
             try:
                 existing = (
