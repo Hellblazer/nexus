@@ -8140,8 +8140,8 @@ FROM scope s
     // ── RDR-169 G5: address-triple enrichment (chash / source_uri / span) ────────
 
     /**
-     * The manifest owner of each (collection, chash) a result window names, in one batched lookup per
-     * collection (RDR-169 G5, bead nexus-jkv85; reshaped by nexus-6pfgb.26, RDR-236 Phase 3).
+     * The manifest owner of each (collection, chash) a result window names, in one batched lookup over
+     * every collection of the window (RDR-169 G5, bead nexus-jkv85; reshaped by nexus-6pfgb.26, RDR-236 Phase 3).
      *
      * <p>A chash held by several documents has several {@code catalog_document_chunks} rows. The row's
      * {@code source_uri} and its span ({@code line_start}, {@code line_end}, {@code chunk_start_char},

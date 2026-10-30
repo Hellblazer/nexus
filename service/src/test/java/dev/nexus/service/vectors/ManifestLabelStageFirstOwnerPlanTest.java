@@ -258,8 +258,8 @@ class ManifestLabelStageFirstOwnerPlanTest {
     void aTwoCollectionWindow_isOneStatement_andAnswersEachCollectionFromItsOwnRows() {
         var stage = new ManifestLabelStage(tenantScope);
         Map<String, Set<String>> w = window();
-        // COL2 is asked for chunk 0 only; it also holds the lone chunk, which the statement's ANY(...) pair
-        // can match and the stage must drop.
+        // COL2 is asked for chunk 0 only; it also holds the lone chunk, which COL asks for: the pairwise join
+        // must never return (COL2, lone chunk).
         w.put(COL2, new LinkedHashSet<>(List.of(chashes.get(0))));
 
         int before = stage.lookupStatementCount();

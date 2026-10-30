@@ -731,7 +731,7 @@ final class ManifestLabelStage {
     /**
      * The one statement behind both lookups, for one batch of (collection, chash) pairs: {@code collections[i]}
      * and {@code keys[i]} are one pair. They bind as two arrays and join as {@code unnest(collections, keys)
-     * AS w(collection, chash)} on both columns, so the statement text is the same whatever the batch's size.
+     * AS asked(collection, chash)} on both columns, so the statement text is the same whatever the batch's size.
      * Package-private so a plan test can EXPLAIN the statement production runs, not a copy of it.
      * {@code firstOnly} is {@code SELECT DISTINCT ON (chash, collection) ... ORDER BY chash, collection, doc_id,
      * position}, chash first because {@code idx_catalog_chunks_chash (tenant_id, chash)} returns rows in chash
