@@ -281,7 +281,10 @@ class JooqRecordReflectionFeatureTest {
     // nexus.manifest_search_384/768/1024, three RETURNS TABLE functions (the plain, text-gated and chash-set
     // rankings with an EXISTS on the catalog manifest), one generated Record type each
     // (ManifestSearch_384Record/ManifestSearch_768Record/ManifestSearch_1024Record), +3.
-    private static final int EXPECTED_RECORD_TYPES = 120;
+    // 120 -> 123: nexus-jypmj (RDR-232 chash_allow), vectors-042-text-gated-search-allowed.xml added
+    // nexus.text_gated_search_allowed_384/768/1024, three RETURNS TABLE functions, three generated
+    // Record types (TextGatedSearchAllowed384Record, ...768Record, ...1024Record), +3.
+    private static final int EXPECTED_RECORD_TYPES = 123;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

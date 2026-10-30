@@ -92,6 +92,12 @@ MAX_BUNDLE_PROMPT_CHARS: int = 200_000
 #: ``bundle_oversized_fallback_to_per_step`` already established, applied
 #: at the coarser (whole-reduction, not per-step) granularity a
 #: continuation cut operates at.
+#:
+#: A run confined to one document (RDR-232, nexus-jypmj) reserves up to 82 primary chunks under a 60,000-character
+#: budget; with their attribution headers that is about 70,000 characters in the reducer's input, so a LONG narrowed
+#: read breaches this cap and takes the headless path (``continuation_oversized_fallback_to_headless``, nothing
+#: truncated); a short one (under about 55,000 characters of chunks) still hands off. A test pins both
+#: (``tests/test_rdr232_continuation_cap.py``). A separate cap for narrowed runs is Sam's call.
 MAX_CONTINUATION_PROMPT_CHARS: int = 60_000
 
 

@@ -11,9 +11,11 @@ decided on nexus-jypmj.1.18:
 * The owners are the explicit owners of the request (:func:`request_owners`): the ``owner`` and
   ``project`` bindings only. A catalog-subtree ``scope`` is the owner qualifier for source resolution
   (RDR-232 section 1) and is not intersected with any corpus (section 2a), so it narrows nothing here.
-  An owner that resolution inferred does not narrow; neither does a qualifier that conflicted or did
-  not resolve. The run then proceeds without owner narrowing and says so
-  (``scope_check.owner_narrowing.not_applied``): the section 1 disclose-don't-choose rule.
+  An owner that resolution inferred does not narrow BY ITSELF, and neither does a qualifier that
+  conflicted or did not resolve. The run then proceeds without owner narrowing and says so
+  (``scope_check.owner_narrowing.not_applied``): the section 1 disclose-don't-choose rule. The one-source
+  rule (:mod:`nexus.plans.single_source`) is the exception for an inferred source: it sets the owner binding
+  to the resolved document's owner when no other project carries the number (nexus-jypmj, Sam 2026-10-30).
 * **Vector stream.** After the section 2a corpus narrowing, a corpus-taking retrieval step keeps
   only those collections of a project-owned content type (:data:`PROJECT_OWNED_TYPES`: ``code``,
   ``docs``, ``rdr``) whose owner segment (``1.2`` is ``1-2``) matches an owner. Any other content

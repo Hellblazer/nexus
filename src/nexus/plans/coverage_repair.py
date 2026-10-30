@@ -25,7 +25,8 @@ caller's scope is dropped (the coverage ledger does that). Contradicted facets a
 * :data:`MAX_REPAIR_QUERIES` (6): the whole repair, not per facet. Six unsupported facets against two targets
   would be twelve; the order above decides which six run.
 * :data:`REPAIR_RESULTS_PER_QUERY` (5) and :data:`MAX_REPAIR_ITEMS` (12): chunks asked for, and chunks that
-  may join the reduction's input. The supplement sits under the reserved share (50) and the positional cap (100).
+  may join the reduction's input. The supplement sits beside the reserved share (50, or 88 for a run confined to one document: 88 + 12 = 100) under
+  the positional cap (100).
 * :data:`REPAIR_DEADLINE_SHARE` (0.3) of the deadline left when the repair starts, capped at
   :data:`REPAIR_ALLOWANCE_CAP_S` (90 s), and the repair is not started under :data:`MIN_REPAIR_ALLOWANCE_S`
   (20 s). The allowance covers the retrieval (at most :data:`REPAIR_RETRIEVAL_SHARE`, 0.4, of it) and the
@@ -56,6 +57,7 @@ __all__ = [
     "REPAIR_ALLOWANCE_CAP_S",
     "REPAIR_DEADLINE_SHARE",
     "REPAIR_RESULTS_PER_QUERY",
+    "REPAIR_RESULTS_PER_QUERY_UNFILTERED",
     "REPAIR_RETRIEVAL_SHARE",
     "RepairHit",
     "RepairOutcome",
@@ -72,6 +74,10 @@ __all__ = [
 MAX_REPAIR_QUERIES: int = 6
 #: Chunks one query asks for.
 REPAIR_RESULTS_PER_QUERY: int = 5
+#: Chunks one query asks for when the run is confined to one document but the engine has no chunk filter
+#: (nexus-jypmj): the query reads the whole collection and the document's chunks are filtered from the page, so the
+#: page is wider (40 of the collection's top hits; the repair's chunk-hash membership test keeps only the document's).
+REPAIR_RESULTS_PER_QUERY_UNFILTERED: int = 40
 #: New chunks that may join the terminal reduction's input.
 MAX_REPAIR_ITEMS: int = 12
 #: The repair may use this share of the deadline left when it starts ...

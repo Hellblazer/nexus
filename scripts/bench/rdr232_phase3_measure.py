@@ -29,10 +29,32 @@ Not measured here (listed in the report's ``not_measured``): the continuation fa
 cut-and-resume run), ``terminal_completeness`` (needs per-facet addressed/disclosed judgments of the prose), and the
 precision of any-support-wins beyond what the oracle labels cover.
 
-Run from the repository root::
+**A live run must not start from a source checkout.** ``uv run`` inside the repository imports ``nexus`` from the
+checkout, and the production-write guard (``nexus.db.service_endpoint.guard_production_write``, nexus-a2qhz) then
+refuses every write to the service. ``nx_answer`` writes on every plan hit (the matcher's ``increment_match_metrics``)
+and on every run (its ``nx_answer_runs`` row), so from a checkout a plan hit returns ``[non-answer: error] Error
+during plan match`` and a plan miss drops its run row (``persistence: dropped``, ``ProductionWriteGuardError``): the
+run costs money and measures nothing (found 2026-10-30, RDR-232 close). ``--live`` therefore refuses to start from a
+checkout (:func:`refuse_live_from_dev_checkout`) and prints the recipe; do not set ``NX_ALLOW_PROD_WRITE`` to get past
+it. The recipe installs the tree you want to measure, non-editable, into a virtualenv outside the repository and runs
+the driver with that interpreter::
+
+    VENV=$HOME/rdr232-measure-venv          # any directory outside the repository
+    uv venv "$VENV"
+    uv pip install --python "$VENV/bin/python" --reinstall /path/to/nexus      # no --editable
+    "$VENV/bin/python" -c "from nexus.db.service_endpoint import is_dev_checkout_process as f; print(f())"   # False
+    cd "$HOME" && PYTHONPATH=/path/to/nexus/scripts "$VENV/bin/python" -m bench.rdr232_phase3_measure --set both --live ...
+
+``--reinstall`` after every change to the tree, and compare ``diff -rq src/nexus "$VENV"/lib/python3.*/site-packages/nexus``
+(only ``__pycache__`` may differ) so the code measured is the code named in the report. ``PYTHONPATH`` carries only
+``scripts`` (the ``bench`` package), never ``src``.
+
+Run from the repository root with ``--stub`` or ``--from-envelopes`` (no service, no model)::
 
     PYTHONPATH=scripts uv run python -m bench.rdr232_phase3_measure --set golden --stub FILE --out OUT.json
-    PYTHONPATH=scripts uv run python -m bench.rdr232_phase3_measure --set both --live --engine 0.1.167 --out OUT.json
+
+and ``--live`` only by the recipe above. The siblings ``rdr232_replay``, ``rdr232_oracle_packet`` and ``rdr232_gate_matrix``
+read only, and ``rdr232_extract_measure`` refuses an ambient write opt-in, so none of them needs the install.
 """
 from __future__ import annotations
 
@@ -629,6 +651,42 @@ def _fail(message: str) -> int:
     return 2
 
 
+def refuse_live_from_dev_checkout() -> str | None:
+    """The refusal message when a live run would start from a source checkout, else ``None``.
+
+    Asks the production-write guard itself, so the answer matches what the first write would get: a process whose
+    ``nexus`` package resolves from a checkout is refused unless ``NX_ALLOW_PROD_WRITE`` carries a reason, in which
+    case the guard logs the opt-in and lets the run go on (a deliberate, reviewed choice, not this driver's to veto).
+    An installed copy is never a checkout. The guard is neither bypassed nor weakened here."""
+    from nexus.db.service_endpoint import (  # noqa: PLC0415 — deferred: this module imports nothing from nexus at load
+        ProductionWriteGuardError,
+        guard_production_write,
+        is_dev_checkout_process,
+    )
+
+    if not is_dev_checkout_process():
+        return None
+    try:
+        guard_production_write("the nexus-service this run is configured for")
+    except ProductionWriteGuardError:
+        pass
+    else:
+        return None
+    return (
+        "--live cannot run from a source checkout. This process imports nexus from a dev checkout, so the production-write "
+        "guard (src/nexus/db/service_endpoint.py) refuses every write to the service: the plan matcher's "
+        "increment_match_metrics write fails on every plan hit, and a plan miss drops its run row, so the run spends money "
+        "and measures nothing. Do not set NX_ALLOW_PROD_WRITE to get past this. Install the tree you want to measure "
+        "outside the checkout (non-editable, into a virtualenv outside the repository) and run the driver with that "
+        "interpreter:\n"
+        "  VENV=$HOME/rdr232-measure-venv && uv venv \"$VENV\"\n"
+        f"  uv pip install --python \"$VENV/bin/python\" --reinstall {REPO_ROOT}   # no --editable\n"
+        "  \"$VENV/bin/python\" -c \"from nexus.db.service_endpoint import is_dev_checkout_process as f; print(f())\"   # must print False\n"
+        f"  cd \"$HOME\" && PYTHONPATH={REPO_ROOT}/scripts \"$VENV/bin/python\" -m bench.rdr232_phase3_measure --live ...\n"
+        "Reinstall after every change to the tree. The module docstring has the full recipe."
+    )
+
+
 async def _run(args: argparse.Namespace, caller: Caller | None, clock: Callable[[], float], doc_path_of: DocPathOf | None) -> int:
     queries = _load_queries(args.set, args.qid or [], args.limit)
     if args.from_envelopes:
@@ -655,6 +713,8 @@ async def _run(args: argparse.Namespace, caller: Caller | None, clock: Callable[
             if args.stub:
                 caller = stub_caller(args.stub)
             elif args.live:
+                if (refusal := refuse_live_from_dev_checkout()) is not None:
+                    return _fail(refusal)
                 click.echo("LIVE: model calls and nx_answer_runs telemetry writes against the configured tenant", err=True)
                 caller = live_caller(no_plan_growth=args.no_plan_growth)
             else:
