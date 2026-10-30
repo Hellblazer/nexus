@@ -568,7 +568,11 @@ listed under Critical Assumptions before gate.
   documents were measured taking cut slots. The predicate takes a collection set or a subtree,
   not an owner; owner narrowing happens client-side in `traversal_policy.select_documents`.
   Whether the lost evidence changes an answer is not measured: one request, no oracle on the
-  graph stream. Remedy options are recorded on the bead, not decided here.
+  graph stream. Remedy (decided, nexus-jypmj.18): the engine returns each node's BFS depth and best
+  link role (`node_walk`, engine-service-v0.1.170) and the client scores a node the edges do not reach
+  from it; against an engine without it a single-role policy sends no `scope_filter` and narrows
+  client-side, as before the filter. Verified in process and on the real engine (Java, Postgres
+  container) on the S-R-B shape; the G06 rerun on an engine carrying `node_walk` is not done.
   *Source: bead nexus-jypmj.18; T2 `nexus/rdr232-jypmj18-dropped-out-of-owner-evidence-2026-10-29`;
   `service/.../CatalogRepository.graphBFS` javadoc; `src/nexus/plans/traversal_policy.py`.*
 
