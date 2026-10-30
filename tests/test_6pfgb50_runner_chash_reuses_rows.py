@@ -155,3 +155,40 @@ def test_the_step_still_hydrates_when_no_owner_exists(ids) -> None:
     _, args = _hydrate_step(catalog, ids, {X: {"content": "orphan x"}, Y: {"content": "orphan y"}})
     assert "orphan x" in args["content"]
     assert catalog.count("chash_positions") == 1
+
+
+def test_the_capture_is_reset_when_the_block_raises() -> None:
+    """The contextvar leaves with the block on every exit. A leak would send a later, unrelated
+    ``store_get_many`` call's rows into this block's :class:`OwnerLookups`."""
+    from nexus.mcp import core as mcp_core
+
+    assert mcp_core._OWNER_LOOKUPS.get() is None
+    with pytest.raises(RuntimeError, match="boom"):
+        with mcp_core.capturing_owner_lookups() as lookups:
+            assert mcp_core._OWNER_LOOKUPS.get() is lookups
+            raise RuntimeError("boom")
+    assert mcp_core._OWNER_LOOKUPS.get() is None
+
+
+def test_a_following_step_starts_with_no_captured_lookups() -> None:
+    """After a block that raised, a plain ``store_get_many`` outside any block records nothing into the
+    dead block's lookups, and the next runner step captures its own fresh rows."""
+    from nexus.mcp import core as mcp_core
+
+    with pytest.raises(RuntimeError):
+        with mcp_core.capturing_owner_lookups() as dead:
+            raise RuntimeError("boom")
+    catalog = _CountingCatalog([_plain("1.1.1")], [_position(X, "1.1.1")])
+    with patch("nexus.mcp_infra.get_catalog", return_value=catalog), patch(
+        "nexus.mcp.core._get_catalog", return_value=catalog,
+    ), patch("nexus.mcp.core._get_t3", return_value=_t3({X: {"content": "plain text"}})), patch(
+        "nexus.mcp.core._read_scope", return_value=[COLL],
+    ):
+        mcp_core.store_get_many(ids=[X], collections=COLL, structured=True)
+    assert (dead.asked, dead.owner_rows, dead.entries) == (False, None, {})
+
+    fresh = _CountingCatalog([_plain("1.1.1")], [_position(X, "1.1.1")])
+    _, args = _hydrate_step(fresh, [X], {X: {"content": "plain text"}})
+    assert "plain text" in args["content"]
+    assert fresh.count("chash_positions") == 1 and fresh.count("docs_for_chashes") == 0
+    assert (dead.asked, dead.owner_rows, dead.entries) == (False, None, {})

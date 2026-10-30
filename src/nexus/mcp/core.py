@@ -6036,7 +6036,12 @@ def capturing_owner_lookups() -> Iterator[OwnerLookups]:
     """Within the block, ``store_get_many(structured=True)`` records the owner rows and entries it
     fetched into the yielded :class:`OwnerLookups`. The wire result is unchanged. For the plan
     runner's chash path, which classifies the same chunks by their owners right after hydrating
-    them (nexus-6pfgb.50)."""
+    them (nexus-6pfgb.50).
+
+    One ``store_get_many`` call per block is the contract. ``asked`` and ``owner_rows`` are
+    overwritten by each call while ``entries`` accumulates, so a second call in the same block would
+    pair the second call's rows with the first call's entries. The contextvar is reset on every exit,
+    a raise included, so nothing captured leaks into a following step."""
     lookups = OwnerLookups()
     token = _OWNER_LOOKUPS.set(lookups)
     try:
