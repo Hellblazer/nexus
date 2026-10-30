@@ -2541,19 +2541,36 @@ class TestTupleVerdictMap:
             (nack,) = tuples.ops("nack")
             assert nack[3]["dead"] is True and db.completed == []
 
-    def test_a_missing_document_is_acked_as_dropped_without_extraction(
+    def test_a_missing_document_is_retried_once_then_acked_as_dropped_without_extraction(
         self, tuple_env, monkeypatch,  # noqa: ANN001
     ) -> None:
+        """nexus-1o3ft: the first claim of a task whose document is not visible is a
+        short ladder nack (the catalog row may land a moment after the wake); the
+        second claim of a still-missing document is the ack-as-dropped."""
+        from nexus.aspect_worker import _RETRY_BASE_SECONDS
+
         tuple_env.gone.add("1.1.0")
         calls: list = []
         monkeypatch.setattr("nexus.aspect_worker._extract_aspects", lambda **kw: calls.append(kw))
-        tuples = _FakeTuples([_task_body(0)])
-        tuple_env.install(_FakeTupleDb(tuples))
-        side = _tuple_worker()._tuple_side
-        claims, _ = side.claim_batch(park=False)
-        side.process(claims)
-        assert calls == [] and len(tuples.ops("ack")) == 1
-        assert "aspect_task_dropped_missing_doc" in tuple_env.events
+        for attempts in (0, 1):
+            tuple_env.events.clear()
+            tuples = _FakeTuples([_task_body(0)], attempts=attempts)
+            tuple_env.install(_FakeTupleDb(tuples))
+            side = _tuple_worker()._tuple_side
+            claims, _ = side.claim_batch(park=False)
+            side.process(claims)
+            assert calls == []
+            if attempts == 0:
+                assert tuples.ops("ack") == [], "the first gone verdict is never a drop"
+                (nack,) = tuples.ops("nack")
+                assert nack[3]["dead"] is False
+                assert 0.8 * _RETRY_BASE_SECONDS - 1 <= nack[3]["retry_after_s"] <= 1.2 * _RETRY_BASE_SECONDS
+                assert "aspect_task_doc_not_visible_yet" in tuple_env.events
+                assert "aspect_task_dropped_missing_doc" not in tuple_env.events
+            else:
+                assert tuples.ops("nack") == [] and len(tuples.ops("ack")) == 1
+                assert "aspect_task_dropped_missing_doc" in tuple_env.events
+                assert "aspect_task_doc_not_visible_yet" not in tuple_env.events
 
     def test_a_catalog_that_cannot_answer_is_not_a_missing_document(
         self, tuple_env, monkeypatch,  # noqa: ANN001

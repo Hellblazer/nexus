@@ -350,12 +350,7 @@ class TupleQueueSide:
             except Exception:  # noqa: BLE001 — an unanswerable lookup is not a missing document; extraction decides
                 gone = False
             if gone:
-                _log.info(
-                    "aspect_task_dropped_missing_doc",
-                    doc_id=claim.row.doc_id, collection=claim.row.collection,
-                    source_path=claim.row.source_path, task_id=claim.task_id,
-                )
-                self._ack(claim)
+                self._gone_verdict(claim)
                 continue
             ready.append(claim)
         if not ready:
@@ -476,8 +471,7 @@ class TupleQueueSide:
                 "aspect_worker_upsert_conflict", task_id=claim.task_id, error=str(exc)[:300],
             )
             if self._gone_now(row.doc_id):
-                _log.info("aspect_task_dropped_missing_doc", doc_id=row.doc_id, task_id=claim.task_id)
-                self._ack(claim)
+                self._gone_verdict(claim)
             else:
                 self._retry_or_dead(claim)
             return
@@ -561,6 +555,34 @@ class TupleQueueSide:
             successor=getattr(exc, "successor", None),
         )
         self._release(claim)
+
+    def _gone_verdict(self, claim: HeldClaim) -> None:
+        """The catalog answered and has no such document (nexus-1o3ft). The table's
+        doc_id FK refused such a row at enqueue; the tuple queue checks nothing, and
+        the enqueue hook can fire (and wake a worker, ~11 ms) before the catalog row
+        commits. So the FIRST claim (``attempts == 0``) is a short retryable nack on
+        the ladder's first interval, never a drop; a document still gone on a later
+        claim is acked as dropped. A lookup that could not answer never reaches here
+        (it is not a gone verdict)."""
+        from nexus import aspect_worker as w  # noqa: PLC0415 — deferred: aspect_worker imports this module lazily
+
+        row = claim.row
+        assert row is not None
+        if claim.attempts == 0:
+            interval = w._backoff_interval_seconds(0)
+            _log.info(
+                "aspect_task_doc_not_visible_yet",
+                doc_id=row.doc_id, collection=row.collection, source_path=row.source_path,
+                task_id=claim.task_id, retry_after_s=interval,
+            )
+            self._nack(claim, retry_after_s=interval)
+            return
+        _log.info(
+            "aspect_task_dropped_missing_doc",
+            doc_id=row.doc_id, collection=row.collection,
+            source_path=row.source_path, task_id=claim.task_id,
+        )
+        self._ack(claim)
 
     def _gone_now(self, doc_id: str) -> bool:
         try:

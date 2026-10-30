@@ -8,7 +8,7 @@ extractor (never a model call, never a credential) and the worker's own
 (five claims, five tasks), 7 (renewed inside the deadline, lapsed past it), 10
 (409, release, bounded), 14 worker half (an MCP note is a task with no text; the
 extractor reads it through the manifest), 15 (more than four collections, one
-park), 16 (a deleted document is acked as dropped), gate S3 (T3 unreachable is a
+park), 16 (a missing document is retried once, then acked as dropped), gate S3 (T3 unreachable is a
 retryable nack, never a drop) and the alternation of the tuple queue with the old
 table.
 
@@ -216,26 +216,71 @@ class TestScenario15ParkCap:
 
 
 class TestScenario16DeletedDocument:
-    def test_a_task_for_a_missing_document_is_acked_as_dropped_and_a_present_one_is_extracted(
+    def test_a_missing_document_gets_one_short_retry_and_is_then_dropped_a_late_one_is_extracted(
         self, db: Any, extracted: list[dict], tuple_events: list[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The present document is the control: the same pass extracts it, so the
-        missing one's silence is the drop and not a worker that did nothing."""
+        """One journey over three tasks (nexus-1o3ft; the table's FK refused such a
+        row at enqueue, the tuple queue checks nothing, and the wake is ~11 ms, so
+        a producer can out a task before its catalog row commits):
+
+        - ``present``: the control. The same first pass extracts it, so the
+          silence of the other two is the verdict and not a worker that did nothing.
+        - ``late``: its document is registered only after the first claim. The first
+          claim is a short retryable nack, the second extracts and persists.
+        - ``gone``: its document never appears. The first claim is the same nack;
+          the second is the ack-as-dropped.
+        """
+        from nexus import aspect_worker as w
+
+        monkeypatch.setattr(w, "_RETRY_BASE_SECONDS", 2.0)
+        monkeypatch.setattr(w, "_RETRY_JITTER_FRACTION", 0.0)
         present = _doc("s16-present")
-        _out(db, "1.99999.99999", source="/gone.md")  # no such catalog document
+        anchor = _doc("s16-anchor")
+        head, _, last = anchor.rpartition(".")
+        late = f"{head}.{int(last) + 1}"  # the next tumbler this owner mints
+        _out(db, "1.99999.99999", source="/gone.md")  # no such catalog document, ever
+        _out(db, late, source="/late.md")  # not registered yet
         _out(db, present, source="/present.md")
         side = _worker()._tuple_side
         claims, _ = side.claim_batch(park=False)
-        assert len(claims) == 2
+        assert len(claims) == 3
+        assert {c.attempts for c in claims} == {0}
 
         side.process(claims)
 
-        assert "aspect_task_dropped_missing_doc" in tuple_events, tuple_events
         assert [c["source_path"] for c in extracted] == ["/present.md"], (
-            "no extraction for a document that is gone; one for the document that is there"
+            "the first pass extracts only the document that is there"
         )
-        assert _tasks(db) == [], "acked as dropped: both tasks are consumed"
+        assert tuple_events.count("aspect_task_doc_not_visible_yet") == 2, tuple_events
+        assert "aspect_task_dropped_missing_doc" not in tuple_events, (
+            "the first gone verdict is a retry, never a drop"
+        )
+        held = {json.loads(r.body)["source_path"]: r for r in _tasks(db)}
+        assert sorted(held) == ["/gone.md", "/late.md"], f"present is consumed, the others queued: {sorted(held)}"
+        assert all(r.attempts == 1 and r.claim_state != "dead" for r in held.values()), held
+        assert db.document_aspects.get_by_doc_id(late) is None
+        assert side.claim_batch(park=False)[0] == [], "held back by the ladder's first interval"
+
+        assert _doc("s16-late") == late, "the late document registers under the predicted tumbler"
+
+        again: list = []
+
+        def second_claim() -> bool:
+            got, _ = side.claim_batch(park=False)
+            again.extend(got)
+            return len(again) == 2
+
+        _wait(second_claim, timeout=20)
+        assert {c.attempts for c in again} == {1}
+        side.process(again)
+
+        assert [c["source_path"] for c in extracted] == ["/present.md", "/late.md"]
+        assert tuple_events.count("aspect_task_dropped_missing_doc") == 1, tuple_events
+        assert tuple_events.count("aspect_task_doc_not_visible_yet") == 2, "no second retry"
+        assert _tasks(db) == [], "late extracted and acked, gone acked as dropped"
         assert db.document_aspects.get_by_doc_id("1.99999.99999") is None
+        assert db.document_aspects.get_by_doc_id(late) is not None
         assert db.document_aspects.get_by_doc_id(present) is not None
 
 
