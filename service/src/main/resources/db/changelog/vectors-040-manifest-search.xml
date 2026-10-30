@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-    Bead nexus-p89h4 (RDR-236 Phase 3): nexus.manifest_search_<dim>, the vector search with an
+    Beads nexus-p89h4 and nexus-6pfgb.25 (RDR-236 Phase 3): nexus.manifest_search_<dim>, the vector search with an
     EXISTS on the catalog manifest INSIDE it.
 
     THE DEFECT. Since nexus-tko2w the per-position labels (section_title, section_type, page_number) are answered
     from the catalog manifest, one (document, position) at a time, by ManifestLabelStage, AFTER the search and over
-    a cut of four times the limit (at most 1200). So a positive filter on a rare label was judged over the nearest
-    40 rows at a limit of 10. A label held by two chunks of 2,000 that rank last came back
+    a cut of four times the limit (at most 1200). So a positive filter on a rare label, and a filter on title or
+    content_type (nexus-6pfgb.25: a chunk shared by a code file and a note carries only the last writer's), was
+    judged over the nearest 40 rows at a limit of 10. A label held by two chunks of 2,000 that rank last came back
     empty, where the old in-index predicate kept walking under hnsw.iterative_scan.
 
     THE FIX. The predicate runs in the scan. This function ranks exactly as plain_search_<dim> does and adds ONE
@@ -14,8 +15,9 @@
     catalog_documents, tenant, collection and chash, the document not tombstoned: the same owners chunk_live_owners
     names) of whether one passes (p_manifest_where @> / p_manifest_path @@) a JSON object built per occurrence, the
     owning document's EFFECTIVE value of each key the engine can push down: the section labels (a WRITTEN manifest
-    row's own label, else the chunk row's), source_author (the catalog's when it is not blank, else the chunk
-    row's) and the three id-valued bib columns. A missing value is the empty string in the object, because the stage counts a missing value as the empty
+    row's own label, else the chunk row's), title and source_author (the catalog's when it is not blank, else the
+    chunk row's), the three id-valued bib columns, and content_type as an ARRAY of every word the document answers
+    to. A missing value is the empty string in the object, because the stage counts a missing value as the empty
     string; with that rule the in-SQL test admits a SUPERSET of what the stage keeps, and the stage (which names the
     qualifying owner and judges every operator) trims the rest. The compiled predicate holds only positive
     operators (ManifestPushdown).
@@ -25,6 +27,11 @@
     sets plan_cache_mode = force_custom_plan before it runs, so the NULL tests fold at plan time and the plan is
     that of the sibling it stands in for. The existing functions are untouched: their signatures are called by
     arity from many tests and from the other routes.
+
+    THE DERIVED FORMAT. content_type=pdf and =markdown answer from a format the catalog derives (the file extension
+    first, else the catalog content type). nexus-6pfgb.23 will store that rule as a GENERATED column
+    source_format; until it ships the same expression is computed here (and in ManifestLabelStage.derivedFormat).
+    When the column lands this expression is replaced by f.fmt = d.source_format.
 
     Security: SECURITY INVOKER, so FORCE RLS on the catalog tables and the chunk table stays the isolation
     boundary; every table also carries an explicit tenant predicate. No function-level SET clause (it would stop
@@ -39,7 +46,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-040-1" author="nexus-6pfgb.25">
-        <comment>nexus.manifest_search_384/768/1024 (nexus-p89h4): the plain, text-gated and chash-set vector rankings with an EXISTS on the catalog manifest inside the scan, so a positive label filter is answered in the search and a rare label is found. Three new RETURNS TABLE functions granted to nexus_svc; the existing search functions are untouched. No data effect: function definitions only.</comment>
+        <comment>nexus.manifest_search_384/768/1024 (nexus-p89h4, nexus-6pfgb.25): the plain, text-gated and chash-set vector rankings with an EXISTS on the catalog manifest inside the scan, so a positive label filter, title and content_type are answered in the search and a rare label is found. Three new RETURNS TABLE functions granted to nexus_svc; the existing search functions are untouched. No data effect: function definitions only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.manifest_search_384(
     p_query          nexus.vector(384),
@@ -82,6 +89,16 @@ AS $$
               JOIN nexus.catalog_documents d
                 ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
              CROSS JOIN LATERAL (
+                   SELECT CASE
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) = 'pdf'
+                                 OR d.content_type IN ('pdf', 'paper') THEN 'pdf'
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) IN ('md', 'markdown') THEN 'markdown'
+                            WHEN d.content_type = 'code' THEN 'code'
+                            WHEN d.content_type IN ('prose', 'rdr') THEN 'prose'
+                            ELSE NULL
+                          END AS fmt
+                 ) f
+             CROSS JOIN LATERAL (
                    SELECT jsonb_build_object(
                        'section_title', CASE WHEN m.labels_written
                            THEN to_jsonb(COALESCE(m.section_title, ''))
@@ -92,12 +109,21 @@ AS $$
                        'page_number', CASE WHEN m.labels_written
                            THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
                            ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END,
+                       'title', CASE WHEN d.title ~ '\S'
+                           THEN to_jsonb(d.title)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END,
                        'source_author', CASE WHEN COALESCE(d.author, '') ~ '\S'
                            THEN to_jsonb(d.author)
                            ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END,
                        'bib_doi', to_jsonb(d.bib_doi),
                        'bib_openalex_id', to_jsonb(d.bib_openalex_id),
-                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id)
+                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
+                       'content_type', to_jsonb(array_remove(ARRAY[
+                           NULLIF(d.content_type, ''),
+                           f.fmt,
+                           CASE WHEN f.fmt IS NULL OR COALESCE(d.content_type, '') = ''
+                                THEN c.metadata ->> 'content_type' END
+                       ], NULL))
                    ) AS eff
                  ) e
              WHERE m.tenant_id  = c.tenant_id
@@ -152,6 +178,16 @@ AS $$
               JOIN nexus.catalog_documents d
                 ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
              CROSS JOIN LATERAL (
+                   SELECT CASE
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) = 'pdf'
+                                 OR d.content_type IN ('pdf', 'paper') THEN 'pdf'
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) IN ('md', 'markdown') THEN 'markdown'
+                            WHEN d.content_type = 'code' THEN 'code'
+                            WHEN d.content_type IN ('prose', 'rdr') THEN 'prose'
+                            ELSE NULL
+                          END AS fmt
+                 ) f
+             CROSS JOIN LATERAL (
                    SELECT jsonb_build_object(
                        'section_title', CASE WHEN m.labels_written
                            THEN to_jsonb(COALESCE(m.section_title, ''))
@@ -162,12 +198,21 @@ AS $$
                        'page_number', CASE WHEN m.labels_written
                            THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
                            ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END,
+                       'title', CASE WHEN d.title ~ '\S'
+                           THEN to_jsonb(d.title)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END,
                        'source_author', CASE WHEN COALESCE(d.author, '') ~ '\S'
                            THEN to_jsonb(d.author)
                            ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END,
                        'bib_doi', to_jsonb(d.bib_doi),
                        'bib_openalex_id', to_jsonb(d.bib_openalex_id),
-                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id)
+                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
+                       'content_type', to_jsonb(array_remove(ARRAY[
+                           NULLIF(d.content_type, ''),
+                           f.fmt,
+                           CASE WHEN f.fmt IS NULL OR COALESCE(d.content_type, '') = ''
+                                THEN c.metadata ->> 'content_type' END
+                       ], NULL))
                    ) AS eff
                  ) e
              WHERE m.tenant_id  = c.tenant_id
@@ -222,6 +267,16 @@ AS $$
               JOIN nexus.catalog_documents d
                 ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
              CROSS JOIN LATERAL (
+                   SELECT CASE
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) = 'pdf'
+                                 OR d.content_type IN ('pdf', 'paper') THEN 'pdf'
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) IN ('md', 'markdown') THEN 'markdown'
+                            WHEN d.content_type = 'code' THEN 'code'
+                            WHEN d.content_type IN ('prose', 'rdr') THEN 'prose'
+                            ELSE NULL
+                          END AS fmt
+                 ) f
+             CROSS JOIN LATERAL (
                    SELECT jsonb_build_object(
                        'section_title', CASE WHEN m.labels_written
                            THEN to_jsonb(COALESCE(m.section_title, ''))
@@ -232,12 +287,21 @@ AS $$
                        'page_number', CASE WHEN m.labels_written
                            THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
                            ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END,
+                       'title', CASE WHEN d.title ~ '\S'
+                           THEN to_jsonb(d.title)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END,
                        'source_author', CASE WHEN COALESCE(d.author, '') ~ '\S'
                            THEN to_jsonb(d.author)
                            ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END,
                        'bib_doi', to_jsonb(d.bib_doi),
                        'bib_openalex_id', to_jsonb(d.bib_openalex_id),
-                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id)
+                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
+                       'content_type', to_jsonb(array_remove(ARRAY[
+                           NULLIF(d.content_type, ''),
+                           f.fmt,
+                           CASE WHEN f.fmt IS NULL OR COALESCE(d.content_type, '') = ''
+                                THEN c.metadata ->> 'content_type' END
+                       ], NULL))
                    ) AS eff
                  ) e
              WHERE m.tenant_id  = c.tenant_id

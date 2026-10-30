@@ -98,4 +98,35 @@ class ManifestPushdownTest {
         // "0042" reads as a number, so it takes the search's tolerant number-or-text form (a jsonpath), not containment.
         assertThat(plan.jsonPath()).contains("bib_semantic_scholar_id").contains("\"0042\"");
     }
+
+    @Test
+    void title_isCompiled_asAnEquality() {
+        var plan = ManifestPushdown.of(predicates(where("title", "alpha.py")));
+
+        assertThat(plan.containment().data()).isEqualTo("{\"title\":\"alpha.py\"}");
+        assertThat(ManifestPushdown.of(predicates(where("title", op("$ne", "alpha.py"))))).isNull();
+    }
+
+    @Test
+    void contentType_isCompiled_asMembershipOfTheDocumentsArray() {
+        var eq = ManifestPushdown.of(predicates(where("content_type", "pdf")));
+        assertThat(eq.containment()).isNull();
+        assertThat(eq.jsonPath()).isEqualTo("(exists($.\"content_type\"[*] ? (@ == \"pdf\")))");
+
+        var in = ManifestPushdown.of(predicates(where("content_type", op("$in", List.of("pdf", "code")))));
+        assertThat(in.jsonPath()).contains("== \"pdf\"").contains("== \"code\"").contains("||");
+
+        // An empty list admits nothing, as the stage's anyMatch does.
+        assertThat(ManifestPushdown.of(predicates(where("content_type", op("$in", List.of())))).jsonPath())
+            .isEqualTo("(1 == 2)");
+        assertThat(ManifestPushdown.of(predicates(where("content_type", op("$ne", "pdf"))))).isNull();
+    }
+
+    @Test
+    void contentTypeAndALabel_areAndedInOneJsonPath() {
+        var plan = ManifestPushdown.of(predicates(where("page_number", op("$gte", 3), "content_type", "pdf")));
+
+        assertThat(plan.jsonPath()).isEqualTo(
+            "$.\"page_number\" >= 3 && (exists($.\"content_type\"[*] ? (@ == \"pdf\")))");
+    }
 }

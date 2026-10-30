@@ -22,6 +22,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -85,17 +87,26 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       document's year 0 or empty string is "not recorded" (unlabelled); its citation count 0 is a
  *       count.</li>
  * </ul>
+ * <ul>
+ *   <li>{@code title} (nexus-6pfgb.25) reads {@code catalog_documents.title}; an empty catalog title falls back to
+ *       the chunk row's, so a legacy document keeps matching its row title.</li>
+ *   <li>{@code content_type} (nexus-6pfgb.25) is answered by value, see {@link #CONTENT_TYPE_KEY} and {@link
+ *       ContentType}. {@code source_format} is not a column yet (nexus-6pfgb.23), so the format is derived here
+ *       from the catalog's content type and file extension by the rule that column will carry, and the engine's
+ *       in-SQL pre-filter ({@code manifest_search_<dim>}, vectors-040) derives it by the same expression.</li>
+ * </ul>
  * The catalog document's {@code metadata} keys ({@code tags}, {@code category}, {@code ttl_days} and the
  * rest) are NOT answered here: no writer puts them on a catalog document yet (epic nexus-6pfgb, wave 1), so
  * answering them would only move those filters under the {@link #OVERFETCH} cut for the same answers. They
  * stay predicates on the chunk row, inside the search.
  *
- * <p><b>In-SQL pre-filter (nexus-p89h4).</b> The positive form of the predicates {@link ManifestPushdown} can
- * express (an equality or {@code $in} on a label, on {@code source_author} or on an id-valued bib key, a range on
- * {@code page_number}) is ALSO sent into the search as an EXISTS on the manifest ({@code manifest_search_<dim>},
- * vectors-040), so the scan keeps walking until the page is full and a rare label is found. That EXISTS only
- * admits a chunk; this stage still names the qualifying owner per document, and it is the exact judge of every
- * operator, so the in-SQL form is built to admit a superset of what the stage keeps and never less.
+ * <p><b>In-SQL pre-filter (nexus-p89h4, nexus-6pfgb.25).</b> The positive form of the predicates {@link
+ * ManifestPushdown} can express (an equality or {@code $in} on a label, {@code title}, {@code source_author} or an
+ * id-valued bib key, {@code content_type} by value, a range on {@code page_number}) is ALSO sent into the search as
+ * an EXISTS on the manifest ({@code manifest_search_<dim>}), so the scan keeps walking until the page is full and a
+ * rare label is found. That EXISTS only admits a chunk; this stage still names the qualifying owner per document,
+ * and it is the exact judge of every operator, so the in-SQL form is built to admit a superset of what the stage
+ * keeps and never less.
  *
  * Operators, the unlabelled rules, the per-document lowest-passing-position
  * expansion and the cut are the section labels'. An expanded row speaks for its document on the document
@@ -124,8 +135,24 @@ final class ManifestLabelStage {
     static final Set<String> BIB_KEYS = Set.of("bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi");
 
+    /**
+     * {@code title}: the catalog title (the filename for code and prose), the chunk row's only while the catalog
+     * title is empty (nexus-6pfgb.25, Sam's ruling nexus-6pfgb.2). The per-position label is {@code section_title}.
+     */
+    static final String TITLE_KEY = "title";
+
+    /**
+     * {@code content_type}: answered by value (nexus-6pfgb.25, Sam's ruling nexus-6pfgb.3). {@code pdf} and
+     * {@code markdown} read the format the catalog derives for the document ({@link #derivedFormat}), the chunk
+     * row's value when it derives none; every other value ({@code code}, {@code prose}, {@code paper}, {@code
+     * rdr}, {@code knowledge}) reads {@code catalog_documents.content_type}, so {@code prose} includes a markdown
+     * file.
+     */
+    static final String CONTENT_TYPE_KEY = "content_type";
+
     /** Every document-level key this stage answers. */
-    static final Set<String> DOC_KEYS = Set.copyOf(union(Set.of(AUTHOR_KEY, INDEXED_AT_KEY), BIB_KEYS));
+    static final Set<String> DOC_KEYS = Set.copyOf(union(
+        Set.of(AUTHOR_KEY, INDEXED_AT_KEY, TITLE_KEY, CONTENT_TYPE_KEY), BIB_KEYS));
 
     /**
      * The answered keys whose values are numbers. Only these compare numerically across a number and its text
@@ -136,6 +163,75 @@ final class ManifestLabelStage {
 
     /** Every key this stage answers: the per-position labels and the document-level keys. */
     static final Set<String> ANSWERED_KEYS = Set.copyOf(union(LABEL_KEYS, DOC_KEYS));
+
+    /**
+     * A document's answer on {@code content_type}: the catalog's own content type ({@code null} when empty) and the
+     * format {@link #derivedFormat} gives it ({@code null} when it derives none), with the chunk row's value as
+     * the fallback each of them leaves open. The operand picks which one speaks: see {@link #matches}.
+     *
+     * @param rowType the chunk row's {@code content_type}, filled in per hit; {@code null} in the lookup
+     */
+    record ContentType(String catalogType, String format, Object rowType) {
+        ContentType withRow(Object row) {
+            return new ContentType(catalogType, format, row);
+        }
+
+        /** The value an expanded row shows for this document: its format when it has one, else its catalog type. */
+        String display() {
+            return format != null ? format : catalogType;
+        }
+    }
+
+    /** The file extension the way Python's {@code Path.suffix} reads it: no dotfile, no dot in a directory. */
+    private static final Pattern EXTENSION = Pattern.compile("[^/.]\\.([^./]+)$");
+
+    /**
+     * The format the catalog derives for a document (the rule nexus-6pfgb.23's {@code source_format} column will
+     * carry, computed here until it ships): the extension is read first; {@code pdf} (or catalog type {@code pdf}
+     * or {@code paper}) is {@code pdf}, {@code md} and {@code markdown} are {@code markdown} whatever the catalog
+     * type, then catalog {@code code} is {@code code} and {@code prose} or {@code rdr} is {@code prose}. Anything
+     * else (a note, a file with no extension, a type outside the rules) derives none.
+     */
+    static String derivedFormat(String contentType, String filePath) {
+        String ext = null;
+        if (filePath != null) {
+            Matcher m = EXTENSION.matcher(filePath);
+            if (m.find()) {
+                ext = m.group(1).toLowerCase(java.util.Locale.ROOT);
+            }
+        }
+        String type = contentType == null ? "" : contentType;
+        if ("pdf".equals(ext) || "pdf".equals(type) || "paper".equals(type)) {
+            return "pdf";
+        }
+        if ("md".equals(ext) || "markdown".equals(ext)) {
+            return "markdown";
+        }
+        if ("code".equals(type)) {
+            return "code";
+        }
+        if ("prose".equals(type) || "rdr".equals(type)) {
+            return "prose";
+        }
+        return null;
+    }
+
+    /**
+     * Whether a document answers to {@code operand} on {@code content_type}. {@code pdf} and {@code markdown}
+     * are formats: the derived one when the catalog has one, else the chunk row's value. Every other word is a
+     * catalog content type: the catalog's when it has one, else the chunk row's.
+     */
+    static boolean matches(ContentType ct, Object operand) {
+        String wanted = String.valueOf(operand);
+        if ("pdf".equals(wanted) || "markdown".equals(wanted)) {
+            return ct.format() != null ? ct.format().equals(wanted) : wanted.equals(textOf(ct.rowType()));
+        }
+        return ct.catalogType() != null ? ct.catalogType().equals(wanted) : wanted.equals(textOf(ct.rowType()));
+    }
+
+    private static String textOf(Object o) {
+        return o == null ? null : String.valueOf(o);
+    }
 
     private static Set<String> union(Set<String> first, Set<String> second) {
         Set<String> all = new LinkedHashSet<>(first);
@@ -275,6 +371,16 @@ final class ManifestLabelStage {
     }
 
     private static boolean test(Predicate p, Object label) {
+        if (label instanceof ContentType ct) {
+            return switch (p.operator()) {
+                case "$eq" -> matches(ct, p.operand());
+                case "$ne" -> !matches(ct, p.operand());
+                case "$in" -> ((List<?>) p.operand()).stream().anyMatch(o -> matches(ct, o));
+                case "$nin" -> ((List<?>) p.operand()).stream().noneMatch(o -> matches(ct, o));
+                // A range over content types has no meaning; it reads the value the row would show.
+                default -> test(p, ct.display());
+            };
+        }
         if (label == null || (label instanceof String text && text.isEmpty())) {
             // An explicit empty-string operand names exactly this value: compare it before the unlabelled rule.
             // A missing value (null) counts as empty here; the chunk-row filter matched only a stored "".
@@ -391,22 +497,27 @@ final class ManifestLabelStage {
     private record DocFields(Set<String> keys, Field<String> author, Field<OffsetDateTime> indexedAt,
                              Field<Integer> bibYear, Field<String> bibAuthors, Field<String> bibVenue,
                              Field<Integer> bibCitations, Field<String> bibS2, Field<String> bibOpenAlex,
-                             Field<String> bibDoi, Field<OffsetDateTime> bibEnrichedAt) {
+                             Field<String> bibDoi, Field<OffsetDateTime> bibEnrichedAt,
+                             Field<String> title, Field<String> contentType, Field<String> filePath) {
 
         static DocFields of(Set<String> keys) {
             boolean bib = keys.stream().anyMatch(BIB_KEYS::contains);
+            boolean type = keys.contains(CONTENT_TYPE_KEY);
             return new DocFields(keys,
                 keys.contains(AUTHOR_KEY) ? CATALOG_DOCUMENTS.AUTHOR : null,
                 keys.contains(INDEXED_AT_KEY) ? CATALOG_DOCUMENTS.INDEXED_AT : null,
                 bib ? CATALOG_DOCUMENTS.BIB_YEAR : null, bib ? CATALOG_DOCUMENTS.BIB_AUTHORS : null,
                 bib ? CATALOG_DOCUMENTS.BIB_VENUE : null, bib ? CATALOG_DOCUMENTS.BIB_CITATION_COUNT : null,
                 bib ? CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID : null, bib ? CATALOG_DOCUMENTS.BIB_OPENALEX_ID : null,
-                bib ? CATALOG_DOCUMENTS.BIB_DOI : null, bib ? CATALOG_DOCUMENTS.BIB_ENRICHED_AT : null);
+                bib ? CATALOG_DOCUMENTS.BIB_DOI : null, bib ? CATALOG_DOCUMENTS.BIB_ENRICHED_AT : null,
+                keys.contains(TITLE_KEY) ? CATALOG_DOCUMENTS.TITLE : null,
+                type ? CATALOG_DOCUMENTS.CONTENT_TYPE : null, type ? CATALOG_DOCUMENTS.FILE_PATH : null);
         }
 
         void addTo(List<Field<?>> select) {
             for (Field<?> f : java.util.Arrays.asList(author, indexedAt, bibYear, bibAuthors, bibVenue, bibCitations,
-                                                      bibS2, bibOpenAlex, bibDoi, bibEnrichedAt)) {
+                                                      bibS2, bibOpenAlex, bibDoi, bibEnrichedAt, title, contentType,
+                                                      filePath)) {
                 if (f != null) {
                     select.add(f);
                 }
@@ -430,6 +541,21 @@ final class ManifestLabelStage {
             if (bibYear != null) {
                 bibValues(keys, r.get(bibYear), r.get(bibAuthors), r.get(bibVenue), r.get(bibCitations),
                     r.get(bibS2), r.get(bibOpenAlex), r.get(bibDoi), r.get(bibEnrichedAt) != null, out);
+            }
+            if (title != null) {
+                String t = r.get(title);
+                if (t != null && !t.isBlank()) {
+                    out.put(TITLE_KEY, t);
+                }
+            }
+            if (contentType != null) {
+                String catalogType = r.get(contentType);
+                String format = derivedFormat(catalogType, r.get(filePath));
+                String type = catalogType == null || catalogType.isBlank() ? null : catalogType;
+                if (type != null || format != null) {
+                    // The row's value, the fallback each of the two leaves open, is filled in per hit.
+                    out.put(CONTENT_TYPE_KEY, new ContentType(type, format, null));
+                }
             }
             return out;
         }
@@ -676,7 +802,8 @@ final class ManifestLabelStage {
             m.put("page_number", row.get("page_number"));
         }
         for (String key : docKeys) {
-            m.put(key, o != null && o.docValues().containsKey(key) ? o.docValues().get(key) : row.get(key));
+            Object answer = o != null && o.docValues().containsKey(key) ? o.docValues().get(key) : row.get(key);
+            m.put(key, answer instanceof ContentType ct ? ct.withRow(row.get(key)) : answer);
         }
         return m;
     }
@@ -736,10 +863,11 @@ final class ManifestLabelStage {
             }
         }
         for (Map.Entry<String, Object> d : o.docValues().entrySet()) {
-            if (d.getValue() == null) {
+            Object value = d.getValue() instanceof ContentType ct ? ct.display() : d.getValue();
+            if (value == null) {
                 copy.remove(d.getKey());
             } else {
-                copy.put(d.getKey(), d.getValue());
+                copy.put(d.getKey(), value);
             }
         }
         return copy;
