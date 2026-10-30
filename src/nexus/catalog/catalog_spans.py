@@ -124,8 +124,69 @@ def negate_iso(ts: str) -> str:
     )
 
 
+#: Chunk-row metadata keys that are a fact about ONE document's copy of the chunk, mapped to the
+#: manifest field that holds that document's own value (RDR-236 Phase 2, nexus-6pfgb.19).
+_MANIFEST_SPAN_KEYS: tuple[tuple[str, str], ...] = (
+    ("line_start", "line_start"),
+    ("line_end", "line_end"),
+    ("chunk_start_char", "char_start"),
+    ("chunk_end_char", "char_end"),
+)
+#: Section labels of a position: the manifest row's own answer only when ``labels_written``.
+_MANIFEST_LABEL_KEYS: tuple[str, ...] = ("section_title", "section_type", "page_number")
+
+
+def _owner_overlay(
+    metadata: dict, hex_chash: str, entry: "CatalogEntry", catalog: Any,
+) -> dict:
+    """*metadata* (a chunk row's, the last writer's) as the cited document *entry* states it.
+
+    Returns a copy. The title is the entry's own (dropped when the entry has none, since the
+    row's is another document's). With a *catalog*, the span is the one the document's own
+    manifest holds for the chash: the row at the lowest ``position`` when the document holds
+    the chunk more than once, and a field the manifest row leaves ``None`` is removed, never
+    borrowed from the row. Section labels follow the manifest row only when ``labels_written``.
+    When the manifest cannot say (no catalog, the read fails, or the document's manifest has
+    no row for the chash) the chunk row's span stays: it is the only evidence there is, and
+    the right one for a document that is the chunk's sole owner (a manifest-less legacy
+    document). The text-only caller passes no catalog and so pays no manifest read.
+    """
+    out = dict(metadata)
+    title = (getattr(entry, "title", "") or "").strip()
+    if title:
+        out["title"] = title
+    else:
+        out.pop("title", None)
+    if catalog is None:
+        return out
+    try:
+        manifest = catalog.get_manifest(str(entry.tumbler))
+    except Exception:  # noqa: BLE001 — best-effort owner overlay; the row span stays and the failure is logged at debug
+        _log.debug("resolve_span_owner_manifest_failed", doc_id=str(entry.tumbler), exc_info=True)
+        return out
+    held = [row for row in (manifest or []) if getattr(row, "chash", "") == hex_chash]
+    if not held:
+        return out
+    own = min(held, key=lambda row: row.position)
+    for row_key, field in _MANIFEST_SPAN_KEYS:
+        value = getattr(own, field, None)
+        if value is None:
+            out.pop(row_key, None)
+        else:
+            out[row_key] = value
+    if getattr(own, "labels_written", False):
+        for key in _MANIFEST_LABEL_KEYS:
+            value = getattr(own, key, None)
+            if value is None or value == "":
+                out.pop(key, None)
+            else:
+                out[key] = value
+    return out
+
+
 def resolve_span_in_t3(
     span: str, physical_collection: str, t3: "ClientAPI",
+    *, entry: "CatalogEntry | None" = None, catalog: Any = None,
 ) -> dict | None:
     """Resolve a ``chash:`` span to chunk content + metadata in T3.
 
@@ -135,6 +196,13 @@ def resolve_span_in_t3(
 
     Output dict keys: ``chunk_text``, ``metadata``, ``chunk_hash``,
     optionally ``char_range``.
+
+    A chunk two documents share is one row, so its metadata is the last writer's
+    (RDR-236, nexus-6pfgb.19). Given *entry*, the document the span is cited INTO,
+    ``metadata`` is a copy overlaid with that document's own title and, given *catalog*,
+    its own manifest span (see :func:`_owner_overlay`). Without *entry* the row is returned
+    as it is: a bare ``chash:`` names no document. Both are keyword-only so positional
+    ``(span, collection, t3)`` callers and stubs are unchanged.
     """
     if not span.startswith("chash:"):
         return None
@@ -149,9 +217,12 @@ def resolve_span_in_t3(
     text = result["documents"][0]
     if char_range:
         text = text[char_range[0]:char_range[1]]
+    metadata = result["metadatas"][0]
+    if entry is not None:
+        metadata = _owner_overlay(metadata, hex_chash, entry, catalog)
     out: dict = {
         "chunk_text": text,
-        "metadata": result["metadatas"][0],
+        "metadata": metadata,
         "chunk_hash": hex_chash,
     }
     if char_range:
@@ -510,8 +581,12 @@ def resolve_span_text_for_entry(
             # (pinned) but exposes ``get_collection`` itself — the old
             # unconditional ``t3._client`` read AttributeError'd into the broad
             # except below and masked every service-mode chash span to None.
+            # nexus-6pfgb.19: the cited document is named, so any metadata the dict
+            # carries is its own. No catalog is passed on: this caller returns only the
+            # text, so a manifest read for the span would be paid for and thrown away.
             result = resolve_span_in_t3(
                 span, entry.physical_collection, getattr(t3, "_client", t3),
+                entry=entry,
             )
             return result["chunk_text"] if result else None
         except Exception as exc:  # noqa: BLE001 — span resolution is best-effort; failure is logged at WARNING and degrades to None, must not crash caller
