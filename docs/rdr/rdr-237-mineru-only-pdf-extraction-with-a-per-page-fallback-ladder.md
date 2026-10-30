@@ -317,7 +317,8 @@ macOS, else `MINERU_API_MAX_CONCURRENT_REQUESTS`, else three) when the server do
 answer or reports no positive integer.
 
 **RF-19 (Verified, source and tests; nexus-q6nw0).** Where the ladder as built differs from
-the Systemic failure paragraph, which stays as decided. The failure class keys on what the
+the Systemic failure paragraph as first decided (that paragraph was amended to match on
+2026-10-29, Sam, nexus-tr1rj.28). The failure class keys on what the
 worker did, in this order: `timeout`; `signal:<n>` when the OS killed it (a negative return
 code; the stderr line is not part of the key, because a killed worker's last line is a
 progress-bar frame that differs from page to page and would give two pages killed alike two
@@ -399,11 +400,16 @@ cancelled run included, propagate and stop the document (RF-15).
 rung 1 and rung 2 with the same failure class; a page that rung 2 settles resets
 the count, so a run of equation pages that rung 2 recovers never trips it. The
 failure class is a key built from fields the failure carries, not from its
-message, which names the page range and path (RF-16): `timeout` for a timed-out
-attempt, `exit:<returncode>` plus the last non-empty line of the worker's stderr
-for a subprocess exit (the worker failure is given that line as an attribute,
-today only logged), `oom` for `MineruMemoryError`, and `http:<status>` for a
-server error. When `pdf.ladder_breaker` consecutive pages (default 3) fail with
+message, which names the page range and path (RF-16; amended to the built classes
+of RF-19, Sam 2026-10-29). In order: `timeout` for a timed-out attempt;
+`signal:<n>` for a worker the OS killed (no stderr line in the key); `oom` for the
+in-process `MemoryError` exit; `oom:<returncode>:<line>` when a memory ceiling
+turned another exit into `MineruMemoryError`; `exit:<returncode>:<line>` for any
+other subprocess exit, where the line is the last non-empty, non-progress-bar line
+of the worker's stderr with paths, hex addresses and runs of three or more digits
+normalised; and `unclassified` for a failure with no worker facts, which the
+breaker never counts. There is no HTTP class: a server error falls to the
+subprocess path. When `pdf.ladder_breaker` consecutive pages (default 3) fail with
 one class, the cause is the install or the machine: the document fails, no catalog
 document or manifest is written for it, and the failure names the class and the
 stderr line. The pages before the failing window stay in the pipeline's kept
@@ -896,3 +902,4 @@ a candidate for trimming.
 - 2026-10-28: Text corrections after the Docling removal (nexus-tr1rj.17): the Problem Statement qualifies "a document finishes"; the RF-15 stack-gate list and count; eight stack gates; `--on-formula-oom` accepted and ignored for one release.
 - 2026-10-28: The release's MinerU end-to-end coverage is the post-publish `fresh-install-mvv.sh --published` formula-PDF check, default-on with a recorded-reason skip (nexus-tr1rj.20, decision delegated by Sam).
 - 2026-10-28: By decisions Sam delegated (nexus-tr1rj.13, nexus-tr1rj.14): a breaker trip or a machine-resource error in `nx dt index` and `nx index repo` skips and lists the remaining PDFs and keeps other work; a `pymupdf` rerun over a MinerU buffer starts clean; `nx dt index` and `nx dt capture` read `pdf.extractor`.
+- 2026-10-29: By Sam's decision (nexus-tr1rj.28): the Systemic failure paragraph is amended to the failure classes as built (RF-19); `nx index repo` keeps an all-unextracted PDF a per-file skip under error class `AllPagesUnextractedError`, without failing the run's exit.
