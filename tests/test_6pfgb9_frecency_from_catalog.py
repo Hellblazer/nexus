@@ -108,11 +108,12 @@ def test_two_owners_of_one_chunk_each_score_by_their_own_frecency() -> None:
 
 
 def test_a_shared_chunk_with_no_row_doc_id_scores_by_the_best_of_its_owners() -> None:
-    """Review S2 pin. The row names no document, so the owner is chosen by the engine's order
-    (B first, 0.2): that choice is arbitrary, and a hit's frecency must not depend on it. The hit
-    scores with the MAX of its live owners' catalog scores, taken from the page's one lookup."""
-    a = _entry("1.1.1", meta={"frecency_score": 0.9})
-    b = _entry("1.1.2", meta={"frecency_score": 0.2})
+    """Review S2 pin. The row names no document, so the owner is chosen by the smallest doc_id
+    (A first, 0.2; nexus-6pfgb.52): that choice is arbitrary, and a hit's frecency must not depend
+    on it. The hit scores with the MAX of its live owners' catalog scores, taken from the page's
+    one lookup."""
+    a = _entry("1.1.1", meta={"frecency_score": 0.2})
+    b = _entry("1.1.2", meta={"frecency_score": 0.9})
     c = _entry("1.1.3", meta={"frecency_score": 0.5})
     catalog = _Catalog([a, b, c], [_position(X, "1.1.2"), _position(X, "1.1.1"), _position(Y, "1.1.3")])
     shared = _hit(X, row_frecency=0.2)  # no doc_id on the row
@@ -120,7 +121,7 @@ def test_a_shared_chunk_with_no_row_doc_id_scores_by_the_best_of_its_owners() ->
 
     ranked = _rank([shared, other], catalog)
 
-    assert shared.metadata["doc_id"] == "1.1.2", "the display attribution is unchanged: engine order"
+    assert shared.metadata["doc_id"] == "1.1.1", "the display attribution is the smallest doc_id, not the best score"
     assert shared.metadata["_owner_frecency"] == 0.9
     assert ranked[0] is shared, [r.hybrid_score for r in ranked]
     assert len(catalog.resolve_calls) == 1, "no new catalog call"
