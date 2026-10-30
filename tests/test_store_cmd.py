@@ -142,8 +142,10 @@ def _stats(name: str, count: int) -> dict:
 
 
 def _search_result(content="chunk", **overrides):
+    # nexus-6pfgb.51: the display path is the catalog-resolved ``_display_path`` key the search
+    # page stamps; the row's ``source_path`` is no longer read by any formatter.
     base = {"id": "abc1", "content": content, "distance": 0.1,
-            "source_path": "./sec.md", "line_start": 1}
+            "_display_path": "./sec.md", "line_start": 1}
     base.update(overrides)
     return base
 
@@ -739,9 +741,9 @@ def test_search_path_filters_results_by_file_path(runner, mock_search, tmp_path)
     def fake_search(query, collection_names, n_results=10, where=None):
         return [
             _search_result(content="inside src", id="r1",
-                           source_path=str(src_dir / "file.py"), file_path=str(src_dir / "file.py")),
+                           _display_path=str(src_dir / "file.py"), file_path=str(src_dir / "file.py")),
             _search_result(content="outside src", id="r2", distance=0.2,
-                           source_path=str(other_dir / "file.py"), file_path=str(other_dir / "file.py")),
+                           _display_path=str(other_dir / "file.py"), file_path=str(other_dir / "file.py")),
         ]
 
     mock_search.search.side_effect = fake_search
