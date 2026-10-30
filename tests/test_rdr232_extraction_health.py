@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,10 @@ from nexus.plans import eligibility as el
 from nexus.plans import request_coverage as rc
 from tests._module_seam import setattr_in
 from tests.test_rdr232_eligibility import LOOKUP_473, SYNTH_12, _drive
+
+# tests/conftest.py stubs the real `claude --version` probe for every test (a run of the suite must not spawn the
+# user's claude); this module exercises the probe itself against shell stubs, so it opts out.
+REAL_CLAUDE_VERSION_PROBE = True
 
 EVENT = "answer_kind_gate_extraction_failing"
 KEY = "sk-ant-api03-DOCTORSECRET0123456789abcdef"
@@ -167,6 +172,9 @@ def no_claude(monkeypatch):
     setattr_in(monkeypatch, "nexus.health", "shutil.which", lambda name: None)
 
 
+needs_sh = pytest.mark.skipif(sys.platform == "win32", reason="the stub claude is a #!/bin/sh script")
+
+
 @pytest.fixture
 def claude(monkeypatch):
     setattr_in(monkeypatch, "nexus.operators.llm_backend", "shutil.which", lambda name: "/usr/bin/claude")
@@ -212,15 +220,33 @@ class TestAnswerKindExtractionRow:
         assert "cli" in row.detail and rc.DEFAULT_EXTRACT_MODEL in row.detail and KEY not in row.detail
 
     def test_a_healthy_cli_says_what_the_row_did_not_check(self, claude) -> None:
-        """nexus-jypmj.21: green must not claim more than it looked at."""
+        """nexus-jypmj.21: green must not claim more than it looked at, and must not misdescribe where a failing
+        backend does show: each request's outcome is in the envelope's request_coverage.extraction, and the log line
+        fires only after repeated failures while the gate enforces. No doctor row shows it."""
         (row,) = _check_answer_kind_extraction()
         assert row.ok and "no model call" in row.detail and "answer_kind_gate_extraction_failing" in row.detail
+        assert "request_coverage.extraction" in row.detail and "while the gate enforces" in row.detail
+        assert "shows only" not in row.detail
 
+    def test_a_probe_that_raises_is_a_warning_not_a_crash(self, monkeypatch) -> None:
+        """nexus-jypmj.21: the version probe is inside the row's guard, so an unexpected failure of it is a soft
+        warning and `nx doctor` goes on. Failing before: the call sat outside the try and the exception escaped."""
+        setattr_in(monkeypatch, "nexus.operators.llm_backend", "shutil.which", lambda name: "/usr/bin/claude")
+
+        def boom() -> str | None:
+            raise RuntimeError("probe exploded")
+
+        monkeypatch.setattr(health, "_claude_cli_problem", boom)
+        (row,) = _check_answer_kind_extraction()
+        assert not row.ok and row.warn and not row.fatal and "probe exploded" in row.detail
+
+    @needs_sh
     def test_a_cli_that_starts_reads_green(self, monkeypatch, tmp_path) -> None:
         _claude_stub(monkeypatch, tmp_path, "echo '2.1.0 (Claude Code)'\n")
         (row,) = _check_answer_kind_extraction()
         assert row.ok and not row.warn and "claude --version ran" in row.detail
 
+    @needs_sh
     @pytest.mark.parametrize("script, mention", [
         ("echo 'node: command not found' >&2\nexit 127\n", "exited 127"),
         ("exit 1\n", "exited 1"),
@@ -231,14 +257,19 @@ class TestAnswerKindExtractionRow:
         (row,) = _check_answer_kind_extraction()
         assert not row.ok and row.warn and not row.fatal
         assert mention in row.detail and "--version" in row.detail and "first-pass" in row.detail
+        assert "cannot run" in row.detail and "may be unable" not in row.detail
         assert any("NX_ANSWER_STRUCTURED_EXTRACT" in f for f in row.fix_suggestions)
 
+    @needs_sh
     def test_a_cli_that_hangs_warns_within_the_bound(self, monkeypatch, tmp_path) -> None:
+        """A slow cold start looks like a hang, so the row says the CLI MAY be unable to run, not that it cannot."""
         monkeypatch.setattr(health, "_CLAUDE_VERSION_TIMEOUT_S", 0.3)
         _claude_stub(monkeypatch, tmp_path, "sleep 30\n")
         (row,) = _check_answer_kind_extraction()
         assert not row.ok and row.warn and "did not finish" in row.detail
+        assert "may be unable to run" in row.detail and "cannot run" not in row.detail
 
+    @needs_sh
     def test_a_cli_file_that_cannot_execute_warns(self, monkeypatch, tmp_path) -> None:
         stub = _claude_stub(monkeypatch, tmp_path, "exit 0\n")
         stub.chmod(0o644)

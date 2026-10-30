@@ -2688,6 +2688,20 @@ def _restore_cwd():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_claude_version_probe(request, monkeypatch):
+    """nexus-jypmj.21: the "Answer-kind extraction" doctor row runs ``claude --version`` when the ``cli`` backend is
+    chosen, so any test that reaches ``run_health_checks()`` (the doctor tests, the console health panel) on a box
+    with ``claude`` on PATH would spawn the user's real CLI, which can take seconds or hang. Stub the probe to
+    "healthy" for every test. A module that exercises the probe itself sets ``REAL_CLAUDE_VERSION_PROBE = True``
+    (tests/test_rdr232_extraction_health.py drives it against shell stubs)."""
+    if getattr(request.module, "REAL_CLAUDE_VERSION_PROBE", False):
+        return
+    import nexus.health as health  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    monkeypatch.setattr(health, "_claude_cli_problem", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _mcp_server_process_flag_does_not_leak(monkeypatch):
     """nexus-xs7fp: ``core.main()`` / ``catalog.main()`` call
     ``session.mark_mcp_server_process()``, and a couple of tests run a

@@ -3939,11 +3939,13 @@ _CLAUDE_VERSION_TIMEOUT_S = 5.0
 
 
 def _claude_cli_problem() -> str | None:
-    """Why the ``claude`` on PATH cannot run at all, else ``None`` (nexus-jypmj.21).
+    """Why the ``claude`` on PATH may not run at all, else ``None`` (nexus-jypmj.21).
 
     Runs ``claude --version`` once, bounded: a process spawn, not a model call. It catches a broken install
     (a dangling shim, a missing runtime, a wrong-architecture binary) that PATH presence alone reads as healthy.
-    It cannot see a CLI that starts but cannot answer (signed out, offline): only an extraction call shows that.
+    The text carries its own verdict: a failed start says the CLI cannot run, a run that outlasts the bound says
+    it may be unable to (a slow cold start looks the same). It cannot see a CLI that starts but cannot answer
+    (signed out, offline): only an extraction call shows that, and no doctor row does.
     """
     path = shutil.which("claude")
     if path is None:
@@ -3951,11 +3953,11 @@ def _claude_cli_problem() -> str | None:
     try:
         proc = run_bounded([path, "--version"], timeout=_CLAUDE_VERSION_TIMEOUT_S, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        return f"`claude --version` did not finish in {_CLAUDE_VERSION_TIMEOUT_S:g}s"
+        return f"`claude --version` did not finish in {_CLAUDE_VERSION_TIMEOUT_S:g}s, so the CLI may be unable to run"
     except OSError as exc:
-        return f"`claude --version` could not start ({exc.__class__.__name__})"
+        return f"`claude --version` could not start ({exc.__class__.__name__}), so the CLI cannot run"
     if proc.returncode != 0:
-        return f"`claude --version` exited {proc.returncode}"
+        return f"`claude --version` exited {proc.returncode}, so the CLI cannot run"
     return None
 
 
@@ -3966,8 +3968,8 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
     open, and the answer-kind gate enforces on whatever kind comes back. When the call fails the request keeps
     its first-pass kind and the gate keeps enforcing (per request, by design), and the first-pass-only regime is
     the one that failed the held-out lookup measurement. A process in which the call fails every time warns once
-    in its log (``answer_kind_gate_extraction_failing``); this row reads the same preconditions without a model
-    call. Never prints a key.
+    in its log (``answer_kind_gate_extraction_failing``, only while the gate enforces); this row reads the same
+    preconditions without a model call, so a backend that fails each call is not visible in it. Never prints a key.
 
     * The extraction or the gate is switched off, or the box has no LLM backend at all (search and storage only;
       the "LLM backend" row says so): not applicable, a pass. The fresh-install bar is zero warnings.
@@ -3995,6 +3997,7 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
             )]
         status = backend_status()
         model = coverage_mod.extraction_model(os.environ)
+        cli_problem = _claude_cli_problem() if status.available and status.name == "cli" else None
     except Exception as exc:  # noqa: BLE001 - a doctor row must not crash `nx doctor`
         return [HealthResult(label=label, ok=False, warn=True, detail=f"could not determine: {exc}")]
     switches = [
@@ -4002,12 +4005,12 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
         f"or set {eligibility_mod.ANSWER_KIND_ELIGIBILITY_ENV}=0 to switch it off",
     ]
     if status.available and status.name in ("cli", "anthropic"):
-        if status.name == "cli" and (problem := _claude_cli_problem()):
+        if cli_problem:
             return [HealthResult(
                 label=label, ok=False, warn=True,
-                detail=f"cli ({status.reason}) but {problem}: the extraction cannot run, so requests keep their "
-                       "first-pass kind while the answer-kind gate keeps enforcing on it (the regime that lost "
-                       "lookup recall in the held-out measurement)",
+                detail=f"cli ({status.reason}) but {cli_problem}; when the extraction fails, requests keep "
+                       "their first-pass kind while the answer-kind gate keeps enforcing on it (the regime that "
+                       "lost lookup recall in the held-out measurement)",
                 fix_suggestions=["reinstall or repair the claude CLI, or nx config set anthropic_api_key <key>", *switches],
             )]
         unseen = (
@@ -4017,7 +4020,9 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
         return [HealthResult(
             label=label, ok=True,
             detail=f"runs on {status.name} ({status.reason}), model {model}; no model call is made ({unseen}), "
-                   "so a backend that fails each call shows only as answer_kind_gate_extraction_failing in the log",
+                   "so a backend that fails each call is not shown here: each request's outcome is in the answer "
+                   "envelope's request_coverage.extraction, and the log line answer_kind_gate_extraction_failing "
+                   "fires only after repeated failures while the gate enforces",
         )]
     if status.available:
         return [HealthResult(
