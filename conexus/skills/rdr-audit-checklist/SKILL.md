@@ -6,7 +6,7 @@ effort: high
 
 # RDR Audit Skill
 
-Wraps the canonical audit pattern proven in Phase 1b (RDR-067) as a one-command skill. Delegates the classification work to the **deep-research-synthesizer** agent (sonnet). See [registry.yaml](../../registry.yaml).
+Wraps the canonical audit pattern proven in Phase 1b (RDR-067) as a one-command skill. Delegates the classification work to the **deep-research-synthesizer** agent, dispatched with `model: "sonnet"`: the classification is a gate, so it does not take the agent's haiku default (nexus-j6un5.1). See [registry.yaml](../../registry.yaml).
 
 **Phase 2a scope**: default-mode audit dispatch only. The `list` / `status` / `history` management subcommands are added in Phase 2b (`nexus-dqp.4`) and are not implemented here.
 

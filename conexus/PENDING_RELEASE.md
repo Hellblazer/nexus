@@ -47,6 +47,11 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/agents/codebase-deep-analyzer.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5.
+- `conexus/agents/deep-research-synthesizer.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5.
+- `conexus/agents/test-validator.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5.
+- `conexus/skills/orchestration/SKILL.md` (nexus-j6un5.4): mechanical beads dispatch the developer with `model: "haiku"`, labelled `dev-model:haiku` or `dev-model:sonnet` for the comparison; a failed Haiku round is re-dispatched on Sonnet.
+
 
 ## Deferred to the next client release
 
