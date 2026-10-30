@@ -324,12 +324,20 @@ Pass `--allow-degraded-extraction` only after reviewing the extraction (or
 for a document you've confirmed genuinely trips the heuristic) — the run
 logs a WARNING so the override is visible immediately, AND every chunk of
 the document is stamped `quality_gate_overridden: true` in its persisted
-T3 metadata, so a later shakedown/audit has a durable handle on which
-documents were accepted with known-degraded text:
+metadata, so a later shakedown/audit has a durable handle on which
+documents were accepted with known-degraded text. The document's own record is its
+catalog `meta` (nexus-6pfgb.6: an explicit `false` on a clean index, `true` on an
+override), and the audit filters the documents themselves:
 
 ```bash
-nx search "" --corpus docs --where quality_gate_overridden=true --files
+nx catalog list --meta quality_gate_overridden=true
 ```
+
+The older form, `nx search "" --corpus docs --where quality_gate_overridden=true --files`,
+reads the CHUNK ROWS, and a row two documents share holds the last writer's value:
+a clean re-index of document B erased the marker from rows document A still owns,
+so A dropped out of the audit. Use it only for documents that share no chunk, until
+the engine answers `where=` per owning document (nexus-6pfgb.24).
 
 **Querying by extractor identity (`extraction_method`, nexus-1oguj).** Every
 PDF chunk's metadata carries which backend actually produced its text:
@@ -360,26 +368,36 @@ regression scopeable after the fact (e.g. "which documents did MinerU
 extract, so I can re-index just those").
 
 ```bash
-nx search "" --corpus knowledge --where extraction_method=mineru --files
+nx catalog list --meta extraction_method=mineru
 ```
 
+Each document's catalog `meta` carries its own `extraction_method`,
+`quality_gate_overridden` and `extraction_source` (`file`, or `dt_content` /
+`dt_ocr` / `dt_transcribe` for DEVONthink text; an absent source means `file`), and
+`nx catalog list --meta KEY=VALUE` (repeatable, ANDed) filters the documents on them.
+`nx store get` prints them from the same place: an `Extractor:` line, a `Gate:` line for
+a document that overrode the quality gate and a `Source:` line for text that did not come
+from a file, one set per owning document when a chunk is shared. The chunk row's copy is
+the last writer's and is no longer read (nexus-6pfgb.16). The `nx search --where
+extraction_method=mineru --files` form still filters the rows; it can name a document by
+another document's extraction when they share a chunk.
+
 - **Scoping "any mineru-touched document" is two queries today, not one.**
-  `--where` equality has no single-key OR/`$in` yet (repeating the same key
-  with different values is a caller error and now raises loudly — see
-  `--where` above) — `mineru`, `mineru+degraded` and, on documents indexed before
-  RDR-237, `mineru+docling-degraded` are distinct exact values. Run one query per
-  value and union the results client-side:
-  `--where extraction_method=mineru` and
-  `--where extraction_method=mineru+degraded` separately. Single-key
-  `$in` support is tracked as nexus-4gzc8.
-- **Absence of the key is not evidence of "not mineru."** `extraction_method`
-  is a NEW-WRITES-ONLY field — chunks indexed before this fix carry no such
-  key at all, so `--where extraction_method!=mineru` (or any filter that
-  relies on the key's absence meaning "some other extractor") silently
-  conflates "known non-mineru" with "indexed before this field existed."
-  There is no backfill for pre-fix chunks (re-extraction would be required
-  to recover the value honestly); treat a missing key as *unknown*, never as
-  a negative result. Tracked as nexus-0qc4b.
+  `--meta` equality, like `--where`, has no single-key OR/`$in` yet (repeating the
+  same key with different values is a caller error for `--where` and matches nothing
+  for `--meta`, since no document equals both) — `mineru`, `mineru+degraded` and, on
+  documents indexed before RDR-237, `mineru+docling-degraded` are distinct exact
+  values. Run one query per value and union the results:
+  `--meta extraction_method=mineru` and `--meta extraction_method=mineru+degraded`
+  separately. Single-key `$in` support for `--where` is tracked as nexus-4gzc8.
+- **Absence of the key is not evidence of "not mineru."** A document indexed before
+  nexus-6pfgb.6 has no `extraction_method` in its `meta`, so `--meta extraction_method=mineru`
+  does not list it and neither does any other value; treat a missing key as *unknown*,
+  never as a negative result (`quality_gate_overridden=false` likewise finds only the
+  documents that recorded an explicit `false`). `nx catalog backfill-meta` (nexus-6pfgb.10)
+  fills the keys from the rows of a document that is the sole owner of its chunks;
+  a document whose chunks are all shared needs a forced re-index to record its own
+  (nexus-0qc4b).
 
 ### nx index failures
 
@@ -1543,13 +1561,14 @@ Per-collection report of outgoing-link counts at the depth-N BFS frontier (defau
 ### nx catalog list / stats / owners / delete
 
 ```
-nx catalog list [--owner PREFIX_OR_NAME] [--type TEXT] [-n/--limit N] [--offset N] [--json]
+nx catalog list [--owner PREFIX_OR_NAME] [--type TEXT] [--meta KEY=VALUE]... [-n/--limit N] [--offset N] [--json]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--owner` | Filter to one owner. Accepts a dotted tumbler (`1.2`) or an owner name (resolved via catalog lookup); a name shared by a repo and a curator owner resolves to the repo (GH #1544); any other shared name raises a clean error naming the candidates |
 | `--type` | Filter to a `content_type` (e.g. `code`, `rdr`, `knowledge`) |
+| `--meta KEY=VALUE` | Keep the documents whose own catalog `meta` has `KEY` equal to `VALUE`; repeatable, all must match (nexus-6pfgb.16). A boolean compares as `true` / `false`. An absent key matches nothing (absent is unknown), except `extraction_source`, which is `file` when absent. The filter scans every document of the type and pages the matches, so `--limit` bounds the printed page, not the scan. The audit forms: `--meta quality_gate_overridden=true`, `--meta extraction_method=mineru` |
 | `-n`, `--limit` | Page size. Default `50`. **Server-side cap (nexus-xoimv)** — the underlying query is limited at the source, not truncated client-side after a full fetch |
 | `--offset` | Skip this many entries (pagination) |
 | `--json` | Emit entries as a JSON array instead of text rows |

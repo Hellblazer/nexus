@@ -162,9 +162,8 @@ def test_a_clean_document_prints_no_degraded_line(world) -> None:
 def test_a_document_that_never_recorded_a_map_prints_no_line(world) -> None:
     """Documents indexed before the field existed (``docling``, ``mineru+docling-degraded``) have
     no ``extraction_pages``: they stay readable and print only ``Extractor:``."""
-    world.t3.docs[CHASH]["extraction_method"] = "mineru+docling-degraded"
     world.holders = {CHASH: [("1.1.1", "Some Paper")]}
-    world.metas = {"1.1.1": {}}
+    world.metas = {"1.1.1": {"extraction_method": "mineru+docling-degraded"}}
     for out in (_cli_get().output, _mcp_get()):
         assert "Extractor:  mineru+docling-degraded" in out
         assert "Degraded:" not in out
@@ -205,10 +204,12 @@ def test_a_catalog_error_leaves_get_working_in_both_surfaces(world, monkeypatch)
 
     monkeypatch.setattr(catalog_factory, "make_catalog_reader", boom)
     cli = _cli_get()
-    assert cli.exit_code == 0 and "Extractor:  mineru+degraded" in cli.output and "pdf chunk text" in cli.output
+    assert cli.exit_code == 0 and "pdf chunk text" in cli.output
     mcp = _mcp_get()
-    assert "Extractor:  mineru+degraded" in mcp and "pdf chunk text" in mcp
-    assert "Degraded:" not in cli.output + mcp
+    assert "pdf chunk text" in mcp
+    # nexus-6pfgb.16: the extractor is the owning documents' catalog fact; the chunk row's is the last
+    # writer's, so with no catalog there is no Extractor line (absent is unknown), not the row's.
+    assert "Extractor:" not in cli.output + mcp and "Degraded:" not in cli.output + mcp
 
 
 def test_a_missing_catalog_leaves_get_working(world, monkeypatch) -> None:
@@ -262,7 +263,7 @@ def test_a_chunk_nobody_holds_prints_no_line_and_looks_the_holders_up_once(world
     world.holders = {}
     world.metas = {"1.1.1": {"extraction_pages": DEGRADED}}
     out = _mcp_get()
-    assert "Degraded:" not in out and "Extractor:  mineru+degraded" in out
+    assert "Degraded:" not in out and "Extractor:" not in out, "nobody owns it: no document's record to print"
     assert world.lookups == 1 and world.reader.resolved == [], "no owner, so nothing was resolved"
 
 
@@ -273,7 +274,7 @@ def test_a_get_asked_by_title_still_prints_the_degraded_line(world) -> None:
     """Asked by title the display still makes its one owner lookup (nexus-6pfgb.13) and the Degraded
     line reads the entries from it: dropping them would lose the line silently."""
     world.holders = {CHASH: [("1.1.1", "Some Paper")]}
-    world.metas = {"1.1.1": {"extraction_pages": DEGRADED}}
+    world.metas = {"1.1.1": {"extraction_method": "mineru+degraded", "extraction_pages": DEGRADED}}
     world.t3.find_ids_by_title = lambda name, title: [CHASH] if title == "Some Paper" else []
     out = mcp_core.store_get(doc_id="Some Paper", collection="art")
     assert "Extractor:  mineru+degraded" in out and "Title:      Some Paper" in out, out

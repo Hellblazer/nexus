@@ -194,8 +194,10 @@ line_start = 1
 [sites."src/nexus/formatters.py::format_plain_with_context"]
 line_start = 1
 
+# nexus-6pfgb.16: whether the post-pass ran is the owning document's own catalog meta (extraction_method),
+# passed in; the row's extraction_method is the last writer's and is no longer read. The placeholder
+# title is the row's (the engine's where= matches it).
 [sites."src/nexus/health.py::_is_pdf_stub_metadata"]
-extraction_method = 1
 title = 1
 
 [sites."src/nexus/health.py::_pdf_stubs_in_collection"]
@@ -226,7 +228,6 @@ title = 2
 # Phase 3, a keyless note stored before nexus-6pfgb.5). ttl_days is read here for that fallback (it
 # is the one new listed read: a keyless sole owner's TTL, shown only when the owner wrote the row).
 [sites."src/nexus/mcp/core.py::store_get"]
-extraction_method = 1
 indexed_at = 1
 tags = 1
 title = 1

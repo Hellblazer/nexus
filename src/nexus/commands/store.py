@@ -540,14 +540,18 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
         out = {**entry, "collection": col_name, "note": {
             "title": shown.title, "tags": shown.tags, "indexed": shown.indexed, "ttl": shown.ttl,
         }}
-        if entry.get("extraction_method"):
+        # nexus-6pfgb.16: each owning document's own extraction facts (the chunk row's are the last
+        # writer's), ONLY when some owner states any, so a note's JSON is unchanged.
+        from nexus.catalog.store_hook import degraded_pages_for_chunk, extraction_facts  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+        if facts := extraction_facts(owners):
+            out["extraction"] = facts
+        if owners is not None:
             # RDR-237: the text form prints the degraded pages of the catalog document(s) holding
             # this chunk, so the machine form carries them too, as `degraded_pages`: a list of
             # {tumbler, title, extraction_pages}, ONLY when some document has any (a clean or
             # non-PDF chunk's JSON is unchanged). A script finding degraded documents reads this
             # instead of scraping the text line.
-            from nexus.catalog.store_hook import degraded_pages_for_chunk  # noqa: PLC0415 — deferred to avoid CLI startup cost
-
             rows, _n = degraded_pages_for_chunk(col_name, entry["id"], owners=owners)
             if rows:
                 out["degraded_pages"] = [
@@ -556,11 +560,8 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
         click.echo(json.dumps(out, indent=2))
     else:
         title, tags, indexed_at = shown.title, shown.tags, shown.indexed
-        # nexus-1oguj: mirrors the MCP store_get display (mcp/core.py) —
-        # extraction_method is canonical for PDF chunks now; absent for
-        # non-PDF chunks and for chunks indexed before the fix shipped
-        # (new-writes-only, no backfill; nexus-0qc4b).
-        extraction_method = entry.get("extraction_method", "")
+        # nexus-6pfgb.16: as the MCP store_get, the extractor, override and source are the owning
+        # documents' catalog facts (extraction_lines), never the chunk row's.
         click.echo(f"ID:         {entry['id']}")
         click.echo(f"Collection: {col_name}")
         if title:
@@ -571,11 +572,12 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
             click.echo(f"Indexed:    {indexed_at}")
         if shown.ttl not in ("permanent", "unknown"):
             click.echo(f"TTL:        {shown.ttl}")
-        if extraction_method:
-            click.echo(f"Extractor:  {extraction_method}")
-            # RDR-237: same line as the MCP store_get, from the same helper.
-            from nexus.catalog.store_hook import degraded_pages_lines  # noqa: PLC0415 — deferred to avoid CLI startup cost
+        from nexus.catalog.store_hook import degraded_pages_lines, extraction_lines  # noqa: PLC0415 — deferred to avoid CLI startup cost
 
+        for line in extraction_lines(owners):
+            click.echo(line)
+        if owners is not None:
+            # RDR-237: same line as the MCP store_get, from the same helper.
             for line in degraded_pages_lines(col_name, entry["id"], owners=owners):
                 click.echo(line)
         click.echo(f"\n{entry.get('content', '')}")

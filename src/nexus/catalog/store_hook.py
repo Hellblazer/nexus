@@ -2142,6 +2142,67 @@ def note_display(
     return NoteDisplay(title=shown_title, tags=tags, indexed=indexed, ttl=ttl)
 
 
+def _held(owners: list[Any] | None, title: str | None) -> list[Any]:
+    """The owners a read about one note looks at: all of *owners*, or only those titled *title*."""
+    return [e for e in (owners or []) if title is None or (getattr(e, "title", "") or "") == title]
+
+
+def extraction_facts(owners: list[Any] | None, *, title: str | None = None) -> list[dict[str, Any]]:
+    """The extraction provenance each owner of a chunk states in its catalog ``meta`` (nexus-6pfgb.16,
+    RDR-236 Phase 2), one dict per owner that states any: ``tumbler``, ``title``, ``extraction_method``
+    (``""`` when it states none), ``quality_gate_overridden`` (``True`` / ``False`` as written, ``None`` when
+    the key is absent: absent is UNKNOWN, an explicit ``False`` is "not overridden") and
+    ``extraction_source`` (an absent source is ``file``). *title* keeps only owners with that title.
+
+    These are DOCUMENT facts: a chunk row is one per chunk text, so its ``extraction_method`` and
+    ``quality_gate_overridden`` are the last writer's, and a clean re-index of one document used to erase
+    the marker of another that shares the chunk. The row is not read."""
+    out: list[dict[str, Any]] = []
+    for e in _held(owners, title):
+        meta = getattr(e, "meta", None) or {}
+        method = str(meta.get("extraction_method") or "")
+        flag = meta.get("quality_gate_overridden")
+        override = flag if isinstance(flag, bool) else None
+        source = str(meta.get("extraction_source") or "")
+        if not (method or override is not None or source):
+            continue
+        out.append({
+            "tumbler": str(getattr(e, "tumbler", "")), "title": getattr(e, "title", "") or "",
+            "extraction_method": method, "quality_gate_overridden": override,
+            "extraction_source": source or "file",
+        })
+    return out
+
+
+def _fact_lines(prefix: str, facts: list[dict[str, Any]], held: int, value: Callable[[dict[str, Any]], str]) -> list[str]:
+    """``prefix + value`` for a fact every one of the *held* owners states alike (one unlabelled line), else one
+    line per stating owner labelled with its title (its tumbler when it has none). ``value`` returns ``""``
+    for an owner that has nothing to show."""
+    shown = [(f, v) for f in facts if (v := value(f))]
+    if not shown:
+        return []
+    if len(shown) == held and len({v for _f, v in shown}) == 1:
+        return [f"{prefix}{shown[0][1]}"]
+    return [f"{prefix}{f['title'] or f['tumbler']}: {v}" for f, v in shown]
+
+
+def extraction_lines(owners: list[Any] | None, *, title: str | None = None) -> list[str]:
+    """The ``Extractor:`` / ``Gate:`` / ``Source:`` lines ``store_get`` and ``nx store get`` print, from the
+    chunk's owning documents' catalog ``meta`` (nexus-6pfgb.16). A fact every owner states alike prints once;
+    owners that differ print one labelled line each. ``Gate:`` appears only for an owner that overrode the
+    quality gate and ``Source:`` only for text that did not come from a file (an absent source is a file).
+    No owner states a method, or the catalog could not be read (*owners* ``None``): no line, never the chunk
+    row's value, which is the last writer's. A document indexed before nexus-6pfgb.6 gets its keys from
+    ``nx catalog backfill-meta`` (nexus-6pfgb.10) or its next index run."""
+    held = _held(owners, title)
+    facts = extraction_facts(held)
+    return [
+        *_fact_lines("Extractor:  ", facts, len(held), lambda f: f["extraction_method"]),
+        *_fact_lines("Gate:       ", facts, len(held), lambda f: "overridden" if f["quality_gate_overridden"] else ""),
+        *_fact_lines("Source:     ", facts, len(held), lambda f: "" if f["extraction_source"] == "file" else f["extraction_source"]),
+    ]
+
+
 #: The rungs a document's ``extraction_pages`` map can name, in display order. Mirrors
 #: ``nexus.pdf_extractor._DEGRADED_METHODS``, which this module cannot import without pulling the
 #: extractor stack into ``nx store get``; ``tests/test_degraded_pages_line.py`` pins the two equal.

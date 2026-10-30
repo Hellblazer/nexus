@@ -5908,27 +5908,21 @@ def store_get(
         # chunk (tags their union, the date and the expiry only where they agree). The row speaks only
         # where no catalog value exists and the chunk has at most one owner. ONE owner lookup serves
         # the whole display (it was three reads: holders, tags, degraded pages).
-        from nexus.catalog.store_hook import live_owner_entries, note_display, owner_holders  # noqa: PLC0415 — deferred for startup cost, as in store_put
+        from nexus.catalog.store_hook import extraction_lines, live_owner_entries, note_display  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
         owner_map = live_owner_entries(col_name, [entry["id"]])
         owners = None if owner_map is None else owner_map.get(entry["id"], [])
-        holders: list[tuple[str, str]] | None = None  # None: not looked up (asked by title)
-        if looks_like_hash:
-            holders = owner_holders(owners or [])
         shown = note_display(
             owners, row=entry, row_title=entry.get("title", ""), row_tags=entry.get("tags", ""),
             row_ttl_days=entry.get("ttl_days"), row_indexed_at=entry.get("indexed_at") or "",
             title=None if looks_like_hash else doc_id,
         )
         title, tags, indexed_at = shown.title, shown.tags, shown.indexed
-        # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL for PDF
-        # chunks now (mineru/pymupdf, or the honest mixed aggregate
-        # mineru+degraded; a legacy value from before RDR-237, pymupdf_normalized
-        # among them) — display it when
-        # present. Absent for non-PDF chunks and for chunks indexed
-        # before the fix shipped (new-writes-only, no backfill;
-        # nexus-0qc4b — absence is "unknown", not "not mineru").
-        extraction_method = entry.get("extraction_method", "")
+        # nexus-6pfgb.16 (RDR-236 Phase 2): the extractor, the quality-gate override and the text source are
+        # DOCUMENT facts, read from the owning documents' catalog meta (the lines below). The chunk row's
+        # ``extraction_method`` is the last writer's: a clean re-index of one PDF left its method on rows
+        # another PDF still owns. Absence is "unknown" (nexus-0qc4b), so a document with no catalog
+        # value prints no line.
         # nexus-spujb: a note split to its model's token window reads back whole.
         from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
@@ -5945,14 +5939,16 @@ def store_get(
             lines.append(f"Indexed:    {indexed_at}")
         if shown.ttl not in ("permanent", "unknown"):
             lines.append(f"TTL:        {shown.ttl}")
-        if extraction_method:
-            lines.append(f"Extractor:  {extraction_method}")
-            # RDR-237: the pages the ladder settled below MinerU's first rung, read from the
-            # catalog document(s) holding this chunk (one line each). Reuses the holders looked up
-            # above; best-effort, so a catalog fault leaves the line out and `get` still answers.
+        lines.extend(extraction_lines(owners, title=None if looks_like_hash else doc_id))
+        if owners is not None:
+            # RDR-237: the pages the ladder settled below MinerU's first rung, read from the catalog
+            # document(s) holding this chunk (one line each) from the owners already in hand.
             from nexus.catalog.store_hook import degraded_pages_lines  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
-            lines.extend(degraded_pages_lines(col_name, entry["id"], holders=holders, owners=owners))
+            lines.extend(degraded_pages_lines(
+                col_name, entry["id"],
+                owners=[o for o in owners if looks_like_hash or (getattr(o, "title", "") or "") == doc_id],
+            ))
         if split is not None:
             lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
         if also_titled:
