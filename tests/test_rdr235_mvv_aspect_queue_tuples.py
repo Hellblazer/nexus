@@ -71,8 +71,21 @@ import pytest
 from nexus.aspect_extractor import AspectRecord
 from nexus.aspect_worker import AspectExtractionWorker
 from nexus.db.t2.http_tuple_store import ClaimNotFoundError
+from tests import _external_engine
 
 pytestmark = pytest.mark.usefixtures("t2_service_env")
+
+#: Scenarios 24 and 25 stay on the local test engine (nexus-ckejb): 24 starts a child process with the
+#: PG-direct substrate env (``tests._chunk_seed.substrate_env``), which an external engine does not have, and 25
+#: writes 1,200 tasks, a load nobody should put on a managed tenant. Evaluated at collection, so the skipped
+#: tests never boot an engine.
+_LOCAL_ONLY = pytest.mark.skipif(
+    _external_engine.requested(),
+    reason=(
+        f"local-only: {_external_engine.URL_ENV} and {_external_engine.TOKEN_ENV} are set, "
+        "so this run targets an external engine; this scenario needs the local test engine"
+    ),
+)
 
 #: A hang bound, not a performance assertion (nexus-61vos): the journey is a few
 #: tens of seconds, so anything past this is a wedge rather than a slow box.
@@ -128,9 +141,12 @@ def _doc_path(i: int) -> str:
 
 def _register_collection(tag: str) -> str:
     from nexus.catalog.factory import make_catalog_writer
-    from nexus.corpus import collection_registration_kwargs
+    from nexus.corpus import collection_registration_kwargs, effective_embedding_model_for_writes
 
-    coll = f"knowledge__nx235{tag}-{uuid.uuid4().hex[:6]}__bge-base-en-v15-768__v1"
+    # The model token is the client's own write model, the one register_collection sends and the engine checks
+    # against the tenant's profile: bge on the local engine, whatever an external engine serves (nexus-ckejb).
+    model = effective_embedding_model_for_writes("knowledge")
+    coll = f"knowledge__nx235{tag}-{uuid.uuid4().hex[:6]}__{model}__v1"
     make_catalog_writer().register_collection(coll, **collection_registration_kwargs(coll))
     return coll
 
@@ -400,6 +416,7 @@ def _worker_opts(**over: Any) -> dict[str, Any]:
 
 
 @pytest.mark.scenario
+@pytest.mark.external_engine_ok
 def test_mvv_journey_on_the_tuple_queue(
     db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -415,6 +432,15 @@ def test_mvv_journey_on_the_tuple_queue(
     ledger.install(monkeypatch)
     ex = _Extractor(db)
     ex.install(monkeypatch)
+
+    # ── precondition: a tenant this journey can own (an external run names the operator's, nexus-ckejb) ──
+    assert any(t["name"] == _SUB for t in db.tuples.registry()["templates"]), (
+        "this engine has no 'aspects' tuple template (an engine older than RDR-235 E3)"
+    )
+    live = db.tuples.subspace_stats(_SUB)
+    assert live.available + live.claimed + live.dead == 0 and db.aspect_queue.pending_count() == 0, (
+        "this tenant already holds aspect-queue work; the journey counts every task in it and needs a fresh tenant"
+    )
 
     # ── setup: one tenant, a collection, 50 documents, and a few old-table rows ──
     coll = _register_collection("mvv")
@@ -684,6 +710,7 @@ def test_mvv_journey_on_the_tuple_queue(
 
 
 @pytest.mark.scenario
+@_LOCAL_ONLY
 def test_scenario_24_an_out_from_a_second_process_wakes_a_parked_worker_within_two_seconds(
     db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -750,6 +777,7 @@ def test_scenario_24_an_out_from_a_second_process_wakes_a_parked_worker_within_t
 
 
 @pytest.mark.slow
+@_LOCAL_ONLY
 def test_scenario_25_a_bulk_index_at_the_measured_backlog_is_not_refused_and_does_not_expire(
     db: Any, monkeypatch: pytest.MonkeyPatch, record_property: Any,
 ) -> None:

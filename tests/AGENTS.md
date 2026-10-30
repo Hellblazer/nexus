@@ -101,6 +101,26 @@ has no live cloud config). The scoring function has fast, non-`integration`
 coverage in `tests/test_search_fanout_recall_parity_reference_logic.py`, which
 runs in the default loop.
 
+## Running an MVV journey against a managed-service tenant (nexus-ckejb)
+
+`tests/test_rdr235_mvv_aspect_queue_tuples.py::test_mvv_journey_on_the_tuple_queue` can run against an EXTERNAL engine in a tenant the operator provisioned, instead of the session engine's minted one (RDR-235 Activation Step 1). The opt-in is `tests/_external_engine.py`, read by `_engine_tenant_env` (the body of `t2_service_env` / `t2_tenant`). It takes all three of: the `external_engine_ok` marker on the test, `NX_TEST_EXTERNAL_ENGINE_URL` and `NX_TEST_EXTERNAL_TENANT_TOKEN`. An unmarked test, or a marked one with one variable, keeps the local minted tenant and logs one `external_engine.variables_ignored` line, so a pair left exported cannot point the suite at production. Only the journey carries the marker; scenarios 24 (child process on the PG-direct substrate env) and 25 (1,200 tasks) are local-only and skip when both variables are set.
+
+Before the run:
+
+- **A fresh tenant, with an engine that carries the `aspects` template (E3).** The journey counts every task in the tenant and asserts that precondition up front. It leaves one dead-lettered task (document 13) and its collection behind; the run is not repeatable in the same tenant. Tearing the tenant down is yours.
+- **State the write.** The suite exempts itself from the production-write guard in-process; the external branch withdraws that for the test and requires `NX_ALLOW_PROD_WRITE="<reason>"` from you (a bare `1`/`true` is refused). The harness never sets it. Announce the UTC window to the engine's operator first.
+- `NX_TEST_T2_SUBSTRATE=none`: the run boots no engine, mints no tenant and needs no jar. (Without it the session start still wants the gate jar and the suite lease for nothing.)
+- Run it from a checkout with `uv sync` done. Do not use `lab-remote`: the variables carry a bearer.
+
+```bash
+export NX_TEST_EXTERNAL_ENGINE_URL=https://api.conexus-nexus.com
+export NX_TEST_EXTERNAL_TENANT_TOKEN=...   # the fresh tenant's bearer
+export NX_ALLOW_PROD_WRITE="RDR-235 Activation Step 1 (nexus-lnwn1): MVV journey in throwaway tenant <name>, window <UTC>"
+NX_TEST_T2_SUBSTRATE=none uv run pytest tests/test_rdr235_mvv_aspect_queue_tuples.py -k journey -q -p no:cacheprovider
+```
+
+Green is `1 passed, 2 deselected` and `tenant pool: leases=0 mints=0` (nothing local was leased). A red at setup names its cause: the missing `NX_ALLOW_PROD_WRITE`, an engine that does not answer `GET /version`, or a bearer the engine refuses on `GET /v1/_whoami`. `NX_LOCAL` follows the engine's `embedding_mode` (`onnx-local` is local posture, anything else cloud), because `register_collection` must send the model the tenant's profile holds. The collection name's model token comes from `effective_embedding_model_for_writes`, so it matches in either posture.
+
 ## Test-authoring directives
 
 Distilled from the 2026-08 compression arc (design records in T2: `nexus/test-suite-compression-analysis-2026-08-05` and the closure/critique entries linked from it):
