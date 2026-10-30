@@ -53,7 +53,8 @@ def shadow(monkeypatch: pytest.MonkeyPatch) -> None:
 #: RDR-232 section 1, "Request kind -> Eligible declared plan kinds", written out here independently of the
 #: module under test. A curated plan, or a grown plan that recorded its route kind, is looked up in it.
 _MATRIX: dict[K, frozenset[K]] = {
-    L: frozenset({L, S, U}),
+    # nexus-jypmj.11, decided by Sam 2026-10-30: a lookup admits lookup plans only (no synthesis plan)
+    L: frozenset({L, U}),
     S: frozenset({S, U}),
     D: frozenset({D, U}),
     C: frozenset({C, S, U}),
@@ -112,8 +113,9 @@ def test_a_refusal_names_why_in_the_closed_vocabulary() -> None:
 def test_the_two_named_rdr_cells() -> None:
     # plan 473: a curated lookup plan; the incident request is a synthesis
     assert not el.eligibility(S, L, "curated").eligible
-    # the other direction is allowed: a synthesis-capable plan may answer a lookup
-    assert el.eligibility(L, S, "curated").eligible
+    # the other direction is closed since nexus-jypmj.11 (Sam, 2026-10-30): a lookup runs a lookup plan
+    assert not el.eligibility(L, S, "curated").eligible
+    assert el.eligibility(L, L, "curated").eligible
     # an unknown request never reaches a narrow curated plan nor any grown plan
     assert not el.eligibility(U, L, "curated").eligible
     assert not el.eligibility(U, U, "grown").eligible
@@ -320,8 +322,25 @@ def test_scenario_1_plan_473_is_ineligible_for_the_synthesis_request() -> None:
 
 def test_scenario_2_an_eligible_lookup_plan_still_matches() -> None:
     out, filt = _match([LOOKUP_473, SYNTH_12], [(473, 0.1), (12, 0.4)], L)
-    assert _ids(out) == [473, 12], "a synthesis-capable plan may answer a lookup, and the lookup plan leads"
-    assert filt.excluded_total == 0
+    assert _ids(out) == [473], "a lookup runs a lookup plan only (nexus-jypmj.11); the synthesis plan is refused"
+    assert filt.excluded_plan_ids == [12]
+    assert filt.to_wire()["branches"]["cosine"] == {"examined": 2, "excluded": 1, "reasons": {"kind_mismatch": 1}}
+
+
+#: Plan 467 as the live H09 run selected it: a builtin synthesis plan (citation-traversal) that scored better
+#: than the lookup plan, ran 1.24 USD against 0.14 for 473, and carried unrelated code files.
+CITATION_467 = _row(467, "citation-traversal", kind=S, tags="builtin-template,rdr-097", verb="research")
+
+
+def test_a_lookup_that_a_synthesis_plan_outscores_still_gets_the_lookup_plan() -> None:
+    out, _ = _match([CITATION_467, LOOKUP_473], [(467, 0.05), (473, 0.3)], L)
+    assert _ids(out) == [473], "H09 (nexus-jypmj.11): the better-scoring synthesis plan is not offered"
+
+
+def test_a_lookup_no_lookup_plan_matches_selects_nothing_so_inline_planning_follows() -> None:
+    out, filt = _match([CITATION_467, SYNTH_12], [(467, 0.05), (12, 0.3)], L, fts=[467, 12])
+    assert out == [], "nothing is forced; the caller plans inline (cost not measured, see the RDR)"
+    assert filt.excluded_total >= 2
 
 
 # Scenario 3: no plan has a compatible shape ------------------------------------------------------------------
@@ -699,7 +718,7 @@ def _as_match(row: dict, confidence: float = 0.35) -> Match:
 def test_eligible_matches_drops_the_wrong_shape_plans() -> None:
     ms = [_as_match(LOOKUP_473), _as_match(SYNTH_12), _as_match(GROWN_UNKNOWN)]
     assert _ids(el.eligible_matches(S, ms)) == [12]
-    assert _ids(el.eligible_matches(L, ms)) == [473, 12, 901]
+    assert _ids(el.eligible_matches(L, ms)) == [473, 901], "a lookup is offered no synthesis plan (nexus-jypmj.11)"
     assert el.eligible_matches(S, None) == [] and el.eligible_matches(S, []) == []
 
 

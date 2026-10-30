@@ -578,6 +578,8 @@ listed under Critical Assumptions before gate.
   container) on the S-R-B shape; the G06 rerun on an engine carrying `node_walk` is not done.
   *Source: bead nexus-jypmj.18; T2 `nexus/rdr232-jypmj18-dropped-out-of-owner-evidence-2026-10-29`;
   `service/.../CatalogRepository.graphBFS` javadoc; `src/nexus/plans/traversal_policy.py`.*
+- **Verified** (spike) — the tightened lookup row (nexus-jypmj.11, 2026-10-30). Measured three rules for a `lookup` request: the shipped directional rule (lookup or synthesis plans), lookup or listing, and lookup only; "synthesis plans declared lookup-suitable" reduces to lookup only, since no plan declares it. Offline, with the Phase 2 matrix, the shipped rule reproduces the approved figures; both tightened rules take held-out wrong-shape admission from 1 of 29 to 0 (H09 now selects the lookup plan) with no recall loss (held-out 21 of 29 against 20; lookup 3 of 5 against 2) and leave golden_v1 and the compound set unchanged. H18's loss is the discovery row and no lookup rule moves it. The labels list only unacceptable plans, so the two tightened rules tie on them. Live they differ: lookup-or-listing sent 3 of 3 changed lookups to the listing plan, which returned a raw list of chunk ids without reading the named source; the shipped rule ran citation-traversal for 2 of 5 lookups (H09 1.24 USD against 0.14 for the lookup plan); lookup-only answered all five with the lookup plan. On the negative control N04 the synthesis plan's 301 anchors left both facets unassessed and off-topic prose came back answered, where the lookup plan withheld it (uncovered, 0.008 USD). Not settled: the cost of the inline planner for a lookup no lookup plan matches.
+  *Source: rule matrix and live runs 901-918. T2: `nexus/rdr232-jypmj11-rule-measurement-2026-10-30`, `nexus/rdr232-jypmj23-measurement-2026-10-30`.*
 
 ### Critical Assumptions
 
@@ -745,6 +747,20 @@ versioned; it is not a claim that kind implies facet coverage.
 | `audit` | `audit`, `synthesis`, `unknown` |
 | `debug` | `debug`, `synthesis`, `unknown` |
 | `unknown` | curated `synthesis`, curated `unknown` only; otherwise inline planning |
+
+**Decided by Sam, 2026-10-30 (nexus-jypmj.11): the `lookup` row admits `lookup`
+and `unknown` plan kinds only; it no longer admits `synthesis`.** The table above
+is the text as gated; this note supersedes its first row. Measured over three
+candidate rules (the Key Discoveries entry dated 2026-10-30): the directional
+row let a synthesis plan outscore the lookup plan (held-out H09 ran
+citation-traversal at 1.24 USD against 0.14 for the lookup plan), the
+lookup-or-listing row sent every changed lookup to a listing plan that read no
+source, and the lookup-only row took held-out wrong-shape admission from 1 of 29
+to 0 with no recall loss (held-out 21 of 29 against 20; lookup 3 of 5 against 2)
+and left golden_v1 and the compound set unchanged. A lookup that no lookup plan
+matches now goes to the inline planner; that planner's cost on lookups is not
+measured. The other rows, and the provenance limits on `unknown` plans, are
+unchanged.
 
 The `unknown` entries are limited by provenance below; they are not blanket
 permission for every legacy or grown plan. In particular an unknown request
