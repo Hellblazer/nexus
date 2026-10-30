@@ -238,6 +238,15 @@ class KeyedSweepRouteTest {
 
     /** {@code n} chunks aged past the grace with no manifest row: every one is a quarantine victim. */
     private Fx seedOrphans(Form form, int n, String titlePad) throws Exception {
+        return seedOrphans(form, n, titlePad, "");
+    }
+
+    /**
+     * As above; {@code textPad} leads every chunk's text. A sample row names a chunk by the first 80 characters of
+     * its text ({@code text_prefix}, vectors-040) and by its manifest owner's title, which an orphan has none of,
+     * so the TEXT is what sizes a sample row; the chunk row's {@code title} metadata no longer reaches it.
+     */
+    private Fx seedOrphans(Form form, int n, String titlePad, String textPad) throws Exception {
         String origin = "knowledge__ks" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
         List<String> hashes = new ArrayList<>();
         List<String> texts = new ArrayList<>();
@@ -245,7 +254,7 @@ class KeyedSweepRouteTest {
         List<Map<String, Object>> metas = new ArrayList<>();
         for (int i = 0; i < n; i++) {
             hashes.add(Chash.ofText(origin + "/" + i).toHex());
-            texts.add("chunk " + i);
+            texts.add(textPad + "chunk " + i);
             vecs.add(new float[384]);
             metas.add(Map.of("title", titlePad + i));
         }
@@ -499,19 +508,20 @@ class KeyedSweepRouteTest {
     @ParameterizedTest
     @EnumSource(value = Form.class, names = {"BOUNDED", "FLOORED"})
     void aSweepBodyOver64KbIsStoredWithATruncatedSample_theLiveResponseIsUntouched(Form form) throws Exception {
-        String pad = "x".repeat(400);
-        Fx f = seedOrphans(form, 300, pad);
+        // Every sample row carries an 80-character text_prefix (a pad of 100 saturates it), so a row renders to well
+        // over 150 bytes whatever else the sample object gains or loses, and 600 rows are over the cap with margin.
+        Fx f = seedOrphans(form, ROWS_OVER_CAP, "t", LONG_TEXT_PAD);
         String key = newKey();
-        var req = body(f, 300);
-        req.put("sample_limit", 300);
+        var req = body(f, ROWS_OVER_CAP);
+        req.put("sample_limit", ROWS_OVER_CAP);
 
         HttpResponse<String> first = post(f.form().path, req, key);
         JsonNode live = json(first, 200);
-        assertThat(live.get("moved").asInt()).isEqualTo(300);
-        assertThat(live.get("sample")).as("the first caller sees every sample row").hasSize(300);
+        assertThat(live.get("moved").asInt()).isEqualTo(ROWS_OVER_CAP);
+        assertThat(live.get("sample")).as("the first caller sees every sample row").hasSize(ROWS_OVER_CAP);
         assertThat(live.has("sample_truncated")).isFalse();
         assertThat(first.body().getBytes(StandardCharsets.UTF_8).length)
-            .as("guard: the body really exceeds the 64 KB cap").isGreaterThan(65_536);
+            .as("guard: the body really exceeds the 64 KB cap, with margin").isGreaterThan(65_536 + 16_384);
 
         HttpResponse<String> replay = post(f.form().path, req, key);
         JsonNode stored = json(replay, 200);
@@ -520,7 +530,7 @@ class KeyedSweepRouteTest {
             .as("the replay's raw body, as Postgres renders the stored copy").isLessThanOrEqualTo(65_536);
         assertThat(stored.get("sample_truncated").asBoolean()).isTrue();
         int kept = stored.get("sample").size();
-        assertThat(kept).isBetween(1, 299);
+        assertThat(kept).isBetween(1, ROWS_OVER_CAP - 1);
         for (int i = 0; i < kept; i++) {
             assertThat(stored.get("sample").get(i)).as("sample[%d] is the live sample's prefix", i)
                 .isEqualTo(live.get("sample").get(i));
@@ -534,9 +544,9 @@ class KeyedSweepRouteTest {
         assertThat(pgJsonbBytes(longer.toString()))
             .as("the stored sample is the longest prefix that fits: %d elements kept, %d would not", kept, kept + 1)
             .isGreaterThan(65_536);
-        assertThat(stored.get("moved").asInt()).as("only the sample is cut").isEqualTo(300);
+        assertThat(stored.get("moved").asInt()).as("only the sample is cut").isEqualTo(ROWS_OVER_CAP);
         assertThat(stored.get("remaining").asInt()).isZero();
-        assertThat(stored.get("row_limit").asInt()).isEqualTo(300);
+        assertThat(stored.get("row_limit").asInt()).isEqualTo(ROWS_OVER_CAP);
         if (form == Form.FLOORED) {
             assertThat(stored.get("floor")).isEqualTo(live.get("floor"));
             assertThat(stored.get("refused").asBoolean()).isFalse();
@@ -790,31 +800,56 @@ class KeyedSweepRouteTest {
 
     @Test
     void aBodyThatFitsCompactButNotAsPostgresRendersItIsStillTruncated() throws Exception {
-        Fx f = seedOrphans(Form.BOUNDED, ROWS_FIT_COMPACT_NOT_JSONB, "p".repeat(PAD_FIT_COMPACT_NOT_JSONB));
+        // The window is narrow: Postgres adds one byte after each ':' and ',' (8 per sample row of four keys), so a
+        // body is in it only within ~8 bytes a row of the cap. The row count is solved from the live shape, never
+        // hard-coded: two probes of this fixture's own rows give the body as c0 + rows * perRow, and the target is
+        // the middle of the window, compact = cap - 4 * rows, so each guard holds with ~4 bytes a row to spare.
+        int small = compactBodyBytes(100);
+        int large = compactBodyBytes(200);
+        double perRow = (large - small) / 100.0;
+        double c0 = small - 100 * perRow;
+        int rows = (int) Math.round((65_536 - c0) / (perRow + 4));
+        assertThat(rows).as("the solved row count is a plain three-digit page (c0=%.0f, perRow=%.1f)", c0, perRow)
+            .isBetween(100, 999);
+
+        Fx f = seedOrphans(Form.BOUNDED, rows, "t", LONG_TEXT_PAD);
         String key = newKey();
-        var req = body(f, ROWS_FIT_COMPACT_NOT_JSONB);
-        req.put("sample_limit", ROWS_FIT_COMPACT_NOT_JSONB);
+        var req = body(f, rows);
+        req.put("sample_limit", rows);
 
         HttpResponse<String> first = post(f.form().path, req, key);
         JsonNode live = json(first, 200);
         int compact = first.body().getBytes(StandardCharsets.UTF_8).length;
         int rendered = pgJsonbBytes(first.body());
-        assertThat(live.get("sample")).hasSize(ROWS_FIT_COMPACT_NOT_JSONB);
-        assertThat(compact).as("guard: the compact body fits the cap (compact=%d, as PG renders it=%d)", compact, rendered)
-            .isLessThanOrEqualTo(65_536);
-        assertThat(rendered).as("guard: and its jsonb rendering does not (compact=%d)", compact)
-            .isGreaterThan(65_536);
+        assertThat(live.get("sample")).hasSize(rows);
+        assertThat(compact).as("guard: the compact body fits the cap (compact=%d, as PG renders it=%d, rows=%d)",
+                compact, rendered, rows)
+            .isLessThanOrEqualTo(65_536 - rows);
+        assertThat(rendered).as("guard: and its jsonb rendering does not (compact=%d, rows=%d)", compact, rows)
+            .isGreaterThan(65_536 + rows);
 
         HttpResponse<String> replay = post(f.form().path, req, key);
         JsonNode stored = json(replay, 200);
         assertThat(stored.has("sample_truncated") && stored.get("sample_truncated").asBoolean())
             .as("the cap is on the rendered text, so the stored copy was cut though the compact body fit").isTrue();
-        assertThat(stored.get("sample").size()).isLessThan(ROWS_FIT_COMPACT_NOT_JSONB);
+        assertThat(stored.get("sample").size()).isLessThan(rows);
         assertThat(replay.body().getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(65_536);
     }
 
-    private static final int ROWS_FIT_COMPACT_NOT_JSONB = 585;
-    private static final int PAD_FIT_COMPACT_NOT_JSONB = 20;
+    /** The compact bytes of the live body of a keyed bounded sweep over {@code rows} fresh orphans. */
+    private int compactBodyBytes(int rows) throws Exception {
+        Fx f = seedOrphans(Form.BOUNDED, rows, "t", LONG_TEXT_PAD);
+        var req = body(f, rows);
+        req.put("sample_limit", rows);
+        HttpResponse<String> r = post(f.form().path, req, newKey());
+        assertThat(json(r, 200).get("sample")).hasSize(rows);
+        return r.body().getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    /** Longer than the 80-character text_prefix, so every sample row carries a full-width one. */
+    private static final String LONG_TEXT_PAD = "p".repeat(100);
+    /** Far enough over the 64 KB cap that no change to the sample object's keys moves a body back under it. */
+    private static final int ROWS_OVER_CAP = 600;
 
     // ── per-exchange failure hook: concurrent failures and unkeyed neighbours ─
 
