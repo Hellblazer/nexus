@@ -146,13 +146,13 @@ def _register(path: Path, marker: str, collection: str = _COLLECTION) -> tuple[s
 
 
 def _index(path: Path, marker: str, *, streaming: str, collection: str = _COLLECTION,
-           force: bool = False, force_re_embed: bool = False, hooks=None):
+           force: bool = False, force_re_embed: bool = False, hooks=None, enrich: bool = False):
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.doc_indexer import index_pdf
 
     return index_pdf(
         path, f"z0o2p11-{marker}", t3=HttpVectorClient(), collection_name=collection,
-        streaming=streaming, force=force, force_re_embed=force_re_embed, hooks=hooks)
+        streaming=streaming, force=force, force_re_embed=force_re_embed, hooks=hooks, enrich=enrich)
 
 
 def _reader():
@@ -1448,3 +1448,150 @@ def test_a_kill_in_the_small_pdfs_catalog_enrichment_leaves_the_document_indexin
     assert calls == ["enrich", "enrich"], "the rerun redid the enrichment"
     assert _index_state(doc) == "complete"
     assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
+
+
+# ── nx index pdf --enrich writes the catalog bib columns (nexus-6pfgb.28) ─────────────────────────
+
+_BIB = {
+    "year": 2019, "venue": "OSDI", "authors": "Dana Example, Eve Example", "citation_count": 42,
+    "semantic_scholar_id": "ss-6pfgb28", "references": [],
+}
+
+
+def _fake_s2(monkeypatch, bib: dict) -> list[str]:
+    """Stand in for Semantic Scholar; returns the titles it was asked about."""
+    asked: list[str] = []
+
+    def _enrich(title: str) -> dict:
+        asked.append(title)
+        return dict(bib)
+
+    monkeypatch.setattr("nexus.bib_enricher.enrich", _enrich)
+    return asked
+
+
+def _bib_columns(doc_id: str) -> dict:
+    e = _reader().resolve(doc_id)
+    assert e is not None
+    return {
+        "year": e.bib_year, "authors": e.bib_authors, "venue": e.bib_venue,
+        "citations": e.bib_citation_count, "s2": e.bib_semantic_scholar_id,
+        "enriched_at": e.bib_enriched_at,
+    }
+
+
+def _found_by_bib_year(collection: str, year: int) -> set[str]:
+    """Chunk ids a ``where bib_year=`` search answers with: the engine's label stage answers it
+    from the catalog document's bib columns."""
+    rows = hvc.HttpVectorClient().search("journey unique text", [collection], n_results=300,
+                                         where={"bib_year": year})
+    return {r["id"] for r in rows}
+
+
+@_THREE_PATHS
+def test_an_enriched_pdf_has_its_catalog_bib_columns_set_on_every_path(
+    tmp_path, fake_pdf, monkeypatch, streaming, size,
+) -> None:
+    """The default (streaming) route dropped ``--enrich`` altogether and the batch route stamped
+    chunk rows only, so a document indexed with ``nx index pdf --enrich`` read as unenriched to
+    every ``bib_*`` filter once the label stage answered them from the catalog columns."""
+    asked = _fake_s2(monkeypatch, _BIB)
+    marker = f"bib28-{streaming}-{size}"
+    lines = _multi_lines(marker) if size == "multi" else _lines(marker, 12)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+    every = {_sha(x) for x in lines}
+
+    _index(path, marker, streaming=streaming, enrich=True)
+
+    doc, _ = _register(path, marker)
+    cols = _bib_columns(doc)
+    assert asked, "non-vacuity: the enricher was asked"
+    assert (cols["year"], cols["authors"], cols["venue"], cols["citations"], cols["s2"]) == (
+        2019, "Dana Example, Eve Example", "OSDI", 42, "ss-6pfgb28"), cols
+    assert cols["enriched_at"], "bib_enriched_at marks the document enriched"
+    found = _found_by_bib_year(_COLLECTION, 2019)
+    assert found & every and found <= every, "the bib_year filter finds this document, and only it"
+    assert not (_found_by_bib_year(_COLLECTION, 1999) & every), "non-vacuity: another year finds nothing"
+
+
+@_THREE_PATHS
+def test_a_pdf_indexed_without_enrich_asks_nobody_and_stays_unenriched(
+    tmp_path, fake_pdf, monkeypatch, streaming, size,
+) -> None:
+    asked = _fake_s2(monkeypatch, _BIB)
+    marker = f"bib28-off-{streaming}-{size}"
+    lines = _multi_lines(marker) if size == "multi" else _lines(marker, 12)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+
+    _index(path, marker, streaming=streaming)
+
+    doc, _ = _register(path, marker)
+    cols = _bib_columns(doc)
+    assert asked == []
+    assert cols["year"] == 0 and not cols["enriched_at"], cols
+
+
+@pytest.mark.parametrize("streaming", ["always", "never"])
+def test_a_lookup_that_found_nothing_stamps_nothing_and_a_partial_one_erases_nothing(
+    tmp_path, fake_pdf, monkeypatch, streaming,
+) -> None:
+    """A miss (``{}``) is not an enrichment: no ``bib_enriched_at``. A later lookup that found less
+    (a venue S2 does not know, a zero year) sends only what it has, because the engine sets every
+    column it is sent, an empty string included."""
+    marker = f"bib28-partial-{streaming}"
+    lines = _lines(marker, 12)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+
+    _fake_s2(monkeypatch, {})
+    _index(path, marker, streaming=streaming, enrich=True)
+    doc, _ = _register(path, marker)
+    assert not _bib_columns(doc)["enriched_at"], "a miss does not read as enriched"
+
+    _fake_s2(monkeypatch, _BIB)
+    _index(path, marker, streaming=streaming, enrich=True, force=True)
+    assert _bib_columns(doc)["venue"] == "OSDI"
+
+    _fake_s2(monkeypatch, {"year": 2020, "venue": "", "authors": "", "citation_count": 0,
+                           "semantic_scholar_id": "", "references": []})
+    _index(path, marker, streaming=streaming, enrich=True, force=True)
+    cols = _bib_columns(doc)
+    assert cols["year"] == 2020, "what the new lookup found is written"
+    assert (cols["venue"], cols["authors"], cols["s2"]) == (
+        "OSDI", "Dana Example, Eve Example", "ss-6pfgb28"), cols
+
+
+@pytest.mark.parametrize("streaming", ["always", "never"])
+@pytest.mark.parametrize("curated", [False, True], ids=["empty", "curated"])
+def test_enrich_fills_the_catalog_author_and_year_only_where_they_are_empty(
+    tmp_path, fake_pdf, monkeypatch, streaming, curated,
+) -> None:
+    """The author/year rule is the register-time one, fill-only: the Semantic Scholar match is
+    title-fuzzy, so it never overwrites a value another writer set. The bib_* columns are the
+    enrichment's own and are always written."""
+    from nexus.catalog.factory import make_catalog_writer
+
+    _fake_s2(monkeypatch, _BIB)
+    marker = f"bib28-fill-{streaming}-{'c' if curated else 'e'}"
+    lines = _lines(marker, 12)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+    doc, _ = _register(path, marker)
+    if curated:
+        w = make_catalog_writer()
+        try:
+            w.update(doc, author="Curated Author", year=2001)
+        finally:
+            w.close()
+
+    _index(path, marker, streaming=streaming, enrich=True)
+
+    e = _reader().resolve(doc)
+    assert e is not None
+    if curated:
+        assert (e.author, e.year) == ("Curated Author", 2001)
+    else:
+        assert (e.author, e.year) == ("Dana Example, Eve Example", 2019)
+    assert e.bib_authors == "Dana Example, Eve Example" and e.bib_year == 2019

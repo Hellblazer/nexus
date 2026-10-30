@@ -1124,6 +1124,100 @@ def record_pdf_extraction_on_document(
             writer.close()
 
 
+def _catalog_bib_fields(bib: Mapping[str, Any]) -> dict[str, Any]:
+    """The catalog document columns a Semantic Scholar lookup sets (``bib_*``), real values only.
+
+    The engine sets every column a request names, an empty string and a zero included, so a field
+    the lookup did not find is left out: a later, poorer lookup cannot erase what an earlier one
+    wrote. A citation count of 0 is a count and is sent whenever the lookup carries one. An empty
+    lookup (a miss) yields ``{}``, and no ``bib_enriched_at``, so a miss never reads as enriched.
+    """
+    if not bib:
+        return {}
+    fields: dict[str, Any] = {}
+    if bib.get("year"):
+        fields["bib_year"] = int(bib["year"])
+    if bib.get("authors"):
+        fields["bib_authors"] = str(bib["authors"])
+    if bib.get("venue"):
+        fields["bib_venue"] = str(bib["venue"])
+    if isinstance(bib.get("citation_count"), int):
+        fields["bib_citation_count"] = bib["citation_count"]
+    if bib.get("semantic_scholar_id"):
+        fields["bib_semantic_scholar_id"] = str(bib["semantic_scholar_id"])
+    if fields:
+        fields["bib_enriched_at"] = datetime.now(UTC).isoformat()
+    return fields
+
+
+def _catalog_pdf_bib_hook(
+    doc_id: str,
+    pdf_path: Path,
+    collection_name: str,
+    bib: Mapping[str, Any] | None,
+    *,
+    corpus: str = "",
+) -> bool:
+    """Write an ``--enrich`` lookup to the catalog document's ``bib_*`` columns (nexus-6pfgb.28).
+
+    The catalog document is where a ``bib_*`` filter is answered from (the engine's label stage
+    treats the columns as authoritative), so a lookup that only reached chunk rows read as
+    unenriched. The document is named by *doc_id*, or, when the run resolved none, by the file
+    path under the corpus's curator owner; never by title (nexus-6pfgb.21: a title match is how
+    one document's bib reached another's).
+
+    ``author`` and ``year`` are FILL-ONLY: set from the lookup only where the catalog column is
+    empty, the register-time posture of :func:`_catalog_pdf_hook`. The match is title-fuzzy, so it
+    must not overwrite a value another writer set; the ``bib_*`` columns are the lookup's own and
+    are written whenever it found them. ``meta.references`` rides only when non-empty (the engine
+    merges ``meta`` and an empty value would overwrite).
+
+    Returns True when a write was sent. Never raises: the PDF is indexed either way, and a failure
+    logs ``catalog_pdf_bib_not_recorded`` naming the document.
+    """
+    fields = _catalog_bib_fields(bib or {})
+    if not fields:
+        return False
+    reader = None
+    writer = None
+    try:
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        reader = make_catalog_reader()
+        if reader is None:
+            _log.warning("catalog_pdf_bib_not_recorded", reason="no_catalog_reader",
+                         file_path=str(pdf_path), collection=collection_name)
+            return False
+        if not doc_id:
+            from nexus.doc_indexer import _lookup_existing_doc_id  # noqa: PLC0415 - deferred to avoid circular import at module load
+            doc_id = _lookup_existing_doc_id(reader, str(pdf_path.resolve()), corpus)
+        if not doc_id:
+            _log.warning("catalog_pdf_bib_not_recorded", reason="no_document",
+                         file_path=str(pdf_path), collection=collection_name)
+            return False
+        entry = reader.resolve(doc_id)
+        update: dict[str, Any] = dict(fields)
+        if entry is not None:
+            if bib.get("authors") and not (getattr(entry, "author", "") or "").strip():
+                update["author"] = str(bib["authors"])
+            if bib.get("year") and not getattr(entry, "year", 0):
+                update["year"] = int(bib["year"])
+        if bib.get("references"):
+            update["meta"] = {"references": list(bib["references"])}
+        writer = make_catalog_writer()
+        writer.update(doc_id, **update)
+        return True
+    except Exception as exc:  # noqa: BLE001 - best-effort: the PDF is indexed either way; named, not raised
+        _log.warning("catalog_pdf_bib_not_recorded", reason="update_failed", error=str(exc),
+                     doc_id=doc_id, file_path=str(pdf_path), collection=collection_name)
+        return False
+    finally:
+        if writer is not None:
+            writer.close()
+        if reader is not None:
+            reader.close()
+
+
 def _catalog_pdf_hook(
     pdf_path: Path,
     collection_name: str,
@@ -1798,8 +1892,14 @@ def pipeline_index_pdf(
     extraction_stats: dict | None = None,
     title_override: str = "",
     on_write_started: Callable[[], None] | None = None,
+    enrich: bool = False,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
+
+    *enrich* (nexus-6pfgb.28), when True, looks the resolved title up in Semantic Scholar once,
+    after the catalog hook, and writes the result to the catalog document's ``bib_*`` columns
+    (:func:`_catalog_pdf_bib_hook`) before the completion stamp. Chunk rows get no ``bib_*`` key
+    on this path. A dry run looks nothing up.
 
     *extraction_stats* (nexus-i0cwh), when given, receives ``page_count``
     and ``pages_with_text`` from the extraction result once the extract
@@ -2352,6 +2452,9 @@ def pipeline_index_pdf(
                 source_uri=source_uri,
                 extraction=extraction_record(_meta),
             )
+            if enrich:
+                from nexus.bib_enricher import enrich as _bib_enrich  # noqa: PLC0415 - deferred: the lookup is a network call and --enrich is opt-in
+                _catalog_pdf_bib_hook(doc_id, pdf_path, collection, _bib_enrich(title), corpus=corpus)
 
             # RDR-089 document-grain chain — once per PDF boundary at the
             # streaming pipeline tail. content="" (PDF text streamed not
