@@ -9206,10 +9206,24 @@ def traverse(
         )
         if scope_filter is not None:
             kw["scope_filter"] = scope_filter
-    if len(seed_tumblers) == 1:
-        result = catalog.graph(seed_tumblers[0], **kw)
-    else:
-        result = catalog.graph_many(seed_tumblers, **kw)
+    def walk(walk_kw: dict) -> Any:
+        if len(seed_tumblers) == 1:
+            return catalog.graph(seed_tumblers[0], **walk_kw)
+        return catalog.graph_many(seed_tumblers, **walk_kw)
+
+    result = walk(kw)
+    if (
+        parsed_policy is not None and "scope_filter" in kw and parsed_policy.require_link_role != "factual"
+        and isinstance(result, dict) and isinstance(result.get("scope_filter"), dict)
+        and result["scope_filter"].get("applied") is True and not isinstance(result.get("node_walk"), dict)
+    ):
+        # nexus-jypmj.18: the predicate ran (the marker says so) but the reply carries no node_walk, so a node behind
+        # a removed relay would score as ``related`` and a role-filtering policy would drop it. The capability probe
+        # said the engine sends one: a replica that predates it, or a rollback inside the probe's cache window.
+        # Walk once more without the predicate and narrow by scope on the client, as an engine without node_walk is.
+        _log.warning("traverse_node_walk_missing_rewalk", role=parsed_policy.require_link_role)
+        kw = {k: v for k, v in kw.items() if k != "scope_filter"}
+        result = walk(kw)
 
     nodes = result.get("nodes") or []
     if parsed_policy is not None:

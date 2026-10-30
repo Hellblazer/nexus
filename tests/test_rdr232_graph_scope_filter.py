@@ -64,6 +64,7 @@ class _Engine:
         self.registry_calls = 0
         self.registry_lifecycle_states: list[str | None] = []
         self.quarantined: list[str] = []
+        self.omit_node_walk = False  # an engine that advertises node_walk and applies the predicate but sends none
 
     def supports_graph_scope_filter(self) -> bool:
         return self._advertise
@@ -129,7 +130,7 @@ class _Engine:
         keep_ids = {str(n.tumbler) for n in nodes}
         reply["nodes"] = nodes
         reply["edges"] = [e for e in self._edges if e.from_tumbler in keep_ids and e.to_tumbler in keep_ids]
-        if flt is not None and self._honour and self._walk_fields:
+        if flt is not None and self._honour and self._walk_fields and not self.omit_node_walk:
             reply["node_walk"] = self._node_walk(seeds, kw.get("direction", "both"), keep_ids)
         return reply
 
@@ -592,15 +593,35 @@ def test_a_role_agnostic_policy_sends_the_predicate_whether_or_not_the_engine_se
         assert "1.2.3" in out["tumblers"], "role 'factual' admits B whatever its role, ranked last"
 
 
-def test_without_node_walk_in_the_reply_a_node_behind_a_removed_relay_is_dropped_as_before() -> None:
-    """The control that pins the defect: the same new-shape request answered WITHOUT node_walk loses B."""
+def test_a_reply_that_applied_the_predicate_but_carries_no_node_walk_is_walked_again_without_it() -> None:
+    """The guard: the probe said node_walk, the marker says the predicate ran, the reply has no node_walk (a replica
+    that predates it, a rollback inside the /version cache window). Scoring B from what is left would drop it as
+    ``related``; the walk is repeated without the predicate and narrowed client-side."""
     nodes, edges = _relay_walk()
     cat = _Engine(nodes, edges, walk=True)
-    cat._node_walk = lambda *a, **k: {}  # the predicate is sent (it advertises node_walk) but the reply carries nothing
+    cat.omit_node_walk = True
     out = _relay_run(cat, "implementation")
 
-    assert "1.2.3" not in out["tumblers"]
-    assert out["traversal"]["dropped_role"] == 1
+    assert ["scope_filter" in kw for kw in cat.graph_kwargs] == [True, False], "one repeat, without the predicate"
+    assert out["tumblers"] == [SEED, "1.2.2", "1.2.3"], "B behind the removed relay is kept"
+    assert out["traversal"]["dropped_role"] == 0
+    assert out["traversal"]["scope_prefilter"] == "unavailable", "the second walk is the old engine's, and is reported so"
+
+
+def test_a_reply_that_carries_node_walk_is_not_walked_twice() -> None:
+    nodes, edges = _relay_walk()
+    cat = _Engine(nodes, edges, walk=True)
+    _relay_run(cat, "implementation")
+    assert len(cat.graph_kwargs) == 1
+
+
+def test_a_role_agnostic_policy_is_not_walked_again_when_node_walk_is_missing() -> None:
+    """A factual policy never needed node_walk: it ranks every node alike, so the one filtered walk stands."""
+    nodes, edges = _relay_walk()
+    cat = _Engine(nodes, edges, walk=True)
+    cat.omit_node_walk = True
+    _relay_run(cat, "factual")
+    assert len(cat.graph_kwargs) == 1
 
 
 def test_node_walk_wins_over_the_edges_and_a_malformed_entry_is_ignored() -> None:
