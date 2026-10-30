@@ -687,17 +687,20 @@ dead14="$NEVER_ALIVE_PID"   # a reaped child's pid could be reused and polled as
 mkdir -p "$root14/popwin"
 printf '%s\n' "$dead14" > "$root14/popwin/pid"
 t14=$(date +%s)
-out14d="$(bash -c "source '$lib14'; build_lease_acquire popwin" 2>&1)"
+# "Without the wait" is proven against a wait that would be visible: 100 polls of 1 s, so a
+# contender that waited would cost 100 s, and a bound of 10 s is safe under CI load (develop
+# 18f805d8a, shard 5: the old 1 s bound read 2 s on a whole-second clock with no wait taken).
+out14d="$(_BUILD_LEASE_POPULATE_POLLS=100 _BUILD_LEASE_POPULATE_POLL_S=1 bash -c "source '$lib14'; build_lease_acquire popwin" 2>&1)"
 rc14d=$?
 d14=$(( $(date +%s) - t14 ))
-if [[ $rc14d -eq 0 && "$out14d" == *WARNING* && $d14 -le 1 ]]; then ok "14d: a dead holder's unpopulated lease is reclaimed at once (${d14}s)"; else bad "14d: rc $rc14d after ${d14}s: $out14d"; fi
+if [[ $rc14d -eq 0 && "$out14d" == *WARNING* && $d14 -le 10 ]]; then ok "14d: a dead holder's unpopulated lease is reclaimed at once (${d14}s, a wait would cost 100 s)"; else bad "14d: rc $rc14d after ${d14}s: $out14d"; fi
 # 14e: an uncontended acquire never reaches the wait (no pid file to wait on)
 rm -rf "${root14:?}/popwin"
 t14=$(date +%s)
-bash -c "source '$lib14'; build_lease_acquire popwin" >/dev/null 2>&1
+_BUILD_LEASE_POPULATE_POLLS=100 _BUILD_LEASE_POPULATE_POLL_S=1 bash -c "source '$lib14'; build_lease_acquire popwin" >/dev/null 2>&1
 rc14e=$?
 d14=$(( $(date +%s) - t14 ))
-if [[ $rc14e -eq 0 && $d14 -le 1 ]]; then ok "14e: an uncontended acquire adds no wait (${d14}s)"; else bad "14e: rc $rc14e after ${d14}s"; fi
+if [[ $rc14e -eq 0 && $d14 -le 10 ]]; then ok "14e: an uncontended acquire adds no wait (${d14}s, a wait would cost 100 s)"; else bad "14e: rc $rc14e after ${d14}s"; fi
 kill -9 "$live14" 2>/dev/null
 wait "$live14" 2>/dev/null
 
