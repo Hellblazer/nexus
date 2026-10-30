@@ -35,6 +35,7 @@ _ENV_VARS = ("NX_SERVICE_URL", "NX_SERVICE_TOKEN")
 
 
 from nexus.engine_version import REQUIRED_ENGINE_VERSION as _FLOOR_TUPLE
+from tests.db._endpoint_asserts import quoted_endpoint
 
 #: The current floor as a string — these tests assert the DIAGNOSTIC text
 #: carries the real floor, whatever it is; hard-coding the literal made every
@@ -145,7 +146,8 @@ def test_probe_unreachable_connect_error_fails_loud():
     with pytest.raises(ManagedServiceUnreachable) as exc:
         probe_managed_service(base_url="https://api.conexus-nexus.com", http_get=fake_get)
     msg = str(exc.value)
-    assert "api.conexus-nexus.com" in msg
+    endpoint = quoted_endpoint(msg, "managed nexus service at ")
+    assert (endpoint.hostname, endpoint.port) == ("api.conexus-nexus.com", None)
     assert "NX_SERVICE_URL" in msg  # remedy names the override
 
 
@@ -157,7 +159,8 @@ def test_probe_unreachable_timeout_fails_loud():
     with pytest.raises(ManagedServiceUnreachable) as exc:
         probe_managed_service(base_url="https://api.conexus-nexus.com", http_get=fake_get)
     msg = str(exc.value)
-    assert "api.conexus-nexus.com" in msg
+    endpoint = quoted_endpoint(msg, "managed nexus service at ")
+    assert (endpoint.hostname, endpoint.port) == ("api.conexus-nexus.com", None)
     assert "NX_SERVICE_URL" in msg  # remedy present, not just the type
 
 
