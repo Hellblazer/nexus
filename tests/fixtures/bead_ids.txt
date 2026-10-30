@@ -2189,6 +2189,7 @@ nexus-9dvqy.1
 nexus-9e9a
 nexus-9eaz
 nexus-9ece
+nexus-9edxe
 nexus-9eiw
 nexus-9ff8l
 nexus-9ff8l.1
