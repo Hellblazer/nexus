@@ -625,6 +625,9 @@ listed under Critical Assumptions before gate.
 **KD (2026-10-30, incident-class re-measure; nexus-4xmpv and nexus-jf9wg at 571248296, engine-service-v0.1.170, tag measure_rdr232-class).** G06 and S01-S06 were re-run once each, coverage on and plan growth off, for 3.4167 USD (baseline rows 919-924 and 931: 3.1024). Plan 467 (citation-traversal) is now excluded with reason `single_source_synthesis` wherever it was a candidate (G06, S02, S05); those three ran plan 465 (`abstract-themes`), which the labels allow, and the other four planned inline, so 7 of 7 plans are allowed by label, against 4 of 7. The primary read rose from 24 chunks on every run to 44 (41 and 42 on the two documents that fit whole). Every level-2 section of the six nexus RDRs is now represented (S04 13 of 13, against 10 of 13), and G06 reaches 44 of its 53 section labels, against 24. Scored by hand against the 24 facets, no facet is ledger-covered while the answer says it is missing or answers it only from other documents (before: 2, S03 f3 and S05 f3). S02 f3 stays withheld, correctly, because RDR-180 records no collision-risk finding. Three limits remain. The result is in-sample, since the fixes were chosen on these requests. S04 (135 chunks) is still item-capped at 44 with 40,258 of 60,000 characters used, and its answer names input gaps under all three covered facets, so the ledger's facet grain is coarser than the prose. And the content labeller's fence tracking breaks when a chunk repeats a fence its predecessor closed, so RDR-070 chunks 17-41 all read as Phase 2.
   *Source: live runs of 2026-10-30, tag `measure_rdr232-class`. T2: `nexus/rdr232-class-remeasure-2026-10-30`.*
 
+Re-measure 2 (2026-10-30, b36646d66, cloud v0.1.170, tag measure_rdr232-class2; G06, S02, S05, S06, one run each, 1.9327 USD): plans 465 (abstract-themes) and 467 (citation-traversal) were both refused with single_source_synthesis on G06, S02 and S05, and all four requests planned inline. Code anchors fell to 0 on every request (plan 465 had added 35 on S02 and 29 on S05); foreign-owner anchors were rdr chunks only (S02 4, S06 2). Primary chunk sets were identical to the first re-measure on all four. Hand scoring found 0 of 15 facets where the ledger said covered and the answer did not. G06's numerical-conventions facet scored A- on the same input as before, because the answer now says the convention sheet (chunks 32-33, beyond the 44-chunk read) was not retrieved. The labeller fix gives RDR-070's 42 chunks 32 labels, matching its 32 headings in document order (was 9). Cost rose 13% and G06 wall rose 49.5 s with inline planning replacing plan 465.
+  *Source: live runs of 2026-10-30, tag `measure_rdr232-class2`. T2: `nexus/rdr232-class-remeasure2-2026-10-30`. Both re-measures ran the strategy-refusal form of the one-source rule (below, superseded), are one run per request and in-sample, and were scored by hand by the implementing session, not blind.*
+
 ### Critical Assumptions
 
 Research 6–10 executed prototypes for A1–A6. Production verification followed
@@ -677,8 +680,12 @@ in `232-research-3`. Behavioral prototype evidence is `232-research-6` through
   primary chunks (of 41 to 135 in the near-miss control), and 4 of 6 answers said
   a requested section was not in their input (nexus-jf9wg). Changed 2026-10-30: a
   request naming exactly one source now reads up to 44 chunks or the character
-  budget (section 2, the dated departure); the effect on those answers is not
-  re-measured, so this stays partial.
+  budget, and up to 84 when its retrieval is narrowed to that source (section 2,
+  the dated departures). The 44 was measured live in two re-measures, one run per
+  request, in-sample and scored by the implementing session, not blind: S01
+  +0.27 USD, S04 +0.15 USD and +44 s, and no facet scored covered while the
+  answer said it was missing (0 of 15); the 84 and the narrowing are pinned
+  offline and not measured live, so this stays partial.
 - [x] **A3 — existing dispatch can support facet coverage at a new runner-owned
   pre-reduction boundary.** **Status**: Verified live 2026-10-29 (research 24);
   earlier, partially verified (research 8). **Method**: Source search plus a
@@ -857,6 +864,12 @@ matches now goes to the inline planner; that planner's cost on lookups is not
 measured. The other rows, and the provenance limits on `unknown` plans, are
 unchanged.
 
+*Superseded 2026-10-30 (Sam; nexus-4xmpv, third round): the plan-strategy
+refusal described in this note and in the one after it was replaced by the
+narrowing rule below. `SINGLE_SOURCE_EXCLUDED_STRATEGIES` and the reason
+`single_source_synthesis` no longer exist, and neither was in a release. Both
+notes stay as written because the two re-measures ran this form.*
+
 **Decided by Sam, 2026-10-30 (nexus-4xmpv): a `synthesis` request that names
 exactly one source does not admit citation-traversal.** The near-miss control
 (rows 920 and 923) and the incident request itself (G06, row 931, which ran plan
@@ -902,9 +915,68 @@ eligible library plan still goes to the inline planner. Not re-measured live; th
 unit selection runs the seven requests as both kinds and the matrix test uses a
 theme-shaped one-source request the offline library does offer abstract-themes.
 
-*Known limits, 2026-10-30.* (a) The 44-item single-source cap still binds on large
-documents: S04 (135 chunks) read 44 and used 40,258 of the 60,000 characters,
-because the reserved share is 50 less the 6 lifecycle records. (b) On S04 the
+*Decided by Sam, 2026-10-30 (nexus-4xmpv; after the second re-measure and the
+round-2 reviews). A. A synthesis or `unknown` request that names exactly one
+source reads that source; the strategy list above is replaced by narrowing.* The
+list was default-admit (a plan nobody listed still read the whole library; the
+code review found audit, debug and comparison requests with one source keeping
+both plans) and it answered a retrieval question with a matcher rule. Once the one
+named source has resolved to one document, the run's `_nx_scope` binding becomes
+that document's collection and its `_nx_owners` binding the document's owner
+(`nexus.plans.single_source`). The runner already applies both to every step of
+every plan: section 2a narrows a plan-pinned corpus to the scope, so a step on
+`rdr`, on `all` or on no corpus reads the collection and a step pinned to
+`knowledge` or `code` has no overlap and is skipped, never run unscoped; the
+traversal policy takes the collection as `allowed_collections` and the owner as
+`allowed_owners`; the coverage check's repair queries read the same scope. It
+holds for every plan, the inline planner's and `research:default` and
+`analyze:default` included. A caller `scope` that admits the collection (none,
+`all`, a corpus prefix or collection, a subtree holding the document) is replaced
+by it; one that excludes the collection stays, and the envelope's
+`single_source_narrowing` says `applied: false` and why. The verdict is in the
+envelope for every request the rule concerns, and text mode names the collection
+and owner. "Names exactly one source" is one property of the request coverage
+(`RequestCoverage.names_one_source`, distinct named ids), read by the narrowing,
+by the primary read's cap and by the replay script; the two hand-written counts
+before it had disagreed on a range whose ends are the same id. *The price,
+accepted by Sam:* a request that names one RDR in passing loses the
+cross-document context its other retrieval would have found. A lookup, a
+comparison, an audit and a debug request, and a request that names no source or
+several, are not narrowed. *Limits stated where a reader looks:* a one-source
+request whose source does not resolve to one document (ambiguous, not found, a
+failed lookup) is not narrowed, so a plan that reads other documents still runs
+for it; a document named only by its title counts as no named source; a grown
+plan of unknown kind is still admitted for a lookup (above, A1; nexus-indyo; no measured
+run exercised it); the two re-measures ran the refusal form, one run per request,
+in-sample and scored by hand by the implementing session, not blind, and
+the narrowing itself is pinned offline and not measured live.
+
+*B. For a narrowed request the primary stream takes 90 of the reducer's 100 input
+slots, so selection runs to the 60,000-character budget.* The 44-chunk read
+stopped G06 at 30,160 characters (80 chunks in the document, the convention sheet
+in chunks 32 and 33 unread) and S04 at 40,258. With the secondary streams
+narrowed to the same collection, most of their hits are chunks the primary already
+holds and merge away by chash, so the primary can have the slots. The arithmetic,
+stated once on `PrimaryEvidenceCaps.max_narrowed_source_items`: 100 input slots,
+cut after the merge so only secondary items are cut; 90 reserved
+(`RESERVED_SHARE_NARROWED`, 50 for any other request) and 10 left to the
+secondary; 6 of the 90 lead for T2 lifecycle records, so 84 chunks; 84 chunks at
+500 to 1,000 characters is 42,000 to 84,000, so for a long document the character
+cap decides, not the count (G06's 80 chunks are 54,800 characters and fit whole;
+S04 takes about 65). The 60,000-character cap does not move; the coverage check
+reads each stream in packs of at most 120,000 characters, and the primary stream
+(60,000, about 70,000 with attribution headers) and the T2 stream (at most 18,000)
+each fit one pack, so neither leaves an unread anchor. A one-source request that is
+not narrowed keeps 44 and the share of 50; several sources keep 24. Pinned
+offline: a 135-row single-source manifest fills the character budget
+(`max_selected_chars` in `caps_hit`, not the item cap), small chunks stop at 84,
+and the multi-source selection is unchanged.
+
+*Known limits, 2026-10-30.* (a) The 44-item single-source cap, which still applies
+to a one-source request that is not narrowed, binds on large documents: S04 (135
+chunks) read 44 and used 40,258 of the 60,000 characters, because the reserved
+share is 50 less the 6 lifecycle records; a narrowed request now takes 84 (B
+above), not measured live. (b) On S04 the
 ledger marks all three facets covered while the answer names missing material
 under each: the ledger's facet grain is coarser than the prose (nexus-dfrfp;
 calibration of the caps is nexus-2dc8b). (c) The content labeller carried
@@ -913,8 +985,17 @@ inverted it and every later heading was ignored (RDR-070 chunks 17-41 all read
 as Phase 2); fixed 2026-10-30 (nexus-jf9wg): a chunk that repeats the tail of its
 predecessor starts in the fence state the predecessor had where that tail began,
 and a chunk with no overlap still inherits the open fence of a block the chunker
-split. Pinned offline on an RDR-070-shaped fixture; the live labels are not
-re-read.
+split. The first form found the overlap anywhere in the chunk's first 600
+characters, so a new section that repeated the previous section's closing command
+lines read as overlap and mislabelled every later section, and it scanned every
+suffix of the previous chunk (2.2 ms a chunk, 6.7 s for 3,000). It now believes an
+overlap only at the head of the chunk, after the repeated section header, as
+`md_chunker` writes it (the last 165 characters of the predecessor's content), at
+under 10 ms for the same 3,000 chunks, and it restarts its fence across a gap in
+the chunks' manifest positions, since the primary read hands it a sampled list.
+Pinned offline on RDR-070 chunked by the real chunker (42 chunks, 32 labels, the
+document's 32 headings in order) and on a negative control; re-measure 2 read
+the same 32 labels live.
 
 The `unknown` entries are limited by provenance below; they are not blanket
 permission for every legacy or grown plan. In particular an unknown request
@@ -1179,13 +1260,23 @@ picks and continues past 24 until 44 chunks or the character budget. 44 is the
 reserved share (`RESERVED_SHARE_MAX`, 50) less the six T2 lifecycle records that
 lead it, so no primary chunk is dropped for the share, and the primary stream
 stays under the coverage check's 120,000-character per-stream size, so it adds
-no unread anchor. Estimated, not measured: a document of about 780 characters a
-chunk adds about 15,000 characters to the reducer input and one assessment call
-(a stream of more than 20 anchors is split into packs of at most 20), about
-0.06 to 0.07 USD on a 0.35 to 0.56 USD run; the worst case does not grow, since
-the character budget is unchanged. The effect on the answers is not re-measured.
-The 44, the 24, the reserved share of 50 and the six lifecycle records are all
-unmeasured calibration parameters. Several-source requests are unchanged.
+no unread anchor. Measured in the re-measure (G06 and S01-S06, one run each, in-sample, scored by
+the implementing session; baseline rows 919-924 and 931): the 44 cost S01 +0.27
+USD and S04 +0.15 USD and S04's wall time +44 s, against an estimate of 0.06 to
+0.07 USD that was too low; the seven-request run was 3.4167 USD against 3.1024
+(+10%) with the plan-exclusion rule of that day also in force, and the second
+re-measure (four requests) was +13% with inline planning replacing plan 465, G06's
+wall time +49.5 s. The worst case does not grow, since the character budget is
+unchanged. No facet was ledger-covered while the answer said it was missing (0 of
+15). The 44, the 24, the reserved share of 50 and the six lifecycle records are
+calibration parameters. Several-source requests are unchanged.
+
+*Departure, 2026-10-30 (nexus-4xmpv).* A request whose retrieval is narrowed to
+its one named source (section 1, the one-source rule) takes 84 chunks
+(`max_narrowed_source_items`) of a share of 90 (`RESERVED_SHARE_NARROWED`), and the
+secondary streams keep 10 of the 100 input slots. The arithmetic is stated once,
+on `PrimaryEvidenceCaps.max_narrowed_source_items`, and summarised in the decision
+note B in section 1. Not measured live.
 
 T2 is outside the corpus graph. When a named source resolves to an RDR, the
 runner adds a third stream: that RDR's T2 records (its metadata record and its
@@ -2417,3 +2508,4 @@ remains Sam's.
 - 2026-10-30: Two changes after the close sweep, one a decision by Sam. (1) A `synthesis` request that names exactly one source does not admit citation-traversal (nexus-4xmpv; Sam's decision of 2026-10-30). (2) A request that names exactly one source reads up to 44 primary chunks, not 24 (nexus-jf9wg). Decision text changed: section 1 (a dated decision note after the lookup note; the `lookup` paragraph now says lookup and unknown-kind plans and names the unknown-grown exposure), section 2 (a dated departure for the 24 and 44 primary caps with the budget arithmetic), section 4 (the original per-stream assessment paragraph is marked superseded by the 2026-10-28 departure and kept), Test Plan (the six-facet scenario no longer says "within the call cap"), Critical Assumptions A2 and the Key Discoveries entries for the near-miss control and the G06 rerun (row 931 ran plan 467, which is why the close was held). Neither change is re-measured live. The post-mortem is corrected the same day. The status is not changed here.
 
 - 2026-10-30: Incident-class re-measure and three changes after it, two decisions by Sam (nexus-4xmpv, nexus-jf9wg). (1) A request that names exactly one source does not admit abstract-themes either (Sam; declared `strategy` dimension `abstract-themes`). (2) The one-source rule also applies to an `unknown`-kind request (Sam). (3) The content labeller no longer reads a fence repeated by chunk overlap as an opening fence. Decision text changed: section 1 (a dated note after the 2026-10-30 one-source note, the old residual marked closed, and the known limits: the 44-item cap on S04, the ledger facet grain against the prose, the labeller defect), Key Discoveries (the re-measure entry). The re-measure itself is one run each of G06 and S01-S06 at 3.4167 USD and is in-sample. The post-mortem and CHANGELOG are updated. The status is not changed here.
+- 2026-10-30: Round 3 of nexus-4xmpv, two decisions by Sam, and review fixes. (A) A synthesis or `unknown` request that names exactly one source narrows every retrieval step of every plan to that source's collection and owner, replacing the strategy refusal (`SINGLE_SOURCE_EXCLUDED_STRATEGIES`, the reason `single_source_synthesis` and the few-shot argument are removed; they were never in a release and the two notes that described them are marked superseded, not deleted); the verdict is the envelope's `single_source_narrowing`; "names exactly one source" is one `RequestCoverage` property. (B) A narrowed request takes 84 chunks of a 90-slot share. Also: the content labeller believes an overlap only in the chunker's layout (a regression of the first form, which read a repeated closing block as overlap), at a flat cost per chunk, and restarts its fence across a gap; the stale "not re-measured" and "estimated 0.06 to 0.07 USD" sentences carry the measured costs; a Key Discoveries entry records re-measure 2. Decision text changed: section 1 (two decision notes, the known limits), section 2 (a dated departure). Status unchanged.
