@@ -251,7 +251,7 @@ public final class TupleHandler implements HttpHandler {
         Map<String, String> dims = stringMap((Map<String, Object>) body.get("dims"));
         String tupleBody = (String) body.get("body");
         String nonce = (String) body.get("nonce");
-        Long ttlSeconds = numberOrNull(body.get("ttl_seconds"));
+        Long ttlSeconds = numberOrNull("ttl_seconds", body.get("ttl_seconds"));
         // nexus-5r2sc.2.1 (RDR-235 E1): optional, whole seconds. Range checks live in the repository.
         Long delaySeconds = wholeSecondsOrNull("delay_s", body.get("delay_s"));
         // nexus-5r2sc.2.2 (RDR-235 E4): absent or "replace" only. The value is not echoed back.
@@ -287,8 +287,8 @@ public final class TupleHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String subspace = requireString(body, "subspace");
         Map<String, String> pattern = stringMap((Map<String, Object>) body.get("keys_pattern"));
-        int n = intOrDefault(body.get("n"), 1);
-        long timeoutS = longOrDefault(body.get("timeout_s"), 0);
+        int n = intOrDefault("n", body.get("n"), 1);
+        long timeoutS = longOrDefault("timeout_s", body.get("timeout_s"), 0);
         TupleRepository.ReadCursor since = readCursor(body.get("since"));
         TupleRepository.ReadOrder order = readOrder(body.get("order"));
 
@@ -305,7 +305,7 @@ public final class TupleHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String subspace = requireString(body, "subspace");
         Map<String, String> pattern = stringMap((Map<String, Object>) body.get("keys_pattern"));
-        int n = intOrDefault(body.get("n"), 1);
+        int n = intOrDefault("n", body.get("n"), 1);
         TupleRepository.ReadCursor since = readCursor(body.get("since"));
         TupleRepository.ReadOrder order = readOrder(body.get("order"));
 
@@ -344,7 +344,7 @@ public final class TupleHandler implements HttpHandler {
             Map<String, Object> spec = (Map<String, Object>) rawSpec;
             String subspace = requireString(spec, "subspace");
             Map<String, String> pattern = stringMap((Map<String, Object>) spec.get("keys_pattern"));
-            int n = intOrDefault(spec.get("n"), 1);
+            int n = intOrDefault("n", spec.get("n"), 1);
             TupleRepository.WaitSpec.Announce announce = readAnnounce(spec.get("announce"));
             // bead nexus-n36sw: a per-subscriber announce (a board arm) honours since
             // as a bare created_at watermark -- the client (SubscriptionSet) records
@@ -358,7 +358,7 @@ public final class TupleHandler implements HttpHandler {
                     : readCursor(spec.get("since"));
             specs.add(new TupleRepository.WaitSpec(subspace, pattern, n, since, announce));
         }
-        long timeoutS = longOrDefault(body.get("timeout_s"), 0);
+        long timeoutS = longOrDefault("timeout_s", body.get("timeout_s"), 0);
 
         List<TupleRepository.WaitResult> results = repo.waitAny(tenant, specs, timeoutS);
         Map<String, Object> out = new LinkedHashMap<>();
@@ -394,8 +394,8 @@ public final class TupleHandler implements HttpHandler {
         String subspace = requireString(body, "subspace");
         Map<String, String> pattern = stringMap((Map<String, Object>) body.get("keys_pattern"));
         String claimant = requireString(body, "claimant");
-        Long leaseS = numberOrNull(body.get("lease_s"));
-        long timeoutS = longOrDefault(body.get("timeout_s"), 0);
+        Long leaseS = numberOrNull("lease_s", body.get("lease_s"));
+        long timeoutS = longOrDefault("timeout_s", body.get("timeout_s"), 0);
 
         Optional<TupleRepository.ClaimedTuple> result = repo.in(tenant, subspace, pattern, claimant, leaseS, timeoutS);
         HttpUtil.send(ex, 200, renderClaim(result));
@@ -416,7 +416,7 @@ public final class TupleHandler implements HttpHandler {
         // lease_s against the template's take.default_lease_seconds) --
         // kept symmetric with /in rather than leaving the probe form as the
         // one endpoint that still hard-requires it.
-        Long leaseS = numberOrNull(body.get("lease_s"));
+        Long leaseS = numberOrNull("lease_s", body.get("lease_s"));
 
         Optional<TupleRepository.ClaimedTuple> result = repo.inp(tenant, subspace, pattern, claimant, leaseS);
         HttpUtil.send(ex, 200, renderClaim(result));
@@ -476,7 +476,7 @@ public final class TupleHandler implements HttpHandler {
                 stringMap((Map<String, Object>) r.get("keys")),
                 stringMap((Map<String, Object>) r.get("dims")),
                 (String) r.get("body"),
-                numberOrNull(r.get("ttl_seconds")));
+                numberOrNull("reply.ttl_seconds", r.get("ttl_seconds")));
     }
 
     private void handleNack(HttpExchange ex, String tenant, String method) throws IOException {
@@ -841,7 +841,7 @@ public final class TupleHandler implements HttpHandler {
     }
 
     private static long requireLong(Map<String, Object> body, String field) {
-        Long v = numberOrNull(body.get(field));
+        Long v = numberOrNull(field, body.get(field));
         if (v == null) {
             throw new IllegalArgumentException(field + " required");
         }
@@ -861,7 +861,7 @@ public final class TupleHandler implements HttpHandler {
 
     /** {@link #numberOrNull} for a field that must be a whole number of seconds (nexus-5r2sc.2.1): a
      *  fractional JSON number is refused rather than truncated, so {@code delay_s: 1.5} is a 400
-     *  and not a silent 1. A non-numeric string fails in {@code parseLong} as every field here does.
+     *  and not a silent 1. A non-numeric string is refused naming the field (nexus-wy51x).
      *  Both surface as {@link IllegalArgumentException} -&gt; 400. */
     private static Long wholeSecondsOrNull(String field, Object v) {
         if (v instanceof Double || v instanceof Float || v instanceof java.math.BigDecimal) {
@@ -870,17 +870,28 @@ public final class TupleHandler implements HttpHandler {
                 throw new IllegalArgumentException(field + " must be a whole number of seconds");
             }
         }
-        return numberOrNull(v);
+        return numberOrNull(field, v, "must be a whole number of seconds");
     }
 
-    private static Long numberOrNull(Object v) {
+    private static Long numberOrNull(String field, Object v) {
+        return numberOrNull(field, v, "must be a whole number");
+    }
+
+    /** A non-numeric value (a string such as {@code "x"}, a boolean, a list) is a caller error that
+     *  names the field, like every other refusal here (nexus-wy51x); the raw {@code NumberFormatException}
+     *  text ({@code For input string: "x"}) never reaches the response. */
+    private static Long numberOrNull(String field, Object v, String requirement) {
         if (v == null) {
             return null;
         }
         if (v instanceof Number n) {
             return n.longValue();
         }
-        return Long.parseLong(String.valueOf(v));
+        try {
+            return Long.parseLong(String.valueOf(v));
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(field + " " + requirement + ", got: " + v);
+        }
     }
 
     /** {@code order} (bead nexus-kp5q3): absent is ascending; a value that is not a
@@ -893,13 +904,13 @@ public final class TupleHandler implements HttpHandler {
         return TupleRepository.ReadOrder.parse((String) raw);
     }
 
-    private static int intOrDefault(Object v, int def) {
-        Long l = numberOrNull(v);
+    private static int intOrDefault(String field, Object v, int def) {
+        Long l = numberOrNull(field, v);
         return l == null ? def : l.intValue();
     }
 
-    private static long longOrDefault(Object v, long def) {
-        Long l = numberOrNull(v);
+    private static long longOrDefault(String field, Object v, long def) {
+        Long l = numberOrNull(field, v);
         return l == null ? def : l;
     }
 
