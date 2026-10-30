@@ -277,6 +277,44 @@ def test_a_header_that_stops_parsing_overwrites_the_stamp_with_a_null_and_the_lo
     assert writes == [], "a stored null equals the stamp the run computes"
 
 
+def test_an_rdr_emptied_to_zero_bytes_loses_its_stale_id_on_the_repo_path(tmp_path: Path) -> None:
+    """``nx index repo`` skipped the stamp for a zero-byte file (``and raw_bytes``), so an RDR truncated to nothing
+    kept its old id while ``nx index rdr`` overwrote it. An empty file is read like any file with no header: a
+    recorded absence (``""``), which replaces the id the document carried."""
+    rel = "docs/rdr/rdr-001-first.md"
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True)
+    path.write_text("---\ntitle: first\nid: RDR-001\n---\n# first\n", encoding="utf-8")
+    files = [(path, "rdr", COLLECTION)]
+    _hook(tmp_path, files)
+    cat = ActiveCatalog()
+    assert _entry(cat, rel).meta[KEY] == "RDR-001"
+    path.write_text("", encoding="utf-8")
+    _hook(tmp_path, files, head="bbb")
+    assert _entry(cat, rel).meta[KEY] == "", "the id the file no longer carries is gone from the catalog"
+
+
+def test_an_rdr_emptied_to_zero_bytes_loses_its_stale_id_on_the_standalone_path(tmp_path: Path) -> None:
+    """The same file through ``nx index rdr``: it stamps the same value the repo path does."""
+    root = tmp_path / "repo"
+    (root / "docs" / "rdr").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    f = root / MAIN
+    f.write_text(TEXTS[MAIN], encoding="utf-8")
+
+    def register() -> str:
+        return _register_or_lookup_doc_id(
+            f, "curator-jypmj20-empty", content_type="prose", physical_collection="rdr__1-1__test-embed-768__v1",
+        )
+
+    cat = ActiveCatalog()
+    first = register()
+    assert cat.resolve(first).meta[KEY] == "RDR-200"
+    f.write_text("", encoding="utf-8")
+    assert register() == first
+    assert cat.resolve(first).meta[KEY] == ""
+
+
 def test_reindexing_an_existing_registration_with_nx_index_rdr_updates_the_stamp(tmp_path: Path) -> None:
     """nexus-jypmj.7 code review M5: the standalone path stamped only when it minted the document. A second
     run of ``nx index rdr <file>`` finds the registration and must bring its stamp up to date: a changed id,
@@ -304,7 +342,8 @@ def test_reindexing_an_existing_registration_with_nx_index_rdr_updates_the_stamp
     assert register() == first
     assert cat.resolve(first).meta[KEY] is None
 
-    # a registration made before the stamp existed: put the key back to null the way an older client left it
+    # a registration whose stamp is null while the file parses (a stamp left null by an earlier run, from a header
+    # that did not parse then): put the key back to null by hand
     f.write_text(TEXTS[MAIN], encoding="utf-8")
     writer = factory.make_catalog_writer()
     try:

@@ -1419,7 +1419,9 @@ def _register_or_lookup_doc_id(
 
 def _rdr_frontmatter_stamp(file_path: Path, content_type: str) -> dict:
     """The catalog ``meta`` stamp for an RDR file's frontmatter id (nexus-jypmj.7), or ``{}`` for any other
-    content type or a file that cannot be read. An unparseable header stamps null (nexus-jypmj.20)."""
+    content type or a file that cannot be read. An unparseable header stamps null (nexus-jypmj.20); an empty file
+    has no header at all, which the shared rule reads as parsed with no id, the same as the repo indexer's
+    (:func:`nexus.indexer._rdr_register_stamp`)."""
     if content_type != "rdr":
         return {}
     from nexus.catalog.rdr_canonical import rdr_frontmatter_meta_from_bytes  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
