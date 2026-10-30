@@ -380,9 +380,11 @@ listed under Critical Assumptions before gate.
   builtin reuse on broad-kind runs falls from 33 to 15 and grown reuse stays 0
   to 0 (no grown plan was selected in the window, so it cannot move); with
   Haiku kinds, 50 of 113 broad-kind runs lose their selected plan (synthesis
-  36 of 84, comparison 13 of 28, audit 1 of 1). Not settled: the directional rule admits synthesis plans for
-  lookups, so the one held-out wrong-shape admission cannot be removed, and a
-  live single-theorem lookup ran a synthesis plan for 1.64 USD.
+  36 of 84, comparison 13 of 28, audit 1 of 1). Not settled when taken (2026-10-27), closed 2026-10-30: the directional rule
+  admitted synthesis plans for lookups, so the one held-out wrong-shape admission
+  could not be removed, and a live single-theorem lookup ran a synthesis plan for
+  1.64 USD. The lookup row is now lookup-only (nexus-jypmj.11; entry dated
+  2026-10-30 below). These figures were taken under the directional rule.
   *Source: gate matrix, replay and live proof. T2: `nexus_rdr/232-research-22`,
   `nexus/rdr232-phase2-thresholds`.*
 
@@ -521,7 +523,10 @@ listed under Critical Assumptions before gate.
   4 serial calls on 2026-10-28; 0 cut, 0 raised, 6 of 6 facets covered; wall 87.7 s
   on, 30.0 s off. Held-out set, 29 requests with the check off and on: 0 errors,
   0 answers withheld, 2 partial, 0 unassessed facets, wall latency p50 +16.8 s and
-  p90 +33.9 s, assessment 0.021 USD a run. The ambiguous-source fix
+  p90 +33.9 s, assessment 0.021 USD a run (all taken under the directional lookup
+  rule and before 2026-10-30's unread-anchor rule, so a lookup that now runs a
+  different plan, and a facet now read as unsupported beside unread items, are
+  outside these figures). The ambiguous-source fix
   (nexus-jypmj.3.17) holds live, with and without a project context; G18, still
   withheld, is a correct withhold (retrieval returned test code, and the
   coverage-off answer addresses a different question).
@@ -535,7 +540,11 @@ listed under Critical Assumptions before gate.
   with the assessor. So the drafted supports labels, and the false-negative rate
   built on them, hold at screening grade; the drafted neutrals under-count support
   and cannot show the assessor over-covers or over-flags conflicts. Not measured:
-  the five largest held-out requests and the negative-control set.
+  the five largest held-out requests (so the rate at which a correct answer
+  whose support stays unread is withheld is unknown). The negative-control set
+  was not measured when this was taken; since then N04 was measured (entry dated
+  2026-10-30 below) and N01-N03 were replaced with markers absent from the
+  tenant and have not been run.
   *Source: bead nexus-jypmj.3.10 comments of 2026-10-29; T2
   `nexus/rdr232-3.10-live-measurement-2026-10-29`; research 24.*
 
@@ -578,8 +587,11 @@ listed under Critical Assumptions before gate.
   container) on the S-R-B shape; the G06 rerun on an engine carrying `node_walk` is not done.
   *Source: bead nexus-jypmj.18; T2 `nexus/rdr232-jypmj18-dropped-out-of-owner-evidence-2026-10-29`;
   `service/.../CatalogRepository.graphBFS` javadoc; `src/nexus/plans/traversal_policy.py`.*
-- **Verified** (spike) — the tightened lookup row (nexus-jypmj.11, 2026-10-30). Measured three rules for a `lookup` request: the shipped directional rule (lookup or synthesis plans), lookup or listing, and lookup only; "synthesis plans declared lookup-suitable" reduces to lookup only, since no plan declares it. Offline, with the Phase 2 matrix, the shipped rule reproduces the approved figures; both tightened rules take held-out wrong-shape admission from 1 of 29 to 0 (H09 now selects the lookup plan) with no recall loss (held-out 21 of 29 against 20; lookup 3 of 5 against 2) and leave golden_v1 and the compound set unchanged. H18's loss is the discovery row and no lookup rule moves it. The labels list only unacceptable plans, so the two tightened rules tie on them. Live they differ: lookup-or-listing sent 3 of 3 changed lookups to the listing plan, which returned a raw list of chunk ids without reading the named source; the shipped rule ran citation-traversal for 2 of 5 lookups (H09 1.24 USD against 0.14 for the lookup plan); lookup-only answered all five with the lookup plan. On the negative control N04 the synthesis plan's 301 anchors left both facets unassessed and off-topic prose came back answered, where the lookup plan withheld it (uncovered, 0.008 USD). Not settled: the cost of the inline planner for a lookup no lookup plan matches.
-  *Source: rule matrix and live runs 901-918. T2: `nexus/rdr232-jypmj11-rule-measurement-2026-10-30`, `nexus/rdr232-jypmj23-measurement-2026-10-30`.*
+- **Verified** (spike) — the tightened lookup row (nexus-jypmj.11, 2026-10-30). Measured three rules for a `lookup` request: the shipped directional rule (lookup or synthesis plans), lookup or listing, and lookup only; "synthesis plans declared lookup-suitable" reduces to lookup only, since no plan declares it. Offline, with the Phase 2 matrix, the shipped rule reproduces the approved figures; both tightened rules take held-out wrong-shape admission from 1 of 29 to 0 (H09 now selects the lookup plan) with no recall loss (held-out 21 of 29 against 20; lookup 3 of 5 against 2) and leave golden_v1 and the compound set unchanged. **Those two figures hold for Haiku- or Opus-extracted kinds.** With first-pass (deterministic) kinds, wrong-shape admission goes 1 to 2 (H09 and H22) under every rule, the tightened ones included, and held-out recall falls 21 to 15; no rule changes that. H18's loss is the discovery row and no lookup rule moves it. The labels list only unacceptable plans, so the two tightened rules tie on them. Live they differ. Against the shipped rule, 4 of the 5 live lookups ran a different plan under lookup or listing, and 3 of those went to the listing plan, which returned a raw list of chunk ids without reading the named source; the shipped rule ran citation-traversal for 2 of 5 lookups (H09 1.24 USD against 0.14 for the lookup plan); lookup-only answered all five with the lookup plan. The live rows are 901-916 and 918: 901-912 are the rule comparison and 913-916 and 918 the N04 runs; row 917 is the `max_rows_per_doc` get_many run and is not part of it, and rows 899 and 900 are void (the run tag matched the RDR-reference pattern and made RDR-232 a named source). A replay of the newest 300 real runs (81 with Haiku kinds, 25 lookups) shows what lookup-only costs in exclusions: it excludes 8 of the 25 lookups against 5 under the shipped rule; the three extra are synthesis plans the held-out labels list unacceptable for lookups, at 1.643 USD (run 737), 0.681 and 0.886. Not settled: the cost of the inline planner for a lookup no lookup plan matches.
+  *Source: rule matrix and live runs 901-916 and 918; real-traffic replay. T2: `nexus/rdr232-jypmj11-rule-measurement-2026-10-30`, `nexus/rdr232-jypmj23-measurement-2026-10-30`.*
+
+- **Verified** (spike, live) — an assessment that leaves anchors unread (nexus-jypmj.23, 2026-10-30; negative control N04, a lookup, scope `rdr`). Under the shipped lookup rule the request ran plan 467 (citation-traversal), which handed the coverage check 301 anchors. The assessment calls carried 127 of them: seven calls, all replied neutral (21 and 58 accepted records, none supporting), and 174 anchors were left out by the per-call size cap. The code then marked both facets `unassessed` (`assessment_incomplete`) because a call had left anchors out, so the check could not withhold: the run reported reason `assessment_failed` beside an assessment outcome `ok` with no failure, and off-topic prose (RDR-007 hosting costs) came back `answered`, on all four runs of the plan (rows 913-916). Under lookup-only the same request ran plan 473 with 15 anchors, all of which fit, and was withheld (`uncovered`, 0.0084 USD, row 918). Sam's ruling (2026-10-30): a facet no item the check READ supports or contradicts reads `unsupported`, not `unassessed`, and the notices and the envelope say how many items were not read (section 4 departure, Phase 3 As run). The count is each unread item once per stream per round, and the notices state "N of M retrieved items were not read". Repair is now entered for these facets and reads the unread anchors. What this does not show: a correct answer whose supporting item is among the unread ones is withheld, and the rate of that is not measured (the five largest held-out requests were never run). Also unmeasured: N01-N03, replaced with markers absent from the tenant.
+  *Source: live runs 913-918. T2: `nexus/rdr232-jypmj23-measurement-2026-10-30`, `nexus/rdr232-jypmj23-negative-controls-2026-10-30`.*
 
 ### Critical Assumptions
 
@@ -597,10 +609,12 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   wrong-shape cases, with correct unknown routing and few-shot exclusion.
   Phase 2 (2026-10-27) verified production integration on every matcher
   branch and the planner few-shots, and request-kind inference with Haiku
-  extraction (Key Discoveries; research 22, 23). Still open: the fall in
-  wrong-shape admission is in-sample only (held-out 1 of 29 before and
-  after), and the directional rule admits synthesis plans for lookups
-  (nexus-jypmj.11). Store kind in `plan_json`, never dimensions; decode legacy absence
+  extraction (Key Discoveries; research 22, 23). Still open when taken
+  (2026-10-27): the fall in wrong-shape admission was in-sample only (held-out 1
+  of 29 before and after), and the directional rule admitted synthesis plans for
+  lookups. The second is closed 2026-10-30: the lookup row is lookup-only
+  (nexus-jypmj.11), which takes held-out wrong-shape admission from 1 of 29 to 0
+  for Haiku- or Opus-extracted kinds (first-pass kinds still give 1 to 2). Store kind in `plan_json`, never dimensions; decode legacy absence
   or invalid metadata as `unknown`; apply eligibility on every matcher branch
   and planner few-shot selection.
 - [ ] **A2 — ordered manifests plus content-derived, document-scoped section
@@ -754,8 +768,9 @@ is the text as gated; this note supersedes its first row. Measured over three
 candidate rules (the Key Discoveries entry dated 2026-10-30): the directional
 row let a synthesis plan outscore the lookup plan (held-out H09 ran
 citation-traversal at 1.24 USD against 0.14 for the lookup plan), the
-lookup-or-listing row sent every changed lookup to a listing plan that read no
-source, and the lookup-only row took held-out wrong-shape admission from 1 of 29
+lookup-or-listing row sent three of the five live lookups to a listing plan
+that read no source (four of the five ran a different plan from the shipped
+rule's), and the lookup-only row took held-out wrong-shape admission from 1 of 29
 to 0 with no recall loss (held-out 21 of 29 against 20; lookup 3 of 5 against 2)
 and left golden_v1 and the compound set unchanged. A lookup that no lookup plan
 matches now goes to the inline planner; that planner's cost on lookups is not
@@ -812,9 +827,11 @@ widening or require citations, but cannot silently become new retrieval facets.
 Explicit user wording is the source of these fields. The caller does not need a
 new MCP parameter or a new command.
 
-Compatibility is directional. A synthesis-capable plan may answer a lookup when
-its operators are suitable; a lookup-only plan may not claim a multi-facet
-synthesis. Unknown **plan** declarations are not positive evidence of
+A `lookup` request admits lookup plans only (Sam, 2026-10-30, nexus-jypmj.11;
+the dated note under the table above and the Key Discoveries entry of that date).
+A lookup-only plan still may not claim a multi-facet synthesis, and the other
+rows keep their shipped directions (a synthesis plan may answer a comparison or
+an audit). Unknown **plan** declarations are not positive evidence of
 incompatibility and remain eligible under conservative legacy/grown gates.
 Unknown **request** kind must not make a known narrow plan the default for a
 broad or ambiguous request: retain only genuinely generic compatible routes or
@@ -822,14 +839,19 @@ enter inline planning with eligibility diagnostics. There is no existing
 no-model generic synthesis fallback to reuse; adding one would be separate
 work.
 
-The directional rule is a measured limit, kept for the first enabled release
-(Sam, 2026-10-27). "When its operators are suitable" is not checked: any
-synthesis-capable plan is admitted for a lookup. So the gate cannot remove a
-synthesis plan the labels call wrong for a lookup (held-out H09), and a live
-single-theorem lookup ran a synthesis plan for 1.64 USD where the lookup plan
-costs about 0.13 (proof run 737). In the other direction it removed one plan
-the labels accept (held-out H18). A tightened rule is measured after the
-release (nexus-jypmj.11).
+Until 2026-10-30 the lookup row was a directional rule, kept as a measured limit
+for the first enabled release (Sam, 2026-10-27): any synthesis-capable plan was
+admitted for a lookup, so the gate could not remove a synthesis plan the labels
+call wrong for a lookup (held-out H09), and a live single-theorem lookup ran a
+synthesis plan for 1.64 USD where the lookup plan costs about 0.13 (proof run
+737). That rule was measured against two tightened ones after the release and
+replaced by lookup-only (nexus-jypmj.11); the lookup-only rule takes no
+`synthesis` plan for a lookup, and no plan has declared itself lookup-suitable,
+so there is no declared exception. A grown plan of unknown kind is still
+admitted for a lookup (its kind is not known to be wrong). The rule does not
+move the loss of one plan the labels accept, held-out H18: that is the
+`discovery/listing` row (a discovery request losing `document:default`), and
+no lookup rule touches it.
 
 Apply eligibility to ordinary cosine candidates, below-floor category-route
 candidates, and FTS fallback candidates before cost choice. Wrong-shape plans
@@ -1186,7 +1208,7 @@ independent of prose fluency.
 | --- | --- | --- | --- | --- | --- |
 | `complete` | every required facet has evidence | `answered` | the answer | `success_count` | allowed |
 | `partial` | at least one required facet is unsupported or contradicted, and a usable answer exists | `insufficient_evidence` | a notice naming each unresolved facet, followed by the answer | `success_count` | blocked |
-| `unavailable` | no usable answer can be produced | `uncovered` when retrieval returned evidence and none of it supported or contradicted a required facet (prose with no such facet included); `no_evidence` when no retrieval result reached the reduction | the existing non-answer notice and chunk references | `failure_count` | blocked |
+| `unavailable` | no usable answer can be produced | `uncovered` when retrieval returned evidence and none of the items read supported or contradicted a required facet (prose with no such facet included); items the check's per-call size cap left unread are counted and disclosed, not assessed; `no_evidence` when no retrieval result reached the reduction | the existing non-answer notice and chunk references | `failure_count` | blocked |
 | `unassessed` | the request has no facets, or the coverage assessment itself failed | `answered` | the answer, as today | `success_count` | as today |
 
 A **usable answer** exists when the terminal generation returned prose that
@@ -1738,11 +1760,23 @@ evidence record leaves its facets `unassessed`, not `unsupported`; a facet
 with both supporting and contradicting evidence is covered and marked
 `conflicted`; prose is kept as `insufficient_evidence` while any facet is
 unassessed, so `uncovered` needs every facet known; the reassessment after the
-repair reads only the evidence the repair added; a partial ledger hands
+repair reads the evidence the repair added and the anchors the first round left
+unread (amended 2026-10-30, below); a partial ledger hands
 generation a coverage note naming the unresolved facets, which is how the
 "explicit list" of step 4 reaches it; ids that come back but hydrate to
 nothing give `no_evidence` and a failure; the envelope's `coverage` object
-carries the state after the post-generation decision. The run summary
+carries the state after the post-generation decision. **Added 2026-10-30
+(Sam, nexus-jypmj.23):** a facet that no item the check read supports or
+contradicts is `unsupported` even when the per-call size cap left anchors
+unread; it is not `unassessed`. A plan that hands the check more anchors than its
+calls carry (N04: 301 anchors, 127 read, 174 omitted) can therefore be
+withheld as `uncovered`; before, both facets read `unassessed` and off-topic
+prose came back `answered`. Only a facet whose assessment failed, raised or was
+skipped stays `unassessed`. The count of unread items is disclosed in both
+notices ("N of M retrieved items were not read") and in the envelope
+(`skipped_items`, `anchors_total`), and a repair reads the unread anchors. The
+cost: a correct answer whose support stays unread is withheld, at a rate not
+measured. The run summary
 persists only on engine-service-v0.1.166 and later; the deployed engine
 reports `unsupported`.
 
@@ -1930,7 +1964,9 @@ summed step time; calls, peak in flight, cut calls, backend and
 baseline (0 unusable of 40 calls); G18 (withheld after assessment while the off
 arm answered), G01, G02 and G04 on the fixed tree; the full golden set on and off
 for latency and cost; a small `budget_usd` and `budget_seconds` for first-wave
-overshoot and cut calls; a persisted run through `nx answer-runs --steps`. The
+overshoot and cut calls; a persisted run through `nx answer-runs --steps`; and, since 2026-10-30, the rate at which a
+correct answer whose support stays unread is withheld (N04 was measured; N01-N03 were replaced and
+not run). The
 `claude -p` backend runs 4 concurrent subprocesses with rate-limit and host-load
 behaviour unmeasured.
 
@@ -2107,3 +2143,4 @@ remain coherent without it.
 - 2026-10-27: Phase 3 As run recorded (the coverage check ships off until nexus-jypmj.3.10 and Sam's approval; the section 4 departures as built), and section 4 and the Test Plan corrected where they misdescribed the build (marker bucketing under trace=False, assessment USD in step records, the continuation fallback repay, the unverified and not_recorded persistence states, the coverage_partial count), approved by Sam.
 - 2026-10-28: Key Discoveries record the lookup-boundary re-measure (nexus-jypmj.13), the pre-cap filter's old-engine departure (nexus-jypmj.1.13) and the live canary latency (nexus-jypmj.3.10); two A5 statements are corrected as findings. No decision text changed.
 - 2026-10-28: The coverage check is on by default (Sam's decision, nexus-jypmj.17), with concurrent assessment calls. Decision text changed: Phase 3 As run (the check no longer ships off; the amendment names Sam and the date), section 4 (a dated departure: packs of at most 20 anchors, at most 4 concurrent calls, the call count bounded by the stage share and the USD stop-line, not by design) and Performance Expectations (the measured canary figures, the unit-test timing model labelled as a model, the outstanding measurements). The Key Discovery for the timing model is tagged Assumed.
+- 2026-10-30: Two decisions by Sam, recorded. (1) The `lookup` row admits lookup plans only (nexus-jypmj.11). (2) A facet no read item bears on is `unsupported` when the per-call size cap left anchors unread, with the unread count disclosed (nexus-jypmj.23). Decision text changed: section 1 (the compatibility paragraph and the measured-limit paragraph now state the lookup-only rule and point at the dated note), section 4 (the `uncovered` definition reads "among the items read"; a dated departure in Phase 3 As run for the unread-anchor rule, N04's 301 anchors, 127 read, 174 omitted; the post-repair reassessment also reads the unread anchors), Key Discoveries (the lookup entry corrected for first-pass kinds and the rows it covers, a separate entry for the omitted-anchor mechanism, the two open items of 2026-10-27 closed, the Phase 3 live figures qualified as taken under the old rules), and Critical Assumptions A1.
