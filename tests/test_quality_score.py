@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import pytest
 
+from nexus.context_annotations import OWNER_QUALITY_KEY
 from nexus.scoring import quality_score, apply_quality_boost
 from nexus.types import SearchResult
 
 
 def _qr(dist: float = 0.3, coll: str = "knowledge__papers",
         bib_count: int = 0, **meta: object) -> SearchResult:
-    m = {"bib_citation_count": bib_count}
+    # nexus-6pfgb.12: the boost reads the OWNING document's citations, stamped on the hit by
+    # ``_attach_display_paths``; the chunk row's ``bib_citation_count`` is the last writer's and is not read.
+    m = {OWNER_QUALITY_KEY: {"bib_citation_count": bib_count}} if bib_count else {}
     m.update(meta)
     return SearchResult(id="r1", content="chunk", distance=dist,
                         collection=coll, metadata=m)

@@ -156,7 +156,11 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # discarded once the process exits) — a deliberately-degraded
     # document became indistinguishable from a silent failure one
     # shakedown cycle later, reproducing this bead's own complaint
-    # shape. Searchable via ``where=quality_gate_overridden=true`` so a
+    # shape. The document's own record is its catalog ``meta``
+    # (nexus-6pfgb.6) and the audit is ``nx catalog list --meta
+    # quality_gate_overridden=true`` (nexus-6pfgb.16): this chunk-row copy
+    # is the LAST WRITER's, so ``where=quality_gate_overridden=true`` loses
+    # a document whose chunk another document indexed later. A
     # shakedown/audit has a durable handle on which documents were
     # accepted with known-degraded text. ``False`` default is dropped by
     # ``normalize`` (see Step 2e) so the common healthy-extraction chunk

@@ -375,9 +375,20 @@ def setup_cmd(remote: str) -> None:
 @click.option("--type", "content_type", default="")
 @click.option("--limit", "-n", default=50)
 @click.option("--offset", default=0)
+@click.option("--meta", "meta_filters", multiple=True, metavar="KEY=VALUE",
+              help="Keep documents whose own catalog meta has KEY equal to VALUE (repeatable, ANDed): "
+                   "`--meta quality_gate_overridden=true`, `--meta extraction_method=mineru`. "
+                   "An absent key matches nothing, except extraction_source, which is `file` when absent. "
+                   "Scans the catalog's documents (nexus-6pfgb.16).")
 @click.option("--json", "as_json", is_flag=True)
-def list_cmd(owner: str, content_type: str, limit: int, offset: int, as_json: bool) -> None:
+def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filters: tuple[str, ...], as_json: bool) -> None:
     """List catalog entries."""
+    from nexus.catalog.meta_filter import documents_with_meta, parse_meta_filters  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    try:
+        meta_wanted = parse_meta_filters(meta_filters)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
     cat = _get_catalog()
     if owner:
         # Resolve --owner to a Tumbler. Try the dotted-tumbler form first
@@ -418,9 +429,13 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, as_json: bo
         # filter ran Python-side AFTER LIMIT/OFFSET; a 15K-entry
         # catalog with only 2 rdr rows had ``--type rdr -n 3`` return
         # 0. Mirrors PR #533's fix for the MCP catalog_list surface.
+        # nexus-6pfgb.16: a meta filter cannot be pushed into SQL, so it scans every document of the type
+        # (0 is the unbounded read) and pages the matches.
         entries = cat.all_documents(
-            limit=limit + offset + 1, content_type=content_type,
+            limit=0 if meta_wanted else limit + offset + 1, content_type=content_type,
         )
+    if meta_wanted:
+        entries = documents_with_meta(entries, meta_wanted)
     total = len(entries)
     entries = entries[offset:offset + limit]
 

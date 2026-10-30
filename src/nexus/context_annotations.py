@@ -169,6 +169,20 @@ OWNER_FRECENCY_KEY: str = "_owner_frecency"
 #: lookup the page already makes. Absent when no live owner states one. A working key like
 #: :data:`OWNER_FACTS_KEY`, read only through ``search_engine._row_agents``.
 OWNER_AGENTS_KEY: str = "_owner_agents"
+#: Metadata key a search hit carries the bibliography of its ATTRIBUTED owner under (RDR-236 Phase 2,
+#: nexus-6pfgb.12): ``{"bib_year", "bib_authors", "bib_venue", "bib_citation_count"}``, each present only
+#: when the owning document's catalog entry states it, taken from the owner lookup the page already makes.
+#: ``query``'s document card reads it; the chunk row's ``bib_*`` keys are the last writer's and are not.
+#: Absent when the attributed document states none (or none resolved). A working key like
+#: :data:`OWNER_FACTS_KEY`.
+OWNER_BIB_KEY: str = "_owner_bib"
+
+#: Metadata key a search hit carries what the quality boost reads under (nexus-6pfgb.12):
+#: ``{"bib_citation_count", "bib_year"}`` of the attributed owner, or, for a hit whose ``doc_id`` the lookup
+#: CHOSE (:data:`DOC_ID_INFERRED_KEY`), of the live owner with the most citations (the choice is arbitrary,
+#: so an enriched owner is not penalised, as for :data:`OWNER_FRECENCY_KEY`). Absent when no owner states a
+#: citation count; ``apply_quality_boost`` then boosts nothing. A working key like :data:`OWNER_FACTS_KEY`.
+OWNER_QUALITY_KEY: str = "_owner_quality"
 
 #: Working key set to ``True`` on a hit whose ``doc_id`` the owner lookup CHOSE (the chunk row
 #: named none; the engine's order picked the first holder). Such a choice is arbitrary, so the
@@ -199,7 +213,9 @@ def meta_frecency_score(meta: Any) -> float | None:
 
 
 def entry_facts(entry: Any) -> dict[str, Any]:
-    """The provenance facts one catalog entry states, each present only when stored.
+    """The provenance facts one catalog entry states, each present only when stored (the document's
+    other bibliography, ``bib_authors`` / ``bib_venue`` / ``bib_citation_count``, rides along for the
+    card and the boost, nexus-6pfgb.12).
 
     ``title``, ``file_path``, ``indexed_at`` (the document's own index time),
     ``bib_year`` (the enriched year, else the catalog ``year``) and ``ttl_days``
@@ -222,6 +238,21 @@ def entry_facts(entry: Any) -> dict[str, Any]:
         year = 0
     if year > 0:
         facts["bib_year"] = year
+    # nexus-6pfgb.12: the rest of the document's own bibliography, for ``query``'s card and the quality
+    # boost. Not provenance facts (``agreed_facts`` compares only ``_FACT_KEYS``), so they never reach
+    # an age line; each present only when stored.
+    authors = str(getattr(entry, "bib_authors", "") or getattr(entry, "author", "") or "").strip()
+    if authors:
+        facts["bib_authors"] = authors
+    venue = str(getattr(entry, "bib_venue", "") or "").strip()
+    if venue:
+        facts["bib_venue"] = venue
+    try:
+        cites = int(getattr(entry, "bib_citation_count", 0) or 0)
+    except (TypeError, ValueError):
+        cites = 0
+    if cites > 0:
+        facts["bib_citation_count"] = cites
     meta = getattr(entry, "meta", None)
     if isinstance(meta, Mapping) and meta.get("ttl_days") is not None:
         # the note's own TTL as the expiry sweep reads it: a bool, NaN or out-of-range value is permanent

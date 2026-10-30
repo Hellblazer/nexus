@@ -16,6 +16,7 @@ from nexus.scoring import (
     quality_score,
     round_robin_interleave,
 )
+from nexus.context_annotations import OWNER_QUALITY_KEY
 from nexus.types import SearchResult
 from tests.conftest import catalog_row_for_collection_name
 
@@ -511,7 +512,9 @@ def test_quality_score_alpha_ignores_age():
 
 def _qr(dist: float = 0.3, coll: str = "knowledge__papers",
         bib_count: int = 0, **meta: object) -> SearchResult:
-    m = {"bib_citation_count": bib_count}
+    # nexus-6pfgb.12: the boost reads the OWNING document's citations, stamped on the hit by
+    # ``_attach_display_paths``; the chunk row's ``bib_citation_count`` is the last writer's and is not read.
+    m = {OWNER_QUALITY_KEY: {"bib_citation_count": bib_count}} if bib_count else {}
     m.update(meta)
     return SearchResult(id="r1", content="chunk", distance=dist,
                         collection=coll, metadata=m)

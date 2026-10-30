@@ -5104,14 +5104,14 @@ def query(
             lines_svc.append(f"{routing_note_svc}\n{header_svc}")
             lines_svc.append(_READER_INSTRUCTION_LINE())
             lines_svc.append("")
+            # nexus-6pfgb.12 (RF-10): one batched resolve and one batched manifest read for every row
+            # of the page, where each row used to make a round trip of each kind.
+            entries_svc, chunk_counts_svc = _catalog_rows_batch(cat, [row.get("id", "") for row in rows])
             for i, row in enumerate(rows, 1):
                 tumbler_str = row.get("id", "")
                 dist = f"{row.get('distance', 0.0):.4f}"
                 # Re-hydrate from catalog
-                try:
-                    entry_svc = cat.resolve(Tumbler.parse(tumbler_str)) if tumbler_str else None
-                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                    entry_svc = None
+                entry_svc = entries_svc.get(tumbler_str)
                 title_svc = (entry_svc.title if entry_svc else tumbler_str or "")[:70]
                 # Prefer bib_* (RDR-101
                 # enrichment), fall back to the plain author/year fields.
@@ -5119,10 +5119,7 @@ def query(
                 bib_authors_svc = (entry_svc.bib_authors or entry_svc.author) if entry_svc else ""
                 bib_venue_svc = entry_svc.bib_venue if entry_svc else ""
                 bib_citation_count_svc = entry_svc.bib_citation_count if entry_svc else 0
-                try:
-                    chunk_count_svc = len(cat.get_manifest(tumbler_str)) if tumbler_str else 0
-                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                    chunk_count_svc = 0
+                chunk_count_svc = chunk_counts_svc.get(tumbler_str, 0)
                 snippet_svc = row.get("content", "")[:300].replace("\n", " ")
                 collection_svc = row.get("collection", "")
 
@@ -5289,77 +5286,21 @@ def query(
                 structured_result["graph_scope"] = graph_batch_info
             return structured_result
 
-        # Group by document. RDR-108 Phase 4b (nexus-kosc): post-Phase-3
-        # chunks no longer carry ``doc_id`` in their metadata, so the
-        # canonical mapping is now ``chunk_text_hash -> [doc_id, ...]``
-        # via ``Catalog.docs_for_chashes``. Fall back to the legacy
-        # metadata keys (``content_hash``, ``title``, ``_display_path``,
-        # ``source_path``, chunk id) for chunks the catalog cannot
-        # resolve (catalog absent, orphan chunks, pre-Phase-A chunks).
-        chash_to_doc: dict[str, str] = {}
-        # nexus-tko2w: the owner each search row names (``doc_id``: the
-        # engine's collection-scoped first owner, or search_cross_corpus's
-        # chash_positions pairing), read once per row; "" when it names none.
-        row_owners = [str(r.metadata.get("doc_id") or "") for r in results]
-        # nexus-voy5 (RDR-108 Phase 4 review S3): chunk_count was
-        # previously read from chunk metadata, but RDR-108 Phase 3
-        # (nexus-bdag) removed it. Resolve via the catalog manifest
-        # once per unique doc_id so the display value matches D2's
-        # "manifest is authoritative" invariant. Empty dict when
-        # the catalog is absent (legacy display falls through to "").
-        doc_to_chunk_count: dict[str, int] = {}
-        try:
-            cat = _get_catalog()
-        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            cat = None
-        if cat is not None:
-            # nexus-tko2w: a row that names its owner is grouped under it; only
-            # a row without one needs the tenant-wide reverse lookup below.
-            chashes_seen = sorted({
-                r.metadata.get("chunk_text_hash", "")
-                for r, row_owner in zip(results, row_owners)
-                if r.metadata.get("chunk_text_hash") and not row_owner
-            })
-            if chashes_seen:
-                try:
-                    by_chash = cat.docs_for_chashes(chashes_seen)
-                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                    by_chash = {}
-                # Same chash can appear in multiple docs (identical
-                # content); pick the first deterministically so chunks
-                # group consistently within a single response.
-                for chash, doc_ids in by_chash.items():
-                    if doc_ids:
-                        chash_to_doc[chash] = sorted(doc_ids)[0]
-            # Fetch manifest length for each unique doc_id seen. nexus-tnwm2:
-            # ONE get_manifests round trip for the whole set (it was one
-            # get_manifest per document, serial); the per-doc loop remains
-            # only for a catalog without the batch method.
-            seen_doc_ids = sorted(
-                set(chash_to_doc.values())
-                | {o for o in row_owners if o}
-            )
-            batch_manifests: dict | None = None
-            get_many = getattr(cat, "get_manifests", None)
-            if seen_doc_ids and get_many is not None:
-                try:
-                    batch_manifests = get_many(seen_doc_ids)
-                except Exception:  # noqa: BLE001 — graceful degradation; per-doc loop below
-                    batch_manifests = None
-            if batch_manifests is not None:
-                doc_to_chunk_count = {d: len(m) for d, m in batch_manifests.items()}
-            else:
-                for doc_id in seen_doc_ids:
-                    try:
-                        doc_to_chunk_count[doc_id] = len(cat.get_manifest(doc_id))
-                    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                        continue
+        # Group by document. RDR-108 Phase 4b (nexus-kosc): post-Phase-3 chunks no longer carry
+        # ``doc_id`` in their metadata; ``search_cross_corpus`` stamps the owning document on every hit
+        # (``doc_id``, ``chunk_count``, ``_owner_doc_ids``, the owners' bibliography and agreed facts)
+        # from the lookups it already makes. nexus-6pfgb.12 (RDR-236 Phase 2): this reads those stamps
+        # and makes NO catalog call of its own (it used to repeat ``docs_for_chashes`` and fetch the
+        # manifests again, RF-10). Fall back to the legacy metadata keys (``content_hash``, ``title``,
+        # ``_display_path``, ``source_path``, chunk id) for chunks the catalog could not resolve
+        # (catalog absent, orphan chunks, pre-Phase-A chunks).
+        from nexus.context_annotations import OWNER_BIB_KEY, OWNER_FACTS_KEY  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
-        for r, row_owner in zip(results, row_owners):
+        for r in results:
             meta = r.metadata
-            owner = row_owner or chash_to_doc.get(meta.get("chunk_text_hash", ""))
             doc_key = (
-                owner
+                meta.get("doc_id")
                 or meta.get("content_hash")
                 or meta.get("title")
                 or meta.get("_display_path")
@@ -5378,21 +5319,19 @@ def query(
                     "hybrid_score": r.hybrid_score,
                     # RDR-169 Phase B fix round 1: see the sibling guard above.
                     "snippet": (r.content or "")[:300].replace("\n", " "),
-                    "bib_year": meta.get("bib_year", ""),
-                    "bib_authors": meta.get("bib_authors", ""),
-                    "bib_citation_count": meta.get("bib_citation_count", ""),
-                    "bib_venue": meta.get("bib_venue", ""),
-                    # nexus-onn7s: what the annotation line reads.
-                    "indexed_at": meta.get("indexed_at", ""),
-                    "ttl_days": meta.get("ttl_days"),
-                    # nexus-voy5: derive chunk_count from the catalog
-                    # manifest (RDR-108 D2 authoritative source).
-                    # Fall back to legacy metadata for chunks the
-                    # catalog can't resolve (catalog-absent or
-                    # pre-Phase-A chunks).
-                    "chunk_count": (
-                        doc_to_chunk_count.get(owner) if owner else None
-                    ) or meta.get("chunk_count", ""),
+                    # nexus-6pfgb.12: the document's OWN bibliography and age facts, stamped from the
+                    # page's one owner lookup. The chunk row's bib_*, indexed_at and ttl_days are the
+                    # last writer's and are not read: a document that states none shows none.
+                    "bib_year": (meta.get(OWNER_BIB_KEY) or {}).get("bib_year", ""),
+                    "bib_authors": (meta.get(OWNER_BIB_KEY) or {}).get("bib_authors", ""),
+                    "bib_citation_count": (meta.get(OWNER_BIB_KEY) or {}).get("bib_citation_count", ""),
+                    "bib_venue": (meta.get(OWNER_BIB_KEY) or {}).get("bib_venue", ""),
+                    # nexus-onn7s: what the annotation line reads (the first, best-scoring hit's owners'
+                    # agreed facts; disagreeing owners state nothing).
+                    "owner_facts": meta.get(OWNER_FACTS_KEY) or {},
+                    # nexus-voy5: the manifest row count of the owning document (RDR-108 D2), stamped
+                    # on the hit when the catalog resolved it; the legacy chunk key otherwise.
+                    "chunk_count": meta.get("chunk_count", ""),
                     # page_count / has_formulas are not in ALLOWED_TOP_LEVEL:
                     # normalize() drops them, so the read always returned "".
                     # Removed in nexus-59j0 cleanup. nexus-1oguj later
@@ -5489,6 +5428,49 @@ def query(
         return _mcp_tool_error("query", e)
 
 
+def _catalog_rows_batch(cat: Any, tumblers: list[str]) -> tuple[dict[str, Any], dict[str, int]]:
+    """``({tumbler: CatalogEntry}, {tumbler: manifest row count})`` for the rows of one ``query`` page
+    (nexus-6pfgb.12, RF-10): one ``resolve_many`` and one ``get_manifests`` however many rows. A catalog
+    without the batch methods falls back to one call per row, and any failure degrades the display
+    (no entry, no count), never the tool. A tumbler the catalog does not know is absent from both."""
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+    ids = sorted({t for t in tumblers if t})
+    entries: dict[str, Any] = {}
+    counts: dict[str, int] = {}
+    if not ids:
+        return entries, counts
+    resolve_many = getattr(cat, "resolve_many", None)
+    if resolve_many is not None:
+        try:
+            entries = {t: e for t, e in (resolve_many(ids) or {}).items() if e is not None}
+        except Exception:  # noqa: BLE001 — graceful degradation; the rows print without catalog facts
+            entries = {}
+    else:
+        for t in ids:
+            try:
+                if (e := cat.resolve(Tumbler.parse(t))) is not None:
+                    entries[t] = e
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                continue
+    get_manifests = getattr(cat, "get_manifests", None)
+    batch: dict | None = None
+    if get_manifests is not None:
+        try:
+            batch = get_manifests(ids)
+        except Exception:  # noqa: BLE001 — graceful degradation; per-row loop below
+            batch = None
+    if batch is not None:
+        counts = {t: len(m) for t, m in batch.items()}
+    else:
+        for t in ids:
+            try:
+                counts[t] = len(cat.get_manifest(t))
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                continue
+    return entries, counts
+
+
 def _READER_INSTRUCTION_LINE() -> str:  # noqa: N802 — reads as the constant it wraps
     """nexus-onn7s: the response-level reader instruction for ``query``."""
     from nexus.context_annotations import READER_INSTRUCTION  # noqa: PLC0415 — deferred; keeps core's import surface flat
@@ -5497,12 +5479,12 @@ def _READER_INSTRUCTION_LINE() -> str:  # noqa: N802 — reads as the constant i
 
 
 def _annotation_line_for_doc(d: dict) -> str:
-    """nexus-onn7s: the per-document annotation for ``query``'s grouped
-    path, from the chunk metadata the doc dict carries. ``bib_year`` is
-    already printed on the bib line, so it is not repeated here."""
+    """nexus-onn7s: the per-document annotation for ``query``'s grouped path, from the owners' agreed
+    facts the doc dict carries (nexus-6pfgb.12: never the chunk row's, which is the last writer's).
+    ``bib_year`` is already printed on the bib line, so it is not repeated here."""
     from nexus.context_annotations import annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
-    return annotation_line({"indexed_at": d.get("indexed_at", ""), "ttl_days": d.get("ttl_days")})
+    return annotation_line({k: v for k, v in (d.get("owner_facts") or {}).items() if k != "bib_year"})
 
 
 def _annotation_line_for_entry(entry) -> str:
@@ -5936,41 +5918,28 @@ def store_get(
         if entry is None:
             where = col_name if len(scope) == 1 else f"any of {len(scope)} knowledge collections"
             return f"Not found: {doc_id!r} in {where} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"
-        title = entry.get("title", "")
-        # nexus-sis0m.5: the chunk row's title is its last writer's, which
-        # names the wrong note when two share this text and a deleted one
-        # after its writer is removed. Asked by title, show that title;
-        # asked by id, name the live documents holding the chunk.
-        holders: list[tuple[str, str]] | None = None  # None: not looked up (asked by title)
-        if not looks_like_hash:
-            title = doc_id
-        else:
-            from nexus.catalog.store_hook import live_holders_of_chashes  # noqa: PLC0415 — deferred for startup cost, as in store_put
-            from nexus.search_engine import owner_titles  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+        # nexus-6pfgb.13 (RDR-236 Phase 2): the chunk row's title, tags, ttl_days and indexed_at are its
+        # last writer's, which names the wrong note when two share this text and a deleted one after
+        # its writer is removed. Each is the OWNING note's own, read from its catalog entry
+        # (``note_display``): asked by title, that note's; asked by id, the live documents holding the
+        # chunk (tags their union, the date and the expiry only where they agree). The row speaks only
+        # where no catalog value exists and the chunk has at most one owner. ONE owner lookup serves
+        # the whole display (it was three reads: holders, tags, degraded pages).
+        from nexus.catalog.store_hook import extraction_lines, live_owner_entries, note_display  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
-            holders = live_holders_of_chashes(col_name, [entry["id"]]).get(entry["id"], [])
-            if holders:
-                title = owner_titles([t for _tb, t in holders]) or title
-        # nexus-6pfgb.38 (RDR-236 RF-17): a note's tags are the array in its catalog entry's meta; the
-        # row's comma string is the LAST writer's, shown only where no holder records tags at all
-        # (an indexed file, a note stored before the catalog kept them).
-        from nexus.catalog.store_hook import catalog_tags_for_chunks, format_note_tags  # noqa: PLC0415 — deferred for startup cost, as in store_put
-
-        catalog_tags = catalog_tags_for_chunks(
-            col_name, [entry["id"]],
-            holders={entry["id"]: holders} if holders is not None else None,
+        owner_map = live_owner_entries(col_name, [entry["id"]])
+        owners = None if owner_map is None else owner_map.get(entry["id"], [])
+        shown = note_display(
+            owners, row=entry, row_title=entry.get("title", ""), row_tags=entry.get("tags", ""),
+            row_ttl_days=entry.get("ttl_days"), row_indexed_at=entry.get("indexed_at") or "",
             title=None if looks_like_hash else doc_id,
-        ).get(entry["id"])
-        tags = entry.get("tags", "") if catalog_tags is None else format_note_tags(catalog_tags)
-        indexed_at = (entry.get("indexed_at") or "")[:10]
-        # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL for PDF
-        # chunks now (mineru/pymupdf, or the honest mixed aggregate
-        # mineru+degraded; a legacy value from before RDR-237, pymupdf_normalized
-        # among them) — display it when
-        # present. Absent for non-PDF chunks and for chunks indexed
-        # before the fix shipped (new-writes-only, no backfill;
-        # nexus-0qc4b — absence is "unknown", not "not mineru").
-        extraction_method = entry.get("extraction_method", "")
+        )
+        title, tags, indexed_at = shown.title, shown.tags, shown.indexed
+        # nexus-6pfgb.16 (RDR-236 Phase 2): the extractor, the quality-gate override and the text source are
+        # DOCUMENT facts, read from the owning documents' catalog meta (the lines below). The chunk row's
+        # ``extraction_method`` is the last writer's: a clean re-index of one PDF left its method on rows
+        # another PDF still owns. Absence is "unknown" (nexus-0qc4b), so a document with no catalog
+        # value prints no line.
         # nexus-spujb: a note split to its model's token window reads back whole.
         from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
@@ -5985,14 +5954,18 @@ def store_get(
             lines.append(f"Tags:       {tags}")
         if indexed_at:
             lines.append(f"Indexed:    {indexed_at}")
-        if extraction_method:
-            lines.append(f"Extractor:  {extraction_method}")
-            # RDR-237: the pages the ladder settled below MinerU's first rung, read from the
-            # catalog document(s) holding this chunk (one line each). Reuses the holders looked up
-            # above; best-effort, so a catalog fault leaves the line out and `get` still answers.
+        if shown.ttl not in ("permanent", "unknown"):
+            lines.append(f"TTL:        {shown.ttl}")
+        lines.extend(extraction_lines(owners, title=None if looks_like_hash else doc_id))
+        if owners is not None:
+            # RDR-237: the pages the ladder settled below MinerU's first rung, read from the catalog
+            # document(s) holding this chunk (one line each) from the owners already in hand.
             from nexus.catalog.store_hook import degraded_pages_lines  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
-            lines.extend(degraded_pages_lines(col_name, entry["id"], holders=holders))
+            lines.extend(degraded_pages_lines(
+                col_name, entry["id"],
+                owners=[o for o in owners if looks_like_hash or (getattr(o, "title", "") or "") == doc_id],
+            ))
         if split is not None:
             lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
         if also_titled:
@@ -6788,23 +6761,23 @@ def store_list(
         ]
         if also:
             lines.append(also)
-        # nexus-6pfgb.38 (RDR-236 RF-17): a note's tags come from its catalog entry's array, one lookup
-        # for the page; the row's comma string (the last writer's) is the fallback where no holder
-        # records tags. An indexed file's document has no tags key until Phase 3's generated columns,
-        # so its chunks answer nothing here and the row fallback stays.
+        # nexus-6pfgb.13 (RDR-236 Phase 2): each chunk's title, tags, expiry and index date are its
+        # OWNING note's own (``note_display``), from ONE owner lookup for the whole page; the row's are
+        # the last writer's. The row speaks only for a chunk with no catalog value and at most one
+        # owner: an unowned chunk, or an indexed file's tags until Phase 3's generated columns.
         from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
 
-        catalog_tags = _store_hook.catalog_tags_for_chunks(col_name, [e.get("id", "") for e in page])
+        owner_map = _store_hook.live_owner_entries(col_name, [e.get("id", "") for e in page])
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
-            title = (e.get("title") or "")[:40]
-            tags = (e.get("tags") or "") if doc_id not in catalog_tags else _store_hook.format_note_tags(catalog_tags[doc_id])
-            indexed_at_full = e.get("indexed_at") or ""
-            indexed_at = indexed_at_full[:10]
-            # Same reading as `nx store list` (nexus-njn1a): a ttl_days that cannot lapse is permanent.
-            ttl_str = ttl_listing_label(e.get("ttl_days"), indexed_at_full)
-            tag_str = f"  [{tags}]" if tags else ""
-            lines.append(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
+            shown = _store_hook.note_display(
+                None if owner_map is None else owner_map.get(doc_id, []),
+                row=e, row_title=e.get("title") or "", row_tags=e.get("tags") or "",
+                row_ttl_days=e.get("ttl_days"), row_indexed_at=e.get("indexed_at") or "",
+            )
+            title = shown.title[:40]
+            tag_str = f"  [{shown.tags}]" if shown.tags else ""
+            lines.append(f"  {doc_id}  {title:<40}  {shown.ttl:<24}  {shown.indexed}{tag_str}")
         shown_end = offset + len(page)
         # A full page is the live signal that more rows may follow; the stored
         # total can exceed the live rows and point at an empty page. "Full" is
@@ -6864,7 +6837,9 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
         # accepts. Surfaced whole so the list -> get flow round-trips; see
         # DocumentListing.handle.
         title = (doc.title or "untitled")[:50]
-        indexed = (doc.entry.get("indexed_at") or "")[:10]
+        # nexus-6pfgb.13: the document's own index date (the catalog column); a chunk-keyed row with no
+        # catalog document shows its chunk row's.
+        indexed = (doc.indexed_at or doc.entry.get("indexed_at") or "")[:10]
         lines.append(f"  {i:3d}. {doc.handle}  {title:<50}  {doc.chunks:>4} chunks  {indexed}")
     return _cap_text_result("\n".join(lines), "store_list")
 

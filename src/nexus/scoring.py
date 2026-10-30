@@ -7,7 +7,7 @@ from typing import Any
 
 import structlog
 
-from nexus.context_annotations import OWNER_FRECENCY_KEY, OWNER_RESOLVE_CAP
+from nexus.context_annotations import OWNER_FRECENCY_KEY, OWNER_QUALITY_KEY, OWNER_RESOLVE_CAP
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
@@ -513,11 +513,17 @@ def apply_quality_boost(
     results: list[SearchResult],
     boost_weight: float = _QUALITY_BOOST_WEIGHT,
 ) -> list[SearchResult]:
-    """Boost hybrid_score of results that have bibliographic quality metadata.
+    """Boost hybrid_score of results whose owning document has bibliographic quality metadata.
 
     Mutates ``hybrid_score`` in place: ``score += boost_weight × quality_score``.
-    Only applies to knowledge__/docs__/rdr__ collections.  Results without
-    ``bib_citation_count`` are untouched.
+    Only applies to knowledge__/docs__/rdr__ collections.
+
+    The citation count and year are the OWNING document's, stamped on the hit as
+    ``OWNER_QUALITY_KEY`` by ``search_engine._attach_display_paths`` from the owner lookup the page
+    already makes (nexus-6pfgb.12, RDR-236). A chunk row's ``bib_citation_count`` is its last writer's,
+    so an unenriched document sharing a chunk with an enriched one took the other's boost, and a clean
+    re-index never cleared it; the row is not read. A hit with no stamp (no catalog in scope, no owner
+    resolved, an owner that states no citations) is untouched.
     """
     from datetime import date  # noqa: PLC0415 — branch-local helper import
 
@@ -525,10 +531,11 @@ def apply_quality_boost(
     for r in results:
         if not r.collection.startswith(_QUALITY_ELIGIBLE_PREFIXES):
             continue
-        count = int(r.metadata.get("bib_citation_count", 0))
+        stamp = r.metadata.get(OWNER_QUALITY_KEY) or {}
+        count = int(stamp.get("bib_citation_count", 0) or 0)
         if count <= 0:
             continue
-        bib_year = r.metadata.get("bib_year", "")
+        bib_year = stamp.get("bib_year", "")
         age_days = 0.0
         if bib_year:
             try:

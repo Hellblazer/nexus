@@ -98,6 +98,19 @@ def _row(results):
     return rows[0]
 
 
+def _stub_owners(monkeypatch) -> None:
+    """The fake-collection tests below page canned rows with no catalog behind them; the scan asks the
+    catalog who owns each row (nexus-6pfgb.16), so every row's one owner is a PDF document with no
+    extraction record, at ``file:///big.pdf``."""
+    from types import SimpleNamespace
+
+    owner = SimpleNamespace(tumbler="1.1.1", title="big", meta={}, source_uri="file:///big.pdf", file_path="")
+    monkeypatch.setattr(
+        "nexus.catalog.store_hook.live_owner_entries",
+        lambda collection, chashes: {c: [owner] for c in chashes},
+    )
+
+
 def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
     t3 = make_t3()
     ids = _seed(t3, [
@@ -172,6 +185,7 @@ def test_a_collection_past_the_page_cap_is_partial(monkeypatch) -> None:
         def get_or_create_collection(self, name):
             return _Col()
 
+    _stub_owners(monkeypatch)
     monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
     monkeypatch.setattr("nexus.db.limits.MAX_QUERY_RESULTS", 3)
 
@@ -232,6 +246,7 @@ def test_an_exact_multiple_of_the_page_size_is_complete(monkeypatch) -> None:
         def get_or_create_collection(self, name):
             return _Col()
 
+    _stub_owners(monkeypatch)
     monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
     monkeypatch.setattr("nexus.db.limits.MAX_QUERY_RESULTS", 3)
 
@@ -245,17 +260,16 @@ def test_wired_into_run_health_checks() -> None:
     assert "_check_pdf_stub_metadata()" in inspect.getsource(health.run_health_checks)
 
 
-@pytest.mark.parametrize("title,method,flagged", [
-    ("", None, True),
-    ("", "", True),
-    ("Paper", None, False),
-    ("", "mineru", False),
-    (None, None, True),
+@pytest.mark.parametrize("title,has_method,flagged", [
+    ("", False, True),
+    ("Paper", False, False),
+    ("", True, False),
+    (None, False, True),
 ])
-def test_stub_predicate(title, method, flagged) -> None:
-    meta: dict = {"content_type": "pdf"}
+def test_stub_predicate(title, has_method, flagged) -> None:
+    """The placeholder title is the row's; whether the post-pass ran is the OWNING document's own catalog
+    record (nexus-6pfgb.16), passed in. The row's ``extraction_method`` is the last writer's and not read."""
+    meta: dict = {"content_type": "pdf", "extraction_method": "mineru"}
     if title is not None:
         meta["title"] = title
-    if method is not None:
-        meta["extraction_method"] = method
-    assert _is_pdf_stub_metadata(meta) is flagged
+    assert _is_pdf_stub_metadata(meta, document_has_method=has_method) is flagged
