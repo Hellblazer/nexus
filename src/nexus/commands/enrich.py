@@ -268,6 +268,57 @@ def _chunk_bib(meta: dict | None) -> dict | None:
     return bib
 
 
+def _chunk_idless_bib(meta: dict | None) -> dict | None:
+    """The bib a chunk row carries when it has no backend id: ``year``, ``authors``, ``venue`` and
+    ``citation_count``, or ``None`` when it carries none of them.
+
+    A PDF indexed with ``--enrich`` on the batch path before nexus-6pfgb.28 stamped those four on its rows
+    and no id (the lookup result was written to rows only, and the id was not). ``--backfill-catalog``
+    reads them as the same evidence as an id-bearing row, minus the id."""
+    if not meta:
+        return None
+    bib = {
+        "year": meta.get("bib_year") or 0,
+        "authors": meta.get("bib_authors") or "",
+        "venue": meta.get("bib_venue") or "",
+        "citation_count": meta.get("bib_citation_count") or 0,
+    }
+    return bib if any(bib.values()) else None
+
+
+def _idless_fill(entry: Any, bib: dict) -> dict:
+    """The catalog ``bib_*`` columns an id-less bib may fill: only the ones the document's row leaves
+    empty, never one a curated or looked-up value holds."""
+    held = {
+        "bib_year": getattr(entry, "bib_year", 0),
+        "bib_authors": getattr(entry, "bib_authors", ""),
+        "bib_venue": getattr(entry, "bib_venue", ""),
+        "bib_citation_count": getattr(entry, "bib_citation_count", 0),
+    }
+    wanted = {
+        "bib_year": bib["year"], "bib_authors": bib["authors"],
+        "bib_venue": bib["venue"], "bib_citation_count": bib["citation_count"],
+    }
+    return {k: v for k, v in wanted.items() if v and not held[k]}
+
+
+def _fill_idless_bib(tumbler: str, fields: dict) -> bool:
+    """Write the filled columns and ``bib_enriched_at`` to *tumbler*; no id, no author or year. Best effort:
+    ``False`` on any failure."""
+    try:
+        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — command-local import
+
+        writer = make_catalog_writer()
+        try:
+            writer.update(tumbler, bib_enriched_at=datetime.now(UTC).isoformat(), **fields)
+        finally:
+            writer.close()
+        return True
+    except Exception:  # noqa: BLE001 — best-effort, counted by the caller
+        _log.debug("enrich_backfill_idless_write_failed", tumbler=tumbler, exc_info=True)
+        return False
+
+
 def _bib_key(bib: dict) -> tuple[bool, str]:
     """``(is OpenAlex, backend id)``: two chunk bibs of one document agree when
     their keys are equal. ``--backfill-catalog`` and ``nx enrich bib`` apply the
@@ -418,7 +469,10 @@ def enrich() -> None:
         "wrote its bib_*: a bib a former co-holder wrote and a later "
         "re-index kept cannot be told apart and may be copied onto the "
         "indexing document's empty row. A document whose chunks disagree "
-        "on the id is skipped and reported."
+        "on the id is skipped and reported. A document with no id on any chunk "
+        "(batch-path `nx index pdf --enrich` before nexus-6pfgb.28) is filled "
+        "from its chunks' year/authors/venue/citation count, only into columns "
+        "it leaves empty, with bib_enriched_at and no id."
     ),
 )
 def enrich_bib(
@@ -533,7 +587,7 @@ def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
         batch_meta = batch.get("metadatas", [])
         chunks_scanned += len(batch_ids)
         for chunk_id, meta in zip(batch_ids, batch_meta):
-            bib = _chunk_bib(meta)
+            bib = _chunk_bib(meta) or _chunk_idless_bib(meta)
             if bib is None:
                 continue
             enriched.append((
@@ -578,6 +632,24 @@ def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
     documents_conflicting: list[str] = []
     for tumbler, candidates in doc_bibs.items():
         entry = entries[tumbler]
+        # nexus-6pfgb.28: a bib with no backend id (batch-path ``--enrich`` before that fix) is weaker evidence
+        # than one with an id, so a document with any id-bearing chunk is judged on those alone.
+        with_id = [c for c in candidates if c[0][1]]
+        if not with_id:
+            shapes = {tuple(sorted(b.items())) for _k, b in candidates}
+            if len(shapes) > 1:
+                documents_conflicting.append(tumbler)
+                _log.warning("enrich_backfill_document_chunks_disagree", collection=collection, tumbler=tumbler, ids=[])
+                continue
+            fields = _idless_fill(entry, candidates[0][1])
+            if not fields:
+                documents_already_filled.append(tumbler)
+            elif _fill_idless_bib(tumbler, fields):
+                documents_backfilled += 1
+            else:
+                documents_not_updated += 1
+            continue
+        candidates = with_id
         bib = candidates[0][1]
         backend = "openalex" if bib.get("openalex_id") else "s2"
         id_field = "bib_openalex_id" if backend == "openalex" else "bib_semantic_scholar_id"
