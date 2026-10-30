@@ -61,6 +61,7 @@ from nexus.catalog.rdr_canonical import (
 )
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import RDR_FRONTMATTER_ID_META_KEY, CatalogEntry, ManifestRow
+from nexus.plans.document_confinement import CHASH_ALLOW_MAX, valid_chashes
 from nexus.plans.evidence import EvidenceRequest, OwnerResolution, SourceRange, SourceRef, SourceRefError
 
 _log = structlog.get_logger(__name__)
@@ -97,6 +98,7 @@ __all__ = [
     "DEFAULT_CAPS",
     "ChunkFetcher",
     "ContentLabel",
+    "DocumentChashes",
     "DocumentCoverage",
     "NamedSourceCatalog",
     "NamedSourceResolution",
@@ -158,25 +160,30 @@ class PrimaryEvidenceCaps:
     max_single_source_items: int = 44
     #: The bound when the request names exactly one source, it resolved AND the run narrows every secondary
     #: retrieval step to it (:attr:`RequestCoverage.narrows_to_one_source`, ``nexus.plans.single_source``; nexus-4xmpv,
-    #: Sam, 2026-10-30). The primary stream then has the reducer's slots to itself, because its secondary streams read
-    #: the same collection and mostly hit chunks the primary already holds (a duplicate is merged away by chash before
-    #: the cap). THE SHARE ARITHMETIC, in one place:
+    #: Sam, 2026-10-30). The primary stream then has the reducer's slots to itself, because every secondary step is
+    #: confined to the document the primary reads (``nexus.plans.document_confinement``: a chunk it returns is a
+    #: chunk of that document, and one the primary holds is merged away by chash before the cap). THE SHARE
+    #: ARITHMETIC, in one place:
     #:
     #: * ``runner._OPERATOR_MAX_INPUTS`` = 100 reducer input slots, cut AFTER the merge, so the cap only ever removes
     #:   secondary items (the reserved ones lead).
-    #: * ``reserved_stream.RESERVED_SHARE_NARROWED`` = 90 of them are reserved for a narrowed run (50 otherwise); the
-    #:   other 10 are what the secondary streams keep. 90 + 10 = 100.
-    #: * Of the 90, ``LifecycleCaps.max_records`` = 6 lead for T2 lifecycle records, so the chunk cap is 90 - 6 = 84.
-    #:   84 chunks at the corpus's 500 to 1,000 characters is 42,000 to 84,000 characters, so the character cap
-    #:   below, not this count, is the bound for a long document: G06's 80-chunk document is 54,800 characters
-    #:   (all of it fits), S04 stopped at 40,258 characters over 44 chunks and takes about 65.
+    #: * ``reserved_stream.RESERVED_SHARE_NARROWED`` = 88 of them are reserved for a narrowed run (50 otherwise); the
+    #:   other 12 are the coverage repair's supplement (``coverage_repair.MAX_REPAIR_ITEMS`` = 12), because the document
+    #:   confinement (nexus-jypmj) leaves a plan no secondary item of its own, so nothing else needs the slots.
+    #:   88 + 12 = 100, pinned by a test.
+    #: * Of the 88, ``LifecycleCaps.max_records`` = 6 lead for T2 lifecycle records, so the chunk cap is 88 - 6 = 82.
+    #:   82 chunks at the corpus's 500 to 1,000 characters is 41,000 to 82,000 characters, so the character cap
+    #:   below, not this count, is the bound for a long document. MEASURED (re-measure 3, 2026-10-30): the 80-chunk
+    #:   G06 document is 69,952 characters in all, so the 60,000-character cap stopped its read at 73 chunks
+    #:   (59,798 characters); S04 (135 rows, 157,219 characters) filled the 60,000 at 63 chunks (59,423 characters);
+    #:   the largest read was 73, so the 82 never binds.
     #: * ``max_selected_chars`` = 60,000 is unchanged. The coverage check reads each stream (primary, graph, vector,
     #:   t2) in packs of at most ``coverage_ledger.ASSESSMENT_MAX_ITEM_CHARS`` = 120,000 characters, so the primary
     #:   stream (60,000 raw characters; the attribution header adds under 120 characters a chunk, so about 70,000 in
-    #:   the reducer's input at 84 chunks) and the T2 stream (``LifecycleCaps.max_chars`` = 18,000) each fit one pack
-    #:   and neither leaves an anchor unread. The 135-row manifest case (``max_manifest_rows`` = 300 keeps all 135)
-    #:   fills the 60,000 characters at about 80 chunks.
-    max_narrowed_source_items: int = 84
+    #:   the reducer's input at 82 chunks) and the T2 stream (``LifecycleCaps.max_chars`` = 18,000) each fit one pack
+    #:   and neither leaves an anchor unread. That 70,000 is over ``bundle.MAX_CONTINUATION_PROMPT_CHARS`` (60,000), so
+    #:   a long narrowed read goes to the headless path, not the continuation hand-off (a test pins it).
+    max_narrowed_source_items: int = 82
     #: Characters in the selected evidence (both cases). Also below ``coverage_ledger.ASSESSMENT_MAX_ITEM_CHARS``
     #: (120,000), the per-stream size the coverage check reads, so the primary stream never leaves an unread anchor.
     max_selected_chars: int = 60_000
@@ -1304,6 +1311,17 @@ class DocumentCoverage:
 
 
 @dataclass(frozen=True)
+class DocumentChashes:
+    """The chunk hashes a document's manifest lists, for the document confinement (nexus-jypmj): every manifest
+    row the read held, before the selection sampled them (at most ``CHASH_ALLOW_MAX``). ``manifest_rows`` is the
+    document's true row count (M); ``chashes`` is a sample of it when shorter. Not on the wire (3000 hashes)."""
+
+    doc_id: str
+    chashes: tuple[str, ...]
+    manifest_rows: int
+
+
+@dataclass(frozen=True)
 class PrimaryEvidence:
     items: tuple[SelectedChunk, ...] = ()
     documents: tuple[DocumentCoverage, ...] = ()
@@ -1316,6 +1334,12 @@ class PrimaryEvidence:
     #: Exception type name when the whole read failed (nothing was read and the reason is disclosed); ``""``
     #: for a read that ran.
     error: str = ""
+    #: Each resolved document's manifest chunk hashes (nexus-jypmj, the document confinement). Empty when no manifest
+    #: was read.
+    manifest_chashes: tuple[DocumentChashes, ...] = ()
+
+    def chashes_of(self, doc_id: str) -> DocumentChashes | None:
+        return next((d for d in self.manifest_chashes if d.doc_id == doc_id), None)
 
     @property
     def selected_items(self) -> int:
@@ -1642,6 +1666,13 @@ def select_primary_evidence(
         if true_counts[k] > read_allow:
             all_rows[k] = [all_rows[k][i] for i in _spread(range(true_counts[k]), read_allow)]
             caps_hit.append("max_manifest_rows_read")
+    # The document confinement's chunk hashes: every row held, before the selection below samples them.
+    document_chashes: list[DocumentChashes] = []
+    for k, d in enumerate(docs):
+        held, _bad = valid_chashes([r.chash for r in all_rows[k]])
+        if len(held) > CHASH_ALLOW_MAX:
+            held = tuple(held[i] for i in _spread(range(len(held)), CHASH_ALLOW_MAX))
+        document_chashes.append(DocumentChashes(d.tumbler or "", held, engine_total[k]))
     allowance = _water_fill(caps.max_manifest_rows, [len(r) for r in all_rows])
     sampled: list[list[ManifestRow]] = []
     for rows, allow in zip(all_rows, allowance, strict=True):
@@ -1804,7 +1835,7 @@ def select_primary_evidence(
     return PrimaryEvidence(
         items=tuple(items), documents=tuple(coverage), caps_hit=tuple(dict.fromkeys(caps_hit)),
         manifest_rows_hydrated=sum(len(b) for b in per_doc_rows), fetched_chars=fetched_chars,
-        selected_chars=chars, fetch_errors=fetch_errors, caps=caps,
+        selected_chars=chars, fetch_errors=fetch_errors, caps=caps, manifest_chashes=tuple(document_chashes),
     )
 
 

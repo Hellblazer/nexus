@@ -1427,7 +1427,16 @@ def search_cross_corpus(
     took 2.41 s median against 2.99 s at the default; the boosted page can
     shift near ties, as it already did between 120 and 300 (nexus-cbg2s).
     The batched fallback path ignores it.
+
+    The document confinement (nexus-jypmj, :mod:`nexus.plans.document_confinement`): a tool call run under
+    :func:`~nexus.plans.document_confinement.chash_allow_scope` restricts every engine call this function makes
+    (search, hybrid-search, search-per-collection) to those chunk hashes. The value is read ONCE here, on the calling
+    thread, because the worker threads below do not inherit the context. Absent, every request is byte-identical.
     """
+    from nexus.plans.document_confinement import active_chash_allow  # noqa: PLC0415 — leaf stdlib module; deferred like this function's other imports
+
+    _allow = active_chash_allow()
+    chash_kw: dict[str, Any] = {"chash_allow": list(_allow)} if _allow is not None else {}
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
     cfg_cluster = cfg.get("search", {}).get("cluster_by")
@@ -1619,7 +1628,7 @@ def search_cross_corpus(
                 lex_meta: dict = {}
                 lex_raw = t3.hybrid_search(
                     query, cols, n_results=per_k, where=effective_where,
-                    rerank=True, rerank_meta_out=lex_meta,
+                    rerank=True, rerank_meta_out=lex_meta, **chash_kw,
                 )
                 # A degrade on EITHER leg is a degrade for this batch;
                 # merged rather than overwritten so the vector leg's
@@ -1628,7 +1637,7 @@ def search_cross_corpus(
                     rerank_meta.update(lex_meta)
             else:
                 lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
-                                           where=effective_where)
+                                           where=effective_where, **chash_kw)
         except VectorServiceError as lex_exc:
             raise LexicalLegUnavailableError(
                 f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
@@ -1679,9 +1688,9 @@ def search_cross_corpus(
         try:
             if server_rerank:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where,
-                                rerank=True, rerank_meta_out=rerank_meta, **rerank_cap_kw)
+                                rerank=True, rerank_meta_out=rerank_meta, **rerank_cap_kw, **chash_kw)
             else:
-                raw = t3.search(query, cols, n_results=per_k, where=effective_where)
+                raw = t3.search(query, cols, n_results=per_k, where=effective_where, **chash_kw)
             if lexical:
                 # ADDITIVE: the lexical rows join the vector rows rather than
                 # replacing them, deduplicated by chunk id with the vector row
@@ -1939,7 +1948,7 @@ def search_cross_corpus(
                 query, group, per_collection_k=per_collection_k, limit=limit,
                 thresholds=thresholds or None, where=effective_where,
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
-                **rerank_cap_kw,
+                **rerank_cap_kw, **chash_kw,
                 # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
                 **({"content_chars": content_chars} if content_chars is not None else {}),
                 # nexus-xd2rc: the lexical arms can ride the same request; absent keeps it byte-identical.

@@ -888,6 +888,8 @@ async def _answer(
     t2_records: dict[tuple[str, str], str] | None = None, plan_run_calls: list | None = None,
     aspects: dict[str, Any] | None = None, aspect_calls: list[tuple[str, dict]] | None = None,
     question: str = "State the gate history of this RDR.", scope: str = "",
+    plan_miss_calls: list | None = None, chash_supported: bool = False, plan_steps: list | None = None,
+    query_calls: list | None = None,
 ) -> Any:
     """``nx_answer`` over a one-step ad-hoc plan, the catalog replaced by *cat*. The same
     patches ``test_rdr232_reserved_bindings._text_answer`` uses, plus the catalog. The default *question*
@@ -899,7 +901,7 @@ async def _answer(
 
     match = Match(
         plan_id=0, name="ad-hoc", description="q", confidence=None, dimensions={}, tags="ad-hoc",
-        plan_json=json.dumps({"steps": [{"tool": "search", "args": {"query": "$intent"}}]}),
+        plan_json=json.dumps({"steps": plan_steps or [{"tool": "search", "args": {"query": "$intent"}}]}),
         required_bindings=["intent"], optional_bindings=[], default_bindings={"intent": "q"}, parent_dims=None,
     )
     result = MagicMock()
@@ -920,8 +922,16 @@ async def _answer(
     plan_run = AsyncMock(return_value=result)
     if plan_run_calls is not None:
         plan_run_calls.append(plan_run)
+    plan_miss = AsyncMock(return_value=match)
+    if plan_miss_calls is not None:
+        plan_miss_calls.append(plan_miss)
+    query_mock = MagicMock(return_value={"ids": [], "tumblers": [], "chunk_collections": [], "distances": []})
+    if query_calls is not None:
+        query_calls.append(query_mock)
     with patch("nexus.plans.matcher.plan_match", return_value=[]), \
-         patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+         patch("nexus.mcp.core._nx_answer_plan_miss", plan_miss), \
+         patch("nexus.mcp.core._nx_answer_chash_allow_supported", AsyncMock(return_value=chash_supported)), \
+         patch("nexus.mcp.core.query", query_mock), \
          patch("nexus.plans.runner.plan_run", plan_run), \
          patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
          patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
@@ -954,13 +964,17 @@ async def test_nx_answer_says_so_when_a_named_source_is_ambiguous_and_when_it_re
     # the notice says so (nexus-jypmj.1.6). Nothing else is added for a clean resolution.
     assert env["final_text"].endswith("the answer is 42")
     # ... except that this RDR has no T2 records, which the lifecycle stream says (nexus-jypmj.1.7).
-    # ... and that the request names this one source, so its retrieval was narrowed to it (nexus-4xmpv): a third line.
+    # ... and that the request names this one source, so the answer reads only that document (nexus-4xmpv,
+    # nexus-jypmj): a third line. This t3 double advertises no chunk filter, so no secondary step is dispatched.
     assert env["final_text"].count("[evidence request:") == 3 and "was not merged into a reduction" in env["final_text"]
     assert "no T2 lifecycle records" in env["final_text"] and "ART_rdr" in env["final_text"]
-    assert f"narrowed to collection {ART_COL} and owner {ART_OWNER}" in env["final_text"]
+    assert f"reads only that document ({ART_DOC})" in env["final_text"]
+    assert "no secondary retrieval step (search, query, traverse) was run" in env["final_text"]
+    assert "The primary read holds 1 of its 1 chunks" in env["final_text"]
     assert env["single_source_narrowing"] == {
-        "applied": True, "source": "RDR-084", "tumbler": ART_DOC, "collection": ART_COL, "owner": ART_OWNER,
-        "caller_scope": "", "effective_scope": ART_COL, "reason": "",
+        "applied": True, "source": "RDR-084", "tumbler": ART_DOC, "document": ART_DOC, "collection": ART_COL,
+        "owner": ART_OWNER, "caller_scope": "", "effective_scope": ART_DOC, "reason": "",
+        "confinement": "steps_not_run", "read_chunks": 1, "manifest_chunks": 1, "allow_chunks": 0, "allow_sampled": False,
     }
     assert env["lifecycle_stream"]["sources"][0]["status"] == "no_records" and env["lifecycle_stream"]["records"] == []
     assert env["primary_evidence"]["selected_items"] == 1 and env["reserved_stream"]["merged"] is False
@@ -1873,7 +1887,7 @@ def test_a_narrowed_one_source_135_row_manifest_fills_the_character_budget_not_t
 
     (doc,) = primary.documents
     assert doc.manifest_rows == 135 and doc.rows_hydrated == 135, "non-vacuity: the whole 135-row manifest was read"
-    assert 44 < primary.selected_items < DEFAULT_CAPS.max_narrowed_source_items == 84, primary.selected_items
+    assert 44 < primary.selected_items < DEFAULT_CAPS.max_narrowed_source_items == 82, primary.selected_items
     assert DEFAULT_CAPS.max_selected_chars - 900 < primary.selected_chars <= DEFAULT_CAPS.max_selected_chars == 60_000
     assert "max_selected_chars" in primary.caps_hit and "max_selected_items" not in primary.caps_hit
     assert {i.label for i in primary.items} == {f"Section {s:02d}" for s in range(27)}, "every section is represented"
@@ -1889,10 +1903,10 @@ def test_a_narrowed_read_stops_at_the_item_ceiling_when_the_chunks_are_small() -
     cat, t3 = FakeCatalog(), FakeT3()
     _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 100))  # 135 chunks of about 130 characters
     _res, primary = _select(cat, t3, [RDR084], one_source=True, narrowed=True)
-    assert primary.selected_items == DEFAULT_CAPS.max_narrowed_source_items == 84
+    assert primary.selected_items == DEFAULT_CAPS.max_narrowed_source_items == 82
     assert "max_selected_chars" not in primary.caps_hit
     (doc,) = primary.documents
-    assert doc.manifest_rows == 135 and doc.selected_rows == 84 and doc.partial is True
+    assert doc.manifest_rows == 135 and doc.selected_rows == 82 and doc.partial is True
 
 
 def test_the_character_budget_still_bounds_a_one_source_read_below_the_item_ceiling() -> None:
@@ -1924,7 +1938,7 @@ def test_the_item_ceiling_is_read_from_the_request_coverage_flags_and_never_belo
     assert single_source_item_cap(DEFAULT_CAPS) == 24
     assert single_source_item_cap(DEFAULT_CAPS, narrowed=True) == 24, "narrowing without one source is no tier"
     assert single_source_item_cap(DEFAULT_CAPS, one_source=True) == 44
-    assert single_source_item_cap(DEFAULT_CAPS, one_source=True, narrowed=True) == 84
+    assert single_source_item_cap(DEFAULT_CAPS, one_source=True, narrowed=True) == 82
     # a ceiling set below a smaller tier never lowers it
     assert single_source_item_cap(replace(DEFAULT_CAPS, max_single_source_items=10), one_source=True) == 24
     assert single_source_item_cap(replace(DEFAULT_CAPS, max_narrowed_source_items=10), one_source=True, narrowed=True) == 44
@@ -1943,14 +1957,16 @@ def test_the_caps_are_stated_in_one_place_and_the_downstream_budgets_hold_them()
     records = LifecycleCaps().max_records
     assert wire["max_single_source_items"] == 44 and wire["max_selected_items"] == 24
     assert wire["max_single_source_items"] + records <= RESERVED_SHARE_MAX < _OPERATOR_MAX_INPUTS
-    # narrowed: 84 chunks + 6 records = 90 of 100 slots, and the secondary streams keep the other 10
-    assert wire["max_narrowed_source_items"] == 84
-    assert wire["max_narrowed_source_items"] + records == RESERVED_SHARE_NARROWED == 90
-    assert _OPERATOR_MAX_INPUTS - RESERVED_SHARE_NARROWED == 10
-    # characters: the primary stream (60,000 raw; about 70,000 with 84 attribution headers) and the T2 stream
+    # narrowed (nexus-jypmj): 82 chunks + 6 records = 88 of 100 slots, and the coverage repair's supplement takes the other 12
+    from nexus.plans.coverage_repair import MAX_REPAIR_ITEMS
+
+    assert wire["max_narrowed_source_items"] == 82
+    assert wire["max_narrowed_source_items"] + records == RESERVED_SHARE_NARROWED == 88
+    assert RESERVED_SHARE_NARROWED + MAX_REPAIR_ITEMS == _OPERATOR_MAX_INPUTS == 100, "88 + 12 = 100, nothing is cut"
+    # characters: the primary stream (60,000 raw; about 70,000 with 82 attribution headers) and the T2 stream
     # (18,000) each fit one 120,000-character assessment pack
     assert DEFAULT_CAPS.max_selected_chars < ASSESSMENT_MAX_ITEM_CHARS, "the primary stream never leaves an unread anchor"
-    assert DEFAULT_CAPS.max_selected_chars + 84 * 120 < ASSESSMENT_MAX_ITEM_CHARS
+    assert DEFAULT_CAPS.max_selected_chars + 82 * 120 < ASSESSMENT_MAX_ITEM_CHARS
     assert LifecycleCaps().max_chars < ASSESSMENT_MAX_ITEM_CHARS
 
 
@@ -1967,7 +1983,7 @@ def test_the_largest_one_source_read_fits_the_reserved_share_with_the_lifecycle_
     assert stream.over_share_dropped == 0, "no primary chunk is dropped for the share, so no stray disclosure"
 
 
-def test_the_largest_narrowed_read_fits_the_narrowed_share_and_leaves_ten_slots_for_the_secondary() -> None:
+def test_the_largest_narrowed_read_fits_the_narrowed_share_and_leaves_twelve_slots_for_the_repair() -> None:
     from nexus.plans.lifecycle_stream import LifecycleCaps
     from nexus.plans.reserved_stream import RESERVED_SHARE_MAX, RESERVED_SHARE_NARROWED, ReservedItem, ReservedStream
     from nexus.plans.runner import _OPERATOR_MAX_INPUTS
@@ -1975,14 +1991,14 @@ def test_the_largest_narrowed_read_fits_the_narrowed_share_and_leaves_ten_slots_
     cat, t3 = FakeCatalog(), FakeT3()
     _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 100))  # small chunks: the item ceiling binds, not the characters
     _res, primary = _select(cat, t3, [RDR084], one_source=True, narrowed=True)
-    assert primary.selected_items == 84
+    assert primary.selected_items == 82
     records = tuple(ReservedItem.record(f"nexus_rdr/{i}", f"record {i}") for i in range(LifecycleCaps().max_records))
     stream = ReservedStream.from_evidence(primary, extra=records, share_max=RESERVED_SHARE_NARROWED)
-    assert stream is not None and len(stream.items) == 90 and stream.over_share_dropped == 0
-    assert _OPERATOR_MAX_INPUTS - len(stream.items) == 10
-    # the same 84 chunks under the default share lose 34 of them, with a disclosure that names the share
+    assert stream is not None and len(stream.items) == 88 and stream.over_share_dropped == 0
+    assert _OPERATOR_MAX_INPUTS - len(stream.items) == 12
+    # the same 82 chunks under the default share lose 38 of them, with a disclosure that names the share
     short = ReservedStream.from_evidence(primary, extra=records)
-    assert short is not None and len(short.items) == RESERVED_SHARE_MAX and short.over_share_dropped == 40
+    assert short is not None and len(short.items) == RESERVED_SHARE_MAX and short.over_share_dropped == 38
     assert f"share of {RESERVED_SHARE_MAX}" in short.disclosures()[-1] or any(
         f"share of {RESERVED_SHARE_MAX}" in line for line in short.disclosures()
     )
@@ -2029,8 +2045,10 @@ def test_the_narrowing_replaces_a_scope_the_source_lies_inside_and_never_one_it_
     for scope in ("", "all", "rdr", ART_COL, ART_OWNER, ART_DOC):
         n = derive_single_source_narrowing(cov, res, scope)
         assert n is not None and n.applied, scope
+        # the envelope reports the document; the run's scope binding is the collection, or the caller's own document address
         assert (n.collection, n.owner, n.tumbler, n.effective_scope, n.caller_scope) == (
-            ART_COL, ART_OWNER, ART_DOC, ART_COL, scope), scope
+            ART_COL, ART_OWNER, ART_DOC, ART_DOC, scope), scope
+        assert n.step_scope == (ART_DOC if scope == ART_DOC else ART_COL), scope
     for scope in ("code", NEXUS_COL, NEXUS_OWNER):
         n = derive_single_source_narrowing(cov, res, scope)
         assert n is not None and not n.applied and n.effective_scope == scope and "does not admit" in n.reason, scope
@@ -2055,26 +2073,8 @@ def test_the_narrowing_concerns_only_a_synthesis_or_unknown_request_that_names_o
         assert n.effective_scope == "" and n.collection == ""
 
 
-def test_the_runner_applies_the_narrowing_bindings_to_every_retrieval_step_and_to_the_traversal() -> None:
-    # The seam: the run's _nx_scope and _nx_owners bindings, which the runner already applies to every step of every
-    # plan. A step that pins another corpus is skipped (never run unscoped); one that pins rdr, or nothing, reads
-    # the source's collection; a traversal carries the collection and the owner in its policy.
-    from nexus.plans.runner import _apply_caller_scope_to_args
-    from nexus.plans.traversal_policy import derive_policy
-
-    bindings = {"_nx_scope": ART_COL, "_nx_owners": ART_OWNER}
-    for tool in ("search", "query"):
-        args, narrowing = _apply_caller_scope_to_args(tool, {"query": "q", "corpus": "rdr"}, bindings=bindings)
-        assert args["corpus"] == ART_COL and narrowing is not None and not narrowing.conflict
-        args, narrowing = _apply_caller_scope_to_args(tool, {"query": "q"}, bindings=bindings)
-        assert args["corpus"] == ART_COL
-        args, narrowing = _apply_caller_scope_to_args(tool, {"query": "q", "corpus": "knowledge,code"}, bindings=bindings)
-        assert narrowing is not None and narrowing.conflict, "a step on other collections is skipped, not run unscoped"
-        args, narrowing = _apply_caller_scope_to_args(tool, {"query": "q", "corpus": "all"}, bindings=bindings)
-        assert args["corpus"] == ART_COL
-    policy = derive_policy({"link_types": ["cites"]}, ART_COL, ART_OWNER)
-    assert policy["allowed_collections"] == ART_COL
-    assert policy["allowed_owners"] == [ART_OWNER]
+# The runner seam (the bindings reaching every step and the traversal policy) is run through plan_run in
+# tests/test_rdr232_document_confinement.py::test_the_runner_applies_the_narrowing_bindings_to_every_step_and_the_traversal_policy.
 
 
 @pytest.mark.asyncio
@@ -2091,7 +2091,7 @@ async def test_nx_answer_narrows_every_retrieval_step_and_widens_the_primary_rea
     assert run_bindings["_nx_scope"] == ART_COL and run_bindings["_nx_owners"] == ART_OWNER
     assert run.call_args.kwargs["reserved_stream"].share_max == RESERVED_SHARE_NARROWED
     assert env["single_source_narrowing"]["applied"] is True and env["single_source_narrowing"]["collection"] == ART_COL
-    assert env["primary_evidence"]["caps"]["max_narrowed_source_items"] == 84
+    assert env["primary_evidence"]["caps"]["max_narrowed_source_items"] == 82
 
     # a caller scope the source lies inside is replaced by the narrower collection ...
     runs.clear()
@@ -2132,13 +2132,15 @@ async def test_nx_answer_leaves_a_lookup_a_multi_source_request_and_an_unresolve
 
 def test_rdr_070_chunked_by_the_real_chunker_gets_one_label_run_per_heading_in_document_order() -> None:
     # nexus-4xmpv re-measure 2: RDR-070's 42 chunks carried 9 labels (chunks 13-41 all "Phase 2") before the overlap fix
-    # and 32 after, the 32 headings outside code fences, in document order. The file is the one the fixture came from.
+    # and 32 after, the 32 headings outside code fences, in document order. The text is a committed snapshot of the
+    # document the measurement used (tests/fixtures/rdr232_rdr070_snapshot.md.txt), not the live docs/rdr file, which
+    # is edited and would change the counts under this pin (nexus-jypmj).
     import re
     from pathlib import Path
 
     from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 
-    text = (Path(__file__).resolve().parents[1] / "docs/rdr/rdr-070-incremental-taxonomy-clustered-search.md").read_text()
+    text = (Path(__file__).resolve().parent / "fixtures" / "rdr232_rdr070_snapshot.md.txt").read_text()
     _fm, body = parse_frontmatter(text)
     texts = [c.text for c in SemanticMarkdownChunker().chunk(body, {})]
     fence, headings = None, []

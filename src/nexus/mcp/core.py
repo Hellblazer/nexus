@@ -10741,7 +10741,8 @@ async def _nx_answer_active_project(
     its outcome is on ``request.active_project``: when the session's project is reliable and the question's
     text does not name another one, the request's owner becomes ``inferred``. An inferred owner qualifies
     source resolution only; it is applied after the ``_nx_owners`` run binding was built, and
-    ``request_owners`` ignores it, so it never narrows the secondary streams (nexus-jypmj.1.18).
+    ``request_owners`` ignores it, so it narrows no secondary stream by itself (nexus-jypmj.1.18); the one-source
+    rule (``nexus.plans.single_source``) narrows to the document it chose when no other project carries the number.
 
     *project_names* are the words the question puts where a project name could stand. Only a registered owner
     name counts as one (case-insensitively), so ``in detail`` is no project and ``the conexus RDR-084`` is.
@@ -10957,6 +10958,26 @@ def _manifest_sampler(cat: Any) -> "Callable[[list[str], int], Any] | None":
     except Exception as exc:  # noqa: BLE001 — a capability probe never fails the read; the old path is the answer
         _log.warning("nx_answer_manifest_sampler_probe_failed", error=str(exc))
     return None
+
+
+async def _nx_answer_chash_allow_supported() -> bool:
+    """Whether the engine applies ``chash_allow`` on its search routes (``GET /version``'s
+    ``vector_search_chash_allow_supported``, nexus-jypmj), read BEFORE any request carries the key: an engine
+    without the flag answers 200 and ignores it (a collection-wide answer), and the cloud edge trims ``/version`` to
+    an allowlist. The probe is a (cached) HTTP read, so it runs in a worker thread. Never raises: a client with no
+    probe (an in-memory test client), a failed probe and a flag that is not a JSON ``true`` all read as unsupported,
+    the direction in which no secondary step is dispatched."""
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+
+    def _probe() -> bool:
+        probe = getattr(_get_t3(), "supports_chash_allow", None)
+        return callable(probe) and probe() is True
+
+    try:
+        return bool(await asyncio.to_thread(_probe))
+    except Exception as exc:  # noqa: BLE001 — a capability probe never fails an answer; unsupported is the safe reading
+        _log.warning("nx_answer_chash_allow_probe_failed", error=type(exc).__name__)
+        return False
 
 
 async def _nx_answer_primary_stream(
@@ -11612,6 +11633,7 @@ async def _nx_answer_plan_miss(
     if coverage is not None and enforce_eligibility:
         few_shot_matches = _eligibility.eligible_matches(
             _eligibility.coerce_kind(coverage.answer_kind), few_shot_matches,
+            1 if coverage.names_one_source else 0,
         )
     few_shot_block = _format_plan_few_shot(few_shot_matches)
     if few_shot_block:
@@ -11633,7 +11655,6 @@ async def _nx_answer_plan_miss(
         f"{_nx_answer_planner_request_block(coverage)}"
         f"{corpus_names_hint}\n\n"
         f"{_PLANNER_SCOPING_RULES}\n\n"
-            1 if coverage.names_one_source else 0,
         f"{_PLANNER_TOOL_REFERENCE}\n"
         f"Return the plan as {{\"steps\": [...]}} where each step is "
         f"{{\"tool\": \"<bare name>\", \"args\": {{...}}}}."
@@ -12315,7 +12336,8 @@ async def nx_answer(
     _evidence_request = _nx_answer_question_sources(_evidence_request, _request_coverage)
     # nexus-jypmj.2.4: the third tier, after the explicit owner/project and the owner scope: the session's
     # project, only when it is reliable and nothing explicit qualified an RDR source. Applied after the
-    # `_nx_owners` binding above, so an inferred owner never narrows the secondary streams.
+    # `_nx_owners` binding above, so an inferred owner narrows no stream by itself; the one-source rule below narrows to
+    # the document an inferred owner chose only when no other project carries the number (nexus-jypmj).
     # The two stages share ONE budget (PrimaryEvidenceCaps.max_seconds, or the answer's own deadline if sooner).
     from nexus.plans.request_coverage import project_name_candidates  # noqa: PLC0415 — deferred; matches this module's convention
 
@@ -12351,23 +12373,36 @@ async def nx_answer(
             )
 
         _request_coverage = _nx_answer_isolated("withdraw_unqualified", _request_coverage, _withdraw_unqualified)
-    # RDR-232 section 2a (nexus-4xmpv; Sam, 2026-10-30): a synthesis or unknown request that names exactly ONE source
-    # reads that source. Once it resolved to one document, the run's scope binding becomes the document's collection and
-    # its owner binding the document's owner, and the runner's existing section 2a and owner narrowing then apply them
-    # to EVERY retrieval step of EVERY plan (library, inline, research:default). Replaces the strategy deny-list.
-    # ``_effective_scope`` is the scope the steps run under; ``scope`` stays what the caller gave (plan matching, the inline
-    # planner's corpus hint, plan growth and the envelope's ``scope`` read that: the planner is not handed a collection name,
-    # so a plan it grows does not pin the next question to this document's collection). ``None`` when the request is not one the rule concerns.
+    # RDR-232 section 2a (nexus-4xmpv, nexus-jypmj; Sam, 2026-10-30): a synthesis or unknown request that names exactly
+    # ONE source reads that DOCUMENT. Once it resolved to one document, the run's scope binding becomes the document's
+    # collection (defense in depth; the caller's own document address is kept) and its owner binding the document's
+    # owner, and the runner's section 2a and owner narrowing apply them to EVERY retrieval step of EVERY plan. The
+    # document itself is the run's DocumentConfinement, built once the primary read has the manifest's chunk hashes
+    # (below): the engine's chunk filter on search/query, the document's address on traverse, and no dispatch for a step
+    # that cannot be confined. Replaces the strategy deny-list.
+    # ``_step_scope`` is the scope the steps run under (the collection, or the caller's document address); ``scope``
+    # stays what the caller gave (plan matching, the inline planner's corpus hint, plan growth and the envelope's
+    # ``scope`` read that: the planner is not handed a collection name, so a plan it grows does not pin the next
+    # question to this document's collection). The envelope's ``effective_scope`` is the document's tumbler.
+    # ``None`` when the request is not one the rule concerns; a fault in the derivation is an ``applied: false`` verdict.
     from nexus.plans.owner_narrowing import OWNERS_BINDING as _OWNERS_BINDING  # noqa: PLC0415 — deferred; matches this module's convention
-    from nexus.plans.single_source import derive_single_source_narrowing as _derive_single_source  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.single_source import (  # noqa: PLC0415 — deferred; matches this module's convention
+        derive_single_source_narrowing as _derive_single_source,
+        unavailable_single_source_narrowing as _unavailable_single_source,
+    )
 
     _single_source = _nx_answer_isolated(
-        "single_source_narrowing", None, _derive_single_source, _request_coverage, _named_sources, scope,
+        "single_source_narrowing", _unavailable_single_source(_request_coverage, scope), _derive_single_source,
+        _request_coverage, _named_sources, scope,
     )
-    _effective_scope = scope
+    _step_scope = scope
+    _engine_filter = False
     if _single_source is not None and _single_source.applied:
-        _effective_scope = _single_source.effective_scope
-        _caller_run["_nx_scope"] = _effective_scope
+        # Asked only for a run that is confined: the capability probe is a (cached) HTTP read.
+        _engine_filter = await _nx_answer_chash_allow_supported()
+        _single_source = _single_source.with_confinement("engine_filter" if _engine_filter else "steps_not_run")
+        _step_scope = _single_source.step_scope
+        _caller_run["_nx_scope"] = _step_scope
         _caller_run[_OWNERS_BINDING] = _single_source.owner
     # RDR-232 Phase 2 (nexus-jypmj.2.3): the answer-kind eligibility filter for this request. Handed to
     # plan_match, which asks it of every branch's candidates; enforcing unless NX_ANSWER_KIND_ELIGIBILITY turns
@@ -12384,6 +12419,9 @@ async def nx_answer(
         shadow_reason=(
             "disabled_by_setting" if not _gate_on else None if _extract_on else "extraction_disabled"
         ),
+        # nexus-4xmpv: a synthesis or unknown request that names exactly one source does not admit citation-traversal;
+        # the count is RequestCoverage.names_one_source, the one place that decides it.
+        named_source_count=1 if _request_coverage.names_one_source else 0,
     )
     # nexus-jypmj.16: a failed extraction leaves THIS request on its first-pass kind (the gate keeps enforcing,
     # by design); a run of failures in one process is that regime every time, so it warns once per process.
@@ -12419,9 +12457,6 @@ async def nx_answer(
             resolved_args=list(resolved) if isinstance(resolved, list) else [],
             reducer_expected=reducer_expected,
         )
-        # nexus-4xmpv: a synthesis or unknown request that names exactly one source does not admit citation-traversal;
-        # the count is RequestCoverage.names_one_source, the one place that decides it.
-        named_source_count=1 if _request_coverage.names_one_source else 0,
         _diag_cache.clear()
 
     def _evidence_diagnostics_now() -> "dict[str, Any] | None":
@@ -12440,7 +12475,7 @@ async def nx_answer(
         try:
             diag = build_evidence_diagnostics(
                 steps=_diag_inputs["steps"], tools=plan_tools(_diag_inputs["plan_json"]),
-                scope=ScopeConstraint.parse(_effective_scope), scope_diagnostics=_scope_diagnostics,
+                scope=ScopeConstraint.parse(_step_scope), scope_diagnostics=_scope_diagnostics,
                 resolved_args=_diag_inputs["resolved_args"], recorder=_reducer_recorder,
                 reserved=_reserved_stream, primary=_primary_evidence, lifecycle=_lifecycle,
                 named_sources=_named_sources, reducer_expected=_diag_inputs["reducer_expected"],
@@ -13314,6 +13349,12 @@ async def nx_answer(
     # Step 2 below (previously computed twice) so the pre-Step-2 budget
     # check and the single-step guard agree on the same classification.
     plan_class = _nx_answer_classify_plan(best)
+    if plan_class == "single_query" and _single_source is not None and _single_source.applied:
+        # nexus-jypmj: the single_query fast path has no primary evidence stream and calls ``query`` outside the runner,
+        # so it would read every project's documents. A run confined to one document goes through ``plan_run``, which
+        # confines the plan's query step to the document (or does not run it) and reserves the primary read.
+        _log.info("nx_answer_single_query_not_taken_document_confined", plan_id=best.plan_id)
+        plan_class = "needs_operators"
 
     # ── Pre-Step-2 budget check (nexus-nyry9.2, RDR-196 .r2) ──────────────
     # Step 1 above — the plan-match gate, and on a miss, the inline LLM
@@ -13605,7 +13646,7 @@ async def nx_answer(
             from nexus.plans.evidence import ScopeConstraint, narrow_corpus, narrow_subtree  # noqa: PLC0415 — deferred; matches this module's convention
 
             _single_query_fast_path = True
-            _fast_scope = ScopeConstraint.parse(_effective_scope)
+            _fast_scope = ScopeConstraint.parse(_step_scope)
             _fast_subtree = ""
             if _fast_scope.kind == "subtree":
                 _fast_narrowing, _fast_subtree = narrow_subtree(
@@ -13622,10 +13663,10 @@ async def nx_answer(
                 _log.warning(
                     "nx_answer_single_query_scope_conflict",
                     plan_id=best.plan_id, plan_corpus=_fast_narrowing.plan_corpus,
-                    caller_scope=_effective_scope,
+                    caller_scope=_step_scope,
                 )
                 no_match = (
-                    f"No matching evidence found for {question!r} in scope {_effective_scope!r}. "
+                    f"No matching evidence found for {question!r} in scope {_step_scope!r}. "
                     f"The plan's one retrieval step was skipped (plan_id={best.plan_id}); "
                     f"{_nx_answer_scope_conflict_sentence(_scope_diagnostics)} — pass a scope "
                     "the plan's corpus covers, or use search/query directly."
@@ -13769,7 +13810,7 @@ async def nx_answer(
                         steps=[
                             {"ids": [], "tumblers": [], "scope_conflict": _fast_owner_marker or {
                                 "step_index": 0, "tool": "query", "plan_corpus": _fast_narrowing.plan_corpus,
-                                "caller_scope": _effective_scope, "scope_kind": _fast_scope.kind}}
+                                "caller_scope": _step_scope, "scope_kind": _fast_scope.kind}}
                             if _fast_conflict else {
                                 "ids": [c["id"] for c in chunks],
                                 "chunk_collections": [c["collection"] for c in chunks],
@@ -13913,6 +13954,19 @@ async def nx_answer(
     )
     if _reserved_stream is not None:
         _plan_run_kwargs["reserved_stream"] = _reserved_stream
+    # nexus-jypmj (Sam, 2026-10-30): the document confinement, from the manifest hashes the primary read held. The run
+    # then confines every secondary step to the document; the verdict learns the primary read's S of M chunks and the
+    # mode the run settled on (an engine with no chunk filter, or a document with no hashes, runs no secondary step).
+    _document_confinement = None
+    if _single_source is not None and _single_source.applied:
+        from nexus.plans.document_confinement import build_confinement as _build_confinement  # noqa: PLC0415 — deferred; matches this module's convention
+
+        _document_confinement = _build_confinement(
+            tumbler=_single_source.tumbler, collection=_single_source.collection, evidence=_primary_evidence,
+            engine_filter=_engine_filter,
+        )
+        _single_source = _single_source.with_primary(_primary_evidence, _document_confinement)
+        _plan_run_kwargs["document_confinement"] = _document_confinement
     # RDR-232 Phase 3 (nexus-jypmj.3.3): the coverage boundary, built from the inputs this call already holds (the
     # ones `_evidence_diagnostics_now` hands build_evidence_diagnostics) and given to the runner, which assesses the
     # terminal reduction's evidence before dispatching it. It rides `_plan_run_kwargs`, so the continuation
@@ -13926,9 +13980,10 @@ async def nx_answer(
         from nexus.plans.evidence import ScopeConstraint as _ScopeConstraint  # noqa: PLC0415 — as above
 
         _plan_run_kwargs["coverage_boundary"] = _CoverageBoundary(
-            request=_request_coverage, scope=_ScopeConstraint.parse(_effective_scope), named_sources=_named_sources,
+            request=_request_coverage, scope=_ScopeConstraint.parse(_step_scope), named_sources=_named_sources,
             primary=_primary_evidence, lifecycle=_lifecycle, owner_resolution=_evidence_request.owner.to_wire(),
             dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
+            confinement=_document_confinement,
         )
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline

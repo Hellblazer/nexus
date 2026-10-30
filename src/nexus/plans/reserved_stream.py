@@ -58,12 +58,13 @@ __all__ = [
 #: ``runner._OPERATOR_MAX_INPUTS`` (100) so plan evidence keeps room (a test pins this).
 RESERVED_SHARE_MAX: int = 50
 
-#: The same bound for a run that narrows every secondary retrieval step to its one named source
-#: (``nexus.plans.single_source``; nexus-4xmpv): the secondary streams read the same collection and mostly hit
-#: chunks the primary already holds, so the primary takes 90 of the 100 slots and the secondary keeps 10. The full
-#: arithmetic (the chunk cap 84 = 90 - 6 lifecycle records, the 60,000-character and 120,000-character bounds) is
-#: stated once, on ``PrimaryEvidenceCaps.max_narrowed_source_items``. A test pins the sum.
-RESERVED_SHARE_NARROWED: int = 90
+#: The same bound for a run that confines every secondary retrieval step to its one named document
+#: (``nexus.plans.single_source``, ``nexus.plans.document_confinement``; nexus-4xmpv, nexus-jypmj): a plan keeps no
+#: secondary items of its own, so the primary takes 88 of the 100 slots and the coverage repair's supplement
+#: (``coverage_repair.MAX_REPAIR_ITEMS`` = 12) takes the other 12. The full arithmetic (the chunk cap 82 = 88 - 6
+#: lifecycle records, the 60,000-character and 120,000-character bounds) is stated once, on
+#: ``PrimaryEvidenceCaps.max_narrowed_source_items``. A test pins the sum 88 + 12 = 100.
+RESERVED_SHARE_NARROWED: int = 88
 
 #: Operator args that carry the evidence a later operator reduces.
 EVIDENCE_KEYS: tuple[str, ...] = ("items", "inputs", "content", "context", "groups")

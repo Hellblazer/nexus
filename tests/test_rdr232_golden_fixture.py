@@ -521,15 +521,22 @@ def _assert_production_wiring_reaches_the_reducer(
     assert on_["owners"] == [fx.art_owner] and on_["skipped_steps"] == [], on_
     assert on_["steps"] and all(s["removed"] == [] and s["outcome"] == "within_scope" for s in on_["steps"]), on_
     assert env["single_source_narrowing"]["applied"] is True
-    assert env["single_source_narrowing"]["effective_scope"] == fx.art_rdr_collection
+    assert env["single_source_narrowing"]["effective_scope"] == fx.art_rdr, "the document: the envelope reports the tumbler, the steps ran under its collection"
     assert {s["step_index"] for s in on_["steps"]} == {st["step_index"] for st in d["streams"]["vector"]["steps"]}
     assert not any(
         fx.nexus_rdr_collection in r["by_stream_collection"].get(s, {}) for s in ("vector", "graph", "primary")
     ), "no foreign-owner item reaches the reducer input"
     assert d["streams"]["primary"]["references"] == n_pieces and d["streams"]["t2"]["references"] == 2
-    assert d["capped_traversals"] == 0 and d["skipped_steps"] == []
-    (trav,) = d["traversals"]
-    assert trav["dropped_cap"] == expect_dropped_cap and trav["possibly_truncated"] is False, trav
+    assert d["capped_traversals"] == 0
+    narrowing = env["single_source_narrowing"]
+    assert narrowing["confinement"] == "steps_not_run", (
+        "nexus-jypmj: the gate jar's engine does not advertise vector_search_chash_allow_supported, so a confined run "
+        "dispatches no secondary step; the engine_filter mode is pinned offline (tests/test_rdr232_document_confinement.py)")
+    # every retrieval step of the plan was skipped with the document_confined marker: no vector or graph evidence, no walk
+    assert d["traversals"] == [] and d["streams"]["vector"]["references"] == 0 == d["streams"]["graph"]["references"]
+    document = [x for x in env["scope_diagnostics"] if x.get("scope_kind") == "document"]
+    assert document and {x["outcome"] for x in document} == {"document_confined"}, env["scope_diagnostics"]
+    trav = {"dropped_cap": 0}
     assert env["reserved_stream"]["merged"] is True and env["reserved_stream"]["merged_at_step"] == LOOKUP_RANK_STEP
     covered_facets = {f for f, _t in art_pieces_in_request if f}
     label = strategy[1] if strategy else "natural-selection"
@@ -575,30 +582,31 @@ def _assert_single_query_fast_path_is_contained(fx, art, scope) -> None:
         env_art = _nx_answer_envelope(art, scope, {"content_type": "rdr"}, strategy=("research", "corpus-coverage-check"))
     (named_art,) = env_art["named_sources"]["sources"]
     assert (named_art["status"], named_art["tumbler"], named_art["inferred"]) == ("resolved", fx.art_rdr, True), named_art
-    # The inferred project itself narrows nothing (no owner qualifier). What narrows is the one-source rule
-    # (nexus-4xmpv): the call names one source and it resolved, so the step runs under that source's collection and
-    # owner. The ambiguous run above resolved nothing, so it was not narrowed and says why.
+    # The inferred project itself narrows nothing (no owner qualifier), and the one-source rule does not narrow an
+    # INFERRED source while another project carries the number (nexus-jypmj, Sam 2026-10-30; the Nexus RDR-084 is
+    # registered here). The ambiguous run above resolved nothing, so it was not narrowed and says why; this one
+    # resolved by inference and says why it was not narrowed either, and its step ran as the unnarrowed one did.
     assert env["single_source_narrowing"]["applied"] is False and "did not resolve" in env["single_source_narrowing"]["reason"]
-    assert env_art["single_source_narrowing"]["applied"] is True
-    assert [d["scope_kind"] for d in env_art["scope_diagnostics"]] == ["collection", "owner"]
-    assert env_art["scope_diagnostics"][0]["caller_scope"] == fx.art_rdr_collection
+    assert env_art["single_source_narrowing"]["applied"] is False
+    assert "carry the same number" in env_art["single_source_narrowing"]["reason"], env_art["single_source_narrowing"]
+    assert env_art["scope_diagnostics"] == env["scope_diagnostics"], "an inferred project narrows no stream"
     assert env_art["evidence_request"]["owner"]["status"] == "inferred", "an inferred project is not an explicit owner"
     print(f"RDR232-FASTPATH-TEXT-SOURCE no_project={named['status']} art_session={named_art['status']}:{named_art['tumbler']}")
 
-    # nexus-jypmj.1.18: the same call with the explicit ART owner queries the ART collection only.
+    # nexus-jypmj.1.18 and nexus-jypmj: the same call with the explicit ART owner resolves the one source, so the run is
+    # confined to that document and does NOT take the fast path (it has no primary stream and calls query outside the
+    # runner). It goes through plan_run: the plan's one query step is narrowed to the ART collection and the owner, then
+    # not dispatched, because the gate jar's engine does not advertise the document filter. No other project's
+    # collection is read.
     env = _nx_answer_envelope(
         art, scope, {"content_type": "rdr", "owner": fx.art_owner}, strategy=("research", "corpus-coverage-check"))
-    assert env["continuation"] is None and env["step_count"] == 1
     d = env["evidence_diagnostics"]
     v = d["streams"]["vector"]
-    assert v["references"] > 0 and set(v["by_collection"]) == {fx.art_rdr_collection}, v
-    # nexus-4xmpv: the call names one source, which the explicit owner resolves, so the fast path's one query runs under
-    # that source's collection (the scope `rdr` narrowed to it) and the owner finds nothing left to remove. Before the
-    # one-source rule the owner removed the other project's collection from `rdr` (`narrowed`, removed [nexus]).
+    narrowing = env["single_source_narrowing"]
+    assert narrowing["applied"] is True and narrowing["confinement"] == "steps_not_run" and narrowing["document"] == fx.art_rdr
+    assert v["references"] == 0 and set(v["by_collection"]) <= {fx.art_rdr_collection}, v
     assert [(x["scope_kind"], x["outcome"]) for x in env["scope_diagnostics"]] == [
-        ("collection", "narrowed"), ("owner", "within_scope")], env["scope_diagnostics"]
-    assert env["single_source_narrowing"]["applied"] is True
-    assert d["scope_check"]["owner_narrowing"]["steps"][0]["removed"] == []
+        ("collection", "narrowed"), ("owner", "within_scope"), ("document", "document_confined")], env["scope_diagnostics"]
     print(f"RDR232-FASTPATH-OWNER vector_refs={v['references']} by_collection={v['by_collection']}")
 
 
