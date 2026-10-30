@@ -25,6 +25,30 @@
 -- tumbler wins any further tie. See ManifestLessCensusIntegrationTest#
 -- reverseTieBreak_prefersTheMostConservativeBucket_deterministicallyAcrossLiteralAndBoundForms.
 --
+-- RDR-236 PHASE 3 (nexus-6pfgb.39): THE FORWARD JOIN ENDS WITH CONVERGENCE.
+-- The forward key (catalog_doc_id, falling back to doc_id) lives on the
+-- chunk ROW, and the RDR-236 Phase 4 sweep removes document keys from rows.
+-- Once the tenant has its rdr192 completion record -- the row
+-- nexus.ladder_completions holds for rung 'rdr192-manifest-backfill'
+-- (Rdr192BackfillGate.RUNG_NAME), written when the rdr192 backfill rung
+-- verified -- every chunk the rung could attribute has a manifest row, so a
+-- manifest-less chunk is attributed by the REVERSE path alone: with no live
+-- note-shaped document naming its chash it is no-owner, whatever stale
+-- catalog_doc_id/doc_id its row still carries (it reads the same before and
+-- after the sweep). The condition is the completion RECORD and never an empty
+-- bucket: with the join dropped, legacy-unmanifested would read zero
+-- vacuously. A tenant without the record keeps the forward join. A later
+-- legacy-shaped chunk of a converged tenant therefore reads no-owner instead
+-- of superseded or dead-owner; that is accepted, because only
+-- legacy-unmanifested and unclassified gate the reaper (_GC_CENSUS_BLOCKERS,
+-- src/nexus/commands/t3.py).
+-- PRECONDITION FOR THE SWEEP: `nx t3 census-manifest-less --all
+-- --require-zero legacy-unmanifested` reads zero on the install before the
+-- Phase 4 sweep (a stranded note the rung cannot heal is healed by hand, or
+-- its collection stays unswept); the rdr192 rung refuses to run after the
+-- sweep, because it attributes by the same row keys (pinned by
+-- nexus-6pfgb.43, not here).
+--
 -- WHY THERE IS NO metadata ->> 'doc_id' INDEX (catalog-038 dropped in
 -- round 3; mechanism corrected in round 4):
 -- Structural reason first, and it is sufficient on its own: after the
@@ -213,6 +237,14 @@ rev_candidates AS MATERIALIZED (
     WHERE doc_id_hex IS NOT NULL
     ORDER BY doc_id_hex, total_count ASC, tumbler ASC
 ),
+rdr192_converged AS MATERIALIZED (
+    SELECT EXISTS (
+        SELECT 1
+        FROM nexus.ladder_completions lc
+        WHERE lc.tenant_id = current_setting('nexus.tenant', true)
+          AND lc.rung_name = 'rdr192-manifest-backfill'
+    ) AS done
+),
 base AS (
     SELECT
         encode(c.chash, 'hex') AS chash,
@@ -236,9 +268,12 @@ base AS (
     FROM nexus.chunks c
     LEFT JOIN nexus.catalog_documents fwd_owner
            ON fwd_owner.tenant_id = c.tenant_id
-          AND fwd_owner.tumbler = COALESCE(
-                  NULLIF(c.metadata ->> 'catalog_doc_id', ''),
-                  NULLIF(c.metadata ->> 'doc_id', ''))
+          AND fwd_owner.tumbler = CASE
+                  WHEN (SELECT done FROM rdr192_converged) THEN NULL
+                  ELSE COALESCE(
+                      NULLIF(c.metadata ->> 'catalog_doc_id', ''),
+                      NULLIF(c.metadata ->> 'doc_id', ''))
+              END
     LEFT JOIN rev_candidates rc
            ON rc.doc_id_hex = encode(c.chash, 'hex')
     CROSS JOIN LATERAL (

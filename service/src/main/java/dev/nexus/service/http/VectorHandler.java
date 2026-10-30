@@ -2215,14 +2215,18 @@ public final class VectorHandler implements HttpHandler {
      * </pre>
      * <p>Response 200: {@code {"collection": "...", "grace_seconds": N|null, "returned": N, "next_after":
      * "64-hex"|null, "chunks": [{"chash": "64-hex", "created_at": ISO-8601, "last_written_at": ISO-8601,
-     * "ownerless_since": ISO-8601, "title": str|null, "catalog_doc_id": str|null}, ...]}}.
+     * "ownerless_since": ISO-8601, "title": str|null, "catalog_doc_id": str|null,
+     * "text_prefix": str}, ...]}}.
      * {@code ownerless_since} is the instant the grace counts from, {@code GREATEST(last_written_at,
      * orphaned_at)} (the later of the last write and the moment the chunk last lost an owner, read from
      * {@code nexus.chunk_orphaned_at}); it is never earlier than {@code last_written_at}, and a chunk with no
      * orphaning record reports its {@code last_written_at}. Additive and for display only: the predicate alone
      * decides which chunks are listed. {@code grace_seconds} echoes the request,
-     * {@code null} meaning the default. {@code title} and {@code catalog_doc_id} come from the chunk's own
-     * metadata ({@code null} when absent or empty; {@code catalog_doc_id} falls back to {@code doc_id}).
+     * {@code null} meaning the default. {@code title} and {@code catalog_doc_id} name the document
+     * the chunk's MANIFEST gives as its owner (its catalog title and tumbler; the own-collection manifest row first,
+     * then the lowest tumbler) and are {@code null} when no manifest row names one; {@code text_prefix} is the first
+     * 80 characters of the chunk's text. None of them reads the chunk row's metadata, which is last-writer-wins on a
+     * shared chunk (RDR-236 Phase 3).
      * Page by sending {@code next_after} back as {@code after_chash} while it is not null; {@code next_after}
      * is null when fewer than {@code limit} rows came back. Use the cursor, not {@code offset}, for any
      * consumer that acts on a page before fetching the next: acting shrinks the set, and an offset then skips rows.
@@ -2244,7 +2248,7 @@ public final class VectorHandler implements HttpHandler {
         var rows = repo.reapableChunks(tenant, collection, graceSeconds, afterChash, limit, offset);
         var chunks = new ArrayList<Map<String, Object>>(rows.size());
         for (var r : rows) {
-            // LinkedHashMap, not Map.of: title and catalog_doc_id are null when the metadata has none.
+            // LinkedHashMap, not Map.of: title and catalog_doc_id are null when no manifest row names an owner.
             var item = new LinkedHashMap<String, Object>();
             item.put("chash", r.chash());
             item.put("created_at", r.createdAt());
@@ -2252,6 +2256,7 @@ public final class VectorHandler implements HttpHandler {
             item.put("ownerless_since", r.ownerlessSince());
             item.put("title", r.title());
             item.put("catalog_doc_id", r.catalogDocId());
+            item.put("text_prefix", r.textPrefix());
             chunks.add(item);
         }
         var out = new LinkedHashMap<String, Object>();
