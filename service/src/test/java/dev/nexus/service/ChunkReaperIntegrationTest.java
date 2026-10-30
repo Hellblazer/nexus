@@ -1341,15 +1341,18 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
             assertThat(d.get("reason").asText()).isEqualTo("FLOOR_EXCEEDED");
             assertThat(d.get("candidates").asLong()).isEqualTo(100);
             assertThat(d.get("total").asLong()).isEqualTo(300);
-            assertThat(d.get("sample")).as("up to five text-prefix rows").hasSize(5);
+            assertThat(d.get("sample")).as("up to five sample rows").hasSize(5);
             for (var row : d.get("sample")) {
                 // RDR-236 Phase 3: the row's title and source_path (stale on a shared chunk, swept in Phase 4) are
-                // never shown; an ownerless chunk is labelled by the start of its text.
-                assertThat(row.get("text_prefix").asText()).startsWith("bulk").endsWith(" text");
+                // never shown. Chunk text is never persisted either: nexus_diag reads gc_audit across tenants
+                // under a content-free premise (grants-nexus-diag-4), so a stored sample row is chash, title,
+                // source_path and nothing else.
+                assertThat(row.fieldNames()).toIterable().containsExactlyInAnyOrder("chash", "title", "source_path");
                 assertThat(row.get("title").isNull()).as("no manifest owner, no title").isTrue();
                 assertThat(row.get("source_path").isNull()).isTrue();
             }
-            assertThat(a.details()).doesNotContain("Doc ").doesNotContain("/src/file");
+            assertThat(a.details()).doesNotContain("Doc ").doesNotContain("/src/file")
+                .doesNotContain("text_prefix").doesNotContain("bulk");
         });
 
         // The state changes: the collection leaves `live`. A new reason is a new row.
@@ -1373,7 +1376,7 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void aCensusRefusalAuditRowNamesTheLegacyChunksByTextPrefix_neverByTheRowsTitleOrSourcePath() throws Exception {
+    void aCensusRefusalAuditRowNamesTheLegacyChunksByChash_neverByTheirTextOrTheRowsTitleOrSourcePath() throws Exception {
         String t = newTenant();
         openGate(t);
         String c = col("knowledge");
@@ -1388,7 +1391,9 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
             var d = readJson(a.details());
             assertThat(d.get("reason").asText()).isEqualTo("CENSUS_LEGACY_UNMANIFESTED");
             assertThat(d.get("sample")).hasSize(1);
-            assertThat(d.get("sample").get(0).get("text_prefix").asText()).isEqualTo("legacy text");
+            assertThat(d.get("sample").get(0).fieldNames()).toIterable()
+                .containsExactlyInAnyOrder("chash", "title", "source_path");
+            assertThat(a.details()).doesNotContain("text_prefix").doesNotContain("legacy text");
             assertThat(d.get("sample").get(0).get("title").isNull()).isTrue();
             assertThat(d.get("sample").get(0).get("source_path").isNull()).isTrue();
             assertThat(a.details()).doesNotContain("Stale row title").doesNotContain("/stale/row/path.md");

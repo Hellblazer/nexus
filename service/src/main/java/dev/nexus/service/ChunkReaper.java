@@ -158,7 +158,7 @@ final class ChunkReaper {
     static final String CLIENT_EXPIRY_CONTENT_TYPE = "knowledge";
     /** Consecutive timeouts of one statement before it backs off (the same rule for every bounded statement). */
     static final int TIMEOUT_BACKOFF_AFTER = CENSUS_BACKOFF_AFTER;
-    /** Most text-prefix/title/source_path rows a refusal's audit row carries. */
+    /** Most chash/title/source_path rows a refusal's audit row carries. */
     static final int SAMPLE_SIZE = 5;
     /** The census page asked for: items beyond this are not itemised (the totals are collection-wide). */
     private static final int CENSUS_PAGE = 300;
@@ -1350,14 +1350,14 @@ final class ChunkReaper {
         return "";
     }
 
-    /** Up to {@link #SAMPLE_SIZE} of what the floor refused to move, by text prefix and manifest owner. */
+    /** Up to {@link #SAMPLE_SIZE} of what the floor refused to move, by chash and manifest owner (no chunk text). */
     private List<Map<String, Object>> sampleReapable(String tenant, String collection, Duration grace) {
         try {
             var rows = vectors.reapableChunks(tenant, collection, grace == null ? null : grace.toSeconds(), null,
                 SAMPLE_SIZE, 0);
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : rows) {
-                out.add(sampleRow(r.chash(), r.title(), r.sourcePath(), r.textPrefix()));
+                out.add(sampleRow(r.chash(), r.title(), r.sourcePath()));
             }
             return out;
         } catch (RuntimeException e) {
@@ -1366,7 +1366,7 @@ final class ChunkReaper {
         }
     }
 
-    /** Up to {@link #SAMPLE_SIZE} chunks the census put in {@code bucket}, by text prefix and manifest owner. */
+    /** Up to {@link #SAMPLE_SIZE} chunks the census put in {@code bucket}, by chash and manifest owner (no chunk text). */
     private List<Map<String, Object>> sampleCensus(String tenant, String collection, ManifestLessCensusResult c,
                                                    String bucket) {
         try {
@@ -1374,7 +1374,7 @@ final class ChunkReaper {
             if (hexes.size() > SAMPLE_SIZE) hexes = hexes.subList(0, SAMPLE_SIZE);
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : store.describe(tenant, collection, hexes)) {
-                out.add(sampleRow(r.chash(), r.title(), r.sourcePath(), r.textPrefix()));
+                out.add(sampleRow(r.chash(), r.title(), r.sourcePath()));
             }
             return out;
         } catch (RuntimeException e) {
@@ -1383,12 +1383,17 @@ final class ChunkReaper {
         }
     }
 
-    private static Map<String, Object> sampleRow(String chash, String title, String sourcePath, String textPrefix) {
+    /**
+     * One persisted sample row: the chunk's chash and its manifest owner's title and path, nothing of the chunk's
+     * text. The sample goes into {@code gc_audit.details}, which the cross-tenant {@code nexus_diag} role reads under
+     * the premise that the table is content-free (grants-nexus-diag-4); {@code text_prefix} is for the live
+     * {@code /v1/vectors/reapable} listing and the CLI, never for a stored row.
+     */
+    private static Map<String, Object> sampleRow(String chash, String title, String sourcePath) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("chash", chash);
         m.put("title", title);
         m.put("source_path", sourcePath);
-        m.put("text_prefix", textPrefix);
         return m;
     }
 
