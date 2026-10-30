@@ -115,11 +115,20 @@ worker or strand.
 producer default changes: with `NX_ASPECT_QUEUE` unset, the indexer, the MCP
 store path and `nx aspects requeue-failed` now write one task per document to the
 `aspects` tuple queue instead of a row in the table. The required engine rises to
-`engine-service-v0.1.170`, which carries the read this rung needs and the census
-keys `nx doctor` uses for the queue's stall signal. The worker is unchanged: it
-already drained both queues whatever the variable said. After you upgrade, `nx upgrade`
-runs this rung once and moves the table's waiting rows; there is nothing
-else to do.
+at least `engine-service-v0.1.170` (the release's pairing line names the exact
+tag), which carries the read this rung needs and the census keys `nx doctor` uses
+for the queue's stall signal. The worker that drains the tuple queue ships in this
+same release: a worker from any earlier release drains only the table, so a
+flipped producer's tasks would sit unclaimed until the template's 90-day
+retention expires them, the tuple queue would fill towards its 10,000-task cap
+(further enqueues then fail and are logged, so new documents get no aspects),
+and the old client's `nx doctor` would show an empty queue. Upgrade every host
+that runs an aspect worker before, or in the same step as, the producer hosts;
+a producer host whose only worker host is older keeps `NX_ASPECT_QUEUE=table`
+until that host is upgraded. A single-host install needs nothing: its own worker
+is upgraded with it. After you upgrade, `nx upgrade` runs this rung once and
+moves the table's waiting rows; a stalled tuple queue shows in `nx doctor`'s
+aspects row.
 
 **Rollback.** Set `NX_ASPECT_QUEUE=table` on the producer hosts. The producer
 then writes the table again, the rung stops being applicable, and the worker
@@ -127,7 +136,10 @@ keeps draining any task already on the tuple queue. Nothing is lost in either
 direction: a row is either still in the table or already a task, and a crash
 between the two steps leaves it in both places, never in neither. An engine older
 than `engine-service-v0.1.169` has no `aspects` template and refuses the
-`tuples` producer with a message naming that release; set `table` there.
+`tuples` producer with a message naming that release; set `table` there. The
+variable is read by each process at call time, so a long-lived producer (an MCP
+server session, a running indexer) keeps its old setting until it is restarted:
+restart those processes after changing it, in either direction.
 
 - It applies only when `NX_ASPECT_QUEUE` is `tuples` (the default, unset
   included), the engine has the `aspects` template, and the engine answers
