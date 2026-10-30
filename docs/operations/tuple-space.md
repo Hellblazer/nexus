@@ -22,8 +22,12 @@ tuple per subspace — live, unclaimed, not dead-lettered — over the first
 page (`QUOTAS.MAX_QUERY_RESULTS`, 300 rows) of each subspace; a subspace
 whose oldest unclaimed tuple falls outside that first page is a known,
 documented limitation of a census check, not a silent miss. The `aspects`
-queue is skipped (a routine bulk index leaves its oldest task older than an
-hour while the worker is healthy; `tuples.queue_depth` covers it). Subspaces whose
+queue is aged from the census's `oldest_claimable_created_at` instead (the
+oldest task a worker could claim now, so a task waiting out a retry is not
+stuck): older than an hour with no live claim is red; the same backlog with
+claims in flight (`claimed` minus `lapsed` above zero) is a warning, a slow
+drain. An engine without that field (before `engine-service-v0.1.170`) keeps
+the skip, and `tuples.queue_depth` is then the only aspects signal. Subspaces whose
 template disables `take` (`ledger/<session_id>`) are skipped outright —
 "oldest unclaimed" carries no signal on a read-only template.
 
@@ -115,7 +119,8 @@ The three RDR-211 rows. Each has its own gate and threshold, described in
 `tuples.park_slots` warns at 75% of the engine's global park cap, and the
 remedy is to find the callers holding parks open (`nx tuple stats`);
 `tuples.queue_depth` warns above 1,000 available tasks on a `queue/<name>`
-subspace or on the `aspects` queue (RDR-235), or at any dead-lettered task, so triage as under "Dead-letter triage"
+subspace, above 2,400 on the `aspects` queue (RDR-235; twice its routine bulk
+backlog of 1,200), or at any dead-lettered task, so triage as under "Dead-letter triage"
 below; `tuples.channel_delivery` warns when this session's push waiter is not
 alive or last woke more than 75 s ago, and the fix is `/mcp` to restart the
 server (the drain hook still delivers at the next prompt).

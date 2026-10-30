@@ -7957,6 +7957,13 @@ _TUPLE_PARK_SLOTS_WARN_RATIO: float = 0.75
 #: available or at any dead task".
 _TUPLE_QUEUE_DEPTH_WARN_AVAILABLE: int = 1000
 
+#: The same threshold for the ``aspects`` template (nexus-4tvhk, Sam
+#: 2026-10-30): twice the routine bulk backlog measured for it, which peaks at
+#: 1,200 available (nexus-5r2sc.1.3, scenario 25 sizing). At the queue/*
+#: value a routine bulk index turned the row to a warning while the consumer
+#: was healthy. ``queue/<name>`` keeps :data:`_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE`.
+_TUPLE_ASPECTS_DEPTH_WARN_AVAILABLE: int = 2400
+
 #: RDR-211 Technical Design "Delivery" / bead nexus-rplay.13: "last wake
 #: older than a bound ... (e.g. more than 3 x 25 s ago while alive)". 3x
 #: `nexus.mcp.channel.DEFAULT_WAIT_TIMEOUT_S` (25s) -- a healthy waiter
@@ -8085,12 +8092,17 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
     documented limitation of a census check, not a silent miss (nothing
     here claims exhaustive coverage past one page).
 
-    RDR-235 gate S4: the ``aspects`` queue template is skipped. It is a bulk
+    RDR-235 gate S4 and nexus-p909o: the ``aspects`` queue template is a bulk
     backlog by design (about 136 documents an hour per worker), and a retry-
-    delayed task reads as unclaimed because the census counts it as available
-    and ``available_at`` is not rendered, so the flat threshold could not tell
-    a busy healthy consumer from a stuck one. ``_check_tuple_queue_depth``
-    covers aspects instead.
+    delayed task counts as available, so the flat threshold on the oldest
+    unclaimed row could not tell a busy healthy consumer from a stuck one. An
+    engine that renders the census's ``oldest_claimable_created_at`` (the
+    oldest live unclaimed row whose ``available_at`` is null or reached) lets
+    this row measure aspects against that instead: a task waiting out a retry
+    is not stuck. Older than the threshold is red only when no claim is in
+    flight (``claimed`` minus ``lapsed`` is 0), because a draining backlog has
+    claims; with claims in flight it is a warning. An engine without the field
+    keeps the skip (``_check_tuple_queue_depth`` still covers aspects).
 
     Two review fixes (nexus-em75s.12): a subspace whose resolved template
     has ``take.enabled: false`` (e.g. ``ledger/<session_id>`` — read-only
@@ -8199,6 +8211,7 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
         )]
 
     stale: list[str] = []
+    draining: list[str] = []
     reported: list[str] = []
     for census in subspaces:
         if census.available <= 0:
@@ -8219,10 +8232,30 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
             # worker drains about 136 documents an hour, so a routine
             # 1,000-document index leaves the oldest unclaimed task older than
             # this flat threshold for hours while the consumer is healthy and
-            # busy. A backoff-delayed task reads as unclaimed too (the census
-            # counts it as available and `available_at` is not rendered). The
-            # queue-depth row covers aspects: it warns on available above its
-            # threshold and on any dead task.
+            # busy, and a backoff-delayed task counts as available. Without the
+            # census's claimable age (an engine that predates it) the queue-depth
+            # row is the only aspects signal, so skip here.
+            if not getattr(census, "claimable_known", False):
+                continue
+            # nexus-p909o: age is the oldest task a worker could claim NOW; a
+            # delayed-only backlog has none and is not stuck.
+            claimable_dt = _parse_tuple_timestamp(census.oldest_claimable_created_at)
+            delayed = getattr(census, "delayed", 0)
+            if claimable_dt is None:
+                reported.append(f"{census.subspace}=none claimable (delayed={delayed})")
+                continue
+            age_s = (datetime.now(UTC) - claimable_dt).total_seconds()
+            reported.append(f"{census.subspace}={_fmt_age(age_s)}")
+            if age_s > _TUPLE_STALE_UNCLAIMED_AGE_S:
+                # A lapsed claim is a dead worker's leftover (reclaimed lazily by
+                # the next claim attempt), not activity.
+                live_claims = census.claimed - getattr(census, "lapsed", 0)
+                if live_claims > 0:
+                    draining.append(
+                        f"{census.subspace} ({_fmt_age(age_s)} old, {live_claims} claim(s) in flight)"
+                    )
+                else:
+                    stale.append(f"{census.subspace} ({_fmt_age(age_s)} old, no claim in flight)")
             continue
         census_oldest_dt = _parse_tuple_timestamp(census.oldest_created_at)
         if census_oldest_dt is not None:
@@ -8276,10 +8309,27 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
                 f"{len(stale)} subspace(s) with an unclaimed tuple older "
                 f"than {_fmt_age(_TUPLE_STALE_UNCLAIMED_AGE_S)}: "
                 + "; ".join(stale)
+                + (
+                    "; also draining past the threshold: " + "; ".join(draining)
+                    if draining else ""
+                )
             ),
             fix_suggestions=[
                 "Check for a stuck or absent consumer on the named "
                 "subspace(s): nx tuple rd <subspace>",
+            ],
+        )]
+    if draining:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"{len(draining)} queue(s) draining a backlog older than "
+                f"{_fmt_age(_TUPLE_STALE_UNCLAIMED_AGE_S)}, with claims in flight: "
+                + "; ".join(draining)
+            ),
+            fix_suggestions=[
+                "A worker is claiming, so this is a slow drain, not a stall; "
+                "watch it with: nx tuple stats <subspace>",
             ],
         )]
     return [HealthResult(label=label, ok=True, detail="; ".join(reported) or "none")]
@@ -8965,10 +9015,14 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
     mailbox, lock, ledger, and directory subspaces never count here
     regardless of row counts (RDR-211 Scale and Limits item 3: "a doctor row
     over the census available and dead counts for QUEUE subspaces"). The
-    aspects queue is a queue by the same definition, and this row is the only
-    one that covers it: ``_check_tuple_unclaimed_age`` skips it (gate S4).
+    aspects queue is a queue by the same definition. On an engine without the
+    census's claimable age (nexus-p909o) this row is the only one that covers
+    it, since ``_check_tuple_unclaimed_age`` skips it (gate S4); its detail
+    names the delayed count (the retry-waiting part of ``available``) where the
+    engine reports it.
 
     WARN above :data:`_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE` available tuples
+    (:data:`_TUPLE_ASPECTS_DEPTH_WARN_AVAILABLE` on the ``aspects`` queue)
     on any queue, or at any dead-lettered task on any queue.
 
     Not applicable -- ``ok=True`` with an explicit "informational" detail,
@@ -9044,6 +9098,10 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
 
     queues = []
     caps: dict[str, int] = {}
+    # nexus-4tvhk: the available-count warn threshold per subspace (aspects has its own).
+    thresholds: dict[str, int] = {}
+    # nexus-p909o: aspects subspaces whose engine reports the delayed count.
+    delayed_note: dict[str, str] = {}
     for census in subspaces:
         template = _resolve_tuple_template(templates, census.subspace)
         if template is None:
@@ -9054,6 +9112,12 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
         if not bool(template.get("take", {}).get("enabled", True)):
             continue
         queues.append(census)
+        thresholds[census.subspace] = (
+            _TUPLE_ASPECTS_DEPTH_WARN_AVAILABLE if _is_aspects_template(template)
+            else _TUPLE_QUEUE_DEPTH_WARN_AVAILABLE
+        )
+        if _is_aspects_template(template) and getattr(census, "claimable_known", False):
+            delayed_note[census.subspace] = f"delayed={census.delayed}"
         max_live = template.get("max_live_rows")
         if isinstance(max_live, int) and max_live > 0:
             caps[census.subspace] = max_live
@@ -9067,11 +9131,16 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
             ),
         )]
 
-    over_available = [c for c in queues if c.available > _TUPLE_QUEUE_DEPTH_WARN_AVAILABLE]
+    over_available = [c for c in queues if c.available > thresholds[c.subspace]]
     with_dead = [c for c in queues if c.dead > 0]
 
     if over_available or with_dead:
-        parts = [f"{c.subspace} (available={c.available})" for c in over_available]
+        parts = [
+            f"{c.subspace} (available={c.available}"
+            + (f", {delayed_note[c.subspace]}" if c.subspace in delayed_note else "")
+            + ")"
+            for c in over_available
+        ]
         # A dead task is unconsumed, so it counts against the template's
         # max_live_rows for as long as it is kept (aspects: 90 days). Show the
         # dead share of that cap, where the template states one.
@@ -9084,8 +9153,7 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(
-                f"{len(over_available)} queue(s) above "
-                f"{_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE} available and "
+                f"{len(over_available)} queue(s) above their available threshold and "
                 f"{len(with_dead)} queue(s) with a dead task: " + "; ".join(parts)
             ),
             fix_suggestions=[
@@ -9093,7 +9161,11 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
                 "nx tuple stats <subspace>",
             ],
         )]
-    detail = "; ".join(f"{c.subspace}: available={c.available} dead={c.dead}" for c in queues)
+    detail = "; ".join(
+        f"{c.subspace}: available={c.available} dead={c.dead}"
+        + (f" {delayed_note[c.subspace]}" if c.subspace in delayed_note else "")
+        for c in queues
+    )
     return [HealthResult(label=label, ok=True, detail=detail)]
 
 

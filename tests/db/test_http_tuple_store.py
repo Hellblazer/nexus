@@ -133,6 +133,21 @@ class TestOut:
         renewed = store.rd(f"mailbox/{addr}", {"to": addr})[0]
         assert renewed.claimed_at == claimed[0].claimed_at
 
+        # nexus-p909o (RDR-235), same economy: a row written with a delay renders its available_at,
+        # and the census counts it as available AND delayed, with no claimable row (a row that
+        # was never delayed renders None).
+        assert row.available_at is None
+        delayed_addr = _uniq("delayed")
+        store.out(
+            f"mailbox/{delayed_addr}", {"to": delayed_addr}, {"from": "sender-a"}, "later",
+            nonce=_uniq("nonce"), delay_s=300,
+        )
+        delayed_row = store.rd(f"mailbox/{delayed_addr}", {"to": delayed_addr})[0]
+        assert delayed_row.available_at is not None
+        census = store.subspace_stats(f"mailbox/{delayed_addr}")
+        assert (census.available, census.delayed) == (1, 1)
+        assert census.oldest_claimable_created_at is None and census.claimable_known is True
+
         # No token: the write lands, unstamped (null, but known: the engine rendered the key).
         monkeypatch.delenv("NX_T1_SESSION")
         a2 = _uniq("addr")
@@ -469,6 +484,47 @@ class TestClaimedAtWire:
         assert _body_to_tuple_row({"claimed_at": stamp}).claimed_at == stamp
         assert _body_to_tuple_row({"claimed_at": None}).claimed_at is None
         assert _body_to_tuple_row({}).claimed_at is None
+
+
+class TestDelayedVisibilityWire:
+    """nexus-p909o (RDR-235): the row's `available_at` and the census's `delayed` and
+    `oldest_claimable_created_at` parse off the wire, and an engine that renders none of
+    them (one predating engine-service-v0.1.170) reads as unknown, never as an error."""
+
+    def test_the_row_key_parses_and_its_absence_reads_as_none(self) -> None:
+        from nexus.db.t2.http_tuple_store import _body_to_tuple_row
+
+        stamp = "2026-10-30T01:02:03.456789Z"
+        assert _body_to_tuple_row({"available_at": stamp}).available_at == stamp
+        assert _body_to_tuple_row({"available_at": None}).available_at is None
+        assert _body_to_tuple_row({}).available_at is None
+
+    def test_the_census_keys_parse(self) -> None:
+        from nexus.db.t2.http_tuple_store import _body_to_census
+
+        stamp = "2026-10-30T01:02:03.456789Z"
+        census = _body_to_census({
+            "subspace": "aspects", "available": 4, "delayed": 3,
+            "oldest_claimable_created_at": stamp,
+        })
+        assert (census.delayed, census.oldest_claimable_created_at) == (3, stamp)
+        assert census.claimable_known is True
+
+    def test_a_present_null_is_known_and_means_no_claimable_row(self) -> None:
+        from nexus.db.t2.http_tuple_store import _body_to_census
+
+        census = _body_to_census({"subspace": "aspects", "available": 2, "delayed": 2,
+                                  "oldest_claimable_created_at": None})
+        assert census.oldest_claimable_created_at is None
+        assert census.claimable_known is True, "key present: the engine can say, and says none"
+
+    def test_an_engine_without_the_keys_reads_as_unknown(self) -> None:
+        from nexus.db.t2.http_tuple_store import _body_to_census
+
+        census = _body_to_census({"subspace": "aspects", "available": 2})
+        assert census.delayed == 0
+        assert census.oldest_claimable_created_at is None
+        assert census.claimable_known is False, "key missing: this engine cannot say"
 
 
 class TestRegistry:

@@ -520,6 +520,9 @@ def _body_to_tuple_row(body: dict[str, Any]) -> TupleRow:
         # predating it) and a null both read as None, which a caller must treat
         # as "unknown, use another source", so no known-flag is carried.
         claimed_at=body.get("claimed_at"),
+        # nexus-p909o (RDR-235): when a delayed row becomes claimable. A missing
+        # key (an engine predating it) and a null both read as None: no delay known.
+        available_at=body.get("available_at"),
     )
 
 
@@ -535,6 +538,12 @@ def _body_to_census(body: dict[str, Any]) -> SubspaceCensus:
         oldest_created_at=body.get("oldest_created_at"),
         newest_created_at=body.get("newest_created_at"),
         lapsed=int(body.get("lapsed", 0)),
+        # nexus-p909o (RDR-235): both absent from an engine that predates them. The
+        # known flag keeps "no claimable row" (key present, null) apart from "this
+        # engine cannot say" (key missing).
+        delayed=int(body.get("delayed", 0)),
+        oldest_claimable_created_at=body.get("oldest_claimable_created_at"),
+        claimable_known="oldest_claimable_created_at" in body,
     )
 
 
