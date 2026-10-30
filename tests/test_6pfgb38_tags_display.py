@@ -206,3 +206,27 @@ def test_list_survives_a_down_catalog_with_the_rows_tags(world, lines) -> None:
     world.fail = True
     text = "\n".join(lines())
     assert "[beta,row-only]" in text and "[row-file]" in text
+
+
+def test_one_bad_id_does_not_degrade_the_whole_page(monkeypatch) -> None:
+    """Review L3: the engine answers 400 for a whole batch holding one id that is not hex (a legacy
+    id), so one such chunk on a page used to drop every note's catalog tags back to the row's. The
+    bad id is isolated the way ``live_note_owners`` does it."""
+    import httpx
+
+    bad = "not-hex"
+
+    class _Strict(_StubReader):
+        def docs_for_chashes(self, chashes):
+            if bad in chashes and len(chashes) > 1:
+                req = httpx.Request("POST", "http://engine/v1/catalog/docs-for-chashes")
+                raise httpx.HTTPStatusError("bad id", request=req, response=httpx.Response(400, request=req))
+            return super().docs_for_chashes(chashes)
+
+    reader = _Strict({H_A: ["1.1.1"]}, {"1.1.1": _entry("note-a", {"tags": ["alpha", "one"]})})
+    monkeypatch.setattr(catalog_factory, "make_catalog_reader", lambda: reader)
+
+    got = catalog_tags_for_chunks("knowledge__art", [H_A, bad, H_B])
+
+    assert got == {H_A: ["alpha", "one"]}, "the good chunk keeps its catalog tags; the bad id owns nothing"
+    assert reader.closed == 1

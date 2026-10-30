@@ -1561,6 +1561,29 @@ def test_a_lookup_that_found_nothing_stamps_nothing_and_a_partial_one_erases_not
     assert cols["year"] == 2020, "what the new lookup found is written"
     assert (cols["venue"], cols["authors"], cols["s2"]) == (
         "OSDI", "Dana Example, Eve Example", "ss-6pfgb28"), cols
+    assert cols["citations"] == 42, "a zero count from a poorer lookup does not replace a real one"
+
+
+def test_a_lookup_that_raises_never_fails_the_streaming_index(tmp_path, fake_pdf, monkeypatch) -> None:
+    """The bib call is best effort at the streaming tail too: the enricher catches only httpx and
+    ValueError, so a Semantic Scholar answer of the wrong shape (a list for a dict) raised
+    AttributeError out of ``_bib_enrich(title)``, an argument evaluated outside any guard, and
+    failed the PDF after upload and before the completion stamp."""
+    def _boom(title: str) -> dict:
+        raise AttributeError("'list' object has no attribute 'get'")
+
+    monkeypatch.setattr("nexus.bib_enricher.enrich", _boom)
+    marker = "bib28-raises"
+    lines = _lines(marker, 12)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+
+    _index(path, marker, streaming="always", enrich=True)
+
+    doc, _ = _register(path, marker)
+    assert _index_state(doc) == "complete", "the index finished"
+    assert not _bib_columns(doc)["enriched_at"], "nothing was enriched"
+    assert _present(_COLLECTION, [_sha(x) for x in lines]) == {_sha(x) for x in lines}, "the chunks landed"
 
 
 @pytest.mark.parametrize("streaming", ["always", "never"])

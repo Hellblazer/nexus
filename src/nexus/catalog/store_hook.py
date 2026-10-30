@@ -1831,17 +1831,10 @@ def _row_guard(row_reader: Callable[[list[str]], dict[str, dict]]):
     return guard
 
 
-def live_note_owners(reader, collection: str, chashes: list[str]) -> dict[str, list]:
-    """``chash -> [CatalogEntry, ...]`` of the LIVE documents in *collection* (or ghosts, which have
-    none) whose manifests name each chash; a chash nobody holds maps to ``[]`` (nexus-6pfgb.15).
-
-    Unlike :func:`live_holders_of_chashes` this keeps the entries, so a caller can read each owner's
-    ``meta``, and it raises on a catalog failure: the expiry sweep must not treat "could not look"
-    as "no owner". A chash the wire rejects as not hex (a legacy id) owns nothing.
-    """
-    out: dict[str, list] = {c: [] for c in chashes}
-    if not chashes:
-        return out
+def _docs_for_chashes_isolating(reader, chashes: list[str]) -> dict[str, list]:
+    """``reader.docs_for_chashes`` over *chashes* in pages of 300; a page the engine rejects with 400
+    (one id that is not hex, a legacy id, fails the whole batch) is retried id by id, and an id that
+    still 400s owns nothing. Any other HTTP failure raises."""
     page = 300
     owners: dict[str, list] = {}
     for i in range(0, len(chashes), page):
@@ -1857,6 +1850,21 @@ def live_note_owners(reader, collection: str, chashes: list[str]) -> dict[str, l
                 except httpx.HTTPStatusError as one:
                     if one.response.status_code != 400:
                         raise
+    return owners
+
+
+def live_note_owners(reader, collection: str, chashes: list[str]) -> dict[str, list]:
+    """``chash -> [CatalogEntry, ...]`` of the LIVE documents in *collection* (or ghosts, which have
+    none) whose manifests name each chash; a chash nobody holds maps to ``[]`` (nexus-6pfgb.15).
+
+    Unlike :func:`live_holders_of_chashes` this keeps the entries, so a caller can read each owner's
+    ``meta``, and it raises on a catalog failure: the expiry sweep must not treat "could not look"
+    as "no owner". A chash the wire rejects as not hex (a legacy id) owns nothing.
+    """
+    out: dict[str, list] = {c: [] for c in chashes}
+    if not chashes:
+        return out
+    owners = _docs_for_chashes_isolating(reader, chashes)
     tumblers = sorted({str(t) for ts in owners.values() for t in ts})
     entries = reader.resolve_many(tumblers) if tumblers else {}
     for chash, ts in owners.items():
@@ -1939,7 +1947,7 @@ def catalog_tags_for_chunks(
         return {}
     try:
         if holders is None:
-            owners = {c: [str(t) for t in ts] for c, ts in (reader.docs_for_chashes(list(chashes)) or {}).items()}
+            owners = {c: [str(t) for t in ts] for c, ts in _docs_for_chashes_isolating(reader, list(chashes)).items()}
         else:
             owners = {c: [t for t, _title in hs] for c, hs in holders.items()}
         tumblers = sorted({t for ts in owners.values() for t in ts})

@@ -1143,13 +1143,15 @@ def record_pdf_extraction_on_document(
             writer.close()
 
 
-def _catalog_bib_fields(bib: Mapping[str, Any]) -> dict[str, Any]:
+def _catalog_bib_fields(bib: Mapping[str, Any], *, current_count: int = 0) -> dict[str, Any]:
     """The catalog document columns a Semantic Scholar lookup sets (``bib_*``), real values only.
 
-    The engine sets every column a request names, an empty string and a zero included, so a field
+    The engine sets every column it is sent, an empty string and a zero included, so a field
     the lookup did not find is left out: a later, poorer lookup cannot erase what an earlier one
-    wrote. A citation count of 0 is a count and is sent whenever the lookup carries one. An empty
-    lookup (a miss) yields ``{}``, and no ``bib_enriched_at``, so a miss never reads as enriched.
+    wrote. Semantic Scholar answers a citation count of 0 for a record it knows too little about,
+    so a zero count is fill-only: it is sent only where the catalog holds no count yet
+    (*current_count* is 0), and a positive count always replaces. An empty lookup (a miss) yields
+    ``{}``, and no ``bib_enriched_at``, so a miss never reads as enriched.
     """
     if not bib:
         return {}
@@ -1160,8 +1162,9 @@ def _catalog_bib_fields(bib: Mapping[str, Any]) -> dict[str, Any]:
         fields["bib_authors"] = str(bib["authors"])
     if bib.get("venue"):
         fields["bib_venue"] = str(bib["venue"])
-    if isinstance(bib.get("citation_count"), int):
-        fields["bib_citation_count"] = bib["citation_count"]
+    count = bib.get("citation_count")
+    if isinstance(count, int) and (count > 0 or not current_count):
+        fields["bib_citation_count"] = count
     if bib.get("semantic_scholar_id"):
         fields["bib_semantic_scholar_id"] = str(bib["semantic_scholar_id"])
     if fields:
@@ -1188,7 +1191,8 @@ def _catalog_pdf_bib_hook(
     ``author`` and ``year`` are FILL-ONLY: set from the lookup only where the catalog column is
     empty, the register-time posture of :func:`_catalog_pdf_hook`. The match is title-fuzzy, so it
     must not overwrite a value another writer set; the ``bib_*`` columns are the lookup's own and
-    are written whenever it found them. ``meta.references`` rides only when non-empty (the engine
+    are written whenever it found them, except a zero ``bib_citation_count``, which is fill-only (a poorer
+    lookup cannot replace a real count). ``meta.references`` rides only when non-empty (the engine
     merges ``meta`` and an empty value would overwrite).
 
     Returns True when a write was sent. Never raises: the PDF is indexed either way, and a failure
@@ -1215,6 +1219,11 @@ def _catalog_pdf_bib_hook(
                          file_path=str(pdf_path), collection=collection_name)
             return False
         entry = reader.resolve(doc_id)
+        fields = _catalog_bib_fields(
+            bib or {}, current_count=getattr(entry, "bib_citation_count", 0) or 0,
+        )
+        if not fields:
+            return False
         update: dict[str, Any] = dict(fields)
         if entry is not None:
             if bib.get("authors") and not (getattr(entry, "author", "") or "").strip():
@@ -1231,10 +1240,13 @@ def _catalog_pdf_bib_hook(
                      doc_id=doc_id, file_path=str(pdf_path), collection=collection_name)
         return False
     finally:
-        if writer is not None:
-            writer.close()
-        if reader is not None:
-            reader.close()
+        for client in (writer, reader):
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001 - "never raises": a failed close is named, not raised
+                    _log.warning("catalog_pdf_bib_close_failed", doc_id=doc_id,
+                                 file_path=str(pdf_path), collection=collection_name, exc_info=True)
 
 
 def _catalog_pdf_hook(
@@ -2474,8 +2486,15 @@ def pipeline_index_pdf(
                 extraction=extraction_record(_meta),
             )
             if enrich:
-                from nexus.bib_enricher import enrich as _bib_enrich  # noqa: PLC0415 - deferred: the lookup is a network call and --enrich is opt-in
-                _catalog_pdf_bib_hook(doc_id, pdf_path, collection, _bib_enrich(title), corpus=corpus)
+                # Best effort as a whole, the lookup included: ``enrich`` catches only httpx and
+                # ValueError, and ``_catalog_pdf_bib_hook`` closes its clients in a ``finally``,
+                # so either can raise into the tail that has not yet stamped the document complete.
+                try:
+                    from nexus.bib_enricher import enrich as _bib_enrich  # noqa: PLC0415 - deferred: the lookup is a network call and --enrich is opt-in
+                    _catalog_pdf_bib_hook(doc_id, pdf_path, collection, _bib_enrich(title), corpus=corpus)
+                except Exception as exc:  # noqa: BLE001 - best-effort: the PDF is indexed either way; named, not raised
+                    _log.warning("catalog_pdf_bib_not_recorded", reason="lookup_or_hook_raised", error=str(exc),
+                                 doc_id=doc_id, file_path=str(pdf_path), collection=collection)
 
             # RDR-089 document-grain chain — once per PDF boundary at the
             # streaming pipeline tail. content="" (PDF text streamed not
@@ -2584,7 +2603,10 @@ def _enrich_metadata_from_extraction(
     ``title``, ``source_author`` and ``extraction_method`` are replaced by this PDF's
     (the last-writer-wins limitation of the chunk row; this PDF's own value is now also on its
     catalog document's ``meta``, written by :func:`_catalog_pdf_hook`, nexus-6pfgb.6, where it is
-    its alone; the chunk-row keys go with nexus-6pfgb.27). Nothing else
+    its alone; the chunk-row keys go with nexus-6pfgb.27). The restamped-row co-owner loss
+    (nexus-ahm18's comment on nexus-6pfgb.6: a restamped row should not replace a co-owner's
+    ``extraction_method``) is retired by nexus-6pfgb.27, which removes these writes, and the
+    readers are moved off the row by nexus-6pfgb.16. Nothing else
     is touched on such a row: no ``delete_keys`` (the co-owner's
     ``quality_gate_overridden`` audit flag is never removed, and this PDF's own flag
     is not set on it), and a key whose value here is empty is skipped, so a

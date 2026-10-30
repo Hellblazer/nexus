@@ -11,13 +11,15 @@ from typing import Any
 import structlog
 
 from nexus.bounded_subprocess import run_bounded
-from nexus.context_annotations import OWNER_FACTS_KEY, OWNER_FRECENCY_KEY
+from nexus.context_annotations import DOC_ID_INFERRED_KEY, OWNER_FACTS_KEY, OWNER_FRECENCY_KEY
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
 
 #: Metadata keys the search sets for its own use; ``format_json`` leaves them out.
-_INTERNAL_METADATA_KEYS: frozenset[str] = frozenset({"_owner_doc_ids", OWNER_FACTS_KEY, OWNER_FRECENCY_KEY})
+_INTERNAL_METADATA_KEYS: frozenset[str] = frozenset(
+    {"_owner_doc_ids", OWNER_FACTS_KEY, OWNER_FRECENCY_KEY, DOC_ID_INFERRED_KEY},
+)
 
 
 def _display_path(meta: dict, default: str = "") -> str:

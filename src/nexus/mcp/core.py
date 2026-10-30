@@ -6768,7 +6768,8 @@ def store_list(
             lines.append(also)
         # nexus-6pfgb.38 (RDR-236 RF-17): a note's tags come from its catalog entry's array, one lookup
         # for the page; the row's comma string (the last writer's) is the fallback where no holder
-        # records tags (an indexed file's chunks, whose documents have no tags key, answer nothing).
+        # records tags. An indexed file's document has no tags key until Phase 3's generated columns,
+        # so its chunks answer nothing here and the row fallback stays.
         from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
 
         catalog_tags = _store_hook.catalog_tags_for_chunks(col_name, [e.get("id", "") for e in page])

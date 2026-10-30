@@ -18,6 +18,7 @@ from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
 from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
     OWNER_FACTS_KEY,
+    DOC_ID_INFERRED_KEY,
     OWNER_FRECENCY_KEY,
     OWNER_RESOLVE_CAP,
     agreed_facts,
@@ -201,6 +202,7 @@ def _attach_from_chash_positions(
         r.metadata["_owner_doc_ids"] = list(dict.fromkeys(c["doc_id"] for c in by_chash[chash]))
         if not r.metadata.get("doc_id"):
             r.metadata["doc_id"] = match["doc_id"]
+            r.metadata[DOC_ID_INFERRED_KEY] = True
         r.metadata.setdefault("chunk_count", int(match.get("chunk_count") or 0))
         r.metadata.setdefault("chunk_index", int(match.get("position") or 0))
     return True
@@ -335,6 +337,7 @@ def _attach_doc_ids_from_catalog(
             # the first deterministically; downstream consumers that
             # need finer disambiguation can re-query the manifest.
             r.metadata["doc_id"] = docs[0]
+            r.metadata[DOC_ID_INFERRED_KEY] = True
             resolved_doc_ids[chash] = docs[0]
 
     # Batch-fetch manifests for all resolved doc_ids in one call when the
@@ -467,7 +470,16 @@ def _attach_display_paths(
         # RDR-236 Phase 1 (nexus-6pfgb.9): the hit is scored by the frecency of the document it
         # is attributed to (``doc_id``), taken from the same page lookup as the title above, never
         # from the shared row (the last writer's file). Absent when that document states none.
-        if (
+        # When the row named no document and the lookup chose one from the engine's order, that
+        # choice is arbitrary: the hit takes the best score its live owners state.
+        if r.metadata.get(DOC_ID_INFERRED_KEY):
+            stated = [
+                sc for o in live_owners
+                if (sc := facts.get(o, {}).get("frecency_score")) is not None
+            ]
+            if stated:
+                r.metadata[OWNER_FRECENCY_KEY] = max(stated)
+        elif (
             did in homes and homes[did] in ("", r.collection)
             and (owner_frecency := facts.get(did, {}).get("frecency_score")) is not None
         ):

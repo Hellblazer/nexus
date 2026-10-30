@@ -2734,11 +2734,12 @@ def _write_frecency_meta(
     ]
     if not updates:
         return 0
+    created: "object | None" = None
     try:
         if writer is None:
             from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-            writer = make_catalog_writer()
+            created = writer = make_catalog_writer()
         update_many = getattr(writer, "update_many", None)
         if callable(update_many):
             counts = update_many(updates)
@@ -2754,6 +2755,14 @@ def _write_frecency_meta(
     except Exception:  # noqa: BLE001 — best-effort: the catalog stamp never breaks an index run
         _log.warning("frecency_meta_stamp_batch_failed", documents=len(updates), exc_info=True)
         return 0
+    finally:
+        # A writer this call made is closed here; one the caller handed in is the caller's.
+        close = getattr(created, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 — best-effort: a failed close never breaks an index run
+                _log.debug("frecency_meta_writer_close_failed", exc_info=True)
 
 
 def _run_index_frecency_only(repo: Path, registry: "object") -> None:

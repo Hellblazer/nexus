@@ -107,6 +107,62 @@ def test_two_owners_of_one_chunk_each_score_by_their_own_frecency() -> None:
     assert as_a.hybrid_score < as_b.hybrid_score
 
 
+def test_a_shared_chunk_with_no_row_doc_id_scores_by_the_best_of_its_owners() -> None:
+    """Review S2 pin. The row names no document, so the owner is chosen by the engine's order
+    (B first, 0.2): that choice is arbitrary, and a hit's frecency must not depend on it. The hit
+    scores with the MAX of its live owners' catalog scores, taken from the page's one lookup."""
+    a = _entry("1.1.1", meta={"frecency_score": 0.9})
+    b = _entry("1.1.2", meta={"frecency_score": 0.2})
+    c = _entry("1.1.3", meta={"frecency_score": 0.5})
+    catalog = _Catalog([a, b, c], [_position(X, "1.1.2"), _position(X, "1.1.1"), _position(Y, "1.1.3")])
+    shared = _hit(X, row_frecency=0.2)  # no doc_id on the row
+    other = _hit(Y)
+
+    ranked = _rank([shared, other], catalog)
+
+    assert shared.metadata["doc_id"] == "1.1.2", "the display attribution is unchanged: engine order"
+    assert shared.metadata["_owner_frecency"] == 0.9
+    assert ranked[0] is shared, [r.hybrid_score for r in ranked]
+    assert len(catalog.resolve_calls) == 1, "no new catalog call"
+
+
+def test_the_best_of_the_owners_skips_an_owner_that_states_no_score() -> None:
+    a = _entry("1.1.1")  # states none
+    b = _entry("1.1.2", meta={"frecency_score": 0.2})
+    catalog = _Catalog([a, b], [_position(X, "1.1.1"), _position(X, "1.1.2")])
+    shared = _hit(X)
+
+    _rank([shared], catalog)
+
+    assert shared.metadata["_owner_frecency"] == 0.2
+
+
+def test_the_best_of_the_owners_holds_on_the_manifest_path_too() -> None:
+    """An engine without the chash-positions route attributes through the reverse lookup."""
+    from nexus.search_engine import _attach_display_paths, _attach_doc_ids_from_catalog
+
+    a = _entry("1.1.1", meta={"frecency_score": 0.9})
+    b = _entry("1.1.2", meta={"frecency_score": 0.2})
+
+    class _ManifestCatalog(_Catalog):
+        chash_positions = None
+
+        def docs_for_chashes(self, chashes):
+            return {X: ["1.1.2", "1.1.1"]}
+
+        def get_manifests(self, doc_ids):
+            return {d: [{"chash": X, "position": 0}] for d in doc_ids}
+
+    catalog = _ManifestCatalog([a, b], [])
+    shared = _hit(X)
+
+    _attach_doc_ids_from_catalog([shared], catalog)
+    _attach_display_paths([shared], catalog)
+
+    assert shared.metadata["doc_id"] == "1.1.2"
+    assert shared.metadata["_owner_frecency"] == 0.9
+
+
 def test_a_multi_owner_hit_whose_owner_has_no_catalog_score_scores_zero_not_the_row() -> None:
     a = _entry("1.1.1")  # no frecency in meta
     b = _entry("1.1.2", meta={"frecency_score": 0.9})
@@ -257,6 +313,44 @@ def test_a_non_finite_score_is_not_stamped() -> None:
     n = _write_frecency_meta({"1.1.1": float("nan"), "1.1.2": 0.5}, "T", writer=w)
 
     assert n == 1 and [u[0] for u in w.updates] == ["1.1.2"]
+
+
+class _ClosingWriter(_BatchWriter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_a_writer_the_stamp_created_is_closed_one_it_was_handed_is_not(monkeypatch) -> None:
+    """Review L1: one leaked HTTP client per index run. The caller owns what it injects."""
+    import nexus.catalog.factory as factory
+    from nexus.indexer import _write_frecency_meta
+
+    made = _ClosingWriter()
+    monkeypatch.setattr(factory, "make_catalog_writer", lambda: made)
+    assert _write_frecency_meta({"1.1.1": 0.25}, "T") == 1
+    assert made.closed == 1, "the writer the stamp created is closed"
+
+    handed = _ClosingWriter()
+    assert _write_frecency_meta({"1.1.1": 0.25}, "T", writer=handed) == 1
+    assert handed.closed == 0, "the caller's writer is the caller's to close"
+
+
+def test_a_created_writer_is_closed_when_the_stamp_fails(monkeypatch) -> None:
+    import nexus.catalog.factory as factory
+    from nexus.indexer import _write_frecency_meta
+
+    class _Boom(_ClosingWriter):
+        def update_many(self, updates):
+            raise RuntimeError("catalog down")
+
+    made = _Boom()
+    monkeypatch.setattr(factory, "make_catalog_writer", lambda: made)
+    assert _write_frecency_meta({"1.1.1": 0.25}, "T") == 0
+    assert made.closed == 1
 
 
 def _frecency_only(tmp_path: Path, writer, *, doc_ids: bool = True):

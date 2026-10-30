@@ -114,3 +114,37 @@ def test_the_pre_flight_registration_carries_the_author_without_the_hook(tmp_pat
     assert _index_md(md, "6pfgb7-preflight") > 0
 
     assert _doc(md).author == "Pre Flight"
+
+
+def test_a_register_that_resolves_onto_an_existing_row_still_fills_an_empty_author(tmp_path, monkeypatch) -> None:
+    """Review L5: the hook's lookups missed, so it registered, and the engine answered with the
+    existing row untouched (no ``meta`` merge). The follow-up update carried only ``meta``, so an
+    empty catalog author on that row was never filled; it rides the same fill-only rule now."""
+    from nexus.doc_indexer import _catalog_markdown_hook
+
+    md = tmp_path / "6pfgb7-resolved.md"
+    md.write_text("---\ntitle: T\n---\n\n# H\n\nBody of 6pfgb7 resolved.\n")
+    assert _index_md(md, "6pfgb7-resolved") > 0
+    assert _doc(md).author == ""
+    md.write_text("---\ntitle: T\nauthor: Resolved Author\n---\n\n# H\n\nBody of 6pfgb7 resolved.\n")
+    monkeypatch.setattr("nexus.doc_indexer._find_curator_document", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.doc_indexer._repo_owner_document_for", lambda *a, **k: None)
+
+    _catalog_markdown_hook(md, _COLLECTION, "prose", "6pfgb7-resolved", 1)
+
+    assert _doc(md).author == "Resolved Author"
+
+
+def test_a_register_that_resolves_onto_a_curated_row_keeps_its_author(tmp_path, monkeypatch) -> None:
+    from nexus.doc_indexer import _catalog_markdown_hook
+
+    md = tmp_path / "6pfgb7-resolved-curated.md"
+    md.write_text("---\ntitle: T\nauthor: Frontmatter\n---\n\n# H\n\nBody of 6pfgb7 resolved curated.\n")
+    assert _index_md(md, "6pfgb7-resolved-curated") > 0
+    ActiveCatalog().update(_doc(md).tumbler, author="Curated Author")
+    monkeypatch.setattr("nexus.doc_indexer._find_curator_document", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.doc_indexer._repo_owner_document_for", lambda *a, **k: None)
+
+    _catalog_markdown_hook(md, _COLLECTION, "prose", "6pfgb7-resolved-curated", 1)
+
+    assert _doc(md).author == "Curated Author"
