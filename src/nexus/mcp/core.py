@@ -12354,8 +12354,9 @@ async def nx_answer(
     # reads that source. Once it resolved to one document, the run's scope binding becomes the document's collection and
     # its owner binding the document's owner, and the runner's existing section 2a and owner narrowing then apply them
     # to EVERY retrieval step of EVERY plan (library, inline, research:default). Replaces the strategy deny-list.
-    # ``_effective_scope`` is the scope the steps run under; ``scope`` stays what the caller gave (plan matching, plan
-    # growth and the envelope's ``scope`` read that). ``None`` when the request is not one the rule concerns.
+    # ``_effective_scope`` is the scope the steps run under; ``scope`` stays what the caller gave (plan matching, the inline
+    # planner's corpus hint, plan growth and the envelope's ``scope`` read that: the planner is not handed a collection name,
+    # so a plan it grows does not pin the next question to this document's collection). ``None`` when the request is not one the rule concerns.
     from nexus.plans.owner_narrowing import OWNERS_BINDING as _OWNERS_BINDING  # noqa: PLC0415 — deferred; matches this module's convention
     from nexus.plans.single_source import derive_single_source_narrowing as _derive_single_source  # noqa: PLC0415 — deferred; matches this module's convention
 
@@ -13142,7 +13143,7 @@ async def nx_answer(
             )
             with _ambient_usage_sink(_out_of_step_usage_sink):
                 best = await _nx_answer_plan_miss(
-                    question, scope=_effective_scope, max_steps=max_steps,
+                    question, scope=scope, max_steps=max_steps,
                     few_shot_matches=matches, coverage=_request_coverage,
                     enforce_eligibility=_plan_eligibility.enforce,
                 )

@@ -2128,3 +2128,33 @@ async def test_nx_answer_leaves_a_lookup_a_multi_source_request_and_an_unresolve
     assert env["single_source_narrowing"]["applied"] is False and "did not resolve" in env["single_source_narrowing"]["reason"]
     assert "_nx_scope" not in runs[0].call_args.args[1]
     assert "retrieval was not narrowed to it" in env["final_text"]
+
+
+def test_rdr_070_chunked_by_the_real_chunker_gets_one_label_run_per_heading_in_document_order() -> None:
+    # nexus-4xmpv re-measure 2: RDR-070's 42 chunks carried 9 labels (chunks 13-41 all "Phase 2") before the overlap fix
+    # and 32 after, the 32 headings outside code fences, in document order. The file is the one the fixture came from.
+    import re
+    from pathlib import Path
+
+    from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
+
+    text = (Path(__file__).resolve().parents[1] / "docs/rdr/rdr-070-incremental-taxonomy-clustered-search.md").read_text()
+    _fm, body = parse_frontmatter(text)
+    texts = [c.text for c in SemanticMarkdownChunker().chunk(body, {})]
+    fence, headings = None, []
+    for line in body.splitlines():
+        stripped = line.lstrip()
+        if fence is None:
+            if stripped.startswith(("```", "~~~")):
+                fence = stripped[:3]
+            elif m := re.match(r"^ {0,3}#{1,6}[ \t]+(\S.*?)[ \t]*#*[ \t]*$", line):
+                headings.append(m.group(1).strip())
+        elif stripped.startswith(fence):
+            fence = None
+    labels = derive_content_labels(texts, positions=list(range(len(texts))))
+    runs: list[str] = []
+    for la in labels:
+        if la.label and (not runs or runs[-1] != la.label):
+            runs.append(la.label)
+    assert (len(texts), len(headings)) == (42, 32), "non-vacuity: the document the measurement used"
+    assert runs == headings
