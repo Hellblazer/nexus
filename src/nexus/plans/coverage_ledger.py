@@ -79,10 +79,11 @@ was made, ``partial_failure`` after some were).
 
 **The calls run concurrently** (nexus-jypmj.17), at most :data:`MAX_CONCURRENT_ASSESSMENT_CALLS` at a time (less when an API backend's configured gate is
 lower; the ``claude -p`` backend's four concurrent subprocesses are unmeasured), each started in plan order (stream order, then facet group, then pack). Each call decides when it STARTS: the USD allowance
-(spent so far plus the calls in flight and the starting call at the mean known cost, or at
+(the calls in flight and the starting call at the mean known cost, or at
 :data:`ASSESSMENT_CALL_COST_PRIOR_USD` before any call reported one; one call always starts when none is in flight and
-the allowance is above zero; a call that only the prior says does not fit is HELD, outside the gate, until a call ends and a measured cost
-exists, and is then judged on that cost, nexus-jypmj.22) and the stage allowance left decide whether it runs
+the allowance is above zero until a cost is measured, after which EVERY call is judged on it; a call that does not fit beside
+the calls in flight is HELD, outside the gate, until a call ends, and is skipped for budget only when it cannot fit even
+alone, nexus-jypmj.22) and the stage allowance left decide whether it runs
 and what timeout it draws, and it is cut from outside at that timeout, so the stage cannot outlast its share
 (beyond a cut call's bounded cleanup grace of about 1 s) whatever the check does with the timeout it is given. A call cut that way has its process tree killed
 (:class:`nexus.operators.dispatch.CliBackend`) and its ``StepRecord`` is ``ok=False`` with an UNKNOWN cost: the CLI reports
@@ -218,6 +219,8 @@ MAX_CONCURRENT_ASSESSMENT_CALLS: int = 4
 #: serial design; 0.02 is about 2.4 times the golden per-call cost, so the prior errs towards starting fewer calls. A call that reported its cost
 #: replaces the prior with the mean of the known costs.
 ASSESSMENT_CALL_COST_PRIOR_USD: float = 0.02
+#: Slack on the USD fit test, so a cost that exactly uses up the allowance is not refused over float rounding.
+_USD_EPS: float = 1e-9
 #: Anchors one assessment call reads (nexus-jypmj.17). A stream with more is split into balanced packs of at most this
 #: many, each its own call over the same facet group, so a 65-anchor graph stream is four calls of 16-17 and not
 #: one call that outran the 60 s timeout (nexus-jypmj.3.10 canary: the 10-15 anchor streams answered in about 20 s
@@ -465,7 +468,7 @@ class AssessmentReport:
     def failure_cause(self) -> str:
         """What the failed calls were, over every round: ``raised_call``, ``unusable_reply``, ``mixed`` (both).
         Else, when at least one call ran and other planned calls never started, ``budget_skip`` (the USD allowance
-        was spent; it wins when the deadline cut calls too, the per-call counters carry both) or ``deadline_skip``;
+        was spent or could not cover another call; it wins when the deadline cut calls too, the per-call counters carry both) or ``deadline_skip``;
         else ``none``. A failed call takes precedence over a skip. An assessment that was skipped whole (no call
         ran) is not a failure and reads ``none``, as it always did; its outcome and the skip counters say why."""
         if self.raised_calls and self.unusable_calls:
@@ -1230,8 +1233,10 @@ class CoverageBoundary:
         whether it may: the USD allowance (net of the calls in flight, at the mean cost of those finished) and the
         stage's remaining time (a call's timeout is what is left of the stage, capped by ``call_timeout_s``, and the
         call is cut at that timeout from outside, so no stage overruns its share however the check behaves). A call that
-        only the prior (no measured cost yet) says does not fit waits for a call to end and is then judged on the measured
-        cost; if every call in flight ends without reporting one, it is skipped for budget. One
+        does not fit beside the calls in flight (on the prior before any cost is measured, on the measured cost after)
+        waits for a call to end and is judged again; it is skipped for budget only when the measured cost says it cannot
+        fit even alone. If every call in flight ends without reporting a cost, a held call starts when the allowance
+        is above zero, one at a time. One
         call that raises or replies unusably affects only its own facets; the others still count. The replies are
         read after all calls finish, in plan order, so the ledger, the call log and every count are the same
         whatever order the calls finish in."""
@@ -1280,26 +1285,26 @@ class CoverageBoundary:
                     stage_left = None if reserve is None or remaining is None else remaining - reserve
                     timeout = self.call_timeout(stage_left)
                     if usd is not None:
-                        # The calls in flight and this one are each assumed to cost the mean of those that reported a
-                        # cost, or the prior before any did, so a wave cannot start more calls than the allowance
-                        # holds. With none in flight the call starts whenever the allowance is above zero, as the
-                        # serial loop's did (the budget is soft: one call past it is the accepted overshoot).
-                        estimate = view.assessment_cost_estimate()
-                        per_call = self.call_cost_prior_usd if estimate is None else estimate
-                        spent = _CallOutcome(skipped="skipped_budget", why="the USD allowance was spent")
+                        # Once a call has reported a cost, EVERY call is judged on it: it runs when the allowance left
+                        # covers it beside the calls in flight (a cost that exactly uses up what is left still runs),
+                        # is held when it would fit once those finish, and is skipped when it cannot fit even alone.
+                        # Before any cost is measured the prior stands in, but only for a call decided beside others
+                        # in flight: a call with none in flight starts whenever the allowance is above zero, as the
+                        # serial loop's did (the budget is soft: that one call past it is the accepted overshoot).
+                        # A call held on the prior alone never starts on it while others run; it waits for a measured
+                        # cost or for the wave to end.
                         if usd <= 0:
-                            return spent
-                        if estimate is not None:
-                            if in_flight > 0 and usd - estimate * (in_flight + 1) <= 0:
-                                return spent  # the measured cost says this call does not fit
-                        elif held and in_flight == 0:
-                            # Every call that was running ended without reporting a cost: nothing measured overturns
-                            # the prior's verdict, so the held call stays skipped.
-                            return spent
-                        elif held or (in_flight > 0 and usd - per_call * (in_flight + 1) <= 0):
-                            # Only the prior says this call does not fit (nexus-jypmj.22): hold it until a measured
-                            # cost exists, instead of cutting it on a guess the first report would overturn. A held
-                            # call never starts on the prior alone; it waits for a measurement or for the wave to end.
+                            return _CallOutcome(skipped="skipped_budget", why="the USD allowance was spent")
+                        estimate = view.assessment_cost_estimate()
+                        if estimate is None:
+                            hold = in_flight > 0 and (held or usd - self.call_cost_prior_usd * (in_flight + 1) < 0)
+                        elif usd - estimate * (in_flight + 1) >= -_USD_EPS:
+                            hold = False
+                        elif in_flight > 0 and usd - estimate >= -_USD_EPS:
+                            hold = True  # does not fit beside the calls in flight, fits once they finish
+                        else:
+                            return _CallOutcome(skipped="skipped_budget", why="the USD allowance cannot cover another call")
+                        if hold:
                             # It waits outside the gate, so a call behind it is judged now and is not kept off a slot.
                             held = True
                             waiter = asyncio.get_running_loop().create_future()

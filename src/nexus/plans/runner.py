@@ -3384,8 +3384,13 @@ async def _plan_run_impl(
             supplement.install_note(note)
 
     def _assessment_cost_estimate() -> float | None:
-        """The mean known cost of the assessment calls so far, or ``None`` (no call reported a cost)."""
-        costs = [r.cost_usd for r in step_records if r.operator == "operator_check" and r.cost_usd is not None]
+        """The mean known cost of the assessment calls so far, or ``None`` (no call reported a cost). Assessment calls
+        are the ``operator_check`` records numbered past the plan's own steps; a plan's own ``check`` steps (lower
+        indices, a different prompt and size) are not assessment calls and stay out of the mean."""
+        costs = [
+            r.cost_usd for r in step_records
+            if r.operator == "operator_check" and r.step_index >= len(steps) and r.cost_usd is not None
+        ]
         return sum(costs) / len(costs) if costs else None
 
     async def _run_coverage_boundary(

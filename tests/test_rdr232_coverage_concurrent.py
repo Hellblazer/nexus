@@ -514,29 +514,41 @@ async def test_a_spent_usd_allowance_starts_no_call() -> None:
     assert _summary(cov)["coverage"]["unassessed_by_cause"]["budget_skip"] == 2
 
 
-async def _count_starts(remaining_usd: float, *, estimate: float | None, n_facets: int = 4) -> tuple[int, CoverageResult]:
+async def _count_starts(
+    remaining_usd: float, *, estimate: float | None, n_facets: int = 4,
+) -> tuple[int, CoverageResult, int]:
+    """Starts, the result, and the peak number of calls in flight. ``remaining_usd`` and the estimate are fixed: the
+    calls spend nothing the view can see, so what this measures is the wave the allowance admits at once."""
     started = 0
+    live = peak = 0
 
     async def check(args: dict, *, timeout: float) -> dict:  # noqa: ARG001
-        nonlocal started
+        nonlocal started, live, peak
         started += 1
-        await asyncio.sleep(0.05)
+        live += 1
+        peak = max(peak, live)
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            live -= 1
         return supports_nothing(args["items"], args["check_instruction"])
 
     view = await _direct_view(
         Dispatcher(), check, remaining_usd=lambda: remaining_usd, assessment_cost_estimate=lambda: estimate,
     )
     cov = await CoverageBoundary(request=_request(n_facets), max_facets_per_call=1).evaluate(view)
-    return started, cov
+    return started, cov, peak
 
 
 @pytest.mark.asyncio
 async def test_calls_in_flight_and_the_starting_call_are_counted_against_the_usd_allowance_at_the_mean_known_cost() -> None:
     """2.5 left, 1.0 a call: the first two start (2.5 less 1.0 and less 2.0 for those in flight and itself), the
-    third would spend what is not there (2.5 less 3.0) and is skipped, so a wave cannot overshoot the allowance."""
-    started, cov = await _count_starts(2.5, estimate=1.0)
-    assert started == 2 == cov.ledger.assessment.calls
-    assert cov.ledger.assessment.outcome == "partial_failure" and "USD" in cov.ledger.assessment.detail
+    third would spend what is not there beside them (2.5 less 3.0) and is held until one ends, so a wave never
+    overshoots the allowance: two at a time at most. (The fixture's allowance does not shrink as calls end, so the
+    held calls then start one at a time; the shrinking case is ``_metered`` below.)"""
+    started, cov, peak = await _count_starts(2.5, estimate=1.0)
+    assert peak == 2, "the wave is bounded by the allowance at the measured cost"
+    assert started == 8 == cov.ledger.assessment.calls  # 2 evidence streams x 4 facets
 
 
 @pytest.mark.asyncio
@@ -544,12 +556,13 @@ async def test_the_first_wave_has_no_estimate_so_a_conservative_prior_bounds_it(
     """No call has reported a cost yet, so the mean is unknown. Failing before: every call of the first wave started
     whenever the allowance was above zero (four calls against an allowance for two). The prior is
     ``ASSESSMENT_CALL_COST_PRIOR_USD``: it must be at least the live canary's cost per call (0.0166 USD over 4 calls,
-    nexus-jypmj.3.10), and the allowance here is two and a half of them."""
+    nexus-jypmj.3.10), and the allowance here is two and a half of them. The calls the prior holds back start one at
+    a time once the wave ends (nothing reported a cost and the allowance is still above zero)."""
     prior = ASSESSMENT_CALL_COST_PRIOR_USD
     assert prior >= 0.0166 / 4, "the prior is no smaller than a cost already measured"
-    started, cov = await _count_starts(prior * 2.5, estimate=None)
-    assert started == 2 == cov.ledger.assessment.calls, "two calls fit; the third would be the one past the allowance"
-    assert "USD" in cov.ledger.assessment.detail
+    started, cov, peak = await _count_starts(prior * 2.5, estimate=None)
+    assert peak == 2, "two calls fit beside each other; the third would be the one past the allowance"
+    assert started == 8 == cov.ledger.assessment.calls  # 2 evidence streams x 4 facets
 
 
 @pytest.mark.asyncio
@@ -557,25 +570,34 @@ async def test_a_small_allowance_still_starts_one_call_as_the_serial_loop_did() 
     """Nothing in flight and a positive allowance: the call starts even when one call may cost more than what is left
     (the budget is soft; one call past it is the accepted overshoot). Without this a small ``budget_usd`` would
     assess nothing."""
-    started, cov = await _count_starts(ASSESSMENT_CALL_COST_PRIOR_USD / 10, estimate=None)
-    assert started == 1 == cov.ledger.assessment.calls
+    started, cov, peak = await _count_starts(ASSESSMENT_CALL_COST_PRIOR_USD / 10, estimate=None)
+    assert peak == 1 and started == 8 == cov.ledger.assessment.calls  # one at a time: the prior holds the rest back
 
 
-async def _metered(left: float, *, cost: float | None, n_facets: int = 7, report_cost: bool = True) -> tuple[int, CoverageResult]:
-    """A wave against a live allowance: every call spends *cost* (reported to the estimate once it ends, when
-    *report_cost*), and ``remaining_usd`` is what the calls have left of *left*."""
+async def _metered(
+    left: float, *, cost: float | None, n_facets: int = 7, report_cost: bool = True,
+) -> tuple[int, CoverageResult, int]:
+    """A wave against a live allowance: every call spends *cost*, and ``remaining_usd`` is what the calls have left of
+    *left*. With *report_cost* False the call's cost is unknown (a cut call): neither the estimate nor the remaining
+    allowance sees it, as in the runner, which derives both from ``StepRecord.cost_usd``. Returns the starts, the
+    result and the peak number of calls in flight."""
     started = 0
+    live = peak = 0
     reported: list[float] = []
     state = {"left": left}
 
     async def check(args: dict, *, timeout: float) -> dict:  # noqa: ARG001
-        nonlocal started
+        nonlocal started, live, peak
         started += 1
-        await asyncio.sleep(0.05)
-        if cost is not None:
+        live += 1
+        peak = max(peak, live)
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            live -= 1
+        if cost is not None and report_cost:
             state["left"] -= cost
-            if report_cost:
-                reported.append(cost)
+            reported.append(cost)
         return supports_nothing(args["items"], args["check_instruction"])
 
     view = await _direct_view(
@@ -583,7 +605,7 @@ async def _metered(left: float, *, cost: float | None, n_facets: int = 7, report
         assessment_cost_estimate=lambda: sum(reported) / len(reported) if reported else None,
     )
     cov = await CoverageBoundary(request=_request(n_facets), max_facets_per_call=1).evaluate(view)
-    return started, cov
+    return started, cov, peak
 
 
 @pytest.mark.asyncio
@@ -593,40 +615,58 @@ async def test_calls_held_on_the_prior_alone_run_once_the_first_reports_a_cost_t
     again, so one call ran and the rest were left unassessed. Now they are held, the first reports 0.004, and the
     allowance covers as many calls as fit: 0.03 at 0.004 a call is seven (0.028 <= 0.03), out of the 14 planned
     (two evidence streams, seven facets each), and the other seven are skipped on the MEASURED cost."""
-    started, cov = await _metered(0.03, cost=0.004)
+    started, cov, _ = await _metered(0.03, cost=0.004)
     a = cov.ledger.assessment
     assert started == a.calls == 7 and a.skipped_budget_calls == 7 and a.outcome == "partial_failure"
 
 
 @pytest.mark.asyncio
-async def test_a_held_call_is_skipped_when_the_measured_cost_says_it_cannot_fit() -> None:
+async def test_a_call_that_does_not_fit_beside_those_in_flight_is_held_again_not_skipped_for_good() -> None:
     """0.012 left, 0.004 a call: the first runs and the rest are held. With 0.004 measured, 0.008 is left: one call
-    starts, the next would spend 0.008 (nothing left) and is skipped on the measured cost, as are all that follow.
-    The per-call counter and ``budget_skip`` agree."""
-    started, cov = await _metered(0.012, cost=0.004)
+    starts, the next would not fit beside it (0.008 less 0.008 is zero but 0.004 is in flight too) and is HELD, not
+    cut; when the one in flight ends and 0.004 is left, that call fits alone and runs. Three calls fit (3 x 0.004 =
+    0.012) and three run; the rest cannot fit even alone and are skipped on the measured cost. Failing before: the
+    call that did not fit beside the one in flight was skipped for good and only two ran."""
+    started, cov, peak = await _metered(0.012, cost=0.004)
     a = cov.ledger.assessment
-    assert started == a.calls == 2 and a.skipped_budget_calls == 12
+    assert started == a.calls == 3 and a.skipped_budget_calls == 11
+    assert peak <= 2, "the wave never holds more calls than the allowance covers"
     assert a.skipped_deadline_calls == 0 and a.outcome == "partial_failure" and "USD" in a.detail
     assert _summary(cov)["coverage"]["unassessed_by_cause"]["budget_skip"] > 0
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_cannot_fit_even_alone_is_skipped_on_the_measured_cost() -> None:
+    """0.005 left, 0.004 a call: the first runs (nothing measured, nothing in flight) and spends 0.004; 0.001 is left,
+    which a 0.004 call cannot fit even alone, so every other call is skipped. One call, not two: the old rule started
+    any call that found nothing in flight whenever the allowance was above zero, past a cost already measured."""
+    started, cov, _ = await _metered(0.005, cost=0.004)
+    a = cov.ledger.assessment
+    assert started == a.calls == 1 and a.skipped_budget_calls == 13
+    assert "cannot cover" in a.detail, "no allowance is claimed spent when the cost says a call does not fit"
 
 
 @pytest.mark.asyncio
 async def test_a_budget_too_small_for_one_measured_call_still_skips_the_rest() -> None:
     """0.0015 left (the live row 898's allowance), 0.004 a call: the first call runs, spends past the allowance, and
     the held calls find none left."""
-    started, cov = await _metered(0.0015, cost=0.004)
+    started, cov, _ = await _metered(0.0015, cost=0.004)
     a = cov.ledger.assessment
     assert started == a.calls == 1 and a.skipped_budget_calls == 13 and a.outcome == "partial_failure"
+    assert "was spent" in a.detail
 
 
 @pytest.mark.asyncio
-async def test_calls_held_on_the_prior_stay_skipped_when_no_call_ever_reports_a_cost() -> None:
-    """Nothing measured overturns the prior: the first call ends without a cost, so the held calls are skipped for
-    budget exactly as before (one call ran, the rest were cut)."""
-    started, cov = await _metered(0.03, cost=0.004, report_cost=False)
+async def test_calls_held_on_the_prior_run_one_at_a_time_when_no_call_ever_reports_a_cost() -> None:
+    """The first call ends without a reported cost (the runner's view of a cut call: neither the estimate nor the
+    remaining allowance moves). The allowance is still above zero, so a held call starts when none is in flight, as
+    the module docstring says ('one call always starts when none is in flight and the allowance is above zero'), one
+    at a time. Failing before: the held calls were skipped for budget though nothing had been spent."""
+    started, cov, peak = await _metered(0.03, cost=0.004, report_cost=False)
     a = cov.ledger.assessment
-    assert started == a.calls == 1 and a.skipped_budget_calls == 13 and a.skipped_deadline_calls == 0
-    assert a.outcome == "partial_failure"
+    assert started == a.calls == 14 and a.skipped_budget_calls == 0 and a.skipped_deadline_calls == 0
+    assert peak == 1, "the prior still says only one call fits at a time, so they run serially"
+    assert a.outcome == "ok" and "USD" not in a.detail
 
 
 @pytest.mark.asyncio
@@ -652,6 +692,36 @@ async def test_an_expired_deadline_still_skips_a_held_call_for_the_deadline() ->
     a = cov.ledger.assessment
     assert a.calls == 1 and a.skipped_deadline_calls == 13 and a.skipped_budget_calls == 0
     assert _summary(cov)["coverage"]["unassessed_by_cause"]["deadline_skip"] == 7
+
+
+@pytest.mark.asyncio
+async def test_the_cost_estimate_averages_assessment_calls_only_not_the_plans_own_check_steps() -> None:
+    """The runner's estimate was the mean of every ``operator_check`` record with a cost, so a plan's own ``check``
+    step (a different prompt, here 1.0 USD) inflated what an assessment call was assumed to cost. 1.012 USD is left
+    before the plan's check spends 1.0, so 0.012 reaches the assessment, and each assessment call costs 0.004: three
+    fit. With the check step in the mean the estimate after the first call is 0.502 and nothing else fits (one
+    call). Records are told apart by step index: assessment calls are numbered past the plan's own steps."""
+    plan = {"steps": [*PLAN["steps"][:3], {"tool": "operator_check", "args": {"items": "$step3.contents", "check_instruction": "plan check"}}, PLAN["steps"][3]]}
+
+    async def model(args: dict) -> dict:
+        sink = llm_types._ambient_usage_sink.get()
+        assert sink is not None
+        plan_check = args["check_instruction"] == "plan check"
+        await asyncio.sleep(0.05)
+        sink.append(DispatchUsage(
+            model="haiku", cost_usd=1.0 if plan_check else 0.004, input_tokens=1, output_tokens=1, cache_creation_input_tokens=0,
+            cache_read_input_tokens=0, duration_ms=1, duration_api_ms=1, num_turns=1,
+        ))
+        if plan_check:
+            return {"ok": True, "evidence": []}
+        return supports_nothing(args["items"], args["check_instruction"])
+
+    d = Canary(model, vector=3, graph=3, other=0)
+    result = await _run(d, CoverageBoundary(request=_request(7), max_facets_per_call=1, call_timeout_s=5.0), plan=plan, budget_usd_remaining=1.012)
+    checks = [r for r in result.step_records if r.operator == "operator_check"]
+    assert sorted(r.cost_usd for r in checks)[-1] == 1.0, "non-vacuity: the plan's own check step cost 1.0 and is recorded"
+    a = _cov(result).ledger.assessment
+    assert a.calls == 3 and a.skipped_budget_calls == 11, (a.calls, a.skipped_budget_calls)
 
 
 # ── the runner: accounting and the terminal step's elapsed ──────────────────────────────────────────────────
