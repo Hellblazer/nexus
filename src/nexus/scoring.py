@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 
+from nexus.context_annotations import OWNER_FRECENCY_KEY
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
@@ -422,11 +423,20 @@ def apply_hybrid_scoring(
         model_of=model_of,
     )
     distances = [_effective_distance(r, calibration_factors) for r in basis]
-    frecencies = [
-        r.metadata.get("frecency_score", 0.0)
-        for r in basis
-        if is_code_by_collection[r.collection]
-    ]
+    # RDR-236 Phase 1 (nexus-6pfgb.9): a hit scores by its attributed owner's catalog frecency
+    # (``_owner_frecency``, set from the page's one owner lookup). The chunk row carries the
+    # LAST WRITER's file score, so it is read only for a chunk that has at most one owner (a
+    # legacy chunk nothing has stamped yet); a shared chunk whose owner states none scores 0.0.
+    # One value per hit, so the window below and the per-hit read agree.
+    frecency_of: dict[int, float] = {}
+    for r in (*basis, *results):
+        if id(r) in frecency_of or not is_code_by_collection[r.collection]:
+            continue
+        value = r.metadata.get(OWNER_FRECENCY_KEY)
+        if value is None and len(r.metadata.get("_owner_doc_ids") or ()) <= 1:
+            value = r.metadata.get("frecency_score", 0.0)
+        frecency_of[id(r)] = float(value or 0.0)
+    frecencies = [frecency_of[id(r)] for r in basis if is_code_by_collection[r.collection]]
 
     for r in results:
         # Invert: distances are dissimilarity (smaller = better), so best match → v_norm=1.0.
@@ -457,7 +467,7 @@ def apply_hybrid_scoring(
             # simply 0.0 for them; code__ keeps its existing frecency-
             # window blend.
             if is_code_by_collection[r.collection]:
-                f_score = r.metadata.get("frecency_score", 0.0)
+                f_score = frecency_of[id(r)]
                 f_norm = min_max_normalize(f_score, frecencies) if frecencies else 0.0
                 if window is not None:
                     f_norm = min(1.0, max(0.0, f_norm))

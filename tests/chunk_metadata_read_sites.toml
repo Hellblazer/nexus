@@ -236,7 +236,7 @@ chunk_start_char = 1
 section_type = 1
 
 [sites."src/nexus/scoring.py::apply_hybrid_scoring"]
-frecency_score = 2
+frecency_score = 1
 
 [sites."src/nexus/scoring.py::apply_link_boost"]
 doc_id = 2

@@ -22,6 +22,7 @@ resolves, is left out rather than filled from the row.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -156,6 +157,12 @@ def annotation_line(
 #: not a result field, so ``format_json`` leaves it out.
 OWNER_FACTS_KEY: str = "_owner_facts"
 
+#: Metadata key a search hit carries its ATTRIBUTED owner's frecency under (RDR-236 Phase 1,
+#: nexus-6pfgb.9): the catalog ``meta["frecency_score"]`` of the document the hit is attributed
+#: to, set by ``search_engine._attach_display_paths`` from the owner lookup the page already
+#: makes. A working key like :data:`OWNER_FACTS_KEY`; absent when the owner states none.
+OWNER_FRECENCY_KEY: str = "_owner_frecency"
+
 #: The most owners of one chunk resolved for its title and facts. A chunk many
 #: documents share (boilerplate) would otherwise make every read resolve all of
 #: them; past the cap the owners cannot be shown to agree, so a reader states
@@ -165,6 +172,17 @@ OWNER_RESOLVE_CAP: int = 10
 #: Facts compared by value across owners. ``indexed_at`` compares as an
 #: instant, so two spellings of one stamp agree.
 _FACT_KEYS: tuple[str, ...] = ("title", "file_path", "indexed_at", "bib_year", "ttl_days", "expires_from")
+
+
+def meta_frecency_score(meta: Any) -> float | None:
+    """The document's catalog frecency (``meta["frecency_score"]``), or ``None`` when it states
+    none: absent, not a number, a bool or not finite (a stored string or NaN is not a score)."""
+    if not isinstance(meta, Mapping):
+        return None
+    value = meta.get("frecency_score")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
 
 
 def entry_facts(entry: Any) -> dict[str, Any]:
@@ -198,6 +216,10 @@ def entry_facts(entry: Any) -> dict[str, Any]:
             facts["ttl_days"] = days
     if isinstance(meta, Mapping) and facts.get("ttl_days", 0) > 0 and _parse_iso(meta.get("put_at")) is not None:
         facts["expires_from"] = str(meta["put_at"])
+    # RDR-236 Phase 1: the document's own frecency rides on the same lookup. It is not a provenance
+    # fact (``agreed_facts`` compares only ``_FACT_KEYS``), so it never reaches a display line.
+    if (frecency := meta_frecency_score(meta)) is not None:
+        facts["frecency_score"] = frecency
     return facts
 
 
