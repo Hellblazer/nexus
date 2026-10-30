@@ -435,15 +435,14 @@ def _attach_display_paths(
     ``_display_path`` resolved through the catalog.
 
     Mutates *results* in place. Formatters read ``meta["_display_path"]``
-    in preference to legacy ``source_path``; this keeps display sites
-    catalog-agnostic so the prune verb (nexus-o6aa.10.3) can drop
-    ``source_path`` from chunk metadata without breaking display.
+    (and ``_display_source_path``), never the row's ``source_path``, which is
+    the last writer's file.
 
     No-op when *catalog* is ``None`` or no result carries a ``doc_id``.
     A doc_id with no matching catalog entry leaves ``_display_path``
-    unset; the formatter helper then falls back to ``source_path`` /
-    ``file_path``. Best-effort by design: a display-path lookup must
-    never break a search.
+    unset; the formatter helper then shows the hit's title or id, never
+    the chunk row's own ``source_path`` (nexus-6pfgb.51). Best-effort by
+    design: a display-path lookup must never break a search.
 
     Pairs with :func:`_attach_doc_ids_from_catalog`: under Phase 3
     chunk metadata no longer carries ``doc_id``, so this function

@@ -41,20 +41,20 @@ def _display_path(meta: dict, default: str = "") -> str:
 
     1. ``_display_path`` (catalog-resolved path attached by
        ``search_engine._attach_display_paths`` when a catalog is in scope).
-    2. ``source_path`` (legacy chunk metadata; survives until the prune
-       verb in nexus-o6aa.10.3 lands).
-    3. ``file_path`` (older chunk shape, used by some MCP-promoted entries).
-    4. *default* (caller-provided fallback string).
+    2. ``_display_source_path`` (the owning document's absolute local path,
+       stamped by the same pass).
+    3. *default* (caller-provided fallback string).
 
-    Formatters use this in place of direct ``meta.get("source_path", ...)``
-    reads so a single fallback chain serves catalog-resolved + legacy chunks.
+    The chunk row's own ``source_path`` and ``file_path`` are NOT read
+    (nexus-6pfgb.51): ``source_path`` is the last writer's file, another
+    document's after a shared chunk, and no writer leaves ``file_path`` on a
+    row (the key table does not list it). A chunk with no catalog path shows
+    its title or id. The read-site lint cannot see this function (its
+    receiver is a parameter named ``meta``, and a ``[receivers]`` entry
+    for a function that reads no row key is reported stale), so
+    ``tests/test_6pfgb51_display_path.py`` pins the absence.
     """
-    return (
-        meta.get("_display_path")
-        or meta.get("source_path")
-        or meta.get("file_path")
-        or default
-    )
+    return meta.get("_display_path") or meta.get(DISPLAY_SOURCE_PATH_KEY) or default
 
 
 def _colon_safe(text: str) -> str:
@@ -236,7 +236,7 @@ def _format_with_bat(
     from collections import defaultdict  # noqa: PLC0415 — deferred import — branch-local / circular-dep avoidance
 
     # Group results by display path (nexus-1qed: prefer catalog-resolved
-    # _display_path, fall back to source_path / file_path for legacy chunks).
+    # _display_path, then the owner's absolute path; a chunk with neither is "unknown").
     groups: dict[str, list[SearchResult]] = defaultdict(list)
     for r in results:
         src = _display_path(r.metadata, default="unknown")
@@ -356,14 +356,13 @@ def _file_line_no(
     # The printed path first. A catalog _display_path is often REPO-RELATIVE
     # and only opens from the repo root (review of d41e47c1f), so the owning
     # document's absolute local path (its catalog source_uri, stamped by
-    # search_engine._attach_display_paths) and the chunk's file_path are tried
-    # next, but only while nothing has opened: the first candidate that opens
-    # IS the file, and a line missing from it has drifted, so the answer is
+    # search_engine._attach_display_paths) is tried next, but only while
+    # nothing has opened: the first candidate that opens IS the file, and a line missing from it has drifted, so the answer is
     # line 1 rather than a line read from another file. The row's source_path
     # is the last writer's file, another document's after a shared chunk, and
     # is not read (nexus-6pfgb.49; critique of b3a2f9fd1).
     candidates = list(dict.fromkeys(
-        p for p in (shown, r.metadata.get(DISPLAY_SOURCE_PATH_KEY), r.metadata.get("file_path")) if p
+        p for p in (shown, r.metadata.get(DISPLAY_SOURCE_PATH_KEY)) if p
     ))
     wanted = text.strip()
     for path in candidates:

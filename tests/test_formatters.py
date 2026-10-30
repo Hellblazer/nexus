@@ -27,7 +27,7 @@ def _result(
     line_start: int = 10,
     **extra_meta: object,
 ) -> SearchResult:
-    meta = {"source_path": source_path, "line_start": line_start, **extra_meta}
+    meta = {"_display_path": source_path, "line_start": line_start, **extra_meta}
     return SearchResult(id="r1", content=content, distance=0.1, collection="code__x", metadata=meta)
 
 
@@ -48,13 +48,13 @@ def test_vimgrep_missing_source_path() -> None:
     colon (the old ``:10:0:...`` shape, empty and unusable as a path for
     editor integration)."""
     r = _result()
-    r.metadata.pop("source_path")
+    r.metadata.pop("_display_path")
     assert format_vimgrep([r])[0].startswith("r1:10:0:")
 
 
 def test_vimgrep_missing_source_path_prefers_title() -> None:
     r = _result(title="Demo Note")
-    r.metadata.pop("source_path")
+    r.metadata.pop("_display_path")
     assert format_vimgrep([r])[0].startswith("Demo Note:10:0:")
 
 
@@ -69,7 +69,7 @@ def test_vimgrep_title_with_colon_does_not_shift_fields() -> None:
     r = _result(
         title="Self-Aware Vector Embeddings for RAG: Encoding Relational Knowledge",
     )
-    r.metadata.pop("source_path")
+    r.metadata.pop("_display_path")
     line = format_vimgrep([r])[0]
     path_field, line_field, col_field, text_field = line.split(":", 3)
     assert ":" not in path_field
@@ -100,7 +100,7 @@ def test_colon_safe_is_non_vacuous() -> None:
 
 
 def test_display_path_or_title_prefers_display_path_over_title() -> None:
-    meta = {"source_path": "src/foo.py", "title": "Ignored: Title"}
+    meta = {"_display_path": "src/foo.py", "title": "Ignored: Title"}
     assert _display_path_or_title(meta, "r1") == "src/foo.py"
 
 
@@ -130,11 +130,12 @@ class TestDisplayPathPriority:
         # and reads source_path directly fails this assertion.
         assert _display_path(meta) == "/abs/from/catalog.py"
 
-    def test_falls_back_to_source_path_when_display_path_absent(self) -> None:
-        assert _display_path({"source_path": "src/legacy.py"}) == "src/legacy.py"
+    def test_falls_back_to_the_owners_absolute_path_when_display_path_absent(self) -> None:
+        assert _display_path({"_display_source_path": "/abs/owner.py"}) == "/abs/owner.py"
 
-    def test_falls_back_to_file_path_when_neither_present(self) -> None:
-        assert _display_path({"file_path": "older/shape.md"}) == "older/shape.md"
+    def test_never_reads_the_rows_source_path_or_file_path(self) -> None:
+        """nexus-6pfgb.51: the row's paths are the last writer's, another document's after a shared chunk."""
+        assert _display_path({"source_path": "src/legacy.py", "file_path": "older/shape.md"}) == ""
 
     def test_default_when_no_path_keys(self) -> None:
         assert _display_path({}, default="unknown") == "unknown"
@@ -192,7 +193,7 @@ def test_json_basic() -> None:
     assert len(parsed) == 1
     assert parsed[0]["id"] == "r1"
     assert parsed[0]["collection"] == "code__x"
-    assert parsed[0]["source_path"] == "src/foo.py"
+    assert parsed[0]["_display_path"] == "src/foo.py"
 
 
 def test_json_canonical_fields_win() -> None:
@@ -266,17 +267,17 @@ def test_context_missing_source_path_falls_back_to_title_or_id() -> None:
     fallback as its sibling formatters -- a missing source_path must not
     print an empty leading path field."""
     r = _result(content="solo")
-    r.metadata.pop("source_path")
+    r.metadata.pop("_display_path")
     assert format_plain_with_context([r], lines_after=5)[0].startswith("r1:10:")
 
     r2 = _result(content="solo", title="Demo Note")
-    r2.metadata.pop("source_path")
+    r2.metadata.pop("_display_path")
     assert format_plain_with_context([r2], lines_after=5)[0].startswith("Demo Note:10:")
 
 
 def test_context_title_with_colon_is_substituted() -> None:
     r = _result(content="solo", title="Ratio 3:1 Results")
-    r.metadata.pop("source_path")
+    r.metadata.pop("_display_path")
     line = format_plain_with_context([r], lines_after=5)[0]
     path_field, line_field, text_field = line.split(":", 2)
     assert ":" not in path_field
@@ -450,17 +451,17 @@ def test_compact_missing_source_path_falls_back_to_title_or_id() -> None:
     """nexus-1uov1: sibling of the vimgrep case above -- format_compact
     must not print an empty leading path field either."""
     r = _result()
-    r.metadata.pop("source_path")
+    r.metadata.pop("_display_path")
     assert format_compact([r])[0].startswith("r1:10:")
 
     r2 = _result(title="Demo Note")
-    r2.metadata.pop("source_path")
+    r2.metadata.pop("_display_path")
     assert format_compact([r2])[0].startswith("Demo Note:10:")
 
 
 def test_compact_title_with_colon_is_substituted() -> None:
     r = _result(title="Chapter 2: Results")
-    r.metadata.pop("source_path")
+    r.metadata.pop("_display_path")
     line = format_compact([r])[0]
     path_field, line_field, text_field = line.split(":", 2)
     assert ":" not in path_field
@@ -499,14 +500,14 @@ def test_a_prose_line_is_located_in_its_file(tmp_path) -> None:
     doc = tmp_path / "rdr-223.md"
     doc.write_text("---\ntitle: x\n---\n# Heading\n\nPositive: atomic chunk plus owner write\n")
     r = SearchResult(id="r1", content="# Heading\n\nPositive: atomic chunk plus owner write",
-                     distance=0.1, collection="rdr__x", metadata={"source_path": str(doc)})
+                     distance=0.1, collection="rdr__x", metadata={"_display_path": str(doc)})
     assert format_vimgrep([r], query="atomic chunk owner")[0].split(":")[1] == "6"
     assert format_compact([r], query="atomic chunk owner")[0].split(":")[1] == "6"
 
 
 def test_a_prose_line_whose_file_is_unreadable_reports_line_one() -> None:
     r = SearchResult(id="r1", content="a\nb", distance=0.1, collection="rdr__x",
-                     metadata={"source_path": "/no/such/file.md"})
+                     metadata={"_display_path": "/no/such/file.md"})
     assert format_vimgrep([r])[0].split(":")[1] == "1"
 
 
@@ -532,7 +533,7 @@ def test_a_title_only_result_reports_its_position_in_the_note() -> None:
 
 def test_an_empty_prose_chunk_never_prints_line_zero() -> None:
     r = SearchResult(id="r1", content="", distance=0.1, collection="docs__x",
-                     metadata={"source_path": "/no/such.md"})
+                     metadata={"_display_path": "/no/such.md"})
     assert format_compact([r])[0] == "/no/such.md:1:"
 
 

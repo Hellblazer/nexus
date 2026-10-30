@@ -141,7 +141,7 @@ def test_format_vimgrep():
     results = [
         SearchResult(id="1", content="    def authenticate(user, token):",
                      distance=0.1, collection="code__r",
-                     metadata={"source_path": "./auth.py", "line_start": 42}),
+                     metadata={"_display_path": "./auth.py", "line_start": 42}),
     ]
     lines = format_vimgrep(results)
     assert lines[0] == "./auth.py:42:0:    def authenticate(user, token):"
