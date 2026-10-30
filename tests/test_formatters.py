@@ -491,6 +491,33 @@ def test_bat_line_range_is_relative_to_the_stdin_start(monkeypatch) -> None:
     assert cmd[cmd.index("--line-range") + 1] == "1:3", cmd
 
 
+def test_bat_groups_path_less_hits_apart(monkeypatch) -> None:
+    """nexus-6pfgb.54: every hit with no catalog path joined one "unknown" group whose chunk lines were
+    stitched into one stdin keyed by line number, so unrelated chunks overwrote each other. Each path-less
+    hit is grouped by its own title or id, as the other formatters label it."""
+    from nexus import formatters as fm  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    calls: list[tuple[list[str], str]] = []
+
+    def _fake_run(cmd, *a, **k):
+        calls.append((list(cmd), k.get("input", "")))
+        return subprocess.CompletedProcess(cmd, 0, stdout="hl\n", stderr="")
+
+    monkeypatch.setattr(fm, "run_bounded", _fake_run)
+    monkeypatch.setattr(fm, "_is_bat_installed", lambda: True)
+    a = SearchResult(id="chunk-a", content="alpha body", distance=0.1, collection="knowledge__x",
+                     metadata={"title": "Alpha Note", "line_start": 1})
+    b = SearchResult(id="chunk-b", content="beta body", distance=0.2, collection="knowledge__x",
+                     metadata={"title": "Beta Note", "line_start": 1})
+    c = SearchResult(id="chunk-c", content="gamma body", distance=0.3, collection="knowledge__x",
+                     metadata={"line_start": 1})
+    fm._format_with_bat([a, b, c])
+    assert len(calls) == 3, "three unrelated path-less hits are three groups, not one"
+    names = [cmd[cmd.index("--file-name") + 1] for cmd, _ in calls]
+    assert names == ["Alpha Note", "Beta Note", "chunk-c"]
+    assert [stdin for _, stdin in calls] == ["alpha body", "beta body", "gamma body"], "no chunk overwrote another"
+
+
 # nexus-zdzm5 (7.64.1 shakeout surface A A5): prose chunks carry no
 # line_start, and vimgrep/compact added the chunk-relative index to 0, so a
 # line from the middle of an RDR pointed at its frontmatter.

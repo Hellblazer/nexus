@@ -236,10 +236,11 @@ def _format_with_bat(
     from collections import defaultdict  # noqa: PLC0415 — deferred import — branch-local / circular-dep avoidance
 
     # Group results by display path (nexus-1qed: prefer catalog-resolved
-    # _display_path, then the owner's absolute path; a chunk with neither is "unknown").
+    # _display_path, then the owner's absolute path; a chunk with neither is its own title or id, so
+    # unrelated path-less hits never share one stdin blob, nexus-6pfgb.54).
     groups: dict[str, list[SearchResult]] = defaultdict(list)
     for r in results:
-        src = _display_path(r.metadata, default="unknown")
+        src = _display_path_or_title(r.metadata, r.id)
         groups[src].append(r)
 
     output_parts: list[str] = []
