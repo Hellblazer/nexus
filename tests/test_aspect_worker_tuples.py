@@ -326,6 +326,12 @@ def test_each_verdict_reaches_the_engine_as_its_own_queue_state(
 
     with monkeypatch.context() as m:
         m.setattr("nexus.aspect_worker._extract_aspects", fake)
+        # S3's two retryable nacks must stay held back for the WHOLE of S16 below: with the
+        # production 30 s base they became claimable 24-36 s in, and on a loaded shard the S16
+        # first pass outlasted that, so the second claim swept them up beside gone and late and
+        # the two-claim predicate never held (develop red at 18f805d8a, shard 6). 300 s keeps
+        # them out of S16's 60 s window; S3 asserts only that they are held back.
+        m.setattr(w, "_RETRY_BASE_SECONDS", 300.0)
         side3 = _worker()._tuple_side
         claims3, _ = side3.claim_batch(park=False)
         assert len(claims3) == 4
@@ -343,7 +349,7 @@ def test_each_verdict_reaches_the_engine_as_its_own_queue_state(
     assert rows["/dead.md"].claim_state == "dead" and rows["/dead.md"].attempts == 1, "S3: dead at once"
     for doc in docs.values():
         assert db.document_aspects.get_by_doc_id(doc) is None, "S3: nothing persisted"
-    # held back by retry_after_s from the RDR-163 ladder (30 s +- 20 %)
+    # held back by retry_after_s from the RDR-163 ladder (300 s here, see above)
     assert db.tuples.inp(_SUB, dict(_KEYS), claimant="other", lease_s=60) is None, (
         "S3: the retryable two are held back by the ladder, the dead one is not claimable"
     )
