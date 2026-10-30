@@ -630,9 +630,10 @@ class TestOrphanRowsStayLegacyOnPurpose:
     backfill writes carries NO label key and no ``labels_written``. The engine reads that as legacy
     (``labels_written`` false, NULL labels), which is the truthful state: the positions are
     synthesised (a stable sort by chunk_index), so the shared chunk row's label, a former owner's,
-    is not this row's own answer, and an empty label would assert "no heading" for good. The label is
-    filled from the chunk row by the one-time rung (nexus-1nrcu) only where the chash has one manifest
-    row. This pins the absence, so nobody turns it into ``""`` and loses the information."""
+    is not this row's own answer, and an empty label would assert "no heading" for good. The one-time
+    rung (nexus-1nrcu) leaves them legacy: it skips every document carrying the orphan marker
+    (``meta.backfill_from == "t3_orphan"``, pinned below at every registration site). This pins the
+    absence, so nobody turns it into ``""`` and loses the information."""
 
     _LABEL_KEYS = {"section_title", "section_type", "page_number", "labels_written"}
 
@@ -658,6 +659,32 @@ class TestOrphanRowsStayLegacyOnPurpose:
         cat = _FakeManifestCatalog([_titled_entry("1.1.1", "T")])
         ob.link_by_title(cat, "docs__x", [_titled("T", [("n1", 0), ("n2", 1)])])
         self._assert_legacy(cat.appended["1.1.1"])
+
+
+def test_every_orphan_registration_carries_the_marker_the_labels_rung_skips() -> None:
+    """nexus-jz86a / nexus-1nrcu: the rung excludes a document by ``meta.backfill_from == "t3_orphan"``
+    (``ORPHAN_BACKFILL_MARKER``). A registration site that dropped or renamed it would hand that document's
+    rows, with a former owner's label, to the rung. Read from the source so a NEW site is covered too."""
+    import ast
+    import inspect
+
+    from nexus.upgrade_ladder.rungs.manifest_section_labels import ORPHAN_BACKFILL_MARKER
+
+    key, value = ORPHAN_BACKFILL_MARKER
+    tree = ast.parse(inspect.getsource(ob))
+    sites = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "register"
+    ]
+    assert len(sites) >= 4, f"non-vacuity: expected the four registration sites, found {len(sites)}"
+    for call in sites:
+        meta = next((kw.value for kw in call.keywords if kw.arg == "meta"), None)
+        assert isinstance(meta, ast.Dict), f"line {call.lineno}: register() without a literal meta"
+        pairs = {
+            k.value: v.value for k, v in zip(meta.keys, meta.values)
+            if isinstance(k, ast.Constant) and isinstance(v, ast.Constant)
+        }
+        assert pairs.get(key) == value, f"line {call.lineno}: meta lacks {key}={value!r}"
 
 
 class TestAppendPositionsAreSparse:

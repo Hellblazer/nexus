@@ -186,6 +186,11 @@ re-index of its document is the only later path.
   names another file stays legacy and is counted as "chunk row not attributable".
   Just before each write the batch's manifests and ownership are read again; a row
   that became written, moved or gained a co-owner is skipped.
+- **Orphan-minted documents are skipped.** A document the orphan backfill registered
+  (`meta.backfill_from` is `t3_orphan`) keeps its rows legacy on purpose: the chunk
+  row's label is a former owner's, and the document's `indexed_at` is later than
+  every chunk it holds, so the date guard would not stop the copy. They are counted
+  as "in documents the orphan backfill minted".
 - **Fill-only.** A row already `labels_written` is never touched, an empty label
   included. The rung never writes a label with the flag false.
 - **Known gap.** Ownership is read from live manifests, so a *tombstoned* document

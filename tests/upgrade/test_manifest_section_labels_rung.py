@@ -78,10 +78,10 @@ class World:
         self._manifest_reads = 0
 
     def doc(self, tumbler: str, *, collection: str = COLL, indexed_at: str = DOC_STAMP,
-            title: str = "", file_path: str = "") -> str:
+            title: str = "", file_path: str = "", meta: dict | None = None) -> str:
         self.docs[tumbler] = SimpleNamespace(
             tumbler=tumbler, physical_collection=collection, indexed_at=indexed_at, alias_of="",
-            title=title, file_path=file_path)
+            title=title, file_path=file_path, meta=meta or {})
         self.manifests.setdefault(tumbler, [])
         return tumbler
 
@@ -425,6 +425,31 @@ def test_a_failed_restore_defers_and_names_the_document(world: World) -> None:
 
     assert result.outcome is ConvergeOutcome.DEFERRED
     assert "1.1.1" in result.detail and "indexed_at" in result.detail
+
+
+# ── documents the orphan backfill minted ─────────────────────────────────────
+
+
+@pytest.mark.parametrize("mode", ["dt_link", "synthetic", "synthetic_chash", "csv_curated"])
+def test_a_document_minted_by_the_orphan_backfill_is_left_legacy(world: World, mode: str) -> None:
+    """nexus-jz86a, decision (a): an orphan row stays legacy because the chunk row's label is a FORMER
+    owner's, not the row's own answer. The document is registered at backfill time, so its ``indexed_at`` is
+    later than any chunk it holds and the date guard always passes for it: only the marker keeps the rung
+    from copying exactly that label."""
+    world.doc("1.1.1", meta={"backfill_from": "t3_orphan", "backfill_mode": mode})
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.doc("1.1.2", meta={"tags": "x"})   # control: any other document with the same shape is filled
+    world.row("1.1.2", 0, h(2))
+    _labelled(world, h(2))
+    rung = world.rung()
+
+    result = rung.converge(Report())
+
+    assert world.labels("1.1.1") == [(0, None, None, None, False)]
+    assert world.labels("1.1.2") == [(0, "Refs", "references", 9, True)]
+    assert "1 in documents the orphan backfill minted" in result.detail
+    assert rung.verify() is True
 
 
 # ── the recorded completion short-circuits the scan ─────────────────────────

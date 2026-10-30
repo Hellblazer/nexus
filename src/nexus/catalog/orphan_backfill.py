@@ -396,8 +396,10 @@ def _content_type_for_collection(collection: str) -> str:
 # nexus-jz86a: the manifest rows below carry NO section label keys and no ``labels_written``, on
 # purpose. The engine reads that as legacy (NULL labels, ``labels_written`` false), which is the true
 # state: the positions are synthesised, so the shared chunk row's label (a former owner's) is not this
-# row's own answer, and "" would assert "no heading" for good. nexus-1nrcu's one-time rung copies the
-# chunk row's label onto the row where the chash has exactly one manifest row.
+# row's own answer, and "" would assert "no heading" for good. nexus-1nrcu's one-time rung leaves them
+# legacy: it skips every document whose catalog meta carries ``backfill_from == "t3_orphan"``, which each
+# ``register`` call below sets (``ORPHAN_BACKFILL_MARKER``; a test pins every site). Rows appended to an
+# EXISTING document (``link_by_title`` and its sibling) are that document's, and carry no marker.
 
 def register_dt_linked(
     catalog: "CatalogReader",

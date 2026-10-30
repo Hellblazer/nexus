@@ -23,6 +23,10 @@ THREE MORE GUARDS, each a count in the summary.
   truth is "never recorded". It stays legacy.
 * The chunk row's own ``indexed_at`` must be no later than the document's plus the five-minute skew
   (the guard ``nexus.catalog.meta_backfill`` uses): a later row was written by someone else.
+* The document must not be one the orphan backfill minted (catalog ``meta.backfill_from == "t3_orphan"``,
+  :data:`ORPHAN_BACKFILL_MARKER`): its rows were written legacy on purpose (nexus-jz86a), because the shared
+  chunk row's label is a former owner's, and its ``indexed_at`` is later than every chunk it holds, so the
+  date guard would never stop the copy. Counted apart.
 * The chunk row's ``title`` (the last writer's) must name this document: its title, its file path or file
   name, with or without the per-chunk suffix the indexers add (``:12-30``, ``:chunk-3``, ``:page-2``); a row
   that carries no title is not contradicted. This catches what the date guard cannot: a co-owner indexed
@@ -104,6 +108,17 @@ MAX_ROWS_PER_REQUEST = 300
 
 _LABEL_KEYS = ("section_title", "section_type", "page_number")
 
+#: The catalog ``meta`` marker every document the orphan backfill registers carries
+#: (``nexus.catalog.orphan_backfill``: dt_link, synthetic, synthetic_chash, csv_curated). Such a document's
+#: ``indexed_at`` is the backfill's run time, later than any chunk it holds, so the date guard always passes
+#: for it, and the chunk label is a FORMER owner's (nexus-jz86a, decision (a)): its rows stay legacy.
+ORPHAN_BACKFILL_MARKER = ("backfill_from", "t3_orphan")
+
+
+def minted_by_orphan_backfill(doc: Any) -> bool:
+    meta = getattr(doc, "meta", None)
+    return isinstance(meta, dict) and meta.get(ORPHAN_BACKFILL_MARKER[0]) == ORPHAN_BACKFILL_MARKER[1]
+
 
 class RouteAbsent(RuntimeError):
     """The engine has no ``chash_positions`` route: single-row ownership cannot be told."""
@@ -128,6 +143,7 @@ class Counts:
     chunk_newer_than_document: int = 0  # the chunk row was written after the document
     chunk_without_indexed_at: int = 0   # no indexed_at on the chunk row, so not attributable
     chunk_titled_for_another: int = 0   # the chunk row's title names another document's file
+    orphan_minted: int = 0              # legacy rows of documents the orphan backfill minted: left alone on purpose
     raced: int = 0                      # became written, moved, or gained a co-owner before the write
     write_failed: int = 0
     restore_failed: int = 0             # documents whose indexed_at could not be written back after the fill
@@ -144,7 +160,7 @@ class Counts:
             f"{self.legacy} legacy ({self.fillable} fillable, {self.filled} filled; left legacy: "
             f"{self.multi_row_cross_document} shared with another document, {self.multi_row_in_document} "
             f"repeated inside the document, {self.chunk_without_label_keys} chunk with no label keys, "
-            f"{self.chunk_missing} chunk missing, {self.chunk_newer_than_document + self.chunk_without_indexed_at + self.chunk_titled_for_another} "
+            f"{self.orphan_minted} in documents the orphan backfill minted, {self.chunk_missing} chunk missing, {self.chunk_newer_than_document + self.chunk_without_indexed_at + self.chunk_titled_for_another} "
             f"chunk row not attributable to the document, {self.stale_listing + self.raced} changed "
             f"meanwhile, {self.write_failed} write failed, {self.restore_failed} indexed_at not restored)"
         )
@@ -311,6 +327,9 @@ class ManifestSectionLabelsRung:
                     counts.written_already += 1
                 elif getattr(row, "chash", ""):
                     counts.legacy += 1
+                    if minted_by_orphan_backfill(doc):
+                        counts.orphan_minted += 1
+                        continue
                     legacy.append((doc, row))
         if not legacy:
             return
