@@ -3656,18 +3656,35 @@ def index_pdf(
     return len(prepared)
 
 
-def _parse_md_title_year(md_path: Path) -> tuple[str, int]:
-    """Parse frontmatter title + year for *md_path* (nexus-ivzw8).
+def _frontmatter_author(frontmatter: dict) -> str:
+    """The catalog author of a markdown file's frontmatter ``author`` (nexus-6pfgb.7).
 
-    Returns ``(stem, 0)`` when there is no frontmatter or parsing fails —
+    A string is kept as written, trimmed; a list (flow or block YAML) becomes its items joined with
+    ``", "``, the shape a PDF's author takes. Anything else, and an empty value, is ``""``: the author
+    is sent to the catalog only when it is a real value.
+    """
+    raw = frontmatter.get("author")
+    if isinstance(raw, (list, tuple)):
+        return ", ".join(str(a).strip() for a in raw if a is not None and str(a).strip())
+    return str(raw).strip() if isinstance(raw, str) else ""
+
+
+def _parse_md_frontmatter(md_path: Path) -> tuple[str, int, str]:
+    """Parse frontmatter title, year and author for *md_path* (nexus-ivzw8, nexus-6pfgb.7).
+
+    Returns ``(stem, 0, "")`` when there is no frontmatter or parsing fails —
     the same defaults the pre-flight registration used before the fix.
     Year comes from the first of ``created``/``date``/``accepted_date``.
+    Author is the frontmatter ``author`` (:func:`_frontmatter_author`), read the way the chunk rows'
+    ``source_author`` is (the YAML parse of the block), and ``""`` when it is absent or the block does
+    not parse.
     Extracted from the markdown hook so the PRE-FLIGHT registration can
     use the same values (the update branch's stem-guard backfill and the
     fresh-registration path must agree on the parse).
     """
     title = md_path.stem
     year = 0
+    author = ""
     try:
         text = md_path.read_text(encoding="utf-8")
         if text.startswith("---"):
@@ -3682,13 +3699,14 @@ def _parse_md_title_year(md_path: Path) -> tuple[str, int]:
                     if dm:
                         year = int(dm.group(1))
                         break
+            author = _frontmatter_author(parse_frontmatter(text, source=str(md_path))[0])
     except Exception:  # noqa: BLE001 — best-effort parse; stem/0 defaults preserved, logged for diagnosis
         import structlog  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
         structlog.get_logger(__name__).debug(
             "catalog_markdown_frontmatter_parse_failed",
             path=str(md_path), exc_info=True,
         )
-    return title, year
+    return title, year, author
 
 
 def _catalog_markdown_hook(
@@ -3736,7 +3754,7 @@ def _catalog_markdown_hook(
 
         # Derive title and year from frontmatter or filename (shared with the
         # pre-flight registration, nexus-ivzw8).
-        title, year = _parse_md_title_year(md_path)
+        title, year, author = _parse_md_frontmatter(md_path)
         # The document keys of this registration (RDR-236 Phase 1): sent with a real value only.
         doc_meta: dict[str, Any] = {"extraction_source": extraction_source or "file"}
 
@@ -3810,6 +3828,10 @@ def _catalog_markdown_hook(
                 update_kwargs["title"] = title
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
+            # nexus-6pfgb.7: the PDF hook's fill-only rule (``pipeline_stages._catalog_pdf_hook``): the
+            # catalog author is curated once set, so a re-index fills an empty column and never overwrites.
+            if author and not (getattr(existing, "author", "") or "").strip():
+                update_kwargs["author"] = author
             update_kwargs["meta"] = doc_meta
             writer.update(existing.tumbler, **update_kwargs)
             if derived_source_uri and not from_repo_owner and not getattr(existing, "source_uri", ""):
@@ -3888,7 +3910,7 @@ def _catalog_markdown_hook(
             _write_result = writer.register(
                 owner=owner, title=title, content_type=content_type,
                 file_path=fp, physical_collection=collection_name,
-                chunk_count=chunk_count, year=year,
+                chunk_count=chunk_count, year=year, author=author,
                 source_mtime=source_mtime,
                 source_uri=source_uri,
                 with_created=True,
@@ -4071,7 +4093,7 @@ def index_markdown(
     # chunks (CatalogIdentityMissingError) rather than store them ownerless.
     # nexus-ivzw8: thread the frontmatter title/year into the PRE-FLIGHT
     # registration so a fresh Document row never carries the stem default.
-    _fm_title, _fm_year = _parse_md_title_year(md_path)
+    _fm_title, _fm_year, _fm_author = _parse_md_frontmatter(md_path)
     # with_created (nexus-o19i0): whether THIS call minted the Document. Same
     # defensive unpack as index_pdf (nexus-uxg4u): a test double patching this
     # function returns a bare ``str`` whatever kwargs it is given, and a bare
@@ -4081,6 +4103,7 @@ def index_markdown(
         content_type=content_type,
         physical_collection=col_name,
         title=_fm_title,
+        author=_fm_author,
         year=_fm_year,
         base_path=base_path,
         source_uri=source_uri,
