@@ -2202,3 +2202,22 @@ def test_no_timeout_180_literal_is_left_in_the_extractor() -> None:
             ]
     assert not hits, f"timeout=180 literal(s) at line(s) {hits}: use _SINGLE_CALL_TIMEOUT_S"
     assert mod._SINGLE_CALL_TIMEOUT_S == 180, "the constant the deadline math uses"
+
+
+@pytest.mark.parametrize("dirname", ["50%25 off", "a#b", "q?x", "a%20b"])
+def test_contained_rdr_md_from_uri_takes_the_minted_path_verbatim(tmp_path: Path, dirname: str) -> None:
+    """nexus-6pfgb.57: the file:// URI every registration path mints is ``"file://" + path``, raw, so a
+    ``#``, a ``?`` or a ``%25`` in a directory is part of the path. The reader used to unquote it."""
+    from nexus.aspect_extractor import RdrSourceNotAllowed, contained_rdr_md_from_uri
+    from nexus.aspect_readers import uri_for
+
+    f = tmp_path / dirname / "docs" / "rdr" / "rdr-001.md"
+    f.parent.mkdir(parents=True)
+    f.write_text("---\nid: RDR-001\n---\n", encoding="utf-8")
+
+    uri = uri_for("rdr__nexus", str(f))
+    assert contained_rdr_md_from_uri(uri) == f.resolve()
+    assert contained_rdr_md_from_uri(uri, source_prefix=uri_for("rdr__nexus", str(tmp_path))) == f.resolve()
+    for bad in ("file://relative/docs/rdr/x.md", "nx-note://rdr__nexus/docs/rdr/x.md", "file://"):
+        with pytest.raises(RdrSourceNotAllowed):
+            contained_rdr_md_from_uri(bad)

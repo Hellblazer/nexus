@@ -98,13 +98,11 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
-from urllib.request import url2pathname
 
 import structlog
 
 from nexus import pdeathsig as _pdeathsig
-from nexus.aspect_readers import ReadFail, ReadOk, note_uri, read_source, uri_for
+from nexus.aspect_readers import ReadFail, ReadOk, file_uri_path, note_uri, read_source, uri_for
 from nexus.db.t2.records import AspectRecord
 from nexus.mcp_infra import get_t3
 from nexus.operators.dispatch import _write_prompt_file
@@ -1405,12 +1403,13 @@ def contained_rdr_md(path: Path, source_prefix: str = "") -> Path:
 
 
 def contained_rdr_md_from_uri(uri: str, source_prefix: str = "") -> Path:
-    """:func:`contained_rdr_md` for a ``file://`` URI with no host part (``url2pathname`` decodes the path).
-    A malformed URI raises ``ValueError``, a disallowed one :class:`RdrSourceNotAllowed`."""
-    parsed = urlparse(uri)
-    if parsed.scheme != "file" or parsed.netloc or not parsed.path:
+    """:func:`contained_rdr_md` for a ``file://`` URI. The path is what follows the scheme, verbatim (the mint
+    writes the raw path, nexus-6pfgb.57); anything that is not an absolute ``file://`` path raises
+    :class:`RdrSourceNotAllowed`, a path the filesystem refuses ``ValueError``."""
+    path = file_uri_path(uri)
+    if not path:
         raise RdrSourceNotAllowed("uri")
-    return contained_rdr_md(Path(url2pathname(parsed.path)), source_prefix)
+    return contained_rdr_md(Path(path), source_prefix)
 
 
 def _header_file_candidates(
