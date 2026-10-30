@@ -2736,13 +2736,14 @@ def apply_file_diversity_cap(
     output, just reordered. Nothing is dropped and no score is touched.
 
     File identity resolves per result via ``metadata.doc_id`` ->
-    ``metadata.file_path`` -> ``r.id`` (``doc_id`` first because it is
-    the catalog tumbler, stable across a prune/re-index; ``file_path`` is
-    the legacy pre-doc_id identity) — a result with neither falls back to
-    its own unique ``id``, so results with no shared file identity never
-    cap against each other. The row's ``source_path`` is the last writer's
-    file, shared with other documents, and is not an identity
-    (nexus-6pfgb.49).
+    ``metadata._display_path`` -> ``r.id`` (``doc_id`` first because it is
+    the catalog tumbler, stable across a prune/re-index; ``_display_path``
+    is the catalog-resolved path the search attached) — a result with
+    neither falls back to its own unique ``id``, so results with no shared
+    file identity never cap against each other. The row's ``source_path``
+    is the last writer's file, shared with other documents, and the legacy
+    ``file_path`` key is left by no writer; neither is an identity
+    (nexus-6pfgb.49, nexus-6pfgb.56).
 
     Walks *results* in their existing (already-scored) order; the first
     *max_per_file* occurrences of each file key are kept in place, every
@@ -2777,7 +2778,7 @@ def apply_file_diversity_cap(
     for r in results:
         key = (
             r.metadata.get("doc_id")
-            or r.metadata.get("file_path")
+            or r.metadata.get("_display_path")
             or r.id
         )
         seen = counts.get(key, 0)

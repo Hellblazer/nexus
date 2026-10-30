@@ -65,7 +65,6 @@ def test_a_scope_stops_at_a_path_separator(tmp_path, monkeypatch) -> None:
         _row("inside", _display_path="pkg/in.py", _display_source_path=str(scope / "in.py")),
         _row("sibling-abs", _display_path="pkg/sib.py", _display_source_path=str(sibling / "x.py")),
         _row("sibling-display", _display_path=str(sibling / "y.py")),
-        _row("sibling-file-path", file_path=str(sibling / "z.py")),
         _row("exact", _display_path="pkg/exact.py", _display_source_path=str(scope)),
     ]
     out = _search_files([str(scope)], rows, monkeypatch)
@@ -73,4 +72,17 @@ def test_a_scope_stops_at_a_path_separator(tmp_path, monkeypatch) -> None:
     assert "pkg/exact.py" in out, "a path equal to the scope is inside it"
     assert "pkg/sib.py" not in out
     assert "y.py" not in out
-    assert "z.py" not in out
+
+
+def test_a_stale_file_path_key_never_satisfies_the_scope(tmp_path, monkeypatch) -> None:
+    """nexus-6pfgb.56: no writer leaves ``file_path`` on a row (the chunker's is promoted to ``source_path``
+    and dropped), and the key table has no row for it, so the scope does not read it."""
+    scope = tmp_path / "scope"
+    scope.mkdir()
+    rows = [
+        _row("keep", _display_path="pkg/in.py", _display_source_path=str(scope / "in.py")),
+        _row("legacy", _display_path="pkg/legacy.py", file_path=str(scope / "legacy.py")),
+    ]
+    out = _search_files([str(scope)], rows, monkeypatch)
+    assert "pkg/in.py" in out
+    assert "pkg/legacy.py" not in out, "a stale file_path key does not select a hit"

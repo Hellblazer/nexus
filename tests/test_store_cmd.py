@@ -739,9 +739,9 @@ def test_search_path_filters_results_by_file_path(runner, mock_search, tmp_path)
     def fake_search(query, collection_names, n_results=10, where=None):
         return [
             _search_result(content="inside src", id="r1",
-                           source_path=str(src_dir / "file.py"), file_path=str(src_dir / "file.py")),
+                           _display_path=str(src_dir / "file.py")),
             _search_result(content="outside src", id="r2", distance=0.2,
-                           source_path=str(other_dir / "file.py"), file_path=str(other_dir / "file.py")),
+                           _display_path=str(other_dir / "file.py")),
         ]
 
     mock_search.search.side_effect = fake_search
