@@ -9815,11 +9815,17 @@ def _check_embedding_profile() -> list[HealthResult]:
     dormant = _names("dormant")
     results.append(
         HealthResult(
-            label=_DORMANT_LABEL, ok=False,
-            detail=f"{len(dormant)} collection(s) referenced but empty: {_name_list(dormant)}",
+            # A warn, not a fail: the ghost sweep already marked these, which is the state this row reports
+            # (shakedown 7.89.0 class d: a red row nothing but a re-index or reference removal can clear).
+            label=_DORMANT_LABEL, ok=False, warn=True,
+            detail=(
+                f"{len(dormant)} dormant collection(s), referenced but empty "
+                f"(marked by the ghost sweep): {_name_list(dormant)}"
+            ),
             fix_suggestions=[
-                "referenced but empty: re-index it (nx collection reindex <name>) "
-                "or remove the references",
+                "referenced but empty: re-index it (nx collection reindex <name>), then "
+                "nx catalog sweep-ghosts --apply sets it live again (an engine before the "
+                "nexus-b0y6w sweep leaves it dormant), or remove the references",
             ],
         ) if dormant else HealthResult(label=_DORMANT_LABEL, ok=True, detail="none")
     )

@@ -224,11 +224,61 @@ async def test_an_unusable_reply_and_a_raised_call_in_one_run_are_mixed() -> Non
 
 @pytest.mark.asyncio
 async def test_a_skipped_assessment_is_not_a_failure_cause() -> None:
+    """No call ran, so nothing failed: the cause stays ``none`` (the skip counters and the outcome say why)."""
     d = Dispatcher()
     cov = _cov(await _run(d, CoverageBoundary(request=_request(2)), deadline=time.monotonic() + 3.0))
     block = _summary(cov)["coverage"]
     assert (block["assessment_outcome"], block["failure_cause"]) == ("skipped_deadline", "none")
+    assert block["skipped_deadline_calls"] >= 1 and block["skipped_budget_calls"] == 0
     assert block["reply_classes"] == _classes() and block["assessment_calls"] == 0
+
+
+def test_a_wholly_skipped_assessment_reads_none_whichever_budget_or_deadline_cut_it() -> None:
+    assert AssessmentReport(outcome="skipped_budget", calls=0, skipped_budget_calls=3).failure_cause == "none"
+    assert AssessmentReport(outcome="skipped_deadline", calls=0, skipped_deadline_calls=3).failure_cause == "none"
+
+
+@pytest.mark.asyncio
+async def test_a_budget_cut_run_whose_one_call_covered_every_facet_still_says_why_it_is_partial() -> None:
+    """Shakedown 7.89.0 umbrella class c (live row 898): 1 of 4 planned calls ran and covered both facets, the other
+    three never started because the USD allowance was spent. ``unassessed_by_cause`` is per facet, so it reads 0;
+    the stored summary must still carry the cause and the skipped-call count."""
+    clock = {"spent": False}
+    started = {"n": 0}
+
+    async def check(args: dict, *, timeout: float) -> dict:  # noqa: ARG001
+        started["n"] += 1
+        clock["spent"] = True  # the one call that runs spends the allowance
+        return supports_first_item(args["items"], args["check_instruction"])
+
+    first = await _run(Dispatcher(), CoverageBoundary(request=_request(2)))
+    prior = _cov(first)
+    view = BoundaryView(
+        evidence_texts=[a.content for a in prior.ledger.anchors], observed=True, step_outputs=list(first.steps),
+        tools=["search", "traverse", "store_get_many", "generate"], scope_diagnostics=[], resolved_args=[], check=check,
+        remaining_seconds=lambda: None, remaining_usd=lambda: 0.0 if clock["spent"] else 0.001,
+    )
+    cov = await CoverageBoundary(request=_request(2), max_concurrent_calls=1).evaluate(view)
+    a = cov.ledger.assessment
+    block = _summary(cov)["coverage"]
+    assert a.calls == started["n"] and a.skipped_budget_calls >= 1, "a call ran and at least one was cut"
+    # The premise of row 898: the one call that ran covered every facet, so the per-facet counter cannot see the cut.
+    assert block["facets"] == {"covered": 2, "unsupported": 0, "contradicted": 0, "unassessed": 0}
+    assert block["unassessed_by_cause"]["budget_skip"] == 0
+    assert block["assessment_outcome"] == "partial_failure"
+    assert block["failure_cause"] == "budget_skip"
+    assert block["skipped_budget_calls"] == a.skipped_budget_calls and block["skipped_deadline_calls"] == 0
+    assert "text" not in json.dumps({k: block[k] for k in ("failure_cause", "skipped_budget_calls", "skipped_deadline_calls")})
+
+
+def test_a_failed_call_outranks_a_skip_and_the_skip_counts_merge_across_rounds() -> None:
+    a = AssessmentReport(outcome="partial_failure", calls=1, raised_calls=1, skipped_budget_calls=2)
+    assert a.failure_cause == "raised_call"
+    assert AssessmentReport(outcome="partial_failure", calls=1, skipped_budget_calls=1, skipped_deadline_calls=1).failure_cause == "budget_skip"
+    assert AssessmentReport(outcome="partial_failure", calls=1, skipped_deadline_calls=1).failure_cause == "deadline_skip"
+    m = AssessmentReport(outcome="ok", calls=1, skipped_budget_calls=1).merged_with(
+        AssessmentReport(outcome="partial_failure", calls=1, skipped_budget_calls=2, skipped_deadline_calls=1))
+    assert (m.skipped_budget_calls, m.skipped_deadline_calls) == (3, 1)
 
 
 # ── conflicted facets, counted apart from covered ───────────────────────────────────────────────────────────

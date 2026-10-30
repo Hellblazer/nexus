@@ -10786,7 +10786,7 @@ public final class CatalogRepository {
                                     List<String> ghostNames, List<String> dormantNames) {}
 
     /** Per-row disposition {@link #sweepGhostsAndMarkDormant} assigns during its walk. */
-    private enum SweepDisposition { DELETED, MARKED_DORMANT, HELD_QUARANTINE, HELD_QUARANTINED_ORIGIN, UNCHANGED }
+    private enum SweepDisposition { DELETED, MARKED_DORMANT, PROMOTED_LIVE, HELD_QUARANTINE, HELD_QUARANTINED_ORIGIN, UNCHANGED }
 
     private record SweptRow(String name, SweepDisposition disposition) {}
 
@@ -10845,7 +10845,7 @@ public final class CatalogRepository {
      *       then found left a fully-drained quarantine row with no automated
      *       reclaim path at all (nexus-n060e) — this ordering (empty check
      *       first, quarantine-hold second) is the fix for that gap;</li>
-     *   <li>else, when it has no row in {@code nexus.collection_vector_stats}
+     *   <li>else, when it is {@code 'live'} and has no row in {@code nexus.collection_vector_stats}
      *       (referenced elsewhere but holding no chunk at all, so nothing to embed
      *       or read), sets {@code lifecycle_state = 'dormant'}. That view is the
      *       collection INVENTORY since vectors-019-5 (RDR-192 Step 5 amendment, Sam
@@ -10857,7 +10857,13 @@ public final class CatalogRepository {
      *       all-tombstoned collection had no row and went dormant (nexus-wbfpw.35, pinned
      *       by {@code GhostSweepDormantMarkingTest#allUnownedCollection_*} and
      *       {@code #allTombstonedCollection_*});</li>
-     *   <li>else leaves it exactly as it was.</li>
+     *   <li>else, when it is {@code 'dormant'} and now HAS a row in that view (chunks arrived since it was
+     *       marked; nothing else sets a dormant row back), sets {@code lifecycle_state = 'live'} and fills a
+     *       NULL {@code dimension} from the stored one (nexus-b0y6w class d). Logged
+     *       ({@code ghost_sweep_dormant_promoted_live}); the result has no field for it;</li>
+     *   <li>else leaves it exactly as it was, a row already {@code 'dormant'} or a {@code 'disputed'} one
+     *       included (a dormant row is reported once, by the sweep that marks it, never again; only a
+     *       {@code 'live'} row is ever marked dormant).</li>
      * </ul>
      * The attribute walk (content_type/owner_id/embedding_model/dimension) is
      * deliberately NOT this method's job — that is bead nexus-ft04v.4's Liquibase
@@ -10970,17 +10976,44 @@ public final class CatalogRepository {
                     // row still referenced somewhere (the collectionIsEmpty check above was
                     // false) is held here, never relitigated into 'dormant'.
                     out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINE));
-                } else if (!ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
-                        .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name)))) {
-                    if (!dryRun) {
-                        ctx.update(CATALOG_COLLECTIONS)
-                           .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
-                           .where(CATALOG_COLLECTIONS.NAME.eq(name))
-                           .execute();
-                    }
-                    out.add(new SweptRow(name, SweepDisposition.MARKED_DORMANT));
                 } else {
-                    out.add(new SweptRow(name, SweepDisposition.UNCHANGED));
+                    // The collection inventory (collection_vector_stats): one row per stored dimension. Chunk
+                    // vectors are model-partitioned, so a collection has one.
+                    List<Integer> storedDims = ctx.select(COLLECTION_VECTOR_STATS.DIM)
+                        .from(COLLECTION_VECTOR_STATS)
+                        .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name))
+                        .fetch(COLLECTION_VECTOR_STATS.DIM);
+                    if ("live".equals(lifecycleState) && storedDims.isEmpty()) {
+                        // Only a LIVE row is marked dormant (nexus-b0y6w class d). A row already dormant is not
+                        // marked again: that changed nothing yet was reported as "marked dormant" on every later
+                        // sweep and "would mark dormant" on every dry run (shakedown 7.89.0, knowledge__deploy-probes).
+                        // A disputed row keeps its flag: the remedy RDR-204 gives it is a re-index under the
+                        // current profile, which "dormant" would hide.
+                        if (!dryRun) {
+                            ctx.update(CATALOG_COLLECTIONS)
+                               .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
+                               .where(CATALOG_COLLECTIONS.NAME.eq(name))
+                               .execute();
+                        }
+                        out.add(new SweptRow(name, SweepDisposition.MARKED_DORMANT));
+                    } else if ("dormant".equals(lifecycleState) && !storedDims.isEmpty()) {
+                        // Nothing else sets a dormant row back to live when chunks arrive (the collection upsert
+                        // leaves lifecycle_state out of its SET list), so this sweep, which marked it, also
+                        // clears it once the collection holds chunks again. A dormant row carries no dimension
+                        // (RDR-204), so the stored one fills it when there is exactly one.
+                        if (!dryRun) {
+                            var update = ctx.update(CATALOG_COLLECTIONS)
+                                .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "live");
+                            if (storedDims.size() == 1 && storedDims.get(0) != null) {
+                                update.set(CATALOG_COLLECTIONS.DIMENSION,
+                                    DSL.coalesce(CATALOG_COLLECTIONS.DIMENSION, storedDims.get(0)));
+                            }
+                            update.where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
+                        }
+                        out.add(new SweptRow(name, SweepDisposition.PROMOTED_LIVE));
+                    } else {
+                        out.add(new SweptRow(name, SweepDisposition.UNCHANGED));
+                    }
                 }
             }
             return out;
@@ -11005,6 +11038,15 @@ public final class CatalogRepository {
                     // nexus-ft04v.18 C2: a cached row's lifecycleState is now stale the
                     // instant this UPDATE commits — evict so the next reader re-verifies.
                     // Skipped in dry-run: no UPDATE ran, so nothing to invalidate.
+                    if (!dryRun) {
+                        CollectionRegistry.evict(tenant, r.name());
+                    }
+                }
+                case PROMOTED_LIVE -> {
+                    // The result carries no field for it (the wire key set is pinned), so it is logged. The
+                    // cached row's lifecycleState is stale the instant the UPDATE commits, as for a dormant mark.
+                    log.info("event=ghost_sweep_dormant_promoted_live tenant={} collection={} dry_run={}",
+                             tenant, r.name(), dryRun);
                     if (!dryRun) {
                         CollectionRegistry.evict(tenant, r.name());
                     }

@@ -14,6 +14,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import structlog
+import structlog.testing
 import yaml
 from click.testing import CliRunner
 
@@ -37,8 +39,10 @@ _PDF_STUB = {"chunks": 1, "pages": [], "title": "", "author": ""}
 def _fresh_process_notices() -> None:
     """The notices are once per process; each test starts as a new process."""
     nexus_config._NOTICES_SHOWN.clear()
+    nexus_config._EXTRACTOR_INVALID_WARNED.clear()
     yield
     nexus_config._NOTICES_SHOWN.clear()
+    nexus_config._EXTRACTOR_INVALID_WARNED.clear()
 
 
 @pytest.fixture
@@ -142,8 +146,49 @@ def test_an_unknown_config_value_falls_back_to_mineru_with_a_warning_and_no_alia
     _write_config(fake_home, {"pdf": {"extractor": bad}})
     with patch.object(nexus_config, "_log") as log:
         assert get_pdf_config().extractor == "mineru"
-    log.warning.assert_called_once_with("invalid pdf.extractor config", value=bad)
+    log.warning.assert_called_once_with(
+        "invalid pdf.extractor config", value=bad, fell_back_to="mineru",
+    )
     assert _notices(capsys.readouterr().err) == []
+
+
+def test_an_unknown_config_value_warns_once_per_process_however_often_the_config_is_read(
+    fake_home: Path,
+) -> None:
+    """shakedown 7.89.0 umbrella class a: the accessors re-read the config per page and per call,
+    and one ``nx index pdf`` logged the warning 13 times."""
+    _write_config(fake_home, {"pdf": {"extractor": "frobnicate"}})
+    with structlog.testing.capture_logs() as logs:
+        for _ in range(13):
+            assert get_pdf_extractor() == "mineru"
+    [entry] = [e for e in logs if e["event"] == "invalid pdf.extractor config"]
+    assert entry["value"] == "frobnicate"
+    assert entry["fell_back_to"] == "mineru"
+
+
+def test_a_second_distinct_unknown_value_warns_again(fake_home: Path) -> None:
+    with structlog.testing.capture_logs() as logs:
+        for bad in ("frobnicate", "frobnicate", "other"):
+            _write_config(fake_home, {"pdf": {"extractor": bad}})
+            get_pdf_extractor()
+    assert [e["value"] for e in logs if e["event"] == "invalid pdf.extractor config"] == [
+        "frobnicate", "other",
+    ]
+
+
+# ── one line per notice, not a plain line plus a log echo ───────────────────
+
+
+def test_a_notice_is_one_line_for_the_operator_not_a_plain_line_plus_a_warning_echo(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """shakedown 7.89.0 umbrella class a: ``notice_once`` echoed the plain line AND logged a
+    structlog warning that the console renderer printed to stderr as a second line (4 of 4 runs)."""
+    with structlog.testing.capture_logs() as logs:
+        resolve_extractor("docling", source="--extractor")
+        note_formula_oom_ignored()
+    assert len(_notices(capsys.readouterr().err)) == 2
+    assert [e for e in logs if e.get("log_level") in ("warning", "error")] == []
 
 
 def test_the_default_config_template_names_mineru() -> None:

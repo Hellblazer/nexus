@@ -1890,7 +1890,11 @@ Two dispositions, per row:
   somewhere but with no `collection_vector_stats` row (nothing to embed or
   read). `--apply` flips `lifecycle_state` to `dormant`; the row itself is
   NOT deleted — `nx doctor`'s "Collections dormant" row (see [nx doctor](#nx-doctor))
-  is how an operator later decides to re-index or remove the references.
+  is how an operator later decides to re-index or remove the references. Only a
+  live row is marked: a row already dormant is not listed again by a later sweep
+  or dry run, and a disputed row keeps its flag. After a re-index, an `--apply`
+  sweep sets a dormant row that holds chunks again back to live (the engine logs
+  it; the report has no field for it).
 
 A quarantine row still referenced by something is held unconditionally
 (reported as a count only, never a name, since nothing about it changed).
@@ -6052,7 +6056,10 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
   `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,
   rejected]`, `accepted_records`, `unusable_calls`, `raised_calls` and
-  `failure_cause` (`raised_call`, `unusable_reply`, `mixed` or `none`). The coverage
+  `failure_cause` (`raised_call`, `unusable_reply`, `mixed`, `budget_skip`, `deadline_skip` or `none`;
+  a failed call outranks a skip, and a skip is named only when at least one call ran: an assessment skipped
+  whole reads `none`), `skipped_budget_calls` and `skipped_deadline_calls` (planned calls that never
+  started because the USD allowance or the deadline share was spent). The coverage
   object also has `facets_conflicted` (the conflicted subset of `facets.covered`),
   `unassessed_by_cause` (`unusable_reply`, `deadline_skip`, `budget_skip`,
   `raised_call`, `stopped_after_failure` (always 0 since nexus-jypmj.17: the assessment

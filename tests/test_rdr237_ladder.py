@@ -11,6 +11,7 @@ Rung 1 is MinerU with formulas, rung 2 the same one-page call with
 from __future__ import annotations
 
 import contextlib
+import json
 import pickle
 import subprocess
 import threading
@@ -313,6 +314,32 @@ def test_a_pdf_info_excess_still_stops_the_document(tmp_path: Path) -> None:
          patch.object(ext, "_mineru_run_isolated", side_effect=two_entries):
         with pytest.raises(ValueError, match="parsed the whole document"):
             ext._extract_with_mineru(pdf)
+
+
+@pytest.mark.parametrize("field", ["content_list", "middle_json"])
+def test_malformed_server_json_still_stops_the_document(tmp_path: Path, field: str) -> None:
+    """RF-20 (2): a server result whose content_list or middle_json is not valid JSON stops the
+    document; the real dispatch and server parse run, only the POST is faked."""
+    pdf = make_pdf(tmp_path / "doc.pdf", TEXTS[:2])
+    ext = PDFExtractor()
+    result = {"md_content": "text", "content_list": "[]", "middle_json": '{"pdf_info": [{"page_idx": 0}]}'}
+    result[field] = "{not json"
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"results": {"doc": result}}
+    subprocess_path = MagicMock(side_effect=AssertionError("the ladder fell to the subprocess"))
+
+    with patch("nexus.pdf_extractor.do_parse", object()), \
+         patch("nexus.config.get_mineru_page_batch", return_value=1), \
+         patch("nexus.config.load_config",
+               return_value={"pdf": {"mineru_server_url": "http://127.0.0.1:8010"}}), \
+         patch.object(ext, "_mineru_server_available", return_value=True), \
+         patch.object(ext, "_mineru_run_subprocess", subprocess_path), \
+         patch("nexus.pdf_extractor.httpx.post", return_value=resp) as post:
+        with pytest.raises(json.JSONDecodeError):
+            ext._extract_with_mineru(pdf)
+
+    assert post.call_count == 1, "no rung 2 request followed the malformed result"
+    subprocess_path.assert_not_called()
 
 
 # ── dropped connections ──────────────────────────────────────────────────────
