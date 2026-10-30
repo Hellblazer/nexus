@@ -133,6 +133,22 @@ def test_reapable_lists_chash_ownerless_age_written_created_title_and_catalog_do
     assert engine.posted and all("grace_seconds" not in body for _p, body in engine.posted)
 
 
+def test_a_text_prefix_with_control_characters_reaches_the_terminal_as_plain_text(runner, real_client):
+    """80 characters of arbitrary stored text can carry a carriage return, an ESC sequence or a NUL; none
+    may reach the operator's terminal, and the row stays one line (RDR-236 Phase 3 review S4)."""
+    hostile = "line one\rOVERWRITE\x1b[2Jclear\x00nul\x7f\x9bC1 tab\there\nend"
+    row = _row(1, days_old=40)
+    row["text_prefix"] = hostile
+    engine = _Engine([row])
+    result = _invoke(runner, real_client, engine, ["--reapable", "-c", _COLL])
+    assert result.exit_code == 0, result.output
+    for bad in ("\r", "\x1b", "\x00", "\x7f", "\x9b", "\t"):
+        assert bad not in result.output, repr(bad)
+    lines = [line for line in result.output.splitlines() if _chash(1) in line]
+    assert len(lines) == 1, result.output
+    assert lines[0].rstrip().endswith("line one OVERWRITE [2Jclear nul  C1 tab here end"), lines[0]
+
+
 def test_the_age_is_days_since_ownerless_since_not_since_the_write_or_creation(runner, real_client):
     """The engine's grace runs from the later of the last write and the orphaning record
     (``ownerless_since``), never from created_at (write-once, always overstates). A chunk created 400

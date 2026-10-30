@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import re
 import shlex
 import sys
 from collections.abc import Callable
@@ -22,6 +23,10 @@ from nexus.db.t3 import T3Database
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
 from nexus.ttl import parse_ttl
+
+# C0 (NUL, tab, CR, LF, ESC ...), DEL and C1 controls: stored chunk text printed to an operator's terminal must
+# not move the cursor, overwrite a line or start an escape sequence (CSI is ESC [ or the single C1 byte 0x9b).
+_CONTROL_CHARS: re.Pattern[str] = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _t3(*, prefetch_routing_listing: bool = False) -> T3Database:
@@ -392,7 +397,7 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
             doc = row.get("catalog_doc_id") or "-"
             # RDR-236 Phase 3: title and catalog_doc_id are the manifest owner's, so an ownerless chunk shows
             # neither; the first 80 characters of its text (engine 0.1.171 and later) are what names it.
-            prefix = (row.get("text_prefix") or "").replace("\n", " ")
+            prefix = _CONTROL_CHARS.sub(" ", row.get("text_prefix") or "")
             click.echo(
                 f"  {row.get('chash', '')}  {ownerless}  {_age_days(ownerless):>5}  {written}  "
                 f"{created}  {title:<40}  {doc}" + (f"  {prefix}" if prefix else "")

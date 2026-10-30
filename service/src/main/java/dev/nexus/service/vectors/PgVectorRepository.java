@@ -4924,10 +4924,15 @@ public final class PgVectorRepository {
 -- after the sweep). The condition is the completion RECORD and never an empty
 -- bucket: with the join dropped, legacy-unmanifested would read zero
 -- vacuously. A tenant without the record keeps the forward join. A later
--- legacy-shaped chunk of a converged tenant therefore reads no-owner instead
--- of superseded or dead-owner; that is accepted, because only
--- legacy-unmanifested and unclassified gate the reaper (_GC_CENSUS_BLOCKERS,
--- src/nexus/commands/t3.py).
+-- legacy-shaped chunk of a converged tenant therefore reads no-owner, and no
+-- longer superseded, dead-owner or legacy-unmanifested; that is accepted,
+-- because only legacy-unmanifested and unclassified gate the reaper
+-- (_GC_CENSUS_BLOCKERS, src/nexus/commands/t3.py), so the reaper takes such a
+-- chunk after the grace like any no-owner chunk. The census can then see only
+-- reverse-path strays (a note-shaped document naming the chash): a
+-- forward-keyed stray written after the record exists is invisible to it, so
+-- the zero it reads for the sweep precondition below is true as of the record,
+-- not as of the sweep.
 -- PRECONDITION FOR THE SWEEP: `nx t3 census-manifest-less --all
 -- --require-zero legacy-unmanifested` reads zero on the install before the
 -- Phase 4 sweep (a stranded note the rung cannot heal is healed by hand, or

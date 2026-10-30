@@ -4780,7 +4780,9 @@ class HttpVectorClient:
     ) -> dict:
         """POST /v1/vectors/gc/quarantine-orphans.
 
-        Returns ``{"moved": N, "sample": [{"chash": hex, "title": ...}, ...]}``, plus
+        Returns ``{"moved": N, "sample": [{"chash": hex, "title": ..., "text_prefix": ...}, ...]}``
+        (``title`` is the chunk's live manifest owner's, null when none; ``text_prefix`` its first 80
+        characters, present from engine-service-v0.1.171; neither is written to ``gc_audit``), plus
         ``floor`` (and, with a floor, ``refused`` and the judged counts) from an engine
         that honours the optional floor fields (:meth:`_floor_body`).
         Raises :class:`VectorServiceError` (``code=404`` on a pre-route engine).
