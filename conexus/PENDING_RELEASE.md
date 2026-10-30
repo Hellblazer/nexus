@@ -64,7 +64,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-j6un5.6): the classification dispatches deep-research-synthesizer with `model: "sonnet"` (header, step 5 and Agent Invocation), since the agent now defaults to haiku.
 - `conexus/skills/rdr-research/SKILL.md` (nexus-j6un5.6): names haiku as both agents' model.
 - `conexus/skills/research-synthesis/SKILL.md` (nexus-j6un5.6): haiku is the default; multi-source synthesis passes `model: "sonnet"`.
-- `conexus/skills/orchestration/SKILL.md` (nexus-j6un5.4): mechanical beads dispatch the developer with `model: "haiku"`, labelled `dev-model:haiku` or `dev-model:sonnet` for the comparison; a failed Haiku round is re-dispatched on Sonnet. The debugger note says subagents have no Serena, so symbol tracing happens in the main session (nexus-j6un5.5).
+- `conexus/skills/orchestration/SKILL.md` (nexus-j6un5.4): mechanical beads dispatch the developer with `model: "haiku"`, labelled `dev-model:haiku` or `dev-model:sonnet` for the comparison; a failed Haiku round is re-dispatched on Sonnet. The debugger note says conexus agents have no shared Serena, so symbol tracing happens in the main session (nexus-j6un5.5).
 
 
 ## Deferred to the next client release
