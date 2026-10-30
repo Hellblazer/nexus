@@ -622,6 +622,9 @@ listed under Critical Assumptions before gate.
 - **⚠️ Defect found** (2026-10-30, measurement harness) — `nx_answer` run from a dev checkout (`uv run` in the repository) fails on every plan hit: the production-write guard refuses the matcher's `increment_match_metrics` write, the run returns `[non-answer: error] Error during plan match`, and on a plan miss the run row is dropped (`persistence: dropped`, `ProductionWriteGuardError`). A live measurement of develop code must install the tree outside the checkout. The measurement drivers now refuse to start from a checkout against a production endpoint and print the install recipe (nexus-jypmj).
   *Source: void attempts of 2026-10-30; `src/nexus/db/service_endpoint.py`. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
 
+**KD (2026-10-30, incident-class re-measure; nexus-4xmpv and nexus-jf9wg at 571248296, engine-service-v0.1.170, tag measure_rdr232-class).** G06 and S01-S06 were re-run once each, coverage on and plan growth off, for 3.4167 USD (baseline rows 919-924 and 931: 3.1024). Plan 467 (citation-traversal) is now excluded with reason `single_source_synthesis` wherever it was a candidate (G06, S02, S05); those three ran plan 465 (`abstract-themes`), which the labels allow, and the other four planned inline, so 7 of 7 plans are allowed by label, against 4 of 7. The primary read rose from 24 chunks on every run to 44 (41 and 42 on the two documents that fit whole). Every level-2 section of the six nexus RDRs is now represented (S04 13 of 13, against 10 of 13), and G06 reaches 44 of its 53 section labels, against 24. Scored by hand against the 24 facets, no facet is ledger-covered while the answer says it is missing or answers it only from other documents (before: 2, S03 f3 and S05 f3). S02 f3 stays withheld, correctly, because RDR-180 records no collision-risk finding. Three limits remain. The result is in-sample, since the fixes were chosen on these requests. S04 (135 chunks) is still item-capped at 44 with 40,258 of 60,000 characters used, and its answer names input gaps under all three covered facets, so the ledger's facet grain is coarser than the prose. And the content labeller's fence tracking breaks when a chunk repeats a fence its predecessor closed, so RDR-070 chunks 17-41 all read as Phase 2.
+  *Source: live runs of 2026-10-30, tag `measure_rdr232-class`. T2: `nexus/rdr232-class-remeasure-2026-10-30`.*
+
 ### Critical Assumptions
 
 Research 6–10 executed prototypes for A1–A6. Production verification followed
@@ -871,12 +874,47 @@ synthesis plan or, with none, the inline planner. A synthesis request naming two
 sources or none, and every other kind, keep their rows. Residual: four of the six
 near-miss requests read as `unknown` on the first pass and become synthesis only
 through the model-assisted extraction; if the extraction fails, an `unknown`
-request still admits a curated synthesis plan, including citation-traversal. The
+request still admitted a curated synthesis plan, including citation-traversal
+(closed the same day, the second extension below). The
 rule is pinned offline (the unit selection over the seven requests; the matrix
 test over the seeded library, where the local embedder does not offer
 citation-traversal to the seven and a citation-shaped one-source request is the
 discriminating case); it is not re-measured live, so the near-miss and G06 runs
 above were taken without it.
+
+*Decided by Sam, 2026-10-30 (nexus-4xmpv; after the incident-class re-measure).*
+Two extensions of the one-source rule. (1) A synthesis request that names exactly
+one source does not admit abstract-themes (plan 465) either, alongside
+citation-traversal. In the re-measure G06, S02 and S05 ran 465 once 467 was out;
+it is a corpus-theme plan ("v1 scope: single-collection abstract QA") and on the
+unscoped S02 and S05 its search put 35 and 29 code anchors in, six of S02's from
+three other owners. It joins the same exclusion list by its declared `strategy`
+dimension, `abstract-themes`, which no other shipped template declares (the
+other builtins declare `default`, `hybrid-factual-lookup`, `document-discovery`
+and the like), so `SINGLE_SOURCE_EXCLUDED_STRATEGIES` is now
+`{citation-traversal, abstract-themes}`; no plan id or integer is named. (2) The
+rule also applies to an `unknown` request that names exactly one source. An
+extraction failure leaves S01, S03, S05 and S06-shaped requests at `unknown`, and
+the `unknown` row admits curated synthesis plans, so the residual above no longer
+holds. An `unknown` request naming zero or two sources, a lookup, and the
+comparison, audit and debug kinds are unchanged, and a request left with no
+eligible library plan still goes to the inline planner. Not re-measured live; the
+unit selection runs the seven requests as both kinds and the matrix test uses a
+theme-shaped one-source request the offline library does offer abstract-themes.
+
+*Known limits, 2026-10-30.* (a) The 44-item single-source cap still binds on large
+documents: S04 (135 chunks) read 44 and used 40,258 of the 60,000 characters,
+because the reserved share is 50 less the 6 lifecycle records. (b) On S04 the
+ledger marks all three facets covered while the answer names missing material
+under each: the ledger's facet grain is coarser than the prose (nexus-dfrfp;
+calibration of the caps is nexus-2dc8b). (c) The content labeller carried
+code-fence state across chunks, so a fence repeated by the chunker's overlap
+inverted it and every later heading was ignored (RDR-070 chunks 17-41 all read
+as Phase 2); fixed 2026-10-30 (nexus-jf9wg): a chunk that repeats the tail of its
+predecessor starts in the fence state the predecessor had where that tail began,
+and a chunk with no overlap still inherits the open fence of a block the chunker
+split. Pinned offline on an RDR-070-shaped fixture; the live labels are not
+re-read.
 
 The `unknown` entries are limited by provenance below; they are not blanket
 permission for every legacy or grown plan. In particular an unknown request
@@ -2377,3 +2415,5 @@ remains Sam's.
 - 2026-10-30: Close sweep (nexus-jypmj). Decision text changed: section 1 (the `lookup` row of the compatibility table now reads `lookup`, `unknown`, and the Phase 2 proof line says unknown-grown plans cannot bypass the gate for non-lookup requests only; unknown-kind grown plans are still admitted for lookups, a known limit and unmeasured), section 3 (an "as shipped" paragraph: the pre-cap scope filter, the departure for an engine without it, the relay-loss flaw, Sam's 2026-10-29 choice of client stopgap plus engine `node_walk`, owner narrowing kept on the client; `max_documents` 50 and `max_chunks` 300 are uncalibrated constants, not calibrated values), Phase 3 "As run" (the step 4 measurements were taken after the flip), Performance Expectations (live figures and what stays unmeasured), Proportionality (measured repair yield), Critical Assumptions (A1 to A7 Status lines rewritten to the evidence; A1, A2, A6 and A7 ticked) and Prerequisites (the golden set and the self-contained fixture ticked, with citations). Key Discoveries: the Phase 3 step 4 repair yield and oracle numbers, the near-miss synthesis control, the replacement negative controls N01-N03, the G06 rerun on `node_walk`, the five largest held-out requests, false withholds under the unread-anchor rule, the inline planner on unmatched lookups, and the dev-checkout harness defect; the superseded timing-model entry is retagged with the live figure. New findings carry beads: the 24-chunk primary cap (nexus-jf9wg), the synthesis row admitting citation-traversal (nexus-4xmpv), a coverage ledger that disagrees with its prose (nexus-dfrfp), and covered facets whose unread tail is never read (nexus-z6yvk). The post-mortem is `docs/rdr/post-mortem/rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md`. The status is not changed here.
 
 - 2026-10-30: Two changes after the close sweep, one a decision by Sam. (1) A `synthesis` request that names exactly one source does not admit citation-traversal (nexus-4xmpv; Sam's decision of 2026-10-30). (2) A request that names exactly one source reads up to 44 primary chunks, not 24 (nexus-jf9wg). Decision text changed: section 1 (a dated decision note after the lookup note; the `lookup` paragraph now says lookup and unknown-kind plans and names the unknown-grown exposure), section 2 (a dated departure for the 24 and 44 primary caps with the budget arithmetic), section 4 (the original per-stream assessment paragraph is marked superseded by the 2026-10-28 departure and kept), Test Plan (the six-facet scenario no longer says "within the call cap"), Critical Assumptions A2 and the Key Discoveries entries for the near-miss control and the G06 rerun (row 931 ran plan 467, which is why the close was held). Neither change is re-measured live. The post-mortem is corrected the same day. The status is not changed here.
+
+- 2026-10-30: Incident-class re-measure and three changes after it, two decisions by Sam (nexus-4xmpv, nexus-jf9wg). (1) A request that names exactly one source does not admit abstract-themes either (Sam; declared `strategy` dimension `abstract-themes`). (2) The one-source rule also applies to an `unknown`-kind request (Sam). (3) The content labeller no longer reads a fence repeated by chunk overlap as an opening fence. Decision text changed: section 1 (a dated note after the 2026-10-30 one-source note, the old residual marked closed, and the known limits: the 44-item cap on S04, the ledger facet grain against the prose, the labeller defect), Key Discoveries (the re-measure entry). The re-measure itself is one run each of G06 and S01-S06 at 3.4167 USD and is in-sample. The post-mortem and CHANGELOG are updated. The status is not changed here.

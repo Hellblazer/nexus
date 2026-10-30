@@ -542,6 +542,7 @@ nexus-2c51v.1
 nexus-2cx
 nexus-2cx.1
 nexus-2cxm
+nexus-2dc8b
 nexus-2dq
 nexus-2dq.1
 nexus-2e874
@@ -1650,6 +1651,9 @@ nexus-6pfgb.48
 nexus-6pfgb.49
 nexus-6pfgb.5
 nexus-6pfgb.50
+nexus-6pfgb.51
+nexus-6pfgb.52
+nexus-6pfgb.53
 nexus-6pfgb.6
 nexus-6pfgb.7
 nexus-6pfgb.8
@@ -4487,6 +4491,7 @@ nexus-imhgf
 nexus-imkxs
 nexus-imkxs.1
 nexus-imm06
+nexus-indyo
 nexus-ing7a
 nexus-ingey
 nexus-inhnw
