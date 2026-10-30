@@ -13,6 +13,7 @@ waiter for a fresh id sees another session's.
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -446,6 +447,52 @@ class TestWaitCli:
         result = CliRunner().invoke(tuple_group, ["wait", "--session", "s1", "--max-parks", "1"])
         assert result.exit_code == tuple_cmd.EXIT_ENGINE_TOO_OLD == 5, result.output
         assert tuple_cmd.STOPPED_HINT in result.output and REARM_HINT not in result.output
+
+    @pytest.mark.parametrize(
+        ("reason", "says"),
+        [
+            (SUPERSEDED, "a newer nx tuple wait for this session took over"),
+            (SESSION_CHANGED, "this session was replaced"),
+            (CLAUDE_GONE, "nothing new arrived"),
+        ],
+    )
+    def test_every_exit_but_a_delivery_says_not_to_rerun(self, monkeypatch, reason, says) -> None:
+        """RDR-233 Risks (wake loops): only a delivery asks for a re-run, in text
+        and in --json alike."""
+        from nexus.tuple_wait import WaitOutcome  # noqa: PLC0415 — test-local
+
+        self._fake_outcome(monkeypatch, WaitOutcome(reason=reason))
+        text = CliRunner().invoke(tuple_group, ["wait", "--session", "s1", "--max-parks", "1"])
+        assert text.exit_code == 0, text.output
+        assert says in text.output and "do not run it again" in text.output.lower()
+        assert REARM_HINT not in text.output
+        js = CliRunner().invoke(
+            tuple_group, ["wait", "--session", "s1", "--max-parks", "1", "--json"],
+        )
+        payload = json.loads(js.output)
+        assert payload["reason"] == reason and payload["rerun"] is False
+        assert says in payload["hint"] and REARM_HINT not in payload["hint"]
+
+    def test_a_delivery_under_json_says_to_rerun(self, monkeypatch) -> None:
+        from nexus.tuple_wait import WaitOutcome  # noqa: PLC0415 — test-local
+
+        self._fake_outcome(monkeypatch, WaitOutcome(reason=DELIVERED, lines=["tuple 7 arrived"]))
+        js = CliRunner().invoke(
+            tuple_group, ["wait", "--session", "s1", "--max-parks", "1", "--json"],
+        )
+        payload = json.loads(js.output)
+        assert payload == {
+            "reason": DELIVERED, "notices": ["tuple 7 arrived"], "rerun": True, "hint": REARM_HINT,
+        }
+
+    @staticmethod
+    def _fake_outcome(monkeypatch, outcome) -> None:
+        class Store:
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(tuple_cmd, "_store", Store)
+        monkeypatch.setattr("nexus.tuple_wait.run_wait", lambda *_a, **_k: outcome)
 
     def test_refuses_where_the_channel_flag_is_present(self, monkeypatch) -> None:
         monkeypatch.setattr(

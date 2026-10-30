@@ -2,7 +2,8 @@
 title: "Channel-Free Push: Wake a Session Launched Without the Channel Flag"
 id: RDR-233
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-10-30
 accepted_date: 2026-10-30
 priority: medium
 author: Claude (session for bead nexus-7hzb2), for Sam
@@ -445,3 +446,6 @@ dependency.
   subagent-mail exception (N1); the `mailbox_arm_instruction` docstring says to
   re-run only when a wake's output says to (N2). The two assumed records,
   research-9 and research-12, acknowledged by Sam with the accept.
+- 2026-10-30: closed as implemented. The close critique (partial, 1 Significant) found
+  that `--json` dropped the re-run and stop lines the wake-loop rule rests on; the JSON
+  now carries `rerun` and `hint`, pinned in `TestWaitCli`.

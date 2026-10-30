@@ -5255,7 +5255,7 @@ In a permission mode that prompts before Bash, allow it with `Bash(nx tuple wait
 | `--timeout-s SECONDS` | Seconds per engine park (default 25); liveness and subscriptions are re-checked between parks |
 | `--max-parks N` | Give up after N empty parks (default: wait until something arrives) |
 | `--force` | Run even where the channel launch flag is present; for a flagged session whose channel never registers (plugin not on the channel allowlist, channels disabled by the organisation) |
-| `--json` | Print `{reason, notices}` as JSON |
+| `--json` | Print `{reason, notices, rerun, hint}` as JSON: `rerun` is true only when rows were delivered, and `hint` is the line text mode prints (run it again, or do not) |
 
 A session launched with the channel needs no CLI verb (RDR-211 nexus-rplay.14
 deleted the prior CLI ping-then-pull watcher outright): its own nexus MCP

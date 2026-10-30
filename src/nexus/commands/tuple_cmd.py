@@ -379,7 +379,7 @@ def _board_entries_reader(session_id: str):
 @click.option("--force", is_flag=True, default=False,
               help="Run even when the claude process carries the channel launch flag.")
 @click.option("--json", "json_out", is_flag=True, default=False,
-              help="Print {reason, notices} as JSON.")
+              help="Print {reason, notices, rerun, hint} as JSON; rerun is true only on a delivery.")
 def tuple_wait_cmd(
     session: str | None, timeout_s: int, max_parks: int | None, force: bool, json_out: bool,
 ) -> None:
@@ -462,20 +462,26 @@ def tuple_wait_cmd(
             "it again here, the new session's SessionStart says whether to."
         ),
     }
-    if json_out:
-        click.echo(json.dumps({"reason": outcome.reason, "notices": outcome.lines}))
-        return
-    if outcome.reason == DELIVERED:
-        for line in outcome.lines:
-            click.echo(line)
-        click.echo(REARM_HINT)
+    # Only a delivery asks for a re-run (RDR-233 Risks, wake loops); --json
+    # carries the same instruction as text mode, never a bare reason.
+    rerun = outcome.reason == DELIVERED
+    if rerun:
+        hint = REARM_HINT
     elif outcome.reason in notes:
-        click.echo(notes[outcome.reason])
+        hint = notes[outcome.reason]
     else:
-        click.echo(
+        hint = (
             f"nx tuple wait: stopped ({outcome.reason}); nothing new arrived. Do not "
             "run it again unless you mean to keep waiting."
         )
+    if json_out:
+        click.echo(json.dumps({
+            "reason": outcome.reason, "notices": outcome.lines, "rerun": rerun, "hint": hint,
+        }))
+        return
+    for line in outcome.lines if rerun else ():
+        click.echo(line)
+    click.echo(hint)
 
 
 @tuple_group.command(name="in")
