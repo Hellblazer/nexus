@@ -1115,25 +1115,80 @@ class ContentLabel:
     carry: str | None
 
 
+#: A chunk's overlap with its predecessor must span at least this many characters to be believed (a shorter
+#: shared run, a lone ``` line for one, is as likely to be coincidence as to be the chunker's overlap).
+_MIN_OVERLAP_CHARS = 12
+#: How far to look: the longest tail a chunker repeats, and how far into the chunk it may start (a section
+#: header can precede it).
+_MAX_OVERLAP_CHARS = 2000
+_MAX_OVERLAP_OFFSET = 600
+
+
+def _fence_step(fence: str | None, line: str) -> tuple[str | None, bool]:
+    """One line through the fence state machine: ``(state after, line is outside any fence)``."""
+    stripped = line.lstrip()
+    if fence is None:
+        if stripped.startswith(("```", "~~~")):
+            return stripped[:3], False
+        return None, True
+    return (None if stripped.startswith(fence) else fence), False
+
+
+def _overlap_start_state(prev: str, prev_start: str | None, text: str, end_state: str | None) -> str | None:
+    """The fence state *text* begins in, given the chunk *prev* before it, which began in *prev_start* and ended
+    in *end_state*.
+
+    Chunkers repeat the tail of one chunk at the head of the next (``md_chunker`` ``chunk_overlap``), and the
+    tail can hold a fence line the previous chunk already acted on. Carrying the state across the boundary
+    would then toggle that fence twice. So when *text* does begin with a repeat of *prev*'s tail, it starts in
+    the state *prev* was in where that tail began; with no overlap it starts where *prev* ended, which is a
+    code block the chunker split.
+    """
+    longest = min(len(prev), _MAX_OVERLAP_CHARS)
+    head = text[: _MAX_OVERLAP_OFFSET + _MAX_OVERLAP_CHARS]
+    for k in range(longest, _MIN_OVERLAP_CHARS - 1, -1):
+        tail = prev[-k:]
+        at = head.find(tail)
+        if at == -1 or at > _MAX_OVERLAP_OFFSET:
+            continue
+        # the fence state of prev where its tail begins: walk prev's lines to the one holding that offset
+        cut, state, pos = len(prev) - k, prev_start, 0
+        for line in prev.splitlines(keepends=True):
+            nxt = pos + len(line)
+            if nxt > cut:
+                body = line.rstrip("\r\n")
+                after, _ = _fence_step(state, body)
+                if pos == cut:
+                    return state
+                # the tail starts mid-line: pick the state that reads the remnant of the line the way prev did
+                remnant = body[cut - pos:]
+                return state if _fence_step(state, remnant)[0] == after else after
+            state, _ = _fence_step(state, line.rstrip("\r\n"))
+            pos = nxt
+        return end_state
+    return end_state
+
+
 def derive_content_labels(texts: Sequence[str]) -> list[ContentLabel]:
     """Section labels from chunk text in manifest order. A Markdown heading starts a section;
     following chunks inherit it; content before the first heading is unlabelled. Headings
     inside a code fence do not count, and a fence left open at a chunk boundary stays open
-    into the next chunk."""
+    into the next chunk, unless the next chunk repeats the previous one's tail (the chunker's overlap), in
+    which case it starts in the state the previous chunk was in where that tail began, so a fence line the
+    overlap repeats is not counted twice."""
     out: list[ContentLabel] = []
     carry: str | None = None
     fence: str | None = None
+    prev: str | None = None
+    prev_start: str | None = None
     for text in texts:
+        if prev is not None:
+            fence = _overlap_start_state(prev, prev_start, text, fence)
+        prev_start = fence
         headings: list[str] = []
         for line in text.splitlines():
-            stripped = line.lstrip()
-            if fence is None:
-                if stripped.startswith(("```", "~~~")):
-                    fence = stripped[:3]
-                    continue
-            else:
-                if stripped.startswith(fence):
-                    fence = None
+            fence, outside = _fence_step(fence, line)
+            if not outside:
                 continue
             m = _HEADING.match(line)
             if m:
@@ -1142,6 +1197,7 @@ def derive_content_labels(texts: Sequence[str]) -> list[ContentLabel]:
         if headings:
             carry = headings[-1]
         out.append(ContentLabel(label=label, headings=tuple(headings), carry=carry))
+        prev = text
     return out
 
 

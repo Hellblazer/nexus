@@ -406,6 +406,58 @@ def test_a_comment_inside_a_code_fence_is_not_a_heading_even_across_a_chunk_boun
     assert all(la.headings == (("Run",) if i == 0 else ()) for i, la in enumerate(labels))
 
 
+def _overlapping(parts: list[str], tail: int = 120) -> list[str]:
+    """Chunks the way ``md_chunker`` cuts them: each repeats the last *tail* characters of the one before."""
+    out = [parts[0]]
+    for part in parts[1:]:
+        out.append(out[-1][-tail:] + part)
+    return out
+
+
+def test_a_fence_the_overlap_repeats_does_not_flip_the_state_and_hide_every_later_heading() -> None:
+    # The shape of RDR-070 chunks 15-41 (nexus-4xmpv re-measure): chunk 15 opens and closes a block, chunk 16
+    # repeats the closing fence in its overlap, and every heading after that was read as inside a fence, so
+    # chunks 17-41 all carried "Phase 2".
+    chunks = _overlapping([
+        "## Phase 2: Operator Review\nOperators review the proposal and run it as follows:\n"
+        "```bash\nnx review start --all\nnx review rebalance --apply\n```\nThat is the whole procedure for review.",
+        "\n\nThe rebalance finishes quickly.\n## Phase 3: Backfill\nBackfill reads the manifest.",
+        "\nMore backfill text that follows the heading above.\n## Phase 4: Cutover\nCutover is a flag flip.",
+        "\nCutover details continue here.\n## Consequences\nThe consequences follow from the above.",
+    ], tail=50)
+    head = chunks[1].split("\n\nThe rebalance")[0]
+    assert head.count("```") == 1 and "bash" not in head, "chunk 2 begins with the closing fence its predecessor already closed"
+    labels = derive_content_labels(chunks)
+    assert [la.label for la in labels] == [
+        "Phase 2: Operator Review", "Phase 3: Backfill", "Phase 3: Backfill", "Phase 4: Cutover",
+    ]
+    assert [la.headings for la in labels] == [
+        ("Phase 2: Operator Review",), ("Phase 3: Backfill",), ("Phase 3: Backfill", "Phase 4: Cutover"),
+        ("Phase 4: Cutover", "Consequences"),
+    ]
+
+
+def test_a_code_block_split_across_chunks_with_overlap_still_hides_the_headings_inside_it() -> None:
+    chunks = _overlapping([
+        "## Run\nSteps to run:\n```bash\n# install the thing\nmake build\nmake test",
+        "\n# a comment, not a heading\nmake install\n```\nBack in prose.\n## After\nDone.",
+    ], tail=48)
+    assert chunks[1].startswith("```bash\n# install the thing"), "the overlap carries the opening fence and lines of the block"
+    labels = derive_content_labels(chunks)
+    assert [la.headings for la in labels] == [("Run",), ("After",)]
+    assert [la.label for la in labels] == ["Run", "After"]
+
+
+def test_an_overlap_that_starts_inside_the_split_block_keeps_the_block_open() -> None:
+    chunks = _overlapping([
+        "## Run\nSteps to run:\n```bash\n# install the thing\nmake build\nmake test",
+        "\n# a comment, not a heading\nmake install\n```\nBack in prose.\n## After\nDone.",
+    ], tail=30)
+    assert "```" not in chunks[1].split("# a comment")[0], "the overlap starts inside the block, past its fences"
+    labels = derive_content_labels(chunks)
+    assert [la.headings for la in labels] == [("Run",), ("After",)]
+
+
 # ── Selection helpers ─────────────────────────────────────────────────────────────────────
 
 
