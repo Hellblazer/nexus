@@ -380,9 +380,9 @@ class WaitSpec:
     a fresh subscription never walks the topic's backlog.
 
     ``wait`` is an internal transport method: the session's own MCP server
-    lifespan waiter (:mod:`nexus.mcp.channel`) is its only caller (RDR-211
-    Open Question 6, Sam's decision). There is no MCP tool or CLI verb for
-    it, so nothing outside that waiter constructs a ``WaitSpec`` today.
+    lifespan waiter (:mod:`nexus.mcp.channel`) was its only caller (RDR-211
+    Open Question 6, Sam's decision); RDR-233 adds ``nx tuple wait``
+    (:mod:`nexus.tuple_wait`) for a session the channel cannot reach.
     """
 
     subspace: str

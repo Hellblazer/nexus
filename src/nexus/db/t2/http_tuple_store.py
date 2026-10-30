@@ -17,9 +17,10 @@ Fourteen operations (RDR-205 §Technical Design "Operations", verbatim
 signatures — ``in`` is a Python keyword, spelled ``in_`` here; every
 other name matches). RDR-206 added ``renew``; RDR-211 Phase 1 Step 1
 (bead nexus-rplay.9) added ``release``, ``wait`` and ``park_stats`` --
-the latter two are internal transport with no MCP tool or CLI verb (Sam's
-decision, RDR-211 Open Question 6): the session MCP server's own lifespan
-waiter and a later doctor-row bead are their only intended callers:
+the latter two are internal transport with no MCP tool (Sam's decision,
+RDR-211 Open Question 6): the session MCP server's own lifespan waiter, a
+doctor-row bead and, for a session without the channel, ``nx tuple wait``
+(RDR-233) are their callers:
 
     out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
     rd (subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [TupleRow]
@@ -1252,11 +1253,10 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         never present with an empty ``tuples``.
 
         Internal transport (RDR-211 Open Question 6, Sam's decision): the
-        session's own MCP server lifespan waiter (a later bead) is the
-        ONLY intended caller. There is deliberately no MCP tool or CLI verb
-        for ``wait`` -- a session parks on its own mailboxes and subscribed
-        board topics through that waiter, never by calling this method
-        directly.
+        session's own MCP server lifespan waiter is its caller, and
+        ``nx tuple wait`` (RDR-233, :mod:`nexus.tuple_wait`) for a
+        session launched without the channel. There is no MCP tool for
+        ``wait``.
 
         Refused BEFORE sending, client-side, with :class:`SchemaViolationError`
         -- the SAME class and reason the engine would refuse it with,
