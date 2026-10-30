@@ -339,6 +339,37 @@ def test_run_index_chunks_have_no_source_path(tmp_path):
     )
 
 
+def test_run_index_stamps_each_registered_files_frecency_on_its_catalog_document(tmp_path):
+    """nexus-6pfgb.9 (RDR-236 Phase 1): after the catalog hook resolves the documents, the run writes
+    each one's frecency score and ONE computed_at to its catalog meta (not per chunk, not per file
+    round trip), and a file the hook could not register is not stamped."""
+    from nexus.indexer import _run_index
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+    (repo / "lib.py").write_text("y = 2\n")
+    scores = {repo / "main.py": 0.6, repo / "lib.py": 0.2}
+    seen: list = []
+
+    def hook(**kw):
+        seen.extend(kw["indexed_files"])
+        return {f: "1.1.1" for f, _ct, _col in kw["indexed_files"] if f.name == "main.py"}
+
+    stamped: list = []
+    db, _col = _mock_db()
+    with _patches(db, extra={
+        "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+        "voyageai.Client": {"return_value": _voyage(1)},
+        "nexus.frecency.batch_frecency": {"return_value": scores},
+        "nexus.indexer._catalog_hook": {"side_effect": hook},
+        "nexus.indexer._write_frecency_meta": {"side_effect": lambda d, at, **k: stamped.append((d, at))},
+    }):
+        _run_index(repo, _reg())
+    assert {f.name for f, _ct, _col in seen} == {"main.py", "lib.py"}
+    assert len(stamped) == 1, stamped
+    docs, computed_at = stamped[0]
+    assert docs == {"1.1.1": 0.6} and computed_at
+
+
 # ── Content-hash dedup ──────────────────────────────────────────────────────
 
 def test_run_index_reindexes_when_embedding_model_changed(tmp_path):
@@ -383,6 +414,7 @@ def test_frecency_only_updates_frecency_score(tmp_path):
          patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=MagicMock()), \
          patch("nexus.db.make_t3", return_value=db), \
          patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
         # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
@@ -430,6 +462,7 @@ def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
          patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=MagicMock()), \
          patch("nexus.db.make_t3", return_value=db), \
          patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
         # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
@@ -481,6 +514,7 @@ def test_frecency_only_skips_unmapped_files_source_path_fallback_deleted_as_dead
          patch("nexus.frecency.batch_frecency", return_value={src: 0.42}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=MagicMock()), \
          patch("nexus.db.make_t3", return_value=db), \
          patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
         # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
@@ -503,6 +537,7 @@ def test_frecency_only_skips_unindexed_files(tmp_path):
     with patch("nexus.frecency.batch_frecency", return_value={src: 0.5}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=MagicMock()), \
          patch("nexus.db.make_t3", return_value=db), \
          patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
         # nexus-sghyo (2026-08-06): _run_index_frecency_only routes

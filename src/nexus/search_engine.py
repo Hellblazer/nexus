@@ -18,6 +18,7 @@ from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
 from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
     OWNER_FACTS_KEY,
+    OWNER_FRECENCY_KEY,
     OWNER_RESOLVE_CAP,
     agreed_facts,
     entry_facts,
@@ -463,6 +464,14 @@ def _attach_display_paths(
         live = [titles[o] for o in live_owners if titles.get(o)]
         if live:
             r.metadata["_display_title"] = owner_titles(live)
+        # RDR-236 Phase 1 (nexus-6pfgb.9): the hit is scored by the frecency of the document it
+        # is attributed to (``doc_id``), taken from the same page lookup as the title above, never
+        # from the shared row (the last writer's file). Absent when that document states none.
+        if (
+            did in homes and homes[did] in ("", r.collection)
+            and (owner_frecency := facts.get(did, {}).get("frecency_score")) is not None
+        ):
+            r.metadata[OWNER_FRECENCY_KEY] = owner_frecency
         # nexus-6pfgb.11: the hit's age and expiry are the owners' agreed
         # facts. Past the cap only some owners were resolved, and an owner the
         # lookup named but did not resolve (a live co-owner the catalog read

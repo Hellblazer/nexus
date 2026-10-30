@@ -2702,6 +2702,60 @@ def _build_frecency_doc_id_map(
     return file_to_doc_id
 
 
+def _frecency_computed_at() -> str:
+    """The instant a frecency pass computed its scores, as the ISO UTC stamp the catalog keeps."""
+    from datetime import UTC, datetime  # noqa: PLC0415 — deliberate function-scoped import (the module imports datetime lazily everywhere)
+
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _write_frecency_meta(
+    doc_scores: "dict[str, float]", computed_at: str, *, writer: "object | None" = None,
+) -> int:
+    """RDR-236 Phase 1 (nexus-6pfgb.9): stamp each document's frecency on its catalog ``meta``.
+
+    ``frecency_score`` is a document key: the T3 chunk row a shared chunk carries holds the last
+    writer's file score, so the scorer reads the attributed owner's catalog value instead. Frecency
+    is computed against now(), so the score travels with its ``frecency_computed_at``.
+
+    Sends ONLY those two keys per document; the catalog merges ``meta`` (jsonb ``||``), so nothing
+    else on it is read or re-asserted (the nexus-vhyar lesson). A score that is not a finite number
+    is not stamped. One ``update_many`` batch per page when the writer has it, else one ``update``
+    per document, a failed document skipped (nexus-ou4tb: isolate the file, not the run). Best
+    effort as a whole: an absent or failing catalog logs and returns what was written, never
+    raising into the index run. Returns the number of documents stamped.
+    """
+    import math  # noqa: PLC0415 — deliberate function-scoped import (stdlib, used only here)
+
+    updates = [
+        {"tumbler": str(doc_id), "meta": {"frecency_score": float(score), "frecency_computed_at": computed_at}}
+        for doc_id, score in doc_scores.items()
+        if doc_id and isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)
+    ]
+    if not updates:
+        return 0
+    try:
+        if writer is None:
+            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+            writer = make_catalog_writer()
+        update_many = getattr(writer, "update_many", None)
+        if callable(update_many):
+            counts = update_many(updates)
+            return sum(1 for c in counts if c) if counts is not None else len(updates)
+        stamped = 0
+        for u in updates:
+            try:
+                writer.update(u["tumbler"], meta=u["meta"])  # type: ignore[attr-defined]
+                stamped += 1
+            except Exception:  # noqa: BLE001 — nexus-ou4tb: one document's failed stamp must not stop the rest
+                _log.warning("frecency_meta_stamp_failed", doc_id=u["tumbler"], exc_info=True)
+        return stamped
+    except Exception:  # noqa: BLE001 — best-effort: the catalog stamp never breaks an index run
+        _log.warning("frecency_meta_stamp_batch_failed", documents=len(updates), exc_info=True)
+        return 0
+
+
 def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     """Update frecency_score metadata on all indexed chunks without re-embedding.
 
@@ -2773,6 +2827,14 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     # the per-file loop below — nexus-afudo (2026-08-05) deleted the
     # legacy source_path-keyed filter they used to fall through to.
     file_to_doc_id = _build_frecency_doc_id_map(repo, list(frecency_map.keys()))
+
+    # RDR-236 Phase 1 (nexus-6pfgb.9): the catalog is where a document's frecency lives; one
+    # write per document, not per collection or chunk. The per-chunk row write below stays until
+    # nexus-6pfgb.27 retires it: clients on an older release still read the score from the row.
+    _write_frecency_meta(
+        {file_to_doc_id[f]: s for f, s in frecency_map.items() if f in file_to_doc_id},
+        _frecency_computed_at(),
+    )
 
     # Update frecency in all three content-type collections (nexus-e0w01).
     collection_names = [code_collection]
@@ -5366,6 +5428,7 @@ def _run_index(
 
     # Compute frecency scores in a single git log pass
     frecency_map = batch_frecency(repo, decay_rate=tuning.decay_rate, timeout=tuning.git_log_timeout)
+    _frecency_computed = _frecency_computed_at()  # RDR-236 Phase 1: one stamp for the whole run
 
     # Build absolute RDR path set for exclusion (resolved, so symlink/..
     # normalization matches the classification loop's ``path.resolve()``
@@ -6088,6 +6151,15 @@ def _run_index(
     if on_phase is not None:
         on_phase(
             f"Catalog registration done ({time.monotonic() - _catalog_t0:.1f}s)"
+        )
+
+    # RDR-236 Phase 1 (nexus-6pfgb.9): each document's frecency goes on its catalog meta beside
+    # the run's computed_at (the chunk rows below keep it until nexus-6pfgb.27). Paged batches,
+    # not a round trip per file; best effort, so a catalog that cannot take it never stops indexing.
+    if file_to_doc_id:
+        _write_frecency_meta(
+            {file_to_doc_id[f]: frecency_map.get(f, 0.0) for f, _ct, _col in indexed_for_catalog if f in file_to_doc_id},
+            _frecency_computed,
         )
 
     # nexus-hg2dw / critique round 2 (T2 critique-nexus-hg2dw-36602c67f
