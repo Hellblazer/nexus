@@ -126,6 +126,93 @@ def test_walk_backfills_a_legacy_note_and_records_completion(t2_service_env, cat
     assert record.detail.startswith("census: collections=1 "), record.detail
     assert "legacy-unmanifested=0" in record.detail and "unclassified=0" in record.detail
 
+    # nexus-1nrcu, same tenant, same walk: the manifest-section-labels rung (the ladder's next rung, run by
+    # _run_ladder above) found this note's row legacy and the chunk row without label keys, so it left it.
+    from nexus.upgrade_ladder.rungs.manifest_section_labels import ManifestSectionLabelsRung
+
+    assert [(r.chash, r.labels_written) for r in cat.get_manifest(tumbler)] == [(chash, False)]
+    _labels_rung_against_the_engine(tenant, cat, owner, ManifestSectionLabelsRung, legacy_note_rows=1)
+
+
+def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note_rows: int) -> None:
+    """nexus-1nrcu on the real engine: the rule's partition, the fill, a second run that changes 0, and
+    the reader that follows the manifest once the row is written."""
+    from nexus.mcp.core import resolve_owner_section_types_with_basis
+    from nexus.upgrade_ladder.protocol import ConvergeOutcome
+
+    coll = _coll("labels")
+    labelled = {"section_title": "Refs", "section_type": "references", "page_number": 3,
+                "indexed_at": "2026-01-01T00:00:00+00:00"}
+
+    def doc(title: str, rows: list[tuple[str, int]], **row_extra) -> str:
+        t = str(cat.register(owner, title, content_type="paper", physical_collection=coll, chunk_count=len(rows)))
+        cat.write_manifest(
+            t, [{"chash": c, "position": p, **row_extra} for c, p in rows], collection=coll)
+        return t
+
+    c_single, c_shared, c_repeat, c_written, c_bare = (
+        seed_chunk(tenant, coll, f"{name} 1nrcu", meta)
+        for name, meta in (("single", labelled), ("shared", labelled), ("repeat", labelled),
+                           ("written", labelled), ("bare", {"indexed_at": "2026-01-01T00:00:00+00:00"})))
+    single = doc("single", [(c_single, 0)])
+    shared_a, shared_b = doc("shared-a", [(c_shared, 0)]), doc("shared-b", [(c_shared, 0)])
+    repeat = doc("repeat", [(c_repeat, 0), (c_repeat, 1)])
+    written = doc("written", [(c_written, 0)], section_title="", section_type="", page_number=None)
+    bare = doc("bare", [(c_bare, 0)])
+
+    before = {t: cat.get_manifest(t) for t in (single, shared_a, shared_b, repeat, written, bare)}
+    assert [r.labels_written for r in before[written]] == [True], "control: an empty-labelled row is written"
+    assert all(not r.labels_written for t in (single, shared_a, shared_b, repeat, bare) for r in before[t])
+    legacy_rows = legacy_note_rows + 1 + 2 + 2 + 1
+
+    # The walk above recorded this rung in the tenant's ledger, so a default rung answers "converged" at once
+    # (the short-circuit, pinned at the end). The rung under test is the one with no completion on file.
+    rung = rung_cls(record_fn=lambda: None)
+    status = rung.detect()
+    assert status.applicable and not status.converged
+    assert status.pending_detail.startswith(f"1 legacy manifest row(s) of {legacy_rows} "), status.pending_detail
+    assert [r.labels_written for r in cat.get_manifest(single)] == [False], "detect writes nothing"
+
+    class _Report:
+        def emit(self, event: str, **fields) -> None:
+            pass
+
+    stamp_before = {t: cat.resolve(t).indexed_at for t in (single, shared_a, repeat, written, bare)}
+    assert rung.converge(_Report()).outcome is ConvergeOutcome.COMPLETED
+    (filled,) = cat.get_manifest(single)
+    assert (filled.section_title, filled.section_type, filled.page_number, filled.labels_written) == (
+        "Refs", "references", 3, True)
+    assert (filled.chash, filled.position, filled.chunk_index, filled.line_start) == (
+        before[single][0].chash, 0, before[single][0].chunk_index, before[single][0].line_start), \
+        "only the chash, labels and flag are written; the rest of the row is the engine's own"
+    for t in (shared_a, shared_b, repeat, bare):
+        assert [r.labels_written for r in cat.get_manifest(t)] == [False] * len(before[t]), t
+    assert [(r.section_title, r.section_type, r.labels_written) for r in cat.get_manifest(written)] == [("", "", True)]
+    assert {t: cat.resolve(t).indexed_at for t in stamp_before} == stamp_before, (
+        "untouched documents are not rewritten, and the filled one's stamp is restored: the engine restamps a "
+        "document on every manifest write, which would switch off the chunk-newer guard for its other rows")
+    assert rung.verify() is True and "1 filled this run" in rung.record_detail()
+
+    # a later writer of the shared chunk row no longer decides this row's label
+    import nexus.db.http_vector_client as hvc
+
+    hvc.HttpVectorClient(tenant=tenant).get_collection(coll).update(
+        ids=[c_single], metadatas=[{"section_type": "methods"}])
+    assert resolve_owner_section_types_with_basis([c_single], [True], [coll], ["methods"]) == (
+        ["references"], ["agreed"])
+
+    # second run: nothing fillable, nothing written
+    manifests = {t: cat.get_manifest(t) for t in before}
+    stamp = cat.resolve(single).indexed_at
+    again = rung_cls(record_fn=lambda: None)
+    assert again.detect().converged is True
+    assert again.converge(_Report()).outcome is ConvergeOutcome.COMPLETED
+    assert {t: cat.get_manifest(t) for t in before} == manifests
+    assert cat.resolve(single).indexed_at == stamp, "a second run sends no write"
+
+    # the recorded completion in the real ledger short-circuits the default rung: converged with no scan
+    assert rung_cls().detect().converged is True
+
 
 def test_second_walk_is_a_no_op_and_sends_no_census_request(
     t2_service_env, catalog, monkeypatch,

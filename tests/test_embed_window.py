@@ -279,7 +279,7 @@ def test_pdf_chunks_use_the_collections_window_not_the_efs(tmp_path, monkeypatch
         try:
             doc_indexer._pdf_chunks(
                 tmp_path / "x.pdf", "h", "all-MiniLM-L6-v2", "2026-01-01", "corp",
-                git_meta={}, collection_name="docs__repo-1-1__bge-base-en-v15-768__v1",
+                collection_name="docs__repo-1-1__bge-base-en-v15-768__v1",
             )
         except Exception:  # noqa: BLE001 — only the chunker's window argument is under test
             pass

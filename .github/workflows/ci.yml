@@ -2199,7 +2199,24 @@ jobs:
     # loader is dyld, so the floor is the Mach-O LC_BUILD_VERSION minos
     # (MACOSX_DEPLOYMENT_TARGET), not GLIBC — asserted by TestMacosFloor.
     name: CA-3 live (PG from source + pgvector, mac-arm64)
-    runs-on: macos-14
+    # nexus-vdhcl (2026-10-30): this leg ran on GitHub's hosted macos-14 runner since
+    # RDR-157, before the Mac mini joined the lab pool, and against the CI cost
+    # directive (hosted macOS only where an artifact requires the platform, never in
+    # routine push CI). On 2026-10-30 the hosted runner cancelled it within a second of
+    # starting on every attempt (no runner assigned, no log). It now runs on the pool's
+    # `lab-mac-s` class (a single-use runner on hellmini, 2 cores / 4 GB, as the
+    # mac-signing-rehearsal already does: an accepted exception to hellmini's
+    # release-jobs-only rule, Sam 2026-10-30). The hosted runner stays as the fallback
+    # when the pool is off (repo variable NX_CI_POOL=off) and for a fork PR, which
+    # never reaches owned hardware (same guard as the pytest shards). The PG bundle
+    # cache key below still names macos-14: both runners build the same arm64 bundle
+    # with the same deployment-target floor, and TestMacosFloor pins that floor at run
+    # time; the pool path keys its bundle and wheel caches on the host (see below), so
+    # the hosted key stays byte-identical to pg-bundle-cache-seed.yml's. On a cache
+    # miss scripts/build_pg_bundle.sh builds with --without-icu/-zlib/-readline/-openssl
+    # and takes bison/flex from Homebrew's keg prefixes, so hellmini's non-admin
+    # runner user (no brew install, no pkg-config, CommandLineTools only) builds it.
+    runs-on: ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'macos-14' || 'lab-mac-s' }}
     timeout-minutes: 30
     env:
       # nexus-aqbrk: this job has NO service JAR and does not need one — its
@@ -2311,9 +2328,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
-          key: uv-${{ runner.os }}-mac-arm64-3.12-${{ hashFiles('uv.lock') }}
+          key: uv-${{ runner.os }}-mac-arm64-${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'macos-14' || 'hellmini-lab-mac-s' }}-3.12-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            uv-${{ runner.os }}-mac-arm64-3.12-
+            uv-${{ runner.os }}-mac-arm64-${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'macos-14' || 'hellmini-lab-mac-s' }}-3.12-
 
       - name: Install project + dev deps
         if: steps.gate.outputs.run == 'true'
@@ -2330,7 +2347,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: bundle
-          key: pg-bundle-mac-arm64-macos-14-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-native-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+          # nexus-vdhcl: the pool runner (hellmini, macOS 27, its own toolchain) and the hosted
+          # macos-14 image never share a bundle or wheel cache entry (labrun_559, 2026-10-30):
+          # the hosted key stays byte-identical to pg-bundle-cache-seed.yml's; the pool path
+          # keys on its host and warms its own entry on the first cache miss.
+          key: pg-bundle-mac-arm64-${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'macos-14' || 'hellmini-lab-mac-s' }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-native-${{ hashFiles('scripts/build_pg_bundle.sh') }}
 
       - name: Build complete PG + pgvector from source (native, deployment-target 13.0)
         if: steps.gate.outputs.run == 'true' && steps.pg-bundle-cache.outputs.cache-hit != 'true'

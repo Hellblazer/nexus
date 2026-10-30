@@ -1075,7 +1075,9 @@ _MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "fire_note_chains(outcome, content, hooks=_hooks)", "outcome = stamp_note(outcome)\n        fire_note_chains(outcome, content, hooks=_hooks)"),
     # the .nxexp import
     ("exporter.py", "_ensure", "import writer built without the deferral", "defer_completion=True,", ""),
-    ("exporter.py", "flush", "import stamps deleted", "stamped = writer.complete_documents(result.landed)", "stamped = None"),
+    # nexus-6pfgb.45: the page's landed documents pass through _stamp_note_keys first, so the
+    # completion call reads ``ready``; the mutation still deletes the stamp.
+    ("exporter.py", "flush", "import stamps deleted", "stamped = writer.complete_documents(ready)", "stamped = None"),
     # the ChunkBatcher flush
     ("chunk_batcher.py", "_flush_batch", "flush stamp deleted", "self._on_batch_stamp(", "(lambda *a: None)("),
 )

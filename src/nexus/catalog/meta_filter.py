@@ -47,7 +47,8 @@ def meta_matches(meta: Any, filters: Sequence[tuple[str, str]]) -> bool:
     """Whether a document's ``meta`` satisfies every ``(key, value)`` of *filters*."""
     meta = meta if isinstance(meta, Mapping) else {}
     for key, wanted in filters:
-        if key in meta and meta[key] is not None:
+        # A key with a stated default reads None and "" as absent, as extraction_facts does (nexus-6pfgb.48).
+        if key in meta and meta[key] is not None and not (key in ABSENT_MEANS and meta[key] == ""):
             have = _text(meta[key])
         elif key in ABSENT_MEANS:
             have = ABSENT_MEANS[key]

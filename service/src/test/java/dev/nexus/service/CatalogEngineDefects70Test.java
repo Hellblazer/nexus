@@ -553,6 +553,60 @@ class CatalogEngineDefects70Test {
         assertThat(repo.getDocument(TENANT, t).get("chunk_count")).isEqualTo(2);
     }
 
+    /**
+     * nexus-8o06q / nexus-6pfgb.9: a META-ONLY update is not a manifest change, so it must
+     * leave chunk_count alone. The manifest heal detects a lost manifest row as chunk_count
+     * above the manifest row count; RDR-236 Phase 1's frecency stamp is a meta-only
+     * update, and re-deriving there erased the gap before the heal could mark the document.
+     */
+    @Test
+    void e4gel_metaOnlyUpdateLeavesChunkCountAlone() throws Exception {
+        String t = docWithGappedManifest("meta-only", "knowledge__defects70-metaonly__voyage-context-3__v1");
+
+        repo.updateDocument(TENANT, t, Map.of("meta", Map.of("frecency_score", 0.5)));
+
+        assertThat(repo.getDocument(TENANT, t).get("chunk_count"))
+            .as("a meta-only update must not re-derive chunk_count (the heal's gap signal)")
+            .isEqualTo(5);
+    }
+
+    /** The batch path shares the builder, so the meta-only rule holds on /update_many. */
+    @Test
+    void e4gel_metaOnlyUpdateManyLeavesChunkCountAlone() throws Exception {
+        String t = docWithGappedManifest("meta-only-many", "knowledge__defects70-metaonlymany__voyage-context-3__v1");
+
+        var results = repo.updateDocumentsMany(TENANT, List.of(
+            Map.of("tumbler", t, "meta", Map.of("frecency_score", 0.5))));
+        assertThat(results).containsExactly(1);
+
+        assertThat(repo.getDocument(TENANT, t).get("chunk_count")).isEqualTo(5);
+    }
+
+    /** The boundary: meta ALONGSIDE a non-meta field (head_hash, the post-manifest-write update) still re-derives. */
+    @Test
+    void e4gel_metaPlusHeadHashStillReDerivesChunkCount() throws Exception {
+        String t = docWithGappedManifest("meta-plus-head", "knowledge__defects70-metahead__voyage-context-3__v1");
+
+        repo.updateDocument(TENANT, t, Map.of("head_hash", "h2", "meta", Map.of("k", "v")));
+
+        assertThat(repo.getDocument(TENANT, t).get("chunk_count")).isEqualTo(2);
+    }
+
+    /** A document with a 2-row manifest whose chunk_count was forced to 5 (a lost-manifest-row gap). */
+    private String docWithGappedManifest(String tag, String collection) throws Exception {
+        String owner = freshOwner();
+        String t = repo.registerDocument(TENANT, owner, Map.of(
+            "title", tag, "content_type", "prose", "chunk_count", 0,
+            "source_uri", "file:///defects70/" + tag + "/doc.md"));
+        appendManifestChunksSeeded(TENANT, t, collection, List.of(
+            row(0, ch("defects70-" + tag + "-0")), row(1, ch("defects70-" + tag + "-1"))));
+        forceStaleChunkCount(t, 5);
+        assertThat(repo.getDocument(TENANT, t).get("chunk_count"))
+            .as("precondition: chunk_count sits above the 2-row manifest")
+            .isEqualTo(5);
+        return t;
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // nexus-927mo — /update must stamp indexed_at when head_hash CHANGES
     // ══════════════════════════════════════════════════════════════════════════

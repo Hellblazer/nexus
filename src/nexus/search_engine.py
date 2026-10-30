@@ -17,6 +17,7 @@ import structlog
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
 from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
+    DISPLAY_SOURCE_PATH_KEY,
     OWNER_AGENTS_KEY,
     OWNER_BIB_KEY,
     OWNER_CHUNK_COUNT_KEY,
@@ -163,6 +164,18 @@ class SearchDiagnostics:
             return None
         return max(candidates, key=lambda item: item[2])
 
+def _positions_owner(candidates: list[dict], collection: str) -> dict | None:
+    """The chash-positions row a hit takes as its owner (nexus-6pfgb.52): the
+    smallest doc_id among the rows homed in the hit's own ``collection``, else
+    the smallest doc_id overall. A row without a ``collection`` (an engine
+    before that field) is homed nowhere, so such rows only ever fall to the
+    second rule. ``min`` keeps the first of equal doc_ids, which is the lowest
+    position, the engine's ``ORDER BY doc_id, position``."""
+    homed = [c for c in candidates if collection and c.get("collection") == collection]
+    pool = homed or candidates
+    return min(pool, key=lambda c: c["doc_id"]) if pool else None
+
+
 def _attach_from_chash_positions(
     results: list[SearchResult], chashes: list[str], catalog: Any,
 ) -> bool:
@@ -172,12 +185,16 @@ def _attach_from_chash_positions(
     (touching nothing) when the route is absent, fails, or any result is left
     unserved, such as a legacy chunk naming a doc the route did not return.
 
-    The manifest path's stamps, with one deliberate difference: a chash held
-    by several documents resolves to the first doc_id in the engine's text
-    order, where the manifest path picked from a set in arbitrary order.
-    Otherwise the same: that doc's whole-manifest row count, the chash's
-    first position in it, a legacy ``doc_id`` already on the result kept,
-    and fields already present never overwritten.
+    The route is tenant-wide, but each row carries the ``collection`` it is
+    homed in. A chash held by several documents resolves as the manifest
+    fallback does (``_fallback_owner``): the smallest doc_id homed in the hit's
+    collection, else the smallest doc_id in text order (``_positions_owner``).
+    Text order equals the engine's ``ORDER BY doc_id`` only under C collation,
+    which the local bundle has (``initdb --no-locale``); the cloud collation is
+    not verified in this repo. Otherwise the same stamps as the manifest path:
+    that doc's whole-manifest row count, the chash's first position in it, a
+    legacy ``doc_id`` already on the result kept, and fields already present
+    never overwritten. A row that already names its owner is not touched.
     """
     lookup = getattr(catalog, "chash_positions", None)
     if lookup is None:
@@ -199,7 +216,10 @@ def _attach_from_chash_positions(
             continue
         candidates = by_chash.get(chash, [])
         wanted = r.metadata.get("doc_id")
-        match = next((c for c in candidates if c["doc_id"] == wanted), None) if wanted else (candidates[0] if candidates else None)
+        if wanted:
+            match = next((c for c in candidates if c["doc_id"] == wanted), None)
+        else:
+            match = _positions_owner(candidates, r.collection)
         if match is None:
             if wanted or candidates:
                 return False  # a legacy doc_id the route did not return: manifest path
@@ -268,6 +288,42 @@ class _TopicReads:
         return self._links
 
 
+def _fallback_owner(
+    docs: list[str], chash: str, collection: str,
+    manifests: dict[str, list[Any]] | None,
+) -> str:
+    """The ``doc_id`` the manifest fallback stamps on a hit whose row named none
+    and whose chash several documents hold (nexus-6pfgb.52).
+
+    A document homed in the hit's own collection wins: ``doc_id`` drives the
+    hit's path, line numbers and chunk count, and the owner lookup is
+    tenant-wide, so an arbitrary pick can name a file in another collection.
+    "Homed" is read from the manifests the reverse lookup already fetched
+    (a row for this chash whose own stamped ``collection`` is the hit's); no
+    further catalog call. Ties, and a lookup that carried no manifests or no
+    row collections, fall back to the smallest doc_id in text order, so the
+    choice never depends on the lookup's own order. The ``chash_positions``
+    route applies the same rule (``_positions_owner``). Text order equals the
+    engine's ``ORDER BY doc_id`` only under C collation (the local bundle's
+    ``initdb --no-locale``); the cloud collation is not verified in this repo.
+
+    This is still a CHOICE among co-owners, not a fact about the row. The
+    caller marks the hit ``DOC_ID_INFERRED_KEY``; every owner stays in
+    ``_owner_doc_ids`` and the score readers take the best live owner.
+    """
+    ordered = sorted(set(docs))
+    if manifests:
+        for doc_id in ordered:
+            for row in manifests.get(doc_id) or ():
+                if isinstance(row, dict):
+                    row_chash, row_coll = row.get("chash", ""), row.get("collection")
+                else:
+                    row_chash, row_coll = getattr(row, "chash", ""), getattr(row, "collection", None)
+                if row_chash == chash and row_coll == collection:
+                    return doc_id
+    return ordered[0]
+
+
 def _attach_doc_ids_from_catalog(
     results: list[SearchResult], catalog: Any | None,
 ) -> None:
@@ -327,8 +383,8 @@ def _attach_doc_ids_from_catalog(
     # multi-chunk reassembly order. Batch-fetch manifests for every
     # distinct doc_id so each search hit pays one catalog query
     # amortised, not one per result.
-    resolved_doc_ids: dict[str, str] = {}  # chash -> doc_id
-    for r, chash in zip(results, chashes):
+    resolved_doc_ids: dict[int, str] = {}  # result index -> doc_id
+    for i, (r, chash) in enumerate(zip(results, chashes)):
         if not chash:
             continue
         # If a result already carries doc_id (e.g. from a legacy
@@ -340,27 +396,22 @@ def _attach_doc_ids_from_catalog(
             # nexus-sis0m.5: every document holding the chash, for the title.
             r.metadata["_owner_doc_ids"] = list(dict.fromkeys(docs))
         if r.metadata.get("doc_id"):
-            resolved_doc_ids[chash] = r.metadata["doc_id"]
+            resolved_doc_ids[i] = r.metadata["doc_id"]
             continue
         if docs:
-            # Multiple docs sharing the same chash is uncommon but
-            # possible (content-identical files across docs). Pick
-            # the first deterministically; downstream consumers that
-            # need finer disambiguation can re-query the manifest.
-            r.metadata["doc_id"] = docs[0]
+            # nexus-6pfgb.52: a chash held by several documents has no single
+            # right owner, and the lookup's order is arbitrary. Choose by a rule
+            # that does not depend on it (see ``_fallback_owner``); the mark
+            # tells the score readers the choice is not the row's own.
+            owner = _fallback_owner(docs, chash, r.collection, prefetched)
+            r.metadata["doc_id"] = owner
             r.metadata[DOC_ID_INFERRED_KEY] = True
-            resolved_doc_ids[chash] = docs[0]
+            resolved_doc_ids[i] = owner
 
     # Batch-fetch manifests for all resolved doc_ids in one call when the
     # catalog backend supports get_manifests() (nexus-7lm3q).  Falls back
     # to the per-doc loop for older/local catalogs that lack that method.
-    distinct_doc_ids = list({
-        did
-        for chash in chashes
-        if chash
-        for did in [resolved_doc_ids.get(chash) or ""]
-        if did
-    })
+    distinct_doc_ids = list(set(resolved_doc_ids.values()))
     manifest_cache: dict[str, list[Any]] = {}
     _get_manifests_batch = getattr(catalog, "get_manifests", None)
     if prefetched is not None:
@@ -399,10 +450,10 @@ def _attach_doc_ids_from_catalog(
                 )
                 manifest_cache[doc_id] = []
 
-    for r, chash in zip(results, chashes):
+    for i, (r, chash) in enumerate(zip(results, chashes)):
         if not chash:
             continue
-        doc_id = resolved_doc_ids.get(chash) or r.metadata.get("doc_id", "")
+        doc_id = resolved_doc_ids.get(i) or r.metadata.get("doc_id", "")
         if not doc_id:
             continue
         manifest = manifest_cache.get(doc_id)
@@ -436,15 +487,14 @@ def _attach_display_paths(
     ``_display_path`` resolved through the catalog.
 
     Mutates *results* in place. Formatters read ``meta["_display_path"]``
-    in preference to legacy ``source_path``; this keeps display sites
-    catalog-agnostic so the prune verb (nexus-o6aa.10.3) can drop
-    ``source_path`` from chunk metadata without breaking display.
+    (and ``_display_source_path``), never the row's ``source_path``, which is
+    the last writer's file.
 
     No-op when *catalog* is ``None`` or no result carries a ``doc_id``.
     A doc_id with no matching catalog entry leaves ``_display_path``
-    unset; the formatter helper then falls back to ``source_path`` /
-    ``file_path``. Best-effort by design: a display-path lookup must
-    never break a search.
+    unset; the formatter helper then shows the hit's title or id, never
+    the chunk row's own ``source_path`` (nexus-6pfgb.51). Best-effort by
+    design: a display-path lookup must never break a search.
 
     Pairs with :func:`_attach_doc_ids_from_catalog`: under Phase 3
     chunk metadata no longer carries ``doc_id``, so this function
@@ -460,14 +510,16 @@ def _attach_display_paths(
     if not doc_ids:
         return
     if prefetched is not None and doc_ids <= prefetched.doc_ids:
-        cache, titles, homes, facts = prefetched.maps()
+        cache, titles, homes, facts, local_paths = prefetched.maps()
     else:
-        cache, titles, homes, facts = _resolve_display_maps(doc_ids, catalog)
+        cache, titles, homes, facts, local_paths = _resolve_display_maps(doc_ids, catalog)
     for r in results:
         did = r.metadata.get("doc_id", "")
         path = cache.get(did) if did else None
         if path:
             r.metadata["_display_path"] = path
+        if local := (local_paths.get(did) if did else None):
+            r.metadata[DISPLAY_SOURCE_PATH_KEY] = local
         all_owners = r.metadata.get("_owner_doc_ids") or ([did] if did else [])
         owners = all_owners[:_OWNER_TITLE_RESOLVE_CAP]
         # The owner lookups are tenant-wide (chash is a function of text
@@ -561,13 +613,30 @@ def _display_doc_ids(results: list[SearchResult]) -> set[str]:
     return doc_ids
 
 
-#: ``(file_path, title, physical_collection, facts)`` per doc_id; ``facts`` is
-#: :func:`nexus.context_annotations.entry_facts` of the live entry.
-_DisplayMaps = tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, dict[str, Any]]]
+#: ``(file_path, title, physical_collection, facts, local_path)`` per doc_id; ``facts`` is
+#: :func:`nexus.context_annotations.entry_facts` of the live entry and ``local_path`` the absolute
+#: path of its ``file://`` source_uri (nexus-6pfgb.49).
+_DisplayMaps = tuple[
+    dict[str, str], dict[str, str], dict[str, str], dict[str, dict[str, Any]], dict[str, str],
+]
+
+
+def _local_source_path(entry: Any) -> str:
+    """The absolute local path of *entry*'s ``file://`` source_uri, or ``""`` (any other scheme or none).
+
+    The path is whatever follows the scheme, taken verbatim (nexus-6pfgb.55): every registration path mints
+    the RAW spelling ``"file://" + path`` (``aspect_readers.uri_for``, ``doc_indexer._curator_identity``,
+    the engine's ``deriveSourceUri``), so a ``#``, a ``?`` or a literal ``%25`` in a directory name is part
+    of the path, not a fragment, a query or an escape. A URL parser truncated or unquoted it.
+    """
+    uri = getattr(entry, "source_uri", "") or ""
+    if not isinstance(uri, str) or not uri.startswith("file:///"):
+        return ""
+    return uri[len("file://"):]
 
 
 def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
-    """``(file_path, title, physical_collection, facts)`` per doc_id, best-effort.
+    """``(file_path, title, physical_collection, facts, local_path)`` per doc_id, best-effort.
 
     ``facts`` carries the provenance a hit's age line reads (indexed date, year,
     expiry), taken from the catalog entries this lookup already resolves
@@ -579,6 +648,7 @@ def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
     titles: dict[str, str] = {}  # live documents only (resolve skips tombstones)
     homes: dict[str, str] = {}  # doc_id -> physical_collection
     facts: dict[str, dict[str, Any]] = {}  # doc_id -> entry_facts
+    local_paths: dict[str, str] = {}  # doc_id -> absolute path of a file:// source_uri
     _resolve_many = getattr(catalog, "resolve_many", None)
     if _resolve_many is not None:
         try:
@@ -590,6 +660,8 @@ def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
                     titles[did] = getattr(entry, "title", "") or ""
                     homes[did] = getattr(entry, "physical_collection", "") or ""
                     facts[did] = entry_facts(entry)
+                    if local := _local_source_path(entry):
+                        local_paths[did] = local
         except Exception:  # noqa: BLE001 — best-effort batch resolve; failure logged at debug, display path dropped for set (see comment)
             _log.debug("attach_display_paths_batch_failed", exc_info=True)
             # Degradation granularity (CR Med-1 / critic obs): a single
@@ -610,7 +682,9 @@ def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
                 titles[did] = getattr(entry, "title", "") or ""
                 homes[did] = getattr(entry, "physical_collection", "") or ""
                 facts[did] = entry_facts(entry)
-    return cache, titles, homes, facts
+                if local := _local_source_path(entry):
+                    local_paths[did] = local
+    return cache, titles, homes, facts, local_paths
 
 
 class _DisplayLookup:
@@ -624,7 +698,7 @@ class _DisplayLookup:
     def __init__(self, doc_ids: set[str], catalog: Any) -> None:
         self.doc_ids = doc_ids
         self._catalog = catalog
-        self._maps: _DisplayMaps = ({}, {}, {}, {})
+        self._maps: _DisplayMaps = ({}, {}, {}, {}, {})
         # Run in the caller's context so a ContextVar the catalog client
         # reads (a per-call deadline, for one) reaches the worker too.
         ctx = contextvars.copy_context()
@@ -2438,7 +2512,12 @@ def search_cross_corpus(
     # Link-aware boost (RDR-060 E3)
     if link_boost and catalog and all_results:
         from nexus.scoring import apply_link_boost  # noqa: PLC0415 — branch-local; only when link_boost enabled
-        all_results = apply_link_boost(all_results, catalog)
+        # nexus-6pfgb.47: the owners are stamped tenant-wide, so the boost takes the display lookup's
+        # doc_id -> collection map (joined after its own link call) and drops other collections' owners.
+        all_results = apply_link_boost(
+            all_results, catalog,
+            homes=(lambda: display_lookup.maps()[2]) if display_lookup is not None else None,
+        )
 
     # Compute topic assignments once for both boost and grouping (RDR-070)
     _topic_assignments: dict[str, int] | None = None
@@ -2528,6 +2607,8 @@ def search_cross_corpus(
     # absent catalog or missing doc_ids leave _display_path unset and
     # formatters fall back to source_path / file_path.
     _attach_display_paths(all_results, catalog, prefetched=display_lookup)
+    # nexus-fv2u4: the Ward labels were taken before the display keys existed.
+    _relabel_clusters(all_results)
 
     return all_results
 
@@ -2699,14 +2780,14 @@ def apply_file_diversity_cap(
     partition, not a filter: every input result is still present in the
     output, just reordered. Nothing is dropped and no score is touched.
 
-    File identity resolves per result via ``metadata.doc_id`` ->
-    ``metadata.source_path`` -> ``metadata.file_path`` -> ``r.id``
-    (``doc_id`` first because it is the catalog tumbler, stable across a
-    prune/re-index; the path keys are the legacy pre-doc_id identity the
-    CLI's rg-boost and ``_display_path`` code also fall back on) — a
-    result with none of the first three metadata keys
-    falls back to its own unique ``id``, so results with no shared file
-    identity never cap against each other.
+    File identity resolves per result via ``metadata.doc_id`` -> ``r.id``
+    (``doc_id`` is the catalog tumbler, stable across a prune/re-index) — a
+    result with no doc_id falls back to its own unique ``id``, so results
+    with no shared file identity never cap against each other. The row's
+    ``source_path`` is the last writer's file, shared with other documents,
+    the legacy ``file_path`` key is left by no writer, and ``_display_path``
+    is attached only to a hit that already has a doc_id; none is an identity
+    (nexus-6pfgb.49, nexus-6pfgb.56).
 
     Walks *results* in their existing (already-scored) order; the first
     *max_per_file* occurrences of each file key are kept in place, every
@@ -2739,12 +2820,7 @@ def apply_file_diversity_cap(
     overflow: list[SearchResult] = []
     counts: dict[str, int] = {}
     for r in results:
-        key = (
-            r.metadata.get("doc_id")
-            or r.metadata.get("source_path")
-            or r.metadata.get("file_path")
-            or r.id
-        )
+        key = r.metadata.get("doc_id") or r.id
         seen = counts.get(key, 0)
         (kept if seen < max_per_file else overflow).append(r)
         counts[key] = seen + 1
@@ -3018,10 +3094,10 @@ def _contradiction_candidates(page: list[SearchResult]) -> list[int]:
     N=10"), and the flag renders only on displayed rows.
 
     :func:`_flag_contradictions` flags a pair only when both rows share a collection and
-    each carries a non-empty agent set (:func:`_row_agents`) with a differing member. A
-    row is therefore a candidate only if it has an agent and its collection also holds, on
-    the page, a second row, with the collection's rows naming at least two agents between
-    them. The indexer stamps every code/docs/rdr chunk with one agent
+    each carries a non-empty agent set (:func:`_row_agents`) with a differing member and the
+    two sets are not equal. A row is therefore a candidate only if it has an agent and its
+    collection also holds, on the page, a second row whose agent set differs from some
+    other row's. The indexer stamps every code/docs/rdr chunk with one agent
     (``nexus-indexer``; ``recovery_bundle`` stamps ``recovery-import``), so those
     collections yield none unless an import put a second agent in the same collection;
     a knowledge collection holding notes from two or more agents does. A collection with
@@ -3035,7 +3111,9 @@ def _contradiction_candidates(page: list[SearchResult]) -> list[int]:
             by_col.setdefault(r.collection, []).append(i)
     out: list[int] = []
     for idxs in by_col.values():
-        if len(idxs) < 2 or len(set().union(*(agents[i] for i in idxs))) < 2:
+        # Two rows with the SAME agent set (both held by the notes of agents X and Y) have no pair
+        # of notes that disagree across them (nexus-6pfgb.48), so a candidate needs a second set.
+        if len(idxs) < 2 or len({frozenset(agents[i]) for i in idxs}) < 2:
             continue
         if len(idxs) > _CONTRADICTION_MAX_PER_COLLECTION:
             continue
@@ -3130,7 +3208,7 @@ def _flag_contradictions(
                 continue
             agents_a = _row_agents(results[a])
             agents_b = _row_agents(results[b])
-            if any(x != y for x in agents_a for y in agents_b):
+            if agents_a != agents_b and any(x != y for x in agents_a for y in agents_b):
                 flagged.add(a)
                 flagged.add(b)
 
@@ -3157,6 +3235,36 @@ def _flag_contradictions(
     return out
 
 
+#: Private cluster membership stamped by :func:`_apply_clustering`, consumed (and removed) by
+#: :func:`_relabel_clusters`.
+_CLUSTER_INDEX_KEY = "_cluster_index"
+
+
+def _relabel_clusters(results: list[SearchResult]) -> None:
+    """Relabel each Ward cluster from its best member's catalog title (nexus-fv2u4).
+
+    Clustering runs before :func:`_attach_display_paths`, the only writer of ``_display_title``
+    and ``_display_path``, so the label it assigns is always the chunk id. This runs after the
+    attach, taking the label from the lowest-distance member: its catalog title, else its
+    catalog path, else its id. It also removes the membership stamp. In place; a no-op for a
+    result set that was not clustered.
+    """
+    from nexus.search_clusterer import _cluster_label  # noqa: PLC0415 — branch-local; only when clustering applied
+
+    best: dict[int, SearchResult] = {}
+    for r in results:
+        idx = r.metadata.get(_CLUSTER_INDEX_KEY)
+        if idx is not None and (idx not in best or r.distance < best[idx].distance):
+            best[idx] = r
+    labels = {
+        idx: _cluster_label({"id": r.id, "metadata": r.metadata}) for idx, r in best.items()
+    }
+    for r in results:
+        idx = r.metadata.pop(_CLUSTER_INDEX_KEY, None)
+        if idx is not None:
+            r.metadata["_cluster_label"] = labels[idx]
+
+
 def _apply_clustering(
     results: list[SearchResult],
     embeddings: "np.ndarray",
@@ -3180,11 +3288,13 @@ def _apply_clustering(
 
     # Flatten clusters back to SearchResult list, preserving cluster labels
     out: list[SearchResult] = []
-    for cluster in clusters:
+    for index, cluster in enumerate(clusters):
         for rd in cluster:
             meta = rd.get("metadata", {})
             if "_cluster_label" in rd:
                 meta["_cluster_label"] = rd["_cluster_label"]
+            # Membership for :func:`_relabel_clusters`, which runs once the display keys exist.
+            meta[_CLUSTER_INDEX_KEY] = index
             out.append(SearchResult(
                 id=rd["id"],
                 content=rd.get("content") or "",

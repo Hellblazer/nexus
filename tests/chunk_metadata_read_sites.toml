@@ -134,9 +134,6 @@ bib_year = 1
 catalog_doc_id = 1
 content_hash = 1
 
-[sites."src/nexus/commands/search_cmd.py::search_cmd"]
-source_path = 2
-
 [sites."src/nexus/commands/search_cmd.py::search_cmd._doc_chunk_count"]
 chunk_count = 1
 doc_id = 1
@@ -182,7 +179,6 @@ source_path = 1
 
 [sites."src/nexus/formatters.py::_file_line_no"]
 line_start = 1
-source_path = 1
 
 [sites."src/nexus/formatters.py::_format_with_bat"]
 line_end = 1
@@ -208,19 +204,15 @@ doc_id = 1
 
 [sites."src/nexus/mcp/core.py::_search_render"]
 doc_id = 1
-source_path = 1
-title = 1
 
 # nexus-6pfgb.12: the doc card's bib_*, indexed_at and ttl_days now come from the owning documents
 # (OWNER_BIB_KEY, OWNER_FACTS_KEY), stamped by search_engine._attach_display_paths. What stays are the
-# grouping fallbacks for a chunk the catalog could not resolve (doc_id, content_hash, title, source_path)
-# and the legacy chunk_count key.
+# grouping fallbacks for a chunk the catalog could not resolve (doc_id, content_hash)
+# and the legacy chunk_count key. nexus-fv2u4: the row's title is neither a label nor a grouping key.
 [sites."src/nexus/mcp/core.py::query"]
 chunk_count = 1
 content_hash = 1
 doc_id = 2
-source_path = 2
-title = 2
 
 # nexus-6pfgb.13: store_get shows the owning notes' own tags, ttl, index date and title (note_display, from
 # the catalog entries). The row speaks only as the legacy fallback the bead names: a chunk with at most one
@@ -279,9 +271,6 @@ frecency_score = 1
 [sites."src/nexus/scoring.py::_link_owners"]
 doc_id = 1
 
-[sites."src/nexus/search_clusterer.py::_cluster_label"]
-title = 1
-
 [sites."src/nexus/search_engine.py::_attach_display_paths"]
 doc_id = 1
 
@@ -299,4 +288,14 @@ source_agent = 1
 
 [sites."src/nexus/search_engine.py::apply_file_diversity_cap"]
 doc_id = 1
-source_path = 1
+
+# nexus-1nrcu: the one-time rung that copies a chunk row's section label onto a legacy manifest row (the
+# only row it is exact for: a chash with one manifest row). A LEGACY read of the three POSITION keys, and
+# of indexed_at and title for the attribution guards (the date guard meta_backfill uses; the title guard
+# catches a tombstoned co-owner indexed inside its skew); all go with the keys at Phase 4.
+[sites."src/nexus/upgrade_ladder/rungs/manifest_section_labels.py::_labels_from_chunk_row"]
+indexed_at = 1
+page_number = 1
+section_title = 1
+section_type = 1
+title = 1

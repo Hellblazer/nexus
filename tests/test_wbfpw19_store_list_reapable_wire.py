@@ -58,7 +58,7 @@ def _row(
     written = _ts(days_old)
     created = _ts(created_days_old) if created_days_old is not None else written
     row = {"chash": _chash(i), "created_at": created, "last_written_at": written,
-           "title": f"title-{i}", "catalog_doc_id": doc}
+           "title": f"title-{i}", "catalog_doc_id": doc, "text_prefix": f"text of chunk {i}"}
     if with_ownerless:
         row["ownerless_since"] = _ts(ownerless_days_old) if ownerless_days_old is not None else written
     return row
@@ -124,11 +124,29 @@ def test_reapable_lists_chash_ownerless_age_written_created_title_and_catalog_do
     assert result.exit_code == 0, result.output
     line1 = next(line for line in result.output.splitlines() if _chash(1) in line)
     assert "title-1" in line1 and "1.2.3" in line1 and "40d" in line1
+    # RDR-236 Phase 3: the engine's label for an ownerless chunk is the start of its text.
+    assert line1.rstrip().endswith("text of chunk 1")
     assert "T" in line1  # the timestamps are printed
     line2 = next(line for line in result.output.splitlines() if _chash(2) in line)
     assert "title-2" in line2 and "33d" in line2
     # No grace is passed: the default listing is what a gc pass would take.
     assert engine.posted and all("grace_seconds" not in body for _p, body in engine.posted)
+
+
+def test_a_text_prefix_with_control_characters_reaches_the_terminal_as_plain_text(runner, real_client):
+    """80 characters of arbitrary stored text can carry a carriage return, an ESC sequence or a NUL; none
+    may reach the operator's terminal, and the row stays one line (RDR-236 Phase 3 review S4)."""
+    hostile = "line one\rOVERWRITE\x1b[2Jclear\x00nul\x7f\x9bC1 tab\there\nend"
+    row = _row(1, days_old=40)
+    row["text_prefix"] = hostile
+    engine = _Engine([row])
+    result = _invoke(runner, real_client, engine, ["--reapable", "-c", _COLL])
+    assert result.exit_code == 0, result.output
+    for bad in ("\r", "\x1b", "\x00", "\x7f", "\x9b", "\t"):
+        assert bad not in result.output, repr(bad)
+    lines = [line for line in result.output.splitlines() if _chash(1) in line]
+    assert len(lines) == 1, result.output
+    assert lines[0].rstrip().endswith("line one OVERWRITE [2Jclear nul  C1 tab here end"), lines[0]
 
 
 def test_the_age_is_days_since_ownerless_since_not_since_the_write_or_creation(runner, real_client):

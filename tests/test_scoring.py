@@ -574,7 +574,7 @@ def test_no_circular_imports():
 def test_format_vimgrep():
     from nexus.formatters import format_vimgrep
     r = SearchResult(id="1", content="def foo():", distance=0.1,
-                     collection="code__r", metadata={"source_path": "./foo.py", "line_start": 10})
+                     collection="code__r", metadata={"_display_path": "./foo.py", "line_start": 10})
     assert format_vimgrep([r]) == ["./foo.py:10:0:def foo():"]
 
 

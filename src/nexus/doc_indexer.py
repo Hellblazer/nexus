@@ -2481,7 +2481,6 @@ def _pdf_chunks(
     chunk_chars: int | None = None,
     bib_enrich_enabled: bool = False,
     extractor: str = DEFAULT_EXTRACTOR,
-    git_meta: dict | None = None,
     doc_id: str = "",
     allow_degraded_extraction: bool = False,
     extraction_stats: dict | None = None,
@@ -2526,16 +2525,9 @@ def _pdf_chunks(
     gate that fails loud on space-stripped/garbage extraction output.
     Default ``False``.
 
-    *git_meta* — flat ``git_*`` provenance dict. When ``None`` the function
-    auto-detects via :func:`nexus.indexer_utils.detect_git_metadata` from
-    ``pdf_path``. Pass an explicit value when the caller has already
-    resolved it (the repo-walk path does this once per repo). Empty dict
-    when *pdf_path* is not in a git repository — :func:`normalize` then
-    omits ``git_meta`` per the empty-set rule (nexus-2my fix #3).
+    Chunks carry no git provenance (RDR-101 Phase 5c); the catalog Document does, so this
+    spawns no git subprocess (nexus-ru672).
     """
-    if git_meta is None:
-        from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        git_meta = detect_git_metadata(pdf_path)
     # RDR-237: no ``on_heartbeat`` here, on purpose. The heartbeat stamps a pipeline row's
     # ``updated_at`` so a concurrent run does not take the row over, and this path has no
     # pipeline row (it extracts, then chunks and embeds in memory). The RDR's Progress section
@@ -2639,7 +2631,6 @@ def _markdown_chunks(
     corpus: str,
     *,
     base_path: Path | None = None,
-    git_meta: dict | None = None,
     doc_id: str = "",
     extraction_source: str = "file",
     collection_name: str = "",
@@ -2648,16 +2639,9 @@ def _markdown_chunks(
 
     *collection_name* decides the token window; see :func:`_pdf_chunks`.
 
-    *git_meta* — flat ``git_*`` provenance dict. ``None`` triggers
-    auto-detection from *md_path* via
-    :func:`nexus.indexer_utils.detect_git_metadata`. Empty dict outside
-    a git repo (nexus-2my fix #3).
+    Chunks carry no git provenance (RDR-101 Phase 5c), so no subprocess runs (nexus-ru672).
     """
     from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-
-    if git_meta is None:
-        from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        git_meta = detect_git_metadata(md_path)
 
     raw_text = md_path.read_text(encoding="utf-8")
     frontmatter, body = parse_frontmatter(raw_text, source=str(md_path), strict=True)

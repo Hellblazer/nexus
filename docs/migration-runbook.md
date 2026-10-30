@@ -19,9 +19,9 @@ nx upgrade
 ```
 
 It converges a set of PRECONDITIONS and then walks the data ladder.
-`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds three rungs:
-`rdr192-manifest-backfill`, `aspect-queue-tuples` and `note-tags-array`, each
-described below the table. Everything else in `nx upgrade` is precondition work:
+`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds four rungs:
+`rdr192-manifest-backfill`, `aspect-queue-tuples`, `note-tags-array` and
+`manifest-section-labels`, each described below the table. Everything else in `nx upgrade` is precondition work:
 
 | Precondition | Converges |
 |---|---|
@@ -157,6 +157,65 @@ this rung rewrites those strings as arrays, once.
   The recorded detail names how many notes it examined and how many it converted.
 - Until it has run, readers tolerate the string: `store_get`, `store_list` and the
   recovery-bundle export split it on read.
+
+### The `manifest-section-labels` rung
+
+catalog-046 gave every manifest row its own section label (`section_title`,
+`section_type`, `page_number`) and a `labels_written` flag. A row written before it
+is *legacy*: NULL labels, flag false, and readers fall back to the shared T3 chunk
+row's label, which belongs to whichever document wrote that chunk last. `doc_indexer`
+skips unchanged files, so a re-index never fills them. This rung fills the rows where
+the chunk row's label is exact (nexus-1nrcu). The scan runs until a completion is
+recorded, then never again: `detect()` answers from the recorded completion (at any
+package version) without listing a document, since `nx doctor`, each session start's
+`nx upgrade --auto` and every walk call it. A row left legacy by design (shared
+chash, no label keys, a chunk titled for another file) stays legacy, and a forced
+re-index of its document is the only later path.
+
+- **The rule.** A legacy row takes the chunk row's label only when its chash has
+  exactly one live manifest row in the tenant, and that row is this one. One *owner*
+  is not enough: a document that holds a chash at two positions has one owner and two
+  rows, and the chunk row holds one label. Rows of any other chash stay legacy.
+- **Four more guards.** The chunk row must carry at least one of the three label
+  keys (a writer that predates labels omitted them; copying `""` would say "no
+  heading" where the truth is "never recorded"). Its `indexed_at` must be no later
+  than the document's plus five minutes (a later row was written by someone else).
+  Its `title` (the last writer's) must name this document: the document's title, its
+  file path or file name, with or without the `:12-30` / `:chunk-3` / `:page-2`
+  suffix the indexers add; a row with no title is not contradicted, and one that
+  names another file stays legacy and is counted as "chunk row not attributable".
+  Just before each write the batch's manifests and ownership are read again; a row
+  that became written, moved or gained a co-owner is skipped.
+- **Orphan-minted documents are skipped.** A document the orphan backfill registered
+  (`meta.backfill_from` is `t3_orphan`) keeps its rows legacy on purpose: the chunk
+  row's label is a former owner's, and the document's `indexed_at` is later than
+  every chunk it holds, so the date guard would not stop the copy. They are counted
+  as "in documents the orphan backfill minted".
+- **Fill-only.** A row already `labels_written` is never touched, an empty label
+  included. The rung never writes a label with the flag false.
+- **Known gap.** Ownership is read from live manifests, so a *tombstoned* document
+  that holds the chash is not counted; no client read lists a tombstoned document's
+  rows. The `indexed_at` and `title` guards are the defence: they cover a former
+  owner whose chunk row was written more than five minutes after the document, or
+  carries another file's title. They do not cover one whose row has no title or the
+  same title (nexus-6pfgb.58 closes it with an engine read). The same gap is
+  documented on `nx catalog backfill-meta`.
+- **Cost.** Until a completion is recorded, `detect()` is the dry run and does the whole scan with no write: it
+  reads every live document's manifest and the chunk rows of the legacy single-row
+  chashes, 50 documents at a time. `converge()` writes through `append_manifest_many`,
+  one request per collection per 50 documents and per 300 rows (a document's rows spill into the next request). The engine restamps a document's
+  `indexed_at` on every manifest write; the rung writes each filled document's
+  stamp back to the value it read at scan, so the attribution guard above and
+  `nx catalog backfill-meta`'s are unaffected and the order of the two does not
+  matter. A document whose stamp cannot be written back is named and the run is
+  DEFERRED.
+- **Reading the result.** The recorded detail counts, apart: rows already written,
+  legacy rows, rows filled, and the legacy rows left alone with the reason (shared
+  with another document, repeated inside the document, chunk without label keys,
+  chunk missing, chunk row not attributable, changed meanwhile, write failed). An
+  empty tenant converges having examined 0 documents, and says so. The rung is not
+  applicable when no catalog is available or the engine has no
+  `/manifest/chash_positions` route.
 
 ### Restoring chunks the reaper quarantined
 

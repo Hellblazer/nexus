@@ -435,16 +435,27 @@ def _legacy_identity_fields_for(collection: str) -> tuple[str, ...]:
 # ── file:// reader ───────────────────────────────────────────────────────────
 
 
+def file_uri_path(uri: str) -> str:
+    """The absolute path of a ``file://`` URI, or ``""`` (another scheme, or a path that is not absolute).
+
+    The path is whatever follows the scheme, taken VERBATIM (nexus-6pfgb.55, .57): every registration path
+    mints the RAW spelling ``"file://" + path`` (:func:`uri_for`, ``doc_indexer._curator_identity``, the
+    engine's ``deriveSourceUri``), so a ``#``, a ``?`` or a literal ``%25`` in a directory name is part of
+    the path, not a fragment, a query or an escape. A URL parser truncated or unquoted it. A path that is
+    not absolute (``file://relative/x``) is refused rather than anchored on the working directory."""
+    if not uri.startswith("file://"):
+        return ""
+    path = uri[len("file://"):]
+    return path if os.path.isabs(path) else ""
+
+
 def _read_file_uri(uri: str, **_kw: Any) -> ReadResult:
     """Read a ``file://`` URI from disk.
 
-    ``urlparse`` handles ``file:///abs/path`` and
-    ``file://localhost/abs/path`` shapes; the path component is
-    URL-unquoted to recover characters that were percent-encoded at
-    write time (spaces, unicode, etc.).
+    The path is what follows ``file://``, verbatim (see :func:`file_uri_path`): the mint writes the raw
+    path, so nothing is unquoted (nexus-6pfgb.57).
     """
-    parsed = urlparse(uri)
-    path = unquote(parsed.path)
+    path = file_uri_path(uri)
     if not path:
         return ReadFail(reason="unreachable", detail=f"empty path in {uri!r}")
     try:
@@ -1447,9 +1458,8 @@ StalenessSignal = Literal["fresh", "stale", "dangling", "unknown"]
 
 
 def _stat_file_uri(uri: str, **_kw: Any) -> StatResult:
-    """Stat a ``file://`` URI — return current mtime without reading bytes."""
-    parsed = urlparse(uri)
-    path = unquote(parsed.path)
+    """Stat a ``file://`` URI — return current mtime without reading bytes (path verbatim, see :func:`file_uri_path`)."""
+    path = file_uri_path(uri)
     if not path:
         return StatFail(reason="error", detail=f"empty path in {uri!r}")
     try:

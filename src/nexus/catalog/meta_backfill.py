@@ -49,7 +49,7 @@ from typing import Any
 
 import structlog
 
-from nexus.catalog.note_ttl import PUT_SKEW, _parse_iso, note_ttl_days, row_may_give_tags, row_written_by
+from nexus.catalog.note_ttl import PUT_SKEW, parse_iso, note_ttl_days, row_may_give_tags, row_written_by
 from nexus.catalog.store_hook import NOTE_META_KEYS, split_note_tags
 from nexus.ttl import MAX_TTL_DAYS
 
@@ -99,10 +99,10 @@ def _attributable(entry: Any, row_meta: dict, skew: Any = PUT_SKEW) -> str:
     ``last_written_at`` is not on a chunk-row read, so the row's own ``indexed_at`` is compared with the
     document's (the engine refreshes the document's on every manifest write, so a row that is LATER than
     it plus the skew was written by someone else)."""
-    stamped = _parse_iso(row_meta.get("indexed_at"))
+    stamped = parse_iso(row_meta.get("indexed_at"))
     if stamped is None:
         return "no_indexed_at"
-    ceiling = _parse_iso(getattr(entry, "indexed_at", ""))
+    ceiling = parse_iso(getattr(entry, "indexed_at", ""))
     if ceiling is None:
         return "document_has_no_indexed_at"
     return "" if stamped - ceiling <= skew else "row_newer"

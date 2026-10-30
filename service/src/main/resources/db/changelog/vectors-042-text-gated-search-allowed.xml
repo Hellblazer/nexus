@@ -20,7 +20,7 @@
     SHAPE. Three CREATE OR REPLACE FUNCTION statements (new names, so no existing signature, generated routine or
     caller changes), EXECUTE granted to nexus_svc explicitly as vectors-031-1 did, a rollback that drops them.
 
-    No DATA EFFECT: function definitions and a grant only. After vectors-039 and telemetry-017, before the
+    No DATA EFFECT: function definitions and a grant only. After vectors-041 and telemetry-017, before the
     runAlways grants blocks.
 -->
 <databaseChangeLog
@@ -29,7 +29,7 @@
     xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
-    <changeSet id="vectors-040-1" author="nexus-jypmj">
+    <changeSet id="vectors-042-1" author="nexus-jypmj">
         <comment>RDR-232 chash_allow: text_gated_search_allowed_384/768/1024, the exact text-gated rank over an allow-list of chunk hashes (text_gated_search_hnsw_first with chash = ANY(p_chashes) added), granted to nexus_svc. New names; no existing function changes. No data effect: function definitions and a grant only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.text_gated_search_allowed_384(
@@ -150,7 +150,7 @@ BEGIN
      WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
        AND p.proname IN ('text_gated_search_allowed_384', 'text_gated_search_allowed_768', 'text_gated_search_allowed_1024');
     IF n <> 3 THEN
-        RAISE EXCEPTION 'vectors-040-1: expected exactly 3 text_gated_search_allowed functions (one signature each), found %', n;
+        RAISE EXCEPTION 'vectors-042-1: expected exactly 3 text_gated_search_allowed functions (one signature each), found %', n;
     END IF;
 END
 $post$;

@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_1024;
@@ -275,6 +276,33 @@ class PlainSearchTextGatedSearchExplainTest {
                 + "plan would mean it stayed an opaque per-row call. Plan was:%n%s", plan)
             .doesNotContain("chunk_live_owners")
             .contains("catalog_document_chunks");
+    }
+
+    /**
+     * nexus-6pfgb.25 / nexus-p89h4 (review round 1, F2): {@code manifest_search_1024} puts a correlated EXISTS on
+     * the catalog manifest inside the scan. The plan must still be driven by the leaf HNSW index with the EXISTS
+     * as a filter on that scan, not a sequential scan of the chunk table, and the function must inline. The
+     * manifest predicate here is satisfiable by every fixture row (an empty section_title), so it is evaluated per
+     * candidate without thinning the result.
+     */
+    @Test
+    void explain_manifestSearch_usesHnswIndexWithTheExistsAsAFilter_notSeqScan() {
+        Table<?> fn = MANIFEST_SEARCH_1024.call(vec(1.0, 0.0), null, null, colls(COLL), null, null,
+            org.jooq.JSONB.valueOf("{\"section_title\": \"\"}"), null, 10, MODEL, TENANT);
+        String plan = explain(ctx -> ctx.select(fn.field("id")).from(fn));
+        assertThat(plan)
+            .as("manifest_search_1024 must be driven by the HNSW index on its leaf. Plan was:%n%s", plan)
+            .containsPattern("Index Scan using \"?\\S*embedding_1024_idx");
+        assertThat(plan).as("no sequential scan of the chunk table. Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan");
+        assertThat(plan).as("the function must inline (LANGUAGE sql). Plan was:%n%s", plan)
+            .doesNotContain("Function Scan");
+        // Measured (chas, PG17, nexus-6pfgb.25 review round 1): the manifest EXISTS is a correlated SubPlan in the
+        // scan's Filter, evaluated per HNSW candidate, not a semi-join. The pin records that shape: the index scan
+        // drives, the manifest test filters it, and it reads the manifest tables.
+        assertThat(plan).as("the manifest EXISTS is a filter on the index scan. Plan was:%n%s", plan)
+            .contains("catalog_document_chunks")
+            .containsPattern("(?s)embedding_1024_idx.*Filter:.*EXISTS\\(SubPlan");
     }
 
     // ══════════════════════════════════════════════════════════════════════════

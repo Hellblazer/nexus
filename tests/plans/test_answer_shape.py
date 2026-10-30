@@ -31,6 +31,19 @@ class TestPayloadShapes:
         text = json.dumps({"contents": ["a"], "missing": []})
         assert classify_answer_shape(text) is AnswerShape.HYDRATION_DUMP
 
+    @pytest.mark.parametrize("extra", [
+        [],                                              # the original 3-key store_get_many dump
+        ["source_notes"],                                # + source_notes (nexus-onn7s): every structured dump since
+        ["source_notes", "section_type_basis"],          # + section_type_basis (nexus-sx1t0)
+    ], ids=["3-key", "4-key", "5-key"])
+    def test_every_store_get_many_dump_shape_is_a_hydration_dump(self, extra: list[str]) -> None:
+        """A raw structured ``store_get_many`` result is a non-answer in every shape the tool has
+        returned. The subset rule meant the 3-key table never matched a dump that carried
+        ``source_notes``, so such a dump read as ANSWERED (nexus-sx1t0)."""
+        payload: dict[str, object] = {"contents": ["a", "b"], "missing": [], "section_types": ["class", ""]}
+        payload.update({key: [] if key == "source_notes" else ["stored", "agreed"] for key in extra})
+        assert classify_answer_shape(json.dumps(payload)) is AnswerShape.HYDRATION_DUMP
+
     def test_extract_payload_is_extractions_only(self) -> None:
         text = json.dumps({"extractions": [{"item_index": 1, "rdr_id": "RDR-176"}]})
         assert classify_answer_shape(text) is AnswerShape.EXTRACTIONS_ONLY

@@ -977,7 +977,6 @@ def _repo_doubles(config: dict):
     mocks: dict[str, MagicMock] = {}
     patches = {
         "nexus.frecency.batch_frecency": {"return_value": {}},
-        "nexus.indexer._git_metadata": {"return_value": {}},
         "nexus.config.load_config": {"return_value": config},
         "nexus.config.get_credential": {"return_value": "fake-key"},
         "nexus.mcp_infra.get_t3": {"return_value": db},
@@ -1379,7 +1378,7 @@ def test_the_repo_pdf_indexer_hands_its_extractor_to_the_chunker(tmp_path, monke
     pdf.write_bytes(b"%PDF-1.4 x")
 
     indexer._index_pdf_file(
-        pdf, tmp_path, "docs__c__m__v1", "m", MagicMock(), MagicMock(), "k", {}, "now", 1.0,
+        pdf, tmp_path, "docs__c__m__v1", "m", MagicMock(), MagicMock(), "k", "now", 1.0,
         force=True, extractor="pymupdf",
     )
     assert [kw["extractor"] for kw in seen] == ["pymupdf"]

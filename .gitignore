@@ -79,3 +79,8 @@ scripts/spikes/s04-build/bin/
 scripts/spikes/s04-build/.project
 scripts/spikes/s04-build/.classpath
 scripts/spikes/s04-build/.settings/
+# Hand-run outputs that lab-remote --fetch brings back into the worktree root,
+# where a commit that builds its paths from git status picks them up (nexus-0asrr):
+# watched_pytest status files, and lab-out/ for anything else fetched.
+/*status*.json
+/lab-out/

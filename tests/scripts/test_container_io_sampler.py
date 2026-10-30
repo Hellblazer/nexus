@@ -278,11 +278,13 @@ def _set_wbytes(world: dict[str, Path], cgroup: str, value: int) -> str:
 def test_end_to_end_keeps_the_max_per_container_and_the_daemon_delta(world: dict[str, Path]) -> None:
     a, b, d = "system.slice/docker-a.scope", "system.slice/docker-b.scope", "system.slice/docker.service"
     (world["root"] / d / "io.stat").write_text("259:0 rbytes=0 wbytes=1000 rios=0 wios=0 dbytes=0 dios=0\n")  # the baseline
+    # Each step waits for two more sampler ticks, not a fixed sleep: a loaded CI box (develop 90e6209d4,
+    # shard 1) outran the 0.3 s window between A's last write and its removal, so the 5000 was never sampled.
     command = "; ".join([
-        _set_wbytes(world, a, 100), _set_wbytes(world, b, 40), "sleep 0.5",
-        _set_wbytes(world, a, 5000), _set_wbytes(world, d, 3000), "sleep 0.5",
+        _set_wbytes(world, a, 100), _set_wbytes(world, b, 40), _until_ticks(world, 2),
+        _set_wbytes(world, a, 5000), _set_wbytes(world, d, 3000), _until_ticks(world, 4),
         # container A's cgroup disappears with its container; its last reading must survive
-        f"rm -f '{world['root'] / a / 'io.stat'}'", "sleep 0.3", "exit 7",
+        f"rm -f '{world['root'] / a / 'io.stat'}'", _until_ticks(world, 6), "exit 7",
     ])
     result = _run(world, command)
     assert result.returncode == 7, "the command's exit status is the script's"
@@ -428,10 +430,10 @@ def test_the_report_gives_the_docker_driver_and_reconciles_with_the_device(world
     diskstats = world["proc"] / "diskstats"
     command = "; ".join([
         _set_wbytes(world, a, 4096),
-        "sleep 0.5",
+        _until_ticks(world, 2),
         # 80 more sectors written to the device = 40960 bytes
         f"printf '259 0 nvme0n1 100 0 800 10 200 0 8080 20 0 30 40\\n' > '{diskstats}'",
-        "sleep 0.3",
+        _until_ticks(world, 4),
     ])
     result = _run(world, command)
     assert result.returncode == 0, result.stderr
@@ -454,9 +456,9 @@ def test_a_device_stacked_on_the_nvme_is_reported_but_counted_once(world: dict[s
     )
     command = "; ".join([
         f"printf '259:0 rbytes=0 wbytes=4096 rios=0 wios=1 dbytes=0 dios=0\\n252:0 rbytes=0 wbytes=4096 rios=0 wios=1 dbytes=0 dios=0\\n' > '{io_stat}'",
-        "sleep 0.5",
+        _until_ticks(world, 2),
         f"printf '259 0 nvme0n1 100 0 800 10 200 0 8080 20 0 30 40\\n252 0 dm-0 100 0 800 10 200 0 8080 20 0 30 40\\n' > '{diskstats}'",
-        "sleep 0.3",
+        _until_ticks(world, 4),
     ])
     result = _run(world, command, extra_env={"NX_IO_SAMPLER_SYS_DEV_BLOCK": str(sysfs)})
     assert result.returncode == 0, result.stderr

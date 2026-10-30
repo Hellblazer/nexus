@@ -26,7 +26,7 @@ def _sr(
     file_path: str = "/repo/file.py",
     **extra_meta: object,
 ) -> SearchResult:
-    meta = {"source_path": file_path, "file_path": file_path, "frecency_score": 0.5}
+    meta = {"source_path": file_path, "frecency_score": 0.5}
     meta.update(extra_meta)
     return SearchResult(
         id=id, content=content, distance=distance,

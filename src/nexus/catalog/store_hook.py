@@ -27,6 +27,7 @@ import httpx
 import structlog
 
 from nexus.aspect_readers import uri_for
+from nexus.catalog.meta_filter import ABSENT_MEANS
 from nexus.catalog.types import manifest_row_wire
 from nexus.embed_window import window_for_model
 
@@ -883,6 +884,19 @@ def note_catalog_meta(
             continue
         revert[key] = prior[key] if prior.get(key) is not None else unset
     return write, revert
+
+
+def imported_note_meta(meta: dict[str, Any] | None, *, put_at: str) -> dict[str, Any]:
+    """The note keys an ``.nxexp`` import stamps on a note's catalog entry (nexus-6pfgb.45): ``put_at``
+    = *put_at* and ``ttl_days`` = 0 (permanent), only when the entry (*meta*) holds none of
+    :data:`NOTE_META_KEYS`. Fill-only: an entry that holds any note key keeps every one, so a
+    note an earlier put gave a TTL keeps it. The export carries no TTL the catalog could keep true, so
+    an imported note makes no claim to expire; ``ttl_days`` 0 is the value readers show as permanent
+    (:func:`nexus.catalog.note_ttl.note_ttl_days`), and its presence is what tells them the catalog,
+    not a shared chunk row, holds this note's TTL. Returns ``{}`` when there is nothing to stamp."""
+    if any(key in (meta or {}) for key in NOTE_META_KEYS):
+        return {}
+    return {"put_at": put_at, "ttl_days": 0}
 
 
 def catalog_store_hook(
@@ -2099,6 +2113,8 @@ def note_display(
     from nexus.metadata_schema import ttl_listing_label  # noqa: PLC0415 — deferred for startup cost
 
     live = list(owners or [])
+    # note_ttl's row rules judge a dict only: a Mapping that is not one would read as nobody's row (nexus-6pfgb.48).
+    row = dict(row)
     held = [e for e in live if title is None or (getattr(e, "title", "") or "") == title]
     # Sole ownership is judged over ALL live owners, before the title filter: with owners A and B sharing a
     # chunk, a read asked for A's title still has a row that B may have written (Phase 2 review H2). With
@@ -2115,7 +2131,7 @@ def note_display(
     elif not row_may_speak:
         tags = ""
     elif held and not note_ttl.row_may_give_tags(
-        getattr(held[0], "tumbler", ""), row if isinstance(row, dict) else {}, owner_title=getattr(held[0], "title", "") or "",
+        getattr(held[0], "tumbler", ""), row, owner_title=getattr(held[0], "title", "") or "",
     ):
         tags = ""  # a row another note wrote is not this note's, as in the recovery-bundle export
     else:
@@ -2132,7 +2148,7 @@ def note_display(
     elif len(held) == 1:
         indexed_full = stamps[0] or (row_indexed_at if row_may_speak else "") or None
     else:
-        parsed = [note_ttl._parse_iso(s_) if s_ else None for s_ in stamps]  # noqa: SLF001 — one parser for the catalog clock
+        parsed = [note_ttl.parse_iso(s_) if s_ else None for s_ in stamps]
         indexed_full = stamps[0] if parsed[0] is not None and len({*parsed}) == 1 else None
     indexed = (indexed_full or "")[:10]
 
@@ -2159,6 +2175,10 @@ def _held(owners: list[Any] | None, title: str | None) -> list[Any]:
     return [e for e in (owners or []) if title is None or (getattr(e, "title", "") or "") == title]
 
 
+#: The one reading of an absent or empty ``extraction_source``, shared with ``catalog list --meta``.
+_DEFAULT_SOURCE: str = ABSENT_MEANS["extraction_source"]
+
+
 def extraction_facts(owners: list[Any] | None, *, title: str | None = None) -> list[dict[str, Any]]:
     """The extraction provenance each owner of a chunk states in its catalog ``meta`` (nexus-6pfgb.16,
     RDR-236 Phase 2), one dict per owner that states any: ``tumbler``, ``title``, ``extraction_method``
@@ -2181,7 +2201,7 @@ def extraction_facts(owners: list[Any] | None, *, title: str | None = None) -> l
         out.append({
             "tumbler": str(getattr(e, "tumbler", "")), "title": getattr(e, "title", "") or "",
             "extraction_method": method, "quality_gate_overridden": override,
-            "extraction_source": source or "file",
+            "extraction_source": source or _DEFAULT_SOURCE,
         })
     return out
 
@@ -2211,7 +2231,7 @@ def extraction_lines(owners: list[Any] | None, *, title: str | None = None) -> l
     return [
         *_fact_lines("Extractor:  ", facts, len(held), lambda f: f["extraction_method"]),
         *_fact_lines("Gate:       ", facts, len(held), lambda f: "overridden" if f["quality_gate_overridden"] else ""),
-        *_fact_lines("Source:     ", facts, len(held), lambda f: "" if f["extraction_source"] == "file" else f["extraction_source"]),
+        *_fact_lines("Source:     ", facts, len(held), lambda f: "" if f["extraction_source"] == _DEFAULT_SOURCE else f["extraction_source"]),
     ]
 
 

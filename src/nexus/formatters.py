@@ -12,6 +12,7 @@ import structlog
 
 from nexus.bounded_subprocess import run_bounded
 from nexus.context_annotations import (
+    DISPLAY_SOURCE_PATH_KEY,
     DOC_ID_INFERRED_KEY,
     OWNER_AGENTS_KEY,
     OWNER_BIB_KEY,
@@ -27,7 +28,7 @@ _log = structlog.get_logger()
 #: Metadata keys the search sets for its own use; ``format_json`` leaves them out.
 _INTERNAL_METADATA_KEYS: frozenset[str] = frozenset(
     {
-        "_owner_doc_ids", DOC_ID_INFERRED_KEY, OWNER_AGENTS_KEY, OWNER_BIB_KEY, OWNER_CHUNK_COUNT_KEY,
+        "_owner_doc_ids", DISPLAY_SOURCE_PATH_KEY, DOC_ID_INFERRED_KEY, OWNER_AGENTS_KEY, OWNER_BIB_KEY, OWNER_CHUNK_COUNT_KEY,
         OWNER_FACTS_KEY, OWNER_FRECENCY_KEY, OWNER_QUALITY_KEY,
     },
 )
@@ -40,20 +41,20 @@ def _display_path(meta: dict, default: str = "") -> str:
 
     1. ``_display_path`` (catalog-resolved path attached by
        ``search_engine._attach_display_paths`` when a catalog is in scope).
-    2. ``source_path`` (legacy chunk metadata; survives until the prune
-       verb in nexus-o6aa.10.3 lands).
-    3. ``file_path`` (older chunk shape, used by some MCP-promoted entries).
-    4. *default* (caller-provided fallback string).
+    2. ``_display_source_path`` (the owning document's absolute local path,
+       stamped by the same pass).
+    3. *default* (caller-provided fallback string).
 
-    Formatters use this in place of direct ``meta.get("source_path", ...)``
-    reads so a single fallback chain serves catalog-resolved + legacy chunks.
+    The chunk row's own ``source_path`` and ``file_path`` are NOT read
+    (nexus-6pfgb.51): ``source_path`` is the last writer's file, another
+    document's after a shared chunk, and no writer leaves ``file_path`` on a
+    row (the key table does not list it). A chunk with no catalog path shows
+    its title or id. The read-site lint cannot see this function (its
+    receiver is a parameter named ``meta``, and a ``[receivers]`` entry
+    for a function that reads no row key is reported stale), so
+    ``tests/test_6pfgb51_display_path.py`` pins the absence.
     """
-    return (
-        meta.get("_display_path")
-        or meta.get("source_path")
-        or meta.get("file_path")
-        or default
-    )
+    return meta.get("_display_path") or meta.get(DISPLAY_SOURCE_PATH_KEY) or default
 
 
 def _colon_safe(text: str) -> str:
@@ -84,8 +85,8 @@ def _display_path_or_title(meta: dict, result_id: str) -> str:
     :func:`_colon_safe`).
 
     nexus-cd1k0.16 finding (2): ``format_plain`` already falls back to
-    ``title or id`` for a result with no ``source_path`` (a knowledge/docs
-    entry from ``store put``), rendering it in the doc-style
+    ``title or id`` for a result with no catalog path (``_display_path``
+    empty: a knowledge/docs entry from ``store put``, or an orphan chunk), rendering it in the doc-style
     ``[distance] title`` shape instead of a bare path. The three OTHER
     single-line formatters (``format_compact``, ``format_vimgrep``,
     ``format_plain_with_context``) call ``_display_path`` directly with no
@@ -101,9 +102,11 @@ def _display_path_or_title(meta: dict, result_id: str) -> str:
 
 def display_title(meta: dict) -> str:
     """The catalog's title for a hit's document(s) when the search attached
-    one (``_display_title``, nexus-sis0m.5), else the chunk row's own title,
-    which is only its last writer's."""
-    return meta.get("_display_title") or meta.get("title") or ""
+    one (``_display_title``, nexus-sis0m.5), else nothing. The chunk row's own
+    title is the last writer's (a code chunk's is another document's
+    ``path:lines`` once the chunk is shared), so it is never a label
+    (nexus-fv2u4, RDR-236 reader remedy R1)."""
+    return meta.get("_display_title") or ""
 
 
 def _find_matching_lines(chunk_text: str, query: str) -> list[int]:
@@ -235,10 +238,11 @@ def _format_with_bat(
     from collections import defaultdict  # noqa: PLC0415 — deferred import — branch-local / circular-dep avoidance
 
     # Group results by display path (nexus-1qed: prefer catalog-resolved
-    # _display_path, fall back to source_path / file_path for legacy chunks).
+    # _display_path, then the owner's absolute path; a chunk with neither is its own title or id, so
+    # unrelated path-less hits never share one stdin blob, nexus-6pfgb.54).
     groups: dict[str, list[SearchResult]] = defaultdict(list)
     for r in results:
-        src = _display_path(r.metadata, default="unknown")
+        src = _display_path_or_title(r.metadata, r.id)
         groups[src].append(r)
 
     output_parts: list[str] = []
@@ -353,15 +357,16 @@ def _file_line_no(
     if not shown:
         return best_idx + 1
     # The printed path first. A catalog _display_path is often REPO-RELATIVE
-    # and only opens from the repo root (review of d41e47c1f), so the chunk's
-    # own source_path / file_path, which the indexer writes absolute, are
-    # tried next, but only while nothing has opened: the first candidate
-    # that opens IS the file, and a line missing from it has drifted, so
-    # the answer is line 1 rather than a line read from another file (a
-    # catalog rename leaves source_path naming a different document;
-    # critique of b3a2f9fd1).
+    # and only opens from the repo root (review of d41e47c1f), so the owning
+    # document's absolute local path (its catalog source_uri, stamped by
+    # search_engine._attach_display_paths) is tried next, but only while
+    # nothing has opened: the first candidate that opens IS the file, and a
+    # line missing from it has drifted, so the answer is line 1 rather than a
+    # line read from another file. The row's source_path is the last writer's
+    # file, another document's after a shared chunk, and is not read
+    # (nexus-6pfgb.49; critique of b3a2f9fd1).
     candidates = list(dict.fromkeys(
-        p for p in (shown, r.metadata.get("source_path"), r.metadata.get("file_path")) if p
+        p for p in (shown, r.metadata.get(DISPLAY_SOURCE_PATH_KEY)) if p
     ))
     wanted = text.strip()
     for path in candidates:
@@ -471,8 +476,8 @@ def format_json(results: list[SearchResult]) -> str:
 def format_plain(results: list[SearchResult]) -> list[str]:
     """Default plain-text format: ./path/to/file.py:42:    content.
 
-    For results without a ``source_path`` (knowledge/docs entries from
-    ``store put``), falls back to the doc-style ``[distance] title\\n  snippet``
+    For results without a catalog path (knowledge/docs entries from
+    ``store put``, orphan chunks), falls back to the doc-style ``[distance] title\\n  snippet``
     format that the MCP surface uses.
     """
     lines: list[str] = []

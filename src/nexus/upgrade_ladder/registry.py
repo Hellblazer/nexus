@@ -24,8 +24,9 @@ ladder walks (wired in P3, nexus-n7u38.23) — they are NOT rungs and never
 appear in :data:`RUNG_ORDER`. Their edges here document the walk contract;
 the registry can only mechanically enforce rung-to-rung order.
 
-:data:`RUNG_ORDER` holds three rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
-:data:`RUNG_ASPECT_QUEUE_TUPLES`, :data:`RUNG_NOTE_TAGS_ARRAY`; none depends on another).
+:data:`RUNG_ORDER` holds four rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
+:data:`RUNG_ASPECT_QUEUE_TUPLES`, :data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`; none
+depends on another).
 Inserting a new rung means adding both a :data:`RUNG_ORDER` entry and its edges
 in :data:`HARD_EDGES`; the order is validated against the edges at
 import/construction time.
@@ -66,6 +67,11 @@ RUNG_ASPECT_QUEUE_TUPLES = "aspect-queue-tuples"
 #: design; independent of the other rungs.
 RUNG_NOTE_TAGS_ARRAY = "note-tags-array"
 
+#: RDR-236 (nexus-1nrcu): copy a chunk row's section label onto the legacy manifest rows (written before
+#: catalog-046, labels_written false) whose chash has exactly one live manifest row in the tenant. Fill-only,
+#: independent of the other rungs; it sits after the RDR-192 backfill, whose rows it may then fill.
+RUNG_MANIFEST_SECTION_LABELS = "manifest-section-labels"
+
 #: Stateless preconditions — NOT rungs (see module docstring).
 PRECONDITION_PACKAGE = "precondition:package"
 PRECONDITION_ENGINE = "precondition:engine"
@@ -79,7 +85,9 @@ ALL_RUNGS = "*"
 #: against the edges at import/construction time, so an inconsistent insert
 #: fails immediately rather than walking in a wrong order. Empty from
 #: nexus-lgdel.l1 (which retired chash-rekey) until nexus-wbfpw.41.
-RUNG_ORDER: tuple[str, ...] = (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_ASPECT_QUEUE_TUPLES, RUNG_NOTE_TAGS_ARRAY)
+RUNG_ORDER: tuple[str, ...] = (
+    RUNG_RDR192_MANIFEST_BACKFILL, RUNG_ASPECT_QUEUE_TUPLES, RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS,
+)
 
 #: RQ2 hard edges as ``(before, after)`` pairs; ``after == ALL_RUNGS`` means
 #: the source precedes every rung.
@@ -226,4 +234,10 @@ def default_registry() -> LadderRegistry:
         NoteTagsArrayRung,
     )
 
-    return LadderRegistry((Rdr192ManifestBackfillRung(), AspectQueueTuplesRung(), NoteTagsArrayRung()))
+    from nexus.upgrade_ladder.rungs.manifest_section_labels import (  # noqa: PLC0415 — deferred; keeps registry import cheap and avoids a cycle
+        ManifestSectionLabelsRung,
+    )
+
+    return LadderRegistry((
+        Rdr192ManifestBackfillRung(), AspectQueueTuplesRung(), NoteTagsArrayRung(), ManifestSectionLabelsRung(),
+    ))

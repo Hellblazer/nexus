@@ -274,3 +274,41 @@ def test_the_manifest_backfill_sends_no_label_keys_so_its_rows_stay_legacy() -> 
 
     assert row["chash"] == X
     assert not ({"section_title", "section_type", "page_number", "labels_written"} & row.keys())
+
+
+# ── nexus-jz86a: a note's rows are written, unlabelled ───────────────────────
+
+def test_note_manifest_rows_are_written_unlabelled_not_legacy() -> None:
+    """nexus-jz86a: a note piece has no heading, so its row is the document's own answer "no label",
+    sent as the three keys with nothing in them. A row with NO label keys is legacy to the engine
+    (``labels_written`` false) and a reader then takes the SHARED chunk row's label, which belongs to
+    whichever document wrote the chunk last. Every row, whatever the piece."""
+    from nexus.catalog.note_write import note_manifest_rows
+
+    rows = note_manifest_rows([
+        {"chunk_text_hash": X, "chunk_index": 0, "chunk_start_char": 0, "chunk_end_char": 10},
+        {"chunk_text_hash": Y, "chunk_index": 1, "chunk_start_char": 10, "chunk_end_char": 20,
+         "section_title": "ignored", "section_type": "ignored", "page_number": 3},
+    ])
+
+    assert len(rows) == 2
+    for row in rows:
+        assert {"section_title", "section_type", "page_number"} <= row.keys()
+        assert (row["section_title"], row["section_type"], row["page_number"]) == ("", "", None)
+        assert "labels_written" not in row, "the engine infers written from the keys; none is sent"
+
+
+def test_note_manifest_rows_carry_the_notes_own_headings() -> None:
+    """nexus-jz86a, corrected (develop red at 32c0a680f: the RDR-232 golden fixture lost every section
+    label): a note's own answer is its own text. A piece that begins a Markdown section is labelled
+    with that heading, a following piece inherits it, and content before the first heading is
+    unlabelled, the rule the primary-evidence reader applied to the TEXT while the rows were legacy.
+    Writing "" for every row made a written-empty label suppress that reading."""
+    from nexus.catalog.note_write import note_manifest_rows
+
+    pieces = ["intro with no heading", "## Locked Architecture\n\none", "two, still locked", "## Evidence\n\nthree"]
+    metas = [{"chunk_text_hash": f"{'a' * 63}{i}", "chunk_index": i} for i in range(4)]
+    rows = note_manifest_rows(metas, pieces)
+    assert [r["section_title"] for r in rows] == ["", "Locked Architecture", "Locked Architecture", "Evidence"]
+    assert all((r["section_type"], r["page_number"]) == ("", None) for r in rows)
+    assert [r["section_title"] for r in note_manifest_rows(metas)] == ["", "", "", ""], "no pieces: unlabelled"

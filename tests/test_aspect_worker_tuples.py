@@ -135,13 +135,13 @@ def _worker(**opts: Any) -> AspectExtractionWorker:
     return AspectExtractionWorker(poll_interval=0.1, tuple_options=opts or None)
 
 
-def _wait(pred, timeout: float = 20.0, poll: float = 0.05) -> None:
+def _wait(pred, timeout: float = 20.0, poll: float = 0.05, detail=None) -> None:
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if pred():
             return
         time.sleep(poll)
-    raise AssertionError("condition not reached in time")
+    raise AssertionError("condition not reached in time" + (f": {detail()}" if detail else ""))
 
 
 def _by_path(db: Any) -> dict[str, Any]:
@@ -326,6 +326,12 @@ def test_each_verdict_reaches_the_engine_as_its_own_queue_state(
 
     with monkeypatch.context() as m:
         m.setattr("nexus.aspect_worker._extract_aspects", fake)
+        # S3's two retryable nacks must stay held back for the WHOLE of S16 below: with the
+        # production 30 s base they became claimable 24-36 s in, and on a loaded shard the S16
+        # first pass outlasted that, so the second claim swept them up beside gone and late and
+        # the two-claim predicate never held (develop red at 18f805d8a, shard 6). 300 s keeps
+        # them out of S16's 60 s window; S3 asserts only that they are held back.
+        m.setattr(w, "_RETRY_BASE_SECONDS", 300.0)
         side3 = _worker()._tuple_side
         claims3, _ = side3.claim_batch(park=False)
         assert len(claims3) == 4
@@ -343,7 +349,7 @@ def test_each_verdict_reaches_the_engine_as_its_own_queue_state(
     assert rows["/dead.md"].claim_state == "dead" and rows["/dead.md"].attempts == 1, "S3: dead at once"
     for doc in docs.values():
         assert db.document_aspects.get_by_doc_id(doc) is None, "S3: nothing persisted"
-    # held back by retry_after_s from the RDR-163 ladder (30 s +- 20 %)
+    # held back by retry_after_s from the RDR-163 ladder (300 s here, see above)
     assert db.tuples.inp(_SUB, dict(_KEYS), claimant="other", lease_s=60) is None, (
         "S3: the retryable two are held back by the ladder, the dead one is not claimable"
     )
@@ -389,18 +395,30 @@ def test_each_verdict_reaches_the_engine_as_its_own_queue_state(
 
     assert _doc("s16-late") == late, "S16: the late document registers under the predicted tumbler"
 
-    again: list = []
+    again: dict[str, Any] = {}
 
     def second_claim() -> bool:
         got, _ = side.claim_batch(park=False)
-        again.extend(got)
-        return len(again) == 2
+        for c in got:
+            # keyed on the task's path: a task that is claimed, lapses and is claimed again
+            # counts once, and a task from any other phase never satisfies the predicate.
+            if c.row is not None:
+                again[c.row.source_path] = c
+        return {"/gone.md", "/late.md"} <= set(again)
 
-    # 60 s, not 20: the retried task's ladder delay is on the engine clock and a loaded CI shard
-    # (four xdist workers) reached 20 s once (develop red at c94cd4b00, 2026-10-30).
-    _wait(second_claim, timeout=60)
-    assert {c.attempts for c in again} == {1}
-    side.process(again)
+    # 120 s: the retried task's ladder delay is on the engine clock and loaded CI shards reached
+    # 20 s (develop red at c94cd4b00) and 60 s (b7d6c6355, 2026-10-30) with the ladder correct.
+    # On a timeout the queue state is in the message, so the next red is diagnosable.
+    _wait(
+        second_claim, timeout=120,
+        detail=lambda: (
+            f"claimed={sorted(again)} rows="
+            f"{[(p, r.claim_state, r.attempts, r.available_at) for p, r in sorted(_by_path(db).items())]}"
+        ),
+    )
+    again_list = [again["/gone.md"], again["/late.md"]]
+    assert {c.attempts for c in again_list} == {1}
+    side.process(again_list)
 
     assert [c["source_path"] for c in extracted] == ["/present.md", "/late.md"]
     assert tuple_events.count("aspect_task_dropped_missing_doc") == 1, tuple_events

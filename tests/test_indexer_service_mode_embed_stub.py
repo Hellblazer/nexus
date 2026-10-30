@@ -83,7 +83,6 @@ def _make_ctx(
         repo_path=tmp_path,
         corpus=corpus,
         embedding_model=model,
-        git_meta={},
         now_iso="2026-06-11T00:00:00+00:00",
         force=force,  # bypass staleness — no col roundtrip
         force_re_embed=force_re_embed,
@@ -171,7 +170,7 @@ def test_index_prose_file_wrapper_threads_force_re_embed(tmp_path, monkeypatch):
         db = _RecordingDb()
         _index_prose_file(
             f, tmp_path, "rdr__t__minilm-l6-v2-384__v1", "minilm-l6-v2-384",
-            _make_col(), db, "key-present-but-must-not-be-used", {},
+            _make_col(), db, "key-present-but-must-not-be-used",
             "2026-06-11T00:00:00+00:00", 0.0,
             force=True, force_re_embed=force_re_embed,
         )

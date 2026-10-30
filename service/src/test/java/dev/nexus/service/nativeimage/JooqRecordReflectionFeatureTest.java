@@ -277,10 +277,14 @@ class JooqRecordReflectionFeatureTest {
     // 115 -> 117: nexus-f98bg (RDR-210 P6.2), vectors-037-reembed-jobs.xml added the tables
     // nexus.reembed_jobs and nexus.reembed_job_moves, two generated Record types
     // (ReembedJobsRecord, ReembedJobMovesRecord), +2.
-    // 117 -> 120: nexus-jypmj (RDR-232 chash_allow), vectors-040-text-gated-search-allowed.xml added
+    // 117 -> 120: nexus-p89h4 and nexus-6pfgb.25 (RDR-236 Phase 3), vectors-041-manifest-search.xml added
+    // nexus.manifest_search_384/768/1024, three RETURNS TABLE functions (the plain, text-gated and chash-set
+    // rankings with an EXISTS on the catalog manifest), one generated Record type each
+    // (ManifestSearch_384Record/ManifestSearch_768Record/ManifestSearch_1024Record), +3.
+    // 120 -> 123: nexus-jypmj (RDR-232 chash_allow), vectors-042-text-gated-search-allowed.xml added
     // nexus.text_gated_search_allowed_384/768/1024, three RETURNS TABLE functions, three generated
     // Record types (TextGatedSearchAllowed384Record, ...768Record, ...1024Record), +3.
-    private static final int EXPECTED_RECORD_TYPES = 120;
+    private static final int EXPECTED_RECORD_TYPES = 123;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

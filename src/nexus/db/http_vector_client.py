@@ -4821,7 +4821,9 @@ class HttpVectorClient:
     ) -> dict:
         """POST /v1/vectors/gc/quarantine-orphans.
 
-        Returns ``{"moved": N, "sample": [{"chash": hex, "title": ...}, ...]}``, plus
+        Returns ``{"moved": N, "sample": [{"chash": hex, "title": ..., "text_prefix": ...}, ...]}``
+        (``title`` is the chunk's live manifest owner's, null when none; ``text_prefix`` its first 80
+        characters, present from engine-service-v0.1.171; neither is written to ``gc_audit``), plus
         ``floor`` (and, with a floor, ``refused`` and the judged counts) from an engine
         that honours the optional floor fields (:meth:`_floor_body`).
         Raises :class:`VectorServiceError` (``code=404`` on a pre-route engine).
@@ -5135,7 +5137,11 @@ class HttpVectorClient:
         ``nexus.chunk_is_reapable`` selects at this instant, ordered by chash.
         Returns ``{"collection", "grace_seconds", "returned", "next_after",
         "chunks": [{"chash", "created_at", "last_written_at", "ownerless_since",
-        "title", "catalog_doc_id"}, ...]}``. ``ownerless_since`` is the instant
+        "title", "catalog_doc_id", "text_prefix"}, ...]}``. ``title`` and
+        ``catalog_doc_id`` are the chunk's manifest owner's (null when no manifest
+        row names one), ``text_prefix`` its first 80 characters; an engine older
+        than engine-service-v0.1.171 reads the chunk row's own keys and omits
+        ``text_prefix``. ``ownerless_since`` is the instant
         the grace counts from, the later of ``last_written_at`` and the moment
         the chunk last lost an owner; an engine older than that field omits it,
         so a reader must tolerate its absence.

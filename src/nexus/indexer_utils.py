@@ -708,43 +708,6 @@ def resolve_pdf_title(metadata: dict, pdf_path: Path, text: str | None) -> str:
     return derive_title(pdf_path, body=text)
 
 
-def detect_git_metadata(path: Path) -> dict[str, str]:
-    """Return git provenance metadata for the repo containing *path*.
-
-    Walks up via :func:`find_repo_root`, then collects:
-
-      * ``git_project_name`` — basename of the repo root
-      * ``git_branch`` — current branch name
-      * ``git_commit_hash`` — full SHA of HEAD
-      * ``git_remote_url`` — ``origin`` URL (empty when no remote)
-
-    Returns an empty dict when *path* is not inside a git repository
-    so callers can ``**``-merge the result without conditional logic.
-    Indexer-side code (PDF / markdown / pipeline) needs this so chunks
-    carry the same provenance the repo-walk path gets via
-    ``indexer._git_metadata`` (nexus-2my fix #3).
-    """
-    repo = find_repo_root(path)
-    if repo is None:
-        return {}
-
-    def _run(args: list[str]) -> str:
-        try:
-            r = run_bounded(
-                args, cwd=repo, timeout=10,
-            )
-        except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
-            return ""
-        return r.stdout.strip() if r.returncode == 0 else ""
-
-    return {
-        "git_project_name": repo.name,
-        "git_branch": _run(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
-        "git_commit_hash": _run(["git", "rev-parse", "HEAD"]),
-        "git_remote_url": _run(["git", "remote", "get-url", "origin"]),
-    }
-
-
 def _path_glob_match(parts: tuple[str, ...], segs: list[str]) -> bool:
     """Match a tuple of path components against pattern segments.
 

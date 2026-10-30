@@ -1827,7 +1827,9 @@ _REQUIRED_META = {
     # Lifecycle. ``frecency_score`` is NOT required (nexus-vhyar): the stub
     # omits its 0.0 default so a late duplicate cannot reset a score the
     # frecency-only reindex bumped; readers default a missing score to 0.0.
-    "indexed_at", "ttl_days", "source_agent", "session_id",
+    # ``session_id`` is no longer written by any factory (nexus-6pfgb.4, RDR-236 Phase 2):
+    # the key stays accepted by the schema for old rows echoed back, never required.
+    "indexed_at", "ttl_days", "source_agent",
     # bib_* intentionally omitted (drop-when-empty by normalize)
 }
 

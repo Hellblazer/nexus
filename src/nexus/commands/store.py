@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import re
 import shlex
 import sys
 from collections.abc import Callable
@@ -22,6 +23,10 @@ from nexus.db.t3 import T3Database
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
 from nexus.ttl import parse_ttl
+
+# C0 (NUL, tab, CR, LF, ESC ...), DEL and C1 controls: stored chunk text printed to an operator's terminal must
+# not move the cursor, overwrite a line or start an escape sequence (CSI is ESC [ or the single C1 byte 0x9b).
+_CONTROL_CHARS: re.Pattern[str] = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _t3(*, prefetch_routing_listing: bool = False) -> T3Database:
@@ -356,7 +361,10 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
     (``nexus.chunk_orphaned_at``). An engine that does not return the key (one older than the field)
     gets the write age in its place, which is at least the grace for every listed chunk but can
     overstate how long the chunk has been ownerless. ``last_written_at`` and ``created_at`` are
-    printed beside it; ``created_at`` is write-once, so it is never the grace clock."""
+    printed beside it; ``created_at`` is write-once, so it is never the grace clock.
+
+    ``title`` and ``catalog_doc_id`` are the chunk's MANIFEST owner's (RDR-236 Phase 3), blank/``-`` for a chunk
+    no manifest row names; ``text_prefix``, the first 80 characters of the chunk's text, is the last column."""
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred for startup cost (nexus.db.http_vector_client)
 
     reapable_chunks = getattr(db, "reapable_chunks", None)
@@ -380,16 +388,19 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
             if shown == 0:
                 click.echo(
                     f"{col_name}  (chash, ownerless_since, days ownerless, last_written_at, "
-                    f"created_at, title, catalog_doc_id)\n"
+                    f"created_at, title, catalog_doc_id, text_prefix)\n"
                 )
             written = row.get("last_written_at") or ""
             ownerless = row.get("ownerless_since") or written
             created = row.get("created_at") or ""
             title = (row.get("title") or "")[:40]
             doc = row.get("catalog_doc_id") or "-"
+            # RDR-236 Phase 3: title and catalog_doc_id are the manifest owner's, so an ownerless chunk shows
+            # neither; the first 80 characters of its text (engine 0.1.171 and later) are what names it.
+            prefix = _CONTROL_CHARS.sub(" ", row.get("text_prefix") or "")
             click.echo(
                 f"  {row.get('chash', '')}  {ownerless}  {_age_days(ownerless):>5}  {written}  "
-                f"{created}  {title:<40}  {doc}"
+                f"{created}  {title:<40}  {doc}" + (f"  {prefix}" if prefix else "")
             )
             shown += 1
     except VectorServiceError as exc:

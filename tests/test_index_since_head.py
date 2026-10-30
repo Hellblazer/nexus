@@ -173,17 +173,43 @@ def test_since_head_without_base_logs_fallback(git_repo, monkeypatch):
     class _Stop(Exception):
         pass
 
-    monkeypatch.setattr(idx, "_git_metadata", lambda repo: {})
     monkeypatch.setattr(
         idx, "batch_frecency",
         lambda *a, **k: (_ for _ in ()).throw(_Stop()), raising=False,
     )
+
+    # nexus-ru672: the removed _git_metadata ran these three git subprocesses
+    # on every index run for a value no reader consumed. Record every git
+    # spawn up to the sentinel and pin that none of them comes back.
+    from nexus import bounded_subprocess
+
+    spawned: list[tuple[str, ...]] = []
+    real_popen = bounded_subprocess.subprocess.Popen
+
+    def recording_popen(args, *a, **k):
+        if isinstance(args, (list, tuple)) and args and args[0] == "git":
+            spawned.append(tuple(str(x) for x in args[1:]))
+        return real_popen(args, *a, **k)
+
+    # Local to bounded_subprocess's own ``subprocess`` name, never the stdlib module.
+    from tests._module_seam import setattr_in
+    setattr_in(monkeypatch, bounded_subprocess, "subprocess.Popen", recording_popen)
     try:
         idx._run_index(git_repo, _Reg(git_repo), since_head=True,
                        on_phase=phases.append)
     except Exception:  # noqa: BLE001 — sentinel or later-stage failure both fine here
         pass
     assert any("no usable base — full index" in p for p in phases)
+
+    assert spawned, "vacuous: the run spawned no git subprocess at all"
+    # A spawn that survives the removal, so a recorder that stopped seeing argv in this
+    # shape (a -C prefix, a wrapper) cannot pass the absence check below by seeing nothing.
+    assert ("rev-parse", "--show-toplevel") in spawned, spawned
+    # head_hash's own read (_current_head) runs after the sentinel, so none of
+    # the three can appear before it.
+    removed = [("rev-parse", "--abbrev-ref", "HEAD"), ("rev-parse", "HEAD"),
+               ("remote", "get-url", "origin")]
+    assert [s for s in spawned if s in removed] == [], spawned
 
 
 @pytest.mark.t2_tenant
@@ -201,7 +227,6 @@ def test_since_head_ignored_with_force(git_repo, monkeypatch):
     class _Stop(Exception):
         pass
 
-    monkeypatch.setattr(idx, "_git_metadata", lambda repo: {})
     monkeypatch.setattr(
         idx, "batch_frecency",
         lambda *a, **k: (_ for _ in ()).throw(_Stop()), raising=False,

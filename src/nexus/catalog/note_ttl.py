@@ -36,7 +36,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 
-def _parse_iso(value: Any) -> datetime | None:
+def parse_iso(value: Any) -> datetime | None:
     """Best-effort ISO-8601 parse; naive stamps are read as UTC."""
     if not isinstance(value, str) or not value:
         return None
@@ -74,7 +74,7 @@ def has_own_keys(meta: Any) -> bool:
 
 def clock_start(meta: Any, indexed_at: str) -> str:
     """The stamp the note's TTL counts from: ``meta.put_at``, else the entry's *indexed_at*."""
-    if isinstance(meta, dict) and _parse_iso(meta.get("put_at")) is not None:
+    if isinstance(meta, dict) and parse_iso(meta.get("put_at")) is not None:
         return str(meta["put_at"])
     return indexed_at or ""
 
@@ -85,7 +85,7 @@ def lapsed(meta: Any, indexed_at: str, *, now: datetime) -> bool:
     days = note_ttl_days(meta)
     if days <= 0:
         return False
-    start = _parse_iso(clock_start(meta, indexed_at))
+    start = parse_iso(clock_start(meta, indexed_at))
     if start is None:
         return False
     try:
@@ -190,13 +190,13 @@ def catalog_ttl_stale(
     chunk rows' metadata dicts.
     """
     days = note_ttl_days(meta)
-    start = _parse_iso(clock_start(meta, indexed_at))
+    start = parse_iso(clock_start(meta, indexed_at))
     for row in rows or ():
         if not row_names_note(owner_tumbler, row, owner_title=owner_title):
             continue
         if note_ttl_days(row) != days:
             return True
-        stamped = _parse_iso(row.get("indexed_at"))
+        stamped = parse_iso(row.get("indexed_at"))
         if stamped is not None and start is not None and stamped - start > skew:
             return True
     return False

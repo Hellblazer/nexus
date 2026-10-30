@@ -341,3 +341,31 @@ def test_runner_emits_walk_events(store: InMemoryLedger) -> None:
     ).run()
     events = [name for name, _ in recorder.events]
     assert "ladder_rung_recorded" in events
+
+
+
+class _ExplodingDetectRung:
+    """A rung whose detect raises with the engine's 401 body, which echoes the rejected credential."""
+
+    name = "exploding"
+
+    def detect(self) -> RungStatus:
+        raise RuntimeError("HTTP 401: invalid api_key SUPERSECRET")
+
+    def converge(self, report: ProgressReporter) -> ConvergeResult:  # pragma: no cover - never reached
+        raise AssertionError("not reached")
+
+    def verify(self) -> bool:  # pragma: no cover - never reached
+        return False
+
+
+def test_a_rungs_detect_failure_is_redacted_before_it_is_rendered() -> None:
+    """develop red at 32c0a680f (test_fanout_floor_census_redacts_credentials): the manifest-section-labels
+    rung reaches T3 from `nx doctor`, so its failure text carried the engine's 401 body with the
+    credential into the ladder row. The runner redacts once, for every rung."""
+    from nexus.upgrade_ladder.runner import pending_rungs
+
+    [(name, status)] = pending_rungs(LadderRegistry((_ExplodingDetectRung(),)))
+    assert name == "exploding" and status.applicable and not status.converged
+    assert "SUPERSECRET" not in status.pending_detail
+    assert "api_key [redacted]" in status.pending_detail

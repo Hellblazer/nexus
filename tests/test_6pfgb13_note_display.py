@@ -365,3 +365,20 @@ def test_a_sole_keyless_owner_takes_the_rows_tags_only_when_another_note_did_not
     assert _display([a], row={"catalog_doc_id": "1.1.1", "title": "alpha"}, row_tags="mine").tags == "mine"
     assert _display([a], row={}, row_tags="legacy-unstamped").tags == "legacy-unstamped"
 
+
+def test_a_non_dict_row_mapping_is_read_like_the_dict() -> None:
+    """nexus-6pfgb.48 (Low-7): the row is a ``Mapping``, but ``row_written_by`` and ``row_may_give_tags``
+    judge only a ``dict``, so a mapping that is not one silently read as "nobody's row"."""
+    from types import MappingProxyType
+
+    a = _entry("1.1.1", "alpha", {}, "")  # a keyless sole owner
+    own = {"catalog_doc_id": "1.1.1", "title": "alpha"}
+    other = {"catalog_doc_id": "9.9.9", "title": "someone-else"}
+    common = {"row_tags": "row-tags", "row_ttl_days": 5, "row_indexed_at": "2026-10-10T00:00:00+00:00"}
+
+    own_dict = _display([a], row=own, **common)
+    own_map = _display([a], row=MappingProxyType(own), **common)
+    assert own_dict.ttl != "unknown", "non-vacuity: the dict form attributes the row's TTL to its writer"
+    assert own_map.ttl == own_dict.ttl
+    assert _display([a], row=MappingProxyType(other), **common).tags == _display([a], row=other, **common).tags == ""
+

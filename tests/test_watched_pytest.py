@@ -230,3 +230,21 @@ def test_the_notify_url_resolves_flag_then_env_then_host_file(tmp_path: Path) ->
 def test_a_failed_notify_never_echoes_the_private_topic() -> None:
     problem = wp._notify("ntfy://127.0.0.1:1/secret-topic", _status("stalled"))
     assert problem is not None and "secret-topic" not in problem
+
+
+def test_hand_run_outputs_at_the_worktree_root_are_ignored_by_git() -> None:
+    """lab-remote --fetch brings a run's status file back to the worktree root, and a
+    commit that builds its paths from git status took one along (nexus-0asrr).
+    The defaults come from the script itself, so renaming one without
+    the ignore rule goes red here."""
+    root = SCRIPT.parent.parent
+    defaults = wp.parse_args(["--", "true"])
+    outputs = [defaults.status, defaults.log, "suite_status.json", "lab-out/report.json"]
+    tracked = [".test_durations.json", "tests/fixtures/pci_status_bodies.json"]
+    probe = subprocess.run(
+        ["git", "-C", str(root), "check-ignore", "--no-index", *outputs, *tracked],
+        capture_output=True, text=True, check=False,
+    )
+    ignored = set(probe.stdout.split())
+    assert ignored >= set(outputs), f"not ignored: {sorted(set(outputs) - ignored)}"
+    assert not ignored & set(tracked), f"rule too wide, ignores {sorted(ignored & set(tracked))}"

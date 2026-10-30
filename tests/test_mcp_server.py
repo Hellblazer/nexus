@@ -774,13 +774,13 @@ def test_cluster_by_keeps_every_per_document_row_of_a_shared_chunk():
 def _dom_result(i: int) -> SearchResult:
     return SearchResult(id=f"dom{i}", content="x", distance=0.01 * i,
                          collection="code__test",
-                         metadata={"source_path": "dominant.py"})
+                         metadata={"doc_id": "dominant.py", "_display_path": "dominant.py"})
 
 
 def _other_result(i: int) -> SearchResult:
     return SearchResult(id=f"o{i}", content="x", distance=0.5 + 0.01 * i,
                          collection="code__test",
-                         metadata={"source_path": f"other{i}.py"})
+                         metadata={"doc_id": f"other{i}.py", "_display_path": f"other{i}.py"})
 
 
 @pytest.mark.t2_tenant
@@ -814,7 +814,7 @@ def test_structured_true_uncapped_structured_false_capped_same_cache_entry():
     )
 
     dom_count_text = text_out.count("dominant.py")
-    assert dom_count_text <= 2, (
+    assert dom_count_text == 2, (  # exactly 2, not <= 2: a render with no path labels counts 0
         f"structured=False (cache-hit path) must apply the file-diversity "
         f"cap; got {dom_count_text} dominant.py rows in:\n{text_out}"
     )
@@ -3344,3 +3344,78 @@ def test_query_card_shows_the_owners_manifest_count_not_a_stale_row_chunk_count(
     assert "7 chunks" in out
     assert "99 chunks" not in out
     assert "4 chunks" in out, "an unresolved hit falls back to the legacy row key"
+
+
+# -- nexus-fv2u4: the label is the catalog title, never the chunk row's --------
+
+#: A code chunk's row title is its LAST writer's ``rel_path:line_start-line_end``.
+_STALE_ROW_TITLE = "other/doc.py:40-60"
+
+
+def _shared_chunk_hits() -> list[SearchResult]:
+    """One shared chunk attributed to ``owner/doc.py`` and one the catalog did not resolve."""
+    return [
+        SearchResult(
+            id="resolved-id", content="shared text", distance=0.1, collection="code__test",
+            metadata={"chunk_text_hash": "ab" * 32, "doc_id": "1.1.9", "title": _STALE_ROW_TITLE,
+                      "_display_title": "owner/doc.py"},
+        ),
+        SearchResult(
+            id="unresolved-id", content="orphan text", distance=0.2, collection="code__test",
+            metadata={"chunk_text_hash": "cd" * 32, "title": _STALE_ROW_TITLE},
+        ),
+    ]
+
+
+def test_search_labels_a_shared_chunk_with_the_owners_catalog_title_and_an_unresolved_hit_with_its_id():
+    _mock_t3([{"name": "code__test", "count": 2}])
+    with patch("nexus.search_engine.search_cross_corpus", lambda *_a, **_kw: _shared_chunk_hits()), \
+         patch("nexus.mcp.core._get_t1", side_effect=RuntimeError("no T1 in this test")), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = search(query="shared chunk label", corpus="code__test")
+    assert "owner/doc.py" in out
+    assert "unresolved-id" in out, "an unresolved hit shows its id"
+    assert _STALE_ROW_TITLE not in out and "other/doc.py" not in out
+
+
+def test_query_card_is_titled_by_the_owners_catalog_title_and_an_unresolved_hit_by_its_id():
+    _mock_t3([{"name": "code__test", "count": 2}])
+    refusing = _RefusingCatalog()
+    with patch("nexus.search_engine.search_cross_corpus", lambda *_a, **_kw: _shared_chunk_hits()), \
+         patch("nexus.mcp.core._get_catalog", return_value=refusing), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="shared chunk card", corpus="code__test")
+    assert refusing.calls == []
+    assert "owner/doc.py" in out
+    assert "unresolved-id" in out, "an unresolved hit's card shows its id"
+    assert _STALE_ROW_TITLE not in out and "other/doc.py" not in out
+
+
+def test_query_does_not_group_unresolved_chunks_under_a_shared_row_title():
+    """Two unresolved chunks whose rows carry the same (last writer's) title are two documents,
+    not one: the row title is no grouping key either."""
+    _mock_t3([{"name": "code__test", "count": 2}])
+    hits = [
+        SearchResult(id=f"u{i}", content=f"text {i}", distance=0.1 * i, collection="code__test",
+                     metadata={"title": _STALE_ROW_TITLE})
+        for i in (1, 2)
+    ]
+    with patch("nexus.search_engine.search_cross_corpus", lambda *_a, **_kw: hits), \
+         patch("nexus.mcp.core._get_catalog", return_value=_RefusingCatalog()), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="same row title", corpus="code__test")
+    assert "Found 2 documents" in out
+
+
+def test_query_card_of_a_resolved_document_with_no_title_or_path_shows_its_document_key():
+    """nexus-fv2u4 fix round: the last-resort card title is the document key (its tumbler),
+    not the chunk hash of the best hit."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+    hit = SearchResult(id="chunkhash-not-a-title", content="body", distance=0.1,
+                       collection="code__test", metadata={"doc_id": "1.9.77"})
+    with patch("nexus.search_engine.search_cross_corpus", lambda *_a, **_kw: [hit]), \
+         patch("nexus.mcp.core._get_catalog", return_value=_RefusingCatalog()), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="untitled document", corpus="code__test")
+    assert "1.9.77" in out
+    assert "chunkhash-not-a-title" not in out

@@ -320,15 +320,26 @@ class TestReadFileUri:
         assert isinstance(result, ReadFail)
         assert result.reason == "empty"
 
-    def test_url_encoded_path_is_unquoted(self, tmp_path: Path):
+    def test_a_percent_sequence_in_the_path_is_part_of_the_path(self, tmp_path: Path):
+        """nexus-6pfgb.57: every mint writes the RAW path (``"file://" + path``), so ``%20`` in a
+        directory name is those three characters, not a space. The reader used to unquote it."""
         from nexus.aspect_readers import ReadOk, _read_file_uri
 
-        p = tmp_path / "with space.md"
-        p.write_text("payload", encoding="utf-8")
-        encoded_path = quote(str(p))
-        result = _read_file_uri(f"file://{encoded_path}")
-        assert isinstance(result, ReadOk)
-        assert result.text == "payload"
+        real = tmp_path / "a b"
+        real.mkdir()
+        (real / "x.md").write_text("spaced", encoding="utf-8")
+        literal = tmp_path / "a%20b"
+        literal.mkdir()
+        (literal / "x.md").write_text("literal", encoding="utf-8")
+
+        got = _read_file_uri(f"file://{literal}/x.md")
+        assert isinstance(got, ReadOk) and got.text == "literal"
+
+    def test_a_relative_file_uri_is_never_anchored_on_the_working_directory(self):
+        from nexus.aspect_readers import ReadFail, _read_file_uri
+
+        got = _read_file_uri("file://relative/x.md")
+        assert isinstance(got, ReadFail) and got.reason == "unreachable"
 
     def test_no_path_returns_read_fail(self):
         from nexus.aspect_readers import ReadFail, _read_file_uri
@@ -336,6 +347,27 @@ class TestReadFileUri:
         result = _read_file_uri("file://")
         assert isinstance(result, ReadFail)
         assert result.reason == "unreachable"
+
+
+@pytest.mark.parametrize("dirname", ["50%25 off", "a#b", "q?x", "a%20b"])
+class TestFileUriMintRoundTripsThroughBothReaders:
+    """nexus-6pfgb.57: the URI ``uri_for`` mints reads back through the reader and the stat handler, whatever
+    characters the directory holds (a URL parser truncated at ``#`` and ``?`` and unquoted ``%25``)."""
+
+    def test_read_and_stat_find_the_file_the_mint_named(self, tmp_path: Path, dirname: str):
+        from nexus.aspect_readers import ReadOk, StatOk, _read_file_uri, _stat_file_uri, uri_for
+
+        d = tmp_path / dirname
+        d.mkdir()
+        f = d / "doc.md"
+        f.write_text("payload", encoding="utf-8")
+        uri = uri_for("rdr__nexus", str(f))
+        assert uri == "file://" + str(f)
+
+        read = _read_file_uri(uri)
+        assert isinstance(read, ReadOk) and read.text == "payload"
+        stat = _stat_file_uri(uri)
+        assert isinstance(stat, StatOk) and stat.current_mtime == f.stat().st_mtime
 
 
 # ── nx-note:// reader fixtures ────────────────────────────────────────────────
