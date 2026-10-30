@@ -10,6 +10,7 @@ import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.ResultQuery;
+import org.jooq.impl.DSL;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
@@ -17,6 +18,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -249,10 +251,22 @@ final class ManifestLabelStage {
     /** The widened cut never exceeds this unless the caller's own limit already does. */
     static final int OVERFETCH_CEILING = 1200;
 
-    /** Chashes per manifest lookup (a bind-parameter budget well under PostgreSQL's 32767). */
+    /**
+     * (collection, chash) keys per manifest lookup statement. The keys are bound as two arrays, so this bounds
+     * the statement's work, not its bind-parameter count.
+     */
     private static final int LOOKUP_BATCH = PgVectorRepository.SOURCE_URI_JOIN_BATCH;
 
     private final TenantScope tenantScope;
+
+    /** Test-visibility hook: manifest lookup statements run; production code never reads it. */
+    private final java.util.concurrent.atomic.AtomicInteger lookupStatements =
+        new java.util.concurrent.atomic.AtomicInteger();
+
+    /** Test-only read of {@link #lookupStatements}. */
+    int lookupStatementCount() {
+        return lookupStatements.get();
+    }
 
     ManifestLabelStage(TenantScope tenantScope) {
         this.tenantScope = tenantScope;
@@ -626,7 +640,8 @@ final class ManifestLabelStage {
      *
      * <p>Its own {@code SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id, position}, so the statement
      * returns one row per chash where {@link #apply}'s lookup returns every occurrence: a boilerplate chunk
-     * held by N documents costs a search window one row, not N.
+     * held by N documents costs a search window one row, not N. Every collection in the window is answered by
+     * the same statement (see {@link #fetchOccurrences}).
      */
     Map<String, Occurrence> firstOwners(String tenant, Map<String, Set<String>> chashesByCollection) {
         Map<String, Occurrence> first = new HashMap<>();
@@ -643,8 +658,15 @@ final class ManifestLabelStage {
     }
 
     /**
-     * @param firstOnly one occurrence per chash (the first, by {@code doc_id} then position) instead of all
-     *                  of them; both orders are the database's own, so the two shapes agree on that row
+     * One statement per {@link #LOOKUP_BATCH} (collection, chash) keys, over every collection in the window
+     * together (nexus-6pfgb.26 latency fix: a statement per collection cost a default search about 7.5 statements
+     * of 3 to 7 ms each on production, most of it planning and round trip). The statement matches
+     * {@code collection = ANY(...) AND chash = ANY(...)}, so it can also return a chash of one window collection
+     * held in another; those rows were not asked for and are dropped here.
+     *
+     * @param firstOnly one occurrence per (collection, chash) (the first, by {@code doc_id} then position)
+     *                  instead of all of them; both orders are the database's own, so the two shapes agree on
+     *                  that row
      */
     private Map<String, List<Occurrence>> fetchOccurrences(String tenant,
                                                            Map<String, Set<String>> chashesByCollection,
@@ -657,30 +679,48 @@ final class ManifestLabelStage {
         DocFields docFields = DocFields.of(docKeys);
         List<Field<?>> select = occurrenceFields(chashHex);
         docFields.addTo(select);
+        List<String[]> pairs = new ArrayList<>();
+        for (Map.Entry<String, Set<String>> e : chashesByCollection.entrySet()) {
+            for (String hex : e.getValue()) {
+                pairs.add(new String[] {e.getKey(), hex});
+            }
+        }
         tenantScope.withTenant(tenant, ctx -> {
-            for (Map.Entry<String, Set<String>> e : chashesByCollection.entrySet()) {
-                List<String> hexes = new ArrayList<>(e.getValue());
-                for (int start = 0; start < hexes.size(); start += LOOKUP_BATCH) {
-                    List<String> batch = hexes.subList(start, Math.min(start + LOOKUP_BATCH, hexes.size()));
-                    List<byte[]> keys = new ArrayList<>(batch.size());
-                    for (String hex : batch) {
-                        keys.add(Chash.fromHex(hex).toBytes());
+            for (int start = 0; start < pairs.size(); start += LOOKUP_BATCH) {
+                List<String[]> batch = pairs.subList(start, Math.min(start + LOOKUP_BATCH, pairs.size()));
+                Set<String> wanted = new HashSet<>();
+                Set<String> collections = new LinkedHashSet<>();
+                Set<String> hexes = new LinkedHashSet<>();
+                for (String[] p : batch) {
+                    wanted.add(key(p[0], p[1]));
+                    collections.add(p[0]);
+                    hexes.add(p[1]);
+                }
+                byte[][] keys = new byte[hexes.size()][];
+                int i = 0;
+                for (String hex : hexes) {
+                    keys[i++] = Chash.fromHex(hex).toBytes();
+                }
+                lookupStatements.incrementAndGet();
+                for (var r : occurrenceQuery(ctx, tenant, collections.toArray(String[]::new), keys, select, firstOnly)
+                        .fetch()) {
+                    String k = key(r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION), r.get(chashHex));
+                    if (!wanted.contains(k)) {
+                        continue;
                     }
-                    for (var r : occurrenceQuery(ctx, tenant, e.getKey(), keys, select, firstOnly).fetch()) {
-                        out.computeIfAbsent(key(e.getKey(), r.get(chashHex)), k -> new ArrayList<>())
-                           .add(new Occurrence(r.get(CATALOG_DOCUMENT_CHUNKS.DOC_ID),
-                                               r.get(CATALOG_DOCUMENT_CHUNKS.POSITION),
-                                               r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE),
-                                               r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE),
-                                               r.get(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER),
-                                               Boolean.TRUE.equals(r.get(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)),
-                                               r.get(CATALOG_DOCUMENTS.SOURCE_URI),
-                                               r.get(CATALOG_DOCUMENT_CHUNKS.LINE_START),
-                                               r.get(CATALOG_DOCUMENT_CHUNKS.LINE_END),
-                                               r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_START),
-                                               r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_END),
-                                               docFields.read(r)));
-                    }
+                    out.computeIfAbsent(k, x -> new ArrayList<>())
+                       .add(new Occurrence(r.get(CATALOG_DOCUMENT_CHUNKS.DOC_ID),
+                                           r.get(CATALOG_DOCUMENT_CHUNKS.POSITION),
+                                           r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE),
+                                           r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE),
+                                           r.get(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER),
+                                           Boolean.TRUE.equals(r.get(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)),
+                                           r.get(CATALOG_DOCUMENTS.SOURCE_URI),
+                                           r.get(CATALOG_DOCUMENT_CHUNKS.LINE_START),
+                                           r.get(CATALOG_DOCUMENT_CHUNKS.LINE_END),
+                                           r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_START),
+                                           r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_END),
+                                           docFields.read(r)));
                 }
             }
             return null;
@@ -690,7 +730,7 @@ final class ManifestLabelStage {
 
     /** The columns every occurrence statement selects, before the document-level fields the filter names. */
     private static List<Field<?>> occurrenceFields(Field<String> chashHex) {
-        return new ArrayList<>(List.of(chashHex,
+        return new ArrayList<>(List.of(chashHex, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
             CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
             CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
@@ -700,19 +740,22 @@ final class ManifestLabelStage {
     }
 
     /**
-     * The one statement behind both lookups, for ONE collection and one batch of chashes. Package-private so
-     * a plan test can EXPLAIN the statement production runs, not a copy of it. {@code firstOnly} is {@code
-     * SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id, position}; otherwise every occurrence, ordered
-     * by {@code doc_id}, {@code position}.
+     * The one statement behind both lookups, for one batch of keys across every collection named. Both lists
+     * bind as one array each ({@code = ANY(?)}), so the statement text, and its plan, is the same whatever the
+     * batch's size. Package-private so a plan test can EXPLAIN the statement production runs, not a copy of it.
+     * {@code firstOnly} is {@code SELECT DISTINCT ON (collection, chash) ... ORDER BY collection, chash, doc_id,
+     * position}; otherwise every occurrence, ordered by {@code doc_id}, {@code position}.
      */
-    static ResultQuery<Record> occurrenceQuery(DSLContext ctx, String tenant, String collection,
-                                               List<byte[]> keys, List<Field<?>> select, boolean firstOnly) {
+    static ResultQuery<Record> occurrenceQuery(DSLContext ctx, String tenant, String[] collections,
+                                               byte[][] keys, List<Field<?>> select, boolean firstOnly) {
         var head = firstOnly
-            ? ctx.select(select).distinctOn(CATALOG_DOCUMENT_CHUNKS.CHASH)
+            ? ctx.select(select).distinctOn(CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.CHASH)
             : ctx.select(select);
-        List<org.jooq.OrderField<?>> order = new ArrayList<>(3);
+        List<org.jooq.OrderField<?>> order = new ArrayList<>(4);
         if (firstOnly) {
-            order.add(CATALOG_DOCUMENT_CHUNKS.CHASH);  // DISTINCT ON (chash) needs it as the leading key
+            // DISTINCT ON (collection, chash) needs them as the leading keys
+            order.add(CATALOG_DOCUMENT_CHUNKS.COLLECTION);
+            order.add(CATALOG_DOCUMENT_CHUNKS.CHASH);
         }
         order.add(CATALOG_DOCUMENT_CHUNKS.DOC_ID);
         order.add(CATALOG_DOCUMENT_CHUNKS.POSITION);
@@ -724,8 +767,8 @@ final class ManifestLabelStage {
                     .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
                     .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
-                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(keys)))
+                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(DSL.any(collections)))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(DSL.any(keys))))
             .orderBy(order);
     }
 

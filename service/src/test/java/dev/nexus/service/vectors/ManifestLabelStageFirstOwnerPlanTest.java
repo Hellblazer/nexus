@@ -53,6 +53,7 @@ class ManifestLabelStageFirstOwnerPlanTest {
     private static final String SVC_PASS = "svc_first_owner_plan_pass";
     private static final String TENANT = "first-owner-plan";
     private static final String COL = "knowledge__first-owner-plan__minilm-l6-v2-384__v1";
+    private static final String COL2 = "docs__first-owner-plan__minilm-l6-v2-384__v1";
     private static final String MODEL = "minilm-l6-v2-384";
 
     /** Three boilerplate chunks held by HOLDERS documents each, and one held by a single document. */
@@ -112,11 +113,33 @@ class ManifestLabelStageFirstOwnerPlanTest {
             // Written in descending doc_id order so the first owner is not the first row on disk.
             for (int d = HOLDERS - 1; d >= 0; d--) {
                 for (int c = 0; c < BOILERPLATE; c++) {
-                    manifest(ctx, String.format("doc-%03d", d), c, chashes.get(c));
+                    manifest(ctx, COL, String.format("doc-%03d", d), c, chashes.get(c));
                 }
             }
             // The last chunk is held by one document only.
-            manifest(ctx, "doc-007", 9, chashes.get(BOILERPLATE));
+            manifest(ctx, COL, "doc-007", 9, chashes.get(BOILERPLATE));
+            // A second collection holds boilerplate chunk 0 and the lone chunk, in one document whose doc_id
+            // sorts after every COL holder, so a COL2 answer can only come from COL2's own row.
+            PgContainerHelper.insertCollection(ctx, TENANT, COL2);
+            for (int c : new int[] {0, BOILERPLATE}) {
+                ctx.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT)
+                    .set(CHUNKS.COLLECTION, COL2)
+                    .set(CHUNKS.CHASH, HexFormat.of().parseHex(chashes.get(c)))
+                    .set(CHUNKS.EMBEDDING_MODEL, MODEL)
+                    .set(CHUNKS.CHUNK_TEXT, "text " + c)
+                    .set(CHUNKS.EMBEDDING_384, zero)
+                    .execute();
+            }
+            ctx.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "doc-900")
+                .set(CATALOG_DOCUMENTS.TITLE, "doc-900")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL2)
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///doc-900.md")
+                .execute();
+            manifest(ctx, COL2, "doc-900", 4, chashes.get(0));
+            manifest(ctx, COL2, "doc-900", 5, chashes.get(BOILERPLATE));
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
         }
     }
@@ -127,13 +150,13 @@ class ManifestLabelStageFirstOwnerPlanTest {
         if (pg != null) pg.stop();
     }
 
-    private static void manifest(DSLContext ctx, String doc, int position, String hex) {
+    private static void manifest(DSLContext ctx, String collection, String doc, int position, String hex) {
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
             .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(hex))
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COL)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
             .execute();
     }
@@ -144,8 +167,8 @@ class ManifestLabelStageFirstOwnerPlanTest {
         return w;
     }
 
-    private List<byte[]> keys() {
-        return chashes.stream().map(h -> Chash.fromHex(h).toBytes()).toList();
+    private byte[][] keys() {
+        return chashes.stream().map(h -> Chash.fromHex(h).toBytes()).toArray(byte[][]::new);
     }
 
     private static final Pattern ACTUAL_ROWS = Pattern.compile("actual time=[0-9.]+\\.\\.[0-9.]+ rows=(\\d+)");
@@ -157,7 +180,7 @@ class ManifestLabelStageFirstOwnerPlanTest {
             var select = new ArrayList<Field<?>>(List.of(chashHex, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENTS.SOURCE_URI));
             return List.of(PgContainerHelper.explainPlanWith(ctx,
-                ManifestLabelStage.occurrenceQuery(ctx, TENANT, COL, keys(), select, firstOnly),
+                ManifestLabelStage.occurrenceQuery(ctx, TENANT, new String[] {COL}, keys(), select, firstOnly),
                 new PgContainerHelper.ExplainOptions(true, false, false, false)).split("\n"));
         });
     }
@@ -203,5 +226,41 @@ class ManifestLabelStageFirstOwnerPlanTest {
         }
         assertThat(first.get(ManifestLabelStage.ownerKey(COL, chashes.get(BOILERPLATE))).docId())
             .isEqualTo("doc-007");
+    }
+
+    @Test
+    void aTwoCollectionWindow_isOneStatement_andAnswersEachCollectionFromItsOwnRows() {
+        var stage = new ManifestLabelStage(tenantScope);
+        Map<String, Set<String>> w = window();
+        // COL2 is asked for chunk 0 only; it also holds the lone chunk, which the statement's ANY(...) pair
+        // can match and the stage must drop.
+        w.put(COL2, new LinkedHashSet<>(List.of(chashes.get(0))));
+
+        int before = stage.lookupStatementCount();
+        var first = stage.firstOwners(TENANT, w);
+        assertThat(stage.lookupStatementCount() - before).as("one statement for the whole window").isEqualTo(1);
+
+        assertThat(first).hasSize(chashes.size() + 1);
+        var col2 = first.get(ManifestLabelStage.ownerKey(COL2, chashes.get(0)));
+        assertThat(col2.docId()).isEqualTo("doc-900");
+        assertThat(col2.position()).isEqualTo(4);
+        assertThat(first.get(ManifestLabelStage.ownerKey(COL, chashes.get(0))).docId()).isEqualTo("doc-000");
+        assertThat(first).as("a pair the window did not ask for")
+            .doesNotContainKey(ManifestLabelStage.ownerKey(COL2, chashes.get(BOILERPLATE)));
+
+        var all = stage.allOccurrences(TENANT, w);
+        assertThat(all.get(ManifestLabelStage.ownerKey(COL2, chashes.get(0))))
+            .extracting(ManifestLabelStage.Occurrence::docId).containsExactly("doc-900");
+        assertThat(all).doesNotContainKey(ManifestLabelStage.ownerKey(COL2, chashes.get(BOILERPLATE)));
+    }
+
+    @Test
+    void theStatementText_isTheSame_whateverTheBatchSize() {
+        Field<String> chashHex = ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH);
+        String one = tenantScope.withTenant(TENANT, ctx -> ManifestLabelStage.occurrenceQuery(ctx, TENANT,
+            new String[] {COL}, new byte[][] {keys()[0]}, new ArrayList<>(List.of(chashHex)), true).getSQL());
+        String many = tenantScope.withTenant(TENANT, ctx -> ManifestLabelStage.occurrenceQuery(ctx, TENANT,
+            new String[] {COL, COL2}, keys(), new ArrayList<>(List.of(chashHex)), true).getSQL());
+        assertThat(many).isEqualTo(one);
     }
 }
