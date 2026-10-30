@@ -455,7 +455,7 @@ out12="$WORKDIR/untrack12.out"; rm -f "$out12"
 bash -c "
     source '$repo12/scripts/lib/build-lease.sh'
     build_lease_acquire untrack || exit 9
-    sleep 300 & dead=\$!; kill -9 \$dead; wait \$dead 2>/dev/null
+    dead=$NEVER_ALIVE_PID
     build_lease_track_pid untrack \$dead
     echo TRACKED > '$out12'
     sleep 2
@@ -472,7 +472,7 @@ rm -f "$out12"
 bash -c "
     source '$repo12/scripts/lib/build-lease.sh'
     build_lease_acquire untrack || exit 9
-    sleep 300 & dead=\$!; kill -9 \$dead; wait \$dead 2>/dev/null
+    dead=$NEVER_ALIVE_PID
     build_lease_track_pid untrack \$dead
     build_lease_untrack_pid untrack
     echo UNTRACKED > '$out12'
@@ -547,7 +547,7 @@ if [[ $rc13 -eq 0 && "$(_ev_lines "$ev13")" == 1 && "$line13" == *" waited_s=5 o
 # 13f: stale reclaim -> one stale_reclaimed line naming the dead holder
 rm -f "$ev13"
 mkdir -p "$leasedir13/corpse"
-sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+dead13="$NEVER_ALIVE_PID"
 printf '%s\n' "$dead13" > "$leasedir13/corpse/pid"; echo "2026-01-01T00:00:00Z" > "$leasedir13/corpse/ts"; echo dead-agent > "$leasedir13/corpse/label"
 out13="$(NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire corpse && build_lease_release corpse" 2>&1)"; rc13=$?
 line13="$(head -1 "$ev13" 2>/dev/null)"
@@ -579,7 +579,7 @@ if [[ $badrc13 -eq $goodrc13 && "$badout13" == "$good13" ]]; then ok "an unwrita
 mkdir -p "$WORKDIR/a-dir-log"
 for how13 in "$bad_log13" "$WORKDIR/a-dir-log"; do
     mkdir -p "$leasedir13/corpse2"
-    sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+    dead13="$NEVER_ALIVE_PID"
     printf '%s\n' "$dead13" > "$leasedir13/corpse2/pid"; echo dead-agent > "$leasedir13/corpse2/label"
     badout13="$(NX_LEASE_EVENTS_LOG="$how13" bash -c "set -e; source '$lib13'; build_lease_acquire corpse2 >/dev/null 2>&1; build_lease_release corpse2; echo SURVIVED" 2>&1)"
     if [[ "$badout13" == SURVIVED ]]; then ok "an unwritable log (${how13##*/}) under set -e does not abort a successful stale reclaim"; else bad "set -e caller (${how13##*/}): [$badout13]"; fi
@@ -601,7 +601,7 @@ rm -rf "$leasedir13/suite"
 rm -f "$ev13"
 sleep 25 & peer13=$!
 mkdir -p "$leasedir13/raced" "$WORKDIR/fakebin13"
-sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+dead13="$NEVER_ALIVE_PID"
 printf '%s\n' "$dead13" > "$leasedir13/raced/pid"; echo dead-agent > "$leasedir13/raced/label"
 # a peer wins the reclaim between our read and our mv: the lease is the peer's by the time ours fails
 cat > "$WORKDIR/fakebin13/mv" <<MV
