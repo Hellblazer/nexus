@@ -27,6 +27,8 @@
 "src/nexus/exporter.py" = ["meta"]
 "src/nexus/catalog/manifest_backfill.py" = ["meta"]
 "src/nexus/commands/catalog.py" = ["meta", "m"]
+# nexus-6pfgb.10: the backfill verb reads chunk rows by design; every name below is a chunk row's metadata.
+"src/nexus/catalog/meta_backfill.py" = ["chosen", "r", "row"]
 
 # src/nexus/catalog/note_ttl.py is the legacy-fallback module (RF-8): exempt from [sites], but it
 # may read only catalog_doc_id and title and these counts may only fall.
@@ -64,6 +66,27 @@ line_start = 1
 catalog_doc_id = 1
 doc_id = 1
 
+# nexus-6pfgb.10: the one-time backfill verb is the sanctioned reader of these legacy row keys until Phase 4
+# deletes them: it copies each into the document's own catalog home (fill-only, single-owner, attributed
+# by the row's indexed_at against the document's), so it reads the shared row on purpose. Listed, not
+# exempt, so the ratchet still counts them and the Phase 4 sweep deletes them with the verb.
+[sites."src/nexus/catalog/meta_backfill.py::_attributable"]
+indexed_at = 1
+
+[sites."src/nexus/catalog/meta_backfill.py::plan_indexed_rows"]
+extraction_method = 1
+extraction_source = 1
+frecency_score = 1
+indexed_at = 1
+quality_gate_overridden = 1
+source_author = 1
+
+[sites."src/nexus/catalog/meta_backfill.py::plan_note"]
+category = 1
+indexed_at = 1
+source_agent = 1
+tags = 1
+
 [sites."src/nexus/catalog/orphan_backfill.py::gather_titled_chunks"]
 chunk_index = 1
 title = 1
@@ -98,6 +121,14 @@ bib_openalex_id = 1
 bib_semantic_scholar_id = 1
 bib_venue = 1
 bib_year = 2
+
+# nexus-6pfgb.28: the id-less bib of a batch-path `--enrich` PDF, read by `--backfill-catalog` (the same
+# recovery verb as _chunk_bib above) into the catalog's empty bib columns.
+[sites."src/nexus/commands/enrich.py::_chunk_idless_bib"]
+bib_authors = 1
+bib_citation_count = 1
+bib_venue = 1
+bib_year = 1
 
 [sites."src/nexus/commands/enrich.py::run_bib_enrichment"]
 catalog_doc_id = 1

@@ -1618,6 +1618,25 @@ Captures the ETag for every `https://` catalog reference that lacks one (nexus-0
 | `--dry-run` | Report candidates only; no network calls, no writes |
 | `--limit N` | Cap on candidates processed in one run (default 500, max 2000) — a bounded sweep, never an unlimited fan-out |
 
+### nx catalog backfill-meta
+
+```
+nx catalog backfill-meta [--apply] [--json]
+```
+
+One-time, fill-only stamp of the catalog `meta` keys that the RDR-236 Phase 1 homes now write at index and put time, for documents written before them (nexus-6pfgb.10). Dry run by default. A key the entry already holds (a retraction `''` / `0` / `[]` included, tested by presence, not truthiness) and a non-empty catalog column are never touched, and a key is sent only with a real value (the catalog merges `meta`; an explicit empty overwrites). A run that examines no document exits 1.
+
+- **Notes** (`knowledge`): `ttl_days` and `put_at` come only from a chunk row the note itself wrote (`row_written_by`: stamp and title), `put_at` being that row's `indexed_at`. `tags` (written as a JSON array, a legacy comma string split once), `category` and `source_agent` come from that row or, when there is none, from a row of a chunk the note solely owns that `row_may_give_tags` allows. A note recovered that way has no TTL to give: it gets `put_at` and `ttl_days` 0 and leaves the keyless count. An entry that already holds a note key is authoritative: only `put_at` may still be filled, and only from a row with the same TTL.
+- **Indexed documents**: `extraction_method`, `quality_gate_overridden` (only where the rows say `True`), `extraction_source` (only where a row carries a value), `frecency_score` with `frecency_computed_at` (the rows' latest `indexed_at`; a score of 0 is not sent) and the catalog `author` (from `source_author`, a plain string only; where the column is empty) are copied from chunks the document solely owns, when its sampled rows (64 at most, spread over the document) agree and are no later than the document plus five minutes. `tags`, `category` and `source_format` are not backfilled: they become generated columns in RDR-236 Phase 3. A legacy `tags` string is never converted here; the `note-tags-array` upgrade rung does that.
+- Single-owner means `chash_positions` shows exactly one live owner in the chunk's own collection. A document whose chunks are all shared is skipped and counted. A tombstoned co-owner is not counted (no 0.1.165 client read lists one); the `indexed_at` guard stands against a departed co-owner that wrote last. A failed owner or row lookup withholds that document's row-sourced keys and counts it; it never fails the run.
+
+The dry run prints, per key, how many documents were examined, already held it, were skipped as shared, would be stamped, or are residue (the reasons are in `--json`). The `bib_*` columns of documents indexed with `nx index pdf --enrich` on the batch path are filled by `nx enrich bib COLLECTION --backfill-catalog`, which now also accepts chunks that carry year, authors, venue and citation count but no backend id (fill-only, no id written, `bib_enriched_at` set).
+
+| Flag | Description |
+|------|-------------|
+| `--apply` | Write the keys (default: dry run, counts only) |
+| `--json` | Emit JSON instead of the human-readable report |
+
 ### nx catalog backfill-collections
 
 ```
