@@ -564,7 +564,6 @@ def search_cmd(
             r for r in results
             if _within(r.metadata.get("_display_path") or "")
             or _within(r.metadata.get(DISPLAY_SOURCE_PATH_KEY) or "")
-            or _within(r.metadata.get("file_path") or "")
         ]
         if not results:
             if json_out:

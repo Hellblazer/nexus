@@ -856,7 +856,7 @@ def search_corpus() -> T3Database:
         ids=[f"code-{t}" for t, _ in _CODE_DOCS],
         documents=[txt for _, txt in _CODE_DOCS],
         metadatas=[{
-            "title": t, "source_path": f"/repo/{t}.py", "file_path": f"/repo/{t}.py",
+            "title": t, "source_path": f"/repo/{t}.py",
             "line_start": 1, "line_end": txt.count("\n") + 1, "frecency_score": 0.5,
         } for t, txt in _CODE_DOCS],
     )
@@ -866,7 +866,7 @@ def search_corpus() -> T3Database:
         ids=[f"know-{t}" for t, _ in _KNOWLEDGE_DOCS],
         documents=[txt for _, txt in _KNOWLEDGE_DOCS],
         metadatas=[{
-            "title": t, "source_path": f"/docs/{t}.md", "file_path": f"/docs/{t}.md",
+            "title": t, "source_path": f"/docs/{t}.md",
             "line_start": 1, "line_end": 1, "frecency_score": 0.5,
         } for t, txt in _KNOWLEDGE_DOCS],
     )

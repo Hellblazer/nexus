@@ -11,8 +11,6 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
-from urllib.request import url2pathname
 
 import structlog
 
@@ -620,11 +618,17 @@ _DisplayMaps = tuple[
 
 
 def _local_source_path(entry: Any) -> str:
-    """The absolute local path of *entry*'s ``file://`` source_uri, or ``""`` (any other scheme or none)."""
+    """The absolute local path of *entry*'s ``file://`` source_uri, or ``""`` (any other scheme or none).
+
+    The path is whatever follows the scheme, taken verbatim (nexus-6pfgb.55): every registration path mints
+    the RAW spelling ``"file://" + path`` (``aspect_readers.uri_for``, ``doc_indexer._curator_identity``,
+    the engine's ``deriveSourceUri``), so a ``#``, a ``?`` or a literal ``%25`` in a directory name is part
+    of the path, not a fragment, a query or an escape. A URL parser truncated or unquoted it.
+    """
     uri = getattr(entry, "source_uri", "") or ""
-    if not isinstance(uri, str) or not uri.startswith("file://"):
+    if not isinstance(uri, str) or not uri.startswith("file:///"):
         return ""
-    return url2pathname(urlparse(uri).path)
+    return uri[len("file://"):]
 
 
 def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
@@ -2732,13 +2736,14 @@ def apply_file_diversity_cap(
     output, just reordered. Nothing is dropped and no score is touched.
 
     File identity resolves per result via ``metadata.doc_id`` ->
-    ``metadata.file_path`` -> ``r.id`` (``doc_id`` first because it is
-    the catalog tumbler, stable across a prune/re-index; ``file_path`` is
-    the legacy pre-doc_id identity) — a result with neither falls back to
-    its own unique ``id``, so results with no shared file identity never
-    cap against each other. The row's ``source_path`` is the last writer's
-    file, shared with other documents, and is not an identity
-    (nexus-6pfgb.49).
+    ``metadata._display_path`` -> ``r.id`` (``doc_id`` first because it is
+    the catalog tumbler, stable across a prune/re-index; ``_display_path``
+    is the catalog-resolved path the search attached) — a result with
+    neither falls back to its own unique ``id``, so results with no shared
+    file identity never cap against each other. The row's ``source_path``
+    is the last writer's file, shared with other documents, and the legacy
+    ``file_path`` key is left by no writer; neither is an identity
+    (nexus-6pfgb.49, nexus-6pfgb.56).
 
     Walks *results* in their existing (already-scored) order; the first
     *max_per_file* occurrences of each file key are kept in place, every
@@ -2773,7 +2778,7 @@ def apply_file_diversity_cap(
     for r in results:
         key = (
             r.metadata.get("doc_id")
-            or r.metadata.get("file_path")
+            or r.metadata.get("_display_path")
             or r.id
         )
         seen = counts.get(key, 0)

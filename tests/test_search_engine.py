@@ -2620,8 +2620,10 @@ class TestBoostWindow:
 class TestApplyFileDiversityCap:
     def _r(self, *, id: str, doc_id: str | None = None,
            source_path: str | None = None, file_path: str | None = None,
-           dist: float = 0.1) -> SearchResult:
+           display_path: str | None = None, dist: float = 0.1) -> SearchResult:
         meta: dict = {}
+        if display_path is not None:
+            meta["_display_path"] = display_path
         if doc_id is not None:
             meta["doc_id"] = doc_id
         if source_path is not None:
@@ -2645,17 +2647,22 @@ class TestApplyFileDiversityCap:
         # first 2 occurrences kept in place; the rest pushed to the tail.
         assert [r.id for r in out] == ["0", "1", "2", "3"]
 
-    def test_falls_back_to_source_path_when_no_doc_id(self):
-        results = [self._r(id=str(i), source_path="a.py") for i in range(3)]
-        out = apply_file_diversity_cap(results, max_per_file=2)
-        # 3rd occurrence (no doc_id, same source_path) is overflow -> tail.
-        assert [r.id for r in out] == ["0", "1", "2"]
+    def test_falls_back_to_the_catalog_display_path_when_no_doc_id(self):
+        """nexus-6pfgb.56: with no doc_id the file identity is the catalog-resolved ``_display_path``."""
+        a1, a2 = self._r(id="a1", display_path="a.py"), self._r(id="a2", display_path="a.py")
+        b = self._r(id="b", display_path="b.py")
+        out = apply_file_diversity_cap([a1, a2, b], max_per_file=1)
+        assert [r.id for r in out] == ["a1", "b", "a2"], "the second chunk of a.py moves behind b.py"
 
-    def test_falls_back_to_file_path_when_no_doc_id_or_source_path(self):
-        results = [self._r(id=str(i), file_path="a.py") for i in range(3)]
-        out = apply_file_diversity_cap(results, max_per_file=2)
-        assert [r.id for r in out] == ["0", "1", "2"]
-        assert out[-1].id == "2"  # 3rd occurrence pushed to the tail
+    def test_a_stale_row_path_is_never_a_file_identity(self):
+        """nexus-6pfgb.56: a row's ``source_path`` (the last writer's file) and the legacy ``file_path``
+        key no writer leaves group nothing. Three same-path rows stay in order; capped as one file the
+        second would drop behind ``b``."""
+        for key in ("source_path", "file_path"):
+            a1, a2 = self._r(id="a1", **{key: "a.py"}), self._r(id="a2", **{key: "a.py"})
+            b = self._r(id="b")
+            out = apply_file_diversity_cap([a1, a2, b], max_per_file=1)
+            assert [r.id for r in out] == ["a1", "a2", "b"], key
 
     def test_no_file_identity_never_caps_against_each_other(self):
         """Results with no doc_id/source_path/file_path fall back to
