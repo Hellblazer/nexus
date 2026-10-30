@@ -11602,6 +11602,7 @@ async def _nx_answer_plan_miss(
     if coverage is not None and enforce_eligibility:
         few_shot_matches = _eligibility.eligible_matches(
             _eligibility.coerce_kind(coverage.answer_kind), few_shot_matches,
+            len({(s.kind, s.value) for s in coverage.named_sources}),
         )
     few_shot_block = _format_plan_few_shot(few_shot_matches)
     if few_shot_block:
@@ -12355,6 +12356,8 @@ async def nx_answer(
         shadow_reason=(
             "disabled_by_setting" if not _gate_on else None if _extract_on else "extraction_disabled"
         ),
+        # nexus-4xmpv: a synthesis request that names exactly one source does not admit citation-traversal.
+        named_source_count=len({(s.kind, s.value) for s in _request_coverage.named_sources}),
     )
     # nexus-jypmj.16: a failed extraction leaves THIS request on its first-pass kind (the gate keeps enforcing,
     # by design); a run of failures in one process is that regime every time, so it warns once per process.
