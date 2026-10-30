@@ -4086,8 +4086,14 @@ def _collapse_identical_chunk_rows(rows: list[dict]) -> list[dict]:
 def _collapse_identical_chunk_results(results: list) -> list:
     """The :func:`_collapse_identical_chunk_rows` rule for ``SearchResult``
     lists (the plain query path): keyed on ``metadata["chunk_text_hash"]``,
-    the other collections recorded as ``metadata["also_in"]``."""
+    the other collections recorded as ``metadata["also_in"]``.
+
+    nexus-tko2w: a row in the kept row's collection that names a different
+    owning document (a label filter's per-owner expansion) is that document's
+    hit, so it is kept, once per owner, not folded into the first owner's card.
+    """
     kept_by_chash: dict = {}
+    owners_kept: set = set()
     out: list = []
     for r in results:
         chash = (r.metadata or {}).get("chunk_text_hash", "") or ""
@@ -4097,7 +4103,17 @@ def _collapse_identical_chunk_results(results: list) -> list:
         kept = kept_by_chash.get(chash)
         if kept is None:
             kept_by_chash[chash] = r
+            owners_kept.add((chash, _row_key(r)[2]))
             out.append(r)
+            continue
+        owner = _row_key(r)[2]
+        if (
+            r.collection == kept.collection and owner
+            and owner != _row_key(kept)[2]
+        ):
+            if (chash, owner) not in owners_kept:
+                owners_kept.add((chash, owner))
+                out.append(r)
             continue
         if r.collection and r.collection != kept.collection:
             also = kept.metadata.setdefault("also_in", [])
@@ -5375,7 +5391,7 @@ def query(
                     # catalog can't resolve (catalog-absent or
                     # pre-Phase-A chunks).
                     "chunk_count": (
-                        doc_to_chunk_count.get(str(owner), None) if owner else None
+                        doc_to_chunk_count.get(owner) if owner else None
                     ) or meta.get("chunk_count", ""),
                     # page_count / has_formulas are not in ALLOWED_TOP_LEVEL:
                     # normalize() drops them, so the read always returned "".

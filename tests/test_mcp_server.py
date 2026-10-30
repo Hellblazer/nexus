@@ -3214,3 +3214,79 @@ def test_query_groups_a_shared_chunk_under_the_row_owner_not_the_first_holder():
     assert "owner-doc" in out
     assert "7 chunks" in out
     assert "3 chunks" not in out
+
+
+def test_query_reverse_looks_up_only_the_rows_that_name_no_owner():
+    """nexus-tko2w: in one response a row that names its owner is grouped
+    under it and its chash never reaches ``docs_for_chashes``; a row without
+    one still goes through the reverse lookup and is grouped under the first
+    holder it returns."""
+    _mock_t3([{"name": "code__test", "count": 2}])
+    named, unnamed = "ab" * 32, "cd" * 32
+
+    def fake(*_a, **_kw):
+        return [
+            SearchResult(
+                id="r1", content="named row", distance=0.1, collection="code__test",
+                metadata={"chunk_text_hash": named, "doc_id": "1.1.9",
+                          "_display_title": "named-doc"},
+            ),
+            SearchResult(
+                id="r2", content="unnamed row", distance=0.2, collection="code__test",
+                metadata={"chunk_text_hash": unnamed, "_display_title": "unnamed-doc"},
+            ),
+        ]
+
+    asked: list[list[str]] = []
+
+    class _Catalog:
+        def docs_for_chashes(self, chashes):
+            asked.append(list(chashes))
+            return {c: ["1.1.4"] for c in chashes}
+
+        def get_manifests(self, doc_ids):
+            sizes = {"1.1.4": 5, "1.1.9": 7}
+            return {d: [object()] * sizes[d] for d in doc_ids}
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.mcp.core._get_catalog", return_value=_Catalog()), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="mixed owners", corpus="code__test")
+    assert asked == [[unnamed]]
+    assert "7 chunks" in out and "5 chunks" in out
+
+
+def test_query_keeps_one_card_per_owner_of_a_label_expanded_shared_chunk():
+    """nexus-tko2w: under a label filter the engine returns a shared chunk
+    once per owning document (same id and collection, a different ``doc_id``).
+    The identical-chunk collapse kept only the first, so the second owner
+    vanished; each owner now keeps its card, and an exact repeat still
+    collapses."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+    chash = "ef" * 32
+
+    def row(doc_id: str, title: str, distance: float) -> SearchResult:
+        return SearchResult(
+            id=chash, content="shared text", distance=distance, collection="code__test",
+            metadata={"chunk_text_hash": chash, "doc_id": doc_id, "_display_title": title},
+        )
+
+    def fake(*_a, **_kw):
+        return [row("1.1.2", "first-owner", 0.1), row("1.1.9", "second-owner", 0.1),
+                row("1.1.9", "second-owner", 0.1)]
+
+    class _Catalog:
+        def docs_for_chashes(self, chashes):
+            raise AssertionError("every row names its owner")
+
+        def get_manifests(self, doc_ids):
+            sizes = {"1.1.2": 3, "1.1.9": 7}
+            return {d: [object()] * sizes[d] for d in doc_ids}
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.mcp.core._get_catalog", return_value=_Catalog()), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="label expanded", corpus="code__test")
+    assert "first-owner" in out and "second-owner" in out
+    assert out.count("second-owner") == 1
+    assert "3 chunks" in out and "7 chunks" in out
