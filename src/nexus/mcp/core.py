@@ -16,7 +16,6 @@ import json
 import re
 import threading
 import time
-import weakref
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Annotated, Any
@@ -9270,41 +9269,26 @@ def traverse(
     return out
 
 
-#: How long one catalog handle's live-collection listing is reused by ``_engine_scope_filter`` (nexus-jypmj.19).
-#: The steps of one run share a listing; a collection registered inside the window is missing from the
-#: predicate until it lapses, which the engine then treats as out of scope, so the bound stays short.
-_SCOPE_REGISTRY_TTL_S: float = 30.0
-_scope_registry_clock = time.monotonic  # a seam: tests set the clock without patching the shared ``time`` module
-_scope_registry_cache: "weakref.WeakKeyDictionary[Any, tuple[float, tuple[str, ...]]]" = weakref.WeakKeyDictionary()
-_scope_registry_lock = threading.Lock()
-
-
 def _live_collection_names(catalog: Any) -> tuple[str, ...]:
-    """The live registered collection names, read through ``catalog`` at most once per ``_SCOPE_REGISTRY_TTL_S``.
+    """The live registered collection names, read through ``catalog`` once per plan run (nexus-jypmj.19).
 
-    Keyed on the handle (weakly, so a replaced catalog never serves its predecessor's listing) and held unfiltered,
-    so every corpus prefix shares one read. A failed read raises and leaves nothing cached. Routing reads the live
-    view only (nexus-bc7ps): a quarantine-<name> row must not reach the predicate. Two threads that both miss
-    read twice and the later write wins: harmless, both are fresh.
+    Inside a plan run (:func:`~nexus.plans.traversal_policy.registry_listing_scope`, opened by ``plan_run``) the
+    steps share one listing, every corpus prefix included, so a multi-step run reads the registry once. Nothing
+    outlives the run: a later run, after an index or ``store_put`` registered a collection, reads it afresh. A
+    cache keyed on the catalog handle would not work, since ``_get_catalog()`` returns a new handle per call.
+    Outside a run (a direct ``traverse``) every call reads. A failed read raises and keeps nothing. Routing reads
+    the live view only (nexus-bc7ps): a quarantine-<name> row must not reach the predicate.
     """
-    now = _scope_registry_clock()
-    try:
-        with _scope_registry_lock:
-            hit = _scope_registry_cache.get(catalog)
-    except TypeError:  # a handle that cannot be weakly keyed: no cache, the read below still answers
-        hit = None
-    if hit is not None and now < hit[0]:
-        return hit[1]
-    names = tuple(sorted({
-        str(row["name"]) for row in catalog.list_collections(lifecycle_state="live")
-        if isinstance(row, dict) and row.get("name")
-    }))
-    try:
-        with _scope_registry_lock:
-            _scope_registry_cache[catalog] = (now + _SCOPE_REGISTRY_TTL_S, names)
-    except TypeError:
-        pass
-    return names
+    from nexus.plans import traversal_policy as tp  # noqa: PLC0415 — deferred, like traverse's other imports
+
+    def read() -> tuple[str, ...]:
+        return tuple(sorted({
+            str(row["name"]) for row in catalog.list_collections(lifecycle_state="live")
+            if isinstance(row, dict) and row.get("name")
+        }))
+
+    listing = tp.active_registry_listing()
+    return read() if listing is None else listing.get(read)
 
 
 def _engine_scope_filter(catalog: Any, scope: Any, *, require_link_role: str = "factual") -> "dict | None":

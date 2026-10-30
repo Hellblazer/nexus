@@ -48,9 +48,12 @@ This module imports only the standard library and :mod:`nexus.plans.evidence`.
 """
 from __future__ import annotations
 
+import contextlib
 import re
+import threading
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -344,6 +347,44 @@ def _distance_and_role(
         if isinstance(depth, int) and not isinstance(depth, bool) and depth >= 1 and role in _ROLE_RANK:
             dist[str(tumbler)], best[str(tumbler)] = depth, role
     return dist, best
+
+
+class RegistryListing:
+    """The live collection names one plan run reads once and every scoped ``traverse`` step of it shares
+    (nexus-jypmj.19). The run's scope (:func:`registry_listing_scope`) owns it, so it lives exactly as long as
+    the run: a later run, after an index or ``store_put`` registered a collection, reads the registry afresh.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._names: tuple[str, ...] | None = None
+
+    def get(self, read: Callable[[], tuple[str, ...]]) -> tuple[str, ...]:
+        """The run's listing, read through *read* on the first call only. A failed read raises and keeps
+        nothing, so the next step tries again. Steps that run together wait on one read, not several."""
+        with self._lock:
+            if self._names is None:
+                self._names = read()
+            return self._names
+
+
+_RUN_LISTING: ContextVar[RegistryListing | None] = ContextVar("nexus_run_registry_listing", default=None)
+
+
+def active_registry_listing() -> RegistryListing | None:
+    """The listing of the plan run this call belongs to, or ``None`` outside a run (a direct ``traverse``)."""
+    return _RUN_LISTING.get()
+
+
+@contextlib.contextmanager
+def registry_listing_scope() -> Iterator[RegistryListing]:
+    """Open one plan run's registry listing. Each run opens its own; a nested run does not reuse the outer one."""
+    listing = RegistryListing()
+    token = _RUN_LISTING.set(listing)
+    try:
+        yield listing
+    finally:
+        _RUN_LISTING.reset(token)
 
 
 def is_scoped(scope: ScopeConstraint) -> bool:

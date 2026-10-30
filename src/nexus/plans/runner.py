@@ -712,6 +712,7 @@ from nexus.plans.repair_stream import (  # noqa: E402
     set_supplement_step,
     supplement_scope,
 )
+from nexus.plans.traversal_policy import registry_listing_scope  # noqa: E402
 
 #: RDR-232 Phase 3 (nexus-jypmj.3.1). A dispatcher carrying this attribute runs :func:`_hydrate_operator_args`
 #: itself (the default dispatcher does). The coverage boundary has to read the terminal reduction's hydrated
@@ -4291,7 +4292,7 @@ async def plan_run(
     if _recorder is not None:  # nexus-jypmj.1.8: a whole-plan re-run starts from a clean reducer input
         _recorder.reset_run()
     supplement = RepairSupplement() if coverage_boundary is not None else None
-    with reserved_scope(reserved_stream), supplement_scope(supplement):
+    with reserved_scope(reserved_stream), supplement_scope(supplement), registry_listing_scope():
         result = await _plan_run_impl(
             match, bindings, dispatcher=dispatcher, bundle_operators=bundle_operators,
             deadline=deadline, budget_usd_remaining=budget_usd_remaining,

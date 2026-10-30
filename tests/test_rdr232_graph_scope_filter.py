@@ -301,24 +301,49 @@ def test_a_registry_that_cannot_be_read_falls_back_to_the_old_engine_path() -> N
     assert rep["scope_prefilter"] == "unavailable" and rep["secondary_omitted"] is True and rep["contained"] is False
 
 
-def _clock(start: float = 1000.0):
-    """A hand-set monotonic clock for the registry cache: ``clock.now`` is read, ``clock.now += n`` advances."""
-    return SimpleNamespace(now=start)
+@pytest.fixture()
+def real_handle_factory(monkeypatch):
+    """The production path: ``_get_catalog()`` -> ``make_catalog_reader()`` builds a NEW ``_SharedServiceCatalogHandle``
+    on every call, over one shared client. The slot is the only seam replaced, by one that holds the test's engine."""
+    from nexus.catalog import factory
+    from nexus.service_handles import SharedClientSlot
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
+    holder: dict = {}
+    slot = SharedClientSlot(lambda: holder["engine"], lambda _client: None)
+    monkeypatch.setattr(factory, "_default_catalog_slot", slot)
+
+    def install(engine):
+        holder["engine"] = engine
+        return engine
+
+    return install
 
 
-def _with_clock(clock):
-    return patch("nexus.mcp.core._scope_registry_clock", lambda: clock.now)
+def _run_real(**kw):
+    """``traverse`` with nothing patched: the handle comes from the real factory path."""
+    from nexus.mcp.core import traverse
+
+    return traverse(**kw)
 
 
-def test_a_multi_step_run_lists_the_registry_once() -> None:
+def test_the_real_factory_hands_a_new_handle_per_call(real_handle_factory) -> None:
+    """The premise of the run-scoped listing: a cache keyed on the catalog handle can never hit in production."""
+    from nexus.mcp_infra import get_catalog
+
+    real_handle_factory(_Engine(*_crowded()))
+    assert get_catalog() is not get_catalog()
+
+
+def test_a_multi_step_run_lists_the_registry_once(real_handle_factory) -> None:
     """nexus-jypmj.19: every corpus-prefix scoped traverse step used to list every collection. Steps of one run
-    share one listing, across prefixes too, since the cached view is the live registry and not one scope's slice."""
-    nodes, edges = _crowded()
-    cat = _Engine(nodes, edges, registry=[RDR, CODE])
-    clock = _clock()
-    with _with_clock(clock):
+    share one listing, across prefixes too, since the shared view is the live registry and not one scope's slice."""
+    from nexus.plans.traversal_policy import registry_listing_scope
+
+    cat = real_handle_factory(_Engine(*_crowded(), registry=[RDR, CODE]))
+    with registry_listing_scope():
         for scope in ("rdr", "rdr", "code", "rdr"):
-            out = _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy(scope))
+            out = _run_real(seeds=[SEED], link_types=["relates"], policy=_policy(scope))
             assert out["traversal"]["scope_prefilter"] == "applied"
     assert cat.registry_calls == 1, "four scoped steps, one registry read"
     assert [kw["scope_filter"] for kw in cat.graph_kwargs] == [
@@ -326,49 +351,68 @@ def test_a_multi_step_run_lists_the_registry_once() -> None:
     ]
 
 
-def test_the_cached_registry_is_not_served_past_its_bound() -> None:
-    from nexus.mcp.core import _SCOPE_REGISTRY_TTL_S  # noqa: PLC0415 — deferred, like this file's other imports of nexus.mcp.core
+def test_a_second_run_lists_again_and_sees_a_collection_registered_between_the_runs(real_handle_factory) -> None:
+    from nexus.plans.traversal_policy import registry_listing_scope
 
-    nodes, edges = _crowded()
-    cat = _Engine(nodes, edges, registry=[RDR])
-    clock = _clock()
     new_rdr = "rdr__1-9__bge-base-en-v15-768__v1"
-    with _with_clock(clock):
-        _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
-        cat._registry = [RDR, new_rdr]  # a collection registered while the cache is warm
-        clock.now += _SCOPE_REGISTRY_TTL_S - 1
-        _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
-        assert cat.registry_calls == 1 and cat.graph_kwargs[-1]["scope_filter"] == {"collections": [RDR]}
-        clock.now += 1  # the bound is reached
-        _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
-    assert cat.registry_calls == 2, "the entry expired at the TTL and the registry was read again"
-    assert cat.graph_kwargs[-1]["scope_filter"] == {"collections": sorted([RDR, new_rdr])}
+    cat = real_handle_factory(_Engine(*_crowded(), registry=[RDR]))
+    with registry_listing_scope():
+        _run_real(seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    cat._registry = [RDR, new_rdr]  # an index or store_put registers it after the first run
+    with registry_listing_scope():
+        _run_real(seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    assert cat.registry_calls == 2
+    assert cat.graph_kwargs[0]["scope_filter"] == {"collections": [RDR]}
+    assert cat.graph_kwargs[1]["scope_filter"] == {"collections": sorted([RDR, new_rdr])}, "no staleness window"
 
 
-def test_a_failed_registry_read_is_not_cached() -> None:
-    nodes, edges = _crowded()
-    cat = _Engine(nodes, edges, registry=[RDR], registry_error=RuntimeError("catalog down"))
-    clock = _clock()
-    with _with_clock(clock):
-        _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+def test_a_traverse_outside_a_run_reads_the_registry_each_time(real_handle_factory) -> None:
+    cat = real_handle_factory(_Engine(*_crowded(), registry=[RDR]))
+    for _ in range(2):
+        _run_real(seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    assert cat.registry_calls == 2, "nothing is kept past a call that belongs to no run"
+
+
+def test_a_failed_registry_read_is_not_kept_within_a_run(real_handle_factory) -> None:
+    from nexus.plans.traversal_policy import registry_listing_scope
+
+    cat = real_handle_factory(_Engine(*_crowded(), registry=[RDR], registry_error=RuntimeError("catalog down")))
+    with registry_listing_scope():
+        _run_real(seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
         assert "scope_filter" not in cat.graph_kwargs[0]
         cat._registry_error = None
-        out = _run(cat, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+        out = _run_real(seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
     assert cat.registry_calls == 2, "the failure left nothing behind to serve"
     assert cat.graph_kwargs[1]["scope_filter"] == {"collections": [RDR]}
     assert out["traversal"]["scope_prefilter"] == "applied"
 
 
-def test_two_catalog_handles_do_not_share_a_cached_registry() -> None:
-    nodes, edges = _crowded()
-    a = _Engine(nodes, edges, registry=[RDR])
-    b = _Engine(nodes, edges, registry=[RDR, "rdr__1-9__bge-base-en-v15-768__v1"])
-    clock = _clock()
-    with _with_clock(clock):
-        _run(a, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
-        _run(b, seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
-    assert (a.registry_calls, b.registry_calls) == (1, 1)
-    assert b.graph_kwargs[0]["scope_filter"] == {"collections": sorted(b._registry)}
+def test_plan_run_opens_one_registry_listing_per_run() -> None:
+    """The seam: ``plan_run`` opens the scope, so every step of a run sees the same listing and a second run a new one."""
+    import asyncio
+    import json
+
+    from nexus.plans.match import Match
+    from nexus.plans.runner import plan_run
+    from nexus.plans.traversal_policy import active_registry_listing
+
+    seen: list = []
+
+    async def dispatcher(tool: str, args: dict) -> dict:
+        seen.append(active_registry_listing())
+        return {"ids": [], "tumblers": [], "collections": []}
+
+    plan = {"steps": [{"tool": "traverse", "args": {"seeds": []}}, {"tool": "traverse", "args": {"seeds": []}}]}
+    match = Match(
+        plan_id=7, name="fixture", description="fixture", confidence=0.9, dimensions={"verb": "test"}, tags="",
+        plan_json=json.dumps(plan), required_bindings=[], optional_bindings=[], default_bindings={}, parent_dims=None,
+    )
+    for _ in range(2):
+        asyncio.run(plan_run(match, {}, dispatcher=dispatcher, bundle_operators=False))
+    assert len(seen) == 4 and all(listing is not None for listing in seen)
+    assert seen[0] is seen[1] and seen[2] is seen[3], "the steps of one run share a listing"
+    assert seen[0] is not seen[2], "a second run opens a new one"
+    assert active_registry_listing() is None, "nothing leaks out of the run"
 
 
 def test_a_scope_naming_more_collections_than_the_engine_accepts_is_not_sent() -> None:
