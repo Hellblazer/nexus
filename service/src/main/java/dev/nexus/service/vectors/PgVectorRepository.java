@@ -79,6 +79,9 @@ import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_7
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_768;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_384;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_768;
@@ -1437,15 +1440,38 @@ public final class PgVectorRepository {
                                                                int nResults,
                                                                Map<String, Object> where,
                                                                boolean includeSourceUri) {
+        return searchWithTokens(tenant, queryText, collectionNames, nResults, where, includeSourceUri, null);
+    }
+
+    /**
+     * {@link #searchWithTokens} restricted to an allow-list of chunk hashes (nexus-jypmj, RDR-232 {@code chash_allow}).
+     *
+     * <p>{@code chashAllow == null} is the plain search, byte for byte. Non-null restricts the candidates to rows
+     * whose chash is in the set (within the requested collections and the tenant's RLS) and ranks them EXACTLY:
+     * the statement is {@code text_gated_search_by_chash_<dim>} (the exact rank over a chash set) run with index
+     * scans off, so the HNSW index is not an option for the planner and a filtered search cannot lose recall. An
+     * empty set returns no rows without embedding the query. See {@link #chashAllowedSearchFn}.
+     *
+     * @param chashAllow the allowed chashes as 32-byte values, de-duplicated by the caller; {@code null} = no restriction
+     */
+    public Tokened<List<Map<String, Object>>> searchWithTokens(String tenant, String queryText,
+                                                               List<String> collectionNames,
+                                                               int nResults,
+                                                               Map<String, Object> where,
+                                                               boolean includeSourceUri,
+                                                               byte[][] chashAllow) {
+        if (chashAllow != null && chashAllow.length == 0) {
+            return new Tokened<>(List.of(), 0L);
+        }
         // nexus-tko2w: section_title / section_type / page_number are answered per manifest occurrence.
         var labelSplit = ManifestLabelStage.split(where);
         if (!labelSplit.active()) {
             return searchWithTokensUnlabelled(tenant, queryText, collectionNames, nResults, where, includeSourceUri,
-                                              false);
+                                              false, chashAllow);
         }
         var wide = searchWithTokensUnlabelled(tenant, queryText, collectionNames,
                                               ManifestLabelStage.widen(nResults), labelSplit.rest(), includeSourceUri,
-                                              true);
+                                              true, chashAllow);
         return new Tokened<>(labelStage().apply(tenant, wide.value(), labelSplit.labels(), nResults),
                              wide.tokens(), wide.skippedCollections());
     }
@@ -1461,7 +1487,8 @@ public final class PgVectorRepository {
                                                                           int nResults,
                                                                           Map<String, Object> where,
                                                                           boolean includeSourceUri,
-                                                                          boolean labelStageFollows) {
+                                                                          boolean labelStageFollows,
+                                                                          byte[][] chashAllow) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -1496,10 +1523,13 @@ public final class PgVectorRepository {
         WherePlan wherePlan = planWhere(where);
         String[] colls = collectionNames.toArray(String[]::new);
 
-        org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, nResults, model, tenant);
+        org.jooq.Table<?> fn = chashAllow == null
+            ? plainSearchFn(dim, queryVec, colls, wherePlan, nResults, model, tenant)
+            : chashAllowedSearchFn(dim, queryVec, chashAllow, colls, wherePlan, nResults, model, tenant);
 
         Result<? extends Record> result = runPlainSearchStatement(
-            tenant, model, fn, dim, colls, nResults, PgSession::startupSearchStatementTimeoutMs, false);
+            tenant, model, fn, dim, colls, nResults, PgSession::startupSearchStatementTimeoutMs, false, null,
+            chashAllow != null);
 
         List<Map<String, Object>> rows = plainSearchRows(result);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
@@ -1523,6 +1553,28 @@ public final class PgVectorRepository {
                 queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
             case 1024 -> PLAIN_SEARCH_1024.call(
                 queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+    }
+
+    /**
+     * The exact rank over an allow-list of chashes (nexus-jypmj, RDR-232): {@code text_gated_search_by_chash_<dim>}
+     * (vectors-031), which despite its name evaluates no text gate. It is the plain-search statement with one more
+     * predicate, {@code chash = ANY(p_chashes)}, and the same tenant, model, collection, live(c) and where
+     * predicates, row shape and order ({@code distance, then id}) as {@code plain_search_<dim>}. The caller runs it
+     * with index scans off ({@link #runPlainSearchStatement}'s {@code forceExact}), so the rank is a scan of the
+     * allowed rows by the primary key, then a sort, never an HNSW walk filtered down to the allowed set.
+     */
+    private static org.jooq.Table<?> chashAllowedSearchFn(int dim, Vector queryVec, byte[][] chashAllow,
+                                                          String[] colls, WherePlan wherePlan, int nResults,
+                                                          String model, String tenant) {
+        return switch (dim) {
+            case 384  -> TEXT_GATED_SEARCH_BY_CHASH_384.call(
+                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+            case 768  -> TEXT_GATED_SEARCH_BY_CHASH_768.call(
+                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+            case 1024 -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(
+                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
     }
@@ -1553,16 +1605,23 @@ public final class PgVectorRepository {
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun) {
         return runPlainSearchStatement(tenant, model, fn, dim, colls, nResults, statementTimeoutMs,
-                                       rebindBeforeExactRerun, null);
+                                       rebindBeforeExactRerun, null, false);
     }
 
-    /** As above; {@code phases}, when not null, receives the setup, probe and statement timings. */
+    /**
+     * As above; {@code phases}, when not null, receives the setup, probe and statement timings.
+     *
+     * @param forceExact when true the cardinality router is bypassed and the statement runs the exact route
+     *        (index scans off), whatever the collections hold: the {@code chash_allow} search, whose statement
+     *        {@code fn} ranks a named set of rows and must not walk the HNSW index (nexus-jypmj)
+     */
     private Result<? extends Record> runPlainSearchStatement(String tenant, String model, org.jooq.Table<?> fn,
                                                              int dim, String[] colls,
                                                              int nResults,
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun,
-                                                             ArmPhases phases) {
+                                                             ArmPhases phases,
+                                                             boolean forceExact) {
         final long setupStartNanos = System.nanoTime();
         // RDR-227 Step 1: a statement over exactly one collection that has no valid per-collection index walks
         // the shared leaf index, filtered down to that collection, and stops at the first rows the filter
@@ -1615,7 +1674,9 @@ public final class PgVectorRepository {
             long statementStartNanos = 0L;
             try {
                 Result<? extends Record> result;
-                if (exactMaxRows > 0) {
+                if (forceExact) {
+                    exact = true;
+                } else if (exactMaxRows > 0) {
                     probedRows = probeSelectedRows(ctx, dim, colls, model, tenant, exactMaxRows);
                     exact = probedRows <= exactMaxRows;
                 }
@@ -2543,9 +2604,28 @@ public final class PgVectorRepository {
                                                    boolean includeEmbeddings,
                                                    boolean lexical) {
         return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, includeEmbeddings, lexical, (byte[][]) null);
+    }
+
+    /**
+     * As above, restricted to an allow-list of chunk hashes (nexus-jypmj, RDR-232 {@code chash_allow}); {@code
+     * null} is the unrestricted search, byte for byte. Every arm, the vector arm and the lexical arm alike, ranks
+     * only the allowed rows of its collection, exactly (see {@link #searchWithTokens(String, String, List, int,
+     * Map, boolean, byte[][])}).
+     */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings,
+                                                   boolean lexical,
+                                                   byte[][] chashAllow) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
             includeSourceUri, includeEmbeddings, lexical,
             new FanoutSettings(defaultFanoutParallelism(), defaultFanoutBudgetMs(),
-                               PgSession.startupSearchStatementTimeoutMs()));
+                               PgSession.startupSearchStatementTimeoutMs()), chashAllow);
     }
 
     /** As above with every fan-out knob explicit; a test seam. */
@@ -2590,18 +2670,33 @@ public final class PgVectorRepository {
                                                    boolean includeEmbeddings,
                                                    boolean lexical,
                                                    FanoutSettings settings) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, includeEmbeddings, lexical, settings, null);
+    }
+
+    /** As above with the {@code chash_allow} restriction ({@code null} = none); see the overload without it. */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings,
+                                                   boolean lexical,
+                                                   FanoutSettings settings,
+                                                   byte[][] chashAllow) {
         var labelSplit = ManifestLabelStage.split(where);
         boolean validBounds = perCollectionK >= 1 && perCollectionK <= MAX_PER_COLLECTION_K
             && limit >= 1 && limit <= MAX_FANOUT_LIMIT;
         if (!labelSplit.active() || !validBounds) {
             // An out-of-range K or limit is refused by the fan-out itself, with its own wording.
             return searchPerCollectionUnlabelled(tenant, queryText, collectionNames, perCollectionK, limit,
-                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings, false);
+                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings, false, chashAllow);
         }
         var wide = searchPerCollectionUnlabelled(tenant, queryText, collectionNames,
             Math.min(MAX_PER_COLLECTION_K, ManifestLabelStage.widen(perCollectionK)),
             Math.min(MAX_FANOUT_LIMIT, ManifestLabelStage.widen(limit)),
-            thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings, true);
+            thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings, true, chashAllow);
         var stage = labelStage();
         List<Map<String, Object>> rows = stage.apply(tenant, wide.rows(), labelSplit.labels(), limit);
         List<Map<String, Object>> lexicalRows = wide.lexicalRows().isEmpty()
@@ -2634,7 +2729,8 @@ public final class PgVectorRepository {
                                                               boolean includeEmbeddings,
                                                               boolean lexical,
                                                               FanoutSettings settings,
-                                                              boolean labelStageFollows) {
+                                                              boolean labelStageFollows,
+                                                              byte[][] chashAllow) {
         final int parallelism = settings.parallelism();
         final long fanoutBudgetMs = settings.fanoutBudgetMs();
         final int searchBoundMs = settings.searchBoundMs();
@@ -2745,7 +2841,7 @@ public final class PgVectorRepository {
                                 try {
                                     lexicalLeg.accept(i, runLexicalArm(tenant, model, col, dims[i], queryVec,
                                         gateText, wherePlan, perCollectionK, requestDeadlineNanos,
-                                        fanoutDeadlineNanos, searchBoundMs, armGate, run));
+                                        fanoutDeadlineNanos, searchBoundMs, armGate, run, chashAllow));
                                 } catch (Throwable t) {
                                     settleArmFailure(t, col, run, fanoutBudgetMs,
                                                      (kind, text) -> lexicalLeg.error(i, kind, text), failure);
@@ -2757,7 +2853,8 @@ public final class PgVectorRepository {
                             try {
                                 List<Candidate> rows = runArm(tenant, model, col, dims[i], queryVec, wherePlan,
                                                               perCollectionK, requestDeadlineNanos,
-                                                              fanoutDeadlineNanos, searchBoundMs, armGate, run);
+                                                              fanoutDeadlineNanos, searchBoundMs, armGate, run,
+                                                              chashAllow);
                                 merger.accept(i, col, thresholdMap.get(col), rows);
                             } catch (Throwable t) {
                                 settleArmFailure(t, col, run, fanoutBudgetMs,
@@ -3015,9 +3112,11 @@ public final class PgVectorRepository {
     private List<Candidate> runArm(String tenant, String model, String collection, int dim, Vector queryVec,
                                    WherePlan wherePlan, int k, long requestDeadlineNanos,
                                    long fanoutDeadlineNanos, int searchBoundMs, Semaphore armGate,
-                                   ArmRun run) {
+                                   ArmRun run, byte[][] chashAllow) {
         String[] colls = new String[] {collection};
-        org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, k, model, tenant);
+        org.jooq.Table<?> fn = chashAllow == null
+            ? plainSearchFn(dim, queryVec, colls, wherePlan, k, model, tenant)
+            : chashAllowedSearchFn(dim, queryVec, chashAllow, colls, wherePlan, k, model, tenant);
         long permitStartNanos = System.nanoTime();
         acquireArmSlot(armGate, requestDeadlineNanos, fanoutDeadlineNanos);
         run.phases.permitWaitNanos = System.nanoTime() - permitStartNanos;
@@ -3028,7 +3127,7 @@ public final class PgVectorRepository {
                 run.limiter = bound.limiter();
                 run.boundMs = bound.timeoutMs();
                 return bound.timeoutMs();
-            }, true, run.phases));
+            }, true, run.phases, chashAllow != null));
         } finally {
             armGate.release();
         }
@@ -3044,7 +3143,7 @@ public final class PgVectorRepository {
     private List<Candidate> runLexicalArm(String tenant, String model, String collection, int dim, Vector queryVec,
                                           String gateText, WherePlan wherePlan, int k, long requestDeadlineNanos,
                                           long fanoutDeadlineNanos, int searchBoundMs, Semaphore armGate,
-                                          ArmRun run) {
+                                          ArmRun run, byte[][] chashAllow) {
         String[] colls = new String[] {collection};
         acquireArmSlot(armGate, requestDeadlineNanos, fanoutDeadlineNanos);
         try {
@@ -3058,7 +3157,7 @@ public final class PgVectorRepository {
             };
             return plainSearchCandidates(tenantScope.withTenant(tenant, ctx ->
                 hybridRank(ctx, dim, queryVec, gateText, colls, wherePlan, k, SELECTIVE_GATE_MAX, model, tenant,
-                           bound, true)));
+                           bound, true, chashAllow)));
         } finally {
             armGate.release();
         }
@@ -3253,13 +3352,32 @@ public final class PgVectorRepository {
                                                                       Map<String, Object> where,
                                                                       boolean includeSourceUri) {
         // nexus-tko2w: the manifest-answered label keys leave the where the SQL receives; see ManifestLabelStage.
+        return hybridSearchWithTokens(tenant, queryText, collectionNames, nResults, where, includeSourceUri, null);
+    }
+
+    /**
+     * {@link #hybridSearchWithTokens} restricted to an allow-list of chunk hashes (nexus-jypmj, RDR-232 {@code
+     * chash_allow}); {@code null} is the unrestricted search, byte for byte. The restriction is on the candidate
+     * set both sides of the fusion draw from: a row must be in the allow-list AND pass the text gate, and the
+     * survivors are ranked by exact vector distance (see {@link #hybridRank}). An empty set returns no rows
+     * without embedding the query.
+     */
+    public Tokened<List<Map<String, Object>>> hybridSearchWithTokens(String tenant, String queryText,
+                                                                      List<String> collectionNames,
+                                                                      int nResults,
+                                                                      Map<String, Object> where,
+                                                                      boolean includeSourceUri,
+                                                                      byte[][] chashAllow) {
+        if (chashAllow != null && chashAllow.length == 0) {
+            return new Tokened<>(List.of(), 0L);
+        }
         var labelSplit = ManifestLabelStage.split(where);
         long[] tokensOut = {0L};
         List<String> skippedOut = new ArrayList<>();
         List<Map<String, Object>> rows = hybridSearch(
             tenant, queryText, collectionNames,
             labelSplit.active() ? ManifestLabelStage.widen(nResults) : nResults,
-            labelSplit.rest(), SELECTIVE_GATE_MAX, tokensOut, skippedOut);
+            labelSplit.rest(), SELECTIVE_GATE_MAX, tokensOut, skippedOut, chashAllow);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in).
         // Enrichment runs BEFORE the label stage (nexus-tko2w): it resolves ONE owner's source_uri per
         // chash and writes it on every row of that chash, so a stage that had already expanded a shared
@@ -3302,7 +3420,7 @@ public final class PgVectorRepository {
                                            int nResults,
                                            Map<String, Object> where,
                                            int selectiveGateMax) {
-        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null, null);
+        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null, null, null);
     }
 
     /**
@@ -3329,7 +3447,8 @@ public final class PgVectorRepository {
                                            Map<String, Object> where,
                                            int selectiveGateMax,
                                            long[] tokensOut,
-                                           List<String> skippedOut) {
+                                           List<String> skippedOut,
+                                           byte[][] chashAllow) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
@@ -3375,7 +3494,7 @@ public final class PgVectorRepository {
 
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx ->
             hybridRank(ctx, dim, queryVec, gateQueryText, colls, wherePlan, nResults, selectiveGateMax,
-                       model, tenant, PgSession::startupSearchStatementTimeoutMs, false));
+                       model, tenant, PgSession::startupSearchStatementTimeoutMs, false, chashAllow));
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
@@ -3400,7 +3519,7 @@ public final class PgVectorRepository {
                                                 String[] colls, WherePlan wherePlan, int nResults,
                                                 int selectiveGateMax, String model, String tenant,
                                                 java.util.function.IntSupplier statementTimeoutMs,
-                                                boolean rebind) {
+                                                boolean rebind, byte[][] chashAllow) {
         // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
         // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
         // inherit it. Set here, before the first fetch, rather than per branch: a
@@ -3423,6 +3542,27 @@ public final class PgVectorRepository {
         // collection set's selectivity (a cached generic HNSW plan on a tiny
         // collection ran ~30s and returned EMPTY in production).
         PgSession.setSearchPlanCacheMode(ctx);
+
+        if (chashAllow != null) {
+            // nexus-jypmj (RDR-232 chash_allow): the candidates are the allowed rows, so there is no gate probe to
+            // size and no HNSW-first branch to choose. Rank the allowed rows that pass the text gate, exactly:
+            // index scans off, so the planner reads the allowed rows by the primary key and sorts them by distance
+            // and the HNSW index is never a candidate plan.
+            PgSession.disableIndexScanForExactFallback(ctx);
+            org.jooq.Table<?> allowedFn = switch (dim) {
+                case 384  -> TEXT_GATED_SEARCH_ALLOWED_384.call(
+                    queryVec, gateQueryText, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(),
+                    nResults, model, tenant);
+                case 768  -> TEXT_GATED_SEARCH_ALLOWED_768.call(
+                    queryVec, gateQueryText, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(),
+                    nResults, model, tenant);
+                case 1024 -> TEXT_GATED_SEARCH_ALLOWED_1024.call(
+                    queryVec, gateQueryText, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(),
+                    nResults, model, tenant);
+                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+            };
+            return ctx.selectFrom(allowedFn).fetch();
+        }
 
         // T2 [24219] critique finding B (single-gate-eval restored, nexus-x7z7l/
         // conexus-qsa): the probe is now SETOF bytea, not a scalar COUNT -- ONE

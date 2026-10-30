@@ -39,6 +39,7 @@ import java.util.function.Supplier;
  *  "catalog_manifest_row_limit_supported":true,
  *  "nx_answer_out_of_step_cost_supported":true,
  *  "search_row_owner_span_supported":true,
+ *  "vector_search_chash_allow_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -417,6 +418,21 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-jypmj capability advertisement (RDR-232): does this engine restrict {@code POST /v1/vectors/search},
+     * {@code /query}, {@code /hybrid-search} and {@code /search-per-collection} to the chunks named by an optional
+     * {@code chash_allow} array (at most 3000 distinct 64-hex chashes), ranking them exactly?
+     *
+     * <p>An independent flag, and the only evidence: an engine without the feature ignores the unknown key and
+     * answers 200 with an UNRESTRICTED search, so a client that relies on the confinement must read this flag
+     * before it sends the key. Always present, always {@code true} on an engine carrying the change. Invisible to
+     * cloud clients until the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent,
+     * nexus-04sff).
+     */
+    static void appendVectorSearchChashAllowCapabilityField(StringBuilder body) {
+        body.append(",\"vector_search_chash_allow_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -606,6 +622,8 @@ public final class VersionHandler implements HttpHandler {
         appendNxAnswerOutOfStepCostCapabilityField(body);
         // nexus-6pfgb.26: a search row's source_uri and span come from one collection-scoped manifest owner.
         appendSearchRowOwnerSpanCapabilityField(body);
+        // nexus-jypmj (RDR-232): the chash_allow restriction on the four vector search routes.
+        appendVectorSearchChashAllowCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {
