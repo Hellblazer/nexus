@@ -82,6 +82,11 @@ import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_768;
+// nexus-p89h4 / nexus-6pfgb.25 (vectors-040): the one search function that also tests an EXISTS on the catalog
+// manifest, serving plain search, the dense text gate and the selective chash set.
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_1024;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_384;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_768;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1441,11 +1446,12 @@ public final class PgVectorRepository {
         var labelSplit = ManifestLabelStage.split(where);
         if (!labelSplit.active()) {
             return searchWithTokensUnlabelled(tenant, queryText, collectionNames, nResults, where, includeSourceUri,
-                                              false);
+                                              false, null);
         }
+        // nexus-p89h4: the positive part of the predicate also runs inside the search, so a rare label is found.
         var wide = searchWithTokensUnlabelled(tenant, queryText, collectionNames,
                                               ManifestLabelStage.widen(nResults), labelSplit.rest(), includeSourceUri,
-                                              true);
+                                              true, ManifestPushdown.of(labelSplit.labels()));
         return new Tokened<>(labelStage().apply(tenant, wide.value(), labelSplit.labels(), nResults),
                              wide.tokens(), wide.skippedCollections());
     }
@@ -1461,7 +1467,8 @@ public final class PgVectorRepository {
                                                                           int nResults,
                                                                           Map<String, Object> where,
                                                                           boolean includeSourceUri,
-                                                                          boolean labelStageFollows) {
+                                                                          boolean labelStageFollows,
+                                                                          ManifestPushdown.Plan manifest) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -1493,7 +1500,7 @@ public final class PgVectorRepository {
         // (same convention as the Chroma path).
         EmbedResult embedResult = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embedResult.embeddings().get(0));
-        WherePlan wherePlan = planWhere(where);
+        WherePlan wherePlan = planWhere(where).withManifest(manifest);
         String[] colls = collectionNames.toArray(String[]::new);
 
         org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, nResults, model, tenant);
@@ -1516,6 +1523,10 @@ public final class PgVectorRepository {
     private static org.jooq.Table<?> plainSearchFn(int dim, Vector queryVec, String[] colls,
                                                    WherePlan wherePlan, int nResults,
                                                    String model, String tenant) {
+        if (wherePlan.manifest() != null) {
+            // nexus-p89h4: the same ranking with an EXISTS on the catalog manifest inside the scan.
+            return manifestSearchFn(dim, queryVec, null, null, colls, wherePlan, nResults, model, tenant);
+        }
         return switch (dim) {
             case 384  -> PLAIN_SEARCH_384.call(
                 queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
@@ -1523,6 +1534,34 @@ public final class PgVectorRepository {
                 queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
             case 1024 -> PLAIN_SEARCH_1024.call(
                 queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+    }
+
+    /**
+     * The generated {@code manifest_search_<dim>} call (vectors-040, nexus-p89h4 and nexus-6pfgb.25): the ranking
+     * of {@code plain_search_<dim>}, of {@code text_gated_search_hnsw_first_<dim>} when {@code queryText} is not
+     * null, and of {@code text_gated_search_by_chash_<dim>} when {@code chashes} is not null, with one more
+     * conjunct: some live manifest occurrence of the chunk passes {@code wherePlan.manifest()} (see {@link
+     * ManifestPushdown}). It returns the same six columns, so every caller reads the result as it read the others.
+     *
+     * @param queryText the text gate (an FTS or trigram match), or null for none
+     * @param chashes   the exact chash set to rank, or null for no set
+     */
+    private static org.jooq.Table<?> manifestSearchFn(int dim, Vector queryVec, String queryText, byte[][] chashes,
+                                                      String[] colls, WherePlan wherePlan, int nResults,
+                                                      String model, String tenant) {
+        ManifestPushdown.Plan m = wherePlan.manifest();
+        return switch (dim) {
+            case 384  -> MANIFEST_SEARCH_384.call(
+                queryVec, queryText, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(),
+                m.containment(), m.jsonPath(), nResults, model, tenant);
+            case 768  -> MANIFEST_SEARCH_768.call(
+                queryVec, queryText, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(),
+                m.containment(), m.jsonPath(), nResults, model, tenant);
+            case 1024 -> MANIFEST_SEARCH_1024.call(
+                queryVec, queryText, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(),
+                m.containment(), m.jsonPath(), nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
     }
@@ -1690,6 +1729,12 @@ public final class PgVectorRepository {
      * larger than the threshold. The model and tenant predicates are what confine the count to ONE leaf of
      * the partitioned table, chosen when this statement is planned (the engine has set
      * {@code force_custom_plan} before it runs).
+     *
+     * <p>The manifest EXISTS of {@code manifest_search_<dim>} (nexus-p89h4) is deliberately NOT mirrored here: it
+     * only narrows what the statement returns, so the probe's count stays the collection's, never an under-count.
+     * A selective filter over a collection above the threshold therefore walks the HNSW index under
+     * {@code hnsw.iterative_scan}, as every filter on the chunk row always did, and an empty page is repaired by
+     * the nexus-bq06h exact re-run.
      */
     private static int probeSelectedRows(DSLContext ctx, int dim, String[] colls, String model, String tenant,
                                          int limit) {
@@ -2596,12 +2641,13 @@ public final class PgVectorRepository {
         if (!labelSplit.active() || !validBounds) {
             // An out-of-range K or limit is refused by the fan-out itself, with its own wording.
             return searchPerCollectionUnlabelled(tenant, queryText, collectionNames, perCollectionK, limit,
-                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings, false);
+                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings, false, null);
         }
         var wide = searchPerCollectionUnlabelled(tenant, queryText, collectionNames,
             Math.min(MAX_PER_COLLECTION_K, ManifestLabelStage.widen(perCollectionK)),
             Math.min(MAX_FANOUT_LIMIT, ManifestLabelStage.widen(limit)),
-            thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings, true);
+            thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings, true,
+            ManifestPushdown.of(labelSplit.labels()));
         var stage = labelStage();
         List<Map<String, Object>> rows = stage.apply(tenant, wide.rows(), labelSplit.labels(), limit);
         List<Map<String, Object>> lexicalRows = wide.lexicalRows().isEmpty()
@@ -2634,7 +2680,8 @@ public final class PgVectorRepository {
                                                               boolean includeEmbeddings,
                                                               boolean lexical,
                                                               FanoutSettings settings,
-                                                              boolean labelStageFollows) {
+                                                              boolean labelStageFollows,
+                                                              ManifestPushdown.Plan manifest) {
         final int parallelism = settings.parallelism();
         final long fanoutBudgetMs = settings.fanoutBudgetMs();
         final int searchBoundMs = settings.searchBoundMs();
@@ -2664,7 +2711,7 @@ public final class PgVectorRepository {
         List<String> skipped = new ArrayList<>();
         List<String> cols = registeredSurvivors(tenant, requested, "searchPerCollection", skipped);
         final String model = requireHomogeneousModel(tenant, cols);
-        WherePlan wherePlan = planWhere(where);
+        WherePlan wherePlan = planWhere(where).withManifest(manifest);
 
         // Embed ONCE, before any arm borrows a connection (embed-before-borrow). The vector's width
         // is the reference each collection's dispatch dimension is checked against.
@@ -3252,6 +3299,21 @@ public final class PgVectorRepository {
                                                                       int nResults,
                                                                       Map<String, Object> where,
                                                                       boolean includeSourceUri) {
+        return hybridSearchWithTokens(tenant, queryText, collectionNames, nResults, where, includeSourceUri,
+                                      SELECTIVE_GATE_MAX);
+    }
+
+    /**
+     * As above with the gate-selectivity cutoff explicit, so a test can send a fixture-scale gate down the dense
+     * (HNSW-first) branch with a label filter, as {@link #hybridSearch(String, String, List, int, Map, int)} does
+     * for a plain {@code where}. Production callers use the overload without the cutoff.
+     */
+    public Tokened<List<Map<String, Object>>> hybridSearchWithTokens(String tenant, String queryText,
+                                                                      List<String> collectionNames,
+                                                                      int nResults,
+                                                                      Map<String, Object> where,
+                                                                      boolean includeSourceUri,
+                                                                      int selectiveGateMax) {
         // nexus-tko2w: the manifest-answered label keys leave the where the SQL receives; see ManifestLabelStage.
         var labelSplit = ManifestLabelStage.split(where);
         long[] tokensOut = {0L};
@@ -3259,7 +3321,8 @@ public final class PgVectorRepository {
         List<Map<String, Object>> rows = hybridSearch(
             tenant, queryText, collectionNames,
             labelSplit.active() ? ManifestLabelStage.widen(nResults) : nResults,
-            labelSplit.rest(), SELECTIVE_GATE_MAX, tokensOut, skippedOut);
+            labelSplit.rest(), selectiveGateMax, tokensOut, skippedOut,
+            labelSplit.active() ? ManifestPushdown.of(labelSplit.labels()) : null);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in).
         // Enrichment runs BEFORE the label stage (nexus-tko2w): it resolves ONE owner's source_uri per
         // chash and writes it on every row of that chash, so a stage that had already expanded a shared
@@ -3302,7 +3365,7 @@ public final class PgVectorRepository {
                                            int nResults,
                                            Map<String, Object> where,
                                            int selectiveGateMax) {
-        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null, null);
+        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null, null, null);
     }
 
     /**
@@ -3329,7 +3392,8 @@ public final class PgVectorRepository {
                                            Map<String, Object> where,
                                            int selectiveGateMax,
                                            long[] tokensOut,
-                                           List<String> skippedOut) {
+                                           List<String> skippedOut,
+                                           ManifestPushdown.Plan manifest) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
@@ -3369,7 +3433,7 @@ public final class PgVectorRepository {
         EmbedResult hybridEmbed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         if (tokensOut != null) tokensOut[0] = hybridEmbed.tokens();
         Vector queryVec = Vector.of(hybridEmbed.embeddings().get(0));
-        WherePlan wherePlan = planWhere(where);
+        WherePlan wherePlan = planWhere(where).withManifest(manifest);
         String[] colls = collectionNames.toArray(String[]::new);
         String gateQueryText = queryText;
 
@@ -3454,6 +3518,12 @@ public final class PgVectorRepository {
             for (int i = 0; i < probeResult.size(); i++) {
                 chashes[i] = probeResult.get(i).get(0, byte[].class);
             }
+            // nexus-p89h4: with a manifest predicate the same exact rank also tests the EXISTS, so the cut that
+            // follows never sees a chunk no owner of which passes.
+            if (wherePlan.manifest() != null) {
+                return ctx.selectFrom(
+                    manifestSearchFn(dim, queryVec, null, chashes, colls, wherePlan, nResults, model, tenant)).fetch();
+            }
             org.jooq.Table<?> fn = switch (dim) {
                 case 384  -> TEXT_GATED_SEARCH_BY_CHASH_384.call(
                     queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
@@ -3474,6 +3544,11 @@ public final class PgVectorRepository {
         PgSession.setHnswEfSearch(ctx, nResults);
         // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
         PgSession.setHnswScanBudget(ctx);
+        if (wherePlan.manifest() != null) {
+            return exactSelectFrom(ctx, nResults,
+                manifestSearchFn(dim, queryVec, gateQueryText, null, colls, wherePlan, nResults, model, tenant),
+                rebind ? statementTimeoutMs : null);
+        }
         org.jooq.Table<?> hnswFirstFn = switch (dim) {
             case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
                 queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
@@ -7549,7 +7624,20 @@ FROM scope s
      * cast to {@code jsonpath} INSIDE the function body -- never SQL string
      * concatenation. Either or both may be {@code null} (no predicate of that kind).
      */
-    record WherePlan(JSONB containment, String jsonPath) {}
+    record WherePlan(JSONB containment, String jsonPath, ManifestPushdown.Plan manifest) {
+
+        WherePlan(JSONB containment, String jsonPath) {
+            this(containment, jsonPath, null);
+        }
+
+        /**
+         * This plan with the in-SQL manifest predicate (nexus-p89h4): when it is not null the search runs
+         * through {@code manifest_search_<dim>}, which also tests an EXISTS on the catalog manifest.
+         */
+        WherePlan withManifest(ManifestPushdown.Plan manifestPlan) {
+            return new WherePlan(containment, jsonPath, manifestPlan);
+        }
+    }
 
     /**
      * Translate a Chroma-style metadata {@code where} map into a {@link WherePlan}

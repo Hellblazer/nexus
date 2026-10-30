@@ -104,7 +104,11 @@ migration_wal_bytes_per_worker = 11038000
 # to a fresh migration, the shape tuples-009-1 added.
 # 2149 -> 2150 (2026-10-29): tuples-011-1 (nexus-5r2sc.2.2, RDR-235 E4, nexus.tuples.dirty) adds one ALTER TABLE ADD COLUMN
 # to a fresh migration, the shape tuples-010-1 added.
-migration_ddl_per_worker = 2150
+# 2150 -> 2156 (2026-10-30): vectors-040-1 (nexus-p89h4, RDR-236 Phase 3, manifest_search_<dim>) adds six DDL statements to a
+# fresh migration: 3 CREATE OR REPLACE FUNCTION (manifest_search_384, 768 and 1024) and their 3 GRANT EXECUTE (new functions, so the
+# grant is not inherited). The post-condition DO block is not DDL. Measured: see the nexus-p89h4 bead comment (scoped substrate run of
+# tests/test_scenario_journeys.py, ddl: migration=2156).
+migration_ddl_per_worker = 2156
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

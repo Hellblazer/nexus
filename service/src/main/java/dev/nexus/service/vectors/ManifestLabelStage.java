@@ -89,16 +89,25 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  * rest) are NOT answered here: no writer puts them on a catalog document yet (epic nexus-6pfgb, wave 1), so
  * answering them would only move those filters under the {@link #OVERFETCH} cut for the same answers. They
  * stay predicates on the chunk row, inside the search.
+ *
+ * <p><b>In-SQL pre-filter (nexus-p89h4).</b> The positive form of the predicates {@link ManifestPushdown} can
+ * express (an equality or {@code $in} on a label, on {@code source_author} or on an id-valued bib key, a range on
+ * {@code page_number}) is ALSO sent into the search as an EXISTS on the manifest ({@code manifest_search_<dim>},
+ * vectors-040), so the scan keeps walking until the page is full and a rare label is found. That EXISTS only
+ * admits a chunk; this stage still names the qualifying owner per document, and it is the exact judge of every
+ * operator, so the in-SQL form is built to admit a superset of what the stage keeps and never less.
+ *
  * Operators, the unlabelled rules, the per-document lowest-passing-position
  * expansion and the cut are the section labels'. An expanded row speaks for its document on the document
  * keys the filter names: the owner's value replaces the chunk row's, and an authoritative absence (an
  * unenriched document's bib) removes the key.
  *
  * <p><b>Known cost.</b> The search is cut at {@link #OVERFETCH} times the limit before this stage
- * filters, so a filter that rejects most of the neighbourhood (a positive filter on a rare label) can
- * return fewer rows than the limit where the old in-index {@code hnsw.iterative_scan} would have kept
- * walking. The filter that matters in practice, a negative one ({@code section_type!=references}),
- * rejects a small fraction.
+ * filters. A positive predicate {@link ManifestPushdown} carries into the search no longer starves on it (the
+ * nexus-p89h4 fix). A predicate it does not carry (a negative operator, {@code indexed_at}, {@code bib_year},
+ * {@code bib_venue}, {@code bib_authors}, {@code bib_citation_count}) still depends on the cut: a filter that
+ * rejects most of the neighbourhood returns fewer rows than the limit. The negative filter that matters in
+ * practice ({@code section_type!=references}) rejects a small fraction.
  */
 final class ManifestLabelStage {
 
