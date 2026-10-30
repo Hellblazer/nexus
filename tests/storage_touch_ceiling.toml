@@ -40,7 +40,7 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4961
+provisioned_tests = 4962
 tolerance_tests = 0
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
@@ -161,6 +161,10 @@ tolerance_tests = 0
 # second pass that consumes the retried one. Folded into one test, not three, so the ceiling rises by one. Fails with its code
 # deleted: manifest lookup stubbed to [] reds seam 2, retryable errors routed dead reds seam 3, a zero ladder interval reds the
 # available_at stamp. DDL-per-run ratchet untouched (no changeset).
+# 4961 -> 4962 (nexus-7hzb2, 2026-10-30): +1, RDR-233's `nx tuple wait` against a real engine. CI 41025078317
+# (83235a663) counted 4971 with its ten engine tests as separate tests; they are folded into one journey,
+# tests/test_tuple_wait.py::test_wait_against_a_real_engine, which runs all ten scenarios and reports each failure
+# by name. DDL-per-run ratchet untouched (no changeset).
 measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992), 39713947919 (da8c08fdc)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default

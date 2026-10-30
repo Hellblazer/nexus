@@ -320,89 +320,100 @@ def _tuple_id(out: str) -> str:
     return m.group(1)
 
 
-@pytest.mark.usefixtures("t2_service_env")
-class TestWaitRealEngine:
-    def test_mail_from_another_session_wakes_a_parked_waiter(self) -> None:
-        session_id = str(uuid.uuid4())
-        result: dict = {}
+# Each scenario below is an independent signal against the real engine, run by
+# one journey test so the whole family costs one tenant (nexus-9edxe ratchet).
+# The journey runs every scenario and reports each failure by name, so an early
+# failure does not hide a later one.
 
-        def run() -> None:
-            result["outcome"] = _wait(session_id, park_s=5, max_parks=6)
 
-        waiter = threading.Thread(target=run, daemon=True)
-        started = time.monotonic()
-        waiter.start()
-        time.sleep(1.0)  # let the first park reach the engine
-        tid = _mail(session_id, "wake up")
-        waiter.join(_HANG_S)
-        assert not waiter.is_alive(), "the waiter never returned"
-        outcome = result["outcome"]
-        assert outcome.reason == DELIVERED
-        assert len(outcome.lines) == 1
-        assert f"subspace mailbox/{session_id}, tuple {tid}" in outcome.lines[0]
-        assert "wake up" not in outcome.lines[0], "a notice never carries the body"
-        # Woken by the post inside one park, not by running out of parks.
-        assert time.monotonic() - started < 5.0 + 5.0
+def _engine_mail_from_another_session_wakes_a_parked_waiter() -> None:
+    session_id = str(uuid.uuid4())
+    result: dict = {}
 
-    def test_a_board_post_from_another_session_wakes_the_waiter(self) -> None:
-        topic = f"t{uuid.uuid4().hex[:12]}"
-        tid = _post(topic, "news", "peer-session")
-        outcome = _wait(str(uuid.uuid4()), entries=[_board_entry(topic)])
-        assert outcome.reason == DELIVERED
-        assert outcome.lines == [
-            line for line in outcome.lines if f"subspace board/{topic}, tuple {tid}" in line
-        ] and len(outcome.lines) == 1
+    def run() -> None:
+        result["outcome"] = _wait(session_id, park_s=5, max_parks=6)
 
-    def test_a_miss_does_not_wake(self) -> None:
-        outcome = _wait(str(uuid.uuid4()), entries=[_board_entry(f"t{uuid.uuid4().hex[:12]}")])
-        assert outcome.reason == PARKS_EXHAUSTED and outcome.lines == []
+    waiter = threading.Thread(target=run, daemon=True)
+    started = time.monotonic()
+    waiter.start()
+    time.sleep(1.0)  # let the first park reach the engine
+    tid = _mail(session_id, "wake up")
+    waiter.join(_HANG_S)
+    assert not waiter.is_alive(), "the waiter never returned"
+    outcome = result["outcome"]
+    assert outcome.reason == DELIVERED
+    assert len(outcome.lines) == 1
+    assert f"subspace mailbox/{session_id}, tuple {tid}" in outcome.lines[0]
+    assert "wake up" not in outcome.lines[0], "a notice never carries the body"
+    # Woken by the post inside one park, not by running out of parks.
+    assert time.monotonic() - started < 5.0 + 5.0
 
-    def test_own_posts_do_not_wake(self) -> None:
-        own = os.environ["NX_T1_SESSION_ID"]
-        topic = f"t{uuid.uuid4().hex[:12]}"
-        entries = [_board_entry(topic)]
-        _post(topic, "mine", own)
-        _mail(own, "note to self")
-        outcome = _wait(own, entries=entries)
-        assert outcome.reason == PARKS_EXHAUSTED and outcome.lines == []
-        assert outcome.own_dropped == 2, "both own rows reached the waiter and were dropped"
 
-    def test_a_row_is_delivered_once_so_rearming_does_not_repeat_it(self) -> None:
-        session_id = str(uuid.uuid4())
-        _mail(session_id, "once")
-        assert _wait(session_id).reason == DELIVERED
+def _engine_a_board_post_from_another_session_wakes_the_waiter() -> None:
+    topic = f"t{uuid.uuid4().hex[:12]}"
+    tid = _post(topic, "news", "peer-session")
+    outcome = _wait(str(uuid.uuid4()), entries=[_board_entry(topic)])
+    assert outcome.reason == DELIVERED
+    assert outcome.lines == [
+        line for line in outcome.lines if f"subspace board/{topic}, tuple {tid}" in line
+    ] and len(outcome.lines) == 1
+
+
+def _engine_a_miss_does_not_wake() -> None:
+    outcome = _wait(str(uuid.uuid4()), entries=[_board_entry(f"t{uuid.uuid4().hex[:12]}")])
+    assert outcome.reason == PARKS_EXHAUSTED and outcome.lines == []
+
+
+def _engine_own_posts_do_not_wake() -> None:
+    own = os.environ["NX_T1_SESSION_ID"]
+    topic = f"t{uuid.uuid4().hex[:12]}"
+    entries = [_board_entry(topic)]
+    _post(topic, "mine", own)
+    _mail(own, "note to self")
+    outcome = _wait(own, entries=entries)
+    assert outcome.reason == PARKS_EXHAUSTED and outcome.lines == []
+    assert outcome.own_dropped == 2, "both own rows reached the waiter and were dropped"
+
+
+def _engine_a_row_is_delivered_once_so_rearming_does_not_repeat_it() -> None:
+    session_id = str(uuid.uuid4())
+    _mail(session_id, "once")
+    assert _wait(session_id).reason == DELIVERED
+    assert _wait(session_id, max_parks=1).reason == PARKS_EXHAUSTED
+
+
+def _engine_mail_already_claimed_does_not_wake() -> None:
+    """A row the drain hook (or the session) holds is not claimable, so it
+    is not announced; a plain wait would return it (the channel tests pin
+    that wait returns claimed rows)."""
+    from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — test-local
+
+    session_id = str(uuid.uuid4())
+    _mail(session_id, "being drained")
+    store = HttpTupleStore()
+    try:
+        assert store.in_(f"mailbox/{session_id}", {"to": session_id}, claimant="drain", lease_s=60)
         assert _wait(session_id, max_parks=1).reason == PARKS_EXHAUSTED
+    finally:
+        store.close()
 
-    def test_mail_already_claimed_does_not_wake(self) -> None:
-        """A row the drain hook (or the session) holds is not claimable, so it
-        is not announced; a plain wait would return it (the channel tests pin
-        that wait returns claimed rows)."""
-        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — test-local
 
-        session_id = str(uuid.uuid4())
-        _mail(session_id, "being drained")
-        store = HttpTupleStore()
-        try:
-            assert store.in_(f"mailbox/{session_id}", {"to": session_id}, claimant="drain", lease_s=60)
-            assert _wait(session_id, max_parks=1).reason == PARKS_EXHAUSTED
-        finally:
-            store.close()
+def _engine_a_board_backlog_is_not_replayed() -> None:
+    """A topic starts at its subscribe time (less the channel's skew margin),
+    as the channel waiter does: older posts are read with tuple_rd."""
+    topic = f"t{uuid.uuid4().hex[:12]}"
+    _post(topic, "old news", "peer-session")
+    later = {"subspace": f"board/{topic}",
+             "since": (datetime.now(UTC) + timedelta(minutes=5)).isoformat()}
+    assert _wait(str(uuid.uuid4()), entries=[later], max_parks=1).reason == PARKS_EXHAUSTED
 
-    def test_a_board_backlog_is_not_replayed(self) -> None:
-        """A topic starts at its subscribe time (less the channel's skew margin),
-        as the channel waiter does: older posts are read with tuple_rd."""
-        topic = f"t{uuid.uuid4().hex[:12]}"
-        _post(topic, "old news", "peer-session")
-        later = {"subspace": f"board/{topic}",
-                 "since": (datetime.now(UTC) + timedelta(minutes=5)).isoformat()}
-        assert _wait(str(uuid.uuid4()), entries=[later], max_parks=1).reason == PARKS_EXHAUSTED
 
-    def test_a_newer_waiter_supersedes_an_older_one(self) -> None:
-        session_id = str(uuid.uuid4())
-        older = _token()
-        newer = _token()
-        assert _wait(session_id, max_parks=1, token=newer).reason == PARKS_EXHAUSTED
-        assert _wait(session_id, max_parks=1, token=older).reason == SUPERSEDED
+def _engine_a_newer_waiter_supersedes_an_older_one() -> None:
+    session_id = str(uuid.uuid4())
+    older = _token()
+    newer = _token()
+    assert _wait(session_id, max_parks=1, token=newer).reason == PARKS_EXHAUSTED
+    assert _wait(session_id, max_parks=1, token=older).reason == SUPERSEDED
 
 
 # ── The CLI verb ─────────────────────────────────────────────────────────────
@@ -445,26 +456,58 @@ class TestWaitCli:
         assert result.exit_code == EXIT_CHANNEL_ACTIVE, result.output
         assert "Do not run it again" in result.output and "--force" in result.output
 
-    @pytest.mark.usefixtures("t2_service_env")
-    def test_delivers_then_says_to_rearm(self, monkeypatch) -> None:
-        monkeypatch.setattr("nexus.channel_launch._claude_ancestor_argv", lambda: "claude --resume x")
-        monkeypatch.setattr(tuple_cmd, "_board_entries_reader", lambda _sid: (lambda: []))
-        session_id = str(uuid.uuid4())
-        tid = _mail(session_id, "cli wake")
-        result = CliRunner().invoke(
-            tuple_group, ["wait", "--session", session_id, "--timeout-s", "1", "--max-parks", "2"],
-        )
-        assert result.exit_code == 0, result.output
-        assert f"tuple {tid}" in result.output
-        assert REARM_HINT in result.output
 
-    @pytest.mark.usefixtures("t2_service_env")
-    def test_nothing_new_exits_zero_and_says_so(self, monkeypatch) -> None:
-        monkeypatch.setattr(tuple_cmd, "_board_entries_reader", lambda _sid: (lambda: []))
-        result = CliRunner().invoke(
-            tuple_group,
-            ["wait", "--session", str(uuid.uuid4()), "--timeout-s", "1", "--max-parks", "1"],
-        )
-        assert result.exit_code == 0, result.output
-        assert "nothing new arrived" in result.output and "Do not run it again" in result.output
-        assert REARM_HINT not in result.output
+def _cli_delivers_then_says_to_rearm(monkeypatch) -> None:
+    monkeypatch.setattr("nexus.channel_launch._claude_ancestor_argv", lambda: "claude --resume x")
+    monkeypatch.setattr(tuple_cmd, "_board_entries_reader", lambda _sid: (lambda: []))
+    session_id = str(uuid.uuid4())
+    tid = _mail(session_id, "cli wake")
+    result = CliRunner().invoke(
+        tuple_group, ["wait", "--session", session_id, "--timeout-s", "1", "--max-parks", "2"],
+    )
+    assert result.exit_code == 0, result.output
+    assert f"tuple {tid}" in result.output
+    assert REARM_HINT in result.output
+
+
+def _cli_nothing_new_exits_zero_and_says_so(monkeypatch) -> None:
+    monkeypatch.setattr(tuple_cmd, "_board_entries_reader", lambda _sid: (lambda: []))
+    result = CliRunner().invoke(
+        tuple_group,
+        ["wait", "--session", str(uuid.uuid4()), "--timeout-s", "1", "--max-parks", "1"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "nothing new arrived" in result.output and "Do not run it again" in result.output
+    assert REARM_HINT not in result.output
+
+
+_ENGINE_SCENARIOS = (
+    _engine_mail_from_another_session_wakes_a_parked_waiter,
+    _engine_a_board_post_from_another_session_wakes_the_waiter,
+    _engine_a_miss_does_not_wake,
+    _engine_own_posts_do_not_wake,
+    _engine_a_row_is_delivered_once_so_rearming_does_not_repeat_it,
+    _engine_mail_already_claimed_does_not_wake,
+    _engine_a_board_backlog_is_not_replayed,
+    _engine_a_newer_waiter_supersedes_an_older_one,
+)
+_CLI_SCENARIOS = (_cli_delivers_then_says_to_rearm, _cli_nothing_new_exits_zero_and_says_so)
+
+
+@pytest.mark.usefixtures("t2_service_env")
+def test_wait_against_a_real_engine(monkeypatch) -> None:
+    """Every real-engine scenario, each isolated by its own session id or topic.
+    Failures are collected by scenario name so all of them show in one run."""
+    failures: list[str] = []
+    for scenario in _ENGINE_SCENARIOS:
+        try:
+            scenario()
+        except AssertionError as exc:
+            failures.append(f"{scenario.__name__}: {exc}")
+    for scenario in _CLI_SCENARIOS:
+        with monkeypatch.context() as mp:
+            try:
+                scenario(mp)
+            except AssertionError as exc:
+                failures.append(f"{scenario.__name__}: {exc}")
+    assert not failures, "\n".join(failures)
