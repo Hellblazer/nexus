@@ -625,6 +625,41 @@ def _target_entry(by: str):
     return _titled_entry("1.1.1", "T") if by == "title" else _entry("1.1.1", index_content_hash="a" * 64)
 
 
+class TestOrphanRowsStayLegacyOnPurpose:
+    """nexus-jz86a, decision (a): an orphan row's section label is not knowable here, so every row the
+    backfill writes carries NO label key and no ``labels_written``. The engine reads that as legacy
+    (``labels_written`` false, NULL labels), which is the truthful state: the positions are
+    synthesised (a stable sort by chunk_index), so the shared chunk row's label, a former owner's,
+    is not this row's own answer, and an empty label would assert "no heading" for good. The label is
+    filled from the chunk row by the one-time rung (nexus-1nrcu) only where the chash has one manifest
+    row. This pins the absence, so nobody turns it into ``""`` and loses the information."""
+
+    _LABEL_KEYS = {"section_title", "section_type", "page_number", "labels_written"}
+
+    def _assert_legacy(self, rows: list[dict]) -> None:
+        assert rows, "non-vacuity: the site wrote rows"
+        for row in rows:
+            assert not (self._LABEL_KEYS & row.keys()), row
+
+    def test_synthetic_titled_and_untitled_rows(self) -> None:
+        cat = _FakeManifestCatalog([])
+        ob.register_synthetic(cat, "1.1", "docs__x", [_titled("A", [("a1", 0), ("a2", 1)]), _titled("", [("u1", 0)])])
+        self._assert_legacy([r for rows in cat.written.values() for r in rows])
+
+    def test_dt_linked_rows(self) -> None:
+        cat = _FakeManifestCatalog([])
+        match = ob.DTMatch(
+            title="T", dt_uuid="U", dt_name="N", score=0.9,
+            chunks=[ob.ChunkRef(cid="d1", chash="d1", chunk_index=0)])
+        ob.register_dt_linked(cat, "1.1", "docs__x", [match])
+        self._assert_legacy([r for rows in cat.written.values() for r in rows])
+
+    def test_rows_appended_to_an_existing_document(self) -> None:
+        cat = _FakeManifestCatalog([_titled_entry("1.1.1", "T")])
+        ob.link_by_title(cat, "docs__x", [_titled("T", [("n1", 0), ("n2", 1)])])
+        self._assert_legacy(cat.appended["1.1.1"])
+
+
 class TestAppendPositionsAreSparse:
     """Manifest positions are not dense by design and an append upserts BY position, so new rows
     start past the highest position held, never at the row count."""
