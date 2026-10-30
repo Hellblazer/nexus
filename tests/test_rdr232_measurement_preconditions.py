@@ -102,9 +102,15 @@ def test_the_unassessed_table_names_the_stop_after_failure_cause() -> None:
 
 # ── the negative-control set ─────────────────────────────────────────────────────────────────────────────
 
-#: Marker terms of what each negative control asks about; none may occur anywhere in the repository's own RDRs, docs or code.
+#: Marker terms of what each negative control asks about; none may occur anywhere in this repository's own RDRs, docs
+#: or source. This pins the REPOSITORY only. The live tenant also holds other owners' RDRs, docs, notes and code, and
+#: the first N01-N03 (Cassandra, Elasticsearch, SAML / Istio) passed this scan while occurring in them, so they were
+#: not controls there (nexus-jypmj.23). The tenant scan is the measurement's job, not this test's; the yaml header
+#: records the lexical scan that found these replacements absent from the tenant, and it has to be re-run before a
+#: measurement relies on the set.
 ABSENT_TERMS: dict[str, list[str]] = {
-    "N01": ["Cassandra"], "N02": ["Elasticsearch"], "N03": ["SAML", "Istio"], "N04": ["Redis Sentinel", "canary release"],
+    "N01": ["Couchbase", "vbucket"], "N02": ["Hazelcast"], "N03": ["Auth0", "Aerospike"],
+    "N04": ["Redis Sentinel", "canary release"],
 }
 
 
@@ -118,7 +124,8 @@ def test_the_negative_set_is_a_loadable_golden_set_of_unanswerable_requests() ->
 
 
 def test_what_each_negative_control_asks_about_is_absent_from_the_repository() -> None:
-    """Non-vacuity of 'nothing in the corpus bears on the facet': the marker terms occur in no RDR, doc or source file."""
+    """Non-vacuity of 'nothing in the corpus bears on the facet', for THIS repository: the marker terms occur in no RDR,
+    doc or source file under docs/ and src/. It says nothing about the live tenant (see ``ABSENT_TERMS``)."""
     qs = {q.qid: q for q in load_golden_set(NEGATIVE)}
     for qid, terms in ABSENT_TERMS.items():
         for term in terms:
