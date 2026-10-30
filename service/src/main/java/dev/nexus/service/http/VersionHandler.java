@@ -357,6 +357,20 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-jypmj.18 capability advertisement: does a scoped {@code POST /v1/catalog/traverse} (one carrying a
+     * {@code scope_filter}) answer with {@code node_walk}, the BFS depth and best link role of every node it
+     * returns, so a node reached only through a removed relay keeps its depth and role?
+     *
+     * <p>An independent flag. An engine without it removes the relay's edges and says nothing about the
+     * nodes behind it, so a client that must rank or role-filter those nodes reads this flag before it
+     * sends the predicate and walks unfiltered otherwise. Invisible to cloud clients until the public
+     * conexus edge allowlists it (nexus-04sff precedent; engine-release pre-tag check 3e).
+     */
+    static void appendCatalogGraphNodeWalkCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_graph_node_walk_supported\":true");
+    }
+
+    /**
      * nexus-jypmj.6 capability advertisement: does {@code POST /v1/catalog/manifest/get_many} accept an
      * optional {@code max_rows_per_doc} (a document longer than it is returned as an even sample) and answer
      * with the {@code max_rows_per_doc} echo and per-document {@code row_counts}?
@@ -584,6 +598,8 @@ public final class VersionHandler implements HttpHandler {
         appendNxAnswerRunSummaryCapabilityField(body);
         // RDR-232 s3 (nexus-jypmj.1.13): the traverse scope predicate that runs before the node cut.
         appendCatalogGraphScopeFilterCapabilityField(body);
+        // nexus-jypmj.18: depth and best role of every node of a scoped traverse, relay-proof.
+        appendCatalogGraphNodeWalkCapabilityField(body);
         // nexus-jypmj.6: the manifest get_many per-document row limit.
         appendCatalogManifestRowLimitCapabilityField(body);
         // nexus-jypmj.5: the out-of-step cost column on the run row.

@@ -91,6 +91,18 @@ class CatalogHandlerTraverseScopeFilterTest {
         assertThat(resp.statusCode()).as("link: " + resp.body()).isEqualTo(200);
     }
 
+    private void link(String from, String to, String linkType) throws Exception {
+        var resp = post("/v1/catalog/link", mapper.writeValueAsString(Map.of(
+            "from_tumbler", from, "to_tumbler", to, "link_type", linkType, "created_by", "test")));
+        assertThat(resp.statusCode()).as("link: " + resp.body()).isEqualTo(200);
+    }
+
+    private Map<String, Object> traverseRaw(Map<String, Object> body) throws Exception {
+        var resp = post("/v1/catalog/traverse", mapper.writeValueAsString(body));
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        return mapper.readValue(resp.body(), MAP_T);
+    }
+
     private Map<String, Object> traverse(Map<String, Object> extra) throws Exception {
         var body = new java.util.LinkedHashMap<String, Object>(Map.of(
             "seeds", List.of(seed), "link_types", List.of("cites"), "direction", "out", "depth", 1));
@@ -146,6 +158,87 @@ class CatalogHandlerTraverseScopeFilterTest {
 
         assertThat(tumblers(body)).containsExactlyInAnyOrder(seed, inScope, outOfScope);
         assertThat(body).as("a request without the predicate is answered as before").doesNotContainKey("scope_filter");
+    }
+
+    // ── nexus-jypmj.18: the depth and role of every returned node, even one reached only through a removed relay ──
+
+    private static final String RDR_COLL  = "rdr__tsf-walk__voyage-context-3__v1";
+    private static final String CODE_COLL = "code__tsf-walk__voyage-code-3__v1";
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Map<String, Object>> nodeWalk(Map<String, Object> body) {
+        return (Map<String, Map<String, Object>>) body.get("node_walk");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aNodeReachedOnlyThroughARemovedRelayStillCarriesItsDepthAndRole() throws Exception {
+        // S (rdr, seed) -implements-> R (code, out of scope) -implements-> B (rdr, in scope): B is at depth 2
+        // and the scope filter removes R, so no edge reaches B in the reply.
+        String s = registerDoc("7.8", "relay-seed", RDR_COLL, "rdr");
+        String r = registerDoc("7.8", "relay-code", CODE_COLL, "code");
+        String b = registerDoc("7.8", "relay-reached", RDR_COLL, "rdr");
+        link(s, r, "implements");
+        link(r, b, "cites");
+
+        var body = traverseRaw(Map.of("seeds", List.of(s), "direction", "out", "depth", 3,
+            "link_types", List.of("implements", "cites"),
+            "scope_filter", Map.of("collections", List.of(RDR_COLL))));
+
+        assertThat(tumblers(body)).containsExactlyInAnyOrder(s, b);
+        assertThat((List<?>) body.get("edges")).as("R took its edges with it").isEmpty();
+        assertThat(nodeWalk(body)).containsOnlyKeys(s, b);
+        assertThat(nodeWalk(body).get(s)).as("a seed is depth 0 with no role").containsEntry("depth", 0).doesNotContainKey("role");
+        assertThat(nodeWalk(body).get(b)).as("B's depth and the role of the link that reached it, R -> B")
+            .containsEntry("depth", 2).containsEntry("role", "citation");
+    }
+
+    @Test
+    void theRoleIsTheBestOfTheLinksFromThePreviousLevelAndFollowsTheDirection() throws Exception {
+        // X is reached at depth 1 by a 'relates' link from seed S1 and a 'cites' link from seed S2: citation wins.
+        // Q points AT seed S1 with 'implements': under direction "both" it is depth 1, implementation.
+        // W is reached by an unknown link type only: related.
+        String s1 = registerDoc("7.8", "best-seed-1", RDR_COLL, "rdr");
+        String s2 = registerDoc("7.8", "best-seed-2", RDR_COLL, "rdr");
+        String x = registerDoc("7.8", "best-x", RDR_COLL, "rdr");
+        String q = registerDoc("7.8", "best-q", RDR_COLL, "rdr");
+        String w = registerDoc("7.8", "best-w", RDR_COLL, "rdr");
+        link(s1, x, "relates");
+        link(s2, x, "cites");
+        link(q, s1, "implements");
+        link(s2, w, "relates");
+
+        var body = traverseRaw(Map.of("seeds", List.of(s1, s2), "direction", "both", "depth", 1,
+            "link_types", List.of("relates", "cites", "implements"),
+            "scope_filter", Map.of("collections", List.of(RDR_COLL))));
+
+        var walk = nodeWalk(body);
+        assertThat(walk.get(x)).containsEntry("depth", 1).containsEntry("role", "citation");
+        assertThat(walk.get(q)).containsEntry("depth", 1).containsEntry("role", "implementation");
+        assertThat(walk.get(w)).containsEntry("depth", 1).containsEntry("role", "related");
+
+        var outOnly = traverseRaw(Map.of("seeds", List.of(s1, s2), "direction", "out", "depth", 1,
+            "link_types", List.of("relates", "cites", "implements"),
+            "scope_filter", Map.of("collections", List.of(RDR_COLL))));
+        assertThat(nodeWalk(outOnly)).as("direction out does not walk the link that points at a seed").doesNotContainKey(q);
+    }
+
+    @Test
+    void theLinkRoleTableMatchesTheClientsAndANullOrUnknownTypeIsRelated() {
+        for (String t : List.of("cites", "quotes", "supersedes")) {
+            assertThat(dev.nexus.service.db.CatalogRepository.linkRole(t)).as(t).isEqualTo("citation");
+        }
+        for (String t : List.of("implements", "implements-heuristic")) {
+            assertThat(dev.nexus.service.db.CatalogRepository.linkRole(t)).as(t).isEqualTo("implementation");
+        }
+        assertThat(dev.nexus.service.db.CatalogRepository.linkRole("relates")).isEqualTo("related");
+        assertThat(dev.nexus.service.db.CatalogRepository.linkRole("anything-else")).isEqualTo("related");
+        assertThat(dev.nexus.service.db.CatalogRepository.linkRole(null)).isEqualTo("related");
+    }
+
+    @Test
+    void withoutAScopeFilterTheReplyCarriesNoNodeWalk() throws Exception {
+        assertThat(traverse(Map.of())).doesNotContainKey("node_walk");
     }
 
     @Test
