@@ -230,6 +230,10 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"{exc}\n")
         return 2
     runs = collect(Path(argv[0]), sources)
+    skipped = Path(argv[0]) / "not-run.txt"
+    if skipped.is_file() and not runs:  # run-memory-gate.sh skipped the gate on purpose
+        sys.stdout.write(f"NOT-RUN  {skipped.read_text(encoding='utf-8').strip()}\n")
+        return 3
     lines, pooled = summarize(runs)
     sys.stdout.write("\n".join(lines) + "\n")
     if not pooled["measurable"]:

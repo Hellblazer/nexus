@@ -1163,7 +1163,7 @@ def verdict(kind: str, events: list[Obj], c: Obj, new_work_dirs: list[str],
     if kind == "stdin":
         # The turn ends with the question to the author, so one work directory is waiting for the answer.
         filtered = any('"edits"' in v and '"dropped"' in v for v in results.values())
-        rendered = any('"copy"' in v and '"opened"' in v for v in results.values())
+        rendered = any('"counts"' in v and '"unplaced"' in v for v in results.values())
         unread = brief_read_problem(events) if dispatched else None
         ok = (dispatched and filtered and rendered and len(new_work_dirs) <= 1 and c["denied"] == 0
               and not c["off_list_bash"] and unread is None)

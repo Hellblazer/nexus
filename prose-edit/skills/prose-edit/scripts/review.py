@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The review loop of the prose-edit skill (RDR-221 Steps 1.1 and 1.5): marked-up copy, accept, apply.
+"""The review loop of the prose-edit skill (RDR-221 Steps 1.1 and 1.5): session, MarkupEditor translation, accept, apply.
 
 The skill hands every mechanical job to this script so the model's instructions carry none of
 it. Stdlib only; T2 is reached only by running memory.py beside it (through brief.py's child
@@ -41,45 +41,24 @@ PATH:START-END or "-" (a stdin run; --file names the saved text). WORK is a dire
 `brief.py tmpdir` (or `build --work`); every path this script reads or writes is inside it
 except the document itself and the temp file described under `apply`.
 
-`render` writes WORK/<name>.review.md, the marked-up copy, which lives outside the repository
-because WORK does. Its format (Step 1.1):
+`render` sets the session up and writes nothing the author reads: it places each edit against the file and writes
+WORK/session.json (the target, the genre, whether it is a stdin run and the edits that cannot be placed), which
+`apply`, `answer`, `translate` and `decisions` need. It prints {genre, counts, unplaced, dropped, dropped_queries,
+dropped_paragraphs, warnings}. The review itself is in the MarkupEditor app for a path run (`translate`, `proposed`
+and `decisions`, below) and in the chat for a stdin run.
 
-  - a header line naming the file and the genre, then one line on how to answer
-  - an index of links right after that line, one per proposal (`[E1](#e1)`, `[P1](#p1)`, `[Q1](#q1)`) with a
-    one-line gist, because Typora's rendered view shows no line numbers; each proposal site holds the matching
-    `<a id="e1" name="e1"></a>` (an edit's at the start of its mark, a note's at the end of its first line,
-    an unplaced proposal's in its listing). A copy with no proposal has no index; a dropped edit has no link.
-    There is no changes-only copy.
-  - the editor's note as a blockquote, then the voice card as a blockquote
-  - each sentence edit inline as <del>old</del><ins>new</ins><sup>N</sup> (a cut has no ins)
-  - paragraph proposals as `> **[P1] action.** advice` before their paragraph, queries as
-    `> **[Q1]** "anchor": text` after theirs
-  - the reasons as numbered footnotes, `<sup>N</sup> reason`, one per paragraph at the end;
-    edits the filter dropped keep their number there ("dropped before this copy: cause")
-  - what the filter dropped, with old and new text and the cause, in a blockquote after the note
-
-An edit that cannot be placed (its old string is absent, occurs more than once, or overlaps
-another edit) is not marked inline; it is listed after the note with its cause. One whose old
-string is absent or occurs more than once is skipped if accepted; two that overlap are both
-skipped when both are accepted, and either is applied when accepted alone. An edit the copy could
-not show inline cannot be decided in it, so it is never stored as a rejection. For an .html or
-.htm target the copy is flat excerpts: only the sections a mark or note belongs to, as text with
-no head, style, script or tags, each note beside its section. Entities show as the characters they
-stand for (`&lt;` as `<`); a mark keeps the source text its edit matched, since matching is against
-the source.
-
-The copy is opened in the viewer stored at T2 prose/viewer (an application name, run as
-`open -a NAME FILE` on macOS). With no record, or off macOS, or when the open fails, the copy is
-not opened and its path is the answer. PROSE_EDIT_OPEN replaces `open -a` with a command (the
-viewer name and the path are appended); like PROSE_EDIT_NOW it needs PROSE_EDIT_TEST=1 and is
-ignored without it. `render` also writes WORK/session.json; `apply` needs it.
+An edit that cannot be placed (its old string is absent, occurs more than once, or overlaps another edit) is
+listed with its cause. One whose old string is absent or occurs more than once is skipped if accepted; two that
+overlap are both skipped when both are accepted, and either is applied when accepted alone. An edit the review
+could not show cannot be decided there, so it is never stored as a rejection. For an .html or .htm target an edit
+is matched against the raw source, entities and all.
 
 `apply` takes the author's answer. --accept (default "none") is the numbers to apply, --reject the numbers to store
 as rejections for the document, and --hold the numbers left undecided: a comma or space separated
 list of numbers and ranges ("1, 3-5"), or "all" or "none"; --reject also takes "rest", which is
 every edit not accepted, held or named otherwise (the author's "reject the rest"). An edit the
 author does not name is HELD: neither applied nor stored. Only --reject stores a rejection, so
-silence, or "accept 1", never does. An edit the copy could not show inline is left alone by "rest"
+silence, or "accept 1", never does. An edit the review could not show is left alone by "rest"
 and by being unnamed; the author may still name it in --reject. --reason N=TEXT (repeatable) keeps
 the author's one line on why edit N is rejected; N must be a rejected edit and TEXT not empty.
 --reasons-file F is the same thing as a file, for words that must not ride a shell string: a JSON object
@@ -126,7 +105,7 @@ the dry run each need the dry run again. Otherwise, in order:
      and "log_retry" and the exit status is 0, and the payload waits in WORK/log-pending.json:
      `log-retry --work WORK` sends it, so the session still reaches the accept-rate evidence. An
      apply run again over such a WORK is refused and names log-retry.
-  6. WORK is deleted, so the copy is gone even when nothing was accepted. A run that stops
+  6. WORK is deleted, even when nothing was accepted. A run that stops
      before step 5 keeps WORK so the author can run apply again; a run whose log failed keeps it
      for log-retry. A work directory idle for two hours is swept by the next `brief.py tmpdir`; `render`,
      `apply` (a dry run, a refused answer, a failed run) and `log-retry` each renew it.
@@ -159,7 +138,6 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
-from html import unescape as _unescape
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import unquote, urlparse
@@ -301,7 +279,7 @@ def plan_edits(text: str, edits: list[Obj], rng: Obj | None, html: bool, cut_onl
 
     A plan is {"n", "old", "new", "span", "cause", "detail"}. `span` is (start, end) when the
     edit can be applied, else None with a `cause`. Overlap is judged among the edits given,
-    so the caller decides which edits count (all of them for the copy, the accepted ones to apply). `cut_only` (a
+    so the caller decides which edits count (all of them to place, the accepted ones to apply). `cut_only` (a
     cut-only session) protects the nav, heading, button and samp elements of an html page too.
     """
     window = cast("Span | None", _BRIEF._range_span(text, rng))
@@ -356,351 +334,7 @@ def apply_plan(text: str, plans: list[Obj]) -> str:
     return "".join(out)
 
 
-# ---------------------------------------------------------------------------
-# The marked-up copy
-# ---------------------------------------------------------------------------
-
-
-def _block(text: str, offset: int, protected: list[Span]) -> Span:
-    """The paragraph holding `offset` (lines up to a blank line), grown to cover any protected region it touches."""
-    starts: list[int] = []
-    pos = 0
-    lines = text.split("\n")
-    for line in lines:
-        starts.append(pos)
-        pos += len(line) + 1
-    idx = max(i for i, s in enumerate(starts) if s <= offset)
-    if not lines[idx].strip():
-        return offset, offset
-    lo = hi = idx
-    while lo > 0 and lines[lo - 1].strip():
-        lo -= 1
-    while hi + 1 < len(lines) and lines[hi + 1].strip():
-        hi += 1
-    start, end = starts[lo], starts[hi] + len(lines[hi])
-    grown = True
-    while grown:
-        grown = False
-        for a, b in protected:
-            if a < end and start < b and (a < start or b > end):
-                start, end, grown = min(start, a), max(end, b), True
-    return start, end
-
-
-def _quote(body: str) -> str:
-    return "> " + body.replace("\n", "\n> ")
-
-
-def _first(text: str, needle: str, window: Span | None) -> int | None:
-    for i in _occurrences(text, needle):
-        if _within(window, i, i + len(needle)):
-            return i
-    return None
-
-
-# An .html page is shown as flat text: what a reader sees, in sections, with no tags.
-_SKIP_OR_TAG = re.compile(
-    r"(?P<skip><!--.*?-->|<(?P<name>script|style|head|svg|noscript|template)\b.*?</(?P=name)\s*>)|(?P<tag><[^<>]*>)",
-    re.IGNORECASE | re.DOTALL)
-_BLOCK_TAG = re.compile(
-    r"</?(?:p|div|h[1-6]|li|ul|ol|dl|dt|dd|section|article|header|footer|nav|main|aside|table|thead|tbody|tr|td|th|"
-    r"blockquote|pre|figure|figcaption|br|hr|body|html|details|summary|form)\b", re.IGNORECASE)
-_HEADING_TAG = re.compile(r"<h[1-6]\b", re.IGNORECASE)
-
-
-def html_blocks(text: str) -> list[tuple[list[Span], bool]]:
-    """The text nodes of an HTML page grouped into sections: ([(start, end) of each node], is_heading).
-
-    Comments, head, style, script, svg, noscript and template contribute nothing; a block-level tag
-    ends a section; inline tags (a, em, span) do not.
-    """
-    blocks: list[tuple[list[Span], bool]] = []
-    state: dict[str, Any] = {"segs": [], "heading": False}
-
-    def flush(next_heading: bool) -> None:
-        segs = cast("list[Span]", state["segs"])
-        if any(text[a:b].strip() for a, b in segs):
-            blocks.append((segs, bool(state["heading"])))
-        state["segs"], state["heading"] = [], next_heading
-
-    last = 0
-    for m in _SKIP_OR_TAG.finditer(text):
-        if m.start() > last:
-            state["segs"].append((last, m.start()))
-        last = m.end()
-        tag = m.group("tag")
-        if tag and _BLOCK_TAG.match(tag):
-            flush(_HEADING_TAG.match(tag) is not None)
-    if last < len(text):
-        state["segs"].append((last, len(text)))
-    flush(False)
-    return blocks
-
-
-def _flat(text: str, segs: list[Span], marks: list[tuple[int, int, str]]) -> str:
-    """The text of the segments, entities shown as the characters they stand for (`&lt;` as `<`). A mark
-    is put in as it is: it holds the source text its edit matched, which is what apply matches against."""
-    out: list[str] = []
-    for a, b in segs:
-        pos = a
-        for ms, me, piece in marks:
-            if a <= ms and me <= b and ms >= pos:
-                out += [_unescape(text[pos:ms]), piece]
-                pos = me
-        out.append(_unescape(text[pos:b]))
-    return re.sub(r"\s+", " ", "".join(out)).strip()
-
-
-def _html_excerpts(text: str, marks: list[tuple[int, int, str]], p_notes: list[tuple[int, str]],
-                   q_notes: list[tuple[int, str]]) -> tuple[str, list[str]]:
-    """(the flat excerpts, the marks and notes that fell in no section). Marks must be sorted."""
-    blocks = html_blocks(text)
-
-    def block_of(offset: int, end: int | None = None) -> int | None:
-        for i, (segs, _) in enumerate(blocks):
-            if any(a <= offset and (offset if end is None else end) <= b for a, b in segs):
-                return i
-        return None
-
-    want: dict[int, dict[str, list[str]]] = {}
-    lost: list[str] = []
-    for ms, me, piece in marks:
-        i = block_of(ms, me)
-        if i is None:
-            lost.append(piece)
-        else:
-            want.setdefault(i, {"p": [], "q": []})
-    for offset, note in p_notes:
-        i = block_of(offset)
-        if i is None:
-            lost.append(note)
-        else:
-            want.setdefault(i, {"p": [], "q": []})["p"].append(note)
-    for offset, note in q_notes:
-        i = block_of(offset)
-        if i is None:
-            lost.append(note)
-        else:
-            want.setdefault(i, {"p": [], "q": []})["q"].append(note)
-    parts: list[str] = []
-    shown_heading: int | None = None
-    for i in sorted(want):
-        segs, is_heading = blocks[i]
-        if is_heading:
-            parts += [*want[i]["p"], "### " + _flat(text, segs, marks), *want[i]["q"]]
-            shown_heading = i
-            continue
-        head = max((j for j in range(i) if blocks[j][1]), default=None)
-        if head is not None and head != shown_heading:
-            parts.append("### " + _flat(text, blocks[head][0], []))
-            shown_heading = head
-        parts += [*want[i]["p"], _flat(text, segs, marks), *want[i]["q"]]
-    return "\n\n".join(parts), lost
-
-
-def _dropped_lines(prop: Obj) -> list[str]:
-    """One line per thing the filter dropped: the old and new text and the cause."""
-    lines: list[str] = []
-    for d in cast("list[Obj]", prop.get("dropped") or []):
-        new = f' -> "{d["new"]}"' if d.get("new") is not None else ""
-        lines.append(f'- E{d.get("n")} "{d.get("old")}"{new} ({d.get("cause", "")})')
-    for d in cast("list[Obj]", prop.get("dropped_queries") or []):
-        lines.append(f'- [Q{d.get("n")}] "{d.get("anchor")}" ({d.get("cause", "")})')
-    for d in cast("list[Obj]", prop.get("dropped_paragraphs") or []):
-        lines.append(f'- [P{d.get("n")}] {d.get("paragraphs")} ({d.get("cause", "")})')
-    return lines
-
-
 change_core = _SUGGEST.change_core  # one copy, in suggest.py
-
-
-def _show(part: str) -> str:
-    return f"`{part}`" if part.strip() else ("a space" if part == " " else "whitespace" if part else "nothing")
-
-
-def change_note(old: str, new: str) -> str:
-    """A footnote line naming a change no reader would spot by eye: punctuation or whitespace only."""
-    _, a, b, _ = change_core(old, new)
-    if any(c.isalnum() for c in a + b):
-        return ""
-    kind = "whitespace only" if not (a + b).strip() else "punctuation only"
-    return f" ({kind}: {_show(a)} → {_show(b)})"
-
-
-def _anchor(kind: str, n: object) -> str:
-    """An explicit HTML anchor for the index links: `id` for a browser, `name` for older HTML readers. Both
-    render as nothing. Typora's bundled Markdown Reference documents only heading targets for internal links,
-    but a hand check in Typora's rendered view (nexus-ger02.29, 2026-10-18) jumped to this anchor for an edit,
-    an edit inside Markdown link text, an unplaced proposal, a paragraph note and a query."""
-    key = f"{kind.lower()}{n}"
-    return f'<a id="{key}" name="{key}"></a>'
-
-
-def _anchored(body: str, kind: str, n: object) -> str:
-    """`body` with the anchor at the end of its first line, so the quoted text a reader and a test match is
-    unbroken and a jump still lands on the note."""
-    first, nl, rest = body.partition("\n")
-    return first + _anchor(kind, n) + nl + rest
-
-
-INDEX_GIST = 90
-
-
-def _gist(text: object, fallback: str) -> str:
-    """One line: whitespace collapsed, cut at INDEX_GIST characters; `fallback` when nothing is left. Markdown
-    and HTML specials are escaped after the cut, so a reason with `<del>`, a backtick or a bracket is shown as
-    text and cannot open a construct the cut leaves unclosed."""
-    one = " ".join(str(text).split()) or fallback
-    if len(one) > INDEX_GIST:
-        one = one[:INDEX_GIST - 1].rstrip() + "…"
-    return "".join(_GIST_ESCAPES.get(c, c) for c in one)
-
-
-_GIST_ESCAPES: dict[str, str] = {"<": "&lt;", "&": "&amp;", "`": "\\`", "[": "\\[", "]": "\\]", "*": "\\*", "_": "\\_"}
-
-
-def _index(edits: list[Obj], paragraphs: list[Obj], queries: list[Obj]) -> list[str]:
-    """The copy's index: one link per proposal in the copy (a dropped one is not a proposal here) with a
-    one-line gist. A Typora reader has no line numbers, so the links are the way around a long copy."""
-    rows = [f"- [E{e['n']}](#e{e['n']}) {_gist(e.get('reason') or '', 'edit')}"
-            for e in sorted(edits, key=lambda x: int(x["n"]))]
-    rows += [f"- [P{p['n']}](#p{p['n']}) "
-             f"{_gist(': '.join(x for x in (str(p.get('action', '')).strip(), str(p.get('advice', '')).strip()) if x), 'paragraph')}"
-             for p in sorted(paragraphs, key=lambda x: int(x["n"]))]
-    rows += [f"- [Q{q['n']}](#q{q['n']}) {_gist(q.get('text') or '', 'query')}"
-             for q in sorted(queries, key=lambda x: int(x["n"]))]
-    return ["## Index", "", *rows] if rows else []
-
-
-def _unplaced_note(p: Obj) -> str:
-    tail = (" Accepted together they are both skipped; accepted alone it is applied."
-            if p["cause"] == "overlap" else " It is skipped if accepted.")
-    return _quote(_anchored(
-        f"**[E{p['n']}]** Cannot be placed: {p['detail']}.{tail}\n\"{p['old']}\" -> \"{p['new']}\"", "E", p["n"]))
-
-
-def build_copy(text: str, prop: Obj, *, label: str, genre: str, rng: Obj | None, html: bool, stdin: bool) -> str:
-    """The marked-up copy of `text` for the filtered proposal `prop` (Step 1.1)."""
-    edits = cast("list[Obj]", prop.get("edits") or [])
-    paragraphs = cast("list[Obj]", prop.get("paragraphs") or [])
-    queries = cast("list[Obj]", prop.get("queries") or [])
-    dropped = cast("list[Obj]", prop.get("dropped") or [])
-    plans = plan_edits(text, edits, rng, html)
-    window = cast("Span | None", _BRIEF._range_span(text, rng))
-    protected = cast("list[Span]", _BRIEF.protected_spans(text, html=html))
-    replaced = [cast(Span, p["span"]) for p in plans if p["span"] is not None]
-
-    def settle(offset: int) -> int:
-        for a, b in replaced:
-            if a < offset < b:
-                return b
-        return offset
-
-    edit_marks: list[tuple[int, int, str]] = []
-    for p in plans:
-        if p["span"] is not None:
-            start, end = cast(Span, p["span"])
-            head, gone, put, tail = change_core(str(p["old"]), str(p["new"]))
-            mark = (f"<del>{gone}</del>" if gone else "") + (f"<ins>{put}</ins>" if put else "")
-            edit_marks.append((start, end, f"{_anchor('E', p['n'])}{head}{mark}{tail}<sup>{p['n']}</sup>"))
-    unplaced = [_unplaced_note(p) for p in plans if p["span"] is None]
-    p_notes: list[tuple[int, str]] = []
-    for pr in sorted(paragraphs, key=lambda x: int(x["n"])):
-        spots = [s for ph in cast("list[str]", _BRIEF._quoted_phrases(str(pr.get("paragraphs", ""))))
-                 if (s := _first(text, ph, window)) is not None]
-        head = f"**[P{pr['n']}] {pr.get('action', '')}.**"
-        if spots:
-            p_notes.append((min(spots), _quote(_anchored(f"{head} {pr.get('advice', '')}", "P", pr["n"]))))
-        else:
-            unplaced.append(_quote(_anchored(f"{head} {pr.get('paragraphs', '')}: {pr.get('advice', '')}", "P", pr["n"])))
-    q_notes: list[tuple[int, str]] = []
-    for q in sorted(queries, key=lambda x: int(x["n"])):
-        at = _first(text, str(q["anchor"]), window)
-        body = _quote(_anchored(f"**[Q{q['n']}]** \"{q['anchor']}\": {q.get('text', '')}", "Q", q["n"]))
-        if at is None:
-            unplaced.append(body)
-        else:
-            q_notes.append((at, body))
-
-    if html:
-        body_text, lost = _html_excerpts(text, sorted(edit_marks), p_notes, q_notes)
-        unplaced += [_quote(f"Not in any section of the page text: {piece}") for piece in lost]
-        if not body_text:
-            body_text = "No edit, paragraph proposal or query falls in the page text."
-    else:
-        marks = list(edit_marks)
-        for offset, note in p_notes:
-            start = settle(_block(text, offset, protected)[0])
-            marks.append((start, start, note + "\n\n"))
-        for offset, note in q_notes:
-            end = settle(_block(text, offset, protected)[1])
-            marks.append((end, end, "\n\n" + note))
-        marks.sort(key=lambda m: (m[0], m[1]))
-        body_out: list[str] = []
-        pos = 0
-        for start, end, piece in marks:
-            body_out += [text[pos:start], piece]
-            pos = max(pos, end)
-        body_out.append(text[pos:])
-        body_text = "".join(body_out)
-
-    counts = f"{len(edits)} sentence edits, {len(paragraphs)} paragraph proposals, {len(queries)} queries"
-    where = f"Lines {rng['start']}-{rng['end']} only. " if rng else ""
-    head_lines = [f"# Line edit: {label}", "", f"Genre: {genre}. {where}{counts}.", ""]
-    answer = "Answer with the numbers to accept, for example `1, 3-5`, `all` or `none`."
-    if stdin:
-        head_lines.append(f"Nothing is applied to a file; the accepted text is printed. {answer} "
-                          "Edits you do not accept are not stored: a stdin run keeps no rejections.")
-    else:
-        head_lines.append(f"{answer} An edit you do not name stays undecided and nothing is stored for it. "
-                          "To store a rejection for this document say `reject 2` or `reject the rest`, and give a "
-                          "reason if you like (`reject 2 because it changes my meaning`). An edit listed below as "
-                          "cannot be placed is left alone by `reject the rest`; name it to reject it.")
-    index = _index(edits, paragraphs, queries)
-    if index:
-        head_lines += ["", *index]
-    for w in cast("list[str]", prop.get("warnings") or []):
-        head_lines += ["", f"Warning: {w}"]
-    for key, title in (("note", "Editor's note"), ("voice_card", "Voice card")):
-        if str(prop.get(key) or "").strip():
-            head_lines += ["", _quote(f"**{title}.** {str(prop[key]).strip()}")]
-    for block in unplaced:
-        head_lines += ["", block]
-    gone = _dropped_lines(prop)
-    if gone:
-        head_lines += ["", _quote("**Dropped before this copy.**\n" + "\n".join(gone))]
-    notes: list[tuple[int, str]] = [
-        (int(e["n"]), str(e.get("reason", "")) + change_note(str(e["old"]), str(e.get("new") or ""))) for e in edits]
-    notes += [(int(d["n"]), f"dropped before this copy: {d.get('cause', '')}") for d in dropped if d.get("n") is not None]
-    foot = "\n\n".join(f"<sup>{n}</sup> {why}" for n, why in sorted(notes))
-    return "\n".join(head_lines) + "\n\n---\n\n" + body_text.rstrip("\n") + "\n\n---\n\n" + foot + "\n"
-
-
-# ---------------------------------------------------------------------------
-# The viewer
-# ---------------------------------------------------------------------------
-
-
-def _run_open(argv: list[str]) -> int:
-    return subprocess.run(argv, capture_output=True, timeout=30).returncode
-
-
-def open_copy(viewer: str | None, copy: Path, *, platform: str | None = None, override: str | None = None,
-              run: Callable[[list[str]], int] = _run_open) -> Obj:
-    """Open the copy in the stored viewer; say why when it is not opened (the caller prints the path)."""
-    if not viewer:
-        return {"opened": False, "reason": "no viewer is stored at prose/viewer"}
-    if override:
-        argv = [*shlex.split(override), viewer, str(copy)]
-    elif (platform or sys.platform) != "darwin":
-        return {"opened": False, "reason": f"not macOS ({platform or sys.platform}); the viewer is opened with `open -a`"}
-    else:
-        argv = ["open", "-a", viewer, str(copy)]
-    try:
-        code = run(argv)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"opened": False, "reason": f"{argv[0]}: {exc}"}
-    return {"opened": code == 0, "reason": "" if code == 0 else f"{argv[0]} exited {code}"}
 
 
 # ---------------------------------------------------------------------------
@@ -925,22 +559,14 @@ def cmd_render(a: argparse.Namespace) -> Obj:
     text, _eol = read_source(source)
     # a work directory that holds a cut-only run is one whatever its proposal says: the proposal can be rewritten
     cut_only = prop.get("mode") == "cut-only" or bool(_BRIEF.cut_only_work(work))
-    # a cut-only run is a model's (the prose-cut skill): no author reads the copy, so no viewer is asked for or opened
-    viewer = None if cut_only else cast("str | None", _BRIEF.memory_json(["viewer"]).get("viewer"))
-    copy = work / f"{Path(rel).stem if rel else 'stdin'}.review.md"
-    copy.write_text(build_copy(text, prop, label=rel or "stdin", genre=genre, rng=rng, html=html, stdin=stdin),
-                    encoding="utf-8")
-    opened = (open_copy(viewer, copy, override=os.environ.get("PROSE_EDIT_OPEN") if _test_mode() else None)
-              if not cut_only else {"opened": False, "reason": "a cut-only run has no reader for the copy"})
     plans = plan_edits(text, cast("list[Obj]", prop.get("edits") or []), rng, html, cut_only)
     unplaced = [{"n": p["n"], "cause": p["cause"], "detail": p["detail"]} for p in plans if p["span"] is None]
-    session: Obj = {"target": a.target, "genre": genre, "stdin": stdin, "file": a.file, "copy": str(copy),
-                    "unplaced": unplaced}
+    session: Obj = {"target": a.target, "genre": genre, "stdin": stdin, "file": a.file, "unplaced": unplaced}
     if cut_only:
         session["cut_only"] = True
     (work / "session.json").write_text(json.dumps(session), encoding="utf-8")
     return {
-        "copy": str(copy), "genre": genre, "viewer": viewer, **opened,
+        "genre": genre,
         "counts": {"edits": len(plans), "paragraphs": len(prop.get("paragraphs") or []),
                    "queries": len(prop.get("queries") or []), "dropped": len(prop.get("dropped") or [])},
         "unplaced": unplaced,
@@ -1083,7 +709,7 @@ def _load_answers(raw: str, work: Path) -> list[Obj]:
 def cmd_answer(a: argparse.Namespace) -> Obj:
     """Add the author's answers to queries and paragraph proposals as numbered edits (nexus-ger02.21).
 
-    They are the author's own changes, so they go through the same copy, dry run and apply as the editor's
+    They are the author's own changes, so they go through the same dry run and apply as the editor's
     edits: the document changes only through apply. They are marked `by: author`, and apply never stores one
     as a rejection. Nothing is written when any answer cannot be placed.
     """
@@ -1138,7 +764,14 @@ def cmd_answer(a: argparse.Namespace) -> Obj:
         added.append({"n": n, "old": e["old"], "new": e["new"], "reason": f"the author's answer to {e['answers']}",
                       "by": "author", "answers": e["answers"]})
     prop["edits"] = edits + added
+    before = _sha(read_bytes(work / "filtered.json"))
     (work / "filtered.json").write_text(json.dumps(prop, indent=1, ensure_ascii=False), encoding="utf-8")
+    sent = work / "propose.json"
+    if sent.is_file():  # an answer only appends, so the numbers translate read still mean the same edits
+        payload = _load_json(sent, "WORK/propose.json")
+        if payload.get("filtered_sha") == before:
+            payload["filtered_sha"] = _sha(read_bytes(work / "filtered.json"))
+            _write_json(sent, payload)
     return {"added": [{"n": x["n"], "answers": x["answers"], "old": x["old"], "new": x["new"]} for x in added]}
 
 
@@ -1235,6 +868,8 @@ def cmd_translate(a: argparse.Namespace) -> Obj:
 
     Nothing is written but WORK/propose.json, and a suggestions.json from an earlier translate is dropped (its ids
     named the earlier payload). The edits `render` could not place, and the author's own answers, are not sent.
+    propose.json records the sha256 of filtered.json as read here (`filtered_sha`): `decisions` refuses when the
+    proposal has changed since, because the edit numbers in suggestions.json would name other edits.
     """
     work = cast(Path, _BRIEF.work_dir(a.work))
     _BRIEF.touch_work(work)
@@ -1250,7 +885,8 @@ def cmd_translate(a: argparse.Namespace) -> Obj:
              if e.get("by") != "author" and int(e["n"]) not in unplaced]
     proposals, refused = _SUGGEST.translate_edits(blocks, edits)
     payload: Obj = {"edits": [{k: p[k] for k in _PROPOSE_KEYS} for p in proposals],
-                    "order": [int(p["n"]) for p in proposals], "refused": refused}
+                    "order": [int(p["n"]) for p in proposals], "refused": refused,
+                    "filtered_sha": _sha(read_bytes(work / "filtered.json"))}
     _write_json(work / "propose.json", payload)
     (work / "suggestions.json").unlink(missing_ok=True)
     return {"edits": payload["edits"], "sent": len(proposals), "refused": refused}
@@ -1343,6 +979,9 @@ def cmd_decisions(a: argparse.Namespace) -> Obj:
     session = _load_json(sess_file, "WORK/session.json")
     prop = _load_json(work / "filtered.json", "WORK/filtered.json")
     propose = _load_json(work / "propose.json", "WORK/propose.json (run `review.py translate` first)")
+    if propose.get("filtered_sha") != _sha(read_bytes(work / "filtered.json")):
+        raise _user("WORK/filtered.json changed since translate, so the edit numbers in the app's suggestions may no "
+                    "longer be these edits; run `review.py translate` again and ask the author to decide again")
     edits = cast("list[Obj]", prop.get("edits") or [])
     valid = {int(e["n"]) for e in edits}
     mapped: Obj = {"accept": [], "reject": [], "hold": [], "warnings": []}
@@ -1416,7 +1055,7 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
             raise _user(f"--accept: edit {adds[0]} is not a cut (it adds, replaces or reorders a word, or adds "
                         "markup); a cut-only session applies edits that remove words only")
     hold: set[int] = parse_numbers(a.hold, valid, "--hold") if a.hold else set()
-    # an edit the copy could not show inline: `reject the rest` leaves it alone, naming it rejects it
+    # an edit the review could not show: `reject the rest` leaves it alone, naming it rejects it
     unshown = {int(u["n"]): u for u in cast("list[Obj]", session.get("unplaced") or [])}
     mine = {n for n, e in by_n.items() if e.get("by") == "author"}  # the author's own answers: never a rejection
     rest = valid - set(unshown) - accept - hold - mine
@@ -1473,7 +1112,7 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
                 for n in rejected]))
             stored = True
         elif staged is not None:
-            _BRIEF.memory_json(["viewer"])  # nothing to store: ask T2 anyway, so a service that is down stops us before the write
+            _BRIEF.memory_json(["status"])  # nothing to store: ask T2 anyway, so a service that is down stops us before the write
         if staged is not None:
             staged.commit(raw, before_replace=_before_replace_hook())
     except BaseException as exc:
@@ -1576,7 +1215,7 @@ def cmd_log_retry(a: argparse.Namespace) -> Obj:
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="review.py")
     sub = p.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("render", help="write the marked-up copy and open it")
+    r = sub.add_parser("render", help="set the session up")
     r.add_argument("target")
     r.add_argument("--work", required=True)
     r.add_argument("--file")

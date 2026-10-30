@@ -6,14 +6,17 @@ rejections and the only session logger.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from tests.prose_edit.conftest import REPO_PROJECT, Prose, t2_titles
+from tests.prose_edit.test_brief import brief_ok, edit
 from tests.prose_edit.test_markup_verbs import (
     E5,
+    EDITS,
     TEXT,
     app_reply,
     listing,
@@ -146,3 +149,100 @@ def test_an_unknown_chat_number_is_refused(prose: Prose, repo: Path, bad: str) -
     work, sugg = proposed(prose, repo)
     proc = decide(prose, work, listing(sugg, {}), "--accept", bad)
     assert proc.returncode == 1 and "--accept" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Gate 1c survivors (nexus-scmcs.2.10)
+# ---------------------------------------------------------------------------
+
+
+def test_the_suggestions_file_records_what_was_sent_not_what_the_listing_says(prose: Prose, repo: Path) -> None:
+    work, sugg = proposed(prose, repo)
+    sent = read(work / "propose.json")
+    by_n = dict(zip(sent["order"], sent["edits"]))
+    assert [(s["n"], s["find"], s["replace"]) for s in sugg] == [(n, by_n[n]["find"], by_n[n]["replace"]) for n in sent["order"]]
+
+
+def test_reject_rest_leaves_the_authors_answer_alone(prose: Prose, repo: Path) -> None:
+    work, sugg = proposed(prose, repo, queries=[{"n": 1, "anchor": "wakes every ten", "text": "Every ten exactly?"}])
+    answers = write_json(work / "answers.json", [{"answers": "Q1", "old": "picks the oldest job.",
+                                                  "new": "picks the oldest job first."}])
+    n = review_ok(prose, "answer", "--work", str(work), "--from-file", str(answers))["added"][0]["n"]
+    out = json.loads(decide(prose, work, listing(sugg, {}), "--reject", "rest").stdout)
+    assert out["reject"] == [5] and n not in out["reject"]
+
+
+def test_reject_rest_leaves_an_unplaced_edit_alone(prose: Prose, repo: Path) -> None:
+    work, out = translated(prose, repo, edits=[*EDITS, edit(6, "basically ", "", "occurs twice in the file")])
+    assert [int(u["n"]) for u in read(work / "session.json")["unplaced"]] == [6]
+    review_ok(prose, "proposed", "--work", str(work), "--from-file",
+              str(write_json(work / "proposed.json", app_reply(read(work / "propose.json")))))
+    d = json.loads(decide(prose, work, listing(read_list(work / "suggestions.json"), {}), "--reject", "rest").stdout)
+    assert d["reject"] == [5] and 6 not in d["reject"]
+
+
+def test_decisions_before_proposed_names_the_verb_and_has_no_traceback(prose: Prose, repo: Path) -> None:
+    work, _ = translated(prose, repo)
+    proc = decide(prose, work, listing([], {}))
+    assert proc.returncode == 1 and "run `review.py proposed` first" in proc.stderr and "Traceback" not in proc.stderr
+
+
+def test_decisions_without_a_statuses_file_names_the_flag_and_has_no_traceback(prose: Prose, repo: Path) -> None:
+    work, _ = proposed(prose, repo)
+    proc = run_review(prose, "decisions", "--work", str(work))
+    assert proc.returncode == 1 and "--from-file is required" in proc.stderr and "Traceback" not in proc.stderr
+
+
+def test_a_statuses_file_in_another_runs_work_directory_is_refused(prose: Prose, repo: Path) -> None:
+    work, sugg = proposed(prose, repo)
+    other = Path(brief_ok(prose, "tmpdir").strip())
+    foreign = write_json(other / "statuses.json", listing(sugg, {}))
+    proc = run_review(prose, "decisions", "--work", str(work), "--from-file", str(foreign))
+    assert proc.returncode == 1 and "directly inside this work directory" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Gate 1a S2: the numbers in suggestions.json belong to the filtered.json translate read
+# ---------------------------------------------------------------------------
+
+
+def test_translate_records_the_sha256_of_the_filtered_proposal(prose: Prose, repo: Path) -> None:
+    work, _ = translated(prose, repo)
+    want = hashlib.sha256((work / "filtered.json").read_bytes()).hexdigest()
+    assert read(work / "propose.json")["filtered_sha"] == want
+    review_ok(prose, "proposed", "--work", str(work), "--from-file",
+              str(write_json(work / "proposed.json", app_reply(read(work / "propose.json")))))
+    assert read(work / "propose.json")["filtered_sha"] == want  # `proposed` rewrites propose.json and keeps it
+
+
+def test_decisions_refuses_when_the_filtered_proposal_changed_since_translate(prose: Prose, repo: Path) -> None:
+    work, sugg = proposed(prose, repo)
+    filtered = read(work / "filtered.json")
+    filtered["edits"] = filtered["edits"][::-1]  # a re-filter that renumbered or reordered the edits
+    write_json(work / "filtered.json", filtered)
+    proc = decide(prose, work, listing(sugg, {sugg[0]["id"]: "accepted"}))
+    assert proc.returncode == 1 and "filtered.json changed since translate" in proc.stderr
+    assert "run `review.py translate` again" in proc.stderr and "Traceback" not in proc.stderr
+    assert proc.stdout.strip() == ""
+
+
+def test_an_answer_added_after_translate_does_not_trip_the_check(prose: Prose, repo: Path) -> None:
+    work, sugg = proposed(prose, repo, queries=[{"n": 1, "anchor": "wakes every ten", "text": "Every ten exactly?"}])
+    answers = write_json(work / "answers.json", [{"answers": "Q1", "old": "picks the oldest job.",
+                                                  "new": "picks the oldest job first."}])
+    n = review_ok(prose, "answer", "--work", str(work), "--from-file", str(answers))["added"][0]["n"]
+    proc = decide(prose, work, listing(sugg, {}), "--accept", str(n))
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["accept"] == [n]
+
+
+def test_a_second_answer_after_a_changed_filtered_proposal_does_not_launder_the_change(prose: Prose, repo: Path) -> None:
+    work, sugg = proposed(prose, repo, queries=[{"n": 1, "anchor": "wakes every ten", "text": "Every ten exactly?"}])
+    filtered = read(work / "filtered.json")
+    filtered["edits"] = filtered["edits"][::-1]
+    write_json(work / "filtered.json", filtered)
+    answers = write_json(work / "answers.json", [{"answers": "Q1", "old": "picks the oldest job.",
+                                                  "new": "picks the oldest job first."}])
+    review_ok(prose, "answer", "--work", str(work), "--from-file", str(answers))
+    proc = decide(prose, work, listing(sugg, {}))
+    assert proc.returncode == 1 and "filtered.json changed since translate" in proc.stderr

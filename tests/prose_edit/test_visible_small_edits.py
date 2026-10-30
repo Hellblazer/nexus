@@ -30,22 +30,8 @@ def test_the_changed_part_is_cut_at_word_edges(old: str, new: str, want: tuple) 
     assert _review().change_core(old, new) == want
 
 
-@pytest.mark.parametrize(("old", "new", "note"), [
-    (SEMI, COLON, " (punctuation only: `;` → `:`)"),
-    ("a  b", "a b", " (whitespace only: a space → nothing)"),
-    ("The colour is red.", "The color is red.", ""),
-    ("It is done.", "It is done", " (punctuation only: `.` → nothing)"),
-])
-def test_a_change_no_reader_would_spot_is_named(old: str, new: str, note: str) -> None:
-    assert _review().change_note(old, new) == note
-
-
-def test_the_copy_marks_one_character_and_apply_still_changes_it(prose: Prose, repo: Path) -> None:
+def test_apply_changes_the_one_character_a_semicolon_edit_changes(prose: Prose, repo: Path) -> None:
     text = f"Intro line.\n\n{SEMI}\n"
-    work, rendered = start(prose, repo, [edit(1, SEMI, COLON, "no semicolons")], text=text)
-    copy = Path(rendered["copy"]).read_text(encoding="utf-8")
-    assert "append-only<del>;</del><ins>:</ins> bytes are never truly deleted.<sup>1</sup>" in copy
-    assert f"<del>{SEMI}</del>" not in copy
-    assert "<sup>1</sup> no semicolons (punctuation only: `;` → `:`)" in copy
+    work, _rendered = start(prose, repo, [edit(1, SEMI, COLON, "no semicolons")], text=text)
     review_ok(prose, "apply", "--work", str(work), "--accept", "1")
     assert (repo / "docs" / "s.md").read_text(encoding="utf-8") == f"Intro line.\n\n{COLON}\n"

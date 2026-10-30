@@ -37,8 +37,13 @@ OUT="${OUT_DIR:?set OUT_DIR}"
 runner_lock run-memory-gate.sh
 export TMPDIR="${TMPDIR:?set TMPDIR to a directory outside the repository}"
 export PROSE_EDIT_PROJECT_PREFIX="${PROSE_EDIT_PROJECT_PREFIX:-zzprose216_}"
-export PROSE_EDIT_TEST=1  # PROSE_EDIT_OPEN is ignored without it
-export PROSE_EDIT_OPEN="${PROSE_EDIT_OPEN:-true}"
+# Every session is a path run, reviewed in the MarkupEditor app, which a headless session cannot drive
+# (nexus-scmcs.2.13): NOT-RUN, recorded in $OUT/not-run.txt, exit 3. PROSE_EDIT_APP_RUNNER=1, set only by a
+# harness that answers the MarkupEditor tools, runs the gate.
+if [ "${PROSE_EDIT_APP_RUNNER:-0}" != 1 ]; then
+  runner_not_run "$OUT" "memory-gate $LABEL" "$RUNNER_NO_APP_REASON"
+  exit 3
+fi
 DIR=docs/zz-memgate  # nested, so no built-in genre maps it: --genre is passed
 mkdir -p "$OUT"
 cd "$WT" || exit 1
@@ -46,7 +51,6 @@ cd "$WT" || exit 1
 runner_sweep_stale
 mkdir -p "$DIR" && runner_track "$DIR"
 git status --short > "$OUT/$LABEL-repo-status-before.txt"
-python3 prose-edit/skills/prose-edit/scripts/memory.py viewer --set Typora > "$OUT/$LABEL-seed-viewer.json" || exit 1
 wc -l < "$SOURCE" > "$OUT/$LABEL-source-lines.txt"
 cp "$SOURCE" "$OUT/$LABEL-source.txt"
 

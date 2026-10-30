@@ -283,11 +283,26 @@ def requested(out_dir: Path) -> set[str] | None:
     return set(path.read_text(encoding="utf-8").split())
 
 
-def group_rows(group: str, runs: dict[str, list[Obj]], asked: set[str] | None) -> list[tuple[str, str, str]]:
+def not_run_reasons(out_dir: Path) -> dict[str, str]:
+    """{group: reason} from not-run.txt: the groups run-review.sh skipped on purpose (no MarkupEditor harness)."""
+    path = out_dir / "not-run.txt"
+    out: dict[str, str] = {}
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            name, sep, reason = line.partition(": ")
+            if sep:
+                out[name.strip()] = reason.strip()
+    return out
+
+
+def group_rows(group: str, runs: dict[str, list[Obj]], asked: set[str] | None,
+               skipped: dict[str, str] | None = None) -> list[tuple[str, str, str]]:
     """The rows of one group. A group the runner was not asked for, with no transcript, is NOT-RUN: it never
     started, so it did not fail. With no record of what was asked, an absent group is not known to be unrequested
     and keeps failing; a group that was asked for and left nothing fails; a group that ran is always scored."""
     rows, transcripts = GROUPS[group]
+    if skipped and group in skipped and not any(t in runs for t in transcripts):
+        return [(r, "NOT-RUN", f"scenario group {group} was skipped: {skipped[group]}") for r in rows]
     if asked is not None and group not in asked and not any(t in runs for t in transcripts):
         return [(r, "NOT-RUN", f"scenario group {group} was not requested (scenarios.txt lists "
                  f"{' '.join(sorted(asked)) or 'none'}) and left no transcript") for r in rows]
@@ -301,7 +316,8 @@ def main(argv: list[str]) -> int:
     out_dir = Path(argv[0])
     runs = {p.stem: V.load_events(p) for p in sorted(out_dir.glob("*.jsonl"))}
     asked = requested(out_dir)
-    rows = [row for group in GROUPS for row in group_rows(group, runs, asked)]
+    skipped = not_run_reasons(out_dir)
+    rows = [row for group in GROUPS for row in group_rows(group, runs, asked, skipped)]
     for name, verdict, note in rows:
         sys.stdout.write(f"{name:3} {verdict:8} {note}\n")
     verdicts = {v for _, v, _ in rows}

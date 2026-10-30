@@ -352,7 +352,7 @@ def test_each_runner_refuses_while_another_runner_holds_the_lock_before_it_write
                               cwd=ROOT, timeout=60)
         assert proc.returncode == 75, (proc.returncode, proc.stderr)
         assert "run-other.sh" in proc.stderr and name in proc.stderr
-        assert not out.exists()  # nothing written: no status file, no seeded viewer, no transcript
+        assert not out.exists()  # nothing written: no status file, no transcript
         assert not list((ROOT / "docs").glob("zz-*"))  # no copy made
     finally:
         holder.kill()
@@ -410,7 +410,7 @@ def test_every_runner_uses_the_guard_and_none_installs_its_own_trap_or_copies_in
         assert "runner_sweep_stale" in sh and "runner_track" in sh, name
         assert not re.search(r"^trap ", sh, re.MULTILINE), name  # the guard owns the exit trap
         lock_at = sh.index(f"runner_lock {name}")
-        for effect in ('mkdir -p "$OUT"', "memory.py viewer", "cp "):
+        for effect in ('mkdir -p "$OUT"', "cp "):
             if effect in sh:
                 assert lock_at < sh.index(effect), (name, effect)  # the lock comes before the first write
     readme = (ACC / "README.md").read_text(encoding="utf-8")

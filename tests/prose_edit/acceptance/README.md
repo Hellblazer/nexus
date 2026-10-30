@@ -9,7 +9,7 @@ Headless Claude Code runs of the real `prose-edit` skill and `line-editor` agent
 | `run-canaries.sh` | The tool-restriction canary, the T2-failure canary, unmapped, stdin, stdin without genre. |
 | `verdicts.py OUT_DIR` | Verdict and compliance counts per run. Exit 1 on any failure, 3 when none failed but a run was `NOT-MEASURABLE` or `VACUOUS` or a scenario was `NOT-RUN` (listed in `not-run.txt` by `runner_not_run`), 0 only when every run passed. The cut-only kinds have oracles of their own, stated in the file: `cutonly` (cutonly-1), `cutonly-1d`, `cutonly-repeat` (cutonly-2, scored against cutonly-1d's rejected cut; `VACUOUS` when the editor never proposes it again) and `cutonly-web` (no surviving edit inside an excluded element, located by `html.parser`). |
 | `runner_guard.bash` | Sourced by `run-review.sh`, `run-teach.sh` and `run-memory-gate.sh` (not run on its own): the exclusive runner lock, the sweep of an older runner's leftover copies, and the exit trap that removes the copies. See "One runner at a time". |
-| `run-review.sh` | The review-loop scenarios (nexus-ger02.4): reject then run again, list and remove a rejection then run again, a stdin run. `SCENARIOS="a b c"` (default all) picks the groups and is recorded in `scenarios.txt`. `SCENARIOS="b"` alone is refused (exit 2): b1 lists the rejections a2 stored, so b needs a's stored rejections and name `a` with it (`SCENARIOS="a b"`). Several turns each, answers through `RESUME_FROM`; the skill echoes an answer (`apply --dry-run`) and waits, so each answer turn is followed by a confirmation turn (`a2c`, `a4c`, `b4c`, `c2c`). The script sets `PROSE_EDIT_TEST=1`, which `PROSE_EDIT_OPEN` needs. Writes to T2 under `PROSE_EDIT_PROJECT_PREFIX` (default `zzprose024_`). |
+| `run-review.sh` | The review-loop scenarios (nexus-ger02.4): reject then run again, list and remove a rejection then run again, a stdin run. `SCENARIOS="a b c"` (default all) picks the groups and is recorded in `scenarios.txt`. `SCENARIOS="b"` alone is refused (exit 2): b1 lists the rejections a2 stored, so b needs a's stored rejections and name `a` with it (`SCENARIOS="a b"`). Several turns each, answers through `RESUME_FROM`; the skill echoes an answer (`apply --dry-run`) and waits, so each answer turn is followed by a confirmation turn (`a2c`, `a4c`, `b4c`, `c2c`). Groups a and b are path runs and are NOT-RUN here (see "Path-run review is NOT-RUN" below); c, the stdin run, runs. Writes to T2 under `PROSE_EDIT_PROJECT_PREFIX` (default `zzprose024_`). |
 | `review_verdicts.py OUT_DIR` | Verdicts for those runs from what the skill's scripts printed. A rejected fix shown again is a FAIL. A group that `scenarios.txt` does not list and that left no transcript is `NOT-RUN`, not FAIL (exit 3 when every row is PASS or NOT-RUN; a listed group with no transcript, or no `scenarios.txt`, still fails). `VACUOUS` (b3 only) means the editor did not propose the removed edit again, so the check proved nothing; it is reported as it is, never retried into a pass. |
 | `run-memory-gate.sh LABEL SOURCE [N]` | The rejection-memory gate (nexus-ger02.16): N fresh runs on a copy of SOURCE. Writes `LABEL-<k>-<turn>.jsonl`. `GATE_JOBS` runs at once, default 1 (the preregistered runs were one at a time; several copies at once sit as siblings in `docs/zz-memgate/`, within reach of the editor's Glob and Grep). |
 | `memory_gate_verdicts.py OUT_DIR` | Raw counts and the recurrence rate per document and pooled, against the threshold below. |
@@ -35,6 +35,18 @@ The runner uses `--permission-mode dontAsk`, allows `Bash` only for `brief.py`, 
 
 A denied call in a scenario is a failure of the skill's instructions, not an incident. `verdicts.py` counts it under `denied`.
 
+## Path-run review is NOT-RUN (nexus-scmcs.2.13)
+
+A path run reviews its edits as suggestions in the MarkupEditor app, through MCP tools the app serves. A headless `claude -p` session cannot drive the app, and the skill has no other review path for a file (the Typora copy is gone), so every scenario that edits a file is NOT-RUN here, with the reason printed and recorded; nothing skips silently.
+
+| Runner | What happens now |
+| --- | --- |
+| `run-review.sh` | Groups `a` and `b` are recorded in `not-run.txt` with the reason and skipped; `review_verdicts.py` scores their rows `NOT-RUN` with it. Group `c` (the stdin run, which keeps its in-chat review) runs and is scored as before. With only `a` or `b` named, nothing runs and the runner exits 3. |
+| `run-teach.sh` | NOT-RUN, exit 3: scenario 6 and every step 13 flow edit a file. `teach_verdicts.py` prints the reason and exits 3. |
+| `run-memory-gate.sh` | NOT-RUN, exit 3: every session edits a file. `memory_gate_verdicts.py` prints the reason and exits 3. The recurrence threshold has no new measurement until a harness exists. |
+
+Seeding the rejections by script (calling `review.py render` and `apply` between model turns) cannot replace the model turns here: the first turn is the editor's own run, and the skill stops before dispatching the editor when the app is not there. What would restore these scenarios is a harness with a stand-in MarkupEditor MCP server for the headless session; `PROSE_EDIT_APP_RUNNER=1` is the switch such a harness sets, and the bodies of the three runners are kept for it. Until then the review loop is covered by the script tests (`tests/prose_edit/test_markup_*.py`, over the app's real reply shapes) and by Sam's hand trial.
+
 ## One runner at a time
 
 `run-review.sh`, `run-teach.sh` and `run-memory-gate.sh` each copy a scenario document into the shared worktree. The editor Greps the genre's paths (the brief's `Genre paths:` line, built from the tracked and the untracked files, so an untracked copy counts). In the exit batch of 2026-10-03 the three runners ran at once with their copies in `docs/*.md`: each copy was a sibling document of the others, the editor found its own sentences there and called the filler lines house refrains, and the results of review a3, the teach card text and every memory-gate session were not evidence.
@@ -45,7 +57,7 @@ Three controls, all in `runner_guard.bash`:
 - **Copies outside the editor's search.** The copies live in `docs/zz-review/`, `docs/zz-teach/` and `docs/zz-memgate/`, nested directories no built-in genre maps, so no `Genre paths:` list reaches them. `--genre reference-doc` is passed on every edit run for that reason. `runner_sweep_stale` removes untracked `docs/zz-*` left by an older runner at the start (the lock holder knows none is live).
 - **Nothing left behind.** `runner_track` registers the copy directory and the exit trap removes it, on a normal exit, an error, INT, TERM or HUP.
 
-A runner that exits 75 wrote nothing: no output directory, no seeded viewer, no copy.
+A runner that exits 75 wrote nothing: no output directory, no copy.
 
 ## The per-kind verdicts (nexus-ger02.6, S1)
 

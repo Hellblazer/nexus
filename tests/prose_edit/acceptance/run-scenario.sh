@@ -13,7 +13,7 @@
 #   allowed   Bash only for the three prose-edit scripts, Read, Write, Agent
 #   denied    Bash(nx:*), Bash(uv:*), Bash(bd:*), Bash(curl:*)
 #   mode      dontAsk: anything not allowed is refused instead of prompting
-# PROSE_EDIT_NX, PROSE_EDIT_OPEN (honoured only with PROSE_EDIT_TEST=1), PROSE_EDIT_PROJECT_PREFIX and TMPDIR pass
+# PROSE_EDIT_NX, PROSE_EDIT_PROJECT_PREFIX and TMPDIR pass
 # through from the caller's environment.
 set -u
 NAME="${1:?name}"

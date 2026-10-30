@@ -338,3 +338,77 @@ def test_a_refused_result_needs_no_block(prose: Prose, repo: Path) -> None:
     reply = app_reply(read(work / "propose.json"), refuse={1: "no"})
     assert "block" not in reply["results"][1]
     assert proposed_proc(prose, work, reply).returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# Gate 1c survivors: each refusal is a named message, never a traceback that happens to exit 1 (nexus-scmcs.2.10)
+# ---------------------------------------------------------------------------
+
+
+def refused_by_name(prose: Prose, repo: Path, mutate, *needles: str) -> None:
+    work, _ = start(prose, repo, EDITS, text=TEXT)
+    proc = translate_proc(prose, work, mutate(app_blocks(TEXT, target_url(repo))))
+    assert proc.returncode == 1, proc.stdout
+    assert all(n in proc.stderr for n in needles) and "Traceback" not in proc.stderr, proc.stderr
+    assert not (work / "propose.json").exists()
+
+
+def test_the_source_view_is_refused_by_name_even_with_a_url(prose: Prose, repo: Path) -> None:
+    refused_by_name(prose, repo, lambda w: {**w, "view": "source"}, "source view")
+
+
+def test_a_reply_with_no_blocks_and_a_url_is_refused_by_name(prose: Prose, repo: Path) -> None:
+    refused_by_name(prose, repo, lambda w: {**w, "blocks": []}, "holds no blocks")
+
+
+def test_a_missing_url_is_refused_by_name(prose: Prose, repo: Path) -> None:
+    refused_by_name(prose, repo, lambda w: {k: v for k, v in w.items() if k != "url"}, "names no `url`")
+
+
+def test_a_block_without_its_fields_is_refused_by_name(prose: Prose, repo: Path) -> None:
+    def broken(w: dict) -> dict:
+        w["blocks"][1] = {"index": 1}
+        return w
+    refused_by_name(prose, repo, broken, "needs an integer index")
+
+
+def test_a_block_index_that_appears_twice_is_refused_by_name(prose: Prose, repo: Path) -> None:
+    def twice(w: dict) -> dict:
+        w["blocks"][2] = dict(w["blocks"][1])
+        return w
+    refused_by_name(prose, repo, twice, "appears twice")
+
+
+def test_a_read_that_starts_at_firstEditable_after_the_first_block_is_accepted(prose: Prose, repo: Path) -> None:
+    """The app lists read-only blocks (a metadata block) before firstEditable; a read from there is a whole document."""
+    work, _ = start(prose, repo, EDITS, text=TEXT)
+    whole = app_blocks(TEXT, target_url(repo))
+    proc = translate_proc(prose, work, {**whole, "blocks": whole["blocks"][1:], "firstEditable": 1})
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_an_unknown_propose_status_is_refused_not_dropped(prose: Prose, repo: Path) -> None:
+    work, _ = translated(prose, repo)
+    reply = app_reply(read(work / "propose.json"))
+    reply["results"][1]["status"] = "weird"
+    proc = proposed_proc(prose, work, reply)
+    assert proc.returncode == 1 and "status" in proc.stderr and "Traceback" not in proc.stderr
+    assert not (work / "suggestions.json").exists()
+
+
+def test_an_answer_the_author_wrote_is_not_sent_to_the_app(prose: Prose, repo: Path) -> None:
+    work, _ = start(prose, repo, EDITS, text=TEXT, queries=[{"n": 1, "anchor": "wakes every ten", "text": "Every ten exactly?"}])
+    answers = write_json(work / "answers.json", [{"answers": "Q1", "old": "picks the oldest job.",
+                                                  "new": "picks the oldest job first."}])
+    n = review_ok(prose, "answer", "--work", str(work), "--from-file", str(answers))["added"][0]["n"]
+    out = review_ok(prose, "translate", "--work", str(work), "--blocks-file",
+                    str(write_json(work / "blocks.json", app_blocks(TEXT, target_url(repo)))))
+    assert n not in read(work / "propose.json")["order"] and out["sent"] == 4
+
+
+def test_an_edit_render_could_not_place_is_not_sent_to_the_app(prose: Prose, repo: Path) -> None:
+    twice = edit(6, "basically ", "", "occurs twice in the file")
+    work, out = translated(prose, repo, edits=[*EDITS, twice])
+    assert [int(u["n"]) for u in read(work / "session.json")["unplaced"]] == [6]  # setup: render could not place it
+    assert 6 not in read(work / "propose.json")["order"] and out["sent"] == 4
+    assert 6 not in [r["n"] for r in out["refused"]]

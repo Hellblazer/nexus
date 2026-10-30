@@ -17,8 +17,8 @@
 # behaved selects the pass (nexus-ger02.16). Afterwards: python3 review_verdicts.py $OUT_DIR, then delete the
 # zzprose024_* T2 projects.
 #
-#   a1 a2 a3 a4   reject, then run again
-#   b1 b2 b3 b4   list the stored rejections, remove one, run again
+#   a1 a2 a3 a4   reject, then run again                         NOT-RUN without a MarkupEditor harness (path runs)
+#   b1 b2 b3 b4   list the stored rejections, remove one, run again   NOT-RUN likewise
 #   c1 c2         a stdin run with --genre commit-message
 #
 # Stop and report if a run shows a T2 failure; never repair it from here.
@@ -44,8 +44,21 @@ esac
 runner_lock run-review.sh
 export TMPDIR="${TMPDIR:?set TMPDIR to a directory outside the repository}"
 export PROSE_EDIT_PROJECT_PREFIX="${PROSE_EDIT_PROJECT_PREFIX:-zzprose024_}"
-export PROSE_EDIT_TEST=1  # PROSE_EDIT_OPEN is ignored without it
-export PROSE_EDIT_OPEN="${PROSE_EDIT_OPEN:-true}"
+# A path run reviews in the MarkupEditor app, which a headless session cannot drive (nexus-scmcs.2.13): groups a
+# and b are NOT-RUN (recorded in $OUT/not-run.txt, scored NOT-RUN by review_verdicts.py), and c, the stdin run,
+# keeps its in-chat review and runs. PROSE_EDIT_APP_RUNNER=1, set only by a harness that answers the MarkupEditor
+# tools, runs them.
+if [ "${PROSE_EDIT_APP_RUNNER:-0}" != 1 ]; then
+  keep=""
+  for g in $SCENARIOS; do
+    case "$g" in
+      a|b) runner_not_run "$OUT" "$g" "$RUNNER_NO_APP_REASON" ;;
+      *) keep="$keep $g" ;;
+    esac
+  done
+  SCENARIOS="${keep# }"
+  [ -n "$SCENARIOS" ] || { mkdir -p "$OUT"; echo none > "$OUT/scenarios.txt"; exit 3; }
+fi
 DIR=docs/zz-review
 DOC=$DIR/scenario.md
 mkdir -p "$OUT"
@@ -55,7 +68,6 @@ runner_sweep_stale
 mkdir -p "$DIR" && runner_track "$DIR"
 cp tests/prose_edit/fixtures/review-scenario.md "$DOC" || exit 1
 git status --short > "$OUT/repo-status-before.txt"
-python3 prose-edit/skills/prose-edit/scripts/memory.py viewer --set Typora > "$OUT/seed-viewer.json" || exit 1
 
 run() { OUT_DIR="$OUT" "$HERE/run-scenario.sh" "$@"; }
 # answer NAME FROM PROMPT: the author's answer, then the confirmation of the echo the skill shows.

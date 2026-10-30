@@ -17,19 +17,21 @@
 #   runner_track REL...   paths relative to WT that the exit trap removes
 #   runner_not_run OUT NAME REASON
 #                         say, on stderr and in OUT/not-run.txt ("NAME: REASON"), that scenario NAME was not run. The
-#                         verdict script reads that file and scores the scenario NOT-RUN with the reason. A runner
-#                         that skips a scenario goes through this, never silently (nexus-ger02.10).
+#                         verdict scripts read that file and score the scenario NOT-RUN with the reason. A runner
+#                         that skips a scenario goes through this, never silently (nexus-ger02.10, nexus-scmcs.2.13).
+#   RUNNER_NO_APP_REASON  why a path-run review scenario cannot run headless
 #
 # PROSE_EDIT_RUNNER_LOCK overrides the lock path (the tests use it); by default the lock sits in the git common
 # directory, so every worktree of the box sees it.
+RUNNER_NO_APP_REASON="a path run reviews its edits in the MarkupEditor app, which a headless claude -p session cannot drive; the scenario needs a harness that answers the MarkupEditor tools (PROSE_EDIT_APP_RUNNER=1 says one is in place; none exists yet)"
 RUNNER_COPIES=()
-RUNNER_OWNS_LOCK=""
-RUNNER_LOCK_PATH=""
 
 runner_not_run() {
   mkdir -p "$1" && printf '%s: %s\n' "$2" "$3" >> "$1/not-run.txt"
   printf 'NOT-RUN %s: %s\n' "$2" "$3" >&2
 }
+RUNNER_OWNS_LOCK=""
+RUNNER_LOCK_PATH=""
 
 _runner_lock_path() {
   if [ -n "${PROSE_EDIT_RUNNER_LOCK:-}" ]; then

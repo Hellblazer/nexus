@@ -415,11 +415,7 @@ def test_a_stdin_run_stores_no_rejection_even_when_the_author_rejects(prose: Pro
     assert not any(t.startswith("doc/") for t in t2_titles(REPO_PROJECT))
 
 
-def test_the_copy_header_names_held_and_reject_in_the_answer_grammar(prose: Prose, repo: Path) -> None:
-    _, rendered = start(prose, repo, [E1, E2])
-    copy = Path(rendered["copy"]).read_text(encoding="utf-8")
-    assert "An edit you do not name stays undecided and nothing is stored for it." in copy
-    assert "`reject 2`" in copy and "`reject the rest`" in copy
+def test_the_answer_grammar_takes_reject_and_rest() -> None:
     mod = _review()
     for spec, expected in (("1, 3-5", {1, 3, 4, 5}), ("all", {1, 2, 3, 4, 5}), ("none", set())):
         assert mod.parse_numbers(spec, {1, 2, 3, 4, 5}, "--reject") == expected

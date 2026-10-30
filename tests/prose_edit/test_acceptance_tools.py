@@ -316,7 +316,7 @@ def test_a_work_directory_held_for_the_stdin_answer_is_not_blamed_on_the_other_r
              _res("a", '```json\n{"brief_sha": "' + BRIEF_ID + '", "edits": []}\n```'),
              _use("f", "Bash", {"command": f"{brief} filter - --file {held}/input.txt"}),
              _res("f", '{"edits": [], "dropped": []}'),
-             _use("r", "Bash", {"command": f"{review} render -"}), _res("r", '{"copy": "x", "opened": false}')]
+             _use("r", "Bash", {"command": f"{review} render -"}), _res("r", '{"counts": {"edits": 1}, "unplaced": []}')]
     unmapped = [_use("p", "Bash", {"command": f"{brief} parse notes.txt"}), _res("p", "{}"),
                 {"type": "result", "result": "Which genre applies?"}]
     for name, events in (("stdin", stdin), ("unmapped", unmapped)):
@@ -854,7 +854,7 @@ def test_the_stdin_run_needs_the_same_read_proof() -> None:
         return [_use("a", "Agent", {}), *read, _res("a", f"```json\n{reply}\n```"),
                 _use("f", "Bash", {"command": f"{brief} filter - --file {WORK_DIR}/input.txt"}),
                 _res("f", '{"edits": [], "dropped": []}'),
-                _use("r", "Bash", {"command": f"{review} render -"}), _res("r", '{"copy": "x", "opened": false}')]
+                _use("r", "Bash", {"command": f"{review} render -"}), _res("r", '{"counts": {"edits": 1}, "unplaced": []}')]
 
     for read, expected in ((_brief_read(), "PASS"), ([], "FAIL")):
         events = stdin(read)

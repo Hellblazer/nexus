@@ -297,3 +297,45 @@ def test_more_than_200_sendable_edits_send_200_and_route_the_rest_to_the_chat() 
     assert len(proposals) == 200 and [p["n"] for p in proposals] == list(range(1, 201))
     assert [(r["n"], r["cause"]) for r in refused] == [(n, "over-limit") for n in range(201, 206)]
     assert refused[0]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Gate 1c survivors: the visible-text path's own ambiguity, the 2000 boundary, kinds by name (nexus-scmcs.2.10)
+# ---------------------------------------------------------------------------
+
+
+def test_an_old_found_by_its_visible_text_in_two_blocks_is_ambiguous_not_guessed() -> None:
+    blocks = [block(1, "It was *really* ok today."), block(2, "It was *really* ok again.")]
+    proposals, refused = one(blocks, "was _really_ ok", "was _truly_ ok")
+    assert proposals == [] and [r["cause"] for r in refused] == ["ambiguous"]
+
+
+def test_an_old_with_an_escape_found_by_its_visible_text_in_two_blocks_is_ambiguous() -> None:
+    blocks = [block(1, "see \\[sic\\] here"), block(2, "see \\[sic\\] there")]
+    proposals, refused = one(blocks, "see [sic]", "see [SIC]")
+    assert proposals == [] and [r["cause"] for r in refused] == ["ambiguous"]
+
+
+def test_a_verbatim_hit_in_one_block_and_a_visible_text_hit_in_another_is_ambiguous() -> None:
+    blocks = [block(1, "a *x* b"), block(2, "a _x_ b")]
+    proposals, refused = one(blocks, "a *x* b", "a *y* b")
+    assert proposals == [] and [r["cause"] for r in refused] == ["ambiguous"]
+
+
+def test_a_replacement_of_exactly_2000_characters_is_sent_and_2001_goes_to_the_chat() -> None:
+    proposals, refused = one([block(1, "aaa bbb ccc")], "bbb", "x" * 2000)
+    assert refused == [] and len(proposals[0]["replace"]) == 2000
+    proposals, refused = one([block(1, "aaa bbb ccc")], "bbb", "x" * 2001)
+    assert proposals == [] and [r["cause"] for r in refused] == ["too-long"]
+
+
+def test_a_kind_that_merely_contains_meta_is_not_the_metadata_block() -> None:
+    proposals, refused = one([block(0, "basically ok", "metadata-list")], "basically ok", "ok")
+    assert refused == [] and len(proposals) == 1
+    proposals, refused = one([block(0, "basically ok", "metadata")], "basically ok", "ok")
+    assert proposals == [] and [r["cause"] for r in refused] == ["metadata"]
+
+
+def test_an_insertion_that_starts_inside_an_entity_is_refused() -> None:
+    proposals, refused = one([block(1, "Tom &amp; Jerry")], "Tom &amp; Jerry", "Tom &xamp; Jerry")
+    assert proposals == [] and refused

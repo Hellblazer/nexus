@@ -280,6 +280,10 @@ def main(argv: list[str]) -> int:
         return 0
     out = Path(argv[0])
     runs = {name: _read_events(out, name) for name in ("s6-1", "t1", "t2", "t2c", "t3", "t4", "t4c", "t5")}
+    skipped = out / "not-run.txt"
+    if skipped.is_file() and not any(runs.values()):  # run-teach.sh skipped every flow on purpose
+        sys.stdout.write(f"NOT-RUN  {skipped.read_text(encoding='utf-8').strip()}\n")
+        return 3
     rows: list[tuple[str, str, str]] = []
 
     def need(*names: str) -> str | None:
