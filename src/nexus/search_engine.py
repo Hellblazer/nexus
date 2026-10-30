@@ -2395,7 +2395,12 @@ def search_cross_corpus(
     # Link-aware boost (RDR-060 E3)
     if link_boost and catalog and all_results:
         from nexus.scoring import apply_link_boost  # noqa: PLC0415 — branch-local; only when link_boost enabled
-        all_results = apply_link_boost(all_results, catalog)
+        # nexus-6pfgb.47: the owners are stamped tenant-wide, so the boost takes the display lookup's
+        # doc_id -> collection map (joined after its own link call) and drops other collections' owners.
+        all_results = apply_link_boost(
+            all_results, catalog,
+            homes=(lambda: display_lookup.maps()[2]) if display_lookup is not None else None,
+        )
 
     # Compute topic assignments once for both boost and grouping (RDR-070)
     _topic_assignments: dict[str, int] | None = None

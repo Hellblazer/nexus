@@ -2,7 +2,7 @@
 """Pure scoring primitives: normalization, hybrid scoring, reranking, interleaving."""
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 import structlog
@@ -558,10 +558,15 @@ _LINK_BOOST_WEIGHTS: dict[str, float] = {
 _DEFAULT_LINK_BOOST_WEIGHT: float = 0.15
 
 
-def _link_owners(r: SearchResult) -> list[str]:
+def _link_owners(r: SearchResult, homes: Mapping[str, str] | None = None) -> list[str]:
     """The documents whose links boost *r*: the hit's ``doc_id`` first, then the rest of the
     documents holding its chunk (``_owner_doc_ids``, stamped by the search's catalog attach),
     at most :data:`~nexus.context_annotations.OWNER_RESOLVE_CAP` of them.
+
+    ``_owner_doc_ids`` is tenant-wide (a chash is a function of text alone), so *homes* (doc_id to
+    physical collection, from the page's display lookup) drops an owner known to live in another
+    collection than the hit's (nexus-6pfgb.47). An owner *homes* does not name stays: a lookup that
+    failed or skipped a document must not switch the boost off.
 
     A chunk two documents share is one row, and ``doc_id`` is whichever owner the lookup
     named first, so reading it alone ignored every other owner's links (RDR-236, nexus-6pfgb.20).
@@ -570,6 +575,8 @@ def _link_owners(r: SearchResult) -> list[str]:
     """
     did = r.metadata.get("doc_id", "")
     owners = list(dict.fromkeys([did, *(r.metadata.get("_owner_doc_ids") or ())]))
+    if homes:
+        owners = [o for o in owners if homes.get(o, "") in ("", r.collection)]
     return [o for o in owners if o][:OWNER_RESOLVE_CAP]
 
 
@@ -578,8 +585,13 @@ def apply_link_boost(
     catalog: Any,
     boost_weight: float = _DEFAULT_LINK_BOOST_WEIGHT,
     type_weights: dict[str, float] | None = None,
+    homes: Callable[[], Mapping[str, str]] | None = None,
 ) -> list[SearchResult]:
     """Boost hybrid_score for results whose source documents have outgoing links.
+
+    *homes* (nexus-6pfgb.47) returns the page's ``doc_id -> physical_collection`` map, from the display
+    lookup the search already runs; it is called once, after the link call, so the two overlap. An
+    owner it places in another collection than the hit's contributes no links.
 
     A hit's source documents are every owner of its chunk (:func:`_link_owners`); its signal is
     the sum of their link signals, capped at 1.0 below, from ONE ``links_from_batch`` call for
@@ -631,6 +643,14 @@ def apply_link_boost(
             link_type = lnk.get("link_type", "")
             w = tw.get(link_type, 0.0)
             tumbler_signal[from_t] = tumbler_signal.get(from_t, 0.0) + w
+
+    if homes is not None:
+        try:
+            home_map = homes()
+        except Exception:  # noqa: BLE001 — best-effort: a failed display lookup leaves every owner counted, as before
+            _log.debug("scoring_link_boost_homes_failed", exc_info=True)
+            home_map = {}
+        owners_of = [_link_owners(r, home_map) for r in results]
 
     # Apply boost.
     for r, owners in zip(results, owners_of):
