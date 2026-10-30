@@ -14500,6 +14500,7 @@ async def nx_answer(
             _shape, plan_id=best.plan_id, step_count=len(result.steps),
             chunk_refs=_notice_refs,
             unread_items=_verdict.coverage.ledger.assessment.skipped_items if _verdict.coverage is not None else 0,
+            total_items=_verdict.coverage.ledger.assessment.anchors_total if _verdict.coverage is not None else 0,
         )
         try:
             with _t2_ctx() as db:

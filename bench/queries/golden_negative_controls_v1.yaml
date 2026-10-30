@@ -26,13 +26,19 @@
 #   N02  Hazelcast    0 / 0 / 0 / 0   [0 / 0 / 0 / 0]
 #   N03  Auth0        0 / 0 / 0 / 0   [300 / 300 / 300 / 300]   Aerospike  0 / 0 / 0 / 0   [0 / 5 / 26 / 0]
 #   N04  Redis Sentinel, canary release, Sentinel quorum: no hit but this repo's own pin-test term list (nexus-jypmj.23)
-# A lexical hit that is not an exact hit is trigram noise (the engine matches near spellings). Candidates the same scan
+# A lexical hit that is not an exact hit is trigram noise (the engine matches near spellings). The lexical scan returns
+# at most 300 hits per corpus (the engine's page cap, MAX_QUERY_RESULTS); the bracketed counts show it saturating at
+# 300 for `vbucket` (docs, code) and `Auth0` (every corpus). A saturated 300 with no exact hit among them means
+# absence, not a truncated list: when the term occurs, the lexical route returns the exact hits only (Elasticsearch
+# rdr 16 and Cassandra rdr 1 came back as just those), and the trigram flood of near spellings appears only when no
+# exact hit exists. Candidates the same scan
 # set aside because they occur in the tenant: RabbitMQ (rdr, docs, knowledge, code), Keycloak (rdr 49, docs 42),
 # ZooKeeper (rdr 3, knowledge 27, code 1), Memcached (rdr 2, docs 3, knowledge 1, code 2), ScyllaDB (knowledge 2),
 # Okta (knowledge 3), SCIM (docs 1, knowledge 10). Linkerd was set aside too: its one exact hit is a substring of
 # `getLinkerDataOffset` in another owner's Java code. The scan is a point in time; a tenant that later indexes one of
-# these terms turns the control into a non-control, so re-run it before relying on the set (the scan script lives with
-# the bead's evidence, T2 `nexus/rdr232-jypmj23-negative-controls-2026-10-30`).
+# these terms turns the control into a non-control, so re-run it before relying on the set (the scan script lives in a
+# session scratchpad and is not in the repository; the method is recorded in T2
+# `nexus/rdr232-jypmj23-negative-controls-2026-10-30`, enough to rewrite it).
 #
 # Provenance: written 2026-10-28 by the conexus developer agent; N01-N03 replaced 2026-10-30 (nexus-jypmj.23).
 # IN-SAMPLE and 4 requests: a presence check for false coverage, not a rate. No model has run on the replacements.

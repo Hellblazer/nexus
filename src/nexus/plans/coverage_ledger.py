@@ -231,7 +231,8 @@ _USD_EPS: float = 1e-9
 #: per-call instruction repeats. Unmeasured as accuracy or latency-per-anchor (same status as the facet cap).
 MAX_ANCHORS_PER_ASSESSMENT_CALL: int = 20
 #: Characters of item text one call carries (the bundle prompt guard is 200,000 for the whole prompt).
-#: Items past it are not assessed; a facet that no assessed item supports is then ``unassessed``.
+#: Items past it are not assessed (they are the report's ``unread_ids``); a facet that no assessed item supports
+#: or contradicts is ``unsupported`` all the same, and the unread count is disclosed (nexus-jypmj.23).
 ASSESSMENT_MAX_ITEM_CHARS: int = 120_000
 
 #: The order streams are assessed in: the named source first, then its lifecycle records, then the plan's
@@ -272,7 +273,8 @@ _UNUSABLE_DETAIL = "assessor_unusable"
 #: are an unusable reply; the last is a failed call.
 REPLY_CLASSES: tuple[str, ...] = ("support", "neutral_or_contradict", "all_rejected", "no_records", "raised")
 #: Why a facet is ``unassessed`` in the final ledger, counted in ``CoverageResult.unassessed_by_cause``.
-#: ``other`` is every reason not named here (the item cap left an item unread, an assessment never attempted).
+#: ``other`` is every reason not named here (an assessment never attempted, a reason this table does not know). An
+#: item the size cap left unread is not one: it leaves the facet ``unsupported`` and shows in ``skipped_items``.
 UNASSESSED_CAUSES: tuple[str, ...] = (
     "unusable_reply", "deadline_skip", "budget_skip", "raised_call", "stopped_after_failure", "other",
 )
@@ -399,7 +401,11 @@ class AssessmentReport:
 
     ``calls`` counts attempted calls (a failed call is one). ``rejected_records`` counts evidence records
     the validation dropped (an id outside the input, an unknown facet tag, an untagged quote or a bad role).
-    ``skipped_items`` counts anchors a call could not carry. ``detail`` names why the assessment stopped.
+    ``skipped_items`` is the number of retrieved items the check never read because the per-call size cap left them out
+    (nexus-jypmj.23): each such item is counted once per stream per round, never past ``anchors_total`` (the items the
+    check was handed), and an item a later round read is no longer counted (:meth:`merged_with`). ``unread_ids`` names
+    them and ``read_ids`` the items a completed call carried, which is how a repair finds the unread ones.
+    ``detail`` names why the assessment stopped.
 
     The measurement counters (nexus-jypmj.3.10): ``call_log`` has one :class:`AssessmentCall` per attempted call, in
     order, from which the reply classes are counted per call and per stream; ``accepted_records`` counts the records
@@ -419,6 +425,9 @@ class AssessmentReport:
     streams: tuple[str, ...] = ()
     rejected_records: int = 0
     skipped_items: int = 0
+    anchors_total: int = 0
+    unread_ids: tuple[str, ...] = ()
+    read_ids: tuple[str, ...] = ()
     latency_ms: int = 0
     detail: str = ""
     accepted_records: int = 0
@@ -435,12 +444,17 @@ class AssessmentReport:
         outcome: AssessmentOutcome = later.outcome if later.outcome != "not_attempted" else self.outcome
         if later.outcome in ("failed", "skipped_deadline", "skipped_budget") and self.calls > 0 and self.outcome in ("ok", "partial_failure"):
             outcome = "partial_failure"
+        # An item is unread only if no round read it: a repair that reads an item the first round left out removes it
+        # from the count, and an item both rounds left out is counted once, not twice.
+        read = dict.fromkeys(self.read_ids + later.read_ids)
+        unread = tuple(i for i in dict.fromkeys(self.unread_ids + later.unread_ids) if i not in read)
         return AssessmentReport(
             outcome=outcome,
             calls=self.calls + later.calls, facets_per_call=self.facets_per_call + later.facets_per_call,
             streams=tuple(dict.fromkeys(self.streams + later.streams)),
             rejected_records=self.rejected_records + later.rejected_records,
-            skipped_items=self.skipped_items + later.skipped_items,
+            skipped_items=len(unread), anchors_total=later.anchors_total or self.anchors_total,
+            unread_ids=unread, read_ids=tuple(read),
             latency_ms=self.latency_ms + later.latency_ms, detail=later.detail or self.detail,
             accepted_records=self.accepted_records + later.accepted_records,
             unusable_calls=self.unusable_calls + later.unusable_calls,
@@ -489,7 +503,7 @@ class AssessmentReport:
         return {
             "outcome": self.outcome, "calls": self.calls, "facets_per_call": list(self.facets_per_call),
             "streams": list(self.streams), "rejected_records": self.rejected_records,
-            "skipped_items": self.skipped_items, "latency_ms": self.latency_ms, "detail": self.detail,
+            "skipped_items": self.skipped_items, "anchors_total": self.anchors_total, "latency_ms": self.latency_ms, "detail": self.detail,
             "accepted_records": self.accepted_records, "unusable_calls": self.unusable_calls,
             "raised_calls": self.raised_calls, "failure_cause": self.failure_cause,
             "reply_classes": self.reply_classes(), "reply_by_stream": self.reply_by_stream(),
@@ -759,8 +773,10 @@ _UNASSESSED_REASON: dict[str, str] = {
     "skipped_deadline": "assessment_skipped_deadline",
     "skipped_budget": "assessment_skipped_budget",
     "not_attempted": "assessment_not_attempted",
-    # Every call ran and none failed or was skipped, yet no facet could be decided: the assessment read what it was
-    # given and that was not enough to decide. Not a failed assessment (nexus-jypmj.23).
+    # DEFENSIVE: no pass produces this today. ``_assess`` marks a facet unassessed only for a failed, unusable or
+    # skipped call, and any of those makes the outcome something other than ``ok``; the cap-omitted anchors that once
+    # produced it now leave a facet ``unsupported`` (nexus-jypmj.23). If a future pass leaves every facet unassessed
+    # under ``ok``, the reason is not a failed assessment, and this keeps it from saying so.
     "ok": "assessment_incomplete",
 }
 
@@ -964,8 +980,9 @@ class CoverageBoundary:
             fid for fid, f in prior_by_id.items()
             if f.state in ("covered", "contradicted") and set(f.evidence_ids) <= anchor_ids
         }
-        # A repairable gap was assessed against everything held then, so only the new anchors can change it;
-        # every other facet that is not decided is assessed against all of them.
+        # A repairable gap was assessed against what the first round READ, so only the new anchors and the anchors
+        # that round left unread (the per-call size cap, nexus-jypmj.23) can change it; every other facet that is not
+        # decided is assessed against all of them.
         delta = [
             f for f in request.facets
             if f.id not in blocked and f.id not in keep and (p := prior_by_id.get(f.id)) is not None
@@ -979,12 +996,19 @@ class CoverageBoundary:
         if full and anchors:
             assessed, new_report = await self._assess(full, anchors, view, reserve)
         prior_ids = {a.item_id for a in prior.ledger.anchors} if prior is not None else set()
-        fresh = [a for a in anchors if a.item_id not in prior_ids]
+        prior_unread = set(prior.ledger.assessment.unread_ids) if prior is not None else set()
+        # The new anchors, and the first round's unread ones (they are still in the input, never assessed): the same
+        # per-call size cap and the same stage allowance bound this pass as they bound the first.
+        fresh = [a for a in anchors if a.item_id not in prior_ids or a.item_id in prior_unread]
         if delta and fresh:
             more, more_report = await self._assess(delta, fresh, view, reserve)
             assessed.update(more)
             new_report = more_report if new_report.outcome == "not_attempted" else new_report.merged_with(more_report)
         report = report.merged_with(new_report) if prior is not None else new_report
+        # The unread count states what the check was handed: items still in the input that no round read, of all the
+        # items the check was given (the same anchor never counts twice, nor past the number of anchors).
+        unread = tuple(i for i in report.unread_ids if i in anchor_ids)
+        report = replace(report, unread_ids=unread, skipped_items=len(unread), anchors_total=len(anchors))
 
         findings_list: list[FacetFinding] = []
         for f in request.facets:
@@ -1141,7 +1165,10 @@ class CoverageBoundary:
         if allowance <= 0:
             return done("skipped_deadline", detail="too little of the deadline was left")
         estimate = view.assessment_cost_estimate()
-        planned = planned_reassessment_calls(len(targets), self.max_facets_per_call)
+        # The first round's unread anchors are reassessed beside the repair evidence (nexus-jypmj.23): count their packs.
+        unread_first = frozenset(first.ledger.assessment.unread_ids)
+        planned = planned_reassessment_calls(
+            len(targets), self.max_facets_per_call, extra_items=len(unread_first), items_per_call=self.max_anchors_per_call)
         if not usd_affordable(view.remaining_usd(), None if estimate is None else estimate * planned):
             return done("skipped_budget", detail="the USD allowance could not carry the reassessment")
 
@@ -1159,7 +1186,9 @@ class CoverageBoundary:
         # fetch the rest), stopped by the first failure
         retrieval_until = started + allowance * REPAIR_RETRIEVAL_SHARE
         queries_until = started + allowance * REPAIR_RETRIEVAL_SHARE * 0.75
-        held_hashes = {a.chash.lower() for a in first.ledger.anchors if a.chash}
+        # An anchor the first round never read is not "held": a targeted query that returns it found something the
+        # check has yet to assess, so it is not filtered out here (it is already in the input, so it is not added again).
+        held_hashes = {a.chash.lower() for a in first.ledger.anchors if a.chash and a.item_id not in unread_first}
         hits: dict[str, RepairHit] = {}
         issued, failure = 0, ""
         for q in queries:
@@ -1177,41 +1206,53 @@ class CoverageBoundary:
                 if (hit.chash or hit.id).lower() not in held_hashes and self._hit_in_scope(hit):
                     hits.setdefault(hit.id, hit)
         found = len(hits)
-        if failure and not hits:
+        # With unread anchors the repair has something to assess even when the retrieval brings nothing new: the
+        # anchors the first round never read are reassessed below, so these early returns apply only without them.
+        if failure and not hits and not unread_first:
             return done("retrieval_failed", queries=issued, detail=f"a repair query failed: {failure}")
-        if not hits:
+        if not hits and not unread_first:
             return done("no_new_evidence", queries=issued, detail="the targeted queries found nothing not already held")
 
-        try:
-            fetched = await view.fetch(list(hits.values())[: self.max_repair_items * 2], timeout=max(MIN_REPAIR_QUERY_S, retrieval_until - time.monotonic()))
-        except Exception as exc:  # noqa: BLE001 — as above
-            _log.warning("nx_answer_coverage_repair_fetch_failed", error=type(exc).__name__)
-            return done("retrieval_failed", queries=issued, found=found, detail=f"the chunk fetch failed: {type(exc).__name__}")
-        held_texts = {strip_source_note(t) for t in view.evidence_texts if isinstance(t, str)}
+        texts, observed, merged = view.evidence_texts, view.observed, 0
         new: list[SupplementItem] = []
-        for item in fetched:
-            bare = strip_source_note(item.text)
-            if item.text and bare not in held_texts:
-                held_texts.add(bare)
-                new.append(item)
-            if len(new) >= self.max_repair_items:
-                break
-        if not new:
+        if hits:
+            try:
+                fetched = await view.fetch(list(hits.values())[: self.max_repair_items * 2], timeout=max(MIN_REPAIR_QUERY_S, retrieval_until - time.monotonic()))
+            except Exception as exc:  # noqa: BLE001 — as above
+                _log.warning("nx_answer_coverage_repair_fetch_failed", error=type(exc).__name__)
+                if not unread_first:
+                    return done("retrieval_failed", queries=issued, found=found, detail=f"the chunk fetch failed: {type(exc).__name__}")
+                fetched = []
+            held_texts = {strip_source_note(t) for t in view.evidence_texts if isinstance(t, str)}
+            for item in fetched:
+                bare = strip_source_note(item.text)
+                if item.text and bare not in held_texts:
+                    held_texts.add(bare)
+                    new.append(item)
+                if len(new) >= self.max_repair_items:
+                    break
+        if not new and not unread_first:
             return done("no_new_evidence", queries=issued, found=found, detail="the chunks fetched were already held")
 
-        # merge: the runner puts the items into the reduction's input and returns that input
-        view.install_supplement(new)
-        try:
-            texts, observed = view.rehydrate()
-        except Exception as exc:  # noqa: BLE001 — withdraw the items; the reduction hydrates as it would have
-            view.install_supplement(())
-            _log.warning("nx_answer_coverage_repair_rehydrate_failed", error=type(exc).__name__)
-            return done("not_merged", queries=issued, found=found, detail=f"re-reading the input failed: {type(exc).__name__}")
-        in_input = {strip_source_note(t) for t in texts if isinstance(t, str)}
-        merged = sum(1 for i in new if strip_source_note(i.text) in in_input)
-        if merged == 0:
-            view.install_supplement(())
-            return done("not_merged", queries=issued, found=found, detail="the reduction's input holds none of the repair evidence")
+        if new:
+            # merge: the runner puts the items into the reduction's input and returns that input
+            view.install_supplement(new)
+            try:
+                texts, observed = view.rehydrate()
+            except Exception as exc:  # noqa: BLE001 — withdraw the items; the reduction hydrates as it would have
+                view.install_supplement(())
+                _log.warning("nx_answer_coverage_repair_rehydrate_failed", error=type(exc).__name__)
+                if not unread_first:
+                    return done("not_merged", queries=issued, found=found, detail=f"re-reading the input failed: {type(exc).__name__}")
+                texts, observed, new = view.evidence_texts, view.observed, []
+            else:
+                in_input = {strip_source_note(t) for t in texts if isinstance(t, str)}
+                merged = sum(1 for i in new if strip_source_note(i.text) in in_input)
+                if merged == 0:
+                    view.install_supplement(())
+                    if not unread_first:
+                        return done("not_merged", queries=issued, found=found, detail="the reduction's input holds none of the repair evidence")
+                    texts, observed = view.evidence_texts, view.observed
 
         # recompute the ledger once, inside the repair allowance
         repair_until = started + allowance
@@ -1248,16 +1289,20 @@ class CoverageBoundary:
         groups = [tuple(facets[i:i + cap]) for i in range(0, len(facets), cap)]
         by_stream = {s: [a for a in anchors if a.stream == s] for s in STREAM_ORDER}
         planned: list[_PlannedCall] = []
+        # The items the size cap leaves out of a stream, counted once per stream however many facet groups and
+        # packs it has, and whether or not a call that carries the stream's other items ran (a skipped call does not
+        # make its stream's omitted items vanish from the count).
+        unread_ids: list[str] = []
         for s in STREAM_ORDER:
             if not by_stream[s]:
                 continue
-            _payload, included, omitted = _pack(by_stream[s])
+            _payload, included, _omitted = _pack(by_stream[s])
+            unread_ids.extend(a.item_id for a in by_stream[s][len(included):])
             packs = _balanced_chunks(included, self.max_anchors_per_call)
             for g in groups:
-                for k, pack in enumerate(packs):
+                for pack in packs:
                     planned.append(_PlannedCall(
                         s, g, [{"id": a.item_id, "text": a.content} for a in pack], frozenset(a.item_id for a in pack),
-                        omitted if k == len(packs) - 1 else 0,
                     ))
         tag_of = {f.id.lower(): f.id for f in facets}
         supports: dict[str, set[str]] = {f.id: set() for f in facets}
@@ -1347,7 +1392,8 @@ class CoverageBoundary:
                 else:
                     incomplete.setdefault(f.id, reason)
 
-        calls, rejected, skipped_items = 0, 0, 0
+        calls, rejected = 0, 0
+        read_ids: dict[str, None] = {}  # items a call with a usable reply carried
         accepted_total, unusable_n, raised_n = 0, 0, 0
         call_log: list[AssessmentCall] = []
         per_call: list[int] = []
@@ -1370,7 +1416,6 @@ class CoverageBoundary:
                 mark(group, _UNASSESSED_REASON[res.skipped])
                 continue
             calls += 1
-            skipped_items += call.omitted
             per_call.append(len(group))
             if stream not in used_streams:
                 used_streams.append(stream)
@@ -1428,7 +1473,8 @@ class CoverageBoundary:
                 )
                 continue
             completed += 1
-            # Anchors the per-call cap left out (``call.omitted``, summed into ``skipped_items``) were never read.
+            read_ids.update(dict.fromkeys(call.ids))
+            # Anchors the per-call cap left out (``unread_ids``) were never read.
             # A completed call decides its facets on what it read: a facet no READ item supports or contradicts is
             # unsupported (Sam, 2026-10-30, nexus-jypmj.23). Marking it unassessed meant a plan that hands the check
             # more anchors than its calls carry could never be withheld. The count of unread anchors is
@@ -1456,7 +1502,8 @@ class CoverageBoundary:
                 findings[f.id] = FacetFinding(f.id, "unsupported", (), REPAIRABLE_REASON)
         report = AssessmentReport(
             outcome=outcome, calls=calls, facets_per_call=tuple(per_call), streams=tuple(used_streams),
-            rejected_records=rejected, skipped_items=skipped_items,
+            rejected_records=rejected, skipped_items=len(unread_ids), anchors_total=len(anchors),
+            unread_ids=tuple(unread_ids), read_ids=tuple(read_ids),
             latency_ms=int((time.monotonic() - started) * 1000), detail=detail,
             accepted_records=accepted_total, unusable_calls=unusable_n, raised_calls=raised_n, call_log=tuple(call_log),
             skipped_budget_calls=skipped_budget_n, skipped_deadline_calls=skipped_deadline_n,
@@ -1474,14 +1521,13 @@ _WS = re.compile(r"\s+")
 @dataclass(frozen=True)
 class _PlannedCall:
     """One assessment call before it runs: the evidence stream, the facet group, the pack of items it reads (as the
-    check's payload and the ids a record may cite) and the items the character cap left out of this stream, carried by
-    the stream's last pack only so each is counted once per facet group."""
+    check's payload and the ids a record may cite). The items the character cap left out of a stream are counted once per
+    stream in :meth:`CoverageBoundary._assess`, not on a call."""
 
     stream: str
     group: tuple[Facet, ...]
     payload: list[dict[str, str]]
     ids: frozenset[str]
-    omitted: int = 0
 
 
 @dataclass

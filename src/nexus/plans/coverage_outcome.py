@@ -29,6 +29,7 @@ from nexus.plans.answer_shape import (
     INSUFFICIENT_EVIDENCE_NOTICE_PREFIX,
     NON_ANSWER_SHAPES,
     AnswerShape,
+    unread_phrase,
 )
 from nexus.plans.coverage_ledger import CONFLICTED_REASON, CoverageResult, counts_toward_a_usable_answer
 
@@ -139,8 +140,8 @@ def render_insufficient_evidence(coverage: CoverageResult, facet_texts: Mapping[
     if unread > 0:
         # nexus-jypmj.23: the check decided on what it read; say how much it did not.
         lines.append(
-            f"{unread} retrieved item(s) were not read by the coverage check (its per-call size cap), so the evidence "
-            "they hold was not counted for the parts above."
+            f"{unread_phrase(unread, coverage.ledger.assessment.anchors_total)} were not read by the coverage check "
+            "(its per-call size cap), so the evidence they hold was not counted for the parts above."
         )
     if conflicted:
         lines.append("The evidence conflicts on these parts; the answer below follows the supporting evidence:")

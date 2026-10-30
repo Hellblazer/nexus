@@ -254,6 +254,19 @@ def test_the_recorded_envelope_is_the_flawed_assessors_run(envelope) -> None:
     assert f["code_anchor_share"] == 0.0
 
 
+def test_the_facts_tell_unsupported_on_a_full_read_from_unsupported_with_unread_items(envelope) -> None:
+    """nexus-jypmj.23: a facet unsupported after the check read every item is not the facet unsupported after it
+    left items unread; the harness reads both counts from the envelope's assessment block."""
+    assert (envelope_facts(envelope)["assessment_skipped_items"], envelope_facts(envelope)["assessment_anchors_total"]) == (0, 12)
+    capped = json.loads(json.dumps(envelope))
+    capped["coverage"]["assessment"].update(skipped_items=174, anchors_total=301)
+    f = envelope_facts(capped)
+    assert (f["assessment_skipped_items"], f["assessment_anchors_total"]) == (174, 301)
+    bare = json.loads(json.dumps(envelope))
+    del bare["coverage"]["assessment"]["skipped_items"], bare["coverage"]["assessment"]["anchors_total"]
+    assert envelope_facts(bare)["assessment_skipped_items"] == 0
+
+
 def test_the_adapter_builds_a_run_observation_from_the_envelope(envelope, oracle) -> None:
     obs = observation_from_envelope(G06.qid, envelope, oracle=oracle.requests[G06.qid])
     assert obs.qid == G06.qid and obs.evidence is not None and len(obs.evidence) == len(PIECES)

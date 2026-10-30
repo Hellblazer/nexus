@@ -211,9 +211,14 @@ def unresolved_note(unresolved: Sequence[tuple[Facet, str]]) -> str:
     return "\n".join(lines)
 
 
-def planned_reassessment_calls(facet_count: int, max_facets_per_call: int) -> int:
-    """Calls the reassessment will make: the repair evidence is one stream, so one call per group of facets."""
-    return max(1, math.ceil(facet_count / max(1, max_facets_per_call)))
+def planned_reassessment_calls(
+    facet_count: int, max_facets_per_call: int, *, extra_items: int = 0, items_per_call: int = 20,
+) -> int:
+    """Calls the reassessment will make: the repair evidence is one stream, so one call per group of facets, plus
+    the packs of *extra_items* (the first round's unread anchors, reassessed beside it), also per group. An upper
+    estimate: the assessment's own per-call budget check is what bounds the spend."""
+    groups = max(1, math.ceil(facet_count / max(1, max_facets_per_call)))
+    return groups * (1 + math.ceil(max(0, extra_items) / max(1, items_per_call)))
 
 
 def build_repair_queries(
