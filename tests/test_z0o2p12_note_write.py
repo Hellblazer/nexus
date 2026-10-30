@@ -241,7 +241,7 @@ class TestOneRequest:
         pieces = _pieces("meta", 1)
         doc = _register("z0o2p12-meta", pieces)
         write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, title="z0o2p12-meta",
-                   tags="a,b", category="cat", source_agent="agent-x", session_id="sess",
+                   tags="a,b", category="cat", source_agent="agent-x",
                    ttl_days=30, cat=real_cat)
         got = vec.get_collection(_COLLECTION).get(ids=[_chash(pieces[0])], include=["metadatas"])
         meta = got["metadatas"][0]
@@ -686,13 +686,13 @@ class TestChunkMetadata:
         got = vec.get_collection(collection).get(ids=[chash], include=["metadatas"])
         return got["metadatas"][0]
 
-    def test_session_content_type_and_indexed_at_reach_the_engine(self, vec, real_cat):
+    def test_content_type_and_indexed_at_reach_the_engine_and_session_id_does_not(self, vec, real_cat):
         pieces = _pieces("meta-full", 1)
         doc = _register("z0o2p12-meta-full", pieces)
-        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, session_id="sess-42",
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
                    source_agent="agent-x", cat=real_cat)
         meta = self._meta(vec, _chash(pieces[0]))
-        assert meta["session_id"] == "sess-42"
+        assert "session_id" not in meta  # nexus-6pfgb.4: no reader, no writer
         assert meta["content_type"] == "prose"
         assert meta["indexed_at"][:2] == "20", meta["indexed_at"]
         assert meta["source_agent"] == "agent-x"

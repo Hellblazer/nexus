@@ -69,11 +69,24 @@ def test_row_counts_per_class_are_pinned():
     }
 
 
+#: Keys whose writer is gone but that ALLOWED_TOP_LEVEL still accepts, so an old row echoed back
+#: by a read-modify-write validates. Each is a "stored" row; the retirement bead (6pfgb.27)
+#: removes the key from the allowlist and this set together.
+_RETIRED_BUT_ACCEPTED = frozenset({"session_id"})
+
+
+def test_the_retired_but_accepted_keys_are_the_tables_stored_rows():
+    stored = {r.key for r in ckm.rows() if r.cls in _ROW_CLASSES and r.on_row == "stored"}
+    assert stored == _RETIRED_BUT_ACCEPTED
+    assert _RETIRED_BUT_ACCEPTED <= ALLOWED_TOP_LEVEL
+    assert not _RETIRED_BUT_ACCEPTED & _table_allowed()
+
+
 def test_allowed_top_level_equals_the_tables_allowed_rows():
-    assert ALLOWED_TOP_LEVEL == _table_allowed(), (
+    assert ALLOWED_TOP_LEVEL == _table_allowed() | _RETIRED_BUT_ACCEPTED, (
         "ALLOWED_TOP_LEVEL and the key table disagree. Added to the code only: "
-        f"{sorted(ALLOWED_TOP_LEVEL - _table_allowed())}. Added to the table "
-        f"only: {sorted(_table_allowed() - ALLOWED_TOP_LEVEL)}. Edit "
+        f"{sorted(ALLOWED_TOP_LEVEL - _table_allowed() - _RETIRED_BUT_ACCEPTED)}. Added to the "
+        f"table only: {sorted(_table_allowed() - ALLOWED_TOP_LEVEL)}. Edit "
         "src/nexus/tables/chunk-metadata-keys.toml with the code (RDR-236)."
     )
 
@@ -92,7 +105,7 @@ def test_make_chunk_metadata_output_equals_the_tables_allowed_rows():
         tags="x", category="paper",
         bib_year=2020, bib_authors="b", bib_venue="v", bib_citation_count=3,
         bib_semantic_scholar_id="id",
-        ttl_days=7, frecency_score=0.5, source_agent="agent", session_id="sess",
+        ttl_days=7, frecency_score=0.5, source_agent="agent",
         extraction_source="dt_content", extraction_method="mineru",
         quality_gate_overridden=True,
     )

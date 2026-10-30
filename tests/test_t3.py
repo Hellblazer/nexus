@@ -219,7 +219,8 @@ def _check_store_put_full_metadata(mock_col, doc_id):
     assert meta["title"] == "sec.md"
     assert meta["tags"] == "security,audit"
     assert meta["category"] == "security"
-    assert meta["session_id"] == "sess-001"
+    # nexus-6pfgb.4: session_id has no reader; the writer is gone.
+    assert "session_id" not in meta
     assert meta["source_agent"] == "codebase-deep-analyzer"
     # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): omitted ttl_days
     # now defaults to None (permanent), not 0 — T3Database.put's own
@@ -262,7 +263,7 @@ def _check_store_put_ttl_metadata(mock_col, doc_id):
         pytest.param(
             dict(
                 collection="knowledge__security", content="security finding text", title="sec.md",
-                tags="security,audit", category="security", session_id="sess-001",
+                tags="security,audit", category="security",
                 source_agent="codebase-deep-analyzer",
             ),
             _check_store_put_full_metadata, id="full-metadata",

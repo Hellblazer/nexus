@@ -122,6 +122,9 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "ttl_days",
     "frecency_score",
     "source_agent",
+    # Retired writer (nexus-6pfgb.4): no factory call stamps it. It stays accepted so an
+    # old row echoed back by a read-modify-write (commands/enrich.py) still validates;
+    # the key-table retirement (6pfgb.27) removes it.
     "session_id",
     # RDR-101 Phase 5c dropped ``git_meta`` (consolidated git
     # provenance JSON blob): zero non-self-referential readers in
@@ -428,7 +431,6 @@ def make_chunk_metadata(
     ttl_days: int | None = 0,
     frecency_score: float = 0.0,
     source_agent: str = "nexus-indexer",
-    session_id: str = "",
     # Provenance — RDR-139 Layer D. ``file`` default is dropped by normalize.
     extraction_source: str = "file",
     # Provenance — nexus-1oguj. Which PDF extractor produced the chunk's
@@ -475,7 +477,6 @@ def make_chunk_metadata(
         "indexed_at": indexed_at,
         "frecency_score": frecency_score,
         "source_agent": source_agent,
-        "session_id": session_id,
         "extraction_source": extraction_source,
         "extraction_method": extraction_method,
         "quality_gate_overridden": quality_gate_overridden,

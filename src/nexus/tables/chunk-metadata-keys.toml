@@ -35,7 +35,9 @@
 #                            the pipeline post-pass, the note writer after
 #                            normalize, the repo PDF dict).
 #               engine       written only by the engine.
-#               stored       on old rows only; no live writer.
+#               stored       on old rows only; no live writer. May still be in
+#                            ALLOWED_TOP_LEVEL so an old row echoed back by a
+#                            read-modify-write validates (session_id, until 6pfgb.27).
 #               absent       never on a chunk row (catalog meta key, column).
 #   home      where the value lives after normalization.
 #   remedy    the census remedy class (T2 nexus/x54wv-shared-row-key-census-
@@ -212,7 +214,7 @@ emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "
 [[row]]
 id = "session-id"
 match = { key = "session_id" }
-emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "none: zero readers, retired", remedy = "R2", moved_by = "6pfgb.4" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "stored", home = "none: zero readers, retired; no writer since 6pfgb.4; ALLOWED_TOP_LEVEL still accepts it for an old row echoed back until 6pfgb.27", remedy = "R2", moved_by = "6pfgb.4, 6pfgb.27" }
 
 [[row]]
 id = "catalog-doc-id"

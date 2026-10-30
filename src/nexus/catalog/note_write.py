@@ -246,7 +246,7 @@ def note_manifest_rows(manifest_metadatas: Sequence[dict]) -> list[dict]:
 
 def _chunk_payload(
     collection: str, pieces: Sequence[str], rows: Sequence[dict], *,
-    title: str, tags: str, category: str, session_id: str, source_agent: str,
+    title: str, tags: str, category: str, source_agent: str,
     ttl_days: int | None, catalog_doc_id: str, content_type: str,
 ) -> list[dict]:
     """The ``chunks`` array: one ``{chash, text, metadata}`` per DISTINCT piece.
@@ -282,7 +282,6 @@ def _chunk_payload(
             category=category,
             ttl_days=ttl_days,
             source_agent=source_agent,
-            session_id=session_id,
         )
         if catalog_doc_id:
             meta["catalog_doc_id"] = catalog_doc_id
@@ -299,7 +298,6 @@ def write_note(
     title: str = "",
     tags: str = "",
     category: str = "",
-    session_id: str = "",
     source_agent: str = "",
     ttl_days: int | None = None,
     content_type: str | None = None,
@@ -359,7 +357,7 @@ def write_note(
     rows = note_manifest_rows(manifest_metadatas)
     chunks = _chunk_payload(
         collection, pieces, rows, title=title, tags=tags, category=category,
-        session_id=session_id, source_agent=source_agent, ttl_days=ttl_days,
+        source_agent=source_agent, ttl_days=ttl_days,
         catalog_doc_id=catalog_doc_id, content_type=content_type or chunk_content_type_for_collection(collection),
     )
     result = NoteWriteResult(
@@ -621,7 +619,6 @@ def put_note(
     title: str = "",
     tags: str = "",
     category: str = "",
-    session_id: str = "",
     source_agent: str = "",
     ttl_days: int | None = None,
     content_type: str | None = None,
@@ -711,7 +708,7 @@ def put_note(
     try:
         write = write_note(
             catalog_doc_id=doc, collection=collection, pieces=pieces, content_hash=content_hash,
-            title=title, tags=tags, category=category, session_id=session_id,
+            title=title, tags=tags, category=category,
             source_agent=source_agent, ttl_days=ttl_days, content_type=content_type, cat=cat,
             stamp=False)
     except StampRefusedError as exc:
