@@ -40,7 +40,7 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4960
+provisioned_tests = 4961
 tolerance_tests = 0
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
@@ -153,6 +153,14 @@ tolerance_tests = 0
 #     500-is-a-ladder-retry), park-cap refusal not reported failed, no table turn in tuples mode and table mode skipping tuple
 #     tasks (journey 3 and the unit loop tests). A fold hides its later steps behind an earlier failure; every assertion in a
 #     journey names its step. Left unfolded: nothing in the file; the MVV file is untouched.
+# 4960 -> 4961 (nexus-fx9k2, 2026-10-30, same ask): +1, the RDR-235 MVV's three seams in one engine journey,
+# tests/test_rdr235_mvv_seams.py::test_the_three_seams_the_mvv_approximated. It needs the real engine because each seam is a
+# fact about what the engine holds: a real index_repository() whose flush hook leaves four identity-body tasks (seam 1), the
+# real rdr-frontmatter-v1 extractor reading chunks through the catalog manifest into document_aspects rows (seam 2), and one
+# batch-of-5 pass that leaves two consumed, one nacked with the ladder's available_at stamp and one dead (seam 3), then a
+# second pass that consumes the retried one. Folded into one test, not three, so the ceiling rises by one. Fails with its code
+# deleted: manifest lookup stubbed to [] reds seam 2, retryable errors routed dead reds seam 3, a zero ladder interval reds the
+# available_at stamp. DDL-per-run ratchet untouched (no changeset).
 measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992), 39713947919 (da8c08fdc)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default
