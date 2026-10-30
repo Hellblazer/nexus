@@ -47,8 +47,9 @@ WHAT IT DOES.
              available or the engine has no ``chash_positions`` route. Converged when no legacy row is
              fillable; rows that stay legacy (multi-row chash, no label keys, ...) are not pending.
   converge : the same scan, writing each batch of :data:`DOC_BATCH` documents through
-             ``append_manifest_many``, one request per collection and at most one per ~50 documents,
-             so the number of writes is bounded by documents / 50 + collections touched. The
+             ``append_manifest_many``, one request per collection per ~50 documents and per 300 rows
+             (a document's rows spill into the next request), so the number of writes is bounded by
+             documents / 50 + rows / 300 + collections touched. The
              ``nx upgrade --auto`` time limit is honoured between batches (DEFERRED; filled rows drop
              out of the next scan). A write the engine reports as failed is DEFERRED with its count.
   verify   : positive signal only: the whole scan completed and no row is fillable.
@@ -86,6 +87,10 @@ RUNG_NAME = RUNG_MANIFEST_SECTION_LABELS
 #: Documents read, planned and written per step. A document's manifest can hold thousands of rows, so
 #: this bounds the rows in memory and the size of one ``chash_positions`` / chunk read.
 DOC_BATCH = 50
+
+#: Manifest rows in one ``append_manifest_many`` request (the engine runs each document of a request in its
+#: own transaction, and the sibling writers cut at 300). A document's rows spill into the next request.
+MAX_ROWS_PER_REQUEST = 300
 
 _LABEL_KEYS = ("section_title", "section_type", "page_number")
 
@@ -218,11 +223,13 @@ class ManifestSectionLabelsRung:
         writer_factory: Callable[[], Any] = _default_writer,
         t3_factory: Callable[[], Any] = _default_t3,
         doc_batch: int = DOC_BATCH,
+        max_rows: int = MAX_ROWS_PER_REQUEST,
     ) -> None:
         self._reader_factory = reader_factory
         self._writer_factory = writer_factory
         self._t3_factory = t3_factory
         self._doc_batch = doc_batch
+        self._max_rows = max_rows
         self._filled = 0
         self._verify_detail = ""
         self._record_detail = ""
@@ -325,11 +332,12 @@ class ManifestSectionLabelsRung:
         docs = sorted({str(d.tumbler) for d, _r, _c, _l in plan})
         stamps = {str(d.tumbler): getattr(d, "indexed_at", "") for d, _r, _c, _l in plan}  # as read at scan
         fresh = reader.get_manifests(docs) or {}
+        fresh_rows = {t: {r.position: r for r in rows} for t, rows in fresh.items()}  # one index for the batch
         again = self._owner_rows(reader, sorted({r.chash for _d, r, _c, _l in plan}))
         by_collection: dict[str, dict[str, list[dict]]] = {}
         for doc, row, collection, labels in plan:
             tumbler = str(doc.tumbler)
-            now = {r.position: r for r in fresh.get(tumbler, [])}.get(row.position)
+            now = fresh_rows.get(tumbler, {}).get(row.position)
             if (
                 now is None or now.chash != row.chash or getattr(now, "labels_written", False)
                 or len(again.get(row.chash, [])) != 1
@@ -340,19 +348,37 @@ class ManifestSectionLabelsRung:
                 "chash": row.chash, "position": row.position, **labels, "labels_written": True,
             })
         for collection, per_doc in sorted(by_collection.items()):
-            docs_rows = sorted(per_doc.items())
-            for lo in range(0, len(docs_rows), self._doc_batch):
-                chunk = docs_rows[lo:lo + self._doc_batch]
-                result = writer.append_manifest_many(chunk, collection=collection)
+            written: set[str] = set()
+            for request in self._requests(sorted(per_doc.items())):
+                result = writer.append_manifest_many(request, collection=collection)
                 failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
-                for doc_id, rows in chunk:
+                for doc_id, rows in request:
                     if doc_id in failed:
                         counts.write_failed += len(rows)
                     else:
                         counts.filled += len(rows)
                         counts.by_collection[collection] += len(rows)
                         self._filled += len(rows)
-                        self._restore_indexed_at(writer, doc_id, stamps.get(doc_id, ""), counts)
+                        written.add(doc_id)
+            for doc_id in sorted(written):  # once per document, however many requests carried its rows
+                self._restore_indexed_at(writer, doc_id, stamps.get(doc_id, ""), counts)
+
+    def _requests(self, docs_rows: list[tuple[str, list[dict]]]) -> list[list[tuple[str, list[dict]]]]:
+        """Cut ``(doc_id, rows)`` pairs into requests of at most ``max_rows`` rows and ``doc_batch``
+        documents; a document's rows spill into the next request."""
+        out: list[list[tuple[str, list[dict]]]] = []
+        current: dict[str, list[dict]] = {}
+        total = 0
+        for doc_id, rows in docs_rows:
+            for row in rows:
+                if total >= self._max_rows or (doc_id not in current and len(current) >= self._doc_batch):
+                    out.append(list(current.items()))
+                    current, total = {}, 0
+                current.setdefault(doc_id, []).append(row)
+                total += 1
+        if current:
+            out.append(list(current.items()))
+        return out
 
     @staticmethod
     def _restore_indexed_at(writer: Any, doc_id: str, stamp: str, counts: Counts) -> None:

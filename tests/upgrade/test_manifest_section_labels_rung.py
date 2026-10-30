@@ -38,6 +38,21 @@ class Report:
         self.events.append((event, fields))
 
 
+class _PositionProbe:
+    """A manifest row that counts how often its position is read."""
+
+    def __init__(self, row: ManifestRow, world: "World") -> None:
+        self._row, self._world = row, world
+
+    @property
+    def position(self) -> int:
+        self._world.position_reads += 1
+        return self._row.position
+
+    def __getattr__(self, name: str):
+        return getattr(self._row, name)
+
+
 class World:
     """Live documents, their manifests, and the T3 chunk rows; the reader, the writer and the T3 stub."""
 
@@ -53,6 +68,8 @@ class World:
         self.restamp_on_append: str | None = None  # the engine stamps the document's indexed_at on every manifest write
         self.fail_update_ids: set[str] = set()
         self.updates: list[tuple[str, dict]] = []
+        self.probe_positions = False
+        self.position_reads = 0
         self.before_second_manifest_read = None  # called with self, once, before the re-read
         self._manifest_reads = 0
 
@@ -80,6 +97,8 @@ class World:
         if self._manifest_reads == 2 and self.before_second_manifest_read:
             hook, self.before_second_manifest_read = self.before_second_manifest_read, None
             hook(self)
+        if self.probe_positions:
+            return {d: [_PositionProbe(r, self) for r in self.manifests[d]] for d in doc_ids if self.manifests.get(d)}
         return {d: list(self.manifests[d]) for d in doc_ids if self.manifests.get(d)}
 
     def chash_positions(self, chashes: list[str]) -> list[dict] | None:
@@ -479,6 +498,42 @@ def test_writes_are_one_request_per_collection_per_batch_of_documents(world: Wor
     assert [len(docs) for _c, docs in world.appends] == [3, 3, 1], "ceil(7 / 3) requests, not 7"
     assert all(r.labels_written for rows in world.manifests.values() for r in rows)
     assert max(n for _c, n in world.chunk_reads) <= 3, "chunk reads follow the batch"
+
+
+def test_a_request_is_bounded_by_rows_as_well_as_by_documents(world: World) -> None:
+    """nexus-1nrcu (code review): 50 documents of thousands of fillable rows each was one request, every
+    document in its own engine transaction. A request now carries at most ``max_rows`` rows, a document's
+    rows spilling into the next request."""
+    n = 0
+    for t in ("1.1.1", "1.1.2", "1.1.3"):
+        world.doc(t)
+        for pos in range(3):
+            n += 1
+            world.row(t, pos, h(n))
+            _labelled(world, h(n))
+
+    world.rung(max_rows=4).converge(Report())
+
+    sizes = [sum(len(rows) for _d, rows in docs) for _c, docs in world.appends]
+    assert sizes == [4, 4, 1], "9 rows, cut at 4 per request"
+    assert all(r.labels_written for rows in world.manifests.values() for r in rows)
+    assert sorted((d, r["position"]) for _c, docs in world.appends for d, rows in docs for r in rows) == [
+        (t, p) for t in ("1.1.1", "1.1.2", "1.1.3") for p in range(3)], "every row once"
+    assert [u[0] for u in world.updates] == ["1.1.1", "1.1.2", "1.1.3"], "a document is restamped once, not per request"
+
+
+def test_the_write_reads_each_rows_position_a_bounded_number_of_times(world: World) -> None:
+    """The re-read index is built once per batch, not once per planned row (quadratic in a big document)."""
+    world.doc("1.1.1")
+    for pos in range(200):
+        world.row("1.1.1", pos, h(pos + 1))
+        _labelled(world, h(pos + 1))
+    world.probe_positions = True
+
+    world.rung().converge(Report())
+
+    assert all(r.labels_written for r in world.manifests["1.1.1"])
+    assert world.position_reads < 200 * 10, f"{world.position_reads} position reads for 200 rows"
 
 
 def test_the_auto_time_limit_defers_between_batches_and_the_rest_resumes(world: World, monkeypatch) -> None:
