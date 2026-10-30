@@ -15,6 +15,9 @@ from types import SimpleNamespace
 import pytest
 
 from nexus.catalog.types import ManifestRow
+from nexus.upgrade_ladder.registry import LadderRegistry
+from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
+from tests.upgrade.conftest import InMemoryCompletionLedger
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung
 from nexus.upgrade_ladder.registry import RUNG_MANIFEST_SECTION_LABELS, RUNG_ORDER, default_registry
 from nexus.upgrade_ladder.rungs.manifest_section_labels import ManifestSectionLabelsRung
@@ -69,6 +72,7 @@ class World:
         self.fail_update_ids: set[str] = set()
         self.updates: list[tuple[str, dict]] = []
         self.probe_positions = False
+        self.listings = 0
         self.position_reads = 0
         self.before_second_manifest_read = None  # called with self, once, before the re-read
         self._manifest_reads = 0
@@ -92,6 +96,7 @@ class World:
 
     # reader ---------------------------------------------------------------
     def all_documents(self) -> list[SimpleNamespace]:
+        self.listings += 1
         return [SimpleNamespace(**vars(d)) for d in self.docs.values()]  # fresh entries, as the HTTP reader returns
 
     def get_manifests(self, doc_ids: list[str]) -> dict[str, list[ManifestRow]]:
@@ -156,6 +161,7 @@ class World:
         pass
 
     def rung(self, **kw) -> ManifestSectionLabelsRung:
+        kw.setdefault("record_fn", lambda: None)  # no completion on file: the default would ask the engine's ledger
         return ManifestSectionLabelsRung(
             reader_factory=lambda: None if self.no_catalog else self,
             writer_factory=lambda: self, t3_factory=lambda: self, **kw)
@@ -419,6 +425,55 @@ def test_a_failed_restore_defers_and_names_the_document(world: World) -> None:
 
     assert result.outcome is ConvergeOutcome.DEFERRED
     assert "1.1.1" in result.detail and "indexed_at" in result.detail
+
+
+# ── the recorded completion short-circuits the scan ─────────────────────────
+
+
+def test_a_walk_after_a_recorded_completion_makes_no_catalog_listing_call(world: World) -> None:
+    """nexus-1nrcu (critic): ``nx doctor``, ``nx upgrade --auto`` (every session start) and every walk call
+    ``detect()``; a full-corpus scan each time, for rows that stay legacy by design, is not cheap. Once the
+    completion is on file the rung answers from it."""
+    _one_fillable_and_one_newer_row(world)
+    ledger = InMemoryCompletionLedger()
+    rung = world.rung(record_fn=lambda: ledger.completions().get(ManifestSectionLabelsRung.name))
+    runner = LadderRunner(LadderRegistry((rung,)), ledger, package_version_fn=lambda: "9.9.9")
+
+    first = runner.run()
+    assert [r.outcome for r in first.runs] == [RungOutcome.RECORDED]
+    listings, chunk_reads = world.listings, len(world.chunk_reads)
+    assert listings > 0 and ledger.verified_rungs() == frozenset({RUNG_MANIFEST_SECTION_LABELS})
+
+    second = runner.run()
+
+    assert [r.outcome for r in second.runs] == [RungOutcome.ALREADY_RECORDED]
+    assert (world.listings, len(world.chunk_reads)) == (listings, chunk_reads), "no listing, no chunk read"
+    assert rung.detect().converged is True and world.listings == listings
+
+
+def test_a_completion_recorded_by_an_earlier_package_version_still_short_circuits(world: World) -> None:
+    """The rung is a one-time transition, not a per-release one: rows that stay legacy by design stay legacy
+    (a forced re-index is the only later path), and a rescan per release would copy what the guards refused
+    once a co-owner left."""
+    from nexus.upgrade_ladder.completion import CompletionRecord
+
+    _one_fillable_and_one_newer_row(world)
+    old = CompletionRecord(rung_name=RUNG_MANIFEST_SECTION_LABELS, verified_at="t0", package_version="1.0.0")
+
+    status = world.rung(record_fn=lambda: old).detect()
+
+    assert (status.applicable, status.converged) == (True, True) and world.listings == 0
+
+
+def test_an_unreadable_ledger_is_not_a_record_and_the_scan_runs(world: World) -> None:
+    _one_fillable_and_one_newer_row(world)
+
+    def broken():
+        raise RuntimeError("ledger down")
+
+    status = world.rung(record_fn=broken).detect()
+
+    assert (status.applicable, status.converged) == (True, False) and world.listings == 1
 
 
 # ── attribution by title ─────────────────────────────────────────────────────

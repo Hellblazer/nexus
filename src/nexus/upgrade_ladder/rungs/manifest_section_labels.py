@@ -48,8 +48,10 @@ caller-supplied stamp). A document whose stamp cannot be written back is counted
 ends DEFERRED: its stamp is the run time until someone restores it.
 
 WHAT IT DOES.
-  detect   : read-only, and the dry run: the full scan with no write. Applicable unless no catalog is
-             available or the engine has no ``chash_positions`` route. Converged when no legacy row is
+  detect   : converged at once when this tenant's completion is on file (any package version: the rung is a
+             one-time transition, and rows that stay legacy by design stay legacy until a forced re-index).
+             Otherwise read-only, and the dry run: the full scan with no write. Applicable unless no catalog
+             is available or the engine has no ``chash_positions`` route. Converged when no legacy row is
              fillable; rows that stay legacy (multi-row chash, no label keys, ...) are not pending.
   converge : the same scan, writing each batch of :data:`DOC_BATCH` documents through
              ``append_manifest_many``, one request per collection per ~50 documents and per 300 rows
@@ -78,6 +80,7 @@ from typing import Any
 
 import structlog
 
+from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
@@ -157,6 +160,14 @@ def _default_writer() -> Any:
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred: keeps the registry import cheap
 
     return make_catalog_writer()
+
+
+def _default_record() -> CompletionRecord | None:
+    """This tenant's completion record for the rung, from the engine's ledger. Raises when it cannot be read."""
+    from nexus.upgrade_ladder.http_store import HttpLadderStore  # noqa: PLC0415 — deferred: keeps the registry import cheap
+
+    with HttpLadderStore() as store:
+        return store.completions().get(RUNG_NAME)
 
 
 def _default_t3() -> Any:
@@ -255,12 +266,14 @@ class ManifestSectionLabelsRung:
         t3_factory: Callable[[], Any] = _default_t3,
         doc_batch: int = DOC_BATCH,
         max_rows: int = MAX_ROWS_PER_REQUEST,
+        record_fn: Callable[[], CompletionRecord | None] = _default_record,
     ) -> None:
         self._reader_factory = reader_factory
         self._writer_factory = writer_factory
         self._t3_factory = t3_factory
         self._doc_batch = doc_batch
         self._max_rows = max_rows
+        self._record_fn = record_fn
         self._filled = 0
         self._verify_detail = ""
         self._record_detail = ""
@@ -446,7 +459,21 @@ class ManifestSectionLabelsRung:
 
     # ── detect ───────────────────────────────────────────────────────────────
 
+    def _recorded(self) -> bool:
+        """True when this tenant's completion is on file, at any package version. An unreadable ledger is not
+        a record. The rung is a one-time transition: rows that stay legacy by design stay legacy, and a
+        rescan per release would copy what the guards refused once a co-owner left."""
+        try:
+            return self._record_fn() is not None
+        except Exception as exc:  # noqa: BLE001 — an unreadable ledger is 'not recorded', and the scan decides
+            _log.info("manifest_section_labels_ledger_unreadable", error=str(exc))
+            return False
+
     def detect(self) -> RungStatus:
+        """Converged at once when the completion is on file: ``nx doctor``, every ``nx upgrade --auto`` (each
+        session start) and every walk call this, and a scan lists every document. Otherwise the dry run."""
+        if self._recorded():
+            return RungStatus(applicable=True, converged=True)
         try:
             counts = self._dry_run()
         except RouteAbsent as exc:

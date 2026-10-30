@@ -165,7 +165,9 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
     assert all(not r.labels_written for t in (single, shared_a, shared_b, repeat, bare) for r in before[t])
     legacy_rows = legacy_note_rows + 1 + 2 + 2 + 1
 
-    rung = rung_cls()
+    # The walk above recorded this rung in the tenant's ledger, so a default rung answers "converged" at once
+    # (the short-circuit, pinned at the end). The rung under test is the one with no completion on file.
+    rung = rung_cls(record_fn=lambda: None)
     status = rung.detect()
     assert status.applicable and not status.converged
     assert status.pending_detail.startswith(f"1 legacy manifest row(s) of {legacy_rows} "), status.pending_detail
@@ -202,11 +204,14 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
     # second run: nothing fillable, nothing written
     manifests = {t: cat.get_manifest(t) for t in before}
     stamp = cat.resolve(single).indexed_at
-    again = rung_cls()
+    again = rung_cls(record_fn=lambda: None)
     assert again.detect().converged is True
     assert again.converge(_Report()).outcome is ConvergeOutcome.COMPLETED
     assert {t: cat.get_manifest(t) for t in before} == manifests
     assert cat.resolve(single).indexed_at == stamp, "a second run sends no write"
+
+    # the recorded completion in the real ledger short-circuits the default rung: converged with no scan
+    assert rung_cls().detect().converged is True
 
 
 def test_second_walk_is_a_no_op_and_sends_no_census_request(

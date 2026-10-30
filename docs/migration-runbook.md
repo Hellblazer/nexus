@@ -165,7 +165,12 @@ catalog-046 gave every manifest row its own section label (`section_title`,
 is *legacy*: NULL labels, flag false, and readers fall back to the shared T3 chunk
 row's label, which belongs to whichever document wrote that chunk last. `doc_indexer`
 skips unchanged files, so a re-index never fills them. This rung fills the rows where
-the chunk row's label is exact, once (nexus-1nrcu).
+the chunk row's label is exact (nexus-1nrcu). The scan runs until a completion is
+recorded, then never again: `detect()` answers from the recorded completion (at any
+package version) without listing a document, since `nx doctor`, each session start's
+`nx upgrade --auto` and every walk call it. A row left legacy by design (shared
+chash, no label keys, a chunk titled for another file) stays legacy, and a forced
+re-index of its document is the only later path.
 
 - **The rule.** A legacy row takes the chunk row's label only when its chash has
   exactly one live manifest row in the tenant, and that row is this one. One *owner*
@@ -190,7 +195,7 @@ the chunk row's label is exact, once (nexus-1nrcu).
   carries another file's title. They do not cover one whose row has no title or the
   same title (nexus-6pfgb.58 closes it with an engine read). The same gap is
   documented on `nx catalog backfill-meta`.
-- **Cost.** `detect()` is the dry run and does the whole scan with no write: it
+- **Cost.** Until a completion is recorded, `detect()` is the dry run and does the whole scan with no write: it
   reads every live document's manifest and the chunk rows of the legacy single-row
   chashes, 50 documents at a time. `converge()` writes through `append_manifest_many`,
   one request per collection per 50 documents and per 300 rows (a document's rows spill into the next request). The engine restamps a document's
