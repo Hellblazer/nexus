@@ -455,6 +455,68 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(outcome.sample().toString()).doesNotContain("STALE");
     }
 
+    /**
+     * Two properties of the gc sample (nexus-6pfgb.39, review round 1). An owner is LIVE: a chunk whose only
+     * manifest owner is tombstoned is labelled by its text and has a null title, and where a live document also
+     * names it the live one is the owner though the tombstoned one sorts first. And chunk text never reaches
+     * {@code gc_audit} (read across tenants by nexus_diag under a content-free premise, grants-nexus-diag-4): the
+     * audit row of a move holds the chashes and counts only.
+     */
+    @Test
+    void gcSample_aTombstonedOwnerIsNoOwner_andTheAuditRowHoldsNoChunkText() throws Exception {
+        for (boolean bounded : new boolean[] {false, true}) {
+            String tag = bounded ? "p3-tomb-b" : "p3-tomb";
+            String originCol = originCol(tag);
+            String ownerCol = originCol(tag + "-owner");
+            String quarantineCol = quarantineCol(tag);
+            String deadOnly = ch("gcq-" + tag + "-dead");
+            String both = ch("gcq-" + tag + "-both");
+            seedChunk(TENANT_A, originCol, deadOnly, "tombtext ".repeat(12), "STALE dead title");
+            seedChunk(TENANT_A, originCol, both, "bothtext ".repeat(12), "STALE both title");
+            seedChunk(TENANT_A, ownerCol, deadOnly, "owner side dead", "owner side title");
+            seedChunk(TENANT_A, ownerCol, both, "owner side both", "owner side title");
+            seedManifest(TENANT_A, "gcq.doc." + tag + ".a-dead", deadOnly, ownerCol);
+            seedManifest(TENANT_A, "gcq.doc." + tag + ".a-tomb", both, ownerCol);
+            seedManifest(TENANT_A, "gcq.doc." + tag + ".b-live", both, ownerCol);
+            try (var su = pg.createConnection("")) {
+                DSL.using(su, SQLDialect.POSTGRES).update(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS)
+                   .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now())
+                   .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A))
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER.in(
+                        "gcq.doc." + tag + ".a-dead", "gcq.doc." + tag + ".a-tomb"))
+                   .execute();
+            }
+
+            List<Map<String, Object>> sample = bounded
+                ? vectorRepo.quarantineOrphansBounded(TENANT_A, originCol, quarantineCol, "2026-08-10T00:00:00Z", 20, 10)
+                    .sample()
+                : vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-08-10T00:00:00Z", 20)
+                    .sample();
+
+            assertThat(sample).as(tag).hasSize(2);
+            var d = sample.stream().filter(m -> deadOnly.equals(m.get("chash"))).findFirst().orElseThrow();
+            assertThat(d.get("title")).as(tag + ": a tombstoned owner owns nothing").isNull();
+            assertThat(d.get("text_prefix")).isEqualTo(("tombtext ".repeat(12)).substring(0, 80));
+            var b = sample.stream().filter(m -> both.equals(m.get("chash"))).findFirst().orElseThrow();
+            assertThat(b.get("title")).as(tag + ": the live owner wins").isEqualTo("GC quarantine fixture gcq.doc." + tag + ".b-live");
+
+            try (var su = pg.createConnection("")) {
+                var audit = DSL.using(su, SQLDialect.POSTGRES).select(
+                        dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.DETAILS,
+                        dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.CHASHES)
+                    .from(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT)
+                    .where(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.TENANT_ID.eq(TENANT_A))
+                    .and(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.COLLECTION.eq(originCol))
+                    .fetch();
+                assertThat(audit).as(tag + ": one audit row for the move").hasSize(1);
+                // The full column text, not Record.toString(), which cuts every cell at 50 characters.
+                String stored = audit.get(0).value1().data() + " " + audit.get(0).value2().data();
+                assertThat(stored).doesNotContain("tombtext").doesNotContain("bothtext").doesNotContain("text_prefix");
+                assertThat(stored).as("the chashes are there").contains(deadOnly);
+            }
+        }
+    }
+
     // ── EQUIVALENCE: no orphans ───────────────────────────────────────────────
 
     @Test

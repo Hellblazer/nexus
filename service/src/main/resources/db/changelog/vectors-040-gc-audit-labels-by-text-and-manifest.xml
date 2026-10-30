@@ -9,11 +9,20 @@
     null for every chunk.
 
     THE LABEL. left(c.chunk_text, 80) as text_prefix, always present, and the title of the chunk's manifest owner
-    as title where one exists (the catalog_documents row a nexus.catalog_document_chunks row for this chash and
-    model names; the own-collection row is preferred, then the lowest doc_id, so the pick is deterministic). The
-    sample is built in a data-modifying CTE over the DELETE, so the lookup reads the manifest in the same
-    statement and snapshot as the move. A moved chunk is ownerless in its own collection, so the owner is usually a
-    manifest row in ANOTHER collection or none at all: then the title is null and the text prefix is the label.
+    as title where one exists (the LIVE catalog_documents row a nexus.catalog_document_chunks row for this chash
+    and model names; a tombstoned document owns nothing, house rule nexus-mqd6t; the own-collection row is
+    preferred, then the lowest doc_id, so the pick is deterministic). The sample is built in a data-modifying CTE
+    over the DELETE, so the lookup reads the manifest in the same statement and snapshot as the move, and the
+    owner lookup runs in the sampled subselect, over the rows kept by LIMIT v_sample_limit, not in the DELETE's
+    RETURNING list, which would run it for every moved row. A moved chunk has no manifest row in its own
+    collection, in any state, so its owner is a live document's manifest row in ANOTHER collection or none (no
+    manifest row at all, or only tombstoned documents'): then the title is null and the text prefix is the label.
+
+    NO CHUNK TEXT IS PERSISTED. text_prefix is part of the sample RETURNED to the caller only. The gc_audit INSERT in
+    each body is vectors-030-1's: it extracts the chashes from the sample and stores nothing else of it, and
+    details holds counts and the quarantine collection's name. gc_audit is read across tenants by nexus_diag under a
+    content-free premise (grants-nexus-diag-4), so no text, and no title, is written to it by these functions;
+    PgVectorRepositoryGcQuarantineTest pins the stored row.
 
     SHAPE. Two CREATE OR REPLACE FUNCTION statements with the vectors-030-1 signatures (the generated jOOQ routines
     do not move). The sample JSON gains the text_prefix key; "chash" and "title" keep their names. Bodies are
@@ -34,7 +43,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-040-1" author="nexus-6pfgb.39">
-        <comment>RDR-236 Phase 3 (nexus-6pfgb.39): gc_quarantine_orphans and gc_quarantine_orphans_bounded label each moved chunk in the sample they return (and so in their gc_audit rows' callers) by left(chunk_text, 80) as text_prefix and by the title of its manifest owner (the catalog_documents row a catalog_document_chunks row for the chash points at: the own-collection row first, then the lowest doc_id; null when none exists) as title, instead of by the chunk row's metadata title, because the Phase 4 sweep removes document keys from chunk rows and a shared chunk's row title is last-writer-wins. The sample's JSON gains the text_prefix key; the existing chash and title keys keep their names. Signatures, grants, the sweep gate, the victim set and every other statement are vectors-030-1's. No data effect: function definitions and grants only.</comment>
+        <comment>RDR-236 Phase 3 (nexus-6pfgb.39): gc_quarantine_orphans and gc_quarantine_orphans_bounded label each moved chunk in the sample they return (never in their gc_audit row, which holds chashes and counts only) by left(chunk_text, 80) as text_prefix and by the title of its manifest owner (the live catalog_documents row a catalog_document_chunks row for the chash points at: the own-collection row first, then the lowest doc_id; null when none exists) as title, instead of by the chunk row's metadata title, because the Phase 4 sweep removes document keys from chunk rows and a shared chunk's row title is last-writer-wins. The sample's JSON gains the text_prefix key; the existing chash and title keys keep their names. Signatures, grants, the sweep gate, the victim set and every other statement are vectors-030-1's. No data effect: function definitions and grants only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(dim integer, p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_sample_limit integer)
  RETURNS TABLE(moved bigint, sample jsonb)
@@ -223,23 +232,26 @@ BEGIN
            AND c.chash = v.chash
            AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
                  c.tenant_id, c.collection, c.chash, c.last_written_at, NULL))
-        RETURNING c.chash,
-                  left(c.chunk_text, 80) AS text_prefix,
-                  (SELECT od.title
-                     FROM nexus.catalog_document_chunks oc
-                     JOIN nexus.catalog_documents od
-                       ON od.tenant_id = oc.tenant_id AND od.tumbler = oc.doc_id
-                    WHERE oc.tenant_id = c.tenant_id
-                      AND oc.chash = c.chash
-                      AND oc.embedding_model = c.embedding_model
-                    ORDER BY (oc.collection = c.collection) DESC, oc.doc_id
-                    LIMIT 1) AS title
+        RETURNING c.tenant_id, c.collection, c.chash, c.embedding_model,
+                  left(c.chunk_text, 80) AS text_prefix
     ),
     counted AS (SELECT count(*) AS n FROM del),
     sampled AS (
-        SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title,
-                                            'text_prefix', text_prefix)) AS s
-          FROM (SELECT chash, title, text_prefix FROM del LIMIT v_sample_limit) lim
+        SELECT jsonb_agg(jsonb_build_object('chash', encode(lim.chash, 'hex'), 'title', lim.title,
+                                            'text_prefix', lim.text_prefix)) AS s
+          FROM (SELECT d.chash, d.text_prefix,
+                       (SELECT od.title
+                          FROM nexus.catalog_document_chunks oc
+                          JOIN nexus.catalog_documents od
+                            ON od.tenant_id = oc.tenant_id AND od.tumbler = oc.doc_id
+                         WHERE oc.tenant_id = d.tenant_id
+                           AND oc.chash = d.chash
+                           AND oc.embedding_model = d.embedding_model
+                           AND od.deleted_at IS NULL
+                         ORDER BY (oc.collection = d.collection) DESC, oc.doc_id
+                         LIMIT 1) AS title
+                  FROM del d
+                 LIMIT v_sample_limit) lim
     )
     SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
 
@@ -446,23 +458,26 @@ BEGIN
            AND c.chash = v.chash
            AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
                  c.tenant_id, c.collection, c.chash, c.last_written_at, NULL))
-        RETURNING c.chash,
-                  left(c.chunk_text, 80) AS text_prefix,
-                  (SELECT od.title
-                     FROM nexus.catalog_document_chunks oc
-                     JOIN nexus.catalog_documents od
-                       ON od.tenant_id = oc.tenant_id AND od.tumbler = oc.doc_id
-                    WHERE oc.tenant_id = c.tenant_id
-                      AND oc.chash = c.chash
-                      AND oc.embedding_model = c.embedding_model
-                    ORDER BY (oc.collection = c.collection) DESC, oc.doc_id
-                    LIMIT 1) AS title
+        RETURNING c.tenant_id, c.collection, c.chash, c.embedding_model,
+                  left(c.chunk_text, 80) AS text_prefix
     ),
     counted AS (SELECT count(*) AS n FROM del),
     sampled AS (
-        SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title,
-                                            'text_prefix', text_prefix)) AS s
-          FROM (SELECT chash, title, text_prefix FROM del LIMIT v_sample_limit) lim
+        SELECT jsonb_agg(jsonb_build_object('chash', encode(lim.chash, 'hex'), 'title', lim.title,
+                                            'text_prefix', lim.text_prefix)) AS s
+          FROM (SELECT d.chash, d.text_prefix,
+                       (SELECT od.title
+                          FROM nexus.catalog_document_chunks oc
+                          JOIN nexus.catalog_documents od
+                            ON od.tenant_id = oc.tenant_id AND od.tumbler = oc.doc_id
+                         WHERE oc.tenant_id = d.tenant_id
+                           AND oc.chash = d.chash
+                           AND oc.embedding_model = d.embedding_model
+                           AND od.deleted_at IS NULL
+                         ORDER BY (oc.collection = d.collection) DESC, oc.doc_id
+                         LIMIT 1) AS title
+                  FROM del d
+                 LIMIT v_sample_limit) lim
     )
     SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
 
