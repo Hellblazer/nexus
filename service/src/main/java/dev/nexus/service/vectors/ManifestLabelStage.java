@@ -730,8 +730,10 @@ final class ManifestLabelStage {
 
     /**
      * The one statement behind both lookups, for one batch of (collection, chash) pairs: {@code collections[i]}
-     * and {@code keys[i]} are one pair. They bind as two arrays and join as {@code unnest(collections, keys)
-     * AS asked(collection, chash)} on both columns, so the statement text is the same whatever the batch's size.
+     * and {@code keys[i]} are one pair. They bind as two arrays and join as {@code generate_series(1,
+     * cardinality(collections)) AS asked(i)} with {@code chash = keys[i] AND collection = collections[i]}, the
+     * typed-DSL form of a pairwise {@code unnest(collections, keys)} (RawSqlGateTest admits no string template),
+     * so the statement text is the same whatever the batch's size.
      * Package-private so a plan test can EXPLAIN the statement production runs, not a copy of it.
      * {@code firstOnly} is {@code SELECT DISTINCT ON (chash, collection) ... ORDER BY chash, collection, doc_id,
      * position}, chash first because {@code idx_catalog_chunks_chash (tenant_id, chash)} returns rows in chash
@@ -751,11 +753,12 @@ final class ManifestLabelStage {
         }
         order.add(CATALOG_DOCUMENT_CHUNKS.DOC_ID);
         order.add(CATALOG_DOCUMENT_CHUNKS.POSITION);
-        var asked = DSL.table("unnest(cast({0} as text[]), cast({1} as bytea[]))",
-                DSL.val(collections), DSL.val(keys))
-            .as("asked", "collection", "chash");
-        Field<String> askedCollection = DSL.field(DSL.name("asked", "collection"), String.class);
-        Field<byte[]> askedChash = DSL.field(DSL.name("asked", "chash"), byte[].class);
+        Field<String[]> collectionArray = DSL.val(collections);
+        Field<byte[][]> keyArray = DSL.val(keys);
+        var asked = DSL.generateSeries(1, DSL.cardinality(collectionArray)).as("asked", "i");
+        Field<Integer> i = DSL.field(DSL.name("asked", "i"), Integer.class);
+        Field<String> askedCollection = DSL.arrayGet(collectionArray, i);
+        Field<byte[]> askedChash = DSL.arrayGet(keyArray, i);
         return head
             .from(asked)
             .join(CATALOG_DOCUMENT_CHUNKS)
