@@ -5,6 +5,7 @@ description: Verifies test coverage, runs test suites, and validates test qualit
 model: haiku
 color: lime
 effort: high
+disallowedTools: [mcp__plugin_sn_serena, mcp__plugin_sn_context7]
 ---
 
 ## Usage Examples

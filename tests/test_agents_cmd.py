@@ -37,7 +37,9 @@ class TestCompose:
         fm = composed.split("\n---\n", 1)[0]
         template_fm = TEMPLATE.read_text().split("\n---\n", 1)[0]
         assert fm.startswith("---\nname: worktree-developer\n")
-        assert "serena-wt:" in fm and "plugin_sn_serena" not in fm
+        assert "serena-wt:" in fm
+        # The shared server appears only as a denial (nexus-j6un5.5): it writes to the primary checkout.
+        assert [ln for ln in fm.splitlines() if "plugin_sn_serena" in ln] == ["disallowedTools: [mcp__plugin_sn_serena]"]
         assert "--project-from-cwd" not in fm
         for key in ("model:", "color:", "effort:"):
             assert key in fm, key
