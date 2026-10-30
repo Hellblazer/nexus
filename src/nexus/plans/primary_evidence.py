@@ -28,8 +28,9 @@ heading starts a section and the following chunks inherit it. The T3 chunk row's
 the last writer's, so :func:`t3_chunk_fetcher` hands the selector text and nothing else.
 
 Every limit is a field of :class:`PrimaryEvidenceCaps`, the one calibration object
-(:data:`DEFAULT_CAPS`). The reserved share (``max_selected_items``) stays below the
-operator input cap (``runner._OPERATOR_MAX_INPUTS``, 100) so plan evidence keeps room.
+(:data:`DEFAULT_CAPS`). The reserved share (``max_selected_items``, or ``max_single_source_items`` for a request
+that names exactly one source) stays below the operator input cap (``runner._OPERATOR_MAX_INPUTS``, 100) so
+plan evidence keeps room.
 Merging this evidence ahead of the plan's inputs is :mod:`nexus.plans.reserved_stream`
 (nexus-jypmj.1.6); this module only produces it.
 """
@@ -114,6 +115,7 @@ __all__ = [
     "question_source_caps",
     "recorded_frontmatter_id",
     "resolve_named_sources",
+    "single_source_item_cap",
     "title_hint_match",
     "select_primary_evidence",
     "t3_chunk_fetcher",
@@ -144,9 +146,21 @@ class PrimaryEvidenceCaps:
     max_manifest_rows_read: int = 3000
     #: Characters fetched from T3 across all sources (stops at the first batch past it).
     max_fetched_chars: int = 600_000
-    #: Unique chunks reserved for the primary stream (< ``runner._OPERATOR_MAX_INPUTS``).
+    #: Unique chunks reserved for the primary stream when the request names SEVERAL sources, split across them
+    #: (< ``runner._OPERATOR_MAX_INPUTS``). A calibration parameter nothing measured: the near-miss run capped
+    #: a 135-chunk document at 24 while using 18,789 of the character budget below (nexus-jf9wg).
     max_selected_items: int = 24
-    #: Characters in the selected evidence.
+    #: The same bound when the request names exactly ONE source and it resolved (nexus-jf9wg, 2026-10-30): a
+    #: synthesis of one document whose parts sit in different sections needs every section read, and the
+    #: character budget below was the real bound at 24 chunks of 500-1,000 characters. Selection keeps the
+    #: section-diverse, manifest-order picks and continues past ``max_selected_items`` up to this many chunks
+    #: or ``max_selected_chars``, whichever comes first. 44 is ``reserved_stream.RESERVED_SHARE_MAX`` (50) less
+    #: ``lifecycle_stream.LifecycleCaps.max_records`` (6): the reserved share is split between T2 lifecycle records
+    #: (which lead it) and these chunks, and a chunk past the share is dropped with a disclosure (a test pins
+    #: the sum). A calibration parameter, not a derived constant: 44 is the most the share can carry.
+    max_single_source_items: int = 44
+    #: Characters in the selected evidence (both cases). Also below ``coverage_ledger.ASSESSMENT_MAX_ITEM_CHARS``
+    #: (120,000), the per-stream size the coverage check reads, so the primary stream never leaves an unread anchor.
     max_selected_chars: int = 60_000
     #: Frontmatter-id reads one RDR number may cost when several files share it (nexus-xho6c); the
     #: largest group in docs/rdr is nine files. A group past it is candidates, with the cap named.
@@ -1450,6 +1464,17 @@ def _read_manifests(
     return manifests, failed, unread, {}
 
 
+def single_source_item_cap(resolution: NamedSourceResolution, caps: PrimaryEvidenceCaps) -> int:
+    """The unique-chunk ceiling for *resolution*'s primary read (nexus-jf9wg).
+
+    ``caps.max_single_source_items`` (never below ``max_selected_items``) when the request named exactly one
+    source: one entry in the resolution, nothing dropped past ``max_named_sources``, no range (a range names
+    its two ends). ``caps.max_selected_items`` for every other request, so the multi-source selection is unchanged.
+    """
+    one = len(resolution.sources) == 1 and not resolution.dropped and not resolution.ranges
+    return max(caps.max_single_source_items, caps.max_selected_items) if one else caps.max_selected_items
+
+
 def select_primary_evidence(
     resolution: NamedSourceResolution,
     *,
@@ -1601,17 +1626,19 @@ def select_primary_evidence(
         })
 
     # 4. select: fair share of the item budget, each document's priority list, admitted
-    #    round-robin so no document takes the aggregate, shared chunks counted once
-    quotas = _water_fill(caps.max_selected_items, [len(b) for b in per_doc_rows])
+    #    round-robin so no document takes the aggregate, shared chunks counted once. A request that names
+    #    exactly one source (and it resolved) gets the larger single-source ceiling (nexus-jf9wg).
+    item_cap = single_source_item_cap(resolution, caps) if len(docs) == 1 else caps.max_selected_items
+    quotas = _water_fill(item_cap, [len(b) for b in per_doc_rows])
     queues = [deque(_picks(rows, q)) for rows, q in zip(per_doc_rows, quotas, strict=True)]
     admitted: dict[tuple[str, str], _Row] = {}
     holders: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
     held_by_doc: list[set[int]] = [set() for _ in docs]
     chars = 0
     char_capped = False
-    while any(queues) and len(admitted) < caps.max_selected_items:
+    while any(queues) and len(admitted) < item_cap:
         for k, queue in enumerate(queues):
-            if not queue or len(admitted) >= caps.max_selected_items:
+            if not queue or len(admitted) >= item_cap:
                 continue
             row = queue.popleft()
             key = (row.collection, row.chash)
@@ -1627,7 +1654,7 @@ def select_primary_evidence(
             chars += len(row.text)
     if char_capped:
         caps_hit.append("max_selected_chars")
-    if len(admitted) >= caps.max_selected_items and any(queues):
+    if len(admitted) >= item_cap and any(queues):
         caps_hit.append("max_selected_items")
 
     items = sorted(

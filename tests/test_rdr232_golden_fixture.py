@@ -197,7 +197,7 @@ def _assert_named_source_and_primary_evidence(fx, reader):
     art_resolution = resolve_named_sources(
         [rdr084_ref], OwnerResolution("resolved", fx.art_owner, (("project", fx.art_owner),)), cat=reader)
     assert [s.tumbler for s in art_resolution.sources] == [fx.art_rdr]
-    caps = _replace(DEFAULT_CAPS, max_selected_items=6)
+    caps = _replace(DEFAULT_CAPS, max_selected_items=6, max_single_source_items=6)
     primary = select_primary_evidence(
         art_resolution, cat=reader, fetch_chunks=t3_chunk_fetcher(get_t3()), caps=caps)
     (cov,) = primary.documents

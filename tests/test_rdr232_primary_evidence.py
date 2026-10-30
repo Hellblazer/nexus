@@ -427,7 +427,7 @@ def test_a_document_over_the_budget_keeps_one_chunk_per_kind_of_section_spread_n
     cat, t3 = FakeCatalog(), FakeT3()
     names = {3: "Proposed Solution", 11: "Research Findings", 24: "Implementation Status", 36: "Open Questions"}
     _doc(cat, t3, ART_DOC, ART_PATH, _sectioned(40, names))
-    caps = replace(DEFAULT_CAPS, max_selected_items=10)
+    caps = replace(DEFAULT_CAPS, max_selected_items=10, max_single_source_items=10)
     res, primary = _select(cat, t3, [RDR084], caps=caps)
 
     (doc,) = primary.documents
@@ -457,7 +457,7 @@ def test_a_section_kind_that_is_absent_is_not_assumed_and_a_small_document_is_no
 def test_chunks_without_headings_fall_back_to_position_and_say_the_metadata_is_partial() -> None:
     cat, t3 = FakeCatalog(), FakeT3()
     _doc(cat, t3, ART_DOC, ART_PATH, [f"plain paragraph {i} " + "y" * 30 for i in range(40)])
-    caps = replace(DEFAULT_CAPS, max_selected_items=8)
+    caps = replace(DEFAULT_CAPS, max_selected_items=8, max_single_source_items=8)
     _res, primary = _select(cat, t3, [RDR084], caps=caps)
     (doc,) = primary.documents
     positions = [i.position for i in primary.items]
@@ -591,7 +591,8 @@ def test_hydration_fetches_each_collection_once_per_batch_with_unique_ids() -> N
         by_col[col].append(n)
     assert sum(by_col[ART_COL]) == 15 and sum(by_col[other]) == 10
     assert all(n <= 10 for ns in by_col.values() for n in ns)
-    assert len(_primary.items) == DEFAULT_CAPS.max_selected_items and _primary.documents[0].missing_content == 0
+    # one named source: all 25 chunks are under the single-source ceiling (nexus-jf9wg), so all are selected
+    assert len(_primary.items) == 25 and _primary.documents[0].missing_content == 0
     assert _primary.documents[0].rows_hydrated == 25
 
 
@@ -1687,3 +1688,101 @@ async def test_nx_answer_over_live_shaped_rows_and_no_files_discloses_the_reason
     (src,) = env["named_sources"]["sources"]
     assert (src["status"], src["tumbler"]) == ("candidates", None), "no row recorded: nothing is guessed"
     assert "no aspect row yet for 4" in src["detail"]
+
+
+# ── nexus-jf9wg: one named source reads past the multi-source cap ─────────────────────────
+
+
+def _manuscript(sections: int, per_section: int, body: int) -> list[str]:
+    """*sections* sections of *per_section* chunks each; only the first chunk of a section carries the heading,
+    the rest inherit its label, as a real RDR's chunks do."""
+    texts = []
+    for s in range(sections):
+        for c in range(per_section):
+            head = f"## Section {s:02d}\n" if c == 0 else ""
+            texts.append(f"{head}section {s} chunk {c} " + "w" * body)
+    return texts
+
+
+def test_a_one_source_135_row_manifest_selects_past_24_items_with_every_section_in_manifest_order() -> None:
+    # The near-miss S04 shape: one document, 135 manifest rows, 27 sections of five chunks, about 700 characters a chunk
+    # (the live run selected 24 and used 18,789 of the 60,000 character budget).
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 700))
+    res, primary = _select(cat, t3, [RDR084])
+
+    (doc,) = primary.documents
+    assert doc.manifest_rows == 135 and doc.rows_hydrated == 135, "non-vacuity: the whole 135-row manifest was read"
+    assert primary.selected_items == DEFAULT_CAPS.max_single_source_items == 44 > DEFAULT_CAPS.max_selected_items == 24
+    assert {i.label for i in primary.items} == {f"Section {s:02d}" for s in range(27)}, "every section is represented"
+    positions = [i.position for i in primary.items]
+    assert positions == sorted(positions) and len(set(positions)) == 44, "manifest order, no repeats"
+    assert primary.selected_chars <= DEFAULT_CAPS.max_selected_chars
+    assert "max_selected_chars" not in primary.caps_hit, "the item ceiling bound it, not the character budget"
+    assert doc.partial is True and doc.selected_rows == 44
+
+
+def test_the_character_budget_still_bounds_a_one_source_read_below_the_item_ceiling() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 2_000))  # about 2,000 characters a chunk
+    _res, primary = _select(cat, t3, [RDR084])
+    assert 24 < primary.selected_items < 44, primary.selected_items
+    assert primary.selected_chars <= DEFAULT_CAPS.max_selected_chars == 60_000
+    assert "max_selected_chars" in primary.caps_hit
+
+
+def test_several_named_sources_keep_the_multi_source_cap_unchanged() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    for tumbler, n in (("1.2.10", 30), ("1.2.11", 30)):
+        _doc(cat, t3, tumbler, f"docs/rdr/rdr-0{tumbler[-2:]}-doc.md", [t + tumbler for t in _manuscript(n, 4, 300)])
+    sources = [SourceRef.parse(f"RDR-0{n}") for n in (10, 11)]
+    res, primary = _select(cat, t3, sources)
+    assert [s.status for s in res.sources] == ["resolved"] * 2
+    assert primary.selected_items == DEFAULT_CAPS.max_selected_items == 24
+    per_doc = defaultdict(int)
+    for item in primary.items:
+        per_doc[item.doc_id] += 1
+    assert dict(per_doc) == {"1.2.10": 12, "1.2.11": 12}
+
+
+def test_the_single_source_ceiling_needs_exactly_one_source_and_nothing_dropped_or_ranged() -> None:
+    from nexus.plans.evidence import SourceRange
+    from nexus.plans.primary_evidence import NamedSourceResolution, single_source_item_cap
+
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, ["## A\nbody"])
+    res = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat)
+    assert single_source_item_cap(res, DEFAULT_CAPS) == 44
+    assert single_source_item_cap(replace(res, dropped=("RDR-085",)), DEFAULT_CAPS) == 24
+    ranged = replace(res, ranges=(SourceRange(84, 90),))
+    assert single_source_item_cap(ranged, DEFAULT_CAPS) == 24
+    assert single_source_item_cap(NamedSourceResolution(sources=res.sources * 2), DEFAULT_CAPS) == 24
+    # a ceiling set below the multi-source cap never lowers it
+    assert single_source_item_cap(res, replace(DEFAULT_CAPS, max_single_source_items=10)) == 24
+
+
+def test_the_caps_are_stated_in_one_place_and_the_downstream_budgets_hold_them() -> None:
+    """The reserved share carries the T2 lifecycle records AND the primary chunks; the coverage check reads one
+    stream up to ASSESSMENT_MAX_ITEM_CHARS; both must hold the single-source ceiling (nexus-jf9wg)."""
+    from nexus.plans.coverage_ledger import ASSESSMENT_MAX_ITEM_CHARS
+    from nexus.plans.lifecycle_stream import LifecycleCaps
+    from nexus.plans.reserved_stream import RESERVED_SHARE_MAX
+    from nexus.plans.runner import _OPERATOR_MAX_INPUTS
+
+    wire = DEFAULT_CAPS.to_wire()
+    assert wire["max_single_source_items"] == 44 and wire["max_selected_items"] == 24
+    assert wire["max_single_source_items"] + LifecycleCaps().max_records <= RESERVED_SHARE_MAX < _OPERATOR_MAX_INPUTS
+    assert DEFAULT_CAPS.max_selected_chars < ASSESSMENT_MAX_ITEM_CHARS, "the primary stream never leaves an unread anchor"
+
+
+def test_the_largest_one_source_read_fits_the_reserved_share_with_the_lifecycle_records_ahead_of_it() -> None:
+    from nexus.plans.lifecycle_stream import LifecycleCaps
+    from nexus.plans.reserved_stream import ReservedItem, ReservedStream
+
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 700))
+    _res, primary = _select(cat, t3, [RDR084])
+    records = tuple(ReservedItem.record(f"nexus_rdr/{i}", f"record {i}") for i in range(LifecycleCaps().max_records))
+    stream = ReservedStream.from_evidence(primary, extra=records)
+    assert stream is not None and len(stream.items) == 50
+    assert stream.over_share_dropped == 0, "no primary chunk is dropped for the share, so no stray disclosure"
