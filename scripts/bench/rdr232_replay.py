@@ -100,15 +100,17 @@ def _is_enabled(plan: Mapping[str, Any]) -> bool:
     return not plan.get("disabled_at")
 
 
-def judge(request_kind: str, plan: Mapping[str, Any]) -> tuple[bool, str | None, Any]:
+def judge(request_kind: str, plan: Mapping[str, Any], named_source_count: int = 0) -> tuple[bool, str | None, Any]:
     """The gate's verdict on *plan* for a request of *request_kind*: ``(admitted, reason, standing)``.
 
     Runs the real enforcing :class:`EligibilityFilter`, so the matrix, the provenance rules and the fail-closed
-    ``judge_error`` are the gate's own.
+    ``judge_error`` are the gate's own. *named_source_count* is 1 for a request that names exactly one source
+    (``RequestCoverage.names_one_source``): the gate then refuses citation-traversal for a synthesis or ``unknown``
+    request (nexus-jypmj).
     """
     from nexus.plans.eligibility import EligibilityFilter, classify_plan  # noqa: PLC0415 — deferred; keeps module import cheap
 
-    filt = EligibilityFilter(request_kind, "heuristic", enforce=True)
+    filt = EligibilityFilter(request_kind, "heuristic", enforce=True, named_source_count=named_source_count)
     admitted = filt.admit(plan, "cosine")
     reasons = filt.to_wire()["branches"]["cosine"]["reasons"]
     reason = None if admitted else next(iter(reasons), "unknown")
@@ -187,10 +189,10 @@ def classify_rows(
         overridden = kind_override.get(question_key(_row_text(row))) if kind_override else None
         if overridden is not None:
             kind, decision = overridden, "model-assisted"
-        admitted, reason, standing = judge(kind, plan)
-        # nexus-4xmpv: the one-source rule is not an eligibility verdict (no plan is refused for it); it narrows the
-        # run's secondary retrieval. The replay reads the SAME property nx_answer does, on the kind it replays with,
-        # so a count here cannot disagree with a live run's.
+        # nexus-4xmpv, nexus-jypmj: the one-source rule refuses citation-traversal (the gate, below) and confines the
+        # run's secondary retrieval to the document, which a replay cannot see. The replay reads the SAME property
+        # nx_answer does, so a count here cannot disagree with a live run's.
+        admitted, reason, standing = judge(kind, plan, 1 if coverage.names_one_source else 0)
         narrowed = dc_replace(coverage, answer_kind=kind).narrows_to_one_source
         narrowed_runs += narrowed
         bucket = _bucket(standing)
@@ -242,7 +244,7 @@ def classify_rows(
         "one_source_narrowing": {
             "runs": narrowed_runs, "of": examined,
             "note": "synthesis or unknown runs that name exactly one source (RequestCoverage.narrows_to_one_source); "
-                    "nx_answer narrows their secondary retrieval to it once the source resolves, which a replay cannot see",
+                    "nx_answer confines their secondary retrieval to the document once the source resolves, which a replay cannot see",
         },
         "excluded": {
             "count": excluded, "share": round(excluded / examined, 4),

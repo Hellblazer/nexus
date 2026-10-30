@@ -11633,6 +11633,7 @@ async def _nx_answer_plan_miss(
         f"{_nx_answer_planner_request_block(coverage)}"
         f"{corpus_names_hint}\n\n"
         f"{_PLANNER_SCOPING_RULES}\n\n"
+            1 if coverage.names_one_source else 0,
         f"{_PLANNER_TOOL_REFERENCE}\n"
         f"Return the plan as {{\"steps\": [...]}} where each step is "
         f"{{\"tool\": \"<bare name>\", \"args\": {{...}}}}."
@@ -12418,6 +12419,9 @@ async def nx_answer(
             resolved_args=list(resolved) if isinstance(resolved, list) else [],
             reducer_expected=reducer_expected,
         )
+        # nexus-4xmpv: a synthesis or unknown request that names exactly one source does not admit citation-traversal;
+        # the count is RequestCoverage.names_one_source, the one place that decides it.
+        named_source_count=1 if _request_coverage.names_one_source else 0,
         _diag_cache.clear()
 
     def _evidence_diagnostics_now() -> "dict[str, Any] | None":
