@@ -745,7 +745,7 @@ nx enrich aspects knowledge__delos --all               # re-extract everything (
 nx enrich aspects knowledge__delos --dry-run
 nx enrich aspects knowledge__delos --validate-sample 10
 nx enrich aspects knowledge__delos --validate-sample 10 --validation-out /tmp/aspects.jsonl
-nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku-4-5-20251001
+nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku-5-5   # rows made before the 5.5 flip
 ```
 
 | Flag | Description |

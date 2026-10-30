@@ -292,7 +292,7 @@ _SCHOLARLY_PAPER_CONFIG = ExtractorConfig(
     # measuring box, about ten times the cost) while every row was still
     # stamped haiku, and the version-filter query
     # (list_by_extractor_version) could not tell them apart.
-    model_version="claude-haiku-4-5-20251001",
+    model_version="claude-haiku-5-5",
     prompt_template=_SCHOLARLY_PAPER_PROMPT,
     required_fields=(
         "problem_formulation",
@@ -384,7 +384,7 @@ The documents follow, separated by ``=====``. Each is preceded by its
 
 _GENERAL_PROSE_CONFIG = ExtractorConfig(
     extractor_name="general-prose-v1",
-    model_version="claude-haiku-4-5-20251001",
+    model_version="claude-haiku-5-5",
     prompt_template=_GENERAL_PROSE_PROMPT,
     # Only the two prose-applicable fields are required; datasets/baselines
     # are always [] and ``experimental_results`` is optional (a reference
