@@ -18,7 +18,8 @@
     row's own label, else the chunk row's), title and source_author (the catalog's when it is not blank, else the
     chunk row's), the three id-valued bib columns, and content_type as an ARRAY of every word the document answers
     to. A missing value is the empty string in the object, because the stage counts a missing value as the empty
-    string; with that rule the in-SQL test admits a SUPERSET of what the stage keeps, and the stage (which names the
+    string (content_type included: a document with no catalog type, no derivable format and a chunk row without
+    content_type answers the array [""], so content_type="" admits it as the stage keeps it); with that rule the in-SQL test admits a SUPERSET of what the stage keeps, and the stage (which names the
     qualifying owner and judges every operator) trims the rest. The compiled predicate holds only positive
     operators (ManifestPushdown).
 
@@ -119,10 +120,10 @@ AS $$
                        'bib_openalex_id', to_jsonb(d.bib_openalex_id),
                        'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
                        'content_type', to_jsonb(array_remove(ARRAY[
-                           NULLIF(d.content_type, ''),
+                           CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
                            f.fmt,
-                           CASE WHEN f.fmt IS NULL OR COALESCE(d.content_type, '') = ''
-                                THEN c.metadata ->> 'content_type' END
+                           CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
+                                THEN COALESCE(c.metadata ->> 'content_type', '') END
                        ], NULL))
                    ) AS eff
                  ) e
@@ -208,10 +209,10 @@ AS $$
                        'bib_openalex_id', to_jsonb(d.bib_openalex_id),
                        'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
                        'content_type', to_jsonb(array_remove(ARRAY[
-                           NULLIF(d.content_type, ''),
+                           CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
                            f.fmt,
-                           CASE WHEN f.fmt IS NULL OR COALESCE(d.content_type, '') = ''
-                                THEN c.metadata ->> 'content_type' END
+                           CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
+                                THEN COALESCE(c.metadata ->> 'content_type', '') END
                        ], NULL))
                    ) AS eff
                  ) e
@@ -297,10 +298,10 @@ AS $$
                        'bib_openalex_id', to_jsonb(d.bib_openalex_id),
                        'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
                        'content_type', to_jsonb(array_remove(ARRAY[
-                           NULLIF(d.content_type, ''),
+                           CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
                            f.fmt,
-                           CASE WHEN f.fmt IS NULL OR COALESCE(d.content_type, '') = ''
-                                THEN c.metadata ->> 'content_type' END
+                           CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
+                                THEN COALESCE(c.metadata ->> 'content_type', '') END
                        ], NULL))
                    ) AS eff
                  ) e

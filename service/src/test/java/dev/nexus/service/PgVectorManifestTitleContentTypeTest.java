@@ -61,6 +61,7 @@ class PgVectorManifestTitleContentTypeTest {
     private static final String DOC_C = "tct-doc-c";
     private static final String DOC_D = "tct-doc-d";
     private static final String DOC_E = "tct-doc-e";
+    private static final String DOC_F = "tct-doc-f";
 
     private static final String TEXT_S1 = "tctprobe shared chunk held by code file a and note b";
     private static final String TEXT_P1 = "tctprobe chunk only code file a holds";
@@ -68,6 +69,7 @@ class PgVectorManifestTitleContentTypeTest {
     private static final String TEXT_PC = "tctprobe chunk only pdf c holds";
     private static final String TEXT_PD = "tctprobe chunk only markdown d holds";
     private static final String TEXT_PE = "tctprobe chunk only legacy document e holds";
+    private static final String TEXT_PF = "tctprobe chunk only the answerless document f holds";
     private static final String QUERY = "tctprobe";
 
     private static final String S1 = Chash.ofText("tct-s1").toHex();
@@ -76,6 +78,7 @@ class PgVectorManifestTitleContentTypeTest {
     private static final String PC = Chash.ofText("tct-pc").toHex();
     private static final String PD = Chash.ofText("tct-pd").toHex();
     private static final String PE = Chash.ofText("tct-pe").toHex();
+    private static final String PF = Chash.ofText("tct-pf").toHex();
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -107,6 +110,7 @@ class PgVectorManifestTitleContentTypeTest {
         embedder.register(TEXT_PC, 0.6f, 0.8f);
         embedder.register(TEXT_PD, 0.3f, 0.9539392f);
         embedder.register(TEXT_PE, 0.0f, 1.0f);
+        embedder.register(TEXT_PF, -0.6f, 0.8f);
         vec = new PgVectorRepository(tenantScope, embedder, embedder);
 
         try (Connection su = pg.createConnection("")) {
@@ -119,17 +123,20 @@ class PgVectorManifestTitleContentTypeTest {
             doc(seed, DOC_D, "d.md", "prose", "notes/d.md");
             // E: legacy. An empty catalog title (the columns are NOT NULL, so ''), no content type, no path.
             doc(seed, DOC_E, "", "", "");
+            // F: no catalog answer at all, and (below) a chunk row that carries no title and no content_type.
+            doc(seed, DOC_F, "", "", "");
         }
 
-        vec.upsertChunks(TENANT, COLLECTION, List.of(S1, P1, S2, PC, PD, PE),
-            List.of(TEXT_S1, TEXT_P1, TEXT_S2, TEXT_PC, TEXT_PD, TEXT_PE),
+        vec.upsertChunks(TENANT, COLLECTION, List.of(S1, P1, S2, PC, PD, PE, PF),
+            List.of(TEXT_S1, TEXT_P1, TEXT_S2, TEXT_PC, TEXT_PD, TEXT_PE, TEXT_PF),
             List.of(
                 row("title", "B note", "content_type", "knowledge"),
                 row("title", "stale-p1", "content_type", "prose"),
                 row("title", "d.md", "content_type", "markdown"),
                 row("title", "stale-pc", "content_type", "markdown"),
                 row("title", "stale-pd", "content_type", "pdf"),
-                row("title", "legacy-title", "content_type", "pdf")));
+                row("title", "legacy-title", "content_type", "pdf"),
+                row()));
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -142,6 +149,7 @@ class PgVectorManifestTitleContentTypeTest {
             manifest(seed, DOC_D, 0, S2);
             manifest(seed, DOC_D, 1, PD);
             manifest(seed, DOC_E, 0, PE);
+            manifest(seed, DOC_F, 0, PF);
         }
     }
 
@@ -190,7 +198,7 @@ class PgVectorManifestTitleContentTypeTest {
     private static String label(Map<String, Object> r) {
         String chash = (String) r.get("id");
         String name = chash.equals(S1) ? "S1" : chash.equals(P1) ? "P1" : chash.equals(S2) ? "S2"
-                    : chash.equals(PC) ? "PC" : chash.equals(PD) ? "PD" : chash.equals(PE) ? "PE" : chash;
+                    : chash.equals(PC) ? "PC" : chash.equals(PD) ? "PD" : chash.equals(PE) ? "PE" : chash.equals(PF) ? "PF" : chash;
         String doc = (String) r.get("doc_id");
         return name + "@" + (doc == null ? "none" : doc.substring(doc.length() - 1).toUpperCase());
     }
@@ -233,7 +241,7 @@ class PgVectorManifestTitleContentTypeTest {
     @Test
     void title_operators() {
         expect(Map.of("title", op("$in", List.of("alpha.py", "c.pdf"))), "S1@A", "P1@A", "S2@C", "PC@C");
-        expect(Map.of("title", op("$ne", "alpha.py")), "S1@B", "S2@C", "S2@D", "PC@C", "PD@D", "PE@E");
+        expect(Map.of("title", op("$ne", "alpha.py")), "S1@B", "S2@C", "S2@D", "PC@C", "PD@D", "PE@E", "PF@F");
     }
 
     // ── content_type ─────────────────────────────────────────────────────────
@@ -257,7 +265,15 @@ class PgVectorManifestTitleContentTypeTest {
         expect(Map.of("content_type", "paper"), "S2@C", "PC@C");
         expect(Map.of("content_type", "knowledge"), "S1@B");
         expect(Map.of("content_type", op("$in", List.of("code", "paper"))), "S1@A", "P1@A", "S2@C", "PC@C");
-        expect(Map.of("content_type", op("$ne", "code")), "S1@B", "S2@C", "S2@D", "PC@C", "PD@D", "PE@E");
+        expect(Map.of("content_type", op("$ne", "code")), "S1@B", "S2@C", "S2@D", "PC@C", "PD@D", "PE@E", "PF@F");
+    }
+
+    @Test
+    void contentTypeEmpty_aDocumentWithNoAnswerAnywhereIsTheEmptyString_asTheStageReadsIt() {
+        // F has a blank catalog type, no derivable format and a chunk row without content_type. The stage treats a
+        // missing value as "", so the pushed EXISTS must admit it too (a superset of the stage's keep set).
+        expect(Map.of("content_type", ""), "PF@F");
+        expect(Map.of("content_type", op("$in", List.of("", "code"))), "S1@A", "P1@A", "PF@F");
     }
 
     @Test
