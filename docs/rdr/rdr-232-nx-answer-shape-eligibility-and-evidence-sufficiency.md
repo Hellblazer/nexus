@@ -601,13 +601,13 @@ listed under Critical Assumptions before gate.
 
 - **Verified** (spike, live) — Phase 3 step 4, the results that had lived only in bead nexus-jypmj.3.10 and its T2 record (develop 6dd75ec3f, engine 0.1.167 and 0.1.168, 2026-10-28 and 2026-10-29, about 40.8 USD of live spend; recorded here 2026-10-30). Repair yield, by where the facet came from (a "whole_question" facet is the request as a whole, so repair re-searches the question; a "clause" facet is one part of it): whole_question 2 of 3 covered after repair (golden 1 of 2, held-out 1 of 1); clause 0 of 5 (golden 0 of 4, held-out 0 of 1); G18 (an audit request, withheld) 0 of 5 facets on both reruns, 8 items merged each time. Repair entered 2 golden runs, 2 held-out runs and the 2 G18 reruns. A repair cost about 5 search calls and one reassessment call (0.005 to 0.01 USD) and about 30 s (G18: 31.6 s), inside the stage's time share and cost stop-line, and none caused a withhold or an error. The recommendation posted on the bead, not a decision by Sam, was to keep repair as shipped: it is cheap, bounded and yields on whole_question facets; 0 of 5 on clause facets is too few tries to drop it on, and G18 shows its failure is retrieval (the answer sat in a docstring and a plan file the repair queries did not reach), not the repair loop. The oracle's permissive side (labels drafted blind by four readers who never saw the assessor's ledger, 21 held-out requests; the five largest were not drafted): spurious contradicts 7 of 7 scored (95 percent interval 65 to 100; the assessor marked 13 facets `conflicted`, 13 of 49 covered facets, 27 percent) and falsely covered 2 of 3 (21 to 94). Sam's spot check of 15 drafted pairs (seed 20261029) found the drafter wrong on 4 (27 percent, 11 to 52), all drafted neutral where Sam reads supports; drafted supports were wrong 0 of 5, and on the 3 sampled disagreements he sided with the assessor each time. So these two rates are not evidence against the assessor, and they are not evidence for it either: drafted neutrals under-count support, so the drafted labels cannot show that the assessor over-covers or over-flags conflicts. The false-negative rate (1 of 31 facets) is the one that rests on drafted supports, which held up, at screening grade. All figures were taken under the directional lookup rule and before the unread-anchor rule of 2026-10-30. *Source: bead nexus-jypmj.3.10 comments of 2026-10-28 and 2026-10-29. T2: `nexus/rdr232-3.10-live-measurement-2026-10-29`; research 24.*
 
-- **Verified** (spike, live) — the near-miss synthesis control (golden_near_miss_synthesis_v1, six one-source requests whose parts sit in different sections; develop f0d8dcc9e, engine 0.1.170, 2026-10-30, rows 919-924). Extraction read all six as `synthesis` (four model-assisted, two heuristic), so none reached the lookup plan, which was excluded wherever it was a candidate. Four ran the inline planner and two ran citation-traversal (467), a plan the set's labels list as unacceptable, so wrong-shape admission by label is 2 of 6 for this class; it comes from the synthesis row, not the lookup boundary (nexus-4xmpv). Every run capped the named source at 24 primary chunks (of 41 to 135), and four of the six answers say a requested section was not in their input (nexus-jf9wg). On three facets in three of the six runs the coverage check reported `covered` while the answer's own prose said the part was missing from its input: S03 f3 (the alternatives section of RDR-103, "Part 3 is not supported"), S04 f1 ("Gap 2 is not among the supplied passages") and S06 f3 (the passages do not record whether P1 to P4 are done); all three sit behind the 24-chunk primary cap (nexus-dfrfp, nexus-jf9wg). S01 covered its first facet from other sections and said so, which is not a mismatch. In-sample, six requests, cost 0.35 to 0.56 USD and 74 to 111 s a run.
+- **Verified** (spike, live) — the near-miss synthesis control (golden_near_miss_synthesis_v1, six one-source requests whose parts sit in different sections; develop f0d8dcc9e, engine 0.1.170, 2026-10-30, rows 919-924). Extraction read all six as `synthesis` (four model-assisted, two heuristic), so none reached the lookup plan, which was excluded wherever it was a candidate. Four ran the inline planner and two ran citation-traversal (467), a plan the set's labels list as unacceptable, so wrong-shape admission by label is 2 of 6 for this class; it comes from the synthesis row, not the lookup boundary (nexus-4xmpv). Every run capped the named source at 24 primary chunks (of 41 to 135), and four of the six answers say a requested section was not in their input (nexus-jf9wg). On three facets in three of the six runs the coverage check reported `covered` while the answer's own prose said the part was missing from its input: S03 f3 (the alternatives section of RDR-103, "Part 3 is not supported"), S04 f1 ("Gap 2 is not among the supplied passages") and S06 f3 (the passages do not record whether P1 to P4 are done); all three sit behind the 24-chunk primary cap (nexus-dfrfp, nexus-jf9wg). S01 covered its first facet from other sections and said so, which is not a mismatch. In-sample, six requests, cost 0.35 to 0.56 USD and 74 to 111 s a run. Both findings were acted on 2026-10-30 and neither is re-measured: a one-source synthesis no longer admits citation-traversal (nexus-4xmpv, Sam's decision, section 1) and a one-source read takes up to 44 chunks (nexus-jf9wg, section 2).
   *Source: live runs 919-924. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
 
 - **Verified** (spike, live) — the replacement negative controls N01-N03 (develop f0d8dcc9e, engine 0.1.170, 2026-10-30). With the check on, all three were withheld as `uncovered`, with 0 of 6 facets covered, every retrieved item read, and repair finding nothing that covered a facet (rows 925-927, 0.005 to 0.113 USD). With the check off, two of the three returned off-topic prose as `answered` (N01 about RDR-231, N02 about RDR-230) and the third answered with a statement that nothing covered it (rows 928-930). False covers: 0 of 6 facets on four requests' worth of design (N04 was measured earlier), a presence check and not a rate.
   *Source: live runs 925-930. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
 
-- **Verified** (spike, live) — the G06 rerun on an engine carrying `node_walk` (engine-service-v0.1.170, develop f0d8dcc9e, ART RDR-084, owner 1.2, 2026-10-30, row 931). The traverse sent the scope filter and the reply carried `node_walk` for all 32 nodes (depths 0 and 2, roles seed and citation); the engine removed 128 out-of-scope nodes, and the policy retained 32 with 0 dropped by role, against 5 retained (25 dropped by role) on the 0.1.169 canary2 and 30 on the client-side canary. Of the 64 graph anchors handed to the check, 39 match the client-side run and 21 match canary2. The coverage check read all 99 anchors and covered 6 of 6 facets with no repair; 0.432 USD, 69.1 s wall. The 32 against 30 difference is not attributed (the engine removed 124 nodes on 2026-10-28). One request on one run.
+- **Verified** (spike, live) — the G06 rerun on an engine carrying `node_walk` (engine-service-v0.1.170, develop f0d8dcc9e, ART RDR-084, owner 1.2, 2026-10-30, row 931). The traverse sent the scope filter and the reply carried `node_walk` for all 32 nodes (depths 0 and 2, roles seed and citation); the engine removed 128 out-of-scope nodes, and the policy retained 32 with 0 dropped by role, against 5 retained (25 dropped by role) on the 0.1.169 canary2 and 30 on the client-side canary. Of the 64 graph anchors handed to the check, 39 match the client-side run and 21 match canary2. The coverage check read all 99 anchors and covered 6 of 6 facets with no repair; 0.432 USD, 69.1 s wall. The 32 against 30 difference is not attributed (the engine removed 124 nodes on 2026-10-28). One request on one run. This run used plan 467 (citation-traversal), which `golden_v1` lists as unacceptable for G06, so its 6-of-6 covered is the assessor's ledger over the wrong plan's evidence and does not show the incident class fixed; it is why the close was held (nexus-4xmpv; the single-source rule of 2026-10-30, section 1, removes that plan for this request and is not re-measured live).
   *Source: live run 931; 2026-10-28 canary envelopes. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
 
 - **Verified** (spike, live) — the five largest held-out requests with the check on (develop f0d8dcc9e, engine 0.1.170, 2026-10-30, rows 932-936). H09 (lookup) ran the lookup plan with 4 anchors, all read, and answered. H12, H13 and H28 handed the check 261 to 325 anchors and it read 116 to 156 of them (the unread items are always the tail of the graph stream, past the 120,000-character per-stream cap); all their facets were covered from what was read, so repair was not entered and the unread items stayed unread (nexus-z6yvk). H29 read 119 of 300 in the first round, its repair found no new items and its reassessment read 123 of the 181 left unread (242 read, 58 unread), and it was withheld as `uncovered`. Cost 0.06 to 1.51 USD; wall 41 to 252 s, with H13 and H28's time in the comparison plan, not the check (assessment 47 and 33 s).
@@ -670,9 +670,12 @@ in `232-research-3`. Behavioral prototype evidence is `232-research-6` through
   carries the id (nexus-xho6c, ccf594e33); rows indexed before that fix need a
   re-extract. What stays partial: candidate paging past the first page and more
   than two real documents with one number were not exercised live, and the bound
-  is tight. A single-source synthesis request caps the named source at 24 primary
-  chunks (of 41 to 135 in the near-miss control), and 4 of 6 answers said a
-  requested section was not in their input (nexus-jf9wg).
+  is tight. A single-source synthesis request capped the named source at 24
+  primary chunks (of 41 to 135 in the near-miss control), and 4 of 6 answers said
+  a requested section was not in their input (nexus-jf9wg). Changed 2026-10-30: a
+  request naming exactly one source now reads up to 44 chunks or the character
+  budget (section 2, the dated departure); the effect on those answers is not
+  re-measured, so this stays partial.
 - [x] **A3 — existing dispatch can support facet coverage at a new runner-owned
   pre-reduction boundary.** **Status**: Verified live 2026-10-29 (research 24);
   earlier, partially verified (research 8). **Method**: Source search plus a
@@ -851,6 +854,30 @@ matches now goes to the inline planner; that planner's cost on lookups is not
 measured. The other rows, and the provenance limits on `unknown` plans, are
 unchanged.
 
+**Decided by Sam, 2026-10-30 (nexus-4xmpv): a `synthesis` request that names
+exactly one source does not admit citation-traversal.** The near-miss control
+(rows 920 and 923) and the incident request itself (G06, row 931, which ran plan
+467 and is why the close was held) selected the plan the golden labels list as
+unacceptable for them. It walks the reference graph around a document, and the
+request wants the document's own parts read. The rule is a refinement of the
+`synthesis` row, not a new row: the filter refuses a curated plan whose declared
+`strategy` dimension is in `SINGLE_SOURCE_EXCLUDED_STRATEGIES` (today
+`citation-traversal`), so it follows the plan's declared identity and survives a
+re-seed that changes plan ids. It applies when the request kind is `synthesis`
+and the question or the `source` binding names exactly one source (distinct
+sources; a range names its two ends), in the matcher on every branch and in the
+inline planner's few-shots. Under it the request gets its next eligible
+synthesis plan or, with none, the inline planner. A synthesis request naming two
+sources or none, and every other kind, keep their rows. Residual: four of the six
+near-miss requests read as `unknown` on the first pass and become synthesis only
+through the model-assisted extraction; if the extraction fails, an `unknown`
+request still admits a curated synthesis plan, including citation-traversal. The
+rule is pinned offline (the unit selection over the seven requests; the matrix
+test over the seeded library, where the local embedder does not offer
+citation-traversal to the seven and a citation-shaped one-source request is the
+discriminating case); it is not re-measured live, so the near-miss and G06 runs
+above were taken without it.
+
 The `unknown` entries are limited by provenance below; they are not blanket
 permission for every legacy or grown plan. In particular an unknown request
 cannot select an unknown-grown plan, because that is exactly the original
@@ -901,9 +928,15 @@ widening or require citations, but cannot silently become new retrieval facets.
 Explicit user wording is the source of these fields. The caller does not need a
 new MCP parameter or a new command.
 
-A `lookup` request admits lookup plans only (Sam, 2026-10-30, nexus-jypmj.11;
-the dated note under the table above and the Key Discoveries entry of that date).
-A lookup-only plan still may not claim a multi-facet synthesis, and the other
+A `lookup` request admits `lookup` and `unknown`-kind plans, and no plan declared
+`synthesis` (Sam, 2026-10-30, nexus-jypmj.11; the dated note under the table above
+and the Key Discoveries entry of that date; the table's `lookup, unknown` row is
+the rule, and "lookup plans only" in older text means no synthesis plan). The
+`unknown` kind includes every grown plan, since no route is trusted to declare a
+kind, so a grown plan is still admitted for a lookup: that exposure is a known
+limit that no measured run exercised (the close measurements ran with plan growth
+off), and with the rule routing more lookups to the inline planner it grows as
+plans are grown from them. A lookup plan still may not claim a multi-facet synthesis, and the other
 rows keep their shipped directions (a synthesis plan may answer a comparison or
 an audit). Unknown **plan** declarations are not positive evidence of
 incompatibility and remain eligible under conservative legacy/grown gates.
@@ -1095,6 +1128,26 @@ above and the bundle prompt limit. Deduplication by chash keeps the primary
 copy and its attribution. The continuation path re-runs the same hydration
 helper (`plans/continuation_envelope.py:302-309`) and must apply the same
 merge so both reduction routes see the same evidence.
+
+*Departure, 2026-10-30 (nexus-jf9wg).* The primary read reserves 24 unique
+chunks (`PrimaryEvidenceCaps.max_selected_items`) when the request names
+several sources, and 44 (`max_single_source_items`) when it names exactly one
+and that source resolved; the 60,000-character budget is the same for both. The
+24 was a calibration parameter nothing measured: the near-miss control capped
+41 to 135 chunk documents at 24 while using 12,000 to 24,000 of the 60,000
+characters, and four of six answers said a requested section was not in their
+input. For one source the selection keeps its section-diverse, manifest-order
+picks and continues past 24 until 44 chunks or the character budget. 44 is the
+reserved share (`RESERVED_SHARE_MAX`, 50) less the six T2 lifecycle records that
+lead it, so no primary chunk is dropped for the share, and the primary stream
+stays under the coverage check's 120,000-character per-stream size, so it adds
+no unread anchor. Estimated, not measured: a document of about 780 characters a
+chunk adds about 15,000 characters to the reducer input and one assessment call
+(a stream of more than 20 anchors is split into packs of at most 20), about
+0.06 to 0.07 USD on a 0.35 to 0.56 USD run; the worst case does not grow, since
+the character budget is unchanged. The effect on the answers is not re-measured.
+The 44, the 24, the reserved share of 50 and the six lifecycle records are all
+unmeasured calibration parameters. Several-source requests are unchanged.
 
 T2 is outside the corpus graph. When a named source resolves to an RDR, the
 runner adds a third stream: that RDR's T2 records (its metadata record and its
@@ -1398,10 +1451,12 @@ execution counters, decide whether a run can serve as a positive
 answer-quality exemplar, and they supply observed answer-shape evidence for
 RDR-189's family research.
 
-Assessment cost is bounded independently of facet count. Group facets into one
-structured assessment per evidence stream, with a calibrated cap on facets per
-call and one repair/reassessment cycle. The motivating six-facet request must
-not imply six unconditional model calls. Record assessment calls, facets per
+*[Superseded 2026-10-28 by the departure below (nexus-jypmj.17); kept as the
+original design. The calls are no longer one per evidence stream and no
+constant caps their number.]* Assessment cost is bounded independently of facet
+count. Group facets into one structured assessment per evidence stream, with a
+calibrated cap on facets per call and one repair/reassessment cycle. The
+motivating six-facet request must not imply six unconditional model calls. Record assessment calls, facets per
 call, and assessment latency in the run summary. As built, assessment USD is
 not a summary field: it is in the run's step records (the `operator_check`
 steps numbered past the plan's own steps).
@@ -1993,7 +2048,12 @@ library, and composite telemetry surfaces.
 - **Scenario**: Multi-facet request with an ambiguous project qualifier —
   **Verify**: disclose ambiguity instead of choosing another project's RDR.
 - **Scenario**: Six-facet request with several evidence streams — **Verify**:
-  assessment is grouped within the call cap, not six unconditional model calls.
+  assessment is grouped (one call per facet group per pack of at most 20
+  anchors, section 4's departure of 2026-10-28), not six unconditional model
+  calls. No constant caps the call count; the stage's share of the deadline and
+  the USD stop-line bound it, so the check is that a six-facet request makes one
+  call per pack, not six per stream. (Corrected 2026-10-30: this read "within
+  the call cap", which the departure removed.)
 - **Scenario**: Execution succeeds but required evidence is missing —
   **Verify**: `answer_shape="insufficient_evidence"`, coverage is `partial`,
   the text opens with the `[insufficient-evidence: ...]` marker followed by
@@ -2315,3 +2375,5 @@ remains Sam's.
 - 2026-10-29 (entry added late, 2026-10-30): Key Discoveries record the concurrent default-on check live (G06 canary, 29 held-out requests off and on), facet reliability against drafted labels and Sam's 15-pair spot check, the run summary and out-of-step cost column in production, and the relay loss of the engine pre-cap filter (25 of 30 in-scope documents on G06 lost their link role and distance, nexus-jypmj.18). Decision, by Sam: fix the relay loss both ways, a client stopgap and the engine's `node_walk`. Decision text changed: none at the time; section 3 omitted both and is amended 2026-10-30, below.
 - 2026-10-30: Two decisions by Sam, recorded. (1) The `lookup` row admits lookup plans only (nexus-jypmj.11). (2) A facet no read item bears on is `unsupported` when the per-call size cap left anchors unread, with the unread count disclosed (nexus-jypmj.23). Decision text changed: section 1 (the compatibility paragraph and the measured-limit paragraph now state the lookup-only rule and point at the dated note), section 4 (the `uncovered` definition reads "among the items read"; a dated departure in Phase 3 As run for the unread-anchor rule, N04's 301 anchors, 127 read, 174 omitted; the post-repair reassessment also reads the unread anchors), Key Discoveries (the lookup entry corrected for first-pass kinds and the rows it covers, a separate entry for the omitted-anchor mechanism, the two open items of 2026-10-27 closed, the Phase 3 live figures qualified as taken under the old rules), and Critical Assumptions A1.
 - 2026-10-30: Close sweep (nexus-jypmj). Decision text changed: section 1 (the `lookup` row of the compatibility table now reads `lookup`, `unknown`, and the Phase 2 proof line says unknown-grown plans cannot bypass the gate for non-lookup requests only; unknown-kind grown plans are still admitted for lookups, a known limit and unmeasured), section 3 (an "as shipped" paragraph: the pre-cap scope filter, the departure for an engine without it, the relay-loss flaw, Sam's 2026-10-29 choice of client stopgap plus engine `node_walk`, owner narrowing kept on the client; `max_documents` 50 and `max_chunks` 300 are uncalibrated constants, not calibrated values), Phase 3 "As run" (the step 4 measurements were taken after the flip), Performance Expectations (live figures and what stays unmeasured), Proportionality (measured repair yield), Critical Assumptions (A1 to A7 Status lines rewritten to the evidence; A1, A2, A6 and A7 ticked) and Prerequisites (the golden set and the self-contained fixture ticked, with citations). Key Discoveries: the Phase 3 step 4 repair yield and oracle numbers, the near-miss synthesis control, the replacement negative controls N01-N03, the G06 rerun on `node_walk`, the five largest held-out requests, false withholds under the unread-anchor rule, the inline planner on unmatched lookups, and the dev-checkout harness defect; the superseded timing-model entry is retagged with the live figure. New findings carry beads: the 24-chunk primary cap (nexus-jf9wg), the synthesis row admitting citation-traversal (nexus-4xmpv), a coverage ledger that disagrees with its prose (nexus-dfrfp), and covered facets whose unread tail is never read (nexus-z6yvk). The post-mortem is `docs/rdr/post-mortem/rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md`. The status is not changed here.
+
+- 2026-10-30: Two changes after the close sweep, one a decision by Sam. (1) A `synthesis` request that names exactly one source does not admit citation-traversal (nexus-4xmpv; Sam's decision of 2026-10-30). (2) A request that names exactly one source reads up to 44 primary chunks, not 24 (nexus-jf9wg). Decision text changed: section 1 (a dated decision note after the lookup note; the `lookup` paragraph now says lookup and unknown-kind plans and names the unknown-grown exposure), section 2 (a dated departure for the 24 and 44 primary caps with the budget arithmetic), section 4 (the original per-stream assessment paragraph is marked superseded by the 2026-10-28 departure and kept), Test Plan (the six-facet scenario no longer says "within the call cap"), Critical Assumptions A2 and the Key Discoveries entries for the near-miss control and the G06 rerun (row 931 ran plan 467, which is why the close was held). Neither change is re-measured live. The post-mortem is corrected the same day. The status is not changed here.
