@@ -102,9 +102,11 @@ def _display_path_or_title(meta: dict, result_id: str) -> str:
 
 def display_title(meta: dict) -> str:
     """The catalog's title for a hit's document(s) when the search attached
-    one (``_display_title``, nexus-sis0m.5), else the chunk row's own title,
-    which is only its last writer's."""
-    return meta.get("_display_title") or meta.get("title") or ""
+    one (``_display_title``, nexus-sis0m.5), else nothing. The chunk row's own
+    title is the last writer's (a code chunk's is another document's
+    ``path:lines`` once the chunk is shared), so it is never a label
+    (nexus-fv2u4, RDR-236 reader remedy R1)."""
+    return meta.get("_display_title") or ""
 
 
 def _find_matching_lines(chunk_text: str, query: str) -> list[int]:

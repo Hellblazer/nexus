@@ -13,7 +13,7 @@ def _make_results(n: int, distances: list[float] | None = None) -> list[dict]:
     dists = distances or [0.1 * i for i in range(n)]
     return [
         {"id": f"doc-{i}", "content": f"text {i}", "distance": dists[i],
-         "metadata": {"title": f"Title {i}", "source": f"/path/{i}.py"}}
+         "metadata": {"_display_title": f"Title {i}", "_display_path": f"/path/{i}.py"}}
         for i in range(n)
     ]
 
@@ -80,7 +80,7 @@ class TestClusterResults:
                 assert "_cluster_label" in r
             # Label should match the title of the lowest-distance result
             best = min(cluster, key=lambda r: r["distance"])
-            assert cluster[0]["_cluster_label"] == best["metadata"]["title"]
+            assert cluster[0]["_cluster_label"] == best["metadata"]["_display_title"]
 
     def test_clusters_sorted_by_best_distance(self) -> None:
         rng = np.random.default_rng(42)
@@ -144,12 +144,17 @@ class TestKmeansNumpy:
 
 class TestClusterLabel:
     def test_uses_title(self) -> None:
-        r = {"id": "x", "metadata": {"title": "My Title", "source": "/a.py"}}
+        r = {"id": "x", "metadata": {"_display_title": "My Title", "_display_path": "/a.py"}}
         assert _cluster_label(r) == "My Title"
 
-    def test_falls_back_to_source(self) -> None:
-        r = {"id": "x", "metadata": {"source": "/a.py"}}
+    def test_falls_back_to_display_path(self) -> None:
+        r = {"id": "x", "metadata": {"_display_path": "/a.py"}}
         assert _cluster_label(r) == "/a.py"
+
+    def test_never_labels_with_the_chunk_rows_title_or_source(self) -> None:
+        """nexus-fv2u4: the row's title and source are the last writer's, another document's on a shared chunk."""
+        r = {"id": "x", "metadata": {"title": "other/doc.py:40-60", "source": "/other.py"}}
+        assert _cluster_label(r) == "x"
 
     def test_falls_back_to_id(self) -> None:
         r = {"id": "x", "metadata": {}}

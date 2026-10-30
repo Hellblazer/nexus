@@ -3417,7 +3417,9 @@ def _search_render(
                     lines.append("")  # blank separator between clusters
                 lines.append(f"── {cluster_label} ──")
                 current_cluster = cluster_label
-            title = r.metadata.get("_display_title") or r.metadata.get("title", "")
+            # nexus-fv2u4: the catalog title only. The row's title is the last writer's
+            # (another document's path:lines on a shared chunk) and is never a label.
+            title = r.metadata.get("_display_title", "")
             # nexus-1qed: the catalog-resolved _display_path. The row's source_path is the last
             # writer's file, not this document's, and is no longer read (nexus-6pfgb.49).
             source = r.metadata.get("_display_path", "")
@@ -5300,13 +5302,12 @@ def query(
             doc_key = (
                 meta.get("doc_id")
                 or meta.get("content_hash")
-                or meta.get("title")
                 or meta.get("_display_path")
                 or r.id
             )
             if doc_key not in docs:
                 docs[doc_key] = {
-                    "title": meta.get("_display_title") or meta.get("title") or doc_key[:40],
+                    "title": meta.get("_display_title") or meta.get("_display_path") or r.id[:40],
                     "collection": r.collection,
                     "distance": r.distance,
                     # tracks the "best chunk"/doc-order key —
