@@ -73,6 +73,7 @@ from nexus.errors import (
     NexusError,
 )
 from nexus.retry import _vector_with_retry
+from nexus.tables import chunk_metadata_keys as _key_table
 
 if TYPE_CHECKING:
     from nexus.db.http_vector_client import HttpVectorClient
@@ -278,6 +279,32 @@ def _owners_apply(db: object) -> bool:
     from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid import cycle
 
     return is_service_backed(db)
+
+
+def _import_chunk_metadata(meta: dict, *, shared: bool) -> dict:
+    """The metadata an import sends for one chunk row (nexus-6pfgb.18, RDR-236 R2 on import).
+
+    An export record carries the row as it stood: the document keys its LAST writer stamped (title,
+    tags, category, bib_*, ttl_days, indexed_at, content_hash, ...) and the position keys of the
+    position that writer held. Merged onto the target row they restamp what every other document
+    owning that chunk reads back. A document's own keys belong to the catalog entry the import
+    registers and to its manifest row, so the payload keeps only:
+
+    * the CHUNK keys of the key table (``chunk_text_hash``, ``embedding_model``): the chash or the
+      embedding model determines them, so every owner agrees;
+    * the POSITION keys (spans, page, section), only for a row no other live document owns here
+      (*shared* false): the engine's label stage reads them off the written row to fill the
+      document's manifest row, and nothing else holds them yet. A shared row keeps the position keys
+      its owners wrote.
+
+    Everything else (DOCUMENT, LEGACY, ROW and keys outside the table) is left out; the writer merges
+    metadata, so a key left out is a key the target row keeps. The table is the key list; none is
+    kept here.
+    """
+    keep = _key_table.keys_of("CHUNK")
+    if not shared:
+        keep = keep | _key_table.keys_of("POSITION")
+    return {k: v for k, v in (meta or {}).items() if k in keep}
 
 
 def _resolve_export_owners(
@@ -994,7 +1021,10 @@ class _OwnerImport:
     one, including a chash another live document shares (Sam 2026-09-30): the engine counts the
     differing ones (``vector_mismatches``, reported in the import summary). A record whose chunk the
     target already holds under ``--skip-existing`` is sent without a payload, so its stored vector
-    stays. ``metadata_merge`` keeps the keys another document's enrichment set on a shared chunk.
+    stays. ``metadata_merge`` keeps the keys another document's enrichment set on a shared chunk, and
+    the payload carries the chunk's own keys only, plus position keys on a row no other live document
+    holds (:func:`_import_chunk_metadata`, nexus-6pfgb.18), so importing a document restamps none of
+    the title, tags, bib or ttl keys of a document that owns the same chunk.
     """
 
     def __init__(
@@ -1187,18 +1217,23 @@ class _OwnerImport:
         if not rows_by_doc:
             return
 
-        # The import writes chunk rows (metadata whole, ttl_days and indexed_at included) and the
-        # document's manifest, and writes NO note keys (ttl_days, put_at) to the catalog entry: an
-        # imported note makes no TTL claim the catalog could keep true, and a note it lands on keeps
-        # the keys it had. The TTL sweep reads a note's own chunk rows before retiring it for that reason
-        # (nexus-6pfgb.30, note_ttl.catalog_ttl_stale).
+        # The import writes the document's manifest and its chunk rows, and writes NO note keys
+        # (ttl_days, put_at) to the catalog entry: an imported note makes no TTL claim the catalog could
+        # keep true, and a note it lands on keeps the keys it had. Since nexus-6pfgb.18 the chunk
+        # payload no longer carries the export row's document keys either (_import_chunk_metadata), so an
+        # import restamps no title, tags or ttl_days on a row another document owns. Rows an EARLIER
+        # import wrote still carry those keys, which is why the TTL sweep reads a note's own chunk rows
+        # before retiring it (nexus-6pfgb.30, note_ttl.catalog_ttl_stale); that guard stays until
+        # enforcement.
         already = self._existing_ids([r.rec_id for recs in recs_by_doc.values() for r in recs])
+        shared = self._shared_chashes(recs_by_doc)
         chunks: dict[str, dict] = {}
         for recs in recs_by_doc.values():
             for r in recs:
                 if r.rec_id not in already and r.rec_id not in chunks:
                     chunks[r.rec_id] = {
-                        "chash": r.rec_id, "text": r.doc, "metadata": r.meta, "embedding": r.emb,
+                        "chash": r.rec_id, "text": r.doc, "embedding": r.emb,
+                        "metadata": _import_chunk_metadata(r.meta, shared=r.rec_id in shared),
                     }
         result = writer.write_page(rows_by_doc, chunks)
         self.vector_mismatches += result.vector_mismatches
@@ -1232,6 +1267,30 @@ class _OwnerImport:
             "import_page_written", documents=len(result.written), finished=len(result.finished),
             failed=len(result.failed), chunks=len(sent_ids), total_so_far=self.imported_count,
         )
+
+    def _shared_chashes(self, recs_by_doc: dict[str, list[_PageRec]]) -> set[str]:
+        """The page's chashes that more than one live document of this collection holds: two documents
+        of this page, or one of them and a document the catalog already lists (nexus-6pfgb.18). Two
+        batched reads per page (``docs_for_chashes``, then ``resolve_many`` for the other documents),
+        never one per chunk."""
+        in_page: dict[str, set[str]] = {}
+        for doc, recs in recs_by_doc.items():
+            for r in recs:
+                in_page.setdefault(r.rec_id, set()).add(doc)
+        shared = {c for c, docs in in_page.items() if len(docs) > 1}
+        remaining = [c for c in in_page if c not in shared]
+        if not remaining:
+            return shared
+        by_chash = self._reader.docs_for_chashes(remaining)
+        others = {c: set(by_chash.get(c, ())) - in_page[c] for c in remaining}
+        wanted = sorted({t for ts in others.values() for t in ts})
+        if not wanted:
+            return shared
+        entries = self._reader.resolve_many(wanted)
+        for c, ts in others.items():
+            if any(t in entries and entries[t].physical_collection == self.collection_name for t in ts):
+                shared.add(c)
+        return shared
 
     def _existing_ids(self, ids: list[str]) -> set[str]:
         """Records whose chunk the target already holds (``--skip-existing``): their rows are still

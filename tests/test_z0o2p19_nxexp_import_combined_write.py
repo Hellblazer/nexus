@@ -626,14 +626,19 @@ def test_the_exported_vector_replaces_a_stored_one_including_a_chash_another_doc
     # Stored before the import: `shared` owned by live document X, `lone` ownerless, both with
     # vectors that are NOT the file's.
     seed_chunks_direct(dst, [shared, lone], [shared_text, lone_text],
-                       [{"chunk_text_hash": shared, "bib_year": 2020}, {"chunk_text_hash": lone}],
+                       [{"chunk_text_hash": shared, "bib_year": 2020, "title": "x-title", "tags": "xtag",
+                         "line_start": 5},
+                        {"chunk_text_hash": lone}],
                        embeddings=[_vec(1).tolist(), _vec(2).tolist()])
     doc_x = str(cat.register(owner=owner, title="x.py", content_type="code", physical_collection=dst,
                              source_uri=f"file:///z0o2p19/{dst}/x.py"))
     cat.write_manifest(doc_x, [{"chash": shared, "position": 0}], collection=dst)
     file_vecs = {shared: _vec(11), lone: _vec(12), fresh: _vec(13)}
+    # nexus-6pfgb.18: the file's rows carry document keys (title, tags, ttl_days) and a position key
+    # (line_start) the way an export of the last-writer row does.
     records = [{
-        "id": c, "document": t, "metadata": {"chunk_text_hash": c},
+        "id": c, "document": t,
+        "metadata": {"chunk_text_hash": c, "title": "y-title", "tags": "ytag", "ttl_days": 9, "line_start": 99},
         "embedding": file_vecs[c].tobytes(),
         "owner": {"source_uri": uri_y, "title": "y.py", "content_type": "code", "position": p},
     } for p, (c, t) in enumerate([(shared, shared_text), (lone, lone_text), (fresh, fresh_text)])]
@@ -649,6 +654,17 @@ def test_the_exported_vector_replaces_a_stored_one_including_a_chash_another_doc
     assert [c for _, c in _manifest(reader, doc_x)] == [shared], "document X still owns the shared chunk"
     kept = client.get_collection(dst).get(ids=[shared], include=["metadatas"])["metadatas"][0]
     assert kept.get("bib_year") == 2020, "metadata is merged: a key the export omits survives on a shared chunk"
+    # nexus-6pfgb.18: importing document Y restamps no document or position key on the row document X
+    # owns; X keeps its title, tags and line span, and Y's ttl_days never lands.
+    assert (kept.get("title"), kept.get("tags"), kept.get("line_start")) == ("x-title", "xtag", 5), kept
+    assert "ttl_days" not in kept, kept
+    # A row nobody else owns gets no document key either (the catalog entry the import registers holds
+    # them) but keeps its own position key.
+    rows = client.get_collection(dst).get(ids=[lone, fresh], include=["metadatas"])["metadatas"]
+    assert len(rows) == 2, "the unshared rows were not examined"
+    for m in rows:
+        assert not {"title", "tags", "ttl_days"} & set(m), m
+        assert m.get("line_start") == 99, m
 
 
 def test_the_cli_says_how_many_stored_vectors_the_file_replaced(t2_service_env, tmp_path):
@@ -1380,19 +1396,24 @@ def test_a_whole_imported_pdf_keeps_its_native_key_and_joins_a_native_copy_a_tru
         assert by_title["b"].index_content_hash not in (kb, ka), by_title["b"]   # truncated: unique key
 
         # nexus-3ajpd invariant: an import never writes a fence or derived key into a chunk's
-        # ``content_hash``; every chunk keeps the exported record's own value. The exporter's chunk-row
-        # witness (:func:`_note_source_evidence`) can only MISS because of this: a key no chunk carries
-        # is never trusted, so the document gets the unique key (never a wrong one).
+        # ``content_hash``. Since nexus-6pfgb.18 it writes no ``content_hash`` at all: the key is a
+        # document key, held by the catalog entry the import registers, and the exported record's value
+        # (the last writer's) stays out of the target row. The exporter's chunk-row witness
+        # (:func:`_note_source_evidence`) reads the EXPORT record, not the stored row, so the document
+        # still gets the unique key (never a wrong one).
         exported = {r["id"]: r["metadata"].get("content_hash") for r in _read_nxexp(f)}
         assert len(exported) >= 4 and all(v in (ka, kb) for v in exported.values()), exported   # non-vacuous
         stored = client.get_collection(dst).get(ids=list(exported), include=["metadatas"])
         stored_hash = {i: m.get("content_hash") for i, m in zip(stored["ids"], stored["metadatas"])}
-        assert stored_hash == exported, (stored_hash, exported)
+        assert len(stored_hash) == len(exported), "the imported chunks were not examined"
+        # a's chunks sit on rows the native copy ("a-native") already wrote with ka; b's key lands nowhere
+        assert set(stored_hash.values()) <= {None, ka}, stored_hash
         derived = {e.index_content_hash for e in copies}
         # exactly one key beyond a's: b's own unique one (a copy that got a third key, or b stamped
         # with a's, would fail this; ``b in derived`` could not, derived being built from the copies)
         assert derived - {ka} == {by_title["b"].index_content_hash}, derived
         assert not (derived - {ka}) & set(stored_hash.values()), "a derived key landed on a chunk"
+        assert kb not in stored_hash.values(), "the import restamped a document key onto a chunk row"
 
         writer = make_catalog_writer()
         try:
