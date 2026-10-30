@@ -3040,6 +3040,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         key is sent and the reply's ``scope_filter`` marker is still required afterwards."""
         return self._version_flags().get("catalog_graph_scope_filter_supported") is True
 
+    def supports_graph_node_walk(self) -> bool:
+        """Does a scoped ``/traverse`` reply carry ``node_walk``, the depth and best link role of every node it
+        returns (``GET /version``'s ``catalog_graph_node_walk_supported``, nexus-jypmj.18)? Only a JSON ``true``
+        counts. Without it the scope predicate removes a relay's edges and a node behind it cannot be scored,
+        so a single-role traversal policy must not send the predicate."""
+        return self._version_flags().get("catalog_graph_node_walk_supported") is True
+
     def supports_manifest_row_limit(self) -> bool:
         """Does the engine accept ``max_rows_per_doc`` on ``/manifest/get_many`` (``GET /version``'s
         ``catalog_manifest_row_limit_supported``, nexus-jypmj.6)? Only a JSON ``true`` counts; an engine
@@ -3079,6 +3086,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         marker = result.get("scope_filter")
         if isinstance(marker, dict):
             out["scope_filter"] = marker
+        # nexus-jypmj.18: the depth and best role of every node of a scoped walk, passed through when present.
+        node_walk = result.get("node_walk")
+        if isinstance(node_walk, dict):
+            out["node_walk"] = node_walk
         return out
 
     def graph(

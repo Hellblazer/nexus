@@ -25,6 +25,7 @@ from structlog.testing import capture_logs
 
 from nexus.commands.catalog import seed_plan_templates
 from nexus.commands.plan import plan
+from nexus.db.limits import MAX_QUERY_RESULTS
 from nexus.plans import eligibility as el
 from nexus.plans import seed_loader
 from nexus.plans.seed_loader import load_seed_directory
@@ -93,6 +94,40 @@ def test_the_remedy_names_each_thing_that_clears_the_state_in_the_reseeds_own_wo
     assert "library row id=" in inspect.getsource(seed_loader) and "library row id=N" in remedy
     # and the commands it names exist
     assert {"reseed", "delete"} <= set(plan.commands)
+
+
+def test_the_remedy_says_to_inspect_row_n_before_deleting_it() -> None:
+    """nexus-jypmj.21: row N can be a plan someone grew; the delete comes after a look, and names the look."""
+    remedy = el.LIBRARY_REMEDY
+    assert "nx plan show N" in remedy and "grew" in remedy
+    assert remedy.index("nx plan show N") < remedy.index("nx plan delete N"), "the look comes first"
+    assert "show" in plan.commands
+
+
+def test_the_remedy_covers_the_page_cap_refusal_in_the_seed_loaders_own_words() -> None:
+    """nexus-jypmj.21: with a full plan listing the loader refuses every write ("not reconciled"); no one row is to blame."""
+    remedy = el.LIBRARY_REMEDY
+    assert "its page cap" in inspect.getsource(seed_loader), "the words the remedy quotes are the loader's"
+    assert "page cap" in remedy and "nx plan list" in remedy
+    assert remedy.count("nx plan reseed") >= 2, "and the reseed is run again after the listing fits"
+    assert "list" in plan.commands
+
+
+def test_the_page_cap_refusal_is_a_not_reconciled_warning_with_no_row_to_delete() -> None:
+    """The case the remedy describes, run through the loader: a full listing refuses a write and names no row id."""
+    lib = _pre_declaration_library()
+    for i in range(MAX_QUERY_RESULTS):
+        lib.save_plan(
+            query=f"filler plan {i}", plan_json='{"steps": []}', outcome="success", tags="grown", project="",
+            name=f"filler-{i}", verb="lookup", scope="global",
+            dimensions=f'{{"scope":"global","strategy":"filler{i}","verb":"lookup"}}',
+            default_bindings=None, parent_dims=None,
+        )
+    target = next(r for r in lib.rows.values() if r["name"] == "hybrid-factual-lookup")
+    target["query"] = "An older wording of the lookup template's description."
+    result = load_seed_directory(_BUILTIN_DIR, library=lib, reconcile=True)
+    reasons = [reason for _, reason in result.protected]
+    assert reasons and all("page cap" in reason and "library row id=" not in reason for reason in reasons)
 
 
 def test_the_warning_carries_the_remedy_and_nothing_shorter() -> None:

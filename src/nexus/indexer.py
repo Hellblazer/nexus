@@ -1180,6 +1180,19 @@ def _catalog_progress(
 _STAMP_MISSING = object()
 
 
+def _rdr_register_stamp(content_type: str, raw: bytes | None) -> dict:
+    """The RDR frontmatter stamp (nexus-jypmj.7) for the bytes the indexer just hashed, or ``{}`` when there is
+    nothing to stamp: not an RDR, or *raw* is ``None`` (the file could not be read, which says nothing about its
+    header). An EMPTY file is read, and stamps what ``nx index rdr`` stamps for it
+    (:func:`nexus.doc_indexer._rdr_frontmatter_stamp`): the shared rule calls a file with no header at all parsed
+    with no id, so it overwrites the id the document carried before the file was emptied (nexus-jypmj.20)."""
+    if content_type != "rdr" or raw is None:
+        return {}
+    from nexus.catalog import rdr_canonical  # noqa: PLC0415 — deferred: read at call time so a test can replace the stamp
+
+    return rdr_canonical.rdr_frontmatter_meta_from_bytes(raw)
+
+
 def _register_time_meta(rel_path: str, file_hash: str, extra: dict | None = None) -> dict | None:
     """Build a register/update-time ``meta`` dict for *rel_path*.
 
@@ -1544,19 +1557,12 @@ def _catalog_hook(
                 raw_bytes = abs_path.read_bytes()
                 file_hash = _hl.sha256(raw_bytes).hexdigest()
             except OSError:
-                raw_bytes, file_hash = b"", ""
+                raw_bytes, file_hash = None, ""
 
             # nexus-jypmj.7: the RDR's frontmatter id is recorded on the catalog document, synchronously, so
             # the named-source sibling rule does not wait for the aspect worker. The header is read from the
-            # bytes just hashed; a header that does not parse stamps nothing.
-            rdr_stamp: dict = {}
-            if content_type == "rdr" and raw_bytes:
-                from nexus.catalog import rdr_canonical  # noqa: PLC0415 — deferred: read at call time so a test can replace the stamp
-
-                try:
-                    rdr_stamp = rdr_canonical.rdr_frontmatter_meta(raw_bytes.decode("utf-8"))
-                except UnicodeDecodeError:
-                    rdr_stamp = {}
+            # bytes just hashed; a header that does not parse stamps null (nexus-jypmj.20), which overwrites an earlier id.
+            rdr_stamp = _rdr_register_stamp(content_type, raw_bytes)
 
             try:
                 existing = (

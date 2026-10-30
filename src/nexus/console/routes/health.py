@@ -2,6 +2,7 @@
 """Panel 2: Sessions & Health — system health dashboard."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -213,8 +214,9 @@ def _in_str(seconds: int) -> str:
 
 @router.get("/health")
 async def health_index(request: Request, scope: str = "project"):
-    """Panel 2: Sessions & Health — synchronous full render."""
-    data = _collect_health_data()
+    """Panel 2: Sessions & Health — full render. The collector is blocking (the doctor rows spawn processes
+    and make HTTP calls), so it runs on a worker thread and a hung probe cannot stall the event loop."""
+    data = await asyncio.to_thread(_collect_health_data)
     data["age_str"] = _age_str
     data["in_str"] = _in_str
     templates = request.app.state.templates
@@ -227,8 +229,8 @@ async def health_index(request: Request, scope: str = "project"):
 
 @router.get("/health/refresh")
 async def health_refresh(request: Request, scope: str = "project"):
-    """Manual refresh — returns HTMX partial."""
-    data = _collect_health_data()
+    """Manual refresh — returns HTMX partial. The blocking collector runs on a worker thread (see ``health_index``)."""
+    data = await asyncio.to_thread(_collect_health_data)
     data["age_str"] = _age_str
     data["in_str"] = _in_str
     templates = request.app.state.templates

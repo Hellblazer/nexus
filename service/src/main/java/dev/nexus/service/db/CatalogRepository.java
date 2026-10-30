@@ -4552,6 +4552,35 @@ public final class CatalogRepository {
     }
 
     /**
+     * The traversal role of a catalog link type (nexus-jypmj.18), the engine copy of the client's
+     * {@code traversal_policy._ROLE_OF_LINK_TYPE}: {@code cites}, {@code quotes} and {@code supersedes} are
+     * {@code citation}; {@code implements} and {@code implements-heuristic} are {@code implementation};
+     * anything else, or null, is {@code related}. A client-side test pins the two tables to each other.
+     */
+    public static String linkRole(String linkType) {
+        if (linkType == null) return "related";
+        return switch (linkType) {
+            case "cites", "quotes", "supersedes" -> "citation";
+            case "implements", "implements-heuristic" -> "implementation";
+            default -> "related";
+        };
+    }
+
+    /** Rank among roles, lower is better: the client's {@code _ROLE_RANK}. */
+    private static int roleRank(String role) {
+        return switch (role) {
+            case "citation" -> 0;
+            case "implementation" -> 1;
+            default -> 2;
+        };
+    }
+
+    private static void mergeRole(Map<String, String> roleOf, String tumbler, String role) {
+        String prev = roleOf.get(tumbler);
+        if (prev == null || roleRank(role) < roleRank(prev)) roleOf.put(tumbler, role);
+    }
+
+    /**
      * BFS graph traversal with an optional scope predicate that runs BEFORE the node cut
      * (RDR-232 section 3, nexus-jypmj.1.13).
      *
@@ -4568,6 +4597,13 @@ public final class CatalogRepository {
      * without an edge, and the client ranks it by what is left (no link distance, role {@code related}).
      * Seeds are never removed: they are the documents the walk starts from, and the client applies the
      * scope to them itself.
+     *
+     * <p>THE WALK FIELDS (nexus-jypmj.18). Because a relay's edges vanish with it, the client cannot recompute
+     * a survivor's link distance or role from the edges it receives, so a non-null {@code scope} also adds
+     * {@code node_walk: {tumbler: {depth, role}}} for every returned node: {@code depth} is the BFS depth from
+     * the nearest seed (seeds 0), {@code role} the best role ({@code citation}, then {@code implementation},
+     * then {@code related}) among the links from the previous level into that node, absent for a seed. It is
+     * what the client computes over a complete edge set, so a removed relay no longer changes it.
      *
      * <p>THE MARKER. A non-null {@code scope} adds {@code scope_filter:{applied:true, kind, ...,
      * dropped_out_of_scope:N}} to the result, where {@code kind} is {@code "collections"} with a
@@ -4613,6 +4649,9 @@ public final class CatalogRepository {
             // nexus-jypmj.1.13: physical_collection of every non-seed node the walk saw (filled only when a
             // scope predicate is present); a seed need not appear on any edge and is never judged.
             Map<String, String> collectionOf = new java.util.HashMap<>();
+            // nexus-jypmj.18: the best role among the links from the previous BFS level into each non-seed
+            // node (see linkRole / mergeRole).
+            Map<String, String> roleOf = new java.util.HashMap<>();
 
             for (int d = 0; d < depth && !frontier.isEmpty(); d++) {
                 Set<String> next = new LinkedHashSet<>();
@@ -4654,6 +4693,12 @@ public final class CatalogRepository {
                     }
                     if (!visited.contains(fromT)) { next.add(fromT); visited.add(fromT); depthOf.put(fromT, d + 1); }
                     if (!visited.contains(toT))   { next.add(toT);   visited.add(toT);   depthOf.put(toT, d + 1); }
+                    // nexus-jypmj.18: a node first reached this round takes the best role among the links from
+                    // the frontier into it. A link reaches a node only from a frontier endpoint, so the other
+                    // endpoint being in the frontier is what makes this link one of those.
+                    String role = linkRole((String) lm.get("link_type"));
+                    if (frontier.contains(toT) && depthOf.get(fromT) == d + 1) mergeRole(roleOf, fromT, role);
+                    if (frontier.contains(fromT) && depthOf.get(toT) == d + 1) mergeRole(roleOf, toT, role);
                 }
                 frontier = next;
             }
@@ -4701,8 +4746,21 @@ public final class CatalogRepository {
                            .fetch().map(r -> docRowFromRecord(r.intoMap()));
             }
             if (scope == null) return Map.of("nodes", nodes, "edges", survivingEdges);
+            // nexus-jypmj.18: with the predicate, a node reached only through a removed relay arrives
+            // without an edge, so its depth and role ride beside the nodes: the BFS depth from the nearest
+            // seed and the best role of the links that reached it at that depth. Computed over every live
+            // edge the walk saw, not only the survivors.
+            Map<String, Object> nodeWalk = new LinkedHashMap<>();
+            for (String t : surviving) {
+                Map<String, Object> w = new LinkedHashMap<>();
+                w.put("depth", depthOf.get(t));
+                String role = roleOf.get(t);
+                if (role != null) w.put("role", role);
+                nodeWalk.put(t, w);
+            }
             return Map.of("nodes", nodes, "edges", survivingEdges,
-                          "scope_filter", scope.marker(droppedOutOfScope));
+                          "scope_filter", scope.marker(droppedOutOfScope),
+                          "node_walk", nodeWalk);
         });
     }
 

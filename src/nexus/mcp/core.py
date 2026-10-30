@@ -9201,13 +9201,29 @@ def traverse(
     kw = dict(depth=depth, direction=direction, link_types=effective_types or None)
     if parsed_policy is not None:
         # nexus-jypmj.1.13: hand the engine the scope as a predicate it applies before its node cut.
-        scope_filter = _engine_scope_filter(catalog, parsed_policy.allowed_collections)
+        scope_filter = _engine_scope_filter(
+            catalog, parsed_policy.allowed_collections, require_link_role=parsed_policy.require_link_role,
+        )
         if scope_filter is not None:
             kw["scope_filter"] = scope_filter
-    if len(seed_tumblers) == 1:
-        result = catalog.graph(seed_tumblers[0], **kw)
-    else:
-        result = catalog.graph_many(seed_tumblers, **kw)
+    def walk(walk_kw: dict) -> Any:
+        if len(seed_tumblers) == 1:
+            return catalog.graph(seed_tumblers[0], **walk_kw)
+        return catalog.graph_many(seed_tumblers, **walk_kw)
+
+    result = walk(kw)
+    if (
+        parsed_policy is not None and "scope_filter" in kw and parsed_policy.require_link_role != "factual"
+        and isinstance(result, dict) and isinstance(result.get("scope_filter"), dict)
+        and result["scope_filter"].get("applied") is True and not isinstance(result.get("node_walk"), dict)
+    ):
+        # nexus-jypmj.18: the predicate ran (the marker says so) but the reply carries no node_walk, so a node behind
+        # a removed relay would score as ``related`` and a role-filtering policy would drop it. The capability probe
+        # said the engine sends one: a replica that predates it, or a rollback inside the probe's cache window.
+        # Walk once more without the predicate and narrow by scope on the client, as an engine without node_walk is.
+        _log.warning("traverse_node_walk_missing_rewalk", role=parsed_policy.require_link_role)
+        kw = {k: v for k, v in kw.items() if k != "scope_filter"}
+        result = walk(kw)
 
     nodes = result.get("nodes") or []
     if parsed_policy is not None:
@@ -9218,6 +9234,7 @@ def traverse(
             # The marker is the only evidence the predicate ran: a 200 from an engine that ignored the key
             # carries none, and then the walk is reported as the old engine's.
             engine_scope=marker if isinstance(marker, dict) and marker.get("applied") is True else None,
+            node_walk=result.get("node_walk") if isinstance(result.get("node_walk"), dict) else None,
         )
     tumblers = [str(n.tumbler) for n in nodes if hasattr(n, "tumbler")]
     collections = sorted({
@@ -9266,7 +9283,29 @@ def traverse(
     return out
 
 
-def _engine_scope_filter(catalog: Any, scope: Any) -> "dict | None":
+def _live_collection_names(catalog: Any) -> tuple[str, ...]:
+    """The live registered collection names, read through ``catalog`` once per plan run (nexus-jypmj.19).
+
+    Inside a plan run (:func:`~nexus.plans.traversal_policy.registry_listing_scope`, opened by ``plan_run``) the
+    steps share one listing, every corpus prefix included, so a multi-step run reads the registry once. Nothing
+    outlives the run: a later run, after an index or ``store_put`` registered a collection, reads it afresh. A
+    cache keyed on the catalog handle would not work, since ``_get_catalog()`` returns a new handle per call.
+    Outside a run (a direct ``traverse``) every call reads. A failed read raises and keeps nothing. Routing reads
+    the live view only (nexus-bc7ps): a quarantine-<name> row must not reach the predicate.
+    """
+    from nexus.plans import traversal_policy as tp  # noqa: PLC0415 — deferred, like traverse's other imports
+
+    def read() -> tuple[str, ...]:
+        return tuple(sorted({
+            str(row["name"]) for row in catalog.list_collections(lifecycle_state="live")
+            if isinstance(row, dict) and row.get("name")
+        }))
+
+    listing = tp.active_registry_listing()
+    return read() if listing is None else listing.get(read)
+
+
+def _engine_scope_filter(catalog: Any, scope: Any, *, require_link_role: str = "factual") -> "dict | None":
     """The ``scope_filter`` predicate for the engine's ``/traverse``, or ``None`` when none can or need be sent.
 
     None for an unrestricting scope (none, ``all``), for a catalog that does not advertise
@@ -9277,6 +9316,12 @@ def _engine_scope_filter(catalog: Any, scope: Any) -> "dict | None":
     it admits (``ScopeConstraint.admits``, the one place the prefix rule lives), so the engine only ever compares
     names. A registry that cannot be read, or one that names more collections than the engine accepts, sends
     nothing: the walk is then the old engine's and is disclosed as such.
+
+    A single-role policy (*require_link_role* other than ``factual``) sends the predicate only to an engine that
+    advertises ``catalog_graph_node_walk_supported`` (nexus-jypmj.18). The predicate removes an out-of-scope relay
+    and its edges, so without the engine's per-node depth and role a node reached only through one scores as
+    ``related`` and a role-filtering policy drops it (G06: 25 of 30 in-scope documents). Such a policy walks
+    unfiltered on an older engine and narrows by scope client-side, as it did before the predicate existed.
     """
     from nexus.plans import traversal_policy as tp  # noqa: PLC0415 — deferred, like traverse's other imports
 
@@ -9290,16 +9335,21 @@ def _engine_scope_filter(catalog: Any, scope: Any) -> "dict | None":
         return None
     if not supported:
         return None
+    if require_link_role != "factual":
+        try:
+            walk_probe = getattr(catalog, "supports_graph_node_walk", None)
+            carries_walk = callable(walk_probe) and walk_probe() is True
+        except Exception as exc:  # noqa: BLE001 — a capability probe never fails the walk; the unfiltered walk is the answer
+            _log.warning("traverse_node_walk_probe_failed", error=str(exc))
+            carries_walk = False
+        if not carries_walk:
+            return None
     if scope.kind == "subtree":
         return {"subtree": scope.value}
     if scope.kind == "collection":
         return {"collections": [scope.value]}
     try:
-        names = sorted({
-            # Routing reads the live view only (nexus-bc7ps): a quarantine-<name> row must not reach the predicate.
-            str(row["name"]) for row in catalog.list_collections(lifecycle_state="live")
-            if isinstance(row, dict) and row.get("name") and scope.admits(str(row["name"]))
-        })
+        names = sorted(n for n in _live_collection_names(catalog) if scope.admits(n))
     except Exception as exc:  # noqa: BLE001 — no predicate we could not build is sent; the walk is disclosed as unscoped-by-engine
         _log.warning("traverse_scope_filter_registry_failed", scope=scope.value, error=str(exc))
         return None
@@ -9325,7 +9375,7 @@ def _traverse_policy_failed(reason: str, *, warnings: list[str] | None = None) -
 
 def _traverse_with_policy(
     catalog: Any, nodes: list, edges: list, seeds: list, policy: Any,
-    *, direction: str, warnings: list[str], engine_scope: "dict | None" = None,
+    *, direction: str, warnings: list[str], engine_scope: "dict | None" = None, node_walk: "dict | None" = None,
 ) -> dict:
     """``traverse`` under a :class:`~nexus.plans.traversal_policy.TraversalPolicy` (RDR-232 s3).
 
@@ -9345,6 +9395,7 @@ def _traverse_with_policy(
             kinds = {c: collection_kind(c) for c in {str(getattr(n, "physical_collection", "") or "") for n in nodes}}
         selection = tp.select_documents(
             nodes, edges, seeds, policy, direction=direction, collection_kinds=kinds, engine_scope=engine_scope,
+            node_walk=node_walk,
         )
     except Exception as exc:  # noqa: BLE001 — any policy failure omits the graph stream; it never widens
         return _traverse_policy_failed(f"{type(exc).__name__}: {exc}", warnings=warnings)
@@ -9363,7 +9414,8 @@ def _traverse_with_policy(
     if report["secondary_omitted"]:
         warnings.append(
             "traverse: the engine cut this scoped walk at its node cap without the scope predicate "
-            "(catalog_graph_scope_filter_supported absent, or its scope_filter marker missing from the reply), "
+            "(catalog_graph_scope_filter_supported absent, its scope_filter marker missing from the reply, or a "
+            "single-role policy on an engine without catalog_graph_node_walk_supported), "
             "so the cut may have spent its slots on out-of-scope documents; secondary graph evidence omitted, "
             "only the seed documents are returned"
         )

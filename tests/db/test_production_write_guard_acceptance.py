@@ -30,6 +30,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.db._endpoint_asserts import quoted_endpoint
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -179,7 +181,8 @@ class TestExportedProductionServiceUrlStillRefused:
         assert "WRITE-SUCCEEDED" not in proc.stdout
         assert "ProductionWriteGuardError" in proc.stderr
         assert "NX_ALLOW_PROD_WRITE" in proc.stderr
-        assert "api.conexus-nexus.com" in proc.stderr
+        endpoint = quoted_endpoint(proc.stderr, "refusing a WRITE to ")
+        assert (endpoint.hostname, endpoint.port) == ("api.conexus-nexus.com", None)
 
 
 class _CountingEchoHandler(BaseHTTPRequestHandler):

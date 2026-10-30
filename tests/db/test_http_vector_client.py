@@ -14,6 +14,7 @@ from nexus.db.http_vector_client import (
     reset_http_vector_client_for_tests,
 )
 from tests._epipe_server import skip_on_windows
+from tests.db._endpoint_asserts import quoted_endpoint
 from tests._module_seam import module_time
 
 
@@ -2350,7 +2351,8 @@ class TestManagedFailureReframe:
             hv._post("/v1/vectors/search", {})
         assert exc.value.code == 401
         assert "NX_SERVICE_TOKEN" in str(exc.value)
-        assert "api.conexus-nexus.com" in str(exc.value)
+        endpoint = quoted_endpoint(str(exc.value), "managed nexus service at ")
+        assert (endpoint.hostname, endpoint.port) == ("api.conexus-nexus.com", None)
 
     def test_post_500_managed_no_remedy(self, monkeypatch):
         import nexus.db.http_vector_client as hv
@@ -2368,7 +2370,8 @@ class TestManagedFailureReframe:
         monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("refused")))
         with pytest.raises(VectorServiceError) as exc:
             hv._get("/v1/vectors/collections")
-        assert "api.conexus-nexus.com" in str(exc.value)
+        endpoint = quoted_endpoint(str(exc.value), "managed nexus service at ")
+        assert (endpoint.hostname, endpoint.port) == ("api.conexus-nexus.com", None)
         assert "nx service probe" in str(exc.value)
 
     def test_post_403_managed_appends_remedy(self, monkeypatch):

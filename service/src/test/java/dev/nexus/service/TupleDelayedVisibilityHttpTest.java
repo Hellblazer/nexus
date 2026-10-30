@@ -236,4 +236,54 @@ class TupleDelayedVisibilityHttpTest {
         }
         throw new AssertionError("subspace_list did not return " + name);
     }
+
+    /** nexus-wy51x: a non-numeric number field is a 400 whose message names the field, never the raw
+     *  Java parse text ("For input string"), on every tuple route that reads one. */
+    @Test
+    void aNonNumericNumberField_isRefusedWith400_namingTheField_onEveryTupleRoute() throws Exception {
+        String q = newQueue();
+        String sub = "queue/" + q;
+        Map<String, String> pat = Map.of("queue", q);
+        Map<String, Object> outDelay = outBody(q, "n-x1");
+        outDelay.put("delay_s", "x");
+        Map<String, Object> outTtl = outBody(q, "n-x2");
+        outTtl.put("ttl_seconds", "x");
+        Map<String, Object> announceInterval = Map.of("subspaces", java.util.List.of(Map.of(
+                "subspace", sub, "keys_pattern", pat, "announce", Map.of("interval_s", "x", "max", 1))));
+        Map<String, Object> announceMax = Map.of("subspaces", java.util.List.of(Map.of(
+                "subspace", sub, "keys_pattern", pat, "announce", Map.of("interval_s", 1, "max", "x"))));
+        Map<String, Object> waitN = Map.of("subspaces", java.util.List.of(Map.of(
+                "subspace", sub, "keys_pattern", pat, "n", "x")));
+        Map<String, Object> waitTimeout = Map.of("subspaces", java.util.List.of(Map.of(
+                "subspace", sub, "keys_pattern", pat)), "timeout_s", "x");
+        Object[][] cases = {
+            {"/v1/tuples/out", outDelay, "delay_s"},
+            {"/v1/tuples/out", outTtl, "ttl_seconds"},
+            {"/v1/tuples/nack", Map.of("claim_id", "c", "claimant", "w", "retry_after_s", "x"), "retry_after_s"},
+            {"/v1/tuples/inp", Map.of("subspace", sub, "keys_pattern", pat, "claimant", "w", "lease_s", "x"),
+                    "lease_s"},
+            {"/v1/tuples/in", Map.of("subspace", sub, "keys_pattern", pat, "claimant", "w", "lease_s", "x"),
+                    "lease_s"},
+            {"/v1/tuples/in", Map.of("subspace", sub, "keys_pattern", pat, "claimant", "w", "timeout_s", "x"),
+                    "timeout_s"},
+            {"/v1/tuples/rd", Map.of("subspace", sub, "keys_pattern", pat, "n", "x"), "n"},
+            {"/v1/tuples/rd", Map.of("subspace", sub, "keys_pattern", pat, "timeout_s", "x"), "timeout_s"},
+            {"/v1/tuples/rdp", Map.of("subspace", sub, "keys_pattern", pat, "n", "x"), "n"},
+            {"/v1/tuples/renew", Map.of("claim_id", "c", "claimant", "w", "lease_s", "x"), "lease_s"},
+            {"/v1/tuples/wait", waitN, "n"},
+            {"/v1/tuples/wait", waitTimeout, "timeout_s"},
+            {"/v1/tuples/wait", announceInterval, "interval_s"},
+            {"/v1/tuples/wait", announceMax, "max"},
+        };
+        for (Object[] c : cases) {
+            var r = send((String) c[0], c[1]);
+            String field = (String) c[2];
+            assertThat(r.statusCode()).as("%s %s: %s", c[0], field, r.body()).isEqualTo(400);
+            String error = MAPPER.readTree(r.body()).get("error").asText();
+            assertThat(error).as("%s %s", c[0], field).startsWith(field + " must be a whole number")
+                    .endsWith("got: x").doesNotContain("For input string");
+        }
+        assertThat(post("/v1/tuples/rdp", Map.of("subspace", sub, "keys_pattern", pat))
+                .get("tuples").size()).as("nothing written").isZero();
+    }
 }

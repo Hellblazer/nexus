@@ -165,17 +165,23 @@ def eligibility_enforced(environ: Mapping[str, str]) -> bool:
 
 
 #: What clears ``library_not_reseeded`` (nexus-jypmj.16). ``nx plan reseed`` rewrites every builtin it can, and
-#: that is the whole remedy for a library seeded before the declarations. Two things leave a row undeclared
-#: through a reseed, both reported by the reseed itself (``seed_plan_templates`` echoes them): a template the
+#: that is the whole remedy for a library seeded before the declarations. Three things leave a row undeclared
+#: through a reseed, all reported by the reseed itself (``seed_plan_templates`` echoes them): a template the
 #: installed conexus rejects (a ``seed load error``; the row is never written, so only a build whose template
-#: validates clears it) and a template whose description another row already holds (``not reconciled``; the seed
-#: loader refuses to overwrite that row, so it clears when that row is deleted). The words in quotes are the
-#: reseed's own; tests/test_rdr232_library_remedy.py runs the seed loader through each case.
+#: validates clears it), a template whose description another row already holds (``not reconciled``; the seed
+#: loader refuses to overwrite that row, so it clears when that row is deleted, after a look at it, since it can
+#: be a grown plan) and a ``not reconciled`` whose reason is the page cap (the seed loader cannot prove a
+#: description unused when the project's plan listing is full, so it refuses every write there until the listing
+#: fits). The words in quotes are the reseed's own; tests/test_rdr232_library_remedy.py runs the seed loader
+#: through each case.
 LIBRARY_REMEDY = (
     "nx plan reseed. If the gate stays in shadow, read the reseed's warnings: a 'seed load error' for a template "
     "means the installed conexus rejects it, and only an upgraded conexus clears it; a 'not reconciled' warning "
-    "(description already belongs to library row id=N) clears when row N is deleted (nx plan delete N) and "
-    "nx plan reseed is run again."
+    "(description already belongs to library row id=N) clears when row N is deleted and nx plan reseed is run "
+    "again, but inspect row N first with nx plan show N, because it can be a plan someone grew and a delete cannot "
+    "be undone, and run nx plan delete N only when it is not; a 'not reconciled' warning that says the plan listing "
+    "hit its page cap is not about one row: the project holds more plan rows than one listing returns, so find the "
+    "ones you no longer need with nx plan list, delete them with nx plan delete, and run nx plan reseed again."
 )
 
 _warned_libraries: set[tuple[int, tuple[str, ...]]] = set()

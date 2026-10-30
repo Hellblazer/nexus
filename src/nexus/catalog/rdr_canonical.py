@@ -321,13 +321,29 @@ def rdr_frontmatter_id(text: str) -> tuple[bool, object]:
 
 def rdr_frontmatter_meta(text: str) -> dict:
     """The catalog ``meta`` entry that records an RDR file's frontmatter id at registration (nexus-jypmj.7):
-    ``{RDR_FRONTMATTER_ID_META_KEY: id}`` (``""`` for a header with no id), or ``{}`` when the header did not
-    parse or the parser failed. Never raises: registration must not fail because a header is odd."""
+    ``{RDR_FRONTMATTER_ID_META_KEY: id}`` (``""`` for a header with no id).
+
+    A header that did not parse (an opening fence with no closing one, or a parser failure) gives
+    ``{RDR_FRONTMATTER_ID_META_KEY: None}``, not ``{}`` (nexus-jypmj.20): catalog ``meta`` merges and never
+    removes a key, so a stamp from an earlier, parseable version of the file would otherwise outlive the edit
+    that broke the header. A JSON null overwrites it, and the reader treats null as "unknown", the same as an
+    absent key. Never raises: registration must not fail because a header is odd."""
+    unknown = {RDR_FRONTMATTER_ID_META_KEY: None}
     try:
         parsed, raw = rdr_frontmatter_id(text)
     except Exception as exc:  # noqa: BLE001 — an unparseable header is unknown, never a registration failure
         _log.warning("rdr_frontmatter_meta_parse_failed", error=type(exc).__name__)
-        return {}
+        return unknown
     if not parsed:
-        return {}
+        return unknown
     return {RDR_FRONTMATTER_ID_META_KEY: "" if raw is None else raw}
+
+
+def rdr_frontmatter_meta_from_bytes(raw: bytes) -> dict:
+    """:func:`rdr_frontmatter_meta` for a file's bytes: text that is not UTF-8 has no readable header, so it
+    stamps the unknown null like any other header that did not parse."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {RDR_FRONTMATTER_ID_META_KEY: None}
+    return rdr_frontmatter_meta(text)

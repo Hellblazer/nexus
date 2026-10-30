@@ -547,6 +547,38 @@ listed under Critical Assumptions before gate.
   and cached-capability rollback legs remain simulated only.
   *Source: beads nexus-0gc7m, nexus-jypmj.3.10; research 25.*
 
+- **✅ Verified** (spike, live envelopes read; mechanism reproduced in process) — the pre-cap graph
+  scope filter loses the link role and distance of in-scope nodes reached through a removed relay,
+  and under a single-role policy that drops them. ART RDR-084 (G06), owner 1.2, phase-3.10
+  envelopes of 2026-10-28. The same traverse step, client-side filter (canary and golden runs):
+  154 nodes walked, 124 out of scope, 30 retained, 0 dropped by role, 0 out of owner. With the
+  engine filter (canary2 run): 30 walked, the engine removed the same 124, 25 dropped by role,
+  5 retained (seeds included), 0 out of owner. So 25 of the 30 in-scope documents (83 percent)
+  were reachable only through an out-of-scope relay, arrived without an edge, took role `related`
+  and no distance (`traversal_policy._distance_and_role`), and a non-`factual`
+  `require_link_role` dropped them. Under `factual` they would be kept but ranked last and
+  exposed to the document cap. The graph stream's evidence changed with it: the final reducer
+  input held 64 graph chunks in both arms, but 16 of the 64 chunk hashes are the same (25
+  percent), and the coverage check answered 6 of 6 facets in both. The envelopes carry no
+  per-node tumblers for the graph stream and not the step's link types, so the node-by-node
+  table (which of the 25, at what distance and role) cannot be built from them; it needs the
+  seed (1.2.4686), plan 467's traverse arguments and one read-only `/v1/catalog/traverse` call
+  with and without `scope_filter`. The owner limit is separate: `dropped_out_of_owner` was 0 on
+  all 6 owner-bound walks (largest walk 154 nodes, none near the 500 cut), so no other owner's
+  documents were measured taking cut slots. The predicate takes a collection set or a subtree,
+  not an owner; owner narrowing happens client-side in `traversal_policy.select_documents`.
+  Whether the lost evidence changes an answer is not measured: one request, no oracle on the
+  graph stream. Remedy (decided, nexus-jypmj.18): the engine returns each node's BFS depth and best
+  link role (`node_walk`, engine-service-v0.1.170) and the client scores a node the edges do not reach
+  from it; against an engine without it a single-role policy sends no `scope_filter` and narrows
+  client-side, which equals 7.88.0 only under the 500-node cap (a capped walk keeps seeds only,
+  `secondary_omitted`, since 7.89.0). A `factual` or mixed-role policy still sends the filter to such
+  an engine, so its relay-reached nodes rank last and are exposed to `max_documents` until the
+  engine carries `node_walk`. Verified in process and on the real engine (Java, Postgres
+  container) on the S-R-B shape; the G06 rerun on an engine carrying `node_walk` is not done.
+  *Source: bead nexus-jypmj.18; T2 `nexus/rdr232-jypmj18-dropped-out-of-owner-evidence-2026-10-29`;
+  `service/.../CatalogRepository.graphBFS` javadoc; `src/nexus/plans/traversal_policy.py`.*
+
 ### Critical Assumptions
 
 Research 6–10 executed prototypes for A1–A6; A7 has none yet. They establish

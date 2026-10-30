@@ -1525,14 +1525,16 @@ def note_extraction_outcome(outcome: str, *, gate_enforcing: bool) -> bool:
     lookup measurement, so a process in which the call fails every time (no ``claude`` CLI and no API key, an
     ``openai_compat`` endpoint that answers outside the schema, a timeout every time) enforces in it with no
     signal. After :data:`PERSISTENT_FAILURE_THRESHOLD` failures in a row this logs ``answer_kind_gate_extraction_failing``
-    once, the first time that happens while *gate_enforcing* (a gate in shadow loses nothing to it, and does not
-    use the warning up). A working outcome ends the run; an outcome with no call is ignored. Returns whether this
-    call logged the warning. Never raises.
+    once per streak, the first time that happens while *gate_enforcing* (a gate in shadow loses nothing to it, and
+    does not use the warning up). A working outcome ends the run and re-arms the warning, so a later streak after a
+    recovery warns again (nexus-jypmj.21); an outcome with no call is ignored. Returns whether this call logged the
+    warning. Never raises.
     """
     global _consecutive_failures, _failing_warned  # noqa: PLW0603 — process-wide, like the other once-per-process latches
     with _health_lock:
         if outcome in _WORKING_OUTCOMES:
             _consecutive_failures = 0
+            _failing_warned = False  # recovered: a later streak warns again (nexus-jypmj.21)
             return False
         if outcome not in FAILED_OUTCOMES:
             return False

@@ -171,6 +171,13 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"catalog_graph_scope_filter_supported\":true");
     }
 
+    @Test
+    void versionAdvertisesTheGraphNodeWalkAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogGraphNodeWalkCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_graph_node_walk_supported\":true");
+    }
+
     // ── nexus-jypmj.6: the manifest get_many per-document row limit ──
 
     @Test
