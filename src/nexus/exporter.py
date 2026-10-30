@@ -847,6 +847,26 @@ def _resolve_owner_document(
     return tumbler
 
 
+def _is_note_entry(entry: Any) -> bool:
+    """True when a catalog entry is a store_put-origin note (nexus-6pfgb.45): no file path, a note URI
+    (``nx-note://``, or the legacy ``chroma://`` spelling) or none, and a collection that is not
+    file-routed. A copy the import registers under ``nxexp://<target>/<original uri>`` (see
+    :func:`_resolve_owner_document`) is a note when the original is. Answers by
+    :func:`~nexus.catalog.recovery_bundle.classify_store_put_origin`, the shared note predicate that
+    knows the RDR-231 URI, on the unqualified identity."""
+    from types import SimpleNamespace  # noqa: PLC0415 — stdlib import kept branch-local
+
+    from nexus.catalog.recovery_bundle import classify_store_put_origin  # noqa: PLC0415 — deferred to avoid import cycle
+
+    uri = getattr(entry, "source_uri", "") or ""
+    if uri.startswith("nxexp://"):
+        uri = uri.split("/", 3)[3] if uri.count("/") >= 3 else ""
+    probe = SimpleNamespace(
+        file_path=getattr(entry, "file_path", "") or "",
+        physical_collection=getattr(entry, "physical_collection", "") or "", source_uri=uri)
+    return classify_store_put_origin(probe) is not None  # type: ignore[arg-type]
+
+
 @dataclass
 class _PageRec:
     """One export record on its way to a combined write: the chunk and the owner group (and
@@ -1053,7 +1073,9 @@ class _OwnerImport:
     stays. ``metadata_merge`` keeps the keys another document's enrichment set on a shared chunk, and
     the payload carries the chunk's own keys only, plus position keys on a row no other live document
     holds (:func:`_import_chunk_metadata`, nexus-6pfgb.18), so importing a document restamps none of
-    the title, tags, bib or ttl keys of a document that owns the same chunk.
+    the title, tags, bib or ttl keys of a document that owns the same chunk. A note whose catalog entry
+    holds no note key is stamped ``put_at`` now and ``ttl_days`` 0 before its completion stamp
+    (:meth:`_stamp_note_keys`, nexus-6pfgb.45).
     """
 
     def __init__(
@@ -1246,12 +1268,13 @@ class _OwnerImport:
         if not rows_by_doc:
             return
 
-        # The import writes the document's manifest and its chunk rows, and writes NO note keys
-        # (ttl_days, put_at) to the catalog entry: an imported note makes no TTL claim the catalog could
-        # keep true, and a note it lands on keeps the keys it had. Since nexus-6pfgb.18 the chunk
-        # payload no longer carries the export row's document keys either (_import_chunk_metadata), so an
-        # import restamps no title, tags or ttl_days on a row another document owns. Rows an EARLIER
-        # import wrote still carry those keys, which is why the TTL sweep reads a note's own chunk rows
+        # The import writes the document's manifest and its chunk rows. Since nexus-6pfgb.18 the chunk
+        # payload no longer carries the export row's document keys (_import_chunk_metadata), so an import
+        # restamps no title, tags or ttl_days on a row another document owns. A NOTE's own TTL facts live
+        # on its catalog entry, and the export carries none the catalog could keep true: a note whose
+        # entry holds no note key is stamped put_at=now, ttl_days=0 (permanent) once its last page has
+        # landed (_stamp_note_keys, nexus-6pfgb.45); an entry that holds a key keeps it. Rows an EARLIER
+        # import wrote still carry document keys, which is why the TTL sweep reads a note's own chunk rows
         # before retiring it (nexus-6pfgb.30, note_ttl.catalog_ttl_stale); that guard stays until
         # enforcement.
         already = self._existing_ids([r.rec_id for recs in recs_by_doc.values() for r in recs])
@@ -1289,13 +1312,50 @@ class _OwnerImport:
         # and the next run of the same file resumes it and fires the chains again. A refusal is
         # recorded by the writer and reported in finish(); it does not stop the import.
         if result.landed:
-            stamped = writer.complete_documents(result.landed)
+            ready = self._stamp_note_keys(result.landed)
+        else:
+            ready = []
+        if ready:
+            stamped = writer.complete_documents(ready)
             result.finished.extend(stamped.finished)
             result.failed.update(stamped.failed)
         _log.debug(
             "import_page_written", documents=len(result.written), finished=len(result.finished),
             failed=len(result.failed), chunks=len(sent_ids), total_so_far=self.imported_count,
         )
+
+    def _stamp_note_keys(self, landed: list[str]) -> list[str]:
+        """Give each landed document that is a keyless note ``put_at`` = now and ``ttl_days`` = 0
+        (nexus-6pfgb.45), through the catalog writer a put uses; returns the documents to complete.
+
+        Before the completion stamp, so a kill between the two leaves the document ``indexing``, the next
+        run of the same file resumes it, and the fill-only rule makes the second stamp a no-op. A
+        document whose stamp fails is reported and NOT completed (it stays ``indexing`` and resumes), so
+        no note reads complete without its keys. One batched read per page."""
+        from nexus.catalog.store_hook import imported_note_meta  # noqa: PLC0415 — deferred to avoid import cycle
+
+        try:
+            entries = self._reader.resolve_many(landed)
+        except Exception as exc:  # noqa: BLE001 — cannot tell a keyless note from a keyed one: leave them indexing
+            _log.warning(
+                "import_note_keys_read_failed", collection=self.collection_name, docs=len(landed), error=str(exc))
+            for d in landed:
+                self.failures.append((f"document {d}", f"its note keys could not be read: {exc}"))
+            return []
+        put_at = datetime.now(UTC).isoformat()
+        ready: list[str] = []
+        for d in landed:
+            entry = entries.get(d)
+            fields = imported_note_meta(entry.meta, put_at=put_at) if entry is not None and _is_note_entry(entry) else {}
+            if fields:
+                try:
+                    self._writer.update(d, meta=fields)
+                except Exception as exc:  # noqa: BLE001 — one document's refusal must not strand the page
+                    _log.warning("import_note_keys_failed", collection=self.collection_name, doc=d, error=str(exc))
+                    self.failures.append((f"document {d}", f"its note keys could not be stamped: {exc}"))
+                    continue
+            ready.append(d)
+        return ready
 
     def _shared_chashes(self, recs_by_doc: dict[str, list[_PageRec]]) -> set[str]:
         """The page's chashes that more than one live document of this collection holds: two documents

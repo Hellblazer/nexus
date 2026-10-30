@@ -885,6 +885,19 @@ def note_catalog_meta(
     return write, revert
 
 
+def imported_note_meta(meta: dict[str, Any] | None, *, put_at: str) -> dict[str, Any]:
+    """The note keys an ``.nxexp`` import stamps on a note's catalog entry (nexus-6pfgb.45): ``put_at``
+    = *put_at* and ``ttl_days`` = 0 (permanent), only when the entry (*meta*) holds none of
+    :data:`NOTE_META_KEYS`. Fill-only: an entry that holds any note key keeps every one, so a
+    note an earlier put gave a TTL keeps it. The export carries no TTL the catalog could keep true, so
+    an imported note makes no claim to expire; ``ttl_days`` 0 is the value readers show as permanent
+    (:func:`nexus.catalog.note_ttl.note_ttl_days`), and its presence is what tells them the catalog,
+    not a shared chunk row, holds this note's TTL. Returns ``{}`` when there is nothing to stamp."""
+    if any(key in (meta or {}) for key in NOTE_META_KEYS):
+        return {}
+    return {"put_at": put_at, "ttl_days": 0}
+
+
 def catalog_store_hook(
     title: str, doc_id: str, collection_name: str,
 ) -> str:
