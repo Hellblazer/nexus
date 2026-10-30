@@ -87,8 +87,10 @@ import java.util.function.Supplier;
  *       chosen wins.</li>
  * </ol>
  *
- * <p><b>Known blind spot of the census.</b> It resolves a chunk's owner from the chunk's own metadata
- * ({@code catalog_doc_id} or {@code doc_id}) or a note-shaped reverse match. A {@code docs__} or {@code code__}
+ * <p><b>Known blind spot of the census.</b> Until the tenant has its rdr192 completion record it resolves a chunk's
+ * owner from the chunk's own metadata ({@code catalog_doc_id} or {@code doc_id}) or a note-shaped reverse match; from
+ * the record on (RDR-236 Phase 3, which the Phase 4 sweep needs) only the reverse match, so a chunk whose row still
+ * carries a document id but which no live note names reads {@code no-owner}. A {@code docs__} or {@code code__}
  * chunk written after RDR-108 carries no document id, so a live document whose manifest rows are missing reads
  * {@code no-owner}, not {@code legacy-unmanifested}, and the census passes. The backstops are the 30 day grace, the
  * floor, and the quarantine's 14 days. See the operator runbook.
@@ -156,7 +158,7 @@ final class ChunkReaper {
     static final String CLIENT_EXPIRY_CONTENT_TYPE = "knowledge";
     /** Consecutive timeouts of one statement before it backs off (the same rule for every bounded statement). */
     static final int TIMEOUT_BACKOFF_AFTER = CENSUS_BACKOFF_AFTER;
-    /** Most title/source_path rows a refusal's audit row carries. */
+    /** Most text-prefix/title/source_path rows a refusal's audit row carries. */
     static final int SAMPLE_SIZE = 5;
     /** The census page asked for: items beyond this are not itemised (the totals are collection-wide). */
     private static final int CENSUS_PAGE = 300;
@@ -1348,14 +1350,14 @@ final class ChunkReaper {
         return "";
     }
 
-    /** Up to {@link #SAMPLE_SIZE} of what the floor refused to move, by title and source path. */
+    /** Up to {@link #SAMPLE_SIZE} of what the floor refused to move, by text prefix and manifest owner. */
     private List<Map<String, Object>> sampleReapable(String tenant, String collection, Duration grace) {
         try {
             var rows = vectors.reapableChunks(tenant, collection, grace == null ? null : grace.toSeconds(), null,
                 SAMPLE_SIZE, 0);
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : rows) {
-                out.add(sampleRow(r.chash(), r.title(), r.sourcePath()));
+                out.add(sampleRow(r.chash(), r.title(), r.sourcePath(), r.textPrefix()));
             }
             return out;
         } catch (RuntimeException e) {
@@ -1364,7 +1366,7 @@ final class ChunkReaper {
         }
     }
 
-    /** Up to {@link #SAMPLE_SIZE} chunks the census put in {@code bucket}, by title and source path. */
+    /** Up to {@link #SAMPLE_SIZE} chunks the census put in {@code bucket}, by text prefix and manifest owner. */
     private List<Map<String, Object>> sampleCensus(String tenant, String collection, ManifestLessCensusResult c,
                                                    String bucket) {
         try {
@@ -1372,7 +1374,7 @@ final class ChunkReaper {
             if (hexes.size() > SAMPLE_SIZE) hexes = hexes.subList(0, SAMPLE_SIZE);
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : store.describe(tenant, collection, hexes)) {
-                out.add(sampleRow(r.chash(), r.title(), r.sourcePath()));
+                out.add(sampleRow(r.chash(), r.title(), r.sourcePath(), r.textPrefix()));
             }
             return out;
         } catch (RuntimeException e) {
@@ -1381,11 +1383,12 @@ final class ChunkReaper {
         }
     }
 
-    private static Map<String, Object> sampleRow(String chash, String title, String sourcePath) {
+    private static Map<String, Object> sampleRow(String chash, String title, String sourcePath, String textPrefix) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("chash", chash);
         m.put("title", title);
         m.put("source_path", sourcePath);
+        m.put("text_prefix", textPrefix);
         return m;
     }
 

@@ -392,7 +392,10 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(outcome.moved()).isEqualTo(1L);
         assertThat(outcome.sample()).hasSize(1);
         assertThat(outcome.sample().get(0).get("chash")).isEqualTo(chashOrphan);
-        assertThat(outcome.sample().get(0).get("title")).isEqualTo("Orphan Doc");
+        // RDR-236 Phase 3: the row's title ("Orphan Doc", stale on a shared chunk and swept in Phase 4) is never
+        // shown; an orphan with no manifest owner is labelled by the start of its text.
+        assertThat(outcome.sample().get(0).get("title")).isNull();
+        assertThat(outcome.sample().get(0).get("text_prefix")).isEqualTo("orphan text");
 
         // Zero wire cost is verified separately (Python-side call-spy), but the
         // SERVER-SIDE effect is verified here: origin loses exactly the orphan,
@@ -402,6 +405,54 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(chunkText(quarantineCol, chashOrphan)).isEqualTo("orphan text");
         assertThat(metadataField(quarantineCol, chashOrphan, "origin_collection")).isEqualTo(originCol);
         assertThat(metadataField(quarantineCol, chashOrphan, "quarantined_at")).isEqualTo("2026-08-10T00:00:00Z");
+    }
+
+    /**
+     * RDR-236 Phase 3 (nexus-6pfgb.39): the audit sample of both gc functions labels a moved chunk by
+     * {@code left(chunk_text, 80)} and by its MANIFEST owner's title, never by the chunk row's title.
+     */
+    @Test
+    void quarantineOrphans_sampleCarriesTheTextPrefixAndTheManifestOwnersTitle_neverTheRowTitle() throws Exception {
+        String originCol = originCol("p3-sample");
+        String ownerCol = originCol("p3-sample-owner");
+        String quarantineCol = quarantineCol("p3-sample");
+        String chash = ch("gcq-p3-sample");
+        seedChunk(TENANT_A, originCol, chash, "x".repeat(100), "STALE row title");
+        seedChunk(TENANT_A, ownerCol, chash, "owner side", "owner side title");
+        seedManifest(TENANT_A, "gcq.doc.p3owner", chash, ownerCol);   // an owner in ANOTHER collection
+
+        var outcome = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-08-10T00:00:00Z", 20);
+
+        assertThat(outcome.sample()).hasSize(1);
+        assertThat(outcome.sample().get(0).get("title")).isEqualTo("GC quarantine fixture gcq.doc.p3owner");
+        assertThat(outcome.sample().get(0).get("text_prefix")).isEqualTo("x".repeat(80));
+        assertThat(outcome.sample().toString()).doesNotContain("STALE");
+    }
+
+    @Test
+    void quarantineOrphansBounded_sampleCarriesTheTextPrefixAndTheManifestOwnersTitle_neverTheRowTitle()
+            throws Exception {
+        String originCol = originCol("p3-bsample");
+        String ownerCol = originCol("p3-bsample-owner");
+        String quarantineCol = quarantineCol("p3-bsample");
+        String owned = ch("gcq-p3-bsample-owned");
+        String alone = ch("gcq-p3-bsample-alone");
+        seedChunk(TENANT_A, originCol, owned, "x".repeat(100), "STALE row title");
+        seedChunk(TENANT_A, originCol, alone, "alone text", "STALE alone title");
+        seedChunk(TENANT_A, ownerCol, owned, "owner side", "owner side title");
+        seedManifest(TENANT_A, "gcq.doc.p3bowner", owned, ownerCol);
+
+        var outcome = vectorRepo.quarantineOrphansBounded(TENANT_A, originCol, quarantineCol,
+            "2026-08-10T00:00:00Z", 20, 10);
+
+        assertThat(outcome.sample()).hasSize(2);
+        var o = outcome.sample().stream().filter(m -> owned.equals(m.get("chash"))).findFirst().orElseThrow();
+        assertThat(o.get("title")).isEqualTo("GC quarantine fixture gcq.doc.p3bowner");
+        assertThat(o.get("text_prefix")).isEqualTo("x".repeat(80));
+        var n = outcome.sample().stream().filter(m -> alone.equals(m.get("chash"))).findFirst().orElseThrow();
+        assertThat(n.get("title")).isNull();
+        assertThat(n.get("text_prefix")).isEqualTo("alone text");
+        assertThat(outcome.sample().toString()).doesNotContain("STALE");
     }
 
     // ── EQUIVALENCE: no orphans ───────────────────────────────────────────────

@@ -58,7 +58,7 @@ def _row(
     written = _ts(days_old)
     created = _ts(created_days_old) if created_days_old is not None else written
     row = {"chash": _chash(i), "created_at": created, "last_written_at": written,
-           "title": f"title-{i}", "catalog_doc_id": doc}
+           "title": f"title-{i}", "catalog_doc_id": doc, "text_prefix": f"text of chunk {i}"}
     if with_ownerless:
         row["ownerless_since"] = _ts(ownerless_days_old) if ownerless_days_old is not None else written
     return row
@@ -124,6 +124,8 @@ def test_reapable_lists_chash_ownerless_age_written_created_title_and_catalog_do
     assert result.exit_code == 0, result.output
     line1 = next(line for line in result.output.splitlines() if _chash(1) in line)
     assert "title-1" in line1 and "1.2.3" in line1 and "40d" in line1
+    # RDR-236 Phase 3: the engine's label for an ownerless chunk is the start of its text.
+    assert line1.rstrip().endswith("text of chunk 1")
     assert "T" in line1  # the timestamps are printed
     line2 = next(line for line in result.output.splitlines() if _chash(2) in line)
     assert "title-2" in line2 and "33d" in line2
