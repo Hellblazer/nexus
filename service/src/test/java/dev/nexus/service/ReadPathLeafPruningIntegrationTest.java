@@ -62,6 +62,9 @@ import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_384;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_384;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_1024;
@@ -484,7 +487,8 @@ class ReadPathLeafPruningIntegrationTest {
     // ── isolation, at the function (acceptance 2) ───────────────────────────
 
     private static final List<String> FAMILIES = List.of(
-        "plain_search", "text_gated_search_hnsw_first", "text_gated_search_by_chash", "search_metadata_scoped",
+        "plain_search", "text_gated_search_hnsw_first", "text_gated_search_by_chash", "text_gated_search_allowed",
+        "search_metadata_scoped",
         "search_aspect_scoped", "search_graph_hop", "search_topic_scoped", "text_gate_probe", "taxonomy_ann_query",
         "assign_from_chashes", "cross_preview");
 
@@ -514,6 +518,11 @@ class ReadPathLeafPruningIntegrationTest {
                 case 384 -> TEXT_GATED_SEARCH_BY_CHASH_384.call(q, raw, colls, null, null, 10, model, t);
                 case 768 -> TEXT_GATED_SEARCH_BY_CHASH_768.call(q, raw, colls, null, null, 10, model, t);
                 default -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(q, raw, colls, null, null, 10, model, t);
+            };
+            case "text_gated_search_allowed" -> switch (dim) {
+                case 384 -> TEXT_GATED_SEARCH_ALLOWED_384.call(q, COMMON, raw, colls, null, null, 10, model, t);
+                case 768 -> TEXT_GATED_SEARCH_ALLOWED_768.call(q, COMMON, raw, colls, null, null, 10, model, t);
+                default -> TEXT_GATED_SEARCH_ALLOWED_1024.call(q, COMMON, raw, colls, null, null, 10, model, t);
             };
             case "search_metadata_scoped" -> switch (dim) {
                 case 384 -> SEARCH_METADATA_SCOPED_384.call(q, colls, null, null, null, null, null, null, 10, model, t);
