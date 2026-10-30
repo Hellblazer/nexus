@@ -331,7 +331,7 @@ def test_a_path_run_build_prints_ready_reply_filtered_and_reasons_paths(prose: P
     fields = _fields(head)
     work = Path(fields["WORK"])
     try:
-        assert list(fields) == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS", "ANSWERS"], list(fields)
+        assert list(fields) == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS", "ANSWERS", "BLOCKS", "PROPOSED", "STATUSES"], list(fields)
         assert Path(fields["REPLY"]) == work / "reply.txt"
         assert Path(fields["FILTERED"]) == work / "filtered.json"
         assert Path(fields["REASONS"]) == work / "reasons.json"

@@ -1648,8 +1648,12 @@ DISPATCH_LABEL = "DISPATCH="
 # skill copies those lines and never composes a path (nexus-ger02.7: a literal `WORK/...` was typed, and Write
 # creates a missing directory without a word, so a stray WORK/ appeared in the repository).
 READY_FILES = {"INPUT": "input.txt", "REPLY": "reply.txt", "FILTERED": "filtered.json", "REASONS": "reasons.json",
-               "ANSWERS": "answers.json", "ENTRY": "entry.json", "CARD": "card.json"}
-READY_BUILD = ("REPLY", "FILTERED", "REASONS", "ANSWERS")  # what a path run's header adds after DISPATCH=
+               "ANSWERS": "answers.json", "ENTRY": "entry.json", "CARD": "card.json",
+               # the MarkupEditor review (nexus-scmcs.2): the skill writes the app's three replies to these
+               "BLOCKS": "blocks.json", "PROPOSED": "proposed.json", "STATUSES": "statuses.json"}
+READY_BUILD = ("REPLY", "FILTERED", "REASONS", "ANSWERS", "BLOCKS", "PROPOSED",
+               "STATUSES")  # what a path run's header adds after DISPATCH=
+READY_TMPDIR = ("INPUT", "REPLY", "FILTERED", "REASONS", "ANSWERS", "ENTRY", "CARD")  # a stdin run has no app
 
 
 def ready_paths(work: Path | str, labels: tuple[str, ...] | list[str]) -> str:
@@ -2020,7 +2024,7 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(json.dumps(cmd_count(args.target)) + "\n")
         elif args.cmd == "tmpdir":
             made = cmd_tmpdir()
-            sys.stdout.write(f"WORK={made}\n" + ready_paths(made, list(READY_FILES)) if args.ready else made + "\n")
+            sys.stdout.write(f"WORK={made}\n" + ready_paths(made, READY_TMPDIR) if args.ready else made + "\n")
         elif args.cmd == "setup":
             sys.stdout.write(json.dumps(cmd_setup(), ensure_ascii=False, indent=1) + "\n")
         elif args.cmd == "suggest-genre":

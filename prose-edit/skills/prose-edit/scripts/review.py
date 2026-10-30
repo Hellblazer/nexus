@@ -10,6 +10,22 @@ to stderr with exit 1; memory.py's exit code 3 (T2 unavailable) passes through.
   review.py render TARGET --work WORK [--file F] [--genre G]
   review.py apply --work WORK [--accept SPEC] [--hold SPEC] [--reject SPEC] [--reasons-file F] [--reason N=TEXT]... [--dry-run]
   review.py log-retry --work WORK
+  review.py translate --work WORK --blocks-file F
+  review.py proposed --work WORK --from-file F
+  review.py decisions --work WORK [--from-file F] [--accept SPEC] [--reject SPEC] [--hold SPEC]
+
+The MarkupEditor review (nexus-scmcs.2): the author decides in the app's suggestions and never saves there, so
+`apply` stays the only writer of the document, the only store of rejections and the only session logger. `translate`
+reads get_document's blocks (F, written inside WORK) and writes WORK/propose.json, the payload of one propose_edits
+call plus the refused edits (cause: not-found, ambiguous, formatting, code-block, metadata, spans-lines, no-change);
+it prints {edits, sent, refused}. `proposed` reads propose_edits' reply (F), checks it holds one result per edit
+sent, and writes WORK/suggestions.json (edit number, suggestion id, find, replace) and adds the app's refusals
+(cause app-refused) to the refused list. `decisions` reads list_suggestions' reply (F), maps THIS run's ids
+(accepted -> accept, rejected -> reject, pending, stale or missing -> hold; ids of other documents are ignored),
+merges the author's chat decisions for the leftovers (edits the script or the app refused, the author's own
+answers) and prints the flags for `apply`: {accept, reject, hold, apply_args, app, chat, leftover, undecided,
+warnings}. None of the three writes the document or T2. Every file named is a file directly inside WORK
+(the BLOCKS=, PROPOSED= and STATUSES= header paths).
 
 A cut-only session (RDR-221 Step 3.1, nexus-ger02.10; the prose-cut skill) is a model's run, with no author to read
 the copy: its filtered.json carries "mode": "cut-only" or its work directory holds a cut-only run's brief or card
@@ -165,7 +181,18 @@ def _load_brief() -> Any:
     return mod
 
 
+def _load_suggest() -> Any:
+    spec = importlib.util.spec_from_file_location("prose_edit_suggest_lib", HERE / "suggest.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {HERE / 'suggest.py'}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 _BRIEF = _load_brief()
+_SUGGEST = _load_suggest()
 UserError: type[Exception] = _BRIEF.UserError
 Passthrough: type[Exception] = _BRIEF.Passthrough
 
@@ -483,34 +510,7 @@ def _dropped_lines(prop: Obj) -> list[str]:
     return lines
 
 
-def change_core(old: str, new: str) -> tuple[str, str, str, str]:
-    """(shared head, old part, new part, shared tail) of an edit, cut at word edges (nexus-ger02.19).
-
-    The copy strikes only the part that changes: a whole sentence struck and re-inserted hides a one-character
-    change in two near-identical lines. The changed part grows to whole words, so a word is never split.
-    """
-    p = 0
-    while p < min(len(old), len(new)) and old[p] == new[p]:
-        p += 1
-    s = 0
-    while s < min(len(old), len(new)) - p and old[-1 - s] == new[-1 - s]:
-        s += 1
-    lo, hi_old, hi_new = p, len(old) - s, len(new) - s
-
-    def word(c: str) -> bool:
-        return c.isalnum() or c in "_'"
-
-    def starts_word(part: str) -> bool:
-        return bool(part) and word(part[0])
-
-    while lo > 0 and word(old[lo - 1]) and (starts_word(old[lo:hi_old]) or starts_word(new[lo:hi_new])):
-        lo -= 1
-    tail = len(old) - hi_old
-    while tail > 0 and word(old[hi_old]) and (old[lo:hi_old][-1:].isalnum() or new[lo:hi_new][-1:].isalnum()):
-        hi_old += 1
-        hi_new += 1
-        tail -= 1
-    return old[:lo], old[lo:hi_old], new[lo:hi_new], old[hi_old:]
+change_core = _SUGGEST.change_core  # one copy, in suggest.py
 
 
 def _show(part: str) -> str:
@@ -1141,12 +1141,211 @@ def cmd_answer(a: argparse.Namespace) -> Obj:
     return {"added": [{"n": x["n"], "answers": x["answers"], "old": x["old"], "new": x["new"]} for x in added]}
 
 
+def _work_input(raw: str, work: Path, flag: str) -> Path:
+    """A file the skill wrote directly inside WORK (one of the header paths), or a refusal."""
+    try:
+        path = cast(Path, _BRIEF.work_file(raw))
+    except UserError as exc:
+        raise _user(f"{flag} {raw!r}: {exc}") from exc
+    if path.parent != work:
+        raise _user(f"{flag} {raw!r}: must sit directly inside this work directory")
+    return path
+
+
+def _read_json_value(path: Path, flag: str, raw: str, what: str) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise _user(f"{flag} {raw!r}: {what}: cannot read it as JSON ({exc})") from exc
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _load_blocks(raw: str, work: Path) -> list[Obj]:
+    """The blocks of get_document's reply: one reply, or the pages of a long document one after another."""
+    path = _work_input(raw, work, "--blocks-file")
+    value = _read_json_value(path, "--blocks-file", raw, "the blocks")
+    pages = value if isinstance(value, list) and value and all(isinstance(v, dict) and "blocks" in v for v in value) \
+        else [value]
+    blocks: list[Obj] = []
+    for page in pages:
+        if isinstance(page, dict) and page.get("view") == "source":
+            raise _user("--blocks-file: the app is in its source view, which has no blocks; "
+                        "ask the author to switch back to the document view, then read the document again")
+        items = page.get("blocks") if isinstance(page, dict) else page
+        if not isinstance(items, list):
+            raise _user("--blocks-file: expected get_document's reply, with a `blocks` list")
+        blocks.extend(cast("list[Obj]", items))
+    if not blocks:
+        raise _user("--blocks-file: the reply holds no blocks")
+    seen: set[int] = set()
+    for b in blocks:
+        if (not isinstance(b, dict) or not isinstance(b.get("index"), int) or not isinstance(b.get("hash"), str)
+                or not isinstance(b.get("markdown"), str)):
+            raise _user("--blocks-file: every block needs an integer index, a hash and its markdown")
+        if b["index"] in seen:
+            raise _user(f"--blocks-file: block {b['index']} appears twice (pages that overlap)")
+        seen.add(b["index"])
+    return blocks
+
+
+_PROPOSE_KEYS = ("block", "expected", "find", "replace", "note")
+
+
+def cmd_translate(a: argparse.Namespace) -> Obj:
+    """The placed edits as one propose_edits payload (WORK/propose.json); the edits the app could not show wait in the chat.
+
+    Nothing is written but WORK/propose.json, and a suggestions.json from an earlier translate is dropped (its ids
+    named the earlier payload). The edits `render` could not place, and the author's own answers, are not sent.
+    """
+    work = cast(Path, _BRIEF.work_dir(a.work))
+    _BRIEF.touch_work(work)
+    sess_file = work / "session.json"
+    if not sess_file.is_file():
+        raise _user("no session in the work directory: run `review.py render` first")
+    session = _load_json(sess_file, "WORK/session.json")
+    prop = _load_json(work / "filtered.json", "WORK/filtered.json")
+    blocks = _load_blocks(a.blocks_file, work)
+    unplaced = {int(u["n"]) for u in cast("list[Obj]", session.get("unplaced") or [])}
+    edits = [e for e in cast("list[Obj]", prop.get("edits") or [])
+             if e.get("by") != "author" and int(e["n"]) not in unplaced]
+    proposals, refused = _SUGGEST.translate_edits(blocks, edits)
+    payload: Obj = {"edits": [{k: p[k] for k in _PROPOSE_KEYS} for p in proposals],
+                    "order": [int(p["n"]) for p in proposals], "refused": refused}
+    _write_json(work / "propose.json", payload)
+    (work / "suggestions.json").unlink(missing_ok=True)
+    return {"edits": payload["edits"], "sent": len(proposals), "refused": refused}
+
+
+def cmd_proposed(a: argparse.Namespace) -> Obj:
+    """Record the app's reply to propose_edits: the suggestion id of each edit sent (WORK/suggestions.json) and the app's refusals.
+
+    The reply must hold exactly one result for each edit sent, indexes 0..k-1 once each; anything else stops the
+    run with nothing written. An edit the app refused joins the refused list of WORK/propose.json (cause
+    app-refused, the app's reason as detail) and goes to the chat like a local refusal.
+    """
+    work = cast(Path, _BRIEF.work_dir(a.work))
+    _BRIEF.touch_work(work)
+    propose = _load_json(work / "propose.json", "WORK/propose.json (run `review.py translate` first)")
+    path = _work_input(a.from_file, work, "--from-file")
+    reply = _read_json_value(path, "--from-file", a.from_file, "the propose_edits reply")
+    sent = cast("list[Obj]", propose["edits"])
+    order = [int(n) for n in cast("list[Any]", propose["order"])]
+    results = reply.get("results") if isinstance(reply, dict) else None
+
+    def bad(why: str) -> Exception:
+        return _user(f"propose_edits reply: {why}; nothing was written. Write the app's reply as it came back, "
+                     "or run `review.py translate` again")
+
+    if not isinstance(results, list):
+        raise bad("no `results` list" + (f" (the app said: {reply.get('error') or reply.get('reason')})"
+                                         if isinstance(reply, dict) and (reply.get("error") or reply.get("reason")) else ""))
+    if len(results) != len(sent):
+        raise bad(f"it holds {len(results)} results for {len(sent)} edits sent")
+    by_index: dict[int, Obj] = {}
+    for r in cast("list[Any]", results):
+        if not isinstance(r, dict) or not isinstance(r.get("index"), int) or r["index"] in by_index:
+            raise bad("every result needs its own integer `index`")
+        by_index[r["index"]] = cast(Obj, r)
+    if set(by_index) != set(range(len(sent))):
+        raise bad(f"the result indexes are not 0..{len(sent) - 1}")
+    suggestions: list[Obj] = []
+    app_refused: list[Obj] = []
+    for i in range(len(sent)):
+        r = by_index[i]
+        if r.get("status") == "proposed":
+            if not isinstance(r.get("id"), str) or not r["id"]:
+                raise bad(f"result {i} is proposed but has no id")
+            suggestions.append({"n": order[i], "id": r["id"], "find": sent[i]["find"], "replace": sent[i]["replace"]})
+        elif r.get("status") == "refused":
+            app_refused.append({"n": order[i], "cause": "app-refused", "detail": str(r.get("reason") or "no reason given")})
+        else:
+            raise bad(f"result {i} has status {r.get('status')!r}")
+    kept = [x for x in cast("list[Obj]", propose.get("refused") or []) if x.get("cause") != "app-refused"]
+    propose["refused"] = kept + app_refused
+    _write_json(work / "suggestions.json", suggestions)
+    _write_json(work / "propose.json", propose)
+    return {"suggested": len(suggestions), "refused": app_refused}
+
+
 def _both(flags: list[tuple[str, set[int]]]) -> None:
     """An edit can be named by one of --accept, --hold and --reject only."""
     for i, (first, a) in enumerate(flags):
         for second, b in flags[i + 1:]:
             if a & b:
                 raise _user(f"{first} and {second} both name edit {min(a & b)}")
+
+
+def _spec(numbers: set[int]) -> str:
+    return ",".join(str(n) for n in sorted(numbers)) or "none"
+
+
+def cmd_decisions(a: argparse.Namespace) -> Obj:
+    """The author's decisions in the app, plus any made in the chat for the leftovers, as the flags `apply` takes.
+
+    list_suggestions' reply (--from-file) is mapped for THIS run's suggestion ids only: accepted -> accept,
+    rejected -> reject, pending, stale or missing -> hold. --accept/--reject/--hold name the edits the app never
+    held (refused by the script or by the app, the author's own answers): `reject` also takes `rest`. An edit the
+    app held cannot be decided in the chat. Nothing is written: `apply` stays the only writer of the document, the
+    only store of rejections and the only session logger.
+    """
+    work = cast(Path, _BRIEF.work_dir(a.work))
+    _BRIEF.touch_work(work)
+    sess_file = work / "session.json"
+    if not sess_file.is_file():
+        raise _user("no session in the work directory: run `review.py render` first")
+    session = _load_json(sess_file, "WORK/session.json")
+    prop = _load_json(work / "filtered.json", "WORK/filtered.json")
+    propose = _load_json(work / "propose.json", "WORK/propose.json (run `review.py translate` first)")
+    edits = cast("list[Obj]", prop.get("edits") or [])
+    valid = {int(e["n"]) for e in edits}
+    mapped: Obj = {"accept": [], "reject": [], "hold": [], "warnings": []}
+    held_by_app: set[int] = set()
+    if propose.get("order"):
+        sugg_file = work / "suggestions.json"
+        if not sugg_file.is_file():
+            raise _user("the app's reply to propose_edits is not recorded: run `review.py proposed` first")
+        if not a.from_file:
+            raise _user("--from-file is required: write list_suggestions' reply to the STATUSES= path")
+        path = _work_input(a.from_file, work, "--from-file")
+        reply = _read_json_value(path, "--from-file", a.from_file, "the list_suggestions reply")
+        listed = reply.get("suggestions") if isinstance(reply, dict) else reply
+        if not isinstance(listed, list):
+            raise _user("--from-file: expected list_suggestions' reply, with a `suggestions` list")
+        sent = cast("list[Obj]", json.loads(sugg_file.read_text(encoding="utf-8")))
+        mapped = _SUGGEST.map_statuses(sent, cast("list[Obj]", listed))
+        held_by_app = {int(s["n"]) for s in sent}
+    leftover_n = valid - held_by_app
+    unshown = {int(u["n"]) for u in cast("list[Obj]", session.get("unplaced") or [])}
+    mine = {int(e["n"]) for e in edits if e.get("by") == "author"}
+    named = {"--accept": a.accept, "--hold": a.hold, "--reject": a.reject}
+    for flag, spec in named.items():
+        for token in re.findall(r"[0-9]+", spec or ""):
+            if int(token) in held_by_app:
+                raise _user(f"{flag}: edit {token} is with the app; its decision is the one made there")
+    c_accept = parse_numbers(a.accept, leftover_n, "--accept") if a.accept else set()
+    c_hold = parse_numbers(a.hold, leftover_n, "--hold") if a.hold else set()
+    rest = leftover_n - unshown - c_accept - c_hold - mine
+    c_reject = parse_numbers(a.reject, leftover_n, "--reject", rest=rest) if a.reject else set()
+    _both([("--accept", c_accept), ("--hold", c_hold), ("--reject", c_reject)])
+    accept = set(mapped["accept"]) | c_accept
+    reject = set(mapped["reject"]) | c_reject
+    hold = set(mapped["hold"]) | c_hold
+    args: list[str] = []
+    for flag, group in (("--accept", accept), ("--reject", reject), ("--hold", hold)):
+        if group:
+            args += [flag, _spec(group)]
+    refused = cast("list[Obj]", propose.get("refused") or [])
+    return {
+        "accept": sorted(accept), "reject": sorted(reject), "hold": sorted(hold), "apply_args": args,
+        "app": {k: mapped[k] for k in ("accept", "reject", "hold")},
+        "chat": {"accept": sorted(c_accept), "reject": sorted(c_reject), "hold": sorted(c_hold)},
+        "leftover": [r for r in refused if int(r["n"]) in leftover_n],
+        "undecided": sorted(leftover_n - unshown - accept - reject - hold),
+        "warnings": list(mapped["warnings"]),
+    }
 
 
 def cmd_apply(a: argparse.Namespace) -> Obj:
@@ -1354,6 +1553,21 @@ def _parser() -> argparse.ArgumentParser:
     an.add_argument("--work", required=True)
     an.add_argument("--from-file", required=True, metavar="FILE",
                     help='a JSON list [{"answers": "Q4", "old": "...", "new": "..."}] inside WORK (written with Write)')
+    tr = sub.add_parser("translate", help="turn the placed edits into one propose_edits payload")
+    tr.add_argument("--work", required=True)
+    tr.add_argument("--blocks-file", required=True, metavar="FILE",
+                    help="get_document's reply, written with Write to the BLOCKS= path")
+    pr = sub.add_parser("proposed", help="record the app's reply to propose_edits")
+    pr.add_argument("--work", required=True)
+    pr.add_argument("--from-file", required=True, metavar="FILE",
+                    help="propose_edits' reply, written with Write to the PROPOSED= path")
+    de = sub.add_parser("decisions", help="the app's decisions (and the chat's, for the leftovers) as apply's flags")
+    de.add_argument("--work", required=True)
+    de.add_argument("--from-file", metavar="FILE",
+                    help="list_suggestions' reply, written with Write to the STATUSES= path (needed when edits went to the app)")
+    de.add_argument("--accept", help="leftover edits the author accepted in the chat")
+    de.add_argument("--hold", help="leftover edits the author left undecided in the chat")
+    de.add_argument("--reject", help="leftover edits the author rejected in the chat, or `rest`")
     lr = sub.add_parser("log-retry", help="send the session log of an apply whose log failed, then delete WORK")
     lr.add_argument("--work", required=True)
     return p
@@ -1365,7 +1579,9 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8")
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        commands = {"render": cmd_render, "apply": cmd_apply, "answer": cmd_answer, "log-retry": cmd_log_retry}
+        commands = {"render": cmd_render, "apply": cmd_apply, "answer": cmd_answer, "log-retry": cmd_log_retry,
+                    "translate": cmd_translate, "proposed": cmd_proposed,
+                    "decisions": cmd_decisions}
         _emit(commands[args.cmd](args))
     except Passthrough as exc:
         sys.stderr.write(f"{exc}\n")
