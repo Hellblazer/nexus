@@ -42,6 +42,20 @@ e. **Suggestion ids and document changes.** Ids do not restart when another docu
    opened (s12 followed s11). list_suggestions keeps returning the previous document's
    suggestions, with nothing that says which document each belongs to, and opening a new
    document did not make them stale. Match only the ids this run's propose_edits returned.
+g. **What the serializer writes** (`serializer-source.md` gives `get_document_serializer.json`):
+   - `_x_` becomes `*x*` and `__x__` becomes `**x**`.
+   - `[sic]` becomes `\[sic\]`, `<` becomes `\<`, and `~x~` becomes `\~x\~` (plain text, not strikethrough).
+   - `&amp;` becomes `&`.
+   - A reference link `[t][d]` becomes inline `[t](url)`, and the definition line is dropped.
+   - A hard break is `\` followed by a newline. Ordered lists are kind `numbered-list`, and quotes are kind `quote`.
+
+   `propose_edits_serializer.json` holds the request and the reply. The app accepts a find written as visible text:
+   - across `[sic]`, `<`, `~`, `&`, a backslash-escaped `*`, a link's text, an emphasis run's inner text, a list item, a quote and a table cell;
+   - it refuses a find that spans a hard break when the find writes the break as a space.
+
+   So `old` has to be located by visible text, not by file Markdown.
 f. **open_document reports too early.** It replied "Opened" while the app was still showing
-   its save prompt for the previous document, which had unsaved changes. Confirm the open by
-   reading `url` from get_document or app_state, and check that `modalWindow` is empty.
+   its save prompt for the previous document, which had unsaved changes. The load also happens
+   after the reply even with no prompt: a get_document sent straight after "Opened" returned
+   the previous document. Before calling get_document, poll app_state until `url` is the
+   target and `modalWindow` is empty.
