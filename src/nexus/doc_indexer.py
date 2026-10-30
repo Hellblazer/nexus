@@ -3347,7 +3347,7 @@ def index_pdf(
             # nexus-uxg4u: never touch the catalog on a dry run.
             return
         try:
-            from nexus.pipeline_stages import _catalog_pdf_hook  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+            from nexus.pipeline_stages import _catalog_pdf_hook, extraction_record  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             _catalog_pdf_hook(
                 pdf_path, col_name,
                 title=meta_list[0].get("title", "") if meta_list else "",
@@ -3358,11 +3358,10 @@ def index_pdf(
                 source_uri=source_uri,
                 # RDR-237: the method and the rung-to-pages map come from the extraction result
                 # (filled into ``_extraction_stats`` by ``_pdf_chunks``), not from the chunks:
-                # the map is document-level and no chunk carries it.
-                extraction={
-                    "extraction_method": _extraction_stats.get("extraction_method", ""),
-                    "extraction_pages": _extraction_stats.get("extraction_pages", {}),
-                },
+                # the map is document-level and no chunk carries it. nexus-6pfgb.6: so do the
+                # quality-gate override (an explicit boolean) and the source, read back from the
+                # stats ``_pdf_chunks`` filled with this same record.
+                extraction=extraction_record(_extraction_stats),
             )
             # nexus-6pfgb.28: the --enrich lookup goes to the catalog document's bib_* columns,
             # which a bib_* filter is answered from. Before the stamp, like the rest of the
@@ -3694,9 +3693,17 @@ def _parse_md_title_year(md_path: Path) -> tuple[str, int]:
 
 def _catalog_markdown_hook(
     md_path: Path, collection_name: str, content_type: str, corpus: str, chunk_count: int,
-    *, base_path: Path | None = None, source_uri: str = "",
+    *, base_path: Path | None = None, source_uri: str = "", extraction_source: str = "file",
 ) -> None:
     """Register markdown document in catalog after indexing. Silently skipped if absent.
+
+    *extraction_source* (nexus-6pfgb.6) is where the text came from: ``file`` for a markdown file,
+    ``dt_content`` (or ``dt_ocr`` / ``dt_transcribe``) for DEVONthink text. It is a fact about this
+    document, so its home is the catalog document's ``meta``, written on every leg of the hook (the
+    update of an existing row, the registration of a new one, and the update that follows a
+    registration which resolved onto an existing row, because the engine's register returns that
+    row without merging ``meta``). Markdown has no extraction method and no quality gate: neither
+    key is written.
 
     nexus-3lswy WARNING: this registers under a SEPARATE "curator" owner
     (see ``owner_name``/``curator_owner_tumbler_by_name`` below), distinct
@@ -3730,6 +3737,8 @@ def _catalog_markdown_hook(
         # Derive title and year from frontmatter or filename (shared with the
         # pre-flight registration, nexus-ivzw8).
         title, year = _parse_md_title_year(md_path)
+        # The document keys of this registration (RDR-236 Phase 1): sent with a real value only.
+        doc_meta: dict[str, Any] = {"extraction_source": extraction_source or "file"}
 
         owner_name = corpus if corpus else "standalone-docs"
         # Curator-only lookup — see _register_or_lookup_doc_id for
@@ -3801,6 +3810,7 @@ def _catalog_markdown_hook(
                 update_kwargs["title"] = title
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
+            update_kwargs["meta"] = doc_meta
             writer.update(existing.tumbler, **update_kwargs)
             if derived_source_uri and not from_repo_owner and not getattr(existing, "source_uri", ""):
                 # nexus-njn1a: a curator document an earlier release registered by a relative path has
@@ -3882,6 +3892,7 @@ def _catalog_markdown_hook(
                 source_mtime=source_mtime,
                 source_uri=source_uri,
                 with_created=True,
+                meta=doc_meta,
             )
             _created = created_from_register_result(_write_result)
             announce_cross_owner_mint(
@@ -3903,6 +3914,8 @@ def _catalog_markdown_hook(
                     target_collection=collection_name, file_path=fp,
                     owner=owner,
                 )
+                # register() returned an existing row untouched (no ``meta`` merge): the record rides an update.
+                writer.update(tumbler_from_register_result(_write_result), meta=doc_meta)
     except Exception as exc:  # noqa: BLE001 — best-effort catalog markdown hook; logged + audited, cleanup in finally
         # nexus-ou4tb (site from the e9ru2 review): an indexed markdown doc
         # that never reached the catalog is invisible to every catalog-routed
@@ -4128,7 +4141,10 @@ def index_markdown(
             assert isinstance(raw, int)
             count = raw
             if count > 0:
-                _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri)
+                _catalog_markdown_hook(
+                    md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri,
+                    extraction_source=extraction_source,
+                )
                 _stamp_last()
                 # nexus-y8qtj: end-of-run fork check (see index_pdf for rationale).
                 _forks = _check_document_fork(doc_id, col_name)
@@ -4140,7 +4156,10 @@ def index_markdown(
         metadatas: list[dict] = raw
         sections = sum(1 for m in metadatas if m.get("section_title", ""))
         if metadatas:
-            _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri)
+            _catalog_markdown_hook(
+                md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri,
+                extraction_source=extraction_source,
+            )
             _stamp_last()
             _forks = _check_document_fork(doc_id, col_name)
             if on_fork_detected is not None:

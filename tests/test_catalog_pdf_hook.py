@@ -366,18 +366,49 @@ class TestExtractionRecord:
             "extraction_pages": {"pymupdf-text": [12, 3], "mineru-no-formula": [7]},
             "page_count": 12,
         }) == {"extraction_method": "mineru+degraded",
-               "extraction_pages": {"pymupdf-text": [3, 12], "mineru-no-formula": [7]}}
+               "extraction_pages": {"pymupdf-text": [3, 12], "mineru-no-formula": [7]},
+               "quality_gate_overridden": False, "extraction_source": "file"}
 
     def test_drops_empty_rungs_and_reads_a_missing_map_as_clean(self):
         from nexus.pipeline_stages import extraction_record
 
         assert extraction_record({"extraction_method": "mineru", "extraction_pages": {"unextracted": []}}) == {
-            "extraction_method": "mineru", "extraction_pages": {}}
+            "extraction_method": "mineru", "extraction_pages": {},
+            "quality_gate_overridden": False, "extraction_source": "file"}
         # A non-ladder extractor reports no map: the record says "none degraded", never "unknown".
         assert extraction_record({"extraction_method": "pymupdf_normalized"}) == {
-            "extraction_method": "pymupdf_normalized", "extraction_pages": {}}
+            "extraction_method": "pymupdf_normalized", "extraction_pages": {},
+            "quality_gate_overridden": False, "extraction_source": "file"}
+        # No extraction metadata at all: no extraction ran, so the override and the source are
+        # unknown (absent), never "not overridden" (nexus-6pfgb.6).
         assert extraction_record(None) == {"extraction_method": "", "extraction_pages": {}}
-        assert extraction_record({"extraction_pages": "garbage"}) == {"extraction_method": "", "extraction_pages": {}}
+        assert extraction_record({}) == {"extraction_method": "", "extraction_pages": {}}
+        assert extraction_record({"extraction_pages": "garbage"}) == {
+            "extraction_method": "", "extraction_pages": {},
+            "quality_gate_overridden": False, "extraction_source": "file"}
+
+    def test_the_override_is_an_explicit_boolean_and_the_record_is_idempotent(self):
+        """nexus-6pfgb.6: ``quality_gate_overridden`` is ``False`` on a clean extraction and ``True`` on
+        an override, and a record fed back through ``extraction_record`` (the batch route reads its own
+        stats back) is unchanged."""
+        from nexus.pipeline_stages import extraction_record
+
+        clean = extraction_record({"extraction_method": "mineru", "page_count": 3})
+        assert clean["quality_gate_overridden"] is False
+        over = extraction_record({"extraction_method": "pymupdf", "quality_gate_overridden": True})
+        assert over["quality_gate_overridden"] is True
+        assert extraction_record(over) == over and extraction_record(clean) == clean
+        assert extraction_record({"extraction_method": "x", "extraction_source": "dt_content"})["extraction_source"] == "dt_content"
+
+    def test_the_catalog_meta_sends_the_override_explicitly_and_only_what_the_record_states(self):
+        from nexus.pipeline_stages import _catalog_extraction_meta, extraction_record
+
+        assert _catalog_extraction_meta(extraction_record({"extraction_method": "mineru"})) == {
+            "extraction_pages": {}, "extraction_method": "mineru",
+            "quality_gate_overridden": False, "extraction_source": "file"}
+        # A record that never states the override (no extraction ran) leaves the key out, so the merge
+        # cannot overwrite an earlier real value with a guess.
+        assert _catalog_extraction_meta(extraction_record(None)) == {"extraction_pages": {}}
 
     @pytest.mark.parametrize("bad_pages", [["x", 3], [None, 3], [4.5, 3], [True, 3], "3,4"])
     def test_a_malformed_map_is_skipped_and_named_never_raised(self, bad_pages):

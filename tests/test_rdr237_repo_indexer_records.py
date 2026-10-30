@@ -45,7 +45,10 @@ def _chunks_filling(method: str, pages: dict):
 
     def fake(file, content_hash, model, now_iso, corpus, *, extraction_stats=None, **kw):
         if extraction_stats is not None:
-            extraction_stats.update({"extraction_method": method, "extraction_pages": pages, "page_count": 12})
+            extraction_stats.update({
+                "extraction_method": method, "extraction_pages": pages, "page_count": 12,
+                "quality_gate_overridden": False, "extraction_source": "file",
+            })
         return [("id1", "Page 1", {"source_title": "T", "page_number": 1, "source_path": str(file),
                                    "corpus": corpus, "embedding_model": model, "store_type": "prose",
                                    "source_agent": "nexus-indexer"})]
@@ -80,7 +83,8 @@ def test_a_degraded_pdf_indexed_by_the_repo_indexer_records_its_map(tmp_path) ->
     count, writer, _pdf = _index(tmp_path, "mineru+degraded", DEGRADED)
     assert count == 1
     assert writer.updates == [
-        ("1.1.7", {"meta": {"extraction_method": "mineru+degraded", "extraction_pages": DEGRADED}}),
+        ("1.1.7", {"meta": {"extraction_method": "mineru+degraded", "extraction_pages": DEGRADED,
+                           "quality_gate_overridden": False, "extraction_source": "file"}}),
     ]
     assert writer.closed
 
@@ -89,7 +93,9 @@ def test_a_clean_re_extract_through_the_repo_indexer_writes_an_empty_map(tmp_pat
     """The service merges ``meta`` key by key and never removes one, so a clean run clears an old
     map only by writing ``extraction_pages`` whole, ``{}`` included."""
     _count, writer, _pdf = _index(tmp_path, "mineru", {})
-    assert writer.updates == [("1.1.7", {"meta": {"extraction_method": "mineru", "extraction_pages": {}}})]
+    assert writer.updates == [("1.1.7", {"meta": {
+        "extraction_method": "mineru", "extraction_pages": {},
+        "quality_gate_overridden": False, "extraction_source": "file"}})]
 
 
 def test_a_file_with_no_catalog_document_logs_that_nothing_was_recorded(tmp_path) -> None:

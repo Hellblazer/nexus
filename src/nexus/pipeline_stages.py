@@ -1053,6 +1053,14 @@ def extraction_record(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     did or the extractor reports no map (a non-ladder extractor): the hook writes it on EVERY
     extraction, because the catalog merge never removes a key and so a clean re-extract can clear
     an old map only by replacing it with ``{}`` (RDR-237).
+
+    ``quality_gate_overridden`` and ``extraction_source`` (nexus-6pfgb.6) are the document's other
+    extraction facts; their home is the catalog document's meta, because on a chunk row they are the
+    last writer's. A record built from real extraction metadata carries the override as an EXPLICIT
+    boolean (``False`` on a clean extraction: the merge never retracts, so a clean re-extract clears
+    an old ``True`` only by overwriting it) and the source (``file`` for a PDF). *metadata* of
+    ``None`` or empty means no extraction ran: neither key is in the record, so nothing reads as
+    "not overridden". The record is idempotent: feeding it its own output returns it unchanged.
     """
     meta = metadata or {}
     raw = meta.get("extraction_pages")
@@ -1071,15 +1079,26 @@ def extraction_record(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
                 pages[str(rung)] = sorted(kept)
             elif nums:
                 _log.warning("extraction_record_skipped_a_malformed_rung", rung=str(rung), pages=repr(nums))
-    return {"extraction_method": str(meta.get("extraction_method") or ""), "extraction_pages": pages}
+    record: dict[str, Any] = {"extraction_method": str(meta.get("extraction_method") or ""), "extraction_pages": pages}
+    if meta:
+        record["quality_gate_overridden"] = bool(meta.get("quality_gate_overridden", False))
+        record["extraction_source"] = str(meta.get("extraction_source") or "file")
+    return record
 
 
 def _catalog_extraction_meta(extraction: Mapping[str, Any]) -> dict[str, Any]:
     """The ``meta`` keys one extraction record writes: ``extraction_pages`` always (``{}`` when
-    clean), ``extraction_method`` only when the extractor named one."""
+    clean), ``extraction_method`` only when the extractor named one, ``quality_gate_overridden``
+    whenever the record states it (an explicit ``False`` included, nexus-6pfgb.6) and
+    ``extraction_source`` when it names one. A record that does not state the override leaves the
+    key out: absent means unknown, and the merge would not retract an old value anyway."""
     meta: dict[str, Any] = {"extraction_pages": dict(extraction.get("extraction_pages") or {})}
     if extraction.get("extraction_method"):
         meta["extraction_method"] = str(extraction["extraction_method"])
+    if "quality_gate_overridden" in extraction:
+        meta["quality_gate_overridden"] = bool(extraction["quality_gate_overridden"])
+    if extraction.get("extraction_source"):
+        meta["extraction_source"] = str(extraction["extraction_source"])
     return meta
 
 
@@ -1235,7 +1254,9 @@ def _catalog_pdf_hook(
     ``meta`` on BOTH branches, the update of an existing row and the registration of a new one
     (and the update that follows a registration which resolved onto an existing row, because the
     engine's register returns that row untouched). ``extraction_pages`` is always written, ``{}``
-    when clean. ``None`` writes nothing.
+    when clean. So are ``quality_gate_overridden`` (an explicit boolean, ``False`` on a clean
+    extraction) and ``extraction_source`` (nexus-6pfgb.6): the document's own extraction facts,
+    which a shared chunk row cannot hold per document. ``None`` writes nothing.
 
     Runs that record NO extraction metadata, each with a ``catalog_pdf_extraction_not_recorded``
     warning that names the document (``reason`` says which):
@@ -2561,8 +2582,9 @@ def _enrich_metadata_from_extraction(
     never reached. A row another document restamped between this PDF's upload and
     this post-pass (its ``content_hash`` is not *content_hash*) is now written: its
     ``title``, ``source_author`` and ``extraction_method`` are replaced by this PDF's
-    (the last-writer-wins limitation until those keys live in the catalog,
-    nexus-6pfgb.6, and the chunk-row keys are retired, nexus-6pfgb.27). Nothing else
+    (the last-writer-wins limitation of the chunk row; this PDF's own value is now also on its
+    catalog document's ``meta``, written by :func:`_catalog_pdf_hook`, nexus-6pfgb.6, where it is
+    its alone; the chunk-row keys go with nexus-6pfgb.27). Nothing else
     is touched on such a row: no ``delete_keys`` (the co-owner's
     ``quality_gate_overridden`` audit flag is never removed, and this PDF's own flag
     is not set on it), and a key whose value here is empty is skipped, so a
