@@ -293,3 +293,12 @@ source_agent = 1
 
 [sites."src/nexus/search_engine.py::apply_file_diversity_cap"]
 doc_id = 1
+
+# nexus-1nrcu: the one-time rung that copies a chunk row's section label onto a legacy manifest row (the
+# only row it is exact for: a chash with one manifest row). A LEGACY read of the three POSITION keys, and
+# of indexed_at for the same attribution guard meta_backfill uses; both go with the keys at Phase 4.
+[sites."src/nexus/upgrade_ladder/rungs/manifest_section_labels.py::_labels_from_chunk_row"]
+indexed_at = 1
+page_number = 1
+section_title = 1
+section_type = 1
