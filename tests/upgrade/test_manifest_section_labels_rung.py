@@ -550,6 +550,25 @@ def test_a_paper_chunk_titled_with_the_documents_title_is_copied(world: World) -
     assert world.labels("1.1.1") == [(0, "Refs", "references", None, True)]
 
 
+@pytest.mark.parametrize("listed", [("1.1.2", 0), ("1.1.1", 7)], ids=["other-document", "other-position"])
+def test_a_single_listing_that_does_not_name_this_row_is_not_ownership(world: World, listed: tuple[str, int]) -> None:
+    """The ownership read answers with exactly ONE row for the chash, but it is not this row (the listing and
+    the manifest read disagree: a document moved, a position renumbered between the two reads). One row is
+    not enough; it has to be this one. Mutating the guard to ``len(held) == 1`` fills this row."""
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    doc_id, position = listed
+    world.chash_positions = lambda chashes: [  # type: ignore[method-assign]
+        {"chash": c, "doc_id": doc_id, "position": position, "chunk_count": 1, "collection": COLL,
+         "labels_written": False} for c in chashes]
+
+    result = world.rung().converge(Report())
+
+    assert world.appends == [] and world.labels("1.1.1") == [(0, None, None, None, False)]
+    assert "1 changed meanwhile" in result.detail
+
+
 # ── races and failures ───────────────────────────────────────────────────────
 
 
