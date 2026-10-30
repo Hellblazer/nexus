@@ -3548,7 +3548,10 @@ def _index_pdf_file(
             "ttl_days": 0,
             "frecency_score": float(score),
             "doc_id": catalog_doc_id,
-            **{k: v for k, v in git_meta.items() if v},
+            # RDR-236 Phase 0 (nexus-qyx35): no flat ``git_*`` keys here. They are LEGACY
+            # (RDR-101 Phase 5c), nothing reads them from a chunk row, and this dict never
+            # passed ``normalize``, so they reached the engine. ``doc_id`` stays until
+            # nexus-6pfgb.39: the engine's manifest-less census forward join reads it.
         }
         metadatas.append(augmented)
 

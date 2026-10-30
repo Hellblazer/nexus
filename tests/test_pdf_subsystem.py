@@ -429,18 +429,20 @@ class TestIndexPdfFileGitMetadata:
 
         return captured[0] if captured else []
 
-    def test_git_fields_populated(self, pdf_git_repo: Path) -> None:
-        """AC-S5: Indexed chunks carry non-empty git_commit_hash, correct branch."""
+    def test_git_fields_are_not_written(self, pdf_git_repo: Path) -> None:
+        """RDR-236 Phase 0 (nexus-qyx35): the repo PDF dict no longer sets the flat git
+        keys. They are LEGACY (RDR-101 Phase 5c dropped them from the schema), nothing
+        reads them from a chunk row, and this path never ran ``normalize``, so they
+        reached the engine. The catalog document carries git provenance."""
         pdf = pdf_git_repo / "docs" / "simple.pdf"
         git_meta = _git_metadata(pdf_git_repo)
+        assert git_meta["git_commit_hash"], "the fixture must be a real repo, or this proves nothing"
 
         metadatas = self._run_index_pdf_file(pdf, pdf_git_repo, git_meta)
 
         assert metadatas, "Expected at least one chunk to be upserted"
         for meta in metadatas:
-            assert meta["git_commit_hash"], "git_commit_hash must be non-empty"
-            assert meta["git_branch"] == "main"
-            assert meta["git_project_name"], "git_project_name must be non-empty"
+            assert not [k for k in meta if k.startswith("git_")], sorted(meta)
             assert meta["tags"] == "pdf"
             assert meta["category"] == "prose"
             assert isinstance(meta["frecency_score"], float)
