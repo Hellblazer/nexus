@@ -69,9 +69,12 @@ from nexus.ttl import MAX_TTL_DAYS
 _log = structlog.get_logger(__name__)
 
 #: Bundle format version written by this implementation; mirrors
-#: ``exporter.py``'s FORMAT_VERSION / MAX_SUPPORTED_FORMAT_VERSION pair.
-RECOVERY_BUNDLE_FORMAT_VERSION: int = 1
-MAX_SUPPORTED_RECOVERY_FORMAT_VERSION: int = 1
+#: ``exporter.py``'s FORMAT_VERSION / MAX_SUPPORTED_FORMAT_VERSION pair. Version 2 (nexus-6pfgb.38):
+#: a note record's ``tags`` is a list, where version 1 wrote the comma string. The importer accepts
+#: both (a string is split once), so a version 1 bundle still reads; an older client reading a
+#: version 2 bundle refuses it by this number.
+RECOVERY_BUNDLE_FORMAT_VERSION: int = 2
+MAX_SUPPORTED_RECOVERY_FORMAT_VERSION: int = 2
 
 #: Page size for the link_query exhaustion loop (the ``bulk_unlink``
 #: dry_run idiom — http_catalog_client.py's own pagination shape).

@@ -487,7 +487,7 @@ def test_bundle_is_plain_jsonl(fake_catalog, tmp_path):
     lines = (tmp_path / "b.jsonl").read_text(encoding="utf-8").splitlines()
     parsed = [json.loads(l) for l in lines]      # every line is plain JSON
     assert parsed[0]["format"] == "nexus-recovery-bundle"
-    assert parsed[0]["format_version"] == 1
+    assert parsed[0]["format_version"] == 2
     # docs precede links (import resolves links against just-imported docs)
     kinds = [p.get("record") for p in parsed[1:]]
     assert kinds == sorted(kinds, key=lambda k: 0 if k == "knowledge_doc" else 1)
@@ -564,6 +564,15 @@ def test_import_is_idempotent_on_links(fake_catalog, tmp_path):
     # nothing new is created.
     assert s2.links_created == 0
     assert s2.links_merged == s1.links_created + s1.links_merged
+
+
+def test_read_bundle_still_reads_a_version_1_bundle(tmp_path):
+    """Version 2 only changed what a note's ``tags`` is (a list, nexus-6pfgb.38); the importer
+    accepts both shapes, so a bundle an older client wrote reads as before."""
+    p = tmp_path / "v1.jsonl"
+    p.write_text(json.dumps({"format": "nexus-recovery-bundle", "format_version": 1}) + "\n")
+    header, records = read_bundle(p)
+    assert header["format_version"] == 1 and records == []
 
 
 def test_read_bundle_refuses_future_format(tmp_path):

@@ -2710,7 +2710,7 @@ def _markdown_chunks(
             indexed_at=now_iso,
             embedding_model=target_model,
             title=source_title,
-            source_author=str(frontmatter.get("author", "")),
+            source_author=_frontmatter_author(frontmatter),
             section_title=chunk.metadata.get("header_path", ""),
             section_type=chunk.metadata.get("section_type", ""),
             tags="markdown",
@@ -3936,8 +3936,19 @@ def _catalog_markdown_hook(
                     target_collection=collection_name, file_path=fp,
                     owner=owner,
                 )
-                # register() returned an existing row untouched (no ``meta`` merge): the record rides an update.
-                writer.update(tumbler_from_register_result(_write_result), meta=doc_meta)
+                # register() returned an existing row untouched (no ``meta`` merge): the record rides an
+                # update, and so does the author, under the same fill-only rule as the branch above
+                # (nexus-6pfgb.7): only where the resolved row's author is empty.
+                _resolved_tumbler = tumbler_from_register_result(_write_result)
+                _resolved_update: dict = {"meta": doc_meta}
+                if author:
+                    try:
+                        _resolved = reader.resolve(_resolved_tumbler)
+                    except Exception:  # noqa: BLE001 — advisory read: without it the author is simply not filled
+                        _resolved = None
+                    if _resolved is not None and not (getattr(_resolved, "author", "") or "").strip():
+                        _resolved_update["author"] = author
+                writer.update(_resolved_tumbler, **_resolved_update)
     except Exception as exc:  # noqa: BLE001 — best-effort catalog markdown hook; logged + audited, cleanup in finally
         # nexus-ou4tb (site from the e9ru2 review): an indexed markdown doc
         # that never reached the catalog is invisible to every catalog-routed

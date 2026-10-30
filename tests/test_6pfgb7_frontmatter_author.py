@@ -36,3 +36,23 @@ def test_no_usable_frontmatter_gives_the_stem_and_no_author(tmp_path, text) -> N
     md.write_text(text)
     _title, year, author = _parse_md_frontmatter(md)  # the title regex is line-based; the author needs valid YAML
     assert (year, author) == (0, "")
+
+
+@pytest.mark.parametrize("author_yaml,expected", [
+    ("[Ann Lee, Bo Chen]", "Ann Lee, Bo Chen"),
+    ("Jane Q. Writer", "Jane Q. Writer"),
+    ("", ""),
+])
+def test_the_chunk_rows_source_author_is_the_string_the_catalog_gets(tmp_path, author_yaml, expected) -> None:
+    """Review S3: the row writer once stored ``str(frontmatter.get("author"))``, so a list author
+    became the repr ``"['Ann Lee', 'Bo Chen']"`` and an empty key ``"None"``, while the catalog got
+    ``"Ann Lee, Bo Chen"`` / ``""``. Both now come from :func:`_frontmatter_author`."""
+    from nexus.doc_indexer import _markdown_chunks
+
+    md = tmp_path / "doc.md"
+    md.write_text(f"---\ntitle: T\nauthor: {author_yaml}\n---\n\n# Hello\n\nSome content here for chunking.\n")
+
+    rows = _markdown_chunks(md, "abc123", "model-ctx", "2026-01-01", "corp")
+
+    assert rows
+    assert rows[0][2].get("source_author", "") == expected

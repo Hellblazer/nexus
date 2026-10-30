@@ -424,7 +424,8 @@ def apply_hybrid_scoring(
     )
     distances = [_effective_distance(r, calibration_factors) for r in basis]
     # RDR-236 Phase 1 (nexus-6pfgb.9): a hit scores by its attributed owner's catalog frecency
-    # (``_owner_frecency``, set from the page's one owner lookup). The chunk row carries the
+    # (``_owner_frecency``, set from the page's one owner lookup; the best of the owners' scores
+    # when the row named no document, see ``DOC_ID_INFERRED_KEY``). The chunk row carries the
     # LAST WRITER's file score, so it is read only for a chunk that has at most one owner (a
     # legacy chunk nothing has stamped yet); a shared chunk whose owner states none scores 0.0.
     # One value per hit, so the window below and the per-hit read agree.

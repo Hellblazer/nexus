@@ -163,6 +163,12 @@ OWNER_FACTS_KEY: str = "_owner_facts"
 #: makes. A working key like :data:`OWNER_FACTS_KEY`; absent when the owner states none.
 OWNER_FRECENCY_KEY: str = "_owner_frecency"
 
+#: Working key set to ``True`` on a hit whose ``doc_id`` the owner lookup CHOSE (the chunk row
+#: named none; the engine's order picked the first holder). Such a choice is arbitrary, so the
+#: hit's frecency is the best of its live owners', not the chosen one's (RDR-236 Phase 1 review,
+#: nexus-6pfgb.9). Never set when the row carried its own ``doc_id``.
+DOC_ID_INFERRED_KEY: str = "_doc_id_inferred"
+
 #: The most owners of one chunk resolved for its title and facts. A chunk many
 #: documents share (boilerplate) would otherwise make every read resolve all of
 #: them; past the cap the owners cannot be shown to agree, so a reader states

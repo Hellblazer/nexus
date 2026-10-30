@@ -463,3 +463,46 @@ class TestCatalogBibFields:
                                       "semantic_scholar_id": ""})
         assert set(fields) == {"bib_citation_count", "bib_enriched_at"}
         assert fields["bib_citation_count"] == 0
+
+    def test_a_close_that_raises_does_not_escape_the_hook(self, monkeypatch):
+        """Review L2: the hook promises never to raise; a client whose close() raised used to
+        propagate out of its ``finally``."""
+        from pathlib import Path
+
+        import nexus.catalog.factory as factory
+        from nexus.pipeline_stages import _catalog_pdf_bib_hook
+
+        class _Client:
+            def __init__(self):
+                self.updates = []
+
+            def resolve(self, doc_id):
+                return None
+
+            def update(self, doc_id, **kw):
+                self.updates.append(kw)
+
+            def close(self):
+                raise RuntimeError("socket gone")
+
+        client = _Client()
+        monkeypatch.setattr(factory, "make_catalog_reader", lambda: client)
+        monkeypatch.setattr(factory, "make_catalog_writer", lambda: client)
+
+        sent = _catalog_pdf_bib_hook("1.1.1", Path("/data/p.pdf"), "docs__x", {"year": 2019})
+
+        assert sent is True and client.updates[0]["bib_year"] == 2019
+
+    def test_a_zero_count_fills_only_where_the_catalog_has_no_count_yet(self):
+        """Semantic Scholar answers 0 for a record it knows too little about, so a zero must never
+        replace a count the catalog already holds (nexus-6pfgb.28 review I2). A positive count
+        always replaces: a newer lookup is a newer count."""
+        from nexus.pipeline_stages import _catalog_bib_fields
+
+        zero = {"year": 0, "venue": "", "authors": "", "citation_count": 0, "semantic_scholar_id": ""}
+        assert _catalog_bib_fields(zero, current_count=42) == {}, "nothing real to send, nothing stamped"
+        assert _catalog_bib_fields({**zero, "venue": "OSDI"}, current_count=42).keys() == {
+            "bib_venue", "bib_enriched_at"}
+        assert _catalog_bib_fields({**zero, "citation_count": 50}, current_count=42)[
+            "bib_citation_count"] == 50
+        assert _catalog_bib_fields(zero, current_count=0)["bib_citation_count"] == 0
