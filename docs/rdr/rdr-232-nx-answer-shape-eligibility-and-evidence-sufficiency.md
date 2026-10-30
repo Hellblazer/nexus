@@ -491,8 +491,9 @@ listed under Critical Assumptions before gate.
   the fixed tree.
   *Source: bead nexus-jypmj.3.17; bead nexus-jypmj.3.10 comment of 2026-10-28.*
 
-- **❓ Assumed** (unit-test timing model; no live run; the code behaviour is
-  tested, the latency and accuracy are not measured) — the coverage check is on
+- **❓ Assumed, superseded 2026-10-29 by the live figure in the next finding**
+  (unit-test timing model; no live run when written; the code behaviour is
+  tested, the latency and accuracy were not measured) — the coverage check is on
   by default as of 2026-10-28, by Sam's decision, taken together with the latency
   fix the canary above asked for (nexus-jypmj.17). The assessment calls now run
   at most 4 at a time, fewer when an API backend's configured
@@ -513,7 +514,12 @@ listed under Critical Assumptions before gate.
   on is re-taken on the next canary, and the 20-anchor pack size and the
   per-anchor latency are unmeasured as accuracy and latency. An unrecognised
   `NX_ANSWER_COVERAGE` value (`disable`, `off!`) reads as off, not as the default:
-  the safe direction for a typo.
+  the safe direction for a typo. [Superseded 2026-10-29: the live G06 canary of
+  this design (develop 6dd75ec3f, engine 0.1.168) measured the assessment stage at
+  54.3 s for 8 concurrent calls, against the model's 50 s and the serial live
+  118 s, with 0 cut calls and 6 of 6 facets covered; every predicted range held
+  except assessment cost, 0.047 USD against the predicted 0.02 to 0.04. The 1/100
+  timing model is not a measurement and the 54.3 s is, on one request.]
   *Source: bead nexus-jypmj.17; `tests/test_rdr232_coverage_concurrent.py`; bead
   nexus-jypmj.3.10 comment of 2026-10-28.*
 
@@ -593,58 +599,111 @@ listed under Critical Assumptions before gate.
 - **Verified** (spike, live) — an assessment that leaves anchors unread (nexus-jypmj.23, 2026-10-30; negative control N04, a lookup, scope `rdr`). Under the shipped lookup rule the request ran plan 467 (citation-traversal), which handed the coverage check 301 anchors. The assessment calls carried 127 of them: seven calls, all replied neutral (21 and 58 accepted records, none supporting), and 174 anchors were left out by the per-call size cap. The code then marked both facets `unassessed` (`assessment_incomplete`) because a call had left anchors out, so the check could not withhold: the run reported reason `assessment_failed` beside an assessment outcome `ok` with no failure, and off-topic prose (RDR-007 hosting costs) came back `answered` on the two coverage-on runs of the plan (rows 913 and 915; rows 914 and 916 were the coverage-off arm, where the check does not run, so they do not show the mechanism). Under lookup-only the same request ran plan 473 with 15 anchors, all of which fit, and was withheld (`uncovered`, 0.0084 USD, row 918). Sam's ruling (2026-10-30): a facet no item the check READ supports or contradicts reads `unsupported`, not `unassessed`, and the notices and the envelope say how many items were not read (section 4 departure, Phase 3 As run). The count is each unread item once per stream per round, and the notices state "N of M retrieved items were not read". Repair is now entered for these facets and reads the unread anchors. What this does not show: a correct answer whose supporting item is among the unread ones is withheld, and the rate of that is not measured (the five largest held-out requests were never run). Also unmeasured: N01-N03, replaced with markers absent from the tenant.
   *Source: live runs 913-918. T2: `nexus/rdr232-jypmj23-measurement-2026-10-30`, `nexus/rdr232-jypmj23-negative-controls-2026-10-30`.*
 
+- **Verified** (spike, live) — Phase 3 step 4, the results that had lived only in bead nexus-jypmj.3.10 and its T2 record (develop 6dd75ec3f, engine 0.1.167 and 0.1.168, 2026-10-28 and 2026-10-29, about 40.8 USD of live spend; recorded here 2026-10-30). Repair yield, by where the facet came from (a "whole_question" facet is the request as a whole, so repair re-searches the question; a "clause" facet is one part of it): whole_question 2 of 3 covered after repair (golden 1 of 2, held-out 1 of 1); clause 0 of 5 (golden 0 of 4, held-out 0 of 1); G18 (an audit request, withheld) 0 of 5 facets on both reruns, 8 items merged each time. Repair entered 2 golden runs, 2 held-out runs and the 2 G18 reruns. A repair cost about 5 search calls and one reassessment call (0.005 to 0.01 USD) and about 30 s (G18: 31.6 s), inside the stage's time share and cost stop-line, and none caused a withhold or an error. The recommendation posted on the bead, not a decision by Sam, was to keep repair as shipped: it is cheap, bounded and yields on whole_question facets; 0 of 5 on clause facets is too few tries to drop it on, and G18 shows its failure is retrieval (the answer sat in a docstring and a plan file the repair queries did not reach), not the repair loop. The oracle's permissive side (labels drafted blind by four readers who never saw the assessor's ledger, 21 held-out requests; the five largest were not drafted): spurious contradicts 7 of 7 scored (95 percent interval 65 to 100; the assessor marked 13 facets `conflicted`, 13 of 49 covered facets, 27 percent) and falsely covered 2 of 3 (21 to 94). Sam's spot check of 15 drafted pairs (seed 20261029) found the drafter wrong on 4 (27 percent, 11 to 52), all drafted neutral where Sam reads supports; drafted supports were wrong 0 of 5, and on the 3 sampled disagreements he sided with the assessor each time. So these two rates are not evidence against the assessor, and they are not evidence for it either: drafted neutrals under-count support, so the drafted labels cannot show that the assessor over-covers or over-flags conflicts. The false-negative rate (1 of 31 facets) is the one that rests on drafted supports, which held up, at screening grade. All figures were taken under the directional lookup rule and before the unread-anchor rule of 2026-10-30. *Source: bead nexus-jypmj.3.10 comments of 2026-10-28 and 2026-10-29. T2: `nexus/rdr232-3.10-live-measurement-2026-10-29`; research 24.*
+
+- **Verified** (spike, live) — the near-miss synthesis control (golden_near_miss_synthesis_v1, six one-source requests whose parts sit in different sections; develop f0d8dcc9e, engine 0.1.170, 2026-10-30, rows 919-924). Extraction read all six as `synthesis` (four model-assisted, two heuristic), so none reached the lookup plan, which was excluded wherever it was a candidate. Four ran the inline planner and two ran citation-traversal (467), a plan the set's labels list as unacceptable, so wrong-shape admission by label is 2 of 6 for this class; it comes from the synthesis row, not the lookup boundary (nexus-4xmpv). Every run capped the named source at 24 primary chunks (of 41 to 135), and four of the six answers say a requested section was not in their input (nexus-jf9wg). On one facet (S03, the alternatives section of RDR-103) the coverage check reported `covered` while the prose said the part was not supported (nexus-dfrfp). In-sample, six requests, cost 0.35 to 0.56 USD and 74 to 111 s a run.
+  *Source: live runs 919-924. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
+
+- **Verified** (spike, live) — the replacement negative controls N01-N03 (develop f0d8dcc9e, engine 0.1.170, 2026-10-30). With the check on, all three were withheld as `uncovered`, with 0 of 6 facets covered, every retrieved item read, and repair finding nothing that covered a facet (rows 925-927, 0.005 to 0.113 USD). With the check off, two of the three returned off-topic prose as `answered` (N01 about RDR-231, N02 about RDR-230) and the third answered with a statement that nothing covered it (rows 928-930). False covers: 0 of 6 facets on four requests' worth of design (N04 was measured earlier), a presence check and not a rate.
+  *Source: live runs 925-930. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
+
+- **Verified** (spike, live) — the G06 rerun on an engine carrying `node_walk` (engine-service-v0.1.170, develop f0d8dcc9e, ART RDR-084, owner 1.2, 2026-10-30, row 931). The traverse sent the scope filter and the reply carried `node_walk` for all 32 nodes (depths 0 and 2, roles seed and citation); the engine removed 128 out-of-scope nodes, and the policy retained 32 with 0 dropped by role, against 5 retained (25 dropped by role) on the 0.1.169 canary2 and 30 on the client-side canary. Of the 64 graph anchors handed to the check, 39 match the client-side run and 21 match canary2. The coverage check read all 99 anchors and covered 6 of 6 facets with no repair; 0.432 USD, 69.1 s wall. The 32 against 30 difference is not attributed (the engine removed 124 nodes on 2026-10-28). One request on one run.
+  *Source: live run 931; 2026-10-28 canary envelopes. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
+
+- **Verified** (spike, live) — the five largest held-out requests with the check on (develop f0d8dcc9e, engine 0.1.170, 2026-10-30, rows 932-936). H09 (lookup) ran the lookup plan with 4 anchors, all read, and answered. H12, H13 and H28 handed the check 261 to 325 anchors and it read 116 to 156 of them (the unread items are always the tail of the graph stream, past the 120,000-character per-stream cap); all their facets were covered from what was read, so repair was not entered and the unread items stayed unread (nexus-z6yvk). H29 read 119 of 300 in the first round, its repair found no new items and its reassessment read 123 of the 181 left unread (242 read, 58 unread), and it was withheld as `uncovered`. Cost 0.06 to 1.51 USD; wall 41 to 252 s, with H13 and H28's time in the comparison plan, not the check (assessment 47 and 33 s).
+  *Source: live runs 932-936. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
+
+- **Verified** (spike, live; screening grade) — false withholds under the unread-anchor rule (develop f0d8dcc9e, 2026-10-30). Five capped runs (H12, H13, H28, H29 and one constructed debug request, row 940): one withheld (H29). A read-only text scan of all 300 of H29's retrieved items found none that carries the answer (the meaning of exit 75), so the withhold is correct and the false-withhold count is 0 of 1 withheld and 0 of 5 capped. The constructed run shows the exposure: 14 of its items carry the answer, 4 in the read part (which covered the facet) and 10 in the unread tail; without the 4, it would have been withheld with its support unread (nexus-z6yvk). Five capped runs and one withhold do not estimate a rate.
+  *Source: live runs 933-936 and 940; anchor text scans. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
+
+- **Verified** (spike, live) — the inline planner on a lookup no lookup plan matches (develop f0d8dcc9e, 2026-10-30, rows 937-939). A dry match against the live library (match metrics not written) showed every wh-phrased lookup tried (10 of 10) reaching the lookup plan through the research category route; a lookup misses it only when its inferred verb is `document`, `debug` or none. Three such lookups, all extracted as `lookup`, ran the inline planner and answered correctly and covered, at 0.24 to 0.32 USD (the planner about 0.09 of it) and 28 to 60 s, against 0.104 USD for the lookup plan on H09 and its 0.189 real-traffic median: about 1.3 to 1.7 times the median. Three requests.
+  *Source: dry match and live runs 937-939. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
+
+- **⚠️ Defect found** (2026-10-30, measurement harness) — `nx_answer` run from a dev checkout (`uv run` in the repository) fails on every plan hit: the production-write guard refuses the matcher's `increment_match_metrics` write, the run returns `[non-answer: error] Error during plan match`, and on a plan miss the run row is dropped (`persistence: dropped`, `ProductionWriteGuardError`). A live measurement of develop code must install the tree outside the checkout. The measurement drivers now refuse to start from a checkout against a production endpoint and print the install recipe (nexus-jypmj).
+  *Source: void attempts of 2026-10-30; `src/nexus/db/service_endpoint.py`. T2: `nexus/rdr232-close-measurements-2026-10-30`.*
+
 ### Critical Assumptions
 
-Research 6–10 executed prototypes for A1–A6; A7 has none yet. They establish
-feasibility within the stated fixtures, not production integration or live
-answer quality. The detailed A1/A2 census is
-`nexus_rdr/232-research-a1-a2-source-verification`; A3/A4 current interfaces
-are in `232-research-3`. Behavioral evidence is in `232-research-6` through
+Research 6–10 executed prototypes for A1–A6. Production verification followed
+phase by phase (research 19–25). Each Status line below is the state at close,
+2026-10-30; the Key Discoveries above hold the figures and say how large each
+sample was. The detailed A1/A2 census is
+`nexus_rdr/232-research-a1-a2-source-verification`; A3/A4 current interfaces are
+in `232-research-3`. Behavioral prototype evidence is `232-research-6` through
 `232-research-10`.
 
-- [ ] **A1 — explicit answer-kind metadata and conservative request routing can
-  improve eligibility without material recall loss.** **Status**: Partially
-  verified (research 6, 22). **Method**: Source Search plus executed prototype
-  fixture using the real matcher. The gate passed 14/14 eligible and 0/3
-  wrong-shape cases, with correct unknown routing and few-shot exclusion.
-  Phase 2 (2026-10-27) verified production integration on every matcher
-  branch and the planner few-shots, and request-kind inference with Haiku
-  extraction (Key Discoveries; research 22, 23). Still open when taken
-  (2026-10-27): the fall in wrong-shape admission was in-sample only (held-out 1
-  of 29 before and after), and the directional rule admitted synthesis plans for
-  lookups. The second is closed 2026-10-30: the lookup row is lookup-only
-  (nexus-jypmj.11), which takes held-out wrong-shape admission from 1 of 29 to 0
-  for Haiku- or Opus-extracted kinds (first-pass kinds still give 1 to 2). Store kind in `plan_json`, never dimensions; decode legacy absence
-  or invalid metadata as `unknown`; apply eligibility on every matcher branch
-  and planner few-shot selection.
-- [ ] **A2 — ordered manifests plus content-derived, document-scoped section
+- [x] **A1 — explicit answer-kind metadata and conservative request routing can
+  improve eligibility without material recall loss.** **Status**: Verified in
+  production, Phase 2, at the sample sizes stated here (research 6, 22; Key
+  Discoveries dated 2026-10-27 and 2026-10-30). **Method**: Source search, an
+  executed prototype with the real matcher (14/14 eligible cases kept, 0/3
+  wrong-shape cases admitted), then Phase 2 production integration on every
+  matcher branch and the planner few-shots, with request-kind inference by Haiku
+  extraction (research 22, 23). Two limits were open on 2026-10-27 and are closed.
+  The fall in wrong-shape admission was in-sample only (golden 4 of 24 to 0;
+  held-out 1 of 29 before and after), because the directional rule let synthesis
+  plans serve lookups. The lookup row is now lookup-only (Sam, 2026-10-30,
+  nexus-jypmj.11): held-out wrong-shape admission falls from 1 of 29 to 0 with no
+  recall loss (held-out 21 of 29 against 20), for Haiku- or Opus-extracted kinds.
+  The near-miss control (`golden_near_miss_synthesis_v1`, 2026-10-30) is the
+  second: all six one-source synthesis requests read as synthesis, and none
+  reached the lookup plan. What stays partial: the held-out set is 29 requests;
+  with first-pass (deterministic) kinds, held-out wrong-shape admission still
+  goes from 1 to 2 under every lookup rule; the near-miss control admitted
+  citation-traversal (467), which its labels list as unacceptable, for 2 of 6
+  (nexus-4xmpv); and unknown-kind grown plans are still admitted for lookups, a
+  gap no measured run exercised (section 1). Store kind in `plan_json`, never
+  dimensions; decode legacy absence or invalid metadata as `unknown`; apply
+  eligibility on every matcher branch and planner few-shot selection.
+- [x] **A2 — ordered manifests plus content-derived, document-scoped section
   labels can supply bounded section-diverse primary evidence.** **Status**:
-  Partially verified (research 7). **Method**: Source Search plus real
-  ART/Nexus RDR-084 resolution, manifest hydration, selection, and edge
-  fixtures. Project-scoped resolution, bounded retrieval, aggregate budgets,
-  positional fallback, and duplicate-chash attribution passed. Shared-chash
-  `section_title` was falsified as authoritative document metadata: identical
-  headings in different RDRs returned another document's title. The corrected
-  selector derives labels from chunk content in manifest order and never
-  trusts stored labels unvalidated. Production resolver/runner integration,
-  candidate paging, and more than two real documents remain unverified.
+  Verified in production, Phase 1 (research 7, 19; Key Discoveries dated
+  2026-10-26). **Method**: Source search plus real ART/Nexus RDR-084 resolution,
+  manifest hydration, selection and edge fixtures (research 7), then the golden
+  journey on the engine substrate and the live canary (research 19). Project-scoped
+  resolution, bounded retrieval, aggregate budgets, positional fallback and
+  duplicate-chash attribution passed. Shared-chash `section_title` was falsified
+  as authoritative document metadata: identical headings in different RDRs
+  returned another document's title. The selector therefore derives labels from
+  chunk content in manifest order and never trusts stored labels unvalidated.
+  Sibling files that share an RDR number now resolve to the file whose frontmatter
+  carries the id (nexus-xho6c, ccf594e33); rows indexed before that fix need a
+  re-extract. What stays partial: candidate paging past the first page and more
+  than two real documents with one number were not exercised live, and the bound
+  is tight. A single-source synthesis request caps the named source at 24 primary
+  chunks (of 41 to 135 in the near-miss control), and 4 of 6 answers said a
+  requested section was not in their input (nexus-jf9wg).
 - [x] **A3 — existing dispatch can support facet coverage at a new runner-owned
-  pre-reduction boundary.** **Status**: Verified live 2026-10-29 (research 24); earlier, partially verified (research 8).
-  **Method**: Source Search plus deterministic boundary spike using real
-  `plan_run` and real bundle composition/dispatch with fake model output.
-  Plain `check → generate` hid its intermediate; the proposed boundary preserved
-  anchors, executed one prefix/repair/reduction, shared budget/deadline, and
-  disclosed failure/scope/continuation states correctly. Production runner
-  integration and live-model facet reliability remain unverified.
+  pre-reduction boundary.** **Status**: Verified live 2026-10-29 (research 24);
+  earlier, partially verified (research 8). **Method**: Source search plus a
+  deterministic boundary spike using real `plan_run` and real bundle
+  composition/dispatch with fake model output. Plain `check → generate` hid its
+  intermediate; the proposed boundary preserved anchors, executed one
+  prefix/repair/reduction, shared budget/deadline, and disclosed
+  failure/scope/continuation states correctly. Phase 3 then built the boundary in
+  the runner and ran it with a real model (develop 6dd75ec3f, engine 0.1.168,
+  2026-10-29): 6 of 6 facets covered on G06, 0 errors and 0 withheld answers on
+  29 held-out requests. Facet reliability against labels drafted blind is
+  screening grade: false negative 1 of 31 facets, false skip 0 of 21 runs, and
+  Sam found the drafter wrong on 4 of 15 sampled pairs. What stays partial: the
+  assessor's permissive side is a presence check, not a rate (the negative
+  controls N01-N04 covered 0 of 6 facets on four requests, and one live run,
+  S03, covered a facet its own prose called unsupported, nexus-dfrfp).
 - [x] **A4 — a nullable versioned run summary can extend existing telemetry
-  compatibly.** **Status**: Verified live 2026-10-29 except the old-engine and cached-capability rollback legs, which stay simulated (research 25); earlier, partially verified (research 9). **Method**: Source
-  Search plus private-engine and isolated `TenantScope`/jOOQ repository spike.
-  Old-engine silent drop, one-write current completion, nullable JSONB summary
-  persistence, rollback, plan counters, imports/readback, and old-client null
-  behavior passed. Production Liquibase/jOOQ/DDL-ratchet work, full handler and
-  import wiring, old/new matrix, and the client capability-off sub-leg remain
-  unverified; that sub-leg's private-test write-guard opt-in was denied by the
-  permission classifier and was not executed.
+  compatibly.** **Status**: Verified live 2026-10-29 except the old-engine and
+  cached-capability rollback legs, which stay simulated (research 25); earlier,
+  partially verified (research 9). **Method**: Source search plus a private-engine
+  and isolated `TenantScope`/jOOQ repository spike. Old-engine silent drop,
+  one-write current completion, nullable JSONB summary persistence, rollback, plan
+  counters, imports/readback and old-client null behavior passed in the spike.
+  Production followed: engine 0.1.168 (telemetry-017-1, one nullable column) went
+  out after a fork rehearsal, STEP-6 was green, the cloud client-path gate passed
+  13 of 13, and every measurement row persisted and read back its summary. The
+  client capability-off sub-leg, which the 2026-10-24 spike could not run because
+  the write-guard opt-in was denied, passed later against the real engine
+  (`tests/db/test_rdr232_run_summary_integration.py`). What stays partial: the
+  old-engine and cached-capability rollback legs were simulated and never run
+  against a live old engine.
 
 - [x] **A5 — deterministic-first request extraction can produce kind, facets,
   and project-qualified sources without silent narrowing.** **Status**:
@@ -665,23 +724,36 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   aligned with the approved lookup definition in nexus-jypmj.13. [Correction
   2026-10-28: only the prompt was aligned; `_weak_lookup` was left unchanged on
   purpose, and the compound set closes the Opus divergence for six requests. See
-  the Key Discoveries entry on the lookup boundary.]
-- [ ] **A6 — traversal can apply scope before its chunk cap without losing
-  alignment.** **Status**: Partially verified (research 10). **Method**: Source
-  Search plus synthetic graph fixture with >300 out-of-scope ids preceding
-  in-scope evidence. Legacy truncation lost the in-scope doc; filtering nodes
-  before manifest expansion retained it with per-id collection alignment.
-  Production `traverse` integration and no-policy backward compatibility remain
-  unverified. The engine also caps graphBFS at 500 nodes before client
-  filtering. A6 does not exercise the engine path; Phase 1 discloses a capped
-  response and measures how often the cap fires before deciding on an engine
-  filter.
-- [ ] **A7 — an RDR's T2 metadata and gate records can serve as a bounded
-  lifecycle evidence stream.** **Status**: Unverified (inferred, not read: the
-  read path and record shapes were not exercised for this purpose). **Method**:
-  Phase 1 integration test resolving an RDR source, reading its `{repo}_rdr`
-  metadata and latest gate record within budget, and refusing a source from
-  another tenant.
+  the Key Discoveries entry on the lookup boundary.] The control for that
+  boundary ran on 2026-10-30: all six one-source synthesis requests whose parts
+  sit in different sections read as `synthesis`, none as `lookup`.
+- [x] **A6 — traversal can apply scope before its chunk cap without losing
+  alignment.** **Status**: Verified in production, Phase 1 client side, and on the
+  engine since (research 10, 20; Key Discoveries dated 2026-10-26, 2026-10-28 and
+  2026-10-30). **Method**: Source search plus a synthetic graph fixture with >300
+  out-of-scope ids preceding in-scope evidence. Legacy truncation lost the
+  in-scope doc; filtering nodes before manifest expansion retained it with per-id
+  collection alignment. Phase 1 then ran the policy inside the production
+  `traverse` (a call with no policy returns the old shape), and the live canary
+  found the engine's 500-node cap reached on 1 of 4 traversals, which met the gate
+  for the engine pre-cap filter. That filter shipped, and measuring it found a
+  flaw the fixture could not: the engine removed out-of-scope nodes that sat
+  between the seed and other nodes, so 25 of 30 in-scope documents on G06 (reached
+  only through such a node) lost their link role and distance. The engine fix (`node_walk`,
+  engine-service-v0.1.170) and a client stopgap closed it; the G06 rerun on that
+  engine retained 32 nodes with 0 dropped by role (one request, one run). What
+  stays partial: the owner cannot be expressed in the engine's scope predicate,
+  so owner narrowing stays client-side (0 nodes dropped by owner on 6 owner-bound
+  walks), and the document and chunk caps were never calibrated (section 3).
+- [x] **A7 — an RDR's T2 metadata and gate records can serve as a bounded
+  lifecycle evidence stream.** **Status**: Verified in production, Phase 1
+  (research 21; Key Discoveries dated 2026-10-26). **Method**: Phase 1
+  integration test on the engine substrate with a second tenant, resolving an RDR
+  source, reading its `<owner>_rdr` metadata and latest gate record within
+  budget, and refusing a source from another tenant; then the live canary (G06
+  got 2 T2 records to the reducer, G15 got 4). What stays partial: the
+  owner-name-to-project rule depends on `nx rdr` and the indexer deriving the same
+  name, which a test pins and no shared helper enforces.
 
 ## Proposed Solution
 
@@ -754,7 +826,7 @@ versioned; it is not a claim that kind implies facet coverage.
 
 | Request kind | Eligible declared plan kinds |
 | --- | --- |
-| `lookup` | `lookup`, `synthesis`, `unknown` |
+| `lookup` | `lookup`, `unknown` |
 | `synthesis` | `synthesis`, `unknown` |
 | `discovery/listing` | `discovery/listing`, `unknown` |
 | `comparison` | `comparison`, `synthesis`, `unknown` |
@@ -764,7 +836,8 @@ versioned; it is not a claim that kind implies facet coverage.
 
 **Decided by Sam, 2026-10-30 (nexus-jypmj.11): the `lookup` row admits `lookup`
 and `unknown` plan kinds only; it no longer admits `synthesis`.** The table above
-is the text as gated; this note supersedes its first row. Measured over three
+carries that row. As gated (2026-10-25) it read `lookup`, `synthesis`, `unknown`;
+this note records the change. Measured over three
 candidate rules (the Key Discoveries entry dated 2026-10-30): the directional
 row let a synthesis plan outscore the lookup plan (held-out H09 ran
 citation-traversal at 1.24 USD against 0.14 for the lookup plan), the
@@ -1116,11 +1189,22 @@ Introduce an explicit traversal evidence policy rather than pretending
 TraversalPolicy(
     allowed_collections: ScopeConstraint,
     preserve_seed_documents: true,
-    max_documents: calibrated,
-    max_chunks: calibrated,
+    max_documents: int,   # shipped default 50
+    max_chunks: int,      # shipped default 300
     require_link_role: factual | implementation | citation | related,
 )
 ```
+
+The shipped values are the constants `DEFAULT_MAX_DOCUMENTS = 50` and
+`DEFAULT_MAX_CHUNKS = 300` in `src/nexus/plans/traversal_policy.py`. This RDR
+first said both would be calibrated. They were not: 300 is the bound `traverse`
+has always put on ids, and 50 secondary documents was a starting value that no
+measurement of real `nx_answer` traversals set. The one measurement taken, the
+Phase 1 canary, showed the link-role-before-distance ranking dropping all 38
+one-hop documents of G06 in favor of two-hop implementation-role ones, which is a
+reason to suspect the document cap, not a calibration of it. With no caller scope
+the runner derives the document cap from the engine's 500-node limit, which binds
+nothing. Calibrating both is unfinished work.
 
 The policy is applied **inside `traverse` before manifest expansion**, not by
 filtering already-truncated results. `traverse` currently returns a sorted
@@ -1160,6 +1244,35 @@ absent. With a policy it:
 4. Returns per-id collection alignment or document-grouped ids so hydration
    cannot reconstruct scope from a union of collection names. Existing
    no-policy results retain the legacy shape.
+
+**As shipped (amended 2026-10-28 to 2026-10-30; decisions by Sam).** The
+text above is the gated design. Four things changed in the building.
+
+- The scope filter runs before the engine's 500-node cut (engine-service-v0.1.168
+  and later; live on the production engine 2026-10-29). Against an engine that
+  does not report the filter, the client does not always omit secondary graph
+  evidence, which is what the text above says. It discloses and omits that
+  evidence only when the walk may have been cut: the nodes returned plus the
+  seeds the walk lost reach the 500-node cap, the one silent cap in the walk
+  (nexus-jypmj.1.13, 2026-10-28). A walk under the cap is complete, so the client
+  filters it by scope exactly and omitting it would discard good evidence. A
+  capped walk keeps the seed documents only, marked `secondary_omitted` (client
+  7.89.0 and later).
+- The engine filter had a flaw the design did not foresee. It removes
+  out-of-scope nodes, and an in-scope node reached only through a removed node
+  arrives with no edge, so the client cannot tell its link role or distance. On
+  G06, 25 of 30 in-scope documents (83 percent) were reached that way, and a
+  policy that keeps one link role dropped them.
+- On 2026-10-29 Sam chose to fix this both ways (nexus-jypmj.18). The client
+  stopgap: against an engine without the fix, a single-role policy sends no
+  `scope_filter` and narrows on the client. The engine fix: each returned node
+  carries its walk depth and best link role (`node_walk`), shipped in
+  engine-service-v0.1.170 and live on 2026-10-30. The G06 rerun on that engine
+  retained 32 documents with 0 dropped by role (one request, one run).
+- The engine's scope predicate takes a set of collections or a subtree, not an
+  owner. Owner narrowing therefore stays on the client
+  (`traversal_policy.select_documents`; section 2a). It dropped 0 nodes on 6
+  owner-bound walks, so whether it matters is not measured.
 
 This policy contains the graph stream only. The vector stream's scope comes
 from section 2a; containing traversal alone would leave plan-pinned searches
@@ -1576,10 +1689,21 @@ more context is useful.
 - [x] Run bounded A1–A6 research spikes and record findings through
   `/conexus:rdr-research` (research 6–10). These are partial prototype
   verifications, not proof of production integration or live answer quality.
-- [ ] Build the labeled golden set before choosing numeric thresholds or
-  declaring a match-quality improvement.
-- [ ] Reproduce the ART RDR-084 evidence mix in a self-contained fixture; do
-  not depend on a mutable live corpus for the unit regression.
+- [x] Build the labeled golden set before choosing numeric thresholds or
+  declaring a match-quality improvement. Done 2026-10-25 (nexus-jypmj.1.1,
+  ddfa6cfd3): `bench/queries/golden_v1.yaml`, 24 requests of 7 kinds, with kinds
+  labeled independently of plan declarations. A blind held-out set (29 requests,
+  `golden_heldout_v1.yaml`) was added for Phase 2. The Phase 2 thresholds were set
+  after the gate-on measurement rather than before it (Phase 2 step 6, "As run").
+- [x] Reproduce the ART RDR-084 evidence mix in a self-contained fixture; do
+  not depend on a mutable live corpus for the unit regression. Done 2026-10-25
+  (nexus-jypmj.1.1): `tests/_rdr232_golden.py` writes two RDR-084 documents under
+  two owners and more than 300 code chunks reachable through `implements` and
+  `relates` links into the test tenant only, and
+  `tests/test_rdr232_golden_fixture.py` loads it on the engine substrate with
+  non-vacuity assertions (more than 300 reachable code chunks, so the traversal
+  cap bites; without the owner, the other project's RDR-084 is in the vector
+  stream).
 - [x] Exercise real manifest fixtures with and without headings, duplicate
   chashes, aggregate budgets, same-number RDRs across projects, and sibling
   artifacts. The shared-chash metadata anomaly is recorded in research 7;
@@ -1644,7 +1768,12 @@ reliable session of another project, where the question's ART title vetoes the
 inference (see "How the active-project tier decides" in section 1). A
 title-less question from a reliable session of another project resolves that
 project's RDR, disclosed as inferred. Lookup-only plan 473 is ineligible, and
-unknown-grown plans cannot bypass the gate. A generic route or inline planner
+unknown-grown plans cannot bypass the gate for any request that is not a
+lookup. Known limit, as shipped: the `lookup` row admits `unknown` plan kinds,
+so an unknown-kind grown plan is still admitted for a lookup request, with the
+same wrong-shape exposure the lookup-only rule removed for synthesis plans. This
+is unmeasured: no grown plan was selected in the Phase 2 replay window or in
+the 2026-10-30 close runs (plan growth was off for those runs). A generic route or inline planner
 receives the coverage request. No facet-coverage guarantee is claimed.
 
 **Phase 3 end-to-end proof:** run the recorded ART RDR-084 request verbatim
@@ -1752,9 +1881,10 @@ flip only after nexus-jypmj.3.10 and Sam's approval. **Amended 2026-10-28:** Sam
 decided on 2026-10-28 (nexus-jypmj.17) that the check is on by default, ahead
 of the step 4 measurement and together with the concurrent assessment calls; it
 shipped off in 7.88.0 and on in the release after it, and `NX_ANSWER_COVERAGE=0`
-turns it off. The step 4 measurements of the shipped call shape (the Key
-Discoveries and Performance Expectations list what is still outstanding) were
-not taken before the flip. Departures from section 4, each
+turns it off. The step 4 measurements of the shipped call shape were
+not taken before the flip. They were taken afterwards, 2026-10-28 to 2026-10-30
+(the Key Discoveries hold the figures; Performance Expectations lists what is
+still unmeasured). Departures from section 4, each
 stated in the code and the published docs: an assessor reply with no usable
 evidence record leaves its facets `unassessed`, not `unsupported`; a facet
 with both supporting and contradicting evidence is covered and marked
@@ -1950,25 +2080,51 @@ invocation rates, facets per call, incremental latency, and cost against the
 current run records. No throughput target is asserted without a baseline.
 
 Coverage check on (default from 2026-10-28), what is measured and what is not.
-Measured, one request on one run (ART RDR-084 G06, engine 0.1.167, 2026-10-28,
-the serial design, one `operator_check` call per stream): check off 29.4 s and
+
+Measured live. Serial design, one request on one run (ART RDR-084 G06, engine
+0.1.167, 2026-10-28, one `operator_check` call per stream): check off 29.4 s and
 0.433 USD; check on 147.3 s and 0.430 USD, of which the assessment took 118 s
-(four serial calls, one cut at the 60 s limit) and 0.0166 USD. The concurrent
-design with 20-anchor packs has no live figure. Its timing is a unit-test model
-of the canary at 1/100 scale (a call takes 0.15 s plus 7 ms per anchor), under
-which the stage takes 50 model-seconds against 130 for the serial one: a model of
-assumed per-call latencies, not a measurement, and not a prediction to cite.
-Outstanding, in order: the canary on and off on the shipped tree (wall clock, not
-summed step time; calls, peak in flight, cut calls, backend and
-`NX_LLM_MAX_CONCURRENCY`); reply classes per pack against the one-call-per-stream
-baseline (0 unusable of 40 calls); G18 (withheld after assessment while the off
-arm answered), G01, G02 and G04 on the fixed tree; the full golden set on and off
-for latency and cost; a small `budget_usd` and `budget_seconds` for first-wave
-overshoot and cut calls; a persisted run through `nx answer-runs --steps`; and, since 2026-10-30, the rate at which a
-correct answer whose support stays unread is withheld (N04 was measured; N01-N03 were replaced and
-not run). The
-`claude -p` backend runs 4 concurrent subprocesses with rate-limit and host-load
-behaviour unmeasured.
+(four serial calls, one cut at the 60 s limit) and 0.0166 USD. Concurrent design
+(develop 6dd75ec3f, engine 0.1.168, 2026-10-29): on G06 the check on took 87.7 s
+against 30.0 s off, the assessment 54.3 s for 8 calls, 0 cut and 0 raised, at
+0.047 USD; on 29 held-out requests run off and on, 0 errors and 0 withheld
+answers, wall latency +16.8 s at the median and +33.9 s at the 90th percentile,
+and the assessment 0.021 USD a run (90th percentile 0.039) over 117 calls with
+none unusable. The 2026-10-30 close runs (develop f0d8dcc9e) add the cost and time
+of the five largest held-out requests (0.06 to 1.51 USD, 41 to 252 s, most of it
+the comparison plan and not the check), the inline planner on lookups no lookup
+plan matches (0.24 to 0.32 USD, about 1.3 to 1.7 times the lookup plan's real-traffic
+median of 0.189 USD), and whole runs of the near-miss control with the check on (0.35 to
+0.56 USD a run). The earlier unit-test timing model (50 model-seconds for the
+concurrent stage) is superseded by the live 54.3 s.
+
+Still unmeasured after the 2026-10-30 close:
+
+- The full golden set run off and on the concurrent design. The golden pairs were
+  measured on the serial design only; the concurrent design was measured on G06,
+  G01, G02, G04, G18 and the held-out set.
+- A small `budget_usd` and `budget_seconds`: first-wave overshoot and cut calls
+  (nexus-jypmj.22).
+- A persisted run read through `nx answer-runs --steps` (rows were read back
+  through the run-summary API; the CLI path is not recorded).
+- The rate at which a correct answer whose support stays unread is withheld.
+  Five capped runs and one withhold gave 0 of 1, which does not estimate a rate.
+  The covered-facet case, where most of a stream is never read and no repair runs,
+  is nexus-z6yvk.
+- The assessor's permissive side as a rate: false covers and spurious conflicts
+  rest on drafted labels the spot check showed are conservative. The negative
+  controls are a presence check (N01 to N04: 0 of 6 facets covered on four
+  requests).
+- Any labelled oracle for the five largest held-out requests, so the correctness
+  of the capped runs' answers is not scored.
+- Clause-facet repair yield (0 of 5 tries), and whether evidence lost to the
+  traversal caps changes an answer.
+- Calibration of `max_documents` and `max_chunks` (section 3).
+- The held-out and golden latency and cost figures under the lookup-only rule and
+  the unread-anchor rule; they were taken before both.
+- The `claude -p` backend's behavior under rate limits and host load when several
+  sessions run it at once; the live runs used it at up to 4 concurrent
+  subprocesses with 0 cut and 0 raised calls.
 
 ## Finalization Gate
 
@@ -2005,14 +2161,14 @@ The RDR-189 boundary is settled by RDR-189's Shared Contract section.
 
 | API Call | Library | Verification |
 | --- | --- | --- |
-| `plan_match(...)` candidate filtering | Nexus `plans.matcher` | Source Search + external eligibility spike passed (research 6); production integration unverified |
-| `traverse(...)` policy before manifest expansion | Nexus MCP/catalog | Ordering fixture passed (research 10); production integration unverified |
-| `graphBFS(...)` node cap and `graph_node_limit` log | Nexus engine catalog | Source Search verified the 500-node pre-client cap and its log event (research 16); a scope predicate, release, capability marker, and old-engine fallback are needed only if Phase 1 step 6 is taken |
-| Catalog resolve/manifest + content-derived section selection | Nexus catalog/T3 | Real bounded resolution/manifest/selection spike passed (research 7); production resolver/runner and paging unverified |
-| Request extraction and owner-qualified source resolution | `mcp/core.py`, catalog owner scope | Prototype + real owner resolution passed (research 10); general extraction and ambiguity handling unverified |
+| `plan_match(...)` candidate filtering | Nexus `plans.matcher` | Source Search + external eligibility spike passed (research 6); production integration verified in Phase 2 (research 22) |
+| `traverse(...)` policy before manifest expansion | Nexus MCP/catalog | Ordering fixture passed (research 10); production integration verified in Phase 1 (research 20) and on the engine since (section 3, as shipped) |
+| `graphBFS(...)` node cap and `graph_node_limit` log | Nexus engine catalog | Source Search verified the 500-node pre-client cap and its log event (research 16); Phase 1 step 6 was taken: the scope predicate, capability marker and old-engine fallback shipped (engine 0.1.168), and `node_walk` followed in engine-service-v0.1.170 |
+| Catalog resolve/manifest + content-derived section selection | Nexus catalog/T3 | Real bounded resolution/manifest/selection spike passed (research 7); production resolver/runner verified in Phase 1 (research 19); candidate paging not exercised live |
+| Request extraction and owner-qualified source resolution | `mcp/core.py`, catalog owner scope | Prototype + real owner resolution passed (research 10); general extraction and ambiguity handling verified in Phase 2 (research 23) |
 | `store_get_many(..., limit_per_source=...)` | Nexus MCP/runner | Source Search completed; not a primary-source reservation |
-| Structured coverage at runner boundary | Nexus operators/runner | Deterministic spike passed (research 8); production integration and live-model reliability unverified |
-| Composite `nx_answer` run record | Nexus telemetry/engine | Private repository/DDL spike passed (research 9); production migration, wiring, and client degradation unverified |
+| Structured coverage at runner boundary | Nexus operators/runner | Deterministic spike passed (research 8); production integration and live-model reliability verified in Phase 3 at screening grade (research 24) |
+| Composite `nx_answer` run record | Nexus telemetry/engine | Private repository/DDL spike passed (research 9); production migration, wiring and client capability-off leg verified (research 25); old-engine and cached-capability rollback legs simulated only |
 
 ### Scope Verification
 
@@ -2051,7 +2207,12 @@ testable boundaries. It deliberately excludes the general RDR-189 answer-object
 architecture, a new planner, a new telemetry table, or a second telemetry write.
 Phase 3 can be
 dropped if its measured repair yield does not justify its cost; Phases 1 and 2
-remain coherent without it.
+remain coherent without it. Measured 2026-10-29 (Key Discoveries, Phase 3 step
+4): repair covered 2 of 3 whole-question facets and 0 of 5 clause facets, at
+about 0.005 to 0.01 USD and 30 s a run, with five repair entries in all. That is
+too few to justify dropping repair and too few to call it proven; the
+recommendation posted on nexus-jypmj.3.10 was to keep it, and the drop decision
+remains Sam's.
 
 ## References
 
@@ -2141,6 +2302,8 @@ remain coherent without it.
 - 2026-10-27: Section 4's coverage-state table row for `unavailable` names the new `uncovered` shape for evidence that covered no facet and keeps `no_evidence` for zero retrieval results, per Sam's ruling (nexus-jypmj.3.12), added with the shape in nexus-jypmj.3.3.
 - 2026-10-27: Section 4 counts a contradicted facet toward a usable answer: the definition and the `unavailable` row say covered or contradicted, so a contradiction-only result is `partial` with the contradiction named ahead of the prose, per Sam's ruling (nexus-jypmj.3.13).
 - 2026-10-27: Phase 3 As run recorded (the coverage check ships off until nexus-jypmj.3.10 and Sam's approval; the section 4 departures as built), and section 4 and the Test Plan corrected where they misdescribed the build (marker bucketing under trace=False, assessment USD in step records, the continuation fallback repay, the unverified and not_recorded persistence states, the coverage_partial count), approved by Sam.
-- 2026-10-28: Key Discoveries record the lookup-boundary re-measure (nexus-jypmj.13), the pre-cap filter's old-engine departure (nexus-jypmj.1.13) and the live canary latency (nexus-jypmj.3.10); two A5 statements are corrected as findings. No decision text changed.
+- 2026-10-28: Key Discoveries record the lookup-boundary re-measure (nexus-jypmj.13), the pre-cap filter's old-engine departure (nexus-jypmj.1.13) and the live canary latency (nexus-jypmj.3.10); two A5 statements are corrected as findings. [Correction 2026-10-30: "No decision text changed" was wrong. The pre-cap filter finding records a departure from section 3 (an engine that does not report the filter no longer always yields no secondary graph evidence), and section 3 was not amended then; it is amended 2026-10-30, below.]
 - 2026-10-28: The coverage check is on by default (Sam's decision, nexus-jypmj.17), with concurrent assessment calls. Decision text changed: Phase 3 As run (the check no longer ships off; the amendment names Sam and the date), section 4 (a dated departure: packs of at most 20 anchors, at most 4 concurrent calls, the call count bounded by the stage share and the USD stop-line, not by design) and Performance Expectations (the measured canary figures, the unit-test timing model labelled as a model, the outstanding measurements). The Key Discovery for the timing model is tagged Assumed.
+- 2026-10-29 (entry added late, 2026-10-30): Key Discoveries record the concurrent default-on check live (G06 canary, 29 held-out requests off and on), facet reliability against drafted labels and Sam's 15-pair spot check, the run summary and out-of-step cost column in production, and the relay loss of the engine pre-cap filter (25 of 30 in-scope documents on G06 lost their link role and distance, nexus-jypmj.18). Decision, by Sam: fix the relay loss both ways, a client stopgap and the engine's `node_walk`. Decision text changed: none at the time; section 3 omitted both and is amended 2026-10-30, below.
 - 2026-10-30: Two decisions by Sam, recorded. (1) The `lookup` row admits lookup plans only (nexus-jypmj.11). (2) A facet no read item bears on is `unsupported` when the per-call size cap left anchors unread, with the unread count disclosed (nexus-jypmj.23). Decision text changed: section 1 (the compatibility paragraph and the measured-limit paragraph now state the lookup-only rule and point at the dated note), section 4 (the `uncovered` definition reads "among the items read"; a dated departure in Phase 3 As run for the unread-anchor rule, N04's 301 anchors, 127 read, 174 omitted; the post-repair reassessment also reads the unread anchors), Key Discoveries (the lookup entry corrected for first-pass kinds and the rows it covers, a separate entry for the omitted-anchor mechanism, the two open items of 2026-10-27 closed, the Phase 3 live figures qualified as taken under the old rules), and Critical Assumptions A1.
+- 2026-10-30: Close sweep (nexus-jypmj). Decision text changed: section 1 (the `lookup` row of the compatibility table now reads `lookup`, `unknown`, and the Phase 2 proof line says unknown-grown plans cannot bypass the gate for non-lookup requests only; unknown-kind grown plans are still admitted for lookups, a known limit and unmeasured), section 3 (an "as shipped" paragraph: the pre-cap scope filter, the departure for an engine without it, the relay-loss flaw, Sam's 2026-10-29 choice of client stopgap plus engine `node_walk`, owner narrowing kept on the client; `max_documents` 50 and `max_chunks` 300 are uncalibrated constants, not calibrated values), Phase 3 "As run" (the step 4 measurements were taken after the flip), Performance Expectations (live figures and what stays unmeasured), Proportionality (measured repair yield), Critical Assumptions (A1 to A7 Status lines rewritten to the evidence; A1, A2, A6 and A7 ticked) and Prerequisites (the golden set and the self-contained fixture ticked, with citations). Key Discoveries: the Phase 3 step 4 repair yield and oracle numbers, the near-miss synthesis control, the replacement negative controls N01-N03, the G06 rerun on `node_walk`, the five largest held-out requests, false withholds under the unread-anchor rule, the inline planner on unmatched lookups, and the dev-checkout harness defect; the superseded timing-model entry is retagged with the live figure. New findings carry beads: the 24-chunk primary cap (nexus-jf9wg), the synthesis row admitting citation-traversal (nexus-4xmpv), a coverage ledger that disagrees with its prose (nexus-dfrfp), and covered facets whose unread tail is never read (nexus-z6yvk). The post-mortem is `docs/rdr/post-mortem/rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md`. The status is not changed here.
