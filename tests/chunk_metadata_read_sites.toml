@@ -209,18 +209,16 @@ doc_id = 1
 source_path = 1
 title = 1
 
+# nexus-6pfgb.12: the doc card's bib_*, indexed_at and ttl_days now come from the owning documents
+# (OWNER_BIB_KEY, OWNER_FACTS_KEY), stamped by search_engine._attach_display_paths. What stays are the
+# grouping fallbacks for a chunk the catalog could not resolve (doc_id, content_hash, title, source_path)
+# and the legacy chunk_count key.
 [sites."src/nexus/mcp/core.py::query"]
-bib_authors = 1
-bib_citation_count = 1
-bib_venue = 1
-bib_year = 1
 chunk_count = 1
 content_hash = 1
 doc_id = 2
-indexed_at = 1
 source_path = 2
 title = 2
-ttl_days = 1
 
 # nexus-6pfgb.13: store_get shows the owning notes' own tags, ttl, index date and title (note_display, from
 # the catalog entries). The row speaks only as the legacy fallback the bead names: a chunk with at most one
@@ -279,10 +277,6 @@ frecency_score = 1
 
 [sites."src/nexus/scoring.py::apply_link_boost"]
 doc_id = 2
-
-[sites."src/nexus/scoring.py::apply_quality_boost"]
-bib_citation_count = 1
-bib_year = 1
 
 [sites."src/nexus/search_clusterer.py::_cluster_label"]
 title = 1

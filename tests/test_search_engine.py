@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nexus.context_annotations import OWNER_QUALITY_KEY
 from nexus.formatters import format_json, format_vimgrep
 from nexus.scoring import (
     apply_hybrid_scoring,
@@ -2259,7 +2260,8 @@ class TestApplyRankingBoosts:
             SearchResult(
                 id="highly_cited", content="b", distance=0.15,
                 collection="knowledge__r",
-                metadata={"bib_citation_count": 5000, "bib_year": "2024"},
+                # nexus-6pfgb.12: the owning document's citations, as _attach_display_paths stamps them
+                metadata={OWNER_QUALITY_KEY: {"bib_citation_count": 5000, "bib_year": 2024}},
             ),
         ]
         out = apply_ranking_boosts(results, hybrid=False)

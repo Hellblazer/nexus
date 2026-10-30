@@ -17,9 +17,11 @@ import structlog
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
 from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
+    OWNER_BIB_KEY,
     OWNER_FACTS_KEY,
     DOC_ID_INFERRED_KEY,
     OWNER_FRECENCY_KEY,
+    OWNER_QUALITY_KEY,
     OWNER_RESOLVE_CAP,
     agreed_facts,
     entry_facts,
@@ -484,6 +486,26 @@ def _attach_display_paths(
             and (owner_frecency := facts.get(did, {}).get("frecency_score")) is not None
         ):
             r.metadata[OWNER_FRECENCY_KEY] = owner_frecency
+        # RDR-236 Phase 2 (nexus-6pfgb.12): the hit's bibliography is its owning document's, from this
+        # same lookup, never the chunk row's (the last writer's). The card shows the attributed
+        # document's own; the quality boost takes the attributed owner's citations and year, or, when
+        # the lookup CHOSE the document, the live owner with the most (as for frecency above). A
+        # document that states no bibliography stamps nothing, so an unenriched B sharing a chunk with
+        # an enriched A neither shows A's bib nor takes A's boost.
+        attributed = (
+            facts.get(did, {}) if did in homes and homes[did] in ("", r.collection) else {}
+        )
+        if bib := {k: attributed[k] for k in _BIB_FACT_KEYS if k in attributed}:
+            r.metadata[OWNER_BIB_KEY] = bib
+        quality_pool = (
+            [facts.get(o, {}) for o in live_owners] if r.metadata.get(DOC_ID_INFERRED_KEY) else [attributed]
+        )
+        if cited := [f for f in quality_pool if f.get("bib_citation_count")]:
+            best = max(cited, key=lambda f: f["bib_citation_count"])
+            quality = {"bib_citation_count": best["bib_citation_count"]}
+            if best.get("bib_year"):
+                quality["bib_year"] = best["bib_year"]
+            r.metadata[OWNER_QUALITY_KEY] = quality
         # nexus-6pfgb.11: the hit's age and expiry are the owners' agreed
         # facts. Past the cap only some owners were resolved, and an owner the
         # lookup named but did not resolve (a live co-owner the catalog read
@@ -498,6 +520,10 @@ def _attach_display_paths(
             agreed = agreed_facts([facts.get(o, {}) for o in live_owners])
             if agreed:
                 r.metadata[OWNER_FACTS_KEY] = agreed
+
+
+#: The bibliography an owner's :func:`entry_facts` states that ``query``'s card prints (nexus-6pfgb.12).
+_BIB_FACT_KEYS: tuple[str, ...] = ("bib_year", "bib_authors", "bib_venue", "bib_citation_count")
 
 
 def _display_doc_ids(results: list[SearchResult]) -> set[str]:
