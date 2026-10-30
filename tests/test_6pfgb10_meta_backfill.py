@@ -357,7 +357,7 @@ def test_the_command_apply_writes_and_json_carries_the_reasons(monkeypatch):
     w = _world_with_one_of_each()
     result, closed = _invoke(monkeypatch, w, "--apply", "--json")
     assert result.exit_code == 0, result.output
-    report = json.loads(result.output)
+    report = json.loads(result.stdout)
     assert report["applied"] is True and report["documents_written"] == 2 and closed == [True]
     assert report["keys"]["note.tags"]["stamped"] == 1
     assert "residue_reasons" in report["keys"]["doc.quality_gate_overridden"]

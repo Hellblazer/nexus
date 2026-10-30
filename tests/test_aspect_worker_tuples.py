@@ -201,7 +201,12 @@ def test_slots_parks_and_leases_on_the_engine(db: Any, monkeypatch: pytest.Monke
     # While parked (read it from the engine, mid-park): exactly ONE parked in,
     # under the slot-0 claimant.
     side_p = _worker(park_timeout_s=3)._tuple_side
-    base = db.tuples.park_stats().global_in_use
+    base_stats = db.tuples.park_stats()
+    base = base_stats.global_in_use
+    # The refusal counters are engine-process-wide and shared with every other test on this
+    # substrate, so S15 asserts no INCREASE, never an absolute zero (develop red at c94cd4b00).
+    base_refused_claimant = base_stats.refused_claimant
+    base_refused_global = base_stats.refused_global
     holder: list = []
     t = threading.Thread(target=lambda: holder.append(side_p.claim_batch(park=True)), daemon=True)
     t.start()
@@ -220,8 +225,9 @@ def test_slots_parks_and_leases_on_the_engine(db: Any, monkeypatch: pytest.Monke
     for _ in range(3):
         got_i, failed = side_i.claim_batch(park=True)
         assert got_i == [] and not failed
-    assert db.tuples.park_stats().refused_claimant == 0, "S15: no per-claimant refusal"
-    assert db.tuples.park_stats().refused_global == 0, "S15: no global refusal"
+    end_stats = db.tuples.park_stats()
+    assert end_stats.refused_claimant == base_refused_claimant, "S15: no per-claimant refusal"
+    assert end_stats.refused_global == base_refused_global, "S15: no global refusal"
 
     # ── S7a: renewed past its lease, inside the deadline ────────────────────────
     doc_a = _doc("s7a")
@@ -390,7 +396,9 @@ def test_each_verdict_reaches_the_engine_as_its_own_queue_state(
         again.extend(got)
         return len(again) == 2
 
-    _wait(second_claim, timeout=20)
+    # 60 s, not 20: the retried task's ladder delay is on the engine clock and a loaded CI shard
+    # (four xdist workers) reached 20 s once (develop red at c94cd4b00, 2026-10-30).
+    _wait(second_claim, timeout=60)
     assert {c.attempts for c in again} == {1}
     side.process(again)
 
