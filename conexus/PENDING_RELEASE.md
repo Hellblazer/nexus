@@ -50,6 +50,10 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/agents/codebase-deep-analyzer.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5.
 - `conexus/agents/deep-research-synthesizer.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5.
 - `conexus/agents/test-validator.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5.
+- `conexus/skills/codebase-analysis/SKILL.md` (nexus-j6un5.6): names haiku as codebase-deep-analyzer's model.
+- `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-j6un5.6): the classification dispatches deep-research-synthesizer with `model: "sonnet"`, since the agent now defaults to haiku.
+- `conexus/skills/rdr-research/SKILL.md` (nexus-j6un5.6): names haiku as both agents' model.
+- `conexus/skills/research-synthesis/SKILL.md` (nexus-j6un5.6): haiku is the default; multi-source synthesis passes `model: "sonnet"`.
 - `conexus/skills/orchestration/SKILL.md` (nexus-j6un5.4): mechanical beads dispatch the developer with `model: "haiku"`, labelled `dev-model:haiku` or `dev-model:sonnet` for the comparison; a failed Haiku round is re-dispatched on Sonnet.
 
 
