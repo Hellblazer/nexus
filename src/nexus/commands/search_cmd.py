@@ -7,6 +7,7 @@ import click
 import structlog
 
 from nexus.config import get_telemetry_config, get_tuning_config, load_config
+from nexus.context_annotations import DISPLAY_SOURCE_PATH_KEY
 from nexus.corpus import is_conformant_collection_name, resolve_corpus
 from nexus.commands.store import _t3
 from nexus.formatters import (
@@ -547,12 +548,15 @@ def search_cmd(
         return
 
     # Python-side path scoping (ChromaDB has no $startswith operator).
-    # nexus-1qed: the catalog-resolved _display_path. The row's source_path is
-    # the last writer's file and is not read (nexus-6pfgb.49).
+    # nexus-1qed: the catalog-resolved _display_path (often repo-relative) or,
+    # nexus-6pfgb.53, the owner's absolute local path (_display_source_path), which
+    # is what an absolute PATH names. The row's source_path is the last writer's
+    # file and is not read (nexus-6pfgb.49).
     if resolved is not None:
         results = [
             r for r in results
             if (r.metadata.get("_display_path") or "").startswith(resolved)
+            or (r.metadata.get(DISPLAY_SOURCE_PATH_KEY) or "").startswith(resolved)
             or r.metadata.get("file_path", "").startswith(resolved)
         ]
         if not results:
