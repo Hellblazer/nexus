@@ -73,9 +73,11 @@ class World:
         self.before_second_manifest_read = None  # called with self, once, before the re-read
         self._manifest_reads = 0
 
-    def doc(self, tumbler: str, *, collection: str = COLL, indexed_at: str = DOC_STAMP) -> str:
+    def doc(self, tumbler: str, *, collection: str = COLL, indexed_at: str = DOC_STAMP,
+            title: str = "", file_path: str = "") -> str:
         self.docs[tumbler] = SimpleNamespace(
-            tumbler=tumbler, physical_collection=collection, indexed_at=indexed_at, alias_of="")
+            tumbler=tumbler, physical_collection=collection, indexed_at=indexed_at, alias_of="",
+            title=title, file_path=file_path)
         self.manifests.setdefault(tumbler, [])
         return tumbler
 
@@ -365,6 +367,7 @@ def test_an_empty_catalog_is_converged_and_says_it_examined_nothing(world: World
 
 
 RUN_TIME = "2026-10-30T12:00:00+00:00"
+WITHIN_SKEW = "2026-02-01T00:02:00+00:00"  # two minutes after DOC_STAMP: inside the five-minute guard
 
 
 def _one_fillable_and_one_newer_row(world: World) -> None:
@@ -416,6 +419,55 @@ def test_a_failed_restore_defers_and_names_the_document(world: World) -> None:
 
     assert result.outcome is ConvergeOutcome.DEFERRED
     assert "1.1.1" in result.detail and "indexed_at" in result.detail
+
+
+# ── attribution by title ─────────────────────────────────────────────────────
+
+
+def test_a_chunk_row_written_by_another_document_within_the_skew_is_not_copied(world: World) -> None:
+    """nexus-1nrcu (critic): B is indexed, A (sharing a chunk) is indexed two minutes later and then
+    deleted. The ``indexed_at`` guard (+5 min) lets A's row through; A is tombstoned, so the live ownership
+    read counts one owner. The chunk row's title names A's file, not B's."""
+    world.doc("1.1.1", title="b.py", file_path="src/b.py")
+    world.row("1.1.1", 0, h(1))
+    world.chunk(h(1), section_title="A's heading", section_type="references", indexed_at=WITHIN_SKEW,
+                title="src/a.py:3-9")
+    rung = world.rung()
+
+    result = rung.converge(Report())
+
+    assert world.appends == [] and world.labels("1.1.1") == [(0, None, None, None, False)]
+    assert "1 chunk row not attributable" in result.detail
+    assert rung.verify() is True, "left legacy by design: not pending"
+
+
+@pytest.mark.parametrize("title", [
+    "src/b.py:3-9",          # code chunk: <relative path>:<line range>
+    "src/b.py:chunk-4",      # prose chunk: <relative path>:chunk-<n>
+    "src/b.py:page-2",       # page chunk
+    "b.py",                  # the document's own title
+    "",                      # the chunk row carries none
+    None,                    # no title key at all
+])
+def test_a_chunk_row_titled_for_the_document_or_untitled_is_copied(world: World, title) -> None:
+    world.doc("1.1.1", title="b.py", file_path="src/b.py")
+    world.row("1.1.1", 0, h(1))
+    meta = {} if title is None else {"title": title}
+    world.chunk(h(1), section_title="Refs", section_type="references", indexed_at=WITHIN_SKEW, **meta)
+
+    world.rung().converge(Report())
+
+    assert world.labels("1.1.1") == [(0, "Refs", "references", None, True)]
+
+
+def test_a_paper_chunk_titled_with_the_documents_title_is_copied(world: World) -> None:
+    world.doc("1.1.1", title="Attention Is All You Need", file_path="")
+    world.row("1.1.1", 0, h(1))
+    world.chunk(h(1), section_title="Refs", section_type="references", indexed_at=OLD, title="Attention Is All You Need")
+
+    world.rung().converge(Report())
+
+    assert world.labels("1.1.1") == [(0, "Refs", "references", None, True)]
 
 
 # ── races and failures ───────────────────────────────────────────────────────

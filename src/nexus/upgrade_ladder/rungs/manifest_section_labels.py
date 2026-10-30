@@ -23,13 +23,18 @@ THREE MORE GUARDS, each a count in the summary.
   truth is "never recorded". It stays legacy.
 * The chunk row's own ``indexed_at`` must be no later than the document's plus the five-minute skew
   (the guard ``nexus.catalog.meta_backfill`` uses): a later row was written by someone else.
+* The chunk row's ``title`` (the last writer's) must name this document: its title, its file path or file
+  name, with or without the per-chunk suffix the indexers add (``:12-30``, ``:chunk-3``, ``:page-2``); a row
+  that carries no title is not contradicted. This catches what the date guard cannot: a co-owner indexed
+  within the skew and then tombstoned, whose row the live ownership read does not count.
 * Just before the write, the batch's manifests are read again. A row that became written, or no longer
   holds the same chash at that position, is skipped, and so is a chash that has gained a second row.
 
 KNOWN GAP, shared with ``meta_backfill``. Ownership is read from LIVE manifests (``chash_positions``,
 which filters tombstoned documents), so a TOMBSTONED co-owner is not counted: the RDR asks for it, and no
-client read on this engine lists a tombstoned document's manifest rows. The ``indexed_at`` guard is what
-stands against a departed co-owner that wrote last. Closing the gap is an engine read.
+client read on this engine lists a tombstoned document's manifest rows. The ``indexed_at`` and ``title``
+guards stand against a departed co-owner that wrote last; they do not cover one whose chunk row carries no
+title or the same title as this document. Closing the gap is an engine read (nexus-6pfgb.58).
 
 SIDE EFFECT OF THE ONLY WRITE ROUTE, AND ITS REPAIR. The fill goes through ``append_manifest_many``, which
 upserts by position and, on a conflict, rewrites only ``chash``, ``collection``, the three labels and
@@ -64,6 +69,8 @@ Phase 4.
 """
 from __future__ import annotations
 
+import os.path
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -117,6 +124,7 @@ class Counts:
     chunk_without_label_keys: int = 0   # the chunk row carries none of the three keys
     chunk_newer_than_document: int = 0  # the chunk row was written after the document
     chunk_without_indexed_at: int = 0   # no indexed_at on the chunk row, so not attributable
+    chunk_titled_for_another: int = 0   # the chunk row's title names another document's file
     raced: int = 0                      # became written, moved, or gained a co-owner before the write
     write_failed: int = 0
     restore_failed: int = 0             # documents whose indexed_at could not be written back after the fill
@@ -133,7 +141,7 @@ class Counts:
             f"{self.legacy} legacy ({self.fillable} fillable, {self.filled} filled; left legacy: "
             f"{self.multi_row_cross_document} shared with another document, {self.multi_row_in_document} "
             f"repeated inside the document, {self.chunk_without_label_keys} chunk with no label keys, "
-            f"{self.chunk_missing} chunk missing, {self.chunk_newer_than_document + self.chunk_without_indexed_at} "
+            f"{self.chunk_missing} chunk missing, {self.chunk_newer_than_document + self.chunk_without_indexed_at + self.chunk_titled_for_another} "
             f"chunk row not attributable to the document, {self.stale_listing + self.raced} changed "
             f"meanwhile, {self.write_failed} write failed, {self.restore_failed} indexed_at not restored)"
         )
@@ -157,6 +165,26 @@ def _default_t3() -> Any:
     return make_t3()
 
 
+#: The per-chunk suffix an indexer appends to a chunk row's title: ``<relative path>:<line>-<line>`` (code),
+#: ``:chunk-<n>`` (prose) and ``:page-<n>`` (page chunks).
+_CHUNK_TITLE_SUFFIX = re.compile(r":(?:chunk-\d+|\d+-\d+|page-\d+)$")
+
+
+def _title_names_document(title: str, doc: Any) -> bool:
+    """True when a chunk row's *title* is this document's own: its title, its file path or file name, with
+    or without a per-chunk suffix. A row that carries no title is not contradicted. The title is the LAST
+    writer's, so one that names another file is a former owner's row."""
+    if not title:
+        return True
+    own = {n for n in (
+        getattr(doc, "title", "") or "",
+        getattr(doc, "file_path", "") or "",
+        os.path.basename(getattr(doc, "file_path", "") or ""),
+    ) if n}
+    stripped = _CHUNK_TITLE_SUFFIX.sub("", title)
+    return bool({title, stripped, os.path.basename(stripped)} & own)
+
+
 def _labels_from_chunk_row(metadata: dict, doc: Any) -> tuple[dict[str, Any] | None, str]:
     """``(labels, why)`` for one chunk row and the document whose legacy row would take them.
 
@@ -164,7 +192,8 @@ def _labels_from_chunk_row(metadata: dict, doc: Any) -> tuple[dict[str, Any] | N
     not give them: ``"no_label_keys"`` when it carries none of the three (a writer that predates
     labels: the position stays legacy), ``"newer"`` when its ``indexed_at`` is later than the
     document's plus the five-minute skew (someone else wrote it), ``"no_indexed_at"`` when either side
-    has none (not attributable). This is the module's only read of a chunk row's metadata."""
+    has none (not attributable), ``"other_title"`` when its title names another document's file (a
+    former owner wrote it, inside the skew). This is the module's only read of a chunk row's metadata."""
     from nexus.catalog.note_ttl import PUT_SKEW, parse_iso  # noqa: PLC0415 — deferred: note_ttl has a wide import graph
 
     if not any(k in metadata for k in _LABEL_KEYS):
@@ -175,6 +204,8 @@ def _labels_from_chunk_row(metadata: dict, doc: Any) -> tuple[dict[str, Any] | N
         return None, "no_indexed_at"
     if stamped - ceiling > PUT_SKEW:
         return None, "newer"
+    if not _title_names_document(metadata.get("title") or "", doc):
+        return None, "other_title"
     return {
         "section_title": metadata.get("section_title") or "",
         "section_type": metadata.get("section_type") or "",
@@ -307,6 +338,9 @@ class ManifestSectionLabelsRung:
                 continue
             if why == "newer":
                 counts.chunk_newer_than_document += 1
+                continue
+            if why == "other_title":
+                counts.chunk_titled_for_another += 1
                 continue
             if why:
                 counts.chunk_without_indexed_at += 1

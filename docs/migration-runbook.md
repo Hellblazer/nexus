@@ -171,18 +171,25 @@ the chunk row's label is exact, once (nexus-1nrcu).
   exactly one live manifest row in the tenant, and that row is this one. One *owner*
   is not enough: a document that holds a chash at two positions has one owner and two
   rows, and the chunk row holds one label. Rows of any other chash stay legacy.
-- **Three more guards.** The chunk row must carry at least one of the three label
+- **Four more guards.** The chunk row must carry at least one of the three label
   keys (a writer that predates labels omitted them; copying `""` would say "no
   heading" where the truth is "never recorded"). Its `indexed_at` must be no later
   than the document's plus five minutes (a later row was written by someone else).
+  Its `title` (the last writer's) must name this document: the document's title, its
+  file path or file name, with or without the `:12-30` / `:chunk-3` / `:page-2`
+  suffix the indexers add; a row with no title is not contradicted, and one that
+  names another file stays legacy and is counted as "chunk row not attributable".
   Just before each write the batch's manifests and ownership are read again; a row
   that became written, moved or gained a co-owner is skipped.
 - **Fill-only.** A row already `labels_written` is never touched, an empty label
   included. The rung never writes a label with the flag false.
 - **Known gap.** Ownership is read from live manifests, so a *tombstoned* document
   that holds the chash is not counted; no client read lists a tombstoned document's
-  rows. The `indexed_at` guard is the defence. The same gap is documented on
-  `nx catalog backfill-meta`.
+  rows. The `indexed_at` and `title` guards are the defence: they cover a former
+  owner whose chunk row was written more than five minutes after the document, or
+  carries another file's title. They do not cover one whose row has no title or the
+  same title (nexus-6pfgb.58 closes it with an engine read). The same gap is
+  documented on `nx catalog backfill-meta`.
 - **Cost.** `detect()` is the dry run and does the whole scan with no write: it
   reads every live document's manifest and the chunk rows of the legacy single-row
   chashes, 50 documents at a time. `converge()` writes through `append_manifest_many`,
