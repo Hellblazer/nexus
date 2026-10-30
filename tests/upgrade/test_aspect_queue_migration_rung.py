@@ -11,8 +11,9 @@ Three layers:
   the flag injected through the rung's constructor, so each call and its ORDER is
   observable: out first, then the delete;
 * the registry and runner pins (the skips are not recorded, R2);
-* real-engine cases against the substrate the unit suite boots: the new
-  ``list_waiting`` read on ``HttpAspectQueue``, and the whole move.
+* one real-engine journey against the substrate the unit suite boots: the flag at
+  table, the new ``list_waiting`` read on ``HttpAspectQueue``, the whole move and a
+  crash between out and delete (nexus-9edxe folded four engine tests into it).
 """
 from __future__ import annotations
 
@@ -586,34 +587,13 @@ def _claim_all(store: HttpTupleStore) -> list[dict]:
 
 
 @pytest.mark.usefixtures("t2_service_env")
-class TestListWaitingRealEngine:
-    def test_pending_and_in_progress_rows_come_back_with_status_delay_and_no_content(self, real) -> None:
-        queue, _ = real
-        coll = _coll()
-        docs = [register_real_doc_id(title=f"d{i}") for i in range(4)]
-        for i, d in enumerate(docs):
-            queue.enqueue(coll, f"/p{i}.md", content_hash=f"h{i}", content="text must not return", doc_id=d)
-        assert queue.claim_next().source_path == "/p0.md"          # p0 -> in_progress
-        queue.mark_retry(coll, "/p1.md", interval_seconds=600)     # p1 -> pending, backed off
-        queue.mark_failed(coll, "/p3.md", "boom")                  # p3 -> failed
-
-        rows = {r.source_path: r for r in queue.list_waiting()}
-        assert sorted(rows) == ["/p0.md", "/p1.md", "/p2.md"], "failed rows are not waiting"
-        assert rows["/p0.md"].status == "in_progress" and rows["/p0.md"].delay_s == 0
-        assert rows["/p1.md"].status == "pending" and rows["/p1.md"].retry_count == 1
-        assert 590 <= rows["/p1.md"].delay_s <= 600, "seconds to next_retry_at, on the database clock"
-        assert rows["/p2.md"].status == "pending" and rows["/p2.md"].delay_s == 0
-        assert rows["/p2.md"].doc_id == docs[2] and rows["/p2.md"].content_hash == "h2"
-        assert len(queue.list_waiting(limit=2)) == 2
-        # the read changed nothing: p0 is still in_progress
-        assert {r.source_path: r.status for r in queue.list_waiting()}["/p0.md"] == "in_progress"
-
-
-@pytest.mark.usefixtures("t2_service_env")
 class TestTheMoveRealEngine:
-    def test_three_table_rows_become_three_tasks_and_the_table_empties(
+    def test_the_real_engine_journey_flag_at_table_list_waiting_the_move_and_a_crash(
         self, real, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """One tenant, five steps over one table (nexus-9edxe folded the four engine
+        tests of nexus-5r2sc.3.6 into this journey; each assertion names its step,
+        and the crash is last so an earlier failure hides only it)."""
         queue, store = real
         coll = _coll()
         d = [register_real_doc_id(title=f"m{i}") for i in range(5)]
@@ -623,6 +603,14 @@ class TestTheMoveRealEngine:
         # a failed row and a pending sibling of it that share one doc_id
         queue.enqueue(coll, "/dead.md", content_hash="h-dead", doc_id=d[3])
         queue.enqueue(coll, "/dead-sibling.md", content_hash="h-sib", doc_id=d[3])
+
+        # Step 1, the flag at table moves nothing: not applicable, the tuple space stays empty
+        # and the table keeps all five rows.
+        status = AspectQueueTuplesRung().detect()
+        assert status.applicable is False, "step 1: the flag at table is not applicable"
+        assert store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300) == [], "step 1: nothing was sent"
+        assert len(queue.list_waiting()) == 5, "step 1: the table is untouched"
+
         assert queue.claim_next().source_path == "/due.md"      # due -> in_progress (oldest)
         queue.mark_retry(coll, "/due.md", interval_seconds=0)    # back to pending, due now (retry 1)
         assert queue.claim_next().source_path == "/due.md"      # claim it again: in_progress
@@ -630,6 +618,24 @@ class TestTheMoveRealEngine:
         assert queue.claim_next().source_path == "/held.md"     # held -> in_progress, a worker holds it
         queue.mark_failed(coll, "/dead.md", "boom")
 
+        # Step 2, list_waiting: pending and in_progress rows come back with status, delay and
+        # the identity, the failed row does not, and the read changes nothing.
+        rows = {r.source_path: r for r in queue.list_waiting()}
+        assert sorted(rows) == ["/dead-sibling.md", "/due.md", "/held.md", "/later.md"], (
+            "step 2: failed rows are not waiting"
+        )
+        assert rows["/due.md"].status == "in_progress" and rows["/due.md"].delay_s == 0, "step 2: due"
+        assert rows["/held.md"].status == "in_progress", "step 2: held"
+        assert rows["/later.md"].status == "pending" and rows["/later.md"].retry_count == 1, "step 2: later"
+        assert 890 <= rows["/later.md"].delay_s <= 900, "step 2: seconds to next_retry_at, on the database clock"
+        assert rows["/dead-sibling.md"].status == "pending" and rows["/dead-sibling.md"].delay_s == 0
+        assert rows["/dead-sibling.md"].doc_id == d[3] and rows["/dead-sibling.md"].content_hash == "h-sib"
+        assert len(queue.list_waiting(limit=2)) == 2, "step 2: the limit applies"
+        assert {r.source_path: r.status for r in queue.list_waiting()}["/due.md"] == "in_progress", (
+            "step 2: the read changed nothing"
+        )
+
+        # Step 3, the move.
         monkeypatch.setenv(ASPECT_QUEUE_ENV, "tuples")
         rung = AspectQueueTuplesRung()
         status = rung.detect()
@@ -641,57 +647,50 @@ class TestTheMoveRealEngine:
 
         # table: only the failed row is left
         monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
-        assert queue.list_waiting() == []
-        assert [r.source_path for r in queue.list_failed()] == ["/dead.md"], "a failed row never moves, nor is deleted"
+        assert queue.list_waiting() == [], "step 3: the table emptied"
+        assert [r.source_path for r in queue.list_failed()] == ["/dead.md"], (
+            "step 3: a failed row never moves, nor is deleted"
+        )
 
         # tasks: one per document (the sibling shares d[3]'s task), identity bodies only
         tasks = store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300)
         bodies = {json.loads(t.body)["doc_id"]: json.loads(t.body) for t in tasks}
-        assert sorted(bodies) == sorted([d[0], d[1], d[2], d[3]])
+        assert sorted(bodies) == sorted([d[0], d[1], d[2], d[3]]), "step 3: one task per document"
         assert bodies[d[0]] == {"collection": coll, "source_path": "/due.md", "doc_id": d[0], "content_hash": "h-due"}
         assert all(set(b) == {"collection", "source_path", "doc_id", "content_hash"} for b in bodies.values())
         assert len(tasks) == 4
 
         # the delay: the 900 s row is not claimable now, the others are
         claimed = _claim_all(store)
-        assert sorted(b["doc_id"] for b in claimed) == sorted([d[0], d[2], d[3]]), "the backed-off row waits"
+        assert sorted(b["doc_id"] for b in claimed) == sorted([d[0], d[2], d[3]]), (
+            "step 3: the backed-off row waits"
+        )
 
         # a second run changes nothing
         monkeypatch.setenv(ASPECT_QUEUE_ENV, "tuples")
         again = AspectQueueTuplesRung()
         assert again.detect() == RungStatus(applicable=True, converged=True)
         assert again.converge(Report()).outcome is ConvergeOutcome.COMPLETED
-        assert len(store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300)) == 4
+        assert len(store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300)) == 4, "step 3: a second run changed nothing"
 
-    def test_the_flag_at_table_moves_nothing(self, real) -> None:
-        queue, store = real
-        coll = _coll()
-        queue.enqueue(coll, "/a.md", doc_id=register_real_doc_id(title="t"))
-        status = AspectQueueTuplesRung().detect()
-        assert status.applicable is False
-        assert store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300) == []
-        assert len(queue.list_waiting()) == 1
-
-    def test_a_real_crash_between_out_and_delete_then_a_rerun_leaves_one_task(
-        self, real, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        queue, store = real
-        coll = _coll()
-        doc = register_real_doc_id(title="crash")
-        queue.enqueue(coll, "/a.md", content_hash="h", doc_id=doc)
+        # Step 4, a real crash between out and delete, then a rerun leaves one task for the document.
+        monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
+        crash_doc = register_real_doc_id(title="crash")
+        queue.enqueue(_coll(), "/crash.md", content_hash="h", doc_id=crash_doc)
         monkeypatch.setenv(ASPECT_QUEUE_ENV, "tuples")
 
         class Crashing(HttpAspectQueue):
             def mark_done(self, *a, **k):
                 raise Boom("killed after the out")
 
-        rung = AspectQueueTuplesRung(queue_factory=Crashing)
         with pytest.raises(Boom):
-            rung.converge(Report())
-        assert len(queue.list_waiting()) == 1, "the row is still in the table"
-        assert len(store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300)) == 1, "and the task is out"
+            AspectQueueTuplesRung(queue_factory=Crashing).converge(Report())
+        assert len(queue.list_waiting()) == 1, "step 4: the row is still in the table"
+        assert len(store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300)) == 5, "step 4: and the task is out"
 
         assert AspectQueueTuplesRung().converge(Report()).outcome is ConvergeOutcome.COMPLETED
-        assert queue.list_waiting() == []
-        assert len(store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300)) == 1, "one task, not two"
-
+        assert queue.list_waiting() == [], "step 4: the rerun emptied the table"
+        tasks = store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300)
+        assert len(tasks) == 5 and [json.loads(t.body)["doc_id"] for t in tasks].count(crash_doc) == 1, (
+            "step 4: one task, not two"
+        )

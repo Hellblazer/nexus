@@ -902,60 +902,7 @@ class TestDrainCountsTheTupleSide:
         assert exc.value.detail is None
 
 
-@pytest.mark.t2_tenant
-class TestDrainCliAgainstTheEngine:
-    """Test Plan scenario 21, drain half: the old table holds pending and
-    failed rows, `aspects` holds available, claimed and dead tasks, and
-    `nx aspects drain` exits 0 only when both are drained."""
-
-    _KEYS = {"queue": "aspects"}
-
-    @pytest.fixture(autouse=True)
-    def _cli(self, monkeypatch, tmp_path: Path):
-        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: tmp_path / "t2.db")
-
-    def _drain_cli(self) -> int:
-        from click.testing import CliRunner
-        from nexus.commands.aspects import aspects_group
-
-        res = CliRunner().invoke(
-            aspects_group, ["drain", "--timeout", "0.4", "--poll-interval", "0.05"],
-        )
-        return res.exit_code
-
-    def _task(self, store) -> str:
-        import uuid
-
-        doc = f"9.{uuid.uuid4().int % 10**9}.1"
-        return store.out("aspects", self._KEYS, None, "{}", nonce=doc)
-
-    def test_exit_zero_only_when_both_sides_are_drained(self, queue_path: Path) -> None:
-        from nexus.db.t2.http_tuple_store import HttpTupleStore
-
-        store = HttpTupleStore()
-        assert self._drain_cli() == 0, "empty on both sides"
-
-        # A failed table row and a dead task never block.
-        with T2Database(queue_path) as db:
-            db.aspect_queue.enqueue("knowledge__d", "/f.pdf", doc_id=_shared_doc_id())
-            assert db.aspect_queue.claim_next() is not None
-            db.aspect_queue.mark_failed("knowledge__d", "/f.pdf", "boom")
-        self._task(store)
-        got = store.inp("aspects", self._KEYS, claimant="drain-dead", lease_s=60)
-        store.nack(got[1], "drain-dead", dead=True)
-        census = store.subspace_stats("aspects")
-        assert (census.dead, census.available, census.claimed) == (1, 0, 0)
-        assert self._drain_cli() == 0, "failed row + dead task only"
-
-        # An available task blocks it.
-        self._task(store)
-        assert self._drain_cli() == 1, "available task"
-
-        # A claimed task blocks it.
-        got = store.inp("aspects", self._KEYS, claimant="drain-live", lease_s=60)
-        assert got is not None
-        assert self._drain_cli() == 1, "claimed task"
-
-        # Acked, it is drained.
-        store.ack(got[1], "drain-live")
-        assert self._drain_cli() == 0, "acked"
+# The drain CLI against the real engine (Test Plan scenario 21, drain half: exit 0
+# only when the table and the `aspects` tuple side are both drained) is a step of the
+# journeys in tests/test_aspects_requeue_failed_tuples.py (nexus-9edxe): it needs a
+# tenant, and those journeys already hold one.

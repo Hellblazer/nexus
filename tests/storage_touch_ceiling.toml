@@ -40,7 +40,7 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4996
+provisioned_tests = 4972
 tolerance_tests = 0
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
@@ -101,6 +101,30 @@ tolerance_tests = 0
 #   tests/test_aspects_requeue_failed_tuples.py +2: requeue-failed with the flag at tuples deletes the failed table row by
 #     (collection, source_path), skips a blank doc_id row and leaves a pending sibling; the doctor goes green and a second
 #     run has nothing to do.
+# 4996 -> 4972 (nexus-9edxe, 2026-10-30, Sam's 2026-10-30 ask "keep going on the tenant consolidation"): round 2 over the
+# RDR-235 client-half tests, -24. Reduce-only. tests/test_aspect_worker_tuples.py, tests/test_aspect_worker.py and
+# tests/test_health_tuple_doctor_rows.py were not touched (their own round). Per file (count over merge base 2b7b12bfb,
+# before -> after):
+#   tests/test_http_aspect_queue_tuples_producer.py 10 -> 2: the table-mode, bounded fan-out, skipped-row, tenant-ceiling and
+#     missing-template cases now run over an httpx.MockTransport behind the real HttpTupleStore (the 429 and 404 are the
+#     engine's typed error bodies, so the client's own mapping is exercised) and mint no tenant. Two engine tests stay: the
+#     producer journey (identity bodies, replace by doc_id, a retired name, and the tuple_counts census moved in from
+#     test_http_aspect_queue_tuple_counts.py) and the two hook_failures writers. The recorded nonce mutation (doc_id +
+#     source_path) is now killed twice: by the journey's step 3 and by the mock fan-out test's nonce == doc_id check.
+#   tests/test_aspects_requeue_failed_tuples.py 7 -> 2: a dead-task journey (since paging, revive, collection scope, the queue
+#     depth, and the drain CLI's exit codes) and a failed-table-row journey (table mode, tuples mode, the blank-doc_id row).
+#     A step that needs an empty queue drains it; the mark_done mutation of requeue-failed is killed by step 3 of the second.
+#   tests/test_aspect_persist_claim_fence.py 5 -> 2: scenario 9's two halves in one test, the four refusals and the
+#     lapse-after-write in another; the pair rule runs against a stand-in that fails on any attribute read, with no tenant.
+#     The claim-branch mutation (mark_done for ack) still reds both engine tests.
+#   tests/upgrade/test_aspect_queue_migration_rung.py 4 -> 1: flag at table, list_waiting, the move and the crash rerun in one
+#     journey; the delete-by-doc_id mutation is killed by step 3's failed row and pending sibling on one doc_id.
+#   tests/test_5r2sc_aspect_flush_batch_failure_tripwire.py 2 -> 1: both modes through two real index_repository() runs.
+#   tests/test_http_tuple_store_rdr235_transport.py 2 -> 1 and tests/test_mcp_tuple_tools.py +2 -> +1: the replace outcome is
+#     the last branch of the delay/nack scenario in each.
+#   tests/test_aspect_drain_protocol.py +1 -> 0 and tests/test_http_aspect_queue_tuple_counts.py 1 -> 0: their engine tests
+#     are steps of the journeys above. tests/test_rdr235_mvv_aspect_queue_tuples.py stays 2 (the MVV journey and scenario 24).
+#   A fold hides its later steps behind an earlier failure; every assertion in a journey names its step.
 measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992), 39713947919 (da8c08fdc)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default

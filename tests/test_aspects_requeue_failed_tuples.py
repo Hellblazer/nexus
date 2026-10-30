@@ -12,10 +12,11 @@ Covers the two readers that are not the drain gate (that is
   * ``_best_effort_queue_depth`` is the table's pending count plus the
     subspace's ``available``.
 
-The real-engine classes boot a dead task the way production does: ``out``,
+The real-engine class boots a dead task the way production does: ``out``,
 ``inp`` and ``nack(dead=True)``. The stub classes pin what the engine cannot be
 made to do cheaply (a read cap smaller than the data, a template the engine
-lacks, one side failing).
+lacks, one side failing). The depth sum's real-engine check is step 4 of the
+dead-task journey.
 """
 from __future__ import annotations
 
@@ -57,6 +58,13 @@ def _census(**kw) -> SubspaceCensus:
 
 
 # ── real engine ──────────────────────────────────────────────────────────────
+#
+# Two journeys (nexus-9edxe folded seven engine tests into them, one tenant
+# each): the dead-task journey (paging, revive, scope, then the queue depth the
+# hook reports) and the failed-table-row journey (the verb and the doctor over
+# the table and the tuple side together). A step that needs the subspace empty
+# drains the available tasks first. Each assertion names its step; a failure in
+# an early step hides the later ones.
 
 
 @pytest.mark.t2_tenant
@@ -78,6 +86,7 @@ class TestRequeueFailedAgainstTheEngine:
 
     @staticmethod
     def _make_dead(store: HttpTupleStore, collection: str, source_path: str = "a.pdf") -> str:
+        """Needs the subspace to hold no available task: ``inp`` claims the oldest."""
         doc = _doc()
         tid = store.out("aspects", _KEYS, None, _body(collection, doc, source_path), nonce=doc)
         got = store.inp("aspects", _KEYS, claimant="t-dead", lease_s=60)
@@ -85,13 +94,68 @@ class TestRequeueFailedAgainstTheEngine:
         store.nack(got[1], "t-dead", dead=True)
         return tid
 
-    def test_a_dead_task_is_listed_revived_and_comes_back_available(self, _t2: Path) -> None:
+    @staticmethod
+    def _drain_cli() -> int:
+        """``nx aspects drain``'s exit code: 0 only when the table and the tuple side
+        are both drained."""
+        res = CliRunner().invoke(
+            aspects_group, ["drain", "--timeout", "0.4", "--poll-interval", "0.05"],
+        )
+        return res.exit_code
+
+    @staticmethod
+    def _drain(store: HttpTupleStore) -> None:
+        """Consume every available task (a consumed row is invisible to ``rd``), so
+        the next step starts with nothing available. Dead tasks stay."""
+        while (got := store.inp("aspects", _KEYS, claimant="t-drain", lease_s=60)) is not None:
+            store.ack(got[1], "t-drain")
+
+    def test_the_dead_task_journey_paging_revive_collection_scope_and_the_queue_depth(
+        self, _t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.commands.aspects as mod
+        from nexus.aspect_worker import _best_effort_queue_depth
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        from tests._catalog_fixture_ops import register_real_doc_id
+
+        monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
         store = HttpTupleStore()
+        assert _best_effort_queue_depth() == 0, "step 0: an empty queue reports zero on both sides"
+        assert self._drain_cli() == 0, "step 0: drain: empty on both sides"
+
+        # Step 1, since paging: five dead tasks interleaved with available ones,
+        # read two rows per page: every dead task is found, so the loop pages by
+        # ``since`` and does not stop at the first page.
+        with monkeypatch.context() as page:
+            page.setattr(mod, "_TASK_PAGE", 2)
+            coll = "docs__nx235r-f__bge-base-en-v15-768__v1"
+            for i in range(10):
+                doc = _doc()
+                store.out("aspects", _KEYS, None, _body(coll, doc, f"{i}.pdf"), nonce=doc)
+            # Claim all ten oldest-first, then kill the even ones and return the
+            # odd ones: dead and available tasks alternate in created_at order.
+            claims = []
+            for i in range(10):
+                got = store.inp("aspects", _KEYS, claimant=f"t-page-{i}", lease_s=60)
+                assert got is not None
+                claims.append((i, got[1]))
+            for i, claim in claims:
+                store.nack(claim, f"t-page-{i}", dead=(i % 2 == 0))
+            assert store.subspace_stats("aspects").dead == 5, "step 1: five dead before the verb"
+            res = CliRunner().invoke(aspects_group, ["requeue-failed"])
+            assert res.exit_code == 0, res.output
+            assert "Revived 5 dead task(s)" in res.output, f"step 1: paging: {res.output}"
+        census = store.subspace_stats("aspects")
+        assert (census.dead, census.available) == (0, 10), f"step 1: {census}"
+        self._drain(store)
+
+        # Step 2, a dead task is listed, revived and comes back available.
         coll = "docs__nx235r-a__bge-base-en-v15-768__v1"
         tid = self._make_dead(store, coll)
         before = next(r for r in store.rd("aspects", _KEYS, n=300) if r.id == tid)
         assert before.claim_state == "dead"
         assert store.subspace_stats("aspects").dead == 1
+        assert self._drain_cli() == 0, "step 2: drain: a dead task alone never blocks"
 
         def snapshot() -> list[tuple]:
             return [
@@ -102,21 +166,21 @@ class TestRequeueFailedAgainstTheEngine:
         pre_dry = snapshot()
         dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
         assert dry.exit_code == 0, dry.output
-        assert "Would re-enqueue 1 dead task(s)" in dry.output
+        assert "Would re-enqueue 1 dead task(s)" in dry.output, f"step 2: {dry.output}"
         assert coll in dry.output and "a.pdf" in dry.output
-        assert snapshot() == pre_dry, "dry-run wrote"
+        assert snapshot() == pre_dry, "step 2: dry-run wrote"
 
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
-        assert "Revived 1 dead task(s)" in res.output
+        assert "Revived 1 dead task(s)" in res.output, f"step 2: {res.output}"
 
         census = store.subspace_stats("aspects")
-        assert (census.dead, census.available) == (0, 1), census
+        assert (census.dead, census.available) == (0, 1), f"step 2: {census}"
         after = next(r for r in store.rd("aspects", _KEYS, n=300) if r.id == tid)
         assert after.claim_state is None and after.attempts == 0, after
-        assert after.id == before.id, "one document stays one task id"
+        assert after.id == before.id, "step 2: one document stays one task id"
         assert after.body == before.body
-        assert after.expires_at > before.expires_at, "the retention clock restarted"
+        assert after.expires_at > before.expires_at, "step 2: the retention clock restarted"
         assert after.created_at >= before.created_at
 
         # The revived task is now an available one: a second run finds nothing
@@ -124,14 +188,19 @@ class TestRequeueFailedAgainstTheEngine:
         pre_again = snapshot()
         again = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert again.exit_code == 0, again.output
-        assert "no failed rows" in again.output
-        assert snapshot() == pre_again, "an available task was touched"
+        assert "no failed rows" in again.output, f"step 2: {again.output}"
+        assert snapshot() == pre_again, "step 2: an available task was touched"
         assert store.subspace_stats("aspects").available == 1
+        # The drain gate (Test Plan scenario 21, drain half), on the revived task: an
+        # available task blocks it, a claimed one blocks it, an acked one does not.
+        assert self._drain_cli() == 1, "step 2: drain: an available task blocks"
+        got = store.inp("aspects", _KEYS, claimant="drain-live", lease_s=60)
+        assert got is not None
+        assert self._drain_cli() == 1, "step 2: drain: a claimed task blocks"
+        store.ack(got[1], "drain-live")
+        assert self._drain_cli() == 0, "step 2: drain: acked, drained"
 
-    def test_collection_scope_filters_on_the_body_and_the_limit_applies_after_it(
-        self, _t2: Path,
-    ) -> None:
-        store = HttpTupleStore()
+        # Step 3, collection scope filters on the body and the limit applies after it.
         a = "docs__nx235r-c1__bge-base-en-v15-768__v1"
         b = "docs__nx235r-c2__bge-base-en-v15-768__v1"
         # b's task is the OLDEST: a limit applied before the collection filter
@@ -141,41 +210,21 @@ class TestRequeueFailedAgainstTheEngine:
             self._make_dead(store, a, f"{i}.pdf")
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--collection", a, "--limit", "2"])
         assert res.exit_code == 0, res.output
-        assert f"Revived 2 dead task(s) in {a}" in res.output
+        assert f"Revived 2 dead task(s) in {a}" in res.output, f"step 3: {res.output}"
         census = store.subspace_stats("aspects")
         assert (census.dead, census.available) == (2, 2), (
-            f"b stays dead, one of a stays dead, two of a are back: {census}"
+            f"step 3: b stays dead, one of a stays dead, two of a are back: {census}"
         )
 
-    def test_since_paging_reaches_dead_tasks_past_a_small_page(
-        self, _t2: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Five dead tasks interleaved with available ones, read two rows per
-        page: every dead task is found, so the loop pages by ``since`` and does
-        not stop at the first page."""
-        import nexus.commands.aspects as mod
-
-        monkeypatch.setattr(mod, "_TASK_PAGE", 2)
-        store = HttpTupleStore()
-        coll = "docs__nx235r-f__bge-base-en-v15-768__v1"
-        for i in range(10):
-            doc = _doc()
-            store.out("aspects", _KEYS, None, _body(coll, doc, f"{i}.pdf"), nonce=doc)
-        # Claim all ten oldest-first, then kill the even ones and return the
-        # odd ones: dead and available tasks alternate in created_at order.
-        claims = []
-        for i in range(10):
-            got = store.inp("aspects", _KEYS, claimant=f"t-page-{i}", lease_s=60)
-            assert got is not None
-            claims.append((i, got[1]))
-        for i, claim in claims:
-            store.nack(claim, f"t-page-{i}", dead=(i % 2 == 0))
-        assert store.subspace_stats("aspects").dead == 5
-        res = CliRunner().invoke(aspects_group, ["requeue-failed"])
-        assert res.exit_code == 0, res.output
-        assert "Revived 5 dead task(s)" in res.output
-        census = store.subspace_stats("aspects")
-        assert (census.dead, census.available) == (0, 10), census
+        # Step 4, the depth the hook reports: the tuple side alone, then both sides.
+        assert _best_effort_queue_depth() == 2, "step 4: tuples side alone"
+        q = HttpAspectQueue()
+        try:
+            for i in range(3):
+                q.enqueue("knowledge__nx235r", f"p{i}.pdf", content="c", doc_id=register_real_doc_id())
+        finally:
+            q.close()
+        assert _best_effort_queue_depth() == 5, "step 4: both sides"
 
     @staticmethod
     def _failed_table_row(db, collection: str, source_path: str, doc_id: str) -> None:  # noqa: ANN001
@@ -184,19 +233,62 @@ class TestRequeueFailedAgainstTheEngine:
         assert q.claim_next() is not None
         q.mark_failed(collection, source_path, "boom")
 
-    def test_in_tuples_mode_the_failed_table_row_is_cleared_and_the_doctor_goes_green(
+    def test_the_failed_table_row_journey_table_mode_tuples_mode_and_the_doctor(
         self, _t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """nexus-5r2sc.3.10 Critical 2 (Test Plan scenario 23's tail): with the flag
-        at tuples the verb writes a task for a failed table row AND deletes the
-        row, or the doctor counts it forever and every run re-extracts it. A blank
-        doc_id row is reported and skipped, never aborts the loop."""
+        """Three steps over one tenant: the verb in table mode reports a table
+        failure beside a dead task; in tuples mode it clears the failed table
+        row and the doctor goes green; and with a legacy blank-doc_id row in the
+        listing it reports and skips that row, never aborts (nexus-5r2sc.3.10
+        Critical 2, Test Plan scenario 23's tail)."""
         import click
 
         from nexus.commands.doctor import _report_aspect_queue_service
         from nexus.db.t2 import T2Database
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        from nexus.db.t2.records import QueueRow
         from tests._catalog_fixture_ops import register_real_doc_id
 
+        store = HttpTupleStore()
+
+        # Step 1, table mode: a table failed row and a dead task are both reported.
+        with T2Database(_t2) as db:
+            q = db.aspect_queue
+            q.enqueue("knowledge__a", "x.pdf", content="c", doc_id=register_real_doc_id())
+            assert q.claim_next() is not None
+            q.mark_failed("knowledge__a", "x.pdf", "boom")
+        self._make_dead(store, "docs__nx235r-g__bge-base-en-v15-768__v1")
+        assert self._drain_cli() == 0, "step 1: drain: a failed table row and a dead task never block"
+        dry =CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
+        assert dry.exit_code == 0, dry.output
+        assert "Would re-enqueue 1 failed row(s)" in dry.output, f"step 1: {dry.output}"
+        assert "Would re-enqueue 1 dead task(s)" in dry.output, f"step 1: {dry.output}"
+        res = CliRunner().invoke(aspects_group, ["requeue-failed"])
+        assert res.exit_code == 0, res.output
+        assert "Re-enqueued 1 failed row(s)" in res.output, f"step 1: {res.output}"
+        assert "Revived 1 dead task(s)" in res.output, f"step 1: {res.output}"
+
+        # Step 2, tuples mode, no blank row: the doctor exits 0 after the verb and a
+        # second run has nothing to do.
+        with T2Database(_t2) as db:
+            # step 1 re-enqueued its failed row as a pending table row; clear it so the
+            # claim below is the failed row's own
+            while (pending := db.aspect_queue.claim_next()) is not None:
+                db.aspect_queue.mark_done(pending.collection, pending.source_path)
+            self._failed_table_row(db, "knowledge__nx235rt2", "only.pdf", register_real_doc_id())
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
+        res = CliRunner().invoke(aspects_group, ["requeue-failed"])
+        assert res.exit_code == 0, res.output
+        _report_aspect_queue_service()  # exits 0: no raise
+        again = CliRunner().invoke(aspects_group, ["requeue-failed"])
+        assert again.exit_code == 0 and "no failed rows" in again.output, f"step 2: {again.output}"
+
+        # Step 3, tuples mode with a blank-doc_id row. Nothing available first, so the
+        # dead task made below is the one the claim returns.
+        self._drain(store)
+        monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)  # the table rows below are written in table mode
+        with T2Database(_t2) as db:
+            pending_before = db.aspect_queue.pending_count()
         good_doc = register_real_doc_id()
         other_doc = register_real_doc_id()
         coll = "knowledge__nx235rt"
@@ -205,11 +297,9 @@ class TestRequeueFailedAgainstTheEngine:
             self._failed_table_row(db, coll, "sibling.pdf", other_doc)
             # a PENDING row sharing good_doc's doc_id: deleting by doc_id would take it too
             db.aspect_queue.enqueue(coll, "pending.pdf", content="c", doc_id=good_doc)
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
         # The engine refuses a table row with no doc_id, so the legacy blank row
         # is injected into the listing (the shape an old failed row would have).
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
-        from nexus.db.t2.records import QueueRow
-
         real_list_failed = HttpAspectQueue.list_failed
         blank = QueueRow(collection=coll, source_path="blank.pdf", content_hash="h",
                          content="", retry_count=0, doc_id="")
@@ -218,18 +308,16 @@ class TestRequeueFailedAgainstTheEngine:
             return [*real_list_failed(self, collection), blank]
 
         monkeypatch.setattr(HttpAspectQueue, "list_failed", with_blank)
-        store = HttpTupleStore()
         dead_tid = self._make_dead(store, "docs__nx235rt-dead__bge-base-en-v15-768__v1")
-        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
 
         with pytest.raises(click.exceptions.Exit):
-            _report_aspect_queue_service()  # before: red (failed rows exist)
+            _report_aspect_queue_service()  # step 3 before: red (failed rows exist)
 
         dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
         assert dry.exit_code == 0, dry.output
         with T2Database(_t2) as db:
-            assert len(real_list_failed(db.aspect_queue, coll)) == 2, "dry-run wrote"
-        assert [r.claim_state for r in store.rd("aspects", _KEYS, n=300)] == ["dead"]
+            assert len(real_list_failed(db.aspect_queue, coll)) == 2, "step 3: dry-run wrote"
+        assert [r.claim_state for r in store.rd("aspects", _KEYS, n=300)] == ["dead"], "step 3: dry-run wrote"
         # The preview says which row the tuples-mode run will skip, so it and
         # the run agree (critique r2): the blank row carries the note, the
         # others do not.
@@ -238,64 +326,28 @@ class TestRequeueFailedAgainstTheEngine:
 
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
-        assert "blank.pdf" in res.output and "no doc_id" in res.output, "the blank row is reported"
+        assert "blank.pdf" in res.output and "no doc_id" in res.output, "step 3: the blank row is reported"
         assert "Re-enqueued 2 failed row(s)" in res.output and "skipped 1" in res.output, res.output
         assert "Revived 1 dead task(s)" in res.output
 
         with T2Database(_t2) as db:
             left = [r.source_path for r in real_list_failed(db.aspect_queue, coll)]
-        assert left == [], f"the two re-enqueued table rows are gone: {left}"
+        assert left == [], f"step 3: the two re-enqueued table rows are gone: {left}"
         with T2Database(_t2) as db:
-            assert db.aspect_queue.pending_count() == 1, (
-                "the row is deleted by (collection, source_path): a pending sibling with the same doc_id stays"
+            assert db.aspect_queue.pending_count() == pending_before + 1, (
+                "step 3: the row is deleted by (collection, source_path): a pending sibling with the same "
+                "doc_id stays"
             )
         tasks = store.rd("aspects", _KEYS, n=300)
         docs = {json.loads(t.body)["doc_id"]: t for t in tasks}
-        assert good_doc in docs and other_doc in docs, "each re-enqueued row has its task"
-        assert all(t.claim_state is None for t in tasks), "all available; the dead one is revived"
+        assert good_doc in docs and other_doc in docs, "step 3: each re-enqueued row has its task"
+        assert all(t.claim_state is None for t in tasks), "step 3: all available; the dead one is revived"
         assert dead_tid in {t.id for t in tasks}
 
         # A second run: only the blank row is listed, and it is reported, not retried.
         again = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert again.exit_code == 0, again.output
         assert "Re-enqueued 0 failed row(s)" in again.output and "skipped 1" in again.output, again.output
-
-    def test_in_tuples_mode_with_no_blank_row_the_doctor_exits_zero_and_a_second_run_has_nothing_to_do(
-        self, _t2: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from nexus.commands.doctor import _report_aspect_queue_service
-        from nexus.db.t2 import T2Database
-        from tests._catalog_fixture_ops import register_real_doc_id
-
-        coll = "knowledge__nx235rt2"
-        with T2Database(_t2) as db:
-            self._failed_table_row(db, coll, "only.pdf", register_real_doc_id())
-        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
-        res = CliRunner().invoke(aspects_group, ["requeue-failed"])
-        assert res.exit_code == 0, res.output
-        _report_aspect_queue_service()  # exits 0: no raise
-        again = CliRunner().invoke(aspects_group, ["requeue-failed"])
-        assert again.exit_code == 0 and "no failed rows" in again.output, again.output
-
-    def test_a_table_failed_row_and_a_dead_task_are_both_reported(self, _t2: Path) -> None:
-        from nexus.db.t2 import T2Database
-        from tests._catalog_fixture_ops import register_real_doc_id
-
-        with T2Database(_t2) as db:
-            q = db.aspect_queue
-            q.enqueue("knowledge__a", "x.pdf", content="c", doc_id=register_real_doc_id())
-            assert q.claim_next() is not None
-            q.mark_failed("knowledge__a", "x.pdf", "boom")
-        store = HttpTupleStore()
-        self._make_dead(store, "docs__nx235r-g__bge-base-en-v15-768__v1")
-        dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
-        assert dry.exit_code == 0, dry.output
-        assert "Would re-enqueue 1 failed row(s)" in dry.output
-        assert "Would re-enqueue 1 dead task(s)" in dry.output
-        res = CliRunner().invoke(aspects_group, ["requeue-failed"])
-        assert res.exit_code == 0, res.output
-        assert "Re-enqueued 1 failed row(s)" in res.output
-        assert "Revived 1 dead task(s)" in res.output
 
 
 # ── stubs ────────────────────────────────────────────────────────────────────
@@ -551,29 +603,3 @@ class TestQueueDepthSum:
 
         wire(table_exc=RuntimeError("503"), available=9)
         assert _best_effort_queue_depth() is None
-
-
-@pytest.mark.t2_tenant
-class TestQueueDepthAgainstTheEngine:
-    """Each side nonzero on its own, against the real engine."""
-
-    def test_tuples_only_then_table_only_then_both(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from nexus.aspect_worker import _best_effort_queue_depth
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
-        from tests._catalog_fixture_ops import register_real_doc_id
-
-        monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
-        assert _best_effort_queue_depth() == 0
-        store = HttpTupleStore()
-        for _ in range(2):
-            doc = _doc()
-            store.out("aspects", _KEYS, None, _body("docs__nx235r-h__x__v1", doc), nonce=doc)
-        assert _best_effort_queue_depth() == 2, "tuples side alone"
-
-        q = HttpAspectQueue()
-        try:
-            for i in range(3):
-                q.enqueue("knowledge__nx235r", f"p{i}.pdf", content="c", doc_id=register_real_doc_id())
-        finally:
-            q.close()
-        assert _best_effort_queue_depth() == 5, "both sides"
