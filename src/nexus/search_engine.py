@@ -267,6 +267,40 @@ class _TopicReads:
         return self._links
 
 
+def _fallback_owner(
+    docs: list[str], chash: str, collection: str,
+    manifests: dict[str, list[Any]] | None,
+) -> str:
+    """The ``doc_id`` the manifest fallback stamps on a hit whose row named none
+    and whose chash several documents hold (nexus-6pfgb.52).
+
+    A document homed in the hit's own collection wins: ``doc_id`` drives the
+    hit's path, line numbers and chunk count, and the owner lookup is
+    tenant-wide, so an arbitrary pick can name a file in another collection.
+    "Homed" is read from the manifests the reverse lookup already fetched
+    (a row for this chash whose own stamped ``collection`` is the hit's); no
+    further catalog call. Ties, and a lookup that carried no manifests or no
+    row collections, fall back to the smallest doc_id in text order, the order
+    the engine's ``chash_positions`` route answers in, so the choice never
+    depends on the lookup's own order.
+
+    This is still a CHOICE among co-owners, not a fact about the row. The
+    caller marks the hit ``DOC_ID_INFERRED_KEY``; every owner stays in
+    ``_owner_doc_ids`` and the score readers take the best live owner.
+    """
+    ordered = sorted(set(docs))
+    if manifests:
+        for doc_id in ordered:
+            for row in manifests.get(doc_id) or ():
+                if isinstance(row, dict):
+                    row_chash, row_coll = row.get("chash", ""), row.get("collection")
+                else:
+                    row_chash, row_coll = getattr(row, "chash", ""), getattr(row, "collection", None)
+                if row_chash == chash and row_coll == collection:
+                    return doc_id
+    return ordered[0]
+
+
 def _attach_doc_ids_from_catalog(
     results: list[SearchResult], catalog: Any | None,
 ) -> None:
@@ -326,8 +360,8 @@ def _attach_doc_ids_from_catalog(
     # multi-chunk reassembly order. Batch-fetch manifests for every
     # distinct doc_id so each search hit pays one catalog query
     # amortised, not one per result.
-    resolved_doc_ids: dict[str, str] = {}  # chash -> doc_id
-    for r, chash in zip(results, chashes):
+    resolved_doc_ids: dict[int, str] = {}  # result index -> doc_id
+    for i, (r, chash) in enumerate(zip(results, chashes)):
         if not chash:
             continue
         # If a result already carries doc_id (e.g. from a legacy
@@ -339,27 +373,22 @@ def _attach_doc_ids_from_catalog(
             # nexus-sis0m.5: every document holding the chash, for the title.
             r.metadata["_owner_doc_ids"] = list(dict.fromkeys(docs))
         if r.metadata.get("doc_id"):
-            resolved_doc_ids[chash] = r.metadata["doc_id"]
+            resolved_doc_ids[i] = r.metadata["doc_id"]
             continue
         if docs:
-            # Multiple docs sharing the same chash is uncommon but
-            # possible (content-identical files across docs). Pick
-            # the first deterministically; downstream consumers that
-            # need finer disambiguation can re-query the manifest.
-            r.metadata["doc_id"] = docs[0]
+            # nexus-6pfgb.52: a chash held by several documents has no single
+            # right owner, and the lookup's order is arbitrary. Choose by a rule
+            # that does not depend on it (see ``_fallback_owner``); the mark
+            # tells the score readers the choice is not the row's own.
+            owner = _fallback_owner(docs, chash, r.collection, prefetched)
+            r.metadata["doc_id"] = owner
             r.metadata[DOC_ID_INFERRED_KEY] = True
-            resolved_doc_ids[chash] = docs[0]
+            resolved_doc_ids[i] = owner
 
     # Batch-fetch manifests for all resolved doc_ids in one call when the
     # catalog backend supports get_manifests() (nexus-7lm3q).  Falls back
     # to the per-doc loop for older/local catalogs that lack that method.
-    distinct_doc_ids = list({
-        did
-        for chash in chashes
-        if chash
-        for did in [resolved_doc_ids.get(chash) or ""]
-        if did
-    })
+    distinct_doc_ids = list(set(resolved_doc_ids.values()))
     manifest_cache: dict[str, list[Any]] = {}
     _get_manifests_batch = getattr(catalog, "get_manifests", None)
     if prefetched is not None:
@@ -398,10 +427,10 @@ def _attach_doc_ids_from_catalog(
                 )
                 manifest_cache[doc_id] = []
 
-    for r, chash in zip(results, chashes):
+    for i, (r, chash) in enumerate(zip(results, chashes)):
         if not chash:
             continue
-        doc_id = resolved_doc_ids.get(chash) or r.metadata.get("doc_id", "")
+        doc_id = resolved_doc_ids.get(i) or r.metadata.get("doc_id", "")
         if not doc_id:
             continue
         manifest = manifest_cache.get(doc_id)

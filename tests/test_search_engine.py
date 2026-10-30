@@ -923,6 +923,107 @@ class TestAttachDocIdsFromCatalog:
         )
 
 
+class TestFallbackOwnerChoice:
+    """nexus-6pfgb.52: the manifest fallback (engine without ``chash_positions``)
+    picks ONE owner for a chash several documents hold. The pick must not depend
+    on the lookup's order, must prefer a document homed in the hit's own
+    collection, and must cost no catalog call beyond the reverse lookup."""
+
+    CHASH = "d" * 64
+
+    @staticmethod
+    def _hit(collection: str = "docs__c", chash: str = CHASH, rid: str = "r") -> SearchResult:
+        return SearchResult(
+            id=rid, content="x", distance=0.1, collection=collection,
+            metadata={"chunk_text_hash": chash},
+        )
+
+    @staticmethod
+    def _catalog(owners: list[str], homes: dict[str, str], chash: str = CHASH):
+        """A with-manifests catalog: ``homes`` maps doc_id -> the collection its
+        manifest row for the chash is stamped with."""
+        from nexus.catalog.types import ManifestRow
+        manifests = {
+            d: [ManifestRow(position=0, chash=chash, collection=homes[d])] for d in owners
+        }
+
+        class _Cat:
+            calls: list[str] = []
+
+            def docs_and_manifests_for_chashes(self, chashes):
+                self.calls.append("docs_and_manifests_for_chashes")
+                return {chash: list(owners)}, manifests
+
+            def get_manifests(self, doc_ids):
+                self.calls.append("get_manifests")
+                return {}
+
+            def get_manifest(self, doc_id):
+                self.calls.append("get_manifest")
+                return []
+
+        cat = _Cat()
+        cat.calls = []
+        return cat
+
+    def test_choice_does_not_depend_on_lookup_order(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        picked = []
+        for order in (["1.1.9", "1.1.2"], ["1.1.2", "1.1.9"]):
+            catalog = MagicMock()
+            del catalog.docs_and_manifests_for_chashes
+            catalog.docs_for_chashes.return_value = {self.CHASH: order}
+            r = self._hit()
+            _attach_doc_ids_from_catalog([r], catalog=catalog)
+            picked.append(r.metadata["doc_id"])
+            assert r.metadata["_owner_doc_ids"] == order, "every owner kept, in lookup order"
+            assert r.metadata["_doc_id_inferred"] is True
+        assert picked == ["1.1.2", "1.1.2"]
+
+    def test_prefers_owner_homed_in_the_hits_collection(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        # 1.1.2 sorts first but lives in another collection; 1.1.9 is the hit's own.
+        for order in (["1.1.2", "1.1.9"], ["1.1.9", "1.1.2"]):
+            cat = self._catalog(order, {"1.1.2": "docs__other", "1.1.9": "docs__c"})
+            r = self._hit("docs__c")
+            _attach_doc_ids_from_catalog([r], catalog=cat)
+            assert r.metadata["doc_id"] == "1.1.9", order
+            assert r.metadata["_owner_doc_ids"] == order
+            assert r.metadata["_doc_id_inferred"] is True
+            assert r.metadata["chunk_count"] == 1
+
+    def test_each_hit_takes_the_owner_of_its_own_collection(self):
+        """One chash seen in two collections: each hit resolves its own owner, not
+        the first hit's (the choice was once keyed by chash alone)."""
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        cat = self._catalog(["1.1.2", "1.1.9"], {"1.1.2": "docs__a", "1.1.9": "docs__b"})
+        in_a, in_b = self._hit("docs__a", rid="ra"), self._hit("docs__b", rid="rb")
+        _attach_doc_ids_from_catalog([in_a, in_b], catalog=cat)
+        assert (in_a.metadata["doc_id"], in_b.metadata["doc_id"]) == ("1.1.2", "1.1.9")
+
+    def test_no_owner_in_the_hits_collection_falls_back_to_smallest(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        cat = self._catalog(["1.1.9", "1.1.2"], {"1.1.2": "docs__x", "1.1.9": "docs__y"})
+        r = self._hit("docs__c")
+        _attach_doc_ids_from_catalog([r], catalog=cat)
+        assert r.metadata["doc_id"] == "1.1.2"
+
+    def test_no_catalog_call_beyond_the_reverse_lookup(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        cat = self._catalog(["1.1.2", "1.1.9"], {"1.1.2": "docs__other", "1.1.9": "docs__c"})
+        _attach_doc_ids_from_catalog([self._hit("docs__c")], catalog=cat)
+        assert cat.calls == ["docs_and_manifests_for_chashes"]
+
+    def test_a_row_that_named_its_owner_keeps_it(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        cat = self._catalog(["1.1.2", "1.1.9"], {"1.1.2": "docs__c", "1.1.9": "docs__c"})
+        r = self._hit("docs__c")
+        r.metadata["doc_id"] = "1.1.9"
+        _attach_doc_ids_from_catalog([r], catalog=cat)
+        assert r.metadata["doc_id"] == "1.1.9"
+        assert "_doc_id_inferred" not in r.metadata
+
+
 # ── Per-collection error isolation (nexus-pebfx.8) ──────────────────────────
 
 

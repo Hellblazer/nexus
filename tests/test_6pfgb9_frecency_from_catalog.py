@@ -141,8 +141,8 @@ def test_the_best_of_the_owners_holds_on_the_manifest_path_too() -> None:
     """An engine without the chash-positions route attributes through the reverse lookup."""
     from nexus.search_engine import _attach_display_paths, _attach_doc_ids_from_catalog
 
-    a = _entry("1.1.1", meta={"frecency_score": 0.9})
-    b = _entry("1.1.2", meta={"frecency_score": 0.2})
+    a = _entry("1.1.1", meta={"frecency_score": 0.2})
+    b = _entry("1.1.2", meta={"frecency_score": 0.9})
 
     class _ManifestCatalog(_Catalog):
         chash_positions = None
@@ -159,7 +159,9 @@ def test_the_best_of_the_owners_holds_on_the_manifest_path_too() -> None:
     _attach_doc_ids_from_catalog([shared], catalog)
     _attach_display_paths([shared], catalog)
 
-    assert shared.metadata["doc_id"] == "1.1.2"
+    # nexus-6pfgb.52: the fallback picks the smallest doc_id whatever the lookup order, here the
+    # owner with the LOWER score, so the best-of-owners rule is what yields 0.9.
+    assert shared.metadata["doc_id"] == "1.1.1"
     assert shared.metadata["_owner_frecency"] == 0.9
 
 
