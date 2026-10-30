@@ -3180,3 +3180,37 @@ def test_a_topic_grouped_text_render_prints_the_topic_headers():
                       cluster_by="semantic")
     assert "── Topic Alpha ──" in text
     assert "── Topic Beta ──" in text
+
+
+def test_query_groups_a_shared_chunk_under_the_row_owner_not_the_first_holder():
+    """nexus-tko2w (RDR-236 Phase 3 client half): ``query()``'s document
+    grouping keyed a hit by ``sorted(docs_for_chashes(chash))[0]``, the
+    tenant-wide first holder, ahead of the row's own ``doc_id``. A search row
+    names its owner (the engine's collection-scoped first owner from
+    engine-service-v0.1.170, else the client's chash_positions pairing), so
+    the grouping and the chunk count must be that document's."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+    chash = "ab" * 32
+
+    def fake(*_a, **_kw):
+        return [SearchResult(
+            id="r1", content="shared text", distance=0.1, collection="code__test",
+            metadata={"chunk_text_hash": chash, "doc_id": "1.1.9",
+                      "_display_title": "owner-doc"},
+        )]
+
+    class _Catalog:
+        def docs_for_chashes(self, chashes):
+            return {c: ["1.1.2", "1.1.9"] for c in chashes}
+
+        def get_manifests(self, doc_ids):
+            sizes = {"1.1.2": 3, "1.1.9": 7}
+            return {d: [object()] * sizes[d] for d in doc_ids}
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.mcp.core._get_catalog", return_value=_Catalog()), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="shared chunk owner", corpus="code__test")
+    assert "owner-doc" in out
+    assert "7 chunks" in out
+    assert "3 chunks" not in out
