@@ -2119,7 +2119,7 @@ def _entry_is_non_evidentiary(entry: Any) -> bool:
     return bool(meta.get(NON_EVIDENTIARY_META_KEY))
 
 
-def _resolve_non_evidentiary_chashes(chashes: list[str]) -> set[str]:
+def _resolve_non_evidentiary_chashes(chashes: list[str], *, lookups: Any = None) -> set[str]:
     """Best-effort, batched chash -> "belongs to a non_evidentiary-
     stamped document" set, for the chash-shaped hydration path (plain
     ``search()`` results).
@@ -2132,6 +2132,14 @@ def _resolve_non_evidentiary_chashes(chashes: list[str]) -> set[str]:
     shaped path). Either call failing, the catalog being unavailable, or
     *chashes* being empty degrades to an empty set — never raises, never
     excludes a chash it cannot classify.
+
+    *lookups* (nexus-6pfgb.50, RF-10) is the :class:`nexus.mcp.core.OwnerLookups` the
+    ``store_get_many`` call that hydrated these same chashes recorded. When it holds the owner
+    rows, the chash -> documents map comes from them (``docs_for_chashes`` is not called) and the
+    entries from the ones that call already resolved; only owners it did not resolve are fetched,
+    in one batch. The owner rows are tenant-wide, as ``docs_for_chashes`` is, so the answer is the
+    same. Without them (the catalog could not answer ``chash_positions``, or no lookup ran), the
+    two round trips above run as before.
     """
     from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -2141,17 +2149,36 @@ def _resolve_non_evidentiary_chashes(chashes: list[str]) -> set[str]:
     if cat is None:
         return set()
     try:
-        chash_to_docs = cat.docs_for_chashes(chashes)
-        if not isinstance(chash_to_docs, dict) or not chash_to_docs:
-            return set()
-        all_doc_ids = sorted({
-            doc_id for docs in chash_to_docs.values() for doc_id in (docs or [])
-        })
-        if not all_doc_ids:
-            return set()
-        entries = cat.resolve_many(all_doc_ids)
-        if not isinstance(entries, dict):
-            return set()
+        if lookups is not None and lookups.asked and lookups.owner_rows is not None:
+            chash_to_docs = {
+                c: list(dict.fromkeys(
+                    row["doc_id"] for row in lookups.owner_rows.get(c, ()) if row.get("doc_id")
+                ))
+                for c in dict.fromkeys(chashes)
+            }
+            chash_to_docs = {c: docs for c, docs in chash_to_docs.items() if docs}
+            if not chash_to_docs:
+                return set()
+            all_doc_ids = sorted({doc_id for docs in chash_to_docs.values() for doc_id in docs})
+            wanted_docs = set(all_doc_ids)
+            entries = {d: e for d, e in lookups.entries.items() if d in wanted_docs}
+            if unresolved := [d for d in all_doc_ids if d not in entries]:
+                fetched = cat.resolve_many(unresolved)
+                if not isinstance(fetched, dict):
+                    return set()
+                entries.update(fetched)
+        else:
+            chash_to_docs = cat.docs_for_chashes(chashes)
+            if not isinstance(chash_to_docs, dict) or not chash_to_docs:
+                return set()
+            all_doc_ids = sorted({
+                doc_id for docs in chash_to_docs.values() for doc_id in (docs or [])
+            })
+            if not all_doc_ids:
+                return set()
+            entries = cat.resolve_many(all_doc_ids)
+            if not isinstance(entries, dict):
+                return set()
     except Exception:  # noqa: BLE001 — best-effort exclusion; ANY failure here (a raised exception or a malformed/unconfigured catalog return) must degrade to "leave every candidate in", never crash the hydration
         _log.warning(
             "resolve_non_evidentiary_chashes_failed",
@@ -2360,17 +2387,19 @@ def _hydrate_operator_args(
             hydrated = _hydrate_tumbler_ids([str(i) for i in id_list_raw])
             excluded_ids: set[str] = set()
         else:
-            hydrated = mcp_core.store_get_many(
-                ids=ids, collections=collections, structured=True,
-            )
+            with mcp_core.capturing_owner_lookups() as owner_lookups:
+                hydrated = mcp_core.store_get_many(
+                    ids=ids, collections=collections, structured=True,
+                )
             # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review
             # round 3): the chash-shaped path -- the far more common
             # shape (plain search() results) round 2 left uncovered.
-            # docs_for_chashes + resolve_many, one batched call each
-            # (never one per chash), mirroring _hydrate_tumbler_ids'
-            # own resolve_many use for the tumbler-shaped path.
+            # One batched lookup, never one per chash. nexus-6pfgb.50
+            # (RF-10): it reuses the owner rows and entries the
+            # store_get_many call above already fetched, so the step
+            # asks the catalog for owners once, not twice.
             excluded_ids = _resolve_non_evidentiary_chashes(
-                [str(i) for i in id_list_raw],
+                [str(i) for i in id_list_raw], lookups=owner_lookups,
             )
             # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's
             # decision 3): import-only chunks, resolved from the

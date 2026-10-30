@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import dataclasses
 import json
 import re
 import threading
@@ -6010,6 +6011,40 @@ def without_source_notes() -> Iterator[None]:
     finally:
         _SOURCE_NOTES_ON.reset(token)
 
+#: What one ``store_get_many(structured=True)`` call learned from the catalog, handed to an in-process
+#: caller that needs the same facts, so it does not ask the catalog again (nexus-6pfgb.50, RF-10).
+@dataclasses.dataclass
+class OwnerLookups:
+    """``asked`` is False until the call reaches the owner lookup (so a call that failed or was
+    stubbed leaves the caller on its own lookup). ``owner_rows`` is ``chash_positions`` grouped by
+    chash, tenant-wide and unfiltered (``None``: the catalog could not answer). ``entries`` are the
+    owner entries the source-notes read resolved (``doc_id`` -> ``CatalogEntry``), which covers the
+    owners in each chunk's own collection when notes are on, and none when they are off."""
+
+    asked: bool = False
+    owner_rows: dict[str, list[dict]] | None = None
+    entries: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+_OWNER_LOOKUPS: contextvars.ContextVar[OwnerLookups | None] = contextvars.ContextVar(
+    "nexus_store_get_many_owner_lookups", default=None,
+)
+
+
+@contextlib.contextmanager
+def capturing_owner_lookups() -> Iterator[OwnerLookups]:
+    """Within the block, ``store_get_many(structured=True)`` records the owner rows and entries it
+    fetched into the yielded :class:`OwnerLookups`. The wire result is unchanged. For the plan
+    runner's chash path, which classifies the same chunks by their owners right after hydrating
+    them (nexus-6pfgb.50)."""
+    lookups = OwnerLookups()
+    token = _OWNER_LOOKUPS.set(lookups)
+    try:
+        yield lookups
+    finally:
+        _OWNER_LOOKUPS.reset(token)
+
+
 #: Sentinel: "fetch the owner rows yourself" (``None`` is a fetch that failed).
 _FETCH_OWNER_ROWS: Any = object()
 
@@ -6100,6 +6135,8 @@ def resolve_owner_source_notes(
         return notes
     if not isinstance(entries, dict):
         return notes
+    if (lookups := _OWNER_LOOKUPS.get()) is not None:
+        lookups.entries.update({d: e for d, e in entries.items() if e is not None})
     for i, docs in owners_of.items():
         if any(entries.get(d) is None for d in docs):
             # The manifest lists only live rows, so an owner with no entry is an anomaly (a
@@ -6150,6 +6187,7 @@ def resolve_owner_section_types(
 
     Best-effort: a catalog that is unreachable, or an engine that predates the
     ``chash_positions`` route, leaves every entry on its stored value.
+
     """
     wanted = [i for i, cid in enumerate(chunk_ids) if found[i] and _CHASH_ID.fullmatch(cid or "")]
     if not wanted:
@@ -6601,6 +6639,8 @@ def store_get_many(
             # result carries it, so only that mode pays the lookup).
             found_flags = [entry is not None for entry in entries]
             owner_rows = _owner_rows_by_chash(id_list, found_flags)
+            if (lookups := _OWNER_LOOKUPS.get()) is not None:
+                lookups.asked, lookups.owner_rows = True, owner_rows
             section_types = resolve_owner_section_types(
                 id_list, found_flags, entry_collections, section_types, owner_rows=owner_rows,
             )
