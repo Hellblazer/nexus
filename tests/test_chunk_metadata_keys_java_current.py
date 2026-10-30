@@ -46,7 +46,18 @@ def test_the_row_wording_separates_the_route_check_from_the_database_check():
     text = gen.OUTPUT.read_text(encoding="utf-8")
     assert "ROUTE check admits the" in text and "{@link #CHUNK} keys only" in text
     assert "database CHECK admits" in text
-    assert "admits the\n * {@link #CHUNK} and {@link #ROW} keys on a chunk row" not in text
+    assert "{@link #ROW}" not in text, "ROW is not emitted, so no link to it"
+
+
+def test_generated_java_never_names_the_reapers_quarantine_keys():
+    """EngineOwnedPredicateIntegrationTest.noJavaMainSourceNamesTheTagKeys forbids any main source
+    naming quarantined_by or reaper_quarantined_at outside a comment (the one predicate is
+    Routines.reaperOwnsQuarantinedRow). The ROW class is therefore not generated (develop red at
+    c94cd4b00, 2026-10-30)."""
+    text = gen.OUTPUT.read_text(encoding="utf-8")
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(("*", "/*", "//")))
+    assert "quarantined_by" not in code and "reaper_quarantined_at" not in code
+    assert "ROW" not in gen.CLASSES
 
 
 def test_a_crlf_file_is_caught(tmp_path, monkeypatch):

@@ -105,7 +105,6 @@ class ChunkMetadataKeysTest {
             "CHUNK", ChunkMetadataKeys.CHUNK,
             "DOCUMENT", ChunkMetadataKeys.DOCUMENT,
             "POSITION", ChunkMetadataKeys.POSITION,
-            "ROW", ChunkMetadataKeys.ROW,
             "LEGACY", ChunkMetadataKeys.LEGACY);
         for (Map.Entry<String, Set<String>> e : generated.entrySet()) {
             assertThat(e.getValue())
@@ -113,16 +112,20 @@ class ChunkMetadataKeysTest {
                     + "regenerate with scripts/gen_chunk_metadata_keys_java.py --write", e.getKey(), e.getKey())
                 .isEqualTo(p.metadataKeysByClass().getOrDefault(e.getKey(), Set.of()));
         }
+        // ROW is the one class the generator leaves out on purpose: the reaper's quarantine keys are
+        // engine-owned and EngineOwnedPredicateIntegrationTest forbids a main source naming them.
+        Set<String> emittedOrRow = new HashSet<>(generated.keySet());
+        emittedOrRow.add("ROW");
         assertThat(p.metadataKeysByClass().keySet())
             .as("a class in the table the generator does not emit")
-            .isSubsetOf(generated.keySet());
+            .isSubsetOf(emittedOrRow);
     }
 
     @Test
     void theClassesAreDisjoint() {
         Set<String> seen = new HashSet<>();
         for (Set<String> keys : List.of(ChunkMetadataKeys.CHUNK, ChunkMetadataKeys.DOCUMENT,
-                ChunkMetadataKeys.POSITION, ChunkMetadataKeys.ROW, ChunkMetadataKeys.LEGACY)) {
+                ChunkMetadataKeys.POSITION, ChunkMetadataKeys.LEGACY)) {
             for (String k : keys) {
                 assertThat(seen.add(k)).as("key %s is in two classes", k).isTrue();
             }

@@ -29,7 +29,11 @@ OUTPUT = (
     / "ChunkMetadataKeys.java"
 )
 #: The classes whose metadata keys become a Java set, in the order they are emitted.
-CLASSES = ("CHUNK", "DOCUMENT", "POSITION", "ROW", "LEGACY")
+#: ROW (the reaper's quarantine keys) is deliberately NOT emitted: the engine owns those keys, and
+#: EngineOwnedPredicateIntegrationTest forbids any main source naming quarantined_by or
+#: reaper_quarantined_at outside a comment (the one predicate is Routines.reaperOwnsQuarantinedRow).
+#: The Phase 4 CHECK renders the ROW allow-list from the Python table into DDL instead.
+CLASSES = ("CHUNK", "DOCUMENT", "POSITION", "LEGACY")
 
 _DOC = {
     "CHUNK": "Keys a chunk row keeps: the chash or the embedding model determines them. Stay.",
@@ -66,10 +70,11 @@ def render() -> str:
         "import java.util.Set;\n\n"
         "/**\n"
         " * The chunk-metadata key table by class (RDR-236). The Phase 4 ROUTE check admits the\n"
-        " * {@link #CHUNK} keys only from a client write, refuses or logs the {@link #ROW} keys (the engine\n"
-        " * writes those itself) and names the home of the others in its\n"
-        " * {@code chunk_metadata_key_refused} 422; the database CHECK admits {@link #CHUNK} and\n"
-        " * {@link #ROW}. Only metadata keys are listed here; the table's columns,\n"
+        " * {@link #CHUNK} keys only from a client write, refuses or logs the engine-owned ROW keys (the\n"
+        " * reaper's quarantine stamps, which this file does not name: the engine writes them itself and\n"
+        " * {@code EngineOwnedPredicateIntegrationTest} forbids a main source naming them) and names the\n"
+        " * home of the others in its {@code chunk_metadata_key_refused} 422; the database CHECK admits\n"
+        " * {@link #CHUNK} and the ROW keys. Only metadata keys are listed here; the table's columns,\n"
         " * tables and catalog rows are not. The bypass prefixes (taxonomy, quarantine) are deliberately NOT\n"
         " * generated: a collection-prefix string literal is a parse site that {@code CollectionParseGateTest}\n"
         " * counts down, never up, so the Phase 4 check resolves the bypass another way.\n"
