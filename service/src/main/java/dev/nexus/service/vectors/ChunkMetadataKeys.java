@@ -42,6 +42,7 @@ public final class ChunkMetadataKeys {
         "content_type",
         "extraction_method",
         "extraction_source",
+        "frecency_computed_at",
         "frecency_score",
         "indexed_at",
         "put_at",

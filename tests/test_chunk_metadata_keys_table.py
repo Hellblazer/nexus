@@ -61,7 +61,7 @@ def test_row_counts_per_class_are_pinned():
     counts = {c: sum(1 for r in ckm.rows() if r.cls == c) for c in ckm.CLASSES}
     assert counts == {
         "CHUNK": 2,
-        "DOCUMENT": 24,
+        "DOCUMENT": 25,
         "POSITION": 7,
         "ROW": 7,
         "LEGACY": 12,

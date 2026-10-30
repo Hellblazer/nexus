@@ -110,7 +110,7 @@ domain = [
   "bib_openalex_id", "bib_doi", "bib_enriched_by",
   "indexed_at", "tags", "category", "ttl_days", "put_at",
   "extraction_method", "quality_gate_overridden", "extraction_source",
-  "frecency_score", "source_agent", "session_id", "catalog_doc_id", "content_hash",
+  "frecency_score", "frecency_computed_at", "source_agent", "session_id", "catalog_doc_id", "content_hash",
   "section_title", "section_type", "page_number",
   "line_start", "line_end", "chunk_start_char", "chunk_end_char",
   "quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at",
@@ -198,6 +198,11 @@ emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "
 id = "frecency-score"
 match = { key = "frecency_score" }
 emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "document meta with a computed_at; the scorer reads the attributed owner", remedy = "R3", moved_by = "6pfgb.9" }
+
+[[row]]
+id = "frecency-computed-at"
+match = { key = "frecency_computed_at" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "absent", home = "document meta beside frecency_score; written by every index repo run; read by nothing yet", remedy = "R3", moved_by = "6pfgb.9" }
 
 [[row]]
 id = "source-agent"
