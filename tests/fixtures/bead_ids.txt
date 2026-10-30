@@ -8046,6 +8046,7 @@ nexus-x2g1z.1
 nexus-x2k4b
 nexus-x2x6v
 nexus-x37zt
+nexus-x3eoc
 nexus-x3gig
 nexus-x3gig.1
 nexus-x3m8e
