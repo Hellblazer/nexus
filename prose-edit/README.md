@@ -45,7 +45,8 @@ It runs on macOS and Linux, not Windows.
 A run on a file reviews its edits in the MarkupEditor app, so it needs:
 
 - A MarkupEditor build with suggestions. The upstream change is pull request 32 of `stevengharris/MarkupEditorApp`; until it is merged and released, use a build of the fork. The Unlimited release keeps working without renewal once you have installed it, and so does a build from source. The Evaluation build stops after two weeks.
-- The app running, with Assistants turned on in its settings and this program allowed to talk to it.
+- The app running, with Assistants turned on in its settings at read-write access and this program allowed to talk to it. Without read-write access the app refuses to show suggestions.
+- One MarkupEditor server. If two are registered in Claude Code, the run uses every tool from the one server that offers `propose_edits` and tells you which it is.
 - "Always allow" for the MarkupEditor tools: Claude Code asks the first time each one is used.
 
 A run that finds the app missing or silent stops before it pays for the editor, and tells you how to start it. A run on pasted text (`-`) has no file and needs no app: it asks you in the chat, as before.

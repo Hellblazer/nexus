@@ -14,7 +14,9 @@ import pytest
 
 from tests.prose_edit.conftest import REPO_PROJECT, Prose, t2_titles
 from tests.prose_edit.test_brief import brief_ok, edit
+from tests.prose_edit.test_review import start
 from tests.prose_edit.test_markup_verbs import (
+    E1,
     E5,
     EDITS,
     TEXT,
@@ -246,3 +248,35 @@ def test_a_second_answer_after_a_changed_filtered_proposal_does_not_launder_the_
     review_ok(prose, "answer", "--work", str(work), "--from-file", str(answers))
     proc = decide(prose, work, listing(sugg, {}))
     assert proc.returncode == 1 and "filtered.json changed since translate" in proc.stderr
+
+
+def test_a_path_run_with_no_editor_edits_and_an_answered_query_decides_and_applies(prose: Prose, repo: Path) -> None:
+    """F4: step 10 skips translate when the proposal has no `edits`, so WORK/propose.json never exists. An answer to a
+    query then adds the run's only edit, and `decisions` (run without --from-file: nothing was sent) must not ask for
+    a translate that has nothing to translate."""
+    query = {"n": 1, "anchor": "wakes every ten", "text": "Every ten exactly?"}
+    work, _ = start(prose, repo, [], text=TEXT, queries=[query])
+    assert not (work / "propose.json").exists()
+    answers = write_json(work / "answers.json", [{"answers": "Q1", "old": "picks the oldest job.",
+                                                  "new": "picks the oldest job first."}])
+    n = review_ok(prose, "answer", "--work", str(work), "--from-file", str(answers))["added"][0]["n"]
+    review_ok(prose, "render", "docs/s.md", "--work", str(work), "--genre", "reference-doc")
+    proc = run_review(prose, "decisions", "--work", str(work), "--accept", str(n))
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["accept"] == [n] and out["apply_args"] == ["--accept", str(n)] and out["undecided"] == []
+    # nothing was decided yet: the author's answer is undecided until the chat names it
+    none = json.loads(run_review(prose, "decisions", "--work", str(work)).stdout)
+    assert none["accept"] == [] and none["undecided"] == [n]
+    review_ok(prose, "apply", "--work", str(work), "--dry-run", *out["apply_args"])
+    done = review_ok(prose, "apply", "--work", str(work), *out["apply_args"])
+    assert done["applied"][0]["n"] == n
+    assert "picks the oldest job first." in (repo / "docs" / "s.md").read_text(encoding="utf-8")
+
+
+def test_a_missing_propose_json_is_still_refused_when_an_editor_edit_is_placed(prose: Prose, repo: Path) -> None:
+    """Skipping translate is only safe when the app holds nothing: a placed editor edit with no translate is a
+    skipped step, and the author's decisions in the app would be unmapped."""
+    work, _ = start(prose, repo, [E1], text=TEXT)
+    proc = run_review(prose, "decisions", "--work", str(work))
+    assert proc.returncode == 1 and "translate" in proc.stderr

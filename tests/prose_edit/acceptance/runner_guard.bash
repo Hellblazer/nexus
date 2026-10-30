@@ -20,6 +20,13 @@
 #                         verdict scripts read that file and score the scenario NOT-RUN with the reason. A runner
 #                         that skips a scenario goes through this, never silently (nexus-ger02.10, nexus-scmcs.2.13).
 #   RUNNER_NO_APP_REASON  why a path-run review scenario cannot run headless
+#   runner_prompt_is_path_run PROMPT
+#                         exit 0 when PROMPT starts a prose-edit run on a file (it reviews in the MarkupEditor app);
+#                         1 for a stdin run (`-`), a subcommand (setup, rejections, exemplar) or any other prompt
+#   runner_stops_before_the_app NAME
+#                         exit 0 for the scenarios that are path runs but stop before step 6b by design (canary-fail:
+#                         T2 is down at the build; unmapped: the skill asks for a genre first), so they stay valid
+#                         headless. run-scenario.sh does not guard them.
 #
 # PROSE_EDIT_RUNNER_LOCK overrides the lock path (the tests use it); by default the lock sits in the git common
 # directory, so every worktree of the box sees it.
@@ -29,6 +36,28 @@ RUNNER_COPIES=()
 runner_not_run() {
   mkdir -p "$1" && printf '%s: %s\n' "$2" "$3" >> "$1/not-run.txt"
   printf 'NOT-RUN %s: %s\n' "$2" "$3" >&2
+}
+
+runner_prompt_is_path_run() {
+  local first
+  first="${1%%$'\n'*}"
+  case "$first" in
+    "/prose-edit "*) first="${first#/prose-edit }" ;;
+    "/conexus-prose-edit:prose-edit "*) first="${first#/conexus-prose-edit:prose-edit }" ;;
+    *) return 1 ;;
+  esac
+  first="${first%% *}"
+  case "$first" in
+    ""|-|setup|rejections|exemplar) return 1 ;;
+  esac
+  return 0
+}
+
+runner_stops_before_the_app() {
+  case "$1" in
+    canary-fail|unmapped) return 0 ;;
+  esac
+  return 1
 }
 RUNNER_OWNS_LOCK=""
 RUNNER_LOCK_PATH=""

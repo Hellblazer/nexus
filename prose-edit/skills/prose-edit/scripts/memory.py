@@ -153,7 +153,7 @@ key. Three limits, all deliberate: the key has no position, so a stored cut of "
 quite " also drops that cut in another sentence; a pure insertion (no old text) matches
 the same insertion anywhere in the document; and a case or apostrophe difference inside a
 shared word is not part of the change, so a fix that also re-capitalises a word next to the
-stored words is taken for the stored fix. Dropped edits stay visible: the review copy
+stored words is taken for the stored fix. Dropped edits stay visible: the review
 lists them with their cause. The key is computed from "old" and "new" every time it is
 needed, never stored, so records written before the key existed are read the same way.
 

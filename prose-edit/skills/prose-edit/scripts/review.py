@@ -978,11 +978,21 @@ def cmd_decisions(a: argparse.Namespace) -> Obj:
         raise _user("no session in the work directory: run `review.py render` first")
     session = _load_json(sess_file, "WORK/session.json")
     prop = _load_json(work / "filtered.json", "WORK/filtered.json")
-    propose = _load_json(work / "propose.json", "WORK/propose.json (run `review.py translate` first)")
-    if propose.get("filtered_sha") != _sha(read_bytes(work / "filtered.json")):
-        raise _user("WORK/filtered.json changed since translate, so the edit numbers in the app's suggestions may no "
-                    "longer be these edits; run `review.py translate` again and ask the author to decide again")
     edits = cast("list[Obj]", prop.get("edits") or [])
+    if (work / "propose.json").is_file():
+        propose = _load_json(work / "propose.json", "WORK/propose.json (run `review.py translate` first)")
+        if propose.get("filtered_sha") != _sha(read_bytes(work / "filtered.json")):
+            raise _user("WORK/filtered.json changed since translate, so the edit numbers in the app's suggestions may "
+                        "no longer be these edits; run `review.py translate` again and ask the author to decide again")
+    else:
+        # Step 10 skips translate when the proposal has no `edits`, and the answer route may then add the run's only
+        # edits (the author's own): nothing was sent to the app, so there is nothing to map. An editor edit that is
+        # placed and was never translated is a skipped step, not that case.
+        shown = {int(u["n"]) for u in cast("list[Obj]", session.get("unplaced") or [])}
+        if any(e.get("by") != "author" and int(e["n"]) not in shown for e in edits):
+            raise _user("WORK/propose.json is missing (run `review.py translate` first): the editor's placed edits "
+                        "have not been sent to the app")
+        propose = {"order": [], "refused": []}
     valid = {int(e["n"]) for e in edits}
     mapped: Obj = {"accept": [], "reject": [], "hold": [], "warnings": []}
     held_by_app: set[int] = set()

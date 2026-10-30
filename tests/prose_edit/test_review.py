@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""review.py (RDR-221 Steps 1.1 and 1.5, nexus-ger02.4): marked-up copy, accept by number, exact-match apply.
+"""review.py (RDR-221 Steps 1.1 and 1.5, nexus-ger02.4): placement, accept by number, exact-match apply.
 
 Pure pieces are imported and called. Everything that touches T2 runs brief.py and review.py as
 subprocesses against the real engine substrate (the `prose` fixture), with the project prefix

@@ -74,3 +74,15 @@ def test_apply_asks_t2_through_a_surviving_verb_so_a_down_service_stops_an_accep
                       env={**prose.env, "PROSE_EDIT_NX": f"{sys.executable} {fake}"})
     assert proc.returncode == 3 and "unavailable" in proc.stderr and proc.stdout == ""
     assert (repo / "docs" / "s.md").read_text(encoding="utf-8") == DOC and work.is_dir()  # nothing written, WORK kept
+
+
+def test_no_script_doc_or_ledger_line_still_speaks_of_a_review_copy_or_a_removed_t2_record() -> None:
+    """Gate 2 (S2, S8): the copy is gone, and removing the `viewer` verb left any stored record in T2 untouched."""
+    for script in SCRIPTS.glob("*.py"):
+        text = script.read_text(encoding="utf-8")
+        assert "review copy" not in text and "marked-up copy" not in text, script.name
+    for doc in (ROOT / "tests" / "prose_edit" / "acceptance" / "README.md", ROOT / "tests" / "prose_edit" / "test_review.py"):
+        assert "marked-up copy" not in doc.read_text(encoding="utf-8"), doc.name
+    ledger = (ROOT / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
+    assert "its T2 record are removed" not in ledger
+    assert "the `viewer` verb and its record shape are removed" in ledger

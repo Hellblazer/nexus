@@ -161,10 +161,10 @@ def test_step_12_uses_the_apply_args_then_returns_the_app_to_the_file() -> None:
     s12 = step(12)
     assert "`apply_args` that `REVIEW decisions` printed" in s12
     before(s12, "--dry-run", "Apply these changes?", "without `--dry-run`",
-           "MarkupEditor undo tool", "`hasChanges` is false", "Don't Save", "open_document tool on the document again")
-    assert "plus 3" in s12 and "accepted in the app" in s12
+           "MarkupEditor undo tool", "`hasChanges` is false", "open_document tool on the document again", "Don't Save")
+    assert "accepted + rejected + 3" in s12 and "accepted and rejected in the app" in s12
     assert "app_state tool as in step 6b" in s12
-    assert "after a successful apply and after Cancel" in s12
+    assert "after a successful apply, after \"Cancel\"" in s12
 
 
 def test_the_answer_route_does_not_read_the_app_again() -> None:
@@ -205,3 +205,128 @@ def test_the_readme_describes_the_markupeditor_review_in_plain_words() -> None:
                    "do not save", "Always allow", "pasted text"):
         assert needle in text, needle
     assert "—" not in text  # no em dash
+
+
+# ---------------------------------------------------------------------------
+# Gate 2 fix round (nexus-scmcs.2.14): the stop paths and the app's edge cases
+# ---------------------------------------------------------------------------
+
+ONE_SERVER = "from the one MCP server that offers propose_edits"
+
+
+def s6b() -> str:
+    s6 = step(6)
+    return s6[s6.index("6b."):]
+
+
+def closing() -> str:
+    """The paragraph of step 12 that returns the app to the file."""
+    s12 = step(12)
+    return s12[s12.index("    A path run returns the app to the file"):]
+
+
+def test_the_save_prompt_branch_says_dont_save_never_save() -> None:
+    """F1: a leftover accepted-suggestion buffer is what raises the prompt, and Save rewrites the whole file."""
+    modal = s6b()[s6b().index("When `modalWindow` is not empty"):s6b().index("If `hasChanges` is true")]
+    assert "Don't Save" in modal and 'never "Save"' in modal, modal
+    assert "earlier prose-edit review" in modal and "rewrites the whole file" in modal
+    assert "the author's own" in modal  # the other possible owner of those changes decides first
+
+
+def test_the_expired_sentence_says_dont_save_never_save() -> None:
+    s12 = step(12)
+    expired = s12[s12.index("On exit 1 with `expired`"):s12.index("On exit 3, or exit 1 with `run apply again`")]
+    assert "Don't Save" in expired and 'never "Save"' in expired, expired
+    assert "returns the app to the file" in expired  # suggestions may still sit in the app
+
+
+def test_every_stop_after_suggestions_were_sent_runs_the_return_to_the_file_first() -> None:
+    s12 = step(12)
+    other = s12[s12.index("On any other failure"):s12.index("A successful apply has already deleted WORK")]
+    assert "returns the app to the file" in other, other
+    cancel = s12[s12.index('On "Cancel"'):s12.index("The script refuses a real apply")]
+    assert "returns the app to the file" in cancel, cancel
+
+
+def test_all_the_markupeditor_tools_come_from_the_one_server_that_offers_propose_edits() -> None:
+    """C1: two MarkupEditor servers can be registered; opening through one and polling through the other is a false
+    'the app is not listening'."""
+    assert ONE_SERVER in s6b() and "name that server to the author" in s6b().lower()
+    assert ONE_SERVER in closing()
+    rules = TEXT[TEXT.index("## Rules"):TEXT.index("## Asking the author")]
+    assert ONE_SERVER in rules
+    setup = TEXT[TEXT.index("3b."):TEXT.index("\n4. Genres")]
+    assert ONE_SERVER in setup
+    # the server's own README sentence
+    assert "one server" in README.read_text(encoding="utf-8").lower()
+
+
+def test_the_read_write_requirement_is_told_to_the_author_everywhere_the_app_is() -> None:
+    """S1: propose_edits needs read-write access; a read-only app passes the 6b probes."""
+    assert "read-write" in s6b()
+    assert "read-write" in TEXT[TEXT.index("3b."):TEXT.index("\n4. Genres")]
+    assert "read-write" in README.read_text(encoding="utf-8")
+    assert "read-write" in step(10)  # the propose_edits failure at item 3 names what to change
+
+
+def test_6b_polls_up_to_30_times_and_reports_the_last_state() -> None:
+    assert "up to 30 times" in s6b() and "ten times" not in TEXT
+    assert "last state" in s6b() and "retry" in s6b().lower()
+
+
+def test_6b_says_the_authors_own_unsaved_changes_are_theirs_to_keep_or_discard() -> None:
+    """S2a: after a fresh open the only hasChanges is the author's own work on this file."""
+    branch = s6b()[s6b().index("If `hasChanges` is true"):s6b().index("Go on to step 7")]
+    for needle in ("the author's own", "Don't Save", "lost", "save them first", "rewrites the file's layout"):
+        assert needle in branch, needle
+
+
+def test_6b_tells_the_author_not_to_type_in_the_app_until_the_review_ends() -> None:
+    """S2b: the editor runs for minutes with the file open and clean; typing then is discarded later."""
+    assert "do not type in the app until the review ends" in s6b()
+
+
+def test_6b_refuses_html_before_it_opens_anything() -> None:
+    """S6: html review in the app is untested; refuse it with a message before the app is touched."""
+    text = s6b()
+    before(text, ".html", ".htm", "not supported", "rmtmp", "Call the open_document tool")
+
+
+def test_the_closing_paragraph_reads_app_state_first_and_skips_undo_for_another_file() -> None:
+    """S2c and S3: undo also undoes the author's own changes, and in another document."""
+    cp = closing()
+    before(cp, "app_state", "`url`", "not the document", "do not call the undo tool", "undo tool")
+    assert "accepted + rejected + 3" in cp
+    assert "at most as many times as the author accepted in the app plus 3" not in cp
+    assert "when `hasChanges` is already false" in cp or "`hasChanges` is already false" in cp
+
+
+def test_the_closing_paragraph_says_dont_save_at_the_reopen_where_the_prompt_appears() -> None:
+    """S3: the prompt appears when open_document reloads the file, so that is where Don't Save is said."""
+    cp = closing()
+    assert cp.index("call the open_document tool on the document again") < cp.index("Don't Save") \
+        < cp.index("app_state tool as in step 6b")
+    assert 'never "Save"' in cp
+    assert ONE_SERVER in cp
+
+
+def test_the_closing_paragraph_reopens_after_any_real_apply_but_undoes_only_what_was_sent() -> None:
+    """F3: apply writes the file while the app shows the old text; that holds with sent 0 and for chat-only accepts."""
+    cp = closing()
+    assert "any real apply" in cp and "whether or not suggestions were sent" in cp
+    assert "undo only when suggestions were sent" in cp or "Undo only when suggestions were sent" in cp
+    assert "`sent` 0" in cp
+
+
+def test_a_stale_get_document_read_tells_the_model_to_open_the_file_again() -> None:
+    """Review S3: a url mismatch must end in open_document, not in a stopped turn."""
+    item1 = step(10)[step(10).index("1. Call the MarkupEditor get_document"):step(10).index("2. Run `REVIEW translate")]
+    assert "open_document" in item1 and "step 6b" in item1
+
+
+def test_get_document_pages_are_about_40_blocks_and_a_saved_reply_is_copied_as_a_file() -> None:
+    """S5: a 200-block page does not stay inline; the saved file is copied, never retyped."""
+    item1 = step(10)[step(10).index("1. Call the MarkupEditor get_document"):step(10).index("2. Run `REVIEW translate")]
+    assert "`limit` 40" in item1 and "`limit` 200" not in TEXT
+    assert "saves a reply to a file" in item1 and "`cp '<saved file>' '<blocks>'`" in item1
+    assert "a file copy" in item1
