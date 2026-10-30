@@ -731,12 +731,15 @@ in `232-research-3`. Behavioral prototype evidence is `232-research-6` through
   primary chunks (of 41 to 135 in the near-miss control), and 4 of 6 answers said
   a requested section was not in their input (nexus-jf9wg). Changed 2026-10-30: a
   request naming exactly one source now reads up to 44 chunks or the character
-  budget, and up to 84 when its retrieval is narrowed to that source (section 2,
-  the dated departures). The 44 was measured live in two re-measures, one run per
+  budget, and up to 82 of an 88-slot share when its retrieval is confined to that
+  document (section 2, the dated departures). The 44 was measured live in two re-measures, one run per
   request, in-sample and scored by the implementing session, not blind: S01
   +0.27 USD, S04 +0.15 USD and +44 s, and no facet scored covered while the
-  answer said it was missing (0 of 15); the 84 and the narrowing are pinned
-  offline and not measured live, so this stays partial.
+  answer said it was missing (0 of 15). The 84-chunk, 90-slot form was measured once (re-measure 3,
+  2026-10-30: the largest read was 73 chunks and the 60,000-character cap bound it, so 84 was never
+  reached) and then replaced by 82 of 88 with 12 for the repair. The 82 and the document confinement are
+  pinned offline, and the confinement ran once end to end on the gate engine (the golden journey), never
+  on the cloud, so this stays partial.
 - [x] **A3 — existing dispatch can support facet coverage at a new runner-owned
   pre-reduction boundary.** **Status**: Verified live 2026-10-29 (research 24);
   earlier, partially verified (research 8). **Method**: Source search plus a
@@ -1069,15 +1072,23 @@ not widened to the collection, which round 3 did) and the diagnostics and the co
 The slots follow: the primary stream takes 88 of the reducer's 100 inputs (`RESERVED_SHARE_NARROWED`),
 82 chunks after 6 lifecycle records (`max_narrowed_source_items`), and the repair's supplement takes the other 12
 (`MAX_REPAIR_ITEMS`): 88 + 12 = 100, pinned by a test. *Limits, stated where a reader looks:* a document over the
-60,000-character primary budget relies on the confined repair and the confined secondary search for the rest of its
-chunks, and a repair or search that misses leaves them unread; a document with more than 3,000 manifest rows has a
+60,000-character primary budget relies, in `engine_filter` mode, on the confined repair and the confined secondary
+search for the rest of its chunks, and in `steps_not_run` mode on the repair alone (a 40-wide unfiltered page filtered
+by chunk hash, which adds only chunks that page happens to hold); a repair or search that misses leaves them unread; a document with more than 3,000 manifest rows has a
 sampled chunk-hash set and the disclosure says so; the cross-document context a question about one RDR in passing would have
 found is gone and the disclosure says so; an inferred source with documents of the same number in other projects is not
 narrowed (note D); the primary read of a long narrowed document is about 70,000 characters with headers, over the
 continuation prompt cap of 60,000 (`MAX_CONTINUATION_PROMPT_CHARS`), so such a run takes the headless path and not
 the continuation hand-off (a test pins it; a separate cap for narrowed runs is Sam's call); an engine without the flag
-runs no secondary step, which re-measure 3 suggests costs little (1 of 170 secondary anchors lay in the named document
-on G06) but is not measured live. Not measured live after this change.
+runs no secondary step. Until engine-service-v0.1.171 is deployed and the public edge allowlists `vector_search_chash_allow_supported` (conexus-zvbp), the cloud reads the flag absent, so every cloud one-source synthesis or `unknown` request runs `steps_not_run`: no secondary retrieval step, and a repair that asks a 40-wide unfiltered page and keeps the hits whose chunk hash is in the document's manifest. That fallback has never run live. The quality to expect there is by analogy to re-measure 3's
+collection form alone: that run found 1 of 170 secondary anchors in the named document across the seven requests
+(G06 alone 1 of 25), so dropping the secondary streams loses little there; but that datum counts the unfiltered
+collection search, not what the in-document filtered search or the 40-wide repair would add for the unread
+remainder of a document (S04 read 63 of its 135 rows). A verbatim chunk shared with a sibling document is in the
+document by its hash and counts as in-document. The capability flag is cached for 300 seconds; an engine rolled
+back, or an older replica, inside that window would ignore the key and answer 200, so the client also drops any
+returned row outside the allow list and reports the count (`chash_allow_dropped` on the step, `rows_outside_allow`
+in the run's scope diagnostics). Pinned offline and run once on the gate engine; not measured live after this change.
 
 *D. Decided by Sam, 2026-10-30 (nexus-jypmj): an inferred resolution narrows only when no other project carries the number.*
 The resolver may pick the document by the session's project (`inferred`). Round 3 narrowed on any resolved source,
@@ -1096,8 +1107,9 @@ and its summarize terminal produced both facet mismatches of that set. abstract-
 *Known limits, 2026-10-30.* (a) The 44-item single-source cap, which still applies
 to a one-source request that is not narrowed, binds on large documents: S04 (135
 chunks) read 44 and used 40,258 of the 60,000 characters, because the reserved
-share is 50 less the 6 lifecycle records; a narrowed request now takes 84 (B
-above), not measured live. (b) On S04 the
+share is 50 less the 6 lifecycle records; a request confined to its document now takes 82 of an 88-slot share (note C; the 84 of 90 in
+note B above was measured once, in re-measure 3, where the character cap bound the read at 73 chunks, and
+then replaced), pinned offline and not measured live. (b) On S04 the
 ledger marks all three facets covered while the answer names missing material
 under each: the ledger's facet grain is coarser than the prose (nexus-dfrfp;
 calibration of the caps is nexus-2dc8b). (c) The content labeller carried
@@ -2635,3 +2647,4 @@ remains Sam's.
 - 2026-10-30: Incident-class re-measure and three changes after it, two decisions by Sam (nexus-4xmpv, nexus-jf9wg). (1) A request that names exactly one source does not admit abstract-themes either (Sam; declared `strategy` dimension `abstract-themes`). (2) The one-source rule also applies to an `unknown`-kind request (Sam). (3) The content labeller no longer reads a fence repeated by chunk overlap as an opening fence. Decision text changed: section 1 (a dated note after the 2026-10-30 one-source note, the old residual marked closed, and the known limits: the 44-item cap on S04, the ledger facet grain against the prose, the labeller defect), Key Discoveries (the re-measure entry). The re-measure itself is one run each of G06 and S01-S06 at 3.4167 USD and is in-sample. The post-mortem and CHANGELOG are updated. The status is not changed here.
 - 2026-10-30: Round 3 of nexus-4xmpv, two decisions by Sam, and review fixes. (A) A synthesis or `unknown` request that names exactly one source narrows every retrieval step of every plan to that source's collection and owner, replacing the strategy refusal (`SINGLE_SOURCE_EXCLUDED_STRATEGIES`, the reason `single_source_synthesis` and the few-shot argument are removed; they were never in a release and the two notes that described them are marked superseded, not deleted); the verdict is the envelope's `single_source_narrowing`; "names exactly one source" is one `RequestCoverage` property. (B) A narrowed request takes 84 chunks of a 90-slot share. Also: the content labeller believes an overlap only in the chunker's layout (a regression of the first form, which read a repeated closing block as overlap), at a flat cost per chunk, and restarts its fence across a gap; the stale "not re-measured" and "estimated 0.06 to 0.07 USD" sentences carry the measured costs; a Key Discoveries entry records re-measure 2. Decision text changed: section 1 (two decision notes, the known limits), section 2 (a dated departure). Status unchanged.
 - 2026-10-30: Document confinement and its review fixes (nexus-jypmj; four decisions by Sam). (C) A synthesis or `unknown` request that names exactly one source confines every secondary retrieval step to the document: the engine's `chash_allow` filter on `search` and `query` (when `vector_search_chash_allow_supported`), the document's address on `traverse`, no dispatch for a step whose route has no filter or on an engine without the flag; the collection-level narrowing text of notes A and B is marked superseded and kept. (D) An inferred source narrows only when no other project carries the number; a fallback-resolved source narrows. (E) The citation-traversal exclusion is restored (abstract-themes stays allowed). Disclosure: the false "other documents were not read" is replaced by the document, the confinement, the primary read's S of M and the repair cap. Slots 88, 82 and 12. Also: a caller scope that is the document's own address is kept; the stale G06 and S04 figures are corrected; the continuation prompt cap's effect on a long narrowed read is stated; a faulted narrowing is an `applied: false` verdict; re-measure 3 is recorded in Key Discoveries. Decision text changed: section 1 (notes C, D, E, the supersession of A and B, the active-project paragraph), section 2 (a dated replacement of the 84, 90 and 10 departure), Key Discoveries. Status unchanged.
+- 2026-10-30: Review round of the document confinement (nexus-jypmj). The stale 84 and 90 sites (assumption A2's status, known limit (a)) now say 82 of 88 with 12 for the repair and that the 84-of-90 form was measured once and replaced; note C states what the cloud runs today (`steps_not_run` until engine-service-v0.1.171 and the edge allowlist, conexus-zvbp, are live; the fallback has never run live; a document over the primary budget then adds only repair chunks; the quality expectation is by analogy to re-measure 3's collection form only), corrects the 1-of-170 attribution (across the seven requests; G06 alone 1 of 25), qualifies the over-budget limit by mode, and states that a verbatim chunk shared with a sibling counts as in-document and that the 300 s capability-flag window is covered by a response-side check of the returned rows. Code fixes in the same round: the search tool's page cache keys on the allow list, the client drops and counts rows the engine returns outside it, `store_get_many` is cut in every id form, and `sampled` counts rows a cap dropped. Decision text changed: section 1 (note C, known limit (a)), assumption A2's status. Status unchanged.

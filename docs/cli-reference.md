@@ -5773,10 +5773,16 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `traverse` walks under the document's address; a step on a route that takes no such filter (`search_metadata_scoped`,
   `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`, a `query` with `author`, `content_type`,
   `follow_links` or `subtree`) is not dispatched. `steps_not_run` when the engine does not advertise the flag (an
-  older engine, or an edge that trims `/version`): no secondary retrieval step and no traversal is dispatched, and
+  older engine, or an edge that trims `/version`; until `engine-service-v0.1.171` and the edge allowlist
+  (conexus-zvbp) are live that is every cloud request, and this fallback has not run live): no secondary retrieval step and no traversal is dispatched, and
   each skipped step is listed in `scope_diagnostics` with `scope_kind: document` and outcome `document_confined`
   (a step that carried the filter reports `document_filtered`, the traversal `document_scoped`). The coverage
-  repair asks under the same filter and keeps only hits whose chunk hash is in the document's manifest. Only a
+  repair keeps only hits whose chunk hash is in the document's manifest (a verbatim chunk shared with a sibling
+  document counts as in-document); in `engine_filter` mode it asks under the same filter, and in `steps_not_run`
+  mode it asks a 40-wide unfiltered page and filters it by hash. When a confined search returns a row outside
+  the document's hashes (the engine ignored the key, inside the 300 s window the capability flag is cached for),
+  the row is dropped and counted: `chash_allow_dropped` on the step output and `rows_outside_allow` in its
+  `scope_diagnostics` entry. Only a
   request the rule concerns has the object, `{applied, source, tumbler, document, collection, owner, caller_scope,
   effective_scope, reason, confinement, read_chunks, manifest_chunks, allow_chunks, allow_sampled}`; otherwise it is
   `null` (a lookup, a comparison, a request that names no source or several). `effective_scope` is the document's
@@ -5790,7 +5796,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   to 12 more chunks of the same document, or the reason. The primary read of a confined run takes up to 82 chunks
   (`max_narrowed_source_items` in `primary_evidence.caps`) of 88 reserved slots (the T2 records take 6); the
   coverage repair's 12 supplement items take the rest of the reducer's 100 input slots. A document longer than
-  the 60,000-character primary budget relies on the confined repair and search for the rest of its chunks, and its
+  the 60,000-character primary budget relies, in `engine_filter` mode, on the confined repair and search for the
+  rest of its chunks and, in `steps_not_run` mode, on the repair alone, and its
   primary read of about 70,000 characters with headers is over the continuation prompt cap of 60,000, so such a
   run takes the headless path, not the continuation handoff. One source that is not narrowed (a lookup) keeps 44
   and the 50-slot share. The price: a request that names one RDR in passing loses the cross-document context its
