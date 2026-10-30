@@ -23,7 +23,7 @@ from nexus.cli import main
 from nexus.db.t2 import T2Database
 from tests._catalog_fixture_ops import documents_by_file_path
 
-pytestmark = pytest.mark.t2_tenant
+pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
 
 
 def _project(root: Path) -> list[Path]:
