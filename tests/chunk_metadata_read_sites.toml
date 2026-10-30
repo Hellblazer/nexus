@@ -288,14 +288,11 @@ doc_id = 3
 [sites."src/nexus/search_engine.py::_attach_from_chash_positions"]
 doc_id = 2
 
-[sites."src/nexus/search_engine.py::_contradiction_candidates"]
-source_agent = 2
-
 [sites."src/nexus/search_engine.py::_display_doc_ids"]
 doc_id = 2
 
-[sites."src/nexus/search_engine.py::_flag_contradictions"]
-source_agent = 2
+[sites."src/nexus/search_engine.py::_row_agents"]
+source_agent = 1
 
 [sites."src/nexus/search_engine.py::apply_file_diversity_cap"]
 doc_id = 1
