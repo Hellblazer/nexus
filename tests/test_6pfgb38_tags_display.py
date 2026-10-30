@@ -190,13 +190,14 @@ def test_list_shows_each_chunks_tags_from_the_catalog_with_the_row_as_fallback(w
 @pytest.mark.parametrize("lines", [_list_lines_mcp, _list_lines_cli], ids=["mcp", "cli"])
 def test_list_makes_one_lookup_for_the_page(world, lines, monkeypatch) -> None:
     calls: list[list[str]] = []
-    real = store_hook.catalog_tags_for_chunks
+    real = store_hook.live_owner_entries
 
     def counting(collection, chashes, **kw):
         calls.append(list(chashes))
         return real(collection, chashes, **kw)
 
-    monkeypatch.setattr(store_hook, "catalog_tags_for_chunks", counting)
+    # nexus-6pfgb.13: the page's tags come from the one owner lookup every field of the display shares.
+    monkeypatch.setattr(store_hook, "live_owner_entries", counting)
     lines()
     assert len(calls) == 1 and set(calls[0]) == {H_A, H_B, H_FILE}
 

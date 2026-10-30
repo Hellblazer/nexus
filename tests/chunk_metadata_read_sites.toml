@@ -222,15 +222,23 @@ source_path = 2
 title = 2
 ttl_days = 1
 
+# nexus-6pfgb.13: store_get shows the owning notes' own tags, ttl, index date and title (note_display, from
+# the catalog entries). The row speaks only as the legacy fallback the bead names: a chunk with at most one
+# owner and no catalog value (an unreadable catalog or an unowned chunk, an indexed file's tags until
+# Phase 3, a keyless note stored before nexus-6pfgb.5). ttl_days is read here for that fallback (it
+# is the one new listed read: a keyless sole owner's TTL, shown only when the owner wrote the row).
 [sites."src/nexus/mcp/core.py::store_get"]
 extraction_method = 1
 indexed_at = 1
 tags = 1
 title = 1
+ttl_days = 1
 
 [sites."src/nexus/mcp/core.py::store_get_many"]
 section_type = 1
 
+# nexus-6pfgb.13: store_list shows each chunk's title, tags, ttl and index date from its owning notes;
+# the four reads below are the same legacy fallback as store_get's (at most one owner, no catalog value).
 [sites."src/nexus/mcp/core.py::store_list"]
 indexed_at = 1
 tags = 1

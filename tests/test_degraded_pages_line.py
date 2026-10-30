@@ -58,16 +58,27 @@ class _StubT3:
 
 
 class _StubReader:
-    """``resolve_many`` over ``{tumbler: meta}``; counts the lookups so a test can see them."""
+    """The catalog read the display makes: ``docs_for_chashes`` then ``resolve_many``, over the
+    world's ``holders`` (chash -> [(tumbler, title)]) and ``metas`` (tumbler -> meta). Counts the
+    lookups so a test can see them."""
 
-    def __init__(self, metas: dict[str, dict]) -> None:
-        self.metas = metas
+    def __init__(self, state) -> None:
+        self.state = state
         self.resolved: list[list[str]] = []
         self.closed = False
 
+    def docs_for_chashes(self, chashes: list[str]) -> dict:
+        self.state.lookups += 1
+        return {c: [t for t, _title in self.state.holders[c]] for c in chashes if c in self.state.holders}
+
     def resolve_many(self, tumblers: list[str]) -> dict:
         self.resolved.append(list(tumblers))
-        return {t: SimpleNamespace(meta=self.metas[t]) for t in tumblers if t in self.metas}
+        titles = {t: title for hs in self.state.holders.values() for t, title in hs}
+        return {
+            t: SimpleNamespace(tumbler=t, title=titles.get(t, ""), meta=self.state.metas[t], indexed_at="",
+                               physical_collection="")
+            for t in tumblers if t in self.state.metas
+        }
 
     def close(self) -> None:
         self.closed = True
@@ -79,12 +90,8 @@ def world(monkeypatch):
     t3 = _StubT3()
     state = SimpleNamespace(holders={}, metas={}, reader=None, lookups=0)
 
-    def live_holders(collection, chashes):
-        state.lookups += 1
-        return {c: list(state.holders[c]) for c in chashes if c in state.holders}
-
     def make_reader():
-        state.reader = _StubReader(state.metas)
+        state.reader = _StubReader(state)
         return state.reader
 
     monkeypatch.setattr(mcp_infra, "_collections_cache", mcp_infra._collections_cache)
@@ -94,10 +101,8 @@ def world(monkeypatch):
     monkeypatch.setattr(store_hook, "split_note_text", lambda *a, **k: None)
     monkeypatch.setattr(store_cmd, "_split_note_text", lambda *a, **k: None)
     monkeypatch.setattr(store_hook, "catalog_chashes_for_title", lambda *a, **k: [])
-    monkeypatch.setattr(store_hook, "live_holders_of_chashes", live_holders)
-    # nexus-6pfgb.38: the tags lookup opens a catalog reader of its own; these pins count the readers the
-    # degraded line opens, so the tags lookup is stubbed out (tests/test_6pfgb38_tags_display.py covers it).
-    monkeypatch.setattr(store_hook, "catalog_tags_for_chunks", lambda *a, **k: {})
+    # nexus-6pfgb.13: ONE owner lookup (docs_for_chashes, resolve_many) serves the title, the tags, the
+    # dates and the Degraded line, so the stub reader sits under it and counts the chunk-to-document reads.
     monkeypatch.setattr(catalog_factory, "make_catalog_reader", make_reader)
     state.t3 = t3
     yield state
@@ -184,11 +189,12 @@ def test_the_mcp_reuses_the_holders_it_already_looked_up(world) -> None:
     assert world.lookups == 1, "one chunk-to-document lookup for the title and the Degraded line together"
 
 
-def test_a_note_chunk_makes_no_catalog_lookup_for_the_line(world) -> None:
-    """A chunk without an ``extraction_method`` is not a PDF chunk: no map to look for."""
+def test_a_note_chunk_makes_no_catalog_lookup_of_its_own_for_the_line(world) -> None:
+    """A chunk without an ``extraction_method`` is not a PDF chunk: no map to look for. The one owner
+    lookup the display makes for its title, tags and dates is all the catalog is asked."""
     out = _mcp_get(NOTE_CHASH)
     assert "Degraded:" not in out
-    assert world.reader is None, "no catalog reader was opened for the degraded line"
+    assert world.lookups == 1 and len(world.reader.resolved) <= 1
 
 
 def test_a_catalog_error_leaves_get_working_in_both_surfaces(world, monkeypatch) -> None:
@@ -242,7 +248,7 @@ def test_json_carries_degraded_pages_only_when_some_document_has_any(world) -> N
     world.reader, world.lookups = None, 0
     out = json.loads(CliRunner().invoke(main, ["store", "get", NOTE_CHASH, "--collection", "art", "--json"]).stdout)
     assert "degraded_pages" not in out
-    assert world.reader is None and world.lookups == 0, "a note makes no catalog lookup"
+    assert world.lookups == 1, "a note makes the one owner lookup of the display and none for the Degraded line"
 
 
 def test_unsorted_pages_print_sorted(world) -> None:
@@ -257,22 +263,22 @@ def test_a_chunk_nobody_holds_prints_no_line_and_looks_the_holders_up_once(world
     world.metas = {"1.1.1": {"extraction_pages": DEGRADED}}
     out = _mcp_get()
     assert "Degraded:" not in out and "Extractor:  mineru+degraded" in out
-    assert world.lookups == 1 and world.reader is None
+    assert world.lookups == 1 and world.reader.resolved == [], "no owner, so nothing was resolved"
 
 
 # ── fix round 1: edges the first round left unpinned ─────────────────────────
 
 
 def test_a_get_asked_by_title_still_prints_the_degraded_line(world) -> None:
-    """Asked by title the MCP has not looked the holders up (``holders`` is ``None``), so the helper
-    must do its own lookup; passing an empty list instead would drop the line silently."""
+    """Asked by title the display still makes its one owner lookup (nexus-6pfgb.13) and the Degraded
+    line reads the entries from it: dropping them would lose the line silently."""
     world.holders = {CHASH: [("1.1.1", "Some Paper")]}
     world.metas = {"1.1.1": {"extraction_pages": DEGRADED}}
     world.t3.find_ids_by_title = lambda name, title: [CHASH] if title == "Some Paper" else []
     out = mcp_core.store_get(doc_id="Some Paper", collection="art")
     assert "Extractor:  mineru+degraded" in out and "Title:      Some Paper" in out, out
     assert LINE in out.splitlines()
-    assert world.lookups == 1, "the helper looked the holders up itself"
+    assert world.lookups == 1, "one lookup serves the title, the tags, the dates and the Degraded line"
 
 
 def test_a_chunk_held_by_untitled_documents_is_labelled_by_tumbler(world) -> None:
@@ -304,7 +310,7 @@ def test_the_catalog_reader_is_closed_when_the_lookup_fails(world, monkeypatch) 
     assert world.reader is not None and world.reader.closed
 
 
-def test_a_catalog_fault_is_logged_at_warning_naming_the_chunk(world, monkeypatch) -> None:
+def test_a_catalog_fault_is_logged_at_warning_naming_the_collection(world, monkeypatch) -> None:
     """A swallowed fault leaves ``Extractor: mineru+degraded`` with no Degraded line, which reads
     like a clean document: the log is the only place it shows."""
     from structlog.testing import capture_logs
@@ -317,5 +323,5 @@ def test_a_catalog_fault_is_logged_at_warning_naming_the_chunk(world, monkeypatc
     monkeypatch.setattr(catalog_factory, "make_catalog_reader", boom)
     with capture_logs() as cap:
         _mcp_get()
-    (event,) = [e for e in cap if e.get("event") == "degraded_pages_lookup_failed"]
-    assert event["log_level"] == "warning" and event["chash"] == CHASH and event["collection"] == world.t3.name
+    (event,) = [e for e in cap if e.get("event") == "live_owner_entries_failed"]
+    assert event["log_level"] == "warning" and event["chashes"] == 1 and event["collection"] == world.t3.name

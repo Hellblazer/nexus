@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -241,8 +241,17 @@ def note_content_hash(content: str, manifest_metadatas: list[dict]) -> str:
 def manifest_doc_index(
     collection: str,
 ) -> tuple[dict[str, tuple[str, ...]], dict[str, str], dict[str, str], str]:
+    """``(chash -> owning tumblers, tumbler -> title, tumbler -> head chash, reason)`` for every
+    manifested document in *collection*: :func:`_manifest_doc_index_full` without the index dates."""
+    owners, titles, heads, _stamps, reason = _manifest_doc_index_full(collection)
+    return owners, titles, heads, reason
+
+
+def _manifest_doc_index_full(
+    collection: str,
+) -> tuple[dict[str, tuple[str, ...]], dict[str, str], dict[str, str], dict[str, str], str]:
     """``(chash -> owning tumblers, tumbler -> title, tumbler -> head chash,
-    reason)`` for every manifested document in *collection*.
+    tumbler -> indexed_at, reason)`` for every manifested document in *collection*.
 
     A chash maps to EVERY document whose manifest holds it (nexus-sis0m.5):
     identical chunk text in one collection is one T3 row by design, so two
@@ -281,7 +290,7 @@ def manifest_doc_index(
     try:
         reader = make_catalog_reader()
         if reader is None:
-            return {}, {}, {}, "no catalog reader"
+            return {}, {}, {}, {}, "no catalog reader"
         entries = list(reader.list_by_collection(collection) or [])
         titles = {
             str(t): (getattr(e, "title", "") or "")
@@ -300,9 +309,14 @@ def manifest_doc_index(
                 holders = owners.setdefault(row.chash, [])
                 if str(tumbler) not in holders:
                     holders.append(str(tumbler))
-        return {c: tuple(t) for c, t in owners.items()}, titles, heads, ""
+        stamps = {
+            str(t): (getattr(e, "indexed_at", "") or "")
+            for e in entries
+            if (t := getattr(e, "tumbler", ""))
+        }
+        return {c: tuple(t) for c, t in owners.items()}, titles, heads, stamps, ""
     except Exception as exc:  # noqa: BLE001 — a degraded listing is reported, never raised
-        return {}, {}, {}, f"catalog unreadable ({exc.__class__.__name__})"
+        return {}, {}, {}, {}, f"catalog unreadable ({exc.__class__.__name__})"
     finally:
         if reader is not None:
             try:
@@ -325,6 +339,9 @@ class DocumentListing:
     handle: str
     chunks: int
     entry: dict
+    #: The document's own ``indexed_at`` (the catalog column, nexus-6pfgb.13), ``""`` for a chunk-keyed
+    #: row with no catalog document; the listing then shows the chunk row's.
+    indexed_at: str = ""
 
 
 def group_documents(
@@ -341,7 +358,7 @@ def group_documents(
     :func:`manifest_doc_index` gives: two copies of one grouping loop had to
     be fixed twice.
     """
-    owners, doc_titles, doc_heads, degraded = manifest_doc_index(collection)
+    owners, doc_titles, doc_heads, doc_stamps, degraded = _manifest_doc_index_full(collection)
     seen: dict[str, dict] = {}
     counts: dict[str, int] = {}
     offset = 0
@@ -362,6 +379,7 @@ def group_documents(
             handle=doc_heads.get(key) or e.get("id") or key,
             chunks=counts[key],
             entry=e,
+            indexed_at=doc_stamps.get(key, ""),
         )
         for key, e in seen.items()
     ]
@@ -1915,24 +1933,15 @@ def live_holders_of_chashes(collection: str, chashes: list[str]) -> dict[str, li
         reader.close()
 
 
-def catalog_tags_for_chunks(
-    collection: str, chashes: list[str], *,
-    holders: dict[str, list[tuple[str, str]]] | None = None, title: str | None = None,
-) -> dict[str, list[str]]:
-    """``chash -> tags`` for the chunks of *collection* whose live holders record tags in their catalog
-    ``meta`` (nexus-6pfgb.38, RDR-236 RF-17): the display read of ``store_get`` / ``store_list``.
+def live_owner_entries(collection: str, chashes: list[str]) -> dict[str, list[Any]] | None:
+    """``chash -> [CatalogEntry, ...]`` of the LIVE documents in *collection* holding each chash, from ONE
+    ``docs_for_chashes`` and ONE ``resolve_many`` (nexus-6pfgb.13): the owner lookup every note display
+    (``store_get``, ``store_list``, ``nx store get/list``) shares, so a page of chunks costs one catalog
+    read however many fields it shows. A chash nobody holds maps to ``[]``.
 
-    A chunk row carries the last writer's tags; each holding note carries its own, as an array (a
-    legacy string reads as its split array). A chunk held by several notes shows the union in
-    first-seen order. A chunk is OMITTED when no holder carries a ``tags`` key at all (an indexed
-    file, a note stored before nexus-6pfgb.5), which is the caller's cue to fall back to the row; a
-    holder whose array is empty (the retraction) counts as having the key, so the answer is ``[]``
-    and the row's stale tags stay hidden. *title*, when given, keeps only holders with that title
-    (a ``store_get`` asked by title wants that note's tags). *holders* is what
-    :func:`live_holders_of_chashes` already returned, to save the ownership lookup.
-
-    Best-effort like :func:`live_holders_of_chashes`: ``{}`` when the catalog is unavailable or
-    unreadable, since this only decorates a listing.
+    ``None`` (not ``{}``) when the catalog is unavailable or unreadable: "could not look" is not "no
+    owner", and a caller must not read it as a ghost chunk whose row is the only record. A display is
+    best-effort, so this never raises.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -1940,46 +1949,197 @@ def catalog_tags_for_chunks(
         return {}
     try:
         reader = make_catalog_reader()
-    except Exception:  # noqa: BLE001 — decorating a listing is best-effort
-        _log.debug("catalog_tags_reader_unavailable", exc_info=True)
-        return {}
+    except Exception:  # noqa: BLE001 — decorating a display is best-effort
+        # Warning, not debug: the display then falls back to the chunk row's values (the last writer's)
+        # and omits the Degraded line, which reads like a clean document; the log is the only place it shows.
+        _log.warning("live_owner_entries_failed", collection=collection, chashes=len(chashes), exc_info=True)
+        return None
     if reader is None:
-        return {}
+        return None
     try:
-        if holders is None:
-            owners = {c: [str(t) for t in ts] for c, ts in _docs_for_chashes_isolating(reader, list(chashes)).items()}
-        else:
-            owners = {c: [t for t, _title in hs] for c, hs in holders.items()}
-        tumblers = sorted({t for ts in owners.values() for t in ts})
-        entries = reader.resolve_many(tumblers) if tumblers else {}
-        out: dict[str, list[str]] = {}
-        for chash in chashes:
-            tags: list[str] = []
-            keyed = False
-            for tumbler in owners.get(chash, []):
-                entry = entries.get(tumbler)
-                if entry is None or (entry.physical_collection or "") not in ("", collection):
-                    continue
-                if title is not None and (entry.title or "") != title:
-                    continue
-                meta = entry.meta or {}
-                if "tags" not in meta:
-                    continue
-                keyed = True
-                tags.extend(t for t in split_note_tags(meta["tags"]) if t not in tags)
-            if keyed:
-                out[chash] = tags
-        return out
-    except Exception:  # noqa: BLE001 — decorating a listing is best-effort
-        _log.debug("catalog_tags_lookup_failed", exc_info=True)
-        return {}
+        return live_note_owners(reader, collection, list(chashes))
+    except Exception:  # noqa: BLE001 — decorating a display is best-effort
+        _log.warning("live_owner_entries_failed", collection=collection, chashes=len(chashes), exc_info=True)
+        return None
     finally:
         reader.close()
+
+
+def owner_holders(owners: list[Any]) -> list[tuple[str, str]]:
+    """``[(tumbler, title), ...]`` of *owners* (:func:`live_holders_of_chashes`' shape). Reads attributes
+    with defaults, so a hand-built stub entry works."""
+    return [(str(getattr(e, "tumbler", "")), getattr(e, "title", "") or "") for e in owners]
+
+
+def owner_tags(entries: list[Any], *, title: str | None = None) -> list[str] | None:
+    """The tags the owners of one chunk record in their catalog ``meta`` (nexus-6pfgb.38, RDR-236 RF-17):
+    the union in first-seen order, each owner's array (a legacy string reads as its split array).
+    ``None`` when no owner carries a ``tags`` key at all (an indexed file, a note stored before
+    nexus-6pfgb.5), which is the caller's cue to consider the row; an owner whose array is empty (the
+    retraction) counts as carrying the key, so the answer is ``[]`` and a stale row stays hidden.
+    *title*, when given, keeps only owners with that title."""
+    tags: list[str] = []
+    keyed = False
+    for entry in entries:
+        if title is not None and (getattr(entry, "title", "") or "") != title:
+            continue
+        meta = getattr(entry, "meta", None) or {}
+        if "tags" not in meta:
+            continue
+        keyed = True
+        tags.extend(t for t in split_note_tags(meta["tags"]) if t not in tags)
+    return tags if keyed else None
+
+
+def catalog_tags_for_chunks(
+    collection: str, chashes: list[str], *,
+    holders: dict[str, list[tuple[str, str]]] | None = None, title: str | None = None,
+    owners: dict[str, list[Any]] | None = None,
+) -> dict[str, list[str]]:
+    """``chash -> tags`` for the chunks of *collection* whose live holders record tags in their catalog
+    ``meta`` (nexus-6pfgb.38, RDR-236 RF-17): the tags half of :func:`note_display`, kept as the
+    tested entry for the union rule (:func:`owner_tags`).
+
+    A chunk row carries the last writer's tags; each holding note carries its own, as an array. A chunk
+    is OMITTED when no holder carries a ``tags`` key at all, which is the caller's cue to fall back to
+    the row. *title*, when given, keeps only holders with that title. *owners* is what
+    :func:`live_owner_entries` already returned (saves the lookup); *holders* is what
+    :func:`live_holders_of_chashes` returned, which still costs the resolve.
+
+    Best-effort: ``{}`` when the catalog is unavailable or unreadable, since this only decorates a listing.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if not chashes:
+        return {}
+    if owners is None and holders is None:
+        owners = live_owner_entries(collection, list(chashes))
+        if owners is None:
+            return {}
+    elif owners is None:
+        try:
+            reader = make_catalog_reader()
+        except Exception:  # noqa: BLE001 — decorating a listing is best-effort
+            _log.debug("catalog_tags_reader_unavailable", exc_info=True)
+            return {}
+        if reader is None:
+            return {}
+        try:
+            names = {c: [t for t, _title in hs] for c, hs in (holders or {}).items()}
+            tumblers = sorted({t for ts in names.values() for t in ts})
+            entries = reader.resolve_many(tumblers) if tumblers else {}
+            owners = {
+                c: [
+                    entries[t] for t in ts
+                    if t in entries and (entries[t].physical_collection or "") in ("", collection)
+                ]
+                for c, ts in names.items()
+            }
+        except Exception:  # noqa: BLE001 — decorating a listing is best-effort
+            _log.debug("catalog_tags_lookup_failed", exc_info=True)
+            return {}
+        finally:
+            reader.close()
+    out: dict[str, list[str]] = {}
+    for chash in chashes:
+        tags = owner_tags(owners.get(chash, []), title=title)
+        if tags is not None:
+            out[chash] = tags
+    return out
 
 
 def format_note_tags(tags: list[str]) -> str:
     """A tag array as the display text: ``alpha, one``."""
     return ", ".join(tags)
+
+
+@dataclass(frozen=True)
+class NoteDisplay:
+    """What ``store_get`` / ``store_list`` print for one chunk (:func:`note_display`): *title*, *tags*
+    (display text), *indexed* (``YYYY-MM-DD``) and *ttl* (``permanent``, ``expires YYYY-MM-DD``,
+    ``ttl Nd``, or ``unknown``). An empty string is a field with nothing to say."""
+
+    title: str
+    tags: str
+    indexed: str
+    ttl: str
+
+
+def _agreed(values: list[str | None]) -> str | None:
+    """The one value every entry of *values* states, else ``None`` (any is missing, or they differ)."""
+    if not values or any(v is None for v in values) or len(set(values)) != 1:
+        return None
+    return values[0]
+
+
+def note_display(
+    owners: list[Any] | None, *, row: Mapping[str, Any], row_title: str, row_tags: str,
+    row_ttl_days: Any, row_indexed_at: str, title: str | None = None,
+) -> NoteDisplay:
+    """The title, tags, expiry and index date of one chunk as its OWNING documents state them (nexus-6pfgb.13,
+    RDR-236 Phase 2). A T3 chunk row is one per chunk text: its ``title``, ``tags``, ``ttl_days`` and
+    ``indexed_at`` are the last writer's, so a note whose text another note wrote later would print that
+    note's values. Each owner's catalog entry holds its own: ``meta.tags``, ``meta.ttl_days`` with its
+    clock ``meta.put_at`` (:mod:`nexus.catalog.note_ttl`, the module the expiry sweep reads), and the
+    ``indexed_at`` column.
+
+    *owners* are the live entries holding the chunk (:func:`live_owner_entries`; ``None`` when the
+    catalog could not be read), *title* keeps only owners with that title (a read asked by title). Several
+    owners: tags are their union (:func:`owner_tags`); the title is theirs joined; the index date and the
+    expiry are shown only when every owner states the same one, never the row's. The row (*row* is the
+    chunk row, *row_title* and the others its values, read by the caller) speaks only where no catalog
+    value exists and the chunk has at most one owner: a ghost or an unreadable catalog (no owner), or a
+    sole owner with no value of its own (an indexed file's tags until Phase 3, a note stored before
+    nexus-6pfgb.5). A keyless note's row TTL is read as the note's only when the note wrote the row
+    (:func:`~nexus.catalog.note_ttl.row_written_by`): a TTL a departed co-owner left must not appear as
+    this note's. A keyless owner among several has no value to agree with, so the field is blank.
+    """
+    from nexus.catalog import note_ttl  # noqa: PLC0415 — sibling module, deferred like the other catalog imports here
+    from nexus.context_annotations import owner_titles  # noqa: PLC0415 — deferred for startup cost
+    from nexus.metadata_schema import ttl_listing_label  # noqa: PLC0415 — deferred for startup cost
+
+    held = [e for e in (owners or []) if title is None or (getattr(e, "title", "") or "") == title]
+    row_may_speak = len(held) <= 1
+
+    shown_title = title if title is not None else (
+        owner_titles([getattr(e, "title", "") or "" for e in held]) if held else row_title
+    )
+
+    keyed_tags = owner_tags(held, title=title)
+    if keyed_tags is not None:
+        tags = format_note_tags(keyed_tags)
+    else:
+        tags = row_tags if row_may_speak else ""
+
+    stamps: list[str | None] = []
+    for e in held:
+        stamp = getattr(e, "indexed_at", "") or ""
+        stamps.append(stamp or None)
+    if not held:
+        indexed_full: str | None = row_indexed_at or None
+    elif len(held) == 1:
+        indexed_full = stamps[0] or row_indexed_at or None
+    else:
+        parsed = [note_ttl._parse_iso(s_) if s_ else None for s_ in stamps]  # noqa: SLF001 — one parser for the catalog clock
+        indexed_full = stamps[0] if parsed[0] is not None and len({*parsed}) == 1 else None
+    indexed = (indexed_full or "")[:10]
+
+    labels: list[str | None] = []
+    for e in held:
+        meta = getattr(e, "meta", None) or {}
+        if note_ttl.has_own_keys(meta):
+            labels.append(ttl_listing_label(
+                note_ttl.note_ttl_days(meta), note_ttl.clock_start(meta, getattr(e, "indexed_at", "") or ""),
+            ))
+        elif len(held) == 1 and note_ttl.row_written_by(
+            getattr(e, "tumbler", ""), row, owner_title=getattr(e, "title", "") or "",
+        ):
+            labels.append(ttl_listing_label(row_ttl_days, row_indexed_at))
+        else:
+            labels.append(None)
+    ttl = ttl_listing_label(row_ttl_days, row_indexed_at) if not held else (_agreed(labels) or "unknown")
+
+    return NoteDisplay(title=shown_title, tags=tags, indexed=indexed, ttl=ttl)
 
 
 #: The rungs a document's ``extraction_pages`` map can name, in display order. Mirrors
@@ -2015,30 +2175,36 @@ def format_degraded_pages(extraction_pages: dict[str, list[int]]) -> str:
 
 def degraded_pages_for_chunk(
     collection: str, chash: str, *, holders: list[tuple[str, str]] | None = None,
+    owners: list[Any] | None = None,
 ) -> tuple[list[tuple[str, str, dict[str, list[int]]]], int]:
     """``([(tumbler, title, extraction_pages), ...], holder_count)``: the live documents holding
     chunk *chash* in *collection* whose catalog ``meta`` records degraded pages (RDR-237), and how
     many documents hold it. Documents with no degraded page are left out of the list.
 
     *holders* is the ``(tumbler, title)`` list :func:`live_holders_of_chashes` already returned for
-    this chunk (the MCP ``store_get`` has it); ``None`` looks it up. Best-effort like that
-    function: ``([], 0)`` when the catalog is unavailable or unreadable, so a catalog fault never
-    breaks a ``get``.
+    this chunk; ``None`` looks it up. *owners* (nexus-6pfgb.13) is the chunk's live owner entries
+    (:func:`live_owner_entries`), which the display already holds: with it nothing is looked up or
+    resolved. Best-effort like :func:`live_holders_of_chashes`: ``([], 0)`` when the catalog is
+    unavailable or unreadable, so a catalog fault never breaks a ``get``.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     try:
-        if holders is None:
+        if owners is not None:
+            entries = {str(getattr(e, "tumbler", "")): e for e in owners}
+            holders = owner_holders(owners)
+        elif holders is None:
             holders = live_holders_of_chashes(collection, [chash]).get(chash, [])
         if not holders:
             return [], 0
-        reader = make_catalog_reader()
-        if reader is None:
-            return [], len(holders)
-        try:
-            entries = reader.resolve_many([t for t, _title in holders])
-        finally:
-            reader.close()
+        if owners is None:
+            reader = make_catalog_reader()
+            if reader is None:
+                return [], len(holders)
+            try:
+                entries = reader.resolve_many([t for t, _title in holders])
+            finally:
+                reader.close()
         rows: list[tuple[str, str, dict[str, list[int]]]] = []
         for tumbler, title in holders:
             entry = entries.get(tumbler)
@@ -2061,12 +2227,13 @@ def degraded_pages_for_chunk(
 
 def degraded_pages_lines(
     collection: str, chash: str, *, holders: list[tuple[str, str]] | None = None,
+    owners: list[Any] | None = None,
 ) -> list[str]:
     """The ``Degraded:`` lines ``nx store get`` and the MCP ``store_get`` print after ``Extractor:``:
     one per document whose catalog record has degraded pages, ``[]`` when none does. A chunk held
     by one document prints ``Degraded:   mineru-no-formula 3,7; pymupdf-text 12``; held by several,
     each line is labelled with its document's title (its tumbler when it has none)."""
-    rows, holder_count = degraded_pages_for_chunk(collection, chash, holders=holders)
+    rows, holder_count = degraded_pages_for_chunk(collection, chash, holders=holders, owners=owners)
     lines = []
     for tumbler, title, pages in rows:
         text = format_degraded_pages(pages)

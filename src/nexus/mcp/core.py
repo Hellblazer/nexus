@@ -5914,33 +5914,26 @@ def store_get(
         if entry is None:
             where = col_name if len(scope) == 1 else f"any of {len(scope)} knowledge collections"
             return f"Not found: {doc_id!r} in {where} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"
-        title = entry.get("title", "")
-        # nexus-sis0m.5: the chunk row's title is its last writer's, which
-        # names the wrong note when two share this text and a deleted one
-        # after its writer is removed. Asked by title, show that title;
-        # asked by id, name the live documents holding the chunk.
+        # nexus-6pfgb.13 (RDR-236 Phase 2): the chunk row's title, tags, ttl_days and indexed_at are its
+        # last writer's, which names the wrong note when two share this text and a deleted one after
+        # its writer is removed. Each is the OWNING note's own, read from its catalog entry
+        # (``note_display``): asked by title, that note's; asked by id, the live documents holding the
+        # chunk (tags their union, the date and the expiry only where they agree). The row speaks only
+        # where no catalog value exists and the chunk has at most one owner. ONE owner lookup serves
+        # the whole display (it was three reads: holders, tags, degraded pages).
+        from nexus.catalog.store_hook import live_owner_entries, note_display, owner_holders  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+        owner_map = live_owner_entries(col_name, [entry["id"]])
+        owners = None if owner_map is None else owner_map.get(entry["id"], [])
         holders: list[tuple[str, str]] | None = None  # None: not looked up (asked by title)
-        if not looks_like_hash:
-            title = doc_id
-        else:
-            from nexus.catalog.store_hook import live_holders_of_chashes  # noqa: PLC0415 — deferred for startup cost, as in store_put
-            from nexus.search_engine import owner_titles  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
-
-            holders = live_holders_of_chashes(col_name, [entry["id"]]).get(entry["id"], [])
-            if holders:
-                title = owner_titles([t for _tb, t in holders]) or title
-        # nexus-6pfgb.38 (RDR-236 RF-17): a note's tags are the array in its catalog entry's meta; the
-        # row's comma string is the LAST writer's, shown only where no holder records tags at all
-        # (an indexed file, a note stored before the catalog kept them).
-        from nexus.catalog.store_hook import catalog_tags_for_chunks, format_note_tags  # noqa: PLC0415 — deferred for startup cost, as in store_put
-
-        catalog_tags = catalog_tags_for_chunks(
-            col_name, [entry["id"]],
-            holders={entry["id"]: holders} if holders is not None else None,
+        if looks_like_hash:
+            holders = owner_holders(owners or [])
+        shown = note_display(
+            owners, row=entry, row_title=entry.get("title", ""), row_tags=entry.get("tags", ""),
+            row_ttl_days=entry.get("ttl_days"), row_indexed_at=entry.get("indexed_at") or "",
             title=None if looks_like_hash else doc_id,
-        ).get(entry["id"])
-        tags = entry.get("tags", "") if catalog_tags is None else format_note_tags(catalog_tags)
-        indexed_at = (entry.get("indexed_at") or "")[:10]
+        )
+        title, tags, indexed_at = shown.title, shown.tags, shown.indexed
         # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL for PDF
         # chunks now (mineru/pymupdf, or the honest mixed aggregate
         # mineru+degraded; a legacy value from before RDR-237, pymupdf_normalized
@@ -5963,6 +5956,8 @@ def store_get(
             lines.append(f"Tags:       {tags}")
         if indexed_at:
             lines.append(f"Indexed:    {indexed_at}")
+        if shown.ttl not in ("permanent", "unknown"):
+            lines.append(f"TTL:        {shown.ttl}")
         if extraction_method:
             lines.append(f"Extractor:  {extraction_method}")
             # RDR-237: the pages the ladder settled below MinerU's first rung, read from the
@@ -5970,7 +5965,7 @@ def store_get(
             # above; best-effort, so a catalog fault leaves the line out and `get` still answers.
             from nexus.catalog.store_hook import degraded_pages_lines  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
-            lines.extend(degraded_pages_lines(col_name, entry["id"], holders=holders))
+            lines.extend(degraded_pages_lines(col_name, entry["id"], holders=holders, owners=owners))
         if split is not None:
             lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
         if also_titled:
@@ -6766,23 +6761,23 @@ def store_list(
         ]
         if also:
             lines.append(also)
-        # nexus-6pfgb.38 (RDR-236 RF-17): a note's tags come from its catalog entry's array, one lookup
-        # for the page; the row's comma string (the last writer's) is the fallback where no holder
-        # records tags. An indexed file's document has no tags key until Phase 3's generated columns,
-        # so its chunks answer nothing here and the row fallback stays.
+        # nexus-6pfgb.13 (RDR-236 Phase 2): each chunk's title, tags, expiry and index date are its
+        # OWNING note's own (``note_display``), from ONE owner lookup for the whole page; the row's are
+        # the last writer's. The row speaks only for a chunk with no catalog value and at most one
+        # owner: an unowned chunk, or an indexed file's tags until Phase 3's generated columns.
         from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
 
-        catalog_tags = _store_hook.catalog_tags_for_chunks(col_name, [e.get("id", "") for e in page])
+        owner_map = _store_hook.live_owner_entries(col_name, [e.get("id", "") for e in page])
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
-            title = (e.get("title") or "")[:40]
-            tags = (e.get("tags") or "") if doc_id not in catalog_tags else _store_hook.format_note_tags(catalog_tags[doc_id])
-            indexed_at_full = e.get("indexed_at") or ""
-            indexed_at = indexed_at_full[:10]
-            # Same reading as `nx store list` (nexus-njn1a): a ttl_days that cannot lapse is permanent.
-            ttl_str = ttl_listing_label(e.get("ttl_days"), indexed_at_full)
-            tag_str = f"  [{tags}]" if tags else ""
-            lines.append(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
+            shown = _store_hook.note_display(
+                None if owner_map is None else owner_map.get(doc_id, []),
+                row=e, row_title=e.get("title") or "", row_tags=e.get("tags") or "",
+                row_ttl_days=e.get("ttl_days"), row_indexed_at=e.get("indexed_at") or "",
+            )
+            title = shown.title[:40]
+            tag_str = f"  [{shown.tags}]" if shown.tags else ""
+            lines.append(f"  {doc_id}  {title:<40}  {shown.ttl:<24}  {shown.indexed}{tag_str}")
         shown_end = offset + len(page)
         # A full page is the live signal that more rows may follow; the stored
         # total can exceed the live rows and point at an empty page. "Full" is
@@ -6842,7 +6837,9 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
         # accepts. Surfaced whole so the list -> get flow round-trips; see
         # DocumentListing.handle.
         title = (doc.title or "untitled")[:50]
-        indexed = (doc.entry.get("indexed_at") or "")[:10]
+        # nexus-6pfgb.13: the document's own index date (the catalog column); a chunk-keyed row with no
+        # catalog document shows its chunk row's.
+        indexed = (doc.indexed_at or doc.entry.get("indexed_at") or "")[:10]
         lines.append(f"  {i:3d}. {doc.handle}  {title:<50}  {doc.chunks:>4} chunks  {indexed}")
     return _cap_text_result("\n".join(lines), "store_list")
 

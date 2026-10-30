@@ -502,7 +502,7 @@ class TestListDocumentsGroupsByTheManifest:
     ``content_hash``, on the premise that a ``store_put`` note is always one
     chunk. Note splitting (nexus-spujb, nexus-b2tld) falsified that, so a
     split note listed as one row per piece under a repeated title. Both now
-    call ``nexus.catalog.store_hook.manifest_doc_index``.
+    call ``nexus.catalog.store_hook.group_documents``, which reads ``_manifest_doc_index_full``.
     """
 
     @staticmethod
@@ -523,8 +523,8 @@ class TestListDocumentsGroupsByTheManifest:
             {"id": "ccc", "content_hash": "h3", "title": "standalone", "indexed_at": "2026-09-19"},
         ]
         monkeypatch.setattr(
-            "nexus.catalog.store_hook.manifest_doc_index",
-            lambda _col: ({"aaa": ("1.2.3",), "bbb": ("1.2.3",)}, {"1.2.3": "split note"}, {"1.2.3": "aaa"}, ""),
+            "nexus.catalog.store_hook._manifest_doc_index_full",
+            lambda _col: ({"aaa": ("1.2.3",), "bbb": ("1.2.3",)}, {"1.2.3": "split note"}, {"1.2.3": "aaa"}, {}, ""),
         )
 
         _list_documents(self._db(rows), "knowledge__subject__m__v1")
@@ -545,11 +545,12 @@ class TestListDocumentsGroupsByTheManifest:
         to one tumbler listed the pair as a single document."""
         rows = [{"id": "aaa", "content_hash": "h1", "title": "B", "indexed_at": "2026-09-29"}]
         monkeypatch.setattr(
-            "nexus.catalog.store_hook.manifest_doc_index",
+            "nexus.catalog.store_hook._manifest_doc_index_full",
             lambda _col: (
                 {"aaa": ("1.2.3", "1.2.4")},
                 {"1.2.3": "note A", "1.2.4": "note B"},
                 {"1.2.3": "aaa", "1.2.4": "aaa"},
+                {},
                 "",
             ),
         )
@@ -567,8 +568,8 @@ class TestListDocumentsGroupsByTheManifest:
         disagreed; the count is derived from the grouping on both now."""
         rows = [{"id": "aaa", "content_hash": "h1", "title": "a note", "indexed_at": "2026-09-19"}]
         monkeypatch.setattr(
-            "nexus.catalog.store_hook.manifest_doc_index",
-            lambda _col: ({}, {}, {}, ""),
+            "nexus.catalog.store_hook._manifest_doc_index_full",
+            lambda _col: ({}, {}, {}, {}, ""),
         )
 
         _list_documents(self._db(rows), "knowledge__subject__m__v1")
@@ -583,8 +584,8 @@ class TestListDocumentsGroupsByTheManifest:
         beats an error — but never silently (nexus-39upx hazard 4)."""
         rows = [{"id": "aaa", "content_hash": "h1", "title": "a note", "indexed_at": "2026-09-19"}]
         monkeypatch.setattr(
-            "nexus.catalog.store_hook.manifest_doc_index",
-            lambda _col: ({}, {}, {}, "catalog unreadable (RuntimeError)"),
+            "nexus.catalog.store_hook._manifest_doc_index_full",
+            lambda _col: ({}, {}, {}, {}, "catalog unreadable (RuntimeError)"),
         )
 
         _list_documents(self._db(rows), "knowledge__subject__m__v1")

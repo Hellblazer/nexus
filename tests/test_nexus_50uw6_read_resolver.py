@@ -186,4 +186,4 @@ def test_a_cache_without_the_picked_names_row_is_refreshed_once(monkeypatch, cac
 def _no_catalog_tags(monkeypatch):
     """nexus-6pfgb.38: store list/get look a note's tags up in the catalog; these tests stub the T3 and
     have no catalog, so the lookup is stubbed (tests/test_6pfgb38_tags_display.py covers it)."""
-    monkeypatch.setattr("nexus.catalog.store_hook.catalog_tags_for_chunks", lambda *a, **k: {})
+    monkeypatch.setattr("nexus.catalog.store_hook.live_owner_entries", lambda *a, **k: {})  # nexus-6pfgb.13: no catalog read (the one owner lookup of the display)
