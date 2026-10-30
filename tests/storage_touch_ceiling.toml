@@ -40,8 +40,9 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4962
+provisioned_tests = 4961
 tolerance_tests = 0
+# 4962 -> 4961 (nexus-ru672, 2026-10-30): tests/test_pdf_subsystem.py::test_no_git_repo_empty_git_fields deleted (tautological after the git_* writer removal; reduce-only ceiling lowered in the commit that lowers the count)
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
 # row of that run reads the session engine, so the test needs its tenant (t2_tenant). CI 39698506258 (a0d079992)
