@@ -186,6 +186,13 @@ class ManifestLabelStageFirstOwnerPlanTest {
         return w;
     }
 
+    /** The collection half of {@code n} (collection, chash) pairs, every pair in {@code collection}. */
+    private static String[] cols(String collection, int n) {
+        String[] out = new String[n];
+        java.util.Arrays.fill(out, collection);
+        return out;
+    }
+
     private byte[][] keys() {
         return chashes.stream().map(h -> Chash.fromHex(h).toBytes()).toArray(byte[][]::new);
     }
@@ -199,7 +206,7 @@ class ManifestLabelStageFirstOwnerPlanTest {
             var select = new ArrayList<Field<?>>(List.of(chashHex, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENTS.SOURCE_URI));
             return List.of(PgContainerHelper.explainPlanWith(ctx,
-                ManifestLabelStage.occurrenceQuery(ctx, TENANT, new String[] {COL}, keys(), select, firstOnly),
+                ManifestLabelStage.occurrenceQuery(ctx, TENANT, cols(COL, keys().length), keys(), select, firstOnly),
                 new PgContainerHelper.ExplainOptions(true, false, false, false)).split("\n"));
         });
     }
@@ -304,9 +311,9 @@ class ManifestLabelStageFirstOwnerPlanTest {
     void theStatementText_isTheSame_whateverTheBatchSize() {
         Field<String> chashHex = ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH);
         String one = tenantScope.withTenant(TENANT, ctx -> ManifestLabelStage.occurrenceQuery(ctx, TENANT,
-            new String[] {COL}, new byte[][] {keys()[0]}, new ArrayList<>(List.of(chashHex)), true).getSQL());
+            cols(COL, 1), new byte[][] {keys()[0]}, new ArrayList<>(List.of(chashHex)), true).getSQL());
         String many = tenantScope.withTenant(TENANT, ctx -> ManifestLabelStage.occurrenceQuery(ctx, TENANT,
-            new String[] {COL, COL2}, keys(), new ArrayList<>(List.of(chashHex)), true).getSQL());
+            cols(COL2, keys().length), keys(), new ArrayList<>(List.of(chashHex)), true).getSQL());
         assertThat(many).isEqualTo(one);
     }
 }

@@ -18,7 +18,6 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -659,10 +658,11 @@ final class ManifestLabelStage {
 
     /**
      * One statement per {@link #LOOKUP_BATCH} (collection, chash) keys, over every collection in the window
-     * together (nexus-6pfgb.26 latency fix: a statement per collection cost a default search about 7.5 statements
-     * of 3 to 7 ms each on production, most of it planning and round trip). The statement matches
-     * {@code collection = ANY(...) AND chash = ANY(...)}, so it can also return a chash of one window collection
-     * held in another; those rows were not asked for and are dropped here.
+     * together (nexus-6pfgb.26: a statement per collection was one planning and one round trip per collection
+     * in the window, 8 statements for a 32-key window on production). The statement joins the asked pairs
+     * themselves, so it reads only the holders of each chash in the collection it was asked in: an
+     * {@code ANY(collections) AND ANY(chashes)} filter would match the cross product, and on production a window
+     * with widely shared chunks returned 11297 rows for 50 owners that way (70 ms, against 15 ms per collection).
      *
      * @param firstOnly one occurrence per (collection, chash) (the first, by {@code doc_id} then position)
      *                  instead of all of them; both orders are the database's own, so the two shapes agree on
@@ -688,26 +688,15 @@ final class ManifestLabelStage {
         tenantScope.withTenant(tenant, ctx -> {
             for (int start = 0; start < pairs.size(); start += LOOKUP_BATCH) {
                 List<String[]> batch = pairs.subList(start, Math.min(start + LOOKUP_BATCH, pairs.size()));
-                Set<String> wanted = new HashSet<>();
-                Set<String> collections = new LinkedHashSet<>();
-                Set<String> hexes = new LinkedHashSet<>();
-                for (String[] p : batch) {
-                    wanted.add(key(p[0], p[1]));
-                    collections.add(p[0]);
-                    hexes.add(p[1]);
-                }
-                byte[][] keys = new byte[hexes.size()][];
-                int i = 0;
-                for (String hex : hexes) {
-                    keys[i++] = Chash.fromHex(hex).toBytes();
+                String[] collections = new String[batch.size()];
+                byte[][] keys = new byte[batch.size()][];
+                for (int i = 0; i < batch.size(); i++) {
+                    collections[i] = batch.get(i)[0];
+                    keys[i] = Chash.fromHex(batch.get(i)[1]).toBytes();
                 }
                 lookupStatements.incrementAndGet();
-                for (var r : occurrenceQuery(ctx, tenant, collections.toArray(String[]::new), keys, select, firstOnly)
-                        .fetch()) {
+                for (var r : occurrenceQuery(ctx, tenant, collections, keys, select, firstOnly).fetch()) {
                     String k = key(r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION), r.get(chashHex));
-                    if (!wanted.contains(k)) {
-                        continue;
-                    }
                     out.computeIfAbsent(k, x -> new ArrayList<>())
                        .add(new Occurrence(r.get(CATALOG_DOCUMENT_CHUNKS.DOC_ID),
                                            r.get(CATALOG_DOCUMENT_CHUNKS.POSITION),
@@ -740,8 +729,9 @@ final class ManifestLabelStage {
     }
 
     /**
-     * The one statement behind both lookups, for one batch of keys across every collection named. Both lists
-     * bind as one array each ({@code = ANY(?)}), so the statement text is the same whatever the batch's size.
+     * The one statement behind both lookups, for one batch of (collection, chash) pairs: {@code collections[i]}
+     * and {@code keys[i]} are one pair. They bind as two arrays and join as {@code unnest(collections, keys)
+     * AS w(collection, chash)} on both columns, so the statement text is the same whatever the batch's size.
      * Package-private so a plan test can EXPLAIN the statement production runs, not a copy of it.
      * {@code firstOnly} is {@code SELECT DISTINCT ON (chash, collection) ... ORDER BY chash, collection, doc_id,
      * position}, chash first because {@code idx_catalog_chunks_chash (tenant_id, chash)} returns rows in chash
@@ -761,16 +751,22 @@ final class ManifestLabelStage {
         }
         order.add(CATALOG_DOCUMENT_CHUNKS.DOC_ID);
         order.add(CATALOG_DOCUMENT_CHUNKS.POSITION);
+        var asked = DSL.table("unnest(cast({0} as text[]), cast({1} as bytea[]))",
+                DSL.val(collections), DSL.val(keys))
+            .as("asked", "collection", "chash");
+        Field<String> askedCollection = DSL.field(DSL.name("asked", "collection"), String.class);
+        Field<byte[]> askedChash = DSL.field(DSL.name("asked", "chash"), byte[].class);
         return head
-            .from(CATALOG_DOCUMENT_CHUNKS)
+            .from(asked)
+            .join(CATALOG_DOCUMENT_CHUNKS)
+                .on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                    .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(askedChash))
+                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(askedCollection)))
             .join(CATALOG_DOCUMENTS)
                 // A tombstoned document owns nothing (nexus-mqd6t): its occurrence is not a hit.
                 .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                     .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
                     .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
-            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(DSL.any(collections)))
-                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(DSL.any(keys))))
             .orderBy(order);
     }
 
