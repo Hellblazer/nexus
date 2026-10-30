@@ -9,7 +9,12 @@ from nexus.search_clusterer import _cluster_label, _kmeans_numpy, cluster_result
 
 
 def _make_results(n: int, distances: list[float] | None = None) -> list[dict]:
-    """Create n fake result dicts."""
+    """Create n fake result dicts shaped like POST-attach rows.
+
+    ``_display_title``/``_display_path`` are written only by ``_attach_display_paths``, which
+    runs AFTER clustering in ``search_cross_corpus``. These rows therefore exercise the
+    clusterer's own label logic; the live-path label is pinned through the pipeline in
+    ``tests/test_fv2u4_cluster_header.py``."""
     dists = distances or [0.1 * i for i in range(n)]
     return [
         {"id": f"doc-{i}", "content": f"text {i}", "distance": dists[i],
@@ -71,6 +76,8 @@ class TestClusterResults:
             assert dists == sorted(dists)
 
     def test_cluster_label_assigned(self) -> None:
+        """Unit-level only: the rows carry post-attach keys (see ``_make_results``). The live
+        header is relabelled after the attach and pinned in ``test_fv2u4_cluster_header.py``."""
         rng = np.random.default_rng(42)
         emb = _two_cluster_embeddings(rng)
         results = _make_results(10)

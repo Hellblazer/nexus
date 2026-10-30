@@ -2564,6 +2564,8 @@ def search_cross_corpus(
     # absent catalog or missing doc_ids leave _display_path unset and
     # formatters fall back to source_path / file_path.
     _attach_display_paths(all_results, catalog, prefetched=display_lookup)
+    # nexus-fv2u4: the Ward labels were taken before the display keys existed.
+    _relabel_clusters(all_results)
 
     return all_results
 
@@ -3190,6 +3192,36 @@ def _flag_contradictions(
     return out
 
 
+#: Private cluster membership stamped by :func:`_apply_clustering`, consumed (and removed) by
+#: :func:`_relabel_clusters`.
+_CLUSTER_INDEX_KEY = "_cluster_index"
+
+
+def _relabel_clusters(results: list[SearchResult]) -> None:
+    """Relabel each Ward cluster from its best member's catalog title (nexus-fv2u4).
+
+    Clustering runs before :func:`_attach_display_paths`, the only writer of ``_display_title``
+    and ``_display_path``, so the label it assigns is always the chunk id. This runs after the
+    attach, taking the label from the lowest-distance member: its catalog title, else its
+    catalog path, else its id. It also removes the membership stamp. In place; a no-op for a
+    result set that was not clustered.
+    """
+    from nexus.search_clusterer import _cluster_label  # noqa: PLC0415 — branch-local; only when clustering applied
+
+    best: dict[int, SearchResult] = {}
+    for r in results:
+        idx = r.metadata.get(_CLUSTER_INDEX_KEY)
+        if idx is not None and (idx not in best or r.distance < best[idx].distance):
+            best[idx] = r
+    labels = {
+        idx: _cluster_label({"id": r.id, "metadata": r.metadata}) for idx, r in best.items()
+    }
+    for r in results:
+        idx = r.metadata.pop(_CLUSTER_INDEX_KEY, None)
+        if idx is not None:
+            r.metadata["_cluster_label"] = labels[idx]
+
+
 def _apply_clustering(
     results: list[SearchResult],
     embeddings: "np.ndarray",
@@ -3213,11 +3245,13 @@ def _apply_clustering(
 
     # Flatten clusters back to SearchResult list, preserving cluster labels
     out: list[SearchResult] = []
-    for cluster in clusters:
+    for index, cluster in enumerate(clusters):
         for rd in cluster:
             meta = rd.get("metadata", {})
             if "_cluster_label" in rd:
                 meta["_cluster_label"] = rd["_cluster_label"]
+            # Membership for :func:`_relabel_clusters`, which runs once the display keys exist.
+            meta[_CLUSTER_INDEX_KEY] = index
             out.append(SearchResult(
                 id=rd["id"],
                 content=rd.get("content") or "",
