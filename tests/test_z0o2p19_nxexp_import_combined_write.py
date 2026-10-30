@@ -1348,6 +1348,68 @@ def test_export_writes_the_owners_key_only_when_complete_and_its_manifest_rows(s
     assert owners["c3"]["key_registered"] is False
 
 
+class _ReindexingReader(_StubOwnerReader):
+    """A reader whose document 1.1.1 is re-indexed between its two entry reads (nexus-6pfgb.1).
+
+    The log names the order of the reads. ``resolve_many`` answers from ``entry_reads``: the first
+    call returns the first state, every later call the second. The manifests are always the OLD
+    ones, as they are when the re-index lands after the manifest read."""
+
+    def __init__(self, first: tuple[str, str], then: tuple[str, str]) -> None:
+        super().__init__("complete")
+        self.log: list[str] = []
+        self._states = [first, then]
+        self._resolves = 0
+
+    def docs_for_chashes(self, chashes):
+        self.log.append("docs_for_chashes")
+        return super().docs_for_chashes(chashes)
+
+    def get_manifests(self, tumblers):
+        self.log.append("get_manifests")
+        return super().get_manifests(tumblers)
+
+    def resolve_many(self, tumblers):
+        self.log.append("resolve_many")
+        run_id, key = self._states[min(self._resolves, 1)]
+        self._resolves += 1
+        out = super().resolve_many(tumblers)
+        e = out["1.1.1"]
+        e.index_content_hash, e.index_run_id, e.meta = key, run_id, {"content_hash": key}
+        out["1.1.2"].index_run_id = "run-b"
+        return out
+
+
+_KB = "ef" * 32
+
+
+@pytest.mark.parametrize(
+    "first,then",
+    [
+        pytest.param(("run-1", _KA), ("run-2", _KB), id="re-index-to-a-new-key"),
+        pytest.param(("run-1", _KA), ("run-2", _KA), id="two-re-indexes-back-to-the-same-key"),
+    ],
+)
+def test_a_reindex_between_the_entry_reads_drops_the_key_and_its_registration_witness(first, then) -> None:
+    """nexus-6pfgb.1: the entry is read before the manifests and again after them. When the document's
+    fence (run id, key) differs between the two reads, the manifest rows and chunks read in between may
+    belong to neither, so the record carries no key and no registration witness (the importer then
+    cannot stamp the old rows with the new key). A document that did not move keeps both."""
+    reader = _ReindexingReader(first, then)
+    owners = _resolve_export_owners(reader, ["c1", "c2", "c3"], "docs__s")
+    assert owners["c1"]["index_content_hash"] == "" and owners["c1"]["key_registered"] is False
+    assert owners["c1"]["manifest_rows"] == 2, "the rows read are reported as read"
+    assert owners["c3"]["index_content_hash"] == "cd" * 32, "a document that did not move keeps its key"
+    # The first entry read comes before the manifests: that order is what the comparison rests on.
+    assert reader.log == ["docs_for_chashes", "resolve_many", "get_manifests", "resolve_many"], reader.log
+
+
+def test_a_quiescent_source_keeps_the_key_and_its_registration_witness() -> None:
+    reader = _ReindexingReader(("run-1", _KA), ("run-1", _KA))
+    owners = _resolve_export_owners(reader, ["c1", "c2", "c3"], "docs__s")
+    assert owners["c1"]["index_content_hash"] == _KA and owners["c1"]["key_registered"] is True
+
+
 def _native_pdf(cat, owner, coll: str, name: str, key: str, texts: list[str]) -> str:
     """A natively indexed, complete pdf document owning *texts* at positions 0..n-1."""
     uri = f"file:///mjikf/{coll}/{name}.pdf"

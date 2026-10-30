@@ -307,6 +307,13 @@ def _import_chunk_metadata(meta: dict, *, shared: bool) -> dict:
     return {k: v for k, v in (meta or {}).items() if k in keep}
 
 
+def _entry_fence(entry: Any) -> tuple[str, str]:
+    """A catalog entry's fence pair, ``(index_run_id, index_content_hash)``: it differs between two reads
+    of one entry exactly when an index run began or finished in between (nexus-6pfgb.1). Read with
+    ``getattr`` because test doubles are plain namespaces without the run id."""
+    return (getattr(entry, "index_run_id", "") or "", getattr(entry, "index_content_hash", "") or "")
+
+
 def _resolve_export_owners(
     reader: Any, chashes: list[str], collection_name: str,
 ) -> dict[str, dict]:
@@ -315,9 +322,10 @@ def _resolve_export_owners(
     "position"}}`` for every *chashes* entry that has a LIVE catalog
     document in *collection_name* whose manifest names it.
 
-    Three batched catalog round trips total, regardless of page size:
-    ``docs_for_chashes`` (reverse lookup), ``get_manifests`` (positions),
-    ``resolve_many`` (document attributes) — never one call per chash.
+    Four batched catalog round trips total, regardless of page size:
+    ``docs_for_chashes`` (reverse lookup), ``resolve_many`` (document attributes), ``get_manifests``
+    (positions), ``resolve_many`` again (nexus-6pfgb.1: a document whose fence moved between the two
+    entry reads was re-indexed in between) — never one call per chash.
 
     Every chash here is LIVE: export reads through the live-filtered
     content read (RDR-192 Step 5), and live(c) means "a live catalog
@@ -341,6 +349,11 @@ def _resolve_export_owners(
     all_tumblers = sorted({t for ts in by_chash.values() for t in ts})
     if not all_tumblers:
         return {}
+    # nexus-6pfgb.1: the entry (fence run id and key) is read BEFORE the manifests and again after them.
+    # The three reads are not one snapshot, and a re-index landing between them leaves the later entry
+    # with the new fence while the manifest rows read in the middle are the old ones. A document whose
+    # fence differs between the two reads is reported without its key (see below).
+    entries_before = reader.resolve_many(all_tumblers)
     manifests = reader.get_manifests(all_tumblers)
     entries = reader.resolve_many(all_tumblers)
     owners: dict[str, dict] = {}
@@ -360,6 +373,8 @@ def _resolve_export_owners(
             )
         chosen = min(candidates, key=lambda t: Tumbler.parse(t).segments)
         entry = entries[chosen]
+        before = entries_before.get(chosen)
+        stable = before is not None and _entry_fence(before) == _entry_fence(entry)
         position = next(
             (row.position for row in manifests.get(chosen, []) if row.chash == chash),
             0,
@@ -374,22 +389,27 @@ def _resolve_export_owners(
             # row count, so the import can tell a whole document from one whose shared chunks
             # were written under another owner (the import uses the key only when it holds every row
             # and the key is witnessed, _note_source_evidence: by the registration, key_registered
-            # below, or by one of the document's chunks carrying the key). The entry is read after
-            # the manifests, and the three reads are not one snapshot: the source is assumed
-            # quiescent during export, and that assumption is what bounds the race. A re-index
-            # landing between the reads leaves the entry (read last) with the NEW fence and key
-            # while the manifest rows and chunks read earlier are the old ones. The chunk witness
-            # then refuses (the old chunks carry the old key), but key_registered is True for the
-            # new entry, so the old rows can be stamped with the new key. Nothing in the export
-            # detects that; a quiescent source is the only guard.
-            "index_content_hash": entry.index_content_hash if entry.index_state == "complete" else "",
+            # below, or by one of the document's chunks carrying the key). The reads are not one
+            # snapshot (nexus-6pfgb.1): the entry is read before the manifests and again after them,
+            # and a document whose fence (run id and key, _entry_fence) differs between the two reads
+            # was re-indexed in between, so the manifest rows read in the middle may be the old ones
+            # under the new entry. Its record carries no key and no registration witness (``stable``),
+            # so the importer cannot stamp those rows with a key they were not indexed under; the group
+            # then disagrees with the pages read before the re-index and is poisoned. A run id is a
+            # fresh uuid per index run, so two complete re-indexes back to the same key (A to B to A)
+            # still differ. The window left is a re-index that completes before the first entry read
+            # but after the chunk page read: entry and manifest are then both NEW and the chunks OLD.
+            # That one is bounded by the candidate filter above (an old chash absent from the new
+            # manifest is dropped, and one still present is the same text).
+            "index_content_hash": (
+                entry.index_content_hash if stable and entry.index_state == "complete" else ""),
             "manifest_rows": len(manifests.get(chosen, [])),
             # nexus-3ajpd: catalog-side evidence that the key is a file hash: the document's own
             # registration recorded the same value. A chunk row cannot say it (its content_hash is
             # the last writer's, so a chunk another document wrote last carries that document's
             # hash), and this does not depend on any chunk row surviving unrestamped.
             "key_registered": bool(
-                entry.index_state == "complete" and entry.index_content_hash
+                stable and entry.index_state == "complete" and entry.index_content_hash
                 and (getattr(entry, "meta", None) or {}).get("content_hash") == entry.index_content_hash
             ),
         }
