@@ -19,9 +19,9 @@ nx upgrade
 ```
 
 It converges a set of PRECONDITIONS and then walks the data ladder.
-`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds two rungs:
-`rdr192-manifest-backfill` and `aspect-queue-tuples`, each described below the
-table. Everything else in `nx upgrade` is precondition work:
+`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds three rungs:
+`rdr192-manifest-backfill`, `aspect-queue-tuples` and `note-tags-array`, each
+described below the table. Everything else in `nx upgrade` is precondition work:
 
 | Precondition | Converges |
 |---|---|
@@ -130,6 +130,33 @@ worker or strand.
 - Migrated rows restart at attempts 0: `retry_count` does not travel.
 - `verify()` passes only when it read the waiting rows and none can move; an
   unreachable read fails the rung with the reason.
+
+### The `note-tags-array` rung
+
+RDR-236 RF-17 makes a note's tags a set. In the note's catalog entry (`meta.tags`)
+they are a JSON array, so a filter can match one tag of several. Clients before
+nexus-6pfgb.38 stored the comma string the CLI and MCP pass, `"arch,decision"`;
+this rung rewrites those strings as arrays, once.
+
+- A note is a catalog document with `content_type` `knowledge` and no `file_path`
+  in a `knowledge__*` collection. Indexed files never carried `meta.tags`.
+- `detect()` is the dry run: it reads every `knowledge__*` collection's listing
+  and reports how many notes hold a string, out of how many it examined. The rung
+  is not applicable only when no catalog is available.
+- `converge()` re-reads each such note just before writing (a put since the
+  listing may have written the array, and that put wins), then sends
+  `meta={"tags": [...]}` alone: the string trimmed, split on commas, de-duplicated,
+  first-seen order kept; `""` becomes `[]`. The engine merges `meta`, so no other
+  key changes. An entry already holding an array, or no `tags` key, is left alone,
+  so a re-run does nothing. Batches of 500 resume on the next call.
+- It is exempt from the RDR-236 backfill's fill-only rule on purpose: the backfill
+  never rewrites a value it finds, and this conversion rewrites the old spelling of
+  the same value. It runs before the backfill, which then writes arrays.
+- `verify()` passes only when every `knowledge__*` listing was read and no note
+  holds a string; a missing or unreadable catalog fails the rung with the reason.
+  The recorded detail names how many notes it examined and how many it converted.
+- Until it has run, readers tolerate the string: `store_get`, `store_list` and the
+  recovery-bundle export split it on read.
 
 ### Restoring chunks the reaper quarantined
 

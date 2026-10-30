@@ -158,4 +158,5 @@ def test_default_registry_is_exactly_the_canonical_rung_order() -> None:
     assert [r.name for r in registry] == list(RUNG_ORDER) == [
         "rdr192-manifest-backfill",
         "aspect-queue-tuples",  # RDR-235 Phase 1 (nexus-5r2sc.3.6)
+        "note-tags-array",  # RDR-236 RF-17 (nexus-6pfgb.38)
     ]

@@ -1105,3 +1105,10 @@ def test_store_list_offers_a_next_page_only_after_a_full_page(runner):
         full = runner.invoke(main, ["store", "list", "-c", "knowledge__x__model-ctx__v1", "--limit", "1"])
     assert "Next page" not in short.output, short.output
     assert "Next page: --offset 1" in full.output, full.output
+
+
+@pytest.fixture(autouse=True)
+def _no_catalog_tags(monkeypatch):
+    """nexus-6pfgb.38: store list/get look a note's tags up in the catalog; these tests stub the T3 and
+    have no catalog, so the lookup is stubbed (tests/test_6pfgb38_tags_display.py covers it)."""
+    monkeypatch.setattr("nexus.catalog.store_hook.catalog_tags_for_chunks", lambda *a, **k: {})
