@@ -338,3 +338,30 @@ def test_the_rule_blanks_what_a_keyless_owner_among_several_cannot_state() -> No
     keyless = _entry("1.1.2", "b", {}, "2026-10-01T00:00:00Z")
     assert _display([keyed, keyless], row_ttl_days=3, row_indexed_at="2026-10-01T00:00:00Z").ttl == "unknown"
     assert _display([keyed]).ttl == "expires 2026-10-04"
+
+
+def test_a_title_filter_over_two_keyless_owners_does_not_make_the_shared_row_the_filtered_owners() -> None:
+    """Phase 2 review H2: ``held`` was already narrowed to the requested title, so a chunk with owners A
+    "alpha" and B "beta" read as A's alone and B's row tags (and index date) printed for A. Sole ownership
+    is judged over ALL live owners, before the title filter."""
+    a = _entry("1.1.1", "alpha", {}, "")
+    b = _entry("1.1.2", "beta", {}, "")
+    row = {"catalog_doc_id": "1.1.2", "title": "beta"}
+    shown = _display([a, b], title="alpha", row=row, row_tags="b-tags", row_indexed_at="2026-10-20T00:00:00+00:00")
+    assert shown.tags == ""
+    assert shown.indexed == ""
+    assert shown.title == "alpha"
+    # control: the unfiltered read of the same two owners already blanked both
+    both = _display([a, b], row=row, row_tags="b-tags", row_indexed_at="2026-10-20T00:00:00+00:00")
+    assert both.tags == "" and both.indexed == ""
+
+
+def test_a_sole_keyless_owner_takes_the_rows_tags_only_when_another_note_did_not_write_it() -> None:
+    """The tags path goes through ``row_may_give_tags`` as the export does: a row whose stamp AND title
+    name another note is not this note's."""
+    a = _entry("1.1.1", "alpha", {}, "2026-10-01T00:00:00+00:00")
+    other = {"catalog_doc_id": "9.9.9", "title": "someone-else"}
+    assert _display([a], row=other, row_tags="stale").tags == ""
+    assert _display([a], row={"catalog_doc_id": "1.1.1", "title": "alpha"}, row_tags="mine").tags == "mine"
+    assert _display([a], row={}, row_tags="legacy-unstamped").tags == "legacy-unstamped"
+

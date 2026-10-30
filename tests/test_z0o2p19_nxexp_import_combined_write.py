@@ -1355,7 +1355,8 @@ class _ReindexingReader(_StubOwnerReader):
     call returns the first state, every later call the second. The manifests are always the OLD
     ones, as they are when the re-index lands after the manifest read."""
 
-    def __init__(self, first: tuple[str, str], then: tuple[str, str]) -> None:
+    def __init__(self, first: tuple[str, ...], then: tuple[str, ...]) -> None:
+        # (run id, key) or (run id, key, index_state); the state defaults to "complete"
         super().__init__("complete")
         self.log: list[str] = []
         self._states = [first, then]
@@ -1371,11 +1372,12 @@ class _ReindexingReader(_StubOwnerReader):
 
     def resolve_many(self, tumblers):
         self.log.append("resolve_many")
-        run_id, key = self._states[min(self._resolves, 1)]
+        run_id, key, *state = self._states[min(self._resolves, 1)]
         self._resolves += 1
         out = super().resolve_many(tumblers)
         e = out["1.1.1"]
         e.index_content_hash, e.index_run_id, e.meta = key, run_id, {"content_hash": key}
+        e.index_state = state[0] if state else "complete"
         out["1.1.2"].index_run_id = "run-b"
         return out
 
@@ -1388,6 +1390,9 @@ _KB = "ef" * 32
     [
         pytest.param(("run-1", _KA), ("run-2", _KB), id="re-index-to-a-new-key"),
         pytest.param(("run-1", _KA), ("run-2", _KA), id="two-re-indexes-back-to-the-same-key"),
+        # A run that began before the first read and finished before the second: beginIndexRun wrote the
+        # run id and the key at the start, so both fences are equal and only the state moved.
+        pytest.param(("run-1", _KA, "indexing"), ("run-1", _KA, "complete"), id="run-in-flight-at-the-first-read-completes"),
     ],
 )
 def test_a_reindex_between_the_entry_reads_drops_the_key_and_its_registration_witness(first, then) -> None:

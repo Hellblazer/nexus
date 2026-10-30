@@ -19,6 +19,7 @@ from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load
 from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
     OWNER_AGENTS_KEY,
     OWNER_BIB_KEY,
+    OWNER_CHUNK_COUNT_KEY,
     OWNER_FACTS_KEY,
     DOC_ID_INFERRED_KEY,
     OWNER_FRECENCY_KEY,
@@ -206,6 +207,9 @@ def _attach_from_chash_positions(
         if not r.metadata.get("doc_id"):
             r.metadata["doc_id"] = match["doc_id"]
             r.metadata[DOC_ID_INFERRED_KEY] = True
+        # Phase 2 review H1: the owner's count rides its own working key, assigned outright;
+        # a legacy row's ``chunk_count`` keeps its setdefault (the scorer's size penalty reads it).
+        r.metadata[OWNER_CHUNK_COUNT_KEY] = int(match.get("chunk_count") or 0)
         r.metadata.setdefault("chunk_count", int(match.get("chunk_count") or 0))
         r.metadata.setdefault("chunk_index", int(match.get("position") or 0))
     return True
@@ -400,6 +404,8 @@ def _attach_doc_ids_from_catalog(
         manifest = manifest_cache.get(doc_id)
         if not manifest:
             continue
+        # Phase 2 review H1: the owner's count rides its own working key, assigned outright.
+        r.metadata[OWNER_CHUNK_COUNT_KEY] = len(manifest)
         # Only inject when absent (legacy chunks may have these).
         if "chunk_count" not in r.metadata:
             r.metadata["chunk_count"] = len(manifest)

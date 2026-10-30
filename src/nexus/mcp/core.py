@@ -5294,7 +5294,7 @@ def query(
         # manifests again, RF-10). Fall back to the legacy metadata keys (``content_hash``, ``title``,
         # ``_display_path``, ``source_path``, chunk id) for chunks the catalog could not resolve
         # (catalog absent, orphan chunks, pre-Phase-A chunks).
-        from nexus.context_annotations import OWNER_BIB_KEY, OWNER_FACTS_KEY  # noqa: PLC0415 — deferred; keeps core's import surface flat
+        from nexus.context_annotations import OWNER_BIB_KEY, OWNER_CHUNK_COUNT_KEY, OWNER_FACTS_KEY  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
         for r in results:
@@ -5330,8 +5330,12 @@ def query(
                     # agreed facts; disagreeing owners state nothing).
                     "owner_facts": meta.get(OWNER_FACTS_KEY) or {},
                     # nexus-voy5: the manifest row count of the owning document (RDR-108 D2), stamped
-                    # on the hit when the catalog resolved it; the legacy chunk key otherwise.
-                    "chunk_count": meta.get("chunk_count", ""),
+                    # on the hit when the catalog resolved it; the legacy chunk key only when the
+                    # stamp is absent (an unresolved hit). A stale row's chunk_count never wins.
+                    "chunk_count": (
+                        meta[OWNER_CHUNK_COUNT_KEY] if OWNER_CHUNK_COUNT_KEY in meta
+                        else meta.get("chunk_count", "")
+                    ),
                     # page_count / has_formulas are not in ALLOWED_TOP_LEVEL:
                     # normalize() drops them, so the read always returned "".
                     # Removed in nexus-59j0 cleanup. nexus-1oguj later

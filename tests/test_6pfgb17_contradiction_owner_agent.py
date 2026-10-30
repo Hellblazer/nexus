@@ -190,3 +190,22 @@ def test_the_owner_agents_stay_off_the_json_wire() -> None:
 
     assert "_owner_agents" in page[0].metadata
     assert "_owner_agents" not in json.dumps(json.loads(format_json(page)))
+
+
+def test_every_owner_working_key_stays_off_the_json_wire() -> None:
+    """Critique of Phase 2 (.12): ``_INTERNAL_METADATA_KEYS`` gained only the agents key, so
+    ``nx search --json`` emitted ``_owner_bib``, ``_owner_quality`` and the rest. Every ``OWNER_*_KEY``
+    working key the search stamps (and the inferred-owner flag) is internal, enumerated from
+    ``context_annotations`` so a key added later is held to the same rule."""
+    import json
+
+    from nexus import context_annotations as ca
+    from nexus.formatters import format_json
+
+    keys = sorted({v for n, v in vars(ca).items() if n.startswith("OWNER_") and n.endswith("_KEY") and isinstance(v, str)})
+    assert len(keys) >= 6, f"the census found only {keys}: the enumeration is vacuous"
+    hit = SearchResult(id="h", content="", distance=0.1, collection=COLL,
+                       metadata={"chunk_text_hash": SHARED, **{k: {"x": 1} for k in keys}})
+    wire = json.loads(format_json([hit]))[0]
+    assert [k for k in keys if k in wire] == []
+

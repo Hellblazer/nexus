@@ -2098,8 +2098,12 @@ def note_display(
     from nexus.context_annotations import owner_titles  # noqa: PLC0415 — deferred for startup cost
     from nexus.metadata_schema import ttl_listing_label  # noqa: PLC0415 — deferred for startup cost
 
-    held = [e for e in (owners or []) if title is None or (getattr(e, "title", "") or "") == title]
-    row_may_speak = len(held) <= 1
+    live = list(owners or [])
+    held = [e for e in live if title is None or (getattr(e, "title", "") or "") == title]
+    # Sole ownership is judged over ALL live owners, before the title filter: with owners A and B sharing a
+    # chunk, a read asked for A's title still has a row that B may have written (Phase 2 review H2). With
+    # none (a ghost, an unreadable catalog) the row speaks; with one it speaks only if that one is asked for.
+    row_may_speak = len(live) <= 1 and (not live or len(held) == 1)
 
     shown_title = title if title is not None else (
         owner_titles([getattr(e, "title", "") or "" for e in held]) if held else row_title
@@ -2108,17 +2112,25 @@ def note_display(
     keyed_tags = owner_tags(held, title=title)
     if keyed_tags is not None:
         tags = format_note_tags(keyed_tags)
+    elif not row_may_speak:
+        tags = ""
+    elif held and not note_ttl.row_may_give_tags(
+        getattr(held[0], "tumbler", ""), row if isinstance(row, dict) else {}, owner_title=getattr(held[0], "title", "") or "",
+    ):
+        tags = ""  # a row another note wrote is not this note's, as in the recovery-bundle export
     else:
-        tags = row_tags if row_may_speak else ""
+        tags = row_tags
 
     stamps: list[str | None] = []
     for e in held:
         stamp = getattr(e, "indexed_at", "") or ""
         stamps.append(stamp or None)
-    if not held:
+    if not live:
         indexed_full: str | None = row_indexed_at or None
+    elif not held:
+        indexed_full = None
     elif len(held) == 1:
-        indexed_full = stamps[0] or row_indexed_at or None
+        indexed_full = stamps[0] or (row_indexed_at if row_may_speak else "") or None
     else:
         parsed = [note_ttl._parse_iso(s_) if s_ else None for s_ in stamps]  # noqa: SLF001 — one parser for the catalog clock
         indexed_full = stamps[0] if parsed[0] is not None and len({*parsed}) == 1 else None
@@ -2137,7 +2149,7 @@ def note_display(
             labels.append(ttl_listing_label(row_ttl_days, row_indexed_at))
         else:
             labels.append(None)
-    ttl = ttl_listing_label(row_ttl_days, row_indexed_at) if not held else (_agreed(labels) or "unknown")
+    ttl = ttl_listing_label(row_ttl_days, row_indexed_at) if not live else (_agreed(labels) or "unknown")
 
     return NoteDisplay(title=shown_title, tags=tags, indexed=indexed, ttl=ttl)
 

@@ -308,9 +308,12 @@ def _import_chunk_metadata(meta: dict, *, shared: bool) -> dict:
 
 
 def _entry_fence(entry: Any) -> tuple[str, str]:
-    """A catalog entry's fence pair, ``(index_run_id, index_content_hash)``: it differs between two reads
-    of one entry exactly when an index run began or finished in between (nexus-6pfgb.1). Read with
-    ``getattr`` because test doubles are plain namespaces without the run id."""
+    """A catalog entry's fence pair, ``(index_run_id, index_content_hash)``. Both are written when an index
+    run BEGINS (``beginIndexRun``), so the pair differs between two reads of one entry only when a run
+    began in between; a run that was already in flight at the first read and completed before the second
+    leaves the pair equal. The caller therefore also requires the first read to be ``complete`` before it
+    calls the two reads stable (nexus-6pfgb.1). Read with ``getattr`` because test doubles are plain
+    namespaces without the run id."""
     return (getattr(entry, "index_run_id", "") or "", getattr(entry, "index_content_hash", "") or "")
 
 
@@ -374,7 +377,13 @@ def _resolve_export_owners(
         chosen = min(candidates, key=lambda t: Tumbler.parse(t).segments)
         entry = entries[chosen]
         before = entries_before.get(chosen)
-        stable = before is not None and _entry_fence(before) == _entry_fence(entry)
+        # A run in flight at the first read (state indexing) that completes before the second leaves the
+        # fence pair equal, so the first read must itself be complete (Phase 2 critique).
+        stable = (
+            before is not None
+            and getattr(before, "index_state", None) == "complete"
+            and _entry_fence(before) == _entry_fence(entry)
+        )
         position = next(
             (row.position for row in manifests.get(chosen, []) if row.chash == chash),
             0,
@@ -391,8 +400,8 @@ def _resolve_export_owners(
             # and the key is witnessed, _note_source_evidence: by the registration, key_registered
             # below, or by one of the document's chunks carrying the key). The reads are not one
             # snapshot (nexus-6pfgb.1): the entry is read before the manifests and again after them,
-            # and a document whose fence (run id and key, _entry_fence) differs between the two reads
-            # was re-indexed in between, so the manifest rows read in the middle may be the old ones
+            # and a document whose fence (run id and key, _entry_fence) differs between the two reads,
+            # or whose first read was not complete, was re-indexed in between, so the manifest rows read in the middle may be the old ones
             # under the new entry. Its record carries no key and no registration witness (``stable``),
             # so the importer cannot stamp those rows with a key they were not indexed under; the group
             # then disagrees with the pages read before the re-index and is poisoned. A run id is a

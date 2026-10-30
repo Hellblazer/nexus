@@ -177,6 +177,15 @@ OWNER_AGENTS_KEY: str = "_owner_agents"
 #: :data:`OWNER_FACTS_KEY`.
 OWNER_BIB_KEY: str = "_owner_bib"
 
+#: Metadata key a search hit carries the row count of its ATTRIBUTED owner's manifest under (RDR-236 Phase 2
+#: review, nexus-6pfgb.12): the chash-positions route's (or the manifest's) count for the document the hit is
+#: attributed to, stamped unconditionally by ``search_engine._attach_from_chash_positions`` and
+#: ``_attach_doc_ids_from_catalog``. ``query``'s document card reads it first and the legacy ``chunk_count``
+#: row key only when it is absent (a hit the catalog did not resolve): a pre-Phase-3 row still carries the
+#: last writer's ``chunk_count``, which the plain ``setdefault`` stamp leaves in place for the scorer.
+#: A working key like :data:`OWNER_FACTS_KEY`, never stored.
+OWNER_CHUNK_COUNT_KEY: str = "_owner_chunk_count"
+
 #: Metadata key a search hit carries what the quality boost reads under (nexus-6pfgb.12):
 #: ``{"bib_citation_count", "bib_year"}`` of the attributed owner, or, for a hit whose ``doc_id`` the lookup
 #: CHOSE (:data:`DOC_ID_INFERRED_KEY`), of the live owner with the most citations (the choice is arbitrary,

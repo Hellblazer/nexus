@@ -20,6 +20,7 @@ import nexus.search_engine as se
 from nexus.context_annotations import (
     DOC_ID_INFERRED_KEY,
     OWNER_BIB_KEY,
+    OWNER_CHUNK_COUNT_KEY,
     OWNER_QUALITY_KEY,
     entry_facts,
 )
@@ -169,6 +170,40 @@ def test_the_boost_stays_off_code_collections_whatever_the_owner_says() -> None:
     r.hybrid_score = 0.7
     apply_quality_boost([r])
     assert r.hybrid_score == 0.7
+
+
+# ── the owner's chunk count: a legacy row's chunk_count never beats the manifest (Phase 2 review H1) ──
+
+
+class _PositionsCatalog:
+    """The engine's chash-positions route: A's manifest has 7 rows."""
+
+    def chash_positions(self, chashes):
+        return [{"chash": c, "doc_id": A, "position": 2, "chunk_count": 7} for c in chashes]
+
+
+class _ManifestOnlyCatalog:
+    """An engine without the route: the reverse lookup and the manifest give A 7 rows."""
+
+    chash_positions = None
+
+    def docs_for_chashes(self, chashes):
+        return {c: [A] for c in chashes}
+
+    def get_manifests(self, doc_ids):
+        return {d: [{"chash": H_A if i == 2 else f"{i:064d}", "position": i} for i in range(7)] for d in doc_ids}
+
+
+@pytest.mark.parametrize("catalog", [_PositionsCatalog(), _ManifestOnlyCatalog()], ids=["chash_positions", "manifest"])
+def test_a_stale_row_chunk_count_never_beats_the_owners_manifest_count(catalog) -> None:
+    stale = SearchResult(id="s", content="x", distance=0.2, collection=COLL,
+                         metadata={"chunk_text_hash": H_A, "chunk_count": 99})
+    bare = SearchResult(id="b", content="x", distance=0.2, collection=COLL, metadata={"chunk_text_hash": H_A})
+    se._attach_doc_ids_from_catalog([stale, bare], catalog)
+    assert stale.metadata[OWNER_CHUNK_COUNT_KEY] == 7
+    assert bare.metadata[OWNER_CHUNK_COUNT_KEY] == 7
+    assert stale.metadata["chunk_count"] == 99, "the row's own key keeps its setdefault semantics (the scorer reads it)"
+    assert bare.metadata["chunk_count"] == 7
 
 
 # ── query's card, end to end through the real attach and the real boosts ─────────────────────

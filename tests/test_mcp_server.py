@@ -3196,33 +3196,54 @@ def test_query_groups_a_shared_chunk_under_the_row_owner_not_the_first_holder():
     chash = "ab" * 32
 
     def fake(*_a, **_kw):
-        return [SearchResult(
-            id="r1", content="shared text", distance=0.1, collection="code__test",
-            metadata={"chunk_text_hash": chash, "doc_id": "1.1.9", "chunk_count": 7,
-                      "_owner_doc_ids": ["1.1.2", "1.1.9"], "_display_title": "owner-doc"},
-        )]
+        # Two hits on the one chunk, each attributed to a different owner. A grouping that keyed on
+        # sorted(_owner_doc_ids)[0] (the first holder) would merge them into one card; keyed on the
+        # row's own doc_id they stay two.
+        return [
+            SearchResult(
+                id="r1", content="shared text", distance=0.1, collection="code__test",
+                metadata={"chunk_text_hash": chash, "doc_id": "1.1.9", "chunk_count": 7,
+                          "_owner_doc_ids": ["1.1.2", "1.1.9"], "_display_title": "owner-doc"},
+            ),
+            SearchResult(
+                id="r2", content="shared text", distance=0.2, collection="code__test",
+                metadata={"chunk_text_hash": chash, "doc_id": "1.1.2", "chunk_count": 3,
+                          "_owner_doc_ids": ["1.1.2", "1.1.9"], "_display_title": "first-holder-doc"},
+            ),
+        ]
 
+    refusing = _RefusingCatalog()
     with patch("nexus.search_engine.search_cross_corpus", fake), \
-         patch("nexus.mcp.core._get_catalog", return_value=_RefusingCatalog()), \
+         patch("nexus.mcp.core._get_catalog", return_value=refusing), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         out = query(question="shared chunk owner", corpus="code__test")
-    assert "owner-doc" in out
-    assert "7 chunks" in out
-    assert "3 chunks" not in out
+    assert refusing.calls == [], "query() reached the catalog (an except Exception would swallow the refusal)"
+    assert "Found 2 documents" in out, "one card per attributed owner, not one for the first holder"
+    assert "owner-doc" in out and "first-holder-doc" in out
+    assert "7 chunks" in out and "3 chunks" in out
 
 
 class _RefusingCatalog:
     """nexus-6pfgb.12: ``query()`` reads the stamps ``search_cross_corpus``
     put on each hit; any catalog call of its own is the duplicated lookup
-    RF-10 removed."""
+    RF-10 removed. Every call is RECORDED as well as refused: the refusal is
+    an ``AssertionError``, which a reintroduced ``except Exception`` in
+    ``query()`` would swallow, so each test asserts :attr:`calls` is empty
+    afterwards (Phase 2 review, M2)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
 
     def docs_for_chashes(self, chashes):
+        self.calls.append(("docs_for_chashes", chashes))
         raise AssertionError(f"query() must not reverse-look-up {chashes}")
 
     def get_manifests(self, doc_ids):
+        self.calls.append(("get_manifests", doc_ids))
         raise AssertionError(f"query() must not fetch manifests for {doc_ids}")
 
     def get_manifest(self, doc_id):
+        self.calls.append(("get_manifest", doc_id))
         raise AssertionError(f"query() must not fetch the manifest of {doc_id}")
 
 
@@ -3249,10 +3270,12 @@ def test_query_groups_a_row_that_names_no_owner_under_its_legacy_key_without_a_l
             ),
         ]
 
+    refusing = _RefusingCatalog()
     with patch("nexus.search_engine.search_cross_corpus", fake), \
-         patch("nexus.mcp.core._get_catalog", return_value=_RefusingCatalog()), \
+         patch("nexus.mcp.core._get_catalog", return_value=refusing), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         out = query(question="mixed owners", corpus="code__test")
+    assert refusing.calls == [], "query() reached the catalog (an except Exception would swallow the refusal)"
     assert "named-doc" in out and "unnamed-doc" in out
     assert "7 chunks" in out
     assert "5 chunks" not in out
@@ -3278,10 +3301,46 @@ def test_query_keeps_one_card_per_owner_of_a_label_expanded_shared_chunk():
         return [row("1.1.2", "first-owner", 0.1, 3), row("1.1.9", "second-owner", 0.1, 7),
                 row("1.1.9", "second-owner", 0.1, 7)]
 
+    refusing = _RefusingCatalog()
     with patch("nexus.search_engine.search_cross_corpus", fake), \
-         patch("nexus.mcp.core._get_catalog", return_value=_RefusingCatalog()), \
+         patch("nexus.mcp.core._get_catalog", return_value=refusing), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         out = query(question="label expanded", corpus="code__test")
+    assert refusing.calls == [], "query() reached the catalog (an except Exception would swallow the refusal)"
     assert "first-owner" in out and "second-owner" in out
     assert out.count("second-owner") == 1
     assert "3 chunks" in out and "7 chunks" in out
+
+
+def test_query_card_shows_the_owners_manifest_count_not_a_stale_row_chunk_count():
+    """Phase 2 review H1 (nexus-6pfgb.12): a legacy chunk row still carries the last
+    writer's ``chunk_count`` (99). The attach step stamps the attributed owner's manifest
+    count under ``OWNER_CHUNK_COUNT_KEY`` (7), and the card reads that first; the legacy key
+    only serves a hit the catalog did not resolve (the second row)."""
+    from nexus.context_annotations import OWNER_CHUNK_COUNT_KEY
+
+    _mock_t3([{"name": "code__test", "count": 2}])
+    resolved, unresolved = "ab" * 32, "cd" * 32
+
+    def fake(*_a, **_kw):
+        return [
+            SearchResult(
+                id="r1", content="resolved row", distance=0.1, collection="code__test",
+                metadata={"chunk_text_hash": resolved, "doc_id": "1.1.9", "chunk_count": 99,
+                          OWNER_CHUNK_COUNT_KEY: 7, "_display_title": "resolved-doc"},
+            ),
+            SearchResult(
+                id="r2", content="unresolved row", distance=0.2, collection="code__test",
+                metadata={"chunk_text_hash": unresolved, "chunk_count": 4, "_display_title": "unresolved-doc"},
+            ),
+        ]
+
+    refusing = _RefusingCatalog()
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.mcp.core._get_catalog", return_value=refusing), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="stale row count", corpus="code__test")
+    assert refusing.calls == []
+    assert "7 chunks" in out
+    assert "99 chunks" not in out
+    assert "4 chunks" in out, "an unresolved hit falls back to the legacy row key"
