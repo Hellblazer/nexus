@@ -29,6 +29,7 @@ from nexus.plans.answer_shape import (
     INSUFFICIENT_EVIDENCE_NOTICE_PREFIX,
     NON_ANSWER_SHAPES,
     AnswerShape,
+    unread_phrase,
 )
 from nexus.plans.coverage_ledger import CONFLICTED_REASON, CoverageResult, counts_toward_a_usable_answer
 
@@ -135,6 +136,13 @@ def render_insufficient_evidence(coverage: CoverageResult, facet_texts: Mapping[
         # nexus-jypmj.3.17: an ambiguous or unlookable source blocked nothing; say that it was not read, and why.
         lines.append("A named source could not be resolved, so nothing of it was read; the parts above rest on other evidence:")
         lines.extend(f"  - {r.source}: {_clip(r.detail or 'unresolved')}" for r in unresolved)
+    unread = coverage.ledger.assessment.skipped_items
+    if unread > 0:
+        # nexus-jypmj.23: the check decided on what it read; say how much it did not.
+        lines.append(
+            f"{unread_phrase(unread, coverage.ledger.assessment.anchors_total)} were not read by the coverage check "
+            "(its per-call size cap), so the evidence they hold was not counted for the parts above."
+        )
     if conflicted:
         lines.append("The evidence conflicts on these parts; the answer below follows the supporting evidence:")
         lines.extend(f"  - {f.facet_id} (the evidence conflicts): {clip(f.facet_id)}" for f in conflicted)

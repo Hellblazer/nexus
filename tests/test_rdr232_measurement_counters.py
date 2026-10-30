@@ -348,11 +348,17 @@ async def test_unassessed_by_cause_deadline_skip_after_a_call_was_made() -> None
 
 
 @pytest.mark.asyncio
-async def test_unassessed_by_cause_other_is_the_item_cap() -> None:
+async def test_the_item_cap_leaves_no_facet_unassessed() -> None:
+    """Until nexus-jypmj.23 an item the cap left out made its facets unassessed (cause ``other``). Sam's ruling of
+    2026-10-30: a facet no read item bears on reads unsupported, and the unread count is disclosed, so the cap is
+    no longer a cause of an unassessed facet (tests/test_rdr232_unread_anchors.py has the withholding cases)."""
     with patch.object(coverage_ledger, "ASSESSMENT_MAX_ITEM_CHARS", 10):
-        cov = _cov(await _run(Dispatcher(supports_nothing), CoverageBoundary(request=_request(2))))
+        cov = _cov(await _run(Dispatcher(supports_nothing), CoverageBoundary(request=_request(2), max_repair_queries=0)))
     assert cov.ledger.assessment.skipped_items > 0
-    assert _summary(cov)["coverage"]["unassessed_by_cause"] == _causes(other=2)
+    block = _summary(cov)["coverage"]
+    assert block["unassessed_by_cause"] == _causes()
+    assert block["assessment_skipped_items"] == cov.ledger.assessment.skipped_items
+    assert [f.state for f in cov.ledger.findings] == ["unsupported", "unsupported"]
 
 
 @pytest.mark.asyncio

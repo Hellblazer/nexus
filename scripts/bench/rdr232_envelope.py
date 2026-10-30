@@ -238,6 +238,10 @@ def envelope_facts(envelope: Mapping[str, Any]) -> dict[str, Any]:
         "assessment_outcome": assessment.get("outcome"),
         "assessment_calls": int(assessment.get("calls") or 0),
         "assessment_latency_ms": int(assessment.get("latency_ms") or 0),
+        # Unsupported on a full read versus unsupported with unread items (nexus-jypmj.23): the first is "nothing
+        # supports it", the second "nothing it READ supports it", and the harness must tell them apart.
+        "assessment_skipped_items": int(assessment.get("skipped_items") or 0),
+        "assessment_anchors_total": int(assessment.get("anchors_total") or 0),
         "failure_cause": assessment.get("failure_cause"),
         "accepted_records": int(assessment.get("accepted_records") or 0),
         "rejected_records": int(assessment.get("rejected_records") or 0),

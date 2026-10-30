@@ -12,7 +12,7 @@ declared kind and its provenance:
 ====================  =========================================
 request kind          eligible declared plan kinds
 ====================  =========================================
-``lookup``            lookup, synthesis, unknown
+``lookup``            lookup, unknown
 ``synthesis``         synthesis, unknown
 ``discovery/listing`` discovery/listing, unknown
 ``comparison``        comparison, synthesis, unknown
@@ -20,6 +20,9 @@ request kind          eligible declared plan kinds
 ``debug``             debug, synthesis, unknown
 ``unknown``           curated synthesis and curated unknown only
 ====================  =========================================
+
+A ``lookup`` request admits no synthesis plan (Sam, 2026-10-30, nexus-jypmj.11): a synthesis plan outscored the
+lookup plan and cost 8.9 times as much on H09. The rows of the other kinds are unchanged.
 
 ``unknown`` plan kinds are limited by provenance, as the RDR says: a curated (reviewed builtin) unknown
 plan is eligible as the table reads; an unknown plan that is not curated (grown with no recorded route,
@@ -239,7 +242,7 @@ _C, _A, _B, _U = (
 #: Request kind -> the KNOWN plan kinds it accepts. ``unknown`` plan kinds and the ``unknown`` request are
 #: rules of their own (see :func:`eligibility`), not rows of this table.
 _COMPATIBLE: dict[PlanAnswerKind, frozenset[PlanAnswerKind]] = {
-    _L: frozenset({_L, _S}),
+    _L: frozenset({_L}),  # lookup plans only: Sam, 2026-10-30 (nexus-jypmj.11), RDR-232 section 1
     _S: frozenset({_S}),
     _D: frozenset({_D}),
     _C: frozenset({_C, _S}),

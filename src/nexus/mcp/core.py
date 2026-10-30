@@ -4086,8 +4086,14 @@ def _collapse_identical_chunk_rows(rows: list[dict]) -> list[dict]:
 def _collapse_identical_chunk_results(results: list) -> list:
     """The :func:`_collapse_identical_chunk_rows` rule for ``SearchResult``
     lists (the plain query path): keyed on ``metadata["chunk_text_hash"]``,
-    the other collections recorded as ``metadata["also_in"]``."""
+    the other collections recorded as ``metadata["also_in"]``.
+
+    nexus-tko2w: a row in the kept row's collection that names a different
+    owning document (a label filter's per-owner expansion) is that document's
+    hit, so it is kept, once per owner, not folded into the first owner's card.
+    """
     kept_by_chash: dict = {}
+    owners_kept: set = set()
     out: list = []
     for r in results:
         chash = (r.metadata or {}).get("chunk_text_hash", "") or ""
@@ -4097,7 +4103,17 @@ def _collapse_identical_chunk_results(results: list) -> list:
         kept = kept_by_chash.get(chash)
         if kept is None:
             kept_by_chash[chash] = r
+            owners_kept.add((chash, _row_key(r)[2]))
             out.append(r)
+            continue
+        owner = _row_key(r)[2]
+        if (
+            r.collection == kept.collection and owner
+            and owner != _row_key(kept)[2]
+        ):
+            if (chash, owner) not in owners_kept:
+                owners_kept.add((chash, owner))
+                out.append(r)
             continue
         if r.collection and r.collection != kept.collection:
             also = kept.metadata.setdefault("also_in", [])
@@ -5281,6 +5297,10 @@ def query(
         # ``source_path``, chunk id) for chunks the catalog cannot
         # resolve (catalog absent, orphan chunks, pre-Phase-A chunks).
         chash_to_doc: dict[str, str] = {}
+        # nexus-tko2w: the owner each search row names (``doc_id``: the
+        # engine's collection-scoped first owner, or search_cross_corpus's
+        # chash_positions pairing), read once per row; "" when it names none.
+        row_owners = [str(r.metadata.get("doc_id") or "") for r in results]
         # nexus-voy5 (RDR-108 Phase 4 review S3): chunk_count was
         # previously read from chunk metadata, but RDR-108 Phase 3
         # (nexus-bdag) removed it. Resolve via the catalog manifest
@@ -5293,10 +5313,12 @@ def query(
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             cat = None
         if cat is not None:
+            # nexus-tko2w: a row that names its owner is grouped under it; only
+            # a row without one needs the tenant-wide reverse lookup below.
             chashes_seen = sorted({
                 r.metadata.get("chunk_text_hash", "")
-                for r in results
-                if r.metadata.get("chunk_text_hash")
+                for r, row_owner in zip(results, row_owners)
+                if r.metadata.get("chunk_text_hash") and not row_owner
             })
             if chashes_seen:
                 try:
@@ -5313,7 +5335,10 @@ def query(
             # ONE get_manifests round trip for the whole set (it was one
             # get_manifest per document, serial); the per-doc loop remains
             # only for a catalog without the batch method.
-            seen_doc_ids = sorted(set(chash_to_doc.values()))
+            seen_doc_ids = sorted(
+                set(chash_to_doc.values())
+                | {o for o in row_owners if o}
+            )
             batch_manifests: dict | None = None
             get_many = getattr(cat, "get_manifests", None)
             if seen_doc_ids and get_many is not None:
@@ -5330,11 +5355,11 @@ def query(
                     except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                         continue
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
-        for r in results:
+        for r, row_owner in zip(results, row_owners):
             meta = r.metadata
+            owner = row_owner or chash_to_doc.get(meta.get("chunk_text_hash", ""))
             doc_key = (
-                chash_to_doc.get(meta.get("chunk_text_hash", ""))
-                or meta.get("doc_id")
+                owner
                 or meta.get("content_hash")
                 or meta.get("title")
                 or meta.get("_display_path")
@@ -5366,12 +5391,8 @@ def query(
                     # catalog can't resolve (catalog-absent or
                     # pre-Phase-A chunks).
                     "chunk_count": (
-                        doc_to_chunk_count.get(
-                            chash_to_doc.get(meta.get("chunk_text_hash", "")),
-                            None,
-                        )
-                        or meta.get("chunk_count", "")
-                    ),
+                        doc_to_chunk_count.get(owner) if owner else None
+                    ) or meta.get("chunk_count", ""),
                     # page_count / has_formulas are not in ALLOWED_TOP_LEVEL:
                     # normalize() drops them, so the read always returned "".
                     # Removed in nexus-59j0 cleanup. nexus-1oguj later
@@ -14478,6 +14499,8 @@ async def nx_answer(
         notice = _render_non_answer_notice(
             _shape, plan_id=best.plan_id, step_count=len(result.steps),
             chunk_refs=_notice_refs,
+            unread_items=_verdict.coverage.ledger.assessment.skipped_items if _verdict.coverage is not None else 0,
+            total_items=_verdict.coverage.ledger.assessment.anchors_total if _verdict.coverage is not None else 0,
         )
         try:
             with _t2_ctx() as db:

@@ -1,31 +1,57 @@
-# RDR-232 negative controls v1 (nexus-jypmj.3.10 fix round; critique S4).
+# RDR-232 negative controls v1 (nexus-jypmj.3.10 fix round; critique S4; N01-N03 replaced under nexus-jypmj.23).
 #
 # What this is: 4 requests whose facets NOTHING in the corpus bears on. Each asks about a system the nexus RDRs never
-# describe (Cassandra, Elasticsearch, SAML with Istio, Redis Sentinel with a canary-release pipeline); the presence of
-# each marker term is pinned absent from docs/ and src/ by tests/test_rdr232_measurement_preconditions.py. They are the
-# bead's missing precondition for turning the coverage check on: with a request nothing answers, a correct assessor
-# says `neutral` for every item and the facet comes out `unsupported` (so the run is `uncovered`, or `partial` beside
-# a facet that is covered); a facet reported `covered` here is a FALSE COVER, and an `unassessed` one costs a call for
-# nothing. build_check_request asks for a record per item with no tag, so a model that did not read the items can
-# answer neutral and make the check a silent no-op; this set is where that shows.
+# describe (Couchbase vbucket rebalancing, a Hazelcast cluster map, Auth0 with Aerospike, Redis Sentinel with a
+# canary-release pipeline). They are the bead's missing precondition for turning the coverage check on: with a request
+# nothing answers, a correct assessor says `neutral` for every item and the facet comes out `unsupported` (so the run is
+# `uncovered`, or `partial` beside a facet that is covered); a facet reported `covered` here is a FALSE COVER, and an
+# `unassessed` one costs a call for nothing. build_check_request asks for a record per item with no tag, so a model that
+# did not read the items can answer neutral and make the check a silent no-op; this set is where that shows.
 #
-# Retrieval still returns related-sounding RDR chunks (canary, paging, search, auth): the test is that the assessor
+# Retrieval still returns related-sounding RDR chunks (queues, caches, auth, canary): the test is that the assessor
 # does not call them support. There is no oracle entry for these requests: absence is by construction, so the driver
 # counts the assessor's facet states directly (report key `negative_controls`). The measurement reads this set with
 # `--set negative` (bench.rdr232_phase3_measure). Same label fields and golden_set_version as golden_v1.
 #
-# Provenance: written 2026-10-28 by the conexus developer agent. IN-SAMPLE and 4 requests: a presence check for false
-# coverage, not a rate. No model has run on it. Scope is rdr with no named source, so no source binding decides a
-# facet before the assessor sees it.
+# Two scans pin absence, and they answer different questions. tests/test_rdr232_measurement_preconditions.py scans THIS
+# REPOSITORY only (docs/ and src/). It cannot see the live tenant, which holds other owners' RDRs, docs, notes and code.
+# The tenant scan is the measurement's job, and it found that the first N01-N03 were not controls there (2026-10-30,
+# nexus-jypmj.23): Cassandra (rdr 1, docs 5, knowledge 17), Elasticsearch (rdr 16, docs 10, knowledge 7, code 58) and
+# SAML / Istio (SAML in rdr 8 and knowledge 8) occur in other owners' RDRs and notes, inside this set's own `rdr` scope.
+#
+# Tenant scan of the replacements, read-only, 2026-10-30, live cloud tenant: search(lexical=True, threshold=0.0) per
+# corpus (rdr, docs, knowledge, code), then each lexical hit's full text checked for the exact marker, case-insensitive.
+# Exact-marker hits per corpus (rdr / docs / knowledge / code), with the lexical hits the engine returned in brackets:
+#   N01  Couchbase    0 / 0 / 0 / 0   [6 / 12 / 3 / 19]      vbucket   0 / 0 / 0 / 0   [133 / 300 / 94 / 300]
+#   N02  Hazelcast    0 / 0 / 0 / 0   [0 / 0 / 0 / 0]
+#   N03  Auth0        0 / 0 / 0 / 0   [300 / 300 / 300 / 300]   Aerospike  0 / 0 / 0 / 0   [0 / 5 / 26 / 0]
+#   N04  Redis Sentinel, canary release, Sentinel quorum: no hit but this repo's own pin-test term list (nexus-jypmj.23)
+# A lexical hit that is not an exact hit is trigram noise (the engine matches near spellings). The lexical scan returns
+# at most 300 hits per corpus (the engine's page cap, MAX_QUERY_RESULTS); the bracketed counts show it saturating at
+# 300 for `vbucket` (docs, code) and `Auth0` (every corpus). A saturated 300 with no exact hit among them means
+# absence, not a truncated list: when the term occurs, the lexical route returns the exact hits only (Elasticsearch
+# rdr 16 and Cassandra rdr 1 came back as just those), and the trigram flood of near spellings appears only when no
+# exact hit exists. Candidates the same scan
+# set aside because they occur in the tenant: RabbitMQ (rdr, docs, knowledge, code), Keycloak (rdr 49, docs 42),
+# ZooKeeper (rdr 3, knowledge 27, code 1), Memcached (rdr 2, docs 3, knowledge 1, code 2), ScyllaDB (knowledge 2),
+# Okta (knowledge 3), SCIM (docs 1, knowledge 10). Linkerd was set aside too: its one exact hit is a substring of
+# `getLinkerDataOffset` in another owner's Java code. The scan is a point in time; a tenant that later indexes one of
+# these terms turns the control into a non-control, so re-run it before relying on the set (the scan script lives in a
+# session scratchpad and is not in the repository; the method is recorded in T2
+# `nexus/rdr232-jypmj23-negative-controls-2026-10-30`, enough to rewrite it).
+#
+# Provenance: written 2026-10-28 by the conexus developer agent; N01-N03 replaced 2026-10-30 (nexus-jypmj.23).
+# IN-SAMPLE and 4 requests: a presence check for false coverage, not a rate. No model has run on the replacements.
+# Scope is rdr with no named source, so no source binding decides a facet before the assessor sees it.
 golden_set_version: 1
 queries:
   - qid: N01
     category: factual
-    text: "What does the Cassandra tombstone compaction policy in the nexus catalog design say about gc_grace_seconds?"
+    text: "What does the nexus catalog design say about how Couchbase vbucket rebalancing moves documents between nodes?"
     scope: rdr
     answer_kind: lookup
     required_sources: []
-    required_facets: ["gc-grace-seconds"]
+    required_facets: ["vbucket-rebalancing"]
     allowed_corpora: ["rdr"]
     unacceptable_plans:
       - "query:abstract-themes"
@@ -36,11 +62,11 @@ queries:
 
   - qid: N02
     category: factual
-    text: "Which Elasticsearch index template does the nexus search service use for RDR documents, and how are its shard counts chosen?"
+    text: "Which Hazelcast cluster map configuration does the nexus search service use for RDR documents, and how is its backup count chosen?"
     scope: rdr
     answer_kind: lookup
     required_sources: []
-    required_facets: ["index-template", "shard-count-rule"]
+    required_facets: ["cluster-map-configuration", "backup-count-rule"]
     allowed_corpora: ["rdr"]
     unacceptable_plans:
       - "query:abstract-themes"
@@ -51,11 +77,11 @@ queries:
 
   - qid: N03
     category: compositional
-    text: "Summarize how the nexus gateway validates SAML assertions, how Istio sidecars forward the caller identity, and what the SAML session-expiry policy is."
+    text: "Summarize how the nexus gateway validates Auth0 tokens, how Aerospike stores the session records, and what the Auth0 session-expiry policy is."
     scope: rdr
     answer_kind: synthesis
     required_sources: []
-    required_facets: ["saml-assertion-validation", "istio-identity-forwarding", "saml-session-expiry"]
+    required_facets: ["auth0-token-validation", "aerospike-session-storage", "auth0-session-expiry"]
     allowed_corpora: ["rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"

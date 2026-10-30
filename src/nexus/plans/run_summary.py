@@ -199,6 +199,7 @@ def _coverage_block(coverage: Any) -> dict[str, Any] | None:
     assessment = coverage.ledger.assessment
     block["assessment_latency_ms"] = assessment.latency_ms
     block["assessment_skipped_items"] = assessment.skipped_items
+    block["assessment_anchors_total"] = assessment.anchors_total
     # nexus-jypmj.3.10, additive to version 1: what each assessment call came back as (closed names and counts),
     # the failed outcome split into an unusable reply and a raised call. ``assessment_call_log`` lists
     # ``[stream, facets, reply_class]`` per call, in order.
