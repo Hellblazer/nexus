@@ -27,6 +27,7 @@ import java.util.stream.Collectors;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -141,6 +142,13 @@ class PgVectorManifestRareLabelTest {
                 }
                 step.execute();
             }
+            // The planner's choice of plan for the hybrid selective statement turns on the table statistics. A bulk
+            // load is analysed by autovacuum at a moment that depends on the load of the box, so this class passed
+            // alone and failed in the full suite (develop red at b7d6c6355). Analyse here so the class always runs
+            // the production case, a table with statistics.
+            PgContainerHelper.analyzeTable(su, CHUNKS);
+            PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
+            PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
         }
     }
 

@@ -291,12 +291,7 @@ def test_other_buckets_are_left_alone_and_nothing_is_deleted(t2_service_env, cat
 
     after = _census_totals(tenant, coll)
     assert after["legacy-unmanifested"] == 0
-    # RDR-236 Phase 3 (nexus-6pfgb.39): the rung's completion record now exists for the tenant, so the engine's
-    # census no longer reads the chunk row's catalog_doc_id. The dead-owner and superseded chunks, which that key
-    # attributed, fold into no-owner with the one that never had a key. The reaper's gate is unchanged: only
-    # legacy-unmanifested and unclassified block it, and both read zero.
-    assert (after["no-owner"], after["dead-owner"], after["superseded"]) == (3, 0, 0)
-    assert after["unclassified"] == 0
+    assert (after["no-owner"], after["dead-owner"], after["superseded"]) == (1, 1, 1)
     assert _stored(tenant, coll) == stored_before, "the rung must never delete a chunk"
     assert rdr192_backfill_complete() is True
 

@@ -241,6 +241,12 @@ final class KeyedSweep {
      * <p>The cap is on the bytes a replay or the status route returns, and that is the text Postgres renders
      * from the jsonb column, not the compact text stored: Postgres writes a space after every {@code ':'} and
      * {@code ','}, which adds several KB to a body near the cap. So the size is taken with {@link #pgJsonbBytes}.
+     *
+     * <p>The stored copy keeps each sample row's {@code text_prefix} (the first 80 characters of the chunk's text,
+     * vectors-040), so a replay is the first response field for field. That is deliberate: the request ledger is not
+     * readable by {@code nexus_diag} in the view era (grants-nexus-diag-2 revokes its direct table SELECT), and in the
+     * legacy era that role already reads {@code nexus.chunks} itself, so the ledger adds no reader of chunk text.
+     * What stays content-free is {@code gc_audit.details} ({@code ChunkReaper#sampleRow}), not this table.
      */
     String storedResponse(Map<String, Object> body, String liveJson) {
         if (pgJsonbBytes(body) <= STORED_RESPONSE_CAP_BYTES) {

@@ -26,16 +26,19 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * RDR-236 Phase 3 (bead nexus-6pfgb.39): once a tenant has its rdr192 completion record
- * ({@code nexus.ladder_completions}, rung {@link Rdr192BackfillGate#RUNG_NAME}) the manifest-less census
- * stops reading {@code catalog_doc_id}/{@code doc_id} off the chunk row, because the Phase 4 sweep removes
- * those keys. A manifest-less chunk is then attributed by the REVERSE path alone; a chunk with no reverse
- * match is {@code no-owner} whatever stale keys its row still carries.
+ * RDR-236 Phase 3 (bead nexus-6pfgb.39), the pin the other way round: the manifest-less census keeps its forward
+ * join (the chunk row's {@code catalog_doc_id}, then {@code doc_id}) for EVERY tenant, including one that has its
+ * rdr192 completion record ({@code nexus.ladder_completions}, rung {@link Rdr192BackfillGate#RUNG_NAME}). A first
+ * version of the bead dropped the join for such a tenant on the premise that a manifest-less chunk with a key is
+ * no-owner by definition once the rung converged. It is not: a manifest row lost AFTER convergence leaves its chunk
+ * carrying the key until the Phase 4 sweep, and the manifest heal (nexus-8o06q) re-indexes exactly that document,
+ * naming it through the census. Dropping the join read those chunks no-owner and the heal found nothing to do
+ * (tests/integration/test_8o06q_manifest_heal_keeps_rows.py, red on develop at b7d6c6355).
  *
- * <p>Three tenants carry the same fixture: PRE (no completion record, keys present: the forward join still
- * runs, the control), KEYS (completion record, keys present) and STRIPPED (completion record, keys removed).
- * The record, not the bucket, is the condition: a dropped join would read {@code legacy-unmanifested} as zero
- * vacuously, so the PRE tenant pins that the join is still on without the record.
+ * <p>Three tenants carry the same fixture: PRE (no completion record, keys present), KEYS (completion record, keys
+ * present) and STRIPPED (completion record, keys removed, as after the sweep). The record changes nothing: PRE and
+ * KEYS read the same buckets, and the keys, not the record, decide the attribution: STRIPPED reads every keyed
+ * chunk no-owner.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ManifestLessCensusConvergedTenantIntegrationTest {
@@ -165,7 +168,7 @@ class ManifestLessCensusConvergedTenantIntegrationTest {
     }
 
     @Test
-    void aTenantWithoutTheCompletionRecordStillAttributesByTheRowKeys() {
+    void aTenantWithoutTheCompletionRecordAttributesByTheRowKeys() {
         Map<String, List<String>> b = buckets(TENANT_PRE);
 
         assertThat(b.get("superseded")).containsExactly(SUPERSEDED);
@@ -176,28 +179,32 @@ class ManifestLessCensusConvergedTenantIntegrationTest {
     }
 
     @Test
-    void aConvergedTenantAttributesByTheReversePathOnly_staleRowKeysAreNotRead() {
+    void aConvergedTenantsLostManifestRowIsStillAttributedByItsKey_theRecordChangesNothing() {
         Map<String, List<String>> b = buckets(TENANT_KEYS);
 
-        assertThat(b.get("legacy-unmanifested")).as("only the reverse match survives").containsExactly(REV_ONLY);
-        assertThat(b.get("no-owner"))
-            .as("a keyed row with no reverse match is no-owner: the stale key names a live, a dead and a ghost owner")
-            .containsExactlyInAnyOrder(SUPERSEDED, LEGACY_FWD, DEAD, GHOST);
-        assertThat(b.get("superseded")).isEmpty();
-        assertThat(b.get("dead-owner")).isEmpty();
-        assertThat(b.get("unclassified")).isEmpty();
+        assertThat(b).as("the completion record does not move a single chunk between buckets")
+            .isEqualTo(buckets(TENANT_PRE));
+        assertThat(b.get("legacy-unmanifested"))
+            .as("the live document whose manifest row was lost is named by the row key, so the heal can find it")
+            .contains(LEGACY_FWD);
+        assertThat(vecRepo.manifestLessCensus(TENANT_KEYS, COLLECTION, 300, 0).owners().get(LEGACY_FWD))
+            .containsEntry("owner_tumbler", "d-leg").containsEntry("owner_path", "forward");
     }
 
     @Test
-    void theBucketsAreIdenticalWithTheKeysPresentAndStrippedAfterConvergence() {
-        assertThat(buckets(TENANT_STRIPPED)).isEqualTo(buckets(TENANT_KEYS));
-        var keys = vecRepo.manifestLessCensus(TENANT_KEYS, COLLECTION, 300, 0);
+    void aTenantWhoseKeysAreStrippedReadsNoOwner_asAfterThePhase4Sweep() {
+        Map<String, List<String>> b = buckets(TENANT_STRIPPED);
+
+        assertThat(b.get("legacy-unmanifested")).as("only the reverse match survives").containsExactly(REV_ONLY);
+        assertThat(b.get("no-owner")).containsExactlyInAnyOrder(SUPERSEDED, LEGACY_FWD, DEAD, GHOST);
+        assertThat(b.get("superseded")).isEmpty();
+        assertThat(b.get("dead-owner")).isEmpty();
+        assertThat(b.get("unclassified")).isEmpty();
         var stripped = vecRepo.manifestLessCensus(TENANT_STRIPPED, COLLECTION, 300, 0);
-        assertThat(stripped.totals()).isEqualTo(keys.totals());
-        assertThat(stripped.scopeChunkTotal()).isEqualTo(keys.scopeChunkTotal());
+        var pre = vecRepo.manifestLessCensus(TENANT_PRE, COLLECTION, 300, 0);
+        assertThat(stripped.scopeChunkTotal()).isEqualTo(pre.scopeChunkTotal());
         assertThat(stripped.owners().get(REV_ONLY)).containsEntry("owner_path", "reverse");
-        assertThat(keys.owners().get(LEGACY_FWD)).as("no owner is reported for a chunk the join no longer finds")
-            .containsEntry("owner_tumbler", null).containsEntry("owner_path", null);
+        assertThat(stripped.owners().get(LEGACY_FWD)).containsEntry("owner_tumbler", null).containsEntry("owner_path", null);
     }
 
     private static final class ConstantEmbedder implements Embedder {
