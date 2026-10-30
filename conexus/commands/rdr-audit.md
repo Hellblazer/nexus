@@ -29,7 +29,7 @@ The skill body should:
 1. **Seed T1 link context** to RDR-067 tumbler (1.1.771) so audit findings auto-link
 2. **Run the main-session transcript pre-step** — NOT delegatable (see skill body §Main-Session PRE-STEP). Honor the `--no-transcripts` flag if passed.
 3. **Load the canonical prompt** from T2 `nexus_rdr/067-canonical-prompt-v1` and substitute `{project}` + `{transcript_excerpts}`
-4. **Dispatch `deep-research-synthesizer`** via Agent tool with the substituted prompt as the task body
+4. **Dispatch `deep-research-synthesizer`** via Agent tool with `model: "sonnet"` and the substituted prompt as the task body
 5. **Parse the subagent output** for verdict, incident count, confidence, drift distribution
 6. **The skill body owns `memory_put`** — persist the full output to T2 `rdr_process/audit-<project>-<YYYY-MM-DD>` permanently (omit `ttl`). Do NOT rely on the subagent to self-persist (Phase 1b finding: 0/3 runs self-persisted).
 7. **Surface a compact summary** to the user: verdict, rate, confidence, drift distribution, T2 record id for the full record
