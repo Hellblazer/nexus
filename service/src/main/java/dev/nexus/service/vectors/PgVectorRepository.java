@@ -3521,6 +3521,16 @@ public final class PgVectorRepository {
             // nexus-p89h4: with a manifest predicate the same exact rank also tests the EXISTS, so the cut that
             // follows never sees a chunk no owner of which passes.
             if (wherePlan.manifest() != null) {
+                // nexus-p89h4: the candidate set is already materialised (at most selectiveGateMax chashes), so
+                // the rank is made exact outright. Left to the planner, a table whose statistics say the chash set
+                // is most of the collection and the EXISTS usually true takes the HNSW index for ORDER BY ...
+                // LIMIT n; without hnsw.iterative_scan (this branch sets none) that scan yields ef_search
+                // candidates, the EXISTS rejects every one of a rare label's nearest, and the statement returns
+                // EMPTY. Whether it does depends on the table statistics (an analysed table does, a fresh one
+                // does not), which is how a green class went red once the full suite ran it after others.
+                // Bitmap scans stay on, so the chash = ANY(...) key lookup and the EXISTS probes still use the
+                // primary keys.
+                PgSession.disableIndexScanForExactFallback(ctx);
                 return ctx.selectFrom(
                     manifestSearchFn(dim, queryVec, null, chashes, colls, wherePlan, nResults, model, tenant)).fetch();
             }
