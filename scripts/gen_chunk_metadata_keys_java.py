@@ -35,7 +35,10 @@ _DOC = {
     "CHUNK": "Keys a chunk row keeps: the chash or the embedding model determines them. Stay.",
     "DOCUMENT": "Keys a catalog document determines. Their home is the catalog; they leave the row.",
     "POSITION": "Keys one manifest position determines. Their home is the manifest; they leave the row.",
-    "ROW": "Keys the engine writes on the physical row (quarantine). A client write is refused.",
+    "ROW": (
+        "Keys the engine writes on the physical row (quarantine). The Phase 4 route check refuses or "
+        "logs them from a client write; the database CHECK admits them (CHUNK and ROW)."
+    ),
     "LEGACY": "Retired keys, readable on old rows and swept.",
 }
 
@@ -62,9 +65,11 @@ def render() -> str:
         "package dev.nexus.service.vectors;\n\n"
         "import java.util.Set;\n\n"
         "/**\n"
-        " * The chunk-metadata key table by class (RDR-236). The engine check added in Phase 4 admits the\n"
-        " * {@link #CHUNK} and {@link #ROW} keys on a chunk row and names the home of the others in its\n"
-        " * {@code chunk_metadata_key_refused} 422. Only metadata keys are listed here; the table's columns,\n"
+        " * The chunk-metadata key table by class (RDR-236). The Phase 4 ROUTE check admits the\n"
+        " * {@link #CHUNK} keys only from a client write, refuses or logs the {@link #ROW} keys (the engine\n"
+        " * writes those itself) and names the home of the others in its\n"
+        " * {@code chunk_metadata_key_refused} 422; the database CHECK admits {@link #CHUNK} and\n"
+        " * {@link #ROW}. Only metadata keys are listed here; the table's columns,\n"
         " * tables and catalog rows are not. The bypass prefixes (taxonomy, quarantine) are deliberately NOT\n"
         " * generated: a collection-prefix string literal is a parse site that {@code CollectionParseGateTest}\n"
         " * counts down, never up, so the Phase 4 check resolves the bypass another way.\n"
@@ -86,11 +91,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     text = render()
     if args.write:
-        OUTPUT.write_text(text, encoding="utf-8")
+        OUTPUT.write_bytes(text.encode("utf-8"))  # LF endings on every platform
         print(f"wrote {OUTPUT.relative_to(REPO_ROOT)}")
         return 0
-    current = OUTPUT.read_text(encoding="utf-8") if OUTPUT.exists() else ""
-    if current != text:
+    current = OUTPUT.read_bytes() if OUTPUT.exists() else b""
+    if current != text.encode("utf-8"):
         print(
             f"{OUTPUT} is not current; run "
             "`uv run python scripts/gen_chunk_metadata_keys_java.py --write`",

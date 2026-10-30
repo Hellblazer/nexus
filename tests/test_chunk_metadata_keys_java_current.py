@@ -15,7 +15,7 @@ from nexus.tables import chunk_metadata_keys as ckm
 
 def test_generated_java_equals_what_the_generator_renders_now():
     assert gen.OUTPUT.exists(), f"{gen.OUTPUT} is missing; run the generator with --write"
-    assert gen.OUTPUT.read_text(encoding="utf-8") == gen.render(), (
+    assert gen.OUTPUT.read_bytes() == gen.render().encode("utf-8"), (
         "ChunkMetadataKeys.java is stale; run "
         "`uv run python scripts/gen_chunk_metadata_keys_java.py --write`"
     )
@@ -38,6 +38,23 @@ def test_generated_java_leaves_out_columns_tables_and_catalog_rows():
     for row in ckm.rows():
         if row.kind != "metadata-key":
             assert f'"{row.key}"' not in text, row.key
+
+
+def test_the_row_wording_separates_the_route_check_from_the_database_check():
+    """RDR-236 Phase 4: the ROUTE check admits CHUNK keys only from a client write and refuses or
+    logs ROW keys (the engine writes those); the database CHECK admits CHUNK and ROW."""
+    text = gen.OUTPUT.read_text(encoding="utf-8")
+    assert "ROUTE check admits the" in text and "{@link #CHUNK} keys only" in text
+    assert "database CHECK admits" in text
+    assert "admits the\n * {@link #CHUNK} and {@link #ROW} keys on a chunk row" not in text
+
+
+def test_a_crlf_file_is_caught(tmp_path, monkeypatch):
+    """--check compares bytes: a CRLF-converted but otherwise equal file is stale."""
+    crlf = tmp_path / "ChunkMetadataKeys.java"
+    crlf.write_bytes(gen.render().replace("\n", "\r\n").encode("utf-8"))
+    monkeypatch.setattr(gen, "OUTPUT", crlf)
+    assert gen.main(["--check"]) == 1
 
 
 def test_a_stale_file_is_caught(tmp_path, monkeypatch):

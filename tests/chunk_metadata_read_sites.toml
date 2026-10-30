@@ -6,15 +6,102 @@
 # what the scan finds is a finding too, so the commit that moves a reader to the catalog (or
 # the manifest) deletes or lowers its line. Never add a line to make the lint pass: read the
 # value from the key's home instead (src/nexus/tables/chunk-metadata-keys.toml, the `home`
-# column). The note TTL fallback in src/nexus/catalog/note_ttl.py is exempt whole.
+# column). The note TTL fallback in src/nexus/catalog/note_ttl.py is exempt from this list, but
+# bounded: see [exempt] below.
 #
 # Some entries are not readers of a shared row at all (the extractor and chunker dicts that
 # become a row's metadata, `metadata_schema` itself, the injected T3Database facade). They are
 # listed because the scan cannot tell them apart; the epic's Phase 2 and 4 sweep removes them.
 
+# Bare receivers that ARE a chunk row's metadata at the Phase 2 reader sites, so the lint reads
+# them too (RDR-236 critique S2). `path` opts a name in for the whole file, `path::qualname` for
+# one function and what it nests. Each was read in place: the receiver is a T3 row's metadata,
+# not a catalog entry's meta. An entry that matches no read is stale; delete it.
+[receivers]
+"src/nexus/commands/enrich.py" = ["meta"]
+"src/nexus/catalog/orphan_backfill.py" = ["meta"]
+"src/nexus/health.py" = ["meta"]
+"src/nexus/mcp/core.py::store_get" = ["entry"]
+"src/nexus/mcp/core.py::store_get_many" = ["entry"]
+"src/nexus/mcp/core.py::store_list" = ["e"]
+"src/nexus/exporter.py" = ["meta"]
+"src/nexus/catalog/manifest_backfill.py" = ["meta"]
+"src/nexus/commands/catalog.py" = ["meta", "m"]
+
+# src/nexus/catalog/note_ttl.py is the legacy-fallback module (RF-8): exempt from [sites], but it
+# may read only catalog_doc_id and title and these counts may only fall.
+[exempt]
+[exempt."src/nexus/catalog/note_ttl.py::row_may_give_tags"]
+catalog_doc_id = 1
+title = 1
+
+[exempt."src/nexus/catalog/note_ttl.py::row_names_note"]
+catalog_doc_id = 1
+title = 1
+
+[exempt."src/nexus/catalog/note_ttl.py::row_written_by"]
+catalog_doc_id = 1
+title = 1
+
 [sites]
 [sites."src/nexus/aspect_readers.py::_gather_chroma_chunks_by_field"]
 chunk_index = 2
+
+[sites."src/nexus/catalog/manifest_backfill.py::_fetch_chunk_by_id"]
+chunk_end_char = 1
+chunk_start_char = 1
+line_end = 1
+line_start = 1
+
+[sites."src/nexus/catalog/manifest_backfill.py::_fetch_chunks_by_key"]
+chunk_end_char = 1
+chunk_index = 1
+chunk_start_char = 1
+line_end = 1
+line_start = 1
+
+[sites."src/nexus/catalog/manifest_backfill.py::_forward_hints_for_chashes"]
+catalog_doc_id = 1
+doc_id = 1
+
+[sites."src/nexus/catalog/orphan_backfill.py::gather_titled_chunks"]
+chunk_index = 1
+title = 1
+
+[sites."src/nexus/catalog/orphan_backfill.py::link_by_content_hash"]
+chunk_index = 1
+content_hash = 1
+
+[sites."src/nexus/commands/catalog.py::_backfill_papers"]
+bib_authors = 1
+bib_year = 1
+title = 1
+
+[sites."src/nexus/commands/catalog.py::_backfill_per_file_from_t3"]
+doc_id = 2
+source_path = 1
+
+[sites."src/nexus/commands/catalog.py::_backfill_rdrs"]
+doc_id = 2
+source_path = 1
+title = 1
+
+[sites."src/nexus/commands/enrich.py::_backfill_catalog_from_chunks"]
+catalog_doc_id = 1
+content_hash = 1
+
+[sites."src/nexus/commands/enrich.py::_chunk_bib"]
+bib_authors = 1
+bib_citation_count = 1
+bib_doi = 2
+bib_openalex_id = 1
+bib_semantic_scholar_id = 1
+bib_venue = 1
+bib_year = 2
+
+[sites."src/nexus/commands/enrich.py::run_bib_enrichment"]
+catalog_doc_id = 1
+content_hash = 1
 
 [sites."src/nexus/commands/search_cmd.py::search_cmd"]
 source_path = 2
@@ -47,8 +134,20 @@ quality_gate_overridden = 1
 section_title = 1
 section_type = 1
 
+[sites."src/nexus/exporter.py::_locate_legacy_group"]
+chunk_index = 1
+doc_id = 1
+title = 1
+
+[sites."src/nexus/exporter.py::_note_source_evidence"]
+content_hash = 1
+
 [sites."src/nexus/exporter.py::_prepass_groups"]
 doc_id = 1
+
+[sites."src/nexus/exporter.py::import_collection"]
+doc_id = 1
+source_path = 1
 
 [sites."src/nexus/formatters.py::_file_line_no"]
 line_start = 1
@@ -63,6 +162,13 @@ line_start = 1
 
 [sites."src/nexus/formatters.py::format_plain_with_context"]
 line_start = 1
+
+[sites."src/nexus/health.py::_is_pdf_stub_metadata"]
+extraction_method = 1
+title = 1
+
+[sites."src/nexus/health.py::_pdf_stubs_in_collection"]
+content_hash = 1
 
 [sites."src/nexus/mcp/core.py::_row_key"]
 doc_id = 1
@@ -83,6 +189,21 @@ doc_id = 2
 indexed_at = 1
 source_path = 2
 title = 2
+ttl_days = 1
+
+[sites."src/nexus/mcp/core.py::store_get"]
+extraction_method = 1
+indexed_at = 1
+tags = 1
+title = 1
+
+[sites."src/nexus/mcp/core.py::store_get_many"]
+section_type = 1
+
+[sites."src/nexus/mcp/core.py::store_list"]
+indexed_at = 1
+tags = 1
+title = 1
 ttl_days = 1
 
 [sites."src/nexus/metadata_schema.py::is_expired"]

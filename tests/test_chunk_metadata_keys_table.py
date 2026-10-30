@@ -10,7 +10,11 @@ does not hold is red too.
 """
 from __future__ import annotations
 
+import dataclasses
 import inspect
+import re
+import tomllib
+from importlib import resources
 
 import pytest
 
@@ -48,6 +52,7 @@ def test_row_vocabulary_is_closed():
         assert r.kind in ckm.KINDS, r
         assert r.on_row in ckm.ON_ROW, r
         assert r.remedy in ckm.REMEDIES, r
+        assert r.remedy_reader == "" or r.remedy_reader in ckm.REMEDIES, r
         assert r.home and r.moved_by, r
 
 
@@ -142,3 +147,83 @@ def test_non_chunk_metadata_keys_is_document_position_and_legacy():
     )
     assert not got & ckm.keys_of("CHUNK")
     assert not got & ckm.keys_of("ROW")
+
+
+def test_reader_remedies_are_pinned():
+    """Where the writer's remedy and the reader's differ the row carries both (the
+    census 2/2 section 5 split): a change here is deliberate and cites the census."""
+    got = {r.key: (r.remedy, r.remedy_reader) for r in ckm.rows() if r.remedy_reader}
+    assert got == {
+        "title": ("R1", "R5"),
+        "catalog_doc_id": ("R2", "R5"),
+        "doc_id": ("R2", "R5"),
+        "content_hash": ("R2", "R5"),
+    }
+
+
+def test_the_remedies_the_census_does_not_give_are_recorded_as_the_plans():
+    for key in ("source_author", "category", "source_agent"):
+        row = ckm.row_for(key)
+        assert row.remedy == "R3"
+        assert "plan 6pfgb" in row.moved_by and "not the census" in row.moved_by, row
+    frec = ckm.row_for("nexus.frecency")
+    assert frec.remedy == "n/a" and "6pfgb.42" in frec.moved_by and "unconfirmed" in frec.moved_by
+    assert "R6" in ckm.row_for("title").moved_by
+
+
+def test_a_row_missing_an_emit_field_is_refused_by_name(monkeypatch):
+    """A missing emit field names the row and the field (a ValueError), not a bare KeyError."""
+    table = ckm.load_table()
+    first = table.rows[0]
+    broken = dataclasses.replace(first, outcome={k: v for k, v in first.outcome.items() if k != "home"})
+    patched = dataclasses.replace(table, rows=(broken, *table.rows[1:]))
+    monkeypatch.setattr(ckm, "load_table", lambda: patched)
+    ckm.rows.cache_clear()
+    try:
+        with pytest.raises(ValueError, match=r"chunk_text_hash.*home"):
+            ckm.rows()
+    finally:
+        ckm.rows.cache_clear()
+
+
+# ---- the Java pin's parser preconditions (ChunkMetadataKeysTest reads the file by lines) ----
+
+_JAVA_EMIT_FIELD = re.compile(r'\b(class|kind)\s*=\s*"([^"]*)"')
+
+
+def _table_text() -> str:
+    return resources.files("nexus.tables").joinpath(ckm.TABLE_RESOURCE).read_bytes().decode("utf-8")
+
+
+def _raw_blocks() -> list[list[str]]:
+    """The non-comment lines of each ``[[row]]`` block, stripped."""
+    blocks: list[list[str]] = []
+    for line in _table_text().splitlines():
+        s = line.strip()
+        if s == "[[row]]":
+            blocks.append([])
+        elif blocks and s and not s.startswith("#"):
+            blocks[-1].append(s)
+    return blocks
+
+
+def test_every_row_is_one_match_line_then_one_emit_line():
+    """ChunkMetadataKeysTest pairs a single-line match with the single-line emit after it. The
+    Java job is path-filtered to service/**, so a TOML-only edit that breaks this would surface
+    on the next unrelated service/ change; the default loop holds it instead."""
+    blocks = _raw_blocks()
+    assert len(blocks) >= 30, "the sweep examined too few rows to mean anything"
+    for block in blocks:
+        assert [ln.split("=")[0].strip() for ln in block] == ["id", "match", "emit"], block
+        assert block[1].endswith("}") and block[2].endswith("}"), block
+
+
+def test_the_java_pin_reads_each_rows_class_and_kind_from_its_emit_line():
+    """The Java parser takes the class/kind strings found anywhere on the emit line, free text
+    included, so no home or moved_by may contain ``class = "`` or ``kind = "``."""
+    raw = tomllib.loads(_table_text())
+    for row, block in zip(raw["row"], _raw_blocks(), strict=True):
+        emit = row["emit"]
+        for field in ("home", "moved_by"):
+            assert not _JAVA_EMIT_FIELD.search(emit[field]), (row["id"], field)
+        assert dict(_JAVA_EMIT_FIELD.findall(block[2])) == {"class": emit["class"], "kind": emit["kind"]}, row["id"]

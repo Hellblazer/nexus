@@ -29,11 +29,16 @@ CLASSES: Final[tuple[str, ...]] = ("CHUNK", "DOCUMENT", "POSITION", "ROW", "LEGA
 KINDS: Final[tuple[str, ...]] = ("metadata-key", "column", "table", "catalog")
 ON_ROW: Final[tuple[str, ...]] = ("allowed", "unvalidated", "engine", "stored", "absent")
 REMEDIES: Final[tuple[str, ...]] = ("R1", "R2", "R3", "R4", "R5", "R6", "keep", "n/a")
+_REQUIRED_EMIT_FIELDS: Final[tuple[str, ...]] = ("class", "kind", "on_row", "home", "remedy", "moved_by")
 
 #: Files whose row reads of a non-CHUNK key are the legacy fallback by design:
 #: the note TTL rules read the row until the keyless-note count is zero (RDR-236
 #: RF-8). Repo-relative POSIX paths.
 LEGACY_FALLBACK_MODULES: Final[frozenset[str]] = frozenset({"src/nexus/catalog/note_ttl.py"})
+
+#: The only keys the legacy-fallback modules may read off a row. The exemption bounds what the
+#: fallback reads, not just where: a read of any other key there is a lint finding.
+LEGACY_FALLBACK_KEYS: Final[frozenset[str]] = frozenset({"catalog_doc_id", "title"})
 
 
 @dataclass(frozen=True)
@@ -45,6 +50,9 @@ class KeyRow:
     home: str
     remedy: str
     moved_by: str
+    #: The remedy for the key's READERS where it differs from the writer's ``remedy`` (the
+    #: census 2/2 split: R2 stops the writer, R5 moves the readers to the manifest); "" = same.
+    remedy_reader: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -58,11 +66,16 @@ def rows() -> tuple[KeyRow, ...]:
     out: list[KeyRow] = []
     for row in load_table().rows:
         emit = row.outcome
-        assert isinstance(emit, dict)
+        if not isinstance(emit, dict):
+            raise ValueError(f"{TABLE_RESOURCE}: row {row.id!r} has no emit table")
         key = str(row.match["key"])
+        missing = [f for f in _REQUIRED_EMIT_FIELDS if f not in emit]
+        if missing:
+            raise ValueError(f"{TABLE_RESOURCE}: row {row.id!r} (key {key!r}) lacks emit field(s) {missing}")
         built = KeyRow(
             key=key, cls=emit["class"], kind=emit["kind"], on_row=emit["on_row"],
             home=emit["home"], remedy=emit["remedy"], moved_by=emit["moved_by"],
+            remedy_reader=emit.get("remedy_reader", ""),
         )
         for field, value, domain in (
             ("class", built.cls, CLASSES), ("kind", built.kind, KINDS),
@@ -70,6 +83,10 @@ def rows() -> tuple[KeyRow, ...]:
         ):
             if value not in domain:
                 raise ValueError(f"{TABLE_RESOURCE}: key {key!r} has {field} {value!r}, not one of {domain}")
+        if built.remedy_reader and built.remedy_reader not in REMEDIES:
+            raise ValueError(
+                f"{TABLE_RESOURCE}: key {key!r} has remedy_reader {built.remedy_reader!r}, not one of {REMEDIES}"
+            )
         out.append(built)
     return tuple(out)
 

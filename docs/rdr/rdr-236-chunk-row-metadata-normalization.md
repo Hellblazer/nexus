@@ -1607,6 +1607,10 @@ upgrade or a key to classify. 2c: enforcement ships in one paired cut with
 the client release that raises the pin to it (Step 1's client already
 stopped writing), the ledger entry written not-additive, conexus armed,
 in the deploy order of RDR-223 Phase 3.
+The engine's route check takes the bypass prefixes (`taxonomy__`, `quarantine-`)
+from a source other than a string literal, because `CollectionParseGateTest`
+counts `"__"` literals down and never up (the generated key set carries no
+prefix; recorded on nexus-6pfgb.43).
 `catalog_ttl_stale` is deleted here.
 
 #### Step 3: Sweep and constraints (mandatory, per tenant, measured precondition; vehicle 6pfgb.43; the manifest constraints and `nexus.frecency` by 6pfgb.42 in this cut or after it)

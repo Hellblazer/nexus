@@ -8,9 +8,11 @@ package dev.nexus.service.vectors;
 import java.util.Set;
 
 /**
- * The chunk-metadata key table by class (RDR-236). The engine check added in Phase 4 admits the
- * {@link #CHUNK} and {@link #ROW} keys on a chunk row and names the home of the others in its
- * {@code chunk_metadata_key_refused} 422. Only metadata keys are listed here; the table's columns,
+ * The chunk-metadata key table by class (RDR-236). The Phase 4 ROUTE check admits the
+ * {@link #CHUNK} keys only from a client write, refuses or logs the {@link #ROW} keys (the engine
+ * writes those itself) and names the home of the others in its
+ * {@code chunk_metadata_key_refused} 422; the database CHECK admits {@link #CHUNK} and
+ * {@link #ROW}. Only metadata keys are listed here; the table's columns,
  * tables and catalog rows are not. The bypass prefixes (taxonomy, quarantine) are deliberately NOT
  * generated: a collection-prefix string literal is a parse site that {@code CollectionParseGateTest}
  * counts down, never up, so the Phase 4 check resolves the bypass another way.
@@ -61,7 +63,7 @@ public final class ChunkMetadataKeys {
         "section_title",
         "section_type");
 
-    /** Keys the engine writes on the physical row (quarantine). A client write is refused. */
+    /** Keys the engine writes on the physical row (quarantine). The Phase 4 route check refuses or logs them from a client write; the database CHECK admits them (CHUNK and ROW). */
     public static final Set<String> ROW = Set.of(
         "origin_collection",
         "quarantined_at",
