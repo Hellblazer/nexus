@@ -130,7 +130,8 @@ NON_EVIDENTIARY_META_KEY: str = "non_evidentiary"
 #: Catalog document ``meta`` key holding the RDR file's frontmatter ``id`` exactly as the file's header gives
 #: it (``"RDR-200"``, ``200``, ``"companion-note"``; ``""`` when the header parsed and has no ``id``). Stamped by
 #: the indexer at registration (nexus-jypmj.7) so the named-source sibling rule does not wait for the aspect
-#: worker; absent when the header did not parse or the document predates the stamp. Read through
+#: worker; null when the header did not parse (overwriting an earlier id, nexus-jypmj.20); absent when the document
+#: predates the stamp. Null and absent both mean unknown. Read through
 #: ``nexus.plans.primary_evidence.recorded_frontmatter_id``.
 RDR_FRONTMATTER_ID_META_KEY: str = "rdr_frontmatter_id"
 

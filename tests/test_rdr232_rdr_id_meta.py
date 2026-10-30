@@ -56,9 +56,17 @@ def test_the_registration_meta_carries_the_raw_id_as_the_file_read_would(header:
     assert rdr_frontmatter_meta(header) == {KEY: stamped}
 
 
-def test_an_unclosed_fence_is_not_stamped() -> None:
-    """The header did not parse, so nothing is known: no key, and the aspect row or the file decide."""
-    assert rdr_frontmatter_meta("---\nid: RDR-200\n# body with no closing fence\n") == {}
+def test_an_unclosed_fence_stamps_null() -> None:
+    """The header did not parse, so nothing is known: a null, which overwrites an earlier id (meta merges and
+    never removes a key, nexus-jypmj.20), and the aspect row or the file decide."""
+    assert rdr_frontmatter_meta("---\nid: RDR-200\n# body with no closing fence\n") == {KEY: None}
+
+
+def test_a_header_that_cannot_be_decoded_stamps_null() -> None:
+    from nexus.catalog.rdr_canonical import rdr_frontmatter_meta_from_bytes  # noqa: PLC0415
+
+    assert rdr_frontmatter_meta_from_bytes(b"---\nid: RDR-200\n---\n\xff\xfe") == {KEY: None}
+    assert rdr_frontmatter_meta_from_bytes(b"---\nid: RDR-200\n---\n") == {KEY: "RDR-200"}
 
 
 @pytest.mark.parametrize("text", [
@@ -101,6 +109,18 @@ def test_the_resolver_reads_the_registration_meta_before_asking_the_aspect_store
 def test_a_recorded_absence_in_meta_is_known_and_empty() -> None:
     got = recorded_frontmatter_id(lambda d, t: None)(_entry(meta={KEY: ""}), 1.0, "")
     assert (got.known, got.value) == (True, "")
+
+
+def test_a_null_stamp_falls_through_to_the_aspect_row_not_the_stale_id() -> None:
+    """nexus-jypmj.20: the header stopped parsing, so the indexer overwrote the id with null. The lookup reads
+    the next source, an aspect row here, never the id the document carried before."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    row = SimpleNamespace(extractor_name="rdr-frontmatter-v1", confidence=1.0, extras={"rdr_id": "RDR-300"})
+    got = recorded_frontmatter_id(lambda d, t: row)(_entry(meta={KEY: None}), 1.0, "")
+    assert (got.known, got.value) == (True, "RDR-300")
+    nothing = recorded_frontmatter_id(lambda d, t: None)(_entry(meta={KEY: None}), 1.0, "")
+    assert not nothing.known and nothing.reasons == (NO_ASPECT_ROW, "no_file_source")
 
 
 def test_without_the_key_the_aspect_row_and_the_file_still_decide() -> None:

@@ -712,8 +712,8 @@ def recorded_frontmatter_id(get_aspect: Callable[[str, float], Any] | None) -> F
     The RDR indexer writes the frontmatter ``id`` onto the catalog document when it registers (or updates)
     the document (``meta[RDR_FRONTMATTER_ID_META_KEY]``, nexus-jypmj.7), so the id is there for every
     registration made since, in local and cloud mode, with no wait on the aspect worker and no extra call: the
-    entry is already in hand. A registration that predates the stamp (or whose header did not parse) has no
-    key and falls through. Next is the deterministic ``rdr-frontmatter-v1`` aspect row (``extras["rdr_id"]``),
+    entry is already in hand. A registration that predates the stamp has no key, and one whose header stopped parsing has
+    a null (nexus-jypmj.20); both fall through. Next is the deterministic ``rdr-frontmatter-v1`` aspect row (``extras["rdr_id"]``),
     in the engine's T2, filled asynchronously by the aspect worker; a re-index or ``nx enrich aspects`` fills
     either. *get_aspect* is ``(doc_id, timeout) -> AspectRecord | None`` (the store's ``get_by_doc_id``), keyed
     by the catalog tumbler string.
@@ -730,7 +730,9 @@ def recorded_frontmatter_id(get_aspect: Callable[[str, float], Any] | None) -> F
     def lookup(entry: CatalogEntry, timeout: float, source_prefix: str = "") -> FrontmatterId:
         nonlocal store_failed
         meta = entry.meta
-        if isinstance(meta, dict) and RDR_FRONTMATTER_ID_META_KEY in meta:
+        # A null is the indexer's "the header no longer parses" (nexus-jypmj.20): meta merges and never
+        # removes a key, so the stamp is overwritten with null, and null falls through like an absent key.
+        if isinstance(meta, dict) and meta.get(RDR_FRONTMATTER_ID_META_KEY) is not None:
             return FrontmatterId.of(meta[RDR_FRONTMATTER_ID_META_KEY])
         reasons: list[str] = []
         if get_aspect is not None and not store_failed:

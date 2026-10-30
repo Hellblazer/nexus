@@ -1277,6 +1277,7 @@ def _register_or_lookup_doc_id(
                     # scrolling back through WARNING-level structlog output.
                     from nexus.mcp_infra import _record_physical_collection_reconciled  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
                     _record_physical_collection_reconciled()
+            _restamp_rdr_frontmatter(writer, existing, file_path, content_type)
             return (str(existing.tumbler), False) if with_created else str(existing.tumbler)
 
         # nexus-u8n4r: refuse registration when the identity about to be
@@ -1348,15 +1349,9 @@ def _register_or_lookup_doc_id(
         # indexer writes), so the named-source sibling rule reads it without the aspect worker. Passed only
         # when there is one, so a writer double that predates ``meta`` is untouched for every other type.
         _register_extra: dict = {}
-        if content_type == "rdr":
-            from nexus.catalog.rdr_canonical import rdr_frontmatter_meta  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-
-            try:
-                _stamp = rdr_frontmatter_meta(file_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError):
-                _stamp = {}
-            if _stamp:
-                _register_extra["meta"] = _stamp
+        _stamp = _rdr_frontmatter_stamp(file_path, content_type)
+        if _stamp:
+            _register_extra["meta"] = _stamp
         _write_result = writer.register(
             owner=owner,
             title=title or file_path.stem,
@@ -1420,6 +1415,39 @@ def _register_or_lookup_doc_id(
             writer.close()
         if reader is not None:
             reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
+
+
+def _rdr_frontmatter_stamp(file_path: Path, content_type: str) -> dict:
+    """The catalog ``meta`` stamp for an RDR file's frontmatter id (nexus-jypmj.7), or ``{}`` for any other
+    content type or a file that cannot be read. An unparseable header stamps null (nexus-jypmj.20)."""
+    if content_type != "rdr":
+        return {}
+    from nexus.catalog.rdr_canonical import rdr_frontmatter_meta_from_bytes  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+
+    try:
+        return rdr_frontmatter_meta_from_bytes(file_path.read_bytes())
+    except OSError:
+        return {}
+
+
+def _restamp_rdr_frontmatter(writer: Any, existing: Any, file_path: Path, content_type: str) -> None:
+    """Bring an EXISTING RDR registration's frontmatter stamp up to date (nexus-jypmj.20, code review M5 of
+    nexus-jypmj.7). The stamp used to be written only when ``nx index rdr <file>`` minted the document, so
+    re-indexing a registration made before the stamp, or one whose header changed, left it stale. Written only
+    when the stored value differs, so a warm re-index writes nothing. Advisory: the tumbler is already
+    resolved, so a failed write is logged and the run goes on."""
+    stamp = _rdr_frontmatter_stamp(file_path, content_type)
+    if not stamp:
+        return
+    meta = getattr(existing, "meta", None)
+    meta = meta if isinstance(meta, dict) else {}
+    missing = object()
+    if all(meta.get(k, missing) == v for k, v in stamp.items()):
+        return
+    try:
+        writer.update(existing.tumbler, meta=stamp)
+    except Exception:  # noqa: BLE001 — boundary catch: advisory stamp write, must never discard a resolved tumbler
+        _log.warning("rdr_frontmatter_restamp_failed", tumbler=str(existing.tumbler), exc_info=True)
 
 
 def _make_local_embed_fn() -> tuple[EmbedFn, str]:

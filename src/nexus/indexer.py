@@ -1548,15 +1548,12 @@ def _catalog_hook(
 
             # nexus-jypmj.7: the RDR's frontmatter id is recorded on the catalog document, synchronously, so
             # the named-source sibling rule does not wait for the aspect worker. The header is read from the
-            # bytes just hashed; a header that does not parse stamps nothing.
+            # bytes just hashed; a header that does not parse stamps null (nexus-jypmj.20), which overwrites an earlier id.
             rdr_stamp: dict = {}
             if content_type == "rdr" and raw_bytes:
                 from nexus.catalog import rdr_canonical  # noqa: PLC0415 — deferred: read at call time so a test can replace the stamp
 
-                try:
-                    rdr_stamp = rdr_canonical.rdr_frontmatter_meta(raw_bytes.decode("utf-8"))
-                except UnicodeDecodeError:
-                    rdr_stamp = {}
+                rdr_stamp = rdr_canonical.rdr_frontmatter_meta_from_bytes(raw_bytes)
 
             try:
                 existing = (
