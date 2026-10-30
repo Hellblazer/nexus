@@ -65,16 +65,19 @@ _warned_unknown_modes: set[str] = set()
 
 
 def aspect_queue_mode() -> str:
-    """``"table"`` (default) or ``"tuples"``, read from ``NX_ASPECT_QUEUE`` at
-    call time. An unset or blank value is ``table``. Any other value logs one
-    warning per process and means ``table``: the table is the path every
-    released engine supports, so a typo falls back to the working queue and
-    says so, instead of failing every ingest hook."""
+    """``"tuples"`` (default) or ``"table"``, read from ``NX_ASPECT_QUEUE`` at
+    call time. An unset or blank value is ``tuples`` (the RDR-235 Activation
+    Step 1 flip, nexus-lnwn1); ``table`` is the explicit opt-out and the
+    rollback. Any other value logs one warning per process and means ``table``,
+    NOT the default: ``table`` is the path every released engine supports and
+    the rollback path the runbook names, so a typo lands on the conservative
+    queue and says so, instead of failing every ingest hook or quietly picking
+    the path that needs the newer engine."""
     raw = os.environ.get(ASPECT_QUEUE_ENV, "").strip().lower()
-    if raw in ("", "table"):
-        return "table"
-    if raw == "tuples":
+    if raw in ("", "tuples"):
         return "tuples"
+    if raw == "table":
+        return "table"
     if raw not in _warned_unknown_modes:
         _warned_unknown_modes.add(raw)
         _log.warning(
@@ -455,7 +458,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise AspectQueueEngineUnsupportedError(
                 f"{ASPECT_QUEUE_ENV}=tuples needs the 'aspects' tuple template, which the "
                 f"engine does not have; it predates {ASPECTS_ENGINE_RELEASE}. Upgrade the "
-                f"engine, or unset {ASPECT_QUEUE_ENV} to use the table queue."
+                f"engine, or set {ASPECT_QUEUE_ENV}=table to use the table queue."
             ) from exc
         return outcome
 

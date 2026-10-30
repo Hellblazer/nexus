@@ -111,13 +111,30 @@ engine's `aspects` tuple queue, selected by `NX_ASPECT_QUEUE=tuples`. This rung
 moves the rows the table already holds, so none wait for the table side of the
 worker or strand.
 
-- It applies only when `NX_ASPECT_QUEUE` is `tuples`, the engine has the
-  `aspects` template, and the engine answers
+**What flips in this release (RDR-235 Activation Step 1, nexus-lnwn1).** The
+producer default changes: with `NX_ASPECT_QUEUE` unset, the indexer, the MCP
+store path and `nx aspects requeue-failed` now write one task per document to the
+`aspects` tuple queue instead of a row in the table. The required engine rises to
+`engine-service-v0.1.170`, which carries the read this rung needs and the census
+keys `nx doctor` uses for the queue's stall signal. The worker is unchanged: it
+already drained both queues whatever the variable said. After you upgrade, `nx upgrade`
+runs this rung once and moves the table's waiting rows; there is nothing
+else to do.
+
+**Rollback.** Set `NX_ASPECT_QUEUE=table` on the producer hosts. The producer
+then writes the table again, the rung stops being applicable, and the worker
+keeps draining any task already on the tuple queue. Nothing is lost in either
+direction: a row is either still in the table or already a task, and a crash
+between the two steps leaves it in both places, never in neither. An engine older
+than `engine-service-v0.1.169` has no `aspects` template and refuses the
+`tuples` producer with a message naming that release; set `table` there.
+
+- It applies only when `NX_ASPECT_QUEUE` is `tuples` (the default, unset
+  included), the engine has the `aspects` template, and the engine answers
   `GET /v1/aspects/queue/list_waiting` (`engine-service-v0.1.170`; older
   engines answer 404). Any other case is reported as not applicable, nothing is
-  recorded, and the rung is detected again at each `nx upgrade`, including the
-  first one after the default flips to `tuples`. With the variable unset or
-  `table` it sends no request.
+  recorded, and the rung is detected again at each `nx upgrade`. With
+  `NX_ASPECT_QUEUE=table` it sends no request.
 - Each `pending` or `in_progress` row becomes one `aspects` task (an `out` with
   `mode=replace`, nonce = `doc_id`, an identity body), then the table row is
   deleted. A crash between the two leaves the row in both places; the re-run

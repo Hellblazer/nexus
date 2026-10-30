@@ -156,7 +156,7 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
     monkeypatch.setenv("NX_LOCAL", "1")
     monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
-    monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
+    monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")  # explicit; the seams that need the tuple producer set "tuples"
     monkeypatch.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: None)
     d = T2Database(tmp_path / "t2.db")
     monkeypatch.setattr(infra, "t2_index_write", lambda fn, **kw: fn(d))

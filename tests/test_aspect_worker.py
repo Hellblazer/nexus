@@ -94,6 +94,10 @@ def _isolate_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             return write_fn(db)
 
     monkeypatch.setattr(infra, "t2_index_write", _direct_index_write)
+    # This module's drain, hook and batch classes test the TABLE producer, so they
+    # say so: the unset default is "tuples" since nexus-lnwn1. The tuple-loop
+    # tests set their own mode (TestTupleLoop._start).
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
     return db_path
 
 
@@ -2851,7 +2855,7 @@ class TestTupleLoop:
         self, tuple_env, monkeypatch,  # noqa: ANN001
     ) -> None:
         tuples, table = _FakeTuples(), _FakeTable()
-        w, _db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table, mode="")
+        w, _db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table, mode="table")
         try:
             time.sleep(0.9)
         finally:

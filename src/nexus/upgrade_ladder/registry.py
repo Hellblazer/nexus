@@ -57,7 +57,7 @@ RUNG_RDR192_MANIFEST_BACKFILL = "rdr192-manifest-backfill"
 
 #: RDR-235 Phase 1 step 3 (nexus-5r2sc.3.6): move the aspect queue table's
 #: waiting rows to ``aspects`` tuples. It applies only under
-#: ``NX_ASPECT_QUEUE=tuples`` on an engine that has the template and the
+#: ``NX_ASPECT_QUEUE=tuples`` (the default since nexus-lnwn1) on an engine that has the template and the
 #: ``list_waiting`` route, and reports every other case as not applicable, so
 #: nothing is recorded and it is detected again on the next ``nx upgrade``.
 RUNG_ASPECT_QUEUE_TUPLES = "aspect-queue-tuples"

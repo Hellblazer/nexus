@@ -13,7 +13,8 @@ census, the claim fence), never against local monotonic time. Local
 ``time.monotonic`` appears only as the hang bound (``_HANG_S``, as in
 ``tests/test_rdr206_mvv_http_tuple_store.py``) and as pacing.
 
-THE SCRIPT. One tenant, ``NX_ASPECT_QUEUE=tuples``, 50 documents registered in
+THE SCRIPT. One tenant, ``NX_ASPECT_QUEUE`` UNSET (the default is ``tuples`` since
+nexus-lnwn1, so the journey reaches the tuple producer the way a user does), 50 documents registered in
 a ``knowledge__`` collection and enqueued through the production batch producer
 (``HttpAspectQueue.enqueue_many``, the call the indexer's flush makes). Indexing
 50 real documents would add embedding time and prove nothing about the queue:
@@ -154,6 +155,8 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from nexus.db.t2 import T2Database
 
     monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
+    # UNSET, not "tuples": the default is the thing under test (nexus-lnwn1). A test
+    # that needs the table path sets it to "table" itself.
     monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
     monkeypatch.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: None)
     d = T2Database(tmp_path / "t2.db")
@@ -421,14 +424,18 @@ def test_mvv_journey_on_the_tuple_queue(
     docs = [_register_doc(f"d{i:02d}", coll) for i in range(N_DOCS)]
     table_docs = [_register_doc(f"t{i}", coll) for i in range(N_TABLE_DOCS)]
 
-    # The table's pending rows are written while the flag is unset (a producer on
-    # an older box still writes rows); the tuple tasks after the flag flips.
-    monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
+    # The table's pending rows are written under the explicit opt-out (a producer
+    # on an older box still writes rows); the tuple tasks after, with the variable
+    # unset, which is the default and so the producer a user gets (nexus-lnwn1).
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
     for i, d in enumerate(table_docs):
         db.aspect_queue.enqueue(coll, f"/nx235/table-{i}.md", content_hash="t", doc_id=d)
     assert db.aspect_queue.pending_count() == N_TABLE_DOCS
 
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
+    monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
+    from nexus.db.t2.http_aspect_queue import aspect_queue_mode  # noqa: PLC0415
+
+    assert aspect_queue_mode() == "tuples", "the unset variable is the tuple producer"
     rows = [
         {
             "collection": coll, "source_path": _doc_path(i), "doc_id": docs[i],
@@ -697,7 +704,7 @@ def test_scenario_24_an_out_from_a_second_process_wakes_a_parked_worker_within_t
     """
     from tests._chunk_seed import substrate_env
 
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
+    monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)  # the default is tuples
     ledger = _Ledger()
     ledger.install(monkeypatch)
     ex = _Extractor(db)
@@ -728,9 +735,10 @@ def test_scenario_24_an_out_from_a_second_process_wakes_a_parked_worker_within_t
         )
         env = {
             **os.environ, **substrate_env(),
-            "NX_ASPECT_QUEUE": "tuples", "NEXUS_CONFIG_DIR": str(tmp_path / "child-config"),
+            "NEXUS_CONFIG_DIR": str(tmp_path / "child-config"),
             "NX_ALLOW_PROD_WRITE": "RDR-235 scenario 24 child: writes only to this test's throwaway engine",
         }
+        env.pop("NX_ASPECT_QUEUE", None)  # the child reaches the tuple producer by default
         proc = subprocess.run(
             [sys.executable, "-c", child, coll, path, doc],
             env=env, capture_output=True, text=True, timeout=_HANG_S,
@@ -765,7 +773,7 @@ def test_scenario_25_a_bulk_index_at_the_measured_backlog_is_not_refused_and_doe
     retention, drain), and the journey above covers what a worker does with a
     document.
     """
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
+    monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)  # the default is tuples
     ex = _Extractor(db)
     ex.pace = 0.0
     ex.install(monkeypatch)

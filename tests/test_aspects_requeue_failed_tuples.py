@@ -251,7 +251,9 @@ class TestRequeueFailedAgainstTheEngine:
 
         store = HttpTupleStore()
 
-        # Step 1, table mode: a table failed row and a dead task are both reported.
+        # Step 1, table mode (explicit: the unset default is "tuples" since nexus-lnwn1):
+        # a table failed row and a dead task are both reported.
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
         with T2Database(_t2) as db:
             q = db.aspect_queue
             q.enqueue("knowledge__a", "x.pdf", content="c", doc_id=register_real_doc_id())
@@ -286,7 +288,7 @@ class TestRequeueFailedAgainstTheEngine:
         # Step 3, tuples mode with a blank-doc_id row. Nothing available first, so the
         # dead task made below is the one the claim returns.
         self._drain(store)
-        monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)  # the table rows below are written in table mode
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")  # the table rows below are written in table mode
         with T2Database(_t2) as db:
             pending_before = db.aspect_queue.pending_count()
         good_doc = register_real_doc_id()
@@ -420,6 +422,9 @@ class TestRequeueWithStubs:
                 return False
 
         def build(tuples: _StubTuples, failed=()):
+            # The stub db re-enqueues through the TABLE queue; the unset default is
+            # "tuples" since nexus-lnwn1, so the mode is explicit.
+            monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
             db = _Db(tuples, list(failed))
             monkeypatch.setattr("nexus.db.t2.T2Database", lambda *a, **k: db)
             monkeypatch.setattr(

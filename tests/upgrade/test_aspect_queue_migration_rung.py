@@ -481,11 +481,18 @@ class TestRegistration:
     def test_the_rung_conforms_to_the_protocol(self) -> None:
         assert isinstance(World().rung(), Rung)
 
-    def test_the_default_rung_is_not_applicable_with_the_flag_unset(self, monkeypatch) -> None:
-        monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
+    def test_the_default_rung_is_not_applicable_under_the_table_opt_out(self, monkeypatch) -> None:
+        monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")
         rung = AspectQueueTuplesRung()
         status = rung.detect()
         assert status.applicable is False
+
+    def test_the_default_rung_passes_the_flag_gate_with_the_variable_unset(self, monkeypatch) -> None:
+        """nexus-lnwn1: the producer default is ``tuples``, so the unset variable is
+        no longer a skip reason (the engine checks that follow it are covered by the
+        injected-engine cases). No request is made: only the flag gate is read."""
+        monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
+        assert AspectQueueTuplesRung()._skip_reason() == ""
 
     def test_the_retention_constant_equals_the_template(self) -> None:
         text = (_REPO / "service/src/main/resources/tuples/templates/aspects.yaml").read_text()
@@ -564,7 +571,7 @@ def real(monkeypatch: pytest.MonkeyPatch):
     corpus._REGISTERED_COLLECTIONS_SCOPED.clear()
     monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
     monkeypatch.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: None)
-    monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
+    monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")  # explicit: the steps below set "tuples" where the move runs
     queue = HttpAspectQueue()
     store = HttpTupleStore()
     yield queue, store
@@ -646,7 +653,7 @@ class TestTheMoveRealEngine:
         assert rung.detect() == RungStatus(applicable=True, converged=True)
 
         # table: only the failed row is left
-        monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
+        monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")
         assert queue.list_waiting() == [], "step 3: the table emptied"
         assert [r.source_path for r in queue.list_failed()] == ["/dead.md"], (
             "step 3: a failed row never moves, nor is deleted"
@@ -674,7 +681,7 @@ class TestTheMoveRealEngine:
         assert len(store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300)) == 4, "step 3: a second run changed nothing"
 
         # Step 4, a real crash between out and delete, then a rerun leaves one task for the document.
-        monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
+        monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")
         crash_doc = register_real_doc_id(title="crash")
         queue.enqueue(_coll(), "/crash.md", content_hash="h", doc_id=crash_doc)
         monkeypatch.setenv(ASPECT_QUEUE_ENV, "tuples")

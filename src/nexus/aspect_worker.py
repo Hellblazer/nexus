@@ -277,7 +277,7 @@ _TUPLE_CLAIM_RETRY_S: float = 30.0
 
 
 def _aspect_queue_mode() -> str:
-    """``NX_ASPECT_QUEUE`` (``table`` or ``tuples``), read at call time. A seam
+    """``NX_ASPECT_QUEUE`` (``tuples`` by default, or ``table``), read at call time. A seam
     for the loop; the rule itself is ``http_aspect_queue.aspect_queue_mode``."""
     from nexus.db.t2.http_aspect_queue import aspect_queue_mode  # noqa: PLC0415 — deferred: heavy import, service-side
 
@@ -638,7 +638,8 @@ class AspectExtractionWorker:
             # is left on the tuple queue. The flag decides one thing here, the
             # cadence: ``tuples`` parks slot 0's ``in`` (a claim in under a
             # second) and checks the table on the poll interval or a wake-file
-            # touch; ``table`` keeps today's poll cadence for both queues.
+            # touch (the default since nexus-lnwn1); ``table`` keeps the old poll cadence
+            # for both queues.
             tuples_ok = side.supported()
             tuples_mode = tuples_ok and _aspect_queue_mode() == "tuples"
             claim_failed = False

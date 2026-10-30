@@ -441,6 +441,12 @@ class TestNexusHmxiRoundTripGrandfathering:
         """
         from unittest.mock import MagicMock
 
+        # The post-store hook's aspect enqueue also registers the collection, and
+        # under the tuples default (nexus-lnwn1) it does so against the real
+        # substrate's embedding model, so the (fake) registrar sees a second,
+        # bge-token call instead of the voyage one this test asserts. This test is
+        # about the store path's name promotion, not the aspect queue: pin the table path.
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
         fake_writer = MagicMock()
         monkeypatch.setattr(
             "nexus.catalog.factory.make_catalog_writer", lambda **kw: fake_writer,

@@ -25,6 +25,13 @@ from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsSto
 from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 
 
+@pytest.fixture(autouse=True)
+def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module tests the aspect queue TABLE path, so it says so: the unset
+    default is ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1)."""
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+
+
 # ── Mock transport helpers ─────────────────────────────────────────────────────
 
 

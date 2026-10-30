@@ -59,7 +59,7 @@ def _quiet_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
     monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
     monkeypatch.setenv("NX_LOCAL", "1")
-    monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
+    monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")  # explicit; each test sets its own mode
 
 
 def _refuse_every_batch(monkeypatch: pytest.MonkeyPatch) -> list[int]:

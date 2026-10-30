@@ -60,7 +60,7 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from nexus.db.t2 import T2Database
 
     monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
-    monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")  # explicit: each test sets "tuples" where it needs the producer
     monkeypatch.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: None)
     d = T2Database(tmp_path / "t2.db")
     monkeypatch.setattr(infra, "t2_index_write", lambda fn, **kw: fn(d))
@@ -496,7 +496,7 @@ def test_task_shapes_the_old_table_and_a_retired_collection_on_the_engine(
 
     # ── alternation: both queues drain in tuples mode; table mode drains leftover tasks ──
     _pending_table_rows_and_tuple_tasks_both_drain_in_tuples_mode(db, monkeypatch)
-    monkeypatch.delenv("NX_ASPECT_QUEUE")
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
     _a_table_mode_worker_still_drains_leftover_tuple_tasks(db, monkeypatch)
 
     # ── S10: superseded ─────────────────────────────────────────────────────────
@@ -509,7 +509,7 @@ def _pending_table_rows_and_tuple_tasks_both_drain_in_tuples_mode(
 ) -> None:
     table_docs = [_doc(f"alt-t{i}") for i in range(3)]
     tuple_docs = [_doc(f"alt-u{i}") for i in range(3)]
-    # Table rows first, while the flag is unset: in tuples mode the producer
+    # Table rows first, while the flag is "table": in tuples mode the producer
     # would write tasks instead (a producer on an older box still writes rows).
     for i, d in enumerate(table_docs):
         db.aspect_queue.enqueue(_COLL, f"/t{i}.md", doc_id=d)

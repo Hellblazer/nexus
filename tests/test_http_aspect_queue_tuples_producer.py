@@ -193,11 +193,16 @@ def no_registration(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestFlag:
-    def test_default_is_table(self) -> None:
-        assert aspect_queue_mode() == "table"
+    def test_default_is_tuples(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unset is the tuple producer (RDR-235 Activation Step 1, nexus-lnwn1);
+        ``table`` is the explicit opt-out. Set explicitly to unset, so a shell that
+        exports the variable cannot make the test read its own environment."""
+        monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
+        assert aspect_queue_mode() == "tuples"
 
     @pytest.mark.parametrize("value, expected", [
-        ("tuples", "tuples"), ("TUPLES", "tuples"), (" table ", "table"), ("", "table"),
+        ("tuples", "tuples"), ("TUPLES", "tuples"), (" table ", "table"), ("TABLE", "table"),
+        ("", "tuples"), ("   ", "tuples"),
     ])
     def test_values(self, monkeypatch: pytest.MonkeyPatch, value: str, expected: str) -> None:
         monkeypatch.setenv(ASPECT_QUEUE_ENV, value)
@@ -223,16 +228,15 @@ class TestTableModeSendsNothingToTheTupleSpace:
     def test_enqueue_and_enqueue_many_leave_the_tuple_space_alone(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Under the default (flag unset) and under an unknown value (a typo
+        """Under the explicit opt-out ("table") and under an unknown value (a typo
         means table), nothing goes to ``/v1/tuples``, and the table queue's own
         routes carry the write."""
         eng = _MockEngine()
         queue = eng.queue()
         coll = _coll()
         doc = _tumbler()
-        for flag in (None, "tuple"):
-            if flag is not None:
-                monkeypatch.setenv(ASPECT_QUEUE_ENV, flag)
+        for flag in ("table", "tuple"):
+            monkeypatch.setenv(ASPECT_QUEUE_ENV, flag)
             queue.enqueue(coll, "/p/a.md", content="text", doc_id=doc)
             assert queue.enqueue_many([
                 {"collection": coll, "source_path": f"/p/{i}.md", "doc_id": doc} for i in range(3)

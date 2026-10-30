@@ -3,8 +3,9 @@
 """RDR-235 Phase 1 step 3 (nexus-5r2sc.3.6): move the aspect queue TABLE's
 waiting rows to ``aspects`` tuples, one row at a time.
 
-WHY A RUNG. ``NX_ASPECT_QUEUE=tuples`` points the producer and the worker at the
-tuple space (RDR-235). Rows the old table already holds, written before the flip
+WHY A RUNG. ``NX_ASPECT_QUEUE=tuples`` (the default since the RDR-235 Activation
+Step 1 flip, nexus-lnwn1; ``table`` is the opt-out) points the producer and the
+worker at the tuple space (RDR-235). Rows the old table already holds, written before the flip
 by this or an older client, would otherwise wait for the alternating table side
 of the worker to drain them, or strand if the table side is ever retired. The
 upgrade ladder (RDR-185) is the standing mechanism for a data transition that

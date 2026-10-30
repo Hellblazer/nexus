@@ -426,7 +426,7 @@ def aspects_requeue_failed(
             continue
         # Daemon-routed write (nexus-zir76); INSERT OR REPLACE resets the row
         # to pending / retry_count=0 / clears any stale next_retry_at backoff.
-        # Under NX_ASPECT_QUEUE=tuples enqueue writes a TASK and never touches
+        # Under NX_ASPECT_QUEUE=tuples (the default) enqueue writes a TASK and never touches
         # the table, so the failed row is deleted afterwards (nexus-5r2sc.3.10):
         # left behind, the doctor counts it forever and every run re-extracts it.
         t2_index_write(
