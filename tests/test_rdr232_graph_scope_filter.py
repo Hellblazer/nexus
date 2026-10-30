@@ -568,8 +568,9 @@ def test_a_single_role_policy_keeps_a_node_behind_a_removed_relay_when_the_engin
     assert out["traversal"]["engine_dropped_out_of_scope"] == 1
 
 
-def test_a_single_role_policy_on_an_engine_without_node_walk_walks_unfiltered_and_loses_nothing() -> None:
-    """The stopgap, an engine of 0.1.168 or 0.1.169: it has the predicate but not node_walk."""
+def test_a_single_role_policy_on_an_engine_without_node_walk_walks_unfiltered_and_an_uncapped_walk_loses_nothing() -> None:
+    """The stopgap, an engine of 0.1.168 or 0.1.169: it has the predicate but not node_walk. Under the 500-node cap
+    the client-side narrowing is exact."""
     nodes, edges = _relay_walk()
     cat = _Engine(nodes, edges, walk=False)
     out = _relay_run(cat, "implementation")
@@ -591,6 +592,22 @@ def test_a_role_agnostic_policy_sends_the_predicate_whether_or_not_the_engine_se
         assert "scope_filter" in cat.graph_kwargs[0], f"walk={walk}"
         assert out["traversal"]["scope_prefilter"] == "applied"
         assert "1.2.3" in out["tumblers"], "role 'factual' admits B whatever its role, ranked last"
+
+
+def test_a_capped_single_role_walk_on_an_engine_without_node_walk_keeps_the_seeds_only_and_says_unavailable() -> None:
+    """The limit of the stopgap: unfiltered, the engine cuts the walk at 500 over out-of-scope nodes too, and what
+    survives is an arbitrary sample of the in-scope neighbourhood. Since 7.89.0 that walk keeps its seed documents
+    only (``secondary_omitted``), so the stopgap is NOT 'as 7.88.0' for a walk at the cap."""
+    nodes, _ = _crowded()
+    edges = [_edge(n.tumbler, SEED, "implements") for n in nodes[1:]]
+    cat = _Engine(nodes, edges, walk=False)
+    out = _relay_run(cat, "implementation")
+
+    assert "scope_filter" not in cat.graph_kwargs[0]
+    rep = out["traversal"]
+    assert out["tumblers"] == [SEED], "no in-scope neighbour is returned from an arbitrary sample"
+    assert rep["scope_prefilter"] == "unavailable" and rep["secondary_omitted"] is True
+    assert rep["possibly_truncated"] is True and rep["contained"] is False
 
 
 def test_a_reply_that_applied_the_predicate_but_carries_no_node_walk_is_walked_again_without_it() -> None:

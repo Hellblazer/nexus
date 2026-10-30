@@ -571,7 +571,10 @@ listed under Critical Assumptions before gate.
   graph stream. Remedy (decided, nexus-jypmj.18): the engine returns each node's BFS depth and best
   link role (`node_walk`, engine-service-v0.1.170) and the client scores a node the edges do not reach
   from it; against an engine without it a single-role policy sends no `scope_filter` and narrows
-  client-side, as before the filter. Verified in process and on the real engine (Java, Postgres
+  client-side, which equals 7.88.0 only under the 500-node cap (a capped walk keeps seeds only,
+  `secondary_omitted`, since 7.89.0). A `factual` or mixed-role policy still sends the filter to such
+  an engine, so its relay-reached nodes rank last and are exposed to `max_documents` until the
+  engine carries `node_walk`. Verified in process and on the real engine (Java, Postgres
   container) on the S-R-B shape; the G06 rerun on an engine carrying `node_walk` is not done.
   *Source: bead nexus-jypmj.18; T2 `nexus/rdr232-jypmj18-dropped-out-of-owner-evidence-2026-10-29`;
   `service/.../CatalogRepository.graphBFS` javadoc; `src/nexus/plans/traversal_policy.py`.*
