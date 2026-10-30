@@ -4,7 +4,7 @@
 
 Only a caller with a ``base_path`` (``nx index rdr``) has a relative spelling to get wrong and pays the catalog
 read; ``nx index md``, ``nx dt index`` and collection reindex make none. The catalog reader is a fake here: the
-substrate-backed end to end is ``tests/test_index_rdr_aspect_identity.py``.
+substrate-backed end to end is ``tests/integration/test_index_rdr_aspect_identity.py``.
 """
 from __future__ import annotations
 
