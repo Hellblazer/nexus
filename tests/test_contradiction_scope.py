@@ -399,10 +399,10 @@ class TestTheRenderedPage:
         with a0, and a2, which is in the pool but off the page, is not fetched."""
         spy, _ = _spy_t3({"a0": _NEAR, "a1": _NEAR2, "a2": _NEAR, "b0": _NEAR2}, [_NOTES])
         rows = [
-            _n("a0", _NOTES, "agent-x", 0.10, source_path="A.md"),
-            _n("a1", _NOTES, "agent-x", 0.11, source_path="A.md"),
-            _n("a2", _NOTES, "agent-x", 0.12, source_path="A.md"),
-            _n("b0", _NOTES, "agent-y", 0.13, source_path="B.md"),
+            _n("a0", _NOTES, "agent-x", 0.10, doc_id="A.md"),
+            _n("a1", _NOTES, "agent-x", 0.11, doc_id="A.md"),
+            _n("a2", _NOTES, "agent-x", 0.12, doc_id="A.md"),
+            _n("b0", _NOTES, "agent-y", 0.13, doc_id="B.md"),
         ]
         out = _render(rows, names=[_NOTES], limit=3)
 

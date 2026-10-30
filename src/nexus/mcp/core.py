@@ -3417,12 +3417,9 @@ def _search_render(
                 lines.append(f"── {cluster_label} ──")
                 current_cluster = cluster_label
             title = r.metadata.get("_display_title") or r.metadata.get("title", "")
-            # nexus-1qed: prefer the catalog-resolved _display_path so
-            # the label survives after the prune verb drops source_path.
-            source = (
-                r.metadata.get("_display_path")
-                or r.metadata.get("source_path", "")
-            )
+            # nexus-1qed: the catalog-resolved _display_path. The row's source_path is the last
+            # writer's file, not this document's, and is no longer read (nexus-6pfgb.49).
+            source = r.metadata.get("_display_path", "")
             # Both numbers, because the order comes from the second one.
             # `d=` is the raw vector distance (absolute, lower is better);
             # `s=` is the hybrid score this page was sorted by (relative to
@@ -5292,7 +5289,7 @@ def query(
         # from the lookups it already makes. nexus-6pfgb.12 (RDR-236 Phase 2): this reads those stamps
         # and makes NO catalog call of its own (it used to repeat ``docs_for_chashes`` and fetch the
         # manifests again, RF-10). Fall back to the legacy metadata keys (``content_hash``, ``title``,
-        # ``_display_path``, ``source_path``, chunk id) for chunks the catalog could not resolve
+        # ``_display_path``, chunk id; never the row's ``source_path``, nexus-6pfgb.49) for chunks the catalog could not resolve
         # (catalog absent, orphan chunks, pre-Phase-A chunks).
         from nexus.context_annotations import OWNER_BIB_KEY, OWNER_CHUNK_COUNT_KEY, OWNER_FACTS_KEY  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
@@ -5304,7 +5301,6 @@ def query(
                 or meta.get("content_hash")
                 or meta.get("title")
                 or meta.get("_display_path")
-                or meta.get("source_path")
                 or r.id
             )
             if doc_key not in docs:
@@ -5343,12 +5339,6 @@ def query(
                     # ALLOWED_TOP_LEVEL for PDF chunks now) — it was not
                     # re-added here since this grouped-doc summary wasn't in
                     # that fix's scope, not because it's still dropped.
-                    # nexus-1qed: prefer catalog-resolved _display_path so
-                    # the response survives after source_path is pruned.
-                    "source_path": (
-                        meta.get("_display_path")
-                        or meta.get("source_path", "")
-                    ),
                     "also_in": list(meta.get("also_in", [])),
                     "also_in_ids": list(meta.get("also_in_ids", [])),
                 }

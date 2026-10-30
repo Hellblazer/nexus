@@ -774,13 +774,13 @@ def test_cluster_by_keeps_every_per_document_row_of_a_shared_chunk():
 def _dom_result(i: int) -> SearchResult:
     return SearchResult(id=f"dom{i}", content="x", distance=0.01 * i,
                          collection="code__test",
-                         metadata={"source_path": "dominant.py"})
+                         metadata={"doc_id": "dominant.py", "_display_path": "dominant.py"})
 
 
 def _other_result(i: int) -> SearchResult:
     return SearchResult(id=f"o{i}", content="x", distance=0.5 + 0.01 * i,
                          collection="code__test",
-                         metadata={"source_path": f"other{i}.py"})
+                         metadata={"doc_id": f"other{i}.py", "_display_path": f"other{i}.py"})
 
 
 @pytest.mark.t2_tenant
@@ -814,7 +814,7 @@ def test_structured_true_uncapped_structured_false_capped_same_cache_entry():
     )
 
     dom_count_text = text_out.count("dominant.py")
-    assert dom_count_text <= 2, (
+    assert dom_count_text == 2, (  # exactly 2, not <= 2: a render with no path labels counts 0
         f"structured=False (cache-hit path) must apply the file-diversity "
         f"cap; got {dom_count_text} dominant.py rows in:\n{text_out}"
     )
