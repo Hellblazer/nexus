@@ -162,6 +162,18 @@ class SearchDiagnostics:
             return None
         return max(candidates, key=lambda item: item[2])
 
+def _positions_owner(candidates: list[dict], collection: str) -> dict | None:
+    """The chash-positions row a hit takes as its owner (nexus-6pfgb.52): the
+    smallest doc_id among the rows homed in the hit's own ``collection``, else
+    the smallest doc_id overall. A row without a ``collection`` (an engine
+    before that field) is homed nowhere, so such rows only ever fall to the
+    second rule. ``min`` keeps the first of equal doc_ids, which is the lowest
+    position, the engine's ``ORDER BY doc_id, position``."""
+    homed = [c for c in candidates if collection and c.get("collection") == collection]
+    pool = homed or candidates
+    return min(pool, key=lambda c: c["doc_id"]) if pool else None
+
+
 def _attach_from_chash_positions(
     results: list[SearchResult], chashes: list[str], catalog: Any,
 ) -> bool:
@@ -171,12 +183,16 @@ def _attach_from_chash_positions(
     (touching nothing) when the route is absent, fails, or any result is left
     unserved, such as a legacy chunk naming a doc the route did not return.
 
-    The manifest path's stamps, with one deliberate difference: a chash held
-    by several documents resolves to the first doc_id in the engine's text
-    order, where the manifest path picked from a set in arbitrary order.
-    Otherwise the same: that doc's whole-manifest row count, the chash's
-    first position in it, a legacy ``doc_id`` already on the result kept,
-    and fields already present never overwritten.
+    The route is tenant-wide, but each row carries the ``collection`` it is
+    homed in. A chash held by several documents resolves as the manifest
+    fallback does (``_fallback_owner``): the smallest doc_id homed in the hit's
+    collection, else the smallest doc_id in text order (``_positions_owner``).
+    Text order equals the engine's ``ORDER BY doc_id`` only under C collation,
+    which the local bundle has (``initdb --no-locale``); the cloud collation is
+    not verified in this repo. Otherwise the same stamps as the manifest path:
+    that doc's whole-manifest row count, the chash's first position in it, a
+    legacy ``doc_id`` already on the result kept, and fields already present
+    never overwritten. A row that already names its owner is not touched.
     """
     lookup = getattr(catalog, "chash_positions", None)
     if lookup is None:
@@ -198,7 +214,10 @@ def _attach_from_chash_positions(
             continue
         candidates = by_chash.get(chash, [])
         wanted = r.metadata.get("doc_id")
-        match = next((c for c in candidates if c["doc_id"] == wanted), None) if wanted else (candidates[0] if candidates else None)
+        if wanted:
+            match = next((c for c in candidates if c["doc_id"] == wanted), None)
+        else:
+            match = _positions_owner(candidates, r.collection)
         if match is None:
             if wanted or candidates:
                 return False  # a legacy doc_id the route did not return: manifest path
@@ -280,9 +299,11 @@ def _fallback_owner(
     "Homed" is read from the manifests the reverse lookup already fetched
     (a row for this chash whose own stamped ``collection`` is the hit's); no
     further catalog call. Ties, and a lookup that carried no manifests or no
-    row collections, fall back to the smallest doc_id in text order, the order
-    the engine's ``chash_positions`` route answers in, so the choice never
-    depends on the lookup's own order.
+    row collections, fall back to the smallest doc_id in text order, so the
+    choice never depends on the lookup's own order. The ``chash_positions``
+    route applies the same rule (``_positions_owner``). Text order equals the
+    engine's ``ORDER BY doc_id`` only under C collation (the local bundle's
+    ``initdb --no-locale``); the cloud collation is not verified in this repo.
 
     This is still a CHOICE among co-owners, not a fact about the row. The
     caller marks the hit ``DOC_ID_INFERRED_KEY``; every owner stays in
