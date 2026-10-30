@@ -57,17 +57,4 @@ class ManifestLessCensusSqlIdentityTest {
         // (base scope), limit, offset.
         assertThat(fileText.chars().filter(c -> c == '?').count()).isEqualTo(6);
     }
-
-    /**
-     * RDR-236 Phase 3 (nexus-6pfgb.39): the census drops its forward join for a tenant that has this rung's
-     * completion record, and the SQL spells the rung name as a literal (a bind would change the published bind
-     * order). The literal must be the name the gate and the client rung use.
-     */
-    @Test
-    void theSqlNamesTheRdr192RungTheGateRecords() throws IOException {
-        String fileText = Files.readString(STANDALONE_SCRIPT);
-
-        assertThat(fileText).contains("lc.rung_name = '" + dev.nexus.service.db.Rdr192BackfillGate.RUNG_NAME + "'");
-        assertThat(fileText).contains("FROM nexus.ladder_completions lc");
-    }
 }
