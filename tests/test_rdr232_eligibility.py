@@ -266,17 +266,11 @@ class _Library:
         return [self.rows[i] for i in self.fts]
 
 
-def _row(
-    pid, name, *, kind=None, tags="builtin-template", provenance="curated", route=None, verb="research",
-    strategy=None,
-):
-    dims = {"scope": "global", "verb": verb}
-    if strategy is not None:
-        dims["strategy"] = strategy
+def _row(pid, name, *, kind=None, tags="builtin-template", provenance="curated", route=None, verb="research"):
     return {
         "id": pid, "name": name, "query": f"Description for {name}.", "plan_json": _pj(kind, provenance, route),
         "tags": tags, "verb": verb, "scope": "global",
-        "dimensions": json.dumps(dims), "scope_tags": "", "project": "nexus",
+        "dimensions": json.dumps({"scope": "global", "verb": verb}), "scope_tags": "", "project": "nexus",
         "success_count": 1, "failure_count": 0,
     }
 
@@ -335,9 +329,7 @@ def test_scenario_2_an_eligible_lookup_plan_still_matches() -> None:
 
 #: Plan 467 as the live H09 run selected it: a builtin synthesis plan (citation-traversal) that scored better
 #: than the lookup plan, ran 1.24 USD against 0.14 for 473, and carried unrelated code files.
-CITATION_467 = _row(
-    467, "citation-traversal", kind=S, tags="builtin-template,rdr-097", verb="research", strategy="citation-traversal",
-)
+CITATION_467 = _row(467, "citation-traversal", kind=S, tags="builtin-template,rdr-097", verb="research")
 
 
 def test_a_lookup_that_a_synthesis_plan_outscores_still_gets_the_lookup_plan() -> None:
@@ -349,235 +341,6 @@ def test_a_lookup_no_lookup_plan_matches_selects_nothing_so_inline_planning_foll
     out, filt = _match([CITATION_467, SYNTH_12], [(467, 0.05), (12, 0.3)], L, fts=[467, 12])
     assert out == [], "nothing is forced; the caller plans inline (cost not measured, see the RDR)"
     assert filt.excluded_total >= 2
-
-
-# nexus-4xmpv: a synthesis request that names exactly one source does not admit citation-traversal -------------
-
-
-def _single_source_requests() -> list[str]:
-    """G06 and the six near-miss requests (bench/queries), each of which names exactly one RDR."""
-    import yaml
-
-    from tests._rdr232_golden import REPO
-
-    near_miss = yaml.safe_load((REPO / "bench" / "queries" / "golden_near_miss_synthesis_v1.yaml").read_text())
-    return [G06] + [q["text"] for q in near_miss["queries"]]
-
-
-def _named(text: str) -> int:
-    from nexus.plans.request_coverage import derive_request_coverage
-
-    return len({(s.kind, s.value) for s in derive_request_coverage(text).named_sources})
-
-
-def test_the_request_set_names_one_source_each_and_is_not_empty() -> None:
-    texts = _single_source_requests()
-    assert len(texts) == 7, "G06 + S01..S06"
-    assert [_named(t) for t in texts] == [1] * 7
-
-
-@pytest.mark.parametrize("text", _single_source_requests())
-def test_a_one_source_synthesis_request_is_not_offered_citation_traversal(text: str) -> None:
-    # S01/S03/S05/S06 read as `unknown` on the first pass and become synthesis only through the model-assisted
-    # extraction (rows 919, 921, 923, 924); the kind is passed as the extraction's reading, the count is derived.
-    n = _named(text)
-    filt = el.EligibilityFilter(S, "model-assisted", enforce=True, named_source_count=n)
-    out = real_plan_match("q", library=_Library([CITATION_467, SYNTH_12]), cache=_Cache([(467, 0.05), (12, 0.4)]),
-                          eligibility=filt, n=5)
-    assert _ids(out) == [12], "the better-scoring citation-traversal plan is refused; the other synthesis plan stays"
-    assert filt.excluded_plan_ids == [467]
-    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"single_source_synthesis": 1}
-
-
-def test_a_one_source_synthesis_with_no_other_plan_selects_nothing_so_inline_planning_follows() -> None:
-    filt = el.EligibilityFilter(S, "model-assisted", enforce=True, named_source_count=1)
-    out = real_plan_match("q", library=_Library([CITATION_467], fts=[467]), cache=_Cache([(467, 0.05)]),
-                          eligibility=filt, n=5)
-    assert out == []
-    assert filt.to_wire()["branches"]["fts"]["reasons"] == {"single_source_synthesis": 1}
-    assert el.fallback_reason(force_dynamic=False, matches=out, hit=False, filt=filt) == "all_candidates_ineligible"
-
-
-@pytest.mark.parametrize("named", [0, 2, 3])
-def test_a_synthesis_request_naming_no_source_or_several_may_still_use_citation_traversal(named: int) -> None:
-    filt = el.EligibilityFilter(S, "heuristic", enforce=True, named_source_count=named)
-    out = real_plan_match("q", library=_Library([CITATION_467, SYNTH_12]), cache=_Cache([(467, 0.05), (12, 0.4)]),
-                          eligibility=filt, n=5)
-    assert _ids(out)[0] == 467 and filt.excluded_plan_ids == []
-
-
-def test_two_sources_named_in_the_question_count_as_two() -> None:
-    assert _named("Compare how RDR-084 and RDR-180 handle the gate history.") == 2
-    assert _named("Synthesize RDR-084, then RDR-084 again, as a whole.") == 1, "one source named twice is one source"
-
-
-def test_a_lookup_is_unaffected_by_the_single_source_rule() -> None:
-    # a lookup never admitted a synthesis plan; the reason stays kind_mismatch and its plan is still selected
-    filt = el.EligibilityFilter(L, "heuristic", enforce=True, named_source_count=1)
-    out = real_plan_match("q", library=_Library([CITATION_467, LOOKUP_473]),
-                          cache=_Cache([(467, 0.05), (473, 0.3)]), eligibility=filt, n=5)
-    assert _ids(out) == [473]
-    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"kind_mismatch": 1}
-
-
-@pytest.mark.parametrize("request_kind", [C, A, B])
-def test_the_other_kinds_that_admit_synthesis_plans_keep_citation_traversal(request_kind: K) -> None:
-    filt = el.EligibilityFilter(request_kind, "heuristic", enforce=True, named_source_count=1)
-    out = real_plan_match("q", library=_Library([CITATION_467]), cache=_Cache([(467, 0.05)]), eligibility=filt, n=5)
-    assert _ids(out) == [467], "nexus-4xmpv is decided for a synthesis request only"
-
-
-def test_the_rule_reads_the_declared_strategy_not_the_plan_id_or_name() -> None:
-    renumbered = _row(9001, "citation-traversal-v2", kind=S, tags="builtin-template", verb="research",
-                      strategy="citation-traversal")
-    namesake = _row(467, "citation-traversal", kind=S, tags="builtin-template", verb="research")  # no strategy
-    for row, excluded in ((renumbered, True), (namesake, False)):
-        filt = el.EligibilityFilter(S, "model-assisted", enforce=True, named_source_count=1)
-        out = real_plan_match("q", library=_Library([row]), cache=_Cache([(row["id"], 0.05)]), eligibility=filt, n=5)
-        assert (out == []) is excluded, row["name"]
-
-
-def test_a_grown_plan_cannot_claim_the_strategy_to_change_its_standing() -> None:
-    # a grown plan is judged by provenance first (unknown kind, refused for synthesis); the strategy rule is for
-    # curated rows, so it never turns an eligible grown plan into a different reason
-    grown = _row(905, "grown-cite", kind=U, tags="ad-hoc,grown", provenance="grown", verb="research",
-                 strategy="citation-traversal")
-    filt = el.EligibilityFilter(S, "model-assisted", enforce=True, named_source_count=1)
-    real_plan_match("q", library=_Library([grown]), cache=_Cache([(905, 0.05)]), eligibility=filt, n=5)
-    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"untrusted_unknown_plan": 1}
-
-
-def test_the_planner_few_shots_leave_citation_traversal_out_for_a_one_source_synthesis() -> None:
-    def match(row) -> Match:
-        return Match(plan_id=row["id"], name=row["name"], description="d", confidence=0.5,
-                     dimensions=json.loads(row["dimensions"]), tags=row["tags"], plan_json=row["plan_json"],
-                     required_bindings=[], optional_bindings=[], default_bindings={}, parent_dims=None)
-
-    both = [match(CITATION_467), match(SYNTH_12)]
-    assert [m.plan_id for m in el.eligible_matches(S, both, 1)] == [12]
-    assert [m.plan_id for m in el.eligible_matches(S, both, 2)] == [467, 12]
-    assert [m.plan_id for m in el.eligible_matches(S, both)] == [467, 12]
-
-
-def test_nx_answer_wires_the_named_source_count_g06_gets_the_other_plan_and_a_bare_467_goes_inline() -> None:
-    env, miss, seen = _drive(G06, [CITATION_467, SYNTH_12], [(467, 0.05), (12, 0.4)])
-    wire = env["plan_eligibility"]
-    assert wire["enforced"] is True and wire["request_kind"] == "synthesis"
-    assert wire["excluded_plan_ids"] == [467] and wire["selected"]["plan_id"] == 12
-    assert wire["branches"]["cosine"]["reasons"] == {"single_source_synthesis": 1}
-    miss.assert_not_awaited()
-    env, miss, _ = _drive(G06, [CITATION_467], [(467, 0.05)], fts=[467])
-    assert env["plan_eligibility"]["fallback_reason"] == "all_candidates_ineligible"
-    miss.assert_awaited()
-
-
-# nexus-4xmpv (re-measure, Sam 2026-10-30): abstract-themes is excluded alongside citation-traversal, and the
-# rule covers an `unknown` request too -------------------------------------------------------------------------
-
-#: Plan 465 as seeded: a builtin synthesis plan, ``verb: query``, ``strategy: abstract-themes``.
-ABSTRACT_465 = _row(
-    465, "abstract-themes", kind=S, tags="builtin-template,rdr-098", verb="query", strategy="abstract-themes",
-)
-_EXCLUDED_ROWS = {"citation-traversal": CITATION_467, "abstract-themes": ABSTRACT_465}
-
-
-def test_the_shipped_templates_that_declare_an_excluded_strategy_are_exactly_the_two_decided_ones() -> None:
-    import yaml
-
-    from tests._rdr232_golden import BUILTIN_PLANS
-
-    declared = {}
-    dims_of = {}
-    for path in sorted(BUILTIN_PLANS.glob("*.yml")):
-        dims = (yaml.safe_load(path.read_text()) or {}).get("dimensions") or {}
-        dims_of[path.stem] = dims
-        declared[path.stem] = dims.get("strategy")
-    assert len(declared) >= 10, f"non-vacuity: {len(declared)} templates read"
-    hit = sorted(n for n, strategy in declared.items() if strategy in el.SINGLE_SOURCE_EXCLUDED_STRATEGIES)
-    assert hit == ["abstract-themes", "citation-traversal"], "no plan that should stay eligible shares a strategy value"
-    # the fixture row carries the dimensions the shipped template declares
-    shipped = json.loads(ABSTRACT_465["dimensions"])
-    assert {k: shipped[k] for k in ("verb", "strategy")} == {k: dims_of["abstract-themes"][k] for k in ("verb", "strategy")}
-
-
-@pytest.mark.parametrize("text", _single_source_requests())
-@pytest.mark.parametrize("kind", [S, U], ids=["synthesis", "unknown"])
-def test_a_one_source_request_is_offered_neither_citation_traversal_nor_abstract_themes(text: str, kind: K) -> None:
-    # G06, S02 and S05 ran 465 after 467 was excluded; S01, S03, S05, S06 read as unknown when extraction fails.
-    filt = el.EligibilityFilter(kind, "model-assisted", enforce=True, named_source_count=_named(text))
-    out = real_plan_match("q", library=_Library([CITATION_467, ABSTRACT_465, SYNTH_12]),
-                          cache=_Cache([(467, 0.05), (465, 0.1), (12, 0.4)]), eligibility=filt, n=5)
-    assert _ids(out) == [12], "both are refused even though they outscore the other curated synthesis plan"
-    assert sorted(filt.excluded_plan_ids) == [465, 467]
-    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"single_source_synthesis": 2}
-
-
-@pytest.mark.parametrize("kind", [S, U], ids=["synthesis", "unknown"])
-def test_a_one_source_request_with_nothing_else_eligible_goes_inline(kind: K) -> None:
-    filt = el.EligibilityFilter(kind, "model-assisted", enforce=True, named_source_count=1)
-    out = real_plan_match("q", library=_Library([ABSTRACT_465], fts=[465]), cache=_Cache([(465, 0.05)]),
-                          eligibility=filt, n=5)
-    assert out == []
-    assert filt.to_wire()["branches"]["fts"]["reasons"] == {"single_source_synthesis": 1}
-    assert el.fallback_reason(force_dynamic=False, matches=out, hit=False, filt=filt) == "all_candidates_ineligible"
-
-
-@pytest.mark.parametrize("named", [0, 2, 3])
-@pytest.mark.parametrize("kind", [S, U], ids=["synthesis", "unknown"])
-@pytest.mark.parametrize("name", sorted(_EXCLUDED_ROWS))
-def test_a_request_naming_no_source_or_several_still_admits_both_plans(name: str, kind: K, named: int) -> None:
-    row = _EXCLUDED_ROWS[name]
-    filt = el.EligibilityFilter(kind, "heuristic", enforce=True, named_source_count=named)
-    out = real_plan_match("q", library=_Library([row, SYNTH_12]), cache=_Cache([(row["id"], 0.05), (12, 0.4)]),
-                          eligibility=filt, n=5)
-    assert _ids(out)[0] == row["id"] and filt.excluded_plan_ids == []
-
-
-def test_a_lookup_is_unaffected_by_the_widened_rule() -> None:
-    filt = el.EligibilityFilter(L, "heuristic", enforce=True, named_source_count=1)
-    out = real_plan_match("q", library=_Library([ABSTRACT_465, LOOKUP_473]),
-                          cache=_Cache([(465, 0.05), (473, 0.3)]), eligibility=filt, n=5)
-    assert _ids(out) == [473]
-    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"kind_mismatch": 1}
-
-
-def test_an_unknown_request_still_admits_a_curated_synthesis_plan_when_it_names_one_source() -> None:
-    filt = el.EligibilityFilter(U, "model-assisted", enforce=True, named_source_count=1)
-    out = real_plan_match("q", library=_Library([SYNTH_12]), cache=_Cache([(12, 0.4)]), eligibility=filt, n=5)
-    assert _ids(out) == [12] and filt.excluded_plan_ids == []
-
-
-def test_the_rule_reads_abstract_themes_by_declared_strategy_not_by_id_or_name() -> None:
-    renumbered = _row(9002, "abstract-themes-v2", kind=S, tags="builtin-template", verb="query",
-                      strategy="abstract-themes")
-    namesake = _row(465, "abstract-themes", kind=S, tags="builtin-template", verb="query")  # no strategy
-    for row, excluded in ((renumbered, True), (namesake, False)):
-        filt = el.EligibilityFilter(U, "model-assisted", enforce=True, named_source_count=1)
-        out = real_plan_match("q", library=_Library([row]), cache=_Cache([(row["id"], 0.05)]), eligibility=filt, n=5)
-        assert (out == []) is excluded, row["name"]
-
-
-def test_the_planner_few_shots_leave_both_out_for_a_one_source_unknown_request() -> None:
-    def match(row) -> Match:
-        return Match(plan_id=row["id"], name=row["name"], description="d", confidence=0.5,
-                     dimensions=json.loads(row["dimensions"]), tags=row["tags"], plan_json=row["plan_json"],
-                     required_bindings=[], optional_bindings=[], default_bindings={}, parent_dims=None)
-
-    rows = [match(CITATION_467), match(ABSTRACT_465), match(SYNTH_12)]
-    for kind in (S, U):
-        assert [m.plan_id for m in el.eligible_matches(kind, rows, 1)] == [12], kind
-        assert [m.plan_id for m in el.eligible_matches(kind, rows, 2)] == [467, 465, 12], kind
-
-
-def test_nx_answer_gives_g06_the_other_plan_and_a_bare_465_goes_inline(enabled) -> None:
-    env, miss, _ = _drive(G06, [ABSTRACT_465, SYNTH_12], [(465, 0.05), (12, 0.4)])
-    wire = env["plan_eligibility"]
-    assert wire["excluded_plan_ids"] == [465] and wire["selected"]["plan_id"] == 12
-    assert wire["branches"]["cosine"]["reasons"] == {"single_source_synthesis": 1}
-    miss.assert_not_awaited()
-    env, miss, _ = _drive(G06, [ABSTRACT_465], [(465, 0.05)], fts=[465])
-    assert env["plan_eligibility"]["fallback_reason"] == "all_candidates_ineligible"
-    miss.assert_awaited()
 
 
 # Scenario 3: no plan has a compatible shape ------------------------------------------------------------------
@@ -1265,3 +1028,15 @@ def test_the_tag_words_are_the_matchers() -> None:
 
     assert el.BUILTIN_TAG == matcher._CATEGORY_PLAN_TAG
     assert matcher._is_grown_plan_tags(el.GROWN_TAG) and not matcher._is_grown_plan_tags(el.BUILTIN_TAG)
+
+
+def test_naming_one_source_refuses_no_plan_by_strategy() -> None:
+    """nexus-4xmpv (Sam, 2026-10-30): the strategy deny-list is gone. A request that names one source narrows the run's
+    retrieval to it (nexus.plans.single_source) instead of refusing plans, so eligibility has no source-count input and
+    no refusal reason for it."""
+    import inspect
+
+    assert "single_source_synthesis" not in el.REASONS
+    assert not hasattr(el, "SINGLE_SOURCE_EXCLUDED_STRATEGIES") and not hasattr(el, "declared_strategy")
+    assert "named_source_count" not in inspect.signature(el.EligibilityFilter.__init__).parameters
+    assert "named_source_count" not in inspect.signature(el.eligible_matches).parameters

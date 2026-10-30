@@ -512,12 +512,16 @@ def _assert_production_wiring_reaches_the_reducer(
     assert src["lifecycle"]["state"] == "resolved" and src["lifecycle"]["reached_reducer"] == 2, src
     assert d["scope_check"]["state"] == "satisfied" and d["scope_check"]["violations"] == [], d["scope_check"]
     assert d["streams"]["vector"]["out_of_scope"] == 0 and d["streams"]["graph"]["out_of_scope"] == 0
-    # nexus-jypmj.1.18: scope `rdr` reaches the step first, then the explicit ART owner narrows `rdr` to the
-    # ART owner's collection; the other project's rdr collection is removed from every vector step.
+    # nexus-jypmj.1.18 and nexus-4xmpv: the request names one source, so the run's scope is that source's collection
+    # before any step runs. The step's corpus is the ART collection already, and the explicit ART owner finds nothing
+    # left to remove (`within_scope`, nothing removed): the other project's rdr collection never reached a vector
+    # step. Before the one-source rule the owner removed it from the broader `rdr` corpus (`narrowed`).
     assert all(st["corpus"] == fx.art_rdr_collection for st in d["streams"]["vector"]["steps"]), d["streams"]["vector"]["steps"]
     on_ = d["scope_check"]["owner_narrowing"]
     assert on_["owners"] == [fx.art_owner] and on_["skipped_steps"] == [], on_
-    assert on_["steps"] and all(s["removed"] == [fx.nexus_rdr_collection] and s["outcome"] == "narrowed" for s in on_["steps"]), on_
+    assert on_["steps"] and all(s["removed"] == [] and s["outcome"] == "within_scope" for s in on_["steps"]), on_
+    assert env["single_source_narrowing"]["applied"] is True
+    assert env["single_source_narrowing"]["effective_scope"] == fx.art_rdr_collection
     assert {s["step_index"] for s in on_["steps"]} == {st["step_index"] for st in d["streams"]["vector"]["steps"]}
     assert not any(
         fx.nexus_rdr_collection in r["by_stream_collection"].get(s, {}) for s in ("vector", "graph", "primary")
@@ -571,7 +575,14 @@ def _assert_single_query_fast_path_is_contained(fx, art, scope) -> None:
         env_art = _nx_answer_envelope(art, scope, {"content_type": "rdr"}, strategy=("research", "corpus-coverage-check"))
     (named_art,) = env_art["named_sources"]["sources"]
     assert (named_art["status"], named_art["tumbler"], named_art["inferred"]) == ("resolved", fx.art_rdr, True), named_art
-    assert env_art["scope_diagnostics"] == env["scope_diagnostics"], "an inferred project narrows no stream"
+    # The inferred project itself narrows nothing (no owner qualifier). What narrows is the one-source rule
+    # (nexus-4xmpv): the call names one source and it resolved, so the step runs under that source's collection and
+    # owner. The ambiguous run above resolved nothing, so it was not narrowed and says why.
+    assert env["single_source_narrowing"]["applied"] is False and "did not resolve" in env["single_source_narrowing"]["reason"]
+    assert env_art["single_source_narrowing"]["applied"] is True
+    assert [d["scope_kind"] for d in env_art["scope_diagnostics"]] == ["collection", "owner"]
+    assert env_art["scope_diagnostics"][0]["caller_scope"] == fx.art_rdr_collection
+    assert env_art["evidence_request"]["owner"]["status"] == "inferred", "an inferred project is not an explicit owner"
     print(f"RDR232-FASTPATH-TEXT-SOURCE no_project={named['status']} art_session={named_art['status']}:{named_art['tumbler']}")
 
     # nexus-jypmj.1.18: the same call with the explicit ART owner queries the ART collection only.
@@ -581,9 +592,13 @@ def _assert_single_query_fast_path_is_contained(fx, art, scope) -> None:
     d = env["evidence_diagnostics"]
     v = d["streams"]["vector"]
     assert v["references"] > 0 and set(v["by_collection"]) == {fx.art_rdr_collection}, v
+    # nexus-4xmpv: the call names one source, which the explicit owner resolves, so the fast path's one query runs under
+    # that source's collection (the scope `rdr` narrowed to it) and the owner finds nothing left to remove. Before the
+    # one-source rule the owner removed the other project's collection from `rdr` (`narrowed`, removed [nexus]).
     assert [(x["scope_kind"], x["outcome"]) for x in env["scope_diagnostics"]] == [
-        ("corpus_prefix", "narrowed"), ("owner", "narrowed")], env["scope_diagnostics"]
-    assert d["scope_check"]["owner_narrowing"]["steps"][0]["removed"] == [fx.nexus_rdr_collection]
+        ("collection", "narrowed"), ("owner", "within_scope")], env["scope_diagnostics"]
+    assert env["single_source_narrowing"]["applied"] is True
+    assert d["scope_check"]["owner_narrowing"]["steps"][0]["removed"] == []
     print(f"RDR232-FASTPATH-OWNER vector_refs={v['references']} by_collection={v['by_collection']}")
 
 

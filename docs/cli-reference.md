@@ -5593,12 +5593,12 @@ about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
 
-The envelope has twelve RDR-232 keys, all always present (`scope_diagnostics`,
-`scope_normalized`, `evidence_request`, `named_sources`, `primary_evidence`,
+The envelope has thirteen RDR-232 keys, all always present (`scope_diagnostics`,
+`scope_normalized`, `evidence_request`, `named_sources`, `single_source_narrowing`, `primary_evidence`,
 `reserved_stream`, `lifecycle_stream`, `evidence_diagnostics`, `request_coverage`,
 `plan_eligibility`, `run_summary` and `coverage`; `scope_diagnostics` is `[]` when it has
 nothing to report, `request_coverage`, `plan_eligibility`, `run_summary` and `coverage` are
-always objects, and the other seven are `null` when they have nothing to report). `coverage`
+always objects, and the other eight are `null` when they have nothing to report). `coverage`
 is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same object is
 `continuation.coverage` in a continuation hand-off:
 
@@ -5761,6 +5761,22 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   by then is `unresolved` with "stopped at the deadline" as its reason (an owner
   lookup that did not return makes the qualifier `unresolved`, never a guess),
   and the answer proceeds without the stream.
+- `single_source_narrowing` (nexus-4xmpv, RDR-232 section 2a; Sam's decision of 2026-10-30): what the one-source
+  rule did. A synthesis or `unknown` request that names exactly one source (one distinct id, however it is
+  spelled: `RDR-078 through RDR-078` is one) and whose source resolved to one document runs every retrieval step of
+  every plan under that document's collection and owner: `search`, `query` and `traverse` steps read the collection,
+  a step the plan pinned to other collections is skipped and listed in `scope_diagnostics` (never run unscoped),
+  and the caller's `scope` is replaced by the collection when it admits it. Only a request the rule concerns has
+  the object, `{applied, source, tumbler, collection, owner, caller_scope, effective_scope, reason}`; otherwise it
+  is `null` (a lookup, a comparison, a request that names no source or several). `applied` is false when nothing
+  could be narrowed to (the source did not resolve to one document, or the caller's `scope` does not admit its
+  collection), and `reason` says which. Text mode adds one `[evidence request: ...]` line naming the collection and
+  owner, or the reason. The primary read of a narrowed run takes up to 84 chunks
+  (`max_narrowed_source_items` in `primary_evidence.caps`) of the reducer's 100 input slots, 90 with the T2 records; one source that is not
+  narrowed (a lookup) keeps 44 and the 50-slot share. The price: a request that names one RDR in passing loses the
+  cross-document context its other retrieval would have found. A document named only by its title counts as no
+  named source and is not narrowed. This replaces the plan-eligibility refusal `single_source_synthesis` of the
+  earlier rounds, which no longer exists.
 - `primary_evidence` (nexus-jypmj.1.6): what was read from the resolved
   sources, `{selected_items, selected_chars, manifest_rows_hydrated,
   fetched_chars, fetch_errors, error, partial, caps_hit, caps, documents, items}`;

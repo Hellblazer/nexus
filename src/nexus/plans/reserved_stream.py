@@ -44,6 +44,7 @@ from nexus.plans.primary_evidence import PrimaryEvidence, SelectedChunk
 __all__ = [
     "EVIDENCE_KEYS",
     "RESERVED_SHARE_MAX",
+    "RESERVED_SHARE_NARROWED",
     "ReservedItem",
     "ReservedStream",
     "active_reserved_stream",
@@ -56,6 +57,13 @@ __all__ = [
 #: Reserved items one run may merge. Calibration constant; must stay below
 #: ``runner._OPERATOR_MAX_INPUTS`` (100) so plan evidence keeps room (a test pins this).
 RESERVED_SHARE_MAX: int = 50
+
+#: The same bound for a run that narrows every secondary retrieval step to its one named source
+#: (``nexus.plans.single_source``; nexus-4xmpv): the secondary streams read the same collection and mostly hit
+#: chunks the primary already holds, so the primary takes 90 of the 100 slots and the secondary keeps 10. The full
+#: arithmetic (the chunk cap 84 = 90 - 6 lifecycle records, the 60,000-character and 120,000-character bounds) is
+#: stated once, on ``PrimaryEvidenceCaps.max_narrowed_source_items``. A test pins the sum.
+RESERVED_SHARE_NARROWED: int = 90
 
 #: Operator args that carry the evidence a later operator reduces.
 EVIDENCE_KEYS: tuple[str, ...] = ("items", "inputs", "content", "context", "groups")
@@ -130,6 +138,8 @@ class ReservedStream:
 
     items: tuple[ReservedItem, ...]
     over_share_dropped: int = 0
+    #: The share this stream was built with (:data:`RESERVED_SHARE_MAX`, or :data:`RESERVED_SHARE_NARROWED`).
+    share_max: int = RESERVED_SHARE_MAX
     merged: bool = False
     merged_step: int | None = None
     current_step: int | None = None
@@ -162,7 +172,7 @@ class ReservedStream:
         room = max(share_max - len(extra), 0)
         items = (*extra, *(_item(c) for c in chunks[:room]))
         return cls(
-            items=items, over_share_dropped=len(chunks) - min(len(chunks), room),
+            items=items, over_share_dropped=len(chunks) - min(len(chunks), room), share_max=share_max,
             _raw=frozenset(i.raw for i in items), _chashes=frozenset(i.chash for i in items if i.chash),
         )
 
@@ -260,7 +270,7 @@ class ReservedStream:
         if self.over_share_dropped:
             lines.append(
                 f"[evidence request: {self.over_share_dropped} primary item(s) exceeded the reserved "
-                f"share of {RESERVED_SHARE_MAX} and were not merged]"
+                f"share of {self.share_max} and were not merged]"
             )
         obs = self.last_observed
         if obs and obs["missing"]:

@@ -197,3 +197,16 @@ def test_main_writes_a_report_and_show_questions_goes_to_stderr_only(monkeypatch
     err = capsys.readouterr().err
     assert Q_LOOKUP[:40] in err
     assert json.loads(out.read_text(encoding="utf-8"))["rows"]["examined"] == 8
+
+
+def test_the_replay_counts_one_source_narrowing_with_the_property_nx_answer_reads() -> None:
+    """nexus-4xmpv: the one-source rule is not an eligibility verdict, so the replay reports it from
+    RequestCoverage.narrows_to_one_source, the property nx_answer uses; it must not diverge from a live run."""
+    report = replay.classify_rows(_rows(), _library())
+    flagged = {r["run_id"] for r in report["runs"] if r["one_source_narrowing"]}
+    assert flagged == {2}, "Q_SYNTH names RDR-084 once and reads as synthesis; no other fixture question does"
+    assert report["one_source_narrowing"]["runs"] == 1 and report["one_source_narrowing"]["of"] == report["rows"]["examined"]
+    assert derive_request_coverage(Q_SYNTH).narrows_to_one_source and not derive_request_coverage(Q_LOOKUP).narrows_to_one_source
+    # a kind override (the structured extraction's reading) moves the property with it
+    overridden = replay.classify_rows(_rows(), _library(), kind_override={replay.question_key(Q_SYNTH): "lookup"})
+    assert overridden["one_source_narrowing"]["runs"] == 0

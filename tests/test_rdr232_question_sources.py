@@ -195,11 +195,15 @@ def test_an_explicit_project_binding_outranks_the_active_project_for_a_question_
 
 
 def test_a_source_read_from_the_question_never_narrows_the_secondary_streams(tmp_path: Path) -> None:
-    """The resolved ART document leaves ``_nx_owners`` unset: only an ``owner``/``project`` binding narrows."""
+    """The resolved ART document is not an owner qualifier: only an ``owner``/``project`` binding is explicit, and the
+    envelope's ``owner_narrowing.applied`` stays False. The one-source rule (nexus-4xmpv) is a separate narrowing: this
+    synthesis request names one source, so the run is narrowed to that source's collection and owner, said in
+    ``single_source_narrowing``; a request that names several sources is not (the next test's shape)."""
     env, run, _life, _cat = _run(tmp_path, project=ART_OWNER)
     assert _sources(env)[0]["status"] == "resolved"
-    assert "_nx_owners" not in dict(run.await_args.args[1])
     assert env["evidence_diagnostics"]["scope_check"]["owner_narrowing"]["applied"] is False
+    assert env["single_source_narrowing"]["applied"] is True
+    assert dict(run.await_args.args[1])["_nx_owners"] == ART_OWNER == env["single_source_narrowing"]["owner"]
     # control: the same call with an explicit owner binding does narrow, to that owner alone
     env2, run2, _l, _c = _run(tmp_path / "again", bindings={**INCIDENT_BINDINGS, "owner": NEXUS_OWNER})
     assert dict(run2.await_args.args[1])["_nx_owners"] == NEXUS_OWNER

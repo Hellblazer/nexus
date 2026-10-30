@@ -406,12 +406,22 @@ def test_a_comment_inside_a_code_fence_is_not_a_heading_even_across_a_chunk_boun
     assert all(la.headings == (("Run",) if i == 0 else ()) for i, la in enumerate(labels))
 
 
-def _overlapping(parts: list[str], tail: int = 120) -> list[str]:
-    """Chunks the way ``md_chunker`` cuts them: each repeats the last *tail* characters of the one before."""
-    out = [parts[0]]
+def _overlapping(parts: list[str], header: str = "") -> list[str]:
+    """Chunks the way ``md_chunker._split_large_section`` writes them: the next chunk is ``[header, overlap_tail,
+    part]`` joined by blank lines, the tail being the last 165 characters (50 tokens x 3.3), or all of it when
+    shorter, of the previous chunk's content, which is everything after its header. *parts[0]* is the first
+    chunk's content."""
+    sep, tail = "\n\n", 165
+    out = [header + sep + parts[0] if header else parts[0]]
     for part in parts[1:]:
-        out.append(out[-1][-tail:] + part)
+        content = out[-1][len(header) + len(sep):] if header else out[-1]
+        out.append(sep.join(([header] if header else []) + [content[-tail:], part]))
     return out
+
+
+_PROSE = " ".join(f"word{i}" for i in range(40))
+#: A command block long enough that the chunker's 165-character tail can start inside it.
+_BLOCK = "\n".join(f"nx review step-{i:02d} --apply --all" for i in range(12))
 
 
 def test_a_fence_the_overlap_repeats_does_not_flip_the_state_and_hide_every_later_heading() -> None:
@@ -419,52 +429,123 @@ def test_a_fence_the_overlap_repeats_does_not_flip_the_state_and_hide_every_late
     # repeats the closing fence in its overlap, and every heading after that was read as inside a fence, so
     # chunks 17-41 all carried "Phase 2".
     chunks = _overlapping([
-        "## Phase 2: Operator Review\nOperators review the proposal and run it as follows:\n"
-        "```bash\nnx review start --all\nnx review rebalance --apply\n```\nThat is the whole procedure for review.",
-        "\n\nThe rebalance finishes quickly.\n## Phase 3: Backfill\nBackfill reads the manifest.",
-        "\nMore backfill text that follows the heading above.\n## Phase 4: Cutover\nCutover is a flag flip.",
-        "\nCutover details continue here.\n## Consequences\nThe consequences follow from the above.",
-    ], tail=50)
-    head = chunks[1].split("\n\nThe rebalance")[0]
-    assert head.count("```") == 1 and "bash" not in head, "chunk 2 begins with the closing fence its predecessor already closed"
+        f"{_PROSE}\n```bash\n{_BLOCK}\n```\nThat is the whole procedure.",
+        "The rebalance finishes quickly.",
+    ], header="## Phase 2: Operator Review") + [
+        "## Phase 3: Backfill\n\nBackfill reads the manifest.",
+        "## Phase 4: Cutover\n\nCutover is a flag flip.",
+        "## Consequences\n\nThe consequences follow from the above.",
+    ]
+    overlap = chunks[1].split("\n\n")[1]
+    assert overlap.count("```") == 1 and "bash" not in overlap, "the overlap carries the closing fence its predecessor closed"
     labels = derive_content_labels(chunks)
     assert [la.label for la in labels] == [
-        "Phase 2: Operator Review", "Phase 3: Backfill", "Phase 3: Backfill", "Phase 4: Cutover",
+        "Phase 2: Operator Review", "Phase 2: Operator Review", "Phase 3: Backfill", "Phase 4: Cutover", "Consequences",
     ]
-    assert [la.headings for la in labels] == [
-        ("Phase 2: Operator Review",), ("Phase 3: Backfill",), ("Phase 3: Backfill", "Phase 4: Cutover"),
-        ("Phase 4: Cutover", "Consequences"),
-    ]
+    assert [la.headings for la in labels][2:] == [("Phase 3: Backfill",), ("Phase 4: Cutover",), ("Consequences",)]
 
 
 def test_a_code_block_split_across_chunks_with_overlap_still_hides_the_headings_inside_it() -> None:
     chunks = _overlapping([
-        "## Run\nSteps to run:\n```bash\n# install the thing\nmake build\nmake test",
-        "\n# a comment, not a heading\nmake install\n```\nBack in prose.\n## After\nDone.",
-    ], tail=48)
-    assert chunks[1].startswith("```bash\n# install the thing"), "the overlap carries the opening fence and lines of the block"
+        f"{_PROSE}\n```bash\n# install the thing\nmake build\nmake test",
+        "# a comment, not a heading\nmake install\n```\nBack in prose.\n## After\nDone.",
+    ], header="## Run")
+    assert "```bash\n# install the thing" in chunks[1].split("\n\n")[1], "the overlap carries the opening fence of the block"
+    labels = derive_content_labels(chunks)
+    assert [la.headings for la in labels] == [("Run",), ("Run", "After")], "chunk 2 repeats its section header"
+    assert [la.label for la in labels] == ["Run", "Run"]
+
+
+def test_an_overlap_that_starts_inside_the_split_block_keeps_the_block_open() -> None:
+    chunks = _overlapping([
+        f"{_PROSE}\n```bash\n{_BLOCK}",
+        "# a comment, not a heading\nmake install\n```\nBack in prose.\n## After\nDone.",
+    ], header="## Run")
+    assert "```" not in chunks[1].split("\n\n")[1], "the overlap starts inside the block, past its fences"
     labels = derive_content_labels(chunks)
     assert [la.headings for la in labels] == [("Run",), ("After",)]
     assert [la.label for la in labels] == ["Run", "After"]
 
 
-def test_an_overlap_that_starts_inside_the_split_block_keeps_the_block_open() -> None:
-    chunks = _overlapping([
-        "## Run\nSteps to run:\n```bash\n# install the thing\nmake build\nmake test",
-        "\n# a comment, not a heading\nmake install\n```\nBack in prose.\n## After\nDone.",
-    ], tail=30)
-    assert "```" not in chunks[1].split("# a comment")[0], "the overlap starts inside the block, past its fences"
+def test_a_no_overlap_chunk_that_repeats_a_closing_command_block_is_not_read_as_overlap() -> None:
+    # nexus-4xmpv code review r2 blocker: two consecutive sections end with the same command lines, the second
+    # opening its fence differently (a new section, so NO overlap), and the second chunk repeats the body in its
+    # first 600 characters. Reading that as the chunker's overlap started the chunk inside the fence and inverted
+    # the state for every later section (r2: "Test" carried the label "Build", and so did the rest).
+    block = "```bash\nnx review start --all\nmake build && make test\n```"
+    chunks = [
+        f"## Build\n\n{_PROSE}\n\nRun it:\n\n{block}",
+        f"## Test\n\nThe same lines apply here.\n\n{block.replace('```bash', '```sh')}\n\nThen read the report.",
+        "## Release\n\nTag it.",
+        "## Cleanup\n\nRemove the build directory.",
+    ]
     labels = derive_content_labels(chunks)
-    assert [la.headings for la in labels] == [("Run",), ("After",)]
+    assert [la.label for la in labels] == ["Build", "Test", "Release", "Cleanup"]
+    assert [la.headings for la in labels] == [("Build",), ("Test",), ("Release",), ("Cleanup",)]
+
+
+def test_labels_follow_the_real_chunkers_layout_over_a_document_whose_sections_end_in_the_same_block() -> None:
+    # The layout assumed above is the one SemanticMarkdownChunker writes: every section is split in three chunks
+    # whose second and third repeat the previous chunk's tail, and the closing fence lands in an overlap.
+    from nexus.md_chunker import SemanticMarkdownChunker
+
+    def section(k: int) -> str:
+        words = lambda n, w: " ".join(f"{w}{i}" for i in range(n))  # noqa: E731 — one-use helper
+        return (f"## Phase {k}\n\n{words(30, 'alpha')}\n\nRun it as follows:\n\n```bash\n# step {k}\n"
+                f"nx review start --all\nmake build && make test\n```\n\n{words(25, 'omega')}\n")
+
+    doc = "# Plan\n\n" + "\n".join(section(k) for k in range(1, 7))
+    chunks = [c.text for c in SemanticMarkdownChunker(chunk_size=90, chunk_overlap=50).chunk(doc, {})]
+    assert any(c.startswith("## Phase") and "make test\n```" in c[:200] for c in chunks), (
+        "non-vacuity: some chunk's overlap carries the closing fence"
+    )
+    seen = [la.label for la in derive_content_labels(chunks)]
+    assert [x for i, x in enumerate(seen) if i == 0 or x != seen[i - 1]] == ["Plan"] + [f"Phase {k}" for k in range(1, 7)]
+
+
+def test_an_open_fence_does_not_swallow_the_headings_of_a_non_adjacent_chunk() -> None:
+    # nexus-4xmpv code review r2: the call site hands the labeller a sampled, gapped list. Chunk 1 ends inside an
+    # open fence; chunk 7 is far from it, so its headings count. With adjacent positions the fence carries on.
+    texts = ["## A\n\ntext\n```bash\nmake build", "## B\n\nlater section\n\nmore text here"]
+    gapped = derive_content_labels(texts, positions=[1, 7])
+    assert [la.headings for la in gapped] == [("A",), ("B",)] and [la.label for la in gapped] == ["A", "B"]
+    adjacent = derive_content_labels(texts, positions=[1, 2])
+    assert [la.headings for la in adjacent] == [("A",), ()], "adjacent chunks still carry the open fence"
+    with pytest.raises(ValueError):
+        derive_content_labels(texts, positions=[1])
+
+
+def test_the_labeller_cost_is_flat_per_chunk_when_there_is_no_overlap() -> None:
+    import random
+    import time
+
+    rng = random.Random(7)
+    vocab = "the of and to in is that for it as with was on be by this are from at or an chunk section decision store".split()
+    chunks = [
+        f"## Section {i}\n\n" + " ".join(rng.choice(vocab) for _ in range(330)) + "\n\n```bash\nmake build && make test\n```"
+        for i in range(3000)
+    ]
+    started = time.perf_counter()
+    labels = derive_content_labels(chunks)
+    elapsed = time.perf_counter() - started
+    assert len(labels) == 3000 and labels[-1].label == "Section 2999"
+    # r2 scanned every suffix of the previous chunk against the next one's head: 6.7 s for these 3,000 chunks (2.2 ms
+    # a chunk). The head probe makes it under 10 ms. Generous bound, not a benchmark.
+    assert elapsed < 1.0, f"{elapsed:.2f}s for 3000 chunks"
 
 
 # ── Selection helpers ─────────────────────────────────────────────────────────────────────
 
 
 def _select(cat: FakeCatalog, t3: FakeT3, sources: list[SourceRef], owner: str | None = ART_OWNER,
-            caps: PrimaryEvidenceCaps = DEFAULT_CAPS):
+            caps: PrimaryEvidenceCaps = DEFAULT_CAPS, *, one_source: bool = False, narrowed: bool = False):
+    """Resolve *sources* and read their primary evidence. *one_source* and *narrowed* are what the request coverage
+    says (``names_one_source``, ``narrows_to_one_source``); the default is neither, so the cap under test is
+    ``caps.max_selected_items``, which is what the tests below that set it mean to bound, one document or several."""
     res = resolve_named_sources(sources, _resolved(owner), cat=cat, caps=caps)
-    return res, select_primary_evidence(res, cat=cat, fetch_chunks=t3.fetch, caps=caps)
+    return res, select_primary_evidence(
+        res, cat=cat, fetch_chunks=t3.fetch, caps=caps, one_source=one_source, narrowed=narrowed,
+    )
 
 
 def _sectioned(n: int, names: dict[int, str] | None = None, tag: str = "") -> list[str]:
@@ -637,7 +718,7 @@ def test_hydration_fetches_each_collection_once_per_batch_with_unique_ids() -> N
         rows[i] = replace(rows[i], collection=other)
         t3.put(other, texts[i])
     caps = replace(DEFAULT_CAPS, fetch_batch_ids=10)
-    _res, _primary = _select(cat, t3, [RDR084], caps=caps)
+    _res, _primary = _select(cat, t3, [RDR084], caps=caps, one_source=True)
     by_col = defaultdict(list)
     for col, n in t3.fetches:
         by_col[col].append(n)
@@ -806,7 +887,7 @@ async def _answer(
     cat: FakeCatalog, *, bindings: dict, structured: bool, t3: FakeT3 | None = None,
     t2_records: dict[tuple[str, str], str] | None = None, plan_run_calls: list | None = None,
     aspects: dict[str, Any] | None = None, aspect_calls: list[tuple[str, dict]] | None = None,
-    question: str = "State the gate history of this RDR.",
+    question: str = "State the gate history of this RDR.", scope: str = "",
 ) -> Any:
     """``nx_answer`` over a one-step ad-hoc plan, the catalog replaced by *cat*. The same
     patches ``test_rdr232_reserved_bindings._text_answer`` uses, plus the catalog. The default *question*
@@ -850,7 +931,7 @@ async def _answer(
          patch("nexus.plans.primary_evidence.t3_chunk_fetcher", return_value=(t3 or FakeT3()).fetch), \
          patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
         t2_ctx.return_value.__enter__.return_value = db_stub
-        return await nx_answer(question=question, bindings=bindings, structured=structured)
+        return await nx_answer(question=question, bindings=bindings, structured=structured, scope=scope)
 
 
 @pytest.mark.asyncio
@@ -873,8 +954,14 @@ async def test_nx_answer_says_so_when_a_named_source_is_ambiguous_and_when_it_re
     # the notice says so (nexus-jypmj.1.6). Nothing else is added for a clean resolution.
     assert env["final_text"].endswith("the answer is 42")
     # ... except that this RDR has no T2 records, which the lifecycle stream says (nexus-jypmj.1.7).
-    assert env["final_text"].count("[evidence request:") == 2 and "was not merged into a reduction" in env["final_text"]
+    # ... and that the request names this one source, so its retrieval was narrowed to it (nexus-4xmpv): a third line.
+    assert env["final_text"].count("[evidence request:") == 3 and "was not merged into a reduction" in env["final_text"]
     assert "no T2 lifecycle records" in env["final_text"] and "ART_rdr" in env["final_text"]
+    assert f"narrowed to collection {ART_COL} and owner {ART_OWNER}" in env["final_text"]
+    assert env["single_source_narrowing"] == {
+        "applied": True, "source": "RDR-084", "tumbler": ART_DOC, "collection": ART_COL, "owner": ART_OWNER,
+        "caller_scope": "", "effective_scope": ART_COL, "reason": "",
+    }
     assert env["lifecycle_stream"]["sources"][0]["status"] == "no_records" and env["lifecycle_stream"]["records"] == []
     assert env["primary_evidence"]["selected_items"] == 1 and env["reserved_stream"]["merged"] is False
 
@@ -883,7 +970,8 @@ async def test_nx_answer_says_so_when_a_named_source_is_ambiguous_and_when_it_re
     env = await _answer(cat, bindings={"source": "RDR-084", "owner": ART_OWNER}, structured=True, t3=t3, t2_records=records)
     assert [r["kind"] for r in env["lifecycle_stream"]["records"]] == ["metadata", "gate-latest"]
     assert env["reserved_stream"]["reserved_items"] == 3, "two T2 records and the one chunk"
-    assert env["final_text"].count("[evidence request:") == 1 and "no T2 lifecycle records" not in env["final_text"]
+    assert env["final_text"].count("[evidence request:") == 2, "the narrowing line and the one chunk's notice"
+    assert "no T2 lifecycle records" not in env["final_text"]
 
     env = await _answer(cat, bindings={"source": "RDR-084", "owner": "9.9"}, structured=True)
     (src,) = env["named_sources"]["sources"]
@@ -1758,10 +1846,11 @@ def _manuscript(sections: int, per_section: int, body: int) -> list[str]:
 
 def test_a_one_source_135_row_manifest_selects_past_24_items_with_every_section_in_manifest_order() -> None:
     # The near-miss S04 shape: one document, 135 manifest rows, 27 sections of five chunks, about 700 characters a chunk
-    # (the live run selected 24 and used 18,789 of the 60,000 character budget).
+    # (the live run selected 24 and used 18,789 of the 60,000 character budget). A one-source request whose secondary
+    # streams are NOT narrowed (a lookup, a comparison) takes the 44-chunk tier.
     cat, t3 = FakeCatalog(), FakeT3()
     _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 700))
-    res, primary = _select(cat, t3, [RDR084])
+    res, primary = _select(cat, t3, [RDR084], one_source=True)
 
     (doc,) = primary.documents
     assert doc.manifest_rows == 135 and doc.rows_hydrated == 135, "non-vacuity: the whole 135-row manifest was read"
@@ -1774,10 +1863,42 @@ def test_a_one_source_135_row_manifest_selects_past_24_items_with_every_section_
     assert doc.partial is True and doc.selected_rows == 44
 
 
+def test_a_narrowed_one_source_135_row_manifest_fills_the_character_budget_not_the_item_ceiling() -> None:
+    # nexus-4xmpv, Sam 2026-10-30 B: when the secondary streams are narrowed to the one source, the primary stream
+    # takes more of the reducer's slots and selection runs to the 60,000-character budget (G06 stopped at 30,160
+    # characters and missed its convention sheet; S04 at 40,258).
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 800))  # about 830 characters a chunk
+    res, primary = _select(cat, t3, [RDR084], one_source=True, narrowed=True)
+
+    (doc,) = primary.documents
+    assert doc.manifest_rows == 135 and doc.rows_hydrated == 135, "non-vacuity: the whole 135-row manifest was read"
+    assert 44 < primary.selected_items < DEFAULT_CAPS.max_narrowed_source_items == 84, primary.selected_items
+    assert DEFAULT_CAPS.max_selected_chars - 900 < primary.selected_chars <= DEFAULT_CAPS.max_selected_chars == 60_000
+    assert "max_selected_chars" in primary.caps_hit and "max_selected_items" not in primary.caps_hit
+    assert {i.label for i in primary.items} == {f"Section {s:02d}" for s in range(27)}, "every section is represented"
+    positions = [i.position for i in primary.items]
+    assert positions == sorted(positions) and len(set(positions)) == primary.selected_items
+
+    # the same document, one source, secondary streams not narrowed: the 44-chunk tier
+    _res, kept = _select(cat, t3, [RDR084], one_source=True)
+    assert kept.selected_items == 44 < primary.selected_items
+
+
+def test_a_narrowed_read_stops_at_the_item_ceiling_when_the_chunks_are_small() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 100))  # 135 chunks of about 130 characters
+    _res, primary = _select(cat, t3, [RDR084], one_source=True, narrowed=True)
+    assert primary.selected_items == DEFAULT_CAPS.max_narrowed_source_items == 84
+    assert "max_selected_chars" not in primary.caps_hit
+    (doc,) = primary.documents
+    assert doc.manifest_rows == 135 and doc.selected_rows == 84 and doc.partial is True
+
+
 def test_the_character_budget_still_bounds_a_one_source_read_below_the_item_ceiling() -> None:
     cat, t3 = FakeCatalog(), FakeT3()
     _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 2_000))  # about 2,000 characters a chunk
-    _res, primary = _select(cat, t3, [RDR084])
+    _res, primary = _select(cat, t3, [RDR084], one_source=True)
     assert 24 < primary.selected_items < 44, primary.selected_items
     assert primary.selected_chars <= DEFAULT_CAPS.max_selected_chars == 60_000
     assert "max_selected_chars" in primary.caps_hit
@@ -1797,44 +1918,213 @@ def test_several_named_sources_keep_the_multi_source_cap_unchanged() -> None:
     assert dict(per_doc) == {"1.2.10": 12, "1.2.11": 12}
 
 
-def test_the_single_source_ceiling_needs_exactly_one_source_and_nothing_dropped_or_ranged() -> None:
-    from nexus.plans.evidence import SourceRange
-    from nexus.plans.primary_evidence import NamedSourceResolution, single_source_item_cap
+def test_the_item_ceiling_is_read_from_the_request_coverage_flags_and_never_below_the_smaller_tier() -> None:
+    from nexus.plans.primary_evidence import single_source_item_cap
 
-    cat, t3 = FakeCatalog(), FakeT3()
-    _doc(cat, t3, ART_DOC, ART_PATH, ["## A\nbody"])
-    res = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat)
-    assert single_source_item_cap(res, DEFAULT_CAPS) == 44
-    assert single_source_item_cap(replace(res, dropped=("RDR-085",)), DEFAULT_CAPS) == 24
-    ranged = replace(res, ranges=(SourceRange(84, 90),))
-    assert single_source_item_cap(ranged, DEFAULT_CAPS) == 24
-    assert single_source_item_cap(NamedSourceResolution(sources=res.sources * 2), DEFAULT_CAPS) == 24
-    # a ceiling set below the multi-source cap never lowers it
-    assert single_source_item_cap(res, replace(DEFAULT_CAPS, max_single_source_items=10)) == 24
+    assert single_source_item_cap(DEFAULT_CAPS) == 24
+    assert single_source_item_cap(DEFAULT_CAPS, narrowed=True) == 24, "narrowing without one source is no tier"
+    assert single_source_item_cap(DEFAULT_CAPS, one_source=True) == 44
+    assert single_source_item_cap(DEFAULT_CAPS, one_source=True, narrowed=True) == 84
+    # a ceiling set below a smaller tier never lowers it
+    assert single_source_item_cap(replace(DEFAULT_CAPS, max_single_source_items=10), one_source=True) == 24
+    assert single_source_item_cap(replace(DEFAULT_CAPS, max_narrowed_source_items=10), one_source=True, narrowed=True) == 44
 
 
 def test_the_caps_are_stated_in_one_place_and_the_downstream_budgets_hold_them() -> None:
-    """The reserved share carries the T2 lifecycle records AND the primary chunks; the coverage check reads one
-    stream up to ASSESSMENT_MAX_ITEM_CHARS; both must hold the single-source ceiling (nexus-jf9wg)."""
+    """The reserved share carries the T2 lifecycle records AND the primary chunks; the coverage check reads each
+    stream up to ASSESSMENT_MAX_ITEM_CHARS; every tier must hold its ceiling (nexus-jf9wg, nexus-4xmpv). The
+    arithmetic is on ``PrimaryEvidenceCaps.max_narrowed_source_items``; these are its numbers."""
     from nexus.plans.coverage_ledger import ASSESSMENT_MAX_ITEM_CHARS
     from nexus.plans.lifecycle_stream import LifecycleCaps
-    from nexus.plans.reserved_stream import RESERVED_SHARE_MAX
+    from nexus.plans.reserved_stream import RESERVED_SHARE_MAX, RESERVED_SHARE_NARROWED
     from nexus.plans.runner import _OPERATOR_MAX_INPUTS
 
     wire = DEFAULT_CAPS.to_wire()
+    records = LifecycleCaps().max_records
     assert wire["max_single_source_items"] == 44 and wire["max_selected_items"] == 24
-    assert wire["max_single_source_items"] + LifecycleCaps().max_records <= RESERVED_SHARE_MAX < _OPERATOR_MAX_INPUTS
+    assert wire["max_single_source_items"] + records <= RESERVED_SHARE_MAX < _OPERATOR_MAX_INPUTS
+    # narrowed: 84 chunks + 6 records = 90 of 100 slots, and the secondary streams keep the other 10
+    assert wire["max_narrowed_source_items"] == 84
+    assert wire["max_narrowed_source_items"] + records == RESERVED_SHARE_NARROWED == 90
+    assert _OPERATOR_MAX_INPUTS - RESERVED_SHARE_NARROWED == 10
+    # characters: the primary stream (60,000 raw; about 70,000 with 84 attribution headers) and the T2 stream
+    # (18,000) each fit one 120,000-character assessment pack
     assert DEFAULT_CAPS.max_selected_chars < ASSESSMENT_MAX_ITEM_CHARS, "the primary stream never leaves an unread anchor"
+    assert DEFAULT_CAPS.max_selected_chars + 84 * 120 < ASSESSMENT_MAX_ITEM_CHARS
+    assert LifecycleCaps().max_chars < ASSESSMENT_MAX_ITEM_CHARS
 
 
 def test_the_largest_one_source_read_fits_the_reserved_share_with_the_lifecycle_records_ahead_of_it() -> None:
     from nexus.plans.lifecycle_stream import LifecycleCaps
-    from nexus.plans.reserved_stream import ReservedItem, ReservedStream
+    from nexus.plans.reserved_stream import RESERVED_SHARE_MAX, ReservedItem, ReservedStream
 
     cat, t3 = FakeCatalog(), FakeT3()
     _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 700))
-    _res, primary = _select(cat, t3, [RDR084])
+    _res, primary = _select(cat, t3, [RDR084], one_source=True)
     records = tuple(ReservedItem.record(f"nexus_rdr/{i}", f"record {i}") for i in range(LifecycleCaps().max_records))
     stream = ReservedStream.from_evidence(primary, extra=records)
-    assert stream is not None and len(stream.items) == 50
+    assert stream is not None and len(stream.items) == 50 == RESERVED_SHARE_MAX
     assert stream.over_share_dropped == 0, "no primary chunk is dropped for the share, so no stray disclosure"
+
+
+def test_the_largest_narrowed_read_fits_the_narrowed_share_and_leaves_ten_slots_for_the_secondary() -> None:
+    from nexus.plans.lifecycle_stream import LifecycleCaps
+    from nexus.plans.reserved_stream import RESERVED_SHARE_MAX, RESERVED_SHARE_NARROWED, ReservedItem, ReservedStream
+    from nexus.plans.runner import _OPERATOR_MAX_INPUTS
+
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, _manuscript(27, 5, 100))  # small chunks: the item ceiling binds, not the characters
+    _res, primary = _select(cat, t3, [RDR084], one_source=True, narrowed=True)
+    assert primary.selected_items == 84
+    records = tuple(ReservedItem.record(f"nexus_rdr/{i}", f"record {i}") for i in range(LifecycleCaps().max_records))
+    stream = ReservedStream.from_evidence(primary, extra=records, share_max=RESERVED_SHARE_NARROWED)
+    assert stream is not None and len(stream.items) == 90 and stream.over_share_dropped == 0
+    assert _OPERATOR_MAX_INPUTS - len(stream.items) == 10
+    # the same 84 chunks under the default share lose 34 of them, with a disclosure that names the share
+    short = ReservedStream.from_evidence(primary, extra=records)
+    assert short is not None and len(short.items) == RESERVED_SHARE_MAX and short.over_share_dropped == 40
+    assert f"share of {RESERVED_SHARE_MAX}" in short.disclosures()[-1] or any(
+        f"share of {RESERVED_SHARE_MAX}" in line for line in short.disclosures()
+    )
+    assert not any("share of" in line for line in stream.disclosures() if "exceeded" in line)
+
+
+# ── nexus-4xmpv: a request that names one source reads that source (Sam, 2026-10-30) ─────────
+
+
+def _coverage(text: str, **kw: Any) -> Any:
+    from nexus.plans.request_coverage import derive_request_coverage
+
+    return derive_request_coverage(text, **kw)
+
+
+def test_naming_exactly_one_source_is_one_property_that_a_degenerate_range_does_not_disagree_with() -> None:
+    # code review r2: the count was written out twice in core.py and disagreed with the primary cap on a range whose
+    # two ends are the same id. One property now answers for the eligibility-era call sites, the cap and the narrowing.
+    cases = {
+        "Synthesize RDR-084": (True, True),
+        "Summarize RDR-078 through RDR-078": (True, True),
+        "Which file defines the parser in RDR-084?": (True, True),  # extraction failure leaves it unknown
+        "What is the status of RDR-084?": (True, False),  # a lookup names one source and keeps its cross-document reads
+        "Synthesize RDR-084 and RDR-085": (False, False),
+        "Summarize RDR-078 through RDR-095": (False, False),
+        "Synthesize the chunking design": (False, False),
+    }
+    got = {q: (c.names_one_source, c.narrows_to_one_source) for q, c in ((q, _coverage(q)) for q in cases)}
+    assert got == cases
+    assert len(_coverage("Summarize RDR-078 through RDR-078").source_ranges) == 1, "the range is there, and still one source"
+
+
+def _one_source_resolution(scope_cat: FakeCatalog | None = None, owner: str | None = ART_OWNER) -> Any:
+    cat, t3 = scope_cat or FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, ART_PATH, ["## A\nbody"])
+    return resolve_named_sources([RDR084], _resolved(owner), cat=cat)
+
+
+def test_the_narrowing_replaces_a_scope_the_source_lies_inside_and_never_one_it_lies_outside() -> None:
+    from nexus.plans.single_source import derive_single_source_narrowing
+
+    res = _one_source_resolution()
+    cov = _coverage("Synthesize RDR-084")
+    for scope in ("", "all", "rdr", ART_COL, ART_OWNER, ART_DOC):
+        n = derive_single_source_narrowing(cov, res, scope)
+        assert n is not None and n.applied, scope
+        assert (n.collection, n.owner, n.tumbler, n.effective_scope, n.caller_scope) == (
+            ART_COL, ART_OWNER, ART_DOC, ART_COL, scope), scope
+    for scope in ("code", NEXUS_COL, NEXUS_OWNER):
+        n = derive_single_source_narrowing(cov, res, scope)
+        assert n is not None and not n.applied and n.effective_scope == scope and "does not admit" in n.reason, scope
+        assert n.collection == ART_COL, "the verdict still names where the source is"
+
+
+def test_the_narrowing_concerns_only_a_synthesis_or_unknown_request_that_names_one_resolved_source() -> None:
+    from dataclasses import replace as _replace
+
+    from nexus.plans.single_source import derive_single_source_narrowing
+
+    res = _one_source_resolution()
+    assert derive_single_source_narrowing(_coverage("What is the status of RDR-084?"), res, "") is None
+    assert derive_single_source_narrowing(_coverage("Synthesize RDR-084 and RDR-085"), res, "") is None
+    assert derive_single_source_narrowing(_coverage("Synthesize the chunking design"), res, "") is None
+    cov = _coverage("Synthesize RDR-084")
+    candidates = _replace(res, sources=(_replace(res.sources[0], status="candidates", tumbler=None, collection=""),))
+    for resolution in (None, candidates):
+        n = derive_single_source_narrowing(cov, resolution, "")
+        assert n is not None and not n.applied and "did not resolve" in n.reason
+        assert "retrieval was not narrowed to it" in n.disclosure()
+        assert n.effective_scope == "" and n.collection == ""
+
+
+def test_the_runner_applies_the_narrowing_bindings_to_every_retrieval_step_and_to_the_traversal() -> None:
+    # The seam: the run's _nx_scope and _nx_owners bindings, which the runner already applies to every step of every
+    # plan. A step that pins another corpus is skipped (never run unscoped); one that pins rdr, or nothing, reads
+    # the source's collection; a traversal carries the collection and the owner in its policy.
+    from nexus.plans.runner import _apply_caller_scope_to_args
+    from nexus.plans.traversal_policy import derive_policy
+
+    bindings = {"_nx_scope": ART_COL, "_nx_owners": ART_OWNER}
+    for tool in ("search", "query"):
+        args, narrowing = _apply_caller_scope_to_args(tool, {"query": "q", "corpus": "rdr"}, bindings=bindings)
+        assert args["corpus"] == ART_COL and narrowing is not None and not narrowing.conflict
+        args, narrowing = _apply_caller_scope_to_args(tool, {"query": "q"}, bindings=bindings)
+        assert args["corpus"] == ART_COL
+        args, narrowing = _apply_caller_scope_to_args(tool, {"query": "q", "corpus": "knowledge,code"}, bindings=bindings)
+        assert narrowing is not None and narrowing.conflict, "a step on other collections is skipped, not run unscoped"
+        args, narrowing = _apply_caller_scope_to_args(tool, {"query": "q", "corpus": "all"}, bindings=bindings)
+        assert args["corpus"] == ART_COL
+    policy = derive_policy({"link_types": ["cites"]}, ART_COL, ART_OWNER)
+    assert policy["allowed_collections"] == ART_COL
+    assert policy["allowed_owners"] == [ART_OWNER]
+
+
+@pytest.mark.asyncio
+async def test_nx_answer_narrows_every_retrieval_step_and_widens_the_primary_read_for_a_one_source_synthesis() -> None:
+    from nexus.plans.reserved_stream import RESERVED_SHARE_NARROWED
+
+    cat, t3 = FakeCatalog(), FakeT3()
+    _two_projects(cat, t3)
+    runs: list = []
+    env = await _answer(cat, bindings={"source": "RDR-084", "owner": ART_OWNER}, structured=True, t3=t3,
+                        plan_run_calls=runs, question="Synthesize RDR-084")
+    (run,) = runs
+    run_bindings = run.call_args.args[1]
+    assert run_bindings["_nx_scope"] == ART_COL and run_bindings["_nx_owners"] == ART_OWNER
+    assert run.call_args.kwargs["reserved_stream"].share_max == RESERVED_SHARE_NARROWED
+    assert env["single_source_narrowing"]["applied"] is True and env["single_source_narrowing"]["collection"] == ART_COL
+    assert env["primary_evidence"]["caps"]["max_narrowed_source_items"] == 84
+
+    # a caller scope the source lies inside is replaced by the narrower collection ...
+    runs.clear()
+    env = await _answer(cat, bindings={"source": "RDR-084", "owner": ART_OWNER}, structured=True, t3=t3,
+                        plan_run_calls=runs, question="Synthesize RDR-084", scope="rdr")
+    assert env["single_source_narrowing"]["applied"] is True and runs[0].call_args.args[1]["_nx_scope"] == ART_COL
+    # ... and one that excludes it stays as the caller gave it, with the verdict saying why nothing was narrowed
+    runs.clear()
+    env = await _answer(cat, bindings={"source": "RDR-084", "owner": ART_OWNER}, structured=True, t3=t3,
+                        plan_run_calls=runs, question="Synthesize RDR-084", scope="code")
+    assert env["single_source_narrowing"]["applied"] is False and "does not admit" in env["single_source_narrowing"]["reason"]
+    assert runs[0].call_args.args[1]["_nx_scope"] == "code"
+    assert runs[0].call_args.kwargs["reserved_stream"].share_max == 50, "not narrowed: the 44-chunk tier and the 50 share"
+
+
+@pytest.mark.asyncio
+async def test_nx_answer_leaves_a_lookup_a_multi_source_request_and_an_unresolved_source_unnarrowed() -> None:
+    from nexus.plans.reserved_stream import RESERVED_SHARE_MAX
+
+    cat, t3 = FakeCatalog(), FakeT3()
+    _two_projects(cat, t3)
+    # a lookup that names the same one source: the 44-chunk tier and no narrowing
+    runs: list = []
+    env = await _answer(cat, bindings={"source": "RDR-084", "owner": ART_OWNER}, structured=True, t3=t3,
+                        plan_run_calls=runs, question="What is the status of RDR-084?")
+    run_bindings = runs[0].call_args.args[1]
+    assert env["single_source_narrowing"] is None and "_nx_scope" not in run_bindings
+    assert run_bindings["_nx_owners"] == ART_OWNER, "the explicit owner binding still narrows by owner, as before"
+    assert runs[0].call_args.kwargs["reserved_stream"].share_max == RESERVED_SHARE_MAX
+    # a synthesis whose one source did not resolve (an owner with no such document): nothing to narrow to, said so
+    runs.clear()
+    env = await _answer(cat, bindings={"source": "RDR-084", "owner": "9.9"}, structured=True, t3=t3,
+                        plan_run_calls=runs, question="Synthesize RDR-084")
+    assert env["single_source_narrowing"]["applied"] is False and "did not resolve" in env["single_source_narrowing"]["reason"]
+    assert "_nx_scope" not in runs[0].call_args.args[1]
+    assert "retrieval was not narrowed to it" in env["final_text"]

@@ -24,18 +24,6 @@ request kind          eligible declared plan kinds
 A ``lookup`` request admits no synthesis plan (Sam, 2026-10-30, nexus-jypmj.11): a synthesis plan outscored the
 lookup plan and cost 8.9 times as much on H09. The rows of the other kinds are unchanged.
 
-A ``synthesis`` request, or an ``unknown`` one, that names exactly ONE source does not admit a citation-traversal
-plan (Sam, 2026-10-30, nexus-4xmpv): the request wants the parts of one document read, and the plan walks the
-reference graph around it (plan 467 on G06 and on two of the six near-miss requests). It does not admit an
-abstract-themes plan either (Sam, 2026-10-30, the re-measure): that plan partitions a whole collection into
-themes, and on one-document requests its search pulled in code anchors from other owners. The ``unknown`` request
-is included because an extraction failure leaves single-source requests unknown, and the unknown row admits
-curated synthesis plans. The plans are named by what they declare, the ``strategy`` dimension of a curated
-(builtin) row, listed in :data:`SINGLE_SOURCE_EXCLUDED_STRATEGIES`, so a re-seeded library with new plan ids is
-still covered. Nothing else changes: a request naming two sources or none still admits them, and the matrix rows
-above are untouched. The request is not left without a
-plan: the matcher offers its other eligible synthesis plans and otherwise ``nx_answer`` plans inline.
-
 ``unknown`` plan kinds are limited by provenance, as the RDR says: a curated (reviewed builtin) unknown
 plan is eligible as the table reads; an unknown plan that is not curated (grown with no recorded route,
 or one that declares nothing) is eligible only for ``lookup`` and ``discovery/listing`` requests. An
@@ -96,7 +84,6 @@ under the binding drop and never reaches ``examined``.
 """
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -122,7 +109,6 @@ __all__ = [
     "PROTECTED_TAGS",
     "REASONS",
     "SHADOW_REASONS",
-    "SINGLE_SOURCE_EXCLUDED_STRATEGIES",
     "TRUSTED_ROUTES",
     "BuiltinCheck",
     "EligibilityFilter",
@@ -131,7 +117,6 @@ __all__ = [
     "classify_plan",
     "coerce_kind",
     "check_builtins",
-    "declared_strategy",
     "eligibility",
     "eligibility_enforced",
     "eligible_matches",
@@ -237,7 +222,6 @@ REASONS: frozenset[str] = frozenset({
     "undeclared_builtin",
     "untrusted_curated_claim",
     "unreviewed_route",
-    "single_source_synthesis",
     "judge_error",
 })
 
@@ -265,20 +249,6 @@ _COMPATIBLE: dict[PlanAnswerKind, frozenset[PlanAnswerKind]] = {
     _A: frozenset({_A, _S}),
     _B: frozenset({_B, _S}),
 }
-
-#: The ``strategy`` dimensions of curated plans that a synthesis or unknown request naming exactly one source does
-#: not admit (nexus-4xmpv; Sam, 2026-10-30). ``citation-traversal`` (``conexus/plans/builtin/citation-traversal.yml``,
-#: dimensions ``verb: research``, ``strategy: citation-traversal``) traces the references AROUND a document; a
-#: request that names one source and asks for its parts to be put together needs that document read, and the
-#: plan's seed step is a semantic query over every corpus. ``abstract-themes``
-#: (``conexus/plans/builtin/abstract-themes.yml``, ``verb: query``, ``strategy: abstract-themes``; no other
-#: builtin declares that strategy) is a corpus-theme plan ("v1 scope: single-collection abstract QA"). Matched on
-#: the declared dimension, never on a plan id.
-SINGLE_SOURCE_EXCLUDED_STRATEGIES: frozenset[str] = frozenset({"citation-traversal", "abstract-themes"})
-
-#: Request kinds the single-source rule applies to: synthesis, and unknown (an extraction failure leaves a
-#: single-source synthesis request unknown, and the unknown row admits curated synthesis plans).
-_SINGLE_SOURCE_REQUESTS = frozenset({_S, _U})
 
 #: Request kinds an untrusted unknown-kind plan may still serve.
 _UNKNOWN_PLAN_REQUESTS = frozenset({_L, _D})
@@ -502,62 +472,32 @@ def eligibility(request_kind: PlanAnswerKind, plan_kind: PlanAnswerKind, provena
     return Verdict(False, "untrusted_unknown_plan")
 
 
-def declared_strategy(dimensions: Any) -> str | None:
-    """The ``strategy`` a plan's stored dimensions declare (a JSON object string or a mapping); ``None`` if none."""
-    if isinstance(dimensions, str):
-        try:
-            dimensions = json.loads(dimensions)
-        except ValueError:
-            return None
-    if isinstance(dimensions, Mapping):
-        value = dimensions.get("strategy")
-        return value if isinstance(value, str) and value else None
-    return None
-
-
-def _judge(
-    request_kind: PlanAnswerKind, tags: str | None, plan_json: Any, dimensions: Any = None, named_source_count: int = 0,
-) -> tuple[PlanStanding, Verdict]:
+def _judge(request_kind: PlanAnswerKind, tags: str | None, plan_json: Any) -> tuple[PlanStanding, Verdict]:
     standing = classify_plan(tags, plan_json)
     verdict = eligibility(request_kind, standing.kind, standing.provenance)
     if not verdict.eligible and standing.flag is not None:
         verdict = Verdict(False, standing.flag)
-    if (
-        verdict.eligible and request_kind in _SINGLE_SOURCE_REQUESTS and named_source_count == 1 and standing.provenance == "curated"
-        and declared_strategy(dimensions) in SINGLE_SOURCE_EXCLUDED_STRATEGIES
-    ):
-        verdict = Verdict(False, "single_source_synthesis")
     return standing, verdict
 
 
-def _safe_judge(
-    request_kind: PlanAnswerKind, tags: Any, plan_json: Any, dimensions: Any = None, named_source_count: int = 0,
-) -> tuple[PlanStanding, Verdict]:
+def _safe_judge(request_kind: PlanAnswerKind, tags: Any, plan_json: Any) -> tuple[PlanStanding, Verdict]:
     """:func:`_judge` that never raises: a fault is the ``judge_error`` verdict on an unattested standing.
 
     Callers on the production path (the matcher, ``nx_answer``) use this one, so a judging fault with the
     gate off cannot fail ``plan_match``; the fault is logged and counted under ``judge_error``.
     """
     try:
-        return _judge(request_kind, tags, plan_json, dimensions, named_source_count)
+        return _judge(request_kind, tags, plan_json)
     except Exception:  # noqa: BLE001 — a judging fault must never fail the caller; logged and counted
         _log.warning("eligibility_judge_failed", exc_info=True)
         return PlanStanding(_U, "unattested", "judge_error"), Verdict(False, "judge_error")
 
 
-def eligible_matches(
-    request_kind: PlanAnswerKind, matches: Iterable[Any] | None, named_source_count: int = 0,
-) -> list[Any]:
-    """*matches* without the plans a request of *request_kind* may not use (quiet: no counting).
-
-    *named_source_count* is how many sources the request names (the single-source synthesis rule reads it).
-    """
+def eligible_matches(request_kind: PlanAnswerKind, matches: Iterable[Any] | None) -> list[Any]:
+    """*matches* without the plans a request of *request_kind* may not use (quiet: no counting)."""
     kept = []
     for m in matches or ():
-        _, verdict = _safe_judge(
-            request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None),
-            getattr(m, "dimensions", None), named_source_count,
-        )
+        _, verdict = _safe_judge(request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None))
         if verdict.eligible:
             kept.append(m)
     return kept
@@ -572,11 +512,9 @@ class EligibilityFilter:
 
     def __init__(
         self, request_kind: PlanAnswerKind | str, decision: str = "unknown", enforce: bool = False,
-        shadow_reason: str | None = None, named_source_count: int = 0,
+        shadow_reason: str | None = None,
     ) -> None:
         self.request_kind = coerce_kind(request_kind)
-        #: How many distinct sources the request names (nexus-4xmpv): exactly one switches the single-source rule on.
-        self.named_source_count = named_source_count
         self.decision = decision
         self.enforce = enforce
         if shadow_reason is not None and shadow_reason not in SHADOW_REASONS:
@@ -604,7 +542,6 @@ class EligibilityFilter:
         standing, verdict = _safe_judge(
             self.request_kind, row.get("tags") if isinstance(row, Mapping) else None,
             row.get("plan_json") if isinstance(row, Mapping) else None,
-            row.get("dimensions") if isinstance(row, Mapping) else None, self.named_source_count,
         )
         if isinstance(plan_id, int):
             self._judged[plan_id] = (standing, verdict)
@@ -632,10 +569,7 @@ class EligibilityFilter:
             plan_id = getattr(m, "plan_id", 0)
             if plan_id in self._judged:
                 return self._judged[plan_id]
-            return _safe_judge(
-                self.request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None),
-                getattr(m, "dimensions", None), self.named_source_count,
-            )
+            return _safe_judge(self.request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None))
 
         self._returned = {
             "total": len(matches), "eligible": sum(1 for m in matches if judged(m)[1].eligible),

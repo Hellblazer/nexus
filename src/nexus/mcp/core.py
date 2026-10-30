@@ -10964,6 +10964,8 @@ async def _nx_answer_primary_stream(
     lifecycle: "LifecycleStream | None" = None,
     *,
     deadline: float | None = None,
+    one_source: bool = False,
+    narrowed: bool = False,
 ) -> "tuple[PrimaryEvidence | None, ReservedStream | None]":
     """Read the resolved named sources and build the reserved stream (RDR-232, nexus-jypmj.1.6).
 
@@ -10981,6 +10983,9 @@ async def _nx_answer_primary_stream(
     *lifecycle* (nexus-jypmj.1.7) supplies the T2 records of a resolved RDR; they lead the reserved
     share, ahead of the chunks, and do not depend on the T3 read: a failed chunk read still yields a
     stream of the records.
+
+    *one_source* and *narrowed* are ``RequestCoverage.names_one_source`` and whether the run narrowed its secondary
+    streams to that source (nexus-4xmpv): the item cap and the reserved share are read from them, once, here.
     """
     if resolution is None or not resolution.resolved():
         return None, None
@@ -10997,6 +11002,7 @@ async def _nx_answer_primary_stream(
             # The capability probe is a (cached) HTTP read, so it runs here with the rest of the blocking I/O.
             return select_primary_evidence(
                 resolution, cat=cat, fetch_chunks=fetch, deadline=deadline, manifest_sampler=_manifest_sampler(cat),
+                one_source=one_source, narrowed=narrowed,
             )
 
         evidence = await asyncio.wait_for(
@@ -11009,7 +11015,11 @@ async def _nx_answer_primary_stream(
     except Exception as exc:  # noqa: BLE001 — an unreadable source is disclosed, never a failed answer
         _log.warning("nx_answer_primary_evidence_failed", error=str(exc))
         evidence = PrimaryEvidence(error=type(exc).__name__, caps=resolution.caps)
-    return evidence, ReservedStream.from_evidence(evidence, extra=records)
+    from nexus.plans.reserved_stream import RESERVED_SHARE_MAX, RESERVED_SHARE_NARROWED  # noqa: PLC0415 — deferred; matches this module's convention
+
+    return evidence, ReservedStream.from_evidence(
+        evidence, extra=records, share_max=RESERVED_SHARE_NARROWED if narrowed else RESERVED_SHARE_MAX,
+    )
 
 
 def _autoalias_bindings(
@@ -11602,7 +11612,6 @@ async def _nx_answer_plan_miss(
     if coverage is not None and enforce_eligibility:
         few_shot_matches = _eligibility.eligible_matches(
             _eligibility.coerce_kind(coverage.answer_kind), few_shot_matches,
-            len({(s.kind, s.value) for s in coverage.named_sources}),
         )
     few_shot_block = _format_plan_few_shot(few_shot_matches)
     if few_shot_block:
@@ -12341,6 +12350,23 @@ async def nx_answer(
             )
 
         _request_coverage = _nx_answer_isolated("withdraw_unqualified", _request_coverage, _withdraw_unqualified)
+    # RDR-232 section 2a (nexus-4xmpv; Sam, 2026-10-30): a synthesis or unknown request that names exactly ONE source
+    # reads that source. Once it resolved to one document, the run's scope binding becomes the document's collection and
+    # its owner binding the document's owner, and the runner's existing section 2a and owner narrowing then apply them
+    # to EVERY retrieval step of EVERY plan (library, inline, research:default). Replaces the strategy deny-list.
+    # ``_effective_scope`` is the scope the steps run under; ``scope`` stays what the caller gave (plan matching, plan
+    # growth and the envelope's ``scope`` read that). ``None`` when the request is not one the rule concerns.
+    from nexus.plans.owner_narrowing import OWNERS_BINDING as _OWNERS_BINDING  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.single_source import derive_single_source_narrowing as _derive_single_source  # noqa: PLC0415 — deferred; matches this module's convention
+
+    _single_source = _nx_answer_isolated(
+        "single_source_narrowing", None, _derive_single_source, _request_coverage, _named_sources, scope,
+    )
+    _effective_scope = scope
+    if _single_source is not None and _single_source.applied:
+        _effective_scope = _single_source.effective_scope
+        _caller_run["_nx_scope"] = _effective_scope
+        _caller_run[_OWNERS_BINDING] = _single_source.owner
     # RDR-232 Phase 2 (nexus-jypmj.2.3): the answer-kind eligibility filter for this request. Handed to
     # plan_match, which asks it of every branch's candidates; enforcing unless NX_ANSWER_KIND_ELIGIBILITY turns
     # the gate off (nexus-jypmj.2.8; shadow: the filter counts what it would exclude and excludes nothing).
@@ -12356,8 +12382,6 @@ async def nx_answer(
         shadow_reason=(
             "disabled_by_setting" if not _gate_on else None if _extract_on else "extraction_disabled"
         ),
-        # nexus-4xmpv: a synthesis request that names exactly one source does not admit citation-traversal.
-        named_source_count=len({(s.kind, s.value) for s in _request_coverage.named_sources}),
     )
     # nexus-jypmj.16: a failed extraction leaves THIS request on its first-pass kind (the gate keeps enforcing,
     # by design); a run of failures in one process is that regime every time, so it warns once per process.
@@ -12411,7 +12435,7 @@ async def nx_answer(
         try:
             diag = build_evidence_diagnostics(
                 steps=_diag_inputs["steps"], tools=plan_tools(_diag_inputs["plan_json"]),
-                scope=ScopeConstraint.parse(scope), scope_diagnostics=_scope_diagnostics,
+                scope=ScopeConstraint.parse(_effective_scope), scope_diagnostics=_scope_diagnostics,
                 resolved_args=_diag_inputs["resolved_args"], recorder=_reducer_recorder,
                 reserved=_reserved_stream, primary=_primary_evidence, lifecycle=_lifecycle,
                 named_sources=_named_sources, reducer_expected=_diag_inputs["reducer_expected"],
@@ -12563,6 +12587,7 @@ async def nx_answer(
                     ) if _named_sources else ()
                 ),
                 _active_notice,
+                _single_source.disclosure() if _single_source is not None else None,
             )
             if line
         ]
@@ -12684,6 +12709,9 @@ async def nx_answer(
             # detail, ...}], dropped, catalog_calls}. None when no source
             # was named.
             "named_sources": _named_sources.to_wire() if _named_sources else None,
+            # nexus-4xmpv: the one-source rule's verdict ({applied, source, collection, owner, caller_scope,
+            # effective_scope, reason}); ``None`` when the request is not one it concerns.
+            "single_source_narrowing": _single_source.to_wire() if _single_source is not None else None,
             # RDR-232 Phase 1 (nexus-jypmj.1.6): the primary evidence read from the resolved
             # sources (per-document coverage, selected items by position, caps hit) and what the
             # runner did with it (merged step, secondary items cut or deduplicated, reserved
@@ -13114,7 +13142,7 @@ async def nx_answer(
             )
             with _ambient_usage_sink(_out_of_step_usage_sink):
                 best = await _nx_answer_plan_miss(
-                    question, scope=scope, max_steps=max_steps,
+                    question, scope=_effective_scope, max_steps=max_steps,
                     few_shot_matches=matches, coverage=_request_coverage,
                     enforce_eligibility=_plan_eligibility.enforce,
                 )
@@ -13572,7 +13600,7 @@ async def nx_answer(
             from nexus.plans.evidence import ScopeConstraint, narrow_corpus, narrow_subtree  # noqa: PLC0415 — deferred; matches this module's convention
 
             _single_query_fast_path = True
-            _fast_scope = ScopeConstraint.parse(scope)
+            _fast_scope = ScopeConstraint.parse(_effective_scope)
             _fast_subtree = ""
             if _fast_scope.kind == "subtree":
                 _fast_narrowing, _fast_subtree = narrow_subtree(
@@ -13589,10 +13617,10 @@ async def nx_answer(
                 _log.warning(
                     "nx_answer_single_query_scope_conflict",
                     plan_id=best.plan_id, plan_corpus=_fast_narrowing.plan_corpus,
-                    caller_scope=scope,
+                    caller_scope=_effective_scope,
                 )
                 no_match = (
-                    f"No matching evidence found for {question!r} in scope {scope!r}. "
+                    f"No matching evidence found for {question!r} in scope {_effective_scope!r}. "
                     f"The plan's one retrieval step was skipped (plan_id={best.plan_id}); "
                     f"{_nx_answer_scope_conflict_sentence(_scope_diagnostics)} — pass a scope "
                     "the plan's corpus covers, or use search/query directly."
@@ -13736,7 +13764,7 @@ async def nx_answer(
                         steps=[
                             {"ids": [], "tumblers": [], "scope_conflict": _fast_owner_marker or {
                                 "step_index": 0, "tool": "query", "plan_corpus": _fast_narrowing.plan_corpus,
-                                "caller_scope": scope, "scope_kind": _fast_scope.kind}}
+                                "caller_scope": _effective_scope, "scope_kind": _fast_scope.kind}}
                             if _fast_conflict else {
                                 "ids": [c["id"] for c in chunks],
                                 "chunk_collections": [c["collection"] for c in chunks],
@@ -13874,7 +13902,10 @@ async def nx_answer(
         await _nx_answer_lifecycle_stream(_named_sources, deadline=deadline)
         if _request_coverage.wants_lifecycle_stream else None
     )
-    _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources, _lifecycle, deadline=deadline)
+    _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(
+        _named_sources, _lifecycle, deadline=deadline, one_source=_request_coverage.names_one_source,
+        narrowed=_single_source is not None and _single_source.applied,
+    )
     if _reserved_stream is not None:
         _plan_run_kwargs["reserved_stream"] = _reserved_stream
     # RDR-232 Phase 3 (nexus-jypmj.3.3): the coverage boundary, built from the inputs this call already holds (the
@@ -13890,7 +13921,7 @@ async def nx_answer(
         from nexus.plans.evidence import ScopeConstraint as _ScopeConstraint  # noqa: PLC0415 — as above
 
         _plan_run_kwargs["coverage_boundary"] = _CoverageBoundary(
-            request=_request_coverage, scope=_ScopeConstraint.parse(scope), named_sources=_named_sources,
+            request=_request_coverage, scope=_ScopeConstraint.parse(_effective_scope), named_sources=_named_sources,
             primary=_primary_evidence, lifecycle=_lifecycle, owner_resolution=_evidence_request.owner.to_wire(),
             dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
         )

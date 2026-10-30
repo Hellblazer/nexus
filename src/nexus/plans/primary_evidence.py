@@ -28,9 +28,9 @@ heading starts a section and the following chunks inherit it. The T3 chunk row's
 the last writer's, so :func:`t3_chunk_fetcher` hands the selector text and nothing else.
 
 Every limit is a field of :class:`PrimaryEvidenceCaps`, the one calibration object
-(:data:`DEFAULT_CAPS`). The reserved share (``max_selected_items``, or ``max_single_source_items`` for a request
-that names exactly one source) stays below the operator input cap (``runner._OPERATOR_MAX_INPUTS``, 100) so
-plan evidence keeps room.
+(:data:`DEFAULT_CAPS`), and the arithmetic that ties the item caps to the reducer's input slots is stated once,
+there. The reserved share stays below the operator input cap (``runner._OPERATOR_MAX_INPUTS``, 100) so plan
+evidence keeps room.
 Merging this evidence ahead of the plan's inputs is :mod:`nexus.plans.reserved_stream`
 (nexus-jypmj.1.6); this module only produces it.
 """
@@ -150,15 +150,33 @@ class PrimaryEvidenceCaps:
     #: (< ``runner._OPERATOR_MAX_INPUTS``). A calibration parameter nothing measured: the near-miss run capped
     #: a 135-chunk document at 24 while using 18,789 of the character budget below (nexus-jf9wg).
     max_selected_items: int = 24
-    #: The same bound when the request names exactly ONE source and it resolved (nexus-jf9wg, 2026-10-30): a
-    #: synthesis of one document whose parts sit in different sections needs every section read, and the
-    #: character budget below was the real bound at 24 chunks of 500-1,000 characters. Selection keeps the
-    #: section-diverse, manifest-order picks and continues past ``max_selected_items`` up to this many chunks
-    #: or ``max_selected_chars``, whichever comes first. 44 is ``reserved_stream.RESERVED_SHARE_MAX`` (50) less
-    #: ``lifecycle_stream.LifecycleCaps.max_records`` (6): the reserved share is split between T2 lifecycle records
-    #: (which lead it) and these chunks, and a chunk past the share is dropped with a disclosure (a test pins
-    #: the sum). A calibration parameter, not a derived constant: 44 is the most the share can carry.
+    #: The same bound when the request names exactly ONE source (:attr:`RequestCoverage.names_one_source`) and it
+    #: resolved, but the run does NOT narrow its secondary streams to that source (a lookup, a comparison: they keep
+    #: their cross-document retrieval). nexus-jf9wg, 2026-10-30. It is ``reserved_stream.RESERVED_SHARE_MAX`` (50)
+    #: less ``lifecycle_stream.LifecycleCaps.max_records`` (6): the share is split between T2 lifecycle records
+    #: (which lead it) and these chunks, and a chunk past the share is dropped with a disclosure (a test pins the sum).
     max_single_source_items: int = 44
+    #: The bound when the request names exactly one source, it resolved AND the run narrows every secondary
+    #: retrieval step to it (:attr:`RequestCoverage.narrows_to_one_source`, ``nexus.plans.single_source``; nexus-4xmpv,
+    #: Sam, 2026-10-30). The primary stream then has the reducer's slots to itself, because its secondary streams read
+    #: the same collection and mostly hit chunks the primary already holds (a duplicate is merged away by chash before
+    #: the cap). THE SHARE ARITHMETIC, in one place:
+    #:
+    #: * ``runner._OPERATOR_MAX_INPUTS`` = 100 reducer input slots, cut AFTER the merge, so the cap only ever removes
+    #:   secondary items (the reserved ones lead).
+    #: * ``reserved_stream.RESERVED_SHARE_NARROWED`` = 90 of them are reserved for a narrowed run (50 otherwise); the
+    #:   other 10 are what the secondary streams keep. 90 + 10 = 100.
+    #: * Of the 90, ``LifecycleCaps.max_records`` = 6 lead for T2 lifecycle records, so the chunk cap is 90 - 6 = 84.
+    #:   84 chunks at the corpus's 500 to 1,000 characters is 42,000 to 84,000 characters, so the character cap
+    #:   below, not this count, is the bound for a long document: G06's 80-chunk document is 54,800 characters
+    #:   (all of it fits), S04 stopped at 40,258 characters over 44 chunks and takes about 65.
+    #: * ``max_selected_chars`` = 60,000 is unchanged. The coverage check reads each stream (primary, graph, vector,
+    #:   t2) in packs of at most ``coverage_ledger.ASSESSMENT_MAX_ITEM_CHARS`` = 120,000 characters, so the primary
+    #:   stream (60,000 raw characters; the attribution header adds under 120 characters a chunk, so about 70,000 in
+    #:   the reducer's input at 84 chunks) and the T2 stream (``LifecycleCaps.max_chars`` = 18,000) each fit one pack
+    #:   and neither leaves an anchor unread. The 135-row manifest case (``max_manifest_rows`` = 300 keeps all 135)
+    #:   fills the 60,000 characters at about 80 chunks.
+    max_narrowed_source_items: int = 84
     #: Characters in the selected evidence (both cases). Also below ``coverage_ledger.ASSESSMENT_MAX_ITEM_CHARS``
     #: (120,000), the per-stream size the coverage check reads, so the primary stream never leaves an unread anchor.
     max_selected_chars: int = 60_000
@@ -1118,10 +1136,9 @@ class ContentLabel:
 #: A chunk's overlap with its predecessor must span at least this many characters to be believed (a shorter
 #: shared run, a lone ``` line for one, is as likely to be coincidence as to be the chunker's overlap).
 _MIN_OVERLAP_CHARS = 12
-#: How far to look: the longest tail a chunker repeats, and how far into the chunk it may start (a section
-#: header can precede it).
-_MAX_OVERLAP_CHARS = 2000
-_MAX_OVERLAP_OFFSET = 600
+#: The tail ``md_chunker`` repeats at the head of the next chunk: ``chunk_overlap`` (50 tokens) x 3.3 characters a
+#: token. The repeat is the last ``min(this, the chunk's content)`` characters of the previous chunk.
+_CHUNKER_OVERLAP_CHARS = 165
 
 
 def _fence_step(fence: str | None, line: str) -> tuple[str | None, bool]:
@@ -1134,54 +1151,84 @@ def _fence_step(fence: str | None, line: str) -> tuple[str | None, bool]:
     return (None if stripped.startswith(fence) else fence), False
 
 
+def _chunker_tail(prev: str) -> tuple[str, str]:
+    """``(header, tail)``: what the chunker would repeat at the head of the chunk after *prev*.
+
+    ``md_chunker._split_large_section`` flushes a chunk and starts the next as ``[header_text, overlap_tail,
+    part_text]`` joined by blank lines (``[overlap_tail, part_text]`` for a section with no header), where the
+    tail is the last ``min(165, content)`` characters of the flushed chunk's content (everything after its
+    header). *header* is *prev*'s own first line and the blank line after it when that line is a heading, else
+    ``""``; *tail* is ``""`` when the content is too short to be told from a coincidence.
+    """
+    first, sep, _ = prev.partition("\n\n")
+    header = first + sep if sep and "\n" not in first and _HEADING.match(first) else ""
+    content = prev[len(header):]
+    if len(content) < _MIN_OVERLAP_CHARS:
+        return header, ""
+    return header, content[-_CHUNKER_OVERLAP_CHARS:]
+
+
 def _overlap_start_state(prev: str, prev_start: str | None, text: str, end_state: str | None) -> str | None:
     """The fence state *text* begins in, given the chunk *prev* before it, which began in *prev_start* and ended
     in *end_state*.
 
     Chunkers repeat the tail of one chunk at the head of the next (``md_chunker`` ``chunk_overlap``), and the
     tail can hold a fence line the previous chunk already acted on. Carrying the state across the boundary
-    would then toggle that fence twice. So when *text* does begin with a repeat of *prev*'s tail, it starts in
-    the state *prev* was in where that tail began; with no overlap it starts where *prev* ended, which is a
+    would then toggle that fence twice. So when *text* begins with the repeat the chunker produces, it starts in
+    the state *prev* was in where that tail began; with no such repeat it starts where *prev* ended, which is a
     code block the chunker split.
+
+    The repeat is believed only in the layout the chunker writes (:func:`_chunker_tail`): at the very head of
+    the chunk, after the repeated section header and its blank line if *prev* has one. A shared run found
+    anywhere else is a coincidence: a closing command block that two consecutive sections both end with is not
+    an overlap, and reading it as one inverts the fence state for every later chunk. Cost: two ``startswith``
+    probes a chunk; the walk of *prev*'s lines happens only on a match.
     """
-    longest = min(len(prev), _MAX_OVERLAP_CHARS)
-    head = text[: _MAX_OVERLAP_OFFSET + _MAX_OVERLAP_CHARS]
-    for k in range(longest, _MIN_OVERLAP_CHARS - 1, -1):
-        tail = prev[-k:]
-        at = head.find(tail)
-        if at == -1 or at > _MAX_OVERLAP_OFFSET:
-            continue
-        # the fence state of prev where its tail begins: walk prev's lines to the one holding that offset
-        cut, state, pos = len(prev) - k, prev_start, 0
-        for line in prev.splitlines(keepends=True):
-            nxt = pos + len(line)
-            if nxt > cut:
-                body = line.rstrip("\r\n")
-                after, _ = _fence_step(state, body)
-                if pos == cut:
-                    return state
-                # the tail starts mid-line: pick the state that reads the remnant of the line the way prev did
-                remnant = body[cut - pos:]
-                return state if _fence_step(state, remnant)[0] == after else after
-            state, _ = _fence_step(state, line.rstrip("\r\n"))
-            pos = nxt
+    header, tail = _chunker_tail(prev)
+    if not tail or not (text.startswith(tail) or (header and text.startswith(header + tail))):
         return end_state
+    # the fence state of prev where its tail begins: walk prev's lines to the one holding that offset
+    cut, state, pos = len(prev) - len(tail), prev_start, 0
+    for line in prev.splitlines(keepends=True):
+        nxt = pos + len(line)
+        if nxt > cut:
+            body = line.rstrip("\r\n")
+            after, _ = _fence_step(state, body)
+            if pos == cut:
+                return state
+            # the tail starts mid-line: pick the state that reads the remnant of the line the way prev did
+            remnant = body[cut - pos:]
+            return state if _fence_step(state, remnant)[0] == after else after
+        state, _ = _fence_step(state, line.rstrip("\r\n"))
+        pos = nxt
     return end_state
 
 
-def derive_content_labels(texts: Sequence[str]) -> list[ContentLabel]:
+def derive_content_labels(texts: Sequence[str], positions: Sequence[int] | None = None) -> list[ContentLabel]:
     """Section labels from chunk text in manifest order. A Markdown heading starts a section;
     following chunks inherit it; content before the first heading is unlabelled. Headings
     inside a code fence do not count, and a fence left open at a chunk boundary stays open
     into the next chunk, unless the next chunk repeats the previous one's tail (the chunker's overlap), in
     which case it starts in the state the previous chunk was in where that tail began, so a fence line the
-    overlap repeats is not counted twice."""
+    overlap repeats is not counted twice.
+
+    *positions* are the chunks' manifest positions. A sampled or partly fetched manifest hands this a list with
+    gaps, and chunk n+k is not the chunk after n: its neighbour's open fence and overlap say nothing about it, so
+    across a gap the fence state restarts closed and no overlap is looked for. A label is still inherited across a
+    gap (it is a best-effort carry, and the chunk reports ``label_source`` content). Without *positions* the
+    texts are taken as adjacent."""
+    if positions is not None and len(positions) != len(texts):
+        raise ValueError("positions must match texts one to one")
     out: list[ContentLabel] = []
     carry: str | None = None
     fence: str | None = None
     prev: str | None = None
     prev_start: str | None = None
-    for text in texts:
+    prev_position: int | None = None
+    for i, text in enumerate(texts):
+        position = positions[i] if positions is not None else None
+        if positions is not None and prev_position is not None and position != prev_position + 1:
+            fence, prev = None, None
         if prev is not None:
             fence = _overlap_start_state(prev, prev_start, text, fence)
         prev_start = fence
@@ -1198,6 +1245,7 @@ def derive_content_labels(texts: Sequence[str]) -> list[ContentLabel]:
             carry = headings[-1]
         out.append(ContentLabel(label=label, headings=tuple(headings), carry=carry))
         prev = text
+        prev_position = position
     return out
 
 
@@ -1520,15 +1568,20 @@ def _read_manifests(
     return manifests, failed, unread, {}
 
 
-def single_source_item_cap(resolution: NamedSourceResolution, caps: PrimaryEvidenceCaps) -> int:
-    """The unique-chunk ceiling for *resolution*'s primary read (nexus-jf9wg).
+def single_source_item_cap(caps: PrimaryEvidenceCaps, *, one_source: bool = False, narrowed: bool = False) -> int:
+    """The unique-chunk ceiling for a primary read (nexus-jf9wg, nexus-4xmpv).
 
-    ``caps.max_single_source_items`` (never below ``max_selected_items``) when the request named exactly one
-    source: one entry in the resolution, nothing dropped past ``max_named_sources``, no range (a range names
-    its two ends). ``caps.max_selected_items`` for every other request, so the multi-source selection is unchanged.
+    *one_source* and *narrowed* are :attr:`RequestCoverage.names_one_source` and
+    :attr:`RequestCoverage.narrows_to_one_source`, computed once from the request: this function does not count
+    sources itself. A narrowed one-source request gets ``max_narrowed_source_items``; a one-source request whose
+    secondary streams are not narrowed gets ``max_single_source_items``; every other request gets
+    ``max_selected_items``, so the multi-source selection is unchanged. A cap is never below the smaller tier's.
     """
-    one = len(resolution.sources) == 1 and not resolution.dropped and not resolution.ranges
-    return max(caps.max_single_source_items, caps.max_selected_items) if one else caps.max_selected_items
+    if one_source and narrowed:
+        return max(caps.max_narrowed_source_items, caps.max_single_source_items, caps.max_selected_items)
+    if one_source:
+        return max(caps.max_single_source_items, caps.max_selected_items)
+    return caps.max_selected_items
 
 
 def select_primary_evidence(
@@ -1540,6 +1593,8 @@ def select_primary_evidence(
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
     manifest_sampler: ManifestSampler | None = None,
+    one_source: bool = False,
+    narrowed: bool = False,
 ) -> PrimaryEvidence:
     """Read each resolved source's manifest, hydrate its chunks and select the evidence.
 
@@ -1552,6 +1607,9 @@ def select_primary_evidence(
     *deadline* is an absolute time on *clock* (the caller's own budget); the read also stops at
     ``caps.max_seconds`` from its start. No manifest read or chunk fetch is started past it (``deadline``
     on ``caps_hit``): the chunks fetched by then are selected, the rest are missing and said so.
+
+    *one_source* and *narrowed* say the request names exactly one source and that its secondary streams are
+    narrowed to it (:func:`single_source_item_cap`); the caller reads them from the request coverage.
     """
     caps = caps or resolution.caps
     docs = resolution.resolved()
@@ -1642,7 +1700,10 @@ def select_primary_evidence(
             r for r in sampled[k]
             if (r.collection or d.collection or "", r.chash) in texts
         ]
-        content = derive_content_labels([texts[(r.collection or d.collection or "", r.chash)] for r in hydrated])
+        content = derive_content_labels(
+            [texts[(r.collection or d.collection or "", r.chash)] for r in hydrated],
+            positions=[r.position for r in hydrated],
+        )
         built: list[_Row] = []
         n_manifest = n_content = 0
         for r, cl in zip(hydrated, content, strict=True):
@@ -1683,8 +1744,12 @@ def select_primary_evidence(
 
     # 4. select: fair share of the item budget, each document's priority list, admitted
     #    round-robin so no document takes the aggregate, shared chunks counted once. A request that names
-    #    exactly one source (and it resolved) gets the larger single-source ceiling (nexus-jf9wg).
-    item_cap = single_source_item_cap(resolution, caps) if len(docs) == 1 else caps.max_selected_items
+    #    exactly one source (and it resolved) gets the larger single-source ceiling (nexus-jf9wg), the larger
+    #    still when its secondary streams are narrowed to it (nexus-4xmpv).
+    item_cap = (
+        single_source_item_cap(caps, one_source=one_source, narrowed=narrowed) if len(docs) == 1
+        else caps.max_selected_items
+    )
     quotas = _water_fill(item_cap, [len(b) for b in per_doc_rows])
     queues = [deque(_picks(rows, q)) for rows, q in zip(per_doc_rows, quotas, strict=True)]
     admitted: dict[tuple[str, str], _Row] = {}
@@ -1750,6 +1815,8 @@ def gather_primary_evidence(
     fetch_chunks: ChunkFetcher,
     caps: PrimaryEvidenceCaps = DEFAULT_CAPS,
     frontmatter_id: FrontmatterIdLookup | None = None,
+    one_source: bool = False,
+    narrowed: bool = False,
 ) -> tuple[NamedSourceResolution, PrimaryEvidence]:
     """Resolve the request's named sources and read their primary evidence.
 
@@ -1762,4 +1829,6 @@ def gather_primary_evidence(
     )
     if cat is None:
         return resolution, PrimaryEvidence(caps=caps)
-    return resolution, select_primary_evidence(resolution, cat=cat, fetch_chunks=fetch_chunks, caps=caps)
+    return resolution, select_primary_evidence(
+        resolution, cat=cat, fetch_chunks=fetch_chunks, caps=caps, one_source=one_source, narrowed=narrowed,
+    )
