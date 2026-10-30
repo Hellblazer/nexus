@@ -2647,12 +2647,14 @@ class TestApplyFileDiversityCap:
         # first 2 occurrences kept in place; the rest pushed to the tail.
         assert [r.id for r in out] == ["0", "1", "2", "3"]
 
-    def test_falls_back_to_the_catalog_display_path_when_no_doc_id(self):
-        """nexus-6pfgb.56: with no doc_id the file identity is the catalog-resolved ``_display_path``."""
+    def test_a_display_path_without_a_doc_id_is_not_a_file_identity(self):
+        """nexus-6pfgb.56: ``_attach_display_paths`` sets ``_display_path`` only for a hit that has a doc_id,
+        and the cap reads doc_id first, so a ``_display_path`` is never the winning key. A hit that has one
+        without a doc_id is a state the producer cannot emit; it keys on its own id like any other."""
         a1, a2 = self._r(id="a1", display_path="a.py"), self._r(id="a2", display_path="a.py")
         b = self._r(id="b", display_path="b.py")
         out = apply_file_diversity_cap([a1, a2, b], max_per_file=1)
-        assert [r.id for r in out] == ["a1", "b", "a2"], "the second chunk of a.py moves behind b.py"
+        assert [r.id for r in out] == ["a1", "a2", "b"]
 
     def test_a_stale_row_path_is_never_a_file_identity(self):
         """nexus-6pfgb.56: a row's ``source_path`` (the last writer's file) and the legacy ``file_path``

@@ -2735,14 +2735,13 @@ def apply_file_diversity_cap(
     partition, not a filter: every input result is still present in the
     output, just reordered. Nothing is dropped and no score is touched.
 
-    File identity resolves per result via ``metadata.doc_id`` ->
-    ``metadata._display_path`` -> ``r.id`` (``doc_id`` first because it is
-    the catalog tumbler, stable across a prune/re-index; ``_display_path``
-    is the catalog-resolved path the search attached) — a result with
-    neither falls back to its own unique ``id``, so results with no shared
-    file identity never cap against each other. The row's ``source_path``
-    is the last writer's file, shared with other documents, and the legacy
-    ``file_path`` key is left by no writer; neither is an identity
+    File identity resolves per result via ``metadata.doc_id`` -> ``r.id``
+    (``doc_id`` is the catalog tumbler, stable across a prune/re-index) — a
+    result with no doc_id falls back to its own unique ``id``, so results
+    with no shared file identity never cap against each other. The row's
+    ``source_path`` is the last writer's file, shared with other documents,
+    the legacy ``file_path`` key is left by no writer, and ``_display_path``
+    is attached only to a hit that already has a doc_id; none is an identity
     (nexus-6pfgb.49, nexus-6pfgb.56).
 
     Walks *results* in their existing (already-scored) order; the first
@@ -2776,11 +2775,7 @@ def apply_file_diversity_cap(
     overflow: list[SearchResult] = []
     counts: dict[str, int] = {}
     for r in results:
-        key = (
-            r.metadata.get("doc_id")
-            or r.metadata.get("_display_path")
-            or r.id
-        )
+        key = r.metadata.get("doc_id") or r.id
         seen = counts.get(key, 0)
         (kept if seen < max_per_file else overflow).append(r)
         counts[key] = seen + 1
