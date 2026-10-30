@@ -613,7 +613,7 @@ final class ManifestLabelStage {
 
     /**
      * The live manifest occurrences of each (collection, chash) the rows name, in (doc_id, position)
-     * order. One bounded statement per collection and batch, under the tenant's row-level security, joined
+     * order. One statement per batch of keys, every collection together, under the tenant's row-level security, joined
      * to the document so a tombstoned document owns nothing. The same statement reads the document-level
      * values the predicates name ({@code docKeys}); nothing is read for a filter that names none.
      */
@@ -741,21 +741,23 @@ final class ManifestLabelStage {
 
     /**
      * The one statement behind both lookups, for one batch of keys across every collection named. Both lists
-     * bind as one array each ({@code = ANY(?)}), so the statement text, and its plan, is the same whatever the
-     * batch's size. Package-private so a plan test can EXPLAIN the statement production runs, not a copy of it.
-     * {@code firstOnly} is {@code SELECT DISTINCT ON (collection, chash) ... ORDER BY collection, chash, doc_id,
-     * position}; otherwise every occurrence, ordered by {@code doc_id}, {@code position}.
+     * bind as one array each ({@code = ANY(?)}), so the statement text is the same whatever the batch's size.
+     * Package-private so a plan test can EXPLAIN the statement production runs, not a copy of it.
+     * {@code firstOnly} is {@code SELECT DISTINCT ON (chash, collection) ... ORDER BY chash, collection, doc_id,
+     * position}, chash first because {@code idx_catalog_chunks_chash (tenant_id, chash)} returns rows in chash
+     * order, so the sort is incremental per chash; otherwise every occurrence, ordered by {@code doc_id},
+     * {@code position}.
      */
     static ResultQuery<Record> occurrenceQuery(DSLContext ctx, String tenant, String[] collections,
                                                byte[][] keys, List<Field<?>> select, boolean firstOnly) {
         var head = firstOnly
-            ? ctx.select(select).distinctOn(CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.CHASH)
+            ? ctx.select(select).distinctOn(CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
             : ctx.select(select);
         List<org.jooq.OrderField<?>> order = new ArrayList<>(4);
         if (firstOnly) {
-            // DISTINCT ON (collection, chash) needs them as the leading keys
-            order.add(CATALOG_DOCUMENT_CHUNKS.COLLECTION);
+            // DISTINCT ON (chash, collection) needs them as the leading keys
             order.add(CATALOG_DOCUMENT_CHUNKS.CHASH);
+            order.add(CATALOG_DOCUMENT_CHUNKS.COLLECTION);
         }
         order.add(CATALOG_DOCUMENT_CHUNKS.DOC_ID);
         order.add(CATALOG_DOCUMENT_CHUNKS.POSITION);

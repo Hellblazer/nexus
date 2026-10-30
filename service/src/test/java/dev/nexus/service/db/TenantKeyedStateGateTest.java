@@ -611,7 +611,7 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, CONFIG);
             }
-            // COUNTER (41)
+            // COUNTER (42)
             for (String f : List.of(
                 "Bge768Embedder.onnxInvocationCount",
                 "CatalogRepository.vacuumInProgress",
@@ -636,6 +636,7 @@ public class TenantKeyedStateGateTest {
                 "EmbedActivityTracker.subBatchesTotal",
                 "EmbedProgressGate.lastLogNanos",
                 "HttpUtil.GZIP_FAILURE_LOGGED",
+                "ManifestLabelStage.lookupStatements",
                 "NexusService.SweepCounts.tenants",
                 "NexusService.TupleSweepRunResult.tenantsVisited",
                 "OwnerlessWriteActivity.REFUSED",

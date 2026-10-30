@@ -65,6 +65,10 @@ class ManifestLabelStageFirstOwnerPlanTest {
     private TenantScope tenantScope;
     private final List<String> chashes = new ArrayList<>();
 
+    /** COL2-only chunks; with the four COL keys and chunk 0 a window is 305 keys, past one 300-key batch. */
+    private static final int BIG = 300;
+    private final List<String> big = new ArrayList<>();
+
     @BeforeAll
     void seed() throws Exception {
         pg = PgContainerHelper.start();
@@ -140,6 +144,20 @@ class ManifestLabelStageFirstOwnerPlanTest {
                 .execute();
             manifest(ctx, COL2, "doc-900", 4, chashes.get(0));
             manifest(ctx, COL2, "doc-900", 5, chashes.get(BOILERPLATE));
+            // Enough further COL2 chunks that a window over both collections crosses one lookup batch.
+            for (int c = 0; c < BIG; c++) {
+                String hex = Chash.ofText("first-owner-plan-big-" + c).toHex();
+                big.add(hex);
+                ctx.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT)
+                    .set(CHUNKS.COLLECTION, COL2)
+                    .set(CHUNKS.CHASH, HexFormat.of().parseHex(hex))
+                    .set(CHUNKS.EMBEDDING_MODEL, MODEL)
+                    .set(CHUNKS.CHUNK_TEXT, "big " + c)
+                    .set(CHUNKS.EMBEDDING_384, zero)
+                    .execute();
+                manifest(ctx, COL2, "doc-900", 100 + c, hex);
+            }
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
         }
     }
@@ -252,6 +270,33 @@ class ManifestLabelStageFirstOwnerPlanTest {
         assertThat(all.get(ManifestLabelStage.ownerKey(COL2, chashes.get(0))))
             .extracting(ManifestLabelStage.Occurrence::docId).containsExactly("doc-900");
         assertThat(all).doesNotContainKey(ManifestLabelStage.ownerKey(COL2, chashes.get(BOILERPLATE)));
+    }
+
+    @Test
+    void aWindowPastOneBatch_isTwoStatements_andEveryKeyIsAnsweredFromItsOwnCollection() {
+        var stage = new ManifestLabelStage(tenantScope);
+        Map<String, Set<String>> w = window();
+        Set<String> col2 = new LinkedHashSet<>(List.of(chashes.get(0)));
+        col2.addAll(big);
+        w.put(COL2, col2);
+
+        int before = stage.lookupStatementCount();
+        var first = stage.firstOwners(TENANT, w);
+        var all = stage.allOccurrences(TENANT, w);
+        assertThat(stage.lookupStatementCount() - before).as("305 keys: two statements per lookup").isEqualTo(4);
+
+        assertThat(first).hasSize(chashes.size() + 1 + BIG);
+        for (int c = 0; c < BIG; c++) {
+            var o = first.get(ManifestLabelStage.ownerKey(COL2, big.get(c)));
+            assertThat(o.docId()).as(big.get(c)).isEqualTo("doc-900");
+            assertThat(o.position()).isEqualTo(100 + c);
+        }
+        assertThat(first.get(ManifestLabelStage.ownerKey(COL2, chashes.get(0))).docId()).isEqualTo("doc-900");
+        assertThat(first.get(ManifestLabelStage.ownerKey(COL, chashes.get(0))).docId()).isEqualTo("doc-000");
+        assertThat(first).doesNotContainKey(ManifestLabelStage.ownerKey(COL2, chashes.get(BOILERPLATE)));
+        assertThat(all.get(ManifestLabelStage.ownerKey(COL, chashes.get(0)))).hasSize(HOLDERS);
+        assertThat(all).doesNotContainKey(ManifestLabelStage.ownerKey(COL2, chashes.get(BOILERPLATE)));
+        all.forEach((key, list) -> assertThat(first.get(key)).as(key).isEqualTo(list.get(0)));
     }
 
     @Test

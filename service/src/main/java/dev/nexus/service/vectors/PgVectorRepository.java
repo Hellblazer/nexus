@@ -8151,8 +8151,8 @@ FROM scope s
      * {@code source_uri} while the span came from the shared chunk row's last writer. A chash with no live
      * manifest row has no entry: the caller keeps the chunk row's own values and a null {@code source_uri}.
      *
-     * <p>Runs under the tenant's RLS, chunked at {@link #SOURCE_URI_JOIN_BATCH} chashes per statement (the
-     * stage's {@code LOOKUP_BATCH}), joined to {@code catalog_documents} with an explicit tenant bind as
+     * <p>Runs under the tenant's RLS as one statement per {@link #SOURCE_URI_JOIN_BATCH} (collection, chash)
+     * keys across every collection of the window (the stage's {@code LOOKUP_BATCH}), joined to {@code catalog_documents} with an explicit tenant bind as
      * defence in depth (fix #H2).
      *
      * @param tenant               the tenant whose catalog rows to query (RLS-scoped)
