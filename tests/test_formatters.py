@@ -53,7 +53,7 @@ def test_vimgrep_missing_source_path() -> None:
 
 
 def test_vimgrep_missing_source_path_prefers_title() -> None:
-    r = _result(title="Demo Note")
+    r = _result(_display_title="Demo Note")
     r.metadata.pop("_display_path")
     assert format_vimgrep([r])[0].startswith("Demo Note:10:0:")
 
@@ -67,7 +67,7 @@ def test_vimgrep_title_with_colon_does_not_shift_fields() -> None:
     anywhere in it), and the line/col/text fields after it must parse
     exactly as they would for a plain path."""
     r = _result(
-        title="Self-Aware Vector Embeddings for RAG: Encoding Relational Knowledge",
+        _display_title="Self-Aware Vector Embeddings for RAG: Encoding Relational Knowledge",
     )
     r.metadata.pop("_display_path")
     line = format_vimgrep([r])[0]
@@ -109,7 +109,7 @@ def test_display_path_or_title_falls_back_to_id_with_no_title() -> None:
 
 
 def test_display_path_or_title_substitutes_colons_in_title_only() -> None:
-    assert _display_path_or_title({"title": "A: B"}, "r1") == "A： B"
+    assert _display_path_or_title({"_display_title": "A: B"}, "r1") == "A： B"
 
 
 # ── nexus-1qed: _display_path priority + formatter integration ──────────────
@@ -234,7 +234,7 @@ def test_plain_uses_title_when_present() -> None:
         content="line one\nline two",
         distance=0.5,
         collection="knowledge__demo",
-        metadata={"title": "Demo Note"},
+        metadata={"_display_title": "Demo Note"},
     )
     assert format_plain([r]) == ["[0.5000] Demo Note", "  line one"]
 
@@ -270,13 +270,13 @@ def test_context_missing_source_path_falls_back_to_title_or_id() -> None:
     r.metadata.pop("_display_path")
     assert format_plain_with_context([r], lines_after=5)[0].startswith("r1:10:")
 
-    r2 = _result(content="solo", title="Demo Note")
+    r2 = _result(content="solo", _display_title="Demo Note")
     r2.metadata.pop("_display_path")
     assert format_plain_with_context([r2], lines_after=5)[0].startswith("Demo Note:10:")
 
 
 def test_context_title_with_colon_is_substituted() -> None:
-    r = _result(content="solo", title="Ratio 3:1 Results")
+    r = _result(content="solo", _display_title="Ratio 3:1 Results")
     r.metadata.pop("_display_path")
     line = format_plain_with_context([r], lines_after=5)[0]
     path_field, line_field, text_field = line.split(":", 2)
@@ -454,13 +454,13 @@ def test_compact_missing_source_path_falls_back_to_title_or_id() -> None:
     r.metadata.pop("_display_path")
     assert format_compact([r])[0].startswith("r1:10:")
 
-    r2 = _result(title="Demo Note")
+    r2 = _result(_display_title="Demo Note")
     r2.metadata.pop("_display_path")
     assert format_compact([r2])[0].startswith("Demo Note:10:")
 
 
 def test_compact_title_with_colon_is_substituted() -> None:
-    r = _result(title="Chapter 2: Results")
+    r = _result(_display_title="Chapter 2: Results")
     r.metadata.pop("_display_path")
     line = format_compact([r])[0]
     path_field, line_field, text_field = line.split(":", 2)
@@ -506,9 +506,9 @@ def test_bat_groups_path_less_hits_apart(monkeypatch) -> None:
     monkeypatch.setattr(fm, "run_bounded", _fake_run)
     monkeypatch.setattr(fm, "_is_bat_installed", lambda: True)
     a = SearchResult(id="chunk-a", content="alpha body", distance=0.1, collection="knowledge__x",
-                     metadata={"title": "Alpha Note", "line_start": 1})
+                     metadata={"_display_title": "Alpha Note", "line_start": 1})
     b = SearchResult(id="chunk-b", content="beta body", distance=0.2, collection="knowledge__x",
-                     metadata={"title": "Beta Note", "line_start": 1})
+                     metadata={"_display_title": "Beta Note", "line_start": 1})
     c = SearchResult(id="chunk-c", content="gamma body", distance=0.3, collection="knowledge__x",
                      metadata={"line_start": 1})
     fm._format_with_bat([a, b, c])
@@ -554,7 +554,7 @@ def test_the_line_is_looked_up_in_the_printed_file_not_raw_metadata(tmp_path) ->
 
 def test_a_title_only_result_reports_its_position_in_the_note() -> None:
     r = SearchResult(id="r1", content="one\ntwo\nthree", distance=0.1, collection="knowledge__x",
-                     metadata={"title": "A Note"})
+                     metadata={"_display_title": "A Note"})
     assert format_compact([r], query="three")[0] == "A Note:3:three"
 
 
@@ -591,3 +591,49 @@ def test_a_printed_file_that_opens_but_drifted_never_borrows_a_line_from_another
     r = SearchResult(id="r1", content="the line", distance=0.1, collection="docs__x",
                      metadata={"_display_path": str(shown), "source_path": str(other)})
     assert format_vimgrep([r])[0] == f"{shown}:1:0:the line"
+
+
+# ── nexus-fv2u4: the label is the catalog title, never the chunk row's ──────
+
+#: A code chunk's row title is its LAST writer's ``rel_path:line_start-line_end``: another
+#: document's path and lines once the chunk is shared.
+_STALE_ROW_TITLE = "other/doc.py:40-60"
+
+
+def _titled(display_title: str | None, content: str = "solo") -> SearchResult:
+    r = _result(content=content, title=_STALE_ROW_TITLE)
+    r.metadata.pop("_display_path")
+    if display_title is not None:
+        r.metadata["_display_title"] = display_title
+    return r
+
+
+def _fv2u4_render(fmt: str, r: SearchResult) -> str:
+    if fmt == "plain":
+        return "\n".join(format_plain([r]))
+    if fmt == "vimgrep":
+        return "\n".join(format_vimgrep([r], query="solo"))
+    if fmt == "compact":
+        return "\n".join(format_compact([r], query="solo"))
+    return "\n".join(format_plain_with_context([r], query="solo", lines_before=1, lines_after=1))
+
+
+@pytest.mark.parametrize("fmt", ["plain", "vimgrep", "compact", "context"])
+def test_a_shared_chunk_is_labelled_with_the_attributed_owners_catalog_title(fmt: str) -> None:
+    out = _fv2u4_render(fmt, _titled("owner/doc.py"))
+    assert "owner/doc.py" in out
+    assert _STALE_ROW_TITLE not in out and "other/doc.py" not in out
+
+
+@pytest.mark.parametrize("fmt", ["plain", "vimgrep", "compact", "context"])
+def test_an_unresolved_hit_shows_its_id_not_the_stale_row_title(fmt: str) -> None:
+    out = _fv2u4_render(fmt, _titled(None))
+    assert "r1" in out
+    assert "other/doc.py" not in out
+
+
+def test_display_title_reads_only_the_catalog_title() -> None:
+    from nexus.formatters import display_title
+
+    assert display_title({"title": _STALE_ROW_TITLE}) == ""
+    assert display_title({"title": _STALE_ROW_TITLE, "_display_title": "owner/doc.py"}) == "owner/doc.py"
