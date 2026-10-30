@@ -697,8 +697,6 @@ _TREE_RESOLVERS = _ARGV_RESOLVERS | _BOUNDED_SPAWNS
 #: ``test_every_tree_wrapper_hands_its_argv_to_a_resolver`` pins each one.
 _TREE_WRAPPERS: frozenset[tuple[str, str]] = frozenset({
     ("nexus/commands/command_context.py", "_check_output"),
-    ("nexus/indexer.py", "run"),
-    ("nexus/indexer_utils.py", "_run"),
     ("nexus/operators/dispatch.py", "_spawn_with_prompt_file"),
     ("nexus/_install/generation_core.py", "_run"),
 })

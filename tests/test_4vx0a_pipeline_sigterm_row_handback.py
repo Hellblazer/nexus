@@ -225,7 +225,7 @@ def test_an_interrupt_during_the_drain_after_a_stage_failure_propagates_and_keep
                 pytest.raises(TerminationRequested) as raised:
             pipeline_index_pdf(
                 Path("/4vx0a-drain.pdf"), "h4vx0a-drain", "docs__test", MagicMock(),
-                db=db, embed_fn=_embed, doc_id="1.1.9", git_meta={},
+                db=db, embed_fn=_embed, doc_id="1.1.9",
             )
     finally:
         uploader_may_finish.set()
@@ -285,7 +285,7 @@ def test_a_straggler_stage_after_an_interrupted_drain_never_writes_over_a_wiped_
                 pytest.raises(TerminationRequested):
             pipeline_index_pdf(
                 Path("/4vx0a-straggler.pdf"), h, "docs__test", MagicMock(),
-                db=db, embed_fn=_embed_and_hold, doc_id="1.1.9", git_meta={}, hooks=HookRegistry(),
+                db=db, embed_fn=_embed_and_hold, doc_id="1.1.9", hooks=HookRegistry(),
             )
     finally:
         release.set()

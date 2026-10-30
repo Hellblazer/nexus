@@ -375,7 +375,6 @@ def _build_chunk_metadata(
     corpus: str,
     embedding_model: str,
     now_iso: str,
-    git_meta: dict | None = None,
 ) -> dict:
     """Build chunk metadata with fields known at chunk time.
 
@@ -386,11 +385,6 @@ def _build_chunk_metadata(
     RDR-108 Phase 3 retired ``chunk_index``, ``chunk_count``, ``doc_id``
     from chunk metadata; the catalog ``document_chunks`` manifest is now
     authoritative for document-to-chunk binding.
-
-    *git_meta* — accepted for backwards compatibility; the schema dropped
-    git provenance from chunk metadata (RDR-101 Phase 5c). Catalog Document
-    carries it at the document level. Parameter retained so existing call
-    sites do not need to drop the kwarg simultaneously.
 
     nexus-w94eo: ``title``/``source_author`` are OMITTED from the returned
     dict rather than stamped as ``""`` placeholders. They are ALWAYS unknown
@@ -454,7 +448,6 @@ def _embed_and_write_batch(
     corpus: str,
     target_model: str,
     now_iso: str,
-    git_meta: dict | None = None,
 ) -> tuple[int, str]:
     """Embed and write a batch of chunks. Returns (count_written, actual_model)."""
     if not chunks_to_embed:
@@ -511,7 +504,6 @@ def _embed_and_write_batch(
             corpus=corpus,
             embedding_model=actual_model,
             now_iso=now_iso,
-            git_meta=git_meta,
         )
         db.write_chunk(content_hash, chunk.chunk_index, chunk.text, chunk_id,
                         metadata=meta, embedding=emb_bytes)
@@ -531,7 +523,6 @@ def chunker_loop(
     pdf_path: str = "",
     corpus: str = "",
     target_model: str = "voyage-context-3",
-    git_meta: dict | None = None,
     doc_id: str = "",
 ) -> None:
     """Incrementally chunk pages as they arrive, overlapping with extraction.
@@ -643,7 +634,7 @@ def chunker_loop(
 
         batch_kwargs = dict(
             pdf_path=pdf_path, corpus=corpus, target_model=current_model,
-            now_iso=now_iso, git_meta=git_meta,
+            now_iso=now_iso,
         )
 
         if is_final:
@@ -1913,7 +1904,6 @@ def pipeline_index_pdf(
     extractor: str = DEFAULT_EXTRACTOR,
     corpus: str = "",
     target_model: str = "voyage-context-3",
-    git_meta: dict | None = None,
     force: bool = False,
     force_re_embed: bool = False,
     doc_id: str = "",
@@ -2059,13 +2049,6 @@ def pipeline_index_pdf(
 
     # Normalize to absolute so staleness checks are path-form-independent.
     pdf_path = pdf_path.resolve()
-
-    # Resolve git provenance once at the entrypoint so chunker_loop and
-    # _build_chunk_metadata can stamp every chunk without re-detecting
-    # (nexus-2my fix #3).
-    if git_meta is None:
-        from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 - deferred to avoid circular import at module load
-        git_meta = detect_git_metadata(pdf_path)
 
     # RDR-102 Phase A: pre-flight catalog registration for the streaming
     # path. When called via index_pdf (the routing case) the caller already
@@ -2214,7 +2197,7 @@ def pipeline_index_pdf(
                     chunker_loop, content_hash, db, cancel, embed_fn,
                     extraction_done=extraction_done, chunking_done=chunking_done,
                     pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
-                    git_meta=git_meta, doc_id=doc_id,
+                    doc_id=doc_id,
                 )
                 all_futures.add(chunk_future)
                 if hooks is None:
