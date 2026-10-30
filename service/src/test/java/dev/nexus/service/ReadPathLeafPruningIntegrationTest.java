@@ -43,6 +43,9 @@ import static dev.nexus.service.jooq.nexus.Tables.ASSIGN_FROM_CHASHES_768;
 import static dev.nexus.service.jooq.nexus.Tables.CROSS_PREVIEW_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CROSS_PREVIEW_384;
 import static dev.nexus.service.jooq.nexus.Tables.CROSS_PREVIEW_768;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_1024;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_384;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_768;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_768;
@@ -486,7 +489,9 @@ class ReadPathLeafPruningIntegrationTest {
     private static final List<String> FAMILIES = List.of(
         "plain_search", "text_gated_search_hnsw_first", "text_gated_search_by_chash", "search_metadata_scoped",
         "search_aspect_scoped", "search_graph_hop", "search_topic_scoped", "text_gate_probe", "taxonomy_ann_query",
-        "assign_from_chashes", "cross_preview");
+        "assign_from_chashes", "cross_preview", "manifest_search");
+
+    private static final org.jooq.JSONB MANIFEST_ANY = org.jooq.JSONB.valueOf("{\"section_title\": \"\"}");
 
     /** The generated call of {@code family} at the dimension of {@code coll}, for the model of {@code coll} and the tenant PARAMETER {@code paramTenant}. */
     private Table<?> fnFor(String family, String coll, String paramTenant, boolean cross) {
@@ -504,6 +509,13 @@ class ReadPathLeafPruningIntegrationTest {
                 case 384 -> PLAIN_SEARCH_384.call(q, colls, null, null, 10, model, t);
                 case 768 -> PLAIN_SEARCH_768.call(q, colls, null, null, 10, model, t);
                 default -> PLAIN_SEARCH_1024.call(q, colls, null, null, 10, model, t);
+            };
+            case "manifest_search" -> switch (dim) {
+                // nexus-6pfgb.25: the EXISTS on the catalog manifest is satisfiable by every fixture row (an empty
+                // section_title), so it is evaluated per candidate and the rows are plain_search's.
+                case 384 -> MANIFEST_SEARCH_384.call(q, null, null, colls, null, null, MANIFEST_ANY, null, 10, model, t);
+                case 768 -> MANIFEST_SEARCH_768.call(q, null, null, colls, null, null, MANIFEST_ANY, null, 10, model, t);
+                default -> MANIFEST_SEARCH_1024.call(q, null, null, colls, null, null, MANIFEST_ANY, null, 10, model, t);
             };
             case "text_gated_search_hnsw_first" -> switch (dim) {
                 case 384 -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(q, COMMON, colls, null, null, 10, model, t);
