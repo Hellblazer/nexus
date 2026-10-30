@@ -204,4 +204,13 @@ class VersionHandlerReleaseVersionTest {
         VersionHandler.appendSearchRowOwnerSpanCapabilityField(body);
         assertThat(body.toString()).isEqualTo(",\"search_row_owner_span_supported\":true");
     }
+
+    // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──
+
+    @Test
+    void versionAdvertisesTheChashAllowRestrictionAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendVectorSearchChashAllowCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"vector_search_chash_allow_supported\":true");
+    }
 }
