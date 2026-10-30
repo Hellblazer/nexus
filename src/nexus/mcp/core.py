@@ -6045,6 +6045,28 @@ def capturing_owner_lookups() -> Iterator[OwnerLookups]:
         _OWNER_LOOKUPS.reset(token)
 
 
+#: Whether ``store_get_many(structured=True)`` reads each chunk's section type from its owners'
+#: manifest rows. On by default; a caller that holds every label already turns it off with
+#: :func:`without_owner_section_types` (nexus-sx1t0). With the source notes off as well, the call makes
+#: no owner lookup at all.
+_OWNER_SECTION_TYPES_ON: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nexus_store_get_many_owner_section_types", default=True,
+)
+
+
+@contextlib.contextmanager
+def without_owner_section_types() -> Iterator[None]:
+    """Within the block, ``store_get_many(structured=True)`` returns each chunk row's own stored
+    ``section_type`` (``section_type_basis`` ``"stored"``) and makes no ``chash_positions`` call for
+    it. For a caller that takes every label from the owning document's own manifest row (the plan
+    runner's tumbler hydration, when no document in the batch is a legacy one)."""
+    token = _OWNER_SECTION_TYPES_ON.set(False)
+    try:
+        yield
+    finally:
+        _OWNER_SECTION_TYPES_ON.reset(token)
+
+
 #: Sentinel: "fetch the owner rows yourself" (``None`` is a fetch that failed).
 _FETCH_OWNER_ROWS: Any = object()
 
@@ -6157,6 +6179,15 @@ def _row_key(r) -> tuple:
     return (r.id, r.collection, r.metadata.get("doc_id"), r.metadata.get("position"))
 
 
+#: How a chunk's ``section_type`` was decided, the parallel list ``store_get_many(structured=True)``
+#: returns as ``section_type_basis`` (nexus-sx1t0). ``section_types[i] == ""`` alone cannot tell these
+#: apart: ``"stored"`` with an empty value is an unstamped chunk, ``"ambiguous"`` is owners that disagree.
+SECTION_BASIS_MISSING = "missing"  # the id was not found
+SECTION_BASIS_STORED = "stored"  # the chunk row's own value: no owner, or only legacy owners, answered
+SECTION_BASIS_AGREED = "agreed"  # every owner wrote a label and they all agree (possibly an empty one)
+SECTION_BASIS_AMBIGUOUS = "ambiguous"  # owners disagree, or written and legacy owners are mixed
+
+
 def resolve_owner_section_types(
     chunk_ids: list[str],
     found: list[bool],
@@ -6165,6 +6196,20 @@ def resolve_owner_section_types(
     *,
     owner_rows: Any = _FETCH_OWNER_ROWS,
 ) -> list[str]:
+    """:func:`resolve_owner_section_types_with_basis` without the basis (the labels alone)."""
+    return resolve_owner_section_types_with_basis(
+        chunk_ids, found, collections, stored, owner_rows=owner_rows,
+    )[0]
+
+
+def resolve_owner_section_types_with_basis(
+    chunk_ids: list[str],
+    found: list[bool],
+    collections: list[str],
+    stored: list[str],
+    *,
+    owner_rows: Any = _FETCH_OWNER_ROWS,
+) -> tuple[list[str], list[str]]:
     """The ``section_type`` of each hydrated chunk, read from the catalog manifest of the
     documents that own it (nexus-tko2w, RDR-108).
 
@@ -6188,14 +6233,19 @@ def resolve_owner_section_types(
     Best-effort: a catalog that is unreachable, or an engine that predates the
     ``chash_positions`` route, leaves every entry on its stored value.
 
+    Returns ``(labels, basis)``, aligned with *chunk_ids*. ``basis[i]`` is one of the
+    ``SECTION_BASIS_*`` values and says which rule above produced ``labels[i]``, so a caller can tell
+    an unstamped chunk (``"stored"``, ``""``) from an ambiguous one (``"ambiguous"``, ``""``), which
+    the label alone cannot (nexus-sx1t0).
     """
+    basis = [SECTION_BASIS_STORED if ok else SECTION_BASIS_MISSING for ok in found]
     wanted = [i for i, cid in enumerate(chunk_ids) if found[i] and _CHASH_ID.fullmatch(cid or "")]
     if not wanted:
-        return stored
+        return stored, basis
     if owner_rows is _FETCH_OWNER_ROWS:
         owner_rows = _owner_rows_by_chash(chunk_ids, found)
     if owner_rows is None:
-        return stored
+        return stored, basis
     by_chash = owner_rows
     out = list(stored)
     for i in wanted:
@@ -6207,8 +6257,11 @@ def resolve_owner_section_types(
         if not owners or not any(written):
             continue  # no owner, or only legacy owners: the stored value stands
         labels = {str(row.get("section_type") or "") for row in owners}
-        out[i] = next(iter(labels)) if all(written) and len(labels) == 1 else ""
-    return out
+        if all(written) and len(labels) == 1:
+            out[i], basis[i] = next(iter(labels)), SECTION_BASIS_AGREED
+        else:
+            out[i], basis[i] = "", SECTION_BASIS_AMBIGUOUS
+    return out, basis
 
 
 def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
@@ -6379,10 +6432,11 @@ def store_get_many(
     max_chars_per_doc: Annotated[int, Field(description="Per-document truncation cap, in characters.")] = 4000,
     structured: Annotated[bool, Field(
         description=(
-            "Return {contents, missing, section_types} instead of the "
+            "Return {contents, missing, section_types, section_type_basis} instead of the "
             "human-readable string; section_types aligns 1:1 with contents/ids "
             "(\"\" when missing, unstamped, or when the documents that own the "
-            "chunk disagree on its section type)."
+            "chunk disagree on its section type); section_type_basis aligns with "
+            "it and says which: missing, stored, agreed or ambiguous."
         ),
     )] = False,
     limit_per_source: Annotated[int | list[int] | None, Field(
@@ -6400,8 +6454,11 @@ def store_get_many(
     at once (e.g. a plan step's `$stepN.ids` results). Returns a
     human-readable "Hydrated N/M docs" listing with each document's content
     under an `[id]` line and a trailing `Missing: ...` line, or, when
-    `structured=True`, `{contents, missing, section_types, source_notes}`
-    (`source_notes` is one provenance line per entry: the collection it was
+    `structured=True`, `{contents, missing, section_types, section_type_basis,
+    source_notes}` (`section_type_basis` is one of missing, stored, agreed or
+    ambiguous per entry, so an empty section type from an unstamped chunk
+    ("stored") differs from one whose owning documents disagree
+    ("ambiguous"); `source_notes` is one provenance line per entry: the collection it was
     found in, plus the catalog documents' titles and the indexed date, year and
     expiry they agree on; a date the owners disagree on, or that no owner
     states, is left out), or
@@ -6638,12 +6695,22 @@ def store_get_many(
             # label is read from the owning documents' manifest rows (only the structured
             # result carries it, so only that mode pays the lookup).
             found_flags = [entry is not None for entry in entries]
-            owner_rows = _owner_rows_by_chash(id_list, found_flags)
-            if (lookups := _OWNER_LOOKUPS.get()) is not None:
-                lookups.asked, lookups.owner_rows = True, owner_rows
-            section_types = resolve_owner_section_types(
-                id_list, found_flags, entry_collections, section_types, owner_rows=owner_rows,
+            notes_on, section_on = _SOURCE_NOTES_ON.get(), _OWNER_SECTION_TYPES_ON.get()
+            lookups = _OWNER_LOOKUPS.get()
+            # nexus-sx1t0: with both owner reads switched off and no caller capturing the rows, the
+            # call makes no owner lookup at all.
+            owner_rows = (
+                _owner_rows_by_chash(id_list, found_flags)
+                if notes_on or section_on or lookups is not None else None
             )
+            if lookups is not None:
+                lookups.asked, lookups.owner_rows = True, owner_rows
+            if section_on:
+                section_types, section_type_basis = resolve_owner_section_types_with_basis(
+                    id_list, found_flags, entry_collections, section_types, owner_rows=owner_rows,
+                )
+            else:
+                section_type_basis = [SECTION_BASIS_STORED if ok else SECTION_BASIS_MISSING for ok in found_flags]
             # nexus-onn7s: ``source_notes`` rides the same fetch, same alignment, same "" for
             # a missing id -- one line per chunk naming its document, collection and dates,
             # which the plan runner prefixes onto the hydrated content an operator prompt sees.
@@ -6653,12 +6720,16 @@ def store_get_many(
                 resolve_owner_source_notes(
                     id_list, found_flags, entry_collections, owner_rows=owner_rows,
                 )
-                if _SOURCE_NOTES_ON.get() else [""] * len(id_list)
+                if notes_on else [""] * len(id_list)
             )
             return {
                 "contents": contents, "missing": missing,
                 "section_types": section_types,
                 "source_notes": source_notes,
+                # nexus-sx1t0: how each section type was decided (SECTION_BASIS_*). An additive key:
+                # ``section_types`` keeps its meaning, and "" there is an unstamped chunk when the basis
+                # is "stored" and owners that disagree when it is "ambiguous".
+                "section_type_basis": section_type_basis,
             }
 
         # nexus-z4j8d: the human-readable mode of a HYDRATION tool must

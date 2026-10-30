@@ -43,6 +43,7 @@ calls into :mod:`nexus.mcp.core`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os as _os
@@ -2022,7 +2023,13 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
 
     # The notes below come from each document's own catalog entry, so the chunk-level
     # ``source_notes`` (an owner ``resolve_many`` over the same documents) is not asked for.
-    with mcp_core.without_source_notes():
+    # nexus-sx1t0: nor is the owner section-type read, when every chunk's label is its document's
+    # own manifest label (no legacy row, ``None`` above): that read would be discarded, and it
+    # costs a ``chash_positions`` round trip. A batch with a legacy row keeps it, for those rows.
+    with contextlib.ExitStack() as _stack:
+        _stack.enter_context(mcp_core.without_source_notes())
+        if None not in flat_manifest_types:
+            _stack.enter_context(mcp_core.without_owner_section_types())
         hydrated = mcp_core.store_get_many(
             ids=flat_ids, collections=flat_collections, structured=True,
         )
