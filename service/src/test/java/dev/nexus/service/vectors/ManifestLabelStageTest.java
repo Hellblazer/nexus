@@ -154,19 +154,69 @@ class ManifestLabelStageTest {
     }
 
     @Test
-    void exactlyTheKeysWithACatalogAnswerAreAnswered_theMetaKeysTitleAndContentTypeAreNot() {
+    void exactlyTheKeysWithACatalogAnswerAreAnswered_theMetaKeysAreNot() {
+        // title and content_type joined the answered keys with nexus-6pfgb.25 (Sam's rulings nexus-6pfgb.2 and
+        // nexus-6pfgb.3); this pin used to list them as unanswered, changed on purpose.
         for (String key : List.of("source_author", "indexed_at", "bib_year", "bib_authors", "bib_venue",
                 "bib_citation_count", "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi",
-                "section_title", "section_type", "page_number")) {
+                "section_title", "section_type", "page_number", "title", "content_type")) {
             assertThat(ManifestLabelStage.split(w(key, "v")).active()).as(key).isTrue();
         }
         // The catalog meta keys have no writer (epic nexus-6pfgb wave 1), so answering them would only put
-        // those filters under the overfetch cut. nexus-6pfgb.25 owns title= and content_type=.
+        // those filters under the overfetch cut.
         for (String key : List.of("tags", "category", "ttl_days", "source_agent", "extraction_method",
-                "quality_gate_overridden", "extraction_source", "frecency_score",
-                "title", "content_type", "chunk_text_hash")) {
+                "quality_gate_overridden", "extraction_source", "frecency_score", "chunk_text_hash")) {
             assertThat(ManifestLabelStage.split(w(key, "v")).active()).as(key).isFalse();
         }
+    }
+
+    @Test
+    void derivedFormat_readsTheExtensionFirst_thenTheCatalogType_asPythonsPathSuffixDoes() {
+        // The extension wins: a markdown file registered as prose, rdr or paper is markdown, a .pdf is pdf.
+        assertThat(ManifestLabelStage.derivedFormat("prose", "notes/d.md")).isEqualTo("markdown");
+        assertThat(ManifestLabelStage.derivedFormat("rdr", "docs/rdr/x.MARKDOWN")).isEqualTo("markdown");
+        assertThat(ManifestLabelStage.derivedFormat("paper", "papers/c.pdf")).isEqualTo("pdf");
+        assertThat(ManifestLabelStage.derivedFormat("", "papers/C.PDF")).isEqualTo("pdf");
+        assertThat(ManifestLabelStage.derivedFormat("paper", "")).isEqualTo("pdf");
+        assertThat(ManifestLabelStage.derivedFormat("pdf", "")).isEqualTo("pdf");
+        // Then the catalog type.
+        assertThat(ManifestLabelStage.derivedFormat("code", "src/alpha.py")).isEqualTo("code");
+        assertThat(ManifestLabelStage.derivedFormat("prose", "notes/readme.txt")).isEqualTo("prose");
+        assertThat(ManifestLabelStage.derivedFormat("rdr", "")).isEqualTo("prose");
+        // None: a note, a type outside the rules, nothing at all.
+        assertThat(ManifestLabelStage.derivedFormat("knowledge", "")).isNull();
+        assertThat(ManifestLabelStage.derivedFormat("docs", "")).isNull();
+        assertThat(ManifestLabelStage.derivedFormat("", "")).isNull();
+        assertThat(ManifestLabelStage.derivedFormat(null, null)).isNull();
+        // Suffix edges: a dotfile has none, a dot in a directory does not count, a double extension is its last.
+        assertThat(ManifestLabelStage.derivedFormat("", ".gitignore")).isNull();
+        assertThat(ManifestLabelStage.derivedFormat("", "dir.pdf/file")).isNull();
+        assertThat(ManifestLabelStage.derivedFormat("", "a.tar.pdf")).isEqualTo("pdf");
+        assertThat(ManifestLabelStage.derivedFormat("", "a.pdf.gz")).isNull();
+    }
+
+    @Test
+    void contentType_pdfAndMarkdownAreFormats_everyOtherWordIsTheCatalogType() {
+        var pdf = new ManifestLabelStage.ContentType("paper", "pdf", "markdown");
+        assertThat(ManifestLabelStage.matches(pdf, "pdf")).isTrue();
+        assertThat(ManifestLabelStage.matches(pdf, "markdown")).isFalse();
+        assertThat(ManifestLabelStage.matches(pdf, "paper")).isTrue();
+        assertThat(ManifestLabelStage.matches(pdf, "prose")).isFalse();
+
+        // A markdown file the catalog calls prose: prose includes it.
+        var md = new ManifestLabelStage.ContentType("prose", "markdown", "pdf");
+        assertThat(ManifestLabelStage.matches(md, "markdown")).isTrue();
+        assertThat(ManifestLabelStage.matches(md, "prose")).isTrue();
+        assertThat(ManifestLabelStage.matches(md, "pdf")).isFalse();
+
+        // No derived format: pdf and markdown fall back to the chunk row's value.
+        var note = new ManifestLabelStage.ContentType("knowledge", null, "pdf");
+        assertThat(ManifestLabelStage.matches(note, "pdf")).isTrue();
+        assertThat(ManifestLabelStage.matches(note, "knowledge")).isTrue();
+        // No catalog type: any other word falls back to the row's too.
+        var bare = new ManifestLabelStage.ContentType(null, "pdf", "code");
+        assertThat(ManifestLabelStage.matches(bare, "code")).isTrue();
+        assertThat(ManifestLabelStage.matches(bare, "pdf")).isTrue();
     }
 
     @Test

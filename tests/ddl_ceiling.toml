@@ -104,11 +104,8 @@ migration_wal_bytes_per_worker = 11038000
 # to a fresh migration, the shape tuples-009-1 added.
 # 2149 -> 2150 (2026-10-29): tuples-011-1 (nexus-5r2sc.2.2, RDR-235 E4, nexus.tuples.dirty) adds one ALTER TABLE ADD COLUMN
 # to a fresh migration, the shape tuples-010-1 added.
-# 2150 -> 2154 (2026-10-30): vectors-040-1 (nexus-6pfgb.39, RDR-236 Phase 3, the gc quarantine audit labels by text prefix and
-# manifest owner) adds four DDL statements to a fresh migration, the vectors-038-1 shape: 2 CREATE OR REPLACE FUNCTION
-# (gc_quarantine_orphans, gc_quarantine_orphans_bounded) and their 2 GRANT EXECUTE. Measured: see the nexus-6pfgb.39 bead
-# comment (scoped substrate run, ddl: migration=).
-migration_ddl_per_worker = 2154
+# 2150 -> 2160 (2026-10-30): the RDR-236 Phase 3 engine batch, two changesets. vectors-040-1 (nexus-6pfgb.39, the gc quarantine audit labels by text prefix and manifest owner) adds four DDL statements, the vectors-038-1 shape: 2 CREATE OR REPLACE FUNCTION (gc_quarantine_orphans, gc_quarantine_orphans_bounded) and their 2 GRANT EXECUTE. vectors-041-1 (nexus-p89h4 and nexus-6pfgb.25, manifest_search_<dim>) adds six: 3 CREATE OR REPLACE FUNCTION (manifest_search_384, 768 and 1024) and their 3 GRANT EXECUTE (new functions, so the grant is not inherited); its post-condition DO block is not DDL. Measured: see the nexus-6pfgb.39 and nexus-p89h4 bead comments (ddl: migration=).
+migration_ddl_per_worker = 2160
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
