@@ -345,7 +345,7 @@ method `pymupdf-text` and the document method `mineru+degraded`, also when every
 rung 3; only `--extractor pymupdf` writes `pymupdf`; nothing writes the legacy
 `pymupdf_normalized`.
 
-**RF-20 (Verified, source; a test pins (1), none pins (2); close-time critique, T2 `nexus_rdr/237-close-critique-2026-10-29`).**
+**RF-20 (Verified, source and tests; close-time critique, T2 `nexus_rdr/237-close-critique-2026-10-29`).**
 Two MinerU outcomes stop the document instead of descending the ladder, outside the propagate
 list in the Approach. (1) MinerU returns more `pdf_info` entries than the pages a batch asked
 for: its pdfium page rewrite failed and it parsed the whole document for that one batch
@@ -354,7 +354,8 @@ corruption nexus-v4xg7 found, and chash dedup hides it in storage. The code rais
 ladder does not descend (`pdf_extractor.py:2302-2318`, pinned by
 `test_a_pdf_info_excess_still_stops_the_document`). (2) A `content_list` or `middle` file the
 worker or server wrote that is not valid JSON raises `json.JSONDecodeError`
-(`pdf_extractor.py:2829-2830`, `:3484-3489`), which also stops the document. Both are reported as
+(`pdf_extractor.py:2829-2830`, `:3484-3489`), which also stops the document; the server case is pinned by
+`test_malformed_server_json_still_stops_the_document`. Both are reported as
 a MinerU failure that points at `nx doctor`; for that document `--extractor pymupdf` is the
 working recourse. The "a document finishes" claim in the Problem Statement holds for page
 failures the ladder classifies, not for these two output defects.
