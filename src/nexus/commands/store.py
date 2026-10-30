@@ -160,7 +160,7 @@ def put_cmd(
     try:
         outcome = put_note(
             content=content, collection=col_name, title=title, tags=tags,
-            category=category, session_id=session_id, source_agent=agent,
+            category=category, source_agent=agent,
             ttl_days=ttl_days,
         )
     except (PutOversizedError, NoteUriEngineTooOldError) as exc:

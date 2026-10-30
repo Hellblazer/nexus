@@ -72,7 +72,7 @@
 | 27 | `expires_at`             | ⚠️ ""             | ⚠️ ""             | ⚠️ ""             | ❌                | ❌                | ❌           | ✅ derived         | PDF/RDR: set `""`. |
 | 28 | `frecency_score`         | ✅ git-derived    | ✅ git-derived    | ✅ git-derived    | ❌                | ❌                | ❌           | ❌                 | PDF/RDR/MCP: set `0.0` (or compute from source-file mtime if available). |
 | 29 | `source_agent`           | ✅ "nexus-indexer"| ✅ "nexus-indexer"| ✅ "nexus-indexer"| ❌                | ❌                | ❌           | ✅ caller          | PDF/RDR: set "nexus-indexer". |
-| 30 | `session_id`             | ⚠️ ""             | ⚠️ ""             | ⚠️ ""             | ❌                | ❌                | ❌           | ✅ caller          | PDF/RDR: set "". |
+| 30 | `session_id`             | ⚠️ ""             | ⚠️ ""             | ⚠️ ""             | ❌                | ❌                | ❌           | ✅ caller          | PDF/RDR: set "". **No longer written by any path (nexus-6pfgb.4).** |
 | 31 | `git_meta` (consolidated)| ✅ via `**ctx.git_meta` | ✅ same     | ✅ same           | ✅ via `**git_meta` | ✅ via `**git_meta` | ✅ via `**git_meta` | ❌       | mcp: capture cwd's git context. |
 | 32 | `indexed_at`             | ⚠️ written → **dropped** | ⚠️ written → **dropped** | ⚠️ written → **dropped** | ⚠️ written → **dropped** | ⚠️ written → **dropped** | ⚠️ written → **dropped** | ⚠️ written → **dropped** | **NOT in `ALLOWED_TOP_LEVEL`** — every indexer wastes work writing it. Either add to allow-list or stop writing. |
 

@@ -27,12 +27,12 @@ def route_note_writes_to(monkeypatch: pytest.MonkeyPatch, t3: Any) -> None:
 
     def _write_note(
         *, catalog_doc_id, collection, pieces, content_hash=None, title="", tags="", category="",
-        session_id="", source_agent="", ttl_days=None, content_type="prose", cat=None, stamp=True,
+        source_agent="", ttl_days=None, content_type="prose", cat=None, stamp=True,
     ):
         ids = [
             t3.put(
                 collection=collection, content=piece, title=title, tags=tags, category=category,
-                session_id=session_id, source_agent=source_agent, ttl_days=ttl_days,
+                source_agent=source_agent, ttl_days=ttl_days,
                 catalog_doc_id=catalog_doc_id,
             )
             for piece in pieces

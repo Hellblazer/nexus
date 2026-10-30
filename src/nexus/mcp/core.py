@@ -5644,7 +5644,8 @@ def store_put(
         # env-fallback chain of its own and would otherwise persist a bare
         # empty string for every MCP write with no explicit agent.
         agent_arg = agent.strip() or _os.environ.get("NX_AGENT", "").strip() or "mcp"
-        session_arg = session.strip() or _os.environ.get("NX_SESSION_ID", "").strip()
+        # nexus-6pfgb.4: `session` stays an accepted argument (wire shape) but no chunk row
+        # carries a session_id any more; nothing read it.
         # nexus-0fw11: refuse a placeholder subject BEFORE any engine contact.
         # ``_get_t3()`` runs the managed-engine floor probe in cloud mode, and
         # an unreachable or below-floor engine would otherwise answer first
@@ -5698,7 +5699,7 @@ def store_put(
         try:
             outcome = put_note(
                 content=content, collection=col_name, title=title, tags=tags,
-                category=category, session_id=session_arg, source_agent=agent_arg,
+                category=category, source_agent=agent_arg,
                 ttl_days=ttl_days,
             )
         except NoteUriEngineTooOldError as exc:
