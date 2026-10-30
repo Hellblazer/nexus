@@ -155,12 +155,14 @@ class TestMcpRenderNoneContentSafety:
         _mock_t3_for_core([{"name": "code__refonly", "count": 2}])
         row1 = SearchResult(
             id="refonly-1", content=None, distance=0.20,
-            collection="code__refonly", metadata={"title": "shared-doc"},
+            # nexus-fv2u4: the two rows share a DOCUMENT (doc_id), stamped by the search page as the
+            # catalog would; a shared row title is no longer a document identity or a display label.
+            collection="code__refonly", metadata={"doc_id": "1.1.7", "_display_title": "shared-doc"},
             hybrid_score=0.5,
         )
         row2 = SearchResult(
             id="refonly-2", content=None, distance=0.05,
-            collection="code__refonly", metadata={"title": "shared-doc"},
+            collection="code__refonly", metadata={"doc_id": "1.1.7", "_display_title": "shared-doc"},
             hybrid_score=0.9,  # higher than row1 -> "better matching chunk" branch
         )
         with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: [row1, row2]), \
