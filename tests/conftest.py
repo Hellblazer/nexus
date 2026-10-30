@@ -2728,6 +2728,17 @@ def _no_engine_restart_taxonomy_deferral(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_host_claude_argv(monkeypatch):
+    """nexus-7hzb2 (RDR-233): the SessionStart line and ``nx tuple wait`` read
+    the nearest ``claude`` ancestor's command line for the channel launch flag.
+    Under pytest that ancestor is whatever session ran the suite (a Desktop
+    session without the flag, a terminal one with it, or none on CI), so the
+    read is pinned to "cannot tell". tests/test_tuple_wait.py replaces it per
+    test."""
+    monkeypatch.setattr("nexus.channel_launch._claude_ancestor_argv", lambda: "")
+
+
+@pytest.fixture(autouse=True)
 def _service_manager_tripwire():
     """nexus-q81g7: no test reaches a REAL service manager with a mutating verb.
 

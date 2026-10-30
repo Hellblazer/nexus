@@ -5197,8 +5197,30 @@ Who holds NAME in the RDR-208 session directory (`directory/<name>`). Prints eac
 |------|-------------|
 | `--json` | Output as JSON: `{name, entries, holders, ambiguous, resolved_session_id}` |
 
-Mailbox push delivery has no CLI verb (RDR-211 nexus-rplay.14 deleted the
-prior CLI ping-then-pull watcher outright): a session's own nexus MCP
+### nx tuple wait
+
+```
+nx tuple wait [--session SESSION_ID] [--timeout-s SECONDS] [--max-parks N] [--force] [--json]
+```
+
+The channel-free push path (RDR-233) for a Claude Code session launched without `--channels`, such as the Claude Desktop Code tab, where the channel below never arrives. Run it as a background task (`run_in_background`): it parks on the session's own `mailbox/<session id>` and the board topics it subscribed with `tuple_subscribe`, and exits as soon as a row arrives that the session did not write itself. That exit re-invokes the idle session. It prints the channel's own notice for each row (subspace, tuple id, how to claim or read it, sender label), never a tuple body, then a line saying to run it again. The SessionStart line tells a session without the channel to do exactly this.
+
+Delivery position is the engine's: each row is announced to this waiter once (a per-subscriber stamp under `wait:<session id>`, apart from the channel's), and only while it is claimable, so mail the drain hook already consumed never wakes the session and re-arming never repeats a row. A board topic starts at its subscribe time. A newer `nx tuple wait` for the same session replaces an older one. Board subscriptions are re-read from T1 between parks; when T1 is unreachable it waits on the mailbox alone and says so on stderr.
+
+Exits 0 when rows arrived, when a newer waiter replaced it, when the session changed (`/clear`), when the `claude` process exited, or when `--max-parks` empty parks ran out; 4 when the `claude` command line carries a conexus channel flag (the channel already pushes; `--force` overrides); 5 when the engine does not honour the per-subscriber announce; 1 when the engine refuses the wait or stays unreachable for six parks in a row (a failed park is retried after 5, 10, 20, 40 and 60 s, since any exit wakes the session).
+
+In a permission mode that prompts before Bash, allow it with `Bash(nx tuple wait:*)` in `permissions.allow` (`~/.claude/settings.json`), or every arm and re-arm is a prompt.
+
+| Flag | Description |
+|------|-------------|
+| `--session SESSION_ID` | Watch this session's mailbox (default: the session the SessionStart marker names for this `claude` process, else the environment) |
+| `--timeout-s SECONDS` | Seconds per engine park (default 25); liveness and subscriptions are re-checked between parks |
+| `--max-parks N` | Give up after N empty parks (default: wait until something arrives) |
+| `--force` | Run even where the channel launch flag is present; for a flagged session whose channel never registers (plugin not on the channel allowlist, channels disabled by the organisation) |
+| `--json` | Print `{reason, notices}` as JSON |
+
+A session launched with the channel needs no CLI verb (RDR-211 nexus-rplay.14
+deleted the prior CLI ping-then-pull watcher outright): its own nexus MCP
 server pushes its own mailbox over the Claude Code channel automatically,
 from startup, with no subscribe call needed. The server also leases the
 session's NAME in the directory above by itself, from Claude Code's session
