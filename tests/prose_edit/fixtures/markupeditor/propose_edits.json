@@ -1,0 +1,44 @@
+{
+  "ok" : true,
+  "results" : [
+    {
+      "block" : 1,
+      "id" : "s12",
+      "index" : 0,
+      "status" : "proposed"
+    },
+    {
+      "block" : 2,
+      "id" : "s13",
+      "index" : 1,
+      "status" : "proposed"
+    },
+    {
+      "block" : 5,
+      "id" : "s14",
+      "index" : 2,
+      "status" : "proposed"
+    },
+    {
+      "index" : 3,
+      "reason" : "replace is the same as find; that edit is a no-op",
+      "status" : "refused"
+    },
+    {
+      "index" : 4,
+      "reason" : "block 6 is a code block; suggestions are for prose",
+      "status" : "refused"
+    },
+    {
+      "block" : 7,
+      "id" : "s15",
+      "index" : 5,
+      "status" : "proposed"
+    },
+    {
+      "index" : 6,
+      "reason" : "find crosses a formatting boundary (bold, code, link...); split the edit so each part lies inside one run of formatting",
+      "status" : "refused"
+    }
+  ]
+}
