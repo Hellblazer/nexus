@@ -561,6 +561,99 @@ async def test_a_small_allowance_still_starts_one_call_as_the_serial_loop_did() 
     assert started == 1 == cov.ledger.assessment.calls
 
 
+async def _metered(left: float, *, cost: float | None, n_facets: int = 7, report_cost: bool = True) -> tuple[int, CoverageResult]:
+    """A wave against a live allowance: every call spends *cost* (reported to the estimate once it ends, when
+    *report_cost*), and ``remaining_usd`` is what the calls have left of *left*."""
+    started = 0
+    reported: list[float] = []
+    state = {"left": left}
+
+    async def check(args: dict, *, timeout: float) -> dict:  # noqa: ARG001
+        nonlocal started
+        started += 1
+        await asyncio.sleep(0.05)
+        if cost is not None:
+            state["left"] -= cost
+            if report_cost:
+                reported.append(cost)
+        return supports_nothing(args["items"], args["check_instruction"])
+
+    view = await _direct_view(
+        Dispatcher(), check, remaining_usd=lambda: state["left"],
+        assessment_cost_estimate=lambda: sum(reported) / len(reported) if reported else None,
+    )
+    cov = await CoverageBoundary(request=_request(n_facets), max_facets_per_call=1).evaluate(view)
+    return started, cov
+
+
+@pytest.mark.asyncio
+async def test_calls_held_on_the_prior_alone_run_once_the_first_reports_a_cost_that_fits() -> None:
+    """The probe (nexus-jypmj.22). 0.03 USD left, 0.004 a call, seven planned calls. Failing before: every call decided
+    while the first was in flight was skipped against the 0.02 prior (0.03 less 0.04 is under zero) and never looked at
+    again, so one call ran and the rest were left unassessed. Now they are held, the first reports 0.004, and the
+    allowance covers as many calls as fit: 0.03 at 0.004 a call is seven (0.028 <= 0.03), out of the 14 planned
+    (two evidence streams, seven facets each), and the other seven are skipped on the MEASURED cost."""
+    started, cov = await _metered(0.03, cost=0.004)
+    a = cov.ledger.assessment
+    assert started == a.calls == 7 and a.skipped_budget_calls == 7 and a.outcome == "partial_failure"
+
+
+@pytest.mark.asyncio
+async def test_a_held_call_is_skipped_when_the_measured_cost_says_it_cannot_fit() -> None:
+    """0.012 left, 0.004 a call: the first runs and the rest are held. With 0.004 measured, 0.008 is left: one call
+    starts, the next would spend 0.008 (nothing left) and is skipped on the measured cost, as are all that follow.
+    The per-call counter and ``budget_skip`` agree."""
+    started, cov = await _metered(0.012, cost=0.004)
+    a = cov.ledger.assessment
+    assert started == a.calls == 2 and a.skipped_budget_calls == 12
+    assert a.skipped_deadline_calls == 0 and a.outcome == "partial_failure" and "USD" in a.detail
+    assert _summary(cov)["coverage"]["unassessed_by_cause"]["budget_skip"] > 0
+
+
+@pytest.mark.asyncio
+async def test_a_budget_too_small_for_one_measured_call_still_skips_the_rest() -> None:
+    """0.0015 left (the live row 898's allowance), 0.004 a call: the first call runs, spends past the allowance, and
+    the held calls find none left."""
+    started, cov = await _metered(0.0015, cost=0.004)
+    a = cov.ledger.assessment
+    assert started == a.calls == 1 and a.skipped_budget_calls == 13 and a.outcome == "partial_failure"
+
+
+@pytest.mark.asyncio
+async def test_calls_held_on_the_prior_stay_skipped_when_no_call_ever_reports_a_cost() -> None:
+    """Nothing measured overturns the prior: the first call ends without a cost, so the held calls are skipped for
+    budget exactly as before (one call ran, the rest were cut)."""
+    started, cov = await _metered(0.03, cost=0.004, report_cost=False)
+    a = cov.ledger.assessment
+    assert started == a.calls == 1 and a.skipped_budget_calls == 13 and a.skipped_deadline_calls == 0
+    assert a.outcome == "partial_failure"
+
+
+@pytest.mark.asyncio
+async def test_an_expired_deadline_still_skips_a_held_call_for_the_deadline() -> None:
+    """The deadline path is unchanged: the held calls wake after the first call, find no time left for a call, and
+    are skipped for the deadline (the first started with time, then the clock ran out)."""
+    clock = {"left": 600.0}
+    state = {"left": 0.03}
+    reported: list[float] = []
+
+    async def check(args: dict, *, timeout: float) -> dict:  # noqa: ARG001
+        await asyncio.sleep(0.05)
+        clock["left"] = 0.0  # the stage's share is gone once the first call ends
+        state["left"] -= 0.004
+        reported.append(0.004)
+        return supports_nothing(args["items"], args["check_instruction"])
+
+    view = await _direct_view(
+        Dispatcher(), check, remaining_usd=lambda: state["left"], remaining_seconds=lambda: clock["left"],
+        assessment_cost_estimate=lambda: sum(reported) / len(reported) if reported else None,
+    )
+    cov = await CoverageBoundary(request=_request(7), max_facets_per_call=1).evaluate(view)
+    a = cov.ledger.assessment
+    assert a.calls == 1 and a.skipped_deadline_calls == 13 and a.skipped_budget_calls == 0
+    assert _summary(cov)["coverage"]["unassessed_by_cause"]["deadline_skip"] == 7
+
+
 # ── the runner: accounting and the terminal step's elapsed ──────────────────────────────────────────────────
 
 

@@ -81,7 +81,8 @@ was made, ``partial_failure`` after some were).
 lower; the ``claude -p`` backend's four concurrent subprocesses are unmeasured), each started in plan order (stream order, then facet group, then pack). Each call decides when it STARTS: the USD allowance
 (spent so far plus the calls in flight and the starting call at the mean known cost, or at
 :data:`ASSESSMENT_CALL_COST_PRIOR_USD` before any call reported one; one call always starts when none is in flight and
-the allowance is above zero) and the stage allowance left decide whether it runs
+the allowance is above zero; a call that only the prior says does not fit is HELD, outside the gate, until a call ends and a measured cost
+exists, and is then judged on that cost, nexus-jypmj.22) and the stage allowance left decide whether it runs
 and what timeout it draws, and it is cut from outside at that timeout, so the stage cannot outlast its share
 (beyond a cut call's bounded cleanup grace of about 1 s) whatever the check does with the timeout it is given. A call cut that way has its process tree killed
 (:class:`nexus.operators.dispatch.CliBackend`) and its ``StepRecord`` is ``ok=False`` with an UNKNOWN cost: the CLI reports
@@ -1228,7 +1229,9 @@ class CoverageBoundary:
         ``max_concurrent_calls`` at a time, each started in plan order. A call decides at the moment it starts
         whether it may: the USD allowance (net of the calls in flight, at the mean cost of those finished) and the
         stage's remaining time (a call's timeout is what is left of the stage, capped by ``call_timeout_s``, and the
-        call is cut at that timeout from outside, so no stage overruns its share however the check behaves). One
+        call is cut at that timeout from outside, so no stage overruns its share however the check behaves). A call that
+        only the prior (no measured cost yet) says does not fit waits for a call to end and is then judged on the measured
+        cost; if every call in flight ends without reporting one, it is skipped for budget. One
         call that raises or replies unusably affects only its own facets; the others still count. The replies are
         read after all calls finish, in plan order, so the ledger, the call log and every count are the same
         whatever order the calls finish in."""
@@ -1258,34 +1261,63 @@ class CoverageBoundary:
             width = min(width, max(1, process_gate))  # an API backend's calls queue for permits past its gate
         gate = asyncio.Semaphore(width)
         in_flight = 0
+        waiters: list[asyncio.Future[None]] = []  # calls held on the prior alone, in plan order; woken when a call ends
+
+        def wake_held() -> None:
+            for w in waiters:
+                if not w.done():
+                    w.set_result(None)
+            waiters.clear()
 
         async def run_one(call: _PlannedCall) -> _CallOutcome:
             nonlocal in_flight
-            async with gate:
-                usd = view.remaining_usd()
-                remaining = view.remaining_seconds()
-                stage_left = None if reserve is None or remaining is None else remaining - reserve
-                timeout = self.call_timeout(stage_left)
-                if usd is not None:
-                    # The calls in flight and this one are each assumed to cost the mean of those that reported a
-                    # cost, or the prior before any did, so a wave cannot start more calls than the allowance holds.
-                    # With none in flight the call starts whenever the allowance is above zero, as the serial loop's
-                    # did (the budget is soft: one call past it is the accepted overshoot).
-                    estimate = view.assessment_cost_estimate()
-                    per_call = self.call_cost_prior_usd if estimate is None else estimate
-                    if usd <= 0 or (in_flight > 0 and usd - per_call * (in_flight + 1) <= 0):
-                        return _CallOutcome(skipped="skipped_budget", why="the USD allowance was spent")
-                if timeout <= 0:
-                    return _CallOutcome(skipped="skipped_deadline", why="too little of the assessment's share of the deadline was left")
-                args = {"items": json.dumps(call.payload), "check_instruction": _instruction(call.group)}
-                in_flight += 1
-                try:
-                    reply = await asyncio.wait_for(view.check(args, timeout=timeout), timeout=timeout)
-                    return _CallOutcome(records=_records(reply))
-                except Exception as exc:  # noqa: BLE001 — a failed assessment leaves the answer; its facets stay unassessed
-                    return _CallOutcome(error=exc)
-                finally:
-                    in_flight -= 1
+            held = False
+            while True:
+                waiter: asyncio.Future[None] | None = None
+                async with gate:
+                    usd = view.remaining_usd()
+                    remaining = view.remaining_seconds()
+                    stage_left = None if reserve is None or remaining is None else remaining - reserve
+                    timeout = self.call_timeout(stage_left)
+                    if usd is not None:
+                        # The calls in flight and this one are each assumed to cost the mean of those that reported a
+                        # cost, or the prior before any did, so a wave cannot start more calls than the allowance
+                        # holds. With none in flight the call starts whenever the allowance is above zero, as the
+                        # serial loop's did (the budget is soft: one call past it is the accepted overshoot).
+                        estimate = view.assessment_cost_estimate()
+                        per_call = self.call_cost_prior_usd if estimate is None else estimate
+                        spent = _CallOutcome(skipped="skipped_budget", why="the USD allowance was spent")
+                        if usd <= 0:
+                            return spent
+                        if estimate is not None:
+                            if in_flight > 0 and usd - estimate * (in_flight + 1) <= 0:
+                                return spent  # the measured cost says this call does not fit
+                        elif held and in_flight == 0:
+                            # Every call that was running ended without reporting a cost: nothing measured overturns
+                            # the prior's verdict, so the held call stays skipped.
+                            return spent
+                        elif held or (in_flight > 0 and usd - per_call * (in_flight + 1) <= 0):
+                            # Only the prior says this call does not fit (nexus-jypmj.22): hold it until a measured
+                            # cost exists, instead of cutting it on a guess the first report would overturn. A held
+                            # call never starts on the prior alone; it waits for a measurement or for the wave to end.
+                            # It waits outside the gate, so a call behind it is judged now and is not kept off a slot.
+                            held = True
+                            waiter = asyncio.get_running_loop().create_future()
+                            waiters.append(waiter)
+                    if waiter is None:
+                        if timeout <= 0:
+                            return _CallOutcome(skipped="skipped_deadline", why="too little of the assessment's share of the deadline was left")
+                        args = {"items": json.dumps(call.payload), "check_instruction": _instruction(call.group)}
+                        in_flight += 1
+                        try:
+                            reply = await asyncio.wait_for(view.check(args, timeout=timeout), timeout=timeout)
+                            return _CallOutcome(records=_records(reply))
+                        except Exception as exc:  # noqa: BLE001 — a failed assessment leaves the answer; its facets stay unassessed
+                            return _CallOutcome(error=exc)
+                        finally:
+                            in_flight -= 1
+                            wake_held()
+                await waiter
 
         tasks = [asyncio.ensure_future(run_one(c)) for c in planned]
         try:
