@@ -298,7 +298,7 @@ class _Env:
                 ctx = IndexContext(
                     col=None, db=_ForbiddenDb(), voyage_key="", voyage_client=None,
                     repo_path=self.repo, corpus=self.collection, embedding_model=_MODEL,
-                    git_meta={}, now_iso=_NOW, score=0.0, chunk_lines=6, force=True,
+                    now_iso=_NOW, score=0.0, chunk_lines=6, force=True,
                     force_re_embed=force_re_embed, doc_id_resolver=lambda p: doc_id,
                     hooks=self._hooks(), batcher=batcher)
                 if self.kind == "code":
@@ -319,7 +319,7 @@ class _Env:
         self.monkeypatch.setattr(di, "_pdf_chunks", lambda *a, **k: [
             (i, t, dict(m)) for i, t, m in prepared])
         _index_pdf_file(
-            self.path, self.repo, self.collection, _MODEL, None, _ForbiddenDb(), "", {}, _NOW, 0.0,
+            self.path, self.repo, self.collection, _MODEL, None, _ForbiddenDb(), "", _NOW, 0.0,
             force=True, embed_fn=lambda texts: [[] for _ in texts],
             doc_id_resolver=lambda p: doc_id, hooks=self._hooks(), batcher=batcher,
             force_re_embed=force_re_embed)

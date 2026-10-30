@@ -720,9 +720,8 @@ def detect_git_metadata(path: Path) -> dict[str, str]:
 
     Returns an empty dict when *path* is not inside a git repository
     so callers can ``**``-merge the result without conditional logic.
-    Indexer-side code (PDF / markdown / pipeline) needs this so chunks
-    carry the same provenance the repo-walk path gets via
-    ``indexer._git_metadata`` (nexus-2my fix #3).
+    Indexer-side code (PDF / markdown / pipeline) uses this for chunk
+    provenance (nexus-2my fix #3).
     """
     repo = find_repo_root(path)
     if repo is None:

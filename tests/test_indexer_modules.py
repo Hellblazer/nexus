@@ -29,7 +29,7 @@ def make_ctx(tmp_path: Path):
             col=MagicMock(), db=MagicMock(), voyage_key="key",
             voyage_client=MagicMock(), repo_path=tmp_path,
             corpus="code__test", embedding_model="model-code",
-            git_meta={}, now_iso="2026-01-01T00:00:00+00:00", force=False,
+            now_iso="2026-01-01T00:00:00+00:00", force=False,
             # nexus-3ajpd: every `nx index repo` call site passes a cache; an
             # empty one answers "stale" without touching the catalog.
             staleness_cache=StalenessCache(),
@@ -389,8 +389,7 @@ def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
     # nexus-8g79.28: real empty collection → check_staleness returns
     # False → indexer proceeds to embed + upsert (which routes through
     # the mocked db, keeping the test focused on the indexer logic).
-    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
-                   git_meta={"git_project_name": "test"})
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn)
 
     result = index_code_file(ctx, py_file)
 
@@ -418,8 +417,7 @@ def test_index_code_file_force_re_embed_decoupled_from_force(tmp_path, make_ctx)
     def fake_embed_fn(texts):
         return [[0.1] * 128 for _ in texts]
 
-    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
-                   git_meta={"git_project_name": "test"}, force=True)
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn, force=True)
 
     assert ctx.force_re_embed is False, "force_re_embed must default False"
     index_code_file(ctx, py_file)
@@ -442,8 +440,7 @@ def test_index_code_file_force_re_embed_explicit_opt_in(tmp_path, make_ctx):
     def fake_embed_fn(texts):
         return [[0.1] * 128 for _ in texts]
 
-    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
-                   git_meta={"git_project_name": "test"}, force=True,
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn, force=True,
                    force_re_embed=True)
 
     index_code_file(ctx, py_file)
@@ -467,8 +464,7 @@ def test_index_code_file_stamps_import_only_chunk_section_type(tmp_path, make_ct
     def fake_embed_fn(texts):
         return [[0.1] * 128 for _ in texts]
 
-    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
-                   git_meta={"git_project_name": "test"})
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn)
 
     result = index_code_file(ctx, py_file)
 
@@ -491,8 +487,7 @@ def test_index_code_file_mixed_chunk_not_stamped_imports(tmp_path, make_ctx):
     def fake_embed_fn(texts):
         return [[0.1] * 128 for _ in texts]
 
-    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
-                   git_meta={"git_project_name": "test"})
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn)
 
     result = index_code_file(ctx, py_file)
 
@@ -756,7 +751,6 @@ def test_index_code_file_does_not_emit_source_path(tmp_path, make_ctx):
     ctx = make_ctx(
         col=_real_col(), db=mock_db,
         embed_fn=lambda texts: [[0.1] * 128 for _ in texts],
-        git_meta={"git_project_name": "phase-b-test"},
     )
 
     result = index_code_file(ctx, py_file)

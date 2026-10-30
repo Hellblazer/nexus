@@ -18,7 +18,7 @@ import pytest
 
 from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import _pdf_chunks, _sha256, index_pdf
-from nexus.indexer import _git_metadata, _index_pdf_file
+from nexus.indexer import _index_pdf_file
 from nexus.pdf_extractor import PDFExtractor
 from tests._mineru_rearm import mineru_importorskip
 from tests.conftest import set_credentials
@@ -368,7 +368,6 @@ class TestIndexPdfFileForceReEmbedDecoupled:
             col=mock_col,
             db=mock_db,
             voyage_key="vk_test",
-            git_meta=_git_metadata(repo),
             now_iso=datetime.now(UTC).isoformat(),
             score=0.5,
             embed_fn=lambda texts: _fake_embed(texts, model, "vk_test")[0],
@@ -390,7 +389,7 @@ class TestIndexPdfFileForceReEmbedDecoupled:
 class TestIndexPdfFileGitMetadata:
     """AC-S5 / AC-S6: _index_pdf_file augments chunks with git metadata."""
 
-    def _run_index_pdf_file(self, pdf: Path, repo: Path, git_meta: dict) -> list[dict]:
+    def _run_index_pdf_file(self, pdf: Path, repo: Path) -> list[dict]:
         """Helper: run _index_pdf_file with mocked embed/db, return captured metadatas."""
         collection_name = "docs__pdf-subsystem-git"
         model = index_model_for_collection(collection_name)
@@ -421,7 +420,6 @@ class TestIndexPdfFileGitMetadata:
             col=mock_col,
             db=mock_db,
             voyage_key="vk_test",
-            git_meta=git_meta,
             now_iso=now_iso,
             score=0.5,
             embed_fn=lambda texts: _fake_embed(texts, model, "vk_test")[0],
@@ -435,10 +433,7 @@ class TestIndexPdfFileGitMetadata:
         reads them from a chunk row, and this path never ran ``normalize``, so they
         reached the engine. The catalog document carries git provenance."""
         pdf = pdf_git_repo / "docs" / "simple.pdf"
-        git_meta = _git_metadata(pdf_git_repo)
-        assert git_meta["git_commit_hash"], "the fixture must be a real repo, or this proves nothing"
-
-        metadatas = self._run_index_pdf_file(pdf, pdf_git_repo, git_meta)
+        metadatas = self._run_index_pdf_file(pdf, pdf_git_repo)
 
         assert metadatas, "Expected at least one chunk to be upserted"
         for meta in metadatas:
@@ -453,12 +448,7 @@ class TestIndexPdfFileGitMetadata:
         pdf = tmp_path / "simple.pdf"
         shutil.copy2(simple_pdf, pdf)
 
-        git_meta = _git_metadata(tmp_path)
-        # Verify _git_metadata itself returns empty strings for non-git dirs
-        assert git_meta["git_commit_hash"] == ""
-        assert git_meta["git_branch"] == ""
-
-        metadatas = self._run_index_pdf_file(pdf, tmp_path, git_meta)
+        metadatas = self._run_index_pdf_file(pdf, tmp_path)
 
         assert metadatas, "Expected at least one chunk to be upserted"
         for meta in metadatas:

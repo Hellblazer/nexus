@@ -51,7 +51,6 @@ class IndexContext:
     embedding_model: str
 
     # Per-file metadata
-    git_meta: dict
     now_iso: str
     score: float = 0.0
 

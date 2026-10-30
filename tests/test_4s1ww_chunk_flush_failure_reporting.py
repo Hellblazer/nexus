@@ -88,7 +88,6 @@ def _register_every_file(**kw):
 def _service_mode_patches(db, *, extra=None):
     patches = {
         "nexus.frecency.batch_frecency": {"return_value": {}},
-        "nexus.indexer._git_metadata": {"return_value": {}},
         "nexus.config.load_config": {"return_value": _DEFAULT_CONFIG},
         "nexus.config.get_credential": {"return_value": "fake-key"},
         "nexus.mcp_infra.get_t3": {"return_value": db},
