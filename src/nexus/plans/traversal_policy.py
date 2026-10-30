@@ -344,7 +344,7 @@ def _distance_and_role(
         if tumbler in seeds or not isinstance(walk, Mapping):
             continue
         depth, role = walk.get("depth"), walk.get("role")
-        if isinstance(depth, int) and not isinstance(depth, bool) and depth >= 1 and role in _ROLE_RANK:
+        if isinstance(depth, int) and not isinstance(depth, bool) and depth >= 1 and isinstance(role, str) and role in _ROLE_RANK:
             dist[str(tumbler)], best[str(tumbler)] = depth, role
     return dist, best
 

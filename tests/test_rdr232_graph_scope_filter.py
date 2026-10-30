@@ -618,6 +618,8 @@ def test_node_walk_wins_over_the_edges_and_a_malformed_entry_is_ignored() -> Non
         "f": {"depth": 0, "role": "citation"},    # depth 0 is a seed
         "a": {"depth": 4, "role": "citation"},    # a seed is never rescored
         "g": "nonsense",
+        "h": {"depth": 2, "role": ["citation"]},  # an unhashable role must be ignored, not raise TypeError
+        "i": {"depth": 2, "role": {"citation": 1}},
     }
     dist, role = _distance_and_role(["a"], edges, "out", walk)
     assert dist == {"a": 0, "b": 1, "c": 2, "d": 2}
