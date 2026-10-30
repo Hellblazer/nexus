@@ -5307,7 +5307,7 @@ def query(
             )
             if doc_key not in docs:
                 docs[doc_key] = {
-                    "title": meta.get("_display_title") or meta.get("_display_path") or r.id[:40],
+                    "title": meta.get("_display_title") or meta.get("_display_path") or doc_key[:40],
                     "collection": r.collection,
                     "distance": r.distance,
                     # tracks the "best chunk"/doc-order key —

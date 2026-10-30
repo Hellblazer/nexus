@@ -3405,3 +3405,17 @@ def test_query_does_not_group_unresolved_chunks_under_a_shared_row_title():
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         out = query(question="same row title", corpus="code__test")
     assert "Found 2 documents" in out
+
+
+def test_query_card_of_a_resolved_document_with_no_title_or_path_shows_its_document_key():
+    """nexus-fv2u4 fix round: the last-resort card title is the document key (its tumbler),
+    not the chunk hash of the best hit."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+    hit = SearchResult(id="chunkhash-not-a-title", content="body", distance=0.1,
+                       collection="code__test", metadata={"doc_id": "1.9.77"})
+    with patch("nexus.search_engine.search_cross_corpus", lambda *_a, **_kw: [hit]), \
+         patch("nexus.mcp.core._get_catalog", return_value=_RefusingCatalog()), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="untitled document", corpus="code__test")
+    assert "1.9.77" in out
+    assert "chunkhash-not-a-title" not in out
