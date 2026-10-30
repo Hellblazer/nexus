@@ -87,15 +87,35 @@ def test_a_gate_that_is_not_enforcing_does_not_warn_and_does_not_use_up_the_warn
     assert len(_warnings(logs)) == 1
 
 
-def test_the_warning_is_once_per_process_not_once_per_run() -> None:
+def test_the_warning_is_once_per_streak_and_a_recovery_re_arms_it() -> None:
+    """nexus-jypmj.21: fail x3 warns, ok, fail x3 warns again; a streak that never recovers warns only once."""
     n = rc.PERSISTENT_FAILURE_THRESHOLD
     with capture_logs() as logs:
-        _note(["error"] * n + ["ok"] + ["error"] * n)
-    assert len(_warnings(logs)) == 1
-    rc.reset_extraction_health()
+        assert _note(["error"] * n).count(True) == 1
+        assert len(_warnings(logs)) == 1
+        assert _note(["error"] * 4) == [False] * 4, "the same streak does not warn again"
+        assert _note(["ok"]) == [False]
+        assert len(_warnings(logs)) == 1, "a recovery logs nothing by itself"
+        assert _note(["error"] * (n - 1)) == [False] * (n - 1), "and the new streak counts from zero"
+        assert _note(["error"]) == [True]
+    assert len(_warnings(logs)) == 2 and all(e["consecutive_failures"] == n for e in _warnings(logs))
+
+
+@pytest.mark.parametrize("neutral", ["not_needed", "disabled", "skipped_deadline"])
+def test_a_request_that_made_no_call_does_not_re_arm_the_warning(neutral: str) -> None:
+    n = rc.PERSISTENT_FAILURE_THRESHOLD
+    with capture_logs() as logs:
+        _note(["error"] * n + [neutral] + ["error"] * n)
+    assert len(_warnings(logs)) == 1, "only a call that worked is a recovery"
+
+
+def test_the_reset_hook_starts_the_process_over() -> None:
+    n = rc.PERSISTENT_FAILURE_THRESHOLD
     with capture_logs() as logs:
         _note(["error"] * n)
-    assert len(_warnings(logs)) == 1, "the reset hook (a test hook) starts the process over"
+        rc.reset_extraction_health()
+        _note(["error"] * n)
+    assert len(_warnings(logs)) == 2
 
 
 def test_an_unknown_outcome_is_ignored_not_counted() -> None:
@@ -151,6 +171,17 @@ def no_claude(monkeypatch):
 def claude(monkeypatch):
     setattr_in(monkeypatch, "nexus.operators.llm_backend", "shutil.which", lambda name: "/usr/bin/claude")
     setattr_in(monkeypatch, "nexus.health", "shutil.which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr(health, "_claude_cli_problem", lambda: None)  # the path above is not a real binary
+
+
+def _claude_stub(monkeypatch, tmp_path: Path, script: str) -> Path:
+    """A real executable standing in for ``claude`` on PATH; the row's version probe runs it for real."""
+    stub = tmp_path / "claude"
+    stub.write_text("#!/bin/sh\n" + script, encoding="utf-8")
+    stub.chmod(0o755)
+    setattr_in(monkeypatch, "nexus.operators.llm_backend", "shutil.which", lambda name: str(stub))
+    setattr_in(monkeypatch, "nexus.health", "shutil.which", lambda name: str(stub))
+    return stub
 
 
 LABEL = "Answer-kind extraction"
@@ -179,6 +210,40 @@ class TestAnswerKindExtractionRow:
         (row,) = _check_answer_kind_extraction()
         assert row.ok and not row.warn
         assert "cli" in row.detail and rc.DEFAULT_EXTRACT_MODEL in row.detail and KEY not in row.detail
+
+    def test_a_healthy_cli_says_what_the_row_did_not_check(self, claude) -> None:
+        """nexus-jypmj.21: green must not claim more than it looked at."""
+        (row,) = _check_answer_kind_extraction()
+        assert row.ok and "no model call" in row.detail and "answer_kind_gate_extraction_failing" in row.detail
+
+    def test_a_cli_that_starts_reads_green(self, monkeypatch, tmp_path) -> None:
+        _claude_stub(monkeypatch, tmp_path, "echo '2.1.0 (Claude Code)'\n")
+        (row,) = _check_answer_kind_extraction()
+        assert row.ok and not row.warn and "claude --version ran" in row.detail
+
+    @pytest.mark.parametrize("script, mention", [
+        ("echo 'node: command not found' >&2\nexit 127\n", "exited 127"),
+        ("exit 1\n", "exited 1"),
+    ])
+    def test_a_present_but_broken_cli_warns(self, monkeypatch, tmp_path, script, mention) -> None:
+        """nexus-jypmj.21: claude is on PATH but cannot run; PATH presence alone used to read green."""
+        _claude_stub(monkeypatch, tmp_path, script)
+        (row,) = _check_answer_kind_extraction()
+        assert not row.ok and row.warn and not row.fatal
+        assert mention in row.detail and "--version" in row.detail and "first-pass" in row.detail
+        assert any("NX_ANSWER_STRUCTURED_EXTRACT" in f for f in row.fix_suggestions)
+
+    def test_a_cli_that_hangs_warns_within_the_bound(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setattr(health, "_CLAUDE_VERSION_TIMEOUT_S", 0.3)
+        _claude_stub(monkeypatch, tmp_path, "sleep 30\n")
+        (row,) = _check_answer_kind_extraction()
+        assert not row.ok and row.warn and "did not finish" in row.detail
+
+    def test_a_cli_file_that_cannot_execute_warns(self, monkeypatch, tmp_path) -> None:
+        stub = _claude_stub(monkeypatch, tmp_path, "exit 0\n")
+        stub.chmod(0o644)
+        (row,) = _check_answer_kind_extraction()
+        assert not row.ok and row.warn and "could not start" in row.detail
 
     def test_the_api_backend_runs_it_too(self, no_claude, monkeypatch) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)

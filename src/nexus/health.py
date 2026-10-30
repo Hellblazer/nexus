@@ -3935,6 +3935,30 @@ def _check_llm_key_persistence() -> list[HealthResult]:
     )]
 
 
+_CLAUDE_VERSION_TIMEOUT_S = 5.0
+
+
+def _claude_cli_problem() -> str | None:
+    """Why the ``claude`` on PATH cannot run at all, else ``None`` (nexus-jypmj.21).
+
+    Runs ``claude --version`` once, bounded: a process spawn, not a model call. It catches a broken install
+    (a dangling shim, a missing runtime, a wrong-architecture binary) that PATH presence alone reads as healthy.
+    It cannot see a CLI that starts but cannot answer (signed out, offline): only an extraction call shows that.
+    """
+    path = shutil.which("claude")
+    if path is None:
+        return None
+    try:
+        proc = run_bounded([path, "--version"], timeout=_CLAUDE_VERSION_TIMEOUT_S, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return f"`claude --version` did not finish in {_CLAUDE_VERSION_TIMEOUT_S:g}s"
+    except OSError as exc:
+        return f"`claude --version` could not start ({exc.__class__.__name__})"
+    if proc.returncode != 0:
+        return f"`claude --version` exited {proc.returncode}"
+    return None
+
+
 def _check_answer_kind_extraction() -> list[HealthResult]:
     """nexus-jypmj.16 (RDR-232): can the structured request extraction that feeds the answer-kind gate run here?
 
@@ -3947,7 +3971,9 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
 
     * The extraction or the gate is switched off, or the box has no LLM backend at all (search and storage only;
       the "LLM backend" row says so): not applicable, a pass. The fresh-install bar is zero warnings.
-    * A usable ``cli`` or ``anthropic`` backend: a pass naming the backend and the model.
+    * A usable ``cli`` backend whose ``claude --version`` fails: a soft warning (nexus-jypmj.21). One that starts
+      is a pass, and says that only the process's own log shows whether it can answer. A usable ``anthropic``
+      backend: a pass naming the backend and the model; it has no probe either, and says so.
     * An ``openai_compat`` endpoint (it runs its configured model, not the measured one) or a backend setting
       that cannot serve: a soft warning with the reason and the switches.
     """
@@ -3976,7 +4002,23 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
         f"or set {eligibility_mod.ANSWER_KIND_ELIGIBILITY_ENV}=0 to switch it off",
     ]
     if status.available and status.name in ("cli", "anthropic"):
-        return [HealthResult(label=label, ok=True, detail=f"runs on {status.name} ({status.reason}), model {model}")]
+        if status.name == "cli" and (problem := _claude_cli_problem()):
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=f"cli ({status.reason}) but {problem}: the extraction cannot run, so requests keep their "
+                       "first-pass kind while the answer-kind gate keeps enforcing on it (the regime that lost "
+                       "lookup recall in the held-out measurement)",
+                fix_suggestions=["reinstall or repair the claude CLI, or nx config set anthropic_api_key <key>", *switches],
+            )]
+        unseen = (
+            "claude --version ran; whether it answers is not checked here" if status.name == "cli"
+            else "the key is not exercised here"
+        )
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"runs on {status.name} ({status.reason}), model {model}; no model call is made ({unseen}), "
+                   "so a backend that fails each call shows only as answer_kind_gate_extraction_failing in the log",
+        )]
     if status.available:
         return [HealthResult(
             label=label, ok=False, warn=True,
