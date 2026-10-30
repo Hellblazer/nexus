@@ -36,12 +36,19 @@ import nexus.health as h
 class _FakeSubspace:
     def __init__(
         self, subspace: str, available: int, oldest_created_at: str | None = None,
-        dead: int = 0,
+        dead: int = 0, *, claimed: int = 0, lapsed: int = 0, delayed: int = 0,
+        oldest_claimable_created_at: str | None = None, claimable_known: bool = False,
     ) -> None:
         self.subspace = subspace
         self.available = available
         self.oldest_created_at = oldest_created_at
         self.dead = dead
+        self.claimed = claimed
+        self.lapsed = lapsed
+        # nexus-p909o: the fields an older engine does not render (claimable_known False).
+        self.delayed = delayed
+        self.oldest_claimable_created_at = oldest_claimable_created_at
+        self.claimable_known = claimable_known
 
 
 class _FakeTupleRow:
@@ -1043,12 +1050,33 @@ class TestAspectsTemplateInTheDepthRow:
 
     def test_available_above_the_threshold_warns(self, monkeypatch) -> None:
         store = _FakeTupleStore(
-            subspaces=[_FakeSubspace("aspects", available=1001, dead=0)],
+            subspaces=[_FakeSubspace("aspects", available=2401, dead=0)],
             templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
         )
         r = _run_queue_depth(monkeypatch, store)
         assert r.ok is False and r.warn is True
-        assert "aspects (available=1001)" in r.detail
+        assert "aspects (available=2401)" in r.detail
+
+    def test_the_aspects_threshold_is_twice_the_routine_backlog_and_queue_keeps_1000(self, monkeypatch) -> None:
+        """nexus-4tvhk: the measured routine aspects backlog peaks at 1,200, so aspects
+        warns above 2,400; queue/* keeps its 1,000."""
+        def run(subspace: str, available: int, template: dict) -> h.HealthResult:
+            store = _FakeTupleStore(
+                subspaces=[_FakeSubspace(subspace, available=available, dead=0)],
+                templates=[*_ALL_TEMPLATE_KINDS, template],
+            )
+            return _run_queue_depth(monkeypatch, store)
+
+        routine = run("aspects", 1200, _aspects_template())
+        assert routine.ok is True and routine.warn is not True, routine.detail
+        edge = run("aspects", 2400, _aspects_template())
+        assert edge.ok is True, "at the threshold, not above it"
+        over = run("aspects", 2401, _aspects_template())
+        assert over.ok is False and over.warn is True
+        assert "aspects (available=2401)" in over.detail
+        queue = run("queue/x", 1001, _queue_template("queue/<name>"))
+        assert queue.ok is False and queue.warn is True
+        assert "queue/x (available=1001)" in queue.detail
 
     def test_a_backlog_under_the_threshold_is_ok_and_named(self, monkeypatch) -> None:
         store = _FakeTupleStore(
@@ -1095,12 +1123,12 @@ class TestAspectsTemplateInTheDepthRow:
 
 
 class TestAspectsBacklogIsNotAStaleConsumer:
-    """Gate S4. The unclaimed-age row is a flat 3,600 s threshold, and one worker
-    drains about 136 documents an hour, so a routine 1,000-document index leaves
-    the oldest unclaimed task older than an hour for hours while the worker is
-    healthy and busy. A backoff-delayed task also reads as unclaimed: the census
-    counts it as available and `available_at` is not rendered. The depth row is
-    what covers the aspects queue."""
+    """Gate S4 on an engine that predates the claimable-age census field. The
+    unclaimed-age row is a flat 3,600 s threshold, and one worker drains about
+    136 documents an hour, so a routine 1,000-document index leaves the oldest
+    unclaimed task older than an hour for hours while the worker is healthy and
+    busy. Without `oldest_claimable_created_at` a retry-delayed task cannot be
+    told from a stuck one, so the row keeps skipping the aspects template."""
 
     def test_a_multi_hour_backlog_does_not_fail_the_age_row(self, monkeypatch) -> None:
         old = _hours_ago(3)
@@ -1135,6 +1163,123 @@ class TestAspectsBacklogIsNotAStaleConsumer:
         r = _run_unclaimed(monkeypatch, store)
         assert r.ok is False
         assert "mailbox/a" in r.detail and "aspects" not in r.detail
+
+
+class TestAspectsAgeFromTheClaimableCensus:
+    """nexus-p909o (RDR-235 S4 remedy). An engine that renders
+    `oldest_claimable_created_at` lets the age row measure the aspects queue
+    against the oldest task a worker could claim now: a task waiting out a retry
+    is not stuck, and a draining bulk backlog (claims in flight) is a warning,
+    not red."""
+
+    def _run(self, monkeypatch, census, *, rd_calls=None) -> h.HealthResult:
+        store = _FakeTupleStore(
+            subspaces=[census],
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
+            rd_calls=rd_calls,
+        )
+        return _run_unclaimed(monkeypatch, store)
+
+    def test_a_two_hour_claimable_backlog_with_no_claim_activity_is_red(self, monkeypatch) -> None:
+        old = _hours_ago(2)
+        rd_calls: list[str] = []
+        r = self._run(monkeypatch, _FakeSubspace(
+            "aspects", available=40, oldest_created_at=old, claimed=0,
+            oldest_claimable_created_at=old, claimable_known=True,
+        ), rd_calls=rd_calls)
+        assert r.ok is False and r.warn is not True, r.detail
+        assert "aspects" in r.detail
+        assert rd_calls == [], "the census field answers, no per-row fetch"
+
+    def test_the_same_backlog_with_a_live_claim_is_a_warn(self, monkeypatch) -> None:
+        old = _hours_ago(2)
+        r = self._run(monkeypatch, _FakeSubspace(
+            "aspects", available=40, oldest_created_at=old, claimed=1,
+            oldest_claimable_created_at=old, claimable_known=True,
+        ))
+        assert r.ok is False and r.warn is True, r.detail
+        assert "aspects" in r.detail and "draining" in r.detail
+
+    def test_claims_that_all_lapsed_are_not_activity(self, monkeypatch) -> None:
+        """A dead worker leaves lapsed claims behind; they stay `claimed` until a
+        claim attempt reclaims them, so `claimed > 0` alone would hide the stall."""
+        old = _hours_ago(2)
+        r = self._run(monkeypatch, _FakeSubspace(
+            "aspects", available=40, oldest_created_at=old, claimed=2, lapsed=2,
+            oldest_claimable_created_at=old, claimable_known=True,
+        ))
+        assert r.ok is False and r.warn is not True, r.detail
+
+    def test_a_delayed_only_backlog_older_than_an_hour_is_ok(self, monkeypatch) -> None:
+        old = _hours_ago(3)
+        r = self._run(monkeypatch, _FakeSubspace(
+            "aspects", available=5, delayed=5, oldest_created_at=old, claimed=0,
+            oldest_claimable_created_at=None, claimable_known=True,
+        ))
+        assert r.ok is True and r.warn is not True, r.detail
+        assert "delayed=5" in r.detail
+
+    def test_a_claimable_backlog_under_the_threshold_is_ok(self, monkeypatch) -> None:
+        young = _hours_ago(0.2)
+        r = self._run(monkeypatch, _FakeSubspace(
+            "aspects", available=40, oldest_created_at=_hours_ago(3), claimed=0,
+            oldest_claimable_created_at=young, claimable_known=True,
+        ))
+        assert r.ok is True, r.detail
+        assert "aspects" in r.detail
+
+    def test_an_engine_without_the_field_keeps_the_skip(self, monkeypatch) -> None:
+        old = _hours_ago(3)
+        r = self._run(monkeypatch, _FakeSubspace(
+            "aspects", available=40, oldest_created_at=old, claimed=0,
+            oldest_claimable_created_at=None, claimable_known=False,
+        ))
+        assert r.ok is True and r.warn is not True, r.detail
+        assert "aspects" not in r.detail
+
+    def test_a_red_aspects_row_does_not_hide_another_subspace(self, monkeypatch) -> None:
+        old = _hours_ago(2)
+        store = _FakeTupleStore(
+            subspaces=[
+                _FakeSubspace(
+                    "aspects", available=40, oldest_created_at=old, claimed=0,
+                    oldest_claimable_created_at=old, claimable_known=True,
+                ),
+                _FakeSubspace("mailbox/a", available=1, oldest_created_at=old),
+            ],
+            rd_by_subspace={"mailbox/a": [_FakeTupleRow("id2", old, None)]},
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
+        )
+        r = _run_unclaimed(monkeypatch, store)
+        assert r.ok is False and "mailbox/a" in r.detail and "aspects" in r.detail
+
+
+class TestAspectsDelayedCountInTheDepthRow:
+    def test_the_delayed_count_is_named_when_the_engine_reports_it(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("aspects", available=2401, delayed=7, claimable_known=True)],
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "aspects (available=2401, delayed=7)" in r.detail
+
+    def test_the_ok_line_names_it_too(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("aspects", available=9, delayed=4, claimable_known=True)],
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is True
+        assert "aspects: available=9 dead=0 delayed=4" in r.detail
+
+    def test_a_queue_subspace_never_shows_it(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("queue/work", available=1500, delayed=3, claimable_known=True)],
+            templates=[*_ALL_TEMPLATE_KINDS],
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert "delayed" not in r.detail
 
 
 def test_rdr211_park_slots_and_queue_depth_rows_are_registered_in_run_health_checks() -> None:

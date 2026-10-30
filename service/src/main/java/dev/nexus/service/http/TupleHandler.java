@@ -690,6 +690,11 @@ public final class TupleHandler implements HttpHandler {
         // Bead nexus-5fpkh: additive. Claims whose lease has passed but the lazy reclaim has
         // not yet released; a SUBSET of "claimed", which keeps counting them.
         m.put("lapsed", c.lapsed());
+        // nexus-p909o (RDR-235): additive. "delayed" is the part of "available" still waiting out an
+        // available_at (a retry or an out delay_s); "available" keeps counting it. The oldest created_at
+        // among live unclaimed rows a claim could take now: null when there are none.
+        m.put("delayed", c.delayed());
+        m.put("oldest_claimable_created_at", c.oldestClaimableCreatedAt());
         return m;
     }
 
@@ -761,6 +766,9 @@ public final class TupleHandler implements HttpHandler {
         // cleared with claim_id); null on an unclaimed row or a claim that predates the column.
         // claim_id itself stays unrendered (see above); this is a time, not a credential.
         m.put("claimed_at", t.claimedAt());
+        // nexus-p909o (RDR-235): when a delayed or retry-pending row becomes claimable; null when unset.
+        // A claim leaves the (by then past) stamp; release, nack and the sweeps clear it.
+        m.put("available_at", t.availableAt());
         return m;
     }
 

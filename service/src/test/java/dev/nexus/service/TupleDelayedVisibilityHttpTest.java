@@ -95,6 +95,14 @@ class TupleDelayedVisibilityHttpTest {
         return MAPPER.readTree(r.body());
     }
 
+    private JsonNode get(String path) throws Exception {
+        var b = TestHttp.request("http://127.0.0.1:" + port + path)
+                .header("Authorization", "Bearer " + TENANT_TOKEN);
+        var r = http.send(b.GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        return MAPPER.readTree(r.body());
+    }
+
     private static Map<String, Object> outBody(String queue, String nonce) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("subspace", "queue/" + queue);
@@ -179,5 +187,53 @@ class TupleDelayedVisibilityHttpTest {
             assertThat(r.statusCode()).as("retry_after_s=%s: %s", bad, r.body()).isEqualTo(400);
         }
         post("/v1/tuples/ack", Map.of("claim_id", claimId, "claimant", "w"));   // still live
+    }
+
+    /** nexus-p909o: the wire shape of the two census keys and the row key, from a real engine. */
+    @Test
+    void theCensusAndTheRenderedRow_tellADelayedTaskFromAClaimableOne() throws Exception {
+        String q = newQueue();
+        Map<String, Object> delayedBody = outBody(q, "n-delayed");
+        delayedBody.put("delay_s", 60);
+        post("/v1/tuples/out", delayedBody);
+
+        JsonNode stats = get("/v1/tuples/subspace_stats?subspace=queue/" + q);
+        assertThat(stats.get("available").asInt()).as("depth keeps counting the delayed task").isEqualTo(1);
+        assertThat(stats.get("delayed").asInt()).isEqualTo(1);
+        assertThat(stats.has("oldest_claimable_created_at")).as("the key is present, so an engine that has it is distinguishable").isTrue();
+        assertThat(stats.get("oldest_claimable_created_at").isNull()).as("nothing claimable yet").isTrue();
+
+        JsonNode rows = post("/v1/tuples/rdp", Map.of("subspace", "queue/" + q, "keys_pattern", Map.of("queue", q)));
+        JsonNode row = rows.get("tuples").get(0);
+        assertThat(row.has("available_at")).isTrue();
+        assertThat(row.get("available_at").isTextual()).as("an ISO timestamp").isTrue();
+
+        post("/v1/tuples/out", outBody(q, "n-plain"));
+        for (JsonNode c : new JsonNode[] {
+                get("/v1/tuples/subspace_stats?subspace=queue/" + q),
+                findIn(get("/v1/tuples/subspace_list?prefix=queue/" + q).get("subspaces"), "queue/" + q)}) {
+            assertThat(c.get("available").asInt()).isEqualTo(2);
+            assertThat(c.get("delayed").asInt()).isEqualTo(1);
+            assertThat(c.get("oldest_claimable_created_at").isTextual()).as("the plain task").isTrue();
+        }
+        JsonNode plain = null;
+        for (JsonNode t : post("/v1/tuples/rdp", Map.of("subspace", "queue/" + q,
+                "keys_pattern", Map.of("queue", q), "n", 10)).get("tuples")) {
+            if (t.get("available_at").isNull()) {
+                plain = t;
+            }
+        }
+        assertThat(plain).isNotNull();
+        assertThat(plain.has("available_at")).as("present and null on a row never delayed").isTrue();
+        assertThat(plain.get("available_at").isNull()).isTrue();
+    }
+
+    private static JsonNode findIn(JsonNode subspaces, String name) {
+        for (JsonNode n : subspaces) {
+            if (name.equals(n.get("subspace").asText())) {
+                return n;
+            }
+        }
+        throw new AssertionError("subspace_list did not return " + name);
     }
 }
