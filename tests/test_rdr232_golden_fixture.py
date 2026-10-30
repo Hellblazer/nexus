@@ -437,13 +437,25 @@ def _assert_oversized_input_keeps_the_reserved_stream(fx, art, primary, resoluti
     return diag
 
 
-def _nx_answer_envelope(art, scope, bindings, *, strategy: tuple[str, str] | None = None) -> dict:
+def _nx_answer_envelope(
+    art, scope, bindings, *, strategy: tuple[str, str] | None = None, chash_supported: bool | None = False,
+    records: list | None = None,
+) -> dict:
     """``nx_answer`` itself on the substrate (the real ``_nx_answer_named_sources``,
     ``_nx_answer_lifecycle_stream``, ``_nx_answer_primary_stream`` and ``plan_run``), stopped before the
     first operator by the continuation handoff; the model is patched to fail loudly. *strategy*
     ``(verb, strategy)`` pins the library plan the matcher offers (the matcher itself, run over the
-    seeded builtins, picks it; ``None`` lets ``nx_answer`` choose)."""
+    seeded builtins, picks it; ``None`` lets ``nx_answer`` choose).
+
+    *chash_supported* is the engine capability ``nx_answer`` reads (``HttpVectorClient.supports_chash_allow``): ``False``
+    (the default) pins the old-engine fallback explicitly, because the gate jar built from this tree advertises
+    ``vector_search_chash_allow_supported`` and an unpinned run is the ``engine_filter`` mode; ``None`` leaves the real
+    probe against the jar. *records*, when given, receives ``(tool, args, output)`` for every tool the runner
+    dispatches (the real ``_default_dispatcher`` still runs)."""
     from unittest.mock import AsyncMock, patch
+
+    import nexus.db.http_vector_client as hvc
+    from nexus.plans import runner
 
     from nexus.mcp.core import nx_answer
 
@@ -457,6 +469,19 @@ def _nx_answer_envelope(art, scope, bindings, *, strategy: tuple[str, str] | Non
         # off for it; the coverage journey is nexus-jypmj.3.10's.
         patch.dict("os.environ", {"NX_ANSWER_COVERAGE": "0"}),
     ]
+    if chash_supported is not None:
+        patches.append(patch.object(hvc.HttpVectorClient, "supports_chash_allow", lambda self: chash_supported))
+    if records is not None:
+        real = runner._default_dispatcher
+
+        async def spy(tool, args):
+            out = await real(tool, args)
+            records.append((tool, dict(args), out))
+            return out
+
+        for attr in (runner._SUPPORTS_BUNDLING_ATTR, runner._HYDRATES_ATTR):
+            setattr(spy, attr, True)
+        patches.append(patch("nexus.plans.runner._default_dispatcher", spy))
     if strategy is not None:
         match = g.library_match(lib, art.text, scope=scope, bindings=bindings,
                                 dimensions={"verb": strategy[0], "strategy": strategy[1]})
@@ -536,7 +561,9 @@ def _assert_production_wiring_reaches_the_reducer(
     assert d["traversals"] == [] and d["streams"]["vector"]["references"] == 0 == d["streams"]["graph"]["references"]
     document = [x for x in env["scope_diagnostics"] if x.get("scope_kind") == "document"]
     assert document and {x["outcome"] for x in document} == {"document_confined"}, env["scope_diagnostics"]
-    trav = {"dropped_cap": 0}
+    # the fallback dispatched no walk, so the traversal reports are empty and there is nothing to cap (the real walk
+    # is checked by _assert_engine_filter_leg_on_the_real_engine)
+    trav = {"dropped_cap": sum(t.get("dropped_cap") or 0 for t in d["traversals"])}
     assert env["reserved_stream"]["merged"] is True and env["reserved_stream"]["merged_at_step"] == LOOKUP_RANK_STEP
     covered_facets = {f for f, _t in art_pieces_in_request if f}
     label = strategy[1] if strategy else "natural-selection"
@@ -550,6 +577,52 @@ def _assert_production_wiring_reaches_the_reducer(
         f"capped_traversals={d['capped_traversals']} traversal_dropped_cap={trav['dropped_cap']} "
         f"facets_in_request={sorted(covered_facets)}")
     return {"envelope": env, "present": present, "pieces": art_pieces_in_request}
+
+
+def _assert_engine_filter_leg_on_the_real_engine(fx, art, scope, bindings, reader) -> None:
+    """nexus-jypmj: the first end-to-end proof of the client and the engine together. The gate jar's engine advertises
+    ``vector_search_chash_allow_supported``, so the one-source run is ``engine_filter``: every search and query step
+    carries the document's chunk hashes and the engine restricts the candidates to them, and the walk runs under the
+    document's tumbler. Nothing here is patched but the model and the continuation handoff."""
+    from nexus.mcp.core import _get_t3
+
+    assert _get_t3().supports_chash_allow() is True, "non-vacuity: the gate jar's engine advertises the filter"
+    document = {r.chash for r in reader.get_manifest(fx.art_rdr)}
+    assert len(document) == len(g.ART_RDR_PIECES) > 0
+    records: list = []
+    env = _nx_answer_envelope(
+        art, scope, bindings, strategy=("lookup", "hybrid-factual-lookup"), chash_supported=None, records=records)
+    narrowing = env["single_source_narrowing"]
+    assert narrowing["applied"] is True and narrowing["confinement"] == "engine_filter", narrowing
+    assert narrowing["document"] == fx.art_rdr and narrowing["allow_chunks"] == len(document), narrowing
+    # every vector call carried the document's hashes, and the rows the engine answered are all in that set
+    vector = [(a, o) for t, a, o in records if t in ("search", "query")]
+    assert vector, "the plan's search step was dispatched"
+    for a, o in vector:
+        assert a["chash_allow"] == sorted(document), "the step carries the document's whole chunk set"
+        assert o["chunk_text_hash"] and set(o["chunk_text_hash"]) <= document, (
+            f"a secondary vector anchor outside the document: {sorted(set(o['chunk_text_hash']) - document)[:3]}")
+        assert "chash_allow_dropped" not in o, "the engine honoured the key, so the client dropped nothing"
+    # the walk ran under the document's own address, and what it returned is inside the document too
+    walks = [(a, o) for t, a, o in records if t == "traverse"]
+    assert walks, "the traversal was dispatched (engine_filter mode)"
+    for a, o in walks:
+        assert a["policy"]["allowed_collections"] == fx.art_rdr, a["policy"]
+        assert set(o.get("ids", [])) <= document, "the walk reached another document's chunks"
+    d = env["evidence_diagnostics"]
+    assert d["traversals"], d
+    for t in d["traversals"]:
+        assert t["policy_applied"] and not t["policy_failed"] and t["dropped_cap"] == 0, t
+        assert not t["scope_conflict"], t
+    assert d["streams"]["vector"]["references"] > 0
+    assert set(d["streams"]["vector"]["by_collection"]) <= {fx.art_rdr_collection}
+    assert set(d["streams"]["graph"]["by_collection"]) <= {fx.art_rdr_collection}
+    outcomes = {x["outcome"] for x in env["scope_diagnostics"] if x.get("scope_kind") == "document"}
+    assert {"document_filtered", "document_scoped"} <= outcomes, env["scope_diagnostics"]
+    assert not any("rows_outside_allow" in x for x in env["scope_diagnostics"]), "the engine ignored no filter"
+    print(
+        f"RDR232-ENGINE-FILTER vector_calls={len(vector)} walks={len(walks)} allow={len(document)} "
+        f"vector_refs={d['streams']['vector']['references']} graph_refs={d['streams']['graph']['references']}")
 
 
 def _assert_single_query_fast_path_is_contained(fx, art, scope) -> None:
@@ -1190,6 +1263,9 @@ def test_rdr084_fixture_containment_and_baseline_emission(t2_service_env) -> Non
     production = _assert_production_wiring_reaches_the_reducer(
         fx, art, scope, call_bindings, primary, resolution, strategy=("lookup", "hybrid-factual-lookup"),
         expect_dropped_cap=g.SECONDARY_DOCS - 50)
+    # ... the same plan on the engine that advertises the document filter (the jar this tree builds): the first
+    # run of client and engine together ...
+    _assert_engine_filter_leg_on_the_real_engine(fx, art, scope, call_bindings, reader)
     # ... a taxonomy-domain builtin, which is what the matcher picks for this request (two searches
     # pinned `corpus: all`, one with a prose and one with a code domain, both narrowed to rdr) ...
     _assert_production_wiring_reaches_the_reducer(
