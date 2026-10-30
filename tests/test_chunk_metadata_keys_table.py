@@ -86,7 +86,7 @@ def test_make_chunk_metadata_output_equals_the_tables_allowed_rows():
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-10-30T00:00:00+00:00",
-        embedding_model="voyage-context-3",
+        embedding_model="bge-base-en-v1.5",
         chunk_start_char=1, chunk_end_char=2, line_start=3, line_end=4, page_number=5,
         title="t", source_author="a", section_title="s", section_type="body",
         tags="x", category="paper",
