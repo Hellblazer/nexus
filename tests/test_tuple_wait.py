@@ -469,7 +469,7 @@ class TestWaitCli:
         js = CliRunner().invoke(
             tuple_group, ["wait", "--session", "s1", "--max-parks", "1", "--json"],
         )
-        payload = json.loads(js.output)
+        payload = json.loads(js.stdout)
         assert payload["reason"] == reason and payload["rerun"] is False
         assert says in payload["hint"] and REARM_HINT not in payload["hint"]
 
@@ -480,7 +480,7 @@ class TestWaitCli:
         js = CliRunner().invoke(
             tuple_group, ["wait", "--session", "s1", "--max-parks", "1", "--json"],
         )
-        payload = json.loads(js.output)
+        payload = json.loads(js.stdout)
         assert payload == {
             "reason": DELIVERED, "notices": ["tuple 7 arrived"], "rerun": True, "hint": REARM_HINT,
         }
