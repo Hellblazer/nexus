@@ -2395,7 +2395,12 @@ def search_cross_corpus(
     # Link-aware boost (RDR-060 E3)
     if link_boost and catalog and all_results:
         from nexus.scoring import apply_link_boost  # noqa: PLC0415 — branch-local; only when link_boost enabled
-        all_results = apply_link_boost(all_results, catalog)
+        # nexus-6pfgb.47: the owners are stamped tenant-wide, so the boost takes the display lookup's
+        # doc_id -> collection map (joined after its own link call) and drops other collections' owners.
+        all_results = apply_link_boost(
+            all_results, catalog,
+            homes=(lambda: display_lookup.maps()[2]) if display_lookup is not None else None,
+        )
 
     # Compute topic assignments once for both boost and grouping (RDR-070)
     _topic_assignments: dict[str, int] | None = None
@@ -2975,10 +2980,10 @@ def _contradiction_candidates(page: list[SearchResult]) -> list[int]:
     N=10"), and the flag renders only on displayed rows.
 
     :func:`_flag_contradictions` flags a pair only when both rows share a collection and
-    each carries a non-empty agent set (:func:`_row_agents`) with a differing member. A
-    row is therefore a candidate only if it has an agent and its collection also holds, on
-    the page, a second row, with the collection's rows naming at least two agents between
-    them. The indexer stamps every code/docs/rdr chunk with one agent
+    each carries a non-empty agent set (:func:`_row_agents`) with a differing member and the
+    two sets are not equal. A row is therefore a candidate only if it has an agent and its
+    collection also holds, on the page, a second row whose agent set differs from some
+    other row's. The indexer stamps every code/docs/rdr chunk with one agent
     (``nexus-indexer``; ``recovery_bundle`` stamps ``recovery-import``), so those
     collections yield none unless an import put a second agent in the same collection;
     a knowledge collection holding notes from two or more agents does. A collection with
@@ -2992,7 +2997,9 @@ def _contradiction_candidates(page: list[SearchResult]) -> list[int]:
             by_col.setdefault(r.collection, []).append(i)
     out: list[int] = []
     for idxs in by_col.values():
-        if len(idxs) < 2 or len(set().union(*(agents[i] for i in idxs))) < 2:
+        # Two rows with the SAME agent set (both held by the notes of agents X and Y) have no pair
+        # of notes that disagree across them (nexus-6pfgb.48), so a candidate needs a second set.
+        if len(idxs) < 2 or len({frozenset(agents[i]) for i in idxs}) < 2:
             continue
         if len(idxs) > _CONTRADICTION_MAX_PER_COLLECTION:
             continue
@@ -3087,7 +3094,7 @@ def _flag_contradictions(
                 continue
             agents_a = _row_agents(results[a])
             agents_b = _row_agents(results[b])
-            if any(x != y for x in agents_a for y in agents_b):
+            if agents_a != agents_b and any(x != y for x in agents_a for y in agents_b):
                 flagged.add(a)
                 flagged.add(b)
 

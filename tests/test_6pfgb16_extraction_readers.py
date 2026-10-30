@@ -211,6 +211,28 @@ def test_an_absent_extraction_source_means_file() -> None:
     )
 
 
+@pytest.mark.parametrize("source", [None, "", "file"])
+def test_both_readers_read_an_empty_extraction_source_as_file(source) -> None:
+    """nexus-6pfgb.48 (Low-6): ``meta_matches`` took ``""`` for a stated value that is not ``file`` while
+    ``extraction_facts`` took it for no value (so ``file``); one reading now, the key's default."""
+    from nexus.catalog.meta_filter import meta_matches
+
+    meta = {"extraction_method": "mineru", "extraction_source": source}
+    (facts,) = extraction_facts([_entry("1.1.1", "P", meta)])
+
+    assert facts["extraction_source"] == "file"
+    assert meta_matches(meta, [("extraction_source", "file")]) is True
+    assert meta_matches(meta, [("extraction_source", "dt_content")]) is False
+
+
+def test_an_empty_value_for_a_key_with_no_default_still_matches_itself() -> None:
+    """The default applies to ``extraction_source`` only; elsewhere an explicit empty value is a value."""
+    from nexus.catalog.meta_filter import meta_matches
+
+    assert meta_matches({"extraction_method": ""}, [("extraction_method", "")]) is True
+    assert meta_matches({}, [("extraction_method", "")]) is False
+
+
 # ── the doctor's PDF stub scan: a document is a stub by its own meta ──────────────────────────
 
 

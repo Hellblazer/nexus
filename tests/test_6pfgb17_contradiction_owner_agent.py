@@ -209,3 +209,34 @@ def test_every_owner_working_key_stays_off_the_json_wire() -> None:
     wire = json.loads(format_json([hit]))[0]
     assert [k for k in keys if k in wire] == []
 
+
+
+def test_two_chunks_held_by_the_same_two_notes_do_not_flag_each_other() -> None:
+    """nexus-6pfgb.48 (Low-2): both rows are {X, Y}, held by the same notes of agents X and Y. No pair
+    of notes disagrees across the two rows, so neither is flagged, and the page is not fetched for."""
+    from nexus.search_engine import _contradiction_candidates, flag_displayed_contradictions
+
+    catalog = _Catalog(
+        [_entry("1.1.1", "agent-x"), _entry("1.1.2", "agent-y")],
+        {SHARED: ["1.1.1", "1.1.2"], OTHER: ["1.1.1", "1.1.2"]},
+    )
+    page = _page(catalog, _hit(SHARED, "agent-y"), _hit(OTHER, "agent-y"))
+
+    assert _contradiction_candidates(page) == []
+    out = flag_displayed_contradictions(page, _Vectors())
+    assert not any(r.metadata.get("_contradiction_flag") for r in out)
+
+
+def test_equal_agent_sets_are_skipped_inside_the_pair_check_itself() -> None:
+    """The pair check must not rely on the candidate filter having run first."""
+    from nexus.search_engine import _flag_contradictions
+
+    catalog = _Catalog(
+        [_entry("1.1.1", "agent-x"), _entry("1.1.2", "agent-y")],
+        {SHARED: ["1.1.1", "1.1.2"], OTHER: ["1.1.1", "1.1.2"]},
+    )
+    page = _page(catalog, _hit(SHARED, "agent-y"), _hit(OTHER, "agent-y"))
+
+    out = _flag_contradictions(page, np.array([[1.0, 0.0, 0.0]] * 2, dtype=np.float32))
+
+    assert not any(r.metadata.get("_contradiction_flag") for r in out)
