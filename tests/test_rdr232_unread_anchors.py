@@ -129,6 +129,8 @@ def test_the_uncovered_notice_says_how_many_anchors_were_not_read() -> None:
     assert "none of the 127 items it read covered a requested part" in full
     assert "174 of 301 retrieved items were not read" in full
     assert "none of it covered" in plain and "none of it covered" not in full
+    one = render_non_answer_notice(AnswerShape.UNCOVERED, plan_id=7, step_count=3, unread_items=2, total_items=3)
+    assert "none of the 1 item it read covered" in one and "1 items" not in one
 
 
 @pytest.mark.asyncio
@@ -241,19 +243,103 @@ async def test_repair_reads_the_unread_anchor_and_a_facet_supported_there_become
     """f2's support ("gate") sits in the second vector item, which the cap left unread in the first round. The
     targeted query finds nothing new (or only that held chunk): the repair still reassesses the unread anchor, so
     f2 ends covered and the unread count drops to 0. Before this fix the repair was blind to unread anchors (they
-    counted as held), ended ``no_new_evidence`` and f2 stayed unsupported."""
+    counted as held), ended ``no_new_evidence`` and f2 stayed unsupported.
+
+    The retrieval found nothing to merge, so the report says so (``no_new_evidence``, not ``completed``) and that the
+    unread anchor was reassessed. A hit on the unread anchor is not retrieval either: it is filtered like any held
+    chunk, so it costs no fetch and is not counted found (the unread anchor is reassessed from the first ledger)."""
     from tests.test_rdr232_coverage_repair import RepairDispatcher
 
     d = RepairDispatcher(_by_topic(), repair_hits=repair_hits)
     with patch.object(coverage_ledger, "ASSESSMENT_MAX_ITEM_CHARS", CAP):
         cov = _cov(await _unread_item_run(2, d))
-    assert cov.repair.outcome == "completed", "repair is entered on the capped path and does not stop at no_new_evidence"
+    assert cov.repair.outcome == "no_new_evidence", "the retrieval brought nothing in, and the report says so"
+    assert "reassessed" in cov.repair.detail and "1 anchors" in cov.repair.detail
+    assert cov.repair.items_found == 0, "a hit on an unread anchor is held, not found"
+    assert d.tools.count("store_get_many") == 1, "the plan's own fetch only: no repair fetch for a chunk the input already holds"
     assert [f.state for f in cov.ledger.findings] == ["covered", "covered"]
     assert cov.ledger.assessment.skipped_items == 0 and cov.ledger.rounds == 2
     # bounded: the first round's two streams, then ONE delta pass over the one unread anchor (one stream, one group)
     assert d.tools.count("operator_check") == 3
     last = d.args_of("operator_check")[-1]
     assert _tag_lines(last["check_instruction"]) == ["f2"] and [i["text"] for i in json.loads(last["items"])] == ["vector hit about the gate"]
+
+
+def _failing_dispatcher(how: str):
+    from tests.test_rdr232_coverage_repair import RepairDispatcher
+
+    class D(RepairDispatcher):
+        searches = 0
+
+        async def __call__(self, tool: str, args: dict) -> dict:
+            if how == "fetch" and tool == "store_get_many" and args.get("ids") and {str(i) for i in args["ids"]} <= set(self.known):
+                raise RuntimeError("fetch backend down")
+            if how == "second_query" and tool in ("search", "query") and self.is_repair_search(args):
+                self.searches += 1
+                if self.searches == 2:
+                    raise RuntimeError("repair search backend down")
+            return await super().__call__(tool, args)
+
+    return D(_by_topic(), fail_repair_search=(how == "query"))
+
+
+def _with_rehydrate(how: str):
+    """Patch ``CoverageBoundary._repair`` so the view it gets has a ``rehydrate`` that raises, or that hands back the
+    input without the repair evidence."""
+    from dataclasses import replace
+
+    orig = CoverageBoundary._repair
+
+    async def wrapped(self, view, first, targets):
+        def raising():
+            raise RuntimeError("re-read failed")
+
+        hook = raising if how == "raise" else (lambda: (list(view.evidence_texts), view.observed))
+        return await orig(self, replace(view, rehydrate=hook), first, targets)
+
+    return patch.object(CoverageBoundary, "_repair", wrapped)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("how", "outcome", "detail"),
+    [
+        ("query", "retrieval_failed", "a repair query failed: RuntimeError"),
+        ("fetch", "retrieval_failed", "the chunk fetch failed: RuntimeError"),
+        ("raise", "not_merged", "re-reading the input failed: RuntimeError"),
+        ("not_in_input", "not_merged", "the reduction's input holds none of the repair evidence"),
+    ],
+)
+async def test_a_repair_whose_retrieval_fails_beside_unread_anchors_reassesses_them_and_says_what_failed(how, outcome, detail) -> None:
+    """The four retrieval failures: the reassessment of the unread anchor still runs (f2, supported by the item the
+    cap left unread, ends covered and the unread count is 0), and the report names the failure instead of reading
+    ``completed`` with an empty detail. f3, whose only support was the repair evidence, stays unsupported."""
+    from contextlib import nullcontext
+
+    from tests.test_rdr232_coverage_repair import RepairDispatcher
+
+    d = _failing_dispatcher(how) if how in ("query", "fetch") else RepairDispatcher(_by_topic())
+    ctx = _with_rehydrate(how) if how in ("raise", "not_in_input") else nullcontext()
+    with patch.object(coverage_ledger, "ASSESSMENT_MAX_ITEM_CHARS", CAP), ctx:
+        cov = _cov(await _unread_item_run(3, d))
+    states = {f.facet_id: f.state for f in cov.ledger.findings}
+    assert states == {"f1": "covered", "f2": "covered", "f3": "unsupported"}, "the unread anchor was reassessed"
+    assert cov.ledger.assessment.skipped_items == 0 and cov.ledger.rounds == 2
+    assert cov.repair.outcome == outcome and detail in cov.repair.detail
+    assert "reassessed" in cov.repair.detail
+    assert cov.repair.items_merged == 0
+    assert cov.counts()["repair_outcome"] == outcome and cov.repair_entered is True
+
+
+@pytest.mark.asyncio
+async def test_a_later_repair_query_that_fails_after_evidence_was_merged_is_named_in_the_detail() -> None:
+    """Evidence from the first query merged and the second query failed: the repair completed on what it had and the
+    detail says the later queries did not run (it used to be empty)."""
+    d = _failing_dispatcher("second_query")
+    with patch.object(coverage_ledger, "ASSESSMENT_MAX_ITEM_CHARS", CAP):
+        cov = _cov(await _unread_item_run(3, d))
+    assert cov.repair.outcome == "completed" and cov.repair.items_merged == 1
+    assert cov.repair.detail == "a repair query failed: RuntimeError; the queries after it were not issued"
 
 
 @pytest.mark.asyncio
@@ -267,7 +353,7 @@ async def test_a_repair_that_leaves_the_same_anchor_unread_does_not_count_it_twi
     with patch.object(coverage_ledger, "ASSESSMENT_MAX_ITEM_CHARS", CAP):
         cov = _cov(await _unread_item_run(3, d))
     a = cov.ledger.assessment
-    assert cov.repair.outcome == "completed" and a.calls > 2
+    assert cov.repair.outcome == "completed" and cov.repair.detail == "" and a.calls > 2
     assert {f.facet_id: f.state for f in cov.ledger.findings}["f3"] == "covered"
     assert any(x.content == REPAIR_TEXT for x in cov.ledger.anchors)
     assert a.skipped_items == 1 and len(a.unread_ids) == 1 and a.skipped_items <= a.anchors_total == len(cov.ledger.anchors)
@@ -277,5 +363,40 @@ def test_the_reassessment_estimate_counts_the_unread_anchors_packs() -> None:
     from nexus.plans.coverage_repair import planned_reassessment_calls
 
     assert planned_reassessment_calls(2, 6) == 1
-    assert planned_reassessment_calls(2, 6, extra_items=174, items_per_call=20) == 10
-    assert planned_reassessment_calls(7, 6, extra_items=1, items_per_call=20) == 4
+    assert planned_reassessment_calls(2, 6, unread_per_stream=[174], items_per_call=20) == 10
+    assert planned_reassessment_calls(7, 6, unread_per_stream=[1], items_per_call=20) == 4
+
+
+def test_the_reassessment_estimate_holds_across_several_streams_and_counts_the_full_facets() -> None:
+    """Unread items in several streams are packed per stream (a pack per stream at least), so 3 + 15 + 1 unread
+    items are three packs, not the one a sum of 19 would give; and the facets that are not repair targets are
+    assessed against every anchor, which the delta pass does not cover."""
+    from nexus.plans.coverage_repair import MAX_ANCHORS_PER_ASSESSMENT_CALL, planned_reassessment_calls
+
+    assert MAX_ANCHORS_PER_ASSESSMENT_CALL == coverage_ledger.MAX_ANCHORS_PER_ASSESSMENT_CALL == 20
+    assert planned_reassessment_calls(2, 6, unread_per_stream=[3, 15, 1]) == 1 + 3
+    assert planned_reassessment_calls(2, 6, unread_per_stream=[19]) == 1 + 1, "the single-stream sum is not the several-stream count"
+    # delta: 1 group x (1 repair pack + 3 unread packs); full: 1 group of 2 facets x (1 + 1 + 2 + 1 anchor packs)
+    assert planned_reassessment_calls(2, 6, unread_per_stream=[3, 15, 1], full_facets=2, anchors_per_stream=[10, 25, 1]) == 4 + (1 + 1 + 2 + 1)
+    # seven full facets are two groups
+    assert planned_reassessment_calls(1, 6, full_facets=7, anchors_per_stream=[4]) == 1 + 2 * 2
+
+
+@pytest.mark.asyncio
+async def test_the_boundary_passes_its_streams_and_full_facets_to_the_estimate() -> None:
+    """``_repair`` hands the estimate the first ledger's per-stream unread and anchor counts and its non-target
+    facets, so the budget check prices what the reassessment will run."""
+    seen: dict = {}
+    real = coverage_ledger.planned_reassessment_calls
+
+    def spy(*a, **kw):
+        seen.update(kw, args=a)
+        return real(*a, **kw)
+
+    from tests.test_rdr232_coverage_repair import RepairDispatcher
+
+    with patch.object(coverage_ledger, "ASSESSMENT_MAX_ITEM_CHARS", CAP), patch.object(coverage_ledger, "planned_reassessment_calls", spy):
+        await _unread_item_run(3, RepairDispatcher(_by_topic()))
+    assert seen["unread_per_stream"] == [0, 0, 1, 0, 0], "the one unread anchor is in the vector stream"
+    assert seen["anchors_per_stream"] == [0, 0, 2, 1, 0] and seen["full_facets"] == 0, "f2 and f3 are the repair targets"
+    assert seen["items_per_call"] == coverage_ledger.MAX_ANCHORS_PER_ASSESSMENT_CALL

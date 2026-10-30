@@ -139,6 +139,7 @@ from nexus.plans.evidence_diagnostics import (
     build_evidence_diagnostics,
 )
 from nexus.plans.coverage_repair import (
+    MAX_ANCHORS_PER_ASSESSMENT_CALL,
     MAX_REPAIR_ITEMS,
     MAX_REPAIR_QUERIES,
     MIN_REPAIR_QUERY_S,
@@ -222,14 +223,6 @@ MAX_CONCURRENT_ASSESSMENT_CALLS: int = 4
 ASSESSMENT_CALL_COST_PRIOR_USD: float = 0.02
 #: Slack on the USD fit test, so a cost that exactly uses up the allowance is not refused over float rounding.
 _USD_EPS: float = 1e-9
-#: Anchors one assessment call reads (nexus-jypmj.17). A stream with more is split into balanced packs of at most this
-#: many, each its own call over the same facet group, so a 65-anchor graph stream is four calls of 16-17 and not
-#: one call that outran the 60 s timeout (nexus-jypmj.3.10 canary: the 10-15 anchor streams answered in about 20 s
-#: each, the 65-anchor one did not in 60). Splitting rather than lengthening the timeout keeps every call close to a
-#: size already seen to finish, lets the packs run concurrently, and loses one pack's anchors, not the stream's, when a
-#: call fails. It sends each item once per facet group either way, so the input tokens barely change; only the
-#: per-call instruction repeats. Unmeasured as accuracy or latency-per-anchor (same status as the facet cap).
-MAX_ANCHORS_PER_ASSESSMENT_CALL: int = 20
 #: Characters of item text one call carries (the bundle prompt guard is 200,000 for the whole prompt).
 #: Items past it are not assessed (they are the report's ``unread_ids``); a facet that no assessed item supports
 #: or contradicts is ``unsupported`` all the same, and the unread count is disclosed (nexus-jypmj.23).
@@ -1167,8 +1160,14 @@ class CoverageBoundary:
         estimate = view.assessment_cost_estimate()
         # The first round's unread anchors are reassessed beside the repair evidence (nexus-jypmj.23): count their packs.
         unread_first = frozenset(first.ledger.assessment.unread_ids)
+        stream_of = {a.item_id: a.stream for a in first.ledger.anchors}
         planned = planned_reassessment_calls(
-            len(targets), self.max_facets_per_call, extra_items=len(unread_first), items_per_call=self.max_anchors_per_call)
+            len(targets), self.max_facets_per_call,
+            unread_per_stream=[sum(1 for i in unread_first if stream_of.get(i) == s) for s in STREAM_ORDER],
+            full_facets=sum(1 for f in first.ledger.findings if f.state in ("unsupported", "unassessed") and f.facet_id not in targets),
+            anchors_per_stream=[sum(1 for a in first.ledger.anchors if a.stream == s) for s in STREAM_ORDER],
+            items_per_call=self.max_anchors_per_call,
+        )
         if not usd_affordable(view.remaining_usd(), None if estimate is None else estimate * planned):
             return done("skipped_budget", detail="the USD allowance could not carry the reassessment")
 
@@ -1186,11 +1185,16 @@ class CoverageBoundary:
         # fetch the rest), stopped by the first failure
         retrieval_until = started + allowance * REPAIR_RETRIEVAL_SHARE
         queries_until = started + allowance * REPAIR_RETRIEVAL_SHARE * 0.75
-        # An anchor the first round never read is not "held": a targeted query that returns it found something the
-        # check has yet to assess, so it is not filtered out here (it is already in the input, so it is not added again).
-        held_hashes = {a.chash.lower() for a in first.ledger.anchors if a.chash and a.item_id not in unread_first}
+        # Every anchor of the first ledger is held, the unread ones too: a hit on an unread anchor would be fetched
+        # only to be dropped by the text de-duplication below (its text is already in the input), at the cost of a
+        # fetch slot and an inflated ``found``. The unread anchors are reassessed from the first ledger (``prior``),
+        # not through retrieval.
+        held_hashes = {a.chash.lower() for a in first.ledger.anchors if a.chash}
         hits: dict[str, RepairHit] = {}
         issued, failure = 0, ""
+        # What went wrong in the retrieval, when the repair then goes on only to reassess the unread anchors:
+        # ``(outcome, detail)``, so the report does not read as a plain ``completed`` (nexus-jypmj.23).
+        retrieval_note: tuple[RepairOutcome, str] | None = None
         for q in queries:
             left = queries_until - time.monotonic()
             if left < MIN_REPAIR_QUERY_S:
@@ -1222,6 +1226,7 @@ class CoverageBoundary:
                 _log.warning("nx_answer_coverage_repair_fetch_failed", error=type(exc).__name__)
                 if not unread_first:
                     return done("retrieval_failed", queries=issued, found=found, detail=f"the chunk fetch failed: {type(exc).__name__}")
+                retrieval_note = ("retrieval_failed", f"the chunk fetch failed: {type(exc).__name__}")
                 fetched = []
             held_texts = {strip_source_note(t) for t in view.evidence_texts if isinstance(t, str)}
             for item in fetched:
@@ -1233,6 +1238,12 @@ class CoverageBoundary:
                     break
         if not new and not unread_first:
             return done("no_new_evidence", queries=issued, found=found, detail="the chunks fetched were already held")
+        if failure and not hits:
+            retrieval_note = ("retrieval_failed", f"a repair query failed: {failure}")
+        elif not hits:
+            retrieval_note = ("no_new_evidence", "the targeted queries found nothing not already held")
+        elif not new and retrieval_note is None:
+            retrieval_note = ("no_new_evidence", "the chunks fetched were already held")
 
         if new:
             # merge: the runner puts the items into the reduction's input and returns that input
@@ -1244,6 +1255,7 @@ class CoverageBoundary:
                 _log.warning("nx_answer_coverage_repair_rehydrate_failed", error=type(exc).__name__)
                 if not unread_first:
                     return done("not_merged", queries=issued, found=found, detail=f"re-reading the input failed: {type(exc).__name__}")
+                retrieval_note = ("not_merged", f"re-reading the input failed: {type(exc).__name__}")
                 texts, observed, new = view.evidence_texts, view.observed, []
             else:
                 in_input = {strip_source_note(t) for t in texts if isinstance(t, str)}
@@ -1252,6 +1264,7 @@ class CoverageBoundary:
                     view.install_supplement(())
                     if not unread_first:
                         return done("not_merged", queries=issued, found=found, detail="the reduction's input holds none of the repair evidence")
+                    retrieval_note = ("not_merged", "the reduction's input holds none of the repair evidence")
                     texts, observed = view.evidence_texts, view.observed
 
         # recompute the ledger once, inside the repair allowance
@@ -1264,7 +1277,13 @@ class CoverageBoundary:
 
         reassess = replace(view, evidence_texts=texts, observed=observed, remaining_seconds=remaining)
         final = await replace(self, stage_share=1.0).evaluate(reassess, prior=first)
-        return done("completed", queries=issued, found=found, merged=merged, result=final)
+        if retrieval_note is not None:
+            # The reassessment ran and is in ``final``; the outcome names why the retrieval brought nothing in.
+            outcome, why = retrieval_note
+            detail = f"{why}; the {len(unread_first)} anchors the first round left unread were reassessed"
+            return done(outcome, queries=issued, found=found, merged=merged, detail=detail, result=final)
+        detail = f"a repair query failed: {failure}; the queries after it were not issued" if failure else ""
+        return done("completed", queries=issued, found=found, merged=merged, detail=detail, result=final)
 
     async def _assess(
         self, facets: Sequence[Facet], anchors: Sequence[EvidenceAnchor], view: BoundaryView, reserve: float | None = None,

@@ -290,7 +290,8 @@ def render_non_answer_notice(
     elif shape is AnswerShape.UNCOVERED:
         # nexus-jypmj.3.12: generation is skipped before it runs, or its prose is withheld after it; this head is
         # true in both cases.
-        read = f"the {total_items - unread_items} items it read" if total_items > unread_items else "the items it read"
+        n_read = total_items - unread_items
+        read = (f"the {n_read} item{'' if n_read == 1 else 's'} it read") if n_read > 0 else "the items it read"
         head = (
             f"{NON_ANSWER_NOTICE_PREFIX} {shape.value}] The plan (plan_id={plan_id}, "
             f"{step_count} steps) retrieved evidence, but "
