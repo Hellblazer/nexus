@@ -50,6 +50,9 @@ class World:
         self.no_catalog = False
         self.route = True
         self.fail_doc_ids: set[str] = set()
+        self.restamp_on_append: str | None = None  # the engine stamps the document's indexed_at on every manifest write
+        self.fail_update_ids: set[str] = set()
+        self.updates: list[tuple[str, dict]] = []
         self.before_second_manifest_read = None  # called with self, once, before the re-read
         self._manifest_reads = 0
 
@@ -70,7 +73,7 @@ class World:
 
     # reader ---------------------------------------------------------------
     def all_documents(self) -> list[SimpleNamespace]:
-        return list(self.docs.values())
+        return [SimpleNamespace(**vars(d)) for d in self.docs.values()]  # fresh entries, as the HTTP reader returns
 
     def get_manifests(self, doc_ids: list[str]) -> dict[str, list[ManifestRow]]:
         self._manifest_reads += 1
@@ -105,7 +108,16 @@ class World:
                     self.manifests[d][i], chash=new["chash"], section_title=new["section_title"],
                     section_type=new["section_type"], page_number=new["page_number"],
                     labels_written=new["labels_written"])
+            if self.restamp_on_append is not None:
+                self.docs[d].indexed_at = self.restamp_on_append
         return {"ok": True, "docs": len(docs), "failed_doc_ids": failed}
+
+    def update(self, tumbler: str, **fields) -> None:
+        self.updates.append((tumbler, dict(fields)))
+        if tumbler in self.fail_update_ids:
+            raise RuntimeError("engine refused the update")
+        assert set(fields) == {"indexed_at"}, fields
+        self.docs[tumbler].indexed_at = fields["indexed_at"]
 
     # t3 -------------------------------------------------------------------
     def get_collection(self, name: str):
@@ -331,6 +343,60 @@ def test_an_empty_catalog_is_converged_and_says_it_examined_nothing(world: World
     assert rung.detect().converged is True
     assert rung.converge(Report()).detail.startswith("0 document(s), 0 row(s)")
     assert rung.verify() is True and "0 document(s)" in rung.record_detail()
+
+
+RUN_TIME = "2026-10-30T12:00:00+00:00"
+
+
+def _one_fillable_and_one_newer_row(world: World) -> None:
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))                      # fillable
+    world.row("1.1.1", 1, h(2))                      # its chunk was last written by a departed co-owner
+    _labelled(world, h(1))
+    world.chunk(h(2), section_title="Departed", section_type="references", page_number=3, indexed_at=FUTURE)
+
+
+def test_the_documents_indexed_at_is_restored_after_the_write_so_a_second_pass_changes_nothing(world: World) -> None:
+    """nexus-1nrcu (code review): the engine restamps a document's ``indexed_at`` on every manifest write.
+    Left alone, the chunk-newer guard (+5 min over the DOCUMENT's stamp) is off for the document's other
+    rows on the next pass, and a departed co-owner's label is copied."""
+    _one_fillable_and_one_newer_row(world)
+    world.restamp_on_append = RUN_TIME
+
+    first = world.rung()
+    assert first.converge(Report()).outcome is ConvergeOutcome.COMPLETED
+    assert world.labels("1.1.1") == [(0, "Refs", "references", 9, True), (1, None, None, None, False)]
+    assert world.updates == [("1.1.1", {"indexed_at": DOC_STAMP})], "the stamp read at scan, written back"
+    assert world.docs["1.1.1"].indexed_at == DOC_STAMP
+    writes = len(world.appends)
+
+    second = world.rung()
+    assert second.detect().converged is True
+    assert second.converge(Report()).outcome is ConvergeOutcome.COMPLETED
+    assert len(world.appends) == writes, "the second pass sends no write"
+    assert world.labels("1.1.1")[1] == (1, None, None, None, False), "the departed co-owner's label is never copied"
+    assert second.verify() is True
+
+
+def test_a_document_that_was_not_written_is_not_restamped(world: World) -> None:
+    _one_fillable_and_one_newer_row(world)
+    world.fail_doc_ids = {"1.1.1"}
+
+    world.rung().converge(Report())
+
+    assert world.updates == [], "the engine rolled the document back: its stamp is untouched"
+
+
+def test_a_failed_restore_defers_and_names_the_document(world: World) -> None:
+    _one_fillable_and_one_newer_row(world)
+    world.restamp_on_append = RUN_TIME
+    world.fail_update_ids = {"1.1.1"}
+    rung = world.rung()
+
+    result = rung.converge(Report())
+
+    assert result.outcome is ConvergeOutcome.DEFERRED
+    assert "1.1.1" in result.detail and "indexed_at" in result.detail
 
 
 # ── races and failures ───────────────────────────────────────────────────────

@@ -186,10 +186,12 @@ the chunk row's label is exact, once (nexus-1nrcu).
 - **Cost.** `detect()` is the dry run and does the whole scan with no write: it
   reads every live document's manifest and the chunk rows of the legacy single-row
   chashes, 50 documents at a time. `converge()` writes through `append_manifest_many`,
-  one request per collection per 50 documents. A write to a document stamps its
-  `indexed_at` (the engine does that on every manifest write), so run
-  `nx catalog backfill-meta` first when both are pending: its attribution guard
-  compares chunk rows with that stamp.
+  one request per collection per 50 documents. The engine restamps a document's
+  `indexed_at` on every manifest write; the rung writes each filled document's
+  stamp back to the value it read at scan, so the attribution guard above and
+  `nx catalog backfill-meta`'s are unaffected and the order of the two does not
+  matter. A document whose stamp cannot be written back is named and the run is
+  DEFERRED.
 - **Reading the result.** The recorded detail counts, apart: rows already written,
   legacy rows, rows filled, and the legacy rows left alone with the reason (shared
   with another document, repeated inside the document, chunk without label keys,

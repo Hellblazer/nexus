@@ -31,13 +31,16 @@ which filters tombstoned documents), so a TOMBSTONED co-owner is not counted: th
 client read on this engine lists a tombstoned document's manifest rows. The ``indexed_at`` guard is what
 stands against a departed co-owner that wrote last. Closing the gap is an engine read.
 
-SIDE EFFECT OF THE ONLY WRITE ROUTE. The fill goes through ``append_manifest_many``, which upserts by
-position and, on a conflict, rewrites only ``chash``, ``collection``, the three labels and
+SIDE EFFECT OF THE ONLY WRITE ROUTE, AND ITS REPAIR. The fill goes through ``append_manifest_many``, which
+upserts by position and, on a conflict, rewrites only ``chash``, ``collection``, the three labels and
 ``labels_written`` (``CatalogRepository.insertManifestChunkRows``, ``UPSERT_APPEND``). The engine also
-stamps the document's ``indexed_at`` on every manifest write, so a filled document's ``indexed_at``
-moves to the run time. ``meta_backfill``'s attribution guard compares a chunk row's ``indexed_at`` with
-the document's, so a document filled here is looked at more leniently there: run that backfill first
-when both are pending.
+stamps the document's ``indexed_at`` on every manifest write. Left alone, that would switch off the
+chunk-newer guard above for the document's OTHER rows (the guard compares against the document's stamp),
+so the next pass would copy a departed co-owner's label, and ``meta_backfill``'s own guard would look at
+the document more leniently. So after each document's append succeeds, the rung writes the document's
+``indexed_at`` back to the value it read at scan (``update(doc, indexed_at=...)``; the engine honours a
+caller-supplied stamp). A document whose stamp cannot be written back is counted and named, and the run
+ends DEFERRED: its stamp is the run time until someone restores it.
 
 WHAT IT DOES.
   detect   : read-only, and the dry run: the full scan with no write. Applicable unless no catalog is
@@ -111,6 +114,8 @@ class Counts:
     chunk_without_indexed_at: int = 0   # no indexed_at on the chunk row, so not attributable
     raced: int = 0                      # became written, moved, or gained a co-owner before the write
     write_failed: int = 0
+    restore_failed: int = 0             # documents whose indexed_at could not be written back after the fill
+    restore_failed_docs: list[str] = field(default_factory=list)
     by_collection: Counter = field(default_factory=Counter)
 
     def as_dict(self) -> dict[str, int]:
@@ -125,7 +130,7 @@ class Counts:
             f"repeated inside the document, {self.chunk_without_label_keys} chunk with no label keys, "
             f"{self.chunk_missing} chunk missing, {self.chunk_newer_than_document + self.chunk_without_indexed_at} "
             f"chunk row not attributable to the document, {self.stale_listing + self.raced} changed "
-            f"meanwhile, {self.write_failed} write failed)"
+            f"meanwhile, {self.write_failed} write failed, {self.restore_failed} indexed_at not restored)"
         )
 
 
@@ -318,6 +323,7 @@ class ManifestSectionLabelsRung:
     def _write(self, reader: Any, writer: Any, plan: list[tuple[Any, Any, str, dict[str, Any]]], counts: Counts) -> None:
         """Re-read the batch just before writing, drop what changed, and append the rest per collection."""
         docs = sorted({str(d.tumbler) for d, _r, _c, _l in plan})
+        stamps = {str(d.tumbler): getattr(d, "indexed_at", "") for d, _r, _c, _l in plan}  # as read at scan
         fresh = reader.get_manifests(docs) or {}
         again = self._owner_rows(reader, sorted({r.chash for _d, r, _c, _l in plan}))
         by_collection: dict[str, dict[str, list[dict]]] = {}
@@ -346,6 +352,23 @@ class ManifestSectionLabelsRung:
                         counts.filled += len(rows)
                         counts.by_collection[collection] += len(rows)
                         self._filled += len(rows)
+                        self._restore_indexed_at(writer, doc_id, stamps.get(doc_id, ""), counts)
+
+    @staticmethod
+    def _restore_indexed_at(writer: Any, doc_id: str, stamp: str, counts: Counts) -> None:
+        """Write the document's ``indexed_at`` back to the value read at scan. The engine restamps it on
+        every manifest write, which would turn off the chunk-newer guard for the document's other rows on
+        the next pass. A failure is counted and the document named; the run ends DEFERRED."""
+        error = ""
+        for _attempt in range(2):  # one retry: a transient failure here would leave the guard off for the document
+            try:
+                writer.update(doc_id, indexed_at=stamp)
+                return
+            except Exception as exc:  # noqa: BLE001 — any failure to write the stamp back is reported, never swallowed
+                error = str(exc)
+        counts.restore_failed += 1
+        counts.restore_failed_docs.append(doc_id)
+        _log.warning("manifest_section_labels_restore_indexed_at_failed", doc_id=doc_id, error=error)
 
     # ── reading with the lifecycle of the collaborators ──────────────────────
 
@@ -415,6 +438,16 @@ class ManifestSectionLabelsRung:
             return ConvergeResult(
                 ConvergeOutcome.DEFERRED,
                 detail=f"the engine refused the write for {counts.write_failed} row(s); retried on the next `nx upgrade` ({counts.summary()})",
+            )
+        if counts.restore_failed:
+            named = ", ".join(counts.restore_failed_docs[:10]) + (" ..." if len(counts.restore_failed_docs) > 10 else "")
+            return ConvergeResult(
+                ConvergeOutcome.DEFERRED,
+                detail=(
+                    f"the fill could not write indexed_at back on {counts.restore_failed} document(s) ({named}); "
+                    f"their stamp is now the run time, which switches off the chunk-newer guard for their "
+                    f"remaining legacy rows ({counts.summary()})"
+                ),
             )
         return ConvergeResult(ConvergeOutcome.COMPLETED, detail=counts.summary())
 

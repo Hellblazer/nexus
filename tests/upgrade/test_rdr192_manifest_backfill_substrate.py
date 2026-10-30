@@ -175,7 +175,7 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
         def emit(self, event: str, **fields) -> None:
             pass
 
-    stamp_before = {t: cat.resolve(t).indexed_at for t in (shared_a, repeat, written, bare)}
+    stamp_before = {t: cat.resolve(t).indexed_at for t in (single, shared_a, repeat, written, bare)}
     assert rung.converge(_Report()).outcome is ConvergeOutcome.COMPLETED
     (filled,) = cat.get_manifest(single)
     assert (filled.section_title, filled.section_type, filled.page_number, filled.labels_written) == (
@@ -186,7 +186,9 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
     for t in (shared_a, shared_b, repeat, bare):
         assert [r.labels_written for r in cat.get_manifest(t)] == [False] * len(before[t]), t
     assert [(r.section_title, r.section_type, r.labels_written) for r in cat.get_manifest(written)] == [("", "", True)]
-    assert {t: cat.resolve(t).indexed_at for t in stamp_before} == stamp_before, "untouched documents are not rewritten"
+    assert {t: cat.resolve(t).indexed_at for t in stamp_before} == stamp_before, (
+        "untouched documents are not rewritten, and the filled one's stamp is restored: the engine restamps a "
+        "document on every manifest write, which would switch off the chunk-newer guard for its other rows")
     assert rung.verify() is True and "1 filled this run" in rung.record_detail()
 
     # a later writer of the shared chunk row no longer decides this row's label
