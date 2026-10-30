@@ -949,6 +949,13 @@ requests unknown or facet-uncertain, and the call costs about 0.002 USD and
 4 s. `NX_ANSWER_STRUCTURED_EXTRACT=0` turns it off, and the eligibility gate
 then runs in shadow, because the gate on first-pass kinds failed the
 lookup-recall threshold (held-out lookup recall 0.4 to 0.2).
+Known limit (recorded at close, 2026-10-30): a request whose extraction call
+fails keeps the gate enforcing on its first-pass kind, the regime just
+measured as failing. It rests on the observed 0 failures in 112 extraction
+calls; only the once-per-streak `answer_kind_gate_extraction_failing` log line
+reports a run of failures, and nothing counts them on the run summary.
+Whether such a request should degrade to shadow is open for Sam
+(nexus-x3eoc).
 
 | Field | Extraction | On failure |
 | --- | --- | --- |
