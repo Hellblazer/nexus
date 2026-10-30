@@ -45,7 +45,8 @@ What the boundary does, in order:
    ``deadline_skip``, with the per-call ``skipped_budget_calls`` / ``skipped_deadline_calls`` beside it; a wholly
    skipped assessment stays ``none``); an unassessed facet carries the reason it is unassessed
    (``assessment_unusable``, ``assessment_skipped_deadline`` / ``_budget``, ``assessment_raised``, or
-   ``assessment_incomplete`` for an item the cap left unread; ``assessment_stopped_after_failure`` is kept in the
+   ``assessment_incomplete`` for an assessment that ran whole but decided nothing (an item the cap left unread no longer
+   makes a facet unassessed: nexus-jypmj.23); ``assessment_stopped_after_failure`` is kept in the
    closed list for older records but no pass emits it since nexus-jypmj.17, which does not stop at a failure), counted in
    :attr:`CoverageResult.unassessed_by_cause`;
    a conflicted facet is counted in ``facets_conflicted`` (a subset of ``facets.covered``); and
@@ -758,6 +759,9 @@ _UNASSESSED_REASON: dict[str, str] = {
     "skipped_deadline": "assessment_skipped_deadline",
     "skipped_budget": "assessment_skipped_budget",
     "not_attempted": "assessment_not_attempted",
+    # Every call ran and none failed or was skipped, yet no facet could be decided: the assessment read what it was
+    # given and that was not enough to decide. Not a failed assessment (nexus-jypmj.23).
+    "ok": "assessment_incomplete",
 }
 
 
@@ -1424,8 +1428,11 @@ class CoverageBoundary:
                 )
                 continue
             completed += 1
-            if call.omitted:
-                mark(group, "assessment_incomplete")
+            # Anchors the per-call cap left out (``call.omitted``, summed into ``skipped_items``) were never read.
+            # A completed call decides its facets on what it read: a facet no READ item supports or contradicts is
+            # unsupported (Sam, 2026-10-30, nexus-jypmj.23). Marking it unassessed meant a plan that hands the check
+            # more anchors than its calls carry could never be withheld. The count of unread anchors is
+            # AssessmentReport.skipped_items, which the envelope and both notices disclose.
         outcome: AssessmentOutcome = "ok"
         if skip_outcome is not None:
             outcome = skip_outcome if calls == 0 else "partial_failure"
