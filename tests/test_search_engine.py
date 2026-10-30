@@ -939,13 +939,19 @@ class TestFallbackOwnerChoice:
         )
 
     @staticmethod
-    def _catalog(owners: list[str], homes: dict[str, str], chash: str = CHASH):
+    def _catalog(
+        owners: list[str], homes: dict[str, str], chash: str = CHASH,
+        manifests: dict[str, list] | None = None,
+    ):
         """A with-manifests catalog: ``homes`` maps doc_id -> the collection its
-        manifest row for the chash is stamped with."""
+        manifest row for the chash is stamped with. ``manifests`` replaces the
+        default one-row manifest for the documents it names."""
         from nexus.catalog.types import ManifestRow
-        manifests = {
+        built = {
             d: [ManifestRow(position=0, chash=chash, collection=homes[d])] for d in owners
         }
+        built.update(manifests or {})
+        manifests = built
 
         class _Cat:
             calls: list[str] = []
@@ -996,10 +1002,28 @@ class TestFallbackOwnerChoice:
         """One chash seen in two collections: each hit resolves its own owner, not
         the first hit's (the choice was once keyed by chash alone)."""
         from nexus.search_engine import _attach_doc_ids_from_catalog
-        cat = self._catalog(["1.1.2", "1.1.9"], {"1.1.2": "docs__a", "1.1.9": "docs__b"})
+        from nexus.catalog.types import ManifestRow
+        from nexus.search_engine import OWNER_CHUNK_COUNT_KEY
+        # 1.1.9 is a three-row document holding the chash at position 1: the
+        # re-key from chash to result index shows in the per-hit count and index
+        # (a chash-keyed choice stamps hit a with 1.1.9's 3 and 1).
+        three_rows = [
+            ManifestRow(position=0, chash="p" * 64, collection="docs__b"),
+            ManifestRow(position=1, chash=self.CHASH, collection="docs__b"),
+            ManifestRow(position=2, chash="q" * 64, collection="docs__b"),
+        ]
+        cat = self._catalog(
+            ["1.1.2", "1.1.9"], {"1.1.2": "docs__a", "1.1.9": "docs__b"},
+            manifests={"1.1.9": three_rows},
+        )
         in_a, in_b = self._hit("docs__a", rid="ra"), self._hit("docs__b", rid="rb")
         _attach_doc_ids_from_catalog([in_a, in_b], catalog=cat)
         assert (in_a.metadata["doc_id"], in_b.metadata["doc_id"]) == ("1.1.2", "1.1.9")
+        got = [
+            (r.metadata["chunk_count"], r.metadata["chunk_index"], r.metadata[OWNER_CHUNK_COUNT_KEY])
+            for r in (in_a, in_b)
+        ]
+        assert got == [(1, 0, 1), (3, 1, 3)]
 
     def test_no_owner_in_the_hits_collection_falls_back_to_smallest(self):
         from nexus.search_engine import _attach_doc_ids_from_catalog
