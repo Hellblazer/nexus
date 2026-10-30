@@ -192,3 +192,108 @@ def test_the_real_fixture_blocks_translate() -> None:
         vis = _suggest().visible(blocks[p["block"]]["markdown"])
         assert vis.count(p["find"]) == 1, p
         assert set(p) == {"n", "block", "expected", "find", "replace", "note"}
+
+
+# ---------------------------------------------------------------------------
+# Gate 1 F4: an old that starts or ends inside an entity or an escape
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("md, old, new", [
+    ("Tom &amp; Jerry", "Tom &", "Tom and"),            # ends inside the entity
+    ("Tom &amp; Jerry", "amp; Jerry", "and Jerry"),     # starts inside the entity
+    ("Use \\* for stars", "* for", "+ for"),            # starts right after the backslash
+    ("Use \\* for stars", "Use \\", "Use x"),           # ends right after the backslash
+    ("Use \\* for stars", "* for stars", "* for planets"),  # the change is elsewhere, the old still starts inside the escape
+])
+def test_an_old_that_starts_or_ends_inside_an_entity_or_an_escape_is_refused(md: str, old: str, new: str) -> None:
+    proposals, refused = one([block(1, md)], old, new)
+    assert proposals == [] and [r["cause"] for r in refused] == ["formatting"], (proposals, refused)
+
+
+def test_an_old_that_holds_a_whole_entity_or_escape_is_translated() -> None:
+    proposals, refused = one([block(1, "Tom &amp; Jerry")], "Tom &amp; Jerry", "Tom and Jerry")
+    assert refused == [] and (proposals[0]["find"], proposals[0]["replace"]) == ("&", "and")
+    proposals, refused = one([block(1, "Use \\* for stars")], "Use \\* for", "Use + for")
+    assert refused == [] and (proposals[0]["find"], proposals[0]["replace"]) == ("*", "+")
+
+
+# ---------------------------------------------------------------------------
+# Real block kinds, matched by exact name
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind, cause", [("code", "code-block"), ("metadata", "metadata"), ("html-preamble", "metadata"),
+                                         ("image", "formatting")])
+def test_kinds_the_app_cannot_edit_are_refused_by_name(kind: str, cause: str) -> None:
+    proposals, refused = one([block(0, "basically ok", kind)], "basically ok", "ok")
+    assert proposals == [] and [r["cause"] for r in refused] == [cause]
+
+
+@pytest.mark.parametrize("kind", ["paragraph", "heading", "bullet-list", "numbered-list", "table", "quote", "other",
+                                  "decoded-list", "frontier"])
+def test_every_other_kind_is_translated_and_a_name_that_merely_contains_code_or_meta_is_not_refused(kind: str) -> None:
+    proposals, refused = one([block(0, "basically ok", kind)], "basically ok", "ok")
+    assert refused == [] and proposals[0]["find"] == "basically "
+
+
+# ---------------------------------------------------------------------------
+# Gate 1 minors: note and replace sanitation, limits, overlap
+# ---------------------------------------------------------------------------
+
+
+def test_the_note_collapses_every_kind_of_whitespace_and_loses_control_characters() -> None:
+    reason = "line one\nline two\r\n\tline  three\x07 and four\x7f"
+    proposals, _ = one([WRAPPED], "is basically ordered", "is ordered", reason=reason)
+    note = proposals[0]["note"]
+    assert note == "Edit 1: line one line two line three and four"
+    assert not any(ord(c) < 32 or 0x7F <= ord(c) <= 0x9F or c in "  " for c in note)
+
+
+def test_the_replace_loses_control_characters() -> None:
+    proposals, _ = one([WRAPPED], "is basically ordered", "is \x07ordered\x7f")
+    assert (proposals[0]["find"], proposals[0]["replace"]) == ("basically ordered", "ordered")
+
+
+def test_a_replace_over_2000_characters_is_refused_and_never_truncated() -> None:
+    big = "x" * 2001
+    proposals, refused = one([WRAPPED], "is basically ordered", f"is {big} ordered")
+    assert proposals == [] and [r["cause"] for r in refused] == ["too-long"]
+    proposals, refused = one([WRAPPED], "is basically ordered", f"is {'x' * 1999} ordered")
+    assert refused == [] and len(proposals[0]["replace"]) == 1999
+
+
+def test_a_note_over_2000_characters_is_truncated() -> None:
+    proposals, refused = one([WRAPPED], "is basically ordered", "is ordered", reason="why " * 1000)
+    assert refused == [] and len(proposals[0]["note"]) == 2000 and proposals[0]["note"].startswith("Edit 1: why why")
+
+
+def test_two_proposals_whose_widened_finds_overlap_refuse_the_later_one() -> None:
+    b = block(1, "ab cd ab cd ef")
+    edits = [{"n": 1, "old": "ab cd ab", "new": "ab XX ab", "reason": "a"},
+             {"n": 2, "old": "ab cd ef", "new": "ab YY ef", "reason": "b"}]
+    proposals, refused = _suggest().translate_edits([b], edits)
+    assert [p["find"] for p in proposals] == ["ab cd ab"]
+    assert [(r["n"], r["cause"]) for r in refused] == [(2, "overlap")]
+    # the same two edits in another order: the later one is the one refused
+    proposals, refused = _suggest().translate_edits([b], edits[::-1])
+    assert [p["n"] for p in proposals] == [2] and [(r["n"], r["cause"]) for r in refused] == [(1, "overlap")]
+
+
+def test_finds_in_different_blocks_or_side_by_side_do_not_overlap() -> None:
+    blocks = [block(1, "alpha beta gamma delta"), block(2, "one two three four epsilon")]
+    edits = [{"n": 1, "old": "alpha beta", "new": "alpha BETA", "reason": "a"},
+             {"n": 2, "old": "three four", "new": "three FOUR", "reason": "b"},
+             {"n": 3, "old": "four epsilon", "new": "four EPS", "reason": "c"}]
+    proposals, refused = _suggest().translate_edits(blocks, edits)
+    assert refused == [] and [(p["block"], p["find"]) for p in proposals] == [(1, "beta"), (2, "four"), (2, "epsilon")]
+
+
+def test_more_than_200_sendable_edits_send_200_and_route_the_rest_to_the_chat() -> None:
+    blocks = [block(i, f"Paragraph {i} says basically hello.") for i in range(205)]
+    edits = [{"n": i + 1, "old": f"Paragraph {i} says basically hello.", "new": f"Paragraph {i} says hello.", "reason": "r"}
+             for i in range(205)]
+    proposals, refused = _suggest().translate_edits(blocks, edits)
+    assert len(proposals) == 200 and [p["n"] for p in proposals] == list(range(1, 201))
+    assert [(r["n"], r["cause"]) for r in refused] == [(n, "over-limit") for n in range(201, 206)]
+    assert refused[0]["detail"]

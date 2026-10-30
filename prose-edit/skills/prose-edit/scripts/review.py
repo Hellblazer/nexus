@@ -162,6 +162,7 @@ from collections.abc import Callable
 from html import unescape as _unescape
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import unquote, urlparse
 
 Obj = dict[str, Any]
 Span = tuple[int, int]
@@ -1163,23 +1164,51 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def _load_blocks(raw: str, work: Path) -> list[Obj]:
-    """The blocks of get_document's reply: one reply, or the pages of a long document one after another."""
+def _same_file(url: str, expected: Path) -> bool:
+    """True when get_document's `url` names `expected`: compared by realpath (macOS reports /private/tmp for /tmp)."""
+    if url.startswith("file://"):
+        url = unquote(urlparse(url).path)
+    return os.path.realpath(url) == os.path.realpath(expected)
+
+
+def _load_blocks(raw: str, work: Path, target: Path) -> list[Obj]:
+    """The blocks of get_document's reply: one reply, or the pages of a long document one after another.
+
+    The blocks must be the whole of THIS run's document, unchanged: `translate` claims an old text occurs exactly
+    once in them. So the read is refused when a page says the buffer has unsaved changes, when `url` is not `target`
+    (open_document can report "Opened" while the previous document is still shown), when the last page still has
+    `next` (the reply was cut), or when the block indexes are not contiguous from 0 or `firstEditable`.
+    """
     path = _work_input(raw, work, "--blocks-file")
     value = _read_json_value(path, "--blocks-file", raw, "the blocks")
     pages = value if isinstance(value, list) and value and all(isinstance(v, dict) and "blocks" in v for v in value) \
         else [value]
     blocks: list[Obj] = []
     for page in pages:
-        if isinstance(page, dict) and page.get("view") == "source":
+        if not isinstance(page, dict):
+            raise _user("--blocks-file: expected get_document's reply, with a `blocks` list, `url` and `hasChanges`")
+        if page.get("view") == "source":
             raise _user("--blocks-file: the app is in its source view, which has no blocks; "
                         "ask the author to switch back to the document view, then read the document again")
-        items = page.get("blocks") if isinstance(page, dict) else page
+        items = page.get("blocks")
         if not isinstance(items, list):
             raise _user("--blocks-file: expected get_document's reply, with a `blocks` list")
+        if page.get("hasChanges") is True:
+            raise _user("--blocks-file: the app's buffer has unsaved changes (hasChanges is true), so these blocks are "
+                        "not the file's text; undo the changes or reopen the file, then read the document again")
+        url = page.get("url")
+        if not isinstance(url, str) or not url:
+            raise _user("--blocks-file: the reply names no `url`, so it cannot be checked against this run's file; "
+                        "write get_document's reply as it came back")
+        if not _same_file(url, target):
+            raise _user(f"--blocks-file: the app shows {url}, not this run's file {target} (url); open the file, wait "
+                        "until app_state's url is the file's and modalWindow is empty, then read the document again")
         blocks.extend(cast("list[Obj]", items))
     if not blocks:
         raise _user("--blocks-file: the reply holds no blocks")
+    if pages[-1].get("next") is not None:
+        raise _user(f"--blocks-file: the last page still has `next` ({pages[-1]['next']}): the reply was cut short, so "
+                    "blocks are missing; read on from `next` and put every page in the file")
     seen: set[int] = set()
     for b in blocks:
         if (not isinstance(b, dict) or not isinstance(b.get("index"), int) or not isinstance(b.get("hash"), str)
@@ -1188,6 +1217,13 @@ def _load_blocks(raw: str, work: Path) -> list[Obj]:
         if b["index"] in seen:
             raise _user(f"--blocks-file: block {b['index']} appears twice (pages that overlap)")
         seen.add(b["index"])
+    first = pages[0].get("firstEditable")
+    starts = {0, first} if isinstance(first, int) else {0}
+    indexes = [int(b["index"]) for b in blocks]
+    if indexes[0] not in starts or any(y != x + 1 for x, y in zip(indexes, indexes[1:])):
+        raise _user(f"--blocks-file: the block indexes are not contiguous from {' or '.join(str(x) for x in sorted(starts))} "
+                    f"(they run {indexes[:6]}{'...' if len(indexes) > 6 else ''}): blocks are missing or out of order; "
+                    "read the whole document and put every page in the file in order")
     return blocks
 
 
@@ -1207,7 +1243,8 @@ def cmd_translate(a: argparse.Namespace) -> Obj:
         raise _user("no session in the work directory: run `review.py render` first")
     session = _load_json(sess_file, "WORK/session.json")
     prop = _load_json(work / "filtered.json", "WORK/filtered.json")
-    blocks = _load_blocks(a.blocks_file, work)
+    _, _, target, _, _ = _source_of(str(session["target"]), cast("str | None", session.get("file")), work)
+    blocks = _load_blocks(a.blocks_file, work, target)
     unplaced = {int(u["n"]) for u in cast("list[Obj]", session.get("unplaced") or [])}
     edits = [e for e in cast("list[Obj]", prop.get("edits") or [])
              if e.get("by") != "author" and int(e["n"]) not in unplaced]
@@ -1222,8 +1259,8 @@ def cmd_translate(a: argparse.Namespace) -> Obj:
 def cmd_proposed(a: argparse.Namespace) -> Obj:
     """Record the app's reply to propose_edits: the suggestion id of each edit sent (WORK/suggestions.json) and the app's refusals.
 
-    The reply must hold exactly one result for each edit sent, indexes 0..k-1 once each; anything else stops the
-    run with nothing written. An edit the app refused joins the refused list of WORK/propose.json (cause
+    The reply must hold exactly one result for each edit sent, indexes 0..k-1 once each, each proposed result naming
+    the block it was sent for and its own id; anything else stops the run with nothing written. An edit the app refused joins the refused list of WORK/propose.json (cause
     app-refused, the app's reason as detail) and goes to the chat like a local refusal.
     """
     work = cast(Path, _BRIEF.work_dir(a.work))
@@ -1253,11 +1290,18 @@ def cmd_proposed(a: argparse.Namespace) -> Obj:
         raise bad(f"the result indexes are not 0..{len(sent) - 1}")
     suggestions: list[Obj] = []
     app_refused: list[Obj] = []
+    ids: set[str] = set()
     for i in range(len(sent)):
         r = by_index[i]
         if r.get("status") == "proposed":
             if not isinstance(r.get("id"), str) or not r["id"]:
                 raise bad(f"result {i} is proposed but has no id")
+            if r.get("block") != sent[i]["block"]:
+                raise bad(f"result {i} is for block {r.get('block')!r} but edit {order[i]} was sent for block "
+                          f"{sent[i]['block']}; this reply is not for these edits")
+            if r["id"] in ids:
+                raise bad(f"two results share the id {r['id']}")
+            ids.add(r["id"])
             suggestions.append({"n": order[i], "id": r["id"], "find": sent[i]["find"], "replace": sent[i]["replace"]})
         elif r.get("status") == "refused":
             app_refused.append({"n": order[i], "cause": "app-refused", "detail": str(r.get("reason") or "no reason given")})

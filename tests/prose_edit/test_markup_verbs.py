@@ -34,7 +34,12 @@ E5 = edit(5, "one attempt per job", "a single **attempt** per job", "adds format
 EDITS = [E1, E2, E3, E4, E5]
 
 
-def app_blocks(text: str) -> dict:
+def target_url(repo: Path) -> str:
+    """The `url` get_document reports for the run's target: the file `start` writes."""
+    return str(repo / "docs" / "s.md")
+
+
+def app_blocks(text: str, url: str) -> dict:
     """get_document's reply for `text`: blocks unwrapped to one line, list markers as `*`."""
     blocks = []
     for i, raw in enumerate(b for b in text.split("\n\n") if b.strip()):
@@ -45,7 +50,7 @@ def app_blocks(text: str) -> dict:
         blocks.append({"index": i, "kind": kind, "hash": hashlib.sha1(md.encode("utf-8")).hexdigest()[:14],
                        "markdown": md, "warnings": []})
     return {"blocks": blocks, "documentType": "md", "firstEditable": 0, "hasChanges": False,
-            "url": "/tmp/stand-in.md", "view": "editor"}
+            "url": url, "view": "editor"}
 
 
 def write_json(path: Path, value: object) -> Path:
@@ -77,7 +82,7 @@ def listing(suggestions: list[dict], statuses: dict[str, str], foreign: bool = T
 def translated(prose: Prose, repo: Path, edits: list[dict] = EDITS, text: str = TEXT,
                **extra: object) -> tuple[Path, dict]:
     work, _ = start(prose, repo, edits, text=text, **extra)
-    blocks = write_json(work / "blocks.json", app_blocks(text))
+    blocks = write_json(work / "blocks.json", app_blocks(text, target_url(repo)))
     return work, review_ok(prose, "translate", "--work", str(work), "--blocks-file", str(blocks))
 
 
@@ -108,7 +113,7 @@ def test_translate_changes_neither_the_document_nor_t2_and_git_stays_clean(prose
     clean = status(repo)
     raw = (repo / "docs" / "s.md").read_bytes()
     translated_out = review_ok(prose, "translate", "--work", str(work), "--blocks-file",
-                               str(write_json(work / "blocks.json", app_blocks(TEXT))))
+                               str(write_json(work / "blocks.json", app_blocks(TEXT, target_url(repo)))))
     review_ok(prose, "proposed", "--work", str(work), "--from-file",
               str(write_json(work / "proposed.json", app_reply(read(work / "propose.json")))))
     assert translated_out["sent"] == 4
@@ -175,7 +180,7 @@ def test_a_proposed_result_without_an_id_is_refused(prose: Prose, repo: Path) ->
 
 def test_files_outside_the_work_directory_are_refused(prose: Prose, repo: Path) -> None:
     work, _ = translated(prose, repo)
-    outside = write_json(prose.tmp / "blocks.json", app_blocks(TEXT))
+    outside = write_json(prose.tmp / "blocks.json", app_blocks(TEXT, target_url(repo)))
     proc = run_review(prose, "translate", "--work", str(work), "--blocks-file", str(outside))
     assert proc.returncode == 1 and "work" in proc.stderr
     reply = write_json(prose.tmp / "proposed.json", app_reply(read(work / "propose.json")))
@@ -185,7 +190,7 @@ def test_files_outside_the_work_directory_are_refused(prose: Prose, repo: Path) 
 
 def test_a_blocks_file_that_is_empty_unreadable_or_the_source_view_is_refused(prose: Prose, repo: Path) -> None:
     work, _ = start(prose, repo, EDITS, text=TEXT)
-    for bad in ({"blocks": []}, {"view": "source", "blocks": app_blocks(TEXT)["blocks"]}, {"nothing": 1}, [], "text"):
+    for bad in ({"blocks": []}, {"view": "source", "blocks": app_blocks(TEXT, target_url(repo))["blocks"]}, {"nothing": 1}, [], "text"):
         proc = run_review(prose, "translate", "--work", str(work), "--blocks-file",
                           str(write_json(work / "blocks.json", bad)))
         assert proc.returncode == 1 and "blocks" in proc.stderr, bad
@@ -197,7 +202,7 @@ def test_a_blocks_file_that_is_empty_unreadable_or_the_source_view_is_refused(pr
 
 def test_pages_of_get_document_concatenate(prose: Prose, repo: Path) -> None:
     work, _ = start(prose, repo, EDITS, text=TEXT)
-    whole = app_blocks(TEXT)
+    whole = app_blocks(TEXT, target_url(repo))
     pages = [{**whole, "blocks": whole["blocks"][:3], "next": 3}, {**whole, "blocks": whole["blocks"][3:]}]
     out = review_ok(prose, "translate", "--work", str(work), "--blocks-file", str(write_json(work / "blocks.json", pages)))
     assert out["sent"] == 4
@@ -214,6 +219,122 @@ def test_translate_needs_a_rendered_session(prose: Prose, repo: Path) -> None:
     from tests.prose_edit.test_brief import brief_ok
     work = Path(brief_ok(prose, "tmpdir").strip())
     proc = run_review(prose, "translate", "--work", str(work), "--blocks-file",
-                      str(write_json(work / "blocks.json", app_blocks(TEXT))))
+                      str(write_json(work / "blocks.json", app_blocks(TEXT, target_url(repo)))))
     assert proc.returncode == 1 and "render" in proc.stderr
     assert t2_get(REPO_PROJECT, "doc/docs/s.md") is None
+
+
+# ---------------------------------------------------------------------------
+# The blocks file must be the whole of the right document, unchanged (Gate 1 S2, F3)
+# ---------------------------------------------------------------------------
+
+
+def translate_proc(prose: Prose, work: Path, blocks: object):
+    return run_review(prose, "translate", "--work", str(work), "--blocks-file",
+                      str(write_json(work / "blocks.json", blocks)))
+
+
+def refused_blocks(prose: Prose, repo: Path, mutate, needle: str) -> None:
+    """A blocks file broken by `mutate(pages)` is refused, with a cause that names `needle`, and nothing is written."""
+    work, _ = start(prose, repo, EDITS, text=TEXT)
+    whole = app_blocks(TEXT, target_url(repo))
+    pages = mutate(whole)
+    proc = translate_proc(prose, work, pages)
+    assert proc.returncode == 1, proc.stdout
+    assert needle in proc.stderr, proc.stderr
+    assert not (work / "propose.json").exists()
+
+
+def test_a_last_page_that_still_has_next_is_refused(prose: Prose, repo: Path) -> None:
+    refused_blocks(prose, repo, lambda w: {**w, "blocks": w["blocks"][:3], "next": 3}, "next")
+
+
+def test_pages_whose_last_page_still_has_next_are_refused(prose: Prose, repo: Path) -> None:
+    refused_blocks(prose, repo, lambda w: [{**w, "blocks": w["blocks"][:3], "next": 3},
+                                           {**w, "blocks": w["blocks"][3:5], "next": 5}], "next")
+
+
+def test_indexes_that_skip_a_block_are_refused(prose: Prose, repo: Path) -> None:
+    refused_blocks(prose, repo, lambda w: {**w, "blocks": w["blocks"][:2] + w["blocks"][3:]}, "contiguous")
+
+
+def test_a_read_that_starts_after_the_first_block_is_refused(prose: Prose, repo: Path) -> None:
+    refused_blocks(prose, repo, lambda w: {**w, "blocks": w["blocks"][2:]}, "contiguous")
+
+
+def test_pages_that_leave_a_gap_between_them_are_refused(prose: Prose, repo: Path) -> None:
+    refused_blocks(prose, repo, lambda w: [{**w, "blocks": w["blocks"][:2], "next": 2},
+                                           {**w, "blocks": w["blocks"][3:]}], "contiguous")
+
+
+def test_a_buffer_with_unsaved_changes_is_refused(prose: Prose, repo: Path) -> None:
+    refused_blocks(prose, repo, lambda w: {**w, "hasChanges": True}, "hasChanges")
+
+
+def test_a_second_page_with_unsaved_changes_is_refused(prose: Prose, repo: Path) -> None:
+    refused_blocks(prose, repo, lambda w: [{**w, "blocks": w["blocks"][:3], "next": 3},
+                                           {**w, "blocks": w["blocks"][3:], "hasChanges": True}], "hasChanges")
+
+
+def test_a_reply_for_another_document_is_refused(prose: Prose, repo: Path) -> None:
+    refused_blocks(prose, repo, lambda w: {**w, "url": str(repo / "docs" / "other.md")}, "url")
+
+
+def test_a_reply_that_names_no_url_is_refused(prose: Prose, repo: Path) -> None:
+    refused_blocks(prose, repo, lambda w: {k: v for k, v in w.items() if k != "url"}, "url")
+
+
+def test_the_url_is_compared_by_realpath(prose: Prose, repo: Path) -> None:
+    """macOS reports /private/tmp/... for a session whose target was given as /tmp/...; a symlinked path is the same file."""
+    work, _ = start(prose, repo, EDITS, text=TEXT)
+    link = prose.tmp / "alias"
+    link.symlink_to(repo, target_is_directory=True)
+    whole = app_blocks(TEXT, str(link / "docs" / "s.md"))
+    proc = translate_proc(prose, work, whole)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["sent"] == 4
+
+
+# ---------------------------------------------------------------------------
+# The reply must be for the edits sent (Gate 1 F2)
+# ---------------------------------------------------------------------------
+
+
+def proposed_proc(prose: Prose, work: Path, reply: object):
+    return run_review(prose, "proposed", "--work", str(work), "--from-file", str(write_json(work / "proposed.json", reply)))
+
+
+def test_a_result_that_echoes_another_block_is_refused_and_nothing_is_written(prose: Prose, repo: Path) -> None:
+    work, _ = translated(prose, repo)
+    before = (work / "propose.json").read_bytes()
+    reply = app_reply(read(work / "propose.json"))
+    reply["results"][2]["block"] += 1
+    proc = proposed_proc(prose, work, reply)
+    assert proc.returncode == 1 and "propose_edits reply" in proc.stderr and "block" in proc.stderr
+    assert not (work / "suggestions.json").exists() and (work / "propose.json").read_bytes() == before
+
+
+def test_a_proposed_result_that_echoes_no_block_is_refused(prose: Prose, repo: Path) -> None:
+    work, _ = translated(prose, repo)
+    reply = app_reply(read(work / "propose.json"))
+    del reply["results"][0]["block"]
+    proc = proposed_proc(prose, work, reply)
+    assert proc.returncode == 1 and "block" in proc.stderr
+    assert not (work / "suggestions.json").exists()
+
+
+def test_two_results_with_one_id_are_refused_and_nothing_is_written(prose: Prose, repo: Path) -> None:
+    work, _ = translated(prose, repo)
+    before = (work / "propose.json").read_bytes()
+    reply = app_reply(read(work / "propose.json"))
+    reply["results"][1]["id"] = reply["results"][0]["id"]
+    proc = proposed_proc(prose, work, reply)
+    assert proc.returncode == 1 and "propose_edits reply" in proc.stderr and reply["results"][0]["id"] in proc.stderr
+    assert not (work / "suggestions.json").exists() and (work / "propose.json").read_bytes() == before
+
+
+def test_a_refused_result_needs_no_block(prose: Prose, repo: Path) -> None:
+    work, _ = translated(prose, repo)
+    reply = app_reply(read(work / "propose.json"), refuse={1: "no"})
+    assert "block" not in reply["results"][1]
+    assert proposed_proc(prose, work, reply).returncode == 0
