@@ -5968,7 +5968,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
     the engine ran the caller's scope before its cut (it advertises `catalog_graph_scope_filter_supported` and its
     reply carried the `scope_filter` marker; `engine_dropped_out_of_scope` counts what it removed), `not_scoped` for a
     run with no restricting scope, and `unavailable` otherwise: an engine without the predicate, or an edge that
-    trims the flag. An `unavailable` scoped walk that may have been cut at the cap sets `secondary_omitted` and
+    trims the flag, or a single-role policy (`require_link_role` other than `factual`) on an engine that lacks
+    `catalog_graph_node_walk_supported` (the walk is made without the predicate, nexus-jypmj.18; so is the repeat
+    after a reply that applied the predicate but carried no `node_walk`). An `unavailable` scoped walk that may have been cut at the cap sets `secondary_omitted` and
     returns only its seed documents as graph evidence, never `contained`; one that was not cut is unchanged.
   - `reserved`: `{items, merged, over_share_dropped, deduped_secondary,
     secondary_cut, capped, dropped_before_terminal}`, the `reserved_stream`
