@@ -9,6 +9,7 @@ import dev.nexus.service.PgVectorRepositoryContractTest.FakeEmbedder;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.vectors.ReaperRepository;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -322,6 +323,50 @@ class VectorHandlerReapableRouteTest {
             .isEqualTo("/the/owner/path.md");
         var rk = rows.stream().filter(r -> keyless.equals(r.chash())).findFirst().get();
         assertThat(rk.sourcePath()).isNull();
+    }
+
+    /**
+     * An owner is a LIVE document (house rule nexus-mqd6t: a tombstoned document owns nothing). A chunk whose only
+     * manifest owner is tombstoned shows no title, document id or path in /reapable and in describe; where a live
+     * document also names it, the live one is the owner even though the tombstoned one sorts first.
+     */
+    @Test
+    void aTombstonedManifestOwnerIsNoOwner_reapableAndDescribeShowNoLabel() throws Exception {
+        String col = "knowledge__reaproute-tomb__minilm-l6-v2-384__v1";
+        String other = "knowledge__reaproute-tomb-owner__minilm-l6-v2-384__v1";
+        register(TENANT_A, col);
+        register(TENANT_A, other);
+        Duration old = Duration.ofDays(40);
+        String dead = chunk(TENANT_A, col, "dead-owner", old, Map.of());
+        chunk(TENANT_A, other, "dead-owner", Duration.ofDays(1), Map.of());
+        doc(TENANT_A, "tomb-only", other, true, null);
+        manifest(TENANT_A, "tomb-only", other, dead);
+        String both = chunk(TENANT_A, col, "both-owners", old, Map.of());
+        chunk(TENANT_A, other, "both-owners", Duration.ofDays(1), Map.of());
+        doc(TENANT_A, "a-tombstoned", other, true, null);
+        doc(TENANT_A, "b-live", other, false, null);
+        manifest(TENANT_A, "a-tombstoned", other, both);
+        manifest(TENANT_A, "b-live", other, both);
+
+        Map<String, Object> body = reapable(TOKEN_A, col, Map.of());
+
+        Map<String, Object> d = item(body, dead);
+        assertThat(d.get("title")).as("a tombstoned owner owns nothing").isNull();
+        assertThat(d.get("catalog_doc_id")).isNull();
+        Map<String, Object> b = item(body, both);
+        assertThat(b.get("catalog_doc_id")).as("the live owner, though the tombstoned one sorts first")
+            .isEqualTo("b-live");
+        assertThat(b.get("title")).isEqualTo("doc b-live");
+
+        var rows = repo.reapableChunks(TENANT_A, col, null, null, 10, 0);
+        assertThat(rows.stream().filter(r -> dead.equals(r.chash())).findFirst().get().sourcePath()).isNull();
+
+        var labels = new ReaperRepository(new TenantScope(svcDs)).describe(TENANT_A, col, List.of(dead, both));
+        var ld = labels.stream().filter(l -> dead.equals(l.chash())).findFirst().get();
+        assertThat(ld.title()).as("describe: a tombstoned owner owns nothing").isNull();
+        assertThat(ld.sourcePath()).isNull();
+        var lb = labels.stream().filter(l -> both.equals(l.chash())).findFirst().get();
+        assertThat(lb.title()).isEqualTo("doc b-live");
     }
 
     @Test

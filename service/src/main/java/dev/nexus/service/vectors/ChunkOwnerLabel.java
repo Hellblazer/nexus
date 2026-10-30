@@ -18,11 +18,13 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * removes them.
  *
  * <p>The owner is one {@code nexus.catalog_document_chunks} row for the chunk's tenant, chash and model joined to
- * its {@code nexus.catalog_documents} row. A chunk with an own-collection manifest row is not reapable, so for the
- * chunks the reaper lists the owner is usually a manifest row of another collection, or none: then {@code
- * owner_doc_id}, {@code owner_title} and {@code owner_file_path} are all null and the text prefix is the label. When
- * several documents name the chunk the own-collection row wins, then the lowest {@code doc_id}, so the pick does not
- * vary between calls. The SQL form of the same rule is in {@code vectors-040-gc-audit-labels-by-text-and-manifest.xml}.
+ * its LIVE {@code nexus.catalog_documents} row (a tombstoned document owns nothing: house rule nexus-mqd6t). A chunk
+ * with an own-collection manifest row in any state is not reapable, so for the chunks the reaper lists the owner is a
+ * live document's manifest row in another collection, or none (no manifest row at all, or only tombstoned
+ * documents'): then {@code owner_doc_id}, {@code owner_title} and {@code owner_file_path} are all null and the text
+ * prefix is the label. When several live documents name the chunk the own-collection row wins, then the lowest
+ * {@code doc_id}, so the pick does not vary between calls. The SQL form of the same rule is in {@code
+ * vectors-040-gc-audit-labels-by-text-and-manifest.xml}.
  */
 final class ChunkOwnerLabel {
 
@@ -56,6 +58,7 @@ final class ChunkOwnerLabel {
                .where(m.TENANT_ID.eq(CHUNKS.TENANT_ID))
                .and(m.CHASH.eq(CHUNKS.CHASH))
                .and(m.EMBEDDING_MODEL.eq(CHUNKS.EMBEDDING_MODEL))
+               .and(d.DELETED_AT.isNull())
                .orderBy(DSL.case_().when(m.COLLECTION.eq(CHUNKS.COLLECTION), 0).otherwise(1), m.DOC_ID)
                .limit(1)).as(ALIAS);
     }
