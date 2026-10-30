@@ -2,7 +2,8 @@
 title: "MinerU-Only PDF Extraction with a Per-Page Fallback Ladder"
 id: RDR-237
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-10-30
 priority: high
 author: Sam
 reviewed-by: self
@@ -74,7 +75,7 @@ nothing would remain between "fully extracted" and "failed".
 #### Gap 5: The MinerU server path has no real per-page bound
 
 The MinerU server runs each parse in a thread it cannot cancel, and serves one
-request at a time on macOS and three elsewhere by default (Dependency table).
+request at a time on macOS and three elsewhere by default (Dependency Source Verification).
 Nexus gives up on a server request after a fixed
 300 s, not the configured per-page timeout, and then retries the same page on
 the server before falling back to the killable subprocess path (RF-3). One
@@ -168,7 +169,7 @@ batch on the server, then falls back to the subprocess path
 probes a live server and restarts nothing (RF-16). The subprocess path bounds a
 batch at `mineru_page_timeout_s` × pages and kills the worker's process group. The
 MinerU server keeps parsing a page after nexus gives up, holding one of its slots
-(Dependency table).
+(Dependency Source Verification).
 
 **RF-4 (Verified, T2 `nexus/mineru-server-memory-repeat-extraction-2026-10-12`).**
 On chas, CPU only, a 30-page PDF through the MinerU server 12 times: 168 to 206 s
@@ -239,7 +240,7 @@ a six-page server request at 3, 10 or 30 s did not delay the next one-page reque
 (17.8 s, 23.1 s and 25.1 s, against warm one-page baselines of 18.9 s and 33.5 s).
 The server log shows the abandoned job ran to completion: MinerU finishes abandoned
 work rather than cancelling it. chas is Linux, so this server had three slots
-(Dependency table); the single-slot macOS case was not run. A page that never
+(Dependency Source Verification); the single-slot macOS case was not run. A page that never
 finishes was not tested and would hold one slot until a restart. A server restart
 cost about 30 s of model reload (the next page took 48.5 s against 17.8 s).
 
@@ -344,6 +345,20 @@ method `pymupdf-text` and the document method `mineru+degraded`, also when every
 rung 3; only `--extractor pymupdf` writes `pymupdf`; nothing writes the legacy
 `pymupdf_normalized`.
 
+**RF-20 (Verified, source; a test pins (1), none pins (2); close-time critique, T2 `nexus_rdr/237-close-critique-2026-10-29`).**
+Two MinerU outcomes stop the document instead of descending the ladder, outside the propagate
+list in the Approach. (1) MinerU returns more `pdf_info` entries than the pages a batch asked
+for: its pdfium page rewrite failed and it parsed the whole document for that one batch
+(MinerU 3.1.11, `mineru/cli/common.py`). Keeping that output duplicates every page, the
+corruption nexus-v4xg7 found, and chash dedup hides it in storage. The code raises `ValueError`, not `RuntimeError`, and the
+ladder does not descend (`pdf_extractor.py:2302-2318`, pinned by
+`test_a_pdf_info_excess_still_stops_the_document`). (2) A `content_list` or `middle` file the
+worker or server wrote that is not valid JSON raises `json.JSONDecodeError`
+(`pdf_extractor.py:2829-2830`, `:3484-3489`), which also stops the document. Both are reported as
+a MinerU failure that points at `nx doctor`; for that document `--extractor pymupdf` is the
+working recourse. The "a document finishes" claim in the Problem Statement holds for page
+failures the ladder classifies, not for these two output defects.
+
 ### Critical Assumptions
 
 - [x] A1: MinerU honours `formula_enable=false` per request on the server path
@@ -445,7 +460,7 @@ that can actually stop work, so it is the path a timed-out page retries on:
   On a server with three slots (Linux and Windows by default) the server is
   restarted after two consecutive pages whose rung-1 server attempt timed out:
   there an abandoned request completes on its own and does not delay the next
-  one (RF-12). On a one-slot server (macOS, Dependency table) the abandoned parse
+  one (RF-12). On a one-slot server (macOS, Dependency Source Verification) the abandoned parse
   holds the only slot, so the first timeout restarts it. The restart replaces the
   registered server by its pid, through `_restart_broken_mineru_server`, so it is
   bounded by the machine-wide cooldown (`claim_broken_restart`, 120 s) and by
@@ -615,7 +630,9 @@ the install, CI and tests; Docling's whole-document convert stays silent.
 - Extraction is slower for non-math, born-digital PDFs: about 4 to 10 s per page
   on CPU across the measured PDFs (RF-1, RF-4, RF-11) against about 0.28 s for
   Docling's unenriched pass (RF-2). A 300-page book goes from about 1.5 minutes to
-  between about 20 and 50, with steady progress instead of silence. Docling's
+  between about 20 and 50 by that estimate, with steady progress instead of
+  silence; the MVV measured a 300-page manual at about 7 minutes on the laptop and
+  about 16 on chas, CPU only (RF-17). Docling's
   enriched default, the path `--extractor docling` took, is not a fast baseline:
   it ran 2.6 hours on a 30-page PDF (RF-11). Sam accepted this cost.
 - Math and scans extract better (RF-1), and no routing guess is made.
@@ -903,3 +920,5 @@ a candidate for trimming.
 - 2026-10-28: The release's MinerU end-to-end coverage is the post-publish `fresh-install-mvv.sh --published` formula-PDF check, default-on with a recorded-reason skip (nexus-tr1rj.20, decision delegated by Sam).
 - 2026-10-28: By decisions Sam delegated (nexus-tr1rj.13, nexus-tr1rj.14): a breaker trip or a machine-resource error in `nx dt index` and `nx index repo` skips and lists the remaining PDFs and keeps other work; a `pymupdf` rerun over a MinerU buffer starts clean; `nx dt index` and `nx dt capture` read `pdf.extractor`.
 - 2026-10-29: By Sam's decision (nexus-tr1rj.28): the Systemic failure paragraph is amended to the failure classes as built (RF-19); `nx index repo` keeps an all-unextracted PDF a per-file skip under error class `AllPagesUnextractedError`, without failing the run's exit.
+- 2026-10-29: RF-20 records the two MinerU output defects (a `pdf_info` excess, malformed `content_list` or `middle` JSON) that stop the document instead of descending the ladder (close-time critique).
+- 2026-10-29: Close-time text corrections: Trade-offs adds the measured RF-17 time for a 300-page book beside the accept-time estimate; four references to a "Dependency table" now name the Dependency Source Verification table.
