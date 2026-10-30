@@ -401,3 +401,34 @@ class TestExtractionRecord:
             assert rec["extraction_pages"]["mineru-no-formula"] == [3]
             assert {e["event"] for e in cap} == {"extraction_record_skipped_a_malformed_page"}
         assert all(e["log_level"] == "warning" for e in cap)
+
+
+class TestCatalogBibFields:
+    """nexus-6pfgb.28: what an ``--enrich`` lookup sends to the catalog document's columns. The engine
+    sets every column it is sent, an empty string and a zero included, so only real values go; the
+    document is written against the real service by ``tests/integration/test_rdr223_pdf_journey.py``."""
+
+    def test_a_full_lookup_names_every_column_and_stamps_enriched_at(self):
+        from nexus.pipeline_stages import _catalog_bib_fields
+
+        fields = _catalog_bib_fields({
+            "year": 2019, "venue": "OSDI", "authors": "A, B", "citation_count": 42,
+            "semantic_scholar_id": "ss1", "references": ["r1"],
+        })
+        assert {k: v for k, v in fields.items() if k != "bib_enriched_at"} == {
+            "bib_year": 2019, "bib_venue": "OSDI", "bib_authors": "A, B", "bib_citation_count": 42,
+            "bib_semantic_scholar_id": "ss1"}
+        assert fields["bib_enriched_at"]
+
+    def test_a_miss_sends_nothing_and_so_stamps_nothing(self):
+        from nexus.pipeline_stages import _catalog_bib_fields
+
+        assert _catalog_bib_fields({}) == {}
+
+    def test_empty_values_are_left_out_but_a_zero_citation_count_is_a_count(self):
+        from nexus.pipeline_stages import _catalog_bib_fields
+
+        fields = _catalog_bib_fields({"year": 0, "venue": "", "authors": "", "citation_count": 0,
+                                      "semantic_scholar_id": ""})
+        assert set(fields) == {"bib_citation_count", "bib_enriched_at"}
+        assert fields["bib_citation_count"] == 0

@@ -2589,6 +2589,10 @@ def _pdf_chunks(
     if bib_enrich_enabled:
         from nexus.bib_enricher import enrich as bib_enrich  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         bib = bib_enrich(source_title)
+    if extraction_stats is not None and bib:
+        # nexus-6pfgb.28: index_pdf writes the lookup to the catalog document's bib_* columns
+        # (the chunk rows' bib_* keys below are retired by nexus-6pfgb.27).
+        extraction_stats["bib"] = bib
 
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
@@ -3160,6 +3164,7 @@ def index_pdf(
                     on_doc_registered=_note_fallback_mint,
                     on_write_started=_note_write_started,
                     extraction_stats=_extraction_stats,
+                    enrich=enrich,
                 )
             except Exception as exc:
                 _rollback_if_freshly_minted(exc)
@@ -3359,6 +3364,15 @@ def index_pdf(
                     "extraction_pages": _extraction_stats.get("extraction_pages", {}),
                 },
             )
+            # nexus-6pfgb.28: the --enrich lookup goes to the catalog document's bib_* columns,
+            # which a bib_* filter is answered from. Before the stamp, like the rest of the
+            # catalog enrichment (nexus-z0o2p.34). Never raises.
+            if _extraction_stats.get("bib"):
+                from nexus.pipeline_stages import _catalog_pdf_bib_hook  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+                _catalog_pdf_bib_hook(
+                    str(_mint_state["doc_id"] or ""), pdf_path, col_name,
+                    _extraction_stats["bib"], corpus=corpus,
+                )
         except Exception:  # noqa: BLE001 — catalog registration is non-fatal; indexing continues
             # Non-fatal, but never silent: the document is indexed and its catalog record
             # (and the extraction method and degraded pages on it) is missing.
