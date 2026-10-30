@@ -56,6 +56,7 @@ from nexus.daemon.storage_service_daemon import (
     stop_storage_service,
     start_storage_service,
 )
+from tests._child_process import NEVER_ALIVE_PID
 from tests._module_seam import module_time, patch_in, patch_time
 
 
@@ -344,7 +345,7 @@ class TestStorageServiceSupervisorUnit:
         """If the service health probe fails, StorageServiceStartError is raised."""
         sup = _make_supervisor(config_dir, clock, service_port=19999)
 
-        fake_proc = _FakeProc(pid=42500)
+        fake_proc = _FakeProc(pid=NEVER_ALIVE_PID)  # the readiness failure SIGTERMs its group for real
 
         with (
             patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN),
@@ -1432,7 +1433,7 @@ class TestRunStorageSupervisorFunction:
         e.g. macOS) must still be found and terminated. Falsifies the
         pre-fix code, which signalled ONLY ``supervisor_pid`` and returned
         immediately — the engine pid never appears in any kill call."""
-        supervisor_pid, engine_pid = 970105, 970106
+        supervisor_pid, engine_pid = NEVER_ALIVE_PID, NEVER_ALIVE_PID + 4  # the stop SIGTERMs the supervisor pid for real
         _write_stale_or_fresh_lease(
             config_dir,
             supervisor_pid=supervisor_pid,
@@ -5197,7 +5198,7 @@ class TestWaitForServiceReadyMigrationAware:
         pre-nexus-8vp0i wording (operators and any external tooling key on
         it)."""
         sup = _make_supervisor(config_dir, clock)
-        fake_proc = _FakeProc(pid=51002)
+        fake_proc = _FakeProc(pid=NEVER_ALIVE_PID)  # the readiness failure SIGTERMs its group for real
         with (
             patch.object(
                 sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN
@@ -5218,7 +5219,7 @@ class TestWaitForServiceReadyMigrationAware:
 
         monkeypatch.setattr(ssd_mod, "_MIGRATION_STALL_TIMEOUT", 0.2)
         sup = _make_supervisor(config_dir, clock)
-        fake_proc = _FakeProc(pid=51003)
+        fake_proc = _FakeProc(pid=NEVER_ALIVE_PID)  # the readiness failure SIGTERMs its group for real
 
         log_lines = iter([["event=schema_migration_start"]])
 
