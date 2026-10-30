@@ -191,7 +191,9 @@ def test_since_head_without_base_logs_fallback(git_repo, monkeypatch):
             spawned.append(tuple(str(x) for x in args[1:]))
         return real_popen(args, *a, **k)
 
-    monkeypatch.setattr(bounded_subprocess.subprocess, "Popen", recording_popen)
+    # Local to bounded_subprocess's own ``subprocess`` name, never the stdlib module.
+    from tests._module_seam import setattr_in
+    setattr_in(monkeypatch, bounded_subprocess, "subprocess.Popen", recording_popen)
     try:
         idx._run_index(git_repo, _Reg(git_repo), since_head=True,
                        on_phase=phases.append)
@@ -200,6 +202,9 @@ def test_since_head_without_base_logs_fallback(git_repo, monkeypatch):
     assert any("no usable base — full index" in p for p in phases)
 
     assert spawned, "vacuous: the run spawned no git subprocess at all"
+    # A spawn that survives the removal, so a recorder that stopped seeing argv in this
+    # shape (a -C prefix, a wrapper) cannot pass the absence check below by seeing nothing.
+    assert ("rev-parse", "--show-toplevel") in spawned, spawned
     # head_hash's own read (_current_head) runs after the sentinel, so none of
     # the three can appear before it.
     removed = [("rev-parse", "--abbrev-ref", "HEAD"), ("rev-parse", "HEAD"),

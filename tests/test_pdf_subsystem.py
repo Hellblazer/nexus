@@ -387,7 +387,9 @@ class TestIndexPdfFileForceReEmbedDecoupled:
 
 @pytest.mark.t2_tenant
 class TestIndexPdfFileGitMetadata:
-    """AC-S5 / AC-S6: _index_pdf_file augments chunks with git metadata."""
+    """AC-S5: _index_pdf_file writes no flat ``git_*`` keys, even inside a real repo.
+
+    Git provenance lives on the catalog Document (RDR-236 Phase 0, nexus-qyx35)."""
 
     def _run_index_pdf_file(self, pdf: Path, repo: Path) -> list[dict]:
         """Helper: run _index_pdf_file with mocked embed/db, return captured metadatas."""
@@ -432,6 +434,8 @@ class TestIndexPdfFileGitMetadata:
         keys. They are LEGACY (RDR-101 Phase 5c dropped them from the schema), nothing
         reads them from a chunk row, and this path never ran ``normalize``, so they
         reached the engine. The catalog document carries git provenance."""
+        # Non-vacuity: in a directory that is no repo there would be no git keys to write.
+        assert (pdf_git_repo / ".git").exists(), "fixture is not a git repo; this proves nothing"
         pdf = pdf_git_repo / "docs" / "simple.pdf"
         metadatas = self._run_index_pdf_file(pdf, pdf_git_repo)
 
@@ -441,21 +445,6 @@ class TestIndexPdfFileGitMetadata:
             assert meta["tags"] == "pdf"
             assert meta["category"] == "prose"
             assert isinstance(meta["frecency_score"], float)
-
-    def test_no_git_repo_empty_git_fields(self, tmp_path: Path, simple_pdf: Path) -> None:
-        """AC-S6: Non-git directory → empty git metadata, no exception raised."""
-        import shutil
-        pdf = tmp_path / "simple.pdf"
-        shutil.copy2(simple_pdf, pdf)
-
-        metadatas = self._run_index_pdf_file(pdf, tmp_path)
-
-        assert metadatas, "Expected at least one chunk to be upserted"
-        for meta in metadatas:
-            # Empty git fields are filtered out by _index_pdf_file to stay
-            # under ChromaDB's 32-key metadata limit. Verify absent or empty.
-            assert meta.get("git_commit_hash", "") == ""
-            assert meta.get("git_branch", "") == ""
 
 
 # ── RDR-237: one extractor per request, no conditional routing ──────────────
