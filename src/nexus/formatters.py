@@ -85,8 +85,8 @@ def _display_path_or_title(meta: dict, result_id: str) -> str:
     :func:`_colon_safe`).
 
     nexus-cd1k0.16 finding (2): ``format_plain`` already falls back to
-    ``title or id`` for a result with no ``source_path`` (a knowledge/docs
-    entry from ``store put``), rendering it in the doc-style
+    ``title or id`` for a result with no catalog path (``_display_path``
+    empty: a knowledge/docs entry from ``store put``, or an orphan chunk), rendering it in the doc-style
     ``[distance] title`` shape instead of a bare path. The three OTHER
     single-line formatters (``format_compact``, ``format_vimgrep``,
     ``format_plain_with_context``) call ``_display_path`` directly with no
@@ -357,10 +357,11 @@ def _file_line_no(
     # and only opens from the repo root (review of d41e47c1f), so the owning
     # document's absolute local path (its catalog source_uri, stamped by
     # search_engine._attach_display_paths) is tried next, but only while
-    # nothing has opened: the first candidate that opens IS the file, and a line missing from it has drifted, so the answer is
-    # line 1 rather than a line read from another file. The row's source_path
-    # is the last writer's file, another document's after a shared chunk, and
-    # is not read (nexus-6pfgb.49; critique of b3a2f9fd1).
+    # nothing has opened: the first candidate that opens IS the file, and a
+    # line missing from it has drifted, so the answer is line 1 rather than a
+    # line read from another file. The row's source_path is the last writer's
+    # file, another document's after a shared chunk, and is not read
+    # (nexus-6pfgb.49; critique of b3a2f9fd1).
     candidates = list(dict.fromkeys(
         p for p in (shown, r.metadata.get(DISPLAY_SOURCE_PATH_KEY)) if p
     ))
@@ -472,8 +473,8 @@ def format_json(results: list[SearchResult]) -> str:
 def format_plain(results: list[SearchResult]) -> list[str]:
     """Default plain-text format: ./path/to/file.py:42:    content.
 
-    For results without a ``source_path`` (knowledge/docs entries from
-    ``store put``), falls back to the doc-style ``[distance] title\\n  snippet``
+    For results without a catalog path (knowledge/docs entries from
+    ``store put``, orphan chunks), falls back to the doc-style ``[distance] title\\n  snippet``
     format that the MCP surface uses.
     """
     lines: list[str] = []
