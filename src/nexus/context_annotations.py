@@ -163,6 +163,13 @@ OWNER_FACTS_KEY: str = "_owner_facts"
 #: makes. A working key like :data:`OWNER_FACTS_KEY`; absent when the owner states none.
 OWNER_FRECENCY_KEY: str = "_owner_frecency"
 
+#: Metadata key a search hit carries its owners' own ``source_agent`` values under (RDR-236 Phase 2,
+#: nexus-6pfgb.17): a sorted list of the agents the catalog entries of the hit's live owners
+#: state in ``meta["source_agent"]``, set by ``search_engine._attach_display_paths`` from the owner
+#: lookup the page already makes. Absent when no live owner states one. A working key like
+#: :data:`OWNER_FACTS_KEY`, read only through ``search_engine._row_agents``.
+OWNER_AGENTS_KEY: str = "_owner_agents"
+
 #: Working key set to ``True`` on a hit whose ``doc_id`` the owner lookup CHOSE (the chunk row
 #: named none; the engine's order picked the first holder). Such a choice is arbitrary, so the
 #: hit's frecency is the best of its live owners', not the chosen one's (RDR-236 Phase 1 review,
@@ -222,6 +229,10 @@ def entry_facts(entry: Any) -> dict[str, Any]:
             facts["ttl_days"] = days
     if isinstance(meta, Mapping) and facts.get("ttl_days", 0) > 0 and _parse_iso(meta.get("put_at")) is not None:
         facts["expires_from"] = str(meta["put_at"])
+    # RDR-236 Phase 2: the note's own writer (``meta["source_agent"]``, the notes catalog-meta home)
+    # rides on the same lookup, for the contradiction flag. Like frecency it is not a provenance fact.
+    if isinstance(meta, Mapping) and isinstance(agent := meta.get("source_agent"), str) and agent.strip():
+        facts["source_agent"] = agent.strip()
     # RDR-236 Phase 1: the document's own frecency rides on the same lookup. It is not a provenance
     # fact (``agreed_facts`` compares only ``_FACT_KEYS``), so it never reaches a display line.
     if (frecency := meta_frecency_score(meta)) is not None:

@@ -17,6 +17,7 @@ import structlog
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
 from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
+    OWNER_AGENTS_KEY,
     OWNER_FACTS_KEY,
     DOC_ID_INFERRED_KEY,
     OWNER_FRECENCY_KEY,
@@ -484,6 +485,14 @@ def _attach_display_paths(
             and (owner_frecency := facts.get(did, {}).get("frecency_score")) is not None
         ):
             r.metadata[OWNER_FRECENCY_KEY] = owner_frecency
+        # RDR-236 Phase 2 (nexus-6pfgb.17): the agents the hit's live owners state in their own
+        # catalog meta, from the same page lookup. Each is a positive statement by that owner, so
+        # an owner past the cap or one the lookup did not resolve simply adds nothing (unlike the
+        # agreed facts below, which are an intersection and need every owner heard).
+        # :func:`_row_agents` reads this and decides when the row may stand in for a legacy owner.
+        owner_agents = sorted({a for o in live_owners if (a := facts.get(o, {}).get("source_agent"))})
+        if owner_agents:
+            r.metadata[OWNER_AGENTS_KEY] = owner_agents
         # nexus-6pfgb.11: the hit's age and expiry are the owners' agreed
         # facts. Past the cap only some owners were resolved, and an owner the
         # lookup named but did not resolve (a live co-owner the catalog read
@@ -2905,6 +2914,26 @@ def _fetch_embeddings_for_results(
 _CONTRADICTION_MAX_PER_COLLECTION: int = 30
 
 
+def _row_agents(r: SearchResult) -> set[str]:
+    """The ``source_agent`` values a hit is attributed to, for the contradiction flag.
+
+    A chunk row is content-addressed, so a chunk two notes share is ONE row whose
+    ``source_agent`` is the last writer's. The agent of each OWNER is its catalog entry's
+    ``meta["source_agent"]`` (RDR-236, nexus-6pfgb.5), which :func:`_attach_display_paths`
+    stamps from the page's owner lookup as :data:`OWNER_AGENTS_KEY`; a shared chunk can
+    therefore carry several. A legacy owner (no ``source_agent`` in its meta) is not
+    attributed the row's value when the chunk has other owners, since the row is another
+    writer's then. The row stands in only when the chunk has at most one owner (or none is
+    known: no catalog, a chunk the manifest does not name), where the last writer IS the owner.
+    """
+    if agents := r.metadata.get(OWNER_AGENTS_KEY):
+        return set(agents)
+    if len(r.metadata.get("_owner_doc_ids") or ()) > 1:
+        return set()
+    row = r.metadata.get("source_agent")
+    return {row} if row else set()
+
+
 def _contradiction_candidates(page: list[SearchResult]) -> list[int]:
     """Indices (ascending) of the rows of one rendered *page* that could be flagged.
 
@@ -2914,9 +2943,10 @@ def _contradiction_candidates(page: list[SearchResult]) -> list[int]:
     N=10"), and the flag renders only on displayed rows.
 
     :func:`_flag_contradictions` flags a pair only when both rows share a collection and
-    both carry a non-empty, different ``source_agent``. A row is therefore a candidate
-    only if it has a ``source_agent`` and its collection also holds, on the page, a row
-    with a different one. The indexer stamps every code/docs/rdr chunk with one agent
+    each carries a non-empty agent set (:func:`_row_agents`) with a differing member. A
+    row is therefore a candidate only if it has an agent and its collection also holds, on
+    the page, a second row, with the collection's rows naming at least two agents between
+    them. The indexer stamps every code/docs/rdr chunk with one agent
     (``nexus-indexer``; ``recovery_bundle`` stamps ``recovery-import``), so those
     collections yield none unless an import put a second agent in the same collection;
     a knowledge collection holding notes from two or more agents does. A collection with
@@ -2924,12 +2954,13 @@ def _contradiction_candidates(page: list[SearchResult]) -> list[int]:
     and so is not fetched for.
     """
     by_col: dict[str, list[int]] = {}
+    agents = [_row_agents(r) for r in page]
     for i, r in enumerate(page):
-        if r.metadata.get("source_agent"):
+        if agents[i]:
             by_col.setdefault(r.collection, []).append(i)
     out: list[int] = []
     for idxs in by_col.values():
-        if len({page[i].metadata["source_agent"] for i in idxs}) < 2:
+        if len(idxs) < 2 or len(set().union(*(agents[i] for i in idxs))) < 2:
             continue
         if len(idxs) > _CONTRADICTION_MAX_PER_COLLECTION:
             continue
@@ -2977,7 +3008,9 @@ def _flag_contradictions(
     """Flag results where same-collection pairs have different source_agent and close distance.
 
     Two results from the same collection, with different non-empty source_agent
-    provenance and cosine distance < 0.3, get ``_contradiction_flag=True`` in
+    provenance (any agent of one differing from any agent of the other, per
+    :func:`_row_agents`: each owner's own, not the shared row's last writer) and
+    cosine distance < 0.3, get ``_contradiction_flag=True`` in
     their metadata. Purely retrieval-time, no LLM calls.
 
     Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
@@ -3020,9 +3053,9 @@ def _flag_contradictions(
             dist = 1.0 - float(np.dot(normed[a], normed[b]))
             if dist >= 0.3:
                 continue
-            agent_a = results[a].metadata.get("source_agent", "")
-            agent_b = results[b].metadata.get("source_agent", "")
-            if agent_a and agent_b and agent_a != agent_b:
+            agents_a = _row_agents(results[a])
+            agents_b = _row_agents(results[b])
+            if any(x != y for x in agents_a for y in agents_b):
                 flagged.add(a)
                 flagged.add(b)
 

@@ -7,7 +7,7 @@ from typing import Any
 
 import structlog
 
-from nexus.context_annotations import OWNER_FRECENCY_KEY
+from nexus.context_annotations import OWNER_FRECENCY_KEY, OWNER_RESOLVE_CAP
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
@@ -551,6 +551,21 @@ _LINK_BOOST_WEIGHTS: dict[str, float] = {
 _DEFAULT_LINK_BOOST_WEIGHT: float = 0.15
 
 
+def _link_owners(r: SearchResult) -> list[str]:
+    """The documents whose links boost *r*: the hit's ``doc_id`` first, then the rest of the
+    documents holding its chunk (``_owner_doc_ids``, stamped by the search's catalog attach),
+    at most :data:`~nexus.context_annotations.OWNER_RESOLVE_CAP` of them.
+
+    A chunk two documents share is one row, and ``doc_id`` is whichever owner the lookup
+    named first, so reading it alone ignored every other owner's links (RDR-236, nexus-6pfgb.20).
+    When the engine names one attributed owner deterministically (nexus-6pfgb.26), narrowing
+    this to that owner is a change to this function only.
+    """
+    did = r.metadata.get("doc_id", "")
+    owners = list(dict.fromkeys([did, *(r.metadata.get("_owner_doc_ids") or ())]))
+    return [o for o in owners if o][:OWNER_RESOLVE_CAP]
+
+
 def apply_link_boost(
     results: list[SearchResult],
     catalog: Any,
@@ -558,6 +573,10 @@ def apply_link_boost(
     type_weights: dict[str, float] | None = None,
 ) -> list[SearchResult]:
     """Boost hybrid_score for results whose source documents have outgoing links.
+
+    A hit's source documents are every owner of its chunk (:func:`_link_owners`); its signal is
+    the sum of their link signals, capped at 1.0 below, from ONE ``links_from_batch`` call for
+    the page.
 
     nexus-1qed (RDR-101 Phase 4): keyed on the catalog ``doc_id`` rather
     than on the legacy ``source_path``. The catalog projects ``doc_id``
@@ -573,11 +592,8 @@ def apply_link_boost(
     tw = type_weights if type_weights is not None else _LINK_BOOST_WEIGHTS
 
     # Collect unique doc_ids from results.
-    doc_ids: set[str] = set()
-    for r in results:
-        did = r.metadata.get("doc_id", "")
-        if did:
-            doc_ids.add(did)
+    owners_of = [_link_owners(r) for r in results]
+    doc_ids: set[str] = {o for owners in owners_of for o in owners}
 
     if not doc_ids:
         return results
@@ -610,11 +626,10 @@ def apply_link_boost(
             tumbler_signal[from_t] = tumbler_signal.get(from_t, 0.0) + w
 
     # Apply boost.
-    for r in results:
-        did = r.metadata.get("doc_id", "")
-        if not did:
+    for r, owners in zip(results, owners_of):
+        if not owners:
             continue
-        signal = min(tumbler_signal.get(did, 0.0), 1.0)
+        signal = min(sum(tumbler_signal.get(o, 0.0) for o in owners), 1.0)
         if signal > 0:
             r.hybrid_score += boost_weight * signal
 
