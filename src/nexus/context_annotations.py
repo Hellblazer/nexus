@@ -193,6 +193,14 @@ OWNER_CHUNK_COUNT_KEY: str = "_owner_chunk_count"
 #: citation count; ``apply_quality_boost`` then boosts nothing. A working key like :data:`OWNER_FACTS_KEY`.
 OWNER_QUALITY_KEY: str = "_owner_quality"
 
+#: Metadata key a search hit carries the absolute local path of its attributed document under
+#: (nexus-6pfgb.49): the ``file://`` ``source_uri`` of the catalog entry the page's one owner lookup
+#: already resolved. ``_display_path`` is the catalog ``file_path``, often repo-relative; a reader that
+#: must OPEN the file (the line number of a prose hit) tries this next, never the chunk row's
+#: ``source_path``, which is the last writer's file. Absent when the document has no local ``file://``
+#: source. A working key like :data:`OWNER_FACTS_KEY`, never stored.
+DISPLAY_SOURCE_PATH_KEY: str = "_display_source_path"
+
 #: Working key set to ``True`` on a hit whose ``doc_id`` the owner lookup CHOSE (the chunk row
 #: named none; the engine's order picked the first holder). Such a choice is arbitrary, so the
 #: hit's frecency is the best of its live owners', not the chosen one's (RDR-236 Phase 1 review,

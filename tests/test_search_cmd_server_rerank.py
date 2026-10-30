@@ -296,9 +296,9 @@ def test_default_rerankermodel_stays_silent(runner, cloud_env):
 # either re-sort would be undone by it; capping after the slice is too
 # late (the domination has already consumed the slots).
 
-def _file_result(id: str, *, source_path: str, distance: float = 0.1,
+def _file_result(id: str, *, doc_id: str, distance: float = 0.1,
                   rerank_score: float | None = None) -> SearchResult:
-    meta: dict = {"source_path": source_path}
+    meta: dict = {"doc_id": doc_id}
     if rerank_score is not None:
         meta["rerank_score"] = rerank_score
     return SearchResult(
@@ -314,11 +314,11 @@ def test_diversity_cap_applies_after_server_rerank_resort(runner, cloud_env):
     mandatory domination-check shape, mirrored from
     TestApplyFileDiversityCap in test_search_engine.py)."""
     results = [
-        _file_result(f"dom{i}", source_path="dominant.py", rerank_score=0.9 - i * 0.001)
+        _file_result(f"dom{i}", doc_id="dominant.py", rerank_score=0.9 - i * 0.001)
         for i in range(8)
     ]
     results += [
-        _file_result(f"o{i}", source_path=f"other{i}.py", rerank_score=0.5 - i * 0.001)
+        _file_result(f"o{i}", doc_id=f"other{i}.py", rerank_score=0.5 - i * 0.001)
         for i in range(10)
     ]
     mock_t3 = _t3_mock(["knowledge__test", "rdr__nexus"])
@@ -329,8 +329,8 @@ def test_diversity_cap_applies_after_server_rerank_resort(runner, cloud_env):
     assert res.exit_code == 0, res.output
     items = json.loads(res.stdout)
     assert len(items) == 10
-    dom_count = sum(1 for it in items if it.get("source_path") == "dominant.py")
-    distinct = {it.get("source_path") for it in items}
+    dom_count = sum(1 for it in items if it.get("doc_id") == "dominant.py")
+    distinct = {it.get("doc_id") for it in items}
     assert dom_count <= 2, f"expected <=2 dominant-file rows, got {dom_count}: {items}"
     assert len(distinct) >= 9, f"expected >=9 distinct files, got {len(distinct)}: {items}"
 
@@ -344,10 +344,10 @@ def test_a_scored_row_always_outranks_an_unscored_one_through_the_diversity_cap(
     4 scored chunks of one file (2 overflow the per-file quota) and 1 unscored
     chunk of another file: on a 4-slot page every slot is a scored row."""
     results = [
-        _file_result(f"dom{i}", source_path="dominant.py", rerank_score=0.9 - i * 0.01)
+        _file_result(f"dom{i}", doc_id="dominant.py", rerank_score=0.9 - i * 0.01)
         for i in range(4)
     ]
-    results.append(_file_result("unscored", source_path="other.py", distance=0.05))
+    results.append(_file_result("unscored", doc_id="other.py", distance=0.05))
     mock_t3 = _t3_mock(["knowledge__test", "rdr__nexus"])
 
     res = _invoke(runner, mock_t3, _fake_retrieval(results),
@@ -365,11 +365,11 @@ def test_diversity_cap_applies_on_fallback_round_robin_path(runner, cloud_env):
     through round_robin_interleave, which groups by COLLECTION, not file,
     and does not by itself stop one file's chunks from dominating)."""
     results = [
-        _file_result(f"dom{i}", source_path="dominant.py", distance=0.01 * i)
+        _file_result(f"dom{i}", doc_id="dominant.py", distance=0.01 * i)
         for i in range(8)
     ]
     results += [
-        _file_result(f"o{i}", source_path=f"other{i}.py", distance=0.5 + 0.01 * i)
+        _file_result(f"o{i}", doc_id=f"other{i}.py", distance=0.5 + 0.01 * i)
         for i in range(10)
     ]
     mock_t3 = _t3_mock(["knowledge__test"])
@@ -380,8 +380,8 @@ def test_diversity_cap_applies_on_fallback_round_robin_path(runner, cloud_env):
     assert res.exit_code == 0, res.output
     items = json.loads(res.stdout)
     assert len(items) == 10
-    dom_count = sum(1 for it in items if it.get("source_path") == "dominant.py")
-    distinct = {it.get("source_path") for it in items}
+    dom_count = sum(1 for it in items if it.get("doc_id") == "dominant.py")
+    distinct = {it.get("doc_id") for it in items}
     assert dom_count <= 2, f"expected <=2 dominant-file rows, got {dom_count}: {items}"
     assert len(distinct) >= 9, f"expected >=9 distinct files, got {len(distinct)}: {items}"
 

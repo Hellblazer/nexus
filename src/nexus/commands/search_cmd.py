@@ -547,14 +547,13 @@ def search_cmd(
         return
 
     # Python-side path scoping (ChromaDB has no $startswith operator).
-    # nexus-1qed: prefer the catalog-resolved _display_path so post-prune
-    # chunks that no longer carry source_path still match the scope.
+    # nexus-1qed: the catalog-resolved _display_path. The row's source_path is
+    # the last writer's file and is not read (nexus-6pfgb.49).
     if resolved is not None:
         results = [
             r for r in results
             if (r.metadata.get("_display_path") or "").startswith(resolved)
             or r.metadata.get("file_path", "").startswith(resolved)
-            or r.metadata.get("source_path", "").startswith(resolved)
         ]
         if not results:
             if json_out:
@@ -732,15 +731,11 @@ def search_cmd(
         for line in format_vimgrep(results, query=query):
             click.echo(line)
     elif files_only:
-        # nexus-1qed: prefer the catalog-resolved _display_path so
-        # files-only output stays correct after the prune verb drops
-        # source_path from chunk metadata.
+        # nexus-1qed: the catalog-resolved _display_path (nexus-6pfgb.49: never
+        # the row's source_path, the last writer's file).
         seen: set[str] = set()
         for r in results:
-            file_path = (
-                r.metadata.get("_display_path")
-                or r.metadata.get("source_path", "")
-            )
+            file_path = r.metadata.get("_display_path", "")
             if file_path and file_path not in seen:
                 seen.add(file_path)
                 click.echo(file_path)

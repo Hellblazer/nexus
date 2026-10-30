@@ -11,12 +11,15 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import structlog
 
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
 from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
+    DISPLAY_SOURCE_PATH_KEY,
     OWNER_AGENTS_KEY,
     OWNER_BIB_KEY,
     OWNER_CHUNK_COUNT_KEY,
@@ -456,14 +459,16 @@ def _attach_display_paths(
     if not doc_ids:
         return
     if prefetched is not None and doc_ids <= prefetched.doc_ids:
-        cache, titles, homes, facts = prefetched.maps()
+        cache, titles, homes, facts, local_paths = prefetched.maps()
     else:
-        cache, titles, homes, facts = _resolve_display_maps(doc_ids, catalog)
+        cache, titles, homes, facts, local_paths = _resolve_display_maps(doc_ids, catalog)
     for r in results:
         did = r.metadata.get("doc_id", "")
         path = cache.get(did) if did else None
         if path:
             r.metadata["_display_path"] = path
+        if local := (local_paths.get(did) if did else None):
+            r.metadata[DISPLAY_SOURCE_PATH_KEY] = local
         all_owners = r.metadata.get("_owner_doc_ids") or ([did] if did else [])
         owners = all_owners[:_OWNER_TITLE_RESOLVE_CAP]
         # The owner lookups are tenant-wide (chash is a function of text
@@ -557,13 +562,24 @@ def _display_doc_ids(results: list[SearchResult]) -> set[str]:
     return doc_ids
 
 
-#: ``(file_path, title, physical_collection, facts)`` per doc_id; ``facts`` is
-#: :func:`nexus.context_annotations.entry_facts` of the live entry.
-_DisplayMaps = tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, dict[str, Any]]]
+#: ``(file_path, title, physical_collection, facts, local_path)`` per doc_id; ``facts`` is
+#: :func:`nexus.context_annotations.entry_facts` of the live entry and ``local_path`` the absolute
+#: path of its ``file://`` source_uri (nexus-6pfgb.49).
+_DisplayMaps = tuple[
+    dict[str, str], dict[str, str], dict[str, str], dict[str, dict[str, Any]], dict[str, str],
+]
+
+
+def _local_source_path(entry: Any) -> str:
+    """The absolute local path of *entry*'s ``file://`` source_uri, or ``""`` (any other scheme or none)."""
+    uri = getattr(entry, "source_uri", "") or ""
+    if not isinstance(uri, str) or not uri.startswith("file://"):
+        return ""
+    return url2pathname(urlparse(uri).path)
 
 
 def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
-    """``(file_path, title, physical_collection, facts)`` per doc_id, best-effort.
+    """``(file_path, title, physical_collection, facts, local_path)`` per doc_id, best-effort.
 
     ``facts`` carries the provenance a hit's age line reads (indexed date, year,
     expiry), taken from the catalog entries this lookup already resolves
@@ -575,6 +591,7 @@ def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
     titles: dict[str, str] = {}  # live documents only (resolve skips tombstones)
     homes: dict[str, str] = {}  # doc_id -> physical_collection
     facts: dict[str, dict[str, Any]] = {}  # doc_id -> entry_facts
+    local_paths: dict[str, str] = {}  # doc_id -> absolute path of a file:// source_uri
     _resolve_many = getattr(catalog, "resolve_many", None)
     if _resolve_many is not None:
         try:
@@ -586,6 +603,8 @@ def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
                     titles[did] = getattr(entry, "title", "") or ""
                     homes[did] = getattr(entry, "physical_collection", "") or ""
                     facts[did] = entry_facts(entry)
+                    if local := _local_source_path(entry):
+                        local_paths[did] = local
         except Exception:  # noqa: BLE001 — best-effort batch resolve; failure logged at debug, display path dropped for set (see comment)
             _log.debug("attach_display_paths_batch_failed", exc_info=True)
             # Degradation granularity (CR Med-1 / critic obs): a single
@@ -606,7 +625,9 @@ def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
                 titles[did] = getattr(entry, "title", "") or ""
                 homes[did] = getattr(entry, "physical_collection", "") or ""
                 facts[did] = entry_facts(entry)
-    return cache, titles, homes, facts
+                if local := _local_source_path(entry):
+                    local_paths[did] = local
+    return cache, titles, homes, facts, local_paths
 
 
 class _DisplayLookup:
@@ -620,7 +641,7 @@ class _DisplayLookup:
     def __init__(self, doc_ids: set[str], catalog: Any) -> None:
         self.doc_ids = doc_ids
         self._catalog = catalog
-        self._maps: _DisplayMaps = ({}, {}, {}, {})
+        self._maps: _DisplayMaps = ({}, {}, {}, {}, {})
         # Run in the caller's context so a ContextVar the catalog client
         # reads (a per-call deadline, for one) reaches the worker too.
         ctx = contextvars.copy_context()
@@ -2662,13 +2683,13 @@ def apply_file_diversity_cap(
     output, just reordered. Nothing is dropped and no score is touched.
 
     File identity resolves per result via ``metadata.doc_id`` ->
-    ``metadata.source_path`` -> ``metadata.file_path`` -> ``r.id``
-    (``doc_id`` first because it is the catalog tumbler, stable across a
-    prune/re-index; the path keys are the legacy pre-doc_id identity the
-    CLI's rg-boost and ``_display_path`` code also fall back on) — a
-    result with none of the first three metadata keys
-    falls back to its own unique ``id``, so results with no shared file
-    identity never cap against each other.
+    ``metadata.file_path`` -> ``r.id`` (``doc_id`` first because it is
+    the catalog tumbler, stable across a prune/re-index; ``file_path`` is
+    the legacy pre-doc_id identity) — a result with neither falls back to
+    its own unique ``id``, so results with no shared file identity never
+    cap against each other. The row's ``source_path`` is the last writer's
+    file, shared with other documents, and is not an identity
+    (nexus-6pfgb.49).
 
     Walks *results* in their existing (already-scored) order; the first
     *max_per_file* occurrences of each file key are kept in place, every
@@ -2703,7 +2724,6 @@ def apply_file_diversity_cap(
     for r in results:
         key = (
             r.metadata.get("doc_id")
-            or r.metadata.get("source_path")
             or r.metadata.get("file_path")
             or r.id
         )

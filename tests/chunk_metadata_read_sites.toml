@@ -134,9 +134,6 @@ bib_year = 1
 catalog_doc_id = 1
 content_hash = 1
 
-[sites."src/nexus/commands/search_cmd.py::search_cmd"]
-source_path = 2
-
 [sites."src/nexus/commands/search_cmd.py::search_cmd._doc_chunk_count"]
 chunk_count = 1
 doc_id = 1
@@ -182,7 +179,6 @@ source_path = 1
 
 [sites."src/nexus/formatters.py::_file_line_no"]
 line_start = 1
-source_path = 1
 
 [sites."src/nexus/formatters.py::_format_with_bat"]
 line_end = 1
@@ -208,18 +204,16 @@ doc_id = 1
 
 [sites."src/nexus/mcp/core.py::_search_render"]
 doc_id = 1
-source_path = 1
 title = 1
 
 # nexus-6pfgb.12: the doc card's bib_*, indexed_at and ttl_days now come from the owning documents
 # (OWNER_BIB_KEY, OWNER_FACTS_KEY), stamped by search_engine._attach_display_paths. What stays are the
-# grouping fallbacks for a chunk the catalog could not resolve (doc_id, content_hash, title, source_path)
+# grouping fallbacks for a chunk the catalog could not resolve (doc_id, content_hash, title)
 # and the legacy chunk_count key.
 [sites."src/nexus/mcp/core.py::query"]
 chunk_count = 1
 content_hash = 1
 doc_id = 2
-source_path = 2
 title = 2
 
 # nexus-6pfgb.13: store_get shows the owning notes' own tags, ttl, index date and title (note_display, from
@@ -299,4 +293,3 @@ source_agent = 1
 
 [sites."src/nexus/search_engine.py::apply_file_diversity_cap"]
 doc_id = 1
-source_path = 1

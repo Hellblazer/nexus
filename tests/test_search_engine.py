@@ -2460,7 +2460,7 @@ class TestBoostWindow:
     def test_cap_with_window_keeps_window_overflow_ahead_of_the_tail(self):
         def r(i, f):
             return SearchResult(id=i, content="x", distance=0.1, collection="code__t",
-                                metadata={"source_path": f})
+                                metadata={"doc_id": f})
 
         rows = [r("a1", "A"), r("a2", "A"), r("a3", "A"), r("b1", "B"), r("c1", "C")]
         assert [x.id for x in apply_file_diversity_cap(rows)] == ["a1", "a2", "b1", "c1", "a3"]

@@ -503,7 +503,7 @@ def test_an_owner_with_a_home_but_no_facts_is_unheard_not_a_key_error() -> None:
         def maps(self):
             return (
                 {}, {"1.1.1": "Doc A", "1.1.2": "Doc B"}, {"1.1.1": COLL, "1.1.2": COLL},
-                {"1.1.1": {"indexed_at": "2026-08-01T00:00:00+00:00"}},
+                {"1.1.1": {"indexed_at": "2026-08-01T00:00:00+00:00"}}, {},
             )
 
     hit = _hit(X, doc_id="1.1.1")

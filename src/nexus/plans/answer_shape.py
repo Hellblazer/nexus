@@ -169,7 +169,10 @@ _PAYLOAD_SHAPES: tuple[tuple[frozenset[str], AnswerShape], ...] = (
     (frozenset({"ids", "tumblers", "distances", "collections",
                 "chunk_collections", "chunk_text_hash", "also_in", "also_in_ids",
                 "seed_scope", "graph_scope"}), AnswerShape.RETRIEVAL_ONLY),
-    (frozenset({"contents", "missing", "section_types"}), AnswerShape.HYDRATION_DUMP),
+    # store_get_many(structured=True): source_notes (nexus-onn7s) and section_type_basis (nexus-sx1t0)
+    # are part of the payload; without them a full dump did not match and read as ANSWERED.
+    (frozenset({"contents", "missing", "section_types", "source_notes", "section_type_basis"}),
+     AnswerShape.HYDRATION_DUMP),
     (frozenset({"extractions"}), AnswerShape.EXTRACTIONS_ONLY),
     (frozenset({"ranked"}), AnswerShape.RANKING_ONLY),
     # The remaining structured operators (``nexus.mcp.operator_requests``

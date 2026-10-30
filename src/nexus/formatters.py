@@ -12,6 +12,7 @@ import structlog
 
 from nexus.bounded_subprocess import run_bounded
 from nexus.context_annotations import (
+    DISPLAY_SOURCE_PATH_KEY,
     DOC_ID_INFERRED_KEY,
     OWNER_AGENTS_KEY,
     OWNER_BIB_KEY,
@@ -27,7 +28,7 @@ _log = structlog.get_logger()
 #: Metadata keys the search sets for its own use; ``format_json`` leaves them out.
 _INTERNAL_METADATA_KEYS: frozenset[str] = frozenset(
     {
-        "_owner_doc_ids", DOC_ID_INFERRED_KEY, OWNER_AGENTS_KEY, OWNER_BIB_KEY, OWNER_CHUNK_COUNT_KEY,
+        "_owner_doc_ids", DISPLAY_SOURCE_PATH_KEY, DOC_ID_INFERRED_KEY, OWNER_AGENTS_KEY, OWNER_BIB_KEY, OWNER_CHUNK_COUNT_KEY,
         OWNER_FACTS_KEY, OWNER_FRECENCY_KEY, OWNER_QUALITY_KEY,
     },
 )
@@ -353,15 +354,16 @@ def _file_line_no(
     if not shown:
         return best_idx + 1
     # The printed path first. A catalog _display_path is often REPO-RELATIVE
-    # and only opens from the repo root (review of d41e47c1f), so the chunk's
-    # own source_path / file_path, which the indexer writes absolute, are
-    # tried next, but only while nothing has opened: the first candidate
-    # that opens IS the file, and a line missing from it has drifted, so
-    # the answer is line 1 rather than a line read from another file (a
-    # catalog rename leaves source_path naming a different document;
-    # critique of b3a2f9fd1).
+    # and only opens from the repo root (review of d41e47c1f), so the owning
+    # document's absolute local path (its catalog source_uri, stamped by
+    # search_engine._attach_display_paths) and the chunk's file_path are tried
+    # next, but only while nothing has opened: the first candidate that opens
+    # IS the file, and a line missing from it has drifted, so the answer is
+    # line 1 rather than a line read from another file. The row's source_path
+    # is the last writer's file, another document's after a shared chunk, and
+    # is not read (nexus-6pfgb.49; critique of b3a2f9fd1).
     candidates = list(dict.fromkeys(
-        p for p in (shown, r.metadata.get("source_path"), r.metadata.get("file_path")) if p
+        p for p in (shown, r.metadata.get(DISPLAY_SOURCE_PATH_KEY), r.metadata.get("file_path")) if p
     ))
     wanted = text.strip()
     for path in candidates:
