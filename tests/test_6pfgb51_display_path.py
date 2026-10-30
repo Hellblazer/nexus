@@ -81,10 +81,36 @@ def test_file_line_no_does_not_open_a_stale_source_path(tmp_path) -> None:
 def test_formatters_module_never_reads_the_row_path_keys() -> None:
     """The read-site lint cannot see a read through a parameter named ``meta`` (a ``[receivers]``
     entry would be reported stale once the read is gone), so the module is pinned here."""
-    tree = ast.parse(pathlib.Path(formatters.__file__).read_text())
-    reads = [
-        c.lineno for c in ast.walk(tree)
-        if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "get"
-        and c.args and isinstance(c.args[0], ast.Constant) and c.args[0].value == "source_path"
-    ]
-    assert not reads, f"formatters.py reads a chunk row's source_path at lines {reads}"
+    reads = _row_path_key_reads(pathlib.Path(formatters.__file__).read_text())
+    assert not reads, f"formatters.py reads a chunk row's source_path or file_path at lines {reads}"
+
+
+_ROW_PATH_KEYS = {"source_path", "file_path"}
+
+
+def _row_path_key_reads(source: str) -> list[int]:
+    """Lines reading a row path key: ``x.get("source_path"...)`` or ``x["file_path"]``."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get" and node.args
+            and isinstance(node.args[0], ast.Constant) and node.args[0].value in _ROW_PATH_KEYS
+        ) or (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant) and node.slice.value in _ROW_PATH_KEYS
+        ):
+            found.append(node.lineno)
+    return found
+
+
+@pytest.mark.parametrize("read", [
+    'meta.get("source_path")', "meta.get('source_path', '')", 'meta.get("file_path")',
+    'meta["source_path"]', "meta['file_path']",
+])
+def test_the_path_key_pin_sees_every_read_spelling(read: str) -> None:
+    assert _row_path_key_reads(f"x = {read}\n") == [1]
+
+
+def test_the_path_key_pin_ignores_other_keys() -> None:
+    assert _row_path_key_reads('a = meta.get("_display_path")\nb = meta["title"]\n') == []
