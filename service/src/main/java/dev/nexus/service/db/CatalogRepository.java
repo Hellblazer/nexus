@@ -2244,7 +2244,13 @@ public final class CatalogRepository {
         // pins a stale count until someone calls /manifest/resync by hand. An
         // EXPLICIT chunk_count still wins (the orphan-backfill paths depend on
         // asserting a count the manifest does not yet carry).
-        if (!fields.containsKey("chunk_count")) {
+        //
+        // nexus-8o06q / nexus-6pfgb.9: NOT on a meta-only update. e4gel's rule exists for the
+        // /update that FOLLOWS a manifest change (head_hash, physical_collection); a stamp that
+        // names only meta (RDR-236 Phase 1's frecency write) follows no manifest change, and
+        // re-deriving there erased the chunk_count-above-manifest gap the manifest heal reads
+        // to mark a lost manifest row for re-index, so any index run hid the gap from the heal.
+        if (!fields.containsKey("chunk_count") && !isMetaOnlyUpdate(fields)) {
             more = more.set(CATALOG_DOCUMENTS.CHUNK_COUNT, reDerivedChunkCount(ctx, tenant, target));
         }
         // nexus-927mo: /update must refresh indexed_at when it CHANGES head_hash —
@@ -2270,6 +2276,21 @@ public final class CatalogRepository {
         return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(target))
                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()));
+    }
+
+    /**
+     * True when the update applies nothing but {@code meta}/{@code metadata}: every other key
+     * is absent, null or the stripped {@code deleted_at}. Such an update says nothing about
+     * the manifest, so {@link #buildUpdateDocumentQuery} leaves chunk_count alone (nexus-8o06q).
+     */
+    private static boolean isMetaOnlyUpdate(Map<String, Object> fields) {
+        boolean sawMeta = false;
+        for (var e : fields.entrySet()) {
+            if (e.getValue() == null || "deleted_at".equals(e.getKey())) continue;
+            if (!"meta".equals(e.getKey()) && !"metadata".equals(e.getKey())) return false;
+            sawMeta = true;
+        }
+        return sawMeta;
     }
 
     /**
