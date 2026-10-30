@@ -2336,6 +2336,26 @@ class TestTupleSlotFanOut:
         side.process(again)
         assert side.held() == [] and len(tuples.ops("ack")) == 2
 
+    def test_a_park_cap_refusal_from_the_engine_is_a_failed_claim_not_a_crash(
+        self, tuple_env,  # noqa: ANN001
+    ) -> None:
+        """Scenario 15's refusal arm (moved here from the engine journey in
+        tests/test_aspect_worker_tuples.py, nexus-9edxe round 3): the engine's
+        per-claimant park cap answers the parked ``in_``; the batch reports a failed
+        claim. The engine journey never made the engine refuse (it replaced
+        ``HttpTupleStore.in_``), so this is the same fault on the fake."""
+        from nexus.db.t2.http_tuple_store import ParkCapExceededError
+
+        tuples = _FakeTuples()
+        tuples.raise_on["in_"] = ParkCapExceededError("cap")
+        tuple_env.install(_FakeTupleDb(tuples))
+        side = _tuple_worker()._tuple_side
+
+        claims, failed = side.claim_batch(park=True)
+
+        assert claims == [] and failed, "a park-cap refusal is a failed claim"
+        assert len(tuples.ops("inp")) == 4, "the four probing slots still ran"
+
 
 class TestClaimRenewerBound:
     def test_renewal_stops_at_the_deadline_and_never_resumes(self) -> None:
@@ -2611,6 +2631,91 @@ class TestTupleVerdictMap:
         tuples, _ = self._run(tuple_env, monkeypatch, rec,
                               db_setup=lambda d: d.complete_raises.append(AspectUpsertConflictError("409")))
         assert tuples.ops("nack")[0][3]["dead"] is False and tuples.ops("nack")[0][3]["retry_after_s"]
+
+    @pytest.mark.parametrize(
+        "code, dead",
+        [(500, False), (400, True)],
+        ids=["500-is-a-ladder-retry", "400-control-is-dead"],
+    )
+    def test_a_bare_http_status_on_the_persist_call_is_a_ladder_retry_only_for_5xx(
+        self, tuple_env, monkeypatch, code, dead,  # noqa: ANN001
+    ) -> None:
+        """nexus-5r2sc.3.9 M2 (moved off the engine, nexus-9edxe round 3): the persist
+        call raises a bare ``httpx.HTTPStatusError`` (the real ``complete_aspect``
+        adds nothing around ``HttpDocumentAspectsStore.upsert``). The generic retry
+        predicate accepts only 429/502/503/504, so a computed extraction was
+        dead-lettered on a 500; a 5xx is the ladder's retry and a 4xx stays dead."""
+        import httpx
+
+        req = httpx.Request("POST", "http://engine/v1/aspects/upsert")
+        exc = httpx.HTTPStatusError(str(code), request=req, response=httpx.Response(code, request=req))
+        tuples, db = self._run(
+            tuple_env, monkeypatch, _record_for("knowledge__delos", "/p0.md"),
+            db_setup=lambda d: d.complete_raises.append(exc),
+        )
+
+        assert db.complete_raises == [], "the persist call was reached exactly once"
+        assert db.completed == [] and tuples.ops("ack") == []
+        (nack,) = tuples.ops("nack")
+        if dead:
+            assert nack[3] == {"retry_after_s": None, "dead": True}
+        else:
+            assert nack[3]["dead"] is False and nack[3]["retry_after_s"] > 0
+
+    @pytest.mark.parametrize(
+        "case",
+        ["t3-connect-error", "t3-5xx", "manifest-raises", "control-empty-read-is-dropped"],
+    )
+    def test_a_transport_failure_reading_t3_or_the_manifest_is_a_ladder_nack_never_a_drop(
+        self, tuple_env, monkeypatch, case,  # noqa: ANN001
+    ) -> None:
+        """nexus-5r2sc.3.10 Critical 1 (moved off the engine, nexus-9edxe round 3): a
+        transport failure reading T3 or the catalog manifest is a fact about the
+        network, not the document. The REAL extractor and reader run (an MCP note
+        task carries no text, so the extractor reads it through the manifest); only
+        T3 and the catalog are stand-ins. The verdict is the worker's, and the fake
+        queue records it exactly as the engine would be told."""
+        import httpx
+
+        collection = "knowledge__nx235t-abc123__bge-base-en-v15-768__v1"
+        rows = [_NS(chash=c * 64, position=i) for i, c in enumerate("ab")]
+
+        class _Cat:
+            def get_manifest(self, doc_id):  # noqa: ANN001
+                if case == "manifest-raises":
+                    raise httpx.ConnectError("catalog unreachable")
+                return rows
+
+        calls: list = []
+
+        def get(**kw):  # noqa: ANN001
+            calls.append(kw)
+            if case == "t3-connect-error":
+                raise httpx.ConnectError("T3 unreachable")
+            if case == "t3-5xx":
+                req = httpx.Request("POST", "http://t3/v1/vectors/get")
+                raise httpx.HTTPStatusError("500", request=req, response=httpx.Response(500, request=req))
+            return {"ids": [], "documents": [], "metadatas": []}
+
+        t3 = _NS(get_collection=lambda name: _NS(get=get))
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: _Cat())
+        monkeypatch.setattr("nexus.aspect_extractor.get_t3", lambda: t3)
+        tuples = _FakeTuples([_task_body(0, collection=collection)], attempts=0)
+        tuple_env.install(_FakeTupleDb(tuples))
+        side = _tuple_worker()._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        assert len(claims) == 1
+
+        side.process(claims)
+
+        if case != "manifest-raises":
+            assert calls, "the read reached T3: the failure is the stub's, not an earlier skip"
+        if case == "control-empty-read-is-dropped":
+            assert len(tuples.ops("ack")) == 1 and tuples.ops("nack") == [], "an empty read is acked as dropped"
+        else:
+            assert tuples.ops("ack") == [], f"{case}: a transport failure is never a drop"
+            (nack,) = tuples.ops("nack")
+            assert nack[3]["dead"] is False and nack[3]["retry_after_s"] > 0, (case, nack)
 
 
 class TestSupersededBound:

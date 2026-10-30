@@ -40,7 +40,7 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4972
+provisioned_tests = 4960
 tolerance_tests = 0
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
@@ -125,6 +125,34 @@ tolerance_tests = 0
 #   tests/test_aspect_drain_protocol.py +1 -> 0 and tests/test_http_aspect_queue_tuple_counts.py 1 -> 0: their engine tests
 #     are steps of the journeys above. tests/test_rdr235_mvv_aspect_queue_tuples.py stays 2 (the MVV journey and scenario 24).
 #   A fold hides its later steps behind an earlier failure; every assertion in a journey names its step.
+# 4972 -> 4960 (nexus-9edxe round 3, 2026-10-30, same ask): the worker-side tests, -12. Reduce-only. The branch total over
+# merge base 2b7b12bfb is now 15 (= 4960 - 4945): worker_tuples 3, producer 2, requeue-failed 2, persist fence 2, MVV 2, rung 1,
+# tripwire 1, transport 1, mcp tuple tools 1. tests/test_aspect_worker.py (29) and tests/test_health_tuple_doctor_rows.py
+# (2) mint the same number at 2b7b12bfb: they are base tests, not RDR-235 additions, and are left alone. Per file (count over
+# the merge base, before -> after):
+#   tests/test_aspect_worker_tuples.py 15 -> 3: three engine journeys. (1) claims and leases: scenario 6 (five slots, five
+#     tasks, the one-claimant F25 control), 15 (tasks in five collections, then an idle queue: exactly one parked in under the
+#     slot-0 claimant, no refusal over three rounds), 7a (renewed past a 2 s lease inside the deadline) and 7b (hung past a 1 s
+#     deadline, the lease lapses, the late result writes and acks nothing). (2) verdicts as queue states: gate S3 (four failure
+#     classes keyed on source path, the retryable two held back by the ladder) then scenario 16 on the queue S3 left (present,
+#     late and never-present documents, the delay proven by the engine's available_at stamp, not by an immediate re-claim).
+#     (3) task shapes and queue interplay: scenario 14 (an MCP note is a text-free identity task read through the manifest), the
+#     alternation (tuples mode drains table rows and tasks; table mode drains leftover tasks), scenario 10 (the 409 release arm,
+#     then the bounded dead arm; last, because it leaves a dead row).
+#   Tenant-free, in tests/test_aspect_worker.py (+7 test ids, 0 tenants): the T3 transport error, the T3 5xx, the raising
+#     manifest and the empty-read control run the REAL extractor and reader over a stub T3 and catalog behind the fake tuple queue
+#     (a parametrized test: four ids); the persist 500 and the 400 control (two ids); the park-cap refusal as a failed claim. The
+#     queue state those cases asserted on the engine (attempts 1, not dead, released) is the verdict the fake records (a nack
+#     with dead=False and retry_after_s, or an ack for the control); the engine's own ladder and dead states stay covered by S3,
+#     the 409 arms and tests/test_http_tuple_store_rdr235_transport.py. The engine-side park-cap case never made the engine
+#     refuse (it replaced HttpTupleStore.in_), so the fake is the same fault.
+#   Kills that survive (re-applied one at a time, red, restored byte for byte): infra_unavailable acked (journey 2 and the unit
+#     verdict map), transport acked as dropped (the unit ids t3-connect-error, t3-5xx, manifest-raises), 409 bound removed
+#     (journey 3), first-claim gone verdict dropped (journey 2), renewer ignoring the deadline and renewer loop body emptied
+#     (journey 1), one claimant for every slot and parking on every slot (journey 1), persist 5xx routed dead (unit id
+#     500-is-a-ladder-retry), park-cap refusal not reported failed, no table turn in tuples mode and table mode skipping tuple
+#     tasks (journey 3 and the unit loop tests). A fold hides its later steps behind an earlier failure; every assertion in a
+#     journey names its step. Left unfolded: nothing in the file; the MVV file is untouched.
 measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992), 39713947919 (da8c08fdc)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default
