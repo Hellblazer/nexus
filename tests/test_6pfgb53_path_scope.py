@@ -54,3 +54,23 @@ def test_an_absolute_path_scope_selects_a_hit_by_its_owners_absolute_path(tmp_pa
     assert "pkg/in.py" in out, "the absolute scope matches the owner's absolute path"
     assert "pkg/out.py" not in out
     assert "pkg/stale.py" not in out, "a row's source_path never satisfies the scope"
+
+
+def test_a_scope_stops_at_a_path_separator(tmp_path, monkeypatch) -> None:
+    """``/a/scope`` must not select ``/a/scope2/x.py``, on any arm that carries a path."""
+    scope = tmp_path / "scope"
+    scope.mkdir()
+    sibling = tmp_path / "scope2"
+    rows = [
+        _row("inside", _display_path="pkg/in.py", _display_source_path=str(scope / "in.py")),
+        _row("sibling-abs", _display_path="pkg/sib.py", _display_source_path=str(sibling / "x.py")),
+        _row("sibling-display", _display_path=str(sibling / "y.py")),
+        _row("sibling-file-path", file_path=str(sibling / "z.py")),
+        _row("exact", _display_path="pkg/exact.py", _display_source_path=str(scope)),
+    ]
+    out = _search_files([str(scope)], rows, monkeypatch)
+    assert "pkg/in.py" in out
+    assert "pkg/exact.py" in out, "a path equal to the scope is inside it"
+    assert "pkg/sib.py" not in out
+    assert "y.py" not in out
+    assert "z.py" not in out

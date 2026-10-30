@@ -553,11 +553,18 @@ def search_cmd(
     # is what an absolute PATH names. The row's source_path is the last writer's
     # file and is not read (nexus-6pfgb.49).
     if resolved is not None:
+        # A scope is a directory or a file: equal to it, or below it past a
+        # separator, so /a/scope does not select /a/scope2/x.py.
+        scope_prefix = resolved.rstrip(os.sep) + os.sep
+
+        def _within(p: str) -> bool:
+            return p == resolved or p.startswith(scope_prefix)
+
         results = [
             r for r in results
-            if (r.metadata.get("_display_path") or "").startswith(resolved)
-            or (r.metadata.get(DISPLAY_SOURCE_PATH_KEY) or "").startswith(resolved)
-            or r.metadata.get("file_path", "").startswith(resolved)
+            if _within(r.metadata.get("_display_path") or "")
+            or _within(r.metadata.get(DISPLAY_SOURCE_PATH_KEY) or "")
+            or _within(r.metadata.get("file_path") or "")
         ]
         if not results:
             if json_out:
