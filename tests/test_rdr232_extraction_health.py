@@ -169,7 +169,7 @@ def _write_global_config(text: str) -> None:
 @pytest.fixture
 def no_claude(monkeypatch):
     setattr_in(monkeypatch, "nexus.operators.llm_backend", "shutil.which", lambda name: None)
-    setattr_in(monkeypatch, "nexus.health", "shutil.which", lambda name: None)
+    monkeypatch.setattr("nexus.health.which_off_cwd", lambda name: None)
 
 
 needs_sh = pytest.mark.skipif(sys.platform == "win32", reason="the stub claude is a #!/bin/sh script")
@@ -178,7 +178,7 @@ needs_sh = pytest.mark.skipif(sys.platform == "win32", reason="the stub claude i
 @pytest.fixture
 def claude(monkeypatch):
     setattr_in(monkeypatch, "nexus.operators.llm_backend", "shutil.which", lambda name: "/usr/bin/claude")
-    setattr_in(monkeypatch, "nexus.health", "shutil.which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr("nexus.health.which_off_cwd", lambda name: "/usr/bin/claude")
     monkeypatch.setattr(health, "_claude_cli_problem", lambda: None)  # the path above is not a real binary
 
 
@@ -188,7 +188,7 @@ def _claude_stub(monkeypatch, tmp_path: Path, script: str) -> Path:
     stub.write_text("#!/bin/sh\n" + script, encoding="utf-8")
     stub.chmod(0o755)
     setattr_in(monkeypatch, "nexus.operators.llm_backend", "shutil.which", lambda name: str(stub))
-    setattr_in(monkeypatch, "nexus.health", "shutil.which", lambda name: str(stub))
+    monkeypatch.setattr("nexus.health.which_off_cwd", lambda name: str(stub))
     return stub
 
 

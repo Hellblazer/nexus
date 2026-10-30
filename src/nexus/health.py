@@ -22,6 +22,7 @@ from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
 from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
+from nexus.util.nx_argv import which_off_cwd
 
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader
@@ -3947,7 +3948,7 @@ def _claude_cli_problem() -> str | None:
     it may be unable to (a slow cold start looks the same). It cannot see a CLI that starts but cannot answer
     (signed out, offline): only an extraction call shows that, and no doctor row does.
     """
-    path = shutil.which("claude")
+    path = which_off_cwd("claude")
     if path is None:
         return None
     try:
