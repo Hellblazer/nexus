@@ -233,6 +233,19 @@ def test_the_save_prompt_branch_says_dont_save_never_save() -> None:
     assert "the author's own" in modal  # the other possible owner of those changes decides first
 
 
+def test_a_save_prompt_is_answered_before_the_retry_offer_when_the_polls_run_out() -> None:
+    """G2c gap 1: a waiting save prompt is the case where 30 polls run out, so Don't Save comes before the retry."""
+    before(s6b(), "When `modalWindow` is not empty", "also when the polls end", "Don't Save",
+           "If the polls end with the state not reached and `modalWindow` empty", "offer to retry")
+
+
+def test_the_closing_url_check_treats_private_and_symlinks_as_the_same_file() -> None:
+    """G2c gap 2: without 6b's rule a /var or symlinked path skips undo and tells the author a false thing."""
+    s12 = step(12)
+    check = s12[s12.index("First call the app_state tool."):s12.index("do not call the undo tool")]
+    assert "`/private` prefix or a symbolic link is the same file" in check, check
+
+
 def test_the_expired_sentence_says_dont_save_never_save() -> None:
     s12 = step(12)
     expired = s12[s12.index("On exit 1 with `expired`"):s12.index("On exit 3, or exit 1 with `run apply again`")]
