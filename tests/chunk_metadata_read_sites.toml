@@ -269,8 +269,8 @@ section_type = 1
 [sites."src/nexus/scoring.py::apply_hybrid_scoring"]
 frecency_score = 1
 
-[sites."src/nexus/scoring.py::apply_link_boost"]
-doc_id = 2
+[sites."src/nexus/scoring.py::_link_owners"]
+doc_id = 1
 
 [sites."src/nexus/scoring.py::apply_quality_boost"]
 bib_citation_count = 1
