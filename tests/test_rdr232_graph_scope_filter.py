@@ -639,6 +639,22 @@ def test_the_client_link_role_table_equals_the_engines() -> None:
     assert engine == _ROLE_OF_LINK_TYPE, "CatalogRepository.linkRole and traversal_policy._ROLE_OF_LINK_TYPE drifted"
 
 
+def test_the_client_role_rank_equals_the_engines() -> None:
+    """``CatalogRepository.roleRank`` orders the roles the engine merges ``node_walk`` by; a rank the client's
+    ``_ROLE_RANK`` does not share makes the two pick different roles for one node."""
+    from nexus.plans.traversal_policy import _ROLE_RANK
+
+    java = (REPO / "service/src/main/java/dev/nexus/service/db/CatalogRepository.java").read_text()
+    body = java[java.index("private static int roleRank("):]
+    body = body[: body.index("private static void mergeRole")]
+    engine = {role: int(rank) for role, rank in re.findall(r"case \"(\w+)\" -> (\d+)", body)}
+    default = re.search(r"default -> (\d+)", body)
+    assert engine and default, "the roleRank switch changed shape: update this parse"
+    assert {**engine, "related": int(default.group(1))} == _ROLE_RANK, (
+        "CatalogRepository.roleRank and traversal_policy._ROLE_RANK drifted"
+    )
+
+
 def test_the_client_reads_the_node_walk_capability_strictly() -> None:
     bodies = iter([{"catalog_graph_node_walk_supported": True}, {"catalog_graph_node_walk_supported": "true"}])
 

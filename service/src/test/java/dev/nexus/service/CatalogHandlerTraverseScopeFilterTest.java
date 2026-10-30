@@ -197,7 +197,7 @@ class CatalogHandlerTraverseScopeFilterTest {
     void theRoleIsTheBestOfTheLinksFromThePreviousLevelAndFollowsTheDirection() throws Exception {
         // X is reached at depth 1 by a 'relates' link from seed S1 and a 'cites' link from seed S2: citation wins.
         // Q points AT seed S1 with 'implements': under direction "both" it is depth 1, implementation.
-        // W is reached by an unknown link type only: related.
+        // W is reached by a 'relates' link only: related.
         String s1 = registerDoc("7.8", "best-seed-1", RDR_COLL, "rdr");
         String s2 = registerDoc("7.8", "best-seed-2", RDR_COLL, "rdr");
         String x = registerDoc("7.8", "best-x", RDR_COLL, "rdr");
@@ -221,6 +221,31 @@ class CatalogHandlerTraverseScopeFilterTest {
             "link_types", List.of("relates", "cites", "implements"),
             "scope_filter", Map.of("collections", List.of(RDR_COLL))));
         assertThat(nodeWalk(outOnly)).as("direction out does not walk the link that points at a seed").doesNotContainKey(q);
+    }
+
+    @Test
+    void whenTwoLinkTypesReachOneNodeTheBetterRoleWinsWhicheverLinkWasMadeFirst() throws Exception {
+        // The rank order citation < implementation < related, pinned pairwise: swapping any two ranks in
+        // CatalogRepository.roleRank changes one of these winners.
+        String s = registerDoc("7.8", "rank-seed", RDR_COLL, "rdr");
+        String implCites = registerDoc("7.8", "rank-impl-cites", RDR_COLL, "rdr");
+        String implRelates = registerDoc("7.8", "rank-impl-relates", RDR_COLL, "rdr");
+        String citesRelates = registerDoc("7.8", "rank-cites-relates", RDR_COLL, "rdr");
+        link(s, implCites, "cites");          // the lower-ranked link types are made first for some nodes,
+        link(s, implCites, "implements");     // and last for others, so no insertion order can decide the winner
+        link(s, implRelates, "relates");
+        link(s, implRelates, "implements");
+        link(s, citesRelates, "cites");
+        link(s, citesRelates, "relates");
+
+        var body = traverseRaw(Map.of("seeds", List.of(s), "direction", "out", "depth", 1,
+            "link_types", List.of("cites", "implements", "relates"),
+            "scope_filter", Map.of("collections", List.of(RDR_COLL))));
+
+        var walk = nodeWalk(body);
+        assertThat(walk.get(implCites)).as("citation beats implementation").containsEntry("role", "citation");
+        assertThat(walk.get(implRelates)).as("implementation beats related").containsEntry("role", "implementation");
+        assertThat(walk.get(citesRelates)).as("citation beats related").containsEntry("role", "citation");
     }
 
     @Test
