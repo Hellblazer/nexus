@@ -37,8 +37,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * nexus-6pfgb.26 fix round 1: the first-owner lookup is its own statement,
- * {@code SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id, position}, so a boilerplate chunk held by
- * many documents costs a search window one row, where the all-occurrences statement returns one per holder.
+ * {@code SELECT DISTINCT ON (chash, collection) ... ORDER BY chash, collection, doc_id, position}, so a
+ * boilerplate chunk held by many documents costs a search window one row per collection, where the
+ * all-occurrences statement returns one per holder. One statement answers every collection of a window.
  *
  * <p>The statement under test is {@link ManifestLabelStage#occurrenceQuery}, the one production runs, planned
  * and EXECUTED (EXPLAIN ANALYZE) through the RLS-subject service role with the tenant GUC stamped. It pins:

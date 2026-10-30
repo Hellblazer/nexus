@@ -3890,8 +3890,9 @@ public final class PgVectorRepository {
     public static final int GET_ALL_METADATA_MAX_ROWS = 200_000;
 
     /**
-     * Batch cap for the ownersByChash IN-clause join — bounds the
-     * per-query bind-parameter budget. Rehomed from
+     * Batch cap for the ownersByChash lookup (keys per statement; the
+     * keys bind as arrays there) and for the other IN-clause joins that
+     * share it, where it bounds the per-query bind-parameter budget. Rehomed from
      * ChromaQuotaValidator.MAX_RECORDS_PER_WRITE at RDR-155 P4b P0e
      * (same own-the-constant precedent as RemapRepository.MAX_BATCH):
      * the value is a generic bind-param ceiling, not a Chroma quota,
@@ -8152,8 +8153,8 @@ FROM scope s
      * manifest row has no entry: the caller keeps the chunk row's own values and a null {@code source_uri}.
      *
      * <p>Runs under the tenant's RLS as one statement per {@link #SOURCE_URI_JOIN_BATCH} (collection, chash)
-     * keys across every collection of the window (the stage's {@code LOOKUP_BATCH}), joined to {@code catalog_documents} with an explicit tenant bind as
-     * defence in depth (fix #H2).
+     * keys across every collection of the window (the stage's {@code LOOKUP_BATCH}), joined to
+     * {@code catalog_documents} with an explicit tenant bind as defence in depth (fix #H2).
      *
      * @param tenant               the tenant whose catalog rows to query (RLS-scoped)
      * @param chashesByCollection  the 64-hex chashes of the window, by the collection they were read from

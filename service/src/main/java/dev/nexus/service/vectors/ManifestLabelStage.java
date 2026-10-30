@@ -613,8 +613,8 @@ final class ManifestLabelStage {
 
     /**
      * The live manifest occurrences of each (collection, chash) the rows name, in (doc_id, position)
-     * order. One statement per batch of keys, every collection together, under the tenant's row-level security, joined
-     * to the document so a tombstoned document owns nothing. The same statement reads the document-level
+     * order. One statement per batch of keys, every collection together, under the tenant's row-level
+     * security, joined to the document so a tombstoned document owns nothing. The same statement reads the document-level
      * values the predicates name ({@code docKeys}); nothing is read for a filter that names none.
      */
     private Map<String, List<Occurrence>> occurrences(String tenant, List<Map<String, Object>> rows,
@@ -638,10 +638,10 @@ final class ManifestLabelStage {
      * {@code doc_id}, {@code position}, {@code source_uri} and span speak for when no label filter has expanded
      * the row per document; keyed by {@link #ownerKey}. A chash with no live manifest row has no entry.
      *
-     * <p>Its own {@code SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id, position}, so the statement
-     * returns one row per chash where {@link #apply}'s lookup returns every occurrence: a boilerplate chunk
-     * held by N documents costs a search window one row, not N. Every collection in the window is answered by
-     * the same statement (see {@link #fetchOccurrences}).
+     * <p>Its own {@code SELECT DISTINCT ON (chash, collection) ... ORDER BY chash, collection, doc_id,
+     * position}, so the statement returns one row per (collection, chash) where {@link #apply}'s lookup returns
+     * every occurrence: a boilerplate chunk held by N documents costs a search window one row, not N. Every
+     * collection in the window is answered by the same statement (see {@link #fetchOccurrences}).
      */
     Map<String, Occurrence> firstOwners(String tenant, Map<String, Set<String>> chashesByCollection) {
         Map<String, Occurrence> first = new HashMap<>();
