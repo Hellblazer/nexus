@@ -84,19 +84,6 @@ FLUSH_CONCURRENCY: int = min(3, QUOTAS.MAX_CONCURRENT_WRITES)
 #: pass owns them if the directory is not excluded from it.
 RDR_DIR_NON_RDR_BASENAMES: frozenset[str] = frozenset({"readme.md", "agents.md", "claude.md"})
 
-def _git_metadata(repo: Path) -> dict:
-    """Collect git metadata for *repo*. Returns empty strings for missing values."""
-    def run(args: list[str]) -> str:
-        r = run_bounded(args, cwd=repo, timeout=10)
-        return r.stdout.strip() if r.returncode == 0 else ""
-
-    return {
-        "git_project_name": repo.name,
-        "git_branch": run(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
-        "git_commit_hash": run(["git", "rev-parse", "HEAD"]),
-        "git_remote_url": run(["git", "remote", "get-url", "origin"]),
-    }
-
 
 # _should_ignore is imported from indexer_utils (as `should_ignore`) above.
 # The local name `_should_ignore` is preserved for backward compatibility.
@@ -3358,7 +3345,6 @@ def _index_code_file(
     col: object,
     db: object,
     voyage_client: object,
-    git_meta: dict,
     now_iso: str,
     score: float,
     chunk_lines: int | None = None,
@@ -3406,7 +3392,6 @@ def _index_code_file(
         repo_path=repo,
         corpus=collection_name,
         embedding_model=target_model,
-        git_meta=git_meta,
         now_iso=now_iso,
         score=score,
         chunk_lines=chunk_lines,
@@ -3430,7 +3415,6 @@ def _index_prose_file(
     col: object,
     db: object,
     voyage_key: str,
-    git_meta: dict,
     now_iso: str,
     score: float,
     force: bool = False,
@@ -3469,7 +3453,6 @@ def _index_prose_file(
         repo_path=repo,
         corpus=collection_name,
         embedding_model=target_model,
-        git_meta=git_meta,
         now_iso=now_iso,
         score=score,
         force=force,
@@ -3493,7 +3476,6 @@ def _index_pdf_file(
     col: object,
     db: object,
     voyage_key: str,
-    git_meta: dict,
     now_iso: str,
     score: float,
     force: bool = False,
@@ -5389,9 +5371,6 @@ def _run_index(
     tuning = _tuning_from_dict(cfg.get("tuning", {}))
     effective_chunk_lines: int | None = chunk_lines if chunk_lines is not None else tuning.code_chunk_lines
 
-    # Collect git metadata once for all chunks
-    git_meta = _git_metadata(repo)
-
     # nexus-fltb4 (--since-head): git-diff-driven incremental scope. When a
     # usable delta exists, ONLY the changed files are walked/indexed, the
     # full-collection staleness pulls are skipped, deleted paths get their
@@ -7022,7 +7001,7 @@ def _run_index(
         # engine that starts emitting 503 under embed-admission saturation.
         return _contain_transient_upsert(lambda: _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
-            voyage_client, git_meta, now_iso, score,
+            voyage_client, now_iso, score,
             chunk_lines=effective_chunk_lines,
             force=force,
             force_re_embed=force_re_embed,
@@ -7076,7 +7055,7 @@ def _run_index(
         # identical _contain_transient_upsert to close that gap.
         return _contain_transient_upsert(lambda: _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
-            voyage_key, git_meta, now_iso, score,
+            voyage_key, now_iso, score,
             force=force,
             force_re_embed=force_re_embed,
             timeout=read_timeout_seconds,
@@ -7117,7 +7096,7 @@ def _run_index(
         return _contain_transient_upsert(lambda: _contain_extraction_quality_gate(
             lambda: _contain_mineru_stop(lambda: _index_pdf_file(
                 file, repo, docs_collection, docs_model, docs_col, db,
-                voyage_key, git_meta, now_iso, score,
+                voyage_key, now_iso, score,
                 force=force,
                 force_re_embed=force_re_embed,
                 timeout=read_timeout_seconds,
@@ -7220,7 +7199,7 @@ def _run_index(
         _log.debug("indexing", file=str(file))
         return _contain_transient_upsert(lambda: _index_prose_file(
             file, repo, rdr_col_name, rdr_model, rdr_col, db,
-            voyage_key, git_meta, now_iso, score,
+            voyage_key, now_iso, score,
             force=force,
             force_re_embed=force_re_embed,
             timeout=read_timeout_seconds,

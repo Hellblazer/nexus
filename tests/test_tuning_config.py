@@ -175,7 +175,7 @@ def test_index_pdf_file_passes_chunk_chars(tmp_path) -> None:
     with patch("nexus.doc_indexer._pdf_chunks", return_value=[fake_chunk]) as mock_pdf_chunks:
         _index_pdf_file(pdf, tmp_path, "docs__test", "model-ctx",
                         MagicMock(get=MagicMock(return_value={"ids": [], "metadatas": []})),
-                        MagicMock(), "voyage-key", {}, "2026-01-01", 0.5, chunk_chars=800,
+                        MagicMock(), "voyage-key", "2026-01-01", 0.5, chunk_chars=800,
                         embed_fn=lambda texts: [[0.1] * 10 for _ in texts])
     assert mock_pdf_chunks.call_args[1].get("chunk_chars") == 800
 

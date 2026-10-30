@@ -128,7 +128,7 @@ def _ctx(repo: Path, *, corpus: str, doc_id: str = _DOC, batcher, db=None,
          hooks=None) -> IndexContext:
     return IndexContext(
         col=None, db=db if db is not None else _http_db(), voyage_key="", voyage_client=None,
-        repo_path=repo, corpus=corpus, embedding_model=_MODEL, git_meta={}, now_iso=_NOW,
+        repo_path=repo, corpus=corpus, embedding_model=_MODEL, now_iso=_NOW,
         chunk_lines=6, force=True, doc_id_resolver=lambda p: doc_id, hooks=hooks, batcher=batcher)
 
 
@@ -192,7 +192,7 @@ def _run_pdf(tmp_path, monkeypatch, *, doc_id=_DOC, batcher="reject", db=None, h
     monkeypatch.setattr("nexus.pipeline_stages.record_pdf_extraction_on_document", lambda *a, **k: None)
     b = _rejecting_batcher() if batcher == "reject" else batcher
     return _index_pdf_file(
-        p, tmp_path, _CCE, _MODEL, None, db if db is not None else _http_db(), "", {}, _NOW, 0.0,
+        p, tmp_path, _CCE, _MODEL, None, db if db is not None else _http_db(), "", _NOW, 0.0,
         force=True, embed_fn=lambda texts: [[] for _ in texts], doc_id_resolver=lambda p_: doc_id,
         hooks=hooks, batcher=b)
 

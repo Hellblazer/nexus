@@ -72,7 +72,7 @@ def _index(tmp_path: Path, method: str, pages: dict, *, doc_id: str = "1.1.7", w
             patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
         count = _index_pdf_file(
-            pdf, repo, "docs__repo", "voyage-context-3", col, db, "fake-key", git_meta={},
+            pdf, repo, "docs__repo", "voyage-context-3", col, db, "fake-key",
             now_iso="2026-01-01T00:00:00", score=1.0, embed_fn=lambda texts: [[0.1] * 3 for _ in texts],
             doc_id_resolver=lambda p: doc_id, hooks=MagicMock(),
         )
@@ -166,7 +166,7 @@ def test_the_record_lands_before_the_chunks_are_embedded_and_uploaded(tmp_path) 
             patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
             patch("nexus.catalog.factory.make_catalog_writer", return_value=_OrderedWriter()):
         _index_pdf_file(
-            pdf, repo, "docs__repo", "bge-base-en-v1.5", col, db, "fake-key", git_meta={},
+            pdf, repo, "docs__repo", "bge-base-en-v1.5", col, db, "fake-key",
             now_iso="2026-01-01T00:00:00", score=1.0, embed_fn=embed,
             doc_id_resolver=lambda p: "1.1.7", hooks=MagicMock(),
         )

@@ -92,7 +92,7 @@ def _index(tmp_path: Path, t3, monkeypatch, *, overridden: bool) -> None:
     doc_id = _doc_id()
     n = _index_pdf_file(
         pdf, tmp_path, _COLLECTION, "bge-base-en-v15-768",
-        t3.get_or_create_collection(_COLLECTION), t3, "", {},
+        t3.get_or_create_collection(_COLLECTION), t3, "",
         "2026-09-26T00:00:00Z", 0.0,
         force=True,
         embed_fn=lambda texts: [[] for _ in texts],
