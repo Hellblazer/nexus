@@ -300,12 +300,18 @@ class Selection:
 
 def _distance_and_role(
     seeds: Sequence[str], edges: Iterable[Any], direction: str,
+    node_walk: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, int], dict[str, str]]:
     """Link distance from the nearest seed and the best role among the links that reach a node at
     that distance, by a breadth-first pass over the edges the engine returned.
 
-    The engine does not send depth or role, so both are recomputed from its edges. Where the engine
-    dropped nodes at its cap the recomputed distance can only be larger than the true one.
+    Both are recomputed from the edges, which is exact only when the walk's relays are in the reply.
+    Where the engine dropped nodes at its cap, or removed out-of-scope relays before it (the
+    ``scope_filter``: an edge is returned only when both its ends survive), the recomputed distance can
+    only be larger than the true one and a node behind a removed relay has none at all. An engine that
+    sends *node_walk* (``{tumbler: {"depth": int, "role": str}}``, ``catalog_graph_node_walk_supported``,
+    nexus-jypmj.18) states both for every node it returned, computed over the edges it dropped too, and
+    those win: they are what this pass computes over the complete edge set. A malformed entry is ignored.
     """
     adj: dict[str, list[tuple[str, str]]] = {}
     for e in edges:
@@ -331,6 +337,12 @@ def _distance_and_role(
             dist[v] = dist[level[0]] + 1
             best[v] = role
             frontier.append(v)
+    for tumbler, walk in (node_walk or {}).items():
+        if tumbler in seeds or not isinstance(walk, Mapping):
+            continue
+        depth, role = walk.get("depth"), walk.get("role")
+        if isinstance(depth, int) and not isinstance(depth, bool) and depth >= 1 and role in _ROLE_RANK:
+            dist[str(tumbler)], best[str(tumbler)] = depth, role
     return dist, best
 
 
@@ -343,7 +355,7 @@ def is_scoped(scope: ScopeConstraint) -> bool:
 def select_documents(
     nodes: Sequence[Any], edges: Sequence[Any], seeds: Sequence[Any], policy: TraversalPolicy,
     *, direction: str = "both", collection_kinds: Mapping[str, str] | None = None,
-    engine_scope: Mapping[str, Any] | None = None,
+    engine_scope: Mapping[str, Any] | None = None, node_walk: Mapping[str, Any] | None = None,
 ) -> Selection:
     """Apply *policy* to one engine walk: scope, role, rank, cap. Reads no manifest.
 
@@ -358,6 +370,11 @@ def select_documents(
     (``scope_prefilter`` ``unavailable``) keeps its seed documents and no secondary ones: the cut was made
     over out-of-scope nodes too, so what survived it is an arbitrary sample of the in-scope neighbourhood,
     not a bounded one. The report says so (``secondary_omitted``).
+
+    *node_walk* is the engine's per-node ``{depth, role}`` for a scoped walk (nexus-jypmj.18), else ``None``.
+    The scope predicate removes an out-of-scope relay and its edges, so a node reached only through one has
+    no edge to score; with *node_walk* it keeps the depth and role of the walk that reached it, and a
+    single-role policy no longer drops it as ``related``.
     """
     if policy.allowed_owners and collection_kinds is None:
         raise ValueError("a policy with allowed_owners needs collection_kinds")
@@ -367,7 +384,7 @@ def select_documents(
     # collection name (RDR-204, tests/test_collection_name_parse_census.py).
     type_of = {str(n.tumbler): str(getattr(n, "content_type", "") or "") or "unattributed" for n in nodes}
     seed_ids = [s for s in dict.fromkeys(str(t) for t in seeds) if s in collection_of]
-    dist, role = _distance_and_role(seed_ids, edges, direction)
+    dist, role = _distance_and_role(seed_ids, edges, direction, node_walk)
 
     scope = policy.allowed_collections
     dropped_by_corpus: dict[str, int] = {}

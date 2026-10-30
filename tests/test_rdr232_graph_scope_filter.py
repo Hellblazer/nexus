@@ -52,7 +52,8 @@ class _Engine:
     but drops the key (no marker). ``advertise`` False is an engine that predates the capability.
     """
 
-    def __init__(self, nodes, edges, *, advertise=True, honour=True, registry=None, registry_error=None):
+    def __init__(self, nodes, edges, *, advertise=True, honour=True, registry=None, registry_error=None, walk=False):
+        self._walk_fields = walk  # nexus-jypmj.18: advertises ``catalog_graph_node_walk_supported`` and sends ``node_walk``
         self._nodes = nodes
         self._edges = edges
         self._advertise = advertise
@@ -66,6 +67,38 @@ class _Engine:
 
     def supports_graph_scope_filter(self) -> bool:
         return self._advertise
+
+    def supports_graph_node_walk(self) -> bool:
+        return self._walk_fields
+
+    def _node_walk(self, seeds, direction, keep_ids) -> dict:
+        """Depth and best role of every returned node, over EVERY edge (the removed relays included): the
+        engine's ``node_walk``, by the rule ``traversal_policy._distance_and_role`` applies to a complete edge set."""
+        from nexus.plans.traversal_policy import _ROLE_RANK, link_role
+
+        depth = {str(x): 0 for x in seeds}
+        role: dict[str, str] = {}
+        frontier = list(depth)
+        while frontier:
+            found: dict[str, str] = {}
+            for e in self._edges:
+                for here, there in ((e.from_tumbler, e.to_tumbler), (e.to_tumbler, e.from_tumbler)):
+                    if (here, there) == (e.to_tumbler, e.from_tumbler) and direction == "out":
+                        continue
+                    if (here, there) == (e.from_tumbler, e.to_tumbler) and direction == "in":
+                        continue
+                    if here in frontier and there not in depth:
+                        r = link_role(e.link_type)
+                        if there not in found or _ROLE_RANK[r] < _ROLE_RANK[found[there]]:
+                            found[there] = r
+            for there, r in found.items():
+                depth[there] = depth[frontier[0]] + 1
+                role[there] = r
+            frontier = list(found)
+        return {
+            t: ({"depth": d} if t not in role else {"depth": d, "role": role[t]})
+            for t, d in depth.items() if t in keep_ids
+        }
 
     def list_collections(self, lifecycle_state=None, content_type=None):
         self.registry_calls += 1
@@ -96,6 +129,8 @@ class _Engine:
         keep_ids = {str(n.tumbler) for n in nodes}
         reply["nodes"] = nodes
         reply["edges"] = [e for e in self._edges if e.from_tumbler in keep_ids and e.to_tumbler in keep_ids]
+        if flt is not None and self._honour and self._walk_fields:
+            reply["node_walk"] = self._node_walk(seeds, kw.get("direction", "both"), keep_ids)
         return reply
 
     def graph(self, seed, **kw):
@@ -455,3 +490,128 @@ def test_an_unreachable_version_probe_reads_unsupported_and_never_raises() -> No
         return httpx.Response(500, json={"error": "boom"})
 
     assert _client(handler).supports_graph_scope_filter() is False
+
+
+# ── nexus-jypmj.18: a node behind a removed relay keeps its depth and role ──────────────────────────────
+
+
+def _relay_walk():
+    """S (rdr, the seed) -implements-> R (code, out of scope) -implements-> B (rdr), and A (rdr) -implements-> S.
+
+    The engine's predicate removes R and with it the R -> B edge, so B arrives with no edge at all; A keeps
+    its edge. Under a single-role policy the client scores B by what is left.
+    """
+    nodes = [_node(SEED, RDR), _node("1.2.2", RDR), _node("1.2.3", RDR), _node("1.1.9", CODE)]
+    edges = [_edge("1.2.2", SEED, "implements"), _edge(SEED, "1.1.9", "implements"), _edge("1.1.9", "1.2.3", "implements")]
+    return nodes, edges
+
+
+def _relay_run(cat, role: str):
+    return _run(cat, seeds=[SEED], link_types=["implements"], policy=_policy("rdr", require_link_role=role, max_documents=50))
+
+
+def test_a_single_role_policy_keeps_a_node_behind_a_removed_relay_when_the_engine_sends_node_walk() -> None:
+    """The new engine: the predicate is sent, the relay is removed, B has no edge, and B survives on node_walk."""
+    nodes, edges = _relay_walk()
+    cat = _Engine(nodes, edges, walk=True)
+    out = _relay_run(cat, "implementation")
+
+    assert "scope_filter" in cat.graph_kwargs[0], "an engine that carries node_walk is sent the predicate"
+    assert out["traversal"]["scope_prefilter"] == "applied"
+    assert out["tumblers"] == [SEED, "1.2.2", "1.2.3"], "B (1.2.3) kept; A (distance 1) ranks before B (distance 2)"
+    assert out["traversal"]["dropped_role"] == 0
+    assert out["traversal"]["engine_dropped_out_of_scope"] == 1
+
+
+def test_a_single_role_policy_on_an_engine_without_node_walk_walks_unfiltered_and_loses_nothing() -> None:
+    """The stopgap, an engine of 0.1.168 or 0.1.169: it has the predicate but not node_walk."""
+    nodes, edges = _relay_walk()
+    cat = _Engine(nodes, edges, walk=False)
+    out = _relay_run(cat, "implementation")
+
+    assert "scope_filter" not in cat.graph_kwargs[0], "no predicate for a role-filtering policy without node_walk"
+    assert out["traversal"]["scope_prefilter"] == "unavailable"
+    assert out["tumblers"] == [SEED, "1.2.2", "1.2.3"], "narrowed client-side, over the relay's edges"
+    assert out["traversal"]["dropped_role"] == 0
+    assert out["traversal"]["dropped_out_of_scope"] == 1, "R is dropped by the client's own scope filter"
+
+
+@pytest.mark.parametrize("role", ["factual", None])
+def test_a_role_agnostic_policy_sends_the_predicate_whether_or_not_the_engine_sends_node_walk(role) -> None:
+    nodes, edges = _relay_walk()
+    for walk in (False, True):
+        cat = _Engine(nodes, edges, walk=walk)
+        over = {} if role is None else {"require_link_role": role}
+        out = _run(cat, seeds=[SEED], link_types=["implements"], policy=_policy("rdr", max_documents=50, **over))
+        assert "scope_filter" in cat.graph_kwargs[0], f"walk={walk}"
+        assert out["traversal"]["scope_prefilter"] == "applied"
+        assert "1.2.3" in out["tumblers"], "role 'factual' admits B whatever its role, ranked last"
+
+
+def test_without_node_walk_in_the_reply_a_node_behind_a_removed_relay_is_dropped_as_before() -> None:
+    """The control that pins the defect: the same new-shape request answered WITHOUT node_walk loses B."""
+    nodes, edges = _relay_walk()
+    cat = _Engine(nodes, edges, walk=True)
+    cat._node_walk = lambda *a, **k: {}  # the predicate is sent (it advertises node_walk) but the reply carries nothing
+    out = _relay_run(cat, "implementation")
+
+    assert "1.2.3" not in out["tumblers"]
+    assert out["traversal"]["dropped_role"] == 1
+
+
+def test_node_walk_wins_over_the_edges_and_a_malformed_entry_is_ignored() -> None:
+    from nexus.plans.traversal_policy import _distance_and_role
+
+    edges = [_edge("a", "b", "relates"), _edge("b", "c", "relates")]
+    dist, role = _distance_and_role(["a"], edges, "out")
+    assert dist == {"a": 0, "b": 1, "c": 2} and role == {"b": "related", "c": "related"}
+
+    walk = {
+        "b": {"depth": 1, "role": "citation"},    # the engine saw a better role than the edges show
+        "c": {"depth": True, "role": "citation"},  # a bool is not a depth
+        "d": {"depth": 2, "role": "implementation"},  # no edge reaches d
+        "e": {"depth": 3, "role": "sideways"},    # an unknown role
+        "f": {"depth": 0, "role": "citation"},    # depth 0 is a seed
+        "a": {"depth": 4, "role": "citation"},    # a seed is never rescored
+        "g": "nonsense",
+    }
+    dist, role = _distance_and_role(["a"], edges, "out", walk)
+    assert dist == {"a": 0, "b": 1, "c": 2, "d": 2}
+    assert role == {"b": "citation", "c": "related", "d": "implementation"}
+
+
+def test_the_client_link_role_table_equals_the_engines() -> None:
+    from nexus.plans.traversal_policy import _ROLE_OF_LINK_TYPE
+
+    java = (REPO / "service/src/main/java/dev/nexus/service/db/CatalogRepository.java").read_text()
+    body = java[java.index("public static String linkRole("):]
+    body = body[: body.index("private static int roleRank")]
+    engine: dict[str, str] = {}
+    for labels, role in re.findall(r"case ((?:\"[a-z-]+\"(?:, )?)+) -> \"(\w+)\"", body):
+        for label in re.findall(r"\"([a-z-]+)\"", labels):
+            engine[label] = role
+    assert engine == _ROLE_OF_LINK_TYPE, "CatalogRepository.linkRole and traversal_policy._ROLE_OF_LINK_TYPE drifted"
+
+
+def test_the_client_reads_the_node_walk_capability_strictly() -> None:
+    bodies = iter([{"catalog_graph_node_walk_supported": True}, {"catalog_graph_node_walk_supported": "true"}])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=next(bodies))
+
+    assert _client(handler).supports_graph_node_walk() is True
+    assert _client(handler).supports_graph_node_walk() is False, "a non-boolean true is not true"
+
+
+def test_graph_keeps_the_node_walk_of_the_reply_and_invents_none() -> None:
+    walk = {"1.2.3": {"depth": 2, "role": "implementation"}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={**_EMPTY, "scope_filter": {"applied": True}, "node_walk": walk})
+
+    assert _client(handler).graph("1.2.1", scope_filter={"collections": [RDR]})["node_walk"] == walk
+
+    def bare(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_EMPTY)
+
+    assert "node_walk" not in _client(bare).graph("1.2.1")
