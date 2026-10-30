@@ -5761,22 +5761,42 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   by then is `unresolved` with "stopped at the deadline" as its reason (an owner
   lookup that did not return makes the qualifier `unresolved`, never a guess),
   and the answer proceeds without the stream.
-- `single_source_narrowing` (nexus-4xmpv, RDR-232 section 2a; Sam's decision of 2026-10-30): what the one-source
-  rule did. A synthesis or `unknown` request that names exactly one source (one distinct id, however it is
-  spelled: `RDR-078 through RDR-078` is one) and whose source resolved to one document runs every retrieval step of
-  every plan under that document's collection and owner: `search`, `query` and `traverse` steps read the collection,
-  a step the plan pinned to other collections is skipped and listed in `scope_diagnostics` (never run unscoped),
-  and the caller's `scope` is replaced by the collection when it admits it. Only a request the rule concerns has
-  the object, `{applied, source, tumbler, collection, owner, caller_scope, effective_scope, reason}`; otherwise it
-  is `null` (a lookup, a comparison, a request that names no source or several). `applied` is false when nothing
-  could be narrowed to (the source did not resolve to one document, or the caller's `scope` does not admit its
-  collection), and `reason` says which. Text mode adds one `[evidence request: ...]` line naming the collection and
-  owner, or the reason. The primary read of a narrowed run takes up to 84 chunks
-  (`max_narrowed_source_items` in `primary_evidence.caps`) of the reducer's 100 input slots, 90 with the T2 records; one source that is not
-  narrowed (a lookup) keeps 44 and the 50-slot share. The price: a request that names one RDR in passing loses the
-  cross-document context its other retrieval would have found. A document named only by its title counts as no
-  named source and is not narrowed. This replaces the plan-eligibility refusal `single_source_synthesis` of the
-  earlier rounds, which no longer exists.
+- `single_source_narrowing` (nexus-4xmpv, nexus-jypmj, RDR-232 section 2a; Sam's decisions of 2026-10-30): what the
+  one-source rule did. A synthesis or `unknown` request that names exactly one source (one distinct id, however it is
+  spelled: `RDR-078 through RDR-078` is one) and whose source resolved to one document reads THAT DOCUMENT only. The
+  run's scope binding is the document's collection (a caller `scope` that is the document's own address is kept) and
+  its owner binding the document's owner, so a step the plan pinned to other collections is skipped and listed in
+  `scope_diagnostics` (never run unscoped). Every secondary retrieval step is then confined to the document itself
+  (`confinement`): `engine_filter` when `GET /version` advertises `vector_search_chash_allow_supported`, where
+  the `search` and `query` steps carry the document's manifest chunk hashes as `chash_allow` (at most 3,000, and
+  `allow_sampled` says when that is a sample of a larger manifest) and the engine restricts and ranks exactly, and
+  `traverse` walks under the document's address; a step on a route that takes no such filter (`search_metadata_scoped`,
+  `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`, a `query` with `author`, `content_type`,
+  `follow_links` or `subtree`) is not dispatched. `steps_not_run` when the engine does not advertise the flag (an
+  older engine, or an edge that trims `/version`): no secondary retrieval step and no traversal is dispatched, and
+  each skipped step is listed in `scope_diagnostics` with `scope_kind: document` and outcome `document_confined`
+  (a step that carried the filter reports `document_filtered`, the traversal `document_scoped`). The coverage
+  repair asks under the same filter and keeps only hits whose chunk hash is in the document's manifest. Only a
+  request the rule concerns has the object, `{applied, source, tumbler, document, collection, owner, caller_scope,
+  effective_scope, reason, confinement, read_chunks, manifest_chunks, allow_chunks, allow_sampled}`; otherwise it is
+  `null` (a lookup, a comparison, a request that names no source or several). `effective_scope` is the document's
+  tumbler when applied (the caller's scope otherwise), `read_chunks` and `manifest_chunks` are the primary read's S
+  of the document's M chunks, `allow_chunks` the hashes the filter carries (0 when none is sent) and `confinement`
+  is `null` when not applied. `applied` is false when nothing could be confined to: the source did not resolve to
+  one document, the caller's `scope` does not admit its collection, the source was resolved by the session's
+  project and another project carries the same number (an inferred source narrows only when none does), or the
+  derivation itself failed; `reason` says which. Text mode adds one `[evidence request: ...]` line naming the
+  document, how the secondary steps were confined, the primary read's S of M chunks and that a repair may add up
+  to 12 more chunks of the same document, or the reason. The primary read of a confined run takes up to 82 chunks
+  (`max_narrowed_source_items` in `primary_evidence.caps`) of 88 reserved slots (the T2 records take 6); the
+  coverage repair's 12 supplement items take the rest of the reducer's 100 input slots. A document longer than
+  the 60,000-character primary budget relies on the confined repair and search for the rest of its chunks, and its
+  primary read of about 70,000 characters with headers is over the continuation prompt cap of 60,000, so such a
+  run takes the headless path, not the continuation handoff. One source that is not narrowed (a lookup) keeps 44
+  and the 50-slot share. The price: a request that names one RDR in passing loses the cross-document context its
+  other retrieval would have found, and the text says so. A document named only by its title counts as no named
+  source and is not narrowed. A one-source synthesis or `unknown` request is also not offered the citation-traversal
+  plan (plan eligibility reason `single_source_synthesis`; abstract-themes stays allowed).
 - `primary_evidence` (nexus-jypmj.1.6): what was read from the resolved
   sources, `{selected_items, selected_chars, manifest_rows_hydrated,
   fetched_chars, fetch_errors, error, partial, caps_hit, caps, documents, items}`;

@@ -628,6 +628,57 @@ listed under Critical Assumptions before gate.
 Re-measure 2 (2026-10-30, b36646d66, cloud v0.1.170, tag measure_rdr232-class2; G06, S02, S05, S06, one run each, 1.9327 USD): plans 465 (abstract-themes) and 467 (citation-traversal) were both refused with single_source_synthesis on G06, S02 and S05, and all four requests planned inline. Code anchors fell to 0 on every request (plan 465 had added 35 on S02 and 29 on S05); foreign-owner anchors were rdr chunks only (S02 4, S06 2). Primary chunk sets were identical to the first re-measure on all four. Hand scoring found 0 of 15 facets where the ledger said covered and the answer did not. G06's numerical-conventions facet scored A- on the same input as before, because the answer now says the convention sheet (chunks 32-33, beyond the 44-chunk read) was not retrieved. The labeller fix gives RDR-070's 42 chunks 32 labels, matching its 32 headings in document order (was 9). Cost rose 13% and G06 wall rose 49.5 s with inline planning replacing plan 465.
   *Source: live runs of 2026-10-30, tag `measure_rdr232-class2`. T2: `nexus/rdr232-class-remeasure2-2026-10-30`. Both re-measures ran the strategy-refusal form of the one-source rule (below, superseded), are one run per request and in-sample, and were scored by hand by the implementing session, not blind.*
 
+Re-measure 3 (2026-10-30, 92cbdecd3, cloud v0.1.170, tag measure_rdr232-class3; G06 and S01-S06, one run each, 3.5204 USD). It ran the collection-and-owner narrowing of note A (section 1), which note C supersedes with the document confinement. The record below is the T2 entry `nexus/rdr232-class-remeasure3-2026-10-30` verbatim; its three OPEN items are answered in section 1 (notes C and E) and in the corrected figures at note B.
+
+RDR-232 incident-class re-measure 3, 2026-10-30. Code: feature/nexus-4xmpv-r3 at 92cbdecd3 (strategy deny-list removed; a synthesis/unknown request naming one source narrows every secondary search/query/traverse step to that source's collection and owner, envelope key single_source_narrowing; narrowed run reserves 90 of 100 reducer inputs, up to 84 primary chunks under the 60,000-char budget). Installed NON-editable in a fresh scratchpad venv (deps from uv export --frozen, --no-deps install; direct_url non-editable; is_dev_checkout_process False; diff -rq -x __pycache__ src/nexus vs site-packages clean; worktree clean). Cloud engine-service-v0.1.170. Tag measure_rdr232-class3. Coverage on, plan growth off (_load_ad_hoc_ttl -> 0), sequential, one run each, NX_ALLOW_PROD_WRITE unset.
+
+DRIVER INCIDENT: pass 1 (14:07:57Z-14:09:25Z) is invalid. My step-logging wrapper replaced runner._default_dispatcher without the hydrates_operator_args attribute (runner.py:2908 sets it, :4029 reads it), so the coverage boundary did not hydrate, the reserved stream never merged, source_check said "no reduction was handed the primary evidence", and all 7 returned non-answer uncovered with 0 assessment calls. 7 run rows from pass 1 are persisted under the same tag (0.4120 USD); ignore them. Pass 2 (14:11:02Z-14:19:35Z) has the attribute copied and asserted; it is the measurement. 14 run rows total, no other writes.
+Cost: pass 2 3.5204 USD, pass 1 0.4120, total 3.9324.
+
+PER REQUEST (pass 2)
+| qid | plan (label allows?) | narrowing | primary items/chars/rows partial | census labels | ledger | outcome | USD | wall s |
+| G06 | 467 citation-traversal (NO, label lists research:citation-traversal) | applied rdr__1-2 owner 1.2 | 73/59798/80 partial (char cap) | 53/53 (r2 44/53) | 6/6 covered, 1 conflicted | answered | 0.4566 | 81.9 |
+| S01 | inline (475 excluded), yes | applied rdr__1-1 owner 1.1 | 57/59793/58 partial (char cap; only Risks chunk 52 out) | 40/40, L2 14/14 | 3/3 | answered | 0.5699 | 101.0 |
+| S02 | 467 (NO) | applied rdr__1-1 1.1 | 56/38044/56 full | 43/43, L2 14/14 | 3/3 covered (f3 was unsupported in r1, r2) | answered | 0.4647 | 63.0 |
+| S03 | inline, yes | applied | 41/31530/41 full | 35/35, L2 10/10 | 3/3 | answered | 0.4395 | 100.0 |
+| S04 | inline, yes | applied | 63/59423/135 partial (char cap) | 56/56 (r1 44/56) | 3/3 | answered | 0.5430 | 99.3 |
+| S05 | 467 (NO) | applied | 61/50190/61 full | 39/39, L2 10/10 | 3/3 | answered | 0.4616 | 63.6 |
+| S06 | inline (475 excluded), yes | applied | 42/33843/42 full | 32/32, L2 13/13 | 3/3, 1 conflicted | answered | 0.5852 | 138.6 |
+Plans allowed by label: 4/7 (r1 7/7; r2 4/4 on its four). 467 is eligible now that the deny-list is gone; all 7 labels list it as unacceptable.
+narrowing reason empty on all 7; caller_scope "rdr" (G06) or "" (S01-S06), effective_scope the collection.
+
+SECONDARY EVIDENCE (non-primary anchors in the ledger). Outside the named collection/owner: 0 on all 7.
+| qid | vector (step) | graph (step) | t2 | other-document anchors |
+| G06 | 7 rdr__1-2 owner 1.2 (step0 query) | 18 rdr__1-2 (step1 traverse, 29 docs all 1.2; 300 chunks fetched, secondary_cut 263) | 2 ART_rdr | 24 of 25 (1 vector hit is RDR-084) |
+| S01 | 20 rdr__1-1 1.1 (step0, step1 search) | 0 | 2 | 20 of 20, 18 docs |
+| S02 | 9 (step0 query) | 29 (step1 traverse, 6 docs; 294 fetched, cut 205) | 2 | 38 of 38 |
+| S03 | 15 (step0, step2 search) | 0 | 0 | 15 of 15, 8 docs |
+| S04 | 16 (step0, step1 search) | 0 | 2 | 16 of 16, 13 docs |
+| S05 | 10 (step0 query) | 29 (step1 traverse, 8 docs; 286 fetched, cut 250) | 0 | 39 of 39 |
+| S06 | 17 (step0, step2 search) | 0 | 0 | 17 of 17, 13 docs |
+r2 for comparison: S02 had 4 foreign-owner rdr anchors (1-20, 1-79), S06 2 (1-79); now 0. Code anchors 0 (r2 0, r1 64 on S02/S05).
+DEFECT: the disclosure (single_source.py:89-91) says "other documents were not read". False on all 7: narrowing is to collection+owner, and every run read other RDRs in that collection (S01's answer lists 18 of them by number).
+
+READ EXTENT. G06: unselected 7 = Test Plan 1, Assumption Verification 2, Revision History 4; convention sheet chunks 32-33 now SELECTED. Census total 69,952 chars; the claim at primary_evidence.py:171-172 and RDR-232 lines 965-966 that "G06's 80 chunks are 54,800 characters and fit whole" is wrong (the char cap fired at 73). S04: 63 of 135 rows, 59,423 of 157,219 chars (r1 44 rows, 40,258); every top section represented; Proposed Solution 12/42 rows (11,860/53,968 chars), Research Findings 10/34, Implementation Plan 8/14, Test Plan 1/5, Revision History 1/6. primary_evidence.py:178 "fills the 60,000 characters at about 80 chunks" is wrong for this document (63); "takes about 65" is close.
+
+HAND SCORING (A answered from named doc; A- answered, part of the facet's material absent, prose discloses it except where noted; O only other docs; M said missing; N not addressed, no disclosure). r3 | r2 | r1 [ledger r3].
+G06 f1-f6: A A A A A A | A A- A A A A | A A A A A A [all covered]. f2: sheet named, conventions given with constants (f0 0.75, g0 1.0, Eq(8) weights sum to 1, unrestricted sum), 13 rows not enumerated.
+S01: A A A- | - | A A- A [covered x3]. f2: all 21 Decision Points rows (r1 rows 14+ missing). f3 A-: says gate critique text and the Risks chunk (Risk #5) were not in its input; Risks chunk 52 is the one the char cap cut.
+S02: A A N | A A M | A A M [covered x3]. f3: no collision-risk content at all and no disclosure. The ledger's f3 evidence is e20 (RDR-180 Approach chunk, alias-table rationale mentioning "the collision class") and e92 (graph chunk from another RDR: ChromaDB per-collection ID scope). MISMATCH.
+S03: A A A | - | A A A [covered x3].
+S04: A A- A | - | A- A- A- [covered x3]. f2 A-: says passages stop before the four coverage states and the full traverse-policy list. f1 now includes Gap 2. f3: full order and rationale; noted gap is Phase 3 build status, outside the facet.
+S05: A A- O | A A A | A A A [covered x3]. f2: one of RDR-086's two alternatives (per-collection ChromaDB query), JSONL fold omitted, not disclosed. f3: only later records (RDR-108 drift, supersession); RDR-086's open question before Phase 3 and its deferred items absent. MISMATCH.
+S06: A A A | A A A | A A A [covered x3].
+Ledger mismatches (covered, answer missing/silent/other docs only): 2 of 24 (S02 f3, S05 f3); r2 0 of 15; r1 0 of 24. A- under covered: 3 (S01 f3, S04 f2, S05 f2 undisclosed); r1 4 in 2 answers.
+Both mismatches are on plan 467, whose terminal is summarize (answers 5,373 and 4,639 chars vs 8,248-9,885 for the inline generate plans). Inline-plan answers (S01, S03, S04, S06): 0 mismatches, scores equal or better than r1.
+
+COST/WALL vs r1 (same 7): 3.5204 vs 3.4167 USD (+3.0%); wall 647.4 vs 698.9 s (-7%). Per request USD r3/r1: G06 0.4566/0.3906, S01 0.5699/0.6230, S02 0.4647/0.4413, S03 0.4395/0.4468, S04 0.5430/0.6388, S05 0.4616/0.4004, S06 0.5852/0.4758. vs r2 on its four: 1.9681 vs 1.9327 (+1.8%); wall G06 81.9/130.1, S02 63.0/111.2, S05 63.6/77.5, S06 138.6/94.7.
+
+VERDICT: containment works as specified (0 anchors outside collection/owner on 7/7, foreign-owner rdr anchors gone). Primary read grows as designed (G06 convention sheet read; S04 63 rows). Regression: removing the deny-list re-admits 467 on G06/S02/S05 against the labels, and the two facet mismatches of this set both come from 467 runs. n=1, in-sample.
+OPEN: (1) label versus plan 467 under narrowing (Sam); (2) disclosure wording "other documents were not read"; (3) the 54,800 / "about 80 chunks" figures in primary_evidence.py and RDR-232.
+
+EVIDENCE: /private/tmp/claude-501/-Users-hal-hildebrand-git-nexus/0f3c9023-31d9-49f1-a0c1-38c5bd4fcd41/scratchpad/remeasure3/ : live_driver.py (with dispatcher step log), spec.json, ana.py, sections.py, sections.json, run/results.json, run/{G06,S01..S06}.{envelope,census,steps}.json, run.out, run.err, reqs.txt, venv/; run_broken_pass1/ (invalid pass, kept for the record).
+
 ### Critical Assumptions
 
 Research 6–10 executed prototypes for A1–A6. Production verification followed
@@ -868,7 +919,9 @@ unchanged.
 refusal described in this note and in the one after it was replaced by the
 narrowing rule below. `SINGLE_SOURCE_EXCLUDED_STRATEGIES` and the reason
 `single_source_synthesis` no longer exist, and neither was in a release. Both
-notes stay as written because the two re-measures ran this form.*
+notes stay as written because the two re-measures ran this form.* *Restored in part
+2026-10-30 (Sam; nexus-jypmj): the citation-traversal exclusion is back, as note E
+below; abstract-themes stays allowed.*
 
 **Decided by Sam, 2026-10-30 (nexus-4xmpv): a `synthesis` request that names
 exactly one source does not admit citation-traversal.** The near-miss control
@@ -915,6 +968,13 @@ eligible library plan still goes to the inline planner. Not re-measured live; th
 unit selection runs the seven requests as both kinds and the matrix test uses a
 theme-shaped one-source request the offline library does offer abstract-themes.
 
+*Superseded in part 2026-10-30 (Sam; nexus-jypmj): the collection-level narrowing in notes A and B
+below is replaced by document-level confinement (note C). Re-measure 3 found that
+sibling documents of the same collection still entered (24 of 25 other-document anchors on
+G06). Both notes stay as written, because re-measure 3 ran this form; the collection
+and owner bindings they describe remain as defense in depth under note C, and the
+slot arithmetic in B is replaced by 88, 82 and 12.*
+
 *Decided by Sam, 2026-10-30 (nexus-4xmpv; after the second re-measure and the
 round-2 reviews). A. A synthesis or `unknown` request that names exactly one
 source reads that source; the strategy list above is replaced by narrowing.* The
@@ -952,7 +1012,8 @@ in-sample and scored by hand by the implementing session, not blind, and
 the narrowing itself is pinned offline and not measured live.
 
 *B. For a narrowed request the primary stream takes 90 of the reducer's 100 input
-slots, so selection runs to the 60,000-character budget.* The 44-chunk read
+slots, so selection runs to the 60,000-character budget (superseded 2026-10-30 by
+note C: 88 of 100, with 12 for the repair).* The 44-chunk read
 stopped G06 at 30,160 characters (80 chunks in the document, the convention sheet
 in chunks 32 and 33 unread) and S04 at 40,258. With the secondary streams
 narrowed to the same collection, most of their hits are chunks the primary already
@@ -962,8 +1023,9 @@ cut after the merge so only secondary items are cut; 90 reserved
 (`RESERVED_SHARE_NARROWED`, 50 for any other request) and 10 left to the
 secondary; 6 of the 90 lead for T2 lifecycle records, so 84 chunks; 84 chunks at
 500 to 1,000 characters is 42,000 to 84,000, so for a long document the character
-cap decides, not the count (G06's 80 chunks are 54,800 characters and fit whole;
-S04 takes about 65). The 60,000-character cap does not move; the coverage check
+cap decides, not the count (corrected 2026-10-30 from re-measure 3: G06's 80 chunks are
+69,952 characters, so the cap stopped its read at 73 chunks, and S04 fills the 60,000 at
+63 chunks; the earlier text said 54,800 and "about 65"). The 60,000-character cap does not move; the coverage check
 reads each stream in packs of at most 120,000 characters, and the primary stream
 (60,000, about 70,000 with attribution headers) and the T2 stream (at most 18,000)
 each fit one pack, so neither leaves an unread anchor. A one-source request that is
@@ -971,6 +1033,65 @@ not narrowed keeps 44 and the share of 50; several sources keep 24. Pinned
 offline: a 135-row single-source manifest fills the character budget
 (`max_selected_chars` in `caps_hit`, not the item cap), small chunks stop at 84,
 and the multi-source selection is unchanged.
+
+*C. Decided by Sam, 2026-10-30 (nexus-jypmj; after re-measure 3): a synthesis or `unknown` request that names exactly one source confines every secondary retrieval step to that DOCUMENT.*
+Re-measure 3 showed the collection and owner narrowing of note A held (0 anchors outside the
+collection) and also that it was not the document: 24 of 25 secondary anchors on G06, and
+20 of 20, 38 of 38, 15 of 15, 16 of 16, 39 of 39 and 17 of 17 on S01 to S06, lay in other
+documents of the same collection, and the disclosure's sentence "other documents were not read"
+was false on all seven. Round 3 could not filter by document: the engine had no document key
+on any vector route, `query` refuses a document-depth `subtree`, and a document-depth scope
+made the runner run the step unscoped. The engine therefore gained one optional request
+field, `chash_allow` (at most 3,000 distinct 64-hex chunk hashes) on `/v1/vectors/search`,
+`/query`, `/hybrid-search` and `/search-per-collection`, advertised as `vector_search_chash_allow_supported`
+on `GET /version`. The client takes the document's FULL manifest chunk-hash set from the
+primary read (`_read_manifests`, every row before the selection samples them, at most
+3,000) and sends it as `chash_allow` on the engine call of every `search` and `query` step of every plan
+(`nexus.plans.document_confinement`; `search_cross_corpus` reads it once and sends it on every
+engine call it makes, whichever of the three routes serves). `traverse` uses the existing
+`scope_filter` subtree at document depth: the policy scope is the document's tumbler. The
+steps whose routes have no such filter (`search_metadata_scoped`, `search_topic_scoped`,
+`search_graph_hop`, `search_aspect_scoped`, and a `query` with `author`, `content_type`,
+`follow_links` or `subtree`) are not dispatched; each leaves the empty structured shape with
+a `document_confined` marker. `store_get_many` ids are cut to the document. The coverage repair queries carry the same
+filter and a repair hit is inside the scope when its chunk hash is in the document's manifest
+set (the hit's catalog tumbler is the last writer of a shared chunk and cannot say which document it is in).
+On an engine that does not advertise the flag, or an edge that trims it from `/version`, the key
+would be ignored and the answer would be collection-wide, so nothing is sent: no secondary
+retrieval step and no traversal is dispatched for the run (`confinement: steps_not_run`), and the repair keeps
+its chunk-hash membership filter and asks a wider page (40 results, not 5). The single_query fast path has no primary
+stream, so a confined run does not take it; it goes through `plan_run`. The envelope's
+`single_source_narrowing` reports `document` and `confinement` (`engine_filter`, `steps_not_run` or null), its
+`effective_scope` is the document's tumbler, and the text names the document, how the secondary steps
+were confined, the primary read's S of M chunks and that a repair may add up to 12 more of its chunks. The
+run's `_nx_scope` binding stays the collection (a caller scope that is this document's own address is kept,
+not widened to the collection, which round 3 did) and the diagnostics and the coverage boundary read it.
+The slots follow: the primary stream takes 88 of the reducer's 100 inputs (`RESERVED_SHARE_NARROWED`),
+82 chunks after 6 lifecycle records (`max_narrowed_source_items`), and the repair's supplement takes the other 12
+(`MAX_REPAIR_ITEMS`): 88 + 12 = 100, pinned by a test. *Limits, stated where a reader looks:* a document over the
+60,000-character primary budget relies on the confined repair and the confined secondary search for the rest of its
+chunks, and a repair or search that misses leaves them unread; a document with more than 3,000 manifest rows has a
+sampled chunk-hash set and the disclosure says so; the cross-document context a question about one RDR in passing would have
+found is gone and the disclosure says so; an inferred source with documents of the same number in other projects is not
+narrowed (note D); the primary read of a long narrowed document is about 70,000 characters with headers, over the
+continuation prompt cap of 60,000 (`MAX_CONTINUATION_PROMPT_CHARS`), so such a run takes the headless path and not
+the continuation hand-off (a test pins it; a separate cap for narrowed runs is Sam's call); an engine without the flag
+runs no secondary step, which re-measure 3 suggests costs little (1 of 170 secondary anchors lay in the named document
+on G06) but is not measured live. Not measured live after this change.
+
+*D. Decided by Sam, 2026-10-30 (nexus-jypmj): an inferred resolution narrows only when no other project carries the number.*
+The resolver may pick the document by the session's project (`inferred`). Round 3 narrowed on any resolved source,
+contradicting this RDR's own text that an inferred owner never narrows. The rule is now: an inferred source with
+`foreign` above 0 (a document of the same number in another project) is not narrowed, and the verdict says so and why;
+an inferred source with none narrows; a source resolved by elimination (`fallback`: the active project holds no such
+number) is unique across projects and narrows. The sentences that said an inferred owner never narrows are rewritten to
+this rule (the active-project tier, `owner_narrowing`, the evidence request, the owner paragraph of section 1).
+
+*E. Decided by Sam, 2026-10-30 (nexus-jypmj): the citation-traversal exclusion is restored for a one-source synthesis or `unknown` request.*
+`SINGLE_SOURCE_EXCLUDED_STRATEGIES` is `{citation-traversal}`, with the reason `single_source_synthesis`, the inline
+planner's few-shot filter argument and the tests, restored from the parent of 5e184752b. The count of named sources is
+`RequestCoverage.names_one_source`. Re-measure 3 ran plan 467 on G06, S02 and S05 (the labels list it unacceptable),
+and its summarize terminal produced both facet mismatches of that set. abstract-themes stays allowed: the deny-list holds citation-traversal only.
 
 *Known limits, 2026-10-30.* (a) The 44-item single-source cap, which still applies
 to a one-source request that is not narrowed, binds on large documents: S04 (135
@@ -1151,7 +1272,9 @@ every candidate; the title never picks a document. With no such evidence, a
 reliable session resolves its own project's RDR and discloses the inference.
 If the session's project holds no such RDR, resolution falls back to the
 unqualified lookup and the answer text says the active project was not used.
-An inferred owner never narrows the secondary streams. RDR ids read from the
+An inferred owner narrows no secondary stream by itself (it is not an owner
+binding); the one-source rule narrows to the document an inference chose only when
+no other project carries the number (note D in section 1, Sam 2026-10-30). RDR ids read from the
 question text go through the same tiers as a `source` binding, at most three
 per request (a calibration parameter for Phase 2 measurement), and a range
 such as "RDR-078 through RDR-095" is disclosed as not expanded.
@@ -1276,7 +1399,9 @@ its one named source (section 1, the one-source rule) takes 84 chunks
 (`max_narrowed_source_items`) of a share of 90 (`RESERVED_SHARE_NARROWED`), and the
 secondary streams keep 10 of the 100 input slots. The arithmetic is stated once,
 on `PrimaryEvidenceCaps.max_narrowed_source_items`, and summarised in the decision
-note B in section 1. Not measured live.
+note B in section 1. Not measured live. *Replaced 2026-10-30 (Sam; nexus-jypmj, note C in
+section 1):* a run confined to its document takes 82 chunks of a share of 88, and the
+coverage repair's 12 supplement items take the rest of the 100.
 
 T2 is outside the corpus graph. When a named source resolves to an RDR, the
 runner adds a third stream: that RDR's T2 records (its metadata record and its
@@ -2509,3 +2634,4 @@ remains Sam's.
 
 - 2026-10-30: Incident-class re-measure and three changes after it, two decisions by Sam (nexus-4xmpv, nexus-jf9wg). (1) A request that names exactly one source does not admit abstract-themes either (Sam; declared `strategy` dimension `abstract-themes`). (2) The one-source rule also applies to an `unknown`-kind request (Sam). (3) The content labeller no longer reads a fence repeated by chunk overlap as an opening fence. Decision text changed: section 1 (a dated note after the 2026-10-30 one-source note, the old residual marked closed, and the known limits: the 44-item cap on S04, the ledger facet grain against the prose, the labeller defect), Key Discoveries (the re-measure entry). The re-measure itself is one run each of G06 and S01-S06 at 3.4167 USD and is in-sample. The post-mortem and CHANGELOG are updated. The status is not changed here.
 - 2026-10-30: Round 3 of nexus-4xmpv, two decisions by Sam, and review fixes. (A) A synthesis or `unknown` request that names exactly one source narrows every retrieval step of every plan to that source's collection and owner, replacing the strategy refusal (`SINGLE_SOURCE_EXCLUDED_STRATEGIES`, the reason `single_source_synthesis` and the few-shot argument are removed; they were never in a release and the two notes that described them are marked superseded, not deleted); the verdict is the envelope's `single_source_narrowing`; "names exactly one source" is one `RequestCoverage` property. (B) A narrowed request takes 84 chunks of a 90-slot share. Also: the content labeller believes an overlap only in the chunker's layout (a regression of the first form, which read a repeated closing block as overlap), at a flat cost per chunk, and restarts its fence across a gap; the stale "not re-measured" and "estimated 0.06 to 0.07 USD" sentences carry the measured costs; a Key Discoveries entry records re-measure 2. Decision text changed: section 1 (two decision notes, the known limits), section 2 (a dated departure). Status unchanged.
+- 2026-10-30: Document confinement and its review fixes (nexus-jypmj; four decisions by Sam). (C) A synthesis or `unknown` request that names exactly one source confines every secondary retrieval step to the document: the engine's `chash_allow` filter on `search` and `query` (when `vector_search_chash_allow_supported`), the document's address on `traverse`, no dispatch for a step whose route has no filter or on an engine without the flag; the collection-level narrowing text of notes A and B is marked superseded and kept. (D) An inferred source narrows only when no other project carries the number; a fallback-resolved source narrows. (E) The citation-traversal exclusion is restored (abstract-themes stays allowed). Disclosure: the false "other documents were not read" is replaced by the document, the confinement, the primary read's S of M and the repair cap. Slots 88, 82 and 12. Also: a caller scope that is the document's own address is kept; the stale G06 and S04 figures are corrected; the continuation prompt cap's effect on a long narrowed read is stated; a faulted narrowing is an `applied: false` verdict; re-measure 3 is recorded in Key Discoveries. Decision text changed: section 1 (notes C, D, E, the supersession of A and B, the active-project paragraph), section 2 (a dated replacement of the 84, 90 and 10 departure), Key Discoveries. Status unchanged.
