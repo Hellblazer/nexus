@@ -141,20 +141,12 @@ class TestAgainstTheEngine:
     def _doc() -> str:
         return f"9.{uuid.uuid4().int % 10**9}.1"
 
-    def test_replace_reports_created_then_replaced_on_one_row(self) -> None:
-        store = HttpTupleStore()
-        doc = self._doc()
-        keys = {"queue": "aspects"}
-        first = store.out_replace("aspects", keys, None, '{"v":1}', nonce=doc)
-        second = store.out_replace("aspects", keys, None, '{"v":2}', nonce=doc)
-        assert first[1] == "created" and second[1] == "replaced"
-        assert first[0] == second[0], "one document is one task id"
-        rows = [r for r in store.rd("aspects", keys, n=300) if r.id == first[0]]
-        assert len(rows) == 1 and rows[0].body == '{"v":2}'
-
-    def test_delay_and_the_nack_fields_reach_the_engine(self) -> None:
-        """``delay_s``, ``nack(dead=True)``, ``nack(retry_after_s=)`` and a plain
-        ``nack`` on one queue, one branch at a time; each assertion names its own.
+    def test_delay_the_nack_fields_and_replace_reach_the_engine(self) -> None:
+        """``delay_s``, ``nack(dead=True)``, ``nack(retry_after_s=)``, a plain
+        ``nack`` and ``out_replace`` on one queue, one branch at a time; each
+        assertion names its own (nexus-9edxe folded the replace test in as the last
+        branch: its task would be claimable, and the earlier branches read the queue
+        by claim order and by census, so it goes after them).
         The delayed task is written FIRST, so a ``delay_s`` the client dropped
         would be claimed ahead of the dead-letter task."""
         store = HttpTupleStore()
@@ -192,3 +184,12 @@ class TestAgainstTheEngine:
         store.nack(claim, "rdr235-plain")
         again = store.inp("aspects", keys, claimant="rdr235-plain", lease_s=60)
         assert again is not None and again[0].id == plain_id, "a plain nack is claimable at once"
+
+        # out_replace reports created then replaced on one row.
+        doc = self._doc()
+        first = store.out_replace("aspects", keys, None, '{"v":1}', nonce=doc)
+        second = store.out_replace("aspects", keys, None, '{"v":2}', nonce=doc)
+        assert first[1] == "created" and second[1] == "replaced", "replace: the outcomes"
+        assert first[0] == second[0], "replace: one document is one task id"
+        rows = [r for r in store.rd("aspects", keys, n=300) if r.id == first[0]]
+        assert len(rows) == 1 and rows[0].body == '{"v":2}', "replace: the new body, on one row"

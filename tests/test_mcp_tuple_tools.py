@@ -212,10 +212,12 @@ class TestTupleInAckNack:
         assert claim2 is not None
         assert claim2["tuple"]["body"] == "retry-me"
 
-    def test_nack_dead_retry_after_and_out_delay_reach_the_engine(self, t2_service_env) -> None:
-        """RDR-235 transport: the MCP tools pass ``dead``, ``retry_after_s`` and ``delay_s``.
+    def test_nack_dead_retry_after_out_delay_and_out_replace_reach_the_engine(self, t2_service_env) -> None:
+        """RDR-235 transport: the MCP tools pass ``dead``, ``retry_after_s``, ``delay_s`` and
+        ``mode="replace"``.
 
-        One scenario, three branches, each assertion naming its own: the delayed task is
+        One scenario, four branches, each assertion naming its own (nexus-9edxe folded the
+        replace test in as the last branch, so a failure above hides it): the delayed task is
         written FIRST, so a ``delay_s`` the tool dropped would be claimed ahead of the
         immediate one."""
         keys = {"queue": "aspects"}
@@ -237,17 +239,17 @@ class TestTupleInAckNack:
         claim2 = tuple_in("aspects", keys, claimant=claimant, lease_s=30)
         assert claim2 is not None
         assert "Nacked" in tuple_nack(claim2["claim_id"], claimant, dead=True)
-        assert tuple_stats("aspects")["dead"] == 1
+        assert tuple_stats("aspects")["dead"] == 1, "dead=True dead-lettered at once"
 
-    def test_out_mode_replace_reports_the_outcome(self, t2_service_env) -> None:
+        # mode="replace" reports the outcome and keeps one row per nonce.
         doc = _uniq("doc")
-        first = tuple_out("aspects", {"queue": "aspects"}, None, '{"v":1}', nonce=doc, mode="replace")
-        second = tuple_out("aspects", {"queue": "aspects"}, None, '{"v":2}', nonce=doc, mode="replace")
+        first = tuple_out("aspects", keys, None, '{"v":1}', nonce=doc, mode="replace")
+        second = tuple_out("aspects", keys, None, '{"v":2}', nonce=doc, mode="replace")
         (id1, outcome1), (id2, outcome2) = first.split(), second.split()
-        assert (outcome1, outcome2) == ("created", "replaced")
-        assert id1 == id2
-        rows = tuple_rd("aspects", {"queue": "aspects"})
-        assert len(rows) == 1 and rows[0]["body"] == '{"v":2}'
+        assert (outcome1, outcome2) == ("created", "replaced"), "replace: the outcome"
+        assert id1 == id2, "replace: one nonce is one task id"
+        rows = [r for r in tuple_rd("aspects", keys, n=300) if r["id"] == id1]
+        assert len(rows) == 1 and rows[0]["body"] == '{"v":2}', "replace: the new body, on one row"
 
     def test_out_mode_replace_without_a_nonce_is_an_error(self, monkeypatch) -> None:
         """The refusal is the client's, before any request: no engine and no tenant."""

@@ -39,16 +39,16 @@ def _git_init(repo: Path) -> None:
         subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
 
 
-@pytest.fixture
-def rdr_repo(tmp_path: Path) -> Path:
+def _rdr_repo(tmp_path: Path, name: str) -> Path:
     """A repo whose only indexable files are RDRs: the rdr__ collection has an
-    extractor, so the flush hook reaches the enqueue."""
-    repo = tmp_path / "rdr-repo"
+    extractor, so the flush hook reaches the enqueue. Its prose is keyed on *name*,
+    so two repos in one test never share a chunk."""
+    repo = tmp_path / name
     (repo / "docs" / "rdr").mkdir(parents=True)
     for i in (1, 2):
         (repo / "docs" / "rdr" / f"rdr-00{i}-thing.md").write_text(
             f"---\ntitle: Thing {i}\nstatus: draft\n---\n\n# Thing {i}\n\n"
-            f"## Problem\n\nThe tuples-mode batch tripwire needs prose number {i}.\n"
+            f"## Problem\n\nThe tuples-mode batch tripwire needs prose number {i} of {name}.\n"
         )
     _git_init(repo)
     return repo
@@ -87,32 +87,28 @@ def _failures() -> dict:
 
 
 @pytest.mark.t2_tenant
-def test_tuples_mode_flush_counts_a_refused_aspect_batch(
-    rdr_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_the_flush_counts_a_refused_aspect_batch_in_tuples_mode_and_not_in_table_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Both modes through a real ``index_repository()`` on one tenant (nexus-9edxe
+    folded the two tests): the tuples-mode flush counts the refusal, then, on a
+    second repo, the table-mode control does not. Tuples first, so the control's
+    'no row added' is read against a count that has just risen."""
+    calls = _refuse_every_batch(monkeypatch)
+
     monkeypatch.setenv(ASPECT_QUEUE_ENV, "tuples")
-    calls = _refuse_every_batch(monkeypatch)
     before = _failures()["total"]
-
-    _index(rdr_repo, tmp_path)
-
-    assert calls, "harness broken: the flush hook never reached enqueue_many"
+    _index(_rdr_repo(tmp_path, "tuples-repo"), tmp_path)
+    assert calls, "tuples: harness broken: the flush hook never reached enqueue_many"
     failures = _failures()
-    assert failures["total"] - before == len(calls) == 1, (failures, calls)
+    assert failures["total"] - before == len(calls) == 1, ("tuples", failures, calls)
     row = str(failures["rows"][0])
-    assert "rdr__" in row and "MaxLiveRowsExceededError" in row
-    assert f"<batch of {calls[0]}>" in row
+    assert "rdr__" in row and "MaxLiveRowsExceededError" in row, f"tuples: {row}"
+    assert f"<batch of {calls[0]}>" in row, f"tuples: {row}"
 
-
-@pytest.mark.t2_tenant
-def test_table_mode_flush_records_no_hook_failure_row_for_a_refused_batch(
-    rdr_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
     monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")
-    calls = _refuse_every_batch(monkeypatch)
-    before = _failures()["total"]
-
-    _index(rdr_repo, tmp_path)
-
-    assert calls, "harness broken: the flush hook never reached enqueue_many"
-    assert _failures()["total"] == before
+    tuples_calls = len(calls)
+    counted = failures["total"]
+    _index(_rdr_repo(tmp_path, "table-repo"), tmp_path)
+    assert len(calls) > tuples_calls, "table: harness broken: the flush hook never reached enqueue_many"
+    assert _failures()["total"] == counted, "table: a refused batch left a hook_failures row"

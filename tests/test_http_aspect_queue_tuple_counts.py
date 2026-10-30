@@ -1,38 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-235 F18 (bead nexus-5r2sc.3.5): ``HttpAspectQueue.tuple_counts``, the one
 reader of the ``aspects`` subspace census that ``nx doctor`` and the console
-share, against the real engine substrate.
+share.
 
-Pins the three-way split the diagnostics rely on: available is pending, claimed
-is in flight (neither pending nor failed), dead is failed; a subspace that does
-not exist is zero; any other failure propagates (UNKNOWN is the caller's call).
+A subspace that does not exist is zero; any other failure propagates (UNKNOWN is
+the caller's call). The three-way split the diagnostics rely on (available is
+pending, claimed is in flight, dead is failed) is pinned against the real engine
+in step 6 of ``tests/test_http_aspect_queue_tuples_producer.py``'s producer
+journey (nexus-9edxe folded it there: it needs a tenant, and the journey has one).
 """
 from __future__ import annotations
-
-import uuid
 
 import pytest
 
 import nexus.corpus as corpus
 from nexus.db.t2.http_aspect_queue import (
     ASPECT_QUEUE_ENV,
-    ASPECTS_KEYS,
-    ASPECTS_SUBSPACE,
     AspectTupleCounts,
     HttpAspectQueue,
 )
 from nexus.db.t2.http_tuple_store import HttpTupleStore, UnknownSubspaceError
 
-# The tenant is opt-in (tests/AGENTS.md): only the census test reaches the engine; the two
-# failure-shape tests stub ``subspace_stats`` and mint none.
-
-
-def _coll() -> str:
-    return f"docs__nx235c-{uuid.uuid4().hex[:8]}__bge-base-en-v15-768__v1"
-
-
-def _tumbler() -> str:
-    return f"1.{uuid.uuid4().int % 10**6}.{uuid.uuid4().int % 10**6}"
+# The tenant is opt-in (tests/AGENTS.md): the two failure-shape tests stub ``subspace_stats``
+# and mint none.
 
 
 @pytest.fixture(autouse=True)
@@ -47,40 +37,10 @@ def _fresh_state(monkeypatch: pytest.MonkeyPatch):
     corpus._REGISTERED_COLLECTIONS_SCOPED.clear()
 
 
-@pytest.fixture
-def queue():
-    q = HttpAspectQueue()
-    yield q
-    q.close()
-
-
 def _offline_queue() -> HttpAspectQueue:
     """A queue with an explicit endpoint, so building it resolves nothing; the
     tests that use it replace ``subspace_stats`` and send no request."""
     return HttpAspectQueue(base_url="http://mock.test", _token="test-token")
-
-
-@pytest.mark.usefixtures("t2_service_env")
-def test_available_claimed_and_dead_are_three_different_counts(queue: HttpAspectQueue) -> None:
-    # Empty first: zero on every side, from the real census (the control for the
-    # missing-subspace case below, which is zero by exception).
-    assert queue.tuple_counts() == AspectTupleCounts(0, 0, 0), "an empty queue"
-
-    coll = _coll()
-    for i in range(4):
-        queue.enqueue(coll, f"/p/{i}.md", doc_id=_tumbler())
-    store = HttpTupleStore()
-    try:
-        # One task in flight, one dead-lettered; two stay available.
-        (_row, in_flight) = store.inp(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), claimant="c1", lease_s=600)
-        (_row, doomed) = store.inp(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), claimant="c2", lease_s=600)
-        store.nack(doomed, "c2", dead=True)
-        counts = queue.tuple_counts()
-    finally:
-        store.close()
-    assert counts == AspectTupleCounts(available=2, claimed=1, dead=1), (
-        f"claimed is in flight, not pending; dead is failed: {counts}, claim {in_flight}"
-    )
 
 
 def test_a_missing_subspace_is_zero_not_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:

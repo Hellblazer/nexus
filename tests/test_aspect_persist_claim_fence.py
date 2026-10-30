@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """RDR-235 client half (nexus-5r2sc.3.1): ``complete_aspect`` takes a claim pair.
 
-Against the real engine substrate, with a real task on the ``aspects`` tuple
+The engine tests run against the real engine substrate, with a real task on the ``aspects`` tuple
 queue. Test Plan scenario 9 (with a claim: the write and the tuple ack happen
 and the table is untouched; without one: the write and ``mark_done`` happen and
 a queued task for that document stays queued) and scenario 4's client half (a
@@ -16,9 +16,10 @@ claim branch of ``T2Database.complete_aspect`` (calling ``mark_done`` instead of
 lapse tests; dropping the pair from ``HttpDocumentAspectsStore.upsert``'s body
 fails the refusal test, because the engine then writes unfenced and nothing raises.
 
-Each test is one scenario with several steps, folded to stay under the tenant
+Each engine test is one scenario with several steps, folded to stay under the tenant
 ceiling (tests/storage_touch_ceiling.toml); a failed step names itself in its
-assertion message.
+assertion message. The pair rule fails before any store is reached and runs
+without a tenant (nexus-9edxe).
 """
 from __future__ import annotations
 
@@ -36,8 +37,6 @@ from nexus.db.t2.http_tuple_store import (
     ClaimTaskMismatchError,
 )
 from tests._catalog_fixture_ops import register_real_doc_id
-
-pytestmark = pytest.mark.t2_tenant
 
 _SUBSPACE = "aspects"
 _KEYS = {"queue": "aspects"}
@@ -108,11 +107,15 @@ def _claimed_task(db: Any, claimant: str = "W:0") -> tuple[str, str]:
     return doc_id, _claim(db, claimant)
 
 
+@pytest.mark.t2_tenant
 class TestScenario9Persist:
-    def test_with_a_claim_the_write_and_the_tuple_ack_happen_the_table_is_untouched_and_rename_lock_is_held(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    def test_with_a_claim_then_without_one_the_write_and_its_own_clear_happen(
+        self, tmp_path: Path,
     ) -> None:
+        """Both halves of scenario 9 on one tenant (nexus-9edxe folded the two): the
+        claim path (steps named 'claim'), then the table path ('table')."""
         db = _db(tmp_path)
+        patched = pytest.MonkeyPatch()  # not the fixture: undo() must not revert the suite's own patches
         try:
             doc_id, claim_id = _claimed_task(db)
             # A table row for the same document: the claim path must not clear it.
@@ -150,49 +153,52 @@ class TestScenario9Persist:
                     probes.append("upsert")
                 return real_upsert(*a, **kw)
 
-            monkeypatch.setattr(db.tuples, "ack", probing_ack)
-            monkeypatch.setattr(db.document_aspects, "upsert", probing_upsert)
+            patched.setattr(db.tuples, "ack", probing_ack)
+            patched.setattr(db.document_aspects, "upsert", probing_upsert)
 
             written = db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
 
-            assert written is True
-            assert _aspect_row(db, doc_id) is not None
+            assert written is True, "claim: written"
+            assert _aspect_row(db, doc_id) is not None, "claim: the aspect row exists"
             with pytest.raises(ClaimNotFoundError):  # the ack consumed the claim
                 real_ack(claim_id, "W:0")
-            assert _task_rows(db) == 0
-            assert db.aspect_queue.pending_count() == 1, "mark_done must not run on the claim path"
+            assert _task_rows(db) == 0, "claim: the task is consumed"
+            assert db.aspect_queue.pending_count() == 1, "claim: mark_done must not run on the claim path"
             assert probes == ["upsert", "ack"], (
-                "another thread must block on RENAME_LOCK during the fenced upsert AND the ack"
+                "claim: another thread must block on RENAME_LOCK during the fenced upsert AND the ack"
             )
+            patched.undo()
+
+            # Without a claim: the write and mark_done happen, and a queued task for the
+            # document stays queued (the claim path's table row is still pending: 1).
+            table_doc = register_real_doc_id(title=_stamp_title())
+            _enqueue_task(db, table_doc)
+            db.aspect_queue.enqueue(_COLLECTION, "/table.md", "h", doc_id=table_doc)
+            assert db.aspect_queue.pending_count() == 2
+
+            written = db.complete_aspect({**_fields(table_doc), "source_path": "/table.md"})
+
+            assert written is True, "table: written"
+            assert _aspect_row(db, table_doc) is not None, "table: the aspect row exists"
+            assert db.aspect_queue.pending_count() == 1, "table: today's path clears its own table row only"
+            assert _task_rows(db) == 1, "table: no client can delete a task by document (F22)"
+            assert _claim(db, "W:1"), "table: and the task is still claimable"
         finally:
+            patched.undo()
             db.close()
 
-    def test_without_a_claim_the_write_and_mark_done_happen_and_a_queued_task_stays_queued(
+
+@pytest.mark.t2_tenant
+class TestFenceRefusalsAndTheLapse:
+    def test_each_refusal_of_the_fence_writes_nothing_and_a_lapse_after_the_write_leaves_the_row(
         self, tmp_path: Path,
     ) -> None:
+        """Four refusals in turn, each leaving the queue as it found it, with scenario 4's
+        client half (a lapse between the write and the ack) between the third and
+        the fourth: a lapse by release leaves a claimable task, so it goes last, and
+        the lapse step consumes its own released task before the fourth begins."""
         db = _db(tmp_path)
-        try:
-            doc_id = register_real_doc_id(title=_stamp_title())
-            _enqueue_task(db, doc_id)
-            db.aspect_queue.enqueue(_COLLECTION, _SOURCE, "h", doc_id=doc_id)
-            assert db.aspect_queue.pending_count() == 1
-
-            written = db.complete_aspect(_fields(doc_id))
-
-            assert written is True
-            assert _aspect_row(db, doc_id) is not None
-            assert db.aspect_queue.pending_count() == 0, "today's path clears the table row"
-            assert _task_rows(db) == 1, "no client can delete a task by document (F22)"
-            assert _claim(db, "W:1"), "and the task is still claimable"
-        finally:
-            db.close()
-
-
-class TestFenceRefusals:
-    def test_each_refusal_of_the_fence_writes_nothing(self, tmp_path: Path) -> None:
-        """Four refusals in turn, each leaving the queue as it found it (the lapse
-        by release goes last: it leaves its task claimable)."""
-        db = _db(tmp_path)
+        patched = pytest.MonkeyPatch()
         try:
             # 403 ownership: another claimant's pair; the claim stays live.
             doc_id, claim_id = _claimed_task(db, "W:0")
@@ -219,6 +225,24 @@ class TestFenceRefusals:
             assert db.aspect_queue.pending_count() == 1, "the table is not touched (ack lapse)"
             assert _task_rows(db) == 0
 
+            # Scenario 4's client half: a lapse between the write and the ack leaves the
+            # row, and the ack answers ClaimNotFound.
+            doc_id, claim_id = _claimed_task(db)
+            real_upsert = db.document_aspects.upsert
+
+            def upsert_then_lose_the_claim(record: Any, **kw: Any) -> bool:
+                result = real_upsert(record, **kw)
+                db.tuples.release(claim_id, "W:0")  # the lapse, after the write
+                return result
+
+            patched.setattr(db.document_aspects, "upsert", upsert_then_lose_the_claim)
+            with pytest.raises(ClaimNotFoundError):
+                db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
+            assert _aspect_row(db, doc_id) is not None, "lapse after the write: the write stands; a rerun overwrites it"
+            patched.undo()
+            db.tuples.ack(_claim(db, "W:0"), "W:0")  # the released task is claimable again; consume it
+            assert _task_rows(db) == 0
+
             # 404 not found, the claim released (the task is claimable again).
             doc_id, claim_id = _claimed_task(db)
             db.tuples.release(claim_id, "W:0")
@@ -229,45 +253,21 @@ class TestFenceRefusals:
             assert db.aspect_queue.pending_count() == 1, "the table is not touched (release lapse)"
             assert _task_rows(db) == rows_before
         finally:
-            db.close()
-
-
-class TestScenario4ClientHalf:
-    def test_a_lapse_between_the_write_and_the_ack_leaves_the_row_and_the_ack_answers_404(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        db = _db(tmp_path)
-        try:
-            doc_id, claim_id = _claimed_task(db)
-            real_upsert = db.document_aspects.upsert
-
-            def upsert_then_lose_the_claim(record: Any, **kw: Any) -> bool:
-                result = real_upsert(record, **kw)
-                db.tuples.release(claim_id, "W:0")  # the lapse, after the write
-                return result
-
-            monkeypatch.setattr(db.document_aspects, "upsert", upsert_then_lose_the_claim)
-
-            with pytest.raises(ClaimNotFoundError):
-                db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
-
-            assert _aspect_row(db, doc_id) is not None, "the write stands; a rerun overwrites it"
-        finally:
+            patched.undo()
             db.close()
 
 
 class TestPairRule:
-    def test_one_of_the_two_is_a_value_error_and_nothing_is_touched(self, tmp_path: Path) -> None:
-        db = _db(tmp_path)
-        try:
-            doc_id, claim_id = _claimed_task(db)
-            db.aspect_queue.enqueue(_COLLECTION, _SOURCE, "h", doc_id=doc_id)
+    def test_one_of_the_two_is_a_value_error_and_nothing_is_touched(self) -> None:
+        """Refused before any store is reached, so no engine and no tenant: the
+        receiver is a stand-in that fails the test on any attribute read
+        (``RENAME_LOCK``, ``document_aspects``, ``aspect_queue``, ``tuples``)."""
+        from nexus.db.t2 import T2Database
 
-            for pair in ({"claim_id": "c"}, {"claimant": "W:0"}):
-                with pytest.raises(ValueError, match="claim_id.*claimant"):
-                    db.complete_aspect(_fields(doc_id), **pair)
-                assert _aspect_row(db, doc_id) is None, f"{pair} wrote"
-                assert db.aspect_queue.pending_count() == 1, f"{pair} touched the table"
-            db.tuples.ack(claim_id, "W:0")  # the claim is still live
-        finally:
-            db.close()
+        class _Untouchable:
+            def __getattr__(self, name: str) -> Any:
+                raise AssertionError(f"complete_aspect reached {name!r} before refusing the pair")
+
+        for pair in ({"claim_id": "c"}, {"claimant": "W:0"}):
+            with pytest.raises(ValueError, match="claim_id.*claimant"):
+                T2Database.complete_aspect(_Untouchable(), _fields("1.2.3"), **pair)
