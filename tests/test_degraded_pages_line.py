@@ -95,6 +95,9 @@ def world(monkeypatch):
     monkeypatch.setattr(store_cmd, "_split_note_text", lambda *a, **k: None)
     monkeypatch.setattr(store_hook, "catalog_chashes_for_title", lambda *a, **k: [])
     monkeypatch.setattr(store_hook, "live_holders_of_chashes", live_holders)
+    # nexus-6pfgb.38: the tags lookup opens a catalog reader of its own; these pins count the readers the
+    # degraded line opens, so the tags lookup is stubbed out (tests/test_6pfgb38_tags_display.py covers it).
+    monkeypatch.setattr(store_hook, "catalog_tags_for_chunks", lambda *a, **k: {})
     monkeypatch.setattr(catalog_factory, "make_catalog_reader", make_reader)
     state.t3 = t3
     yield state

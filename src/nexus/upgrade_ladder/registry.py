@@ -24,8 +24,8 @@ ladder walks (wired in P3, nexus-n7u38.23) — they are NOT rungs and never
 appear in :data:`RUNG_ORDER`. Their edges here document the walk contract;
 the registry can only mechanically enforce rung-to-rung order.
 
-:data:`RUNG_ORDER` holds two rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
-:data:`RUNG_ASPECT_QUEUE_TUPLES`; neither depends on the other).
+:data:`RUNG_ORDER` holds three rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
+:data:`RUNG_ASPECT_QUEUE_TUPLES`, :data:`RUNG_NOTE_TAGS_ARRAY`; none depends on another).
 Inserting a new rung means adding both a :data:`RUNG_ORDER` entry and its edges
 in :data:`HARD_EDGES`; the order is validated against the edges at
 import/construction time.
@@ -61,6 +61,11 @@ RUNG_RDR192_MANIFEST_BACKFILL = "rdr192-manifest-backfill"
 #: nothing is recorded and it is detected again on the next ``nx upgrade``.
 RUNG_ASPECT_QUEUE_TUPLES = "aspect-queue-tuples"
 
+#: RDR-236 RF-17 (nexus-6pfgb.38): rewrite a note's tags in its catalog entry's ``meta`` from the
+#: comma string older clients stored to the JSON array. Exempt from the backfill's fill-only rule by
+#: design; independent of the other rungs.
+RUNG_NOTE_TAGS_ARRAY = "note-tags-array"
+
 #: Stateless preconditions — NOT rungs (see module docstring).
 PRECONDITION_PACKAGE = "precondition:package"
 PRECONDITION_ENGINE = "precondition:engine"
@@ -74,7 +79,7 @@ ALL_RUNGS = "*"
 #: against the edges at import/construction time, so an inconsistent insert
 #: fails immediately rather than walking in a wrong order. Empty from
 #: nexus-lgdel.l1 (which retired chash-rekey) until nexus-wbfpw.41.
-RUNG_ORDER: tuple[str, ...] = (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_ASPECT_QUEUE_TUPLES)
+RUNG_ORDER: tuple[str, ...] = (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_ASPECT_QUEUE_TUPLES, RUNG_NOTE_TAGS_ARRAY)
 
 #: RQ2 hard edges as ``(before, after)`` pairs; ``after == ALL_RUNGS`` means
 #: the source precedes every rung.
@@ -217,4 +222,8 @@ def default_registry() -> LadderRegistry:
         AspectQueueTuplesRung,
     )
 
-    return LadderRegistry((Rdr192ManifestBackfillRung(), AspectQueueTuplesRung()))
+    from nexus.upgrade_ladder.rungs.note_tags_array import (  # noqa: PLC0415 — deferred; keeps registry import cheap and avoids a cycle
+        NoteTagsArrayRung,
+    )
+
+    return LadderRegistry((Rdr192ManifestBackfillRung(), AspectQueueTuplesRung(), NoteTagsArrayRung()))

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 COLLECTION = "knowledge__x__voyage-context-3__v1"
 
 
@@ -72,3 +74,10 @@ def test_a_short_page_under_an_oversized_limit_is_still_the_end() -> None:
     out = _list([_entry(i) for i in range(120)], stored=120, limit=500)
     assert "(end)" in out, out
     assert "next: offset" not in out, out
+
+
+@pytest.fixture(autouse=True)
+def _no_catalog_tags(monkeypatch):
+    """nexus-6pfgb.38: store list/get look a note's tags up in the catalog; these tests stub the T3 and
+    have no catalog, so the lookup is stubbed (tests/test_6pfgb38_tags_display.py covers it)."""
+    monkeypatch.setattr("nexus.catalog.store_hook.catalog_tags_for_chunks", lambda *a, **k: {})

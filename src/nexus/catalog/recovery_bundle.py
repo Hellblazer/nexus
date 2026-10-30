@@ -256,13 +256,13 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
     :func:`nexus.catalog.note_ttl.row_written_by` says the row is this note's own write, and fill its
     tags and category alone on sole ownership (nexus-6pfgb.35).
     """
-    from nexus.catalog.store_hook import NOTE_META_KEYS  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
+    from nexus.catalog.store_hook import NOTE_META_KEYS, split_note_tags  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
 
     meta = entry.meta or {}
     if not any(key in meta for key in NOTE_META_KEYS):
         return None
     return {
-        "tags": str(meta.get("tags") or ""),
+        "tags": split_note_tags(meta.get("tags")),
         "category": str(meta.get("category") or ""),
         "ttl_days": _positive_ttl(meta.get("ttl_days")),
     }
@@ -332,7 +332,7 @@ def export_knowledge_doc(
         if written is not None:
             keys = _row_keys(written)
         else:
-            keys = {"tags": "", "category": "", "ttl_days": None}
+            keys = {"tags": [], "category": "", "ttl_days": None}
             me = str(entry.tumbler)
             sole = next((
                 piece for mrow, piece in zip(ordered, rows)
@@ -422,9 +422,12 @@ def _tag_row_owners(
 
 
 def _row_keys(row: dict) -> dict[str, Any]:
-    """A chunk row's ``tags``, ``category`` and ``ttl_days`` in the record's shape."""
+    """A chunk row's ``tags``, ``category`` and ``ttl_days`` in the record's shape: the row keeps a
+    comma string, the record carries the array (nexus-6pfgb.38)."""
+    from nexus.catalog.store_hook import split_note_tags  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
+
     return {
-        "tags": row.get("tags", "") or "",
+        "tags": split_note_tags(row.get("tags")),
         "category": row.get("category", "") or "",
         "ttl_days": _positive_ttl(row.get("ttl_days")),
     }
@@ -679,12 +682,13 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
         put_note,
         stamp_note,
     )
+    from nexus.catalog.store_hook import split_note_tags  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
 
     col_name = target_collection_for(rec["collection"], t3)
     title = rec.get("title", "")
     outcome = put_note(
         content=rec["content"], collection=col_name, title=rec["title"],
-        tags=rec.get("tags", ""), category=rec.get("category", ""),
+        tags=",".join(split_note_tags(rec.get("tags"))), category=rec.get("category", ""),
         ttl_days=_positive_ttl(rec.get("ttl_days")),
         source_agent="recovery-import",
     )

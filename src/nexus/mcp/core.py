@@ -5929,7 +5929,17 @@ def store_get(
             holders = live_holders_of_chashes(col_name, [entry["id"]]).get(entry["id"], [])
             if holders:
                 title = owner_titles([t for _tb, t in holders]) or title
-        tags = entry.get("tags", "")
+        # nexus-6pfgb.38 (RDR-236 RF-17): a note's tags are the array in its catalog entry's meta; the
+        # row's comma string is the LAST writer's, shown only where no holder records tags at all
+        # (an indexed file, a note stored before the catalog kept them).
+        from nexus.catalog.store_hook import catalog_tags_for_chunks, format_note_tags  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+        catalog_tags = catalog_tags_for_chunks(
+            col_name, [entry["id"]],
+            holders={entry["id"]: holders} if holders is not None else None,
+            title=None if looks_like_hash else doc_id,
+        ).get(entry["id"])
+        tags = entry.get("tags", "") if catalog_tags is None else format_note_tags(catalog_tags)
         indexed_at = (entry.get("indexed_at") or "")[:10]
         # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL for PDF
         # chunks now (mineru/pymupdf, or the honest mixed aggregate
@@ -6756,10 +6766,16 @@ def store_list(
         ]
         if also:
             lines.append(also)
+        # nexus-6pfgb.38 (RDR-236 RF-17): a note's tags come from its catalog entry's array, one lookup
+        # for the page; the row's comma string (the last writer's) is the fallback where no holder
+        # records tags (an indexed file's chunks, whose documents have no tags key, answer nothing).
+        from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+
+        catalog_tags = _store_hook.catalog_tags_for_chunks(col_name, [e.get("id", "") for e in page])
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
             title = (e.get("title") or "")[:40]
-            tags = e.get("tags") or ""
+            tags = (e.get("tags") or "") if doc_id not in catalog_tags else _store_hook.format_note_tags(catalog_tags[doc_id])
             indexed_at_full = e.get("indexed_at") or ""
             indexed_at = indexed_at_full[:10]
             # Same reading as `nx store list` (nexus-njn1a): a ttl_days that cannot lapse is permanent.

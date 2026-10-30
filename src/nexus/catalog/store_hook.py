@@ -786,18 +786,47 @@ def _find_ghost_by_title(reader, owner, title: str):
 #: chunk row carries them too, but a chunk shared by two notes carries only the last writer's.
 #: ``put_at`` (nexus-6pfgb.15) is the time of the note's last put: the clock its own ``ttl_days``
 #: counts from (:mod:`nexus.catalog.note_ttl`), and the marker that the catalog, not the shared
-#: chunk row, holds this note's TTL.
+#: chunk row, holds this note's TTL. ``tags`` (nexus-6pfgb.38, RDR-236 RF-17) is a JSON ARRAY, the
+#: tags being a set: the chunk row keeps the comma string, the catalog entry the array, so a
+#: containment filter matches one tag of several. A string in a stored ``meta`` is a legacy value
+#: (written before nexus-6pfgb.38), converted by the ``note-tags-array`` upgrade rung.
 NOTE_META_KEYS: tuple[str, ...] = ("tags", "category", "ttl_days", "source_agent", "put_at")
 
 #: What a note key reads as when it is unset: the retraction sentinel written over a key the entry held
 #: (catalog ``update`` has no meta delete-keys, so a written key cannot be removed). In catalog meta a
 #: ``ttl_days`` of 0 is that sentinel, not an accepted input (``put_note`` and ``write_note`` reject 0;
-#: the chunk row spells permanent as ``None``/absent): readers treat 0 and absent as permanent.
-_NOTE_META_UNSET: dict[str, Any] = {"tags": "", "category": "", "ttl_days": 0, "source_agent": "", "put_at": ""}
+#: the chunk row spells permanent as ``None``/absent): readers treat 0 and absent as permanent. The
+#: unset ``tags`` is the empty array; a legacy ``""`` reads as unset too (:func:`_note_key_unset`).
+_NOTE_META_UNSET: dict[str, Any] = {"tags": [], "category": "", "ttl_days": 0, "source_agent": "", "put_at": ""}
+
+
+def split_note_tags(tags: object) -> list[str]:
+    """A note's tags as the array the catalog ``meta`` holds (nexus-6pfgb.38): the comma string the CLI
+    and MCP pass through (or a list), each tag trimmed, empties dropped, duplicates removed, first-seen
+    order kept (tags are a set; the order is the writer's). ``None`` and ``""`` are ``[]``."""
+    if not tags:
+        return []
+    parts = tags.split(",") if isinstance(tags, str) else [str(t) for t in tags]  # type: ignore[attr-defined,union-attr]
+    out: list[str] = []
+    for part in parts:
+        tag = part.strip()
+        if tag and tag not in out:
+            out.append(tag)
+    return out
+
+
+def _note_key_unset(key: str, value: Any) -> bool:
+    """True when *value* is what the note key reads as unset: absent, the key's sentinel, and for
+    ``tags`` a legacy empty string or an array with no tag in it."""
+    if value is None:
+        return True
+    if key == "tags":
+        return not split_note_tags(value)
+    return value == _NOTE_META_UNSET[key]
 
 
 def note_catalog_meta(
-    *, tags: str = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
+    *, tags: str | list[str] = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
     put_at: str = "", prior: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The note keys one put writes to its catalog entry's ``meta``, and what undoes them.
@@ -810,12 +839,16 @@ def note_catalog_meta(
     each written key to the value *prior* held (or the unset value), for
     :func:`restore_pre_call_stamp` when the write does not land.
 
+    *tags* is the comma string every caller passes (or a list); it is split once into the array the
+    entry stores (:func:`split_note_tags`, nexus-6pfgb.38). A prior legacy string retracts to ``[]``
+    like an array, and *revert* gives it back verbatim; a prior ``""`` is unset.
+
     *put_at* (nexus-6pfgb.15) is the time of this put, an ISO-8601 stamp. Every put sends it, so the
     TTL clock of a re-put note restarts as the chunk row's does, and a failed put restores the old
     stamp with the rest.
     """
     given: dict[str, Any] = {
-        "tags": tags or "", "category": category or "",
+        "tags": split_note_tags(tags), "category": category or "",
         "ttl_days": ttl_days if ttl_days and ttl_days > 0 else 0, "source_agent": source_agent or "",
         "put_at": put_at or "",
     }
@@ -824,9 +857,9 @@ def note_catalog_meta(
     revert: dict[str, Any] = {}
     for key in NOTE_META_KEYS:
         unset = _NOTE_META_UNSET[key]
-        if given[key] != unset:
+        if not _note_key_unset(key, given[key]):
             write[key] = given[key]
-        elif prior.get(key) not in (None, unset):
+        elif not _note_key_unset(key, prior.get(key)):
             write[key] = unset
         else:
             continue
@@ -1872,6 +1905,73 @@ def live_holders_of_chashes(collection: str, chashes: list[str]) -> dict[str, li
         return {}
     finally:
         reader.close()
+
+
+def catalog_tags_for_chunks(
+    collection: str, chashes: list[str], *,
+    holders: dict[str, list[tuple[str, str]]] | None = None, title: str | None = None,
+) -> dict[str, list[str]]:
+    """``chash -> tags`` for the chunks of *collection* whose live holders record tags in their catalog
+    ``meta`` (nexus-6pfgb.38, RDR-236 RF-17): the display read of ``store_get`` / ``store_list``.
+
+    A chunk row carries the last writer's tags; each holding note carries its own, as an array (a
+    legacy string reads as its split array). A chunk held by several notes shows the union in
+    first-seen order. A chunk is OMITTED when no holder carries a ``tags`` key at all (an indexed
+    file, a note stored before nexus-6pfgb.5), which is the caller's cue to fall back to the row; a
+    holder whose array is empty (the retraction) counts as having the key, so the answer is ``[]``
+    and the row's stale tags stay hidden. *title*, when given, keeps only holders with that title
+    (a ``store_get`` asked by title wants that note's tags). *holders* is what
+    :func:`live_holders_of_chashes` already returned, to save the ownership lookup.
+
+    Best-effort like :func:`live_holders_of_chashes`: ``{}`` when the catalog is unavailable or
+    unreadable, since this only decorates a listing.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if not chashes:
+        return {}
+    try:
+        reader = make_catalog_reader()
+    except Exception:  # noqa: BLE001 — decorating a listing is best-effort
+        _log.debug("catalog_tags_reader_unavailable", exc_info=True)
+        return {}
+    if reader is None:
+        return {}
+    try:
+        if holders is None:
+            owners = {c: [str(t) for t in ts] for c, ts in (reader.docs_for_chashes(list(chashes)) or {}).items()}
+        else:
+            owners = {c: [t for t, _title in hs] for c, hs in holders.items()}
+        tumblers = sorted({t for ts in owners.values() for t in ts})
+        entries = reader.resolve_many(tumblers) if tumblers else {}
+        out: dict[str, list[str]] = {}
+        for chash in chashes:
+            tags: list[str] = []
+            keyed = False
+            for tumbler in owners.get(chash, []):
+                entry = entries.get(tumbler)
+                if entry is None or (entry.physical_collection or "") not in ("", collection):
+                    continue
+                if title is not None and (entry.title or "") != title:
+                    continue
+                meta = entry.meta or {}
+                if "tags" not in meta:
+                    continue
+                keyed = True
+                tags.extend(t for t in split_note_tags(meta["tags"]) if t not in tags)
+            if keyed:
+                out[chash] = tags
+        return out
+    except Exception:  # noqa: BLE001 — decorating a listing is best-effort
+        _log.debug("catalog_tags_lookup_failed", exc_info=True)
+        return {}
+    finally:
+        reader.close()
+
+
+def format_note_tags(tags: list[str]) -> str:
+    """A tag array as the display text: ``alpha, one``."""
+    return ", ".join(tags)
 
 
 #: The rungs a document's ``extraction_pages`` map can name, in display order. Mirrors

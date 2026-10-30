@@ -295,10 +295,15 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
     # cheap count); the rows listed are live ones, so after a delete the
     # two differ (shakeout 7.64.1 F10). Name it rather than imply live.
     click.echo(f"{col_name}  (showing {shown_start}-{shown_end}; {total} stored)\n" + also)
+    # nexus-6pfgb.38 (RDR-236 RF-17): as the MCP store_list, a note's tags come from its catalog
+    # entry's array (one lookup for the page); the row's comma string is the fallback.
+    from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    catalog_tags = _store_hook.catalog_tags_for_chunks(col_name, [e.get("id", "") for e in entries])
     for e in entries:
         doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
         title = (e.get("title") or "")[:40]
-        tags = e.get("tags") or ""
+        tags = (e.get("tags") or "") if doc_id not in catalog_tags else _store_hook.format_note_tags(catalog_tags[doc_id])
         indexed_at_full = e.get("indexed_at") or ""
         indexed_at = indexed_at_full[:10]
         # Derive expiry from indexed_at + ttl_days (expires_at no longer stored). A row's ttl_days is
@@ -538,7 +543,12 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
         click.echo(json.dumps(out, indent=2))
     else:
         title = entry.get("title", "")
-        tags = entry.get("tags", "")
+        # nexus-6pfgb.38 (RDR-236 RF-17): the note's tags from its catalog entry's array, as the MCP
+        # store_get; the row's comma string only where no holder records tags.
+        from nexus.catalog.store_hook import catalog_tags_for_chunks, format_note_tags  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+        catalog_tags = catalog_tags_for_chunks(col_name, [entry["id"]]).get(entry["id"])
+        tags = entry.get("tags", "") if catalog_tags is None else format_note_tags(catalog_tags)
         indexed_at = (entry.get("indexed_at") or "")[:10]
         # nexus-1oguj: mirrors the MCP store_get display (mcp/core.py) —
         # extraction_method is canonical for PDF chunks now; absent for
