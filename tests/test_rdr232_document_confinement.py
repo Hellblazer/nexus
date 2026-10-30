@@ -1107,6 +1107,29 @@ def test_a_row_identified_by_its_chunk_text_hash_metadata_is_checked_by_that_has
     assert [r.metadata["chunk_text_hash"] for r in rows] == [IN_A] and diag[0].chash_allow_dropped == 2
 
 
+def test_a_row_with_a_stale_metadata_hash_is_kept_when_its_id_is_allowed(ignoring_engine) -> None:
+    # nexus-jypmj review S1: the engine matched the row by its chash, which is its id; a stale or legacy-short
+    # metadata hash must not turn an allowed row into a reported drop
+    from nexus.search_engine import search_cross_corpus
+
+    fake, col = ignoring_engine
+    plain = fake._serve_route
+
+    def stale_metadata(body: dict) -> dict:
+        envelope = plain(body)
+        for row in envelope["results"]:
+            row["chunk_text_hash"] = "deadbeef"
+            row.setdefault("metadata", {})["chunk_text_hash"] = "deadbeef"
+        return envelope
+
+    fake._serve_route = stale_metadata
+    diag: list = []
+    with chash_allow_scope([IN_A]):
+        rows = search_cross_corpus(
+            "q", [col], 5, fake.client, threshold_override=float("inf"), cluster_by=None, diagnostics_out=diag)
+    assert [r.id for r in rows] == [IN_A] and diag[0].chash_allow_dropped == 2
+
+
 def test_the_flat_search_and_the_lexical_leg_are_checked_too(ignoring_engine) -> None:
     from nexus.search_engine import search_cross_corpus
 

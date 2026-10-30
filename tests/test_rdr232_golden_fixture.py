@@ -608,13 +608,14 @@ def _assert_engine_filter_leg_on_the_real_engine(fx, art, scope, bindings, reade
     assert walks, "the traversal was dispatched (engine_filter mode)"
     for a, o in walks:
         assert a["policy"]["allowed_collections"] == fx.art_rdr, a["policy"]
+        assert o.get("ids"), "the walk returned chunks (a subset check alone passes on an empty walk; review S3)"
         assert set(o.get("ids", [])) <= document, "the walk reached another document's chunks"
     d = env["evidence_diagnostics"]
     assert d["traversals"], d
     for t in d["traversals"]:
         assert t["policy_applied"] and not t["policy_failed"] and t["dropped_cap"] == 0, t
         assert not t["scope_conflict"], t
-    assert d["streams"]["vector"]["references"] > 0
+    assert d["streams"]["vector"]["references"] > 0 and d["streams"]["graph"]["references"] > 0
     assert set(d["streams"]["vector"]["by_collection"]) <= {fx.art_rdr_collection}
     assert set(d["streams"]["graph"]["by_collection"]) <= {fx.art_rdr_collection}
     outcomes = {x["outcome"] for x in env["scope_diagnostics"] if x.get("scope_kind") == "document"}

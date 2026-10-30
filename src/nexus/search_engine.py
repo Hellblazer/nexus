@@ -1280,13 +1280,17 @@ def _record_poisoned_collection(name: str, exc: Exception) -> None:
 _CLUSTER_DEFAULT = "semantic"
 
 
-def _row_chash(r: "SearchResult") -> str:
-    """The chunk hash a result row stands for: its ``chunk_text_hash`` metadata, else its id (a T3 chunk's natural id
-    is its hash). Lower-cased; ``""`` when neither is a string."""
+def _row_chashes(r: "SearchResult") -> set[str]:
+    """The chunk hashes a result row may stand for, lower-cased: its ``chunk_text_hash`` metadata and its id (a T3
+    chunk's natural id is its hash). Both are offered because a row's metadata hash can be stale or legacy-short while
+    the engine matched the row by its id; the allow check admits the row when either is allowed."""
+    out: set[str] = set()
     h = r.metadata.get("chunk_text_hash") if r.metadata else None
-    if not (isinstance(h, str) and h):
-        h = r.id
-    return h.lower() if isinstance(h, str) else ""
+    if isinstance(h, str) and h:
+        out.add(h.lower())
+    if isinstance(r.id, str) and r.id:
+        out.add(r.id.lower())
+    return out
 
 
 def search_cross_corpus(
@@ -2273,7 +2277,7 @@ def search_cross_corpus(
             # nexus-jypmj: verify the engine honoured the filter. The capability flag is cached for minutes, so a
             # rollback or an older replica can answer 200 and ignore the key; a row outside the allow list is then
             # another document's text in a document-confined run. Fail closed: drop it and count it.
-            held = [r for r in part_results if _row_chash(r) in _allow_set]
+            held = [r for r in part_results if not _row_chashes(r).isdisjoint(_allow_set)]
             chash_allow_dropped += len(part_results) - len(held)
             part_results = held
         all_results.extend(part_results)
