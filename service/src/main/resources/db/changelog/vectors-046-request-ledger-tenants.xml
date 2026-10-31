@@ -27,7 +27,7 @@
     grants loop, and the registry has no RLS, so a definer would add nothing. Under FORCE RLS on the ledger the
     function never touches the ledger (it inserts only into the registry), so the ledger policy does not reach
     it. search_path is pinned and every name is schema-qualified. The registry row is inserted BEFORE the ledger
-    row, so the lock order stays registry, then ledger: two first claims for one brand-new tenant serialise on
+    row; the INSERT has already taken the ledger's table lock, so the order is the ledger table lock, then the registry row (the backfill in -4 takes them in the same order): two first claims for one brand-new tenant serialise on
     the registry's primary-key entry until the first commits and then the second's DO NOTHING proceeds, and
     neither holds anything the other needs, so they cannot deadlock. BEFORE INSERT fires before ON CONFLICT is
     resolved, so a claim that loses to an existing ledger row still runs the registry DO NOTHING; the tenant is
