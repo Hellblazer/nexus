@@ -10,6 +10,7 @@ noticing (review of 2064fd94a, nexus-qo7ie.1). The two reviewers also carry
 memory from standing in for the T2 gate record (critique of 2064fd94a).
 File-only, so it runs in the ``-m lint`` job.
 """
+
 from __future__ import annotations
 
 import re
@@ -29,7 +30,9 @@ RESTATING = (
 )
 TAGS = 'tags="kind:gate,bead:<id>,rdr:<NNN>"'
 DROP_CLAUSE = "drop `rdr:` when the bead serves no RDR"
-SENTENCE = re.compile(r"A gate record \(a review, critique, confirmation or fix round\) also passes [^\n]*?\(RDR-209 Amendment A1\)\.")
+SENTENCE = re.compile(
+    r"A gate record \(a review, critique, confirmation or fix round\) also passes [^\n]*?\(RDR-209 Amendment A1\)\."
+)
 MEMORY_PARAGRAPH = "never replaces the T2 gate record, which is mandatory"
 
 
@@ -42,9 +45,13 @@ def test_the_tag_sentence_is_identical_in_every_writer() -> None:
     found = {}
     for name in WRITERS:
         hits = SENTENCE.findall((AGENTS_DIR / name).read_text(encoding="utf-8"))
-        assert len(hits) == 1, f"{name}: expected the gate-record tag sentence once, found {len(hits)}"
+        assert len(hits) == 1, (
+            f"{name}: expected the gate-record tag sentence once, found {len(hits)}"
+        )
         found[name] = hits[0]
-    assert len(set(found.values())) == 1, f"the tag sentence differs between writers: {found}"
+    assert len(set(found.values())) == 1, (
+        f"the tag sentence differs between writers: {found}"
+    )
     assert TAGS in next(iter(found.values()))
 
 
@@ -58,5 +65,9 @@ def test_restating_files_carry_the_tags_and_the_drop_clause(path: Path) -> None:
 @pytest.mark.parametrize("name", REVIEWERS)
 def test_a_reviewer_with_user_memory_carries_the_bounding_paragraph(name: str) -> None:
     text = (AGENTS_DIR / name).read_text(encoding="utf-8")
-    assert re.search(r"^memory: user$", _frontmatter(text), re.M), f"{name}: no memory: user"
-    assert MEMORY_PARAGRAPH in text, f"{name}: memory: user without the paragraph bounding it"
+    assert re.search(r"^memory: user$", _frontmatter(text), re.M), (
+        f"{name}: no memory: user"
+    )
+    assert MEMORY_PARAGRAPH in text, (
+        f"{name}: memory: user without the paragraph bounding it"
+    )
