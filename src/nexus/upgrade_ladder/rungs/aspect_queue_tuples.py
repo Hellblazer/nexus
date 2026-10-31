@@ -67,9 +67,10 @@ import math
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 import structlog
 
-from nexus.db.t2.http_tuple_store import MaxLiveRowsExceededError, TooLargeError
+from nexus.db.t2.http_tuple_store import CensusTimeoutError, MaxLiveRowsExceededError, TooLargeError
 from nexus.db.t2.http_aspect_queue import (
     ASPECT_QUEUE_ENV,
     ASPECTS_ENGINE_RELEASE as ASPECTS_ENGINE_TAG,  # aliased: the ladder lint bans identifiers containing 'lease' outside preconditions
@@ -113,6 +114,16 @@ DEFAULT_BATCH_LIMIT = 500
 #: so a backlog is never reported converged because of where the limit cut it. ``converge``
 #: and ``verify`` read the whole table: they move rows and confirm the move.
 DETECT_READ_LIMIT = 50
+
+#: The request cap (seconds) on the ``aspects`` census ``detect()`` makes to learn whether the engine has the
+#: template (nexus-s72c5). The census counts the subspace's rows, and the answer used here is only "is there a
+#: template"; a census that runs past this, or that the engine's own statement timeout cuts, makes ``detect``
+#: say pending with the reason, not raise. ``converge`` and ``verify`` send it unchanged.
+DETECT_CENSUS_TIMEOUT_S = 10.0
+
+
+class _CensusSlow(RuntimeError):
+    """The template census ran past its cap or the engine's own statement timeout."""
 
 
 def clamp_delay(delay_s: object) -> int:
@@ -202,7 +213,16 @@ class AspectQueueTuplesRung:
             return reason, []
         tuples = self._tuples_factory()
         try:
-            if aspects_census(tuples) is None:
+            try:
+                census = (
+                    aspects_census(tuples) if limit is None
+                    else aspects_census(tuples, timeout=DETECT_CENSUS_TIMEOUT_S)
+                )
+            except (CensusTimeoutError, httpx.TimeoutException) as exc:
+                if limit is None:
+                    raise
+                raise _CensusSlow(str(exc) or type(exc).__name__) from exc
+            if census is None:
                 return (
                     f"the engine has no 'aspects' tuple template; it predates "
                     f"{ASPECTS_ENGINE_TAG}"
@@ -227,7 +247,17 @@ class AspectQueueTuplesRung:
         :data:`DETECT_READ_LIMIT` rows, because converged needs only "is there a
         row that can move". A full page with none movable in it could hide one
         behind the rows that stay, so that case alone reads the whole table."""
-        reason, rows = self._probe(limit=DETECT_READ_LIMIT)
+        try:
+            reason, rows = self._probe(limit=DETECT_READ_LIMIT)
+        except _CensusSlow as exc:
+            return RungStatus(
+                applicable=True,
+                converged=False,
+                pending_detail=(
+                    "the 'aspects' tuple census did not answer within "
+                    f"{DETECT_CENSUS_TIMEOUT_S:g}s ({exc}); `nx upgrade` checks and moves the rows"
+                ),
+            )
         if reason:
             _log.info("aspect_queue_rung_skipped", reason=reason)
             return RungStatus(applicable=False, converged=False, pending_detail=reason)

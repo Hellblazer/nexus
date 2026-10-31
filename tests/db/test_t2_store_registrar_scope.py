@@ -52,10 +52,11 @@ def _aspect_queue_mode(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
     ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1), and the table producer
     (``HttpAspectQueue`` case) is the opt-out. The tuples producer registers through its own
     ``ensure_collection_registered(..., registrar=self._catalog_registrar)`` call, a different
-    site from the table's ``write_with_registration_retry`` (nexus-zqu6r). Every other store is
+    site from the table's ``write_with_registration_retry`` (nexus-zqu6r); its batch form
+    (``enqueue_many``, ``_enqueue_many_tuples``) registers at a third site of its own. Every other store is
     unaffected by the flag; they run with it at the table value, as before."""
     params = getattr(getattr(request.node, "callspec", None), "params", {})
-    tuples = params.get("drive_write") is _drive_aspect_queue_tuples
+    tuples = params.get("drive_write") in (_drive_aspect_queue_tuples, _drive_aspect_queue_tuples_enqueue_many)
     monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples" if tuples else "table")
 
 
@@ -147,6 +148,13 @@ def _drive_aspect_queue_tuples(store) -> None:
     store.enqueue("some_col", "path/to/doc.md", "chash123", "content", doc_id="doc-1")
 
 
+def _drive_aspect_queue_tuples_enqueue_many(store) -> None:
+    """The tuples producer's batch form: its own ``ensure_collection_registered`` call, one per collection."""
+    store.enqueue_many([
+        {"collection": "some_col", "source_path": "path/to/doc.md", "content_hash": "chash123", "doc_id": "doc-1"},
+    ])
+
+
 def _mk_document_aspects(base_url: str, token: str):
     return HttpDocumentAspectsStore(base_url=base_url, _token=token)
 
@@ -203,6 +211,10 @@ _CASES = [
     pytest.param(_mk_chash, _drive_chash, "new_col", id="HttpChashIndex"),
     pytest.param(_mk_aspect_queue, _drive_aspect_queue, "some_col", id="HttpAspectQueue"),
     pytest.param(_mk_aspect_queue, _drive_aspect_queue_tuples, "some_col", id="HttpAspectQueue.tuples"),
+    pytest.param(
+        _mk_aspect_queue, _drive_aspect_queue_tuples_enqueue_many, "some_col",
+        id="HttpAspectQueue.tuples.enqueue_many",
+    ),
     pytest.param(_mk_document_aspects, _drive_document_aspects, "some_col", id="HttpDocumentAspectsStore"),
     pytest.param(_mk_document_highlights, _drive_document_highlights, "new_col", id="HttpDocumentHighlightsStore"),
     pytest.param(_mk_taxonomy, _drive_taxonomy, "some_col", id="HttpTaxonomyStore"),
@@ -339,6 +351,7 @@ _UNPINNED = {
     _drive_chash: HttpChashIndex,
     _drive_aspect_queue: HttpAspectQueue,
     _drive_aspect_queue_tuples: HttpAspectQueue,
+    _drive_aspect_queue_tuples_enqueue_many: HttpAspectQueue,
     _drive_document_aspects: HttpDocumentAspectsStore,
     _drive_document_highlights: HttpDocumentHighlightsStore,
     _drive_taxonomy: HttpTaxonomyStore,

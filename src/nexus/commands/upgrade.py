@@ -17,7 +17,7 @@ _log = structlog.get_logger()
 
 
 @click.command("upgrade")
-@click.option("--dry-run", is_flag=True, help="Report pending upgrade-ladder rungs (read-only detect() walk) without executing.")
+@click.option("--dry-run", is_flag=True, help="Report pending upgrade-ladder rungs (read-only detect() walk) without executing. Writes nothing; the one write a rung's verify() makes (manifest-section-labels saves a cache note, never rung state) belongs to a real run.")
 # --force REMOVED (RDR-158 P4 Stage 4, review Significant): it reset the
 # local-SQLite version gate so apply_pending re-ran every migration — the
 # machinery is deleted, the flag read nothing, and dead-but-documented

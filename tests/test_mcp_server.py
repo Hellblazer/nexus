@@ -448,15 +448,18 @@ class TestNexusHmxiRoundTripGrandfathering:
         it), so the assertion failed. It asserted a registration the store
         path never made. What the store path itself decides, and does here, is
         the promoted NAME it hands to both of its sinks (the document
-        registration and the note write), and the kwargs a registration of that
-        name carries. Those are asserted directly. The real write's
-        registration against the engine is covered by
-        ``tests/test_z0o2p12_note_write.py``.
+        registration and the note write). That is asserted directly.
+
+        NOT COVERED HERE, AND NOT ELSEWHERE: the registration of the promoted
+        voyage-named collection by the real write. ``tests/test_z0o2p12_note_write.py``
+        does not cover it (it uses bge names only), and this test's note double
+        reaches no registrar. A kwargs assertion on ``collection_registration_kwargs(promoted)``
+        was dropped: it is a pure function of the name and cannot fail from a
+        ``store_put`` change. The missing coverage is nexus-a9inu.
         """
         from unittest.mock import MagicMock
 
         from nexus.catalog import note_write
-        from nexus.corpus import collection_registration_kwargs
 
         # The catalog writer is faked so the fixture seed and the note double's manifest seed
         # write nowhere: this test pins names, not a landed document. The calls it receives are
@@ -501,12 +504,6 @@ class TestNexusHmxiRoundTripGrandfathering:
             "the store path registers the document under the promoted name"
         )
         assert note_writes == [promoted], "and writes the note under it"
-        assert collection_registration_kwargs(promoted) == {
-            "content_type": "knowledge",
-            "owner_id": "greenfield",
-            "embedding_model": "voyage-context-3",
-            "model_version": "v1",
-        }, "a registration of the promoted name carries the voyage token"
         # ``store_list`` resolves to the same conformant target.
         listing = store_list(collection="knowledge__greenfield", limit=10)
         assert "greenfield-doc" in listing

@@ -192,6 +192,11 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
         "untouched documents are not rewritten, and the filled one's stamp is restored: the engine restamps a "
         "document on every manifest write, which would switch off the chunk-newer guard for its other rows")
     assert rung.verify() is True and "1 filled this run" in rung.record_detail()
+    # the real /stats carries both counts the clean-scan memo is keyed on (nexus-6pfgb.60 review F1)
+    from nexus.upgrade_ladder.rungs.manifest_section_labels import _catalog_shape
+
+    shape = _catalog_shape(cat)
+    assert shape is not None and shape[0] >= 6 and shape[1] >= legacy_rows, shape
 
     # a later writer of the shared chunk row no longer decides this row's label
     import nexus.db.http_vector_client as hvc
