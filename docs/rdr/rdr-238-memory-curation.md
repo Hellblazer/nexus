@@ -121,7 +121,16 @@ that wrote this RDR):
 The harness survey points the same way: in its ablation, tools (+3.3 points)
 and middleware (+2.2) carried the gain, and the system prompt alone made
 results worse (Harness Engineering, p.66). The fix delivers a rule for when a
-procedure becomes a command, and the four commands this project needs first.
+procedure becomes a command, a rule for which front door a command gets, and
+the four commands this project needs first.
+
+The front door matters because nexus already has two. Over the 30 days to
+2026-10-31, sessions made about 21,000 nexus MCP tool calls (`memory_get`
+9,394, `memory_put` 5,582, `memory_search` 2,108, `mailbox_send` 1,680) and
+about 1,200 `nx` CLI calls (`nx rdr preamble` 333, `nx memory get` 132,
+`nx memory list` 96, then the catalog verbs). Agents use MCP; the CLI is
+mostly the RDR preamble and hand reads. Neither door is chosen by rule
+today.
 
 ## Relationship to Prior RDRs
 
@@ -285,6 +294,34 @@ and its why, plus a pointer to the skill, command or hook.
    preamble rdr-research -- add`, `nx memory put`, and the bead text the
    skills write through `bd`), so prose never passes through shell parsing.
 
+**One implementation, two front doors (Gap 5).** Every capability is one
+Python function. The MCP tool and the CLI verb are thin wrappers over it, and
+which wrappers exist follows a rule:
+
+| Capability | Front door | Why |
+| --- | --- | --- |
+| Hot, agent-called, structured input (memory, search, store, scratch, mailbox, tuples) | MCP, with a CLI twin | Agents call it thousands of times; it must work where there is no shell |
+| Agent-written prose (gate records, research findings) | MCP first, CLI twin with stdin | MCP arguments are structured JSON, so no shell parsing |
+| Human, CI and admin work (doctor, upgrade, index, preflight, transcripts) | CLI only | It runs in a shell anyway; an MCP schema would be dead weight |
+| An MCP tool nobody calls | Dropped from MCP | Even deferred, it costs its name in every context and its upkeep |
+
+The reasons behind the rule, as measured or documented:
+
+- **Reach.** A verb needs a shell and an installed `nx`. Claude Desktop chat,
+  claude.ai on the web, Cowork and mobile have no shell, so MCP is the only
+  door there.
+- **Input safety.** Gap 5's shell split happened on the CLI path; the same
+  text through `memory_put` arrives byte for byte.
+- **Enforcement.** A hook matches an MCP tool by its exact name; on Bash it
+  parses command strings, which is where false refusals come from (the
+  subagent git guard denied read-only `git merge-base` lines in four of five
+  Haiku runs on 2026-10-31, and the primary-checkout guard refused two
+  worktree commits from this session because a compound command began with
+  `cd`).
+- **Context cost.** Claude Code defers most MCP tools to a name, so the cost
+  gap is the always-loaded set (8 nexus tools, 4.4K tokens) and about 0.4K of
+  deferred names, not the full catalogue.
+
 **Habits that run themselves (Gap 4).** Three checks: the index budget is
 checked at SessionStart and over budget prints one line; a `supersedes` field
 is required when a memory file reverses another (checked by the same hook,
@@ -349,9 +386,12 @@ files, unindexed files, oversized files and superseded rows still served.
    Writes T2 project `<repo>` with the title
    `<kind>-<sha>-<slug>-<date>`, tags `kind:gate,bead:B[,rdr:N]`, and no TTL,
    through the same MCP and CLI paths, and refuses an outcome outside the
-   verdict vocabulary the review agents already mandate. The agents' T2
-   write-back line then names this verb instead of a free-text tag string,
-   and `tests/test_gate_record_tags_lint.py` moves to pin the verb's use.
+   verdict vocabulary the review agents already mandate. Under the
+   front-door rule it is agent-written prose, so its first door is an MCP
+   tool, `gate_record`, with the same fields; the CLI verb is the twin. The
+   agents' T2 write-back line then names `gate_record` instead of a
+   free-text tag string, and `tests/test_gate_record_tags_lint.py` moves to
+   pin its use.
 10. **`nx preflight [--base REF] [--run]`.** Classifies the diff (Python, engine
     `service/`, plugin surface, docs, workflow YAML, schema changeset) and
     prints the checks each class needs: ruff on touched files, the change
@@ -546,7 +586,16 @@ the lint.
 The verb, the agents' write-back lines naming it, and the lint moved to pin
 it.
 
-#### Step 4: `nx preflight`
+#### Step 4: Front-door census
+
+With `nx transcripts tools`, list every nexus MCP tool and CLI verb with its
+30-day call count and caller (main session, subagent, human). Apply the
+front-door table: each MCP tool nobody calls is a drop candidate, each hot
+capability without a twin gets one. The result is a list for Sam to approve,
+never an automatic removal, and dropping an MCP tool is a wire change with a
+ledger entry.
+
+#### Step 5: `nx preflight`
 
 The change-class table, the classifier, and the composed selectors. Done
 when its output for the last ten develop pushes matches what was actually
@@ -581,6 +630,8 @@ None.
   run locally.
 - Stdin: a finding containing `;`, backticks and `$(...)` stored byte for
   byte.
+- Front doors: a lint that every MCP tool and CLI verb wrapping one
+  capability call the same function, so the twins cannot drift.
 
 ## Validation
 
@@ -629,3 +680,4 @@ reads one directory of about 150 small files, well under its hook budget.
 | --- | --- |
 | 2026-10-31 | Filed as draft from the memory survey at Sam's direction (nexus-qo7ie). Gate-record rollup routed to RDR-209 as an amendment. |
 | 2026-10-31 | Gap 5 added at Sam's direction: procedures that run instead of being recalled. Promotion gains three targets (skill, command, hook), and Phase 5 builds `nx transcripts`, prose on stdin, `nx gate record` and `nx preflight`. Title widened to match. |
+| 2026-10-31 | Front-door rule added to Gap 5 at Sam's direction: one implementation, MCP and CLI as thin wrappers, chosen by caller and reach; `nx gate record` becomes the MCP tool `gate_record` first; Phase 5 Step 4 is a front-door census. |
