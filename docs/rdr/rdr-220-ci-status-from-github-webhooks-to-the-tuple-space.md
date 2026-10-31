@@ -298,7 +298,7 @@ fold the posts with a repo script. No workflow file changes.
 - **Engine and edge**: unchanged. The adapter's writes are ordinary
   bearer-authenticated `POST /v1/tuples/out` calls through existing
   pass-through, metered like any client.
-- **Reader fold**: a repo-local script, `scripts/ci_status.py <sha>`,
+- **Reader fold** (retired 2026-10-03 by aed1a2015; see Revision History): a repo-local script, `scripts/ci_status.py <sha>`,
   reads the topic with the ordinary tuple read, keeps the latest state
   per (workflow, job, attempt), and prints what is green, pending, and
   failed. It is a development-workflow helper beside
@@ -430,7 +430,7 @@ the engine, so it has no reason to live in it.
 ### Consequences
 
 - Positive: per-job status for every workflow with no workflow edits.
-- Positive: zero GitHub API calls from readers for CI status.
+- Positive: zero GitHub API calls from readers for CI status. Retired with the fold on 2026-10-03: readers now make one `gh api .../check-runs` call per sha.
 - Positive: no engine or edge change; the engine never sees GitHub.
 - Negative: one more small service to host, with one secret of three
   fields (webhook secret, board token, read-only GitHub token).
@@ -473,8 +473,8 @@ log once GitHub answers again.
 - [x] conexus-4b agrees on the adapter's host and secret store (T2 `nexus_rdr/220-research-2`)
 - [x] Adapter job-event run-origin check (GitHub API, fail closed) merged and re-reviewed (conexus 5a0d3ad, re-review mutation-verified; follow-ups merged as ffe499f)
 - [x] Outside-collaborator approval policy set on Hellblazer/nexus (Sam: `all_external_contributors`, set and read back)
-- [ ] nexus-r3ur5 (`board-ci` scope) shipped in an engine tag and deployed (Sam decided the adapter waits for it; no interim tenant token)
-- [ ] Sam issues the fine-grained, read-only Actions token into 1Password
+- [x] nexus-r3ur5 (`board-ci` scope) shipped in an engine tag and deployed (engine-service-v0.1.134) (Sam decided the adapter waits for it; no interim tenant token)
+- [x] Sam issues the fine-grained, read-only Actions token into 1Password (adapter activated 2026-09-27, T2 conexus/ci-board-adapter-activation-2026-09-27)
 
 ### Minimum Viable Validation
 
@@ -491,8 +491,8 @@ Done: 79a2386c7, shipped in engine-service-v0.1.133.
 #### Step 2: Board-only token scope (engine, this repository, nexus-r3ur5)
 
 A `board-ci` scope admitted only on `POST /v1/tuples/out` for subspaces
-whose template is `board/ci/<topic>`. Implemented and in review; ships in
-the engine tag after v0.1.133.
+whose template is `board/ci/<topic>`. Done: shipped in engine-service-v0.1.134
+(`service-tokens-006-board-ci-scope.xml`, `BoardCiTokenScopeTest`).
 
 #### Step 3: Adapter (conexus repository, conexus-jewq)
 
@@ -502,7 +502,8 @@ as ffe499f.
 
 #### Step 4: Status fold script in `scripts/` (this repository)
 
-Done: `scripts/ci_status.py`, c0a5cfef4.
+Done: `scripts/ci_status.py`, c0a5cfef4; the MVV run efdc06800 used it.
+Retired 2026-10-03 by aed1a2015 (cleanup step 8) together with its tests.
 
 ### Phase 2: Operational Activation
 
@@ -572,10 +573,11 @@ None. The adapter uses the Python standard library only.
    with the fork gate mutation-checked.
 4. **Scenario**: the fold reads adapter-shaped posts across pages.
    **Expected**: `tests/scripts/test_ci_status.py` passes against a real
-   engine.
+   engine. Passed at c0a5cfef4; the script and its test were retired 2026-10-03.
 5. **Scenario**: the Minimum Viable Validation on the live system.
    **Expected**: one post per job transition on `board/ci/nexus-develop`,
-   and `scripts/ci_status.py <sha>` matching GitHub's check runs.
+   and `scripts/ci_status.py <sha>` matching GitHub's check runs. Passed on
+   run efdc06800, before the fold was retired.
 
 ### Performance Expectations
 
@@ -649,3 +651,4 @@ records carry the detail. No section needs trimming before acceptance.
 - 2026-09-26: Gate round 2 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `0538478bc`; critique `nexus_rdr/220-gate-critique-2026-09-26-r2`.
 - 2026-09-26: Gate round 3 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `e575f38d8`; critique `nexus_rdr/220-gate-critique-2026-09-26-r3`.
 - 2026-10-22: Post-accept amendment (conexus-efk8, conexus PR #582, merged as afe4c0e85 and live from 2026-10-22 12:13Z; the first CI burst after it posted 63 tuples with 0 failures, per the conexus session): the adapter sets `ttl_seconds` 86400 on completed posts instead of the template's three-day retention. `board/ci/nexus-develop` sat at about 4,600 of its 5,000 live-row cap (about 1,300 completed posts a day held three days, plus 6 hours of in-flight posts), so the template sizing in Technical Design and Critical Assumption 3 did not hold, and bursts over the cap were refused: 104 posts lost on 2026-10-20 and 626 on 2026-10-21 (counts from the conexus session), which GitHub does not redeliver. Consequences: completed history readable on the board (the reader fold, `tuple_rd`), and the exact-replay window for a completed post, become one day. The template's own retention and cap are unchanged (the comment in `board-ci.yaml` still describes the old sizing). The alternative conexus named is raising the template cap in an engine release, after which it would restore the three-day TTL.
+- 2026-10-31: close audit (critique `nexus_rdr/220-closure-critique-2026-10-31`). Commit aed1a2015 (2026-10-03, cleanup step 8, no bead) deleted the reader fold `scripts/ci_status.py` and its tests, and AGENTS.md rule 7 now reads CI from `gh api .../check-runs`, one call per sha. So Gap 3 is open again. Whether to drop it or build a replacement reader is Sam's decision. The prerequisite boxes and the Step 2 status are brought current, and the fold's sites are marked retired.
