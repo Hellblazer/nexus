@@ -2,7 +2,8 @@
 title: "nx_answer Answer-Shape Eligibility and Evidence Sufficiency"
 id: RDR-232
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-10-31
 priority: high
 author: Sam
 reviewed-by: self
