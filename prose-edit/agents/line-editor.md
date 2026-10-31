@@ -3,6 +3,7 @@ name: line-editor
 description: Use only through the prose-edit skill. Line-edits one document from a brief the skill assembles (exemplars, style sheet, not-a-defect entries, budget) and returns numbered proposals as one JSON block. Read-only: it never changes a file.
 model: opus
 tools: [Read, Grep, Glob]
+omitClaudeMd: true
 ---
 
 # Line editor

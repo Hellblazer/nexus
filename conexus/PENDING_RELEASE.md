@@ -47,5 +47,10 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/mailbox/SKILL.md` (nexus-onjvw): the reply-in-ack paragraph names `lock/<resource>`, not the RDR-184 ledger, as its example of a keys-only target the engine refuses with `SchemaViolation`; the ledger template is retired.
+- `prose-edit/agents/line-editor.md` (nexus-qo7ie.1): `omitClaudeMd: true`, so the agent starts without the user and project CLAUDE.md files, since its brief carries everything it uses.
+- `conexus/agents/code-review-expert.md` (nexus-qo7ie.1): `memory: user` gives the reviewer its own memory directory under `~/.claude/agent-memory/`, and a gate record it writes carries `kind:gate`, `bead:` and `rdr:` tags.
+- `conexus/agents/substantive-critic.md` (nexus-qo7ie.1): `memory: user`, and the same gate-record tags.
+- `conexus/agents/developer.md` (nexus-qo7ie.1): a fix-round gate record it writes carries `kind:gate`, `bead:` and `rdr:` tags.
+- `conexus/skills/orchestration/reference.md` (nexus-qo7ie.1): the T2 ttl rule says a gate record is written with no `ttl` and with gate tags, and the phase-close rollup sets its TTL (RDR-209 Amendment A1), in place of passing a ttl for review rounds, which the agent definitions contradicted.
 
 ## Deferred to the next client release
