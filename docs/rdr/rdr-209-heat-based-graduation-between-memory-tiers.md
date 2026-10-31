@@ -388,8 +388,7 @@ review bead, not the skill alone.
    and keep no TTL.
    - **The lookup is an exact tag match, not a search.** `memory_search`
      tokenizes: a search for `kind:gate` on 2026-10-31 returned 273 hits, the
-     first five untagged critiques matched on words in their bodies (critique
-     of 2064fd94a). Phase 3 therefore needs a list filter on the tags column
+     first five untagged critiques matched on words in their bodies (the nexus-qo7ie.1 critique). Phase 3 therefore needs a list filter on the tags column
      that matches one whole tag, and its tests include an untagged record that
      mentions `kind:gate` in its body and must not be returned.
    - **RDR gate records are in scope.** The `rdr-gate-checklist` skill writes
