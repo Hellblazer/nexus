@@ -69,7 +69,10 @@ within `max_lease_seconds`.
 parameter in the changelog, ten times more aggressive than the 20%
 default) specifically for this workload; a sustained red past that tuning
 means autovacuum genuinely cannot keep up, not that the setting is
-missing.
+missing. A table's ratio is judged only once its dead rows pass twice its
+autovacuum trigger, 2 x (50 + 0.01 x live rows): below that autovacuum is not
+due yet or has not had its next pass, so a small table with a high ratio
+reads green with `not judged: dead <= N` in the detail (nexus-j6un5).
 
 **Action**: the fix suggestion is literal — `VACUUM ANALYZE nexus.<table>;`.
 This check reads `pg_stat_user_tables` directly (local-only admin-psql
