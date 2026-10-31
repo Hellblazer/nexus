@@ -32,7 +32,7 @@ from nexus import _mineru_spawn
 from nexus._mineru_health import claim_broken_restart
 from nexus._mineru_pid import _pid_file_path, is_process_alive, read_pid_file
 from nexus.pdf_extractor import PDFExtractor
-from tests._child_process import kill_group, popen_in_group
+from tests._child_process import NEVER_ALIVE_PID, kill_group, popen_in_group
 from tests._module_seam import patch_in
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="process groups and shebang scripts are POSIX")
@@ -147,7 +147,10 @@ def _fake_worker(calls: list):
     def popen(args, **kwargs):
         pdf, result_dir, start, end_arg, formula = args[-5:]
         calls.append((int(start), formula))
-        proc = MagicMock(pid=4321)
+        # Never a literal like 4321: the worker's exit is swept by the REAL kill primitive
+        # (only safe_killpg_group is patched below), and after a pid wrap 4321 is someone's
+        # live process (develop lost runner at 7eb199896 shard 1).
+        proc = MagicMock(pid=NEVER_ALIVE_PID)
 
         def wait(timeout=None):
             if timeout is None:

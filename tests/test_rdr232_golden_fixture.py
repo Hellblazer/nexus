@@ -197,7 +197,7 @@ def _assert_named_source_and_primary_evidence(fx, reader):
     art_resolution = resolve_named_sources(
         [rdr084_ref], OwnerResolution("resolved", fx.art_owner, (("project", fx.art_owner),)), cat=reader)
     assert [s.tumbler for s in art_resolution.sources] == [fx.art_rdr]
-    caps = _replace(DEFAULT_CAPS, max_selected_items=6)
+    caps = _replace(DEFAULT_CAPS, max_selected_items=6, max_single_source_items=6)
     primary = select_primary_evidence(
         art_resolution, cat=reader, fetch_chunks=t3_chunk_fetcher(get_t3()), caps=caps)
     (cov,) = primary.documents
@@ -437,13 +437,25 @@ def _assert_oversized_input_keeps_the_reserved_stream(fx, art, primary, resoluti
     return diag
 
 
-def _nx_answer_envelope(art, scope, bindings, *, strategy: tuple[str, str] | None = None) -> dict:
+def _nx_answer_envelope(
+    art, scope, bindings, *, strategy: tuple[str, str] | None = None, chash_supported: bool | None = False,
+    records: list | None = None,
+) -> dict:
     """``nx_answer`` itself on the substrate (the real ``_nx_answer_named_sources``,
     ``_nx_answer_lifecycle_stream``, ``_nx_answer_primary_stream`` and ``plan_run``), stopped before the
     first operator by the continuation handoff; the model is patched to fail loudly. *strategy*
     ``(verb, strategy)`` pins the library plan the matcher offers (the matcher itself, run over the
-    seeded builtins, picks it; ``None`` lets ``nx_answer`` choose)."""
+    seeded builtins, picks it; ``None`` lets ``nx_answer`` choose).
+
+    *chash_supported* is the engine capability ``nx_answer`` reads (``HttpVectorClient.supports_chash_allow``): ``False``
+    (the default) pins the old-engine fallback explicitly, because the gate jar built from this tree advertises
+    ``vector_search_chash_allow_supported`` and an unpinned run is the ``engine_filter`` mode; ``None`` leaves the real
+    probe against the jar. *records*, when given, receives ``(tool, args, output)`` for every tool the runner
+    dispatches (the real ``_default_dispatcher`` still runs)."""
     from unittest.mock import AsyncMock, patch
+
+    import nexus.db.http_vector_client as hvc
+    from nexus.plans import runner
 
     from nexus.mcp.core import nx_answer
 
@@ -457,6 +469,19 @@ def _nx_answer_envelope(art, scope, bindings, *, strategy: tuple[str, str] | Non
         # off for it; the coverage journey is nexus-jypmj.3.10's.
         patch.dict("os.environ", {"NX_ANSWER_COVERAGE": "0"}),
     ]
+    if chash_supported is not None:
+        patches.append(patch.object(hvc.HttpVectorClient, "supports_chash_allow", lambda self: chash_supported))
+    if records is not None:
+        real = runner._default_dispatcher
+
+        async def spy(tool, args):
+            out = await real(tool, args)
+            records.append((tool, dict(args), out))
+            return out
+
+        for attr in (runner._SUPPORTS_BUNDLING_ATTR, runner._HYDRATES_ATTR):
+            setattr(spy, attr, True)
+        patches.append(patch("nexus.plans.runner._default_dispatcher", spy))
     if strategy is not None:
         match = g.library_match(lib, art.text, scope=scope, bindings=bindings,
                                 dimensions={"verb": strategy[0], "strategy": strategy[1]})
@@ -512,20 +537,33 @@ def _assert_production_wiring_reaches_the_reducer(
     assert src["lifecycle"]["state"] == "resolved" and src["lifecycle"]["reached_reducer"] == 2, src
     assert d["scope_check"]["state"] == "satisfied" and d["scope_check"]["violations"] == [], d["scope_check"]
     assert d["streams"]["vector"]["out_of_scope"] == 0 and d["streams"]["graph"]["out_of_scope"] == 0
-    # nexus-jypmj.1.18: scope `rdr` reaches the step first, then the explicit ART owner narrows `rdr` to the
-    # ART owner's collection; the other project's rdr collection is removed from every vector step.
+    # nexus-jypmj.1.18 and nexus-4xmpv: the request names one source, so the run's scope is that source's collection
+    # before any step runs. The step's corpus is the ART collection already, and the explicit ART owner finds nothing
+    # left to remove (`within_scope`, nothing removed): the other project's rdr collection never reached a vector
+    # step. Before the one-source rule the owner removed it from the broader `rdr` corpus (`narrowed`).
     assert all(st["corpus"] == fx.art_rdr_collection for st in d["streams"]["vector"]["steps"]), d["streams"]["vector"]["steps"]
     on_ = d["scope_check"]["owner_narrowing"]
     assert on_["owners"] == [fx.art_owner] and on_["skipped_steps"] == [], on_
-    assert on_["steps"] and all(s["removed"] == [fx.nexus_rdr_collection] and s["outcome"] == "narrowed" for s in on_["steps"]), on_
+    assert on_["steps"] and all(s["removed"] == [] and s["outcome"] == "within_scope" for s in on_["steps"]), on_
+    assert env["single_source_narrowing"]["applied"] is True
+    assert env["single_source_narrowing"]["effective_scope"] == fx.art_rdr, "the document: the envelope reports the tumbler, the steps ran under its collection"
     assert {s["step_index"] for s in on_["steps"]} == {st["step_index"] for st in d["streams"]["vector"]["steps"]}
     assert not any(
         fx.nexus_rdr_collection in r["by_stream_collection"].get(s, {}) for s in ("vector", "graph", "primary")
     ), "no foreign-owner item reaches the reducer input"
     assert d["streams"]["primary"]["references"] == n_pieces and d["streams"]["t2"]["references"] == 2
-    assert d["capped_traversals"] == 0 and d["skipped_steps"] == []
-    (trav,) = d["traversals"]
-    assert trav["dropped_cap"] == expect_dropped_cap and trav["possibly_truncated"] is False, trav
+    assert d["capped_traversals"] == 0
+    narrowing = env["single_source_narrowing"]
+    assert narrowing["confinement"] == "steps_not_run", (
+        "nexus-jypmj: the gate jar's engine does not advertise vector_search_chash_allow_supported, so a confined run "
+        "dispatches no secondary step; the engine_filter mode is pinned offline (tests/test_rdr232_document_confinement.py)")
+    # every retrieval step of the plan was skipped with the document_confined marker: no vector or graph evidence, no walk
+    assert d["traversals"] == [] and d["streams"]["vector"]["references"] == 0 == d["streams"]["graph"]["references"]
+    document = [x for x in env["scope_diagnostics"] if x.get("scope_kind") == "document"]
+    assert document and {x["outcome"] for x in document} == {"document_confined"}, env["scope_diagnostics"]
+    # the fallback dispatched no walk, so the traversal reports are empty and there is nothing to cap (the real walk
+    # is checked by _assert_engine_filter_leg_on_the_real_engine)
+    trav = {"dropped_cap": sum(t.get("dropped_cap") or 0 for t in d["traversals"])}
     assert env["reserved_stream"]["merged"] is True and env["reserved_stream"]["merged_at_step"] == LOOKUP_RANK_STEP
     covered_facets = {f for f, _t in art_pieces_in_request if f}
     label = strategy[1] if strategy else "natural-selection"
@@ -539,6 +577,53 @@ def _assert_production_wiring_reaches_the_reducer(
         f"capped_traversals={d['capped_traversals']} traversal_dropped_cap={trav['dropped_cap']} "
         f"facets_in_request={sorted(covered_facets)}")
     return {"envelope": env, "present": present, "pieces": art_pieces_in_request}
+
+
+def _assert_engine_filter_leg_on_the_real_engine(fx, art, scope, bindings, reader) -> None:
+    """nexus-jypmj: the first end-to-end proof of the client and the engine together. The gate jar's engine advertises
+    ``vector_search_chash_allow_supported``, so the one-source run is ``engine_filter``: every search and query step
+    carries the document's chunk hashes and the engine restricts the candidates to them, and the walk runs under the
+    document's tumbler. Nothing here is patched but the model and the continuation handoff."""
+    from nexus.mcp.core import _get_t3
+
+    assert _get_t3().supports_chash_allow() is True, "non-vacuity: the gate jar's engine advertises the filter"
+    document = {r.chash for r in reader.get_manifest(fx.art_rdr)}
+    assert len(document) == len(g.ART_RDR_PIECES) > 0
+    records: list = []
+    env = _nx_answer_envelope(
+        art, scope, bindings, strategy=("lookup", "hybrid-factual-lookup"), chash_supported=None, records=records)
+    narrowing = env["single_source_narrowing"]
+    assert narrowing["applied"] is True and narrowing["confinement"] == "engine_filter", narrowing
+    assert narrowing["document"] == fx.art_rdr and narrowing["allow_chunks"] == len(document), narrowing
+    # every vector call carried the document's hashes, and the rows the engine answered are all in that set
+    vector = [(a, o) for t, a, o in records if t in ("search", "query")]
+    assert vector, "the plan's search step was dispatched"
+    for a, o in vector:
+        assert a["chash_allow"] == sorted(document), "the step carries the document's whole chunk set"
+        assert o["chunk_text_hash"] and set(o["chunk_text_hash"]) <= document, (
+            f"a secondary vector anchor outside the document: {sorted(set(o['chunk_text_hash']) - document)[:3]}")
+        assert "chash_allow_dropped" not in o, "the engine honoured the key, so the client dropped nothing"
+    # the walk ran under the document's own address, and what it returned is inside the document too
+    walks = [(a, o) for t, a, o in records if t == "traverse"]
+    assert walks, "the traversal was dispatched (engine_filter mode)"
+    for a, o in walks:
+        assert a["policy"]["allowed_collections"] == fx.art_rdr, a["policy"]
+        assert o.get("ids"), "the walk returned chunks (a subset check alone passes on an empty walk; review S3)"
+        assert set(o.get("ids", [])) <= document, "the walk reached another document's chunks"
+    d = env["evidence_diagnostics"]
+    assert d["traversals"], d
+    for t in d["traversals"]:
+        assert t["policy_applied"] and not t["policy_failed"] and t["dropped_cap"] == 0, t
+        assert not t["scope_conflict"], t
+    assert d["streams"]["vector"]["references"] > 0 and d["streams"]["graph"]["references"] > 0
+    assert set(d["streams"]["vector"]["by_collection"]) <= {fx.art_rdr_collection}
+    assert set(d["streams"]["graph"]["by_collection"]) <= {fx.art_rdr_collection}
+    outcomes = {x["outcome"] for x in env["scope_diagnostics"] if x.get("scope_kind") == "document"}
+    assert {"document_filtered", "document_scoped"} <= outcomes, env["scope_diagnostics"]
+    assert not any("rows_outside_allow" in x for x in env["scope_diagnostics"]), "the engine ignored no filter"
+    print(
+        f"RDR232-ENGINE-FILTER vector_calls={len(vector)} walks={len(walks)} allow={len(document)} "
+        f"vector_refs={d['streams']['vector']['references']} graph_refs={d['streams']['graph']['references']}")
 
 
 def _assert_single_query_fast_path_is_contained(fx, art, scope) -> None:
@@ -571,19 +656,31 @@ def _assert_single_query_fast_path_is_contained(fx, art, scope) -> None:
         env_art = _nx_answer_envelope(art, scope, {"content_type": "rdr"}, strategy=("research", "corpus-coverage-check"))
     (named_art,) = env_art["named_sources"]["sources"]
     assert (named_art["status"], named_art["tumbler"], named_art["inferred"]) == ("resolved", fx.art_rdr, True), named_art
+    # The inferred project itself narrows nothing (no owner qualifier), and the one-source rule does not narrow an
+    # INFERRED source while another project carries the number (nexus-jypmj, Sam 2026-10-30; the Nexus RDR-084 is
+    # registered here). The ambiguous run above resolved nothing, so it was not narrowed and says why; this one
+    # resolved by inference and says why it was not narrowed either, and its step ran as the unnarrowed one did.
+    assert env["single_source_narrowing"]["applied"] is False and "did not resolve" in env["single_source_narrowing"]["reason"]
+    assert env_art["single_source_narrowing"]["applied"] is False
+    assert "carry the same number" in env_art["single_source_narrowing"]["reason"], env_art["single_source_narrowing"]
     assert env_art["scope_diagnostics"] == env["scope_diagnostics"], "an inferred project narrows no stream"
+    assert env_art["evidence_request"]["owner"]["status"] == "inferred", "an inferred project is not an explicit owner"
     print(f"RDR232-FASTPATH-TEXT-SOURCE no_project={named['status']} art_session={named_art['status']}:{named_art['tumbler']}")
 
-    # nexus-jypmj.1.18: the same call with the explicit ART owner queries the ART collection only.
+    # nexus-jypmj.1.18 and nexus-jypmj: the same call with the explicit ART owner resolves the one source, so the run is
+    # confined to that document and does NOT take the fast path (it has no primary stream and calls query outside the
+    # runner). It goes through plan_run: the plan's one query step is narrowed to the ART collection and the owner, then
+    # not dispatched, because the gate jar's engine does not advertise the document filter. No other project's
+    # collection is read.
     env = _nx_answer_envelope(
         art, scope, {"content_type": "rdr", "owner": fx.art_owner}, strategy=("research", "corpus-coverage-check"))
-    assert env["continuation"] is None and env["step_count"] == 1
     d = env["evidence_diagnostics"]
     v = d["streams"]["vector"]
-    assert v["references"] > 0 and set(v["by_collection"]) == {fx.art_rdr_collection}, v
+    narrowing = env["single_source_narrowing"]
+    assert narrowing["applied"] is True and narrowing["confinement"] == "steps_not_run" and narrowing["document"] == fx.art_rdr
+    assert v["references"] == 0 and set(v["by_collection"]) <= {fx.art_rdr_collection}, v
     assert [(x["scope_kind"], x["outcome"]) for x in env["scope_diagnostics"]] == [
-        ("corpus_prefix", "narrowed"), ("owner", "narrowed")], env["scope_diagnostics"]
-    assert d["scope_check"]["owner_narrowing"]["steps"][0]["removed"] == [fx.nexus_rdr_collection]
+        ("collection", "narrowed"), ("owner", "within_scope"), ("document", "document_confined")], env["scope_diagnostics"]
     print(f"RDR232-FASTPATH-OWNER vector_refs={v['references']} by_collection={v['by_collection']}")
 
 
@@ -1167,6 +1264,9 @@ def test_rdr084_fixture_containment_and_baseline_emission(t2_service_env) -> Non
     production = _assert_production_wiring_reaches_the_reducer(
         fx, art, scope, call_bindings, primary, resolution, strategy=("lookup", "hybrid-factual-lookup"),
         expect_dropped_cap=g.SECONDARY_DOCS - 50)
+    # ... the same plan on the engine that advertises the document filter (the jar this tree builds): the first
+    # run of client and engine together ...
+    _assert_engine_filter_leg_on_the_real_engine(fx, art, scope, call_bindings, reader)
     # ... a taxonomy-domain builtin, which is what the matcher picks for this request (two searches
     # pinned `corpus: all`, one with a prose and one with a code domain, both narrowed to rdr) ...
     _assert_production_wiring_reaches_the_reducer(

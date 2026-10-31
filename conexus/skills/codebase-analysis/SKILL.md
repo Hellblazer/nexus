@@ -6,7 +6,7 @@ effort: medium
 
 # Codebase Analysis Skill
 
-Delegates to the **codebase-deep-analyzer** agent (model: sonnet).
+Delegates to the **codebase-deep-analyzer** agent (model: haiku).
 
 ## When This Skill Activates
 

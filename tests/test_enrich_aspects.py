@@ -390,7 +390,7 @@ class TestDeterministicCostEstimate:
             enrich, ["aspects", "knowledge__delos", "--dry-run"],
         )
         assert result.exit_code == 0, result.output
-        assert "model claude-haiku-4-5-20251001;" in result.output
+        assert "model claude-haiku-5-5;" in result.output
         assert f"${3 * _PER_PAPER_COST_USD:.2f}" in result.output
 
 

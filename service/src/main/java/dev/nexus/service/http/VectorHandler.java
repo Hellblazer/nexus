@@ -631,6 +631,16 @@ public final class VectorHandler implements HttpHandler {
      * A request without those keys is unchanged. Same behavior on {@code /search-per-collection} and {@code
      * /hybrid-search}. See {@code ManifestLabelStage}.
      *
+     * <p><b>{@code chash_allow} (nexus-jypmj, RDR-232, additive).</b> An optional array of chunk hashes (64 lowercase
+     * hex each, at most {@link #MAX_CHASH_ALLOW} distinct after de-duplication). With it the search returns only
+     * rows whose chash is in the set, within the requested collections and the tenant's RLS, ranked by exact distance
+     * over those rows (never the HNSW index, so it cannot lose recall); {@code n_results} and every other field behave
+     * as without it. An empty array returns no rows; a malformed value or too many is a 400 naming the field; absent
+     * (or JSON null) is the search as it always was. The same field is served by {@code /hybrid-search} (a row must be
+     * in the set AND pass the text gate) and {@code /search-per-collection} (both arms). {@code GET /version}
+     * advertises {@code vector_search_chash_allow_supported}: an engine without it ignores the key and answers an
+     * unrestricted search.
+     *
      * <p>{@code retention} ({@code "full"} or {@code "reference-only"}, RDR-169 Phase B
      * fix round 1, Gap 2) and a nullable {@code content} are additive — existing consumers
      * that ignore the two new fields see the same shape they always have. A
@@ -650,9 +660,10 @@ public final class VectorHandler implements HttpHandler {
         int nResults                  = optInt(body, "n_results", 10);
         Map<String, Object> where     = optMap(body, "where");
         boolean includeSourceUri      = optBool(body, "include_source_uri", false);
+        byte[][] chashAllow           = optChashAllow(body);
 
         var searchResult = repo.searchWithTokens(tenant, queryText, collections, nResults, where,
-                                                 includeSourceUri);
+                                                 includeSourceUri, chashAllow);
         sendSearchResult(ex, body, queryText, searchResult);
     }
 
@@ -764,6 +775,7 @@ public final class VectorHandler implements HttpHandler {
         }
         Integer rerankMaxCandidates = optRerankMaxCandidates(body, rerank);
         boolean lexical             = optBool(body, "lexical", false);
+        byte[][] chashAllow         = optChashAllow(body);
         Integer contentChars        = optInteger(body, "content_chars");
         if (contentChars != null && contentChars < 1) {
             throw new IllegalArgumentException("field 'content_chars' must be at least 1, got " + contentChars);
@@ -776,7 +788,8 @@ public final class VectorHandler implements HttpHandler {
 
         long handlerStartNanos = System.nanoTime();
         var result = repo.searchPerCollection(tenant, queryText, collections, perK, limit,
-                                              thresholds, where, includeSourceUri, includeEmbeddings, lexical);
+                                              thresholds, where, includeSourceUri, includeEmbeddings, lexical,
+                                              chashAllow);
         long repoMs = (System.nanoTime() - handlerStartNanos) / 1_000_000L;
         emitTokenUsage(ex, result.tokens());
         emitSkippedCollections(ex, result.skippedCollections());
@@ -914,9 +927,10 @@ public final class VectorHandler implements HttpHandler {
         int nResults              = optInt(body, "n_results", 10);
         Map<String, Object> where = optMap(body, "where");
         boolean includeSourceUri  = optBool(body, "include_source_uri", false);
+        byte[][] chashAllow       = optChashAllow(body);
 
         var hybridResult = repo.hybridSearchWithTokens(tenant, queryText, collections, nResults, where,
-                                                       includeSourceUri);
+                                                       includeSourceUri, chashAllow);
         sendSearchResult(ex, body, queryText, hybridResult);
     }
 
@@ -934,6 +948,7 @@ public final class VectorHandler implements HttpHandler {
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
+        rejectChashAllow(body, "/search-metadata-scoped");
         String queryText         = requireString(body, "query");
         List<String> collections = requireStringList(body, "collections");
         String contentType       = optString(body, "content_type");
@@ -962,6 +977,7 @@ public final class VectorHandler implements HttpHandler {
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
+        rejectChashAllow(body, "/search-topic-scoped");
         String queryText  = requireString(body, "query");
         String topicLabel = requireString(body, "topic");
         String collection = requireString(body, "collection");
@@ -988,6 +1004,7 @@ public final class VectorHandler implements HttpHandler {
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
+        rejectChashAllow(body, "/search-graph-hop");
         String queryText         = requireString(body, "query");
         List<String> seeds       = requireStringList(body, "seeds");
         List<String> collections = requireStringList(body, "collections");
@@ -1023,6 +1040,7 @@ public final class VectorHandler implements HttpHandler {
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
+        rejectChashAllow(body, "/search-aspect-scoped");
         String queryText         = requireString(body, "query");
         List<String> collections = requireStringList(body, "collections");
         String field             = optString(body, "field");
@@ -2553,6 +2571,57 @@ public final class VectorHandler implements HttpHandler {
         List<String> result = new ArrayList<>(list.size());
         for (Object item : list) result.add(item == null ? "" : item.toString());
         return result;
+    }
+
+    /** Most distinct chashes one {@code chash_allow} may carry (nexus-jypmj, RDR-232). */
+    static final int MAX_CHASH_ALLOW = 3000;
+
+    /**
+     * Optional {@code chash_allow} (nexus-jypmj, RDR-232): the chunk hashes a search may return, as an array of
+     * 64-lowercase-hex strings, at most {@link #MAX_CHASH_ALLOW} distinct after de-duplication. Absent or JSON
+     * null is {@code null} (no restriction, the request as it always was); an empty array is a restriction to
+     * nothing. Anything else malformed (not an array, an element that is not a canonical chash, more than the
+     * limit) fails the whole request with a 400 that names the field, never a silent drop of the restriction.
+     * The returned values are the 32-byte storage form, in first-seen order.
+     */
+    byte[][] optChashAllow(Map<String, Object> body) {
+        Object val = body.get("chash_allow");
+        if (val == null) return null;
+        if (!(val instanceof List<?> list)) {
+            throw new IllegalArgumentException("field 'chash_allow' must be an array of chunk hashes");
+        }
+        java.util.LinkedHashMap<String, byte[]> distinct = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < list.size(); i++) {
+            Object item = list.get(i);
+            if (!(item instanceof String hex)) {
+                throw new IllegalArgumentException(
+                    "field 'chash_allow[" + i + "]' must be a string of 64 lowercase hex characters");
+            }
+            if (distinct.containsKey(hex)) continue;
+            try {
+                distinct.put(hex, dev.nexus.service.db.Chash.fromHex(hex).toBytes());
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("field 'chash_allow[" + i + "]': " + e.getMessage());
+            }
+            if (distinct.size() > MAX_CHASH_ALLOW) {
+                throw new IllegalArgumentException("field 'chash_allow' holds more than " + MAX_CHASH_ALLOW
+                    + " distinct chunk hashes; at most " + MAX_CHASH_ALLOW + " are allowed");
+            }
+        }
+        return distinct.values().toArray(new byte[0][]);
+    }
+
+    /**
+     * {@code chash_allow} is served by {@code /search}, {@code /query}, {@code /hybrid-search} and {@code
+     * /search-per-collection} only. The routes that rank through other statements (metadata-, topic-, graph-hop-
+     * and aspect-scoped) refuse it by name rather than ignore it: a search that was meant to be confined to a
+     * set of chunks and came back unconfined is the failure the field exists to prevent.
+     */
+    private static void rejectChashAllow(Map<String, Object> body, String route) {
+        if (body.get("chash_allow") != null) {
+            throw new IllegalArgumentException("field 'chash_allow' is not supported on " + route
+                + "; it applies to /search, /query, /hybrid-search and /search-per-collection");
+        }
     }
 
     private List<String> optStringList(Map<String, Object> body, String key) {

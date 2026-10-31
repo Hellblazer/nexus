@@ -144,6 +144,7 @@ from nexus.plans.coverage_repair import (
     MAX_REPAIR_QUERIES,
     MIN_REPAIR_QUERY_S,
     REPAIR_RESULTS_PER_QUERY,
+    REPAIR_RESULTS_PER_QUERY_UNFILTERED,
     REPAIR_RETRIEVAL_SHARE,
     RepairHit,
     RepairOutcome,
@@ -858,6 +859,9 @@ class CoverageBoundary:
     lifecycle: Any = None
     owner_resolution: Mapping[str, Any] | None = None
     dropped_scope: str = ""
+    #: The document a one-source run is confined to (nexus-jypmj): the repair queries carry its chunk filter, and a
+    #: repair hit is inside the scope exactly when its chunk hash is in the document's manifest set.
+    confinement: Any = None
     skip_generation_when_uncovered: bool = True
     max_repair_queries: int = MAX_REPAIR_QUERIES
     max_repair_items: int = MAX_REPAIR_ITEMS
@@ -1135,6 +1139,12 @@ class CoverageBoundary:
         """Whether a repair hit lies inside the caller's scope. A subtree filter ran server side where a query
         could take one, so an unattributed hit is kept there; a document address cannot be filtered server side,
         so a hit that does not name that document is not inside."""
+        confinement = self.confinement
+        if confinement is not None:
+            # nexus-jypmj: a hit's catalog tumbler is the last writer of a chunk shared by several documents, so
+            # it cannot say which document the chunk is in; the document's own manifest hashes can.
+            key = hit.chash or hit.id
+            return bool(key) and confinement.contains(key)
         scope = self.scope
         if scope.kind == "subtree":
             if hit.tumbler:
@@ -1174,10 +1184,20 @@ class CoverageBoundary:
         wanted = set(targets)
         facets = [f for f in (self.request.facets if self.request else ()) if f.id in wanted]
         primary, primary_subtree, plan = self._repair_targets(view)
+        confinement = self.confinement
+        # Without the engine's chunk filter a repair query reads the whole collection, so the siblings of the document
+        # fill the page and the membership test drops them: ask for a wider page (nexus-jypmj).
+        limit = (
+            REPAIR_RESULTS_PER_QUERY_UNFILTERED
+            if confinement is not None and not getattr(confinement, "sends_filter", False) else REPAIR_RESULTS_PER_QUERY
+        )
         queries = build_repair_queries(
             facets, primary_collections=primary, plan_targets=plan, max_queries=self.max_repair_queries,
-            limit=REPAIR_RESULTS_PER_QUERY, primary_subtree=primary_subtree,
+            limit=limit, primary_subtree=primary_subtree,
         )
+        if confinement is not None and getattr(confinement, "sends_filter", False):
+            for q in queries:
+                q.args["chash_allow"] = confinement.allow_list()
         if not queries:
             return done("no_target", detail="no primary collection or plan retrieval scope to ask")
 

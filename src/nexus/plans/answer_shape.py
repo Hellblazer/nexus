@@ -166,9 +166,12 @@ _PAYLOAD_SHAPES: tuple[tuple[frozenset[str], AnswerShape], ...] = (
     # matches_the_real_query_envelope pins the two against each other.
     # seed_scope / graph_scope are the envelope's OPTIONAL keys (follow_links
     # capping, core.py); also_in_ids pairs with also_in (critique [25095]).
+    # chash_allow_dropped / warnings are set when a document-confined search
+    # drops rows the engine returned outside chash_allow (nexus-jypmj).
     (frozenset({"ids", "tumblers", "distances", "collections",
                 "chunk_collections", "chunk_text_hash", "also_in", "also_in_ids",
-                "seed_scope", "graph_scope"}), AnswerShape.RETRIEVAL_ONLY),
+                "seed_scope", "graph_scope", "chash_allow_dropped", "warnings"}),
+     AnswerShape.RETRIEVAL_ONLY),
     # store_get_many(structured=True): source_notes (nexus-onn7s) and section_type_basis (nexus-sx1t0)
     # are part of the payload; without them a full dump did not match and read as ANSWERED.
     (frozenset({"contents", "missing", "section_types", "source_notes", "section_type_basis"}),

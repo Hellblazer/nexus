@@ -6,7 +6,7 @@ effort: high
 
 # RDR Audit Skill
 
-Wraps the canonical audit pattern proven in Phase 1b (RDR-067) as a one-command skill. Delegates the classification work to the **deep-research-synthesizer** agent (sonnet). See [registry.yaml](../../registry.yaml).
+Wraps the canonical audit pattern proven in Phase 1b (RDR-067) as a one-command skill. Delegates the classification work to the **deep-research-synthesizer** agent, dispatched with `model: "sonnet"`: the classification is a gate, so it does not take the agent's haiku default (nexus-j6un5.1). See [registry.yaml](../../registry.yaml).
 
 **Phase 2a scope**: default-mode audit dispatch only. The `list` / `status` / `history` management subcommands are added in Phase 2b (`nexus-dqp.4`) and are not implemented here.
 
@@ -102,7 +102,7 @@ Do NOT inline the canonical prompt text into this skill file — the prompt is t
    ```
 3. **Main-session PRE-STEP** (transcript mining, see above — NOT delegatable)
 4. **Load canonical prompt** from T2 and substitute `{project}` + `{transcript_excerpts}`
-5. **Dispatch the deep-research-synthesizer agent** via the Agent tool with the substituted prompt as the task body (see Agent Invocation section)
+5. **Dispatch the deep-research-synthesizer agent** via the Agent tool with `model: "sonnet"` and the substituted prompt as the task body (see Agent Invocation section)
 6. **Wait for the subagent result**
 7. **Parse the output** — extract the verdict category (VERIFIED / PARTIALLY VERIFIED / INCONCLUSIVE / FALSIFIED), incident count, confidence level, and drift-category distribution
 8. **Skill body owns persistence** (critical — see Persistence Ownership note below): after the subagent returns, the main session calls `memory_put` to persist the full output. Subagents do NOT reliably self-persist; this was observed in 3/3 Phase 1b spike runs where subagents acknowledged persistence instructions but never called `memory_put`. The skill body itself must own this step.
@@ -189,7 +189,7 @@ The root cause is not diagnosed (could be model-level instruction compliance, co
 
 ## Agent Invocation
 
-Use the Agent tool with standardized relay format.
+Use the Agent tool with `model: "sonnet"` and the standardized relay format.
 See [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md) for required fields and examples.
 
 ```markdown

@@ -195,11 +195,23 @@ def test_an_explicit_project_binding_outranks_the_active_project_for_a_question_
 
 
 def test_a_source_read_from_the_question_never_narrows_the_secondary_streams(tmp_path: Path) -> None:
-    """The resolved ART document leaves ``_nx_owners`` unset: only an ``owner``/``project`` binding narrows."""
+    """The resolved ART document is not an owner qualifier: only an ``owner``/``project`` binding is explicit, and the
+    envelope's ``owner_narrowing.applied`` stays False. The one-source rule (nexus-4xmpv, nexus-jypmj) is a separate
+    narrowing, and it narrows an INFERRED source only when no other project carries the number (Sam, 2026-10-30):
+    the Nexus RDR-084 exists beside the ART one here, so the run is not narrowed and ``single_source_narrowing`` says
+    why (the unit-level cases with no foreign document are in ``test_rdr232_primary_evidence.py``)."""
     env, run, _life, _cat = _run(tmp_path, project=ART_OWNER)
     assert _sources(env)[0]["status"] == "resolved"
-    assert "_nx_owners" not in dict(run.await_args.args[1])
     assert env["evidence_diagnostics"]["scope_check"]["owner_narrowing"]["applied"] is False
+    (src,) = _sources(env)
+    assert src["inferred"] is True and src["foreign"] == 1, "non-vacuity: another project carries the number"
+    narrowing = env["single_source_narrowing"]
+    assert narrowing["applied"] is False and narrowing["confinement"] is None and narrowing["document"] == ""
+    assert "1 document(s) in other projects carry the same number" in narrowing["reason"]
+    assert "retrieval was not narrowed to it" in env["final_text"]
+    bindings = dict(run.await_args.args[1])
+    assert "_nx_owners" not in bindings and bindings["_nx_scope"] == "rdr", "the caller's own scope, not the collection"
+    assert "document_confinement" not in run.await_args.kwargs
     # control: the same call with an explicit owner binding does narrow, to that owner alone
     env2, run2, _l, _c = _run(tmp_path / "again", bindings={**INCIDENT_BINDINGS, "owner": NEXUS_OWNER})
     assert dict(run2.await_args.args[1])["_nx_owners"] == NEXUS_OWNER

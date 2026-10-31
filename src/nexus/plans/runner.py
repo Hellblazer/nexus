@@ -58,6 +58,15 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 import structlog
 
 from nexus import call_deadline
+from nexus.plans.document_confinement import (
+    CONFINED_TOOLS,
+    DocumentConfinement,
+    active_confinement,
+    chash_allow_scope,
+    confine_step,
+    confinement_scope,
+    empty_confined_output,
+)
 from nexus.plans.match import Match
 from nexus.plans.owner_narrowing import OWNERS_BINDING
 
@@ -1450,9 +1459,45 @@ def _apply_traversal_policy_to_args(
         return args
     from nexus.plans.traversal_policy import derive_policy  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
 
-    return {**args, "policy": derive_policy(
-        args, bindings.get(_CALLER_SCOPE_BINDING), bindings.get(OWNERS_BINDING),
-    )}
+    # nexus-jypmj: a run confined to one document walks under that document's address (document depth: the policy's
+    # scope admits the tumbler by equality, and the engine's scope_filter takes the same subtree).
+    confinement = active_confinement()
+    scope = confinement.tumbler if confinement is not None else bindings.get(_CALLER_SCOPE_BINDING)
+    return {**args, "policy": derive_policy(args, scope, bindings.get(OWNERS_BINDING))}
+
+
+def _apply_document_confinement_to_args(
+    tool: str, args: dict[str, Any], *, step_index: int,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    """Confine a retrieval step to the run's document (nexus-jypmj, :mod:`nexus.plans.document_confinement`);
+    returns ``(args, skipped_output, diagnostic)``.
+
+    Without an active confinement, or for a tool it does not act on, this is ``(args, None, None)``. A step that
+    cannot be confined (its route takes no chunk filter, or the engine has none) is NOT dispatched: ``skipped_output``
+    is the empty structured shape with a ``document_confined`` marker, and the caller records the step as skipped,
+    exactly like a scope conflict. A ``search``/``query`` step that can be confined comes back carrying
+    ``chash_allow`` (the dispatcher turns it into the engine request field); ``store_get_many`` comes back with its
+    ids cut to the document. *diagnostic* is the ``scope_diagnostics`` entry, outcome ``document_confined`` (skipped),
+    ``document_filtered`` (the chunk filter rides the step) or ``document_scoped`` (the traversal walks under the
+    document's address).
+    """
+    confinement = active_confinement()
+    if confinement is None or tool not in CONFINED_TOOLS:
+        return args, None, None
+    decision = confine_step(tool, args, confinement)
+    if tool == "store_get_many":
+        return decision.args, None, None
+    corpus = args.get("corpus") or None
+    diagnostic = {
+        "step_index": step_index, "tool": tool, "plan_corpus": corpus, "caller_scope": confinement.tumbler,
+        "scope_kind": "document", "resolved_corpus": corpus,
+        "outcome": "document_confined" if decision.skipped else (
+            "document_scoped" if tool == "traverse" else "document_filtered"),
+        "detail": decision.skipped,
+    }
+    if decision.skipped:
+        return args, empty_confined_output(tool, step_index, confinement, decision.skipped), diagnostic
+    return decision.args, None, diagnostic
 
 
 def _mark_reserved_step(index: int, steps: list[dict[str, Any]]) -> None:
@@ -2757,6 +2802,13 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # merged onto the operator's return dict post-dispatch.
     truncation_metadata = args.pop("_truncation_metadata", None)
 
+    # nexus-jypmj: the document confinement's restriction on a search/query step (see the call below). Not a
+    # parameter of either tool, so it is taken out of the args before the kwargs-drop pass can warn about it.
+    _chash_allow: list[str] | None = None
+    if resolved_tool in ("search", "query") and "chash_allow" in args:
+        args = dict(args)
+        _chash_allow = list(args.pop("chash_allow") or ())
+
     fn = getattr(mcp_core, resolved_tool, None)
     if fn is None or not callable(fn):
         available = sorted(
@@ -2852,21 +2904,25 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # RDR-079 P4: await async tools directly, call sync tools inline.
     # No thread bridge — the loop continuity matters for the pool's
     # subprocess StreamReader objects, which are loop-bound.
-    if inspect.iscoroutinefunction(fn):
-        result = await fn(**args)
-    elif call_deadline.get() is not None:
-        # nexus-5ezgn: off the loop, so plan_run's wait_for can cut it; in a
-        # copy of this context, so the deadline reaches the worker and a cut
-        # search stops at its next stage boundary. See _retrieval_executor.
-        import contextvars  # noqa: PLC0415 — deadline path only
-        import functools  # noqa: PLC0415 — deadline path only
+    # nexus-jypmj: the document confinement's chunk-hash restriction is not a tool parameter; it rides a context value
+    # that ``search_cross_corpus`` reads once and sends on every engine call. The deadline path below copies this
+    # context, so the value reaches the worker thread.
+    with chash_allow_scope(_chash_allow):
+        if inspect.iscoroutinefunction(fn):
+            result = await fn(**args)
+        elif call_deadline.get() is not None:
+            # nexus-5ezgn: off the loop, so plan_run's wait_for can cut it; in a
+            # copy of this context, so the deadline reaches the worker and a cut
+            # search stops at its next stage boundary. See _retrieval_executor.
+            import contextvars  # noqa: PLC0415 — deadline path only
+            import functools  # noqa: PLC0415 — deadline path only
 
-        ctx = contextvars.copy_context()
-        result = await asyncio.get_running_loop().run_in_executor(
-            _get_retrieval_executor(), functools.partial(ctx.run, fn, **args),
-        )
-    else:
-        result = fn(**args)
+            ctx = contextvars.copy_context()
+            result = await asyncio.get_running_loop().run_in_executor(
+                _get_retrieval_executor(), functools.partial(ctx.run, fn, **args),
+            )
+        else:
+            result = fn(**args)
     # Most MCP tools return str (human-readable summary); the runner
     # expects dict per RDR-078 §Phase 1. Normalize: wrap string returns
     # as ``{"text": ...}`` so downstream ``$stepN.text`` references
@@ -4021,6 +4077,30 @@ async def _plan_run_impl(
                         elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
                     )
                     continue
+            # nexus-jypmj (Sam, 2026-10-30): a run that names one source confines every secondary retrieval step
+            # to that DOCUMENT. A step that carries the engine's chunk filter is handed it; one whose route takes
+            # none, or an engine without the filter, is not dispatched (the empty shape plus a marker).
+            resolved, _confined_out, _confined_diag = _apply_document_confinement_to_args(
+                tool, resolved, step_index=index,
+            )
+            if _confined_diag is not None:
+                scope_diagnostics.append(_confined_diag)
+            if _confined_out is not None:
+                _log.info(
+                    "nx_answer_document_confined_step_skipped", step_index=index, tool=tool,
+                    reason=_confined_diag["detail"] if _confined_diag else "",
+                )
+                resolved_step_args.append({
+                    "step_index": index, "tool": tool, "corpus": resolved.get("corpus") or "",
+                    "query": resolved.get("query") or resolved.get("question") or "", "skipped": True,
+                })
+                step_outputs.append(_confined_out)
+                _log.info(
+                    "nx_answer_step_complete", kind="isolated_skipped_document_confined",
+                    step_indices=_seg_indices, tools=_seg_tools,
+                    elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                )
+                continue
             # RDR-232 section 3 (nexus-jypmj.1.5): a traverse step carries the evidence policy
             # derived from the caller's scope, applied inside ``traverse`` before manifest expansion.
             resolved = _apply_traversal_policy_to_args(tool, resolved, bindings=merged)
@@ -4292,6 +4372,14 @@ async def _plan_run_impl(
     # The concurrent assessment calls (nexus-jypmj.17) are appended as they finish, in no fixed order; step_index is
     # unique and assigned in plan order, so listing by it makes the envelope's step order the same on every run.
     step_records.sort(key=lambda r: r.step_index)
+    # nexus-jypmj: a filtered step whose engine returned rows outside the document's hashes (it ignored the key) says
+    # so in the run's scope diagnostics, beside the step's ``document_filtered`` outcome.
+    for _diag in scope_diagnostics:
+        if _diag.get("scope_kind") == "document" and _diag.get("outcome") == "document_filtered":
+            _i = _diag.get("step_index")
+            _out = step_outputs[_i] if isinstance(_i, int) and 0 <= _i < len(step_outputs) else None
+            if isinstance(_out, dict) and _out.get("chash_allow_dropped"):
+                _diag["rows_outside_allow"] = int(_out["chash_allow_dropped"])
     return PlanResult(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,
@@ -4318,8 +4406,14 @@ async def plan_run(
     continuation_cut_at_step: int | None = None,
     reserved_stream: ReservedStream | None = None,
     coverage_boundary: CoverageBoundary | None = None,
+    document_confinement: DocumentConfinement | None = None,
 ) -> PlanResult:
-    """Execute *match*'s steps; see :func:`_plan_run_impl` for every parameter but one.
+    """Execute *match*'s steps; see :func:`_plan_run_impl` for every parameter but two.
+
+    ``document_confinement`` (nexus-jypmj, Sam 2026-10-30): the document a one-source request is confined to, built
+    by ``nx_answer`` (:mod:`nexus.plans.document_confinement`). Every secondary retrieval step then runs under the
+    engine's chunk filter, or is not dispatched where it cannot be confined. ``None`` (the default) runs exactly as
+    before.
 
     ``reserved_stream`` (RDR-232 Phase 1, nexus-jypmj.1.6): the named source's primary evidence,
     built by ``nx_answer`` from the resolved sources. Operator hydration merges it ahead of the
@@ -4333,7 +4427,8 @@ async def plan_run(
     if _recorder is not None:  # nexus-jypmj.1.8: a whole-plan re-run starts from a clean reducer input
         _recorder.reset_run()
     supplement = RepairSupplement() if coverage_boundary is not None else None
-    with reserved_scope(reserved_stream), supplement_scope(supplement), registry_listing_scope():
+    with reserved_scope(reserved_stream), supplement_scope(supplement), registry_listing_scope(), \
+            confinement_scope(document_confinement):
         result = await _plan_run_impl(
             match, bindings, dispatcher=dispatcher, bundle_operators=bundle_operators,
             deadline=deadline, budget_usd_remaining=budget_usd_remaining,

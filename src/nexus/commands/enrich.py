@@ -1477,29 +1477,30 @@ def _enrich_apply(
 # Since nexus-oc98c production passes the config's model_version as
 # ``--model`` (haiku for scholarly-paper-v1) and logs each extraction's
 # actual cost and model (``aspect_extractor_usage``), so that 1.18 figure
-# is from the wrong model. Re-measured 2026-09-07 on haiku through the
-# production prompt over three real papers reassembled from T3 (100, 133
-# and 216 chunks; 54k, 62k and 109k prompt tokens): $0.131, $0.159 and
-# $0.306. The constant is their mean; the per-document actual is the log
-# line, and this is refreshed by re-running ``-m integration -k
-# LiveMeasurement -s`` when the model or its pricing changes.
-_PER_PAPER_COST_USD = 0.20
+# is from the wrong model. Re-measured 2026-09-07 on claude-haiku-4-5
+# through the production prompt over three real papers reassembled from T3
+# (54k, 62k and 109k prompt tokens): $0.131, $0.159 and $0.306, mean $0.20.
+# Re-measured 2026-10-30 on claude-haiku-5-5 (nexus-j6un5.1) through
+# extract_aspects over three cloud papers (47k, 104k and 361k chars; the last
+# bounded to 150k by _bound_content; about 28k, 48k and 66k prompt tokens):
+# $0.0065, $0.0093 and $0.0130 by the envelope's total_cost_usd (list basis).
+# The constant is their mean; the per-document actual is the
+# aspect_extractor_usage log line. No measured paper crossed Haiku 5.5's 100k
+# prompt-token price step; _bound_content cuts a paper at 150k chars (66k
+# tokens on the paper it cut).
+_PER_PAPER_COST_USD = 0.0096
 
 # What _PER_PAPER_COST_USD assumes, stated in every estimate line (nexus-shake7861).
-# It is a mean over PAPER-SIZED documents (54k-109k prompt tokens each), so for a
-# collection of short notes it is far too high: the 7.86.1 shakeout measured
-# $0.0035 for a one-line note on the same model (aspect_extractor_usage log:
-# cost_usd=0.00350840, claude-haiku-4-5-20251001, 5.4 s), against the $0.20 this
-# constant puts on it. It is NOT an upper bound: a mean of three papers measured
-# $0.131-$0.306, so a larger paper or a retry costs more than the line says. The
-# estimate reads as "typical for paper-sized documents"; a per-document figure
-# scaled by size needs per-model rates this module does not hold, so it is not
-# attempted here.
-_MEASURED_SHORT_NOTE_COST_USD = 0.0035
+# It is a mean over PAPER-SIZED documents (about 28k-66k prompt tokens each), so
+# for a collection of short notes it is too high. A one-line note was measured
+# at $0.0035 in the 7.86.1 shakeout on claude-haiku-4-5 (aspect_extractor_usage
+# log: cost_usd=0.00350840, 5.4 s); that has not been re-measured on
+# claude-haiku-5-5, whose per-token price is a tenth of 4-5's. The paper mean is
+# NOT an upper bound: the three papers ranged $0.0065-$0.0130, so a larger
+# paper or a retry costs more than the line says.
 _COST_BASIS = (
     "typical for paper-sized documents (mean of three measured papers, "
-    "$0.13-0.31 each, 54k-109k prompt tokens); far lower for short notes "
-    f"(one measured at ${_MEASURED_SHORT_NOTE_COST_USD})"
+    "$0.0065-0.013 each, about 28k-66k prompt tokens); short notes cost less"
 )
 
 # The write floor on aspect confidence: the engine's upsert refuses a row below

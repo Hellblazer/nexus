@@ -28,8 +28,9 @@ heading starts a section and the following chunks inherit it. The T3 chunk row's
 the last writer's, so :func:`t3_chunk_fetcher` hands the selector text and nothing else.
 
 Every limit is a field of :class:`PrimaryEvidenceCaps`, the one calibration object
-(:data:`DEFAULT_CAPS`). The reserved share (``max_selected_items``) stays below the
-operator input cap (``runner._OPERATOR_MAX_INPUTS``, 100) so plan evidence keeps room.
+(:data:`DEFAULT_CAPS`), and the arithmetic that ties the item caps to the reducer's input slots is stated once,
+there. The reserved share stays below the operator input cap (``runner._OPERATOR_MAX_INPUTS``, 100) so plan
+evidence keeps room.
 Merging this evidence ahead of the plan's inputs is :mod:`nexus.plans.reserved_stream`
 (nexus-jypmj.1.6); this module only produces it.
 """
@@ -60,6 +61,7 @@ from nexus.catalog.rdr_canonical import (
 )
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import RDR_FRONTMATTER_ID_META_KEY, CatalogEntry, ManifestRow
+from nexus.plans.document_confinement import CHASH_ALLOW_MAX, valid_chashes
 from nexus.plans.evidence import EvidenceRequest, OwnerResolution, SourceRange, SourceRef, SourceRefError
 
 _log = structlog.get_logger(__name__)
@@ -96,6 +98,7 @@ __all__ = [
     "DEFAULT_CAPS",
     "ChunkFetcher",
     "ContentLabel",
+    "DocumentChashes",
     "DocumentCoverage",
     "NamedSourceCatalog",
     "NamedSourceResolution",
@@ -114,6 +117,7 @@ __all__ = [
     "question_source_caps",
     "recorded_frontmatter_id",
     "resolve_named_sources",
+    "single_source_item_cap",
     "title_hint_match",
     "select_primary_evidence",
     "t3_chunk_fetcher",
@@ -144,9 +148,44 @@ class PrimaryEvidenceCaps:
     max_manifest_rows_read: int = 3000
     #: Characters fetched from T3 across all sources (stops at the first batch past it).
     max_fetched_chars: int = 600_000
-    #: Unique chunks reserved for the primary stream (< ``runner._OPERATOR_MAX_INPUTS``).
+    #: Unique chunks reserved for the primary stream when the request names SEVERAL sources, split across them
+    #: (< ``runner._OPERATOR_MAX_INPUTS``). A calibration parameter nothing measured: the near-miss run capped
+    #: a 135-chunk document at 24 while using 18,789 of the character budget below (nexus-jf9wg).
     max_selected_items: int = 24
-    #: Characters in the selected evidence.
+    #: The same bound when the request names exactly ONE source (:attr:`RequestCoverage.names_one_source`) and it
+    #: resolved, but the run does NOT narrow its secondary streams to that source (a lookup, a comparison: they keep
+    #: their cross-document retrieval). nexus-jf9wg, 2026-10-30. It is ``reserved_stream.RESERVED_SHARE_MAX`` (50)
+    #: less ``lifecycle_stream.LifecycleCaps.max_records`` (6): the share is split between T2 lifecycle records
+    #: (which lead it) and these chunks, and a chunk past the share is dropped with a disclosure (a test pins the sum).
+    max_single_source_items: int = 44
+    #: The bound when the request names exactly one source, it resolved AND the run narrows every secondary
+    #: retrieval step to it (:attr:`RequestCoverage.narrows_to_one_source`, ``nexus.plans.single_source``; nexus-4xmpv,
+    #: Sam, 2026-10-30). The primary stream then has the reducer's slots to itself, because every secondary step is
+    #: confined to the document the primary reads (``nexus.plans.document_confinement``: a chunk it returns is a
+    #: chunk of that document, and one the primary holds is merged away by chash before the cap). THE SHARE
+    #: ARITHMETIC, in one place:
+    #:
+    #: * ``runner._OPERATOR_MAX_INPUTS`` = 100 reducer input slots, cut AFTER the merge, so the cap only ever removes
+    #:   secondary items (the reserved ones lead).
+    #: * ``reserved_stream.RESERVED_SHARE_NARROWED`` = 88 of them are reserved for a narrowed run (50 otherwise); the
+    #:   other 12 are the coverage repair's supplement (``coverage_repair.MAX_REPAIR_ITEMS`` = 12), because the document
+    #:   confinement (nexus-jypmj) leaves a plan no secondary item of its own, so nothing else needs the slots.
+    #:   88 + 12 = 100, pinned by a test.
+    #: * Of the 88, ``LifecycleCaps.max_records`` = 6 lead for T2 lifecycle records, so the chunk cap is 88 - 6 = 82.
+    #:   82 chunks at the corpus's 500 to 1,000 characters is 41,000 to 82,000 characters, so the character cap
+    #:   below, not this count, is the bound for a long document. MEASURED (re-measure 3, 2026-10-30): the 80-chunk
+    #:   G06 document is 69,952 characters in all, so the 60,000-character cap stopped its read at 73 chunks
+    #:   (59,798 characters); S04 (135 rows, 157,219 characters) filled the 60,000 at 63 chunks (59,423 characters);
+    #:   the largest read was 73, so the 82 never binds.
+    #: * ``max_selected_chars`` = 60,000 is unchanged. The coverage check reads each stream (primary, graph, vector,
+    #:   t2) in packs of at most ``coverage_ledger.ASSESSMENT_MAX_ITEM_CHARS`` = 120,000 characters, so the primary
+    #:   stream (60,000 raw characters; the attribution header adds under 120 characters a chunk, so about 70,000 in
+    #:   the reducer's input at 82 chunks) and the T2 stream (``LifecycleCaps.max_chars`` = 18,000) each fit one pack
+    #:   and neither leaves an anchor unread. That 70,000 is over ``bundle.MAX_CONTINUATION_PROMPT_CHARS`` (60,000), so
+    #:   a long narrowed read goes to the headless path, not the continuation hand-off (a test pins it).
+    max_narrowed_source_items: int = 82
+    #: Characters in the selected evidence (both cases). Also below ``coverage_ledger.ASSESSMENT_MAX_ITEM_CHARS``
+    #: (120,000), the per-stream size the coverage check reads, so the primary stream never leaves an unread anchor.
     max_selected_chars: int = 60_000
     #: Frontmatter-id reads one RDR number may cost when several files share it (nexus-xho6c); the
     #: largest group in docs/rdr is nine files. A group past it is candidates, with the cap named.
@@ -1101,25 +1140,109 @@ class ContentLabel:
     carry: str | None
 
 
-def derive_content_labels(texts: Sequence[str]) -> list[ContentLabel]:
+#: A chunk's overlap with its predecessor must span at least this many characters to be believed (a shorter
+#: shared run, a lone ``` line for one, is as likely to be coincidence as to be the chunker's overlap).
+_MIN_OVERLAP_CHARS = 12
+#: The tail ``md_chunker`` repeats at the head of the next chunk: ``chunk_overlap`` (50 tokens) x 3.3 characters a
+#: token. The repeat is the last ``min(this, the chunk's content)`` characters of the previous chunk.
+_CHUNKER_OVERLAP_CHARS = 165
+
+
+def _fence_step(fence: str | None, line: str) -> tuple[str | None, bool]:
+    """One line through the fence state machine: ``(state after, line is outside any fence)``."""
+    stripped = line.lstrip()
+    if fence is None:
+        if stripped.startswith(("```", "~~~")):
+            return stripped[:3], False
+        return None, True
+    return (None if stripped.startswith(fence) else fence), False
+
+
+def _chunker_tail(prev: str) -> tuple[str, str]:
+    """``(header, tail)``: what the chunker would repeat at the head of the chunk after *prev*.
+
+    ``md_chunker._split_large_section`` flushes a chunk and starts the next as ``[header_text, overlap_tail,
+    part_text]`` joined by blank lines (``[overlap_tail, part_text]`` for a section with no header), where the
+    tail is the last ``min(165, content)`` characters of the flushed chunk's content (everything after its
+    header). *header* is *prev*'s own first line and the blank line after it when that line is a heading, else
+    ``""``; *tail* is ``""`` when the content is too short to be told from a coincidence.
+    """
+    first, sep, _ = prev.partition("\n\n")
+    header = first + sep if sep and "\n" not in first and _HEADING.match(first) else ""
+    content = prev[len(header):]
+    if len(content) < _MIN_OVERLAP_CHARS:
+        return header, ""
+    return header, content[-_CHUNKER_OVERLAP_CHARS:]
+
+
+def _overlap_start_state(prev: str, prev_start: str | None, text: str, end_state: str | None) -> str | None:
+    """The fence state *text* begins in, given the chunk *prev* before it, which began in *prev_start* and ended
+    in *end_state*.
+
+    Chunkers repeat the tail of one chunk at the head of the next (``md_chunker`` ``chunk_overlap``), and the
+    tail can hold a fence line the previous chunk already acted on. Carrying the state across the boundary
+    would then toggle that fence twice. So when *text* begins with the repeat the chunker produces, it starts in
+    the state *prev* was in where that tail began; with no such repeat it starts where *prev* ended, which is a
+    code block the chunker split.
+
+    The repeat is believed only in the layout the chunker writes (:func:`_chunker_tail`): at the very head of
+    the chunk, after the repeated section header and its blank line if *prev* has one. A shared run found
+    anywhere else is a coincidence: a closing command block that two consecutive sections both end with is not
+    an overlap, and reading it as one inverts the fence state for every later chunk. Cost: two ``startswith``
+    probes a chunk; the walk of *prev*'s lines happens only on a match.
+    """
+    header, tail = _chunker_tail(prev)
+    if not tail or not (text.startswith(tail) or (header and text.startswith(header + tail))):
+        return end_state
+    # the fence state of prev where its tail begins: walk prev's lines to the one holding that offset
+    cut, state, pos = len(prev) - len(tail), prev_start, 0
+    for line in prev.splitlines(keepends=True):
+        nxt = pos + len(line)
+        if nxt > cut:
+            body = line.rstrip("\r\n")
+            after, _ = _fence_step(state, body)
+            if pos == cut:
+                return state
+            # the tail starts mid-line: pick the state that reads the remnant of the line the way prev did
+            remnant = body[cut - pos:]
+            return state if _fence_step(state, remnant)[0] == after else after
+        state, _ = _fence_step(state, line.rstrip("\r\n"))
+        pos = nxt
+    return end_state
+
+
+def derive_content_labels(texts: Sequence[str], positions: Sequence[int] | None = None) -> list[ContentLabel]:
     """Section labels from chunk text in manifest order. A Markdown heading starts a section;
     following chunks inherit it; content before the first heading is unlabelled. Headings
     inside a code fence do not count, and a fence left open at a chunk boundary stays open
-    into the next chunk."""
+    into the next chunk, unless the next chunk repeats the previous one's tail (the chunker's overlap), in
+    which case it starts in the state the previous chunk was in where that tail began, so a fence line the
+    overlap repeats is not counted twice.
+
+    *positions* are the chunks' manifest positions. A sampled or partly fetched manifest hands this a list with
+    gaps, and chunk n+k is not the chunk after n: its neighbour's open fence and overlap say nothing about it, so
+    across a gap the fence state restarts closed and no overlap is looked for. A label is still inherited across a
+    gap (it is a best-effort carry, and the chunk reports ``label_source`` content). Without *positions* the
+    texts are taken as adjacent."""
+    if positions is not None and len(positions) != len(texts):
+        raise ValueError("positions must match texts one to one")
     out: list[ContentLabel] = []
     carry: str | None = None
     fence: str | None = None
-    for text in texts:
+    prev: str | None = None
+    prev_start: str | None = None
+    prev_position: int | None = None
+    for i, text in enumerate(texts):
+        position = positions[i] if positions is not None else None
+        if positions is not None and prev_position is not None and position != prev_position + 1:
+            fence, prev = None, None
+        if prev is not None:
+            fence = _overlap_start_state(prev, prev_start, text, fence)
+        prev_start = fence
         headings: list[str] = []
         for line in text.splitlines():
-            stripped = line.lstrip()
-            if fence is None:
-                if stripped.startswith(("```", "~~~")):
-                    fence = stripped[:3]
-                    continue
-            else:
-                if stripped.startswith(fence):
-                    fence = None
+            fence, outside = _fence_step(fence, line)
+            if not outside:
                 continue
             m = _HEADING.match(line)
             if m:
@@ -1128,6 +1251,8 @@ def derive_content_labels(texts: Sequence[str]) -> list[ContentLabel]:
         if headings:
             carry = headings[-1]
         out.append(ContentLabel(label=label, headings=tuple(headings), carry=carry))
+        prev = text
+        prev_position = position
     return out
 
 
@@ -1186,6 +1311,21 @@ class DocumentCoverage:
 
 
 @dataclass(frozen=True)
+class DocumentChashes:
+    """The chunk hashes a document's manifest lists, for the document confinement (nexus-jypmj): every manifest
+    row the read held, before the selection sampled them (at most ``CHASH_ALLOW_MAX``). ``manifest_rows`` is the
+    document's true row count (M); ``chashes`` is a sample of it when shorter. Not on the wire (3000 hashes)."""
+
+    doc_id: str
+    chashes: tuple[str, ...]
+    manifest_rows: int
+    #: Rows left out of ``chashes`` by a cap: the read cap or the engine's own sampling (``manifest_rows`` minus the
+    #: rows held) and :data:`CHASH_ALLOW_MAX`. Duplicate chunk text and malformed hashes are not counted: they are
+    #: not sampling, the set still names every distinct chunk the document has.
+    rows_dropped: int = 0
+
+
+@dataclass(frozen=True)
 class PrimaryEvidence:
     items: tuple[SelectedChunk, ...] = ()
     documents: tuple[DocumentCoverage, ...] = ()
@@ -1198,6 +1338,12 @@ class PrimaryEvidence:
     #: Exception type name when the whole read failed (nothing was read and the reason is disclosed); ``""``
     #: for a read that ran.
     error: str = ""
+    #: Each resolved document's manifest chunk hashes (nexus-jypmj, the document confinement). Empty when no manifest
+    #: was read.
+    manifest_chashes: tuple[DocumentChashes, ...] = ()
+
+    def chashes_of(self, doc_id: str) -> DocumentChashes | None:
+        return next((d for d in self.manifest_chashes if d.doc_id == doc_id), None)
 
     @property
     def selected_items(self) -> int:
@@ -1450,6 +1596,22 @@ def _read_manifests(
     return manifests, failed, unread, {}
 
 
+def single_source_item_cap(caps: PrimaryEvidenceCaps, *, one_source: bool = False, narrowed: bool = False) -> int:
+    """The unique-chunk ceiling for a primary read (nexus-jf9wg, nexus-4xmpv).
+
+    *one_source* and *narrowed* are :attr:`RequestCoverage.names_one_source` and
+    :attr:`RequestCoverage.narrows_to_one_source`, computed once from the request: this function does not count
+    sources itself. A narrowed one-source request gets ``max_narrowed_source_items``; a one-source request whose
+    secondary streams are not narrowed gets ``max_single_source_items``; every other request gets
+    ``max_selected_items``, so the multi-source selection is unchanged. A cap is never below the smaller tier's.
+    """
+    if one_source and narrowed:
+        return max(caps.max_narrowed_source_items, caps.max_single_source_items, caps.max_selected_items)
+    if one_source:
+        return max(caps.max_single_source_items, caps.max_selected_items)
+    return caps.max_selected_items
+
+
 def select_primary_evidence(
     resolution: NamedSourceResolution,
     *,
@@ -1459,6 +1621,8 @@ def select_primary_evidence(
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
     manifest_sampler: ManifestSampler | None = None,
+    one_source: bool = False,
+    narrowed: bool = False,
 ) -> PrimaryEvidence:
     """Read each resolved source's manifest, hydrate its chunks and select the evidence.
 
@@ -1471,6 +1635,9 @@ def select_primary_evidence(
     *deadline* is an absolute time on *clock* (the caller's own budget); the read also stops at
     ``caps.max_seconds`` from its start. No manifest read or chunk fetch is started past it (``deadline``
     on ``caps_hit``): the chunks fetched by then are selected, the rest are missing and said so.
+
+    *one_source* and *narrowed* say the request names exactly one source and that its secondary streams are
+    narrowed to it (:func:`single_source_item_cap`); the caller reads them from the request coverage.
     """
     caps = caps or resolution.caps
     docs = resolution.resolved()
@@ -1503,6 +1670,16 @@ def select_primary_evidence(
         if true_counts[k] > read_allow:
             all_rows[k] = [all_rows[k][i] for i in _spread(range(true_counts[k]), read_allow)]
             caps_hit.append("max_manifest_rows_read")
+    # The document confinement's chunk hashes: every row held, before the selection below samples them.
+    document_chashes: list[DocumentChashes] = []
+    for k, d in enumerate(docs):
+        held, _bad = valid_chashes([r.chash for r in all_rows[k]])
+        read_cut = max(engine_total[k] - len(all_rows[k]), 0)
+        wire_cut = 0
+        if len(held) > CHASH_ALLOW_MAX:
+            wire_cut = len(held) - CHASH_ALLOW_MAX
+            held = tuple(held[i] for i in _spread(range(len(held)), CHASH_ALLOW_MAX))
+        document_chashes.append(DocumentChashes(d.tumbler or "", held, engine_total[k], read_cut + wire_cut))
     allowance = _water_fill(caps.max_manifest_rows, [len(r) for r in all_rows])
     sampled: list[list[ManifestRow]] = []
     for rows, allow in zip(all_rows, allowance, strict=True):
@@ -1561,7 +1738,10 @@ def select_primary_evidence(
             r for r in sampled[k]
             if (r.collection or d.collection or "", r.chash) in texts
         ]
-        content = derive_content_labels([texts[(r.collection or d.collection or "", r.chash)] for r in hydrated])
+        content = derive_content_labels(
+            [texts[(r.collection or d.collection or "", r.chash)] for r in hydrated],
+            positions=[r.position for r in hydrated],
+        )
         built: list[_Row] = []
         n_manifest = n_content = 0
         for r, cl in zip(hydrated, content, strict=True):
@@ -1601,17 +1781,23 @@ def select_primary_evidence(
         })
 
     # 4. select: fair share of the item budget, each document's priority list, admitted
-    #    round-robin so no document takes the aggregate, shared chunks counted once
-    quotas = _water_fill(caps.max_selected_items, [len(b) for b in per_doc_rows])
+    #    round-robin so no document takes the aggregate, shared chunks counted once. A request that names
+    #    exactly one source (and it resolved) gets the larger single-source ceiling (nexus-jf9wg), the larger
+    #    still when its secondary streams are narrowed to it (nexus-4xmpv).
+    item_cap = (
+        single_source_item_cap(caps, one_source=one_source, narrowed=narrowed) if len(docs) == 1
+        else caps.max_selected_items
+    )
+    quotas = _water_fill(item_cap, [len(b) for b in per_doc_rows])
     queues = [deque(_picks(rows, q)) for rows, q in zip(per_doc_rows, quotas, strict=True)]
     admitted: dict[tuple[str, str], _Row] = {}
     holders: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
     held_by_doc: list[set[int]] = [set() for _ in docs]
     chars = 0
     char_capped = False
-    while any(queues) and len(admitted) < caps.max_selected_items:
+    while any(queues) and len(admitted) < item_cap:
         for k, queue in enumerate(queues):
-            if not queue or len(admitted) >= caps.max_selected_items:
+            if not queue or len(admitted) >= item_cap:
                 continue
             row = queue.popleft()
             key = (row.collection, row.chash)
@@ -1627,7 +1813,7 @@ def select_primary_evidence(
             chars += len(row.text)
     if char_capped:
         caps_hit.append("max_selected_chars")
-    if len(admitted) >= caps.max_selected_items and any(queues):
+    if len(admitted) >= item_cap and any(queues):
         caps_hit.append("max_selected_items")
 
     items = sorted(
@@ -1656,7 +1842,7 @@ def select_primary_evidence(
     return PrimaryEvidence(
         items=tuple(items), documents=tuple(coverage), caps_hit=tuple(dict.fromkeys(caps_hit)),
         manifest_rows_hydrated=sum(len(b) for b in per_doc_rows), fetched_chars=fetched_chars,
-        selected_chars=chars, fetch_errors=fetch_errors, caps=caps,
+        selected_chars=chars, fetch_errors=fetch_errors, caps=caps, manifest_chashes=tuple(document_chashes),
     )
 
 
@@ -1667,6 +1853,8 @@ def gather_primary_evidence(
     fetch_chunks: ChunkFetcher,
     caps: PrimaryEvidenceCaps = DEFAULT_CAPS,
     frontmatter_id: FrontmatterIdLookup | None = None,
+    one_source: bool = False,
+    narrowed: bool = False,
 ) -> tuple[NamedSourceResolution, PrimaryEvidence]:
     """Resolve the request's named sources and read their primary evidence.
 
@@ -1679,4 +1867,6 @@ def gather_primary_evidence(
     )
     if cat is None:
         return resolution, PrimaryEvidence(caps=caps)
-    return resolution, select_primary_evidence(resolution, cat=cat, fetch_chunks=fetch_chunks, caps=caps)
+    return resolution, select_primary_evidence(
+        resolution, cat=cat, fetch_chunks=fetch_chunks, caps=caps, one_source=one_source, narrowed=narrowed,
+    )

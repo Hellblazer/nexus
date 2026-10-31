@@ -92,6 +92,7 @@ from nexus.util.process_group import KILL_SIGNAL
 from nexus.util.win_console import ConsoleBreakResult
 from nexus import session as _sess
 from tests.daemon._children import CHILD_PYTHON, spawn_sleeper
+from tests._child_process import NEVER_ALIVE_PID
 from tests._module_seam import patch_in, patch_time
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 
@@ -1623,11 +1624,13 @@ class TestTerminationSurvivorVerdict:
         monkeypatch.setattr(
             "nexus.daemon.service_registry._POST_KILL_SETTLE_S", 0.05,
         )
-        # os.kill is deliberately NOT patched: 424242 does not exist, so the
+        # os.kill is deliberately NOT patched: NEVER_ALIVE_PID exists on no box, so the
         # real signal raises ProcessLookupError, which terminate_pids
         # swallows. Patching `service_registry.os.kill` would rebind the
-        # stdlib os module itself for the duration of the test.
-        assert terminate_pids([424242], grace_s=0.05) == [424242], (
+        # stdlib os module itself for the duration of the test. A literal
+        # pid (this used 424242) is someone's live process after a pid wrap,
+        # and terminate_pids sends it a real SIGTERM and then SIGKILL.
+        assert terminate_pids([NEVER_ALIVE_PID], grace_s=0.05) == [NEVER_ALIVE_PID], (
             "a genuinely-unkillable pid must stay loud"
         )
 

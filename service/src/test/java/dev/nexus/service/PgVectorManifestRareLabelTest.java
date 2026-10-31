@@ -248,4 +248,61 @@ class PgVectorManifestRareLabelTest {
         assertThat(ids(search(500, where("section_type", op("$ne", "body")))))
             .doesNotContain(chash(N - 1), chash(1700));
     }
+
+    private static byte[][] allow(int... idx) {
+        byte[][] out = new byte[idx.length][];
+        for (int k = 0; k < idx.length; k++) out[k] = HexFormat.of().parseHex(chash(idx[k]));
+        return out;
+    }
+
+    /**
+     * Every route with a {@code chash_allow} set AND a positive label filter, which the engine answers through
+     * {@code manifest_search_<dim>} (ManifestPushdown): the allow-list and the manifest EXISTS are two conjuncts of
+     * the one exact rank, so the answer is the allowed rows that pass the filter, nearest first.
+     */
+    private void expectAllConfined(int n, Map<String, Object> where, byte[][] allow, List<String> expected) {
+        assertThat(ids(vec.searchWithTokens(TENANT, QUERY, List.of(COLLECTION), n, where, false, allow).value()))
+            .as("search %s", where).containsExactlyElementsOf(expected);
+        assertThat(ids(vec.hybridSearchWithTokens(TENANT, QUERY, List.of(COLLECTION), n, where, false, allow).value()))
+            .as("hybrid %s", where).containsExactlyElementsOf(expected);
+        assertThat(ids(vec.hybridSearchWithTokens(TENANT, QUERY, List.of(COLLECTION), n, where, false, 1, allow)
+                .value()))
+            .as("hybrid, dense gate %s", where).containsExactlyElementsOf(expected);
+        var fan = vec.searchPerCollection(TENANT, QUERY, List.of(COLLECTION), n, n, null, where, false, false, true,
+                                          allow);
+        assertThat(ids(fan.rows())).as("per-collection %s", where).containsExactlyElementsOf(expected);
+        // The lexical arm's ids are every row it ranked; a row the vector arm also returned is not repeated in
+        // lexicalRows, so the arm's own id list is the thing to read.
+        assertThat(fan.lexical()).hasSize(1);
+        assertThat(fan.lexical().get(0).ids()).as("per-collection, lexical arm %s", where)
+            .containsExactlyInAnyOrderElementsOf(expected);
+    }
+
+    @Test
+    void aChashAllowSet_withAPositiveLabelFilter_returnsOnlyAllowedRowsThatPassIt_exactlyRanked() {
+        // The rare rows (N-2, N-1) rank last of 2,000; the allow-list holds them and two body rows. The body rows
+        // fail the filter, and the rare rows are found however far down they sit.
+        expectAllConfined(10, where("section_type", "appendix-x"), allow(0, 5, N - 1, N - 2),
+                          List.of(chash(N - 2), chash(N - 1)));
+        // A rare row outside the allow-list is not returned.
+        expectAllConfined(10, where("section_type", "appendix-x"), allow(0, 5, N - 1), List.of(chash(N - 1)));
+        // No allowed row passes the filter.
+        expectAllConfined(10, where("section_type", "appendix-x"), allow(0, 1, 2), List.of());
+        // A filter every row passes: only the allowed rows, in exact distance order whatever the order sent.
+        expectAllConfined(10, where("section_type", "body"), allow(1990, 7, 3),
+                          List.of(chash(3), chash(7), chash(1990)));
+    }
+
+    @Test
+    void aChashAllowSet_withAPositiveLabelFilter_isExactOnTheHnswRouteToo() {
+        PgSession.overrideSearchExactMaxRowsForTests(0);
+        try {
+            expectAllConfined(10, where("section_type", "appendix-x"), allow(0, 5, N - 1, N - 2),
+                              List.of(chash(N - 2), chash(N - 1)));
+            expectAllConfined(10, where("section_type", "body"), allow(1990, 7, 3),
+                              List.of(chash(3), chash(7), chash(1990)));
+        } finally {
+            PgSession.resetSearchExactMaxRowsForTests();
+        }
+    }
 }
