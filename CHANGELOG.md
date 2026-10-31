@@ -10,6 +10,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `nx catalog merge` refuses a merge that would leave the merged document reading as chunkless: one where the duplicate holds chunks and the canonical holds none. The merge moves identity and links, never chunks, and the RDR-231 halt rehearsal ended with a note at `Chunks: 0` this way. The refusal suggests merging the other way, and `--force` merges anyway. Every merge now prints both chunk counts (nexus-bivz3.27).
 
+### Fixed
+
+- **Closing the terminal or dropping the ssh session of an `nx index pdf` or `nx dt index` run now releases its pipeline row**, as SIGTERM and Ctrl-C have since nexus-4vx0a (nexus-eq03c; client change, works on every engine). SIGHUP ended the process with no cleanup, and every retry of the document was refused for five minutes. Under `nohup`, which ignores SIGHUP, the run carries on as before.
+- **An interrupted PDF run's cleanup no longer holds the process open against an unreachable engine** (nexus-euczk; client change, works on every engine). Each request of the release is capped at 5 seconds and sent once, and the catalog failure stamp is skipped when the engine did not answer. An interrupt that lands while the run's create call is in flight is acted on when the call returns, so the row it made is released instead of staying `running` for five minutes.
+- **A resumed PDF run says when it keeps text-layer pages an earlier run buffered** (nexus-hvwif; client change). A MinerU run over the buffer of an interrupted `--extractor pymupdf` run keeps those pages; the record already listed them per page, and a warning now names them and `--force`.
+
 ## [7.90.0] - 2026-10-31
 
 Pairs with engine-service-v0.1.171 (REQUIRED_ENGINE_VERSION moves from v0.1.169; the engine deployed to the managed service before this client tag, every wire entry being additive). Upgrade aspect worker hosts before producer hosts: this release makes the aspects tuple queue the default (NX_ASPECT_QUEUE=tuples) and the worker's tuple side ships in it too.
