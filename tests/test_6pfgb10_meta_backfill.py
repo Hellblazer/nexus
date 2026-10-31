@@ -265,7 +265,8 @@ def _world_with_one_of_each():
 def test_a_dry_run_counts_per_key_and_writes_nothing_then_apply_writes_and_a_second_run_stamps_nothing():
     w = _world_with_one_of_each()
     dry = mb.backfill_meta(w, w, None, apply=False)
-    assert w.updates == [] and dry.documents_examined == 4 and dry.documents_to_stamp == 2
+    assert w.updates == [] and dry.documents_examined == 4 and dry.documents_to_stamp == 4, \
+        "the note, the solo paper, and the two sharers (nexus-6pfgb.23: source_format needs no row)"
     ext = dry.keys["doc.extraction_method"]
     assert (ext.examined, ext.stamped, ext.shared) == (3, 1, 2), "the solo doc stamps, the two sharers are skipped"
     assert dry.documents_all_shared == 2
@@ -276,9 +277,11 @@ def test_a_dry_run_counts_per_key_and_writes_nothing_then_apply_writes_and_a_sec
     assert by_tumbler["1.1.1"]["meta"] == {"put_at": PUT, "ttl_days": 3, "tags": ["t"]}
     assert by_tumbler["1.1.2"]["meta"]["extraction_method"] == "mineru" and by_tumbler["1.1.2"]["author"] == "Ann"
     assert "tags" not in by_tumbler["1.1.2"]["meta"] and "category" not in by_tumbler["1.1.2"]["meta"], \
-        "tags, category and source_format of an indexed document are GENERATED columns in Phase 3: never stamped"
-    assert "1.1.3" not in by_tumbler and "1.1.4" not in by_tumbler, "a chunk two documents hold decides nothing"
-    assert first.documents_written == 2 and first.writes_failed == 0
+        "tags and category of an indexed document are not backfilled: the register-time stamp and the next index run fill them"
+    assert by_tumbler["1.1.2"]["meta"]["source_format"] == "pdf"
+    assert by_tumbler["1.1.3"]["meta"] == {"source_format": "pdf"} and by_tumbler["1.1.4"]["meta"] == {"source_format": "pdf"}, \
+        "a chunk two documents hold decides no row-sourced key, but source_format is derived from the entry, not the chunk"
+    assert first.documents_written == 4 and first.writes_failed == 0
 
     # the catalog now holds what was written; a second run finds nothing to stamp
     for e in w.entries:
@@ -303,7 +306,8 @@ def test_a_failed_owner_lookup_withholds_the_keys_counts_the_documents_and_never
     assert rep.lookups_failed == 3, "the note's own written row needs no ownership; the three documents do"
     ext_written = [u for u in w.updates if "extraction_method" in u["meta"]]
     assert ext_written == []
-    assert not any(u["tumbler"] == "1.1.2" for u in w.updates), "an indexed document's keys all come from rows"
+    assert [u["meta"] for u in w.updates if u["tumbler"] == "1.1.2"] == [{"source_format": "pdf"}], \
+        "an indexed document's row-sourced keys are withheld; its derived source_format needs no lookup"
 
 
 def test_a_failed_row_read_for_one_collection_isolates_its_documents():
@@ -358,10 +362,10 @@ def test_the_command_apply_writes_and_json_carries_the_reasons(monkeypatch):
     result, closed = _invoke(monkeypatch, w, "--apply", "--json")
     assert result.exit_code == 0, result.output
     report = json.loads(result.stdout)
-    assert report["applied"] is True and report["documents_written"] == 2 and closed == [True]
+    assert report["applied"] is True and report["documents_written"] == 4 and closed == [True]
     assert report["keys"]["note.tags"]["stamped"] == 1
     assert "residue_reasons" in report["keys"]["doc.quality_gate_overridden"]
-    assert len(w.updates) == 2
+    assert len(w.updates) == 4
 
 
 def test_the_command_exits_non_zero_naming_the_vacuous_run(monkeypatch):
@@ -405,4 +409,5 @@ def test_no_content_type_is_left_out_of_the_row_sourced_keys(ctype):
     w.owners = {"h1": ["1.9.1"]}
     w.rows[("docs__x__m__v1", "h1")] = _row(source_author="Ann Lee", extraction_source="dt_content")
     mb.backfill_meta(w, w, w, apply=True)
-    assert w.updates == [{"tumbler": "1.9.1", "meta": {"extraction_source": "dt_content"}, "author": "Ann Lee"}]
+    fmt = "pdf" if ctype in ("pdf", "paper") else "markdown"   # nexus-6pfgb.23: the extension is read first
+    assert w.updates == [{"tumbler": "1.9.1", "meta": {"extraction_source": "dt_content", "source_format": fmt}, "author": "Ann Lee"}]

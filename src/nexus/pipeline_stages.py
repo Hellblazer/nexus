@@ -1344,6 +1344,16 @@ def _catalog_pdf_hook(
     # Bound before the try so the except handler always has a name to log (resolve() can raise).
     file_path_str = str(pdf_path)
     extraction_meta = _catalog_extraction_meta(extraction) if extraction is not None else None
+    # nexus-6pfgb.8 and nexus-6pfgb.23: the document's own tags, category and source_format, as the PDF row
+    # writer stamps them, ride the same meta write as the extraction record: one update per document, on
+    # every leg (the update of an existing row, the registration of a new one, the update after a
+    # registration that resolved onto an existing row).
+    from nexus.catalog.indexed_meta import pdf_register_meta, source_format_meta  # noqa: PLC0415 - deferred like the hook's other catalog imports
+
+    def _doc_meta(registered_type: str) -> dict[str, Any]:
+        # The document's category follows the content type the catalog already holds for it (a repo-registered
+        # PDF keeps the repo path's statement); see pdf_register_meta.
+        return {**pdf_register_meta(pdf_path, registered_type), **(extraction_meta or {})}
 
     def _not_recorded(reason: str) -> None:
         if extraction_meta is not None:
@@ -1455,11 +1465,10 @@ def _catalog_pdf_hook(
                 update_kwargs["author"] = author
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
-            if extraction_meta is not None:
-                # RDR-237: the service merges meta key by key (jsonb ||), never removing one, so
-                # a clean re-extract clears an old map only because extraction_pages is written
-                # whole here, {} included.
-                update_kwargs["meta"] = extraction_meta
+            # RDR-237: the service merges meta key by key (jsonb ||), never removing one, so
+            # a clean re-extract clears an old map only because extraction_pages is written
+            # whole here, {} included.
+            update_kwargs["meta"] = _doc_meta(getattr(existing, "content_type", "") or "paper")
             writer.update(existing.tumbler, **update_kwargs)
             # nexus-t952k (critique [24114] S1): logged AFTER the write, so
             # the claim "repointed" is only made once the row actually moved.
@@ -1531,7 +1540,7 @@ def _catalog_pdf_hook(
                 source_mtime=source_mtime,
                 source_uri=source_uri,
                 with_created=True,
-                **({"meta": extraction_meta} if extraction_meta is not None else {}),
+                meta=_doc_meta("paper"),
             )
             _created = created_from_register_result(_write_result)
             announce_cross_owner_mint(
@@ -1554,11 +1563,16 @@ def _catalog_pdf_hook(
                     target_collection=collection_name, file_path=file_path_str,
                     owner=owner,
                 )
-                if extraction_meta is not None:
-                    # RDR-237: register() returns an existing row untouched (the engine's
-                    # idempotency legs do not merge ``meta``), so the extraction record rides an
-                    # update, as on the ``existing`` branch above.
-                    writer.update(tumbler_from_register_result(_write_result), meta=extraction_meta)
+                # RDR-237: register() returns an existing row untouched (the engine's
+                # idempotency legs do not merge ``meta``), so the extraction record (and the tags,
+                # category and source_format, nexus-6pfgb.8 and .23) ride an update, as on the
+                # ``existing`` branch above. The resolved row's content type is not known here, so it gets the
+                # source_format (the same for every type that holds a PDF) and the extraction record, and no
+                # tags or category: a repo-registered PDF's must not be flipped to ``paper``.
+                writer.update(
+                    tumbler_from_register_result(_write_result),
+                    meta={**source_format_meta("paper", file_path_str), **(extraction_meta or {})},
+                )
     except Exception as exc:  # noqa: BLE001 - best-effort catalog PDF hook; logged + audited, cleanup in finally
         # nexus-ou4tb: an indexed PDF that never reached the catalog is
         # invisible to every catalog-routed query. WARNING + audit row.

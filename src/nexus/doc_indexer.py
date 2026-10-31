@@ -1349,7 +1349,12 @@ def _register_or_lookup_doc_id(
         # indexer writes), so the named-source sibling rule reads it without the aspect worker. Passed only
         # when there is one, so a writer double that predates ``meta`` is untouched for every other type.
         _register_extra: dict = {}
-        _stamp = _rdr_frontmatter_stamp(file_path, content_type)
+        # nexus-6pfgb.23: the document's source_format, derived from the two columns this call registers
+        # (the engine's own rule), so it exists from the pre-flight on. The tags and category need the kind
+        # of index run (a PDF is "paper" here, "prose" under the repo pass), so the post-index hooks stamp
+        # those; a pair the rule derives nothing for sends no key.
+        from nexus.catalog.indexed_meta import source_format_meta  # noqa: PLC0415 — deferred like the function's other catalog imports
+        _stamp = {**_rdr_frontmatter_stamp(file_path, content_type), **source_format_meta(content_type, fp)}
         if _stamp:
             _register_extra["meta"] = _stamp
         _write_result = writer.register(
@@ -3740,7 +3745,14 @@ def _catalog_markdown_hook(
         # pre-flight registration, nexus-ivzw8).
         title, year, author = _parse_md_frontmatter(md_path)
         # The document keys of this registration (RDR-236 Phase 1): sent with a real value only.
-        doc_meta: dict[str, Any] = {"extraction_source": extraction_source or "file"}
+        # nexus-6pfgb.8 and nexus-6pfgb.23: plus the tags, category and source_format this document's own
+        # row writer stamps. One ``meta`` per hook run: it rides every leg below (the update of an existing
+        # row, the registration of a new one, the update after a registration that resolved onto an existing
+        # row), so a document costs no extra request.
+        from nexus.catalog.indexed_meta import markdown_register_meta  # noqa: PLC0415 — deferred like the hook's other catalog imports
+        doc_meta: dict[str, Any] = {
+            **markdown_register_meta(content_type, md_path), "extraction_source": extraction_source or "file",
+        }
 
         owner_name = corpus if corpus else "standalone-docs"
         # Curator-only lookup — see _register_or_lookup_doc_id for
