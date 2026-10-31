@@ -181,7 +181,8 @@ verifies the signature, maps the delivery to a topic, and writes one board
 post per state change through the engine's ordinary tuple API, with a
 token that can only write board posts (nexus-r3ur5). The engine does not
 change: to it, the adapter is one more client writing tuples. Readers
-fold the posts with a repo script. No workflow file changes.
+get pings from the board and read CI from check runs (the repo-script fold
+was retired 2026-10-03). No workflow file changes.
 
 ### Technical Design
 
@@ -538,7 +539,7 @@ in-workflow publisher's `ci-pending` and `ci-verdict` posts, one pair per
 run. `board/ci/nexus-develop` (three segments, `board/ci/<topic>`) holds
 the adapter's per-run and per-job posts. During the coexistence window a
 session subscribes to whichever it reads; nothing forwards one into the
-other.
+other. (The window ended with 5ac039222.)
 
 ### Day 2 Operations
 
@@ -560,7 +561,7 @@ None. The adapter uses the Python standard library only.
 - **Scenario**: the same delivery id delivered twice — **Verify**: one post.
 - **Scenario**: a bad or missing signature — **Verify**: refused, nothing written.
 - **Scenario**: an unmapped repository — **Verify**: refused, nothing written.
-- **Scenario**: a rerun of a failed job (new attempt) — **Verify**: the fold shows the new attempt's state.
+- **Scenario**: a rerun of a failed job (new attempt) — **Verify**: the post carries the new attempt number (conexus `test_rerun_attempt_is_carried_in_body`).
 
 ## Validation
 
@@ -634,8 +635,8 @@ The fold was retired afterwards, and Gap 3 is dropped.
   fields, re-read every 300 seconds; rotation by re-seed and
   `activate.sh --revoke-previous`; the hourly self-check proves each field.
 - **Deployment model**: one adapter per site; it writes to whichever
-  engine its configuration names. Local-only setups keep the in-workflow
-  publisher.
+  engine its configuration names. Local-only setups have no CI board
+  publisher; the in-workflow publisher was retired (5ac039222).
 - **Incremental adoption**: the in-workflow publisher keeps running until
   the adapter is confirmed, then retires.
 
@@ -650,7 +651,7 @@ records carry the detail. No section needs trimming before acceptance.
 
 - T2 `nexus/github-api-usage-research-2026-09-26`
 - `scripts/ci_board_post.py`, `.github/workflows/ci.yml` board jobs (both retired, 5ac039222)
-- `web/ci-board.html` (use-case page, draft)
+- `web/ci-board.html` (now a redirect, f01ec0402)
 
 ## Revision History
 
