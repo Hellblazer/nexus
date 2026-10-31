@@ -491,10 +491,12 @@ class TupleOutReplaceTest {
         c = claim(r, "w1");
         replace(r, "doc-1", "v4");
         repo.nack(TENANT, c.claimId(), "w1", null, true);
-        Row dead = row(id);
-        assertThat(dead.claimState()).isEqualTo("dead");
-        assertThat(dead.dirty()).as("dead letter").isFalse();
-        assertThat(dead.body()).isEqualTo("v4");
+        // nexus-7rwaj: a dead nack on a dirty row requeues it with the new body instead of dead-lettering.
+        Row requeued = row(id);
+        assertThat(requeued.claimState()).as("dead nack on a dirty row requeues").isNull();
+        assertThat(requeued.dirty()).as("dead nack").isFalse();
+        assertThat(requeued.body()).isEqualTo("v4");
+        assertThat(requeued.attempts()).isZero();
     }
 
     // ── consumed or dead: reset to available ─────────────────────────────────
