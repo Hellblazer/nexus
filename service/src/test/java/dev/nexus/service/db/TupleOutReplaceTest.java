@@ -787,10 +787,10 @@ class TupleOutReplaceTest {
         assertThat(after.claimant()).isEqualTo("holder");
     }
 
-    // ── review round: the lapse-to-dead branch of claimOnce clears dirty ────────────────────────────
+    // ── review round: the lapse-to-dead branch of claimOnce; nexus-7rwaj: a dirty row is requeued ───
 
     @Test
-    void aDirtyClaimWhoseLeaseLapsesAtMaxAttempts_isDeadLetteredWithDirtyClear() throws Exception {
+    void aDirtyClaimWhoseLeaseLapsesAtMaxAttempts_isRequeuedAndClaimedWithTheNewBody() throws Exception {
         Room r = newRoom();   // max_attempts 3
         byte[] id = out(r, "doc-1", "v1");
         repo.nack(TENANT, claim(r, "w1").claimId(), "w1", null);   // attempts 1
@@ -800,14 +800,18 @@ class TupleOutReplaceTest {
         assertThat(row(id).dirty()).isTrue();
         lapseLease(id);
 
-        // The next claim finds the lapsed lease, counts attempt 3 (== max_attempts), dead-letters, finds nothing.
-        assertThat(repo.inp(TENANT, r.subspace(), r.keys(), "w4", 60L)).isEmpty();
+        // The next claim finds the lapsed lease and would count attempt 3 (== max_attempts). The row is dirty,
+        // so it is not dead-lettered (nexus-7rwaj): it is requeued with the new body, attempts 0, and w4 gets it.
+        var got = repo.inp(TENANT, r.subspace(), r.keys(), "w4", 60L);
+        assertThat(got).isPresent();
+        assertThat(got.get().tuple().body()).isEqualTo("v2");
 
-        Row dead = row(id);
-        assertThat(dead.claimState()).isEqualTo("dead");
-        assertThat(dead.attempts()).isEqualTo(3);
-        assertThat(dead.dirty()).as("a dead row holds no claim, so no dirty mark").isFalse();
-        assertThat(dead.body()).as("the new body is kept").isEqualTo("v2");
-        assertThat(transitions(id)).endsWith("expire", "dead");
+        Row held = row(id);
+        assertThat(held.claimState()).isEqualTo("claimed");
+        assertThat(held.claimant()).isEqualTo("w4");
+        assertThat(held.attempts()).isZero();
+        assertThat(held.dirty()).as("a new claim starts clean").isFalse();
+        assertThat(held.body()).isEqualTo("v2");
+        assertThat(transitions(id)).endsWith("expire", "claim").doesNotContain("dead");
     }
 }

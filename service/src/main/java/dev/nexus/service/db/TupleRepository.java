@@ -2198,7 +2198,16 @@ public final class TupleRepository {
                     insertClaimLog(ctx, tenant, subspace, t.name(), row.getId(),
                             row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now);
                     attempts = attempts + 1;
-                    if (attempts >= maxAttempts) {
+                    if (attempts >= maxAttempts && row.getDirty()) {
+                        // nexus-7rwaj (RDR-235 E4): the lapsed holder's row was replaced while it worked,
+                        // so it carries a body nobody extracted. Dead-lettering it here would bury that
+                        // body, as the sweep and nack dead:true no longer do. Sam's ruling (2026-10-31):
+                        // requeue with attempts reset to 0, the new body being a fresh task. The row is
+                        // locked FOR NO KEY UPDATE, so dirty cannot change under this read. Logged as the
+                        // expire above only; the claim below hands the row to this caller, as for any
+                        // available row (it clears the claim columns and the dirty mark itself).
+                        attempts = 0;
+                    } else if (attempts >= maxAttempts) {
                         ctx.update(TUPLES)
                                 .set(TUPLES.CLAIM_STATE, CLAIM_STATE_DEAD)
                                 .set(TUPLES.CLAIMANT, (String) null)

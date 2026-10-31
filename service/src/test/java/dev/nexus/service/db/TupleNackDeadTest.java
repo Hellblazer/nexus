@@ -400,6 +400,45 @@ class TupleNackDeadTest {
         assertThat(transitions(id)).containsExactly("claim", "expire", "dead");
     }
 
+    @Test
+    void claimOfALapsedDirtyClaimAtMaxAttempts_requeuesTheRowWithTheNewBody_andClaimsIt() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        claimOrFail(q, "w1");
+        setAttempts(q, 2);   // the lapse counts attempt 3 == max_attempts
+        replaceWhileClaimed(q, "fixed");
+        lapseLease(q);
+
+        var again = claimOrFail(q, "w2");
+
+        assertThat(again.tuple().body()).as("the new body, not a dead row").isEqualTo("fixed");
+        assertThat(again.tuple().attempts()).as("reset to 0; a claim does not count an attempt").isZero();
+        Content c = content(q);
+        assertThat(c.claimState()).isEqualTo("claimed");
+        assertThat(c.claimant()).isEqualTo("w2");
+        assertThat(c.attempts()).isZero();
+        assertThat(c.dirty()).isFalse();
+        assertThat(transitions(id)).as("expire, then the new claim; no dead row")
+                .containsExactly("claim", "expire", "claim");
+    }
+
+    @Test
+    void claimOfALapsedCleanClaimAtMaxAttempts_stillDeadLetters() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        claimOrFail(q, "w1");
+        setAttempts(q, 2);
+        lapseLease(q);
+
+        assertThat(repo.inp(TENANT, q.subspace(), q.pattern(), "w2", 30))
+                .as("nothing left to claim: the clean row is dead").isEmpty();
+
+        Content c = content(q);
+        assertThat(c.claimState()).isEqualTo("dead");
+        assertThat(c.attempts()).isEqualTo(3);
+        assertThat(transitions(id)).containsExactly("claim", "expire", "dead");
+    }
+
     // ── a dead row can be revived by replace (the requeue-failed path) ───────
 
     @Test
