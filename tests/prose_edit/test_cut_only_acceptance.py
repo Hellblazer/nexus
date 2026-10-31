@@ -21,6 +21,7 @@ from tests.prose_edit.test_acceptance_tools import (
     _verdicts,
 )
 from tests.prose_edit.test_acceptance_tools import _res as res
+from tests._tmp_root import child_env_with_tmpdir
 
 SCRIPTS = "/Users/x/nexus/prose-edit/skills/prose-edit/scripts"
 BUILD = (f"python3 {SCRIPTS}/brief.py build docs/zz-cut/scenario.md --budget 20 --genre how-to --mode cut-only "
@@ -349,7 +350,7 @@ def test_a_scenario_runner_not_run_skipped_is_scored_not_run_and_the_exit_is_3(
 
 
 def test_run_cut_sh_refuses_an_unknown_scenario_group(tmp_path: Path) -> None:
-    env = {**os.environ, "OUT_DIR": str(tmp_path / "out"), "SCENARIOS": "zzz", "TMPDIR": str(tmp_path)}
+    env = {**child_env_with_tmpdir(os.environ, tmp_path), "OUT_DIR": str(tmp_path / "out"), "SCENARIOS": "zzz"}
     proc = subprocess.run(["bash", str(ACC / "run-cut.sh")], capture_output=True, text=True, env=env, timeout=60)
     assert proc.returncode == 2 and "unknown scenario" in proc.stderr
     assert not (tmp_path / "out").exists()  # nothing was started
