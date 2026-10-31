@@ -654,7 +654,8 @@ class BoundaryView:
 
     ``evidence_texts`` are the texts the run's evidence-consuming steps will be given, read before the first
     of them dispatches (the reserved stream merged, the cap applied; a step that reads another step of the run
-    contributes nothing) and ``observed`` says whether that input could be read at all. ``step_outputs`` and ``tools`` are the executed prefix, for the deterministic checks.
+    contributes nothing) and ``observed`` says whether that input could be read at all. ``step_outputs`` and
+    ``tools`` are the executed prefix, for the deterministic checks.
     ``check`` performs one assessment call through the runner's dispatcher and accounts for it;
     ``remaining_seconds`` / ``remaining_usd`` return what is left of the answer's deadline and USD allowance
     (``None`` for no limit).

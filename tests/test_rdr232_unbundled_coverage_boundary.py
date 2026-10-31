@@ -31,6 +31,7 @@ from nexus.mcp import core as mcp_core
 from nexus.plans import runner
 from nexus.plans.bundle import BUNDLED_INTERMEDIATE, MAX_BUNDLE_PROMPT_CHARS as _REAL_MAX_BUNDLE_PROMPT_CHARS
 from nexus.plans.coverage_ledger import CoverageBoundary
+from nexus.plans.evidence_diagnostics import capture_reducer_input
 from nexus.plans.match import Match
 from nexus.plans.request_coverage import Facet, RequestCoverage
 from nexus.plans.runner import PlanResult, plan_run
@@ -78,6 +79,29 @@ INLINE_PLANS: dict[str, dict[str, Any]] = {
         {"tool": "extract", "args": {"inputs": "$step3.contents", "fields": "decision"}},
         {"tool": "generate", "args": {"context": ["$step4.contents", "$step5.extractions"], "question": "q"}},
     ]},
+    #: The generate's whole evidence arg is the extract's output: in the run it is a lone deferred ref, no text at all.
+    "only-deferred-ref": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "extract", "args": {"inputs": "$step2.contents", "fields": "decision"}},
+        {"tool": "generate", "args": {"context": ["$step3.extractions"], "question": "q"}},
+    ]},
+    #: Branch B retrieves nothing, so its fetch returns no texts and the generate holds only the extract's deferred ref.
+    "empty-fetch-beside-ref": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "search", "args": {"query": "q-empty", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "store_get_many", "args": {"ids": "$step2.ids", "collections": "$step2.collections"}},
+        {"tool": "extract", "args": {"inputs": "$step3.contents", "fields": "decision"}},
+        {"tool": "generate", "args": {"context": ["$step4.contents", "$step5.extractions"], "question": "q"}},
+    ]},
+    #: The trailing generate carries its own ``ids``: it hydrates the retrieved chunks itself, after the extract.
+    "later-step-own-ids": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "extract", "args": {"inputs": "$step2.contents", "fields": "decision"}},
+        {"tool": "generate", "args": {"ids": "$step1.ids", "collections": "$step1.collections", "question": "q"}},
+    ]},
 }
 
 
@@ -114,6 +138,8 @@ KNOWN = {_h(t): t for t in (*TEXTS, *TEXTS_B, REPAIR_TEXT)}
 def _retrieve_for(*, repair: bool):
     async def retrieve(**kw: Any) -> dict[str, Any]:
         text = str(kw.get("query") or kw.get("question") or "")
+        if text == "q-empty":
+            return _structured([])
         if repair and text.startswith(FACET_TEXT):
             return _structured([REPAIR_TEXT])
         return _structured(TEXTS_B if text == "q2" else TEXTS)
@@ -237,6 +263,9 @@ HYBRID = ("hybrid-factual-lookup", {
 EXTRACT_GENERATE = ("extract-generate", {})
 CHECK_GENERATE = ("check-generate", {})
 PROBE = ("two-branch-probe", {})
+ONLY_REF = ("only-deferred-ref", {})
+EMPTY_FETCH_REF = ("empty-fetch-beside-ref", {})
+OWN_IDS = ("later-step-own-ids", {})
 SHAPES = [THEMES, REVIEW, ANALYZE, HYBRID, EXTRACT_GENERATE, CHECK_GENERATE, PROBE]
 SHAPE_IDS = [
     "abstract-themes", "review-default", "analyze-default", "hybrid-factual-lookup", "extract-generate",
@@ -475,3 +504,64 @@ async def test_unbundled_repair_leaves_a_downstream_operator_over_model_output_a
     assert result.coverage is not None and result.coverage.repair.outcome == "completed"
     assert REPAIR_TEXT in _hand_text(calls.args["groupby"][0])
     assert REPAIR_TEXT not in _hand_text(calls.args["summarize"][0])
+
+
+@pytest.mark.asyncio
+async def test_two_branch_probe_repair_reads_the_union_and_hands_branch_b_to_the_ledger_bundled_or_not() -> None:
+    """The post-repair reading (``rehydrate``) is the run's union too: a first-step-only re-read would drop branch B
+    from the ledger after the repair, though the pre-repair reading held it."""
+    bundled, _ = await _run(*PROBE, bundled=True, repair=True)
+    unbundled, _ = await _run(*PROBE, bundled=False, repair=True)
+    for result in (bundled, unbundled):
+        assert result.coverage is not None and result.coverage.repair.outcome == "completed"
+        assert set(TEXTS_B) <= _anchor_contents(result)
+        assert REPAIR_TEXT in _anchor_contents(result)
+    assert _anchor_contents(unbundled) == _anchor_contents(bundled)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plan", [ONLY_REF, EMPTY_FETCH_REF], ids=["only-deferred-ref", "empty-fetch-beside-ref"])
+@pytest.mark.parametrize("bundled", [True, False], ids=["bundled", "unbundled"])
+async def test_a_step_holding_only_a_deferred_ref_adds_no_anchor_text(plan: Any, bundled: bool) -> None:
+    """With no text held, no reducer input is reported and the boundary reads the step's args as they stand: the
+    evidence arg is by then one string made of the ref's repr, which is no evidence."""
+    result, _ = await _run(*plan, bundled=bundled)
+    anchors = _anchor_contents(result)
+    assert anchors, "the extract's own evidence still anchors"
+    bad = [c for c in anchors if "deferred" in c or "{'" in c]
+    assert not bad, f"anchor text carries a deferred ref: {bad}"
+
+
+def test_boundary_evidence_reads_a_joined_deferred_ref_as_no_text() -> None:
+    """The unit under the two plans above: the hydrated ``context`` of a step holding only a ref is one string."""
+    ref = {runner._DEFERRED_REF_KEY: True, "step_index": 2, "field": "extractions"}
+    for held in ([ref], ["", ref]):
+        _, prepared = runner._hydrate_operator_args("generate", {"context": list(held), "question": "q"})
+        assert isinstance(prepared["context"], str) and runner._DEFERRED_REF_KEY in prepared["context"]
+        assert runner._boundary_evidence(prepared, []) == ([], True)
+
+
+@pytest.mark.asyncio
+async def test_a_later_step_with_its_own_ids_is_handed_the_repair_evidence_unbundled() -> None:
+    """``extract(inputs=$step2.contents)`` then ``generate(ids=$step1.ids)``: the generate reads retrieved evidence
+    through its own ``ids``, so it is one of the steps the repair supplement is merged at."""
+    assert runner._reads_retrieved_evidence(3, _plan("later-step-own-ids")["steps"])
+    result, calls = await _run(*OWN_IDS, bundled=False, repair=True)
+    assert result.coverage is not None and result.coverage.repair.outcome == "completed"
+    assert calls.ran == ["extract", "generate"]
+    assert REPAIR_TEXT in _hand_text(calls.args["extract"][0])
+    assert REPAIR_TEXT in _hand_text(calls.args["generate"][0])
+
+
+def test_a_chunk_id_beside_a_deferred_ref_and_texts_is_no_evidence() -> None:
+    """``generate(context=[$step4.contents, $step4.ids, $step5.extractions])`` in a bundle: the ids are identifiers,
+    as in the list without a ref, so they are neither reported as evidence nor left in the prompt."""
+    ref = {runner._DEFERRED_REF_KEY: True, "step_index": 4, "field": "extractions"}
+    chash = _h("a chunk id")
+    with capture_reducer_input() as captured:
+        _, prepared = runner._hydrate_operator_args(
+            "generate", {"context": [TEXTS[0], runner._StepId(chash), ref], "question": "q"},
+        )
+    assert captured == [[TEXTS[0]]]
+    assert chash not in prepared["context"]
+    assert runner._boundary_evidence(prepared, captured) == ([TEXTS[0]], True)

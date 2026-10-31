@@ -2681,7 +2681,15 @@ def _hydrate_operator_args(
             # Texts beside a deferred bundle ref (``[$step4.contents, $step5.extractions]`` in a bundle): not merged
             # (the ref is the earlier step's output, inline), but the texts are what the step reads, and the ref's
             # ``repr`` joined into the prompt below is no evidence (nexus-jypmj).
-            if _held := [v for v in _listed if isinstance(v, str) and v]:
+            _held = [v for v in _listed if isinstance(v, str) and v]
+            _kept = _drop_step_ids_from_evidence(
+                _held, tool=tool, resolved_tool=resolved_tool, branch="pattern_a_deferred",
+            )
+            if _kept is not _held:
+                # A chunk id is no evidence here either, and the prompt joined below must not carry it.
+                _held = _kept
+                args[target_key] = [v for v in _listed if not isinstance(v, _StepId)]
+            if _held:
                 note_reducer_input(_held)
 
     if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
@@ -4237,7 +4245,7 @@ async def _plan_run_impl(
                     }) else {}),
                 })
 
-            # RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary, on the terminal step's input,
+            # RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary, at the start of the trailing operator run,
             # BEFORE the timeout below is computed (the assessment spends part of the deadline) and before
             # the step dispatches. A dispatcher that hydrates (the default one) is handed the args this
             # hydration produced, once; any other is handed the resolved args as before.
