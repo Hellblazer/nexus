@@ -33,7 +33,13 @@ DROP_CLAUSE = "drop `rdr:` when the bead serves no RDR"
 SENTENCE = re.compile(
     r"A gate record \(a review, critique, confirmation or fix round\) also passes [^\n]*?\(RDR-209 Amendment A1\)\."
 )
-MEMORY_PARAGRAPH = "never replaces the T2 gate record, which is mandatory"
+MEMORY_CLAUSES = (
+    "never replaces the T2 gate record, which is mandatory",
+    "each entry naming the repo it was learned in",
+    "read an entry as a hint to verify in the repo under review, never as a rule",
+    "Keep its index under 40 lines",
+    "Under a read-only brief, write no memory.",
+)
 
 
 def _frontmatter(text: str) -> str:
@@ -53,6 +59,7 @@ def test_the_tag_sentence_is_identical_in_every_writer() -> None:
         f"the tag sentence differs between writers: {found}"
     )
     assert TAGS in next(iter(found.values()))
+    assert DROP_CLAUSE in next(iter(found.values()))
 
 
 @pytest.mark.parametrize("path", RESTATING, ids=lambda p: p.name)
@@ -68,6 +75,13 @@ def test_a_reviewer_with_user_memory_carries_the_bounding_paragraph(name: str) -
     assert re.search(r"^memory: user$", _frontmatter(text), re.M), (
         f"{name}: no memory: user"
     )
-    assert MEMORY_PARAGRAPH in text, (
-        f"{name}: memory: user without the paragraph bounding it"
+    missing = [clause for clause in MEMORY_CLAUSES if clause not in text]
+    assert not missing, (
+        f"{name}: memory: user without these bounding clauses: {missing}"
     )
+
+
+def test_the_critic_completion_protocol_names_the_gate_record_mandatory() -> None:
+    text = (AGENTS_DIR / "substantive-critic.md").read_text(encoding="utf-8")
+    assert "the gate record is mandatory" in text
+    assert "- [ ] T2 gate record written" in text
