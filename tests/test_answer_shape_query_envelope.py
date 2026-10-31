@@ -22,6 +22,9 @@ QUERY_ENVELOPE_KEYS = {
 #: its node cap). The critique of the GH #1524 landing [25095] found the
 #: classifier blind to them by the same mechanism as also_in.
 OPTIONAL_ENVELOPE_KEYS = {"seed_scope", "graph_scope"}
+#: Set when a document-confined search drops rows the engine returned outside
+#: chash_allow (nexus-jypmj).
+CONFINEMENT_ENVELOPE_KEYS = {"chash_allow_dropped", "warnings"}
 
 
 def test_real_query_envelope_classifies_as_retrieval_only() -> None:
@@ -36,6 +39,15 @@ def test_optional_envelope_keys_still_classify_as_retrieval_only() -> None:
     envelope["ids"] = ["1.61.7"]
     envelope["seed_scope"] = {"seed_count": 5, "capped": True}
     envelope["graph_scope"] = {"batches_at_cap": 1, "batches_total": 2, "possibly_incomplete": True}
+    assert classify_answer_shape(json.dumps(envelope)) is AnswerShape.RETRIEVAL_ONLY
+
+
+def test_confinement_envelope_keys_still_classify_as_retrieval_only() -> None:
+    envelope = {k: [] for k in QUERY_ENVELOPE_KEYS}
+    envelope["ids"] = ["1.61.7"]
+    envelope["chash_allow_dropped"] = 3
+    envelope["warnings"] = ["Note: 3 row(s) the engine returned were outside the document filter"]
+    assert set(envelope) >= CONFINEMENT_ENVELOPE_KEYS
     assert classify_answer_shape(json.dumps(envelope)) is AnswerShape.RETRIEVAL_ONLY
 
 
