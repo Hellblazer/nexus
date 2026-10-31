@@ -124,6 +124,24 @@ live census.
   entries, not records found by content; template changes ride an engine
   cut; `from` is recorded, not checked.
 
+- **❌ A1 refuted, then resolved** (spike, Phase 1, 2026-10-31): the
+  drafted field set did not fit all eight templates; four changes (above,
+  Technical Design item 1) make it fit. The eight blocks are in
+  `docs/rdr/rdr-239-doc-blocks.md`, and a scratch driver compiled against
+  the real `MiniYaml`, `TemplateSchemaParser`, `TemplateSchema` and
+  `TupleLimits` replayed `out()`'s shape, nonce and size checks on each
+  example: 8 of 8 templates, 350 checks, 0 failures, 0 skipped; a planted
+  dropped nonce, an out-of-enum key and an undeclared `fields` name were all
+  caught. *Source: T2 `nexus/rdr-239-phase1-doc-blocks-a1-verdict`.*
+- **✅ Verified** (source and live): template comments go stale, which is
+  Gap 2 measured. `ledger.yaml`'s header names a writer that
+  `CHANGELOG.md:957` records as deleted; the newest of 40,785 rows across
+  446 ledger subspaces is dated 2026-10-04. `board/<topic>` and
+  `queue/<name>` have no writer in this repository and no live subspace.
+  The `board/ci` writer is outside the repository (the conexus webhook
+  adapter, RDR-220). A census join reads zero for every mailbox, because
+  mailboxes hold only consumed rows, which `rd` does not return.
+
 ### Critical Assumptions
 
 - **A1:** One small documentation block covers every template without
@@ -150,14 +168,30 @@ block on every template in the repository.
    - `summary`: one sentence, what the subspace is for (required inside `doc`).
    - `writers`: list of who posts (a workflow, a hook, a verb, a role).
    - `readers`: list of who reads, and how (`rd` page, `in` claim, wake).
-   - `dimension_values`: for a free-text dimension such as `kind`, the
-     values in use and what each means. Documentation only; it does not
-     restrict `out()`, since RDR-211 chose free text on purpose.
-   - `example`: one tuple literal (`keys`, `dims`, `body`). At boot the
-     engine validates it with the same checks `out()` applies; a template
-     whose example fails does not load, and the error names the field.
+   - `fields`: for any declared key or dimension, either a one-line
+     description or a `{value: meaning}` map of the values in use. A name
+     that is not a declared key or dimension fails at boot, so a typo
+     cannot pass. Documentation only; it does not restrict `out()`, since
+     RDR-211 chose free text on purpose. (Phase 1 replaced the drafted
+     `dimension_values`: the ledger's `kind` is a key, and `from`, `topic`
+     and `agent_type` carry meaning with no enumerable values.)
+   - `body`: a one-line description, or a `{json field: meaning}` map when
+     the body is structured (the `board/ci` body carries `state`,
+     `conclusion`, `workflow`, `job`, `sha`, `run`, `attempt`, `url`).
+     Omitted where `max_body_bytes` is 0.
+   - `example`: one tuple literal with `subspace`, `keys`, `dims`, `body`
+     and, when `id_from` is `keys+nonce`, `nonce`. At boot the engine
+     validates it with the same checks `out()` applies (`validateOutShape`,
+     `validateNonce`, the size limits); a template whose example fails does
+     not load, and the error names the field. `subspace` is required because
+     a subspace cannot always be derived from the keys (`ledger/<session_id>`
+     keys on `agent_id` and `kind`).
    - `see_also`: RDR and doc references.
-   Unknown fields inside `doc` are rejected, as at the top level.
+   `writers: []` is valid and means "none today". Unknown fields inside `doc`
+   are rejected, as at the top level. `MiniYaml` has no list of mappings and
+   no multi-line scalars, so `writers` and `readers` are lists of one-line
+   strings, and the `doc` reader turns example keys and dims that arrive as
+   `Long` or `Boolean` back into strings.
 2. **Route.** `renderTemplate` includes `doc` when present. Additive on the
    wire, with a wire-contract ledger entry.
 3. **Clients.** `nx tuple dictionary [NAME] [--json]` renders the doc
@@ -273,3 +307,4 @@ repository lint.
 | Date | Change |
 | --- | --- |
 | 2026-10-31 | Filed as draft at Sam's direction: stage 1 of the scriptable tuple space (nexus-mdbds), the ORB's successor, constrained by the RDR-110 arc's scrap reason. |
+| 2026-10-31 | Phase 1 content written (`docs/rdr/rdr-239-doc-blocks.md`); A1 refuted and resolved: `fields` replaces `dimension_values`, `body` added, `example` gains `subspace` and `nonce`; stale-comment and writerless-template findings recorded. |
