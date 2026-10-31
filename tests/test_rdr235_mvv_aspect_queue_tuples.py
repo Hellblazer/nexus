@@ -21,7 +21,7 @@ the extractor is faked and the task is an identity body, so the journey starts
 at the producer. Document 7 raises a retryable error twice, then succeeds.
 Document 13 crashes its worker on every claim (a ``BaseException`` out of the
 extractor ends the worker thread with the claim held, so nothing nacks, acks or
-releases it) until the engine dead-letters it. Leases are 2 s, the RDR-163
+releases it) until the engine dead-letters it. Leases are 2 s (10 s in an external run), the RDR-163
 ladder is 2 s * 2**attempts with no jitter, both through the worker's own
 configuration (``tuple_options`` and the ladder module constants).
 
@@ -61,6 +61,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -74,18 +75,6 @@ from nexus.db.t2.http_tuple_store import ClaimNotFoundError
 from tests import _external_engine
 
 pytestmark = pytest.mark.usefixtures("t2_service_env")
-
-#: Scenarios 24 and 25 stay on the local test engine (nexus-ckejb): 24 starts a child process with the
-#: PG-direct substrate env (``tests._chunk_seed.substrate_env``), which an external engine does not have, and 25
-#: writes 1,200 tasks, a load nobody should put on a managed tenant. Evaluated at collection, so the skipped
-#: tests never boot an engine.
-_LOCAL_ONLY = pytest.mark.skipif(
-    _external_engine.requested(),
-    reason=(
-        f"local-only: {_external_engine.URL_ENV} and {_external_engine.TOKEN_ENV} are set, "
-        "so this run targets an external engine; this scenario needs the local test engine"
-    ),
-)
 
 #: A hang bound, not a performance assertion (nexus-61vos): the journey is a few
 #: tens of seconds, so anything past this is a wedge rather than a slow box.
@@ -102,6 +91,10 @@ N_TABLE_DOCS = 6
 #: Lease asked of every claim in the journey. The engine's template cap is 900;
 #: 2 s makes the six lapses of document 13 take seconds, not an hour (gate O6).
 _LEASE_S = 2
+#: The lease in an external run (nexus-ckejb): every renewal is a WAN round trip, and one that runs long against
+#: a 2 s lease lets the claim lapse under a live worker (``by_doc == 1`` then fails and the fresh tenant is
+#: burned). Bullet 3's six lapses then take about a minute instead of seconds.
+_WAN_LEASE_S = 10
 #: The ladder, shrunk through the module's own constants: base * 2**attempts,
 #: no jitter, so the intervals are 2 s then 4 s.
 _RETRY_BASE_S = 2.0
@@ -415,10 +408,30 @@ def _worker_opts(**over: Any) -> dict[str, Any]:
     return opts
 
 
+@dataclass(frozen=True)
+class _Timing:
+    """The journey's lease and fence timings: one lease, the renew cadences and the fence variant's renewer
+    deadline, all scaled together so the ratios the assertions rely on (renew well inside the lease; the fence
+    renewer gives up long before the lease ends) hold on either engine."""
+
+    lease_s: int
+    renew_every_s: float
+    fence_renew_every_s: float
+    fence_deadline_s: float
+
+
+def _timing(request: pytest.FixtureRequest) -> _Timing:
+    """Local values unchanged; an external run (``in_external_mode``, keyed on the same pair-and-marker rule
+    the fixture uses) gets WAN-sized ones."""
+    lease = _WAN_LEASE_S if _external_engine.in_external_mode(request) else _LEASE_S
+    scale = lease / _LEASE_S
+    return _Timing(lease, 0.5 * scale, 0.3 * scale, 0.4 * scale)
+
+
 @pytest.mark.scenario
 @pytest.mark.external_engine_ok
 def test_mvv_journey_on_the_tuple_queue(
-    db: Any, monkeypatch: pytest.MonkeyPatch,
+    db: Any, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest,
 ) -> None:
     """RDR-235 MVV: all eight bullets in one journey (see the module docstring)."""
     from click.testing import CliRunner
@@ -426,6 +439,7 @@ def test_mvv_journey_on_the_tuple_queue(
     from nexus import aspect_worker as w
     from nexus.commands.aspects import aspects_group
 
+    timing = _timing(request)
     monkeypatch.setattr(w, "_RETRY_BASE_SECONDS", _RETRY_BASE_S)
     monkeypatch.setattr(w, "_RETRY_JITTER_FRACTION", 0.0)
     ledger = _Ledger()
@@ -438,7 +452,7 @@ def test_mvv_journey_on_the_tuple_queue(
         "this engine has no 'aspects' tuple template (an engine older than RDR-235 E3)"
     )
     live = db.tuples.subspace_stats(_SUB)
-    assert live.available + live.claimed + live.dead == 0 and db.aspect_queue.pending_count() == 0, (
+    assert live.available + live.claimed + live.dead + live.consumed == 0 and db.aspect_queue.pending_count() == 0, (
         "this tenant already holds aspect-queue work; the journey counts every task in it and needs a fresh tenant"
     )
 
@@ -502,7 +516,7 @@ def test_mvv_journey_on_the_tuple_queue(
     ledger.reset()
 
     # ── the run: worker A, a crashing document, and a second worker mid-run ───
-    fleet = _Fleet(_worker_opts())
+    fleet = _Fleet(_worker_opts(lease_s=timing.lease_s, renew_every_s=timing.renew_every_s))
     fleet.spawn()
     b_worker: AspectExtractionWorker | None = None
     claims_before_b: set[str] = set()
@@ -552,7 +566,7 @@ def test_mvv_journey_on_the_tuple_queue(
     nacks7 = [e for e in ledger.ends if e["kind"] == "nack" and e["claim_id"] in {c["claim_id"] for c in c7}]
     nacks7.sort(key=lambda e: [c["claim_id"] for c in c7].index(e["claim_id"]))
     intervals = [e["retry_after_s"] for e in nacks7]
-    assert intervals == [w._backoff_interval_seconds(0), w._backoff_interval_seconds(1)] == [2, 4]
+    assert intervals == [w._backoff_interval_seconds(0), w._backoff_interval_seconds(1)] == [_RETRY_BASE_S, 2 * _RETRY_BASE_S]
     assert all(e["error"] is None and not e["dead"] for e in nacks7)
     for (prev, nxt), interval in zip(zip(c7, c7[1:]), intervals):
         gap = (nxt["claimed_at"] - prev["claimed_at"]).total_seconds()
@@ -636,7 +650,10 @@ def test_mvv_journey_on_the_tuple_queue(
     )
 
     # ── bullet 5: a worker whose claim is not live writes nothing ────────────
-    fence_opts = _worker_opts(lease_s=_LEASE_S, renew_every_s=0.3, deadline_s=lambda n: 0.4)
+    fence_opts = _worker_opts(
+        lease_s=timing.lease_s, renew_every_s=timing.fence_renew_every_s,
+        deadline_s=lambda n: timing.fence_deadline_s,
+    )
 
     def stale_worker_run(path: str, doc_id: str) -> tuple[Any, threading.Thread, AspectExtractionWorker]:
         db.aspect_queue.enqueue(coll, path, content_hash="f", doc_id=doc_id)
@@ -710,7 +727,6 @@ def test_mvv_journey_on_the_tuple_queue(
 
 
 @pytest.mark.scenario
-@_LOCAL_ONLY
 def test_scenario_24_an_out_from_a_second_process_wakes_a_parked_worker_within_two_seconds(
     db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -777,7 +793,6 @@ def test_scenario_24_an_out_from_a_second_process_wakes_a_parked_worker_within_t
 
 
 @pytest.mark.slow
-@_LOCAL_ONLY
 def test_scenario_25_a_bulk_index_at_the_measured_backlog_is_not_refused_and_does_not_expire(
     db: Any, monkeypatch: pytest.MonkeyPatch, record_property: Any,
 ) -> None:

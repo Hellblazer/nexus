@@ -3248,7 +3248,9 @@ def _engine_tenant_env(
     # substrate below (tests/_external_engine.py has the opt-in rules and what the branch does).
     external = _external_engine.resolve(request)
     if external is not None:
-        with _external_engine.external_tenant_env(monkeypatch, external) as tenant:
+        with _external_engine.external_tenant_env(
+            monkeypatch, external, report=_external_engine.terminal_writer(request),
+        ) as tenant:
             yield tenant
         return
 
