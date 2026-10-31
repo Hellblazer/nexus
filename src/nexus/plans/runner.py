@@ -3162,6 +3162,7 @@ async def _plan_run_impl(
         dispatch_bundle,
         is_operator_tool,
         resolve_dispatch_segments,
+        segment_steps,
     )
 
     def _extract_tool(step: dict[str, Any]) -> str:
@@ -3344,10 +3345,30 @@ async def _plan_run_impl(
         supports_bundling=getattr(dispatch, _SUPPORTS_BUNDLING_ATTR, False),
     )
 
-    # RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary sits before the LAST segment when that is an
-    # operator segment. Assessment calls are numbered past the plan's own step indices ((run_id, step_index)
-    # is the primary key of nx_answer_steps) and ride the existing "llm" step source.
-    _terminal_seg = segments[-1] if segments else None
+    # RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary sits before the plan's trailing run of operator
+    # steps, on the input of the run's FIRST step (the one that consumes the retrieved evidence). Bundled, the run
+    # is one segment. Unbundled (a dispatcher without ``supports_bundling``), the run is flattened into isolated
+    # steps, and the boundary sits before the first of them: a later operator's input is model prose (a
+    # ``summarize`` over ``$stepN.aggregates``), which is no evidence and leaves the ledger with no anchors
+    # (nexus-jypmj). Assessment calls are numbered past the plan's own step indices ((run_id, step_index) is the
+    # primary key of nx_answer_steps) and ride the existing "llm" step source.
+    _trailing = segment_steps(steps)[-1] if steps else None
+    if isinstance(_trailing, OperatorBundleSlice):
+        _boundary_run: tuple[int, ...] = _trailing.plan_indices
+    elif isinstance(_trailing, IsolatedStep) and is_operator_tool(_extract_tool(_trailing.step)):
+        _boundary_run = (_trailing.plan_index,)
+    else:
+        _boundary_run = ()
+    _boundary_start = _boundary_run[0] if _boundary_run else -1
+    #: Plan indices at or below this are skipped by the loop: a skipped boundary fills its unbundled run.
+    _skip_through = -1
+    _terminal_seg = next(
+        (
+            sg for sg in segments
+            if (sg.plan_indices[0] if isinstance(sg, OperatorBundleSlice) else sg.plan_index) == _boundary_start
+        ),
+        None,
+    )
     coverage_result: CoverageResult | None = None
     _coverage_calls = 0
     #: Seconds the last boundary run took (assessment, repair, the reassessment). The terminal step's own
@@ -3524,6 +3545,9 @@ async def _plan_run_impl(
 
     try:
         for seg in segments:
+            # A skipped boundary already filled the rest of an unbundled run (see the isolated boundary below).
+            if isinstance(seg, IsolatedStep) and seg.plan_index <= _skip_through:
+                continue
             _cut_pending, _cut_start_index = False, 0
             # nexus-h33x8.6 a4: hard budget check BEFORE dispatching this
             # segment. ``deadline is None`` (the default) skips this
@@ -4162,10 +4186,15 @@ async def _plan_run_impl(
                 _cov = await _run_coverage_boundary(_step_texts, _step_observed, index, _rehydrate_isolated)
                 _seg_started_at += _boundary_s
                 if _cov is not None and _cov.skip_generation:
+                    # Unbundled, the boundary sits before the first step of the trailing run: the run's other steps
+                    # get the placeholder the bundle path leaves, and the last gets the skipped output.
+                    for _ in _boundary_run[1:]:
+                        step_outputs.append(dict(BUNDLED_INTERMEDIATE))
                     step_outputs.append(_coverage_skipped_output())
+                    _skip_through = _boundary_run[-1]
                     _log.info(
                         "nx_answer_coverage_generation_skipped", kind="isolated",
-                        step_indices=_seg_indices, reason=_cov.reason,
+                        step_indices=list(_boundary_run), reason=_cov.reason,
                     )
                     continue
                 if _cut_pending:
