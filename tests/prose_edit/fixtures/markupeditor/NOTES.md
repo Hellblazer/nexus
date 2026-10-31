@@ -74,3 +74,7 @@ h. **The changed-on-disk dialog.** When the file changes under a buffer with uns
    is false BEFORE the real apply writes the file (the dry run hashes the file, which undo does
    not touch), then reopens it; if app_state fails after apply, the author chooses "Reload from
    Disk", never "Keep My Changes".
+   **Live run 3 of the same trial:** after Accept All, two undos restored the text, a third said
+   "There is nothing to undo", and `hasChanges` stayed true, so the dialog came up anyway. Undo
+   does not clear the app's unsaved mark after an accept; the skill tells the author before the
+   apply that the dialog is coming and that the answer is "Reload from Disk".

@@ -189,6 +189,10 @@ def test_the_clean_buffer_paragraph_says_why_and_keeps_the_dry_run_gate() -> Non
 def test_a_buffer_that_does_not_clear_still_goes_on_to_the_apply_and_names_the_dialog() -> None:
     cb = clean_buffer()
     assert "did not clear" in cb and "go on all the same" in cb and "dialog" in cb
+    # live run 3 (2026-10-31): undo restored the text but hasChanges stayed true; the author hears first
+    warn = cb[cb.index("did not clear"):]
+    assert "tell the author first" in warn and '"Reload from Disk"' in warn and 'never "Keep My Changes"' in warn
+    assert warn.index("tell the author first") < warn.index("Only then run")
 
 
 def test_the_fallback_sends_the_author_to_reload_from_disk_never_keep_my_changes() -> None:
