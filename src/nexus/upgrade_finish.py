@@ -327,6 +327,7 @@ class UpgradeInvocation:
 
     walks_ladder: bool  # this command runs every pending data rung next (a rung may still defer)
     cycles_service: bool  # the stale storage service is cycled by this command
+    auto: bool = False  # the unattended `--auto` run: the finish pass must not detect() a rung (nexus-75w5d)
 
 
 def upgrade_invocation(argv: list[str] | None = None) -> UpgradeInvocation | None:
@@ -356,7 +357,9 @@ def upgrade_invocation(argv: list[str] | None = None) -> UpgradeInvocation | Non
         return None
     if PREVIEW_ARGV_FLAG in args or "--help" in args or "-h" in args:
         return None
-    return UpgradeInvocation(walks_ladder=True, cycles_service="--skip-t3" not in args)
+    return UpgradeInvocation(
+        walks_ladder=True, cycles_service="--skip-t3" not in args, auto="--auto" in args,
+    )
 
 
 @dataclass
@@ -3626,10 +3629,17 @@ def check_version_transition(
     # X failed" line either. Left as-is rather than special-cased, so this
     # leg does not diverge from the established pattern the other legs
     # share.
+    #
+    # nexus-75w5d: not under `nx upgrade --auto`. The callout calls every rung's detect() here, in the
+    # root group, before the command (and its single-instance lock) has run any of its own work, and for
+    # a walking `nx upgrade` its only line is "this nx upgrade runs it next". The unattended run reads
+    # nothing it will not read again in the ladder, where the --auto deadline and the managed-service
+    # rule bound it.
     try:
-        actions = actions + pending_data_rung_callout(
-            upgrade_walks_ladder=bool(running_upgrade and running_upgrade.walks_ladder),
-        )
+        if not (running_upgrade and running_upgrade.auto):
+            actions = actions + pending_data_rung_callout(
+                upgrade_walks_ladder=bool(running_upgrade and running_upgrade.walks_ladder),
+            )
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("pending_rung_callout_failed", exc_info=True)
     _log.info(

@@ -116,6 +116,7 @@ from typing import Any
 
 import structlog
 
+from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service, refuses_unbounded_read
 from nexus.upgrade_ladder.census_progress import NoteStore, T2NoteStore, guarded
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.deadline import active_expired
@@ -338,7 +339,9 @@ class ManifestSectionLabelsRung:
         record_fn: Callable[[], CompletionRecord | None] = _default_record,
         memo_store: NoteStore | None = None,
         now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
+        managed_fn: Callable[[], bool] = managed_service,
     ) -> None:
+        self._managed_fn = managed_fn
         self._reader_factory = reader_factory
         self._writer_factory = writer_factory
         self._t3_factory = t3_factory
@@ -620,7 +623,9 @@ class ManifestSectionLabelsRung:
     def detect(self) -> RungStatus:
         """Converged at once when the completion is on file: ``nx doctor``, every ``nx upgrade --auto`` (each
         session start) and every walk call this, and a scan lists every document. Next cheapest, a remembered
-        clean scan that still holds (one ``/stats`` read). Otherwise the dry run, which honours the ``--auto``
+        clean scan that still holds (one ``/stats`` read). Otherwise, under ``--auto`` against a MANAGED service,
+        not applicable with no catalog read (nexus-75w5d: an interactive ``nx upgrade`` does the first
+        scan). Otherwise the dry run, which honours the ``--auto``
         time limit and then says pending, because a scan that did not finish has not found 'nothing'.
         READ-ONLY: the memo is written by :meth:`verify` alone (see the module docstring)."""
         self._from_memo = False
@@ -629,6 +634,17 @@ class ManifestSectionLabelsRung:
         if self._memo_stands():
             self._from_memo = True
             return RungStatus(applicable=True, converged=True)
+        if refuses_unbounded_read(self._managed_fn):
+            # nexus-75w5d: no record and no memo, so the answer is a walk of the whole catalog. On a
+            # managed service that is a 15-minute read of shared capacity per session start (19 at once
+            # on 2026-10-31), so an unattended run reads nothing. Not applicable, not pending: the walk
+            # is skipped, and `nx doctor` (no deadline bound) still reports the true state.
+            reason = (
+                "unattended `nx upgrade --auto` does not scan a managed catalog with no completion "
+                f"record and no remembered clean scan; {INTERACTIVE_REMEDY}"
+            )
+            _log.info("manifest_section_labels_rung_skipped", reason=reason)
+            return RungStatus(applicable=False, converged=False, pending_detail=reason)
         try:
             counts = self._dry_run(honour_deadline=True)
         except RouteAbsent as exc:

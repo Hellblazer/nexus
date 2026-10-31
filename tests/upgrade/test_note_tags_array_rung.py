@@ -212,3 +212,38 @@ def test_verify_counts_what_it_read(world: World) -> None:
     rung.converge(Report())
     assert rung.verify() is True
     assert "3 note" in rung.record_detail() and "1 converted" in rung.record_detail()
+
+
+# ── nexus-75w5d: no unattended walk of a managed catalog ─────────────────────
+
+
+def test_an_unattended_run_on_a_managed_service_lists_nothing(world: World) -> None:
+    """detect() lists every note of every knowledge__* collection on every call, with no record or memo to
+    answer from. Under --auto against a managed service it reads nothing."""
+    from nexus.upgrade_ladder.deadline import Deadline, bound
+
+    world.add("1.1.1", {"tags": "a,b"})
+    reads: list[str] = []
+    world.distinct_doc_collections = lambda: reads.append("collections") or []  # type: ignore[method-assign]
+
+    with bound(Deadline(900)):
+        status = world.rung(managed_fn=lambda: True).detect()
+
+    assert (status.applicable, status.converged) == (False, False)
+    assert "interactive `nx upgrade`" in status.pending_detail
+    assert reads == [], "zero catalog reads"
+
+
+@pytest.mark.parametrize("managed, bound_deadline", [(False, True), (True, False)])
+def test_the_scan_still_runs_locally_under_auto_and_interactively_on_a_managed_service(
+    world: World, managed: bool, bound_deadline: bool,
+) -> None:
+    import contextlib
+
+    from nexus.upgrade_ladder.deadline import Deadline, bound
+
+    world.add("1.1.1", {"tags": "a,b"})
+    with bound(Deadline(900)) if bound_deadline else contextlib.nullcontext():
+        status = world.rung(managed_fn=lambda: managed).detect()
+    assert (status.applicable, status.converged) == (True, False)
+    assert "1 note(s) of 1" in status.pending_detail

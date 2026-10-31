@@ -474,6 +474,31 @@ class TestDetectIsBounded:
         assert w.rung().detect() == RungStatus(applicable=True, converged=True)
         assert _limits(w) == [DETECT_READ_LIMIT, None]
 
+    def test_an_unattended_run_on_a_managed_service_does_not_read_the_whole_table(self) -> None:
+        """nexus-75w5d: the whole-table fallback is the one unbounded read in this detect(). Under --auto
+        against a managed service it is not made; the rung is not applicable, naming the interactive run."""
+        from nexus.upgrade_ladder.deadline import Deadline, bound
+
+        stay = [_row(f"/stay{i}.md", "") for i in range(DETECT_READ_LIMIT)]
+        w = World(rows=[*stay, _row("/late.md", "1.1.9")])
+        with bound(Deadline(900)):
+            status = w.rung(managed_fn=lambda: True).detect()
+        assert (status.applicable, status.converged) == (False, False)
+        assert "interactive `nx upgrade`" in status.pending_detail
+        assert _limits(w) == [DETECT_READ_LIMIT], "the bounded page only"
+
+    def test_the_whole_table_is_still_read_locally_under_auto_and_interactively_when_managed(self) -> None:
+        from nexus.upgrade_ladder.deadline import Deadline, bound
+
+        stay = [_row(f"/stay{i}.md", "") for i in range(DETECT_READ_LIMIT)]
+        local = World(rows=[*stay, _row("/late.md", "1.1.9")])
+        with bound(Deadline(900)):
+            assert local.rung(managed_fn=lambda: False).detect().pending
+        assert _limits(local) == [DETECT_READ_LIMIT, None]
+        interactive = World(rows=[*stay, _row("/late.md", "1.1.9")])
+        assert interactive.rung(managed_fn=lambda: True).detect().pending
+        assert _limits(interactive) == [DETECT_READ_LIMIT, None]
+
     def test_the_template_census_in_detect_carries_a_request_cap_and_converge_and_verify_send_it_unchanged(self) -> None:
         w = World(rows=[_row("/a.md", "1.1.1")])
         rung = w.rung()

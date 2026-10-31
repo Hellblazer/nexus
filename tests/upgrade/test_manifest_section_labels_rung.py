@@ -793,6 +793,82 @@ def test_a_walk_past_the_auto_deadline_does_no_catalog_read_in_the_would_do_work
     assert world.appends == []
 
 
+# ── nexus-75w5d: no unattended walk of a managed catalog ─────────────────────
+
+
+def _bound_auto():
+    from nexus.upgrade_ladder.deadline import Deadline, bound
+
+    return bound(Deadline(900))
+
+
+def test_auto_on_a_managed_service_with_no_record_and_no_memo_reads_nothing_and_is_not_applicable(world: World) -> None:
+    """The 2026-10-31 incident: no completion record, no remembered scan, so detect() walked the cloud catalog
+    in every session start's child. It now reports not applicable, with the reason, and issues zero reads."""
+    _one_fillable_and_one_newer_row(world)
+
+    with _bound_auto():
+        status = world.rung(managed_fn=lambda: True).detect()
+
+    assert (status.applicable, status.converged, status.pending) == (False, False, False)
+    assert "interactive `nx upgrade`" in status.pending_detail
+    assert world.engine_reads() == (0, 0, 0, 0, 0), "not one listing, manifest, owner, chunk or /stats read"
+    assert world.memo.note is None and world.memo.saves == 0
+
+
+def test_auto_on_a_local_engine_keeps_the_walk(world: World) -> None:
+    _one_fillable_and_one_newer_row(world)
+    with _bound_auto():
+        status = world.rung(managed_fn=lambda: False).detect()
+    assert (status.applicable, status.converged) == (True, False)
+    assert world.listings >= 1, "the walk ran"
+
+
+def test_interactive_on_a_managed_service_keeps_the_walk(world: World) -> None:
+    _one_fillable_and_one_newer_row(world)
+    status = world.rung(managed_fn=lambda: True).detect()  # no deadline bound: not an --auto run
+    assert (status.applicable, status.converged) == (True, False)
+    assert world.listings >= 1
+
+
+def test_auto_on_a_managed_service_with_a_recorded_completion_is_still_converged(world: World) -> None:
+    _one_fillable_and_one_newer_row(world)
+    with _bound_auto():
+        status = world.rung(managed_fn=lambda: True, record_fn=lambda: object()).detect()
+    assert (status.applicable, status.converged) == (True, True)
+    assert world.engine_reads() == (0, 0, 0, 0, 0)
+
+
+def test_auto_on_a_managed_service_with_a_standing_memo_is_converged_on_one_bounded_read(world: World) -> None:
+    _remembered(world)
+    before = world.engine_reads()
+    with _bound_auto():
+        status = world.rung(managed_fn=lambda: True).detect()
+    assert (status.applicable, status.converged) == (True, True)
+    after = world.engine_reads()
+    assert (after[0], after[1], after[2], after[3]) == (before[0], before[1], before[2], before[3]), "no listing, manifest, owner or chunk read"
+    assert after[4] == before[4] + 1, "the one /stats read"
+
+
+def test_a_managed_auto_walk_skips_the_rung_and_reads_nothing(world: World) -> None:
+    """Through the runner, as ``nx upgrade --auto`` runs it: SKIPPED_NOT_APPLICABLE, nothing recorded."""
+    from nexus.upgrade_ladder.deadline import Deadline
+
+    _one_fillable_and_one_newer_row(world)
+    ledger = InMemoryCompletionLedger()
+    runner = LadderRunner(
+        LadderRegistry((world.rung(managed_fn=lambda: True),)), ledger,
+        package_version_fn=lambda: "9.9.9", deadline=Deadline(900),
+    )
+
+    report = runner.run()
+
+    assert [r.outcome for r in report.runs] == [RungOutcome.SKIPPED_NOT_APPLICABLE]
+    assert world.engine_reads() == (0, 0, 0, 0, 0)
+    assert world.appends == []
+    assert ledger.verified_rungs() == frozenset() or not ledger.verified_rungs()
+
+
 # ── attribution by title ─────────────────────────────────────────────────────
 
 

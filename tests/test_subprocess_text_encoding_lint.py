@@ -81,15 +81,15 @@ _EXEMPT: dict[str, str] = {}
 # are unpacks into a watched call that names no ``encoding`` and sets no text
 # mode of its own, so what they carry decides whether the child is decoded.
 _KWARGS_READ: dict[str, str] = {
-    "src/nexus/hooks/upgrade_auto.py:181": (
+    "src/nexus/hooks/upgrade_auto.py:188": (
         "``common`` is a literal dict of stdin/stdout/stderr (DEVNULL or a binary "
         "log handle), close_fds and, since nexus-x3m8e, ``cwd`` and (only when a "
         "project directory is handed over or NEXUS_CONFIG_DIR is relative) ``env``, "
         "from ``stable_cwd.detached_spawn_kwargs``; the child is detached and "
         "nothing reads it as text"
     ),
-    "src/nexus/hooks/upgrade_auto.py:184": "same ``common`` dict as :181",
-    "src/nexus/hooks/upgrade_auto.py:187": "same ``common`` dict as :181",
+    "src/nexus/hooks/upgrade_auto.py:191": "same ``common`` dict as :188",
+    "src/nexus/hooks/upgrade_auto.py:194": "same ``common`` dict as :188",
     "src/nexus/_mineru_spawn.py:302": (
         "``stable`` is ``service_registry.detached_spawn_kwargs()`` minus its ``env``: a "
         "lone ``cwd`` key (nexus-x3m8e); stdout and stderr are the child log handle, "

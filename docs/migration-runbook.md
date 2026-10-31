@@ -187,6 +187,30 @@ this rung rewrites those strings as arrays, once.
 - Until it has run, readers tolerate the string: `store_get`, `store_list` and the
   recovery-bundle export split it on read.
 
+### `nx upgrade --auto`: one at a time, and what it does on a managed service
+
+The SessionStart hook starts a detached `nx upgrade --auto` per session start
+(nexus-75w5d, 7.91.0; 7.90.0 started them without a gate and nineteen walked the cloud
+catalog at once).
+
+- **One at a time per config dir.** `--auto` takes an OS lock on
+  `<config dir>/upgrade-auto.lock` before anything else runs (before the finish pass
+  and before any rung's `detect()`). A second `--auto` exits 0 at once and silently;
+  the hook checks the same lock before it forks. A holder that dies frees the lock,
+  so a stale pid in the file blocks nothing. An interactive `nx upgrade` takes no
+  lock and is not blocked by one.
+- **Managed service: no unattended walk.** Under `--auto` against a managed service
+  (`service_url` set), a rung whose `detect()` would read the whole catalog or a whole
+  table, with no completion record and no remembered clean scan to answer from,
+  reads nothing and reports itself not applicable, naming the interactive run. The
+  rungs: `manifest-section-labels`, `note-tags-array`, and the whole-table fallback of
+  `aspect-queue-tuples`. **The first scan on a managed tenant is an interactive `nx
+  upgrade`** (once; it records the completion, and `--auto` answers from the record
+  from then on). A local engine keeps the walk under `--auto`, bounded by the deadline
+  (`NX_UPGRADE_AUTO_DEADLINE_SECONDS`).
+- **Kill switch.** `NX_UPGRADE_AUTO=0` in the environment makes the hook spawn nothing.
+  To find a stray: `ps -eo pid,args | grep 'nx upgrade --auto'`.
+
 ### The `manifest-section-labels` rung
 
 catalog-046 gave every manifest row its own section label (`section_title`,

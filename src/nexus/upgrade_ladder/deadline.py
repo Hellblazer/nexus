@@ -100,6 +100,17 @@ def active_deadline() -> Deadline | None:
     return _ACTIVE.get()
 
 
+def auto_active() -> bool:
+    """True when the running rung is walked by ``nx upgrade --auto``.
+
+    Only the ``--auto`` path builds a :class:`Deadline`, and the runner binds it around every
+    ``detect()``/``converge()``/``verify()`` it makes, so a bound deadline IS the auto signal
+    (nexus-75w5d). It is explicit here so a rung asks "am I unattended?" and not "is there a
+    clock?": an interactive ``nx upgrade``, ``nx doctor`` and the root CLI's version-transition
+    callout bind none and are answered False."""
+    return _ACTIVE.get() is not None
+
+
 def active_expired() -> bool:
     """True when a deadline is bound and has passed. Rungs call this at their
     safe points: between calls, never inside one."""

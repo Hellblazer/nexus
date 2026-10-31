@@ -78,6 +78,13 @@ limit), so a wedged call is bounded only by the HTTP timeouts inside ``nx
 upgrade``; nor the "finish" pass the root CLI group runs before ``upgrade()``, or the service
 stop/start cycle after the ladder (about 60 s each); the spawn event and the
 stderr log are how a wedged child is found.
+
+**Three gates before the spawn (nexus-75w5d).** 7.90.0 forked one child per session start and
+nineteen walked the cloud catalog at once. The hook now spawns nothing when ``NX_UPGRADE_AUTO=0``
+(:data:`KILL_SWITCH_ENV`), when the payload is a subagent's, or when a live ``nx upgrade --auto``
+holds the single-instance lock (:mod:`nexus.util.upgrade_auto_lock`); the child takes that lock
+itself at the top of the ``nx`` root group, so a burst that gets past the hook's probe still runs
+once.
 """
 from __future__ import annotations
 
@@ -187,7 +194,28 @@ def _spawn_detached(argv: list[str], stderr: IO[bytes] | int = subprocess.DEVNUL
         return subprocess.Popen(argv, creationflags=base, **common)  # noqa: S603 — argv list, resolved binary, no shell
 
 
-def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — reads no stdin, as the shell form read none
+#: The kill switch (nexus-75w5d). ``NX_UPGRADE_AUTO=0`` (also ``false``, ``off``, ``no``) makes the hook spawn
+#: nothing. Env only: ``config.yml`` is YAML, the hook is stdlib-only and import-light (it runs on every session
+#: start), and no stdlib reader exists, so a config key would cost an import this module does not pay.
+KILL_SWITCH_ENV = "NX_UPGRADE_AUTO"
+_OFF_VALUES = frozenset({"0", "false", "off", "no"})
+
+
+def _disabled_by_env() -> bool:
+    return os.environ.get(KILL_SWITCH_ENV, "").strip().lower() in _OFF_VALUES
+
+
+def _is_subagent_start(payload: dict | None) -> bool:
+    """True for a SubagentStart payload, or any payload that carries an ``agent_id`` (only a
+    subagent has one). A subagent shares its parent session's box and config: the parent's
+    own session start already ran the upgrade, so a review gate with two reviewers must not
+    add two more children (nexus-75w5d)."""
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("hook_event_name") == "SubagentStart" or bool(payload.get("agent_id"))
+
+
+def run(payload: dict | None) -> HookResult:
     """Start ``nx upgrade --auto`` detached; emit :data:`SKEW_GUIDANCE` if it
     fails inside :data:`_SKEW_WAIT_S`.
 
@@ -212,12 +240,29 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — reads no stdin,
 
     No timeout kills the child, deliberately: a kill partway through a ladder
     rung is worse than letting it finish unattended (the child stops
-    starting new work at safe points instead, see the module docstring), and the rung's own
-    cross-process lock turns concurrent session starts into quick deferrals.
+    starting new work at safe points instead, see the module docstring). Concurrent session
+    starts are bounded by the single-instance lock ``nx upgrade --auto`` takes at process
+    start, which this hook probes before it forks (nexus-75w5d; 7.90.0 relied on a rung's
+    lock taken after ``detect()``, and 19 children walked the cloud catalog at once).
     The spawn is logged once, as ``upgrade_auto_child_spawned`` in
     ``hook.log`` with the pid, argv and (if it exited inside the wait) its
     exit status.
     """
+    # nexus-75w5d, checked in this order and all BEFORE the spawn, so none of them forks:
+    # the kill switch, a subagent start, and a live `nx upgrade --auto` already holding the
+    # single-instance lock (see nexus.util.upgrade_auto_lock). On 2026-10-31 nineteen children
+    # ran at once because the only gate was a lock taken after every rung's detect().
+    if _disabled_by_env():
+        _emit("info", "upgrade_auto_disabled", reason=f"{KILL_SWITCH_ENV}=0")
+        return HookResult()
+    if _is_subagent_start(payload):
+        _emit("info", "upgrade_auto_skipped", reason="subagent start")
+        return HookResult()
+    from nexus.util.upgrade_auto_lock import auto_lock_held  # noqa: PLC0415 — stdlib-only; function-level so the hook module itself stays import-light
+
+    if auto_lock_held():
+        _emit("info", "upgrade_auto_skipped", reason="another nx upgrade --auto holds the lock")
+        return HookResult()
     from nexus.util.nx_argv import nx_argv_for, which_off_cwd  # noqa: PLC0415 — stdlib-only, a few microseconds; function-level so the hook module itself stays import-light
 
     nx = which_off_cwd("nx")

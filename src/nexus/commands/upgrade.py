@@ -437,9 +437,14 @@ def _run_ladder(
         # detect() does live reads that can fail (locked db, bad path); the
         # dry-run report must degrade per-rung like LadderRunner._run_rung
         # does, never crash `nx upgrade --dry-run` with a raw traceback.
+        from nexus.upgrade_ladder.deadline import bound  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
         for rung in registry:
             try:
-                status = rung.detect()
+                # `--auto --dry-run` is still unattended: bind the deadline so a rung's detect() sees it
+                # (nexus-75w5d). Interactive `--dry-run` has none, and binds none.
+                with bound(deadline):
+                    status = rung.detect()
             except Exception as exc:  # noqa: BLE001 — dry-run truth: report the broken rung, keep reporting the rest
                 _log.warning("ladder_dry_run_detect_failed", rung=rung.name, error=str(exc))
                 click.echo(f"Upgrade ladder: rung '{rung.name}' detect failed — {exc}")

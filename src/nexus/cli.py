@@ -160,6 +160,25 @@ def main(ctx: click.Context, verbose: bool) -> None:
     ctx.obj["verbose"] = verbose
     configure_logging("cli", verbose=verbose)
 
+    # nexus-75w5d: the single-instance lock of `nx upgrade --auto`, taken FIRST: before the
+    # tripwire, the stranded-install detector and the finish pass below (which asks every rung
+    # detect()), and so before any rung is asked anything. The hook starts one detached child per
+    # session start; on 2026-10-31 nineteen walked the cloud catalog at once because the only lock
+    # in the path was a rung's, taken after detect(). A second `--auto` exits 0 here, silently.
+    # The kernel drops the lock with the process, so a killed holder never wedges the next run.
+    from nexus.util.upgrade_auto_lock import acquire_auto_lock, argv_is_auto_upgrade  # noqa: PLC0415 — stdlib-only, deferred like the rest of this callback
+
+    if argv_is_auto_upgrade(sys.argv[1:]):
+        _auto_lock = acquire_auto_lock()
+        if _auto_lock.held_by_other:
+            import structlog  # noqa: PLC0415 — deferred import
+
+            structlog.get_logger(__name__).info(
+                "upgrade_auto_already_running", holder_pid=_auto_lock.holder_pid(),
+            )
+            ctx.exit(0)
+        ctx.call_on_close(_auto_lock.release)
+
     # nexus-utpuw.12 / design point 6: one readlink at spawn. A shim-launched
     # process is silent by construction (the shim execs the generation the
     # pointer names); this fires only when something BYPASSED the shim and

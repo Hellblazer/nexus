@@ -84,6 +84,7 @@ from nexus.db.t2.http_aspect_queue import (
     aspect_queue_mode,
     aspects_census,
 )
+from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service, refuses_unbounded_read
 from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
@@ -164,7 +165,9 @@ class AspectQueueTuplesRung:
         queue_factory: Callable[[], Any] = _default_queue,
         tuples_factory: Callable[[], Any] = _default_tuples,
         batch_limit: int = DEFAULT_BATCH_LIMIT,
+        managed_fn: Callable[[], bool] = managed_service,
     ) -> None:
+        self._managed_fn = managed_fn
         self._mode_fn = mode_fn
         self._queue_factory = queue_factory
         self._tuples_factory = tuples_factory
@@ -264,6 +267,17 @@ class AspectQueueTuplesRung:
         truncated = len(rows) >= DETECT_READ_LIMIT
         movable = self._movable(rows)
         if not movable and truncated:
+            if refuses_unbounded_read(self._managed_fn):
+                # nexus-75w5d: the fallback is a read of the whole table, unbounded in its rows. An
+                # unattended run against a managed service does not make it; the first page holding
+                # nothing that moves is not an answer, so the rung is not applicable this run.
+                reason = (
+                    f"the first {DETECT_READ_LIMIT} waiting rows hold none that can move, and "
+                    f"unattended `nx upgrade --auto` does not read a managed service's whole queue; "
+                    f"{INTERACTIVE_REMEDY}"
+                )
+                _log.info("aspect_queue_rung_skipped", reason=reason)
+                return RungStatus(applicable=False, converged=False, pending_detail=reason)
             whole = self._read_queue()
             if isinstance(whole, str):
                 _log.info("aspect_queue_rung_skipped", reason=whole)
