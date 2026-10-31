@@ -69,14 +69,16 @@ def test_a_run_of_failures_warns_exactly_once_at_the_threshold(outcome: str) -> 
 def test_the_warning_says_what_the_switch_saves_and_what_shadow_forfeits_not_that_it_turns_shadow_on() -> None:
     """Review of 3d4e36494: failing requests already run in shadow, so NX_ANSWER_STRUCTURED_EXTRACT=0 is not 'to run the
     gate in shadow'. It saves the failed call's wait on every request; the answer-kind rows then never refuse a
-    wrong-shape plan (already lost per failing request), and the one-source rule still holds."""
+    wrong-shape plan (already lost per failing request), and the one-source rule stops excluding too, since the
+    extraction-disabled shadow enforces nothing (confirmation review of acea80726)."""
     with capture_logs() as logs:
         _note(["error"] * rc.PERSISTENT_FAILURE_THRESHOLD)
     (event,) = _warnings(logs)
     remedy, consequence = event["remedy"], event["consequence"]
     assert "to run the gate in shadow" not in remedy
     assert "NX_ANSWER_STRUCTURED_EXTRACT=0 to stop the failed call's wait on every request" in remedy
-    assert "wrong-shape plan" in remedy and "one-source rule still holds" in remedy
+    assert "wrong-shape plan" in remedy and "one-source rule stops excluding too" in remedy
+    assert "one-source rule still holds" not in remedy
     assert "enforcing" not in consequence and "in shadow" in consequence and "one-source rule" in consequence
 
 
@@ -286,6 +288,7 @@ class TestAnswerKindExtractionRow:
         switch = next(f for f in row.fix_suggestions if "NX_ANSWER_STRUCTURED_EXTRACT" in f)
         assert "to run the answer-kind gate in shadow" not in switch
         assert "failed extraction call's wait on every request" in switch and "wrong-shape plans" in switch
+        assert "the one-source rule too" in switch and "one-source rule still holds" not in switch
 
     @needs_sh
     def test_a_cli_that_hangs_warns_within_the_bound(self, monkeypatch, tmp_path) -> None:

@@ -4005,7 +4005,7 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
     switches = [
         f"set {coverage_mod.EXTRACT_ENV}=0 to stop paying the failed extraction call's wait on every request "
         "(a request whose call fails already runs the answer-kind rows in shadow, so the switch forfeits only "
-        "their refusal of wrong-shape plans for requests whose call would have worked; the one-source rule still holds)",
+        "their refusal of wrong-shape plans for requests whose call would have worked, and the one-source rule too, which the extraction-disabled shadow does not enforce)",
         f"or set {eligibility_mod.ANSWER_KIND_ELIGIBILITY_ENV}=0 to switch the whole gate off, the one-source rule included",
     ]
     if status.available and status.name in ("cli", "anthropic"):

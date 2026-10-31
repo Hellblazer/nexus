@@ -12309,6 +12309,7 @@ async def nx_answer(
     )
     from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — call-time module read so a test's patch of the constant is honored (RDR-232 nexus-jypmj.2.3)
     from nexus.plans.request_coverage import extraction_enabled as _extraction_enabled  # noqa: PLC0415 — deferred; the gate follows the extraction switch (nexus-jypmj.2.8)
+    from nexus.plans.request_coverage import SKIPPED_OUTCOME as _EXTRACTION_SKIPPED_OUTCOME  # noqa: PLC0415 — deferred, as below
     from nexus.plans.request_coverage import FAILED_OUTCOMES as _EXTRACTION_FAILED_OUTCOMES  # noqa: PLC0415 — deferred; a failed extraction runs the gate in shadow for its request (nexus-x3eoc)
     from nexus.plans.request_coverage import note_extraction_outcome as _note_extraction_outcome  # noqa: PLC0415 — deferred; the process-level signal of a failing extraction (nexus-jypmj.16)
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -12568,7 +12569,7 @@ async def nx_answer(
     _extract_failed = _extract_on and _request_coverage.extraction.outcome in _EXTRACTION_FAILED_OUTCOMES
     # skipped_deadline: the call was needed and left out for lack of budget, so the request is on its first-pass kind
     # exactly as after a failed call (Sam 2026-10-31); it is not a failure for the health counter (FAILED_OUTCOMES).
-    _extract_skipped = _extract_on and _request_coverage.extraction.outcome == "skipped_deadline"
+    _extract_skipped = _extract_on and _request_coverage.extraction.outcome == _EXTRACTION_SKIPPED_OUTCOME
     _plan_eligibility = _eligibility.EligibilityFilter(
         _request_coverage.answer_kind, _request_coverage.kind_decision,
         enforce=_gate_on and _extract_on and not _extract_failed and not _extract_skipped,

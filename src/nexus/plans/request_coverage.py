@@ -1531,6 +1531,8 @@ async def structured_extract(
 #: counter. (``skipped_deadline`` still runs that request's gate in shadow, ``extraction_skipped``, because the
 #: call it needed did not happen; it is not a failure of the backend, so it is not counted here.)
 FAILED_OUTCOMES: frozenset[str] = frozenset({"error", "timeout", "invalid"})
+#: The outcome of a call that was needed and skipped for lack of time budget; it shadows the gate like a failure.
+SKIPPED_OUTCOME: str = "skipped_deadline"
 _WORKING_OUTCOMES: frozenset[str] = frozenset({"ok", "unchanged"})
 
 #: This many failed calls in a row, in one process, make the failure persistent (nexus-jypmj.16). One failure is a
@@ -1582,7 +1584,7 @@ def note_extraction_outcome(outcome: str, *, gate_enforcing: bool) -> bool:
             "run `nx doctor` (row 'Answer-kind extraction') to see why; make an LLM backend available "
             "(the claude CLI, or nx config set anthropic_api_key); or set NX_ANSWER_STRUCTURED_EXTRACT=0 to stop "
             "the failed call's wait on every request (the answer-kind rows then never refuse a wrong-shape plan, "
-            "which failing requests already forfeit; the one-source rule still holds); or set "
+            "which failing requests already forfeit, and the one-source rule stops excluding too, because the extraction-disabled shadow enforces nothing); or set "
             "NX_ANSWER_KIND_ELIGIBILITY=0 to switch the whole gate off, the one-source rule included"
         ),
     )
