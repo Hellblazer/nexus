@@ -11,6 +11,14 @@ to stderr with exit 1; memory.py's exit code 3 (T2 unavailable) passes through.
   review.py apply --work WORK [--accept SPEC] [--hold SPEC] [--reject SPEC] [--reasons-file F] [--reason N=TEXT]... [--dry-run]
   review.py log-retry --work WORK
 
+A cut-only session (RDR-221 Step 3.1, nexus-ger02.10; the prose-cut skill) is a model's run, with no author to read
+the copy: its filtered.json carries "mode": "cut-only" or its work directory holds a cut-only run's brief or card
+(brief.py cut_only_work), `render` opens no viewer and records `cut_only` in session.json, and from then on an html page also protects its nav, heading, button and samp
+elements (a normal html run does not) and `apply` refuses (exit 1, nothing written) an accepted edit that is not a cut
+(it adds, replaces or reorders a word, or adds markup), which a hand-edited filtered.json could hold. The session log
+then carries `cut_only`, `word_budget` and `words` {document, budget, removed (the applied cuts' words), after,
+proposed (the filter's count)}.
+
 `render` and `apply` take the filtered proposal that `brief.py filter TARGET --save WORK/filtered.json` wrote:
 the machine format brief.py already emits. No second format exists. TARGET is PATH,
 PATH:START-END or "-" (a stdin run; --file names the saved text). WORK is a directory made by
@@ -260,15 +268,16 @@ def _within(window: Span | None, start: int, end: int) -> bool:
     return window is None or (window[0] <= start and end <= window[1])
 
 
-def plan_edits(text: str, edits: list[Obj], rng: Obj | None, html: bool) -> list[Obj]:
+def plan_edits(text: str, edits: list[Obj], rng: Obj | None, html: bool, cut_only: bool = False) -> list[Obj]:
     """Place each edit against `text`; one plan per edit, in the order given.
 
     A plan is {"n", "old", "new", "span", "cause", "detail"}. `span` is (start, end) when the
     edit can be applied, else None with a `cause`. Overlap is judged among the edits given,
-    so the caller decides which edits count (all of them for the copy, the accepted ones to apply).
+    so the caller decides which edits count (all of them for the copy, the accepted ones to apply). `cut_only` (a
+    cut-only session) protects the nav, heading, button and samp elements of an html page too.
     """
     window = cast("Span | None", _BRIEF._range_span(text, rng))
-    spans = cast("list[Span]", _BRIEF.protected_spans(text, html=html))
+    spans = cast("list[Span]", _BRIEF.protected_spans(text, html=html, cut_only=cut_only))
     tags = cast("list[Span]", _BRIEF.html_tag_spans(text)) if html else []
     plans: list[Obj] = []
     for e in edits:
@@ -913,16 +922,22 @@ def cmd_render(a: argparse.Namespace) -> Obj:
     if genre is None:
         raise _user("no genre: pass --genre")
     text, _eol = read_source(source)
-    viewer = cast("str | None", _BRIEF.memory_json(["viewer"]).get("viewer"))
+    # a work directory that holds a cut-only run is one whatever its proposal says: the proposal can be rewritten
+    cut_only = prop.get("mode") == "cut-only" or bool(_BRIEF.cut_only_work(work))
+    # a cut-only run is a model's (the prose-cut skill): no author reads the copy, so no viewer is asked for or opened
+    viewer = None if cut_only else cast("str | None", _BRIEF.memory_json(["viewer"]).get("viewer"))
     copy = work / f"{Path(rel).stem if rel else 'stdin'}.review.md"
     copy.write_text(build_copy(text, prop, label=rel or "stdin", genre=genre, rng=rng, html=html, stdin=stdin),
                     encoding="utf-8")
-    opened = open_copy(viewer, copy, override=os.environ.get("PROSE_EDIT_OPEN") if _test_mode() else None)
-    plans = plan_edits(text, cast("list[Obj]", prop.get("edits") or []), rng, html)
+    opened = (open_copy(viewer, copy, override=os.environ.get("PROSE_EDIT_OPEN") if _test_mode() else None)
+              if not cut_only else {"opened": False, "reason": "a cut-only run has no reader for the copy"})
+    plans = plan_edits(text, cast("list[Obj]", prop.get("edits") or []), rng, html, cut_only)
     unplaced = [{"n": p["n"], "cause": p["cause"], "detail": p["detail"]} for p in plans if p["span"] is None]
-    (work / "session.json").write_text(json.dumps(
-        {"target": a.target, "genre": genre, "stdin": stdin, "file": a.file, "copy": str(copy),
-         "unplaced": unplaced}), encoding="utf-8")
+    session: Obj = {"target": a.target, "genre": genre, "stdin": stdin, "file": a.file, "copy": str(copy),
+                    "unplaced": unplaced}
+    if cut_only:
+        session["cut_only"] = True
+    (work / "session.json").write_text(json.dumps(session), encoding="utf-8")
     return {
         "copy": str(copy), "genre": genre, "viewer": viewer, **opened,
         "counts": {"edits": len(plans), "paragraphs": len(prop.get("paragraphs") or []),
@@ -1083,7 +1098,7 @@ def cmd_answer(a: argparse.Namespace) -> Obj:
         f"P{pr['n']}" for pr in cast("list[Obj]", prop.get("paragraphs") or [])}
     _, rng, source, html, _ = _source_of(str(session["target"]), cast("str | None", session.get("file")), work)
     text, _eol = read_source(source)
-    spans = cast("list[Span]", _BRIEF.protected_spans(text, html=html))
+    spans = cast("list[Span]", _BRIEF.protected_spans(text, html=html, cut_only=bool(session.get("cut_only"))))
     window = cast("Span | None", _BRIEF._range_span(text, rng))
     edits = cast("list[Obj]", prop.get("edits") or [])
     problems: list[str] = []
@@ -1150,6 +1165,13 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
     by_n = {int(e["n"]): e for e in edits}
     valid = set(by_n)
     accept = parse_numbers(a.accept, valid, "--accept")
+    rel, rng, source, html, root = _source_of(str(session["target"]), cast("str | None", session.get("file")), work)
+    cut_only = bool(session.get("cut_only"))
+    if cut_only:
+        adds = sorted(n for n in accept if not _BRIEF.is_cut(str(by_n[n]["old"]), str(by_n[n]["new"]), html))
+        if adds:
+            raise _user(f"--accept: edit {adds[0]} is not a cut (it adds, replaces or reorders a word, or adds "
+                        "markup); a cut-only session applies edits that remove words only")
     hold: set[int] = parse_numbers(a.hold, valid, "--hold") if a.hold else set()
     # an edit the copy could not show inline: `reject the rest` leaves it alone, naming it rejects it
     unshown = {int(u["n"]): u for u in cast("list[Obj]", session.get("unplaced") or [])}
@@ -1163,7 +1185,6 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
     reasons = parse_reasons(list(a.reason or []), reject, load_reasons_file(a.reasons_file, work))
     stdin = bool(session["stdin"])
     target = str(session["target"])
-    rel, rng, source, html, root = _source_of(target, cast("str | None", session.get("file")), work)
     try:
         raw = read_bytes(source)
     except UserError as exc:
@@ -1175,7 +1196,7 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
     record = _dry_run_record(accept, hold, reject, reasons, proposal_bytes, raw)
     if not a.dry_run:
         _require_dry_run(work, record, source)
-    plans = plan_edits(text, [e for e in edits if int(e["n"]) in accept], rng, html)
+    plans = plan_edits(text, [e for e in edits if int(e["n"]) in accept], rng, html, cut_only)
     placed = [p for p in plans if p["span"] is not None]
     skipped = _skipped(plans)
     left_alone = [{**_shown(by_n[n]), "cause": unshown[n].get("cause"), "detail": unshown[n].get("detail")}
@@ -1238,6 +1259,16 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
         "rejected": rejected, "held": sorted(set(held) - mine), "reasons": {str(n): reasons[n] for n in sorted(reasons)},
         "unplaced": [{"n": u["n"], "cause": u["cause"]} for u in left_alone],
     }
+    if cut_only:
+        # the filter's `removed` is what the editor proposed; the log keeps what the applied cuts took out
+        words = dict(cast("Obj", prop.get("words") or {}))
+        removed = sum(max(0, len(_BRIEF._words(str(p["old"]))) - len(_BRIEF._words(str(p["new"])))) for p in placed)
+        if "document" in words:
+            # no `after`: the gate edits the page before it decides, so `document` minus the applied cuts is not
+            # the page's final count; `brief.py count` on the page is
+            words.pop("after", None)
+            words.update(proposed=words.get("removed"), removed=removed, counts="applied sentence edits only")
+        log_payload.update(cut_only=True, word_budget=prop.get("word_budget"), words=words or None)
     try:
         if staged is not None:
             # the file is written: from here the session log is the only thing left to lose, so its
