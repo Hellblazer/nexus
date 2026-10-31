@@ -884,7 +884,7 @@ Aspect-extraction queue management (the async queue feeding the aspect-extractio
 nx aspects drain [--timeout SECONDS] [--poll-interval SECONDS]
 ```
 
-Stops the singleton `AspectExtractionWorker` (if running in this process), then waits until all pending and in-progress rows are processed or `--timeout` (default 30s) elapses; `--poll-interval` (default 0.1s) sets the queue-empty poll cadence. Use before `nx upgrade` when a `MigrationError` reports the aspect_extraction_queue is not drained. Exit 0 once drained (or already empty); exit 1 on timeout, naming the stuck-row count.
+Stops the singleton `AspectExtractionWorker` (if running in this process), then waits until both queues are empty of active work or `--timeout` (default 30s) elapses; `--poll-interval` (default 0.1s) sets the queue-empty poll cadence. The two queues are the table side, where no pending or in-progress row may remain, and the `aspects` tuple queue, where no task may be available or claimed. Both sides are checked on every drain, because RDR-235 keeps the table and the tuple queue side by side until the old table retires. A tuple task held back by backoff counts as available, so the check is conservative. Failed rows and dead tasks do not block a drain. Use before `nx upgrade` when a `MigrationError` reports the aspect_extraction_queue is not drained. Exit 0 once drained (or already empty); exit 1 on timeout, naming the stuck-row or stuck-task count.
 
 ### nx aspects gc / gc-fixtures — RETIRED (hidden from `--help`)
 
@@ -902,15 +902,22 @@ Both verbs are RETIRED and always raise a `click.UsageError` regardless of the f
 
 ### nx aspects requeue-failed
 
-Bulk re-enqueue terminal-`failed` aspect-queue rows. A row reaches `failed` after exhausting the backoff-retry ladder (RDR-163) or on a non-retryable error. Once the root cause is fixed (e.g. restored API quota, repaired source identity), this verb re-enqueues every failed row at its `(collection, source_path)` key — resetting it to `pending` with `retry_count=0` and clearing any stale backoff — so the worker picks it up again. The write is daemon-routed; the failed-backlog visibility counterpart is `nx doctor --check-aspect-queue`.
+Bulk re-enqueue terminal-`failed` aspect-queue rows. A row reaches `failed` after exhausting the backoff-retry ladder (RDR-163), on a non-retryable error, or when a stale reclaim finds it already at the retry cap. Once the root cause is fixed (e.g. restored API quota, repaired source identity), this verb re-enqueues the failed table rows and revives the dead tasks of the `aspects` tuple queue, so the worker picks them up again. The write is daemon-routed; the failed-backlog visibility counterpart is `nx doctor --check-aspect-queue`.
+
+It reads both sides. Failed table rows are handled by `NX_ASPECT_QUEUE`, which defaults to `tuples` (see [Configuration](configuration.md)):
+
+- `NX_ASPECT_QUEUE=tuples` (the default): each failed row is enqueued as an `aspects` task, keyed by its `doc_id`, and the failed row is then deleted from the table, so the doctor does not count it again. A failed row with no `doc_id` cannot become a task. It is skipped, the message says to re-index the document, and the remaining rows still run.
+- `NX_ASPECT_QUEUE=table`: each failed row is reset in place to `pending` with `retry_count=0` and any stale backoff cleared, as before RDR-235. No tuple task is written for it.
+
+Dead tasks of the `aspects` tuple queue are revived in both modes. A dead task is written back as available with its attempts reset and its retention clock restarted. An engine with no `aspects` template has no dead tasks, and the verb then reads the table alone.
 
 | Flag | Description |
 |------|-------------|
-| `--collection NAME` | Only re-enqueue failed rows in this collection. Default: all collections |
-| `--limit N` | Re-enqueue at most N rows (oldest-`enqueued_at` first). Paces recovery of a large backlog so a burst of newly-pending rows doesn't immediately re-hammer a just-restored API quota |
-| `--dry-run` | Report the rows that would be re-enqueued without writing anything |
+| `--collection NAME` | Only re-enqueue failed rows in this collection. For dead tasks, matches the collection in the task body. Default: all collections |
+| `--limit N` | Re-enqueue at most N items, counting failed rows and dead tasks together: failed rows first, then dead tasks, oldest first. Paces recovery of a large backlog so a burst of newly-pending rows doesn't immediately re-hammer a just-restored API quota |
+| `--dry-run` | Report the failed rows and dead tasks that would be re-enqueued without writing anything. Under `tuples`, a row with no `doc_id` is marked `[would skip: no doc_id]` |
 
-Rows are processed oldest-`enqueued_at`-first (enqueue order, not most-recently-failed); re-enqueue resets `retry_count` to 0. This is a single-operator recovery verb — safe to re-run (it only touches the terminal `failed` state), but do not run two instances concurrently.
+Failed rows are processed oldest-`enqueued_at`-first (enqueue order, not most-recently-failed). This is a single-operator recovery verb. It is safe to re-run, because it only touches the terminal `failed` state and dead tasks, but do not run two instances concurrently: the read and the per-row writes have no shared transaction, so two runs could re-enqueue the same rows.
 
 ```bash
 nx aspects requeue-failed                        # re-enqueue all failed rows
@@ -3718,7 +3725,9 @@ nx doctor --check-engine-activity    # Live engine embed activity from GET /v1/s
 nx doctor --check-index-failures     # Surface the durable index-failures backlog (nexus-nukn3)
 ```
 
-The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring. A transport failure (service unreachable) reports UNKNOWN and exits 0 — not reporting pass or fail; a reachable queue with one or more `failed` rows is a real backlog signal and exits 1 with a `✗ FAIL:` marker, matching the other promoted supplementary checks (nexus-fylxo).
+The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reads the live service queue, not the local file. It counts two sides. The table side is `aspect_extraction_queue`: its pending rows and its failed rows. The tuple side is the `aspects` tuple queue that `NX_ASPECT_QUEUE` moves work onto (RDR-235): its available tasks count as pending, its dead tasks count as failed, and its claimed tasks are in flight and count as neither. The report prints one `aspect_extraction_queue:` line with the combined pending and failed totals. It adds a `  tuple queue (aspects): N available, N claimed (in flight, not pending), N dead` line when the tuple side has any tasks, and `  dead tuple tasks: nx tuple stats aspects` when it has dead ones. Under the failed total it lists up to 20 failed table rows with their collection, source path and retry count, then points at `nx aspects requeue-failed`. The service list endpoint does not carry `last_error`, so the failure text is in the worker logs. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring.
+
+Exit codes. A pending backlog never fails the check. A WARN line on stderr says the worker is idle when rows are pending and `claude` is not on PATH with no `anthropic_api_key` set, and that does not change the exit code. A transport failure to the service prints `Queue depth UNKNOWN` on stderr and exits 0, so it reports neither pass nor fail. If the tuple side cannot be read, the report prints the table side's figures with `tuple queue (aspects) UNKNOWN` on stderr and no combined count, and the exit code follows the table side alone. Any failed count, meaning failed table rows plus tuple dead tasks, above zero exits 1 with a `✗ FAIL: N failed aspect-extraction row(s) in the queue.` marker on stderr, matching the other promoted supplementary checks (nexus-fylxo).
 
 The `--check-index-failures` flag (introduced nexus-nukn3, also part of the default sweep) reports the `nexus.index_failures` all-time row count (see `nx index failures` above) as information, and gates the sweep on the LATEST run that recorded any UNACKNOWLEDGED failure — never the all-time total, and never a failure an operator has durably acknowledged. Deliberately written FAIL-FIRST: this is the exact bead nexus-fylxo names as the trap to avoid, a durable failure queue whose reader never raises reproduces the aspect-queue check's original silent-backlog defect for a second queue. Two rounds of scoping close two separate traps found in review: (1) an unscoped all-time gate turned the FIRST permanent extraction failure in a tenant's history into an unfixable FAIL forever — fixed by gating on the latest run instead, with a failure older than 30 days no longer gating at all (self-heals over time with no operator action); (2) staleness alone did not self-heal a corpus re-indexed on a cadence SHORTER than that window, since every run mints a fresh run id for the identical recurring failure — fixed by `nx index failures --acknowledge`, a durable adjudication the gate excludes regardless of how many times it recurs under a new run id. `nx index failures --clear` remains the immediate one-time remedy for a failure an operator has already handled and does not want to wait out the staleness window for. A transport failure reports UNKNOWN and exits 0; a fresh (within 30 days), unacknowledged latest-run failure exits 1 with a `✗ FAIL:` marker naming that run's count.
 
@@ -4151,6 +4160,13 @@ from a SQLite-era install (GH #1405) — such a unit otherwise respawns a
 T2 daemon that exits instantly by design, forever. Each leg is
 independent — a failure in one (even a missing `ps` binary on minimal
 containers) never blocks the others.
+
+The engine leg prints one `engine:` line when it has no convergence action to report, and that line describes the running service as well as the disk (nexus-bivz3.25). It says `engine: converged` only when the running service reports the release's engine version. With the service down it prints `engine: installed engine is vX (the release dependency); the service is not running (<reason>). Start it with nx daemon service start (its output names the reason if the engine halts at startup).` A service that answers with another version prints `engine: not converged`, naming both versions. A service that answers without a version prints `convergence is unverified`. When a convergence cycle runs and the service does not come back on the release's engine, the verb prints one of these `NEEDS HUMAN` lines:
+
+- `the storage service did not start (nx daemon service start exited N); the engine is NOT converged to vX. Its reason: <start output>`. An engine that halts at a schema migration and whose supervisor exits shows its reason here. The reason is the start output after its `Error:` marker, up to 1000 characters, so the migration RAISE and its runbook URL are shown.
+- `nx daemon service start returned N and nothing answers yet; the service may still be migrating, so convergence to vX is UNVERIFIED. Its output: <reason>`. This is used when the supervisor is alive but the engine has not answered within start's 60-second window.
+- `the service restarted but is STILL running vY, not the required vX`. Something else holds the old engine.
+- `the service restarted but its version could not be confirmed (<reason>) — convergence to vX is UNVERIFIED`.
 
 This runs automatically on the first `nx` invocation after a version change
 (a `last_seen_version` stamp in the config dir), printing one
