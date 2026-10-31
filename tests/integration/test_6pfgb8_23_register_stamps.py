@@ -4,7 +4,7 @@
 
 Every indexer writes ``tags`` and ``category`` on each chunk row as constants of the file's kind (the file
 extension, ``markdown`` or ``pdf``; ``code``, ``prose`` or ``paper``), and ``content_type`` there is the
-chunk's format. Two documents that share a chunk (a ``.py`` and a ``.md`` with the same text, a PDF page and a
+chunk's format. Two documents that share a chunk (a ``.md`` and a ``.rst`` with the same text, a PDF page and a
 markdown file with the same line) share one row, which holds the last writer's value. The document's meta
 holds its own. ``tags`` is a JSON ARRAY, the shape the notes' tags take (nexus-6pfgb.38); ``category`` is a
 string; ``source_format`` is what the engine's ``nexus.catalog_source_format`` derives for the document's
@@ -20,6 +20,7 @@ already sends, one ``meta`` per document: the warm-run pin counts the writes.
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -99,16 +100,38 @@ def test_the_repo_catalog_pass_stamps_each_document_with_its_own_values(tmp_path
 
 
 def test_two_files_sharing_a_chunk_each_keep_their_own_value(tmp_path: Path) -> None:
-    """A ``.py`` and a ``.md`` with the SAME text share a chunk (one content hash), so a row can hold only one
-    of ``py`` / ``markdown``. Each document's meta holds its own."""
-    shared = "# shared 6pfgb8 body\n"
-    (tmp_path / "a.py").write_text(shared)
-    (tmp_path / "b.md").write_text(shared)
-    _hook(tmp_path, [(tmp_path / "a.py", "code", COLLECTIONS["code"]), (tmp_path / "b.md", "prose", COLLECTIONS["prose"])])
-    cat = ActiveCatalog()
-    a, b = _meta(cat, "a.py"), _meta(cat, "b.md")
-    assert (a["tags"], a["category"], a["source_format"]) == (["py"], "code", "code")
-    assert (b["tags"], b["category"], b["source_format"]) == (["markdown"], "prose", "markdown")
+    """A ``.md`` and a ``.rst`` with the SAME one-line text, indexed by the real repo run into the one ``docs__``
+    collection, hold one chunk between them (chunks are per collection, so a ``.py`` and a ``.md`` can never share:
+    they land in ``code__`` and ``docs__``). The row says ``markdown`` or ``rst``, whichever wrote last; each
+    document's meta holds its own tags and source_format. The sharing is asserted from the manifests."""
+    from nexus.catalog.factory import make_catalog_reader
+    from nexus.indexer import _run_index
+    from nexus.registry import RepoRegistry
+    from tests.integration.test_rdr223_index_repo_oversize_journey import _traffic
+
+    line = "one line 6pfgb8shared that two prose files carry\n"
+    repo = tmp_path / "shared-repo"
+    repo.mkdir()
+    (repo / "a.md").write_text(line, encoding="utf-8")
+    (repo / "b.rst").write_text(line, encoding="utf-8")
+    for args in (["init", "-q"], ["add", "a.md", "b.rst"], ["commit", "-q", "-m", "init"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    reg = RepoRegistry(tmp_path / "repos.json")
+    reg.add(repo)
+
+    _run_index(repo, reg, force=False)  # registers the repo's owner
+    with _traffic() as log:
+        _run_index(repo, reg, force=True)
+    (docs_col,) = {b["collection"] for p, b, _ in log if p == "/manifest/write_many" and b["collection"].startswith("docs__")}
+    reader = make_catalog_reader()
+    by_name = {Path(e.file_path).name: e for e in reader.list_by_collection(docs_col)}
+    assert set(by_name) == {"a.md", "b.rst"}, by_name
+    held = {n: {m.chash for m in reader.get_manifest(str(e.tumbler))} for n, e in by_name.items()}
+    assert held["a.md"] & held["b.rst"], f"non-vacuity: the two documents do not share a chunk: {held}"
+
+    a, b = dict(by_name["a.md"].meta), dict(by_name["b.rst"].meta)
+    assert (a["tags"], a["category"], a["source_format"]) == (["markdown"], "prose", "markdown")
+    assert (b["tags"], b["category"], b["source_format"]) == (["rst"], "prose", "prose")
 
 
 class _RecordingWriter:
@@ -264,3 +287,61 @@ def test_the_pre_flight_registration_carries_source_format_before_any_chunk_is_w
     (pdf_row,) = documents_by_file_path(str(pdf))
     (md_row,) = documents_by_file_path(str(md.resolve()))
     assert pdf_row.meta["source_format"] == "pdf" and md_row.meta["source_format"] == "markdown"
+
+
+# ── the seams that stamp from a row they read, not from their arguments ───────────────────────────────
+
+
+def _register_row(corpus: str, path: Path, content_type: str) -> None:
+    """A catalog row as an earlier run left it: the given content type at the given file path, in the curator
+    owner the hooks resolve for *corpus*."""
+    cat = ActiveCatalog()
+    owner = cat.register_owner(corpus, "curator")
+    cat.register(owner, path.stem, content_type=content_type, file_path=str(path), physical_collection=_COLLECTION)
+
+
+@pytest.mark.parametrize("resolved", [False, True], ids=["update-branch", "resolved-onto-existing-branch"])
+def test_the_markdown_hook_stamps_the_format_of_the_row_it_finds_not_of_its_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolved: bool,
+) -> None:
+    """The row is a ``prose`` document at ``notes.txt``: the engine derives ``prose`` for it. A hook call that
+    passes ``paper`` (which alone derives ``pdf``) must not stamp from that argument. Both legs: the update of an
+    existing row, and the update after a registration that resolved onto it."""
+    from nexus.doc_indexer import _catalog_markdown_hook
+
+    corpus = f"6pfgb23-seam-md-{'resolved' if resolved else 'update'}"
+    txt = tmp_path / "notes.txt"
+    txt.write_text("a markdown-hook seam\n")
+    _register_row(corpus, txt.resolve(), "prose")
+    if resolved:
+        monkeypatch.setattr("nexus.doc_indexer._find_curator_document", lambda *a, **k: None)
+        monkeypatch.setattr("nexus.doc_indexer._repo_owner_document_for", lambda *a, **k: None)
+
+    _catalog_markdown_hook(txt, _COLLECTION, "paper", corpus, 1)
+
+    (row,) = documents_by_file_path(str(txt.resolve()))
+    assert row.content_type == "prose", "non-vacuity: the hook did not change the row's type"
+    assert row.meta["source_format"] == "prose", row.meta
+    assert row.meta["tags"] == ["markdown"] and row.meta["category"] == "prose"
+
+
+def test_the_pdf_hook_stamps_a_resolved_row_by_its_own_content_type_and_never_flips_a_repo_pdf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lookups miss, so ``register`` resolves onto the row a repo run registered (``pdf``). The hook reads that
+    row once and stamps tags, category and source_format as the update branch does: the repo path's ``prose``,
+    not ``paper``."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.pipeline_stages import _catalog_pdf_hook
+
+    corpus = "6pfgb23-seam-pdf"
+    pdf = tmp_path / "repo-registered.pdf"
+    pdf.write_bytes(b"%PDF-1.4 6pfgb23 seam\n")
+    _register_row(corpus, pdf.resolve(), "pdf")
+    monkeypatch.setattr(HttpCatalogClient, "by_file_path", lambda self, *a, **k: None)
+
+    _catalog_pdf_hook(pdf, _COLLECTION, title="Repo registered", corpus=corpus, chunk_count=1)
+
+    (row,) = documents_by_file_path(str(pdf.resolve()))
+    assert row.content_type == "pdf", "non-vacuity: the register resolved onto the repo's row"
+    assert row.meta["tags"] == ["pdf"] and row.meta["category"] == "prose" and row.meta["source_format"] == "pdf", row.meta

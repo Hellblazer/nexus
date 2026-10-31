@@ -1566,13 +1566,20 @@ def _catalog_pdf_hook(
                 # RDR-237: register() returns an existing row untouched (the engine's
                 # idempotency legs do not merge ``meta``), so the extraction record (and the tags,
                 # category and source_format, nexus-6pfgb.8 and .23) ride an update, as on the
-                # ``existing`` branch above. The resolved row's content type is not known here, so it gets the
-                # source_format (the same for every type that holds a PDF) and the extraction record, and no
-                # tags or category: a repo-registered PDF's must not be flipped to ``paper``.
-                writer.update(
-                    tumbler_from_register_result(_write_result),
-                    meta={**source_format_meta("paper", file_path_str), **(extraction_meta or {})},
-                )
+                # ``existing`` branch above. The resolved row's content type decides the stamp, as there
+                # (a repo-registered PDF keeps its own category, never flipped to ``paper``): it is read
+                # once. A row that cannot be read is stamped with the source_format alone (the same for
+                # every type that holds a PDF) and the extraction record, and no tags or category.
+                _resolved_tumbler = tumbler_from_register_result(_write_result)
+                try:
+                    _resolved = reader.resolve(_resolved_tumbler)
+                except Exception:  # noqa: BLE001 - advisory read: without it the stamp is the source_format alone
+                    _resolved = None
+                if _resolved is not None:
+                    _resolved_meta = _doc_meta(getattr(_resolved, "content_type", "") or "paper")
+                else:
+                    _resolved_meta = {**source_format_meta("paper", file_path_str), **(extraction_meta or {})}
+                writer.update(_resolved_tumbler, meta=_resolved_meta)
     except Exception as exc:  # noqa: BLE001 - best-effort catalog PDF hook; logged + audited, cleanup in finally
         # nexus-ou4tb: an indexed PDF that never reached the catalog is
         # invisible to every catalog-routed query. WARNING + audit row.

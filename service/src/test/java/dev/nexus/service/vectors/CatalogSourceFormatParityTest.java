@@ -99,7 +99,15 @@ class CatalogSourceFormatParityTest {
         new In(null, "a.pdf"),
         new In("Code", "x"),
         new In("PDF", ""),
-        new In(" code", ""));
+        new In(" code", ""),
+        // The order of the first two branches: a pdf catalog type or extension is read before a markdown extension.
+        new In("paper", "notes/x.md"),
+        new In("pdf", "x.MARKDOWN"),
+        new In("code", "x.md"),
+        // A double dot leaves no extension to the rule's regex ([^/.]\.([^./]+)$ needs a non-dot before the dot),
+        // where Python's Path.suffix reads the part after the last dot as one: the catalog type speaks.
+        new In("", "a..pdf"),
+        new In("prose", "a..md"));
 
     PostgreSQLContainer<?> pg;
 

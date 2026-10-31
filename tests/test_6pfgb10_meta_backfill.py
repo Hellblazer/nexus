@@ -368,6 +368,32 @@ def test_the_command_apply_writes_and_json_carries_the_reasons(monkeypatch):
     assert len(w.updates) == 4
 
 
+def test_the_json_report_names_the_source_format_residue_by_reason(monkeypatch):
+    """nexus-6pfgb.23: a document the rule derives nothing for is residue, ``no_rule`` where it has a path and
+    ``no_file_path`` where it has none; the counts sit under ``keys["doc.source_format"]``."""
+    w = _World()
+    entries = [
+        _entry({}, title="pdf", tumbler="1.1.1", content_type="paper", file_path="p.pdf", collection="docs__x__m__v1"),
+        _entry({}, title="txt", tumbler="1.1.2", content_type="docs", file_path="a.txt", collection="docs__x__m__v1"),
+        _entry({}, title="log", tumbler="1.1.3", content_type="docs", file_path="b.log", collection="docs__x__m__v1"),
+        _entry({}, title="nopath", tumbler="1.1.4", content_type="docs", file_path="", collection="docs__x__m__v1"),
+        _entry({"source_format": "pdf"}, title="held", tumbler="1.1.5", content_type="paper", file_path="h.pdf",
+               collection="docs__x__m__v1"),
+    ]
+    w.entries = entries
+    w.manifests = {str(e.tumbler): [_Manifest(f"c{i}")] for i, e in enumerate(entries)}
+    w.owners = {f"c{i}": [str(e.tumbler)] for i, e in enumerate(entries)}
+
+    result, _ = _invoke(monkeypatch, w, "--json")
+
+    assert result.exit_code == 0, result.output
+    key = json.loads(result.stdout)["keys"]["doc.source_format"]
+    assert key == {
+        "examined": 5, "present": 1, "skipped_shared": 0, "stamped": 1, "residue": 3,
+        "residue_reasons": {"no_rule": 2, "no_file_path": 1},
+    }
+
+
 def test_the_command_exits_non_zero_naming_the_vacuous_run(monkeypatch):
     result, _ = _invoke(monkeypatch, _World())
     assert result.exit_code != 0 and "examined 0 documents" in result.output

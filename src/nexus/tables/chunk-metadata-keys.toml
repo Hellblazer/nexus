@@ -139,7 +139,7 @@ emit = { class = "CHUNK", kind = "metadata-key", on_row = "allowed", home = "the
 [[row]]
 id = "content-type"
 match = { key = "content_type" }
-emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "catalog_documents.content_type, or the document meta key source_format (pdf, markdown, code, prose) for pdf and markdown, stamped at register by every indexer with the value nexus.catalog_source_format derives and filled for older documents by backfill-meta (nexus-6pfgb.23, Sam 2026-10-31 option A); the chunk row is the fallback while a document lacks it", remedy = "R3", moved_by = "6pfgb.23, 6pfgb.25" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "catalog_documents.content_type, or the document meta key source_format (pdf, markdown, code, prose) for pdf and markdown, stamped at register by every indexer with the value nexus.catalog_source_format derives and filled for older documents by backfill-meta (nexus-6pfgb.23, Sam 2026-10-31 option A); no consumer reads the meta key yet, the engine derives the same value from content_type and file_path in the search", remedy = "R3", moved_by = "6pfgb.23, 6pfgb.25" }
 
 [[row]]
 id = "title"

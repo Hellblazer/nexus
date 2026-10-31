@@ -6,19 +6,35 @@ Every indexer writes ``tags`` and ``category`` on each chunk row as constants of
 the file extension (``markdown`` for a markdown file, ``pdf`` for a PDF), ``category`` is ``code``, ``prose``
 or ``paper``. A chunk shared by two documents holds one row, so the row says the last writer's value; the
 document's own ``meta`` says its own. ``source_format`` (``pdf`` / ``markdown`` / ``code`` / ``prose``, the
-chunk vocabulary) is the third such fact, and the one the engine's ``content_type=pdf`` / ``=markdown``
-filters read per document. This module is the one place that states them for the catalog, mirroring the row
-writers (``code_indexer``, ``prose_indexer``, ``doc_indexer``, and the repo PDF path in ``indexer``), and it
-writes nothing it does not know:
+chunk vocabulary) is the third such fact. This module is the one place that states them for the catalog,
+mirroring the row writers (``code_indexer``, ``prose_indexer``, ``doc_indexer``, and the repo PDF path in
+``indexer``), and it writes nothing it does not know.
+
+What reads them. ``tags`` and ``category`` ARE read: the engine's manifest stage (vectors-044) answers a
+``where`` on them from the document's ``meta`` first and from the chunk row only for a document that lacks the
+key. ``source_format`` is WRITE-ONLY today: no engine or client code reads the meta key, because the engine's
+``content_type=pdf`` / ``=markdown`` filters call ``nexus.catalog_source_format`` on the document's
+``content_type`` and ``file_path`` columns in the search. The stamp is kept (Sam's option A, 2026-10-31) for a
+later consumer that wants the value as a stored key; until one exists, nothing depends on it being present.
 
 * ``tags`` is a JSON array of one tag, the shape a note's tags take (nexus-6pfgb.38), so one display reads
   both. A file with no extension has no tag: the row writers wrote ``""`` for it, and an empty value is
   never sent, because the catalog merges ``meta`` and an explicit empty overwrites.
 * ``source_format`` is :func:`catalog_source_format`, a Python copy of the engine's
   ``nexus.catalog_source_format(content_type, file_path)`` (vectors-043). A document is stamped with what the
-  engine would derive for the same two columns, never with a value of its own, so a stamped document and a
-  derived one cannot disagree (``tests/test_6pfgb8_23_indexed_meta.py`` pins the 36-row matrix of the Java
-  parity test against it). A pair the rule derives nothing for sends no key.
+  engine would derive for the same two columns, never with a value of its own. What is enforced: the Python
+  copy answers every row of the Java parity test's matrix as the hand-written answers of
+  ``tests/test_6pfgb8_23_indexed_meta.py`` say (the Java test checks the same rows against the SQL function
+  itself; no test compares the Python copy with live SQL). Which two columns the stamp is computed from
+  depends on the seam: the repo pass and the pre-flight registrations stamp the content type and file path they
+  register; the markdown hook stamps the content type and file path of the row it updates or resolves onto; the
+  PDF hook derives it from ``paper`` and the path it was given, which is ``pdf`` for any registered type that
+  holds a ``.pdf``. A pair the rule derives nothing for sends no key.
+* The extension differs by key. ``tags`` is cut from ``Path.suffix`` (as the row writers cut it) and
+  ``source_format`` from the engine's regex (the module constant ``_EXTENSION``), which needs a non-dot
+  character before the dot: for ``a..md`` the first says ``markdown`` and the second finds no extension, so the catalog type decides
+  (``prose``). The keys describe the same file by two rules, as the row writer's tag and the engine's
+  derivation always have.
 * A ``content_type`` the indexers do not write (``knowledge``, the ``docs`` the orphan backfill can
   produce, anything else) yields ``{}`` from :func:`document_register_meta`: the values are not invented.
 * The repo indexer's PDF path says category ``prose`` where ``nx index pdf`` says ``paper``. That is

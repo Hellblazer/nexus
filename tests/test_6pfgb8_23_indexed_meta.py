@@ -70,19 +70,17 @@ MATRIX: list[tuple[str | None, str | None, str | None]] = [
     ("Code", "x", None),
     ("PDF", "", None),
     (" code", "", None),
-]
-
-
-#: Rows the Java matrix lacks, each of which only the ORDER of the rule's first two branches decides: a markdown
-#: extension under a pdf catalog type is pdf (the type or extension "pdf" is read before the markdown extension).
-ORDER_ROWS: list[tuple[str | None, str | None, str | None]] = [
+    # The order of the first two branches: a pdf catalog type or extension is read before a markdown extension.
     ("paper", "notes/x.md", "pdf"),
     ("pdf", "x.MARKDOWN", "pdf"),
     ("code", "x.md", "markdown"),
+    # A double dot leaves the regex no extension (it needs a non-dot before the dot), where Path.suffix reads one.
+    ("", "a..pdf", None),
+    ("prose", "a..md", "prose"),
 ]
 
 
-@pytest.mark.parametrize("content_type,path,answer", MATRIX + ORDER_ROWS)
+@pytest.mark.parametrize("content_type,path,answer", MATRIX)
 def test_source_format_answers_what_the_engine_derives(content_type, path, answer) -> None:
     assert catalog_source_format(content_type, path) == answer
 
@@ -109,7 +107,7 @@ def _java_pairs() -> set[tuple[str | None, str | None]]:
 
 def test_the_matrix_is_the_java_parity_tests_matrix() -> None:
     java = _java_pairs()
-    assert len(java) >= 36, "the Java matrix was not read: the parity pin would be vacuous"
+    assert len(java) >= 41, "the Java matrix was not read: the parity pin would be vacuous"
     assert {(c, p) for c, p, _a in MATRIX} == java
 
 
@@ -137,6 +135,10 @@ def test_a_stamped_source_format_never_disagrees_with_the_derivation(content_typ
     ("rdr", "docs/rdr/rdr-1-x.md", {"tags": ["markdown"], "category": "prose", "source_format": "markdown"}),
     # the repo path: category prose, where nx index pdf says paper (recorded, not fixed)
     ("pdf", "papers/p.pdf", {"tags": ["pdf"], "category": "prose", "source_format": "pdf"}),
+    # a double dot: the tag is Path.suffix (".md"), the format the engine's regex (no extension, so the catalog type
+    # speaks). The two keys differ on this name, as the row writer's tag and the engine's rule always have.
+    ("prose", "docs/a..md", {"tags": ["markdown"], "category": "prose", "source_format": "prose"}),
+    ("code", "src/a..py", {"tags": ["py"], "category": "code", "source_format": "code"}),
 ])
 def test_the_repo_catalog_pass_rules(content_type, path, expected) -> None:
     assert document_register_meta(content_type, path) == expected
@@ -186,6 +188,15 @@ def _kwargs(path: str, near: str) -> tuple[str, str]:
 ])
 def test_the_row_writers_still_stamp_the_constants_this_module_mirrors(path, near, tags, category) -> None:
     assert _kwargs(path, near) == (tags, category)
+
+
+@pytest.mark.parametrize("path", ["code_indexer.py", "prose_indexer.py"])
+def test_the_row_writers_still_lower_case_the_suffix_the_tag_is_cut_from(path) -> None:
+    """``document_register_meta`` lower-cases the suffix (``A.PY`` is tagged ``py``) because the row writers do; a
+    writer that stopped would tag ``PY`` on the row and leave the catalog's copy saying ``py``."""
+    assert document_register_meta("code", "src/A.PY")["tags"] == ["py"]
+    assert document_register_meta("prose", "docs/B.TXT")["tags"] == ["txt"]
+    assert "ext = file_path.suffix.lower()" in (SRC / path).read_text()
 
 
 # ── the backfill verb's fill of source_format ──────────────────────────────────────────────────────
