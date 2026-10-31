@@ -112,7 +112,10 @@ migration_wal_bytes_per_worker = 11038000
 # FUNCTION (the new scalar function), its 1 GRANT EXECUTE, and 3 CREATE OR REPLACE FUNCTION replacing the manifest_search_384/768/1024 bodies
 # (signatures and grants kept, so no re-grant); the post-condition DO block is not DDL. Counted from the changeset's statements, not yet
 # measured on a migrated cluster (see the nexus-6pfgb.62 bead for the measured figure).
-migration_ddl_per_worker = 2171
+# 2171 -> 2176 (2026-10-31): vectors-044-1 (nexus-6pfgb.29, manifest_search meta keys, nexus.catalog_tag_set) adds five DDL statements, the
+# vectors-043-1 shape: 1 CREATE OR REPLACE FUNCTION (catalog_tag_set), its 1 GRANT EXECUTE, and 3 CREATE OR REPLACE FUNCTION replacing the
+# manifest_search_384/768/1024 bodies again (no re-grant); the post-condition DO block is not DDL. Counted from the changeset's statements.
+migration_ddl_per_worker = 2176
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

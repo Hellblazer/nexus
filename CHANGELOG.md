@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A `where` on `tags`, `category`, `ttl_days`, `source_agent`, `extraction_method`, `quality_gate_overridden`, `extraction_source` or `frecency_score` is answered per owning document from the catalog, with the chunk row as the fallback** (nexus-6pfgb.29, RDR-236 Phase 3; engine change, rides the next engine cut, `engine-service-v0.1.172`; a client on any version benefits). A chunk shared by two documents carries the last writer's value on its row, so a filter on the row returned a chunk for a document that does not satisfy it. The engine now reads the document's `metadata` when it has the key (an empty value included, since the catalog cannot retract a key) and the chunk row only while it lacks it, so a document stamped before the writers existed answers as before. `tags` is a set: `tags=arch` matches a note tagged `arch` and `decision`, `in` matches any listed tag, `!=` and `not in` match a document with none of them, and the legacy comma string is split on commas. `ttl_days` and `frecency_score` are numbers, `quality_gate_overridden` a boolean (`true` and `"true"` agree), the rest exact strings. A positive filter rides the in-search manifest test of nexus-p89h4, so a rare value is found. Behavior change: `tags=arch` used to match only a row whose whole `tags` text was `arch`. An older engine answers all of these from the chunk row.
+
 ### Fixed
 
 - **A `page_number` range reads a numeric string as a number inside the search, as the stage after it does** (nexus-6pfgb.64, RDR-236 Phase 3; engine change, rides the next engine cut, `engine-service-v0.1.172`). A legacy chunk row that stored the page as text (`"5"`) was kept by the label stage and rejected by the in-search test, so a range filter missed it. Needs PostgreSQL 17.

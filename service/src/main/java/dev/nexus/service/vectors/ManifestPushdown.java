@@ -30,18 +30,26 @@ import java.util.Set;
  * qualifying owner and is the exact judge of every operator. So what is compiled here has one rule: it may admit
  * more than the stage keeps, never less. That is why a missing value is the empty string in the object (the stage
  * counts a missing value as {@code ""}), and why only the POSITIVE operators are compiled: {@code $eq}, {@code $in}
- * and, on {@code page_number}, the numeric ranges. A negative operator keeps what it does not reject, so it
+ * and, on the numeric keys ({@code page_number}, {@code ttl_days}, {@code frecency_score}), the numeric ranges. A negative operator keeps what it does not reject, so it
  * prunes little; it, {@code indexed_at}, {@code bib_year}, {@code bib_venue}, {@code bib_authors} and {@code
  * bib_citation_count} stay with the stage alone (the RDR's own split).
  *
  * <p>{@code content_type} is the one key whose answer depends on the operand, so the object holds an ARRAY of every
  * word the document answers to (its catalog type, the format the catalog derives, and the chunk row's value where
  * those leave it open), and the compiled test is "the array has the operand". The array is a superset of what
- * {@link ManifestLabelStage#matches} accepts for any operand.
+ * {@link ManifestLabelStage#matches} accepts for any operand. {@code tags} is the other array key: the object holds
+ * the document's tag set (the meta's array or comma string, else the chunk row's comma string, split by {@code
+ * nexus.catalog_tag_set}; {@code [""]} for none), and the test is the same membership.
+ *
+ * <p>The catalog-meta keys (nexus-6pfgb.29) hold the document's meta value when the meta HAS the key and the chunk
+ * row's value otherwise, the presence fallback the stage applies; {@code category}, {@code source_agent}, {@code
+ * extraction_method}, {@code extraction_source} and {@code quality_gate_overridden} compile like the other scalars
+ * (the boolean through the planner's tolerant JSON-or-text form), {@code ttl_days} and {@code frecency_score} like
+ * {@code page_number}, ranges included.
  *
  * <p>The compiled form reuses {@link PgVectorRepository#planWhere}, so the operators, the tolerant number-or-text
  * equality and the three-valued jsonpath rules are the search's own, with one exception: a NUMERIC range on
- * {@code page_number} is compiled here (nexus-6pfgb.64). {@link PgVectorRepository#planWhere} keeps the retired
+ * a numeric key ({@code page_number}, nexus-6pfgb.64; {@code ttl_days} and {@code frecency_score}, nexus-6pfgb.29) is compiled here. {@link PgVectorRepository#planWhere} keeps the retired
  * type-strict range (a numeric operand never matches a stored string), but the stage's {@code comparable} accepts a
  * numeric string on a numeric key, so a legacy chunk row that stored {@code page_number} as {@code "5"} is KEPT by
  * the stage for {@code page_number >= 3}. The pushed range therefore reads the stored value as a number whichever
@@ -52,20 +60,38 @@ import java.util.Set;
  * the stage parses with {@link java.math.BigDecimal}, which also reads non-ASCII digits; PostgreSQL does not, so a
  * legacy page stored as such text is kept by the stage and rejected by the EXISTS. A STRING operand on a range
  * keeps the strict string comparison on both sides (the stage compares a string label lexically and treats a
- * number as not comparable), so nothing differs there.
+ * number as not comparable), so nothing differs there. EQUALITY on a numeric key keeps the planner's two literal
+ * forms ({@code 5} or {@code "5"}), so a stored {@code "5.0"}, which the stage reads as 5, is rejected by the
+ * EXISTS; the writers store numbers, and the page-number case predates this class.
  */
 final class ManifestPushdown {
 
     /** The compiled predicate: a containment and a jsonpath over the per-occurrence object. Either may be null. */
     record Plan(JSONB containment, String jsonPath) {}
 
-    /** Keys whose effective value is one string and whose equality and {@code $in} compile. */
+    /**
+     * Keys whose effective value is one scalar and whose equality and {@code $in} compile. The catalog-meta ones
+     * (nexus-6pfgb.29) are scalars too: {@code quality_gate_overridden} is a boolean, so {@link PgVectorRepository#planWhere}'s
+     * tolerant form gives its equality both the JSON literal and the text one, as the stage's text compare does;
+     * {@code ttl_days} and {@code frecency_score} are numbers and also take ranges ({@link #NUMERIC_RANGE_KEYS}).
+     */
     private static final Set<String> STRING_KEYS = Set.of(
         "section_title", "section_type", "title", "source_author",
-        "bib_doi", "bib_openalex_id", "bib_semantic_scholar_id");
+        "bib_doi", "bib_openalex_id", "bib_semantic_scholar_id",
+        "category", "source_agent", "extraction_method", "extraction_source", "quality_gate_overridden",
+        "ttl_days", "frecency_score");
 
-    /** {@code page_number} is the one numeric key whose ranges compile. */
-    private static final String PAGE_NUMBER = "page_number";
+    /**
+     * The numeric keys whose ranges compile: the stored value is read as a number whether it is a JSON number or a
+     * numeric string, see the class comment ({@code .number()}).
+     */
+    private static final Set<String> NUMERIC_RANGE_KEYS = Set.of("page_number", "ttl_days", "frecency_score");
+
+    /**
+     * Keys whose effective value is a SET of words, held in the object as an array: {@code content_type} (every word
+     * the document answers to) and {@code tags}. A positive operator compiles to "some member equals the operand".
+     */
+    private static final Set<String> ARRAY_KEYS = Set.of(ManifestLabelStage.CONTENT_TYPE_KEY, ManifestLabelStage.TAGS_KEY);
 
     private static final Set<String> RANGE_OPERATORS = Set.of("$gte", "$gt", "$lte", "$lt");
 
@@ -77,11 +103,11 @@ final class ManifestPushdown {
     static boolean pushable(ManifestLabelStage.Predicate p) {
         String op = p.operator();
         boolean positive = "$eq".equals(op) || "$in".equals(op);
-        if (STRING_KEYS.contains(p.key()) || ManifestLabelStage.CONTENT_TYPE_KEY.equals(p.key())) {
-            return positive;
-        }
-        if (PAGE_NUMBER.equals(p.key())) {
+        if (NUMERIC_RANGE_KEYS.contains(p.key())) {
             return positive || RANGE_OPERATORS.contains(op);
+        }
+        if (STRING_KEYS.contains(p.key()) || ARRAY_KEYS.contains(p.key())) {
+            return positive;
         }
         return false;
     }
@@ -97,8 +123,8 @@ final class ManifestPushdown {
             if (!pushable(p)) {
                 continue;
             }
-            if (ManifestLabelStage.CONTENT_TYPE_KEY.equals(p.key())) {
-                own.add(contentTypePath(p));
+            if (ARRAY_KEYS.contains(p.key())) {
+                own.add(memberPath(p));
                 continue;
             }
             if (isNumericPageRange(p)) {
@@ -120,9 +146,9 @@ final class ManifestPushdown {
         return new Plan(plan.containment(), paths.isEmpty() ? null : String.join(" && ", paths));
     }
 
-    /** A range on {@code page_number} with a numeric operand: the one range this class compiles itself. */
+    /** A range on a numeric key with a numeric operand: the one range this class compiles itself. */
     private static boolean isNumericPageRange(ManifestLabelStage.Predicate p) {
-        return PAGE_NUMBER.equals(p.key()) && RANGE_OPERATORS.contains(p.operator())
+        return NUMERIC_RANGE_KEYS.contains(p.key()) && RANGE_OPERATORS.contains(p.operator())
             && p.operand() instanceof Number;
     }
 
@@ -146,18 +172,18 @@ final class ManifestPushdown {
             case "$lte" -> "<=";
             default -> "<";
         };
-        return "exists($.\"" + PAGE_NUMBER + "\" ? (@.number() " + cmp + " " + operand.toPlainString() + "))";
+        return "exists($." + stringLiteral(p.key()) + " ? (@.number() " + cmp + " " + operand.toPlainString() + "))";
     }
 
-    /** {@code $eq} / {@code $in} on {@code content_type}: some word in the document's array equals the operand. */
-    private static String contentTypePath(ManifestLabelStage.Predicate p) {
+    /** {@code $eq} / {@code $in} on a set-valued key: some word in the document's array equals the operand. */
+    private static String memberPath(ManifestLabelStage.Predicate p) {
         List<?> items = "$in".equals(p.operator()) ? (List<?>) p.operand() : List.of(String.valueOf(p.operand()));
         if (items.isEmpty()) {
             return "(1 == 2)";
         }
         List<String> any = new ArrayList<>(items.size());
         for (Object item : items) {
-            any.add("exists($.\"content_type\"[*] ? (@ == " + stringLiteral(String.valueOf(item)) + "))");
+            any.add("exists($." + stringLiteral(p.key()) + "[*] ? (@ == " + stringLiteral(String.valueOf(item)) + "))");
         }
         return "(" + String.join(" || ", any) + ")";
     }

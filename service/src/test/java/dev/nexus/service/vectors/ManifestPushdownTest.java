@@ -150,4 +150,54 @@ class ManifestPushdownTest {
         assertThat(plan.jsonPath()).isEqualTo(
             "exists($.\"page_number\" ? (@.number() >= 3)) && (exists($.\"content_type\"[*] ? (@ == \"pdf\")))");
     }
+
+    // ── nexus-6pfgb.29: the catalog-meta keys ───────────────────────────────
+
+    @Test
+    void theScalarMetaKeys_compileLikeOtherScalars() {
+        var plan = ManifestPushdown.of(predicates(where(
+            "category", "decision", "source_agent", "claude", "extraction_method", "docling",
+            "extraction_source", "pdf")));
+
+        assertThat(plan.containment().data()).contains("\"category\":\"decision\"").contains("\"source_agent\":\"claude\"")
+            .contains("\"extraction_method\":\"docling\"").contains("\"extraction_source\":\"pdf\"");
+        assertThat(plan.jsonPath()).isNull();
+
+        var in = ManifestPushdown.of(predicates(where("category", op("$in", List.of("a", "b")))));
+        assertThat(in.jsonPath()).contains("== \"a\"").contains("== \"b\"").contains("||");
+        assertThat(ManifestPushdown.of(predicates(where("category", op("$ne", "a"))))).isNull();
+    }
+
+    @Test
+    void qualityGateOverridden_takesTheJsonAndTheTextFormOfABoolean() {
+        var plan = ManifestPushdown.of(predicates(where("quality_gate_overridden", true)));
+
+        assertThat(plan.jsonPath()).isEqualTo(
+            "(exists($.\"quality_gate_overridden\" ? (@ == true)) || exists($.\"quality_gate_overridden\" ? (@ == \"true\")))");
+    }
+
+    @Test
+    void ttlDaysAndFrecencyScore_takeEqualityLikeAPage_andRangesAsNumbers() {
+        assertThat(ManifestPushdown.of(predicates(where("ttl_days", 7))).jsonPath()).isEqualTo(
+            "(exists($.\"ttl_days\" ? (@ == 7)) || exists($.\"ttl_days\" ? (@ == \"7\")))");
+        assertThat(ManifestPushdown.of(predicates(where("frecency_score", op("$gte", 0.5)))).jsonPath())
+            .isEqualTo("exists($.\"frecency_score\" ? (@.number() >= 0.5))");
+        assertThat(ManifestPushdown.of(predicates(where("ttl_days", op("$lt", 30)))).jsonPath())
+            .isEqualTo("exists($.\"ttl_days\" ? (@.number() < 30))");
+        assertThat(ManifestPushdown.of(predicates(where("ttl_days", op("$ne", 7))))).isNull();
+    }
+
+    @Test
+    void tags_isCompiled_asMembershipOfTheDocumentsTagSet() {
+        var eq = ManifestPushdown.of(predicates(where("tags", "arch")));
+        assertThat(eq.containment()).isNull();
+        assertThat(eq.jsonPath()).isEqualTo("(exists($.\"tags\"[*] ? (@ == \"arch\")))");
+
+        var in = ManifestPushdown.of(predicates(where("tags", op("$in", List.of("a", "b")))));
+        assertThat(in.jsonPath()).isEqualTo(
+            "(exists($.\"tags\"[*] ? (@ == \"a\")) || exists($.\"tags\"[*] ? (@ == \"b\")))");
+        assertThat(ManifestPushdown.of(predicates(where("tags", op("$in", List.of())))).jsonPath()).isEqualTo("(1 == 2)");
+        assertThat(ManifestPushdown.of(predicates(where("tags", op("$ne", "arch"))))).isNull();
+        assertThat(ManifestPushdown.of(predicates(where("tags", op("$nin", List.of("arch")))))).isNull();
+    }
 }
