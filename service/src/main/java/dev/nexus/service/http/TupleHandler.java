@@ -88,7 +88,9 @@ import java.util.Optional;
  *                                   dead-lettering nack ignores it.
  *                                   dead (bead nexus-5r2sc.2.3, RDR-235 E4): optional boolean, default false; a
  *                                   non-boolean value is a 400. true dead-letters the claim at once (the attempt
- *                                   counted, claim log nack then dead), and wins over retry_after_s.
+ *                                   counted, claim log nack then dead), and wins over retry_after_s; on a row
+ *                                   replaced while claimed (dirty) it requeues the new body instead, attempts 0,
+ *                                   claim log nack only (nexus-7rwaj).
  *   POST /v1/tuples/renew           {claim_id, claimant, lease_s} -&gt; {"lease_until": "&lt;ISO-8601&gt;"}
  *   POST /v1/tuples/release         {claim_id, claimant} -&gt; {"released": true}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
