@@ -125,6 +125,10 @@ class SearchDiagnostics:
     #: Last field so positional construction stays additive. Empty for a
     #: hand-built struct; :meth:`kept_for` then falls back to ``raw - dropped``.
     kept: dict[str, int] = field(default_factory=dict)
+    #: nexus-jypmj: rows the engine returned that were NOT in the active ``chash_allow`` list, dropped client-side. A
+    #: non-zero count means the engine ignored the key (a rollback, or a replica older than the cached capability
+    #: flag), so the run's document confinement did not hold at the engine.
+    chash_allow_dropped: int = 0
 
     def kept_for(self, name: str) -> int:
         """Rows *name* contributes to the engine's candidate pool.
@@ -1350,6 +1354,19 @@ def _record_poisoned_collection(name: str, exc: Exception) -> None:
 _CLUSTER_DEFAULT = "semantic"
 
 
+def _row_chashes(r: "SearchResult") -> set[str]:
+    """The chunk hashes a result row may stand for, lower-cased: its ``chunk_text_hash`` metadata and its id (a T3
+    chunk's natural id is its hash). Both are offered because a row's metadata hash can be stale or legacy-short while
+    the engine matched the row by its id; the allow check admits the row when either is allowed."""
+    out: set[str] = set()
+    h = r.metadata.get("chunk_text_hash") if r.metadata else None
+    if isinstance(h, str) and h:
+        out.add(h.lower())
+    if isinstance(r.id, str) and r.id:
+        out.add(r.id.lower())
+    return out
+
+
 def search_cross_corpus(
     query: str,
     collections: list[str],
@@ -1501,7 +1518,18 @@ def search_cross_corpus(
     took 2.41 s median against 2.99 s at the default; the boosted page can
     shift near ties, as it already did between 120 and 300 (nexus-cbg2s).
     The batched fallback path ignores it.
+
+    The document confinement (nexus-jypmj, :mod:`nexus.plans.document_confinement`): a tool call run under
+    :func:`~nexus.plans.document_confinement.chash_allow_scope` restricts every engine call this function makes
+    (search, hybrid-search, search-per-collection) to those chunk hashes. The value is read ONCE here, on the calling
+    thread, because the worker threads below do not inherit the context. Absent, every request is byte-identical.
     """
+    from nexus.plans.document_confinement import active_chash_allow  # noqa: PLC0415 — leaf stdlib module; deferred like this function's other imports
+
+    _allow = active_chash_allow()
+    chash_kw: dict[str, Any] = {"chash_allow": list(_allow)} if _allow is not None else {}
+    _allow_set: frozenset[str] | None = frozenset(h.lower() for h in _allow) if _allow is not None else None
+    chash_allow_dropped = 0
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
     cfg_cluster = cfg.get("search", {}).get("cluster_by")
@@ -1693,7 +1721,7 @@ def search_cross_corpus(
                 lex_meta: dict = {}
                 lex_raw = t3.hybrid_search(
                     query, cols, n_results=per_k, where=effective_where,
-                    rerank=True, rerank_meta_out=lex_meta,
+                    rerank=True, rerank_meta_out=lex_meta, **chash_kw,
                 )
                 # A degrade on EITHER leg is a degrade for this batch;
                 # merged rather than overwritten so the vector leg's
@@ -1702,7 +1730,7 @@ def search_cross_corpus(
                     rerank_meta.update(lex_meta)
             else:
                 lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
-                                           where=effective_where)
+                                           where=effective_where, **chash_kw)
         except VectorServiceError as lex_exc:
             raise LexicalLegUnavailableError(
                 f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
@@ -1753,9 +1781,9 @@ def search_cross_corpus(
         try:
             if server_rerank:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where,
-                                rerank=True, rerank_meta_out=rerank_meta, **rerank_cap_kw)
+                                rerank=True, rerank_meta_out=rerank_meta, **rerank_cap_kw, **chash_kw)
             else:
-                raw = t3.search(query, cols, n_results=per_k, where=effective_where)
+                raw = t3.search(query, cols, n_results=per_k, where=effective_where, **chash_kw)
             if lexical:
                 # ADDITIVE: the lexical rows join the vector rows rather than
                 # replacing them, deduplicated by chunk id with the vector row
@@ -2013,7 +2041,7 @@ def search_cross_corpus(
                 query, group, per_collection_k=per_collection_k, limit=limit,
                 thresholds=thresholds or None, where=effective_where,
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
-                **rerank_cap_kw,
+                **rerank_cap_kw, **chash_kw,
                 # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
                 **({"content_chars": content_chars} if content_chars is not None else {}),
                 # nexus-xd2rc: the lexical arms can ride the same request; absent keeps it byte-identical.
@@ -2318,7 +2346,15 @@ def search_cross_corpus(
                     error=part["error"],
                 )
             continue
-        all_results.extend(part["results"])
+        part_results = part["results"]
+        if _allow_set is not None:
+            # nexus-jypmj: verify the engine honoured the filter. The capability flag is cached for minutes, so a
+            # rollback or an older replica can answer 200 and ignore the key; a row outside the allow list is then
+            # another document's text in a document-confined run. Fail closed: drop it and count it.
+            held = [r for r in part_results if not _row_chashes(r).isdisjoint(_allow_set)]
+            chash_allow_dropped += len(part_results) - len(held)
+            part_results = held
+        all_results.extend(part_results)
         pool_lexical_ids.update(part.get("lexical_ids", ()))
         for rid, raw in part.get("embeddings", {}).items():
             prefetched_embeddings[(col, rid)] = raw
@@ -2339,6 +2375,12 @@ def search_cross_corpus(
                 dropped=part["dropped"],
                 threshold=part["threshold"],
             )
+
+    if chash_allow_dropped:
+        _log.warning(
+            "chash_allow_ignored_by_engine", dropped=chash_allow_dropped, allow=len(_allow_set or ()),
+            collections=sorted(diag_per_collection),
+        )
 
     if dim_mismatch_cols:
         # nexus-vply6 fix round 2: unconditional WARNING now -- the old
@@ -2403,6 +2445,7 @@ def search_cross_corpus(
             total_dropped=total_dropped,
             total_raw=total_raw,
             failed_collections=failed_collections,
+            chash_allow_dropped=chash_allow_dropped,
         ))
 
     # RDR-087 Phase 2.2: persist per-call threshold-filter telemetry.

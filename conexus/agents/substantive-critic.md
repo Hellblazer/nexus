@@ -5,6 +5,7 @@ description: Provides deep constructive critique of code, documentation, plans, 
 model: sonnet
 color: teal
 effort: high
+disallowedTools: [mcp__plugin_sn_serena]
 ---
 
 ## Usage Examples

@@ -39,12 +39,18 @@ falsifying pin: a value of ``0.01`` (the old fabricated literal) or
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 import pytest
 
-from nexus.aspect_extractor import _SCHOLARLY_PAPER_CONFIG, _SCHOLARLY_PAPER_PROMPT
-from nexus.commands.enrich import _PER_PAPER_COST_USD
+from nexus.aspect_extractor import (
+    _EXTRACTOR_CONTENT_CHAR_BUDGET,
+    _SCHOLARLY_PAPER_CONFIG,
+    _SCHOLARLY_PAPER_PROMPT,
+)
+from nexus.commands.enrich import _COST_BASIS, _PER_PAPER_COST_USD
+from nexus.operators.llm_models import price_for
 
 # A synthetic but structurally realistic scholarly-paper body -- several
 # paragraphs across abstract/intro/method/experiments/results, ~1000 words.
@@ -225,6 +231,28 @@ class TestPerPaperCostConstantIsMeasured:
     def test_not_zero(self) -> None:
         assert _PER_PAPER_COST_USD != 0.0
         assert _PER_PAPER_COST_USD > 0
+
+
+class TestCostBasisHoldsForTheConstant:
+    """nexus-j6un5.8: the estimate line's stated range and the price tier it
+    was measured in are checked, not only written down."""
+
+    def test_the_constant_lies_inside_the_range_the_cost_line_states(self) -> None:
+        lo, hi = (float(x) for x in re.search(r"\$([0-9.]+)-([0-9.]+) each", _COST_BASIS).groups())
+        assert lo <= _PER_PAPER_COST_USD <= hi
+
+    def test_a_bounded_paper_stays_under_the_models_long_price_step(self) -> None:
+        # 0.6 prompt tokens per char is the worst ratio measured on three
+        # English papers on 2026-10-30 (47k chars became about 28k prompt
+        # tokens with the template). It holds for prose at that ratio, not as
+        # a bound: CJK or LaTeX-heavy text runs denser. Past the step Haiku
+        # 5.5's input rate is five times higher while the estimate stays put.
+        price = price_for(_SCHOLARLY_PAPER_CONFIG.model_version)
+        assert price is not None and price.long_threshold is not None, (
+            f"{_SCHOLARLY_PAPER_CONFIG.model_version} has no long-prompt price step; revisit this guard"
+        )
+        prompt_chars = _EXTRACTOR_CONTENT_CHAR_BUDGET + len(_SCHOLARLY_PAPER_CONFIG.prompt_template)
+        assert prompt_chars * 0.6 < price.long_threshold
 
 
 # lived_in (nexus-pc15o, 2026-08-23): dispatches real `claude -p`, which the

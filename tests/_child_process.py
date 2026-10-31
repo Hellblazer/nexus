@@ -46,6 +46,15 @@ _log = structlog.get_logger(__name__)
 #: True where process groups exist (every POSIX host). Windows has no ``os.killpg``.
 _POSIX: bool = getattr(os, "killpg", None) is not None
 
+#: A pid no process can ever have, for a fake ``Popen`` or a pid file that code under test may
+#: hand to a real ``kill``/``killpg``/``getpgid``. Linux caps ``pid_max`` at 2^22 (4194304),
+#: macOS at 99999, and a Windows pid is a multiple of 4, so 2^22 + 1 exists nowhere. A literal
+#: like 4321 or 42500 is a LIVE process on a box whose pid counter has just wrapped: on
+#: 2026-10-30 chas wrapped at about 19:27Z, and at 19:30:44Z shard 1's runner was SIGKILLed
+#: (develop lost runner at 7eb199896, labrun alloc 519d15ab); shards 2 and 6 of that run each
+#: carried a test that sent a real SIGKILL to the process group of a fake worker's pid 4321.
+NEVER_ALIVE_PID: int = 2**22 + 1
+
 #: pid -> Windows job handle for children spawned by :func:`popen_in_group`. Always empty on
 #: POSIX, where the process group is the containment.
 _JOBS: dict[int, int] = {}
@@ -349,6 +358,7 @@ __all__ = [
     "integration_pg_conf",
     "java_executable",
     "kill_group",
+    "NEVER_ALIVE_PID",
     "pg_data_tempdir",
     "pid_alive",
     "popen_in_group",

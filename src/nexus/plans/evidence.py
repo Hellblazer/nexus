@@ -404,7 +404,8 @@ class OwnerResolution:
     (:mod:`nexus.plans.active_project`): the caller supplied no qualifier and the
     session's project stands in for one (``contributions`` is
     ``(("active_project", tumbler),)``). It qualifies source resolution only and
-    never narrows the secondary streams. :func:`resolve_owner_qualifier` never
+    is not an owner binding, so it narrows no secondary stream by itself (the one-source rule narrows to the
+    document it chose only when no other project carries the number, nexus-jypmj). :func:`resolve_owner_qualifier` never
     returns it; the tier builds it after the explicit tiers returned ``none``.
     """
 

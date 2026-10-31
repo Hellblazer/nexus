@@ -101,6 +101,30 @@ has no live cloud config). The scoring function has fast, non-`integration`
 coverage in `tests/test_search_fanout_recall_parity_reference_logic.py`, which
 runs in the default loop.
 
+## Running an MVV journey against a managed-service tenant (nexus-ckejb)
+
+`tests/test_rdr235_mvv_aspect_queue_tuples.py::test_mvv_journey_on_the_tuple_queue` can run against an EXTERNAL engine in a tenant the operator provisioned, instead of the session engine's minted one (RDR-235 Activation Step 1). The opt-in is `tests/_external_engine.py`, read by `_engine_tenant_env` (the body of `t2_service_env` / `t2_tenant`). It takes all three of: the `external_engine_ok` marker on the test, `NX_TEST_EXTERNAL_ENGINE_URL` and `NX_TEST_EXTERNAL_TENANT_TOKEN`. An unmarked test, or a marked one with one variable, keeps the local minted tenant and logs one `external_engine.variables_ignored` line, so a pair left exported cannot point the suite at production. The marker is carried by exactly two files, the journey module and `tests/test_external_engine_optin.py`; `tests/test_external_engine_marker_allowlist.py` (`-m lint`) fails on any other site, and on an allowlist entry that no longer carries it. Inside the journey module only the journey is marked.
+
+Scenarios 24 (a child process on the PG-direct substrate env) and 25 (1,200 tasks) always run on the local engine, whatever the pair says; they carry no skip. Run the journey with `-k journey`, which deselects them. Running the whole file with the pair set is operator error: the journey goes to the external engine, and 24 still boots a local engine (it needs the gate jar, and the `leases=0 mints=0` line below no longer holds).
+
+Before the run:
+
+- **A tenant nobody uses, on an engine that carries the `aspects` template (E3).** The journey counts every task in the tenant and asserts that up front (available, claimed, dead and consumed rows all zero, and the old queue table empty), so a second run in the same tenant fails at once with "already holds aspect-queue work". A green run leaves, in that tenant: 58 catalog documents (50 journey, 6 old-table, 2 fence), one owner (`test-aspect-fixture-owner`), one collection with no chunks, about 57 `document_aspects` rows, 49 consumed tuple rows plus the one dead-lettered task (document 13) with its claim-log rows, done rows in the old queue table, and a committed `embedding_profile` row for `knowledge`. A red run can also leave claimed, dead or waiting tasks. Only dropping the tenant cleans it; that is yours, and a red run burns the tenant too. The one exception: a 422 at `register_collection` (the first write) leaves only the profile row, so a retry in the same tenant is legal after that specific failure.
+- **State the write, and name the tenant.** The suite exempts itself from the production-write guard in-process; the external branch withdraws that for the test and requires `NX_ALLOW_PROD_WRITE="<reason>"` from you (a bare `1`/`true` is refused). The harness never sets it. When the engine names the bearer's tenant (`GET /v1/_whoami`), the reason must contain that tenant name, or the test fails at setup. Announce the UTC window to the engine's operator first.
+- **A dev checkout with `uv sync` done** (an editable install). `guard_production_write` returns early when `_dev_checkout_root()` is None (`src/nexus/db/service_endpoint.py`), so under a non-editable install the reason check is silent and a write would go out unchecked. Do not use `lab-remote`: the variables carry a bearer.
+- `NX_TEST_T2_SUBSTRATE=none`: the run boots no engine, mints no tenant and needs no jar. (Without it the session start still wants the gate jar and the suite lease for nothing.)
+- **The token comes from a file, not the command line.** `export NX_TEST_EXTERNAL_TENANT_TOKEN=...` typed at the prompt leaves it in shell history. Keep `NX_TEST_EXTERNAL_ENGINE_URL` and `NX_TEST_EXTERNAL_TENANT_TOKEN` in a mode-0600 file and source it with `set -a`. `http://` is accepted only for a loopback host; a URL carrying `user:password@` is refused.
+
+```bash
+set -a; . ~/secure/mvv-tenant.env; set +a    # two lines: NX_TEST_EXTERNAL_ENGINE_URL=https://api.conexus-nexus.com, NX_TEST_EXTERNAL_TENANT_TOKEN=...
+NX_ALLOW_PROD_WRITE="RDR-235 Activation Step 1 (nexus-lnwn1): MVV journey in throwaway tenant <name>, window <UTC>" \
+  NX_TEST_T2_SUBSTRATE=none uv run pytest tests/test_rdr235_mvv_aspect_queue_tuples.py -k journey -q -p no:cacheprovider
+```
+
+The run prints one line at setup, token-free: `external engine: host=... tenant=... release_version=... embedding_mode=... embedding_profile=... posture=NX_LOCAL=<0|1> (from ...) bearer=validated by GET /v1/_whoami` (or `UNVALIDATED` when the engine has no such route, in which case the tenant shows as `external` and the reason is not asked to name it). Green is `1 passed, 2 deselected` and `tenant pool: leases=0 mints=0` (nothing local was leased). A red at setup names its cause: the missing `NX_ALLOW_PROD_WRITE`, a reason that does not name the tenant, an engine that does not answer `GET /version`, a bearer the engine refuses on `GET /v1/_whoami` (401/403) or an unexpected status there, or an engine reporting `embedding_degraded`.
+
+`NX_LOCAL` follows the engine's `embedding_profile` from `GET /version` (`voyage` gives `NX_LOCAL=0`, `bge` gives `NX_LOCAL=1`), and `embedding_mode` only when the engine omits that key, because `register_collection` must send the model the tenant's profile holds and the engine answers 422 otherwise. `embedding_mode` alone (`onnx-local`, `voyage`, `dual`) is the runtime family and does not settle it: a `dual` engine can profile either way. The collection name's model token comes from `effective_embedding_model_for_writes`, so it matches in either posture. In an external run the lease is 10 s instead of 2 s (the fence variant's renew cadence and deadline scale with it), so the journey takes about a minute and a half rather than half a minute.
+
 ## Test-authoring directives
 
 Distilled from the 2026-08 compression arc (design records in T2: `nexus/test-suite-compression-analysis-2026-08-05` and the closure/critique entries linked from it):

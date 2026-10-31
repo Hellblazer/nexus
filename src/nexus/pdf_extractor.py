@@ -3342,13 +3342,13 @@ class PDFExtractor:
                     cwd=stable_daemon_cwd(),
                     **isolation_popen_kwargs(),  # own process group (POSIX) / job object (Windows)
                 )
-            # Use killpg(getpgid(pid)) rather than killpg(pid) directly —
-            # with start_new_session=True the pgid equals pid at spawn time,
-            # but by the time we kill the child may be dead and the PID
-            # recycled by the kernel. getpgid() resolves the current pgid
-            # from the live PID slot (raises ProcessLookupError if the
-            # process is already gone, which we swallow). Matches the
-            # session.py:301 idiom (indexing review C1).
+            # While the worker is alive (not yet reaped) its pid is ours and
+            # kill_tree resolves its group from it (killpg(getpgid(pid))).
+            # Once proc.wait() has reaped it, the pid is free for the kernel to
+            # hand to anyone, and getpgid() then names the NEW owner's group:
+            # the post-exit sweeps below pass reaped=True and use only the
+            # group id recorded here (develop lost runner at 7eb199896 shard 1,
+            # tests/test_reaped_worker_pid_never_signalled.py).
             # nexus-5ny9r: the worker's session id, recorded while it is
             # alive. start_new_session=True makes pgid == pid at spawn; once
             # the worker exits and is reaped, safe_killpg's os.getpgid(pid)
@@ -3364,11 +3364,21 @@ class PDFExtractor:
             # already covers it.
             worker_job = contain(proc)
 
-            def _killpg_safe() -> None:
+            def _killpg_safe(*, reaped: bool = False) -> None:
                 # Delegated to nexus.util.process_group so the mock-guard +
                 # error-swallow contract is consistent across every
                 # subprocess cleanup site in the codebase.
                 from nexus.util.process_group import kill_tree, safe_killpg_group  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+                if reaped and worker_job is None:
+                    # The worker exited and proc.wait() reaped it: its pid may
+                    # already be another process's, so nothing is resolved from
+                    # it (kill_tree would SIGKILL that process's whole group).
+                    # Its pool children, if any, are still in the group recorded
+                    # at spawn. A Windows job is a handle, not a pid, and is
+                    # still closed below.
+                    safe_killpg_group(worker_pgid)
+                    return
 
                 # On Windows, kill_tree closes the job (reaching the whole
                 # pool the worker spawned) when containment succeeded at
@@ -3394,7 +3404,10 @@ class PDFExtractor:
                         proc.kill()
                 safe_killpg_group(worker_pgid)
 
-            live = _LiveWorker(_killpg_safe)
+            # stop_mineru_workers runs on another thread and can land after this
+            # thread's proc.wait() reaped the worker (returncode set) but before
+            # the finally below unregisters it: the reap state decides then.
+            live = _LiveWorker(lambda: _killpg_safe(reaped=proc.returncode is not None))
             with _LIVE_MINERU_WORKERS_LOCK:
                 _LIVE_MINERU_WORKERS.add(live)
             run_cancel = getattr(_RUN_CANCEL, "event", None)
@@ -3426,13 +3439,13 @@ class PDFExtractor:
             if live.stopped:
                 # nexus-4vx0a: killed by stop_mineru_workers, not by memory:
                 # the SIGKILL return code must not be read as an OOM.
-                _killpg_safe()
+                _killpg_safe(reaped=True)
                 raise MineruWorkerStopped(
                     f"MinerU worker stopped: the run was interrupted (pages {start}–{end}, path={pdf_path})"
                 )
             if returncode != 0:
                 # Clean up any orphaned children in the process group
-                _killpg_safe()
+                _killpg_safe(reaped=True)
                 # RDR-148 Gap 5: 3-way OOM classification. A memory exhaustion
                 # surfaces three ways: (1) OS OOM-killer / macOS jetsam ->
                 # negative SIGKILL returncode; (2) an RLIMIT_AS breach caught
@@ -3464,7 +3477,7 @@ class PDFExtractor:
                     msg, returncode=returncode, stderr_last_line=_last_stderr_line(stderr_tail),
                 )
             # Kill any lingering workers in the process group
-            _killpg_safe()
+            _killpg_safe(reaped=True)
 
             pdf_name = pdf_path.name
             base = Path(result_dir) / pdf_name / "auto"

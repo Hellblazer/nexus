@@ -2,9 +2,10 @@
 name: test-validator
 version: "2.0"
 description: Verifies test coverage, runs test suites, and validates test quality for code changes. Use after implementation, before marking work complete, or when test failures need systematic root-cause analysis.
-model: sonnet
+model: haiku
 color: lime
 effort: high
+disallowedTools: [mcp__plugin_sn_serena, mcp__plugin_sn_context7]
 ---
 
 ## Usage Examples

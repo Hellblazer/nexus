@@ -89,6 +89,7 @@ __all__ = [
     "KIND_DECISIONS",
     "PERSISTENT_FAILURE_THRESHOLD",
     "REQUEST_KINDS",
+    "ONE_SOURCE_NARROWED_KINDS",
     "RequestCoverage",
     "SourceHint",
     "SourceRange",
@@ -101,6 +102,12 @@ __all__ = [
     "reset_extraction_health",
     "structured_extract",
 ]
+
+#: The request kinds whose secondary retrieval is narrowed to the one source they name (nexus-4xmpv, RDR-232
+#: section 2a; Sam, 2026-10-30): a synthesis wants the parts of that document put together, and an
+#: ``unknown`` request is what an extraction failure leaves a single-source synthesis as. Other kinds that name
+#: one source (a lookup, a comparison) keep their cross-document retrieval.
+ONE_SOURCE_NARROWED_KINDS: frozenset[str] = frozenset({"synthesis", "unknown"})
 
 RequestKind = Literal["lookup", "synthesis", "discovery/listing", "comparison", "audit", "debug", "unknown"]
 
@@ -289,6 +296,22 @@ class RequestCoverage:
     derive_ms: int | None = None
     #: What the active-project hook returned, recorded for disclosure only (nexus-jypmj.2.4 owns the tier).
     active_project: str | None = None
+
+    @property
+    def names_one_source(self) -> bool:
+        """Whether the request names exactly ONE source: the one count of distinct named ``(kind, value)`` pairs
+        (nexus-4xmpv). Every site that asks (the primary read's item cap, the secondary narrowing, the replay)
+        reads this property, so none can disagree: a range whose two ends are the same id ("RDR-078 through
+        RDR-078") names one source here, and a document named only by its title names none (it is a source hint,
+        not a named source)."""
+        return len({(s.kind, s.value) for s in self.named_sources}) == 1
+
+    @property
+    def narrows_to_one_source(self) -> bool:
+        """Whether the run narrows every secondary retrieval step to the one source it names: a synthesis or
+        ``unknown`` request (:data:`ONE_SOURCE_NARROWED_KINDS`) with :attr:`names_one_source`. The runner does the
+        narrowing only if that source then resolves to one document (``nexus.plans.single_source``)."""
+        return self.names_one_source and self.answer_kind in ONE_SOURCE_NARROWED_KINDS
 
     @property
     def wants_lifecycle_stream(self) -> bool:

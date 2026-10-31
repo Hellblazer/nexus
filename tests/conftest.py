@@ -3192,8 +3192,12 @@ def t2_tenant(request: pytest.FixtureRequest,
     if not _storage_touch_guard.optin_selected():
         yield request.getfixturevalue("t2_service_env")
         return
+    from tests import _external_engine
+
     with _engine_tenant_env(monkeypatch, pin_local=False, request=request) as tenant:
-        _mint_t1_session_env(monkeypatch)
+        # An external engine's tenant is the operator's: no T1 session minted into it (nexus-ckejb).
+        if not _external_engine.in_external_mode(request):
+            _mint_t1_session_env(monkeypatch)
         yield tenant
 
 
@@ -3233,9 +3237,22 @@ def _engine_tenant_env(
     overwrite that fixture's ``NX_LOCAL=0``. The enclosed span is the guard's
     "tenant active" window (``tests/_storage_touch_guard.py``).
     """
+    from tests import _external_engine
     from tests._engine_substrate import ensure_engine
     from tests._tenant_pool import tenant_lease
     from tests.db._service_fixture import jar_freshness_skip_reason
+
+    # EXTERNAL ENGINE (nexus-ckejb): a test carrying ``external_engine_ok`` with both
+    # NX_TEST_EXTERNAL_* variables set runs against that engine and the operator's tenant: no jar,
+    # no session engine, no minted tenant, no drop. Anything else falls through to the local
+    # substrate below (tests/_external_engine.py has the opt-in rules and what the branch does).
+    external = _external_engine.resolve(request)
+    if external is not None:
+        with _external_engine.external_tenant_env(
+            monkeypatch, external, report=_external_engine.terminal_writer(request),
+        ) as tenant:
+            yield tenant
+        return
 
     # CI leg (RDR-155 P4b P0a' registered question, now due): the Python
     # CI job does not build the service JAR, so engine-substrate tests

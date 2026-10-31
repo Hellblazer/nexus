@@ -6,7 +6,7 @@ effort: medium
 
 # RDR Research Skill
 
-Optionally delegates to **deep-research-synthesizer** (sonnet) for evidence gathering, or **codebase-deep-analyzer** (sonnet) for code-specific questions.
+Optionally delegates to **deep-research-synthesizer** (haiku) for evidence gathering, or **codebase-deep-analyzer** (haiku) for code-specific questions.
 
 ## When This Skill Activates
 

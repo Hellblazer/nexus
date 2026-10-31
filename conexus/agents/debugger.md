@@ -5,6 +5,7 @@ description: Systematically investigates bugs, test failures, and performance is
 model: opus
 color: red
 effort: high
+disallowedTools: [mcp__plugin_sn_serena]
 ---
 
 ## Usage Examples

@@ -542,3 +542,88 @@ def test_the_catalog_path_resolver_maps_a_tumbler_to_its_file_path() -> None:
     assert paths({"tumbler": "1.1.2"}) == "docs/rdr/rdr-049-catalog-tumblers.md" and paths({"tumbler": "9"}) == ""
     o = oracle_mod.load_oracle(oracle_mod.DEFAULT_ORACLE_PATH, GOLDEN).requests["G01-lookup-tumblers"]
     assert o.role_of("", paths({"tumbler": "1.1.2"}), "introducing-rdr") == "supports"
+
+
+# ── a live run from a source checkout (RDR-232 close, 2026-10-30) ────────────────────────────────────────────
+
+
+def _pretend_process_is(monkeypatch: pytest.MonkeyPatch, *, checkout: bool, reason: str | None = None) -> None:
+    """Set the production-write guard's view of this process: a dev checkout or an installed copy, with or without
+    a stated opt-in. The pytest session exempts itself through ``_test_only_opt_in_reason``; clear it so the guard
+    answers as it would for a real operator."""
+    from nexus.db import service_endpoint as se  # noqa: PLC0415
+
+    monkeypatch.setattr(se, "_dev_checkout_root_cache", Path("/work/nexus") if checkout else None)
+    monkeypatch.setattr(se, "_test_only_opt_in_reason", None)
+    if reason is None:
+        monkeypatch.delenv(se.PROD_WRITE_OPT_IN_ENV, raising=False)
+    else:
+        monkeypatch.setenv(se.PROD_WRITE_OPT_IN_ENV, reason)
+
+
+_LIVE_ARGS = ["--set", "golden", "--qid", "G01-lookup-tumblers", "--live", "--no-oracle"]
+
+
+def test_a_live_run_from_a_checkout_is_refused_with_the_install_recipe(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """From a checkout the guard refuses nx_answer's matcher write on every plan hit and drops the run row on a miss, so
+    the run would spend money and measure nothing. The driver stops before the first call and says how to install the
+    tree outside the checkout; it must not have built the live caller."""
+    _pretend_process_is(monkeypatch, checkout=True)
+
+    def never(**_kw):
+        raise AssertionError("the live caller was built: the run started from a checkout")
+
+    monkeypatch.setattr(driver, "live_caller", never)
+    assert driver.main(_LIVE_ARGS) == 2
+    err = capsys.readouterr().err
+    assert "--live cannot run from a source checkout" in err
+    assert "outside the checkout" in err and "non-editable" in err and "--reinstall" in err and "no --editable" in err
+    assert "is_dev_checkout_process" in err and "must print False" in err
+    assert "Do not set NX_ALLOW_PROD_WRITE" in err
+    assert "LIVE:" not in err
+
+
+def test_the_refusal_does_not_touch_the_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The driver asks the guard and reports its answer; the guard still refuses the write itself."""
+    from nexus.db import service_endpoint as se  # noqa: PLC0415
+
+    _pretend_process_is(monkeypatch, checkout=True)
+    assert driver.refuse_live_from_dev_checkout() is not None
+    with pytest.raises(se.ProductionWriteGuardError):
+        se.guard_production_write("https://prod.example")
+
+
+def test_a_live_run_from_an_installed_copy_is_not_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
+    _pretend_process_is(monkeypatch, checkout=False)
+    assert driver.refuse_live_from_dev_checkout() is None
+
+    async def caller(q, *, arm, scope, bindings):  # noqa: ARG001
+        return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(driver, "live_caller", lambda **_kw: caller)
+    assert driver.main([*_LIVE_ARGS, "--out", str(tmp_path / "r.json")]) == 0
+    assert "LIVE:" in capsys.readouterr().err
+
+
+def test_a_stated_write_opt_in_is_not_vetoed_by_the_driver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reason-bearing opt-in is the guard's own sanctioned path; the driver defers to the guard rather than adding a
+    stricter rule of its own."""
+    _pretend_process_is(monkeypatch, checkout=True, reason="RDR-232 close measurement, reviewed by Sam")
+    assert driver.refuse_live_from_dev_checkout() is None
+
+
+def test_a_boolean_shaped_opt_in_does_not_pass_the_driver_either(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pretend_process_is(monkeypatch, checkout=True, reason="1")
+    assert driver.refuse_live_from_dev_checkout() is not None
+
+
+def test_stub_and_from_envelope_runs_never_need_the_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """No service is touched, so a checkout is fine: the refusal is for ``--live`` only."""
+    _pretend_process_is(monkeypatch, checkout=True)
+    assert driver.main(["--set", "golden", "--qid", "G01-lookup-tumblers", "--stub", str(FIXTURE), "--no-oracle", "--out", str(tmp_path / "r.json")]) == 0
+
+
+def test_the_docstring_carries_the_install_recipe() -> None:
+    doc = driver.__doc__ or ""
+    for needle in ("uv venv", "uv pip install", "--reinstall", "no --editable", "is_dev_checkout_process", "outside the repository"):
+        assert needle in doc, needle

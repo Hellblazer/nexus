@@ -134,8 +134,8 @@ class TestCliReferenceNxAnswerContract:
         assert re.search(r"uncovered.{0,400}no_evidence|no_evidence.{0,400}uncovered", paragraph, re.S)
 
     def test_the_envelope_key_count_includes_run_summary(self, reference: str) -> None:
-        assert "The envelope has twelve RDR-232 keys" in reference
-        assert "The envelope has eleven RDR-232 keys" not in reference
+        assert "The envelope has thirteen RDR-232 keys" in reference
+        assert "The envelope has twelve RDR-232 keys" not in reference
 
     def test_run_summary_is_documented_with_its_keys_and_every_persistence_state(self, reference: str) -> None:
         block = _section(reference, "- `run_summary` (nexus-jypmj.3.5", "- `traverse` under `nx_answer`")

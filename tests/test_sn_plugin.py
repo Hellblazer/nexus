@@ -924,7 +924,7 @@ class TestPerSessionRecordStorage:
 class TestWorktreeInjection:
     def test_worktree_agent_gets_section_first(self, tmp_path: Path) -> None:
         _, worktree = _make_repo_with_worktree(tmp_path)
-        body = _run_inject({"cwd": str(worktree), "agent_type": "conexus:developer"})
+        body = _run_inject({"cwd": str(worktree), "agent_type": "worktree-developer"})
         assert body.lstrip().startswith("## Worktree isolation")
         assert "## Serena MCP" in body and "## Context7 MCP" in body
         assert body.index("## Worktree isolation") < body.index("## Serena MCP")
@@ -976,7 +976,8 @@ class TestWorktreeDeveloperExample:
         """The sn guard keys on mcp__plugin_sn_serena__; the private server must not collide with it."""
         fm = self._frontmatter()
         assert "serena-wt:" in fm
-        assert "plugin_sn_serena" not in fm
+        # The shared server appears only as a denial (nexus-j6un5.5).
+        assert [ln for ln in fm.splitlines() if "plugin_sn_serena" in ln] == ["disallowedTools: [mcp__plugin_sn_serena]"]
 
     def test_readme_documents_the_example(self) -> None:
         readme = (SN_DIR / "README.md").read_text()
@@ -1311,3 +1312,61 @@ class TestNonStringToolName:
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "", "a non-string tool name must not be approved"
         assert "crashed, event continues" not in result.stderr, result.stderr
+
+
+# ── nexus-j6un5.5: an agent that denies a server gets no section about it ──
+
+def _load_subagent_start():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("sn_subagent_start", SUBAGENT_START)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _conexus_denials() -> dict[str, set[str]]:
+    """Agent type -> servers its frontmatter denies, from conexus/agents/*.md."""
+    out: dict[str, set[str]] = {}
+    agents = sorted((REPO_ROOT / "conexus" / "agents").glob("*.md"))
+    assert len(agents) >= 10, f"only {len(agents)} conexus agents examined"
+    for path in agents:
+        fm = path.read_text().split("\n---\n", 1)[0]
+        m = re.search(r"(?m)^disallowedTools: \[(.*)\]$", fm)
+        out[f"conexus:{path.stem}"] = {x.strip() for x in m.group(1).split(",")} if m else set()
+    return out
+
+
+class TestDeniedServersGetNoSection:
+    def test_the_hooks_denial_sets_match_the_agents_frontmatter(self) -> None:
+        mod = _load_subagent_start()
+        denials = _conexus_denials()
+        assert mod.SERENA_DENIED == {a for a, d in denials.items() if "mcp__plugin_sn_serena" in d}
+        assert mod.CONTEXT7_DENIED == {a for a, d in denials.items() if "mcp__plugin_sn_context7" in d}
+        # Every conexus agent denies the shared Serena: 4 of about 2,900 conexus
+        # runs used it in the 30 days to 2026-10-30, each with a Grep fallback.
+        assert mod.SERENA_DENIED == set(denials)
+
+    def test_no_conexus_agent_body_points_at_serena(self) -> None:
+        for path in sorted((REPO_ROOT / "conexus" / "agents").glob("*.md")):
+            body = path.read_text().split("\n---\n", 1)[1]
+            assert "mcp__plugin_sn_serena" not in body and "serena-code-nav" not in body, path.name
+
+    def test_a_denying_agent_gets_neither_section_it_cannot_use(self) -> None:
+        body = _run_inject({"cwd": str(REPO_ROOT), "agent_type": "conexus:test-validator"})
+        assert "## Serena MCP" not in body and "## Context7 MCP" not in body
+
+    def test_an_agent_denying_only_serena_keeps_context7(self) -> None:
+        body = _run_inject({"cwd": str(REPO_ROOT), "agent_type": "conexus:developer"})
+        assert "## Serena MCP" not in body and "## Context7 MCP" in body
+
+    def test_any_other_agent_gets_both(self) -> None:
+        for agent in ("general-purpose", "worktree-developer", None):
+            payload = {"cwd": str(REPO_ROOT)} | ({"agent_type": agent} if agent else {})
+            body = _run_inject(payload)
+            assert "## Serena MCP" in body and "## Context7 MCP" in body, agent
+
+    def test_an_unparseable_payload_keeps_both(self) -> None:
+        mod = _load_subagent_start()
+        body = mod.build("not json")
+        assert "## Serena MCP" in body and "## Context7 MCP" in body

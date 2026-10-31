@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-jypmj (RDR-232): nexus.text_gated_search_allowed_384/768/1024, the exact text-gated rank over an
+    allow-list of chunk hashes, for POST /v1/vectors/hybrid-search (and the lexical arm of search-per-collection)
+    when the request carries chash_allow.
+
+    WHY A NEW FUNCTION. hybrid-search ranks the rows that pass a text gate (tsvector match or trigram word
+    similarity) by vector distance. With an allow-list the candidates are gate AND allowed. The existing families
+    cannot express that: text_gate_probe is capped and takes no chash set, so a dense gate crowds the allowed rows
+    out of its first N matches; text_gated_search_hnsw_first walks the HNSW index and takes no chash set, so a
+    filtered walk can lose recall; text_gated_search_by_chash takes a chash set but evaluates no gate. The service
+    forbids raw SQL text (RawSqlGateTest), so the combination is a schema function, as the other three are.
+
+    THE BODY is text_gated_search_hnsw_first_<dim> (vectors-031-1) with "c.chash = ANY(p_chashes)" added: the same
+    model, tenant, collection, live(c), where and gate predicates, the same row shape, and the same order
+    (distance, then id). The caller runs it with index scans off, so the planner reads the allowed rows by the
+    primary key (tenant, collection, chash), evaluates the gate on those rows only, and sorts by distance: exact, and
+    bounded by the size of the allow-list (at most 3000 at the route), never by the size of the collection.
+
+    SHAPE. Three CREATE OR REPLACE FUNCTION statements (new names, so no existing signature, generated routine or
+    caller changes), EXECUTE granted to nexus_svc explicitly as vectors-031-1 did, a rollback that drops them.
+
+    No DATA EFFECT: function definitions and a grant only. After vectors-041 and telemetry-017, before the
+    runAlways grants blocks.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-042-1" author="nexus-jypmj">
+        <comment>RDR-232 chash_allow: text_gated_search_allowed_384/768/1024, the exact text-gated rank over an allow-list of chunk hashes (text_gated_search_hnsw_first with chash = ANY(p_chashes) added), granted to nexus_svc. New names; no existing function changes. No data effect: function definitions and a grant only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_allowed_384(
+    p_query        nexus.vector(384),
+    p_query_text   text,
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_allowed_768(
+    p_query        nexus.vector(768),
+    p_query_text   text,
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_allowed_1024(
+    p_query        nexus.vector(1024),
+    p_query_text   text,
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.text_gated_search_allowed_384(nexus.vector, text, bytea[], text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.text_gated_search_allowed_768(nexus.vector, text, bytea[], text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.text_gated_search_allowed_1024(nexus.vector, text, bytea[], text[], jsonb, text, int, text, text) TO nexus_svc;
+
+DO $post$
+DECLARE
+    n int;
+BEGIN
+    SELECT count(*) INTO n
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gated_search_allowed_384', 'text_gated_search_allowed_768', 'text_gated_search_allowed_1024');
+    IF n <> 3 THEN
+        RAISE EXCEPTION 'vectors-042-1: expected exactly 3 text_gated_search_allowed functions (one signature each), found %', n;
+    END IF;
+END
+$post$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.text_gated_search_allowed_384(nexus.vector, text, bytea[], text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_allowed_768(nexus.vector, text, bytea[], text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_allowed_1024(nexus.vector, text, bytea[], text[], jsonb, text, int, text, text);
+]]></sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

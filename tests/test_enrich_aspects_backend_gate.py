@@ -100,7 +100,7 @@ def test_dry_run_is_not_gated_on_a_backend_and_names_its_cost_basis(
     assert result.exit_code == 0, result.output
     assert "2 document(s) in 'knowledge__delos'" in result.output, result.output
     assert "typical for paper-sized documents" in result.output
-    assert "mean of three measured papers, $0.13-0.31 each, 54k-109k prompt tokens" in result.output
-    assert "far lower for short notes (one measured at $0.0035)" in result.output
+    assert "mean of three measured papers, $0.0065-0.013 each, about 28k-66k prompt tokens" in result.output
+    assert "short notes cost less" in result.output
     # $0.20 is a mean, not a ceiling: a claim of a bound is the defect this pins.
     assert "upper bound" not in result.output

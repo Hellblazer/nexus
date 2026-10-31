@@ -15,6 +15,7 @@ if str(_SCRIPTS) not in sys.path:
 
 from bench.model_tier_study import (  # noqa: E402
     ARMS,
+    ARMS_BY_NAME,
     BUDGET_CEILING_USD,
     analyze,
     BudgetExceeded,
@@ -194,3 +195,44 @@ class TestRunResume:
         with pytest.raises(BudgetExceeded):
             await mts.run(["operator_filter"], n=1, out_path=out, timeout=1)
         assert calls == 0
+
+
+# ── nexus-j6un5.2: a named reference arm, so the cheap tier can be measured
+# against Sonnet 5.5 instead of the retired Fable box default ──────────────
+
+
+def test_pinned_arms_name_their_full_model_ids() -> None:
+    assert ARMS_BY_NAME["sonnet-5-5"].model == "claude-sonnet-5-5"
+    assert ARMS_BY_NAME["haiku-5-5"].model == "claude-haiku-5-5"
+    assert ARMS_BY_NAME["haiku-5-5"].family == "haiku-5-5"
+    assert {a.name for a in ARMS} <= set(ARMS_BY_NAME)
+
+
+def test_dispatch_order_takes_an_arm_subset() -> None:
+    arms = (ARMS_BY_NAME["sonnet-5-5"], ARMS_BY_NAME["haiku-5-5"])
+    assert dispatch_order(["operator_filter"], n=2, arms=arms) == [
+        ("operator_filter", 0, "sonnet-5-5"), ("operator_filter", 0, "haiku-5-5"),
+        ("operator_filter", 1, "sonnet-5-5"), ("operator_filter", 1, "haiku-5-5"),
+    ]
+
+
+def test_analyze_against_a_named_reference_arm() -> None:
+    recs = [
+        _rec("operator_filter", arm, i, _filter_out(["a", "b"]), cost=c, model=f"claude-{arm}")
+        for arm, c in (("sonnet-5-5", 0.4), ("haiku-5-5", 0.1))
+        for i in range(3)
+    ]
+    e = analyze(recs, reference="sonnet-5-5")["operators"]["operator_filter"]
+    assert e["verdicts"] == {"haiku-5-5": "NOT_REFUTED"}
+    assert e["arms"]["haiku-5-5"]["cost_ratio_vs_sonnet-5-5"] == pytest.approx(0.25)
+    assert e["reference_void"] is False
+
+
+def test_named_reference_family_violation_voids() -> None:
+    recs = [
+        _rec("operator_filter", arm, i, _filter_out(["a"]),
+             model="claude-haiku-4-5" if (arm, i) == ("sonnet-5-5", 0) else f"claude-{arm}")
+        for arm in ("sonnet-5-5", "haiku-5-5") for i in range(3)
+    ]
+    e = analyze(recs, reference="sonnet-5-5")["operators"]["operator_filter"]
+    assert e["reference_void"] is True and e["verdicts"] == {"haiku-5-5": "VOID"}

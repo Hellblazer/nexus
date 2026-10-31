@@ -257,7 +257,7 @@ def resolve_api_model(model: str | None) -> str:
     ``None`` or blank is the default strong model, :data:`STRONG_DEFAULT_ALIAS`
     (the same model ``_pin_default_model`` gives the CLI path). A CLI alias maps
     through :data:`_API_MODEL_IDS`; anything else is already a full id (the
-    aspect config pins ``claude-haiku-4-5-20251001``) and passes through
+    aspect config pins ``claude-haiku-5-5``) and passes through
     unchanged."""
     name = (model or "").strip() or STRONG_DEFAULT_ALIAS
     return _API_MODEL_IDS.get(name.lower(), name)

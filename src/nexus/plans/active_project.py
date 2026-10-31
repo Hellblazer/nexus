@@ -12,8 +12,11 @@ A named source such as ``RDR-084`` can exist in several projects. The order that
 resolver reports an ambiguity naming every candidate; nothing is guessed.
 
 An owner this tier supplies is ``inferred`` (:class:`~nexus.plans.evidence.OwnerResolution`), shown as
-such in the envelope, and it qualifies **source resolution only**. It never narrows the secondary
-streams (``owner_narrowing.request_owners`` reads explicit bindings only, nexus-jypmj.1.18).
+such in the envelope, and it qualifies **source resolution only**: it is not an owner binding, so on its own it
+narrows no secondary stream (``owner_narrowing.request_owners`` reads explicit bindings only, nexus-jypmj.1.18).
+The one-source rule (:mod:`nexus.plans.single_source`) may narrow a run to the document the inference chose, but
+only when no other project carries the same number; with a foreign candidate the run is not narrowed and says why
+(nexus-jypmj, Sam 2026-10-30).
 
 What the server knows (the trace, bead nexus-jypmj.2.4). ``nx-mcp`` is a stdio server, one process per
 Claude Code session. The plugin launcher moves it to ``CLAUDE_PROJECT_DIR`` before it execs the server,
