@@ -2427,7 +2427,7 @@ def test_a_stand_in_whose_harness_died_exits_instead_of_polling_forever(tmp_path
             deadline = time.monotonic() + 30
             while not (tmp_path / "ready.json").exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
-            engine_pid = json.loads((tmp_path / "ready.json").read_text())["engine"]
+            engine_pid = json.loads((tmp_path / "ready.json").read_text(encoding="utf-8"))["engine"]
         time.sleep(1.5)
         assert child.poll() is None, "non-vacuity: the stand-in waits while its harness lives"
         harness.kill()

@@ -942,8 +942,12 @@ class TestMergeCommand:
             def close(self):
                 self.closed = True
 
+        class _NoEntryCat:
+            def resolve(self, t):
+                return None
+
         writer = _TimingOutWriter()
-        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: object())
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: _NoEntryCat())
         monkeypatch.setattr("nexus.commands.catalog._get_catalog_writer", lambda: writer)
         monkeypatch.setattr("nexus.commands.catalog._resolve_tumbler", lambda cat, t: t)
 
@@ -957,6 +961,77 @@ class TestMergeCommand:
         assert "may have completed" in text
         assert "re-running it is safe" in text
         assert writer.closed
+
+    @staticmethod
+    def _fake_merge(monkeypatch, counts: dict[str, int]):
+        """Fully faked (no engine): pins the CLI's chunk preflight only.
+        ``counts`` maps tumbler to the chunk_count its resolve reports."""
+
+        class _Entry:
+            def __init__(self, n: int) -> None:
+                self.chunk_count = n
+
+        class _Cat:
+            def resolve(self, t):
+                return _Entry(counts[str(t)])
+
+        class _Writer:
+            def __init__(self) -> None:
+                self.merged: list = []
+                self.closed = False
+
+            def merge_documents(self, duplicate, canonical):
+                self.merged.append((duplicate, canonical))
+                return {"source_uri_moved": False}
+
+            def close(self):
+                self.closed = True
+
+        writer = _Writer()
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: _Cat())
+        monkeypatch.setattr("nexus.commands.catalog._get_catalog_writer", lambda: writer)
+        monkeypatch.setattr("nexus.commands.catalog._resolve_tumbler", lambda cat, t: t)
+        return writer
+
+    def test_merge_refuses_when_only_the_duplicate_holds_chunks(self, monkeypatch):
+        """nexus-bivz3.27: the merge moves identity and links, never chunks.
+        Folding a chunk-holding duplicate into a chunkless canonical left the
+        RDR-231 halt rehearsal's note at Chunks: 0, so the CLI refuses it
+        unless --force, and names both counts."""
+        writer = self._fake_merge(monkeypatch, {"1.1.1": 7, "1.1.2": 0})
+
+        result = CliRunner().invoke(main, ["catalog", "merge", "1.1.1", "1.1.2"])
+
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "1.1.1 holds 7 chunk(s)" in result.output, result.output
+        assert "1.1.2 holds none" in result.output, result.output
+        assert "--force" in result.output
+        assert writer.merged == []
+        assert writer.closed
+
+    def test_merge_force_proceeds_and_says_the_chunks_stay(self, monkeypatch):
+        writer = self._fake_merge(monkeypatch, {"1.1.1": 7, "1.1.2": 0})
+
+        result = CliRunner().invoke(
+            main, ["catalog", "merge", "1.1.1", "1.1.2", "--force"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert writer.merged == [("1.1.1", "1.1.2")]
+        assert "chunks: duplicate 7, canonical 0" in result.output, result.output
+
+    @pytest.mark.parametrize(("dup", "canon"), [(0, 0), (0, 5), (3, 5)])
+    def test_merge_proceeds_unless_only_the_duplicate_holds_chunks(
+        self, monkeypatch, dup, canon,
+    ):
+        writer = self._fake_merge(monkeypatch, {"1.1.1": dup, "1.1.2": canon})
+
+        result = CliRunner().invoke(main, ["catalog", "merge", "1.1.1", "1.1.2"])
+
+        assert result.exit_code == 0, result.output
+        assert writer.merged == [("1.1.1", "1.1.2")]
+        assert f"chunks: duplicate {dup}, canonical {canon}" in result.output
 
     @pytest.mark.t2_tenant
     def test_merge_remaps_a_link_and_reports_the_count(

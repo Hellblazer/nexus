@@ -2198,7 +2198,16 @@ public final class TupleRepository {
                     insertClaimLog(ctx, tenant, subspace, t.name(), row.getId(),
                             row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now);
                     attempts = attempts + 1;
-                    if (attempts >= maxAttempts) {
+                    if (attempts >= maxAttempts && row.getDirty()) {
+                        // nexus-7rwaj (RDR-235 E4): the lapsed holder's row was replaced while it worked,
+                        // so it carries a body nobody extracted. Dead-lettering it here would bury that
+                        // body, as the sweep and nack dead:true no longer do. Sam's ruling (2026-10-31):
+                        // requeue with attempts reset to 0, the new body being a fresh task. The row is
+                        // locked FOR NO KEY UPDATE, so dirty cannot change under this read. Logged as the
+                        // expire above only; the claim below hands the row to this caller, as for any
+                        // available row (it clears the claim columns and the dirty mark itself).
+                        attempts = 0;
+                    } else if (attempts >= maxAttempts) {
                         ctx.update(TUPLES)
                                 .set(TUPLES.CLAIM_STATE, CLAIM_STATE_DEAD)
                                 .set(TUPLES.CLAIMANT, (String) null)
@@ -2538,6 +2547,12 @@ public final class TupleRepository {
      * {@code false} is a plain nack. {@code dead: true} on a claim of a {@code lock: true} template is a
      * {@link SchemaViolationException} naming {@code release}, as {@link #ack} is refused on one: a lock
      * must never dead-letter. The claim stays live.
+     *
+     * <p>nexus-7rwaj: a dead decision on a DIRTY claim ({@code out mode=replace} wrote a new body while
+     * the holder worked) does not dead-letter. The row returns to available with the new body, attempts
+     * 0, dirty cleared and the claim columns cleared, the log shows {@value #TRANSITION_NACK} only, and
+     * the decision is a compare-and-swap in the UPDATE, so a replace landing after nack's read is caught.
+     * The same applies to the sweep's lapse at {@code max_attempts}.
      */
     public void nack(String tenant, String claimId, String claimant, Long retryAfterSecondsOrNull,
                      boolean dead) {
@@ -2756,7 +2771,10 @@ public final class TupleRepository {
 
     /** Disposition of one {@link #releaseOrDeadLetter} call. */
     enum ReleaseOutcome {
-        /** Released back to available; one {@code releaseTransition} log row. */
+        /**
+         * Released back to available; one {@code releaseTransition} log row. Also the outcome of a dead
+         * decision on a DIRTY row (nexus-7rwaj): requeued with the new body and attempts reset to 0.
+         */
         RELEASED,
         /**
          * Dead-lettered at {@code max_attempts}, or at once by {@code nack}'s {@code dead: true};
@@ -2814,8 +2832,34 @@ public final class TupleRepository {
                 // the new body, and whoever claims it next must consume it.
                 .set(TUPLES.DIRTY, false)
                 .set(TUPLES.ATTEMPTS, attempts)
-                .where(liveClaimCondition(tupleId, claimId))
+                // nexus-7rwaj (RDR-235 E4): a dead decision matches only a CLEAN row. The dirty flag may
+                // be set after the caller read the row (nack reads it unlocked), so the test lives in this
+                // UPDATE's predicate, not in a value read earlier; a dirty row falls to the requeue below.
+                .where(dead ? liveClaimCondition(tupleId, claimId).and(TUPLES.DIRTY.isFalse())
+                        : liveClaimCondition(tupleId, claimId))
                 .execute();
+        if (updated == 0 && dead) {
+            // The row is dirty (or no longer live). A dirty claim holds a body the failed extraction
+            // never saw: Sam's ruling (2026-10-31) returns it to available with that body and attempts
+            // reset to 0, the end state a dirty ack leaves except for attempts, since the new body is a
+            // fresh task. Logged as the release transition only: no dead row, nothing was dead-lettered.
+            int requeued = ctx.update(TUPLES)
+                    .set(TUPLES.CLAIM_STATE, (String) null)
+                    .set(TUPLES.CLAIMANT, (String) null)
+                    .set(TUPLES.CLAIM_ID, (String) null)
+                    .set(TUPLES.CLAIMED_AT, (OffsetDateTime) null)
+                    .set(TUPLES.AVAILABLE_AT, (OffsetDateTime) null)
+                    .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
+                    .set(TUPLES.DIRTY, false)
+                    .set(TUPLES.ATTEMPTS, 0)
+                    .where(liveClaimCondition(tupleId, claimId).and(TUPLES.DIRTY.isTrue()))
+                    .execute();
+            if (requeued == 0) {
+                return ReleaseOutcome.NOT_LIVE;
+            }
+            insertClaimLog(ctx, tenant, subspace, template, tupleId, claimId, claimant, releaseTransition, now);
+            return ReleaseOutcome.RELEASED;
+        }
         if (updated == 0) {
             return ReleaseOutcome.NOT_LIVE;
         }

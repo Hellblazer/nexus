@@ -107,6 +107,9 @@ class World:
         self.position_reads = 0
         self.before_second_manifest_read = None  # called with self, once, before the re-read
         self._manifest_reads = 0
+        self.tombstoned: list[dict] = []  # manifest rows of deleted documents (nexus-6pfgb.58)
+        self.tombstoned_reported = True  # False: an engine before include_tombstoned, which sends no list
+        self.tombstoned_reads: list[list[str]] = []
 
     def doc(self, tumbler: str, *, collection: str = COLL, indexed_at: str = DOC_STAMP,
             title: str = "", file_path: str = "", meta: dict | None = None) -> str:
@@ -164,6 +167,18 @@ class World:
              "collection": r.collection, "labels_written": r.labels_written}
             for d, rows in sorted(self.manifests.items()) for r in rows if r.chash in wanted
         ]
+
+    def deleted(self, tumbler: str, position: int, chash: str, *, collection: str = COLL) -> None:
+        """A tombstoned document holding *chash*: invisible to chash_positions, named by the tombstoned read."""
+        self.tombstoned.append({"chash": chash, "doc_id": tumbler, "position": position, "collection": collection})
+
+    def chash_positions_with_tombstoned(self, chashes: list[str]):
+        rows = self.chash_positions(chashes)  # a test may replace chash_positions; this follows it
+        if rows is None:
+            return None
+        self.tombstoned_reads.append(list(chashes))
+        gone = [t for t in self.tombstoned if t["chash"] in set(chashes)] if self.tombstoned_reported else None
+        return rows, gone
 
     # writer ---------------------------------------------------------------
     def append_manifest_many(self, docs, *, collection, **kw) -> dict:
@@ -878,6 +893,100 @@ def test_a_chash_that_gained_a_second_row_before_the_write_is_skipped(world: Wor
 
     assert world.appends == []
     assert "1 changed meanwhile" in result.detail
+
+
+# ── nexus-6pfgb.58: a tombstoned co-owner ─────────────────────────────────────
+
+
+def test_a_chash_also_held_by_a_tombstoned_document_is_not_filled(world: World) -> None:
+    """The bead's pin. 1.1.1 and 1.1.2 each hold a chash alone among LIVE documents and the chunk row carries a
+    label for both; a deleted document also held 1.1.1's chash, so that label may be its. Only 1.1.2 is filled.
+    Mutating the rung to ignore the tombstoned holders fills both."""
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    world.doc("1.1.2")
+    world.row("1.1.2", 0, h(2))
+    _labelled(world, h(1))
+    _labelled(world, h(2))
+    world.deleted("9.9.9", 4, h(1))
+    rung = world.rung()
+
+    result = rung.converge(Report())
+
+    assert result.outcome is ConvergeOutcome.COMPLETED
+    assert world.labels("1.1.1") == [(0, None, None, None, False)], "the shared-with-a-deleted-document row stays legacy"
+    assert world.labels("1.1.2") == [(0, "Refs", "references", 9, True)]
+    assert "1 also held by a deleted document" in result.detail
+    assert [a[1] for a in world.appends] == [[("1.1.2", [{
+        "chash": h(2), "position": 0, "section_title": "Refs", "section_type": "references",
+        "page_number": 9, "labels_written": True}])]]
+
+
+def test_a_tombstoned_holder_of_another_chash_does_not_stop_this_fill(world: World) -> None:
+    """The deleted holder is counted for a chash this live row holds alone, not for a chash it does not hold."""
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.deleted("9.9.9", 0, h(7))  # an unrelated chash
+    result = world.rung().converge(Report())
+
+    assert world.labels("1.1.1") == [(0, "Refs", "references", 9, True)]
+    assert "0 also held by a deleted document" in result.detail
+
+
+def test_dry_run_and_verify_do_not_count_a_row_with_a_tombstoned_holder_as_fillable(world: World) -> None:
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.deleted("9.9.9", 0, h(1))
+    rung = world.rung()
+
+    assert rung.detect().converged is True
+    assert rung.verify() is True
+
+
+def test_a_tombstoned_holder_that_appears_between_the_scan_and_the_write_stops_the_fill(world: World) -> None:
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.before_second_manifest_read = lambda w: w.deleted("9.9.9", 0, h(1))  # a co-owner is deleted meanwhile
+
+    result = world.rung().converge(Report())
+
+    assert world.appends == [] and world.labels("1.1.1") == [(0, None, None, None, False)]
+    assert "1 changed meanwhile" in result.detail
+    assert len(world.tombstoned_reads) == 2, "the batch is read for tombstoned holders at the scan and again before the write"
+
+
+def test_an_engine_that_cannot_list_tombstoned_holders_is_not_applicable_and_writes_nothing(world: World) -> None:
+    """Filling without the read is the gap: an engine before include_tombstoned sends no list, which is not 'none'."""
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.tombstoned_reported = False
+    rung = world.rung()
+
+    status = rung.detect()
+
+    assert status.applicable is False and "tombstoned" in status.pending_detail
+    result = world.rung().converge(Report())
+    assert result.outcome is ConvergeOutcome.DEFERRED and "tombstoned" in result.detail
+    assert world.appends == [] and world.labels("1.1.1") == [(0, None, None, None, False)]
+
+
+def test_a_reader_with_no_tombstoned_read_is_not_applicable(world: World) -> None:
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    reader = SimpleNamespace(all_documents=world.all_documents, get_manifests=world.get_manifests,
+                             chash_positions=world.chash_positions, close=lambda: None)
+    rung = ManifestSectionLabelsRung(
+        reader_factory=lambda: reader, writer_factory=lambda: world, t3_factory=lambda: world,
+        record_fn=lambda: None, memo_store=world.memo, now_fn=lambda: world.now)
+
+    assert rung.detect().applicable is False
+    assert rung.converge(Report()).outcome is ConvergeOutcome.DEFERRED
+    assert world.appends == []
 
 
 def test_a_write_the_engine_refuses_defers_and_the_row_stays_fillable(world: World) -> None:

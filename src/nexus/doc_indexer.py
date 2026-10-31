@@ -1349,7 +1349,12 @@ def _register_or_lookup_doc_id(
         # indexer writes), so the named-source sibling rule reads it without the aspect worker. Passed only
         # when there is one, so a writer double that predates ``meta`` is untouched for every other type.
         _register_extra: dict = {}
-        _stamp = _rdr_frontmatter_stamp(file_path, content_type)
+        # nexus-6pfgb.23: the document's source_format, derived from the two columns this call registers
+        # (the engine's own rule), so it exists from the pre-flight on. The tags and category need the kind
+        # of index run (a PDF is "paper" here, "prose" under the repo pass), so the post-index hooks stamp
+        # those; a pair the rule derives nothing for sends no key.
+        from nexus.catalog.indexed_meta import source_format_meta  # noqa: PLC0415 — deferred like the function's other catalog imports
+        _stamp = {**_rdr_frontmatter_stamp(file_path, content_type), **source_format_meta(content_type, fp)}
         if _stamp:
             _register_extra["meta"] = _stamp
         _write_result = writer.register(
@@ -3740,7 +3745,22 @@ def _catalog_markdown_hook(
         # pre-flight registration, nexus-ivzw8).
         title, year, author = _parse_md_frontmatter(md_path)
         # The document keys of this registration (RDR-236 Phase 1): sent with a real value only.
-        doc_meta: dict[str, Any] = {"extraction_source": extraction_source or "file"}
+        # nexus-6pfgb.8 and nexus-6pfgb.23: plus the tags, category and source_format this document's own
+        # row writer stamps. One ``meta`` per hook run: it rides every leg below (the update of an existing
+        # row, the registration of a new one, the update after a registration that resolved onto an existing
+        # row), so a document costs no extra request.
+        from nexus.catalog.indexed_meta import markdown_register_meta  # noqa: PLC0415 — deferred like the hook's other catalog imports
+
+        def _meta_for(row_content_type: str, row_file_path: str | Path) -> dict[str, Any]:
+            return {**markdown_register_meta(row_content_type, row_file_path), "extraction_source": extraction_source or "file"}
+
+        def _meta_of_row(row: Any) -> dict[str, Any]:
+            # An existing row keeps the content type and file path it was registered with (the update never
+            # changes them), and the engine derives its source_format from those two columns, so the stamp is
+            # read from them, never from this call's arguments.
+            return _meta_for(getattr(row, "content_type", "") or content_type, getattr(row, "file_path", "") or md_path)
+
+        doc_meta = _meta_for(content_type, md_path)  # a row this hook registers takes this call's arguments
 
         owner_name = corpus if corpus else "standalone-docs"
         # Curator-only lookup — see _register_or_lookup_doc_id for
@@ -3816,7 +3836,7 @@ def _catalog_markdown_hook(
             # catalog author is curated once set, so a re-index fills an empty column and never overwrites.
             if author and not (getattr(existing, "author", "") or "").strip():
                 update_kwargs["author"] = author
-            update_kwargs["meta"] = doc_meta
+            update_kwargs["meta"] = _meta_of_row(existing)
             writer.update(existing.tumbler, **update_kwargs)
             if derived_source_uri and not from_repo_owner and not getattr(existing, "source_uri", ""):
                 # nexus-njn1a: a curator document an earlier release registered by a relative path has
@@ -3924,14 +3944,15 @@ def _catalog_markdown_hook(
                 # update, and so does the author, under the same fill-only rule as the branch above
                 # (nexus-6pfgb.7): only where the resolved row's author is empty.
                 _resolved_tumbler = tumbler_from_register_result(_write_result)
-                _resolved_update: dict = {"meta": doc_meta}
-                if author:
-                    try:
-                        _resolved = reader.resolve(_resolved_tumbler)
-                    except Exception:  # noqa: BLE001 — advisory read: without it the author is simply not filled
-                        _resolved = None
-                    if _resolved is not None and not (getattr(_resolved, "author", "") or "").strip():
-                        _resolved_update["author"] = author
+                try:
+                    _resolved = reader.resolve(_resolved_tumbler)
+                except Exception:  # noqa: BLE001 — advisory read: without it the author is not filled and the stamp takes this call's arguments
+                    _resolved = None
+                # The resolved row is another owner's, registered with its own content type and file path: the
+                # stamp is read from them (nexus-6pfgb.23), as on the update branch above.
+                _resolved_update: dict = {"meta": _meta_of_row(_resolved) if _resolved is not None else doc_meta}
+                if author and _resolved is not None and not (getattr(_resolved, "author", "") or "").strip():
+                    _resolved_update["author"] = author
                 writer.update(_resolved_tumbler, **_resolved_update)
     except Exception as exc:  # noqa: BLE001 — best-effort catalog markdown hook; logged + audited, cleanup in finally
         # nexus-ou4tb (site from the e9ru2 review): an indexed markdown doc

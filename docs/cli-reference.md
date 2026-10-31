@@ -1478,7 +1478,7 @@ traceback) if the target is not a well-formed tumbler.
 ### nx catalog merge
 
 ```
-nx catalog merge DUPLICATE CANONICAL
+nx catalog merge DUPLICATE CANONICAL [--force]
 ```
 
 Collapse `DUPLICATE` into `CANONICAL` in ONE engine transaction
@@ -1512,6 +1512,12 @@ tumbler not found (including one belonging to a different tenant, which
 reads identically to "not found" under RLS); a `DUPLICATE` already aliased
 to some OTHER canonical (settle that alias first); or a merge that would
 close an alias cycle.
+
+The merge moves identity and links, never chunks or the collection
+(nexus-bivz3.27). When `DUPLICATE` holds chunks and `CANONICAL` holds none,
+the merged document would read as having no chunks, so the command refuses
+and suggests merging the other way; `--force` merges anyway. Every merge
+prints both chunk counts (`chunks: duplicate N, canonical M`).
 
 ### nx catalog gc
 
@@ -1653,7 +1659,7 @@ nx catalog backfill-meta [--apply] [--json]
 One-time, fill-only stamp of the catalog `meta` keys that the RDR-236 Phase 1 homes now write at index and put time, for documents written before them (nexus-6pfgb.10). Dry run by default. A key the entry already holds (a retraction `''` / `0` / `[]` included, tested by presence, not truthiness) and a non-empty catalog column are never touched, and a key is sent only with a real value (the catalog merges `meta`; an explicit empty overwrites). A run that examines no document exits 1.
 
 - **Notes** (`knowledge`): `ttl_days` and `put_at` come only from a chunk row the note itself wrote (`row_written_by`: stamp and title), `put_at` being that row's `indexed_at`. `tags` (written as a JSON array, a legacy comma string split once), `category` and `source_agent` come from that row or, when there is none, from a row of a chunk the note solely owns that `row_may_give_tags` allows. A note recovered that way has no TTL to give: it gets `put_at` and `ttl_days` 0 and leaves the keyless count. An entry that already holds a note key is authoritative: only `put_at` may still be filled, and only from a row with the same TTL.
-- **Indexed documents**: `extraction_method`, `quality_gate_overridden` (only where the rows say `True`), `extraction_source` (only where a row carries a value), `frecency_score` with `frecency_computed_at` (the rows' latest `indexed_at`; a score of 0 is not sent) and the catalog `author` (from `source_author`, a plain string only; where the column is empty) are copied from chunks the document solely owns, when its sampled rows (64 at most, spread over the document) agree and are no later than the document plus five minutes. `tags`, `category` and `source_format` are not backfilled: they become generated columns in RDR-236 Phase 3. A legacy `tags` string is never converted here; the `note-tags-array` upgrade rung does that.
+- **Indexed documents**: `extraction_method`, `quality_gate_overridden` (only where the rows say `True`), `extraction_source` (only where a row carries a value), `frecency_score` with `frecency_computed_at` (the rows' latest `indexed_at`; a score of 0 is not sent) and the catalog `author` (from `source_author`, a plain string only; where the column is empty) are copied from chunks the document solely owns, when its sampled rows (64 at most, spread over the document) agree and are no later than the document plus five minutes. `source_format` (`pdf`, `markdown`, `code` or `prose`, nexus-6pfgb.23) is not read from a chunk at all: it is derived from the entry's own `content_type` and `file_path` by the rule of the engine's `nexus.catalog_source_format` (the extension is read first: `.pdf`, or type `pdf`/`paper`, is `pdf`; `.md`/`.markdown` is `markdown` whatever the type; type `code` is `code`; type `prose`/`rdr` is `prose`), so a document whose chunks are all shared gets it too. A pair the rule derives nothing for is residue, with the reason `no_rule` (it has a path, no rule matched) or `no_file_path` (it has none and its type is outside the rules). The `--json` report carries these under `keys.doc.source_format`. `tags` and `category` of an indexed document are not backfilled: `nx index repo` and the `nx index` verbs stamp them (and `source_format`) in the document's `meta` when they register or update it (nexus-6pfgb.8), a pre-existing document gets them on the next run that touches it, and the engine reads the chunk row until then. A legacy `tags` string is never converted here; the `note-tags-array` upgrade rung does that.
 - Single-owner means `chash_positions` shows exactly one live owner in the chunk's own collection. A document whose chunks are all shared is skipped and counted. A tombstoned co-owner is not counted (no 0.1.165 client read lists one); the `indexed_at` guard stands against a departed co-owner that wrote last. A failed owner or row lookup withholds that document's row-sourced keys and counts it; it never fails the run.
 
 The dry run prints, per key, how many documents were examined, already held it, were skipped as shared, would be stamped, or are residue (the reasons are in `--json`). The `bib_*` columns of documents indexed with `nx index pdf --enrich` on the batch path are filled by `nx enrich bib COLLECTION --backfill-catalog`, which now also accepts chunks that carry year, authors, venue and citation count but no backend id (fill-only, no id written, `bib_enriched_at` set).

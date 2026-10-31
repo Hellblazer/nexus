@@ -334,15 +334,18 @@ class InMemoryPipelineEngine:
         return {"updated": True}
 
     def complete(self, body: dict) -> dict:
-        return self._set_status(body, "completed")
+        # nexus-euczk, as PipelineRepository.markCompleted: only a live run completes.
+        return self._set_status(body, "completed", only=("running", "resuming"))
 
     def fail(self, body: dict) -> dict:
         return self._set_status(body, "failed", error=body.get("error", ""))
 
-    def _set_status(self, ref: dict, status: str, *, error: str | None = None) -> dict:
+    def _set_status(
+        self, ref: dict, status: str, *, error: str | None = None, only: tuple[str, ...] | None = None,
+    ) -> dict:
         pid = self._lock_run(ref)  # one lock per logical write, as the engine
         row = self.pipelines.get(pid) if pid is not None else None
-        if row is not None:
+        if row is not None and (only is None or row["status"] in only):
             row["status"] = status
             if error is not None:
                 row["error"] = error

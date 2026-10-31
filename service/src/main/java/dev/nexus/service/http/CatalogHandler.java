@@ -1715,6 +1715,13 @@ public final class CatalogHandler implements HttpHandler {
      * Search's reverse lookup, with a payload proportional to the hits rather than
      * to the referencing documents' full manifests. Same IN-list cap as its
      * siblings; the client reconciles {@code len(rows) == count}.
+     *
+     * <p>nexus-6pfgb.58 (ADDITIVE): the optional request key {@code "include_tombstoned": true} adds
+     * {@code "tombstoned": [{chash, doc_id, position, collection}], "tombstoned_count": N} to the reply, the manifest
+     * rows of TOMBSTONED documents holding one of the chashes ({@link dev.nexus.service.db.CatalogRepository#tombstonedChashHolders}).
+     * {@code rows} and {@code count} are unchanged by it, and without the key (or with anything but {@code true}) the
+     * reply is byte-identical to before. An engine that predates the key ignores it and sends no {@code tombstoned},
+     * which a client reads as "this engine cannot say", never as "none".
      */
     @SuppressWarnings("unchecked")
     private void handleChashPositions(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -1729,6 +1736,13 @@ public final class CatalogHandler implements HttpHandler {
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
         }
         var rows = repo.chashPositions(tenant, chashes);
+        if (Boolean.TRUE.equals(body.get("include_tombstoned"))) {
+            var tombstoned = repo.tombstonedChashHolders(tenant, chashes);
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+                Map.of("rows", rows, "count", rows.size(),
+                       "tombstoned", tombstoned, "tombstoned_count", tombstoned.size())));
+            return;
+        }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("rows", rows, "count", rows.size())));
     }

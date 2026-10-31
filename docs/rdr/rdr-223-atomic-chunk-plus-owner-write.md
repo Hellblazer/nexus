@@ -70,11 +70,18 @@ Amended 2026-10-01: `upsert-reference-only` is retired rather than refused
 (Phase 3 Step 2), so this Gap closes by refusing two routes and deleting the
 third.
 
+Amended 2026-10-21 (nexus-nt76j, commit 38f4167be): `store-put` is retired
+too. The engine answers `POST /v1/vectors/store-put` with 410 Gone and the fix
+named (`VectorHandler`, pinned by `VectorHandlerStorePutRouteGoneTest`). This
+Gap therefore closes by refusing one route (`upsert-chunks`) and retiring two.
+
 #### Gap 4: One path writes ownerless chunks on purpose
 
 In `nx index repo`, chunks from a file with no catalog document go to the
-legacy upsert and are never given an owner (`src/nexus/indexer.py:5598`,
-event `combined_write_orphan_chunks_routed_to_legacy_upsert`). Since
+legacy upsert and are never given an owner (on 2026-09-28 at
+`src/nexus/indexer.py:5598`, event `combined_write_orphan_chunks_routed_to_legacy_upsert`;
+that event is no longer in `src/`, and the route is replaced as Technical
+Design 4 describes). Since
 `live(c)`, search hides them, so they are written and never found.
 
 ## Relationship to Prior RDRs
@@ -126,7 +133,9 @@ nexus-76's store-path and import review.
 ### Key Discoveries
 
 - **F-1 (Verified, source).** One client path uses the combined write: the
-  `nx index repo` batch flush (`src/nexus/indexer.py:5658`), for files that
+  `nx index repo` batch flush (the `ChunkBatcher` flush in
+  `src/nexus/chunk_batcher.py`; cited as `src/nexus/indexer.py:5658` on
+  2026-09-28), for files that
   fit one batch. Sixteen paths are split: twelve can orphan on a client
   death (R-13), one is ownerless by design (Gap 4), one cannot orphan
   (`collection re-embed` rewrites already-owned chunks), two are dead code
@@ -148,7 +157,8 @@ nexus-76's store-path and import review.
   rows by position. It takes no chunks today; inserting them after the
   index-run lock reproduces `writeManifestRows` exactly.
 - **F-4 (Verified, source).** `store-put` writes no owner row.
-  `VectorHandler.handleStorePut` (`VectorHandler.java:736`) calls
+  `VectorHandler.handleStorePut` (`VectorHandler.java:736` on 2026-09-28; deleted
+  with the route in 38f4167be, 2026-10-21) calls
   `putWithTokens`, which only upserts chunks; the note's `catalog_doc_id`
   goes into chunk metadata. MCP `store_put` registers the catalog document
   before the chunk write, so the owner exists; its rows are just not written
@@ -181,8 +191,13 @@ nexus-76's store-path and import review.
   **Status**: Verified — **Method**: Source Search (F-5)
 - [ ] Identity-less files in `nx index repo` are rare and point at an upstream
   registration gap (A-1, `nexus_rdr/223-research-9`) — **Status**:
-  Unverified — **Method**: Docs Only. Phase 2 counts them before the route is
-  removed; the count, not this assumption, decides the registration fix.
+  Unverified (stays assumed); **Method**: Docs Only. Phase 2 Step 3 recorded
+  the count as a deferral (`nexus_rdr/223-research-16`, 2026-09-30). No
+  identity-less file was observed in the logs or the census, and neither half
+  of the assumption is established. The census did find 48 manifest-less chunks
+  (code and docs, supersede residue of files that still have a document; see
+  Day 2 Operations). The route change (`9163f348e`) refuses identity-less files
+  instead of fixing a registration gap, so no registration fix was made.
 
 ## Proposed Solution
 
@@ -191,8 +206,8 @@ nexus-76's store-path and import review.
 One rule: every chunk the engine inserts through the routes named here is
 written in the same transaction as at least one owner row, so a client never
 needs two requests to make a chunk owned. The rule is enforced for those
-routes (the combined write routes, and the refusal on `upsert-chunks` and
-`store-put`), not for every insert the engine can perform. Known exceptions:
+routes (the combined write routes, and the refusal on `upsert-chunks`;
+`store-put` is retired, nexus-nt76j, 2026-10-21), not for every insert the engine can perform. Known exceptions:
 the SQL functions whose live definition inserts into `nexus.chunks` (the last
 definition of each function in the changelog's include order, rollback blocks
 excluded). The list is `_CHUNK_INSERTER_ALLOWLIST` in
@@ -229,7 +244,8 @@ none of them and cannot go stale when one is redefined.
    leaves a document with some of its batches and no chunk this run wrote
    without an owner; the deferred sweep never runs, so the previous run's
    dropped chunks stay ownerless and hidden from search. The RDR-192 reaper
-   (nexus-2x9xa, not yet built) removes them: it covers every prefix,
+   (nexus-2x9xa, closed; `ChunkReaper` in
+   `service/src/main/java/dev/nexus/service/ChunkReaper.java`) removes them: it covers every prefix,
    `knowledge__`, `docs__`, `code__` and `rdr__`, behind a per-collection
    census gate (Sam, 2026-09-30, T2
    `nexus/rdr-223-192-sam-decisions-2026-09-30-reaper-staging`; this text
@@ -271,9 +287,10 @@ none of them and cannot go stale when one is redefined.
      `store_put_manifest_direct_with_recovery` (`store_hook.py:1469`, a
      single retry that re-puts pieces a concurrent rollback deleted between
      the chunk write and the manifest write, R-15), which has no gap left to
-     recover;
+     recover. Both names are absent from `src/` on develop (checked
+     2026-10-31), and the `/store-put` route they called is retired (Phase 3 Step 2);
    - retired: `rollback_uncataloged_chunk_write` (a chunk can no longer land
-     without its manifest), and nexus-bb6n2's client reap of chashes a
+     without its manifest; absent from `src/` on develop, checked 2026-10-31), and nexus-bb6n2's client reap of chashes a
      supersede dropped (`store_hook.py:1449-1460`), replaced by `write_many`'s
      own sweep;
    - kept: the index fence (`_fence_begin`, `_fence_fail`), the registration
@@ -284,14 +301,22 @@ none of them and cannot go stale when one is redefined.
    Each piece is retired only after a test shows its replacement covers the
    same failure. A failed re-put leaves the old manifest intact.
 4. **Stop the ownerless route (closes Gap 4).** The route at
-   `src/nexus/indexer.py:5598` becomes a counted event that writes no chunks,
+   `src/nexus/indexer.py:5598` (as of 2026-09-28) becomes a counted event that writes no chunks,
    and the registration gap behind it is fixed. No ghost documents.
+   As built (`9163f348e`, fix rounds `9dc6f8acd` and `001616071`): a file with
+   no catalog document is refused before chunking (`_refuse_identity_less_files`
+   in `src/nexus/indexer.py`), and the oversize fallbacks write nothing for it
+   (`refuse_identity_less_file` in `src/nexus/oversize_write.py`). A worktree or
+   temp-dir refusal is counted and is not a durable failure; a register or hook
+   failure is a named identity drop recorded in `nexus.index_failures`. The
+   2026-09-28 pointer (`indexer.py:5598`) and its event are gone. No registration
+   fix was made, because none was observed (Critical Assumption 3).
 5. **Refuse ownerless writes, last (closes Gap 3).** *Amended 2026-10-01
    (Sam, 2026-09-30 and 2026-10-01): this ships in the single final cut, not
    after a separate Phase 2 release; it ships log-only first and then
    enforces; and `upsert-reference-only` is retired, not refused. See Phase 3
    Step 2.* Once the client release carrying step 3 is the paired release, `upsert-chunks` and
-   `store-put` accept a write only when every chash in it already
+   `store-put` (retired 2026-10-21, nexus-nt76j; see *store-put* below) accept a write only when every chash in it already
    has a live manifest row in that collection, checked inside the write's own
    transaction; that keeps `collection re-embed` and metadata refreshes of
    owned chunks working. Every other write is refused (422) with an error
@@ -303,9 +328,10 @@ none of them and cannot go stale when one is redefined.
    - *Where.* The handlers pass an ownership guard to the repository's upsert
      methods; the repository methods called without one (the contract and
      fixture tests, the migration ingest) are unchanged, and
-     `OwnershipGuardCoverageScan` reads the main sources, as text, for the four
+     `OwnershipGuardCoverageScan` reads the main sources, as text, for the three
      named repository methods (`upsertChunksWithTokens`, `upsertChunksWithVectors`,
-     `putWithTokens`, `upsertChunks`), so a handler cannot call one of them
+     `upsertChunks`; `putWithTokens` was named here until nexus-nt76j deleted it
+     with the `store-put` route), so a handler cannot call one of them
      without building a guard. It is a name match: a new repository method that
      writes chunks, a direct SQL insert, or a changeset that inserts chunks is
      invisible to it. The reference-only writer `upsertReferenceOnlyChunk` was
@@ -372,11 +398,13 @@ none of them and cannot go stale when one is redefined.
      a chunk that lost its owner in between would 422 the whole request. On
      that refusal the client re-reads the batch through the live-filtered get
      and resends only the chashes still owned (`_upsert_reembed_batch`).
-   - *`store-put`.* The route stays, guarded by the same check. No client in
-     this repository calls it (the note writers moved to `write_many` in
-     Phase 2) but nothing here shows it has no production caller, and a route
-     is not retired without that evidence; with the guard it can only rewrite
-     an owned chunk.
+   - *`store-put`.* On 2026-10-01 this bullet said the route stayed, guarded by
+     the same check, because nothing showed it had no production caller. It is
+     now retired (nexus-nt76j, commit `38f4167be`, 2026-10-21): no caller had
+     existed since v7.68.0 (the note writers moved to `write_many` in Phase 2),
+     and the engine answers `POST /v1/vectors/store-put` with 410 Gone and the fix
+     named (`VectorHandler`; `VectorHandlerStorePutRouteGoneTest`). The guard
+     stays on `upsert-chunks`.
    - *Cutover.* The ledger entry is `[not-additive]`: an installed pre-RDR-223
      client gets 422 on its ownerless writes. Every long-lived `nx-mcp` server
      and every hook-spawned `nx` on a machine runs the code it started with, so
@@ -515,8 +543,8 @@ nexus-b50zw closes.
 ### Consequences
 
 - Positive: once Phase 3 lands and the engine runs in `enforce` mode,
-  `upsert-chunks` and `store-put` insert no chunk that lacks a live manifest
-  row in its collection. That is narrower than "no write inserts a chunk
+  `upsert-chunks` inserts no chunk that lacks a live manifest row in its
+  collection (`store-put` answers 410 since 2026-10-21, so it inserts none). That is narrower than "no write inserts a chunk
   without an owner". Not covered: (a) `log-only` mode, the default when
   `NX_OWNERLESS_WRITE_MODE` is unset, which writes as before and only logs and
   counts; (b) repository methods called without a guard (the contract and
@@ -532,8 +560,9 @@ nexus-b50zw closes.
   change.
 - Negative: a crash mid-document still leaves a partial document (some
   batches). It is owned and visible, and the next index run replaces it.
-- Negative: old clients that still call `upsert-chunks` or `store-put`
-  without an owner break when the refusal enforces. The paired-release floor
+- Negative: old clients that still call `upsert-chunks` without an owner break
+  when the refusal enforces. An old client's `store-put` gets 410 Gone (retired
+  2026-10-21, nexus-nt76j). The paired-release floor
   bounds that window, and the single final cut means the engine and its paired
   client release go out together. Sam's condition (2026-09-30): every cloud
   machine upgrades to the new client when the engine deploys (Sam is the only
@@ -678,7 +707,7 @@ reaper and census tests build orphan states through substrate SQL instead of
 #### Step 2: Refuse
 
 In the single final cut, the engine applies Technical Design 5's rule to
-`upsert-chunks` and `store-put`, and deletes `upsert-reference-only`. Delete
+`upsert-chunks` and `store-put` (`store-put` was retired instead, nexus-nt76j, 2026-10-21), and deletes `upsert-reference-only`. Delete
 the dead paths (`db/reconcile.verify_fill_*`, `db/embed_migrate`) and retire
 the staging routes.
 
@@ -721,7 +750,8 @@ if nexus-b50zw closes, retire the staging routes. Sam's decisions of
   and the one apparent hit was a T2 record title in a query string.
   conexus has no caller either. The retirement is a `[not-additive]` ledger
   entry, and `VectorHandlerUpsertReferenceOnlyTest` flips to assert the route
-  is gone. The refusal therefore covers `upsert-chunks` and `store-put`.
+  is gone. The refusal therefore covers `upsert-chunks`; `store-put` is retired
+  (nexus-nt76j, 2026-10-21), not refused.
 - **Staging is retired.** Measured first, then decided by Sam on 2026-09-30
   (T2 `nexus/staging-decision-evidence-2026-09-30`, summarised under
   Alternative 2): the staging routes (`/v1/staging`: load, embed_fill,
@@ -729,11 +759,12 @@ if nexus-b50zw closes, retire the staging routes. Sam's decisions of
   sweep-guard branch that reads them (nexus-z0o2p.27), and nexus-b50zw closes.
   A follow-up bead: `ChunkBatcher` must not bisect a failed flush on a 429 or
   a deadline error.
-Built as nexus-z0o2p.24 (Technical Design 5, "As built"); the gating is
-pending: the real-engine cut-mode run (nexus-z0o2p.37), the cut battery
-against the candidate engine (nexus-0kmat), and the published-client write
-gate (nexus-9a6io) are open, and each blocks the final tag. The flip from
-log-only to enforce on the cloud engine is owned by nexus-z0o2p.40.
+Built as nexus-z0o2p.24 (Technical Design 5, "As built"). The gating beads are
+closed: the real-engine cut-mode run (nexus-z0o2p.37), the cut battery against
+the candidate engine (nexus-0kmat) and the published-client write gate
+(nexus-9a6io). The flip from log-only to enforce on the cloud engine was owned
+by nexus-z0o2p.40 (closed); its bead comments record the cloud engine reporting
+`ownerless_write_mode=enforce` on 2026-10-12.
 
 ### Day 2 Operations
 
@@ -742,6 +773,12 @@ census shows no growth, week over week, in its no-manifest and
 other-collection-only buckets, net of known dispositions; conexus then retires
 its FINDING path (conexus-ekg5). Quarantine and tombstoned-owner rows are
 permanent, correct residents of the census and never read zero.
+
+Sam ruled on 2026-10-31 (bead nexus-z0o2p.29, still open) that the exit is two
+consecutive weeks of no growth in that census, counted from about 2026-11-15.
+Readings taken before then are confounded by the reaper's sweep. The 48
+supersede-residue chunks found on 2026-09-30 (`nexus_rdr/223-research-16`) go
+into the census baseline, so they do not read as growth.
 
 ### New Dependencies
 
@@ -783,14 +820,16 @@ None.
   already owns chunks. See Phase 2 Step 2.)
 - **Scenario**: supplied vector with the wrong dimension or model —
   **Verify**: refused, nothing stored.
-- **Scenario**: Phase 3 refusal — **Verify**: an `upsert-chunks` or
-  `store-put` write of a chash with no live manifest row is refused naming
+- **Scenario**: Phase 3 refusal. **Verify**: an `upsert-chunks` write of a
+  chash with no live manifest row is refused naming
   the combined routes, even when the request names a document, and also with
   `force_re_embed` or client-supplied vectors; ownership is checked before
   embedding, so a refused write never pays the embedder; a re-embed of owned
   chashes is accepted; the seeding helpers still build orphan states. In
   log-only mode the same writes are counted and logged and still land.
   `upsert-reference-only` is not refused: a test asserts the route is gone.
+  `store-put` is also gone (410; `VectorHandlerStorePutRouteGoneTest`), so the
+  refusal scenario no longer applies to it.
 
 ## Finalization Gate
 
@@ -804,7 +843,9 @@ Step 2).
 ### Assumption Verification
 
 Assumptions 1 and 2 are verified by source reading. Assumption 3 (A-1) is
-unverified by design: Phase 2 Step 3 measures it before acting on it.
+unverified. Its Phase 2 Step 3 count is recorded as a deferral
+(`nexus_rdr/223-research-16`): no identity-less file was observed and no
+registration gap was found, so the assumption stays open.
 
 #### API Verification
 
@@ -821,8 +862,9 @@ Phase 1, against the real engine substrate.
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: new wire fields are `[additive]`. The Phase 3 refusal and
-  the `upsert-reference-only` retirement are `[not-additive]`, so the deploy
+- **Versioning**: new wire fields are `[additive]`. The Phase 3 refusal, the
+  `upsert-reference-only` retirement and the `store-put` retirement are
+  `[not-additive]`, so the deploy
   is armed with conexus before the client tag pushes (AGENTS.md, rule
   nexus-1emxn (b)). All of it ships in one engine tag and one paired client
   release (Sam, 2026-09-30).
@@ -894,6 +936,15 @@ unless stated.
 - `scripts/sql/livec_census.sql`
 
 ## Revision History
+
+- 2026-10-31: Closure-critique amendment (T2 `nexus_rdr/223-closure-critique-2026-10-31`,
+  findings S1 to S3). The `store-put` retirement (nexus-nt76j, `38f4167be`,
+  2026-10-21) is recorded where the text still said the route stays. The
+  ownership-guard scan names three methods, not four. The status lines for the
+  gating beads, the reaper and the Day 2 exit are current, and Sam's 2026-10-31
+  ruling on the exit is recorded. The `indexer.py` line pointers that no longer
+  resolve are replaced by symbol names. The A-1 outcome from
+  `nexus_rdr/223-research-16` is recorded as a deferral. Status stays accepted.
 
 - 2026-10-01: Phase 3 Step 2 built (nexus-z0o2p.24): the ownership guard
   (a read before the embed and a recheck inside the write transaction under the
