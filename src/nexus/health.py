@@ -7989,6 +7989,11 @@ _TUPLE_STALE_UNCLAIMED_AGE_S: int = 3600  # 1 hour
 #: independent numbers answering different questions (when does autovacuum
 #: run vs. when should a human look).
 _TUPLE_DEAD_RATIO_WARN: float = 0.20
+#: Dead rows a table needs before its ratio can be a finding: PostgreSQL's
+#: default ``autovacuum_vacuum_threshold``, the count below which autovacuum
+#: itself does not act. Without it a fresh install with one live and one dead
+#: tuple read 50% and failed doctor (nexus-j6un5, the 7.90.0 fresh-install MVV).
+_TUPLE_DEAD_ROWS_FLOOR: int = 50
 
 #: NexusService.SWEEP_INTERVAL_HOURS is 6h; NexusService.java:154's own
 #: comment treats 3x that (18h) as the slack budget before a single
@@ -8768,7 +8773,7 @@ def _check_tuple_table_bloat(
             continue
         total = live + dead
         ratio = (dead / total) if total > 0 else 0.0
-        if ratio > worst_ratio:
+        if dead >= _TUPLE_DEAD_ROWS_FLOOR and ratio > worst_ratio:
             worst_ratio, worst_table = ratio, relname
         details.append(
             f"{relname}: dead_ratio={ratio:.2%} live={live} dead={dead} "
@@ -8784,7 +8789,11 @@ def _check_tuple_table_bloat(
             ),
             fix_suggestions=[f"VACUUM ANALYZE nexus.{worst_table};"],
         )]
-    return [HealthResult(label=label, ok=True, detail="; ".join(details) or "none")]
+    floor_note = (
+        f" (a ratio counts only at {_TUPLE_DEAD_ROWS_FLOOR}+ dead rows; "
+        "tables below the autovacuum threshold are not judged)"
+    )
+    return [HealthResult(label=label, ok=True, detail=("; ".join(details) or "none") + floor_note)]
 
 
 _TUPLE_SWEEP_LABEL = "tuples.sweep_freshness"

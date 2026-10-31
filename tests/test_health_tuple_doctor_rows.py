@@ -483,6 +483,34 @@ class TestCheckTupleTableBloat:
         assert r.ok is False and r.warn is not True
         assert "exceeds" in r.detail
 
+    def _bloat_with(self, tmp_path, stdout: str):
+        creds = _make_creds_file(tmp_path)
+
+        def responder(sql, cmd):
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=stdout, stderr="")
+
+        return h._check_tuple_table_bloat(
+            creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
+        )[0]
+
+    def test_a_virgin_box_with_two_tuples_is_not_a_finding(self, tmp_path) -> None:
+        # nexus-j6un5: the 7.90.0 fresh-install MVV went red at live=1 dead=1
+        # (50%) once the aspects tuple queue became the default.
+        r = self._bloat_with(tmp_path, "tuple_claim_log|0|0||\ntuples|1|1||\n")
+        assert r.ok is True
+        assert "below the" in r.detail
+
+    def test_a_high_ratio_below_the_dead_row_floor_is_not_a_finding(self, tmp_path) -> None:
+        r = self._bloat_with(tmp_path, f"tuples|1|{h._TUPLE_DEAD_ROWS_FLOOR - 1}||\n")
+        assert r.ok is True
+
+    def test_a_high_ratio_at_the_dead_row_floor_is_a_hard_finding(self, tmp_path) -> None:
+        r = self._bloat_with(tmp_path, f"tuples|1|{h._TUPLE_DEAD_ROWS_FLOOR}||\n")
+        assert r.ok is False and "exceeds" in r.detail
+
+    def test_the_floor_is_postgres_default_autovacuum_threshold(self) -> None:
+        assert h._TUPLE_DEAD_ROWS_FLOOR == 50
+
     def test_engine_unreachable(self, tmp_path) -> None:
         creds = _make_creds_file(tmp_path)
 
