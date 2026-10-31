@@ -62,9 +62,24 @@ def _isolated_owner_state(monkeypatch):
     """Each test starts with no records this process "holds", and never runs the
     real once-per-process sweep (which would look at the box's real roots)."""
     monkeypatch.setattr(sub, "_owner_records", {})
+    # The record locks (nexus-fuz9t) this test's records took: closed at the end, or they outlive the test.
+    lock_fds: dict = {}
+    monkeypatch.setattr(sub, "_owner_record_lock_fds", lock_fds)
     monkeypatch.setattr(sub, "_integration_swept", True)
     # pytest's tmp_path is deep on macOS; the real limit is pinned where it is tested.
     monkeypatch.setattr(sub, "_SOCKET_PATH_MAX", 10_000)
+    yield
+    for fd in lock_fds.values():
+        sub.release_owner_lock(fd)
+
+
+def _owner_dies() -> None:
+    """This process stops being the owner of every record it holds: its flocks drop (as a SIGKILL
+    drops them) and it forgets the records, so a sweep alone decides (nexus-fuz9t)."""
+    for fd in sub._owner_record_lock_fds.values():
+        sub.release_owner_lock(fd)
+    sub._owner_record_lock_fds.clear()
+    sub._owner_records.clear()
 
 
 class TestClusterConf:
@@ -1241,7 +1256,7 @@ class TestEngineSpawnsAreRecordedWithoutACluster:
         info["owner_pytest_pid"] = _dead_pid()
         info["owner_cmdline"] = ""
         rec.write_text(json.dumps(info))
-        sub._owner_records.clear()  # this process no longer holds it: the sweep alone decides
+        _owner_dies()  # this process no longer holds it: the sweep alone decides
         result = sub.SweepResult()
         sub._sweep_owner_records(self.root, result)
         proc.wait(timeout=10)
@@ -1266,7 +1281,7 @@ class TestEngineSpawnsAreRecordedWithoutACluster:
         info["owner_cmdline"] = ""
         info["children"][0]["cmdline"] = "/usr/bin/java -jar something-else.jar"
         rec.write_text(json.dumps(info))
-        sub._owner_records.clear()
+        _owner_dies()
         result = sub.SweepResult()
         with pytest.warns(UserWarning, match="PID-reuse"):
             sub._sweep_owner_records(self.root, result)
@@ -1309,7 +1324,7 @@ class TestEngineSpawnsAreRecordedWithoutACluster:
         rec["owner_pytest_pid"] = _dead_pid()
         rec["owner_cmdline"] = ""
         rec_path.write_text(json.dumps(rec))
-        sub._owner_records.clear()
+        _owner_dies()
         sub._sweep_owner_records(self.root, sub.SweepResult())
         proc.wait(timeout=10)
         assert not rec_path.exists()
