@@ -47,15 +47,23 @@ from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 
 @pytest.fixture(autouse=True)
-def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path, so it says so: the unset
-    default is ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1)."""
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+def _aspect_queue_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each aspect-queue case names the producer it drives, so it says so: the unset default is
+    ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1), and the table producer
+    (``HttpAspectQueue`` case) is the opt-out. The tuples producer registers through its own
+    ``ensure_collection_registered(..., registrar=self._catalog_registrar)`` call, a different
+    site from the table's ``write_with_registration_retry`` (nexus-zqu6r). Every other store is
+    unaffected by the flag; they run with it at the table value, as before."""
+    params = getattr(getattr(request.node, "callspec", None), "params", {})
+    tuples = params.get("drive_write") is _drive_aspect_queue_tuples
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples" if tuples else "table")
+
 
 OWN_TOKEN = "own-server-token-w1ip"
 AMBIENT_TOKEN = "ambient-server-token-w1ip"
 
 REGISTRATION_ROUTE = "/v1/catalog/collections/upsert"
+TUPLE_OUT_ROUTE = "/v1/tuples/out"
 EMBEDDING_PROFILE_ROUTE = "/v1/catalog/embedding_profile"
 
 
@@ -96,6 +104,9 @@ class _RecordingHandler(FakeT2HandlerBase):
         if pp == REGISTRATION_ROUTE:
             self._send(200, {"created": True, "name": "recorded"})
             return
+        if pp == TUPLE_OUT_ROUTE:  # the tuples producer's task write; ``out_replace`` refuses an answer with no outcome
+            self._send(200, {"id": "task-1", "outcome": "created"})
+            return
         self._send(200, {"ok": True, "updated": 1, "written": True})
 
     def do_GET(self):  # noqa: N802
@@ -128,6 +139,11 @@ def _mk_aspect_queue(base_url: str, token: str):
 
 
 def _drive_aspect_queue(store) -> None:
+    store.enqueue("some_col", "path/to/doc.md", "chash123", "content", doc_id="doc-1")
+
+
+def _drive_aspect_queue_tuples(store) -> None:
+    """The tuples producer (the default since nexus-lnwn1): the same call, a different registering site."""
     store.enqueue("some_col", "path/to/doc.md", "chash123", "content", doc_id="doc-1")
 
 
@@ -186,6 +202,7 @@ def _drive_catalog_write_manifest_many(store) -> None:
 _CASES = [
     pytest.param(_mk_chash, _drive_chash, "new_col", id="HttpChashIndex"),
     pytest.param(_mk_aspect_queue, _drive_aspect_queue, "some_col", id="HttpAspectQueue"),
+    pytest.param(_mk_aspect_queue, _drive_aspect_queue_tuples, "some_col", id="HttpAspectQueue.tuples"),
     pytest.param(_mk_document_aspects, _drive_document_aspects, "some_col", id="HttpDocumentAspectsStore"),
     pytest.param(_mk_document_highlights, _drive_document_highlights, "new_col", id="HttpDocumentHighlightsStore"),
     pytest.param(_mk_taxonomy, _drive_taxonomy, "some_col", id="HttpTaxonomyStore"),
@@ -321,6 +338,7 @@ def test_an_ambient_resolved_store_uses_the_ambient_registration_cache(
 _UNPINNED = {
     _drive_chash: HttpChashIndex,
     _drive_aspect_queue: HttpAspectQueue,
+    _drive_aspect_queue_tuples: HttpAspectQueue,
     _drive_document_aspects: HttpDocumentAspectsStore,
     _drive_document_highlights: HttpDocumentHighlightsStore,
     _drive_taxonomy: HttpTaxonomyStore,
