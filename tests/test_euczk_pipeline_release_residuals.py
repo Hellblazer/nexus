@@ -30,6 +30,10 @@ from nexus.pdf_extractor import ExtractionResult
 from nexus.pipeline_stages import _release_interrupted_run, extractor_loop, pipeline_index_pdf
 from tests.pipeline_fake_engine import make_fake_engine_db
 
+#: The test clients' own timeout, the production client's 30 s, so a request that lost its cap
+#: reads differently from one that kept it (httpx's default, 5 s, equals the cap).
+_CLIENT_TIMEOUT_S = 30.0
+
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="SIGHUP and SIGTERM delivery is POSIX")
 
 
@@ -105,6 +109,43 @@ print("M:handler restored" if signal.getsignal(signal.SIGINT) is signal.default_
     ]
 
 
+@posix_only
+def test_a_second_ctrl_c_inside_the_hold_acts_at_once() -> None:
+    """An engine that never answers must not leave Ctrl-C dead for the create's whole budget."""
+    result = _run("""
+import os, signal
+from nexus.util.termination import interrupts_deferred
+try:
+    with interrupts_deferred():
+        os.kill(os.getpid(), signal.SIGINT)
+        print("M:first held", flush=True)
+        os.kill(os.getpid(), signal.SIGINT)
+        print("M:second ignored", flush=True)
+except KeyboardInterrupt:
+    print("M:raised inside the call", flush=True)
+print("M:handler restored" if signal.getsignal(signal.SIGINT) is signal.default_int_handler else "M:handler lost", flush=True)
+""")
+    assert result.returncode == 0, result.stderr
+    assert _markers(result.stdout) == ["M:first held", "M:raised inside the call", "M:handler restored"]
+
+
+@posix_only
+def test_a_signal_after_the_hold_limit_acts_at_once() -> None:
+    result = _run("""
+import os, signal, time
+from nexus.util.termination import interrupts_deferred
+try:
+    with interrupts_deferred(limit_s=0.05):
+        time.sleep(0.1)
+        os.kill(os.getpid(), signal.SIGINT)
+        print("M:not raised in the call", flush=True)
+except KeyboardInterrupt:
+    print("M:raised inside the call", flush=True)
+""")
+    assert result.returncode == 0, result.stderr
+    assert _markers(result.stdout) == ["M:raised inside the call"]
+
+
 def _embed(texts, model):  # noqa: ANN001, ANN202
     return [[0.1] * 4 for _ in texts], model
 
@@ -122,7 +163,7 @@ def _interrupting_db(engine: InMemoryPipelineEngine, sent: list[str]) -> HttpPip
 
     return HttpPipelineDB(
         base_url="http://in-memory-pipeline", _token="in-memory",
-        client=httpx.Client(transport=httpx.MockTransport(handler)))
+        client=httpx.Client(transport=httpx.MockTransport(handler), timeout=_CLIENT_TIMEOUT_S))
 
 
 def _index(db: HttpPipelineDB, content_hash: str) -> None:
@@ -176,11 +217,66 @@ def test_the_release_sends_one_capped_request_and_reports_an_unreachable_engine(
 
     db = HttpPipelineDB(
         base_url="http://in-memory-pipeline", _token="in-memory",
-        client=httpx.Client(transport=httpx.MockTransport(handler)))
+        client=httpx.Client(transport=httpx.MockTransport(handler), timeout=_CLIENT_TIMEOUT_S))
     db.create_pipeline("h-euczk-budget", "/a.pdf", "docs__test")
 
     assert _release_interrupted_run(db, "h-euczk-budget", KeyboardInterrupt()) == "unreached"
     assert fails == [ps._RELEASE_TIMEOUT_S], "one /fail, capped, never retried"
+
+
+def _capturing_db(engine: InMemoryPipelineEngine, timeouts: dict[str, list], black_hole: set[str]) -> HttpPipelineDB:
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeouts.setdefault(request.url.path, []).append(request.extensions.get("timeout", {}).get("read"))
+        if request.url.path in black_hole:
+            raise httpx.ReadTimeout("black-holed", request=request)
+        return engine.handler(request)
+
+    return HttpPipelineDB(
+        base_url="http://in-memory-pipeline", _token="in-memory",
+        client=httpx.Client(transport=httpx.MockTransport(handler), timeout=_CLIENT_TIMEOUT_S))
+
+
+def test_the_release_flushes_buffered_pages_capped_and_still_fails_the_row() -> None:
+    engine, timeouts = InMemoryPipelineEngine(), {}
+    db = _capturing_db(engine, timeouts, {"/v1/pipeline/pages"})
+    db.create_pipeline("h-euczk-flush", "/a.pdf", "docs__test")
+    db.write_page("h-euczk-flush", 0, "buffered, not yet sent")
+    assert _release_interrupted_run(db, "h-euczk-flush", KeyboardInterrupt()) == "released"
+    assert timeouts["/v1/pipeline/pages"] == [ps._RELEASE_TIMEOUT_S], "one capped page flush"
+    assert timeouts["/v1/pipeline/fail"] == [ps._RELEASE_TIMEOUT_S]
+    (row,) = engine.rows_for("h-euczk-flush")
+    assert row["status"] == "failed"
+
+
+def test_the_stage_failure_cleanup_of_an_interrupted_run_is_capped_and_skips_the_stamp_when_unreached() -> None:
+    """Every stage has finished when the interrupt lands after a stage failed: the WAL-wiping cleanup
+    runs, capped, and an engine that does not answer skips the catalog stamp as the release does."""
+    engine, timeouts = InMemoryPipelineEngine(), {}
+    db = _capturing_db(engine, timeouts, {"/v1/pipeline/fail"})
+
+    class _FailingExtractor:
+        def extract(self, pdf_path, *, extractor="mineru", on_page=None, allow_degraded=False, on_heartbeat=None):
+            raise RuntimeError("boom: deterministic stage failure")
+
+    real_wait = ps.wait
+
+    def _wait(fs, timeout=None, return_when="ALL_COMPLETED"):  # noqa: ANN001, ANN202
+        if return_when != "ALL_COMPLETED":
+            return real_wait(fs, timeout=timeout, return_when=return_when)
+        # The drain after the failure: cancel is set, so every stage finishes; then the interrupt.
+        real_wait(fs, timeout=10, return_when="ALL_COMPLETED")
+        raise KeyboardInterrupt
+
+    with patch("nexus.pipeline_stages.PDFExtractor", return_value=_FailingExtractor()), \
+            patch("nexus.pipeline_stages.wait", side_effect=_wait), \
+            patch("nexus.doc_indexer._fence_fail") as fence_fail, \
+            capture_logs() as cap, \
+            pytest.raises(KeyboardInterrupt):
+        _index(db, "h-euczk-stage")
+    events = [e["event"] for e in cap]
+    assert "pipeline_terminal_mark_failed" in events, "the WAL-wiping branch ran, not the kept-buffer release"
+    assert timeouts["/v1/pipeline/fail"] == [ps._RELEASE_TIMEOUT_S], timeouts
+    fence_fail.assert_not_called()
 
 
 def test_an_unreached_release_skips_the_catalog_stamp_but_drops_the_deferred_sweep() -> None:
@@ -216,24 +312,26 @@ def test_a_live_run_still_completes() -> None:
     assert row["status"] == "completed"
 
 
-# ── nexus-hvwif: a MinerU resume over text-layer pages ───────────────────────
+# ── nexus-hvwif: a resume over another extractor's pages ─────────────────────
 
 
-def _buffer(rungs: list[str], *, meta: dict | None = None) -> MagicMock:
+def _buffer(pages: list[tuple[str, str | None]], *, meta: dict | None = None) -> MagicMock:
+    """Buffered pages as ``(rung, extractor stamp or None for a buffer an older build wrote)``."""
     db = MagicMock()
     db.get_pipeline_state.return_value = {
-        "pages_extracted": len(rungs), "total_pages": len(rungs) if meta else None,
+        "pages_extracted": len(pages), "total_pages": len(pages) if meta else None,
         "extraction_meta": json.dumps(meta) if meta else None,
     }
     db.read_pages.return_value = [
         {"page_index": i, "page_text": f"text {i}",
-         "metadata_json": json.dumps({"page_number": i + 1, "page_method": r})}
-        for i, r in enumerate(rungs)
+         "metadata_json": json.dumps(
+             {"page_number": i + 1, "page_method": rung} | ({"extractor": by} if by else {}))}
+        for i, (rung, by) in enumerate(pages)
     ]
     return db
 
 
-def _resume(monkeypatch: pytest.MonkeyPatch, db: MagicMock, pages: int) -> list[dict]:
+def _resume(monkeypatch: pytest.MonkeyPatch, db: MagicMock, pages: int, extractor: str = "mineru") -> list[dict]:
     class Extractor:
         def extract(self, pdf_path, *, extractor="mineru", on_page=None, allow_degraded=False, on_heartbeat=None):
             for i in range(pages):
@@ -243,21 +341,36 @@ def _resume(monkeypatch: pytest.MonkeyPatch, db: MagicMock, pages: int) -> list[
     monkeypatch.setenv("NEXUS_PDF_PROGRESS_QUIET", "1")
     monkeypatch.setattr("nexus.pipeline_stages.PDFExtractor", Extractor)
     with capture_logs() as cap:
-        extractor_loop(Path("/tmp/x.pdf"), "h" * 64, db, threading.Event(), extractor="mineru")
-    return [e for e in cap if e.get("event") == "pipeline_resume_kept_text_layer_pages"]
+        extractor_loop(Path("/tmp/x.pdf"), "h" * 64, db, threading.Event(), extractor=extractor)
+    return [e for e in cap if e.get("event") == "pipeline_resume_kept_other_extractor_pages"]
 
 
 def test_a_mineru_resume_over_an_interrupted_pymupdf_run_says_its_pages_are_kept(monkeypatch) -> None:
-    warned = _resume(monkeypatch, _buffer(["pymupdf-text", "pymupdf-text"]), pages=4)
-    assert len(warned) == 1 and warned[0]["first_pages"] == [1, 2], warned
+    db = _buffer([("pymupdf-text", "pymupdf"), ("pymupdf-text", "pymupdf")])
+    warned = _resume(monkeypatch, db, pages=4)
+    assert len(warned) == 1 and warned[0]["first_pages"] == [1, 2] and warned[0]["written_by"] == ["pymupdf"], warned
     assert "--force" in warned[0]["remedy"]
 
 
 def test_a_mineru_resume_over_a_finished_pymupdf_extraction_says_so(monkeypatch) -> None:
-    db = _buffer(["pymupdf-text"] * 3, meta={"extraction_method": "pymupdf", "page_count": 3})
+    db = _buffer([("pymupdf-text", "pymupdf")] * 3, meta={"extraction_method": "pymupdf", "page_count": 3})
     warned = _resume(monkeypatch, db, pages=3)
-    assert len(warned) == 1 and warned[0]["text_layer_pages"] == 3, warned
+    assert len(warned) == 1 and warned[0]["kept_pages"] == 3, warned
 
 
-def test_a_mineru_resume_over_mineru_pages_says_nothing(monkeypatch) -> None:
-    assert _resume(monkeypatch, _buffer(["mineru", "mineru-no-formula"]), pages=3) == []
+def test_a_mineru_resume_over_its_own_degraded_pages_says_nothing(monkeypatch) -> None:
+    """The ladder settles pages on the same text-layer rungs pymupdf makes; the stamp tells them apart."""
+    db = _buffer([("mineru", "mineru"), ("pymupdf-text", "mineru"), ("unextracted", "mineru")])
+    assert _resume(monkeypatch, db, pages=4) == []
+
+
+def test_a_buffer_an_older_build_wrote_says_nothing(monkeypatch) -> None:
+    assert _resume(monkeypatch, _buffer([("pymupdf-text", None), ("mineru", None)]), pages=3) == []
+
+
+def test_each_written_page_records_its_extractor(monkeypatch) -> None:
+    db = _buffer([])
+    db.get_pipeline_state.return_value = None
+    _resume(monkeypatch, db, pages=2, extractor="mineru")
+    stamps = [c.kwargs["metadata"]["extractor"] for c in db.write_page.call_args_list]
+    assert stamps == ["mineru", "mineru"]

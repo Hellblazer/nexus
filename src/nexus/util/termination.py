@@ -22,6 +22,7 @@ import contextlib
 import os
 import signal
 import threading
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -113,8 +114,12 @@ def sigterm_raises() -> Iterator[None]:
             _redeliver(fired[0], previous.get(fired[0]))
 
 
+#: How long :func:`interrupts_deferred` holds a signal back; one arriving later is acted on at once.
+DEFER_LIMIT_S: float = 10.0
+
+
 @contextlib.contextmanager
-def interrupts_deferred() -> Iterator[None]:
+def interrupts_deferred(limit_s: float = DEFER_LIMIT_S) -> Iterator[None]:
     """Hold SIGINT, SIGTERM and SIGHUP back until the block ends (nexus-euczk).
 
     For a call whose ANSWER the interrupt's cleanup needs: ``create_pipeline``
@@ -125,27 +130,44 @@ def interrupts_deferred() -> Iterator[None]:
     before it runs for that signal (``sigterm_raises``'s raises
     :class:`TerminationRequested`, Python's SIGINT handler raises
     ``KeyboardInterrupt``), or the signal is sent again under the default
-    disposition. Keep the block to one bounded call: a second Ctrl-C inside it
-    does not end the process. A no-op off the main thread."""
+    disposition.
+
+    The hold is short on purpose. A second signal, or any signal once the block
+    has run *limit_s* seconds, is acted on at once as it would be without the
+    block: the previous handlers are put back and the one for that signal runs
+    inside the call (an engine that never answers must not leave Ctrl-C dead
+    for the call's whole retry budget). The release is then lost for that one
+    call, as it was before the hold existed. A no-op off the main thread."""
     fired: list[int] = []
+    escalated: list[bool] = []
+    started = time.monotonic()
+    previous: dict[int, Any] = {}
 
     def _hold(signum: int, frame: Any) -> None:
-        if not fired:
+        if not fired and time.monotonic() - started < limit_s:
             fired.append(signum)
+            return
+        escalated.append(True)
+        _restore(_hold, previous)
+        _deliver(signum, previous.get(signum), frame)
 
     signums = (signal.SIGINT, *TERMINATION_SIGNALS)
-    previous = _install(_hold, signums)
+    previous.update(_install(_hold, signums))
     try:
         yield
     finally:
         _restore(_hold, previous)
-        if fired:
-            before = previous.get(fired[0])
+        if fired and not escalated:
             _log.info("interrupt_deferred_delivered", signum=fired[0])
-            if callable(before):
-                before(fired[0], None)
-            else:
-                os.kill(os.getpid(), fired[0])
+            _deliver(fired[0], previous.get(fired[0]), None)
+
+
+def _deliver(signum: int, before: Any, frame: Any) -> None:
+    """Run *before* for *signum*, or send the signal again when it was the default disposition."""
+    if callable(before):
+        before(signum, frame)
+    else:
+        os.kill(os.getpid(), signum)
 
 
 def _restore(handler: Any, previous: dict[int, Any]) -> None:

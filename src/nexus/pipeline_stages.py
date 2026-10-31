@@ -197,19 +197,41 @@ def _merge_buffered_provenance(
         metadata["extraction_method"] = "mineru+degraded"
 
 
-def _warn_resumed_text_layer(pdf_path: Path, content_hash: str, extractor: str, pages: list[int]) -> None:
-    """Say that a resumed run keeps buffered text-layer pages its extractor did not make (nexus-hvwif).
+def _foreign_pages(rows: list[dict[str, Any]], extractor: str) -> dict[int, str]:
+    """``{1-based page: extractor}`` for the buffer rows another ``--extractor`` wrote (nexus-hvwif).
+
+    Each page row records the extractor of the run that wrote it (``extractor`` in its
+    ``metadata_json``, stamped by :func:`extractor_loop`). A row with no stamp (a buffer an older
+    build wrote) is not counted: what wrote it is unknown, and a guess would warn on ordinary
+    resumes, since MinerU's own ladder settles pages on the same text-layer rungs ``pymupdf`` makes."""
+    foreign: dict[int, str] = {}
+    for row in rows:
+        meta = row.get("metadata_json")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except ValueError:
+                continue
+        written_by = meta.get("extractor") if isinstance(meta, dict) else None
+        if isinstance(written_by, str) and written_by and written_by != extractor:
+            foreign[int(row.get("page_index", 0)) + 1] = written_by
+    return foreign
+
+
+def _warn_resumed_foreign_pages(pdf_path: Path, content_hash: str, extractor: str, pages: dict[int, str]) -> None:
+    """Say that a resumed run keeps buffered pages another ``--extractor`` made (nexus-hvwif).
 
     The pipeline row records no extraction flags, so a rerun under another ``--extractor``
-    resumes the pages an earlier run buffered. The record is honest (each page's rung is kept, and
-    the method reads ``mineru+degraded`` or ``pymupdf``), but nothing told the user that the run they
-    asked for did not extract those pages; ``--force`` starts the document clean."""
+    resumes the pages an earlier run buffered. The record is honest (each page's rung is kept),
+    but nothing told the user that the run they asked for did not extract those pages;
+    ``--force`` starts the document clean."""
+    numbers = sorted(pages)
     _log.warning(
-        "pipeline_resume_kept_text_layer_pages",
+        "pipeline_resume_kept_other_extractor_pages",
         file_path=str(pdf_path), content_hash=content_hash, extractor=extractor,
-        text_layer_pages=len(pages), first_pages=pages[:10],
-        remedy="these pages are the PDF's text layer from an earlier run and are not extracted "
-               "again; rerun with --force to extract the whole document with " + extractor,
+        written_by=sorted(set(pages.values())), kept_pages=len(numbers), first_pages=numbers[:10],
+        remedy="these pages were extracted by an earlier run with another --extractor and are not "
+               "extracted again; rerun with --force to extract the whole document with " + extractor,
     )
 
 
@@ -244,6 +266,8 @@ def extractor_loop(
     #: buffered page text is not kept alive for the whole extraction.
     buffered_rungs: dict[int, str] = {}
     unknown_pages: list[int] = []
+    #: Buffered pages another ``--extractor`` wrote (nexus-hvwif).
+    foreign: dict[int, str] = {}
 
     # Resume fast path: if all pages already in buffer, skip extraction.
     if (state and state["total_pages"] is not None
@@ -278,12 +302,14 @@ def extractor_loop(
         actual_pages = len(buffered_rows)
         if actual_pages >= state["total_pages"]:
             stored_meta = json.loads(state["extraction_meta"])
-            if extractor != "pymupdf" and stored_meta.get("extraction_method") == "pymupdf":
-                _warn_resumed_text_layer(pdf_path, content_hash, extractor, list(range(1, actual_pages + 1)))
+            foreign = _foreign_pages(buffered_rows, extractor)
+            if foreign:
+                _warn_resumed_foreign_pages(pdf_path, content_hash, extractor, foreign)
             if extraction_done is not None:
                 extraction_done.set()
             return ExtractionResult(text="", metadata=stored_meta)
         buffered_rungs, unknown_pages = _buffer_provenance(buffered_rows)
+        foreign = _foreign_pages(buffered_rows, extractor)
         del buffered_rows
         # The claimed prefix isn't backed by real WAL data — the ENTIRE
         # claimed prefix is suspect (clear_orphan_wal is all-or-nothing
@@ -310,14 +336,12 @@ def extractor_loop(
         buffered_rows = db.read_pages(content_hash)
         pages_extracted_at_start = len(buffered_rows)
         buffered_rungs, unknown_pages = _buffer_provenance(buffered_rows)
+        foreign = _foreign_pages(buffered_rows, extractor)
         del buffered_rows
 
-    if extractor != "pymupdf":
-        # nexus-hvwif: a ``pymupdf`` run wipes a MinerU buffer before it resumes (nexus-tr1rj.14);
-        # the other way round the buffered text-layer pages are kept, so say so.
-        text_layer = sorted(n for n, rung in buffered_rungs.items() if rung in _TEXT_LAYER_RUNGS)
-        if text_layer:
-            _warn_resumed_text_layer(pdf_path, content_hash, extractor, text_layer)
+    if foreign:
+        # nexus-hvwif: the pages the buffer holds are not extracted again (``on_page`` skips them).
+        _warn_resumed_foreign_pages(pdf_path, content_hash, extractor, foreign)
 
     #: Pages settled so far, as the counter counts them (a list so ``on_page`` can move it).
     settled = [pages_extracted_at_start]
@@ -330,7 +354,8 @@ def extractor_loop(
         run_rungs.update(_page_rungs(page_metadata, page_index))
         if page_index < pages_extracted_at_start:
             return
-        db.write_page(content_hash, page_index, page_text, metadata=page_metadata)
+        # nexus-hvwif: the row records which extractor wrote it, so a rerun under another can say so.
+        db.write_page(content_hash, page_index, page_text, metadata={**(page_metadata or {}), "extractor": extractor})
         db.update_progress(content_hash, pages_extracted=page_index + 1)
         settled[0] = max(settled[0], page_index + 1)
 
@@ -1635,14 +1660,15 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
 
 def _mark_failed_and_reset_wal(
     db: HttpPipelineDB, content_hash: str, first_exc: BaseException, *, timeout: float | None = None,
-) -> bool:
+) -> ReleaseOutcome:
     """Terminal bookkeeping for a failed pipeline run: mark the row failed
     and wipe its WAL. Never raises: the caller re-raises *first_exc*, and
-    nothing here may mask it. Returns True when the engine FENCED the
+    nothing here may mask it. Returns ``"fenced"`` when the engine FENCED the
     bookkeeping (nexus-8vu8p: a newer resume took the run over between
     the original failure and this cleanup; the row and its WAL belong to
     the new owner, and the caller must not stamp the catalog document
-    failed either), False otherwise.
+    failed either), ``"unreached"`` when the engine could not be reached
+    (nexus-euczk), ``"released"`` otherwise.
 
     nexus-33q80: ``clear_orphan_wal`` now zeroes ``chunks_uploaded`` (and
     ``pages_extracted``, nexus-gl99l's own counter) on the pipeline row in
@@ -1673,15 +1699,16 @@ def _mark_failed_and_reset_wal(
             current_epoch=fenced.current_epoch,
             original_error=str(first_exc),
         )
-        return True
-    except Exception:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
+        return "fenced"
+    except Exception as exc:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
         _log.warning(
             "pipeline_terminal_mark_failed",
             content_hash=content_hash,
             original_error=str(first_exc),
             exc_info=True,
         )
-    return False
+        return "unreached" if isinstance(exc, httpx.TransportError) else "released"
+    return "released"
 
 
 def _discard_buffer_for_text_only(db: HttpPipelineDB, pdf_path: Path, content_hash: str) -> bool:
@@ -1874,7 +1901,7 @@ def _release_interrupted_run(
 
 def _release_systemic_failure(
     db: HttpPipelineDB, content_hash: str, failure: MineruSystemicFailure, *, timeout: float | None = None,
-) -> bool:
+) -> ReleaseOutcome:
     """Give the pipeline row back after the MinerU breaker tripped (RDR-237), buffer KEPT.
 
     The failure says the install or the machine is failing, which says nothing about the
@@ -1885,8 +1912,8 @@ def _release_systemic_failure(
     Chunks of earlier pages that already reached T3 stay there, as an interrupted run's do; no
     catalog manifest is written for the document because the run never reaches the
     tail. The recorded error names the failure class and the worker's last stderr line (the
-    exception's message). Never raises. Returns True when the engine fenced the write. *timeout*:
-    see :func:`_mark_failed_and_reset_wal`."""
+    exception's message). Never raises. Returns what :func:`_mark_failed_and_reset_wal` returns.
+    *timeout*: see that function."""
     try:
         db.mark_failed(content_hash, error=str(failure), timeout=timeout)
     except PipelineRunFenced as fenced:
@@ -1895,16 +1922,16 @@ def _release_systemic_failure(
             content_hash=content_hash, pipeline_id=fenced.pipeline_id,
             run_epoch=fenced.run_epoch, current_epoch=fenced.current_epoch,
         )
-        return True
-    except Exception:  # noqa: BLE001 — boundary catch: the failure must propagate, not a /fail transport error
+        return "fenced"
+    except Exception as exc:  # noqa: BLE001 — boundary catch: the failure must propagate, not a /fail transport error
         _log.warning("pipeline_systemic_failure_release_failed", content_hash=content_hash, exc_info=True)
-        return False
+        return "unreached" if isinstance(exc, httpx.TransportError) else "released"
     _log.warning(
         "pipeline_run_released_on_systemic_failure",
         content_hash=content_hash, failure_class=failure.failure_class,
         stderr_line=failure.stderr_line, buffer="kept",
     )
-    return False
+    return "released"
 
 
 def _stamp_interrupted(doc_id: str, dry_run: bool, released: ReleaseOutcome | None, error: str) -> None:
@@ -2392,15 +2419,19 @@ def pipeline_index_pdf(
                 # deterministic failure is wiped by the next run, which fails the same way with
                 # every stage stopped.
                 outcome = _release_interrupted_run(db, content_hash, interrupt, stage_error=first_exc)
-                fenced, unreached = outcome == "fenced", outcome == "unreached"
             elif isinstance(first_exc, MineruSystemicFailure):
                 # RDR-237: the MinerU install or machine is failing, not this document. Keep the
                 # buffer (a rerun skips the writes of the pages already buffered, though MinerU
                 # re-extracts them); wiping it would also redo those writes for a cause the PDF
                 # did not have.
-                fenced = _release_systemic_failure(db, content_hash, first_exc, timeout=cleanup_timeout)
+                outcome = _release_systemic_failure(db, content_hash, first_exc, timeout=cleanup_timeout)
             else:
-                fenced = _mark_failed_and_reset_wal(db, content_hash, first_exc, timeout=cleanup_timeout)
+                outcome = _mark_failed_and_reset_wal(db, content_hash, first_exc, timeout=cleanup_timeout)
+            if not fenced:
+                fenced = outcome == "fenced"
+                # Only an interrupted run skips the stamp for an unreachable engine; a run that
+                # failed on its own still tries it at the full budget, as before.
+                unreached = interrupt is not None and outcome == "unreached"
             # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
             # below cannot be masked by a fence-write failure. nexus-uxg4u:
             # never touch the catalog on a dry run (doc_id is already "" in
