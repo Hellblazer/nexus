@@ -161,7 +161,7 @@ def test_the_first_auto_runs_and_holds_the_lock_until_it_ends(seams: list[str], 
 
 def test_an_interactive_upgrade_takes_no_lock(seams: list[str], monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["nx", "upgrade", "--dry-run"])
-    for quiet in ("_migrate_repos_json_to_catalog", "_converge_plugins", "_refresh_generated_agents", "_emit_name_vs_embed_dim_advisory"):
+    for quiet in ("_migrate_repos_json_to_catalog", "_converge_plugins", "_refresh_generated_agents", "_emit_name_vs_embed_dim_advisory", "_refresh_all_git_hooks"):  # the hook refresh reads the repo list from the catalog
         monkeypatch.setattr(upgrade_mod, quiet, lambda **_k: None)
     holder = acquire_auto_lock()
     try:
@@ -347,7 +347,7 @@ def plain_upgrade(monkeypatch, config_dir: Path) -> dict[str, object]:
     monkeypatch.setattr(upgrade_mod, "_run_upgrade", lambda **_k: None)
     monkeypatch.setattr(upgrade_mod, "_cycle_supervised_daemons_to_current", lambda **_k: None)
     monkeypatch.setattr(upgrade_mod, "_converge_preconditions", lambda **_k: None)
-    for quiet in ("_migrate_repos_json_to_catalog", "_converge_plugins", "_refresh_generated_agents", "_emit_name_vs_embed_dim_advisory"):
+    for quiet in ("_migrate_repos_json_to_catalog", "_converge_plugins", "_refresh_generated_agents", "_emit_name_vs_embed_dim_advisory", "_refresh_all_git_hooks"):  # the hook refresh reads the repo list from the catalog
         monkeypatch.setattr(upgrade_mod, quiet, lambda **_k: None)
     monkeypatch.setattr("nexus.upgrade_ladder.http_store.DeferredLadderLedger", InMemoryCompletionLedger)
     seen: dict[str, object] = {}
