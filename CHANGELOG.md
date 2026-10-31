@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tenant that lost its last service token no longer keeps its request-ledger rows for ever** (nexus-yye8l.21, RDR-222; engine change, rides the next engine cut). The retention arm visited only the default tenant and tenants holding a service token; it now also visits every tenant in a new `nexus.request_ledger_tenants` table, which the claim path fills in the transaction of a tenant's first ledger row. One CREATE TABLE, no RLS, no row DML. A tenant whose ledger rows predate the table is recorded on its next keyed request.
+
 ## [7.90.0] - 2026-10-31
 
 Pairs with engine-service-v0.1.171 (REQUIRED_ENGINE_VERSION moves from v0.1.169; the engine deployed to the managed service before this client tag, every wire entry being additive). Upgrade aspect worker hosts before producer hosts: this release makes the aspects tuple queue the default (NX_ASPECT_QUEUE=tuples) and the worker's tuple side ships in it too.

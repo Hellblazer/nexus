@@ -99,4 +99,26 @@ class RequestLedgerRetentionRlsTest {
         // Under RLS with b's stamp, a's row is invisible even by request_id alone.
         assertThat(exists("rls-b", aFresh)).as("RLS is live: b cannot see a's row").isFalse();
     }
+
+    /**
+     * nexus-yye8l.21: the ledger is FORCE RLS, so under the service role a read with no tenant stamp sees no row,
+     * and the tenant list for retention has to come from somewhere else. The claim path records each tenant in
+     * {@code request_ledger_tenants}, which the service role reads whole. A superuser would see the ledger rows
+     * anyway, which is why this runs as the service role.
+     */
+    @Test
+    void theClaimPathRecordsTheTenant_andTheServiceRoleListsItWithNoTenantStamp() {
+        String tenant = "rls-enum-" + UUID.randomUUID();
+        var claim = ledger.claim(tenant, UUID.randomUUID(), "/v1/vectors/gc/quarantine-orphans", new byte[32], 25_000L);
+        assertThat(claim).isInstanceOf(RequestLedger.Claimed.class);
+
+        long visibleWithoutAStamp = org.jooq.impl.DSL.using(svcDs, org.jooq.SQLDialect.POSTGRES)
+            .fetchCount(REQUEST_LEDGER);
+        assertThat(visibleWithoutAStamp).as("FORCE RLS: the ledger itself cannot enumerate its tenants").isZero();
+
+        assertThat(ledger.ledgerTenants(java.time.Duration.ofSeconds(5))).contains(tenant);
+        // A second claim for the same tenant leaves one registry row, not two.
+        ledger.claim(tenant, UUID.randomUUID(), "/v1/vectors/gc/quarantine-orphans", new byte[32], 25_000L);
+        assertThat(ledger.ledgerTenants(java.time.Duration.ofSeconds(5))).containsOnlyOnce(tenant);
+    }
 }

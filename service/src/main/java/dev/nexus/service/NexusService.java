@@ -1165,15 +1165,18 @@ public final class NexusService {
     /**
      * One cycle of the request-ledger retention arm (RDR-222 Phase 1, bead nexus-yye8l.3): one
      * {@code withTenant} delete pass per tenant, cutoff = {@code now} minus the retention days. Tenants are
-     * {@link #reaperTenants()}, the default tenant plus every tenant in {@code service_tokens}, not
-     * {@link #runScheduledTupleSweep}'s {@code tuple_tenants}, which is tuple-specific. Every keyed request is
-     * authenticated, so every ledger tenant holds a token; a tenant that lost its last token is skipped until it
-     * holds one again, the safe direction (a liveness gap, never a wrong deletion). A live lease is later than the
-     * cutoff, so a running attempt's row is never deleted. A tenant's failure is logged and the next still runs.
-     * Package-private so a test drives the exact method the scheduler runs.
+     * {@link #reaperTenants()} (the default tenant plus every tenant in {@code service_tokens}) together with every
+     * tenant in {@code request_ledger_tenants}, which the claim path fills with the tenant of each first ledger
+     * row (nexus-yye8l.21). The second set is what reaches a tenant that lost its last token: the ledger is FORCE
+     * RLS, so its tenants cannot be listed from the ledger itself. Not {@link #runScheduledTupleSweep}'s
+     * {@code tuple_tenants}, which is tuple-specific, and no other tenant enumeration changes. A live lease is
+     * later than the cutoff, so a running attempt's row is never deleted. A tenant's failure is logged and the
+     * next still runs. Package-private so a test drives the exact method the scheduler runs.
      */
     List<dev.nexus.service.db.RequestLedger.RetentionPass> runScheduledLedgerRetention(OffsetDateTime now) {
-        return requestLedger.retainAll(reaperTenants(), now.minusDays(requestLedgerRetentionDays));
+        var tenants = new java.util.LinkedHashSet<String>(reaperTenants());
+        tenants.addAll(requestLedger.ledgerTenants(SweepBounds.STATEMENT_TIMEOUT));
+        return requestLedger.retainAll(List.copyOf(tenants), now.minusDays(requestLedgerRetentionDays));
     }
 
     /** The one request ledger the keyed handlers and the status route share. Package-private so a route test can drive its claim seam. */

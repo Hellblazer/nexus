@@ -7,6 +7,7 @@ import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Record;
+import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.jooq.types.DayToSecond;
@@ -24,6 +25,7 @@ import java.util.function.BiConsumer;
 import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
+import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER_TENANTS;
 
 /**
  * RDR-222 Phase 1 (bead nexus-yye8l.2): request identity for a mutating engine route, kept in
@@ -178,6 +180,7 @@ public final class RequestLedger {
     }
 
     private final TenantScope scope;
+    private final DataSource dataSource;
     private final long connectionTimeoutMs;
 
     /** Test seam: called with the phase and the round number; never set by production code. */
@@ -201,6 +204,7 @@ public final class RequestLedger {
      */
     public RequestLedger(TenantScope scope, DataSource dataSource) {
         this.scope = scope;
+        this.dataSource = dataSource;
         this.connectionTimeoutMs = TenantScope.connectionTimeoutMs(dataSource);
     }
 
@@ -240,17 +244,26 @@ public final class RequestLedger {
             UUID nonce = UUID.randomUUID();
             int inserted;
             try {
-                inserted = withClaimLockBound(tenant, requestId, ctx -> ctx.insertInto(REQUEST_LEDGER)
-                    .set(REQUEST_LEDGER.TENANT_ID, tenant)
-                    .set(REQUEST_LEDGER.REQUEST_ID, requestId)
-                    .set(REQUEST_LEDGER.ROUTE, route)
-                    .set(REQUEST_LEDGER.BODY_SHA256, bodySha256)
-                    .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
-                    .set(REQUEST_LEDGER.HOLDER, nonce)
-                    .set(REQUEST_LEDGER.STARTED_AT, clock())
-                    .set(REQUEST_LEDGER.LEASE_UNTIL, leaseUntil)
-                    .onConflictDoNothing()
-                    .execute());
+                inserted = withClaimLockBound(tenant, requestId, ctx -> {
+                    // nexus-yye8l.21: the tenant is recorded in the SAME transaction as its first ledger row,
+                    // so the retention arm can enumerate it whatever happens to its service tokens. An
+                    // existing row is a lookup, not a write.
+                    ctx.insertInto(REQUEST_LEDGER_TENANTS)
+                        .set(REQUEST_LEDGER_TENANTS.TENANT_ID, tenant)
+                        .onConflictDoNothing()
+                        .execute();
+                    return ctx.insertInto(REQUEST_LEDGER)
+                        .set(REQUEST_LEDGER.TENANT_ID, tenant)
+                        .set(REQUEST_LEDGER.REQUEST_ID, requestId)
+                        .set(REQUEST_LEDGER.ROUTE, route)
+                        .set(REQUEST_LEDGER.BODY_SHA256, bodySha256)
+                        .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
+                        .set(REQUEST_LEDGER.HOLDER, nonce)
+                        .set(REQUEST_LEDGER.STARTED_AT, clock())
+                        .set(REQUEST_LEDGER.LEASE_UNTIL, leaseUntil)
+                        .onConflictDoNothing()
+                        .execute();
+                });
             } catch (ClaimLockTimeout timeout) {
                 return settleAfterLockTimeout(tenant, requestId, route, bodySha256, timeout);
             }
@@ -533,9 +546,30 @@ public final class RequestLedger {
     }
 
     /**
+     * Every tenant that has held a ledger row, from {@code nexus.request_ledger_tenants} (nexus-yye8l.21): the
+     * claim path writes the tenant in the transaction of its first ledger insert. The ledger is FORCE RLS, so
+     * the tenants cannot be read from it without naming each one; this table has no RLS and one row per tenant,
+     * a primary-key scan. Bounded by {@code statementBound} ({@code SET LOCAL statement_timeout}): the retention
+     * arm builds its tenant list with this before any pass runs, so an unbounded read would stall the shared
+     * sweep thread where no per-pass bound could reach it.
+     *
+     * @param statementBound per-statement ceiling, or null for none
+     */
+    public List<String> ledgerTenants(Duration statementBound) {
+        return DSL.using(dataSource, SQLDialect.POSTGRES).transactionResult(cfg -> {
+            DSLContext tx = DSL.using(cfg);
+            SweepBounds.applyStatementTimeout(tx, statementBound);
+            return tx.select(REQUEST_LEDGER_TENANTS.TENANT_ID)
+                .from(REQUEST_LEDGER_TENANTS)
+                .orderBy(REQUEST_LEDGER_TENANTS.TENANT_ID)
+                .fetch(REQUEST_LEDGER_TENANTS.TENANT_ID);
+        });
+    }
+
+    /**
      * One {@link #retain} pass per tenant, each logged at INFO. A tenant's failure is logged at WARN
      * and the next tenant still runs. The caller supplies the tenant list because the ledger is
-     * FORCE RLS: a tenant cannot be enumerated from the table itself.
+     * FORCE RLS: a tenant cannot be enumerated from the table itself ({@link #ledgerTenants} lists them).
      */
     public List<RetentionPass> retainAll(List<String> tenants, OffsetDateTime cutoff) {
         return retainAll(tenants, cutoff, SweepBounds.STATEMENT_TIMEOUT);

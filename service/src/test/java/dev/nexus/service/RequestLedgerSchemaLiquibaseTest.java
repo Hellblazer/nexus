@@ -116,6 +116,31 @@ class RequestLedgerSchemaLiquibaseTest {
         }
     }
 
+    // ── nexus-yye8l.21: the tenant registry the retention arm enumerates ────
+
+    @Test
+    void requestLedgerTenants_isAKeyedTenantListWithNoRls() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Map<String, String> actual = new TreeMap<>();
+            for (String col : PgCatalogProbes.columnNames(ctx, "nexus", "request_ledger_tenants")) {
+                PgCatalogProbes.ColumnInfo info = PgCatalogProbes.columnInfo(ctx, "nexus", "request_ledger_tenants", col);
+                actual.put(col, info.udtName() + " " + info.isNullable());
+            }
+            assertThat(actual).isEqualTo(new TreeMap<>(Map.of("tenant_id", "text NO", "first_seen", "timestamptz NO")));
+            Map<String, String> constraints = PgCatalogProbes.constraintDefinitionsIn(ctx, List.of("nexus")).stream()
+                .filter(c -> c.table().equals("request_ledger_tenants"))
+                .collect(Collectors.toMap(
+                    PgCatalogProbes.ConstraintDefinition::conname,
+                    PgCatalogProbes.ConstraintDefinition::definition));
+            assertThat(constraints).containsOnlyKeys("request_ledger_tenants_pk");
+            assertThat(constraints.get("request_ledger_tenants_pk")).isEqualTo("PRIMARY KEY (tenant_id)");
+            PgCatalogProbes.RowSecurity rls = PgCatalogProbes.rowSecurity(ctx, "nexus", "request_ledger_tenants");
+            assertThat(rls).isNotNull();
+            assertThat(rls.enabled()).as("no RLS: the retention arm must see every tenant's row").isFalse();
+        }
+    }
+
     // ── Test 3: the CHECK constraints reject what they name ─────────────────
 
     @Test
