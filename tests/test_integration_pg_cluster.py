@@ -254,7 +254,7 @@ class TestPgDataTempdirRouting:
 
 class TestOwnerRecord:
     def _record(self, root: Path) -> dict:
-        return json.loads((root / f"{sub._OWNER_RECORD_PREFIX}{os.getpid()}.json").read_text())
+        return json.loads(sub._owner_record_path(root).read_text())
 
     def test_a_cluster_in_a_chosen_root_is_recorded_with_its_owner(
         self, tmp_path, monkeypatch,
@@ -306,20 +306,27 @@ class TestOwnerRecord:
         second = cp.pg_data_tempdir("nexus_bar_pg_")
         assert self._record(root)["pgdatas"] == [second]
 
-    def test_a_stale_record_left_by_an_earlier_process_of_the_same_pid_is_kept(
+    def test_a_record_an_earlier_process_of_the_same_pid_left_is_not_adopted(
         self, tmp_path, monkeypatch,
     ) -> None:
+        """The record is named by a per-process token, not the pid alone (nexus-fuz9t): under PID
+        namespaces a file under this pid number can be a LIVE sibling job's, so this process neither
+        reads it nor writes over it. Its orphans are the sweep's, once their owner's lock is free."""
         root = tmp_path / "nexus-test-pg-1000"
         root.mkdir()
         orphan = root / "nexus_old_pg_zzz"
         orphan.mkdir()
-        (root / f"{sub._OWNER_RECORD_PREFIX}{os.getpid()}.json").write_text(json.dumps({
+        earlier = root / f"{sub._OWNER_RECORD_PREFIX}{os.getpid()}.json"  # the name an older tree used
+        earlier.write_text(json.dumps({
             "owner_pytest_pid": os.getpid(), "owner_cmdline": "", "pgdatas": [str(orphan)],
             "children": [],
         }))
+        before = earlier.read_text()
         monkeypatch.setattr(sub, "pg_cluster_parent", lambda: str(root))
         new = cp.pg_data_tempdir("nexus_foo_pg_")
-        assert set(self._record(root)["pgdatas"]) == {str(orphan), new}
+        assert self._record(root)["pgdatas"] == [new], "the earlier file's clusters did not become ours"
+        assert sub._owner_record_path(root) != earlier
+        assert earlier.read_text() == before, "and the earlier file was left as it was"
 
     def test_exit_drops_a_record_with_nothing_left_to_reap(self, tmp_path, monkeypatch) -> None:
         root = tmp_path / "nexus-test-pg-1000"
@@ -327,12 +334,12 @@ class TestOwnerRecord:
         monkeypatch.setattr(sub, "pg_cluster_parent", lambda: str(root))
         path = Path(cp.pg_data_tempdir("nexus_foo_pg_"))
         sub._drop_finished_owner_records()
-        assert (root / f"{sub._OWNER_RECORD_PREFIX}{os.getpid()}.json").exists(), (
+        assert sub._owner_record_path(root).exists(), (
             "a record whose pgdata still exists must stay for the sweep"
         )
         path.rmdir()
         sub._drop_finished_owner_records()
-        assert not (root / f"{sub._OWNER_RECORD_PREFIX}{os.getpid()}.json").exists()
+        assert not sub._owner_record_path(root).exists()
 
 
 def _write_record(root: Path, *, owner: int, pgdatas=(), children=(), name=None) -> Path:
@@ -894,7 +901,7 @@ class TestThrowawayClusterDefaultRoot:
         with sub.throwaway_pg_cluster(lock_dir=tmp_path / "locks") as pgdata:
             assert pgdata.parent == root and str(pgdata) == made[0]
             assert "# CHOSEN" in (pgdata / "postgresql.conf").read_text()
-            rec = json.loads((root / f"{sub._OWNER_RECORD_PREFIX}{os.getpid()}.json").read_text())
+            rec = json.loads(sub._owner_record_path(root).read_text())
             assert rec["pgdatas"] == [str(pgdata)]
 
     def test_an_explicit_parent_dir_is_neither_recorded_nor_asked_for_a_root(
@@ -1140,6 +1147,9 @@ class TestSweepRemovesAStaleOwnerRecordTmp:
     @pytest.mark.parametrize("name", [
         "other.json.tmp",                                    # not our prefix
         f"{sub._OWNER_RECORD_PREFIX}abc.json.tmp",           # pid is not digits
+        f"{sub._OWNER_RECORD_PREFIX}4242-xyz12345.json.tmp",  # token is not 8 hex digits
+        f"{sub._OWNER_RECORD_PREFIX}4242-abcd12.json.tmp",   # token is too short
+        f"{sub._OWNER_RECORD_PREFIX}4242-abcd1234-0.json.tmp",  # a second token
         f"{sub._OWNER_RECORD_PREFIX}4242.json.tmp.bak",      # extra suffix
         f"{sub._OWNER_RECORD_PREFIX}4242.json",              # the record itself, old as it is
         f"x{sub._OWNER_RECORD_PREFIX}4242.json.tmp",         # prefix not at the start
@@ -1149,6 +1159,15 @@ class TestSweepRemovesAStaleOwnerRecordTmp:
         keep = self._tmp(root, age_s=10 * sub._OWNER_TMP_MIN_AGE_S, name=name)
         result = self._sweep(root)
         assert keep.exists() and result.stale_tmp_removed == []
+
+    def test_a_tmp_with_the_per_process_token_name_is_removed_too(self, tmp_path) -> None:
+        """The record's name carries a token since nexus-fuz9t; an owner killed mid-write leaves
+        THAT name, and the pid-only pattern would never have matched it."""
+        root = tmp_path / "nexus-test-pg-1000"
+        name = f"{sub._OWNER_RECORD_PREFIX}{self._PID}-0a1b2c3d.json.tmp"
+        tmp = self._tmp(root, age_s=sub._OWNER_TMP_MIN_AGE_S + 1, name=name)
+        result = self._sweep(root)
+        assert not tmp.exists() and result.stale_tmp_removed == [str(tmp)]
 
     def test_a_tmp_below_the_root_is_not_reached(self, tmp_path) -> None:
         root = tmp_path / "nexus-test-pg-1000"
@@ -1209,7 +1228,7 @@ class TestEngineSpawnsAreRecordedWithoutACluster:
         monkeypatch.setattr(sub, "_original_tempdir", lambda: self.root)
 
     def _record_file(self) -> Path:
-        return self.root / f"{sub._OWNER_RECORD_PREFIX}{os.getpid()}.json"
+        return sub._owner_record_path(self.root)
 
     def _spawn(self, fake_java, owned_children) -> subprocess.Popen:
         proc = cp.popen_in_group(jar_argv(fake_java, f"/x/{_FAKE_JAR}"))

@@ -156,7 +156,10 @@
 # flock is absent) keeps the pid and start-token rule. The descriptor is
 # inherited by the holder's children (bash cannot mark it close-on-exec), which
 # errs towards keeping the lock: a daemon that outlives a crashed holder keeps
-# it live until the daemon exits.
+# it live until the daemon exits. A timeout against such a lock names the pids
+# that actually hold holder.flock (/proc, Linux), not only the recorded one.
+# Reclaim re-probes the flock of the dir it renamed away before it removes it
+# (a pid number alone does not identify a lock across namespaces).
 #
 # API:
 #   lock_acquire <lockdir-path> [timeout_s]
@@ -334,10 +337,47 @@ _lock_is_stale() {
     return 1 # genuinely live holder
 }
 
+# _lock_flock_holders <lockdir> — the pids (one per line) that hold a descriptor on
+# <lockdir>/holder.flock, read from /proc/*/fd. Linux only; prints nothing elsewhere or
+# for processes this user cannot inspect.
+_lock_flock_holders() {
+    local f="$1/$_LOCK_FLOCK_FILE" d pid
+    [[ -d /proc/self/fd && -e "$f" ]] || return 0
+    for d in /proc/[0-9]*/fd/*; do
+        [[ "$d" -ef "$f" ]] || continue
+        pid="${d#/proc/}"
+        echo "${pid%%/*}"
+    done 2>/dev/null | sort -un
+}
+
+# _lock_explain_held <lockdir> <recorded-pid> — on a timeout, say who really holds a lock
+# whose recorded pid names nothing visible here. The pid in the message is the one the
+# holder wrote; under PID namespaces, or when a daemon the holder started kept its inherited
+# descriptor after the holder died, it points at nothing, and the operator needs the pids
+# that hold the lock (nexus-fuz9t).
+_lock_explain_held() {
+    local lockdir="$1" recorded="$2" pids pid
+    [[ "$recorded" != '?' ]] && _lock_pid_exists "$recorded" && return 0
+    [[ "$(_lock_flock_state "$lockdir")" == live ]] || return 0
+    echo "lock_acquire: pid ${recorded} is not a process here, but '$lockdir/$_LOCK_FLOCK_FILE' is held;" \
+        "the lock is live until every process holding that file exits." >&2
+    pids="$(_lock_flock_holders "$lockdir")"
+    if [[ -n "$pids" ]]; then
+        for pid in $pids; do
+            echo "lock_acquire:   held via pid ${pid}: $(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" >&2
+        done
+        echo "lock_acquire: if none of these is a run you want, stop them (an orphaned child of a crashed" \
+            "holder keeps an inherited descriptor); the lock frees when the last one exits." >&2
+    else
+        echo "lock_acquire: no holder is visible from here (another job's PID namespace, or another user);" \
+            "wait for that job to end." >&2
+    fi
+}
+
 # lock_acquire <lockdir-path> [timeout_s]
 lock_acquire() {
     local lockdir="$1" timeout="${2:-0}" start_ts now holder_pid
-    local stale_holder_pid claim captured_pid fresh
+    local stale_holder_pid claim captured_pid fresh claim_flock
 
     if [[ -z "$lockdir" ]]; then
         echo "lock_acquire: ERROR — lockdir-path is required" >&2
@@ -409,7 +449,13 @@ lock_acquire() {
             claim="$lockdir.reclaim.$$"
             if mv "$lockdir" "$claim" 2>/dev/null; then
                 captured_pid="$(cat "$claim/pid" 2>/dev/null || true)"
-                if [[ "$captured_pid" == "$stale_holder_pid" ]]; then
+                # Identity by pid text is not enough: pids repeat across PID namespaces, so a
+                # live holder that landed at $lockdir after our verdict can carry the dead
+                # holder's pid number. The dir we hold now is private, so its flock cannot be
+                # taken by anyone new; if it is held (or cannot be tried), it is not the stale
+                # lock we judged and goes back (nexus-fuz9t).
+                claim_flock="$(_lock_flock_state "$claim")"
+                if [[ "$captured_pid" == "$stale_holder_pid" && "$claim_flock" != live && "$claim_flock" != unknown ]]; then
                     # Captured exactly the stale lock this contender
                     # observed — safe to discard and retry mkdir. Only
                     # the mv-winner ever reaches this rm; a losing
@@ -471,6 +517,7 @@ lock_acquire() {
         if ((now - start_ts >= timeout)); then
             holder_pid="$(cat "$lockdir/pid" 2>/dev/null || echo '?')"
             echo "lock_acquire: FAILED to acquire '$lockdir' (held by pid ${holder_pid})" >&2
+            _lock_explain_held "$lockdir" "$holder_pid" >&2
             return 1
         fi
         sleep 0.2
@@ -496,7 +543,15 @@ lock_release() {
         return 1
     fi
 
-    # Remove first, close after: the flock keeps a reclaimer out until the dir is gone.
-    rm -rf "$lockdir"
+    # Remove first, close after: the flock keeps a reclaimer out until the dir is gone. The
+    # status that comes back is the removal's, not the close's: a lock that is still on disk
+    # must not read as released (it frees itself for the next contender, its flock now being
+    # dropped, but the caller has to know).
+    local rc=0
+    rm -rf "$lockdir" || rc=$?
     _lock_fd_close "$lockdir"
+    if ((rc != 0)); then
+        echo "lock_release: ERROR — could not remove '$lockdir' (rm exited $rc); its flock is released, so the next contender will reclaim it" >&2
+    fi
+    return "$rc"
 }

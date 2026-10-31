@@ -3,7 +3,7 @@
 #
 # Manual recovery for stale nexus_t2_substrate_pg_* clusters left behind by
 # finished pytest sessions (nexus-ui654), and for the integration-test clusters
-# recorded in nexus_integration_owner_<pid>.json files (nexus-942h9). A heavy
+# recorded in nexus_integration_owner_<pid>-<token>.json files (nexus-942h9). A heavy
 # multi-agent session can accumulate dozens of these tmpdirs even though the processes themselves
 # DO reap on clean exit (bead REFINED PICTURE, 2026-08-09) -- the dirs are
 # debris, and ensure_engine()'s own startup sweep (nexus-lgdy1) only runs

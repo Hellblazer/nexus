@@ -23,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from structlog.testing import capture_logs
 
 from tests import _engine_substrate as sub
 from tests import _tmp_root as tr
@@ -449,7 +450,7 @@ class TestOwnerLock:
         run, fd = tr.make_owned_run_dir(tmp_path / "root", probe=False)
         try:
             assert fd is not None and (run / "owner.lock").is_file()
-            assert json.loads((run / "owner.json").read_text())["pid"] == os.getpid()
+            assert json.loads((run / "owner.json").read_text())["controller_pid"] == os.getpid()
             blocked = subprocess.run([sys.executable, "-c", _TRY_LOCK, str(run / "owner.lock")], check=False)
             assert blocked.returncode == 1, "the lock must be held while the controller lives"
             assert tr.sweep_stale_runs(tmp_path / "root") == [] and run.is_dir()
@@ -515,6 +516,132 @@ class TestOwnerLock:
         finally:
             holder.__exit__(None, None, None)
         assert tr.sweep_stale_runs(root) == [run], "gone with its holder"
+
+
+@needs_flock
+class TestLockIsHeldBeforeItIsPublished:
+    def test_owner_lock_is_flocked_when_it_is_renamed_into_place(self, tmp_path, monkeypatch) -> None:
+        """A sweeper that sees ``owner.lock`` must see it held. Renaming first and locking after
+        leaves a window where it reads a free lock and removes a live controller's tree."""
+        seen: list[bool] = []
+        real = os.replace
+
+        def spy(src, dst, *args, **kwargs):
+            if str(dst).endswith("owner.lock"):
+                fd = os.open(src, os.O_RDONLY)
+                try:
+                    tr.fcntl.flock(fd, tr.fcntl.LOCK_EX | tr.fcntl.LOCK_NB)
+                except BlockingIOError:
+                    seen.append(True)
+                else:
+                    seen.append(False)
+                finally:
+                    os.close(fd)
+            return real(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "replace", spy)
+        _run, fd = tr.make_owned_run_dir(tmp_path / "root", probe=False)
+        tr.release_owner_lock(fd)
+        assert seen == [True], f"owner.lock was renamed into place {len(seen)} time(s), held at each: {seen}"
+
+
+#: ``_owner_is_live`` as it was before nexus-fuz9t (509df9541), copied verbatim: what a sweeper of
+#: an older tree, run on the same host over the same per-uid root, decides about a run dir.
+def _pre_fuz9t_owner_is_live(rec: dict) -> bool:
+    pid = rec.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # alive, someone else's: treat as live (the safe direction)
+    except (OSError, OverflowError):
+        return False
+    recorded = rec.get("starttime")
+    now = tr._process_start(pid)
+    return recorded is None or now is None or recorded == now
+
+
+class TestOlderTreesLeaveANewRunDirAlone:
+    """nexus-fuz9t: a tree from before the flock fix still judges a run dir by the pid in ``owner.json``, and
+    across a PID namespace that pid reads as dead. The record therefore shows such a reader a pid that is
+    alive in every namespace, and keeps the real controller under its own keys."""
+
+    def _record(self, tmp_path, controller_pid: int, *, legacy: bool) -> dict:
+        run = tmp_path / "run"
+        run.mkdir()
+        tr._write_owner_record(run, controller_pid, legacy=legacy)
+        return json.loads((run / "owner.json").read_text())
+
+    def test_the_older_rule_condemns_a_dead_controllers_old_shaped_record(self, tmp_path) -> None:
+        """Positive control: the frozen copy above does call a dead pid dead."""
+        rec = self._record(tmp_path, _dead_pid(), legacy=True)
+        assert _pre_fuz9t_owner_is_live(rec) is False
+
+    def test_the_older_rule_reads_a_new_record_live_whoever_the_controller_is(self, tmp_path) -> None:
+        rec = self._record(tmp_path, _dead_pid(), legacy=False)
+        assert _pre_fuz9t_owner_is_live(rec) is True, "an older sweeper keeps the dir, wherever it runs"
+        assert tr._owner_is_live(rec) is False, "and this tree's no-lock rule still reads the real controller"
+
+    def test_the_real_controller_is_what_this_trees_pid_rule_reads(self, tmp_path) -> None:
+        assert tr._owner_is_live(self._record(tmp_path, os.getpid(), legacy=False)) is True
+        assert tr._owner_is_live({"pid": os.getpid(), "starttime": None}) is True, "an older tree's shape still reads"
+
+    def test_a_free_lock_dir_goes_although_its_record_shows_a_live_pid(self, tmp_path) -> None:
+        """The sweep never asks the record for a dir that carries a lock: the lock decides."""
+        root = tmp_path / "root"
+        run, fd = tr.make_owned_run_dir(root, probe=False)
+        assert json.loads((run / "owner.json").read_text())["pid"] == 1
+        tr.release_owner_lock(fd)  # the controller exits
+        assert tr.sweep_stale_runs(root) == [run]
+
+    @needs_flock
+    def test_a_held_lock_keeps_the_dir_although_the_controller_pid_is_dead(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run, fd = tr.make_owned_run_dir(root, probe=False)
+        try:
+            tr._write_owner_record(run, _dead_pid())  # the record names a dead controller; the lock says live
+            assert tr.sweep_stale_runs(root) == [] and run.is_dir()
+        finally:
+            tr.release_owner_lock(fd)
+
+    def test_an_owner_lock_tmp_left_by_a_killed_controller_goes_with_its_bare_dir(self, tmp_path) -> None:
+        """Killed between creating the lock and renaming it in: no ``owner.lock``, no ``owner.json``,
+        so the run dir is a bare one and the age rule removes it, the leftover with it."""
+        root = tmp_path / "root"
+        run = root / "rbare1111"
+        run.mkdir(parents=True)
+        (run / "owner.lock.tmp").touch()
+        assert tr.sweep_stale_runs(root) == [] and run.is_dir(), "young: left alone"
+        past = time.time() - tr.BARE_MIN_AGE_S - 5
+        os.utime(run, (past, past))
+        assert tr.sweep_stale_runs(root) == [run] and not run.exists()
+
+
+@needs_flock
+class TestLongKeptIsReported:
+    def _events(self, logs) -> list[dict]:
+        return [e for e in logs if e.get("event") == "nexus_test_tmp.kept_long"]
+
+    def test_a_run_whose_lock_is_held_for_hours_is_logged_and_kept(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = _lock_dir(root, pid=_dead_pid())
+        old = time.time() - tr.LONG_KEPT_AGE_S - 60
+        os.utime(run, (old, old))
+        with _holding(run / "owner.lock"), capture_logs() as logs:
+            assert tr.sweep_stale_runs(root) == []
+        (event,) = self._events(logs)
+        assert event["path"] == str(run) and event["state"] == "live" and event["bead"] == "nexus-fuz9t"
+        assert run.is_dir(), "report only: a run is never reaped on age"
+
+    def test_a_run_held_for_minutes_is_not_logged(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = _lock_dir(root, pid=_dead_pid())
+        with _holding(run / "owner.lock"), capture_logs() as logs:
+            tr.sweep_stale_runs(root)
+        assert self._events(logs) == []
 
 
 def _plugin(tmp_path, env=None, **decide_kw) -> tuple[tr.TmpRootPlugin, dict]:
@@ -1175,6 +1302,17 @@ class TestKeptReportPath:
         run.mkdir(parents=True, exist_ok=True)
         (run / "owner.json").write_text(json.dumps({"pid": os.getpid() if pid is None else pid, "starttime": None}))
         return run
+
+    def test_a_run_dir_in_the_current_owner_shape_names_its_controller(self, tmp_path) -> None:
+        """``owner.json`` shows an older tree's sweeper pid 1 and keeps the controller under its own key
+        (nexus-fuz9t); the report path still follows the real controller, not whoever asks as pid 1."""
+        run = tmp_path / "shm" / _ROOT / "rabc12345"
+        run.mkdir(parents=True)
+        tr._write_owner_record(run, os.getpid())
+        report = run / "p" / "pytest-of-u" / "pytest-0" / "nx-ddl-report.json"
+        kept = tr.kept_report_path(report, self._env(run))
+        assert kept.name == "nx-ddl-report.json" and kept != report, "the controller's report is harvested"
+        assert tr.kept_report_path(report, self._env(run), pid=1) == report, "pid 1 is not the controller"
 
     def test_a_basetemp_report_is_named_by_its_disk_copy(self, tmp_path) -> None:
         run = self._owned(tmp_path / "shm" / _ROOT / "rabc12345")
