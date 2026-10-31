@@ -45,7 +45,28 @@ class ManifestPushdownTest {
         var plan = ManifestPushdown.of(predicates(where("page_number", op("$gte", 9000))));
 
         assertThat(plan.containment()).isNull();
-        assertThat(plan.jsonPath()).isEqualTo("$.\"page_number\" >= 9000");
+        // nexus-6pfgb.64: read as a number whether the stored page is a JSON number or numeric text, as the stage does.
+        assertThat(plan.jsonPath()).isEqualTo("exists($.\"page_number\" ? (@.number() >= 9000))");
+    }
+
+    @Test
+    void everyNumericPageRangeOperator_readsTheStoredPageAsANumber() {
+        for (var e : Map.of("$gte", ">=", "$gt", ">", "$lte", "<=", "$lt", "<").entrySet()) {
+            var plan = ManifestPushdown.of(predicates(where("page_number", op(e.getKey(), 7))));
+            assertThat(plan.jsonPath()).as(e.getKey())
+                .isEqualTo("exists($.\"page_number\" ? (@.number() " + e.getValue() + " 7))");
+        }
+        // A decimal operand is rendered as plain numeric text, never in exponent form.
+        assertThat(ManifestPushdown.of(predicates(where("page_number", op("$gte", 2.5)))).jsonPath())
+            .isEqualTo("exists($.\"page_number\" ? (@.number() >= 2.5))");
+    }
+
+    @Test
+    void aStringOperandOnAPageRange_keepsTheStrictStringComparison_asTheStageComparesItLexically() {
+        // The stage treats a string operand as a lexical comparison against a string label and a number as not
+        // comparable, which is what the strict jsonpath comparison does; only a NUMERIC operand reads text as a number.
+        assertThat(ManifestPushdown.of(predicates(where("page_number", op("$gte", "3")))).jsonPath())
+            .isEqualTo("$.\"page_number\" >= \"3\"");
     }
 
     @Test
@@ -60,7 +81,7 @@ class ManifestPushdownTest {
         var plan = ManifestPushdown.of(predicates(where("section_type", "body", "page_number", op("$lt", 5))));
 
         assertThat(plan.containment().data()).isEqualTo("{\"section_type\":\"body\"}");
-        assertThat(plan.jsonPath()).isEqualTo("$.\"page_number\" < 5");
+        assertThat(plan.jsonPath()).isEqualTo("exists($.\"page_number\" ? (@.number() < 5))");
     }
 
     @Test
@@ -127,6 +148,6 @@ class ManifestPushdownTest {
         var plan = ManifestPushdown.of(predicates(where("page_number", op("$gte", 3), "content_type", "pdf")));
 
         assertThat(plan.jsonPath()).isEqualTo(
-            "$.\"page_number\" >= 3 && (exists($.\"content_type\"[*] ? (@ == \"pdf\")))");
+            "exists($.\"page_number\" ? (@.number() >= 3)) && (exists($.\"content_type\"[*] ? (@ == \"pdf\")))");
     }
 }

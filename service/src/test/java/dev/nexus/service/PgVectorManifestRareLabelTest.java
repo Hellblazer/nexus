@@ -41,7 +41,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * chunk's manifest row carries {@code section_type body} and {@code page_number} = its index, except: the last
  * two (indexes 1998, 1999) are {@code appendix-x} on pages 9000 and 9001 with the title {@code Rare}; index 1500
  * is a LEGACY row ({@code labels_written} false) whose chunk row says {@code legacy-rare}; and index 1700 is a
- * WRITTEN row whose chunk row says {@code stale-row} (a last writer's label the document must not inherit).
+ * WRITTEN row whose chunk row says {@code stale-row} (a last writer's label the document must not inherit); index 1600
+ * is a legacy row whose chunk row stores {@code page_number} as the TEXT {@code "5000"} and 1650 one that stores
+ * {@code "abc"} (nexus-6pfgb.64).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PgVectorManifestRareLabelTest {
@@ -55,6 +57,9 @@ class PgVectorManifestRareLabelTest {
     private static final String DOC = "rare-doc";
     private static final String QUERY = "rareprobe";
     private static final int N = 2000;
+    /** Legacy manifest rows (labels_written false) whose chunk row holds page_number as text: "5000" and "abc". */
+    private static final int LEGACY_TEXT_PAGE = 1600;
+    private static final int LEGACY_BAD_PAGE = 1650;
 
     private static String chash(int i) {
         return Chash.ofText("rare-label-" + i).toHex();
@@ -116,6 +121,9 @@ class PgVectorManifestRareLabelTest {
                 Map<String, Object> m = new LinkedHashMap<>();
                 if (i == 1500) m.put("section_type", "legacy-rare");
                 if (i == 1700) m.put("section_type", "stale-row");
+                // nexus-6pfgb.64: legacy rows whose chunk row stores the page as TEXT (the stage reads "5000" as 5000).
+                if (i == LEGACY_TEXT_PAGE) m.put("page_number", "5000");
+                if (i == LEGACY_BAD_PAGE) m.put("page_number", "abc");
                 metas.add(m);
             }
             vec.upsertChunks(TENANT, COLLECTION, ids, texts, metas);
@@ -133,7 +141,7 @@ class PgVectorManifestRareLabelTest {
                     CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN);
                 for (int i = from; i < Math.min(N, from + 500); i++) {
                     boolean rare = i >= N - 2;
-                    boolean legacy = i == 1500;
+                    boolean legacy = i == 1500 || i == LEGACY_TEXT_PAGE || i == LEGACY_BAD_PAGE;
                     step = step.values(TENANT, DOC, i, HexFormat.of().parseHex(chash(i)), COLLECTION, MODEL,
                         rare ? "Rare" : null,
                         legacy ? null : rare ? "appendix-x" : "body",
@@ -211,6 +219,25 @@ class PgVectorManifestRareLabelTest {
         expectAll(10, where("section_title", "Rare"), List.of(chash(N - 2), chash(N - 1)));
         expectAll(10, where("section_type", op("$in", List.of("appendix-x", "nothing"))),
                   List.of(chash(N - 2), chash(N - 1)));
+    }
+
+    @Test
+    void aPageRange_keepsALegacyRowWhosePageIsStoredAsNumericText_asTheStageDoes() {
+        // nexus-6pfgb.64: the stage reads the chunk row's "5000" as 5000 (comparable), so page_number >= 4000 keeps
+        // chunk 1600. Its rank is 1601 of 2000, far past the 4x cut, so only the in-SQL range can find it: the pushed
+        // range must read a numeric string as a number, as the pushed equality already does.
+        List<String> rareAndTextPage = List.of(chash(LEGACY_TEXT_PAGE), chash(N - 2), chash(N - 1));
+        expectAll(10, where("page_number", op("$gte", 4000)), rareAndTextPage);
+        expectAll(10, where("page_number", op("$gt", 5000)), List.of(chash(N - 2), chash(N - 1)));
+    }
+
+    @Test
+    void aPageRange_neverKeepsATextPageThatIsNotANumber() {
+        // "abc" (chunk 1650) is not comparable to a number in the stage; the pushed range must not error on it or keep it.
+        var all = ids(search(2000, where("page_number", op("$lt", 9999))));
+        assertThat(all).doesNotContain(chash(LEGACY_BAD_PAGE)).contains(chash(LEGACY_TEXT_PAGE));
+        // 2,000 chunks less chunk 1500 (a legacy row with no page at all) and "abc": every other page is under 9999.
+        assertThat(all).hasSize(N - 2);
     }
 
     @Test

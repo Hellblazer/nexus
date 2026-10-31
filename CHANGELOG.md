@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `page_number` range reads a numeric string as a number inside the search, as the stage after it does** (nexus-6pfgb.64, RDR-236 Phase 3; engine change, rides the next engine cut, `engine-service-v0.1.172`). A legacy chunk row that stored the page as text (`"5"`) was kept by the label stage and rejected by the in-search test, so a range filter missed it. Needs PostgreSQL 17.
+- **The derived source format (`content_type=pdf` and `markdown`) has one SQL definition, `nexus.catalog_source_format`, and a test that the engine's Java copy agrees with it** (nexus-6pfgb.62, RDR-236 Phase 3; engine change, rides the next engine cut, `engine-service-v0.1.172`). The rule was copied into each of the three `manifest_search_<dim>` functions and into `ManifestLabelStage`; a drift would have made the in-search test stricter than the stage and dropped rows. The function is `IMMUTABLE`, so the generated column of nexus-6pfgb.23 can call it. No behavior change.
+
 ## [7.90.0] - 2026-10-31
 
 Pairs with engine-service-v0.1.171 (REQUIRED_ENGINE_VERSION moves from v0.1.169; the engine deployed to the managed service before this client tag, every wire entry being additive). Upgrade aspect worker hosts before producer hosts: this release makes the aspects tuple queue the default (NX_ASPECT_QUEUE=tuples) and the worker's tuple side ships in it too.

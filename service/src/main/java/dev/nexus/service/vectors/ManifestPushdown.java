@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.jooq.JSONB;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,7 +40,19 @@ import java.util.Set;
  * {@link ManifestLabelStage#matches} accepts for any operand.
  *
  * <p>The compiled form reuses {@link PgVectorRepository#planWhere}, so the operators, the tolerant number-or-text
- * equality and the three-valued jsonpath rules are the search's own.
+ * equality and the three-valued jsonpath rules are the search's own, with one exception: a NUMERIC range on
+ * {@code page_number} is compiled here (nexus-6pfgb.64). {@link PgVectorRepository#planWhere} keeps the retired
+ * type-strict range (a numeric operand never matches a stored string), but the stage's {@code comparable} accepts a
+ * numeric string on a numeric key, so a legacy chunk row that stored {@code page_number} as {@code "5"} is KEPT by
+ * the stage for {@code page_number >= 3}. The pushed range therefore reads the stored value as a number whichever
+ * JSON form it has: {@code exists($."page_number" ? (@.number() >= 3))}. {@code .number()} turns a JSON number or
+ * a numeric string into an exact {@code numeric}; a value that is not numeric (the empty string a missing page is
+ * counted as, text such as {@code "abc"}) is an error inside the filter, which jsonpath turns into "unknown" and so
+ * into "no match", the stage's {@code comparable == false}. It needs PostgreSQL 17 (the engine's floor). Residual:
+ * the stage parses with {@link java.math.BigDecimal}, which also reads non-ASCII digits; PostgreSQL does not, so a
+ * legacy page stored as such text is kept by the stage and rejected by the EXISTS. A STRING operand on a range
+ * keeps the strict string comparison on both sides (the stage compares a string label lexically and treats a
+ * number as not comparable), so nothing differs there.
  */
 final class ManifestPushdown {
 
@@ -79,13 +92,17 @@ final class ManifestPushdown {
      */
     static Plan of(List<ManifestLabelStage.Predicate> predicates) {
         Map<String, Object> where = new LinkedHashMap<>();
-        List<String> contentType = new ArrayList<>();
+        List<String> own = new ArrayList<>();
         for (ManifestLabelStage.Predicate p : predicates) {
             if (!pushable(p)) {
                 continue;
             }
             if (ManifestLabelStage.CONTENT_TYPE_KEY.equals(p.key())) {
-                contentType.add(contentTypePath(p));
+                own.add(contentTypePath(p));
+                continue;
+            }
+            if (isNumericPageRange(p)) {
+                own.add(pageNumberRangePath(p));
                 continue;
             }
             Map<String, Object> op = new LinkedHashMap<>();
@@ -93,7 +110,7 @@ final class ManifestPushdown {
             where.put(p.key(), op);
         }
         PgVectorRepository.WherePlan plan = PgVectorRepository.planWhere(where.isEmpty() ? null : where);
-        List<String> paths = new ArrayList<>(contentType);
+        List<String> paths = new ArrayList<>(own);
         if (plan.jsonPath() != null) {
             paths.add(0, plan.jsonPath());
         }
@@ -101,6 +118,35 @@ final class ManifestPushdown {
             return null;
         }
         return new Plan(plan.containment(), paths.isEmpty() ? null : String.join(" && ", paths));
+    }
+
+    /** A range on {@code page_number} with a numeric operand: the one range this class compiles itself. */
+    private static boolean isNumericPageRange(ManifestLabelStage.Predicate p) {
+        return PAGE_NUMBER.equals(p.key()) && RANGE_OPERATORS.contains(p.operator())
+            && p.operand() instanceof Number;
+    }
+
+    /**
+     * {@code exists($."page_number" ? (@.number() >= N))}: the stored page read as a number whether it is a JSON
+     * number or a numeric string (see the class comment). The operand is rendered as plain numeric text, as {@link
+     * PgVectorRepository#planWhere} renders a numeric operand; a value that is not finite is refused with the same
+     * 400-shaped error the search's own planner gives it.
+     */
+    private static String pageNumberRangePath(ManifestLabelStage.Predicate p) {
+        BigDecimal operand;
+        try {
+            operand = new BigDecimal(p.operand().toString());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                p.operator() + " for field '" + p.key() + "' expects a finite numeric operand, got " + p.operand(), e);
+        }
+        String cmp = switch (p.operator()) {
+            case "$gte" -> ">=";
+            case "$gt" -> ">";
+            case "$lte" -> "<=";
+            default -> "<";
+        };
+        return "exists($.\"" + PAGE_NUMBER + "\" ? (@.number() " + cmp + " " + operand.toPlainString() + "))";
     }
 
     /** {@code $eq} / {@code $in} on {@code content_type}: some word in the document's array equals the operand. */
