@@ -483,6 +483,48 @@ class TestCheckTupleTableBloat:
         assert r.ok is False and r.warn is not True
         assert "exceeds" in r.detail
 
+    def _bloat_with(self, tmp_path, stdout: str):
+        creds = _make_creds_file(tmp_path)
+
+        def responder(sql, cmd):
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=stdout, stderr="")
+
+        return h._check_tuple_table_bloat(
+            creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
+        )[0]
+
+    def test_a_virgin_box_with_two_tuples_is_not_a_finding(self, tmp_path) -> None:
+        # nexus-j6un5: the 7.90.0 fresh-install MVV went red at live=1 dead=1
+        # (50%) once the aspects tuple queue became the default.
+        r = self._bloat_with(tmp_path, "tuple_claim_log|0|0||\ntuples|1|1||\n")
+        assert r.ok is True
+        assert "not judged" in r.detail
+
+    def test_autovacuum_due_but_not_yet_run_is_not_a_finding(self, tmp_path) -> None:
+        # live=1: trigger 50.01, floor 100.02; 99 dead (99%) is inside the window.
+        r = self._bloat_with(tmp_path, "tuples|1|99||\n")
+        assert r.ok is True
+
+    def test_past_twice_the_trigger_is_a_hard_finding_with_the_vacuum_fix(self, tmp_path) -> None:
+        r = self._bloat_with(tmp_path, "tuples|1|101||\n")
+        assert r.ok is False and "exceeds" in r.detail
+        assert r.fix_suggestions == ["VACUUM ANALYZE nexus.tuples;"]
+
+    def test_the_floor_scales_with_live_rows(self, tmp_path) -> None:
+        # live=10000: floor 2 x (50 + 100) = 300. 299 dead is 2.9%, never judged;
+        # 3000 dead on 10000 live is 23% and past the floor.
+        assert h._tuple_dead_rows_floor(10_000) == 300
+        assert self._bloat_with(tmp_path, "tuples|10000|3000||\n").ok is False
+
+    def test_an_unjudged_table_does_not_mask_a_judged_one(self, tmp_path) -> None:
+        r = self._bloat_with(tmp_path, "tuples|1|49||\ntuple_claim_log|10|900||\n")
+        assert r.ok is False and r.detail.startswith("tuple_claim_log ")
+        assert r.fix_suggestions == ["VACUUM ANALYZE nexus.tuple_claim_log;"]
+
+    def test_a_healthy_box_carries_no_floor_note(self, tmp_path) -> None:
+        r = self._bloat_with(tmp_path, "tuples|10000|1000||\n")  # floor 300, judged, 9.1%
+        assert r.ok is True and "not judged" not in r.detail and "twice" not in r.detail
+
     def test_engine_unreachable(self, tmp_path) -> None:
         creds = _make_creds_file(tmp_path)
 

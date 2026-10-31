@@ -7989,6 +7989,25 @@ _TUPLE_STALE_UNCLAIMED_AGE_S: int = 3600  # 1 hour
 #: independent numbers answering different questions (when does autovacuum
 #: run vs. when should a human look).
 _TUPLE_DEAD_RATIO_WARN: float = 0.20
+#: A table's ratio is judged only once its dead rows pass twice its own
+#: autovacuum trigger, ``autovacuum_vacuum_threshold +
+#: autovacuum_vacuum_scale_factor * reltuples``: 50 (PostgreSQL's default
+#: base threshold) plus 0.01 x live rows (tuples-001-baseline and
+#: tuples-007-deliveries set the 0.01 scale factor; reltuples is taken as live
+#: rows). Below the trigger autovacuum is not due; between the trigger and
+#: twice it, autovacuum is due and may simply not have run yet (its naptime is
+#: about a minute), which on a small, busy queue table reads 90% or more. The
+#: row exists to catch autovacuum NOT keeping up, so that window is not a
+#: finding. Without a floor a fresh install with one live and one dead tuple
+#: read 50% and failed doctor (nexus-j6un5, the 7.90.0 fresh-install MVV).
+_TUPLE_AUTOVAC_BASE_THRESHOLD: int = 50
+_TUPLE_AUTOVAC_SCALE_FACTOR: float = 0.01
+_TUPLE_AUTOVAC_SLACK: float = 2.0
+
+
+def _tuple_dead_rows_floor(live: int) -> float:
+    """Dead rows past which a tuple table's ratio counts (see the constants above)."""
+    return _TUPLE_AUTOVAC_SLACK * (_TUPLE_AUTOVAC_BASE_THRESHOLD + _TUPLE_AUTOVAC_SCALE_FACTOR * live)
 
 #: NexusService.SWEEP_INTERVAL_HOURS is 6h; NexusService.java:154's own
 #: comment treats 3x that (18h) as the slack budget before a single
@@ -8756,6 +8775,7 @@ def _check_tuple_table_bloat(
     worst_ratio = 0.0
     worst_table = ""
     details: list[str] = []
+    skipped = 0
     for line in lines:
         parts = line.split("|")
         if len(parts) != 5:
@@ -8768,11 +8788,16 @@ def _check_tuple_table_bloat(
             continue
         total = live + dead
         ratio = (dead / total) if total > 0 else 0.0
-        if ratio > worst_ratio:
+        floor = _tuple_dead_rows_floor(live)
+        judged = dead > floor
+        if judged and ratio > worst_ratio:
             worst_ratio, worst_table = ratio, relname
+        if not judged:
+            skipped += 1
         details.append(
             f"{relname}: dead_ratio={ratio:.2%} live={live} dead={dead} "
             f"last_autovacuum={last_vac or 'never'}"
+            + ("" if judged else f" (not judged: dead <= {floor:.0f})")
         )
 
     if worst_ratio > _TUPLE_DEAD_RATIO_WARN:
@@ -8784,7 +8809,11 @@ def _check_tuple_table_bloat(
             ),
             fix_suggestions=[f"VACUUM ANALYZE nexus.{worst_table};"],
         )]
-    return [HealthResult(label=label, ok=True, detail="; ".join(details) or "none")]
+    note = (
+        "; a ratio counts only past twice the table's autovacuum trigger"
+        if skipped else ""
+    )
+    return [HealthResult(label=label, ok=True, detail=("; ".join(details) or "none") + note)]
 
 
 _TUPLE_SWEEP_LABEL = "tuples.sweep_freshness"

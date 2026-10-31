@@ -602,7 +602,7 @@ class TestQueueMVV:
             }))
             assert done.status_code == 200
 
-    def test_claim_batch_client_roundtrip_real_service(self, service) -> None:
+    def test_claim_batch_client_roundtrip_real_service(self, service, monkeypatch: pytest.MonkeyPatch) -> None:
         """nexus-575kd boundary guard: HttpAspectQueue.claim_batch (the CLIENT
         method the aspect worker polls with) must parse the real service's
         BARE-ARRAY /claim_batch response.
@@ -623,6 +623,10 @@ class TestQueueMVV:
         import time as _time
         from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 
+        # The subject is the TABLE client's wire shape, so this test opts out of the
+        # tuples default (RDR-235 Activation Step 1, nexus-lnwn1): under tuples the
+        # enqueue writes tasks and claim_batch's table has nothing to return.
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
         base_url, token, _ = service
         tenant = f"queue-claimbatch-{_time.time_ns()}"
         doc_id = "doc-fk-control"
