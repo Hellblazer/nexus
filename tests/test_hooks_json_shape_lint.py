@@ -118,7 +118,10 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: PreToolUse, PostToolUse and PostToolUseFailure on Bash (one script, three
 #: events; a Bash call that exits non-zero fires PostToolUseFailure instead).
 #: 19 -> 16 at nexus-i93tz (Sam's decision 2026-10-25): all three entries removed.
-EXPECTED_CONEXUS_ENTRIES = 16
+#: 16 -> 19 at nexus-3lqxv: `compact_checkpoint.py`, one script and three modes
+#: (`pre` on PreCompact, `post` on PostCompact, `inject` on a SessionStart group
+#: whose matcher is `compact` only).
+EXPECTED_CONEXUS_ENTRIES = 19
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -160,12 +163,17 @@ CONEXUS_UV_ARGV = ("tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-
 #: tests/test_hooks_json_verb_release_floor.py decides which entries must use it.
 NX_HOOK_SHIM = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py"
 
+#: The plugin-resident script that takes one mode word after its path (nexus-3lqxv).
+COMPACT_CHECKPOINT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compact_checkpoint.py"
+COMPACT_CHECKPOINT_MODES = frozenset({"pre", "post", "inject"})
+
 #: The handlers bead .21 resolved as plugin-resident (behaviour_census.py
 #: was deleted at cleanup step A1, nexus-0r1uz), plus the one RDR-219 adds
 #: deliberately (nexus-wauo1.22) -- see the docstring for why 7.58.0 still
 #: wires the first ones, and why the last is not a skew accommodation at all.
 PLUGIN_RESIDENT_SCRIPTS = frozenset(
     {
+        COMPACT_CHECKPOINT,
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_setup_notice.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
@@ -298,6 +306,13 @@ def reject_conexus(event: str, entry: dict) -> str | None:
                 return f"runs the nx-hook shim with {len(rest) - 1} verbs; exactly one is permitted"
             if rest[1] not in VERB_TABLE:
                 return f"runs the nx-hook shim on {rest[1]!r}, which this wheel does not register"
+            return None
+        if rest and rest[0] == COMPACT_CHECKPOINT:
+            if len(rest) != 2 or rest[1] not in COMPACT_CHECKPOINT_MODES:
+                return (
+                    f"runs compact_checkpoint.py with {rest[1:]!r}; exactly one of "
+                    f"{sorted(COMPACT_CHECKPOINT_MODES)} is permitted"
+                )
             return None
         if len(rest) != 1:
             return f"runs uv with {len(rest)} trailing args; exactly one script path is permitted"
