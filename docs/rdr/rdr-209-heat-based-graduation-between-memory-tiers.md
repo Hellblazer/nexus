@@ -378,11 +378,26 @@ titles name a bead, so a title-only rollup misses about 23%. And the
 comes first, and the trigger is `rdr-close` and the close of the phase's
 review bead, not the skill alone.
 
-0. Reviewer and developer write-backs carry `bead:` and `rdr:` tags (the
-   agent definitions' T2 write-back lines), so new gate records map to a
+0. Reviewer and developer write-backs carry `kind:gate`, `bead:<id>` and
+   `rdr:<NNN>` tags, `rdr:` dropped when the bead serves no RDR (the agent
+   definitions' T2 write-back lines, the orchestration reference and the
+   substantive-critique skill; shipped by nexus-qo7ie.1 and pinned by
+   `tests/test_gate_record_tags_lint.py`), so new gate records map to a
    phase without parsing the title. Older records are mapped by title, and
    the ones that do not map are listed under "unmapped" in the pointer record
    and keep no TTL.
+   - **The lookup is an exact tag match, not a search.** `memory_search`
+     tokenizes: a search for `kind:gate` on 2026-10-31 returned 273 hits, the
+     first five untagged critiques matched on words in their bodies (critique
+     of 2064fd94a). Phase 3 therefore needs a list filter on the tags column
+     that matches one whole tag, and its tests include an untagged record that
+     mentions `kind:gate` in its body and must not be returned.
+   - **RDR gate records are in scope.** The `rdr-gate-checklist` skill writes
+     its fix-checks, critiques and results to project `{repo}_rdr` tagged
+     `rdr,gate,...` and titled by RDR number. The rollup reads those by that
+     project and the `gate` tag, mapped to the RDR by title, and the skill is
+     not retagged: its records are per RDR, not per bead, so its own
+     vocabulary already names the phase owner.
 
 1. At an RDR phase close (the `phase-review-gate` skill's close step, and
    `rdr-close`), write one T3 record per phase. It lists every gate-record

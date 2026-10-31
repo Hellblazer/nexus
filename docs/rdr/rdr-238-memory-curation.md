@@ -262,7 +262,12 @@ files, unindexed files, oversized files and superseded rows still served.
    Claude Code already reminds a writer near its own 200-line and 25 KB
    limits (research 1); this check is the tighter budget we choose, plus the
    two checks Claude Code does not make.
-6. **Curation report.** `nx memory curate [--files] [--t2]`: unread files
+6. **Curation report.** `nx memory curate [--files] [--agents] [--t2]`. `--agents`
+   covers the reviewers' own memory directories under
+   `~/.claude/agent-memory/` (nexus-qo7ie.1 gave both reviewers `memory: user`):
+   index length against the 40-line cap their definitions state, entries with
+   no repo named, and concurrent-write damage, since two sessions running the
+   same reviewer edit one `MEMORY.md` and the last writer wins. `--files`: unread files
    over N days (read counts from transcripts until RDR-209 Phase 0b gives T2
    a true read counter), unindexed files, files over the promotion size, and
    live T2 rows that a later row names in its title or body as replaced
