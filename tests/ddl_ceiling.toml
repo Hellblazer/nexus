@@ -119,7 +119,12 @@ migration_wal_bytes_per_worker = 11038000
 # adds five DDL statements, the vectors-043-1 shape: 1 CREATE OR REPLACE FUNCTION (manifest_names_key), its 1 GRANT EXECUTE, and 3 CREATE OR REPLACE
 # FUNCTION replacing the manifest_search_384/768/1024 bodies again (no re-grant); the post-condition DO block is not DDL. Measured on chas, 2026-10-31,
 # merged tree (043 +5, 044 +5, 045 +5): ddl: migration=2181 (tests/test_scenario_journeys.py with the batch's other substrate files).
-migration_ddl_per_worker = 2181
+# 2181 -> 2187 (2026-10-31): vectors-046 (nexus-yye8l.21, nexus.request_ledger_tenants) adds six DDL statements to a fresh
+# migration: 1 CREATE TABLE and 1 from the runAlways grants loop for the new table (the vectors-037-1 accounting per table),
+# 1 CREATE OR REPLACE FUNCTION (the register-tenant trigger function), 1 CREATE TRIGGER (BEFORE INSERT on request_ledger),
+# and the backfill's ALTER TABLE ... NO FORCE ROW LEVEL SECURITY and its FORCE restore (the INSERT ... SELECT is not DDL).
+# Measured on the laptop (macOS), 2026-10-31: tests/test_scenario_journeys.py, one worker, ddl: migration=2187, merged tree (043 +5, 044 +5, 045 +5, 046 +6).
+migration_ddl_per_worker = 2187
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

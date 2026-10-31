@@ -116,6 +116,53 @@ class RequestLedgerSchemaLiquibaseTest {
         }
     }
 
+    // ── nexus-yye8l.21: the tenant registry the retention arm enumerates ────
+
+    @Test
+    void requestLedgerTenants_isAKeyedTenantListWithNoRls() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Map<String, String> actual = new TreeMap<>();
+            for (String col : PgCatalogProbes.columnNames(ctx, "nexus", "request_ledger_tenants")) {
+                PgCatalogProbes.ColumnInfo info = PgCatalogProbes.columnInfo(ctx, "nexus", "request_ledger_tenants", col);
+                actual.put(col, info.udtName() + " " + info.isNullable());
+            }
+            assertThat(actual).isEqualTo(new TreeMap<>(Map.of("tenant_id", "text NO", "first_seen", "timestamptz NO")));
+            Map<String, String> constraints = PgCatalogProbes.constraintDefinitionsIn(ctx, List.of("nexus")).stream()
+                .filter(c -> c.table().equals("request_ledger_tenants"))
+                .collect(Collectors.toMap(
+                    PgCatalogProbes.ConstraintDefinition::conname,
+                    PgCatalogProbes.ConstraintDefinition::definition));
+            assertThat(constraints).containsOnlyKeys("request_ledger_tenants_pk");
+            assertThat(constraints.get("request_ledger_tenants_pk")).isEqualTo("PRIMARY KEY (tenant_id)");
+            PgCatalogProbes.RowSecurity rls = PgCatalogProbes.rowSecurity(ctx, "nexus", "request_ledger_tenants");
+            assertThat(rls).isNotNull();
+            assertThat(rls.enabled()).as("no RLS: the retention arm must see every tenant's row").isFalse();
+        }
+    }
+
+    @Test
+    void theRegisterTenantTrigger_isABeforeInsertRowTriggerOnTheLedger_withAnInvokerFunctionAndAPinnedSearchPath()
+            throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var triggers = ctx.fetch("""
+                SELECT t.tgname, pg_get_triggerdef(t.oid) AS def, p.prosecdef, p.proconfig::text AS cfg
+                  FROM pg_trigger t
+                  JOIN pg_proc p ON p.oid = t.tgfoid
+                 WHERE t.tgrelid = 'nexus.request_ledger'::regclass AND NOT t.tgisinternal
+                """);
+            assertThat(triggers).hasSize(1);
+            var trigger = triggers.get(0);
+            assertThat(trigger.get("tgname", String.class)).isEqualTo("trg_request_ledger_register_tenant");
+            assertThat(trigger.get("def", String.class))
+                .contains("BEFORE INSERT ON nexus.request_ledger", "FOR EACH ROW",
+                    "nexus.request_ledger_register_tenant()");
+            assertThat(trigger.get("prosecdef", Boolean.class)).as("SECURITY INVOKER").isFalse();
+            assertThat(trigger.get("cfg", String.class)).contains("search_path=pg_catalog, pg_temp");
+        }
+    }
+
     // ── Test 3: the CHECK constraints reject what they name ─────────────────
 
     @Test

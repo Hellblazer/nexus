@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -37,9 +38,25 @@ _CLIENT_TIMEOUT_S = 30.0
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="SIGHUP and SIGTERM delivery is POSIX")
 
 
+#: A runner that starts the suite in the background (a non-interactive shell's ``&``) hands every
+#: process SIGINT ignored, and an ignored signal is not held: put Python's own handler back first.
+_SIGINT_DEFAULT = "import signal as _s; _s.signal(_s.SIGINT, _s.default_int_handler)\n"
+
+
+@pytest.fixture(autouse=True)
+def _sigint_raises_keyboard_interrupt() -> Iterator[None]:
+    """The in-process tests send themselves SIGINT; see :data:`_SIGINT_DEFAULT`."""
+    before = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, before)
+
+
 def _run(script: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=60,
+        [sys.executable, "-c", _SIGINT_DEFAULT + script], capture_output=True, text=True, timeout=60,
         cwd=str(Path(__file__).parent.parent), env={**os.environ, "NX_NO_TELEMETRY": "1"},
     )
 

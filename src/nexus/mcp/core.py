@@ -8214,7 +8214,10 @@ def tuple_nack(
         description="Whole seconds to hold the task back before it can be claimed again.",
     )] = None,
     dead: Annotated[bool, Field(
-        description="Dead-letter the task at once instead of returning it to available.",
+        description=(
+            "Dead-letter the task at once instead of returning it to available. If the task was "
+            "replaced while claimed, it is requeued with the new body and attempts reset instead."
+        ),
     )] = False,
 ) -> str:
     """Release a claimed tuple back to available (`nack`).

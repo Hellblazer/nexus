@@ -242,7 +242,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
     void requestLedger_svcHasDml_diagIsDenied() throws Exception {
         assertThat(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)
             .as("request_ledger is deliberately not diag-readable (nexus-yye8l.1)")
-            .doesNotContain("request_ledger");
+            .doesNotContain("request_ledger", "request_ledger_tenants");
 
         try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
@@ -289,6 +289,11 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                 assertThatThrownBy(() -> countAs(diag, "nexus", "request_ledger"))
                     .as("nexus_diag must hold no SELECT on nexus.request_ledger")
                     .hasMessageContaining("permission denied for table request_ledger");
+                // nexus-yye8l.21: the tenant registry names every tenant that ever made a keyed request, and the
+                // diag role gets no grant on it either (nothing in it that service_tokens does not show).
+                assertThatThrownBy(() -> countAs(diag, "nexus", "request_ledger_tenants"))
+                    .as("nexus_diag must hold no SELECT on nexus.request_ledger_tenants")
+                    .hasMessageContaining("permission denied for table request_ledger_tenants");
             }
         }
     }
