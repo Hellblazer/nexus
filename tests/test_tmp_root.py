@@ -9,6 +9,7 @@ pytest (serial, xdist and a SIGKILLed one) against a directory standing in for
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import os
 import re
@@ -337,6 +338,183 @@ class TestSweep:
         monkeypatch.setattr(cf, "_ps_all", lambda: procs)
         cf._drain_stale_tmp_run(stale_p, _kill=lambda pid, sig: killed.append((pid, sig)))
         assert killed == [(31, "QUIT")]
+
+
+_HOLDER = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("READY", os.readlink("/proc/self/ns/pid") if os.path.exists("/proc/self/ns/pid") else "", flush=True)
+sys.stdin.read()
+"""
+
+_TRY_LOCK = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)
+"""
+
+#: Set to 1 where a skip of the cross-namespace test must be a failure (qwent's WSL
+#: allows unprivileged user namespaces; chas's AppArmor does not, so there it skips).
+REQUIRE_PIDNS_ENV = "NX_REQUIRE_PIDNS"
+
+needs_flock = pytest.mark.skipif(tr.fcntl is None, reason="no fcntl (Windows): the pid rule is the only rule")
+
+
+@contextlib.contextmanager
+def _holding(lock: Path, *, wrap: tuple[str, ...] = ()):
+    """A real child process that holds ``flock(LOCK_EX)`` on *lock* until the block ends
+    (and on exit of the block, the child is gone and the lock with it). Yields the
+    child's PID-namespace id, or None where there is no procfs. If the child never says
+    READY (an *wrap* such as ``unshare`` was refused) the block is not entered: the
+    ``RuntimeError`` carries what the child printed on stderr."""
+    child = subprocess.Popen(
+        [*wrap, sys.executable, "-c", _HOLDER, str(lock)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        line = child.stdout.readline()
+        if not line.startswith("READY"):
+            child.wait(timeout=30)
+            raise RuntimeError(child.stderr.read().strip() or f"exit {child.returncode}")
+        parts = line.split()
+        yield parts[1] if len(parts) > 1 else None
+    finally:
+        with contextlib.suppress(OSError):
+            child.stdin.close()
+        child.wait(timeout=30)
+        child.stdout.close()
+        child.stderr.close()
+
+
+def _lock_dir(root: Path, *, pid: int) -> Path:
+    """A run dir in the shape of today's controller as far as the sweep can tell: an
+    owner record naming *pid* and an ``owner.lock`` file for a holder to lock."""
+    run = tr.make_run_dir(root, pid=pid, probe=False)
+    (run / "owner.lock").touch()
+    return run
+
+
+@needs_flock
+class TestOwnerLock:
+    """nexus-fuz9t: liveness of a run dir that carries ``owner.lock`` is the flock, not the pid
+    (a reaper in another PID namespace sees every sibling's controller pid as dead)."""
+
+    def test_a_held_lock_keeps_the_run_though_its_pid_is_dead(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = _lock_dir(root, pid=_dead_pid())
+        (run / "p" / "live").write_text("x")
+        with _holding(run / "owner.lock"):
+            drained: list[Path] = []
+            assert tr.sweep_stale_runs(root, drain=drained.append) == []
+            assert run.is_dir() and (run / "p" / "live").exists() and drained == []
+
+    def test_the_same_run_goes_when_the_holder_exits_though_its_pid_is_live(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = _lock_dir(root, pid=os.getpid())  # a live pid: only the lock can condemn it
+        with _holding(run / "owner.lock"):
+            assert tr.sweep_stale_runs(root) == []
+        drained: list[tuple[Path, bool]] = []
+        removed = tr.sweep_stale_runs(root, drain=lambda p: drained.append((p, p.is_dir())))
+        assert removed == [run] and not run.exists()
+        assert drained == [(run / "p", True)], "drained before it is deleted, as for a pid-dead dir"
+
+    def test_a_free_lock_is_a_dead_owner_even_with_no_owner_record(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = tr.make_run_dir(root, probe=False)
+        (run / "owner.json").unlink()
+        (run / "owner.lock").touch()  # fresh mtime: the bare-dir age rule would keep it
+        assert tr.sweep_stale_runs(root) == [run]
+
+    def test_a_lock_that_cannot_be_tried_keeps_the_run(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = tr.make_run_dir(root, pid=_dead_pid(), probe=False)
+        (run / "owner.lock").symlink_to(tmp_path)  # O_NOFOLLOW refuses: not ours to judge
+        assert tr.sweep_stale_runs(root) == [] and run.is_dir()
+
+    def test_a_run_with_no_lock_follows_the_pid_rule_both_ways(self, tmp_path) -> None:
+        """What a controller of an older tree left: no owner.lock, so a live pid keeps it and
+        a dead one does not."""
+        root = tmp_path / "root"
+        live = tr.make_run_dir(root, probe=False)
+        dead = tr.make_run_dir(root, pid=_dead_pid(), probe=False)
+        assert not (live / "owner.lock").exists() and not (dead / "owner.lock").exists()
+        assert tr.sweep_stale_runs(root) == [dead]
+        assert live.is_dir() and not dead.exists()
+
+    def test_the_controllers_run_dir_holds_a_lock_a_second_process_cannot_take(self, tmp_path) -> None:
+        run, fd = tr.make_owned_run_dir(tmp_path / "root", probe=False)
+        try:
+            assert fd is not None and (run / "owner.lock").is_file()
+            assert json.loads((run / "owner.json").read_text())["pid"] == os.getpid()
+            blocked = subprocess.run([sys.executable, "-c", _TRY_LOCK, str(run / "owner.lock")], check=False)
+            assert blocked.returncode == 1, "the lock must be held while the controller lives"
+            assert tr.sweep_stale_runs(tmp_path / "root") == [] and run.is_dir()
+            assert not list(run.glob("owner.lock.tmp")), "the temporary name is gone once the lock is in place"
+        finally:
+            tr.release_owner_lock(fd)
+        free = subprocess.run([sys.executable, "-c", _TRY_LOCK, str(run / "owner.lock")], check=False)
+        assert free.returncode == 0, "closing the descriptor drops the lock"
+
+    def test_the_lock_is_not_inherited_by_a_child_the_controller_execs(self, tmp_path) -> None:
+        """An xdist worker is exec'd from the controller; if it held the lock, a controller that
+        died would still look alive for as long as any worker did."""
+        run, fd = tr.make_owned_run_dir(tmp_path / "root", probe=False)
+        try:
+            assert os.get_inheritable(fd) is False
+            survivor = subprocess.Popen(
+                [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+        finally:
+            tr.release_owner_lock(fd)  # the controller "dies" while its child lives on
+        try:
+            assert tr.sweep_stale_runs(tmp_path / "root") == [run]
+        finally:
+            survivor.stdin.close()
+            survivor.wait(timeout=30)
+
+    def test_the_plugin_holds_the_lock_until_it_has_removed_the_run_dir(self, tmp_path) -> None:
+        plug, _env = _plugin(tmp_path)
+        plug.pytest_configure(_config())
+        run = plug.run
+        assert run is not None and plug._owner_fd is not None
+        blocked = subprocess.run([sys.executable, "-c", _TRY_LOCK, str(run / "owner.lock")], check=False)
+        assert blocked.returncode == 1
+        plug.pytest_unconfigure(_config())
+        assert not run.exists() and plug._owner_fd is None
+
+    def test_a_run_in_another_pid_namespace_is_not_swept(self, tmp_path) -> None:
+        """The incident, for real: lab-run #88 put each job in its own PID namespace, and a
+        reaper outside it saw every sibling's controller pid as dead. The holder here runs
+        under ``unshare --pid`` (its pid, as the sweeper would have recorded it, means nothing
+        out here), and the sweep must still leave the run alone. ``unshare`` is refused where
+        unprivileged user namespaces are (chas: AppArmor); that skips, unless
+        ``NX_REQUIRE_PIDNS=1``, which makes the refusal a failure so a lab-run on a host that
+        allows it (qwent's WSL) can prove the test ran."""
+        if shutil.which("unshare") is None:
+            if os.environ.get(REQUIRE_PIDNS_ENV) == "1":
+                pytest.fail("NX_REQUIRE_PIDNS=1 but unshare is not installed")
+            pytest.skip("unshare is not installed")
+        root = tmp_path / "root"
+        run = _lock_dir(root, pid=_dead_pid())
+        wrap = ("unshare", "--user", "--map-root-user", "--pid", "--fork", "--mount-proc")
+        try:
+            holder = _holding(run / "owner.lock", wrap=wrap)
+            ns = holder.__enter__()
+        except RuntimeError as exc:
+            if os.environ.get(REQUIRE_PIDNS_ENV) == "1":
+                pytest.fail(f"NX_REQUIRE_PIDNS=1 but unshare refused: {exc}")
+            pytest.skip(f"unshare refused: {exc}")
+        try:
+            if ns is not None:
+                ours = os.readlink("/proc/self/ns/pid")
+                assert ns != ours, "the holder must be in a PID namespace of its own"
+            assert tr.sweep_stale_runs(root) == [] and run.is_dir()
+        finally:
+            holder.__exit__(None, None, None)
+        assert tr.sweep_stale_runs(root) == [run], "gone with its holder"
 
 
 def _plugin(tmp_path, env=None, **decide_kw) -> tuple[tr.TmpRootPlugin, dict]:
