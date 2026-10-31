@@ -20,6 +20,7 @@ from nexus.bounded_subprocess import run_bounded
 from nexus.doctor_references import DEFAULT_SAMPLE as _REFERENCES_DEFAULT_SAMPLE
 from nexus.doctor_references import MAX_CONCURRENCY as _REFERENCES_MAX_CONCURRENCY
 from nexus.doctor_references import estimated_worst_case_s as _references_estimated_worst_case_s
+from nexus._vcrt import MINERU_CHILD_PROLOGUE
 from nexus.redact import redact_credentials
 
 
@@ -1096,15 +1097,29 @@ def _report_aspect_queue_service() -> None:
     raises ``click.exceptions.Exit(1)`` with a ✗ FAIL: marker (nexus-fylxo),
     matching the 4 sibling supplementary checks (resources / plan-library /
     taxonomy / t1) that already signal failure this way.
+
+    RDR-235 F18: the queue has two sides while ``NX_ASPECT_QUEUE`` moves it from
+    the table onto the ``aspects`` tuple template. Pending is the table's
+    pending plus the tuple side's ``available``; failed is the table's failed
+    plus the tuple side's ``dead``. ``claimed`` is in flight and counts as
+    neither. A tuple side that cannot be read is reported UNKNOWN and no combined
+    figure is printed (a total that guessed zero for it would be the false-clean
+    this check exists to remove); a subspace that does not exist yet is zero.
     """
     import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred to keep CLI startup fast
 
+    tuple_unknown: str | None = None
+    tuple_counts = None
     try:
         q = HttpAspectQueue()
         pending = q.pending_count()
         failed = q.list_failed()
+        try:
+            tuple_counts = q.tuple_counts()
+        except (httpx.HTTPError, RuntimeError) as texc:
+            tuple_unknown = _exc_detail(texc)
     except (httpx.HTTPError, RuntimeError) as exc:
         # RuntimeError is NOT redundant with httpx.HTTPError: constructing the
         # store resolves the endpoint, and an unresolvable one raises
@@ -1123,7 +1138,26 @@ def _report_aspect_queue_service() -> None:
         )
         return
 
-    click.echo(f"aspect_extraction_queue: {pending} pending, {len(failed)} failed (service backend)")
+    n_failed = len(failed)
+    if tuple_counts is not None:
+        pending += tuple_counts.available
+        n_failed += tuple_counts.dead
+        click.echo(f"aspect_extraction_queue: {pending} pending, {n_failed} failed (service backend)")
+        if tuple_counts.available or tuple_counts.claimed or tuple_counts.dead:
+            click.echo(
+                f"  tuple queue (aspects): {tuple_counts.available} available, "
+                f"{tuple_counts.claimed} claimed (in flight, not pending), "
+                f"{tuple_counts.dead} dead"
+            )
+        if tuple_counts.dead:
+            click.echo("  dead tuple tasks: nx tuple stats aspects")
+    else:
+        click.echo(
+            f"aspect_extraction_queue: table side {pending} pending and {n_failed} failed; "
+            f"tuple queue (aspects) UNKNOWN ({tuple_unknown}). "
+            "No combined count: the tuple side was not read.",
+            err=True,
+        )
     # The spawner declines to start the aspect worker when `claude` is not on
     # PATH and notes it once per process at debug level; this is the durable
     # signal. A WARNING, not a failure: rows wait in the queue until a worker
@@ -1140,13 +1174,14 @@ def _report_aspect_queue_service() -> None:
                 "extracted once a worker can run.",
                 err=True,
             )
-    if failed:
-        click.echo(f"\nFailed rows (showing top {min(len(failed), 20)}):")
-        for row in failed[:20]:
-            click.echo(
-                f"  {row.collection or '?'} :: {row.source_path or '?'} "
-                f"(retries {row.retry_count})"
-            )
+    if n_failed:
+        if failed:
+            click.echo(f"\nFailed rows (showing top {min(len(failed), 20)}):")
+            for row in failed[:20]:
+                click.echo(
+                    f"  {row.collection or '?'} :: {row.source_path or '?'} "
+                    f"(retries {row.retry_count})"
+                )
         # KNOWN GAP, stated rather than silently omitted: the sqlite branch
         # prints each row's last_error, this one cannot. AspectRepository
         # .listFailed does not select LAST_ERROR, so it never crosses the wire
@@ -1167,7 +1202,7 @@ def _report_aspect_queue_service() -> None:
         # printed the numbers and silently returned 0 regardless of how
         # large the backlog grew. Match the sibling contract.
         click.echo(
-            f"\n✗ FAIL: {len(failed)} failed aspect-extraction row(s) in "
+            f"\n✗ FAIL: {n_failed} failed aspect-extraction row(s) in "
             "the queue.",
             err=True,
         )
@@ -1873,7 +1908,7 @@ _MINERU_DOCTOR_PARSE_TIMEOUT_S = 180
 # dispatcher racing exit is the concrete case) -- a successful parse that
 # then dies in teardown would render as a doctor FAIL for nothing.
 _MINERU_DOCTOR_PARSE_SCRIPT = '''
-import os
+__MINERU_CHILD_PROLOGUE__import os
 import sys
 from pathlib import Path
 from mineru.cli.common import do_parse
@@ -1890,7 +1925,7 @@ do_parse(
     end_page_id=0,
 )
 os._exit(0)
-'''
+'''.replace("__MINERU_CHILD_PROLOGUE__", MINERU_CHILD_PROLOGUE)
 
 
 class _MineruDoctorParseFailed(RuntimeError):
@@ -1934,18 +1969,124 @@ def _synthesize_mineru_probe_pdf(directory: Path) -> Path:
     return pdf_path
 
 
+#: What the English (``p_lang_list=["en"]``) pipeline loads from each ``ModelPath`` entry, keyed by the
+#: attribute name in ``mineru.utils.enum_class.ModelPath``. A tuple is the files that must exist, non-empty,
+#: in that directory; ``()`` means the path is itself a file (an ``.onnx``). Directories are downloaded file
+#: by file, so an interrupted first-use fetch leaves a directory present and incomplete: each file the load
+#: opens is required on its own. The names come from the loaders, in mineru 3.1.11:
+#:
+#: - ``pp_doclayout_v2``: ``from_pretrained`` reads ``config.json`` and the weights
+#:   (``model/layout/pp_doclayoutv2.py`` lines 908-909); ``preprocessor_config.json`` is optional (line 167).
+#: - ``unimernet_small``: ``from_pretrained`` reads the config and weights, and ``AutoTokenizer`` the
+#:   tokenizer files (``model/mfr/unimernet/unimernet_hf/modeling_unimernet.py`` lines 80, 99).
+#: - ``pp_formulanet_plus_m``: opens the ``.pth`` and ``_inference.yml``
+#:   (``model/mfr/pp_formulanet_plus_m/predict_formula.py`` lines 29-45).
+#: - ``pytorch_paddle``: the detector and recognizer ``models_config.yml`` names for ``lang.en``
+#:   (``model/ocr/pytorch_paddle.py`` lines 184-193), plus the ``ch_lite`` recognizer: with tables on, the
+#:   orientation classifier builds its own OCR with ``lang="ch_lite"`` whatever the parse language
+#:   (``backend/pipeline/model_init.py`` ``img_orientation_cls_model_init``). Other languages are not needed.
+#: - the four ``.onnx`` paths are opened as they are (``model/table/...``, ``model/ori_cls/paddle_ori_cls.py``).
+#:
+#: ``tests/test_mineru_child_dll_dirs.py`` compares this table with ``download_pipeline_models`` (every path
+#: it fetches is a key here) and with mineru's own sources, so a mineru bump that moves either side fails
+#: there.
+_MINERU_PIPELINE_FILES: dict[str, tuple[str, ...]] = {
+    "pp_doclayout_v2": ("config.json", "model.safetensors"),
+    "unimernet_small": ("config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"),
+    "pp_formulanet_plus_m": ("PP-FormulaNet_plus-M.pth", "PP-FormulaNet_plus-M_inference.yml"),
+    "pytorch_paddle": ("ch_PP-OCRv5_det_infer.pth", "en_PP-OCRv5_rec_infer.pth", "ch_PP-OCRv5_rec_infer.pth"),
+    "slanet_plus": (),
+    "unet_structure": (),
+    "paddle_table_cls": (),
+    "paddle_orientation_classification": (),
+}
+
+#: ``MINERU_FORMULA_CH_SUPPORT`` values mineru reads as on / off (``backend/pipeline/model_init.py``,
+#: ``MFR_MODEL``, case-insensitive); anything else it warns about and treats as off.
+_MINERU_FORMULA_CH_ON = ("true", "1", "yes")
+_MINERU_FORMULA_CH_OFF = ("false", "0", "no")
+
+#: The ``-s`` choices of ``mineru-models-download`` (``REMOTE_MODEL_SOURCES`` in ``mineru/cli/models_download.py``).
+_MINERU_DOWNLOAD_SOURCES = ("huggingface", "modelscope")
+
+
+def _mineru_formula_model() -> str:
+    """The ``ModelPath`` attribute of the formula (MFR) model mineru loads, per ``MINERU_FORMULA_CH_SUPPORT``."""
+    import os  # noqa: PLC0415 — deferred local import — module has no top-level os import
+
+    value = os.environ.get("MINERU_FORMULA_CH_SUPPORT", "False").lower()
+    return "pp_formulanet_plus_m" if value in _MINERU_FORMULA_CH_ON else "unimernet_small"
+
+
+def _mineru_pipeline_weights_cached() -> bool:
+    """Are the weights the English pipeline loads in the Hugging Face cache, found without any network access?
+
+    MinerU's own first-use download (``nx index pdf``) writes no ``mineru.json``: it calls
+    ``huggingface_hub.snapshot_download(ModelPath.pipeline_root_hf, allow_patterns=...)`` and uses the
+    returned snapshot folder (``mineru/utils/models_download_utils.py``). The same call with
+    ``local_files_only=True`` returns that folder from the cache or raises, and downloads and looks up
+    nothing. Under it, every file in :data:`_MINERU_PIPELINE_FILES` must exist and be non-empty, with the
+    one formula model ``MINERU_FORMULA_CH_SUPPORT`` selects. Only ``huggingface`` (MinerU's default
+    source) is probed; no other source's cache layout is guessed."""
+    import os  # noqa: PLC0415 — deferred local import — module has no top-level os import
+
+    if os.environ.get("MINERU_MODEL_SOURCE", "huggingface") != "huggingface":
+        return False
+    try:
+        from huggingface_hub import snapshot_download  # noqa: PLC0415 — optional/heavy dependency deferred (mineru's)
+        from mineru.utils.enum_class import ModelPath  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
+
+        unselected = ({"unimernet_small", "pp_formulanet_plus_m"} - {_mineru_formula_model()}).pop()
+        root = Path(snapshot_download(ModelPath.pipeline_root_hf, local_files_only=True))
+        for name, files in _MINERU_PIPELINE_FILES.items():
+            if name == unselected:
+                continue
+            base = root / getattr(ModelPath, name)
+            for path in (base / f for f in files) if files else (base,):
+                if not path.is_file() or path.stat().st_size == 0:
+                    return False
+        return True
+    except Exception:  # noqa: BLE001 — best-effort probe; an absent cache or a mineru that moved ModelPath reads as unprovisioned
+        return False
+
+
+def _mineru_weights_skip_line() -> str:
+    """The real-parse skip line: the weights are not found, and the command that fetches them.
+
+    The command runs through ``nexus._mineru_console`` (the plain ``mineru-models-download`` script never
+    imports nexus and can die with WinError 126 on bare Windows), names ``-s <source>`` and ``-m pipeline``
+    so it never stops at mineru's prompts and fetches only the pipeline weights nx parses with (not the
+    VLM ones), and uses ``MINERU_MODEL_SOURCE`` when mineru's download accepts it, else ``huggingface``.
+    A source other than ``huggingface`` is not searched for cached weights: the line says so."""
+    import os  # noqa: PLC0415 — deferred local import — module has no top-level os import
+    from nexus._mineru_spawn import mineru_console_command  # noqa: PLC0415 — deferred import (startup cost)
+
+    configured = os.environ.get("MINERU_MODEL_SOURCE")
+    source = configured if configured in _MINERU_DOWNLOAD_SOURCES else "huggingface"
+    command = mineru_console_command("mineru-models-download", "-s", source, "-m", "pipeline")
+    where = "from PowerShell " if command.startswith("& ") else ""  # the Windows form is a PowerShell call
+    caveat = (
+        f" MINERU_MODEL_SOURCE={configured} is not searched for cached weights; the download records them in mineru.json."
+        if configured and configured != "huggingface"
+        else ""
+    )
+    return f"  (MinerU pipeline weights not found; real-parse check skipped. Fetch them {where}with `{command}`.{caveat})"
+
+
 def _mineru_pipeline_model_dir_configured() -> bool:
-    """Best-effort: has ``mineru-models-download`` actually run on this
-    box? Gates the real-parse check so an operator who has never
-    provisioned pipeline weights sees a skip, not a FAIL for a model
-    download this check never asked for."""
+    """Best-effort: are the pipeline weights on this box? Either ``mineru-models-download`` ran
+    (``mineru.json`` names a pipeline models dir) or MinerU fetched them itself on first use (the
+    Hugging Face cache). Gates the real-parse check so an operator who has never provisioned
+    pipeline weights sees a skip, not a FAIL for a model download this check never asked for."""
     try:
         from mineru.utils.config_reader import get_local_models_dir  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
 
         pipeline_dir = (get_local_models_dir() or {}).get("pipeline")
     except Exception:  # noqa: BLE001 — best-effort probe; an unreadable config reads as unconfigured
-        return False
-    return bool(pipeline_dir) and Path(pipeline_dir).is_dir()
+        return _mineru_pipeline_weights_cached()
+    if pipeline_dir and Path(pipeline_dir).is_dir():
+        return True
+    return _mineru_pipeline_weights_cached()
 
 
 def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S) -> None:
@@ -2050,6 +2191,97 @@ def _run_check_mineru_parse() -> bool:
         return False
 
 
+#: What MinerU's own children import first and fail on when a native dependency cannot load:
+#: ``mineru.cli.common`` reaches onnxruntime through magika (the 2026-10-29 Windows failure), and
+#: torch loads its own DLLs (c10.dll). ``mineru.cli.fast_api`` is the module the server child
+#: (``nexus._mineru_api_child``) runs, so a missing or unloadable server entry shows here and not
+#: first as a server that never answers. Patched by tests so a suite is not charged a torch import.
+_MINERU_CHILD_PROBE_MODULES: tuple[str, ...] = (
+    "mineru.cli.common", "mineru.cli.fast_api", "onnxruntime", "torch",
+)
+
+#: How long the child import probe may run before it is reported as hung (a cold torch import
+#: on a slow disk is the long pole).
+_MINERU_CHILD_PROBE_TIMEOUT_S = 120.0
+
+
+def _mineru_child_probe_script(modules: tuple[str, ...]) -> str:
+    """The probe child's code: the same prologue as MinerU's worker, then the imports."""
+    return MINERU_CHILD_PROLOGUE + "".join(f"import {m}\n" for m in modules)
+
+
+def _probe_mineru_child_import(timeout_s: float | None = None) -> str | None:
+    """``None`` when a FRESH interpreter, started the way MinerU's worker is, imports MinerU's
+    native stack; else a one-line cause (credentials redacted).
+
+    The ``MinerU import`` row imports in the doctor's own process, which ran ``import nexus``
+    long ago, so on a Windows box with no VC++ redistributable it saw nx's app-local DLL
+    directories while the worker and server children (fresh ``python -c`` / ``-m`` processes)
+    did not, and the row stayed green over an install whose every parse died with ``DLL load
+    failed while importing onnxruntime_pybind11_state`` (nexus-vyy65). The child here starts with
+    the worker's own prologue, so it fails where the worker would. Bounded by a timeout and run
+    in a child, like the cv2 probe: a native import can kill its process.
+    """
+    import subprocess  # noqa: PLC0415 — deferred to keep CLI startup fast
+    import sys  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    timeout = _MINERU_CHILD_PROBE_TIMEOUT_S if timeout_s is None else timeout_s
+    script = _mineru_child_probe_script(_MINERU_CHILD_PROBE_MODULES)
+    try:
+        proc = run_bounded([sys.executable, "-c", script], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return f"the MinerU imports did not finish within {timeout:g} s"
+    except OSError as exc:
+        return _exc_detail(exc, with_type=True)
+    if proc.returncode == 0:
+        return None
+    tail = [ln for ln in proc.stderr.splitlines() if ln.strip()]
+    if tail:
+        return redact_credentials(tail[-1].strip())
+    if proc.returncode < 0:
+        return f"the MinerU imports crashed the interpreter (signal {-proc.returncode})"
+    return f"the MinerU imports exited {proc.returncode} with no output"
+
+
+def _child_import_remedy(child_error: str, *, in_process: bool = False) -> str:
+    """What to do when MinerU does not import: in a fresh child only (the row above is green), or, with
+    *in_process*, in the doctor's own process.
+
+    On Windows a DLL load failure means the VC++ runtime cannot be found: it is not in System32 (no
+    redistributable) and nx's app-local copies are missing or incomplete. Reinstalling does not place
+    them; ``nx init`` and ``nx upgrade --auto`` do (``ensure_vc_runtime``), as does Microsoft's
+    redistributable. Any other failure, and every non-Windows one, is a native dependency that does not
+    load or a broken install: reinstall."""
+    from nexus import _vcrt  # noqa: PLC0415 — deferred import (startup cost)
+
+    lowered = child_error.lower()
+    dll_failure = _vcrt.is_windows() and ("dll load failed" in lowered or "winerror" in lowered)
+    if in_process and dll_failure:
+        return (
+            "MinerU cannot find the Visual C++ runtime DLLs it needs: this machine has no redistributable and "
+            "nx's own copies are missing or incomplete. Run `nx init` (or `nx upgrade --auto`) to place them, "
+            "or install Microsoft's redistributable from https://aka.ms/vs/17/release/vc_redist.x64.exe."
+        )
+    if in_process:
+        return (
+            "MinerU ships with PDF support (the pdf extra), so this install is broken. Reinstall with "
+            f"`{_reinstall_command()}`."
+        )
+    if dll_failure:
+        return (
+            "the import works in this process but not in a fresh child, which is how MinerU's worker and "
+            "server run. The child cannot find the Visual C++ runtime DLLs: this machine has no "
+            "redistributable and nx's own copies are missing or incomplete. Run `nx init` (or `nx upgrade "
+            "--auto`) to place them, or install Microsoft's redistributable from "
+            "https://aka.ms/vs/17/release/vc_redist.x64.exe."
+        )
+    return (
+        "the import works in this process but not in a fresh child, which is how MinerU's worker and "
+        "server run, so a native dependency does not load. Reinstall "
+        f"with `{_reinstall_command()}`."
+    )
+
+
 #: How long the cv2 import probe may run before it is reported as hung.
 _CV2_PROBE_TIMEOUT_S = 60.0
 
@@ -2068,7 +2300,7 @@ def _probe_cv2(timeout_s: float | None = None) -> tuple[str | None, str]:
     timeout = _CV2_PROBE_TIMEOUT_S if timeout_s is None else timeout_s
     try:
         proc = run_bounded(
-            [sys.executable, "-c", "import cv2; print(cv2.__version__)"], timeout=timeout,
+            [sys.executable, "-c", MINERU_CHILD_PROLOGUE + "import cv2; print(cv2.__version__)"], timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return f"the cv2 import did not finish within {timeout:g} s", ""
@@ -2084,6 +2316,31 @@ def _probe_cv2(timeout_s: float | None = None) -> tuple[str | None, str]:
     if proc.returncode < 0:
         return f"the cv2 import crashed the interpreter (signal {-proc.returncode})", ""
     return f"the cv2 import exited {proc.returncode} with no output", ""
+
+
+def _print_pdf_settings_red(exc: Exception | None = None) -> bool:
+    """Print the default sweep's own red "PDF settings" row and say whether there was one.
+
+    The row is :func:`nexus.health._check_pdf_config`'s, so the wording and the remedy are the
+    sweep's and cannot drift from it: a ``[pdf]`` integer setting that holds no integer, or a
+    timeout x batch product above the bound every MinerU PDF run refuses. When *exc* is given (a
+    ``PdfConfigError`` already caught) and the re-read returns nothing (the file changed between the
+    two reads), the exception's own text is printed so the mode still ends red, never silent."""
+    from nexus.health import _check_pdf_config  # noqa: PLC0415 — deferred import (startup cost)
+
+    rows = [r for r in _check_pdf_config() if not r.ok and not r.warn]
+    if not rows:
+        if exc is None:
+            return False
+        click.echo(_check("PDF settings", False, str(exc)))
+        return True
+    for row in rows:
+        click.echo(_check(row.label, False, row.detail))
+        lines: list[str] = []
+        _fix(lines, *row.fix_suggestions)
+        for line in lines:
+            click.echo(line)
+    return True
 
 
 def _run_check_mineru() -> bool:
@@ -2123,16 +2380,15 @@ def _run_check_mineru() -> bool:
             "MinerU import: N/A (PDF support is not installed; indexing a PDF installs it, "
             f"or run `{pdf_stack.install_plan().command}`)"
         )
-        return False
+        # nexus-tr1rj.27: the [pdf] settings do not depend on the stack, and every PDF run refuses a
+        # bad one whether or not the stack is installed, so this mode names it here too.
+        return _print_pdf_settings_red()
     failed = False
     try:
         from mineru.cli.common import do_parse  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
     except Exception as exc:  # noqa: BLE001 — boundary catch of optional MinerU import failure; surfaced via click.echo
         click.echo(_check("MinerU import", False, _exc_detail(exc, with_type=True)))
-        click.echo(
-            "  ↳ MinerU ships with PDF support (the pdf extra), so this install is broken. Reinstall with "
-            f"`{_reinstall_command()}`."
-        )
+        click.echo(f"  ↳ {_child_import_remedy(_exc_detail(exc, with_type=True), in_process=True)}")
         return True
 
     if do_parse is None:
@@ -2144,6 +2400,17 @@ def _run_check_mineru() -> bool:
         return True
 
     click.echo(_check("MinerU import", True, "mineru.cli.common.do_parse OK"))
+
+    # nexus-vyy65: the row above ran in THIS process. MinerU's worker and server are fresh
+    # children, so import in one the way the worker starts, or a box whose children cannot load
+    # onnxruntime/torch (Windows, no VC++ redistributable) reads green here and fails every parse.
+    child_error = _probe_mineru_child_import()
+    if child_error is not None:
+        failed = True
+        click.echo(_check("MinerU child import", False, child_error))
+        click.echo(f"  ↳ {_child_import_remedy(child_error)} Real-parse check skipped: it would fail on the same import.")
+    else:
+        click.echo(_check("MinerU child import", True, "a fresh interpreter imports MinerU's native stack"))
 
     # nexus-11x9o: MinerU imports cv2 lazily, so the do_parse import above
     # succeeds on a box whose cv2 cannot load (a Linux box without libGL.so.1
@@ -2163,25 +2430,34 @@ def _run_check_mineru() -> bool:
         )
     else:
         click.echo(_check("MinerU cv2 import", True, f"cv2 {cv2_version} loads"))
-        if not _mineru_pipeline_model_dir_configured():
-            click.echo(
-                "  (MinerU pipeline model weights not downloaded; real-parse "
-                "check skipped — run `mineru-models-download`)"
-            )
+        if child_error is not None:
+            pass  # reported above, with the real-parse skip
+        elif not _mineru_pipeline_model_dir_configured():
+            click.echo(_mineru_weights_skip_line())
         else:
             if _run_check_mineru_parse():
                 failed = True
 
     # Optional: surface server-side state. The mineru-api server is opt-in;
     # not running is fine. Just report status.
+    # nexus-tr1rj.27: a setting every PDF run refuses (no integer, or timeout x batch over the bound)
+    # ends the mode red here; the default sweep's row is the one printed.
+    if _print_pdf_settings_red():
+        return True
+    from nexus.config import PdfConfigError, get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
     try:
-        from nexus.config import get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
         # nexus-9xfx5: never probe the built-in default URL on a box where
         # no server was ever provisioned — every fresh install rendered a
         # red ✗ ("unreachable ... OOM-risk") for a service init never set
         # up. Unprovisioned renders as the not-configured skip below; a ✗
         # now means a PROVISIONED server is actually unreachable.
         url = get_mineru_server_url() if mineru_server_provisioned() else None
+    except PdfConfigError as exc:
+        # nexus-tr1rj.27: a [pdf] integer setting holds no integer. This mode returns before the
+        # default sweep, so that sweep's "PDF settings" row never runs; swallowing the error here
+        # printed "no mineru-api server configured" and exited 0 over a config every PDF run refuses.
+        _print_pdf_settings_red(exc)
+        return True
     except Exception:  # noqa: BLE001 — best-effort config read; falls back to None
         url = None
     if url:

@@ -98,13 +98,11 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
-from urllib.request import url2pathname
 
 import structlog
 
 from nexus import pdeathsig as _pdeathsig
-from nexus.aspect_readers import ReadFail, ReadOk, note_uri, read_source, uri_for
+from nexus.aspect_readers import ReadFail, ReadOk, file_uri_path, note_uri, read_source, uri_for
 from nexus.db.t2.records import AspectRecord
 from nexus.mcp_infra import get_t3
 from nexus.operators.dispatch import _write_prompt_file
@@ -161,6 +159,10 @@ class ExtractFail:
     * ``unreachable`` / ``unauthorized`` / ``scheme_unknown`` /
       ``empty`` — passed through from
       :class:`nexus.aspect_readers.ReadFailReason`.
+    * ``transport`` — the network or the service behind the read (T3, the
+      catalog manifest, an HTTP fetch) failed: a transport error, a timeout or a
+      5xx. Retryable: the aspect worker nacks it on the RDR-163 ladder and
+      never drops the extraction (nexus-5r2sc.3.10).
     * ``infra_unavailable`` — T3 client could not be obtained
       (singleton init failure). The URI was constructed but never
       dispatched. Distinct from ``unreachable`` so operators can
@@ -290,7 +292,7 @@ _SCHOLARLY_PAPER_CONFIG = ExtractorConfig(
     # measuring box, about ten times the cost) while every row was still
     # stamped haiku, and the version-filter query
     # (list_by_extractor_version) could not tell them apart.
-    model_version="claude-haiku-4-5-20251001",
+    model_version="claude-haiku-5-5",
     prompt_template=_SCHOLARLY_PAPER_PROMPT,
     required_fields=(
         "problem_formulation",
@@ -382,7 +384,7 @@ The documents follow, separated by ``=====``. Each is preceded by its
 
 _GENERAL_PROSE_CONFIG = ExtractorConfig(
     extractor_name="general-prose-v1",
-    model_version="claude-haiku-4-5-20251001",
+    model_version="claude-haiku-5-5",
     prompt_template=_GENERAL_PROSE_PROMPT,
     # Only the two prose-applicable fields are required; datasets/baselines
     # are always [] and ``experimental_results`` is optional (a reference
@@ -1401,12 +1403,13 @@ def contained_rdr_md(path: Path, source_prefix: str = "") -> Path:
 
 
 def contained_rdr_md_from_uri(uri: str, source_prefix: str = "") -> Path:
-    """:func:`contained_rdr_md` for a ``file://`` URI with no host part (``url2pathname`` decodes the path).
-    A malformed URI raises ``ValueError``, a disallowed one :class:`RdrSourceNotAllowed`."""
-    parsed = urlparse(uri)
-    if parsed.scheme != "file" or parsed.netloc or not parsed.path:
+    """:func:`contained_rdr_md` for a ``file://`` URI. The path is what follows the scheme, verbatim (the mint
+    writes the raw path, nexus-6pfgb.57); anything that is not an absolute ``file://`` path raises
+    :class:`RdrSourceNotAllowed`, a path the filesystem refuses ``ValueError``."""
+    path = file_uri_path(uri)
+    if not path:
         raise RdrSourceNotAllowed("uri")
-    return contained_rdr_md(Path(url2pathname(parsed.path)), source_prefix)
+    return contained_rdr_md(Path(path), source_prefix)
 
 
 def _header_file_candidates(
@@ -1642,6 +1645,31 @@ def extract_aspects(
 # headroom (180 + 4 * 60 = 420 s for batch=5) absorbs Claude's variance.
 _BATCH_TIMEOUT_PER_EXTRA_PAPER_S = 60
 
+#: The per-attempt timeout of a single-document call and the base of a batched
+#: one (``extract_aspects_batch`` adds ``_BATCH_TIMEOUT_PER_EXTRA_PAPER_S`` per
+#: further document). Named here so :func:`worst_case_extract_seconds` and the
+#: batch path read one number.
+_SINGLE_CALL_TIMEOUT_S = 180
+
+
+def worst_case_extract_seconds(n_docs: int) -> float:
+    """Upper bound, in seconds, on one extraction call over *n_docs* documents
+    (RDR-235 Worker side step 2: the deadline a claim renewer works to).
+
+    The split into sub-batches happens inside :func:`extract_aspects_batch`
+    (``_split_by_budget``, by document text the caller does not hold yet), so
+    the bound is taken over the worst split. A sub-batch of ``g`` documents is
+    ``_RETRY_ATTEMPTS`` attempts of ``_SINGLE_CALL_TIMEOUT_S +
+    _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (g - 1)`` each, with the jittered sleeps
+    between attempts; the sum over a partition grows with the number of
+    sub-batches, so the worst case is ``n_docs`` one-document sub-batches, which
+    is also the single-document path run once per document. For 5 documents
+    that is 2,743.75 s (not the 1,270 s of one sub-batch of 5)."""
+    if n_docs <= 0:
+        return 0.0
+    sleeps = sum(_RETRY_BASE_SECONDS[: _RETRY_ATTEMPTS - 1]) * (1.0 + _RETRY_JITTER_FRACTION)
+    return n_docs * (_RETRY_ATTEMPTS * _SINGLE_CALL_TIMEOUT_S + sleeps)
+
 
 def extract_aspects_batch(
     items: list[tuple[str, str, str]] | list[tuple[str, str, str, str]],
@@ -1838,7 +1866,7 @@ def extract_aspects_batch(
     ]
     for cfg, group in sub_batches:
         prompt = _build_batch_prompt(group, cfg)
-        timeout = 180 + _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (len(group) - 1)
+        timeout = _SINGLE_CALL_TIMEOUT_S + _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (len(group) - 1)
         parsed = _retry_subprocess_batch(prompt, cfg, timeout=timeout)
         cfg = _stamped_with_actual_model(cfg)
 
@@ -2385,10 +2413,10 @@ def _invoke_once(prompt: str, *, model: str | None = None) -> dict:
     """
     api_backend = _selected_api_backend()
     if api_backend is not None:
-        inner_text = _api_inner_text(prompt, api_backend, timeout=180, model=model)
+        inner_text = _api_inner_text(prompt, api_backend, timeout=_SINGLE_CALL_TIMEOUT_S, model=model)
     else:
         try:
-            result = _run_claude_isolated(prompt, timeout=180, model=model)
+            result = _run_claude_isolated(prompt, timeout=_SINGLE_CALL_TIMEOUT_S, model=model)
         except subprocess.TimeoutExpired as exc:
             raise _TransientFailure(f"timeout after 180s: {exc}") from exc
         except OSError as exc:

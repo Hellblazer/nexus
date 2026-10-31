@@ -7,9 +7,10 @@ backfill collections. A call in flight is never interrupted. Clocks are fixed
 (a value the fakes advance), so nothing here sleeps.
 
 ``TestRealRegistryShape`` is the test that matters most: production
-``default_registry()`` holds ONE rung, so a between-rungs check alone bounds
-nothing. It drives the real rung class and the real ``_default_census`` against
-a fake engine client whose calls advance the injected clock.
+``default_registry()`` holds ONE long-running rung (the RDR-192 census; the
+aspect queue rung skips at once under the default flag), so a between-rungs
+check alone bounds nothing. It drives the real rung class and the real
+``_default_census`` against a fake engine client whose calls advance the injected clock.
 """
 from __future__ import annotations
 
@@ -443,9 +444,9 @@ def _real_rung(monkeypatch: pytest.MonkeyPatch, engine: SlowEngine, backfill_fn=
     ``_default_census``, with only the engine client, the completion record,
     the memo, the lock and the backfill call replaced."""
     monkeypatch.setattr(nexus_db, "make_t3", lambda **kw: engine)
-    registry = default_registry()
-    (rung,) = list(registry)
-    assert type(rung) is Rdr192ManifestBackfillRung, "production ladder is one RDR-192 rung"
+    (rung,) = [r for r in default_registry() if isinstance(r, Rdr192ManifestBackfillRung)]
+    registry = LadderRegistry((rung,))  # this class is about the RDR-192 rung alone
+    assert type(rung) is Rdr192ManifestBackfillRung, "production ladder holds one RDR-192 rung"
     rung.record_fn = lambda: None
     rung.installed_version_fn = lambda: "9.9.9"
     rung.memo = MemoryNote()

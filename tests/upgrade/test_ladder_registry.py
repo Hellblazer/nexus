@@ -152,7 +152,12 @@ def test_default_registry_is_exactly_the_canonical_rung_order() -> None:
     """The production registry: rung-less after nexus-lgdel.l1 (RDR-180's
     chash-rekey rung retired with the legacy-identity era it existed to
     converge installs out of), then the RDR-192 census and legacy-unmanifested
-    backfill (nexus-wbfpw.41). The registry walks RUNG_ORDER, no more and no
-    fewer."""
+    backfill (nexus-wbfpw.41), then the RDR-235 aspect queue move
+    (nexus-5r2sc.3.6). The registry walks RUNG_ORDER, no more and no fewer."""
     registry = default_registry()
-    assert [r.name for r in registry] == list(RUNG_ORDER) == ["rdr192-manifest-backfill"]
+    assert [r.name for r in registry] == list(RUNG_ORDER) == [
+        "rdr192-manifest-backfill",
+        "aspect-queue-tuples",  # RDR-235 Phase 1 (nexus-5r2sc.3.6)
+        "note-tags-array",  # RDR-236 RF-17 (nexus-6pfgb.38)
+        "manifest-section-labels",  # RDR-236 position labels (nexus-1nrcu)
+    ]

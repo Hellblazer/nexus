@@ -441,6 +441,12 @@ class TestNexusHmxiRoundTripGrandfathering:
         """
         from unittest.mock import MagicMock
 
+        # The post-store hook's aspect enqueue also registers the collection, and
+        # under the tuples default (nexus-lnwn1) it does so against the real
+        # substrate's embedding model, so the (fake) registrar sees a second,
+        # bge-token call instead of the voyage one this test asserts. This test is
+        # about the store path's name promotion, not the aspect queue: pin the table path.
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
         fake_writer = MagicMock()
         monkeypatch.setattr(
             "nexus.catalog.factory.make_catalog_writer", lambda **kw: fake_writer,
@@ -774,13 +780,13 @@ def test_cluster_by_keeps_every_per_document_row_of_a_shared_chunk():
 def _dom_result(i: int) -> SearchResult:
     return SearchResult(id=f"dom{i}", content="x", distance=0.01 * i,
                          collection="code__test",
-                         metadata={"source_path": "dominant.py"})
+                         metadata={"doc_id": "dominant.py", "_display_path": "dominant.py"})
 
 
 def _other_result(i: int) -> SearchResult:
     return SearchResult(id=f"o{i}", content="x", distance=0.5 + 0.01 * i,
                          collection="code__test",
-                         metadata={"source_path": f"other{i}.py"})
+                         metadata={"doc_id": f"other{i}.py", "_display_path": f"other{i}.py"})
 
 
 @pytest.mark.t2_tenant
@@ -814,7 +820,7 @@ def test_structured_true_uncapped_structured_false_capped_same_cache_entry():
     )
 
     dom_count_text = text_out.count("dominant.py")
-    assert dom_count_text <= 2, (
+    assert dom_count_text == 2, (  # exactly 2, not <= 2: a render with no path labels counts 0
         f"structured=False (cache-hit path) must apply the file-diversity "
         f"cap; got {dom_count_text} dominant.py rows in:\n{text_out}"
     )
@@ -3180,3 +3186,242 @@ def test_a_topic_grouped_text_render_prints_the_topic_headers():
                       cluster_by="semantic")
     assert "── Topic Alpha ──" in text
     assert "── Topic Beta ──" in text
+
+
+def test_query_groups_a_shared_chunk_under_the_row_owner_not_the_first_holder():
+    """nexus-tko2w (RDR-236 Phase 3 client half): ``query()``'s document
+    grouping keyed a hit by ``sorted(docs_for_chashes(chash))[0]``, the
+    tenant-wide first holder, ahead of the row's own ``doc_id``. A search row
+    names its owner (the engine's collection-scoped first owner from
+    engine-service-v0.1.170, else the client's chash_positions pairing), and
+    ``search_cross_corpus`` stamps that owner's manifest length as
+    ``chunk_count`` on the hit. nexus-6pfgb.12 (RDR-236 Phase 2): the grouping
+    reads those stamps and makes no catalog call of its own, so the fake
+    catalog here refuses every call."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+    chash = "ab" * 32
+
+    def fake(*_a, **_kw):
+        # Two hits on the one chunk, each attributed to a different owner. A grouping that keyed on
+        # sorted(_owner_doc_ids)[0] (the first holder) would merge them into one card; keyed on the
+        # row's own doc_id they stay two.
+        return [
+            SearchResult(
+                id="r1", content="shared text", distance=0.1, collection="code__test",
+                metadata={"chunk_text_hash": chash, "doc_id": "1.1.9", "chunk_count": 7,
+                          "_owner_doc_ids": ["1.1.2", "1.1.9"], "_display_title": "owner-doc"},
+            ),
+            SearchResult(
+                id="r2", content="shared text", distance=0.2, collection="code__test",
+                metadata={"chunk_text_hash": chash, "doc_id": "1.1.2", "chunk_count": 3,
+                          "_owner_doc_ids": ["1.1.2", "1.1.9"], "_display_title": "first-holder-doc"},
+            ),
+        ]
+
+    refusing = _RefusingCatalog()
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.mcp.core._get_catalog", return_value=refusing), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="shared chunk owner", corpus="code__test")
+    assert refusing.calls == [], "query() reached the catalog (an except Exception would swallow the refusal)"
+    assert "Found 2 documents" in out, "one card per attributed owner, not one for the first holder"
+    assert "owner-doc" in out and "first-holder-doc" in out
+    assert "7 chunks" in out and "3 chunks" in out
+
+
+class _RefusingCatalog:
+    """nexus-6pfgb.12: ``query()`` reads the stamps ``search_cross_corpus``
+    put on each hit; any catalog call of its own is the duplicated lookup
+    RF-10 removed. Every call is RECORDED as well as refused: the refusal is
+    an ``AssertionError``, which a reintroduced ``except Exception`` in
+    ``query()`` would swallow, so each test asserts :attr:`calls` is empty
+    afterwards (Phase 2 review, M2)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def docs_for_chashes(self, chashes):
+        self.calls.append(("docs_for_chashes", chashes))
+        raise AssertionError(f"query() must not reverse-look-up {chashes}")
+
+    def get_manifests(self, doc_ids):
+        self.calls.append(("get_manifests", doc_ids))
+        raise AssertionError(f"query() must not fetch manifests for {doc_ids}")
+
+    def get_manifest(self, doc_id):
+        self.calls.append(("get_manifest", doc_id))
+        raise AssertionError(f"query() must not fetch the manifest of {doc_id}")
+
+
+def test_query_groups_a_row_that_names_no_owner_under_its_legacy_key_without_a_lookup():
+    """nexus-tko2w, re-pinned for nexus-6pfgb.12: a row that names its owner
+    is grouped under it with the stamped chunk count; a row the catalog could
+    not resolve (no ``doc_id`` stamp) is grouped under its legacy key and
+    shows no chunk count. Neither reaches the catalog from ``query()``: the
+    reverse lookup for unresolved rows happens once per page in
+    ``search_engine.attach_doc_ids``."""
+    _mock_t3([{"name": "code__test", "count": 2}])
+    named, unnamed = "ab" * 32, "cd" * 32
+
+    def fake(*_a, **_kw):
+        return [
+            SearchResult(
+                id="r1", content="named row", distance=0.1, collection="code__test",
+                metadata={"chunk_text_hash": named, "doc_id": "1.1.9", "chunk_count": 7,
+                          "_display_title": "named-doc"},
+            ),
+            SearchResult(
+                id="r2", content="unnamed row", distance=0.2, collection="code__test",
+                metadata={"chunk_text_hash": unnamed, "_display_title": "unnamed-doc"},
+            ),
+        ]
+
+    refusing = _RefusingCatalog()
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.mcp.core._get_catalog", return_value=refusing), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="mixed owners", corpus="code__test")
+    assert refusing.calls == [], "query() reached the catalog (an except Exception would swallow the refusal)"
+    assert "named-doc" in out and "unnamed-doc" in out
+    assert "7 chunks" in out
+    assert "5 chunks" not in out
+
+
+def test_query_keeps_one_card_per_owner_of_a_label_expanded_shared_chunk():
+    """nexus-tko2w: under a label filter the engine returns a shared chunk
+    once per owning document (same id and collection, a different ``doc_id``).
+    The identical-chunk collapse kept only the first, so the second owner
+    vanished; each owner now keeps its card, and an exact repeat still
+    collapses. The chunk counts are the stamps on each owner's row."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+    chash = "ef" * 32
+
+    def row(doc_id: str, title: str, distance: float, count: int) -> SearchResult:
+        return SearchResult(
+            id=chash, content="shared text", distance=distance, collection="code__test",
+            metadata={"chunk_text_hash": chash, "doc_id": doc_id, "chunk_count": count,
+                      "_display_title": title},
+        )
+
+    def fake(*_a, **_kw):
+        return [row("1.1.2", "first-owner", 0.1, 3), row("1.1.9", "second-owner", 0.1, 7),
+                row("1.1.9", "second-owner", 0.1, 7)]
+
+    refusing = _RefusingCatalog()
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.mcp.core._get_catalog", return_value=refusing), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="label expanded", corpus="code__test")
+    assert refusing.calls == [], "query() reached the catalog (an except Exception would swallow the refusal)"
+    assert "first-owner" in out and "second-owner" in out
+    assert out.count("second-owner") == 1
+    assert "3 chunks" in out and "7 chunks" in out
+
+
+def test_query_card_shows_the_owners_manifest_count_not_a_stale_row_chunk_count():
+    """Phase 2 review H1 (nexus-6pfgb.12): a legacy chunk row still carries the last
+    writer's ``chunk_count`` (99). The attach step stamps the attributed owner's manifest
+    count under ``OWNER_CHUNK_COUNT_KEY`` (7), and the card reads that first; the legacy key
+    only serves a hit the catalog did not resolve (the second row)."""
+    from nexus.context_annotations import OWNER_CHUNK_COUNT_KEY
+
+    _mock_t3([{"name": "code__test", "count": 2}])
+    resolved, unresolved = "ab" * 32, "cd" * 32
+
+    def fake(*_a, **_kw):
+        return [
+            SearchResult(
+                id="r1", content="resolved row", distance=0.1, collection="code__test",
+                metadata={"chunk_text_hash": resolved, "doc_id": "1.1.9", "chunk_count": 99,
+                          OWNER_CHUNK_COUNT_KEY: 7, "_display_title": "resolved-doc"},
+            ),
+            SearchResult(
+                id="r2", content="unresolved row", distance=0.2, collection="code__test",
+                metadata={"chunk_text_hash": unresolved, "chunk_count": 4, "_display_title": "unresolved-doc"},
+            ),
+        ]
+
+    refusing = _RefusingCatalog()
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.mcp.core._get_catalog", return_value=refusing), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="stale row count", corpus="code__test")
+    assert refusing.calls == []
+    assert "7 chunks" in out
+    assert "99 chunks" not in out
+    assert "4 chunks" in out, "an unresolved hit falls back to the legacy row key"
+
+
+# -- nexus-fv2u4: the label is the catalog title, never the chunk row's --------
+
+#: A code chunk's row title is its LAST writer's ``rel_path:line_start-line_end``.
+_STALE_ROW_TITLE = "other/doc.py:40-60"
+
+
+def _shared_chunk_hits() -> list[SearchResult]:
+    """One shared chunk attributed to ``owner/doc.py`` and one the catalog did not resolve."""
+    return [
+        SearchResult(
+            id="resolved-id", content="shared text", distance=0.1, collection="code__test",
+            metadata={"chunk_text_hash": "ab" * 32, "doc_id": "1.1.9", "title": _STALE_ROW_TITLE,
+                      "_display_title": "owner/doc.py"},
+        ),
+        SearchResult(
+            id="unresolved-id", content="orphan text", distance=0.2, collection="code__test",
+            metadata={"chunk_text_hash": "cd" * 32, "title": _STALE_ROW_TITLE},
+        ),
+    ]
+
+
+def test_search_labels_a_shared_chunk_with_the_owners_catalog_title_and_an_unresolved_hit_with_its_id():
+    _mock_t3([{"name": "code__test", "count": 2}])
+    with patch("nexus.search_engine.search_cross_corpus", lambda *_a, **_kw: _shared_chunk_hits()), \
+         patch("nexus.mcp.core._get_t1", side_effect=RuntimeError("no T1 in this test")), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = search(query="shared chunk label", corpus="code__test")
+    assert "owner/doc.py" in out
+    assert "unresolved-id" in out, "an unresolved hit shows its id"
+    assert _STALE_ROW_TITLE not in out and "other/doc.py" not in out
+
+
+def test_query_card_is_titled_by_the_owners_catalog_title_and_an_unresolved_hit_by_its_id():
+    _mock_t3([{"name": "code__test", "count": 2}])
+    refusing = _RefusingCatalog()
+    with patch("nexus.search_engine.search_cross_corpus", lambda *_a, **_kw: _shared_chunk_hits()), \
+         patch("nexus.mcp.core._get_catalog", return_value=refusing), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="shared chunk card", corpus="code__test")
+    assert refusing.calls == []
+    assert "owner/doc.py" in out
+    assert "unresolved-id" in out, "an unresolved hit's card shows its id"
+    assert _STALE_ROW_TITLE not in out and "other/doc.py" not in out
+
+
+def test_query_does_not_group_unresolved_chunks_under_a_shared_row_title():
+    """Two unresolved chunks whose rows carry the same (last writer's) title are two documents,
+    not one: the row title is no grouping key either."""
+    _mock_t3([{"name": "code__test", "count": 2}])
+    hits = [
+        SearchResult(id=f"u{i}", content=f"text {i}", distance=0.1 * i, collection="code__test",
+                     metadata={"title": _STALE_ROW_TITLE})
+        for i in (1, 2)
+    ]
+    with patch("nexus.search_engine.search_cross_corpus", lambda *_a, **_kw: hits), \
+         patch("nexus.mcp.core._get_catalog", return_value=_RefusingCatalog()), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="same row title", corpus="code__test")
+    assert "Found 2 documents" in out
+
+
+def test_query_card_of_a_resolved_document_with_no_title_or_path_shows_its_document_key():
+    """nexus-fv2u4 fix round: the last-resort card title is the document key (its tumbler),
+    not the chunk hash of the best hit."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+    hit = SearchResult(id="chunkhash-not-a-title", content="body", distance=0.1,
+                       collection="code__test", metadata={"doc_id": "1.9.77"})
+    with patch("nexus.search_engine.search_cross_corpus", lambda *_a, **_kw: [hit]), \
+         patch("nexus.mcp.core._get_catalog", return_value=_RefusingCatalog()), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="untitled document", corpus="code__test")
+    assert "1.9.77" in out
+    assert "chunkhash-not-a-title" not in out

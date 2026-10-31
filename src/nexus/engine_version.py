@@ -681,7 +681,25 @@ from __future__ import annotations
 #: plan and status routes, cutover), the engine plan/start refusing a target
 #: model it cannot serve (nexus-q6t89), the rename without the cross_model
 #: branch (nexus-avjrb) and memory-005-1 (a partial index on nexus.memory).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 169)
+#:
+#: 7.90.0 pairs with engine-service-v0.1.171 (tagged 2026-10-30 on a8566dce3,
+#: published with 36 assets, --acquire PASSED; deployed to the managed service
+#: before this client tag, every wire entry being [additive]; cut bead
+#: nexus-rd7ba). The pin moves two engine tags: v0.1.170 (b45e2b543, deployed
+#: 2026-10-30 08:40Z, cut bead nexus-dxxwt) adds the reads the RDR-235 default
+#: (NX_ASPECT_QUEUE=tuples, nexus-lnwn1) depends on: the read-only
+#: ``GET /v1/aspects/queue/list_waiting`` (6a75d1a03, the read the
+#: ``aspect-queue-tuples`` rung moves the table's waiting rows with; a 404 on an
+#: older engine, where the rung reports not applicable) and the census
+#: ``delayed`` and ``oldest_claimable_created_at`` keys (7470725e0, the doctor
+#: stall signal for the ``aspects`` queue). v0.1.171 adds the RDR-236 Phase 3
+#: manifest_search path (a positive ``where`` on manifest-answered keys runs
+#: inside the search, nexus-p89h4, nexus-6pfgb.25/.39) and RDR-232's
+#: ``chash_allow`` document confinement on the vector search routes
+#: (nexus-jypmj). No data-effecting changeset (vectors-040/041 replace
+#: functions with rollback blocks). The pin rises so a local install converges
+#: to an engine that answers all of these.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 171)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

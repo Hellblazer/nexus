@@ -2688,6 +2688,20 @@ def _restore_cwd():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_claude_version_probe(request, monkeypatch):
+    """nexus-jypmj.21: the "Answer-kind extraction" doctor row runs ``claude --version`` when the ``cli`` backend is
+    chosen, so any test that reaches ``run_health_checks()`` (the doctor tests, the console health panel) on a box
+    with ``claude`` on PATH would spawn the user's real CLI, which can take seconds or hang. Stub the probe to
+    "healthy" for every test. A module that exercises the probe itself sets ``REAL_CLAUDE_VERSION_PROBE = True``
+    (tests/test_rdr232_extraction_health.py drives it against shell stubs)."""
+    if getattr(request.module, "REAL_CLAUDE_VERSION_PROBE", False):
+        return
+    import nexus.health as health  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    monkeypatch.setattr(health, "_claude_cli_problem", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _mcp_server_process_flag_does_not_leak(monkeypatch):
     """nexus-xs7fp: ``core.main()`` / ``catalog.main()`` call
     ``session.mark_mcp_server_process()``, and a couple of tests run a
@@ -2711,6 +2725,17 @@ def _no_engine_restart_taxonomy_deferral(monkeypatch):
     uptime ever defers. tests/test_tawfg_taxonomy_deferral.py deletes this
     to exercise the real threshold."""
     monkeypatch.setenv("NX_TAXONOMY_DEFER_UPTIME_S", "0")
+
+
+@pytest.fixture(autouse=True)
+def _no_host_claude_argv(monkeypatch):
+    """nexus-7hzb2 (RDR-233): the SessionStart line and ``nx tuple wait`` read
+    the nearest ``claude`` ancestor's command line for the channel launch flag.
+    Under pytest that ancestor is whatever session ran the suite (a Desktop
+    session without the flag, a terminal one with it, or none on CI), so the
+    read is pinned to "cannot tell". tests/test_tuple_wait.py replaces it per
+    test."""
+    monkeypatch.setattr("nexus.channel_launch._claude_ancestor_argv", lambda: "")
 
 
 @pytest.fixture(autouse=True)
@@ -3167,8 +3192,12 @@ def t2_tenant(request: pytest.FixtureRequest,
     if not _storage_touch_guard.optin_selected():
         yield request.getfixturevalue("t2_service_env")
         return
+    from tests import _external_engine
+
     with _engine_tenant_env(monkeypatch, pin_local=False, request=request) as tenant:
-        _mint_t1_session_env(monkeypatch)
+        # An external engine's tenant is the operator's: no T1 session minted into it (nexus-ckejb).
+        if not _external_engine.in_external_mode(request):
+            _mint_t1_session_env(monkeypatch)
         yield tenant
 
 
@@ -3208,9 +3237,22 @@ def _engine_tenant_env(
     overwrite that fixture's ``NX_LOCAL=0``. The enclosed span is the guard's
     "tenant active" window (``tests/_storage_touch_guard.py``).
     """
+    from tests import _external_engine
     from tests._engine_substrate import ensure_engine
     from tests._tenant_pool import tenant_lease
     from tests.db._service_fixture import jar_freshness_skip_reason
+
+    # EXTERNAL ENGINE (nexus-ckejb): a test carrying ``external_engine_ok`` with both
+    # NX_TEST_EXTERNAL_* variables set runs against that engine and the operator's tenant: no jar,
+    # no session engine, no minted tenant, no drop. Anything else falls through to the local
+    # substrate below (tests/_external_engine.py has the opt-in rules and what the branch does).
+    external = _external_engine.resolve(request)
+    if external is not None:
+        with _external_engine.external_tenant_env(
+            monkeypatch, external, report=_external_engine.terminal_writer(request),
+        ) as tenant:
+            yield tenant
+        return
 
     # CI leg (RDR-155 P4b P0a' registered question, now due): the Python
     # CI job does not build the service JAR, so engine-substrate tests
@@ -5120,3 +5162,20 @@ def fake_credentials(value: str = "test-key", *, passthrough: tuple[str, ...] = 
         return value
 
     return _side_effect
+
+
+@pytest.fixture()
+def no_mineru_child_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``nx doctor --check-mineru`` without its fresh-child MinerU import (nexus-vyy65).
+
+    ``_run_check_mineru`` imports MinerU's native stack (mineru, onnxruntime, torch) in a child
+    interpreter, which costs a cold torch import per call and ties a doctor unit test to whatever
+    the host has installed. A test of another row (cv2, the real-parse probe, the not-configured
+    server line) patches the child probe green here; the child probe itself is exercised, against
+    real and fake MinerU packages, only in ``tests/test_mineru_child_dll_dirs.py``.
+    ``tests/test_mineru_child_probe_isolation_lint.py`` fails a test file that runs
+    ``_run_check_mineru`` or ``doctor --check-mineru`` without this fixture.
+    """
+    from nexus.commands import doctor
+
+    monkeypatch.setattr(doctor, "_probe_mineru_child_import", lambda timeout_s=None: None)

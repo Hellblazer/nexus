@@ -28,6 +28,10 @@ lives in ``aspect_readers.capture_https_etag`` itself, the single function
 this command's loop calls, so setting it makes every candidate here read
 'no ETag to capture' with zero outbound HEAD requests, exactly like
 ``--dry-run``'s zero-network guarantee.
+
+``backfill-meta`` (nexus-6pfgb.10, RDR-236 Phase 1) is the third: the one-time, fill-only stamp of the
+catalog ``meta`` keys the Phase 1 homes now write at index and put time, for documents written before
+them. The rules live in :mod:`nexus.catalog.meta_backfill`.
 """
 from __future__ import annotations
 
@@ -310,7 +314,74 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
         raise click.exceptions.Exit(1)
 
 
+@click.command(name="backfill-meta")
+@click.option(
+    "--apply", is_flag=True,
+    help="Write the keys (default: dry run, counts only).",
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit JSON instead of the human-readable report.",
+)
+def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
+    """Stamp the new catalog meta keys of pre-existing documents from their chunk rows (nexus-6pfgb.10).
+
+    One-time and fill-only: a key the entry already holds (a retraction value included) and a non-empty
+    catalog column are never touched, and a key is sent only with a real value. Notes (``knowledge``)
+    take ``put_at``, ``ttl_days``, ``tags`` (as an array), ``category`` and ``source_agent`` from the row
+    the note itself wrote, or ``tags``/``category``/``source_agent``/``put_at`` from a row of a chunk it
+    solely owns. Indexed documents take ``tags`` and ``category`` from the register-time statement of
+    their file kind, and ``extraction_method``, ``quality_gate_overridden`` (only where True),
+    ``extraction_source``, ``frecency_score`` (with its computed_at) and an empty ``author`` from chunks
+    they solely own, when those rows agree and are no later than the document. A document whose chunks
+    are all shared is skipped and counted. A legacy comma string under ``tags`` is left for the array rung.
+
+    The dry run (default) prints per key how many documents were examined, already held it, were skipped
+    as shared, would be stamped, or are residue (with the reasons under ``--json``). A run that examines
+    no document exits non-zero.
+    """
+    from nexus.catalog.meta_backfill import VacuousRunError, backfill_meta  # noqa: PLC0415 — command-local
+    from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+    from nexus.db import make_t3  # noqa: PLC0415 — command-local
+
+    reader = _cat_cmd._get_catalog()
+    writer = _cat_cmd._get_catalog_writer() if apply else None
+    try:
+        report = backfill_meta(reader, make_t3(), writer, apply=apply)
+    except VacuousRunError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if as_json:
+        click.echo(json.dumps(report.as_dict(), indent=2, default=str))
+    else:
+        verb = "Stamped" if apply else "Would stamp"
+        click.echo(
+            f"Examined {report.documents_examined} documents ({report.documents_notes} notes): "
+            f"{report.documents_complete} complete, {report.documents_all_shared} with only shared chunks, "
+            f"{verb.lower()} {report.documents_to_stamp}."
+        )
+        for name, st in sorted(report.keys.items()):
+            click.echo(
+                f"  {name}: examined {st.examined}, held {st.present}, skipped (shared) {st.shared}, "
+                f"{'stamped' if apply else 'would stamp'} {st.stamped}, residue {sum(st.residue.values())}"
+            )
+        if report.tags_legacy_strings_left:
+            click.echo(f"  {report.tags_legacy_strings_left} legacy tags strings left for the array rung (nexus-6pfgb.38).")
+        if report.lookups_failed:
+            click.echo(f"  {report.lookups_failed} documents had an owner or row lookup fail; their row-sourced keys were withheld.")
+        if apply:
+            click.echo(f"{verb} {report.documents_written}/{report.documents_to_stamp} documents.")
+        else:
+            click.echo("Dry run: nothing written. Re-run with --apply.")
+    if report.writes_failed:
+        raise click.exceptions.Exit(1)
+
+
 def register(group: click.Group) -> None:
     """Attach the live backfill verb(s) to the shared ``catalog`` group."""
     group.add_command(backfill_source_uri_cmd)
     group.add_command(backfill_etags_cmd)
+    group.add_command(backfill_meta_cmd)

@@ -43,6 +43,7 @@ calls into :mod:`nexus.mcp.core`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os as _os
@@ -57,6 +58,15 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 import structlog
 
 from nexus import call_deadline
+from nexus.plans.document_confinement import (
+    CONFINED_TOOLS,
+    DocumentConfinement,
+    active_confinement,
+    chash_allow_scope,
+    confine_step,
+    confinement_scope,
+    empty_confined_output,
+)
 from nexus.plans.match import Match
 from nexus.plans.owner_narrowing import OWNERS_BINDING
 
@@ -712,6 +722,7 @@ from nexus.plans.repair_stream import (  # noqa: E402
     set_supplement_step,
     supplement_scope,
 )
+from nexus.plans.traversal_policy import registry_listing_scope  # noqa: E402
 
 #: RDR-232 Phase 3 (nexus-jypmj.3.1). A dispatcher carrying this attribute runs :func:`_hydrate_operator_args`
 #: itself (the default dispatcher does). The coverage boundary has to read the terminal reduction's hydrated
@@ -1448,9 +1459,45 @@ def _apply_traversal_policy_to_args(
         return args
     from nexus.plans.traversal_policy import derive_policy  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
 
-    return {**args, "policy": derive_policy(
-        args, bindings.get(_CALLER_SCOPE_BINDING), bindings.get(OWNERS_BINDING),
-    )}
+    # nexus-jypmj: a run confined to one document walks under that document's address (document depth: the policy's
+    # scope admits the tumbler by equality, and the engine's scope_filter takes the same subtree).
+    confinement = active_confinement()
+    scope = confinement.tumbler if confinement is not None else bindings.get(_CALLER_SCOPE_BINDING)
+    return {**args, "policy": derive_policy(args, scope, bindings.get(OWNERS_BINDING))}
+
+
+def _apply_document_confinement_to_args(
+    tool: str, args: dict[str, Any], *, step_index: int,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    """Confine a retrieval step to the run's document (nexus-jypmj, :mod:`nexus.plans.document_confinement`);
+    returns ``(args, skipped_output, diagnostic)``.
+
+    Without an active confinement, or for a tool it does not act on, this is ``(args, None, None)``. A step that
+    cannot be confined (its route takes no chunk filter, or the engine has none) is NOT dispatched: ``skipped_output``
+    is the empty structured shape with a ``document_confined`` marker, and the caller records the step as skipped,
+    exactly like a scope conflict. A ``search``/``query`` step that can be confined comes back carrying
+    ``chash_allow`` (the dispatcher turns it into the engine request field); ``store_get_many`` comes back with its
+    ids cut to the document. *diagnostic* is the ``scope_diagnostics`` entry, outcome ``document_confined`` (skipped),
+    ``document_filtered`` (the chunk filter rides the step) or ``document_scoped`` (the traversal walks under the
+    document's address).
+    """
+    confinement = active_confinement()
+    if confinement is None or tool not in CONFINED_TOOLS:
+        return args, None, None
+    decision = confine_step(tool, args, confinement)
+    if tool == "store_get_many":
+        return decision.args, None, None
+    corpus = args.get("corpus") or None
+    diagnostic = {
+        "step_index": step_index, "tool": tool, "plan_corpus": corpus, "caller_scope": confinement.tumbler,
+        "scope_kind": "document", "resolved_corpus": corpus,
+        "outcome": "document_confined" if decision.skipped else (
+            "document_scoped" if tool == "traverse" else "document_filtered"),
+        "detail": decision.skipped,
+    }
+    if decision.skipped:
+        return args, empty_confined_output(tool, step_index, confinement, decision.skipped), diagnostic
+    return decision.args, None, diagnostic
 
 
 def _mark_reserved_step(index: int, steps: list[dict[str, Any]]) -> None:
@@ -2021,7 +2068,13 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
 
     # The notes below come from each document's own catalog entry, so the chunk-level
     # ``source_notes`` (an owner ``resolve_many`` over the same documents) is not asked for.
-    with mcp_core.without_source_notes():
+    # nexus-sx1t0: nor is the owner section-type read, when every chunk's label is its document's
+    # own manifest label (no legacy row, ``None`` above): that read would be discarded, and it
+    # costs a ``chash_positions`` round trip. A batch with a legacy row keeps it, for those rows.
+    with contextlib.ExitStack() as _stack:
+        _stack.enter_context(mcp_core.without_source_notes())
+        if None not in flat_manifest_types:
+            _stack.enter_context(mcp_core.without_owner_section_types())
         hydrated = mcp_core.store_get_many(
             ids=flat_ids, collections=flat_collections, structured=True,
         )
@@ -2118,7 +2171,7 @@ def _entry_is_non_evidentiary(entry: Any) -> bool:
     return bool(meta.get(NON_EVIDENTIARY_META_KEY))
 
 
-def _resolve_non_evidentiary_chashes(chashes: list[str]) -> set[str]:
+def _resolve_non_evidentiary_chashes(chashes: list[str], *, lookups: Any = None) -> set[str]:
     """Best-effort, batched chash -> "belongs to a non_evidentiary-
     stamped document" set, for the chash-shaped hydration path (plain
     ``search()`` results).
@@ -2131,6 +2184,14 @@ def _resolve_non_evidentiary_chashes(chashes: list[str]) -> set[str]:
     shaped path). Either call failing, the catalog being unavailable, or
     *chashes* being empty degrades to an empty set — never raises, never
     excludes a chash it cannot classify.
+
+    *lookups* (nexus-6pfgb.50, RF-10) is the :class:`nexus.mcp.core.OwnerLookups` the
+    ``store_get_many`` call that hydrated these same chashes recorded. When it holds the owner
+    rows, the chash -> documents map comes from them (``docs_for_chashes`` is not called) and the
+    entries from the ones that call already resolved; only owners it did not resolve are fetched,
+    in one batch. The owner rows are tenant-wide, as ``docs_for_chashes`` is, so the answer is the
+    same. Without them (the catalog could not answer ``chash_positions``, or no lookup ran), the
+    two round trips above run as before.
     """
     from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -2140,17 +2201,36 @@ def _resolve_non_evidentiary_chashes(chashes: list[str]) -> set[str]:
     if cat is None:
         return set()
     try:
-        chash_to_docs = cat.docs_for_chashes(chashes)
-        if not isinstance(chash_to_docs, dict) or not chash_to_docs:
-            return set()
-        all_doc_ids = sorted({
-            doc_id for docs in chash_to_docs.values() for doc_id in (docs or [])
-        })
-        if not all_doc_ids:
-            return set()
-        entries = cat.resolve_many(all_doc_ids)
-        if not isinstance(entries, dict):
-            return set()
+        if lookups is not None and lookups.asked and lookups.owner_rows is not None:
+            chash_to_docs = {
+                c: list(dict.fromkeys(
+                    row["doc_id"] for row in lookups.owner_rows.get(c, ()) if row.get("doc_id")
+                ))
+                for c in dict.fromkeys(chashes)
+            }
+            chash_to_docs = {c: docs for c, docs in chash_to_docs.items() if docs}
+            if not chash_to_docs:
+                return set()
+            all_doc_ids = sorted({doc_id for docs in chash_to_docs.values() for doc_id in docs})
+            wanted_docs = set(all_doc_ids)
+            entries = {d: e for d, e in lookups.entries.items() if d in wanted_docs}
+            if unresolved := [d for d in all_doc_ids if d not in entries]:
+                fetched = cat.resolve_many(unresolved)
+                if not isinstance(fetched, dict):
+                    return set()
+                entries.update(fetched)
+        else:
+            chash_to_docs = cat.docs_for_chashes(chashes)
+            if not isinstance(chash_to_docs, dict) or not chash_to_docs:
+                return set()
+            all_doc_ids = sorted({
+                doc_id for docs in chash_to_docs.values() for doc_id in (docs or [])
+            })
+            if not all_doc_ids:
+                return set()
+            entries = cat.resolve_many(all_doc_ids)
+            if not isinstance(entries, dict):
+                return set()
     except Exception:  # noqa: BLE001 — best-effort exclusion; ANY failure here (a raised exception or a malformed/unconfigured catalog return) must degrade to "leave every candidate in", never crash the hydration
         _log.warning(
             "resolve_non_evidentiary_chashes_failed",
@@ -2359,17 +2439,19 @@ def _hydrate_operator_args(
             hydrated = _hydrate_tumbler_ids([str(i) for i in id_list_raw])
             excluded_ids: set[str] = set()
         else:
-            hydrated = mcp_core.store_get_many(
-                ids=ids, collections=collections, structured=True,
-            )
+            with mcp_core.capturing_owner_lookups() as owner_lookups:
+                hydrated = mcp_core.store_get_many(
+                    ids=ids, collections=collections, structured=True,
+                )
             # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review
             # round 3): the chash-shaped path -- the far more common
             # shape (plain search() results) round 2 left uncovered.
-            # docs_for_chashes + resolve_many, one batched call each
-            # (never one per chash), mirroring _hydrate_tumbler_ids'
-            # own resolve_many use for the tumbler-shaped path.
+            # One batched lookup, never one per chash. nexus-6pfgb.50
+            # (RF-10): it reuses the owner rows and entries the
+            # store_get_many call above already fetched, so the step
+            # asks the catalog for owners once, not twice.
             excluded_ids = _resolve_non_evidentiary_chashes(
-                [str(i) for i in id_list_raw],
+                [str(i) for i in id_list_raw], lookups=owner_lookups,
             )
             # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's
             # decision 3): import-only chunks, resolved from the
@@ -2720,6 +2802,13 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # merged onto the operator's return dict post-dispatch.
     truncation_metadata = args.pop("_truncation_metadata", None)
 
+    # nexus-jypmj: the document confinement's restriction on a search/query step (see the call below). Not a
+    # parameter of either tool, so it is taken out of the args before the kwargs-drop pass can warn about it.
+    _chash_allow: list[str] | None = None
+    if resolved_tool in ("search", "query") and "chash_allow" in args:
+        args = dict(args)
+        _chash_allow = list(args.pop("chash_allow") or ())
+
     fn = getattr(mcp_core, resolved_tool, None)
     if fn is None or not callable(fn):
         available = sorted(
@@ -2815,21 +2904,25 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # RDR-079 P4: await async tools directly, call sync tools inline.
     # No thread bridge — the loop continuity matters for the pool's
     # subprocess StreamReader objects, which are loop-bound.
-    if inspect.iscoroutinefunction(fn):
-        result = await fn(**args)
-    elif call_deadline.get() is not None:
-        # nexus-5ezgn: off the loop, so plan_run's wait_for can cut it; in a
-        # copy of this context, so the deadline reaches the worker and a cut
-        # search stops at its next stage boundary. See _retrieval_executor.
-        import contextvars  # noqa: PLC0415 — deadline path only
-        import functools  # noqa: PLC0415 — deadline path only
+    # nexus-jypmj: the document confinement's chunk-hash restriction is not a tool parameter; it rides a context value
+    # that ``search_cross_corpus`` reads once and sends on every engine call. The deadline path below copies this
+    # context, so the value reaches the worker thread.
+    with chash_allow_scope(_chash_allow):
+        if inspect.iscoroutinefunction(fn):
+            result = await fn(**args)
+        elif call_deadline.get() is not None:
+            # nexus-5ezgn: off the loop, so plan_run's wait_for can cut it; in a
+            # copy of this context, so the deadline reaches the worker and a cut
+            # search stops at its next stage boundary. See _retrieval_executor.
+            import contextvars  # noqa: PLC0415 — deadline path only
+            import functools  # noqa: PLC0415 — deadline path only
 
-        ctx = contextvars.copy_context()
-        result = await asyncio.get_running_loop().run_in_executor(
-            _get_retrieval_executor(), functools.partial(ctx.run, fn, **args),
-        )
-    else:
-        result = fn(**args)
+            ctx = contextvars.copy_context()
+            result = await asyncio.get_running_loop().run_in_executor(
+                _get_retrieval_executor(), functools.partial(ctx.run, fn, **args),
+            )
+        else:
+            result = fn(**args)
     # Most MCP tools return str (human-readable summary); the runner
     # expects dict per RDR-078 §Phase 1. Normalize: wrap string returns
     # as ``{"text": ...}`` so downstream ``$stepN.text`` references
@@ -3383,8 +3476,13 @@ async def _plan_run_impl(
             supplement.install_note(note)
 
     def _assessment_cost_estimate() -> float | None:
-        """The mean known cost of the assessment calls so far, or ``None`` (no call reported a cost)."""
-        costs = [r.cost_usd for r in step_records if r.operator == "operator_check" and r.cost_usd is not None]
+        """The mean known cost of the assessment calls so far, or ``None`` (no call reported a cost). Assessment calls
+        are the ``operator_check`` records numbered past the plan's own steps; a plan's own ``check`` steps (lower
+        indices, a different prompt and size) are not assessment calls and stay out of the mean."""
+        costs = [
+            r.cost_usd for r in step_records
+            if r.operator == "operator_check" and r.step_index >= len(steps) and r.cost_usd is not None
+        ]
         return sum(costs) / len(costs) if costs else None
 
     async def _run_coverage_boundary(
@@ -3979,6 +4077,30 @@ async def _plan_run_impl(
                         elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
                     )
                     continue
+            # nexus-jypmj (Sam, 2026-10-30): a run that names one source confines every secondary retrieval step
+            # to that DOCUMENT. A step that carries the engine's chunk filter is handed it; one whose route takes
+            # none, or an engine without the filter, is not dispatched (the empty shape plus a marker).
+            resolved, _confined_out, _confined_diag = _apply_document_confinement_to_args(
+                tool, resolved, step_index=index,
+            )
+            if _confined_diag is not None:
+                scope_diagnostics.append(_confined_diag)
+            if _confined_out is not None:
+                _log.info(
+                    "nx_answer_document_confined_step_skipped", step_index=index, tool=tool,
+                    reason=_confined_diag["detail"] if _confined_diag else "",
+                )
+                resolved_step_args.append({
+                    "step_index": index, "tool": tool, "corpus": resolved.get("corpus") or "",
+                    "query": resolved.get("query") or resolved.get("question") or "", "skipped": True,
+                })
+                step_outputs.append(_confined_out)
+                _log.info(
+                    "nx_answer_step_complete", kind="isolated_skipped_document_confined",
+                    step_indices=_seg_indices, tools=_seg_tools,
+                    elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                )
+                continue
             # RDR-232 section 3 (nexus-jypmj.1.5): a traverse step carries the evidence policy
             # derived from the caller's scope, applied inside ``traverse`` before manifest expansion.
             resolved = _apply_traversal_policy_to_args(tool, resolved, bindings=merged)
@@ -4250,6 +4372,14 @@ async def _plan_run_impl(
     # The concurrent assessment calls (nexus-jypmj.17) are appended as they finish, in no fixed order; step_index is
     # unique and assigned in plan order, so listing by it makes the envelope's step order the same on every run.
     step_records.sort(key=lambda r: r.step_index)
+    # nexus-jypmj: a filtered step whose engine returned rows outside the document's hashes (it ignored the key) says
+    # so in the run's scope diagnostics, beside the step's ``document_filtered`` outcome.
+    for _diag in scope_diagnostics:
+        if _diag.get("scope_kind") == "document" and _diag.get("outcome") == "document_filtered":
+            _i = _diag.get("step_index")
+            _out = step_outputs[_i] if isinstance(_i, int) and 0 <= _i < len(step_outputs) else None
+            if isinstance(_out, dict) and _out.get("chash_allow_dropped"):
+                _diag["rows_outside_allow"] = int(_out["chash_allow_dropped"])
     return PlanResult(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,
@@ -4276,8 +4406,14 @@ async def plan_run(
     continuation_cut_at_step: int | None = None,
     reserved_stream: ReservedStream | None = None,
     coverage_boundary: CoverageBoundary | None = None,
+    document_confinement: DocumentConfinement | None = None,
 ) -> PlanResult:
-    """Execute *match*'s steps; see :func:`_plan_run_impl` for every parameter but one.
+    """Execute *match*'s steps; see :func:`_plan_run_impl` for every parameter but two.
+
+    ``document_confinement`` (nexus-jypmj, Sam 2026-10-30): the document a one-source request is confined to, built
+    by ``nx_answer`` (:mod:`nexus.plans.document_confinement`). Every secondary retrieval step then runs under the
+    engine's chunk filter, or is not dispatched where it cannot be confined. ``None`` (the default) runs exactly as
+    before.
 
     ``reserved_stream`` (RDR-232 Phase 1, nexus-jypmj.1.6): the named source's primary evidence,
     built by ``nx_answer`` from the resolved sources. Operator hydration merges it ahead of the
@@ -4291,7 +4427,8 @@ async def plan_run(
     if _recorder is not None:  # nexus-jypmj.1.8: a whole-plan re-run starts from a clean reducer input
         _recorder.reset_run()
     supplement = RepairSupplement() if coverage_boundary is not None else None
-    with reserved_scope(reserved_stream), supplement_scope(supplement):
+    with reserved_scope(reserved_stream), supplement_scope(supplement), registry_listing_scope(), \
+            confinement_scope(document_confinement):
         result = await _plan_run_impl(
             match, bindings, dispatcher=dispatcher, bundle_operators=bundle_operators,
             deadline=deadline, budget_usd_remaining=budget_usd_remaining,

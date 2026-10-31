@@ -140,14 +140,19 @@ def test_query_still_applies_the_topic_boost_with_two_taxonomy_requests(
     assert sorted(wired.paths) == ["/assignments/for_docs", "/links/pairs"], wired.paths
 
 
-def test_query_reads_document_manifests_in_one_batch(wired: _RecordingEngine, monkeypatch) -> None:
-    """Chunk counts for the result documents come from ONE get_manifests call,
-    not one get_manifest per document (7 documents here)."""
+def test_query_reads_chunk_counts_from_the_hits_and_makes_no_manifest_read_of_its_own(
+    wired: _RecordingEngine, monkeypatch,
+) -> None:
+    """Chunk counts for the result documents ride the hits (``search_cross_corpus`` stamps each hit's
+    document and its manifest row count from the one reverse lookup it already makes). ``query`` itself
+    made a second ``docs_for_chashes`` and a batched ``get_manifests`` to group the same hits; since
+    nexus-6pfgb.12 (RF-10) it makes neither, and never the per-document ``get_manifest`` (7 documents here)."""
     cat = _CountingCatalog()
     monkeypatch.setattr(core, "_get_catalog", lambda **_kw: cat)
 
     out = core.query("anything", limit=10)
 
-    assert "[2 chunks]" in out, out
-    assert "get_manifest" not in cat.calls, cat.calls
-    assert cat.calls.count("get_manifests") == 1, cat.calls
+    assert "[1 chunks]" in out, out  # the one manifest row the search's own lookup returned per document
+    assert cat.calls.count("docs_and_manifests_for_chashes") == 1, cat.calls
+    for repeated in ("get_manifest", "get_manifests", "docs_for_chashes"):
+        assert repeated not in cat.calls, cat.calls

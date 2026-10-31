@@ -37,7 +37,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -3835,6 +3835,32 @@ class HttpVectorClient:
                     )
         return self._embedding_mode_memo
 
+    #: nexus-jypmj: the longest a probed ``GET /version`` body is trusted for the chunk-filter capability. A cached
+    #: flag is not durable proof across an engine rollback; the same bound the catalog client's probes use.
+    _CHASH_ALLOW_TTL_S: float = 300.0
+    _chash_allow_flag: bool | None = None
+    _chash_allow_fetched_at: float | None = None
+
+    def supports_chash_allow(self) -> bool:
+        """Does the engine apply ``chash_allow`` on search, hybrid-search and search-per-collection (``GET /version``'s
+        ``vector_search_chash_allow_supported``, nexus-jypmj)? Only a JSON ``true`` counts. An engine without the
+        flag answers HTTP 200 to the key and ignores it (collection-wide results), and the public cloud edge trims
+        ``/version`` to an allowlist, so a flag it does not list reads the same: the caller reads this BEFORE it sends
+        the key. Cached for :attr:`_CHASH_ALLOW_TTL_S`. NEVER raises: a failed probe is ``False``, the safe direction
+        (the caller then runs no secondary step rather than risk a collection-wide answer)."""
+        fetched = self._chash_allow_fetched_at
+        if self._chash_allow_flag is not None and fetched is not None and _monotonic() - fetched < self._CHASH_ALLOW_TTL_S:
+            return self._chash_allow_flag
+        try:
+            info = _get("/version", tenant=self._tenant, timeout=10.0)
+            flag = isinstance(info, dict) and info.get("vector_search_chash_allow_supported") is True
+        except Exception as exc:  # noqa: BLE001 — a capability probe never raises; unsupported is the safe answer
+            _log.warning("chash_allow_probe_failed", error=str(exc))
+            flag = False
+        self._chash_allow_flag = flag
+        self._chash_allow_fetched_at = _monotonic()
+        return flag
+
     def search(
         self,
         query: str,
@@ -3850,8 +3876,15 @@ class HttpVectorClient:
         rerank_top_k: int | None = None,
         rerank_max_candidates: int | None = None,
         rerank_meta_out: dict | None = None,
+        chash_allow: Sequence[str] | None = None,
     ) -> list[dict] | dict:
         """Semantic search via the Java service.
+
+        ``chash_allow`` (nexus-jypmj, the document confinement; ``vector_search_chash_allow_supported``): at most
+        3000 distinct 64-hex chunk hashes. The engine restricts its candidates to those chunks and ranks them
+        exactly; an empty list answers no rows. ``None`` (the default) sends no key, so the request is
+        byte-identical to what it was. An engine that predates the field ignores it and answers collection-wide:
+        the caller reads :meth:`supports_chash_allow` first.
 
         ``rerank_max_candidates`` (with ``rerank``) asks the engine to SCORE at
         most that many rows, the first N in distance order; the others stay in
@@ -3915,6 +3948,8 @@ class HttpVectorClient:
             body["where"] = where
         if include_source_uri:
             body["include_source_uri"] = True
+        if chash_allow is not None:
+            body["chash_allow"] = list(chash_allow)
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:
@@ -3973,6 +4008,7 @@ class HttpVectorClient:
         rerank: bool = False,
         rerank_top_k: int | None = None,
         rerank_meta_out: dict | None = None,
+        chash_allow: Sequence[str] | None = None,
     ) -> list[dict]:
         """Hybrid lexical+vector search via ``POST /v1/vectors/hybrid-search``
         (RDR-217 P2.1, bead nexus-lqo4p.6).
@@ -4038,6 +4074,8 @@ class HttpVectorClient:
             body["where"] = where
         if include_source_uri:
             body["include_source_uri"] = True
+        if chash_allow is not None:
+            body["chash_allow"] = list(chash_allow)  # nexus-jypmj: see search()
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:
@@ -4107,6 +4145,7 @@ class HttpVectorClient:
         rerank_meta_out: dict | None = None,
         content_chars: int | None = None,
         lexical: bool = False,
+        chash_allow: Sequence[str] | None = None,
     ) -> dict | None:
         """Per-collection top-K over ONE embedding-model group via
         ``POST /v1/vectors/search-per-collection`` (nexus-tu8wp.1 engine half,
@@ -4216,6 +4255,8 @@ class HttpVectorClient:
             body["content_chars"] = int(content_chars)
         if lexical:
             body["lexical"] = True
+        if chash_allow is not None:
+            body["chash_allow"] = list(chash_allow)  # nexus-jypmj: see search()
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:
@@ -4780,7 +4821,9 @@ class HttpVectorClient:
     ) -> dict:
         """POST /v1/vectors/gc/quarantine-orphans.
 
-        Returns ``{"moved": N, "sample": [{"chash": hex, "title": ...}, ...]}``, plus
+        Returns ``{"moved": N, "sample": [{"chash": hex, "title": ..., "text_prefix": ...}, ...]}``
+        (``title`` is the chunk's live manifest owner's, null when none; ``text_prefix`` its first 80
+        characters, present from engine-service-v0.1.171; neither is written to ``gc_audit``), plus
         ``floor`` (and, with a floor, ``refused`` and the judged counts) from an engine
         that honours the optional floor fields (:meth:`_floor_body`).
         Raises :class:`VectorServiceError` (``code=404`` on a pre-route engine).
@@ -5094,7 +5137,11 @@ class HttpVectorClient:
         ``nexus.chunk_is_reapable`` selects at this instant, ordered by chash.
         Returns ``{"collection", "grace_seconds", "returned", "next_after",
         "chunks": [{"chash", "created_at", "last_written_at", "ownerless_since",
-        "title", "catalog_doc_id"}, ...]}``. ``ownerless_since`` is the instant
+        "title", "catalog_doc_id", "text_prefix"}, ...]}``. ``title`` and
+        ``catalog_doc_id`` are the chunk's manifest owner's (null when no manifest
+        row names one), ``text_prefix`` its first 80 characters; an engine older
+        than engine-service-v0.1.171 reads the chunk row's own keys and omits
+        ``text_prefix``. ``ownerless_since`` is the instant
         the grace counts from, the later of ``last_written_at`` and the moment
         the chunk last lost an owner; an engine older than that field omits it,
         so a reader must tolerate its absence.

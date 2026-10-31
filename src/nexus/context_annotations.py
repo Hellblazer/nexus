@@ -22,6 +22,7 @@ resolves, is left out rather than filled from the row.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -156,6 +157,57 @@ def annotation_line(
 #: not a result field, so ``format_json`` leaves it out.
 OWNER_FACTS_KEY: str = "_owner_facts"
 
+#: Metadata key a search hit carries its ATTRIBUTED owner's frecency under (RDR-236 Phase 1,
+#: nexus-6pfgb.9): the catalog ``meta["frecency_score"]`` of the document the hit is attributed
+#: to, set by ``search_engine._attach_display_paths`` from the owner lookup the page already
+#: makes. A working key like :data:`OWNER_FACTS_KEY`; absent when the owner states none.
+OWNER_FRECENCY_KEY: str = "_owner_frecency"
+
+#: Metadata key a search hit carries its owners' own ``source_agent`` values under (RDR-236 Phase 2,
+#: nexus-6pfgb.17): a sorted list of the agents the catalog entries of the hit's live owners
+#: state in ``meta["source_agent"]``, set by ``search_engine._attach_display_paths`` from the owner
+#: lookup the page already makes. Absent when no live owner states one. A working key like
+#: :data:`OWNER_FACTS_KEY`, read only through ``search_engine._row_agents``.
+OWNER_AGENTS_KEY: str = "_owner_agents"
+#: Metadata key a search hit carries the bibliography of its ATTRIBUTED owner under (RDR-236 Phase 2,
+#: nexus-6pfgb.12): ``{"bib_year", "bib_authors", "bib_venue", "bib_citation_count"}``, each present only
+#: when the owning document's catalog entry states it, taken from the owner lookup the page already makes.
+#: ``query``'s document card reads it; the chunk row's ``bib_*`` keys are the last writer's and are not.
+#: Absent when the attributed document states none (or none resolved). A working key like
+#: :data:`OWNER_FACTS_KEY`.
+OWNER_BIB_KEY: str = "_owner_bib"
+
+#: Metadata key a search hit carries the row count of its ATTRIBUTED owner's manifest under (RDR-236 Phase 2
+#: review, nexus-6pfgb.12): the chash-positions route's (or the manifest's) count for the document the hit is
+#: attributed to, stamped unconditionally by ``search_engine._attach_from_chash_positions`` and
+#: ``_attach_doc_ids_from_catalog``. ``query``'s document card reads it first and the legacy ``chunk_count``
+#: row key only when it is absent (a hit the catalog did not resolve): a pre-Phase-3 row still carries the
+#: last writer's ``chunk_count``, which the plain ``setdefault`` stamp leaves in place for the scorer.
+#: A working key like :data:`OWNER_FACTS_KEY`, never stored.
+OWNER_CHUNK_COUNT_KEY: str = "_owner_chunk_count"
+
+#: Metadata key a search hit carries what the quality boost reads under (nexus-6pfgb.12):
+#: ``{"bib_citation_count", "bib_year"}`` of the attributed owner, or, for a hit whose ``doc_id`` the lookup
+#: CHOSE (:data:`DOC_ID_INFERRED_KEY`), of the live owner with the most citations (the choice is arbitrary,
+#: so an enriched owner is not penalised, as for :data:`OWNER_FRECENCY_KEY`). Absent when no owner states a
+#: citation count; ``apply_quality_boost`` then boosts nothing. A working key like :data:`OWNER_FACTS_KEY`.
+OWNER_QUALITY_KEY: str = "_owner_quality"
+
+#: Metadata key a search hit carries the absolute local path of its attributed document under
+#: (nexus-6pfgb.49): the ``file://`` ``source_uri`` of the catalog entry the page's one owner lookup
+#: already resolved. ``_display_path`` is the catalog ``file_path``, often repo-relative; a reader that
+#: must OPEN the file (the line number of a prose hit) tries this next, never the chunk row's
+#: ``source_path``, which is the last writer's file. Absent when the document has no local ``file://``
+#: source. A working key like :data:`OWNER_FACTS_KEY`, never stored.
+DISPLAY_SOURCE_PATH_KEY: str = "_display_source_path"
+
+#: Working key set to ``True`` on a hit whose ``doc_id`` the owner lookup CHOSE (the chunk row
+#: named none; the engine's order picked the first holder, or, on the manifest fallback, a holder homed in the
+#: hit's own collection, else the smallest ``doc_id`` in text order: nexus-6pfgb.52). Such a choice is arbitrary, so the
+#: hit's frecency is the best of its live owners', not the chosen one's (RDR-236 Phase 1 review,
+#: nexus-6pfgb.9). Never set when the row carried its own ``doc_id``.
+DOC_ID_INFERRED_KEY: str = "_doc_id_inferred"
+
 #: The most owners of one chunk resolved for its title and facts. A chunk many
 #: documents share (boilerplate) would otherwise make every read resolve all of
 #: them; past the cap the owners cannot be shown to agree, so a reader states
@@ -167,8 +219,21 @@ OWNER_RESOLVE_CAP: int = 10
 _FACT_KEYS: tuple[str, ...] = ("title", "file_path", "indexed_at", "bib_year", "ttl_days", "expires_from")
 
 
+def meta_frecency_score(meta: Any) -> float | None:
+    """The document's catalog frecency (``meta["frecency_score"]``), or ``None`` when it states
+    none: absent, not a number, a bool or not finite (a stored string or NaN is not a score)."""
+    if not isinstance(meta, Mapping):
+        return None
+    value = meta.get("frecency_score")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
 def entry_facts(entry: Any) -> dict[str, Any]:
-    """The provenance facts one catalog entry states, each present only when stored.
+    """The provenance facts one catalog entry states, each present only when stored (the document's
+    other bibliography, ``bib_authors`` / ``bib_venue`` / ``bib_citation_count``, rides along for the
+    card and the boost, nexus-6pfgb.12).
 
     ``title``, ``file_path``, ``indexed_at`` (the document's own index time),
     ``bib_year`` (the enriched year, else the catalog ``year``) and ``ttl_days``
@@ -191,6 +256,21 @@ def entry_facts(entry: Any) -> dict[str, Any]:
         year = 0
     if year > 0:
         facts["bib_year"] = year
+    # nexus-6pfgb.12: the rest of the document's own bibliography, for ``query``'s card and the quality
+    # boost. Not provenance facts (``agreed_facts`` compares only ``_FACT_KEYS``), so they never reach
+    # an age line; each present only when stored.
+    authors = str(getattr(entry, "bib_authors", "") or getattr(entry, "author", "") or "").strip()
+    if authors:
+        facts["bib_authors"] = authors
+    venue = str(getattr(entry, "bib_venue", "") or "").strip()
+    if venue:
+        facts["bib_venue"] = venue
+    try:
+        cites = int(getattr(entry, "bib_citation_count", 0) or 0)
+    except (TypeError, ValueError):
+        cites = 0
+    if cites > 0:
+        facts["bib_citation_count"] = cites
     meta = getattr(entry, "meta", None)
     if isinstance(meta, Mapping) and meta.get("ttl_days") is not None:
         # the note's own TTL as the expiry sweep reads it: a bool, NaN or out-of-range value is permanent
@@ -198,6 +278,14 @@ def entry_facts(entry: Any) -> dict[str, Any]:
             facts["ttl_days"] = days
     if isinstance(meta, Mapping) and facts.get("ttl_days", 0) > 0 and _parse_iso(meta.get("put_at")) is not None:
         facts["expires_from"] = str(meta["put_at"])
+    # RDR-236 Phase 2: the note's own writer (``meta["source_agent"]``, the notes catalog-meta home)
+    # rides on the same lookup, for the contradiction flag. Like frecency it is not a provenance fact.
+    if isinstance(meta, Mapping) and isinstance(agent := meta.get("source_agent"), str) and agent.strip():
+        facts["source_agent"] = agent.strip()
+    # RDR-236 Phase 1: the document's own frecency rides on the same lookup. It is not a provenance
+    # fact (``agreed_facts`` compares only ``_FACT_KEYS``), so it never reaches a display line.
+    if (frecency := meta_frecency_score(meta)) is not None:
+        facts["frecency_score"] = frecency
     return facts
 
 

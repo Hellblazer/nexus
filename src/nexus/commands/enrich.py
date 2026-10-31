@@ -60,7 +60,19 @@ def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
     def _lookup(doc_id: str) -> list[Any]:
         try:
             return cat.get_manifest(doc_id)
-        except Exception:  # noqa: BLE001 — best-effort manifest lookup; any failure degrades to empty list
+        except Exception as exc:  # noqa: BLE001 — best-effort manifest lookup; a transport failure is surfaced, anything else degrades to an empty list
+            from nexus.aspect_readers import (  # noqa: PLC0415 — deferred command-local import
+                TransportReadFailure,
+                is_transport_failure,
+            )
+
+            if is_transport_failure(exc):
+                # The manifest is down, not empty. An empty list would read as a
+                # verdict on the document and the aspect worker would drop it
+                # (nexus-5r2sc.3.10); the reader maps this to ReadFail(transport).
+                raise TransportReadFailure(
+                    f"manifest lookup for {doc_id!r}: {type(exc).__name__}: {exc}"
+                ) from exc
             return []
 
     return _lookup
@@ -256,6 +268,57 @@ def _chunk_bib(meta: dict | None) -> dict | None:
     return bib
 
 
+def _chunk_idless_bib(meta: dict | None) -> dict | None:
+    """The bib a chunk row carries when it has no backend id: ``year``, ``authors``, ``venue`` and
+    ``citation_count``, or ``None`` when it carries none of them.
+
+    A PDF indexed with ``--enrich`` on the batch path before nexus-6pfgb.28 stamped those four on its rows
+    and no id (the lookup result was written to rows only, and the id was not). ``--backfill-catalog``
+    reads them as the same evidence as an id-bearing row, minus the id."""
+    if not meta:
+        return None
+    bib = {
+        "year": meta.get("bib_year") or 0,
+        "authors": meta.get("bib_authors") or "",
+        "venue": meta.get("bib_venue") or "",
+        "citation_count": meta.get("bib_citation_count") or 0,
+    }
+    return bib if any(bib.values()) else None
+
+
+def _idless_fill(entry: Any, bib: dict) -> dict:
+    """The catalog ``bib_*`` columns an id-less bib may fill: only the ones the document's row leaves
+    empty, never one a curated or looked-up value holds."""
+    held = {
+        "bib_year": getattr(entry, "bib_year", 0),
+        "bib_authors": getattr(entry, "bib_authors", ""),
+        "bib_venue": getattr(entry, "bib_venue", ""),
+        "bib_citation_count": getattr(entry, "bib_citation_count", 0),
+    }
+    wanted = {
+        "bib_year": bib["year"], "bib_authors": bib["authors"],
+        "bib_venue": bib["venue"], "bib_citation_count": bib["citation_count"],
+    }
+    return {k: v for k, v in wanted.items() if v and not held[k]}
+
+
+def _fill_idless_bib(tumbler: str, fields: dict) -> bool:
+    """Write the filled columns and ``bib_enriched_at`` to *tumbler*; no id, no author or year. Best effort:
+    ``False`` on any failure."""
+    try:
+        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — command-local import
+
+        writer = make_catalog_writer()
+        try:
+            writer.update(tumbler, bib_enriched_at=datetime.now(UTC).isoformat(), **fields)
+        finally:
+            writer.close()
+        return True
+    except Exception:  # noqa: BLE001 — best-effort, counted by the caller
+        _log.debug("enrich_backfill_idless_write_failed", tumbler=tumbler, exc_info=True)
+        return False
+
+
 def _bib_key(bib: dict) -> tuple[bool, str]:
     """``(is OpenAlex, backend id)``: two chunk bibs of one document agree when
     their keys are equal. ``--backfill-catalog`` and ``nx enrich bib`` apply the
@@ -321,7 +384,16 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
             for hit in hits:
                 if hit.physical_collection == collection:
                     return str(hit.tumbler)
-        except Exception:  # noqa: BLE001 — best-effort doc_id resolve; any failure degrades to empty string
+        except Exception as exc:  # noqa: BLE001 — best-effort doc_id resolve; a transport failure is surfaced, anything else degrades to empty string
+            from nexus.aspect_readers import (  # noqa: PLC0415 — deferred command-local import
+                TransportReadFailure,
+                is_transport_failure,
+            )
+
+            if is_transport_failure(exc):
+                # The catalog is down, not silent on this document: the reader
+                # maps this to ReadFail(transport) and the caller retries.
+                raise TransportReadFailure(str(exc)) from exc
             return ""
         return ""
 
@@ -397,7 +469,10 @@ def enrich() -> None:
         "wrote its bib_*: a bib a former co-holder wrote and a later "
         "re-index kept cannot be told apart and may be copied onto the "
         "indexing document's empty row. A document whose chunks disagree "
-        "on the id is skipped and reported."
+        "on the id is skipped and reported. A document with no id on any chunk "
+        "(batch-path `nx index pdf --enrich` before nexus-6pfgb.28) is filled "
+        "from its chunks' year/authors/venue/citation count, only into columns "
+        "it leaves empty, with bib_enriched_at and no id."
     ),
 )
 def enrich_bib(
@@ -512,7 +587,7 @@ def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
         batch_meta = batch.get("metadatas", [])
         chunks_scanned += len(batch_ids)
         for chunk_id, meta in zip(batch_ids, batch_meta):
-            bib = _chunk_bib(meta)
+            bib = _chunk_bib(meta) or _chunk_idless_bib(meta)
             if bib is None:
                 continue
             enriched.append((
@@ -557,6 +632,24 @@ def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
     documents_conflicting: list[str] = []
     for tumbler, candidates in doc_bibs.items():
         entry = entries[tumbler]
+        # nexus-6pfgb.28: a bib with no backend id (batch-path ``--enrich`` before that fix) is weaker evidence
+        # than one with an id, so a document with any id-bearing chunk is judged on those alone.
+        with_id = [c for c in candidates if c[0][1]]
+        if not with_id:
+            shapes = {tuple(sorted(b.items())) for _k, b in candidates}
+            if len(shapes) > 1:
+                documents_conflicting.append(tumbler)
+                _log.warning("enrich_backfill_document_chunks_disagree", collection=collection, tumbler=tumbler, ids=[])
+                continue
+            fields = _idless_fill(entry, candidates[0][1])
+            if not fields:
+                documents_already_filled.append(tumbler)
+            elif _fill_idless_bib(tumbler, fields):
+                documents_backfilled += 1
+            else:
+                documents_not_updated += 1
+            continue
+        candidates = with_id
         bib = candidates[0][1]
         backend = "openalex" if bib.get("openalex_id") else "s2"
         id_field = "bib_openalex_id" if backend == "openalex" else "bib_semantic_scholar_id"
@@ -1384,29 +1477,30 @@ def _enrich_apply(
 # Since nexus-oc98c production passes the config's model_version as
 # ``--model`` (haiku for scholarly-paper-v1) and logs each extraction's
 # actual cost and model (``aspect_extractor_usage``), so that 1.18 figure
-# is from the wrong model. Re-measured 2026-09-07 on haiku through the
-# production prompt over three real papers reassembled from T3 (100, 133
-# and 216 chunks; 54k, 62k and 109k prompt tokens): $0.131, $0.159 and
-# $0.306. The constant is their mean; the per-document actual is the log
-# line, and this is refreshed by re-running ``-m integration -k
-# LiveMeasurement -s`` when the model or its pricing changes.
-_PER_PAPER_COST_USD = 0.20
+# is from the wrong model. Re-measured 2026-09-07 on claude-haiku-4-5
+# through the production prompt over three real papers reassembled from T3
+# (54k, 62k and 109k prompt tokens): $0.131, $0.159 and $0.306, mean $0.20.
+# Re-measured 2026-10-30 on claude-haiku-5-5 (nexus-j6un5.1) through
+# extract_aspects over three cloud papers (47k, 104k and 361k chars; the last
+# bounded to 150k by _bound_content; about 28k, 48k and 66k prompt tokens):
+# $0.0065, $0.0093 and $0.0130 by the envelope's total_cost_usd (list basis).
+# The constant is their mean; the per-document actual is the
+# aspect_extractor_usage log line. No measured paper crossed Haiku 5.5's 100k
+# prompt-token price step; _bound_content cuts a paper at 150k chars (66k
+# tokens on the paper it cut).
+_PER_PAPER_COST_USD = 0.0096
 
 # What _PER_PAPER_COST_USD assumes, stated in every estimate line (nexus-shake7861).
-# It is a mean over PAPER-SIZED documents (54k-109k prompt tokens each), so for a
-# collection of short notes it is far too high: the 7.86.1 shakeout measured
-# $0.0035 for a one-line note on the same model (aspect_extractor_usage log:
-# cost_usd=0.00350840, claude-haiku-4-5-20251001, 5.4 s), against the $0.20 this
-# constant puts on it. It is NOT an upper bound: a mean of three papers measured
-# $0.131-$0.306, so a larger paper or a retry costs more than the line says. The
-# estimate reads as "typical for paper-sized documents"; a per-document figure
-# scaled by size needs per-model rates this module does not hold, so it is not
-# attempted here.
-_MEASURED_SHORT_NOTE_COST_USD = 0.0035
+# It is a mean over PAPER-SIZED documents (about 28k-66k prompt tokens each), so
+# for a collection of short notes it is too high. A one-line note was measured
+# at $0.0035 in the 7.86.1 shakeout on claude-haiku-4-5 (aspect_extractor_usage
+# log: cost_usd=0.00350840, 5.4 s); that has not been re-measured on
+# claude-haiku-5-5, whose per-token price is a tenth of 4-5's. The paper mean is
+# NOT an upper bound: the three papers ranged $0.0065-$0.0130, so a larger
+# paper or a retry costs more than the line says.
 _COST_BASIS = (
     "typical for paper-sized documents (mean of three measured papers, "
-    "$0.13-0.31 each, 54k-109k prompt tokens); far lower for short notes "
-    f"(one measured at ${_MEASURED_SHORT_NOTE_COST_USD})"
+    "$0.0065-0.013 each, about 28k-66k prompt tokens); short notes cost less"
 )
 
 # The write floor on aspect confidence: the engine's upsert refuses a row below

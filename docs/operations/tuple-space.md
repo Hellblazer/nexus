@@ -21,7 +21,13 @@ tables reports UNKNOWN and asks you to investigate the engine install.
 tuple per subspace — live, unclaimed, not dead-lettered — over the first
 page (`QUOTAS.MAX_QUERY_RESULTS`, 300 rows) of each subspace; a subspace
 whose oldest unclaimed tuple falls outside that first page is a known,
-documented limitation of a census check, not a silent miss. Subspaces whose
+documented limitation of a census check, not a silent miss. The `aspects`
+queue is aged from the census's `oldest_claimable_created_at` instead (the
+oldest task a worker could claim now, so a task waiting out a retry is not
+stuck): older than an hour with no live claim is red; the same backlog with
+claims in flight (`claimed` minus `lapsed` above zero) is a warning, a slow
+drain. An engine without that field (before `engine-service-v0.1.170`) keeps
+the skip, and `tuples.queue_depth` is then the only aspects signal. Subspaces whose
 template disables `take` (`ledger/<session_id>`) are skipped outright —
 "oldest unclaimed" carries no signal on a read-only template.
 
@@ -63,7 +69,10 @@ within `max_lease_seconds`.
 parameter in the changelog, ten times more aggressive than the 20%
 default) specifically for this workload; a sustained red past that tuning
 means autovacuum genuinely cannot keep up, not that the setting is
-missing.
+missing. A table's ratio is judged only once its dead rows pass twice its
+autovacuum trigger, 2 x (50 + 0.01 x live rows): below that autovacuum is not
+due yet or has not had its next pass, so a small table with a high ratio
+reads green with `not judged: dead <= N` in the detail (nexus-j6un5).
 
 **Action**: the fix suggestion is literal — `VACUUM ANALYZE nexus.<table>;`.
 This check reads `pg_stat_user_tables` directly (local-only admin-psql
@@ -113,7 +122,8 @@ The three RDR-211 rows. Each has its own gate and threshold, described in
 `tuples.park_slots` warns at 75% of the engine's global park cap, and the
 remedy is to find the callers holding parks open (`nx tuple stats`);
 `tuples.queue_depth` warns above 1,000 available tasks on a `queue/<name>`
-subspace or at any dead-lettered task, so triage as under "Dead-letter triage"
+subspace, above 2,400 on the `aspects` queue (RDR-235; twice its routine bulk
+backlog of 1,200), or at any dead-lettered task, so triage as under "Dead-letter triage"
 below; `tuples.channel_delivery` warns when this session's push waiter is not
 alive or last woke more than 75 s ago, and the fix is `/mcp` to restart the
 server (the drain hook still delivers at the next prompt).

@@ -39,7 +39,7 @@ agents:
     successors: [test-validator]
 
   codebase-deep-analyzer:
-    model: sonnet
+    model: haiku
     version: "2.0"
     color: amber
     skill: codebase-analysis
@@ -79,7 +79,7 @@ agents:
     successors: [strategic-planner]
 
   deep-research-synthesizer:
-    model: sonnet
+    model: haiku
     version: "2.0"
     color: teal
     skill: research-synthesis
@@ -197,7 +197,7 @@ agents:
     successors: []
 
   test-validator:
-    model: sonnet
+    model: haiku
     version: "2.0"
     color: lime
     slash_command: /test-validate
@@ -630,14 +630,14 @@ model_summary:
     - deep-analyst
   sonnet: # Balanced - most common agents
     - code-review-expert
-    - codebase-deep-analyzer
     - substantive-critic
-    - deep-research-synthesizer
     - developer
-    - test-validator
   # knowledge-tidier/plan-auditor/plan-enricher stubs deleted (nexus-cnzei.4);
   # their functions are the nx_tidy/nx_plan_audit/nx_enrich_beads MCP tools.
-  haiku: [] # Fast, cheap - utility agents (none currently)
+  haiku: # Reading, sweeping and test runs; moved off sonnet 2026-10-30 (nexus-j6un5.1)
+    - codebase-deep-analyzer
+    - deep-research-synthesizer
+    - test-validator
 
 # =============================================================================
 # UTILITY COMMANDS

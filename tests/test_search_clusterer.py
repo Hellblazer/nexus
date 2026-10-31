@@ -9,11 +9,16 @@ from nexus.search_clusterer import _cluster_label, _kmeans_numpy, cluster_result
 
 
 def _make_results(n: int, distances: list[float] | None = None) -> list[dict]:
-    """Create n fake result dicts."""
+    """Create n fake result dicts shaped like POST-attach rows.
+
+    ``_display_title``/``_display_path`` are written only by ``_attach_display_paths``, which
+    runs AFTER clustering in ``search_cross_corpus``. These rows therefore exercise the
+    clusterer's own label logic; the live-path label is pinned through the pipeline in
+    ``tests/test_fv2u4_cluster_header.py``."""
     dists = distances or [0.1 * i for i in range(n)]
     return [
         {"id": f"doc-{i}", "content": f"text {i}", "distance": dists[i],
-         "metadata": {"title": f"Title {i}", "source": f"/path/{i}.py"}}
+         "metadata": {"_display_title": f"Title {i}", "_display_path": f"/path/{i}.py"}}
         for i in range(n)
     ]
 
@@ -71,6 +76,8 @@ class TestClusterResults:
             assert dists == sorted(dists)
 
     def test_cluster_label_assigned(self) -> None:
+        """Unit-level only: the rows carry post-attach keys (see ``_make_results``). The live
+        header is relabelled after the attach and pinned in ``test_fv2u4_cluster_header.py``."""
         rng = np.random.default_rng(42)
         emb = _two_cluster_embeddings(rng)
         results = _make_results(10)
@@ -80,7 +87,7 @@ class TestClusterResults:
                 assert "_cluster_label" in r
             # Label should match the title of the lowest-distance result
             best = min(cluster, key=lambda r: r["distance"])
-            assert cluster[0]["_cluster_label"] == best["metadata"]["title"]
+            assert cluster[0]["_cluster_label"] == best["metadata"]["_display_title"]
 
     def test_clusters_sorted_by_best_distance(self) -> None:
         rng = np.random.default_rng(42)
@@ -144,12 +151,17 @@ class TestKmeansNumpy:
 
 class TestClusterLabel:
     def test_uses_title(self) -> None:
-        r = {"id": "x", "metadata": {"title": "My Title", "source": "/a.py"}}
+        r = {"id": "x", "metadata": {"_display_title": "My Title", "_display_path": "/a.py"}}
         assert _cluster_label(r) == "My Title"
 
-    def test_falls_back_to_source(self) -> None:
-        r = {"id": "x", "metadata": {"source": "/a.py"}}
+    def test_falls_back_to_display_path(self) -> None:
+        r = {"id": "x", "metadata": {"_display_path": "/a.py"}}
         assert _cluster_label(r) == "/a.py"
+
+    def test_never_labels_with_the_chunk_rows_title_or_source(self) -> None:
+        """nexus-fv2u4: the row's title and source are the last writer's, another document's on a shared chunk."""
+        r = {"id": "x", "metadata": {"title": "other/doc.py:40-60", "source": "/other.py"}}
+        assert _cluster_label(r) == "x"
 
     def test_falls_back_to_id(self) -> None:
         r = {"id": "x", "metadata": {}}

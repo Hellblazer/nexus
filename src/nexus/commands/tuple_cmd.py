@@ -18,11 +18,16 @@ Subcommands:
   stats      -- the census for one subspace.
   directory  -- who holds a name in the RDR-208 session directory (bead
                 nexus-galkv.11; resolver in ``nexus.tuple_directory``).
+  wait       -- park until new mail or a board post arrives for this session,
+                then exit: the channel-free push path, run as a background
+                task by a session launched without --channels (RDR-233).
 
 Mailbox push delivery is the RDR-211 MCP subscription tools
-(``tuple_subscribe``/``tuple_unsubscribe``/``tuple_subscriptions``) and the
-``UserPromptSubmit`` drain hook, not a CLI subcommand of this group -- the
-prior ping-then-pull watcher loop was deleted at RDR-211 nexus-rplay.14.
+(``tuple_subscribe``/``tuple_unsubscribe``/``tuple_subscriptions``), the
+Claude Code channel, and the ``UserPromptSubmit`` drain hook. ``wait`` covers
+only a session the channel cannot reach (RDR-233): it refuses where the channel
+launch flag is present. The prior ping-then-pull watcher loop was deleted at
+RDR-211 nexus-rplay.14.
 
 Every subcommand calls through ``nexus.db.t2.http_tuple_store.HttpTupleStore``
 (RDR-205 Phase 2 Step 1, nexus-em75s.9) — none of them talks HTTP itself.
@@ -305,6 +310,178 @@ def tuple_rd_cmd(
         # as current. Only the paging fallback reaches here (an engine without
         # descending reads, nexus-kp5q3); a descending read never truncates.
         raise SystemExit(3)
+
+
+#: Exit status when the conexus channel launch flag is present: the channel
+#: already pushes, so a second waiter would wake the session twice per row.
+EXIT_CHANNEL_ACTIVE: int = 4
+#: Exit status when the engine ignores the per-subscriber announce (not 2,
+#: which is click's usage error).
+EXIT_ENGINE_TOO_OLD: int = 5
+
+#: Printed when the waiter gives up on the engine. Every exit wakes the
+#: session, so it must say that re-running now would only fail again.
+STOPPED_HINT: str = (
+    "nx tuple wait: stopped. Do not run it again now; mail still arrives at your "
+    "next prompt through the drain hook."
+)
+
+#: Printed after delivered rows: the wake is one-shot, so the session re-arms.
+REARM_HINT: str = (
+    "Act on these, then run `nx tuple wait` again with run_in_background to keep "
+    "receiving mail and board posts."
+)
+
+
+def _resolve_wait_session(explicit: str | None, claude_pid: int) -> str | None:
+    """The session whose mailbox to watch: *explicit*, else the SessionStart
+    marker for this ``claude`` process (current after ``/clear``), else the
+    env chain."""
+    if explicit:
+        return explicit
+    from nexus import config as _nx_config  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.session_marker import _read_session_marker  # noqa: PLC0415 — deferred: CLI startup cost
+
+    return _read_session_marker(_nx_config.nexus_config_dir(), claude_pid) or resolve_active_session_id()
+
+
+def _board_entries_reader(session_id: str):
+    """A callable returning this session's board subscriptions from T1, read
+    fresh each park; ``[]`` (said once on stderr) when T1 is unreachable."""
+    warned: list[bool] = []
+
+    def read() -> list[dict[str, Any]]:
+        try:
+            from nexus.db.t1 import get_t1_database  # noqa: PLC0415 — deferred: CLI startup cost
+            from nexus.mcp.subscriptions import load  # noqa: PLC0415 — deferred: CLI startup cost
+
+            return load(get_t1_database(session_id), session_id).entries()
+        except Exception as e:  # noqa: BLE001 — degrade to mailbox-only, never stop the wait
+            if not warned:
+                warned.append(True)
+                click.echo(
+                    f"nx tuple wait: board subscriptions unreadable ({type(e).__name__}: {e}); "
+                    "waiting on the mailbox only.", err=True,
+                )
+            return []
+
+    return read
+
+
+@tuple_group.command(name="wait")
+@click.option("--session", "session", default=None, metavar="SESSION_ID",
+              help="Watch this session's mailbox (default: the current Claude session).")
+@click.option("--timeout-s", "timeout_s", type=int, default=25, show_default=True,
+              help="Seconds per engine park; liveness and subscriptions are re-checked between parks.")
+@click.option("--max-parks", "max_parks", type=int, default=None,
+              help="Give up after this many empty parks (default: wait until something arrives).")
+@click.option("--force", is_flag=True, default=False,
+              help="Run even when the claude process carries the channel launch flag.")
+@click.option("--json", "json_out", is_flag=True, default=False,
+              help="Print {reason, notices, rerun, hint} as JSON; rerun is true only on a delivery.")
+def tuple_wait_cmd(
+    session: str | None, timeout_s: int, max_parks: int | None, force: bool, json_out: bool,
+) -> None:
+    """Park until new mail or a board post for this session arrives, then exit.
+
+    The channel-free push path (RDR-233): run it with run_in_background in a
+    Claude Code session launched without --channels (the Claude Desktop Code
+    tab). Its exit wakes the idle session, which acts on the printed notices and
+    runs it again. Watches mailbox/<session id> and the board topics subscribed
+    with tuple_subscribe. Each row is announced once, only while claimable, and
+    never when this session wrote it. Prints the channel's notice text, never a
+    tuple body.
+
+    Exits 0 on delivery, when replaced by a newer `nx tuple wait` for the same
+    session, when the session changes (/clear), or when claude exits; 4 when the
+    conexus channel flag is on the claude command line (the channel already
+    pushes; --force overrides); 5 on an engine without per-subscriber announce.
+    """
+    from nexus.channel_launch import channel_launch_state  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred: CLI startup cost
+
+    if timeout_s <= 0:
+        raise click.UsageError("--timeout-s must be positive")
+    if max_parks is not None and max_parks <= 0:
+        raise click.UsageError("--max-parks must be positive")
+    claude_pid = find_immediate_claude_pid()
+    if not force and channel_launch_state() is True:
+        click.echo(
+            "nx tuple wait: this session was launched with the conexus channel flag, so "
+            "the channel pushes mail and board posts; not starting a second waiter. Do "
+            "not run it again in this session, unless channel notifications never "
+            "arrive here (plugin not on the channel allowlist, channels disabled by "
+            "your organisation): then run it with --force.", err=True,
+        )
+        raise SystemExit(EXIT_CHANNEL_ACTIVE)
+    session_id = _resolve_wait_session(session, claude_pid)
+    if not session_id:
+        raise click.UsageError("no Claude session id resolved; pass --session")
+
+    from nexus.mcp.channel import _mint_waiter_token  # noqa: PLC0415,SLF001 — deferred: loads the MCP package; the engine's token format has one minter
+    from nexus.tuple_wait import (  # noqa: PLC0415 — deferred: CLI startup cost
+        DELIVERED,
+        SESSION_CHANGED,
+        SUPERSEDED,
+        EngineTooOldError,
+        run_wait,
+    )
+
+    store = None
+    try:
+        store = _store()
+        outcome = run_wait(
+            store, session_id,
+            board_entries=_board_entries_reader(session_id),
+            alive=lambda: claude_pid <= 1 or pid_alive(claude_pid),
+            current_session=lambda: None if session else _resolve_wait_session(None, claude_pid),
+            waiter_token=_mint_waiter_token(),
+            park_s=timeout_s, max_parks=max_parks,
+        )
+    except EngineTooOldError as e:
+        _print_tuple_error(e)
+        click.echo(STOPPED_HINT, err=True)
+        raise SystemExit(EXIT_ENGINE_TOO_OLD) from e
+    except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
+        _print_tuple_error(e)
+        click.echo(STOPPED_HINT, err=True)
+        raise SystemExit(1) from e
+    finally:
+        if store is not None:
+            store.close()
+
+    notes = {
+        SUPERSEDED: (
+            "nx tuple wait: a newer nx tuple wait for this session took over; nothing to "
+            "do, do not run it again."
+        ),
+        SESSION_CHANGED: (
+            "nx tuple wait: this session was replaced (/clear or /resume); do not run "
+            "it again here, the new session's SessionStart says whether to."
+        ),
+    }
+    # Only a delivery asks for a re-run (RDR-233 Risks, wake loops); --json
+    # carries the same instruction as text mode, never a bare reason.
+    rerun = outcome.reason == DELIVERED
+    if rerun:
+        hint = REARM_HINT
+    elif outcome.reason in notes:
+        hint = notes[outcome.reason]
+    else:
+        hint = (
+            f"nx tuple wait: stopped ({outcome.reason}); nothing new arrived. Do not "
+            "run it again unless you mean to keep waiting."
+        )
+    if json_out:
+        click.echo(json.dumps({
+            "reason": outcome.reason, "notices": outcome.lines, "rerun": rerun, "hint": hint,
+        }))
+        return
+    for line in outcome.lines if rerun else ():
+        click.echo(line)
+    click.echo(hint)
 
 
 @tuple_group.command(name="in")

@@ -1954,7 +1954,8 @@ _BASE_REQUIRED_FIELDS = {
     "title", "source_author", "section_title", "section_type",
     "tags", "category", "content_type", "embedding_model",
     # Lifecycle
-    "indexed_at", "ttl_days", "frecency_score", "source_agent", "session_id",
+    # (session_id is still accepted on an old row but no writer stamps it: nexus-6pfgb.4)
+    "indexed_at", "ttl_days", "frecency_score", "source_agent",
 }
 # pdf_subject / pdf_keywords / is_image_pdf / has_formulas / format /
 # page_count / source_date are intentionally NOT in ALLOWED_TOP_LEVEL —

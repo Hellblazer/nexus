@@ -186,7 +186,7 @@ MinerU reads the document in page batches. A page whose MinerU attempt fails is 
 - Large PDFs are split into page batches, each processed in an isolated
   subprocess to prevent OOM on formula-dense documents
 
-**PDF support is the `pdf` extra, installed on demand** (nexus-2k66t.4.2). MinerU, torch, torchvision and pdftext are 57 to 65% of the download and 49% of the installed size, and search and store never import them, so a fresh install leaves them out. The first PDF index installs them: [`nx index pdf`](#nx-index), `nx dt index` of a PDF record, `nx index repo` when its walk finds a PDF, and `nx mineru start` check first, before any catalog or T3 write, and either install the stack or stop. An install builds a new generation with the `pdf` extra at the version already running (never an upgrade) through the generation builder's own arguments: CPU torch on Linux, the packaged overrides, the constraints shipped in the wheel. The command then re-runs inside that generation, so it needs no second invocation. The receipt records the extra, so every later `nx self install` keeps it. MinerU's models download on its first use, about 1.2 GB (the unimernet formula model 776 MB, the layout model 205 MB, OCR about 180 MB; measured 2026-10-23).
+**PDF support is the `pdf` extra, installed on demand** (nexus-2k66t.4.2). MinerU, torch, torchvision and pdftext are 62 to 65% of the download and 54 to 62% of the installed size (measured on 7.89.0, 2026-10-29), and search and store never import them, so a fresh install leaves them out. The first PDF index installs them: [`nx index pdf`](#nx-index), `nx dt index` of a PDF record, `nx index repo` when its walk finds a PDF, and `nx mineru start` check first, before any catalog or T3 write, and either install the stack or stop. An install builds a new generation with the `pdf` extra at the version already running (never an upgrade) through the generation builder's own arguments: CPU torch on Linux, the packaged overrides, the constraints shipped in the wheel. The command then re-runs inside that generation, so it needs no second invocation. The receipt records the extra, so every later `nx self install` keeps it. MinerU's models download on its first use, about 1.2 GB (the unimernet formula model 776 MB, the layout model 205 MB, OCR about 180 MB; measured 2026-10-23).
 
 A PDF index never degrades quietly (nexus-2fyb: an opt-in extra once produced silent formula loss). When the stack is missing and cannot be installed, the command exits before writing anything:
 
@@ -324,12 +324,20 @@ Pass `--allow-degraded-extraction` only after reviewing the extraction (or
 for a document you've confirmed genuinely trips the heuristic) — the run
 logs a WARNING so the override is visible immediately, AND every chunk of
 the document is stamped `quality_gate_overridden: true` in its persisted
-T3 metadata, so a later shakedown/audit has a durable handle on which
-documents were accepted with known-degraded text:
+metadata, so a later shakedown/audit has a durable handle on which
+documents were accepted with known-degraded text. The document's own record is its
+catalog `meta` (nexus-6pfgb.6: an explicit `false` on a clean index, `true` on an
+override), and the audit filters the documents themselves:
 
 ```bash
-nx search "" --corpus docs --where quality_gate_overridden=true --files
+nx catalog list --meta quality_gate_overridden=true
 ```
+
+The older form, `nx search "" --corpus docs --where quality_gate_overridden=true --files`,
+reads the CHUNK ROWS, and a row two documents share holds the last writer's value:
+a clean re-index of document B erased the marker from rows document A still owns,
+so A dropped out of the audit. Use it only for documents that share no chunk, until
+the engine answers `where=` per owning document (nexus-6pfgb.24).
 
 **Querying by extractor identity (`extraction_method`, nexus-1oguj).** Every
 PDF chunk's metadata carries which backend actually produced its text:
@@ -360,26 +368,36 @@ regression scopeable after the fact (e.g. "which documents did MinerU
 extract, so I can re-index just those").
 
 ```bash
-nx search "" --corpus knowledge --where extraction_method=mineru --files
+nx catalog list --meta extraction_method=mineru
 ```
 
+Each document's catalog `meta` carries its own `extraction_method`,
+`quality_gate_overridden` and `extraction_source` (`file`, or `dt_content` /
+`dt_ocr` / `dt_transcribe` for DEVONthink text; an absent source means `file`), and
+`nx catalog list --meta KEY=VALUE` (repeatable, ANDed) filters the documents on them.
+`nx store get` prints them from the same place: an `Extractor:` line, a `Gate:` line for
+a document that overrode the quality gate and a `Source:` line for text that did not come
+from a file, one set per owning document when a chunk is shared. The chunk row's copy is
+the last writer's and is no longer read (nexus-6pfgb.16). The `nx search --where
+extraction_method=mineru --files` form still filters the rows; it can name a document by
+another document's extraction when they share a chunk.
+
 - **Scoping "any mineru-touched document" is two queries today, not one.**
-  `--where` equality has no single-key OR/`$in` yet (repeating the same key
-  with different values is a caller error and now raises loudly — see
-  `--where` above) — `mineru`, `mineru+degraded` and, on documents indexed before
-  RDR-237, `mineru+docling-degraded` are distinct exact values. Run one query per
-  value and union the results client-side:
-  `--where extraction_method=mineru` and
-  `--where extraction_method=mineru+degraded` separately. Single-key
-  `$in` support is tracked as nexus-4gzc8.
-- **Absence of the key is not evidence of "not mineru."** `extraction_method`
-  is a NEW-WRITES-ONLY field — chunks indexed before this fix carry no such
-  key at all, so `--where extraction_method!=mineru` (or any filter that
-  relies on the key's absence meaning "some other extractor") silently
-  conflates "known non-mineru" with "indexed before this field existed."
-  There is no backfill for pre-fix chunks (re-extraction would be required
-  to recover the value honestly); treat a missing key as *unknown*, never as
-  a negative result. Tracked as nexus-0qc4b.
+  `--meta` equality, like `--where`, has no single-key OR/`$in` yet (repeating the
+  same key with different values is a caller error for `--where` and matches nothing
+  for `--meta`, since no document equals both) — `mineru`, `mineru+degraded` and, on
+  documents indexed before RDR-237, `mineru+docling-degraded` are distinct exact
+  values. Run one query per value and union the results:
+  `--meta extraction_method=mineru` and `--meta extraction_method=mineru+degraded`
+  separately. Single-key `$in` support for `--where` is tracked as nexus-4gzc8.
+- **Absence of the key is not evidence of "not mineru."** A document indexed before
+  nexus-6pfgb.6 has no `extraction_method` in its `meta`, so `--meta extraction_method=mineru`
+  does not list it and neither does any other value; treat a missing key as *unknown*,
+  never as a negative result (`quality_gate_overridden=false` likewise finds only the
+  documents that recorded an explicit `false`). `nx catalog backfill-meta` (nexus-6pfgb.10)
+  fills the keys from the rows of a document that is the sole owner of its chunks;
+  a document whose chunks are all shared needs a forced re-index to record its own
+  (nexus-0qc4b).
 
 ### nx index failures
 
@@ -391,7 +409,7 @@ nx index failures --acks
 nx index failures --unacknowledge (--file PATH | --error-class CLASS)
 ```
 
-Lists, clears, acknowledges, unacknowledges, or lists acknowledgments of durable per-file index-failure records (nexus-nukn3, Sam's design: "when a file fails, ENQUEUE the failure and move on"). A `repo` run that skips a file it cannot extract (`nexus.errors.UnextractableContentError`) now writes a durable row — file path, error class, reason, run id — to `nexus.index_failures` (engine-side PG table, event-log shape, mirrors `hook_failures`) instead of only a log line and an in-memory counter that die with the process. `nx index repo`'s systemic-skip floor (nexus-deyd5) reads this same durable count rather than the in-memory list — see the note on `--acknowledge` below for why that floor deliberately does NOT honor acknowledgments.
+Lists, clears, acknowledges, unacknowledges, or lists acknowledgments of durable per-file index-failure records (nexus-nukn3, Sam's design: "when a file fails, ENQUEUE the failure and move on"). A `repo` run that skips a file it cannot extract (`nexus.errors.UnextractableContentError`) now writes a durable row — file path, error class, reason, run id — to `nexus.index_failures` (engine-side PG table, event-log shape, mirrors `hook_failures`) instead of only a log line and an in-memory counter that die with the process. The error class is the raised type's own name: `UnextractableContentError` for a file with nothing to extract, `AllPagesUnextractedError` for a PDF on which MinerU failed on every page (nexus-q6nw0), so a class-wide `--acknowledge --error-class UnextractableContentError` does not hide a MinerU failure. `nx index repo`'s systemic-skip floor (nexus-deyd5) reads this same durable count rather than the in-memory list — see the note on `--acknowledge` below for why that floor deliberately does NOT honor acknowledgments.
 
 `--clear`, `--acknowledge`, `--unacknowledge`, and `--acks` are pairwise mutually exclusive. `--dry-run` only means anything paired with `--clear`; used with any other mode (or alone) it is a usage error rather than a silent no-op.
 
@@ -727,7 +745,7 @@ nx enrich aspects knowledge__delos --all               # re-extract everything (
 nx enrich aspects knowledge__delos --dry-run
 nx enrich aspects knowledge__delos --validate-sample 10
 nx enrich aspects knowledge__delos --validate-sample 10 --validation-out /tmp/aspects.jsonl
-nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku-4-5-20251001
+nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku-5-5   # rows made before the 5.5 flip
 ```
 
 | Flag | Description |
@@ -866,7 +884,7 @@ Aspect-extraction queue management (the async queue feeding the aspect-extractio
 nx aspects drain [--timeout SECONDS] [--poll-interval SECONDS]
 ```
 
-Stops the singleton `AspectExtractionWorker` (if running in this process), then waits until all pending and in-progress rows are processed or `--timeout` (default 30s) elapses; `--poll-interval` (default 0.1s) sets the queue-empty poll cadence. Use before `nx upgrade` when a `MigrationError` reports the aspect_extraction_queue is not drained. Exit 0 once drained (or already empty); exit 1 on timeout, naming the stuck-row count.
+Stops the singleton `AspectExtractionWorker` (if running in this process), then waits until both queues are empty of active work or `--timeout` (default 30s) elapses; `--poll-interval` (default 0.1s) sets the queue-empty poll cadence. The two queues are the table side, where no pending or in-progress row may remain, and the `aspects` tuple queue, where no task may be available or claimed. Both sides are checked on every drain, because RDR-235 keeps the table and the tuple queue side by side until the old table retires. A tuple task held back by backoff counts as available, so the check is conservative. Failed rows and dead tasks do not block a drain. Use before `nx upgrade` when a `MigrationError` reports the aspect_extraction_queue is not drained. Exit 0 once drained (or already empty); exit 1 on timeout, naming the stuck-row or stuck-task count.
 
 ### nx aspects gc / gc-fixtures — RETIRED (hidden from `--help`)
 
@@ -884,15 +902,22 @@ Both verbs are RETIRED and always raise a `click.UsageError` regardless of the f
 
 ### nx aspects requeue-failed
 
-Bulk re-enqueue terminal-`failed` aspect-queue rows. A row reaches `failed` after exhausting the backoff-retry ladder (RDR-163) or on a non-retryable error. Once the root cause is fixed (e.g. restored API quota, repaired source identity), this verb re-enqueues every failed row at its `(collection, source_path)` key — resetting it to `pending` with `retry_count=0` and clearing any stale backoff — so the worker picks it up again. The write is daemon-routed; the failed-backlog visibility counterpart is `nx doctor --check-aspect-queue`.
+Bulk re-enqueue terminal-`failed` aspect-queue rows. A row reaches `failed` after exhausting the backoff-retry ladder (RDR-163), on a non-retryable error, or when a stale reclaim finds it already at the retry cap. Once the root cause is fixed (e.g. restored API quota, repaired source identity), this verb re-enqueues the failed table rows and revives the dead tasks of the `aspects` tuple queue, so the worker picks them up again. The write is daemon-routed; the failed-backlog visibility counterpart is `nx doctor --check-aspect-queue`.
+
+It reads both sides. Failed table rows are handled by `NX_ASPECT_QUEUE`, which defaults to `tuples` (see [Configuration](configuration.md)):
+
+- `NX_ASPECT_QUEUE=tuples` (the default): each failed row is enqueued as an `aspects` task, keyed by its `doc_id`, and the failed row is then deleted from the table, so the doctor does not count it again. A failed row with no `doc_id` cannot become a task. It is skipped, the message says to re-index the document, and the remaining rows still run.
+- `NX_ASPECT_QUEUE=table`: each failed row is reset in place to `pending` with `retry_count=0` and any stale backoff cleared, as before RDR-235. No tuple task is written for it.
+
+Dead tasks of the `aspects` tuple queue are revived in both modes. A dead task is written back as available with its attempts reset and its retention clock restarted. An engine with no `aspects` template has no dead tasks, and the verb then reads the table alone.
 
 | Flag | Description |
 |------|-------------|
-| `--collection NAME` | Only re-enqueue failed rows in this collection. Default: all collections |
-| `--limit N` | Re-enqueue at most N rows (oldest-`enqueued_at` first). Paces recovery of a large backlog so a burst of newly-pending rows doesn't immediately re-hammer a just-restored API quota |
-| `--dry-run` | Report the rows that would be re-enqueued without writing anything |
+| `--collection NAME` | Only re-enqueue failed rows in this collection. For dead tasks, matches the collection in the task body. Default: all collections |
+| `--limit N` | Re-enqueue at most N items, counting failed rows and dead tasks together: failed rows first, then dead tasks, oldest first. Paces recovery of a large backlog so a burst of newly-pending rows doesn't immediately re-hammer a just-restored API quota |
+| `--dry-run` | Report the failed rows and dead tasks that would be re-enqueued without writing anything. Under `tuples`, a row with no `doc_id` is marked `[would skip: no doc_id]` |
 
-Rows are processed oldest-`enqueued_at`-first (enqueue order, not most-recently-failed); re-enqueue resets `retry_count` to 0. This is a single-operator recovery verb — safe to re-run (it only touches the terminal `failed` state), but do not run two instances concurrently.
+Failed rows are processed oldest-`enqueued_at`-first (enqueue order, not most-recently-failed). This is a single-operator recovery verb. It is safe to re-run, because it only touches the terminal `failed` state and dead tasks, but do not run two instances concurrently: the read and the per-row writes have no shared transaction, so two runs could re-enqueue the same rows.
 
 ```bash
 nx aspects requeue-failed                        # re-enqueue all failed rows
@@ -1543,13 +1568,14 @@ Per-collection report of outgoing-link counts at the depth-N BFS frontier (defau
 ### nx catalog list / stats / owners / delete
 
 ```
-nx catalog list [--owner PREFIX_OR_NAME] [--type TEXT] [-n/--limit N] [--offset N] [--json]
+nx catalog list [--owner PREFIX_OR_NAME] [--type TEXT] [--meta KEY=VALUE]... [-n/--limit N] [--offset N] [--json]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--owner` | Filter to one owner. Accepts a dotted tumbler (`1.2`) or an owner name (resolved via catalog lookup); a name shared by a repo and a curator owner resolves to the repo (GH #1544); any other shared name raises a clean error naming the candidates |
 | `--type` | Filter to a `content_type` (e.g. `code`, `rdr`, `knowledge`) |
+| `--meta KEY=VALUE` | Keep the documents whose own catalog `meta` has `KEY` equal to `VALUE`; repeatable, all must match (nexus-6pfgb.16). A boolean compares as `true` / `false`. An absent key matches nothing (absent is unknown), except `extraction_source`, which is `file` when absent. The filter scans every document of the type and pages the matches, so `--limit` bounds the printed page, not the scan. The audit forms: `--meta quality_gate_overridden=true`, `--meta extraction_method=mineru` |
 | `-n`, `--limit` | Page size. Default `50`. **Server-side cap (nexus-xoimv)** — the underlying query is limited at the source, not truncated client-side after a full fetch |
 | `--offset` | Skip this many entries (pagination) |
 | `--json` | Emit entries as a JSON array instead of text rows |
@@ -1617,6 +1643,25 @@ Captures the ETag for every `https://` catalog reference that lacks one (nexus-0
 | `--owner PREFIX` | Restrict to this owner tumbler (e.g. `1.1`). Default: every owner |
 | `--dry-run` | Report candidates only; no network calls, no writes |
 | `--limit N` | Cap on candidates processed in one run (default 500, max 2000) — a bounded sweep, never an unlimited fan-out |
+
+### nx catalog backfill-meta
+
+```
+nx catalog backfill-meta [--apply] [--json]
+```
+
+One-time, fill-only stamp of the catalog `meta` keys that the RDR-236 Phase 1 homes now write at index and put time, for documents written before them (nexus-6pfgb.10). Dry run by default. A key the entry already holds (a retraction `''` / `0` / `[]` included, tested by presence, not truthiness) and a non-empty catalog column are never touched, and a key is sent only with a real value (the catalog merges `meta`; an explicit empty overwrites). A run that examines no document exits 1.
+
+- **Notes** (`knowledge`): `ttl_days` and `put_at` come only from a chunk row the note itself wrote (`row_written_by`: stamp and title), `put_at` being that row's `indexed_at`. `tags` (written as a JSON array, a legacy comma string split once), `category` and `source_agent` come from that row or, when there is none, from a row of a chunk the note solely owns that `row_may_give_tags` allows. A note recovered that way has no TTL to give: it gets `put_at` and `ttl_days` 0 and leaves the keyless count. An entry that already holds a note key is authoritative: only `put_at` may still be filled, and only from a row with the same TTL.
+- **Indexed documents**: `extraction_method`, `quality_gate_overridden` (only where the rows say `True`), `extraction_source` (only where a row carries a value), `frecency_score` with `frecency_computed_at` (the rows' latest `indexed_at`; a score of 0 is not sent) and the catalog `author` (from `source_author`, a plain string only; where the column is empty) are copied from chunks the document solely owns, when its sampled rows (64 at most, spread over the document) agree and are no later than the document plus five minutes. `tags`, `category` and `source_format` are not backfilled: they become generated columns in RDR-236 Phase 3. A legacy `tags` string is never converted here; the `note-tags-array` upgrade rung does that.
+- Single-owner means `chash_positions` shows exactly one live owner in the chunk's own collection. A document whose chunks are all shared is skipped and counted. A tombstoned co-owner is not counted (no 0.1.165 client read lists one); the `indexed_at` guard stands against a departed co-owner that wrote last. A failed owner or row lookup withholds that document's row-sourced keys and counts it; it never fails the run.
+
+The dry run prints, per key, how many documents were examined, already held it, were skipped as shared, would be stamped, or are residue (the reasons are in `--json`). The `bib_*` columns of documents indexed with `nx index pdf --enrich` on the batch path are filled by `nx enrich bib COLLECTION --backfill-catalog`, which now also accepts chunks that carry year, authors, venue and citation count but no backend id (fill-only, no id written, `bib_enriched_at` set).
+
+| Flag | Description |
+|------|-------------|
+| `--apply` | Write the keys (default: dry run, counts only) |
+| `--json` | Emit JSON instead of the human-readable report |
 
 ### nx catalog backfill-collections
 
@@ -1890,7 +1935,11 @@ Two dispositions, per row:
   somewhere but with no `collection_vector_stats` row (nothing to embed or
   read). `--apply` flips `lifecycle_state` to `dormant`; the row itself is
   NOT deleted — `nx doctor`'s "Collections dormant" row (see [nx doctor](#nx-doctor))
-  is how an operator later decides to re-index or remove the references.
+  is how an operator later decides to re-index or remove the references. Only a
+  live row is marked: a row already dormant is not listed again by a later sweep
+  or dry run, and a disputed row keeps its flag. After a re-index, an `--apply`
+  sweep sets a dormant row that holds chunks again back to live (the engine logs
+  it; the report has no field for it).
 
 A quarantine row still referenced by something is held unconditionally
 (reported as a count only, never a name, since nothing about it changed).
@@ -2047,7 +2096,7 @@ Because those two classes are caught per-document and never raise, a collection 
 nx t3 census-manifest-less (--collection NAME | --all) [--json] [--require-zero BUCKET]
 ```
 
-Client half of RDR-192 Step 2 (bead nexus-wbfpw.5), wrapping the engine's read-only `POST /v1/vectors/manifest-less-census` route (bead nexus-wbfpw.4). Classifies every chunk carrying no own-collection manifest row into one of five buckets — `superseded`, `legacy-unmanifested`, `dead-owner`, `no-owner`, `unclassified` — and prints, per collection, the count in each bucket, the owning document (tumbler + how it was found: `forward`, `reverse`, or `none`) for each item, and a total (`scope_chunk_total`, every chunk the collection holds in any manifest state). A `legacy-unmanifested` row in text output also prints its owner document's `title` (nexus-wbfpw.41): that chunk is hidden from `nx store get` and search, so the title is the handle for re-putting the note. `--all` iterates every T3 collection except `quarantine-*` ones — `live(c)` applies to every collection, not only `knowledge__*`. `--json` emits the same counts plus the route's `owners` map (`owner_tumbler`/`owner_path` per chash). See `scripts/sql/manifest_less_census.sql`'s header — the identical text the engine route runs — for the full bucket definitions and the forward/reverse precedence rule (a live forward pointer wins; a live reverse note-guard match rescues a chunk whose forward pointer is null or names a tombstoned document; ties break on fewest manifest rows anywhere, then lowest tumbler).
+Client half of RDR-192 Step 2 (bead nexus-wbfpw.5), wrapping the engine's read-only `POST /v1/vectors/manifest-less-census` route (bead nexus-wbfpw.4). Classifies every chunk carrying no own-collection manifest row into one of five buckets — `superseded`, `legacy-unmanifested`, `dead-owner`, `no-owner`, `unclassified` — and prints, per collection, the count in each bucket, the owning document (tumbler + how it was found: `forward`, `reverse`, or `none`) for each item, and a total (`scope_chunk_total`, every chunk the collection holds in any manifest state). A `legacy-unmanifested` row in text output also prints its owner document's `title` (nexus-wbfpw.41): that chunk is hidden from `nx store get` and search, so the title is the handle for re-putting the note. `--all` iterates every T3 collection except `quarantine-*` ones — `live(c)` applies to every collection, not only `knowledge__*`. `--json` emits the same counts plus the route's `owners` map (`owner_tumbler`/`owner_path` per chash). See `scripts/sql/manifest_less_census.sql`'s header — the identical text the engine route runs — for the full bucket definitions and the forward/reverse precedence rule (from engine-service-v0.1.171, a tenant that has its `rdr192-manifest-backfill` completion record in `nexus.ladder_completions` is attributed by the reverse path alone, so a chunk no live note names reads `no-owner` whatever stale `catalog_doc_id` its row carries; run `--all --require-zero legacy-unmanifested` and get zero before the RDR-236 sweep that removes those keys; otherwise a live forward pointer wins; a live reverse note-guard match rescues a chunk whose forward pointer is null or names a tombstoned document; ties break on fewest manifest rows anywhere, then lowest tumbler).
 
 Exit codes:
 
@@ -2429,7 +2478,7 @@ A note whose text is too large for the collection's embedding model's token wind
 | `--docs` | Show unique documents instead of individual chunks; applies once a collection is named |
 | `--reapable` | List the chunks the engine's reapable predicate selects in `--collection` (RDR-192 Step 10, nexus-wbfpw.19); see below |
 
-**`list --reapable`.** Read-only: it lists the chunks `nx t3 gc` would quarantine now, from the engine route `POST /v1/vectors/reapable` with the engine's default 30 day grace (a lock-free snapshot, so it is advisory: it can differ from what a later `gc` moves). It requires an explicit `--collection` (omitting it is a usage error, so an audit never silently targets the default `knowledge` collection), and it cannot be combined with `--docs` or `--offset`; `--limit` bounds the rows shown and a notice says when more exist. Each row prints the chunk's `chash`, `ownerless_since`, the age in days since that instant, `last_written_at`, `created_at`, `title` and `catalog_doc_id` (`-` when the chunk's metadata names none). `ownerless_since` is the grace clock the engine uses: the later of `last_written_at` and when the chunk last lost an owner (`nexus.chunk_orphaned_at`), so the age answers "how long has this chunk been ownerless" and is at least the 30 day grace for every listed chunk. An engine older than the field omits it, and the age then falls back to time since the last write (which can overstate how long the chunk has been ownerless). `created_at` is write-once and never the grace clock, so no age is derived from it. A name that no T3 collection or catalog registration carries is refused ("no collection named ..."), as `nx t3 gc` refuses it, instead of printing `0 reapable chunks`. When nothing is reapable in a known collection it prints `0 reapable chunks in <collection>` and exits 0. Needs an engine that carries the route (the same engine tag as `nx t3 gc` above); an older engine gets an error saying so.
+**`list --reapable`.** Read-only: it lists the chunks `nx t3 gc` would quarantine now, from the engine route `POST /v1/vectors/reapable` with the engine's default 30 day grace (a lock-free snapshot, so it is advisory: it can differ from what a later `gc` moves). It requires an explicit `--collection` (omitting it is a usage error, so an audit never silently targets the default `knowledge` collection), and it cannot be combined with `--docs` or `--offset`; `--limit` bounds the rows shown and a notice says when more exist. Each row prints the chunk's `chash`, `ownerless_since`, the age in days since that instant, `last_written_at`, `created_at`, `title`, `catalog_doc_id` and `text_prefix`. `title` and `catalog_doc_id` are the chunk's manifest owner's (RDR-236 Phase 3; blank and `-` when no manifest row names one, which is usual for a chunk that is reapable), and `text_prefix` is the first 80 characters of its text, the label of an ownerless chunk (an engine older than engine-service-v0.1.171 prints the chunk row's own title and document id and no `text_prefix`). `ownerless_since` is the grace clock the engine uses: the later of `last_written_at` and when the chunk last lost an owner (`nexus.chunk_orphaned_at`), so the age answers "how long has this chunk been ownerless" and is at least the 30 day grace for every listed chunk. An engine older than the field omits it, and the age then falls back to time since the last write (which can overstate how long the chunk has been ownerless). `created_at` is write-once and never the grace clock, so no age is derived from it. A name that no T3 collection or catalog registration carries is refused ("no collection named ..."), as `nx t3 gc` refuses it, instead of printing `0 reapable chunks`. When nothing is reapable in a known collection it prints `0 reapable chunks in <collection>` and exits 0. Needs an engine that carries the route (the same engine tag as `nx t3 gc` above); an older engine gets an error saying so.
 
 **`delete` flags:**
 
@@ -3500,7 +3549,7 @@ only; `--json` output shape is unchanged.
 
 Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and (local-service mode only) the service cross-encoder reranker model.
 
-**LLM backend (nexus-2k66t.3).** The "LLM backend" row names the backend the LLM steps use and why (`cli: claude is on PATH`, `anthropic: claude is not on PATH; the anthropic API is used (anthropic_api_key is set)`, `openai_compat: ...`) and never prints a key. A box with neither `claude` nor a key is reported as not applicable (a pass: search and storage work). It warns when `llm.backend` names a backend that cannot serve (`anthropic` without a key, an `openai_compat` without a base_url and model, an unknown value). The "Answer-kind extraction" row (nexus-jypmj.16) says whether the structured request extraction that feeds the answer-kind gate can run here: it names the backend and model (`runs on cli (claude is on PATH), model haiku`), is not applicable (a pass) when `NX_ANSWER_STRUCTURED_EXTRACT` or `NX_ANSWER_KIND_ELIGIBILITY` is off or the box has no LLM backend at all, and warns for an `openai_compat` endpoint (it runs its configured model, not the measured Haiku) or a backend setting that cannot serve, because every request then keeps its first-pass kind while the gate enforces on it. It makes no model call. A process whose extraction calls keep failing also logs one `answer_kind_gate_extraction_failing` warning. The "LLM key persistence (GUI spawn)" row warns when the key the chosen backend would use is in shell env only, naming `nx config set anthropic_api_key "$ANTHROPIC_API_KEY"`; it stays silent when `claude` is the backend, so exporting `ANTHROPIC_API_KEY` for other reasons is not nagged.
+**LLM backend (nexus-2k66t.3).** The "LLM backend" row names the backend the LLM steps use and why (`cli: claude is on PATH`, `anthropic: claude is not on PATH; the anthropic API is used (anthropic_api_key is set)`, `openai_compat: ...`) and never prints a key. A box with neither `claude` nor a key is reported as not applicable (a pass: search and storage work). It warns when `llm.backend` names a backend that cannot serve (`anthropic` without a key, an `openai_compat` without a base_url and model, an unknown value). The "Answer-kind extraction" row (nexus-jypmj.16) says whether the structured request extraction that feeds the answer-kind gate can run here: it names the backend and model (`runs on cli (claude is on PATH), model haiku`), is not applicable (a pass) when `NX_ANSWER_STRUCTURED_EXTRACT` or `NX_ANSWER_KIND_ELIGIBILITY` is off or the box has no LLM backend at all, and warns for an `openai_compat` endpoint (it runs its configured model, not the measured Haiku) or a backend setting that cannot serve, because every request then keeps its first-pass kind while the gate enforces on it. It makes no model call; for the `cli` backend it runs `claude --version` once (bounded to 5 s) and warns when that fails, because a `claude` that is on PATH but cannot start used to read green. A CLI that starts but cannot answer (signed out, offline) is not seen here, and the row's detail says so. A process whose extraction calls keep failing also logs one `answer_kind_gate_extraction_failing` warning per streak; an extraction that works re-arms it. The "LLM key persistence (GUI spawn)" row warns when the key the chosen backend would use is in shell env only, naming `nx config set anthropic_api_key "$ANTHROPIC_API_KEY"`; it stays silent when `claude` is the backend, so exporting `ANTHROPIC_API_KEY` for other reasons is not nagged.
 
 Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + reachability check that always runs (not behind a `--check-*` flag). Unconfigured (the default — most installs) reports a loud-but-passing skip line, since self-minting is optional and the static `service_token` path runs unchanged. When `mint_token` IS configured it routes through `DataTokenManager`'s own process-wide, TTL-cached singleton (never a throwaway manager — nexus-ssqk9 fixed a residue-discipline bug where the check used to mint a FRESH token on every single `nx doctor` invocation) and reports which of three things happened on success, plus the granted TTL: MINTED a fresh token, REUSED one already live in-process, or REUSED one borrowed from the cross-process lease file (nexus-9c7t9, below). A real `nx doctor` invocation is its own fresh subprocess with an empty in-process cache, so its own two outcomes are "minted a fresh" (no lease existed yet, or it had gone stale) or "reused the cached (lease file)" (a prior `nx` invocation's mint is still fresh); "reused the cached (in-process)" is observable only inside a long-lived process such as the MCP server. Degrades to a soft warning (never fatal, never a silent "ok") on an unresolvable endpoint or a rejected mint. If the credential is bound to a tenant other than `"default"` (see `mint_tenant` above), configure `mint_tenant` too — the doctor check mints against `mint_tenant` (or `"default"`) exactly like every other call site; an unconfigured `mint_tenant` against a mint-locked credential bound to a different tenant surfaces as the same 403 the `mint_tenant` table entry above documents. The managed edge forwards the client's `Authorization` on `/v1` unvalidated (conexus-qomd), so a successful mint means the engine checked this credential and its tenant.
 
@@ -3676,7 +3725,9 @@ nx doctor --check-engine-activity    # Live engine embed activity from GET /v1/s
 nx doctor --check-index-failures     # Surface the durable index-failures backlog (nexus-nukn3)
 ```
 
-The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring. A transport failure (service unreachable) reports UNKNOWN and exits 0 — not reporting pass or fail; a reachable queue with one or more `failed` rows is a real backlog signal and exits 1 with a `✗ FAIL:` marker, matching the other promoted supplementary checks (nexus-fylxo).
+The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reads the live service queue, not the local file. It counts two sides. The table side is `aspect_extraction_queue`: its pending rows and its failed rows. The tuple side is the `aspects` tuple queue that `NX_ASPECT_QUEUE` moves work onto (RDR-235): its available tasks count as pending, its dead tasks count as failed, and its claimed tasks are in flight and count as neither. The report prints one `aspect_extraction_queue:` line with the combined pending and failed totals. It adds a `  tuple queue (aspects): N available, N claimed (in flight, not pending), N dead` line when the tuple side has any tasks, and `  dead tuple tasks: nx tuple stats aspects` when it has dead ones. Under the failed total it lists up to 20 failed table rows with their collection, source path and retry count, then points at `nx aspects requeue-failed`. The service list endpoint does not carry `last_error`, so the failure text is in the worker logs. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring.
+
+Exit codes. A pending backlog never fails the check. A WARN line on stderr says the worker is idle when rows are pending and `claude` is not on PATH with no `anthropic_api_key` set, and that does not change the exit code. A transport failure to the service prints `Queue depth UNKNOWN` on stderr and exits 0, so it reports neither pass nor fail. If the tuple side cannot be read, the report prints the table side's figures with `tuple queue (aspects) UNKNOWN` on stderr and no combined count, and the exit code follows the table side alone. Any failed count, meaning failed table rows plus tuple dead tasks, above zero exits 1 with a `✗ FAIL: N failed aspect-extraction row(s) in the queue.` marker on stderr, matching the other promoted supplementary checks (nexus-fylxo).
 
 The `--check-index-failures` flag (introduced nexus-nukn3, also part of the default sweep) reports the `nexus.index_failures` all-time row count (see `nx index failures` above) as information, and gates the sweep on the LATEST run that recorded any UNACKNOWLEDGED failure — never the all-time total, and never a failure an operator has durably acknowledged. Deliberately written FAIL-FIRST: this is the exact bead nexus-fylxo names as the trap to avoid, a durable failure queue whose reader never raises reproduces the aspect-queue check's original silent-backlog defect for a second queue. Two rounds of scoping close two separate traps found in review: (1) an unscoped all-time gate turned the FIRST permanent extraction failure in a tenant's history into an unfixable FAIL forever — fixed by gating on the latest run instead, with a failure older than 30 days no longer gating at all (self-heals over time with no operator action); (2) staleness alone did not self-heal a corpus re-indexed on a cadence SHORTER than that window, since every run mints a fresh run id for the identical recurring failure — fixed by `nx index failures --acknowledge`, a durable adjudication the gate excludes regardless of how many times it recurs under a new run id. `nx index failures --clear` remains the immediate one-time remedy for a failure an operator has already handled and does not want to wait out the staleness window for. A transport failure reports UNKNOWN and exits 0; a fresh (within 30 days), unacknowledged latest-run failure exits 1 with a `✗ FAIL:` marker naming that run's count.
 
@@ -4109,6 +4160,13 @@ from a SQLite-era install (GH #1405) — such a unit otherwise respawns a
 T2 daemon that exits instantly by design, forever. Each leg is
 independent — a failure in one (even a missing `ps` binary on minimal
 containers) never blocks the others.
+
+The engine leg prints one `engine:` line when it has no convergence action to report, and that line describes the running service as well as the disk (nexus-bivz3.25). It says `engine: converged` only when the running service reports the release's engine version. With the service down it prints `engine: installed engine is vX (the release dependency); the service is not running (<reason>). Start it with nx daemon service start (its output names the reason if the engine halts at startup).` A service that answers with another version prints `engine: not converged`, naming both versions. A service that answers without a version prints `convergence is unverified`. When a convergence cycle runs and the service does not come back on the release's engine, the verb prints one of these `NEEDS HUMAN` lines:
+
+- `the storage service did not start (nx daemon service start exited N); the engine is NOT converged to vX. Its reason: <start output>`. An engine that halts at a schema migration and whose supervisor exits shows its reason here. The reason is the start output after its `Error:` marker, up to 1000 characters, so the migration RAISE and its runbook URL are shown.
+- `nx daemon service start returned N and nothing answers yet; the service may still be migrating, so convergence to vX is UNVERIFIED. Its output: <reason>`. This is used when the supervisor is alive but the engine has not answered within start's 60-second window.
+- `the service restarted but is STILL running vY, not the required vX`. Something else holds the old engine.
+- `the service restarted but its version could not be confirmed (<reason>) — convergence to vX is UNVERIFIED`.
 
 This runs automatically on the first `nx` invocation after a version change
 (a `last_seen_version` stamp in the config dir), printing one
@@ -5193,8 +5251,30 @@ Who holds NAME in the RDR-208 session directory (`directory/<name>`). Prints eac
 |------|-------------|
 | `--json` | Output as JSON: `{name, entries, holders, ambiguous, resolved_session_id}` |
 
-Mailbox push delivery has no CLI verb (RDR-211 nexus-rplay.14 deleted the
-prior CLI ping-then-pull watcher outright): a session's own nexus MCP
+### nx tuple wait
+
+```
+nx tuple wait [--session SESSION_ID] [--timeout-s SECONDS] [--max-parks N] [--force] [--json]
+```
+
+The channel-free push path (RDR-233) for a Claude Code session launched without `--channels`, such as the Claude Desktop Code tab, where the channel below never arrives. Run it as a background task (`run_in_background`): it parks on the session's own `mailbox/<session id>` and the board topics it subscribed with `tuple_subscribe`, and exits as soon as a row arrives that the session did not write itself. That exit re-invokes the idle session. It prints the channel's own notice for each row (subspace, tuple id, how to claim or read it, sender label), never a tuple body, then a line saying to run it again. The SessionStart line tells a session without the channel to do exactly this.
+
+Delivery position is the engine's: each row is announced to this waiter once (a per-subscriber stamp under `wait:<session id>`, apart from the channel's), and only while it is claimable, so mail the drain hook already consumed never wakes the session and re-arming never repeats a row. A board topic starts at its subscribe time. A newer `nx tuple wait` for the same session replaces an older one. Board subscriptions are re-read from T1 between parks; when T1 is unreachable it waits on the mailbox alone and says so on stderr.
+
+Exits 0 when rows arrived, when a newer waiter replaced it, when the session changed (`/clear`), when the `claude` process exited, or when `--max-parks` empty parks ran out; 4 when the `claude` command line carries a conexus channel flag (the channel already pushes; `--force` overrides); 5 when the engine does not honour the per-subscriber announce; 1 when the engine refuses the wait or stays unreachable for six parks in a row (a failed park is retried after 5, 10, 20, 40 and 60 s, since any exit wakes the session).
+
+In a permission mode that prompts before Bash, allow it with `Bash(nx tuple wait:*)` in `permissions.allow` (`~/.claude/settings.json`), or every arm and re-arm is a prompt.
+
+| Flag | Description |
+|------|-------------|
+| `--session SESSION_ID` | Watch this session's mailbox (default: the session the SessionStart marker names for this `claude` process, else the environment) |
+| `--timeout-s SECONDS` | Seconds per engine park (default 25); liveness and subscriptions are re-checked between parks |
+| `--max-parks N` | Give up after N empty parks (default: wait until something arrives) |
+| `--force` | Run even where the channel launch flag is present; for a flagged session whose channel never registers (plugin not on the channel allowlist, channels disabled by the organisation) |
+| `--json` | Print `{reason, notices, rerun, hint}` as JSON: `rerun` is true only when rows were delivered, and `hint` is the line text mode prints (run it again, or do not) |
+
+A session launched with the channel needs no CLI verb (RDR-211 nexus-rplay.14
+deleted the prior CLI ping-then-pull watcher outright): its own nexus MCP
 server pushes its own mailbox over the Claude Code channel automatically,
 from startup, with no subscribe call needed. The server also leases the
 session's NAME in the directory above by itself, from Claude Code's session
@@ -5529,12 +5609,12 @@ about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
 
-The envelope has twelve RDR-232 keys, all always present (`scope_diagnostics`,
-`scope_normalized`, `evidence_request`, `named_sources`, `primary_evidence`,
+The envelope has thirteen RDR-232 keys, all always present (`scope_diagnostics`,
+`scope_normalized`, `evidence_request`, `named_sources`, `single_source_narrowing`, `primary_evidence`,
 `reserved_stream`, `lifecycle_stream`, `evidence_diagnostics`, `request_coverage`,
 `plan_eligibility`, `run_summary` and `coverage`; `scope_diagnostics` is `[]` when it has
 nothing to report, `request_coverage`, `plan_eligibility`, `run_summary` and `coverage` are
-always objects, and the other seven are `null` when they have nothing to report). `coverage`
+always objects, and the other eight are `null` when they have nothing to report). `coverage`
 is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same object is
 `continuation.coverage` in a continuation hand-off:
 
@@ -5697,6 +5777,49 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   by then is `unresolved` with "stopped at the deadline" as its reason (an owner
   lookup that did not return makes the qualifier `unresolved`, never a guess),
   and the answer proceeds without the stream.
+- `single_source_narrowing` (nexus-4xmpv, nexus-jypmj, RDR-232 section 2a; Sam's decisions of 2026-10-30): what the
+  one-source rule did. A synthesis or `unknown` request that names exactly one source (one distinct id, however it is
+  spelled: `RDR-078 through RDR-078` is one) and whose source resolved to one document reads THAT DOCUMENT only. The
+  run's scope binding is the document's collection (a caller `scope` that is the document's own address is kept) and
+  its owner binding the document's owner, so a step the plan pinned to other collections is skipped and listed in
+  `scope_diagnostics` (never run unscoped). Every secondary retrieval step is then confined to the document itself
+  (`confinement`): `engine_filter` when `GET /version` advertises `vector_search_chash_allow_supported`, where
+  the `search` and `query` steps carry the document's manifest chunk hashes as `chash_allow` (at most 3,000, and
+  `allow_sampled` says when that is a sample of a larger manifest) and the engine restricts and ranks exactly, and
+  `traverse` walks under the document's address; a step on a route that takes no such filter (`search_metadata_scoped`,
+  `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`, a `query` with `author`, `content_type`,
+  `follow_links` or `subtree`) is not dispatched. `steps_not_run` when the engine does not advertise the flag (an
+  older engine, or an edge that trims `/version`; until `engine-service-v0.1.171` and the edge allowlist
+  (conexus-zvbp) are live that is every cloud request, and this fallback has not run live): no secondary retrieval step and no traversal is dispatched, and
+  each skipped step is listed in `scope_diagnostics` with `scope_kind: document` and outcome `document_confined`
+  (a step that carried the filter reports `document_filtered`, the traversal `document_scoped`). The coverage
+  repair keeps only hits whose chunk hash is in the document's manifest (a verbatim chunk shared with a sibling
+  document counts as in-document); in `engine_filter` mode it asks under the same filter, and in `steps_not_run`
+  mode it asks a 40-wide unfiltered page and filters it by hash. When a confined search returns a row outside
+  the document's hashes (the engine ignored the key, inside the 300 s window the capability flag is cached for),
+  the row is dropped and counted: `chash_allow_dropped` on the step output and `rows_outside_allow` in its
+  `scope_diagnostics` entry. Only a
+  request the rule concerns has the object, `{applied, source, tumbler, document, collection, owner, caller_scope,
+  effective_scope, reason, confinement, read_chunks, manifest_chunks, allow_chunks, allow_sampled}`; otherwise it is
+  `null` (a lookup, a comparison, a request that names no source or several). `effective_scope` is the document's
+  tumbler when applied (the caller's scope otherwise), `read_chunks` and `manifest_chunks` are the primary read's S
+  of the document's M chunks, `allow_chunks` the hashes the filter carries (0 when none is sent) and `confinement`
+  is `null` when not applied. `applied` is false when nothing could be confined to: the source did not resolve to
+  one document, the caller's `scope` does not admit its collection, the source was resolved by the session's
+  project and another project carries the same number (an inferred source narrows only when none does), or the
+  derivation itself failed; `reason` says which. Text mode adds one `[evidence request: ...]` line naming the
+  document, how the secondary steps were confined, the primary read's S of M chunks and that a repair may add up
+  to 12 more chunks of the same document, or the reason. The primary read of a confined run takes up to 82 chunks
+  (`max_narrowed_source_items` in `primary_evidence.caps`) of 88 reserved slots (the T2 records take 6); the
+  coverage repair's 12 supplement items take the rest of the reducer's 100 input slots. A document longer than
+  the 60,000-character primary budget relies, in `engine_filter` mode, on the confined repair and search for the
+  rest of its chunks and, in `steps_not_run` mode, on the repair alone, and its
+  primary read of about 70,000 characters with headers is over the continuation prompt cap of 60,000, so such a
+  run takes the headless path, not the continuation handoff. One source that is not narrowed (a lookup) keeps 44
+  and the 50-slot share. The price: a request that names one RDR in passing loses the cross-document context its
+  other retrieval would have found, and the text says so. A document named only by its title counts as no named
+  source and is not narrowed. A one-source synthesis or `unknown` request is also not offered the citation-traversal
+  plan (plan eligibility reason `single_source_synthesis`; abstract-themes stays allowed).
 - `primary_evidence` (nexus-jypmj.1.6): what was read from the resolved
   sources, `{selected_items, selected_chars, manifest_rows_hydrated,
   fetched_chars, fetch_errors, error, partial, caps_hit, caps, documents, items}`;
@@ -5964,7 +6087,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
     the engine ran the caller's scope before its cut (it advertises `catalog_graph_scope_filter_supported` and its
     reply carried the `scope_filter` marker; `engine_dropped_out_of_scope` counts what it removed), `not_scoped` for a
     run with no restricting scope, and `unavailable` otherwise: an engine without the predicate, or an edge that
-    trims the flag. An `unavailable` scoped walk that may have been cut at the cap sets `secondary_omitted` and
+    trims the flag, or a single-role policy (`require_link_role` other than `factual`) on an engine that lacks
+    `catalog_graph_node_walk_supported` (the walk is made without the predicate, nexus-jypmj.18; so is the repeat
+    after a reply that applied the predicate but carried no `node_walk`). An `unavailable` scoped walk that may have been cut at the cap sets `secondary_omitted` and
     returns only its seed documents as graph evidence, never `contained`; one that was not cut is unchanged.
   - `reserved`: `{items, merged, over_share_dropped, deduped_secondary,
     secondary_cut, capped, dropped_before_terminal}`, the `reserved_stream`
@@ -6052,7 +6177,10 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
   `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,
   rejected]`, `accepted_records`, `unusable_calls`, `raised_calls` and
-  `failure_cause` (`raised_call`, `unusable_reply`, `mixed` or `none`). The coverage
+  `failure_cause` (`raised_call`, `unusable_reply`, `mixed`, `budget_skip`, `deadline_skip` or `none`;
+  a failed call outranks a skip, and a skip is named only when at least one call ran: an assessment skipped
+  whole reads `none`), `skipped_budget_calls` and `skipped_deadline_calls` (planned calls that never
+  started because the USD allowance or the deadline share was spent). The coverage
   object also has `facets_conflicted` (the conflicted subset of `facets.covered`),
   `unassessed_by_cause` (`unusable_reply`, `deadline_skip`, `budget_skip`,
   `raised_call`, `stopped_after_failure` (always 0 since nexus-jypmj.17: the assessment

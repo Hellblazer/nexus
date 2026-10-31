@@ -2,7 +2,8 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """nexus-4ftd7: MCP ``store_put`` must accept ``agent``/``session`` actor
 attribution params, mirroring ``memory_put``'s shape, and plumb them into
-the T3 chunk's ``source_agent``/``session_id`` metadata.
+the T3 chunk's ``source_agent`` metadata (``session_id`` is accepted and no longer
+stamped: nexus-6pfgb.4).
 
 Pre-fix: ``store_put`` had no actor parameter at all and never passed
 ``source_agent``/``session_id`` to ``T3Database.put``, so every MCP-written
@@ -132,7 +133,7 @@ def test_explicit_agent_lands_in_chunk_metadata(
     assert meta.get("source_agent") == "developer"
 
 
-def test_explicit_session_lands_in_chunk_metadata(
+def test_explicit_session_is_accepted_and_not_stamped_on_the_chunk(
     inject_local_t3: T3Database, catalog_env: Path,
 ) -> None:
     local_t3 = inject_local_t3
@@ -144,7 +145,8 @@ def test_explicit_session_lands_in_chunk_metadata(
     assert "Stored" in result, result
     stored_col_name = result.split("->")[-1].strip()
     meta = _stored_metadata(local_t3, stored_col_name, "attrib-explicit-session")
-    assert meta.get("session_id") == "sess-xyz"
+    # nexus-6pfgb.4: the argument is still accepted (wire shape); no chunk row carries it.
+    assert "session_id" not in meta
 
 
 def test_agent_falls_back_to_nx_agent_env(
@@ -161,7 +163,7 @@ def test_agent_falls_back_to_nx_agent_env(
     assert meta.get("source_agent") == "architect-planner"
 
 
-def test_session_falls_back_to_nx_session_id_env(
+def test_nx_session_id_env_is_not_stamped_on_the_chunk(
     inject_local_t3: T3Database, catalog_env: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("NX_SESSION_ID", "session-from-env")
@@ -172,7 +174,7 @@ def test_session_falls_back_to_nx_session_id_env(
     assert "Stored" in result, result
     stored_col_name = result.split("->")[-1].strip()
     meta = _stored_metadata(local_t3, stored_col_name, "attrib-env-session")
-    assert meta.get("session_id") == "session-from-env"
+    assert "session_id" not in meta  # nexus-6pfgb.4
 
 
 def test_explicit_agent_overrides_nx_agent_env(

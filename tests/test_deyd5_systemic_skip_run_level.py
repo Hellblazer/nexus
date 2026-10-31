@@ -68,7 +68,6 @@ def _service_mode_patches(db, *, extra=None):
     # other in this suite).
     patches = {
         "nexus.frecency.batch_frecency": {"return_value": {}},
-        "nexus.indexer._git_metadata": {"return_value": {}},
         "nexus.config.load_config": {"return_value": _DEFAULT_CONFIG},
         "nexus.config.get_credential": {"return_value": "fake-key"},
         "nexus.mcp_infra.get_t3": {"return_value": db},
@@ -379,6 +378,64 @@ def test_skip_count_is_read_back_from_the_durable_store_not_the_in_memory_list(
     assert error_class == "UnextractableContentError"
     assert "no text extracted" in error
     assert call.kwargs["run_id"]  # non-empty
+
+
+def test_an_all_pages_unextracted_pdf_is_a_skip_recorded_under_its_own_error_class(
+    tmp_path, monkeypatch,
+):
+    """nexus-q6nw0: MinerU failing on every page of a PDF raises ``AllPagesUnextractedError``, a
+    subclass of ``UnextractableContentError``. ``nx index repo`` still counts it as a skip (the
+    per-file contract), but the durable row names the raised type: a class-wide
+    ``nx index failures --acknowledge --error-class UnextractableContentError`` must not hide an
+    extractor failure. A blank file keeps ``UnextractableContentError``."""
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.errors import UnextractableContentError
+    from nexus.indexer import _run_index
+    from nexus.pdf_extractor import AllPagesUnextractedError
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for i in range(24):
+        (repo / f"ok{i}.py").write_text("x = 1\n")
+    (repo / "blank.pdf").write_bytes(b"%PDF-1.4 fake content")
+    (repo / "mineru_failed.pdf").write_bytes(b"%PDF-1.4 fake content")
+    reg = _reg()
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+    monkeypatch.setenv("CHROMA_API_KEY", "fake")
+
+    db = MagicMock(spec=HttpVectorClient)
+
+    def _pdf_side_effect(file, *_a, **_kw):
+        if file.name == "mineru_failed.pdf":
+            raise AllPagesUnextractedError(
+                f"{file.name}: MinerU failed on all 3 pages", total_pages=3, last_error="rung 2: timeout",
+            )
+        raise UnextractableContentError(f"{file.name}: no text extracted")
+
+    telemetry_store = MagicMock()
+    telemetry_store.record_index_failures_batch.return_value = 2
+    telemetry_store.list_index_failures.return_value = {
+        "rows": [], "total": 2, "oldest_occurred_at": "",
+    }
+
+    with _service_mode_patches(db, extra={
+        "nexus.indexer._index_pdf_file": {"side_effect": _pdf_side_effect},
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore": {
+            "return_value": telemetry_store,
+        },
+    }), patch("nexus.chunk_batcher.ChunkBatcher", _DrainTrackingBatcher):
+        stats = _run_index(repo, reg)
+
+    assert stats["skipped_unextractable_files"] == 2, "both PDFs are skips, neither aborts the run"
+    rows = telemetry_store.record_index_failures_batch.call_args.args[0]
+    classes = {Path(path).name: error_class for path, error_class, _reason, _at in rows}
+    assert classes == {
+        "blank.pdf": "UnextractableContentError",
+        "mineru_failed.pdf": "AllPagesUnextractedError",
+    }
 
 
 def test_durable_write_failure_falls_back_to_the_in_memory_count(

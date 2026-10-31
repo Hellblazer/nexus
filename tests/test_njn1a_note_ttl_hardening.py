@@ -218,3 +218,10 @@ def test_context_annotations_read_a_bad_ttl_as_permanent() -> None:
         meta = {"ttl_days": True}
 
     assert "ttl_days" not in entry_facts(_Entry())
+
+
+@pytest.fixture(autouse=True)
+def _no_catalog_tags(monkeypatch):
+    """nexus-6pfgb.38: store list/get look a note's tags up in the catalog; these tests stub the T3 and
+    have no catalog, so the lookup is stubbed (tests/test_6pfgb38_tags_display.py covers it)."""
+    monkeypatch.setattr("nexus.catalog.store_hook.live_owner_entries", lambda *a, **k: {})  # nexus-6pfgb.13: no catalog read (the one owner lookup of the display)

@@ -402,13 +402,22 @@ def test_head_hash_not_updated_when_a_mineru_stop_failed_or_skipped_pdfs(
 ) -> None:
     """nexus-tr1rj.13: the PDFs a MinerU stop failed or never reached are retried once the install
     is repaired. Advancing the --since-head base past them means the next diff never offers them
-    again, so either count holds the base back."""
-    with patch("nexus.indexer._run_index", return_value=stats):
-        with patch("nexus.indexer._current_head", return_value="abc"):
-            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
-                index_repository(tmp_path, registry)
+    again, so either count holds the base back. The warning names which one (nexus-b0y6w class b)."""
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as logs, patch(
+        "nexus.indexer._run_index", return_value=stats,
+    ), patch("nexus.indexer._current_head", return_value="abc"), patch(
+        "nexus.indexer._set_owner_head_hash",
+    ) as mock_set:
+        index_repository(tmp_path, registry)
 
     mock_set.assert_not_called()
+    held = [e for e in logs if e.get("event") == "since_head_base_not_advanced"]
+    assert held and held[0]["log_level"] == "warning", logs
+    assert held[0]["pdf_mineru_tripped"] == stats.get("pdf_mineru_tripped", 0)
+    assert held[0]["pdf_mineru_not_attempted"] == len(stats.get("pdf_mineru_not_attempted_paths", ()))
+    assert held[0]["pdf_mineru_tripped"] + held[0]["pdf_mineru_not_attempted"] == 1
 
 
 def test_head_hash_updated_when_no_files_deferred_or_failed(

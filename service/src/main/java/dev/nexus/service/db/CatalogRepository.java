@@ -2244,7 +2244,13 @@ public final class CatalogRepository {
         // pins a stale count until someone calls /manifest/resync by hand. An
         // EXPLICIT chunk_count still wins (the orphan-backfill paths depend on
         // asserting a count the manifest does not yet carry).
-        if (!fields.containsKey("chunk_count")) {
+        //
+        // nexus-8o06q / nexus-6pfgb.9: NOT on a meta-only update. e4gel's rule exists for the
+        // /update that FOLLOWS a manifest change (head_hash, physical_collection); a stamp that
+        // names only meta (RDR-236 Phase 1's frecency write) follows no manifest change, and
+        // re-deriving there erased the chunk_count-above-manifest gap the manifest heal reads
+        // to mark a lost manifest row for re-index, so any index run hid the gap from the heal.
+        if (!fields.containsKey("chunk_count") && !isMetaOnlyUpdate(fields)) {
             more = more.set(CATALOG_DOCUMENTS.CHUNK_COUNT, reDerivedChunkCount(ctx, tenant, target));
         }
         // nexus-927mo: /update must refresh indexed_at when it CHANGES head_hash —
@@ -2270,6 +2276,21 @@ public final class CatalogRepository {
         return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(target))
                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()));
+    }
+
+    /**
+     * True when the update applies nothing but {@code meta}/{@code metadata}: every other key
+     * is absent, null or the stripped {@code deleted_at}. Such an update says nothing about
+     * the manifest, so {@link #buildUpdateDocumentQuery} leaves chunk_count alone (nexus-8o06q).
+     */
+    private static boolean isMetaOnlyUpdate(Map<String, Object> fields) {
+        boolean sawMeta = false;
+        for (var e : fields.entrySet()) {
+            if (e.getValue() == null || "deleted_at".equals(e.getKey())) continue;
+            if (!"meta".equals(e.getKey()) && !"metadata".equals(e.getKey())) return false;
+            sawMeta = true;
+        }
+        return sawMeta;
     }
 
     /**
@@ -4552,6 +4573,35 @@ public final class CatalogRepository {
     }
 
     /**
+     * The traversal role of a catalog link type (nexus-jypmj.18), the engine copy of the client's
+     * {@code traversal_policy._ROLE_OF_LINK_TYPE}: {@code cites}, {@code quotes} and {@code supersedes} are
+     * {@code citation}; {@code implements} and {@code implements-heuristic} are {@code implementation};
+     * anything else, or null, is {@code related}. A client-side test pins the two tables to each other.
+     */
+    public static String linkRole(String linkType) {
+        if (linkType == null) return "related";
+        return switch (linkType) {
+            case "cites", "quotes", "supersedes" -> "citation";
+            case "implements", "implements-heuristic" -> "implementation";
+            default -> "related";
+        };
+    }
+
+    /** Rank among roles, lower is better: the client's {@code _ROLE_RANK}. */
+    private static int roleRank(String role) {
+        return switch (role) {
+            case "citation" -> 0;
+            case "implementation" -> 1;
+            default -> 2;
+        };
+    }
+
+    private static void mergeRole(Map<String, String> roleOf, String tumbler, String role) {
+        String prev = roleOf.get(tumbler);
+        if (prev == null || roleRank(role) < roleRank(prev)) roleOf.put(tumbler, role);
+    }
+
+    /**
      * BFS graph traversal with an optional scope predicate that runs BEFORE the node cut
      * (RDR-232 section 3, nexus-jypmj.1.13).
      *
@@ -4568,6 +4618,13 @@ public final class CatalogRepository {
      * without an edge, and the client ranks it by what is left (no link distance, role {@code related}).
      * Seeds are never removed: they are the documents the walk starts from, and the client applies the
      * scope to them itself.
+     *
+     * <p>THE WALK FIELDS (nexus-jypmj.18). Because a relay's edges vanish with it, the client cannot recompute
+     * a survivor's link distance or role from the edges it receives, so a non-null {@code scope} also adds
+     * {@code node_walk: {tumbler: {depth, role}}} for every returned node: {@code depth} is the BFS depth from
+     * the nearest seed (seeds 0), {@code role} the best role ({@code citation}, then {@code implementation},
+     * then {@code related}) among the links from the previous level into that node, absent for a seed. It is
+     * what the client computes over a complete edge set, so a removed relay no longer changes it.
      *
      * <p>THE MARKER. A non-null {@code scope} adds {@code scope_filter:{applied:true, kind, ...,
      * dropped_out_of_scope:N}} to the result, where {@code kind} is {@code "collections"} with a
@@ -4613,6 +4670,9 @@ public final class CatalogRepository {
             // nexus-jypmj.1.13: physical_collection of every non-seed node the walk saw (filled only when a
             // scope predicate is present); a seed need not appear on any edge and is never judged.
             Map<String, String> collectionOf = new java.util.HashMap<>();
+            // nexus-jypmj.18: the best role among the links from the previous BFS level into each non-seed
+            // node (see linkRole / mergeRole).
+            Map<String, String> roleOf = new java.util.HashMap<>();
 
             for (int d = 0; d < depth && !frontier.isEmpty(); d++) {
                 Set<String> next = new LinkedHashSet<>();
@@ -4654,6 +4714,12 @@ public final class CatalogRepository {
                     }
                     if (!visited.contains(fromT)) { next.add(fromT); visited.add(fromT); depthOf.put(fromT, d + 1); }
                     if (!visited.contains(toT))   { next.add(toT);   visited.add(toT);   depthOf.put(toT, d + 1); }
+                    // nexus-jypmj.18: a node first reached this round takes the best role among the links from
+                    // the frontier into it. A link reaches a node only from a frontier endpoint, so the other
+                    // endpoint being in the frontier is what makes this link one of those.
+                    String role = linkRole((String) lm.get("link_type"));
+                    if (frontier.contains(toT) && depthOf.get(fromT) == d + 1) mergeRole(roleOf, fromT, role);
+                    if (frontier.contains(fromT) && depthOf.get(toT) == d + 1) mergeRole(roleOf, toT, role);
                 }
                 frontier = next;
             }
@@ -4701,8 +4767,21 @@ public final class CatalogRepository {
                            .fetch().map(r -> docRowFromRecord(r.intoMap()));
             }
             if (scope == null) return Map.of("nodes", nodes, "edges", survivingEdges);
+            // nexus-jypmj.18: with the predicate, a node reached only through a removed relay arrives
+            // without an edge, so its depth and role ride beside the nodes: the BFS depth from the nearest
+            // seed and the best role of the links that reached it at that depth. Computed over every live
+            // edge the walk saw, not only the survivors.
+            Map<String, Object> nodeWalk = new LinkedHashMap<>();
+            for (String t : surviving) {
+                Map<String, Object> w = new LinkedHashMap<>();
+                w.put("depth", depthOf.get(t));
+                String role = roleOf.get(t);
+                if (role != null) w.put("role", role);
+                nodeWalk.put(t, w);
+            }
             return Map.of("nodes", nodes, "edges", survivingEdges,
-                          "scope_filter", scope.marker(droppedOutOfScope));
+                          "scope_filter", scope.marker(droppedOutOfScope),
+                          "node_walk", nodeWalk);
         });
     }
 
@@ -10786,7 +10865,7 @@ public final class CatalogRepository {
                                     List<String> ghostNames, List<String> dormantNames) {}
 
     /** Per-row disposition {@link #sweepGhostsAndMarkDormant} assigns during its walk. */
-    private enum SweepDisposition { DELETED, MARKED_DORMANT, HELD_QUARANTINE, HELD_QUARANTINED_ORIGIN, UNCHANGED }
+    private enum SweepDisposition { DELETED, MARKED_DORMANT, PROMOTED_LIVE, HELD_QUARANTINE, HELD_QUARANTINED_ORIGIN, UNCHANGED }
 
     private record SweptRow(String name, SweepDisposition disposition) {}
 
@@ -10845,7 +10924,7 @@ public final class CatalogRepository {
      *       then found left a fully-drained quarantine row with no automated
      *       reclaim path at all (nexus-n060e) — this ordering (empty check
      *       first, quarantine-hold second) is the fix for that gap;</li>
-     *   <li>else, when it has no row in {@code nexus.collection_vector_stats}
+     *   <li>else, when it is {@code 'live'} and has no row in {@code nexus.collection_vector_stats}
      *       (referenced elsewhere but holding no chunk at all, so nothing to embed
      *       or read), sets {@code lifecycle_state = 'dormant'}. That view is the
      *       collection INVENTORY since vectors-019-5 (RDR-192 Step 5 amendment, Sam
@@ -10857,7 +10936,13 @@ public final class CatalogRepository {
      *       all-tombstoned collection had no row and went dormant (nexus-wbfpw.35, pinned
      *       by {@code GhostSweepDormantMarkingTest#allUnownedCollection_*} and
      *       {@code #allTombstonedCollection_*});</li>
-     *   <li>else leaves it exactly as it was.</li>
+     *   <li>else, when it is {@code 'dormant'} and now HAS a row in that view (chunks arrived since it was
+     *       marked; nothing else sets a dormant row back), sets {@code lifecycle_state = 'live'} and fills a
+     *       NULL {@code dimension} from the stored one (nexus-b0y6w class d). Logged
+     *       ({@code ghost_sweep_dormant_promoted_live}); the result has no field for it;</li>
+     *   <li>else leaves it exactly as it was, a row already {@code 'dormant'} or a {@code 'disputed'} one
+     *       included (a dormant row is reported once, by the sweep that marks it, never again; only a
+     *       {@code 'live'} row is ever marked dormant).</li>
      * </ul>
      * The attribute walk (content_type/owner_id/embedding_model/dimension) is
      * deliberately NOT this method's job — that is bead nexus-ft04v.4's Liquibase
@@ -10970,17 +11055,44 @@ public final class CatalogRepository {
                     // row still referenced somewhere (the collectionIsEmpty check above was
                     // false) is held here, never relitigated into 'dormant'.
                     out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINE));
-                } else if (!ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
-                        .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name)))) {
-                    if (!dryRun) {
-                        ctx.update(CATALOG_COLLECTIONS)
-                           .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
-                           .where(CATALOG_COLLECTIONS.NAME.eq(name))
-                           .execute();
-                    }
-                    out.add(new SweptRow(name, SweepDisposition.MARKED_DORMANT));
                 } else {
-                    out.add(new SweptRow(name, SweepDisposition.UNCHANGED));
+                    // The collection inventory (collection_vector_stats): one row per stored dimension. Chunk
+                    // vectors are model-partitioned, so a collection has one.
+                    List<Integer> storedDims = ctx.select(COLLECTION_VECTOR_STATS.DIM)
+                        .from(COLLECTION_VECTOR_STATS)
+                        .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name))
+                        .fetch(COLLECTION_VECTOR_STATS.DIM);
+                    if ("live".equals(lifecycleState) && storedDims.isEmpty()) {
+                        // Only a LIVE row is marked dormant (nexus-b0y6w class d). A row already dormant is not
+                        // marked again: that changed nothing yet was reported as "marked dormant" on every later
+                        // sweep and "would mark dormant" on every dry run (shakedown 7.89.0, knowledge__deploy-probes).
+                        // A disputed row keeps its flag: the remedy RDR-204 gives it is a re-index under the
+                        // current profile, which "dormant" would hide.
+                        if (!dryRun) {
+                            ctx.update(CATALOG_COLLECTIONS)
+                               .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
+                               .where(CATALOG_COLLECTIONS.NAME.eq(name))
+                               .execute();
+                        }
+                        out.add(new SweptRow(name, SweepDisposition.MARKED_DORMANT));
+                    } else if ("dormant".equals(lifecycleState) && !storedDims.isEmpty()) {
+                        // Nothing else sets a dormant row back to live when chunks arrive (the collection upsert
+                        // leaves lifecycle_state out of its SET list), so this sweep, which marked it, also
+                        // clears it once the collection holds chunks again. A dormant row carries no dimension
+                        // (RDR-204), so the stored one fills it when there is exactly one.
+                        if (!dryRun) {
+                            var update = ctx.update(CATALOG_COLLECTIONS)
+                                .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "live");
+                            if (storedDims.size() == 1 && storedDims.get(0) != null) {
+                                update.set(CATALOG_COLLECTIONS.DIMENSION,
+                                    DSL.coalesce(CATALOG_COLLECTIONS.DIMENSION, storedDims.get(0)));
+                            }
+                            update.where(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
+                        }
+                        out.add(new SweptRow(name, SweepDisposition.PROMOTED_LIVE));
+                    } else {
+                        out.add(new SweptRow(name, SweepDisposition.UNCHANGED));
+                    }
                 }
             }
             return out;
@@ -11005,6 +11117,15 @@ public final class CatalogRepository {
                     // nexus-ft04v.18 C2: a cached row's lifecycleState is now stale the
                     // instant this UPDATE commits — evict so the next reader re-verifies.
                     // Skipped in dry-run: no UPDATE ran, so nothing to invalidate.
+                    if (!dryRun) {
+                        CollectionRegistry.evict(tenant, r.name());
+                    }
+                }
+                case PROMOTED_LIVE -> {
+                    // The result carries no field for it (the wire key set is pinned), so it is logged. The
+                    // cached row's lifecycleState is stale the instant the UPDATE commits, as for a dormant mark.
+                    log.info("event=ghost_sweep_dormant_promoted_live tenant={} collection={} dry_run={}",
+                             tenant, r.name(), dryRun);
                     if (!dryRun) {
                         CollectionRegistry.evict(tenant, r.name());
                     }

@@ -815,7 +815,6 @@ class T3Database:
         title: str = "",
         tags: str = "",
         category: str = "",
-        session_id: str = "",
         source_agent: str = "",
         store_type: str = "knowledge",
         ttl_days: int | None = None,
@@ -927,7 +926,6 @@ class T3Database:
             category=category,
             ttl_days=ttl_days,
             source_agent=source_agent,
-            session_id=session_id,
         )
 
         # ``put`` is the operator / MCP single-document write path. The

@@ -199,7 +199,7 @@ def test_format_vimgrep(local_t3: T3Database) -> None:
     results = [
         SearchResult(id="1", content="def foo():", distance=0.1,
                      collection="code__repo",
-                     metadata={"source_path": "src/main.py", "line_start": 42}),
+                     metadata={"_display_path": "src/main.py", "line_start": 42}),
     ]
     lines = format_vimgrep(results)
     assert len(lines) == 1

@@ -447,7 +447,7 @@ class TestOutcomeMessages:
         begin.assert_not_called()
         assert seen["content"] == "alpha" and seen["title"] == "z0o2p16-args"
         assert seen["tags"] == "a,b" and seen["category"] == "c" and seen["ttl_days"] == 30
-        assert seen["source_agent"] == "dev" and seen["session_id"] == "s1"
+        assert seen["source_agent"] == "dev" and "session_id" not in seen
         assert seen["collection"].startswith("knowledge__z0o2p16-note__")
 
 

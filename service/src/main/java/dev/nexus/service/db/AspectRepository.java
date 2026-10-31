@@ -1421,6 +1421,54 @@ public final class AspectRepository {
     }
 
     /**
+     * List the rows still waiting for a worker: {@code status IN ('pending','in_progress')},
+     * FIFO order, no content (RDR-235 Phase 1 step 3, nexus-5r2sc.3.6: the upgrade-ladder
+     * rung that moves these rows to {@code aspects} tuples reads this, and only this).
+     *
+     * <p>{@code delay_s} is the seconds until {@code next_retry_at}, computed on the
+     * DATABASE clock (the claim gate's clock, so a worker host's skew cannot move it):
+     * {@code GREATEST(0, CEIL(EXTRACT(EPOCH FROM next_retry_at - now())))}, whole seconds
+     * rounded up, 0 when {@code next_retry_at} is NULL or already past. {@code limit <= 0}
+     * means unlimited, as in {@link #listPending}. Read-only: it flips nothing, so an
+     * {@code in_progress} row a live worker holds stays exactly as it is.
+     */
+    public List<Map<String, Object>> listWaiting(String tenant, int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Field<Long> delay = field(
+                "COALESCE(GREATEST(0, CEIL(EXTRACT(EPOCH FROM ({0} - now())))), 0)::bigint",
+                Long.class, ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT);
+            var q = ctx.select(
+                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
+                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                    ASPECT_EXTRACTION_QUEUE.DOC_ID,
+                    ASPECT_EXTRACTION_QUEUE.STATUS,
+                    delay)
+                .from(ASPECT_EXTRACTION_QUEUE)
+                .where(ASPECT_EXTRACTION_QUEUE.STATUS.in("pending", "in_progress"))
+                .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc());
+            var rows = (limit > 0 ? q.limit(limit) : q).fetch();
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (var r : rows) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("collection",   r.get(ASPECT_EXTRACTION_QUEUE.COLLECTION));
+                m.put("source_path",  r.get(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH));
+                String ch = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
+                m.put("content_hash", ch == null ? "" : ch);
+                m.put("retry_count",  r.get(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT));
+                String di = r.get(ASPECT_EXTRACTION_QUEUE.DOC_ID);
+                m.put("doc_id",       di == null ? "" : di);
+                m.put("status",       r.get(ASPECT_EXTRACTION_QUEUE.STATUS));
+                Long d = r.get(delay);
+                m.put("delay_s",      d == null ? 0L : d);
+                out.add(m);
+            }
+            return out;
+        });
+    }
+
+    /**
      * List terminal-{@code failed} rows, optionally scoped to one collection
      * (mirrors AspectExtractionQueue.list_failed). Drives the
      * {@code nx aspects requeue-failed} bulk-recovery CLI (nexus-2c51v).

@@ -2,6 +2,7 @@
 """Panel 2: Sessions & Health — system health dashboard."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -132,6 +133,10 @@ def _collect_aspect_queue_data_service() -> dict[str, Any]:
 
     ``{"present": True, "backend": "service", "total": N, "failed_count": N}``.
 
+    RDR-235 F18: both sides of the queue are counted. ``pending`` is the table's
+    pending plus the ``aspects`` tuple queue's ``available``; ``failed_count``
+    adds its ``dead`` tasks; ``claimed`` (in flight) is neither.
+
     Two deliberate shape differences from the sqlite collector, both because the
     service list endpoint does not carry the data — declared rather than filled
     with zeros, since a zero here is exactly the false-clean being fixed:
@@ -150,6 +155,14 @@ def _collect_aspect_queue_data_service() -> dict[str, Any]:
         q = HttpAspectQueue()
         pending = q.pending_count()
         failed = len(q.list_failed())
+        # RDR-235 F18: the `aspects` tuple queue is the other side of the depth.
+        # `available` is pending, `dead` is failed (the card keys its warn on
+        # failed_count), `claimed` is in flight and is neither. An unreadable
+        # tuple side falls to `unavailable` below: a count without it would
+        # understate the queue, which is the false-clean this collector avoids.
+        tuples = q.tuple_counts()
+        pending += tuples.available
+        failed += tuples.dead
     except (httpx.HTTPError, RuntimeError) as exc:
         return {"present": True, "backend": "service", "unavailable": True,
                 "error": str(exc)[:200]}
@@ -201,8 +214,9 @@ def _in_str(seconds: int) -> str:
 
 @router.get("/health")
 async def health_index(request: Request, scope: str = "project"):
-    """Panel 2: Sessions & Health — synchronous full render."""
-    data = _collect_health_data()
+    """Panel 2: Sessions & Health — full render. The collector is blocking (the doctor rows spawn processes
+    and make HTTP calls), so it runs on a worker thread and a hung probe cannot stall the event loop."""
+    data = await asyncio.to_thread(_collect_health_data)
     data["age_str"] = _age_str
     data["in_str"] = _in_str
     templates = request.app.state.templates
@@ -215,8 +229,8 @@ async def health_index(request: Request, scope: str = "project"):
 
 @router.get("/health/refresh")
 async def health_refresh(request: Request, scope: str = "project"):
-    """Manual refresh — returns HTMX partial."""
-    data = _collect_health_data()
+    """Manual refresh — returns HTMX partial. The blocking collector runs on a worker thread (see ``health_index``)."""
+    data = await asyncio.to_thread(_collect_health_data)
     data["age_str"] = _age_str
     data["in_str"] = _in_str
     templates = request.app.state.templates

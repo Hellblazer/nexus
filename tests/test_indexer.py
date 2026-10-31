@@ -141,7 +141,6 @@ def _reg(override=None):
 def _patches(db, *, cfg=None, extra=None):
     patches = {
         "nexus.frecency.batch_frecency": {"return_value": {}},
-        "nexus.indexer._git_metadata": {"return_value": {}},
         "nexus.config.load_config": {"return_value": cfg or _DEFAULT_CONFIG},
         "nexus.config.get_credential": {"return_value": "fake-key"},
         "nexus.db.make_t3": {"return_value": db},
@@ -339,6 +338,37 @@ def test_run_index_chunks_have_no_source_path(tmp_path):
     )
 
 
+def test_run_index_stamps_each_registered_files_frecency_on_its_catalog_document(tmp_path):
+    """nexus-6pfgb.9 (RDR-236 Phase 1): after the catalog hook resolves the documents, the run writes
+    each one's frecency score and ONE computed_at to its catalog meta (not per chunk, not per file
+    round trip), and a file the hook could not register is not stamped."""
+    from nexus.indexer import _run_index
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+    (repo / "lib.py").write_text("y = 2\n")
+    scores = {repo / "main.py": 0.6, repo / "lib.py": 0.2}
+    seen: list = []
+
+    def hook(**kw):
+        seen.extend(kw["indexed_files"])
+        return {f: "1.1.1" for f, _ct, _col in kw["indexed_files"] if f.name == "main.py"}
+
+    stamped: list = []
+    db, _col = _mock_db()
+    with _patches(db, extra={
+        "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+        "voyageai.Client": {"return_value": _voyage(1)},
+        "nexus.frecency.batch_frecency": {"return_value": scores},
+        "nexus.indexer._catalog_hook": {"side_effect": hook},
+        "nexus.indexer._write_frecency_meta": {"side_effect": lambda d, at, **k: stamped.append((d, at))},
+    }):
+        _run_index(repo, _reg())
+    assert {f.name for f, _ct, _col in seen} == {"main.py", "lib.py"}
+    assert len(stamped) == 1, stamped
+    docs, computed_at = stamped[0]
+    assert docs == {"1.1.1": 0.6} and computed_at
+
+
 # ── Content-hash dedup ──────────────────────────────────────────────────────
 
 def test_run_index_reindexes_when_embedding_model_changed(tmp_path):
@@ -383,6 +413,7 @@ def test_frecency_only_updates_frecency_score(tmp_path):
          patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=MagicMock()), \
          patch("nexus.db.make_t3", return_value=db), \
          patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
         # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
@@ -430,6 +461,7 @@ def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
          patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=MagicMock()), \
          patch("nexus.db.make_t3", return_value=db), \
          patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
         # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
@@ -481,6 +513,7 @@ def test_frecency_only_skips_unmapped_files_source_path_fallback_deleted_as_dead
          patch("nexus.frecency.batch_frecency", return_value={src: 0.42}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=MagicMock()), \
          patch("nexus.db.make_t3", return_value=db), \
          patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
         # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
@@ -503,6 +536,7 @@ def test_frecency_only_skips_unindexed_files(tmp_path):
     with patch("nexus.frecency.batch_frecency", return_value={src: 0.5}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+         patch("nexus.catalog.factory.make_catalog_writer", return_value=MagicMock()), \
          patch("nexus.db.make_t3", return_value=db), \
          patch("nexus.db.http_vector_client.get_http_vector_client", return_value=db):
         # nexus-sghyo (2026-08-06): _run_index_frecency_only routes
@@ -1773,7 +1807,7 @@ def test_index_code_file_skips_empty_text_chunks(tmp_path):
         return [[0.1] * 3 for _ in texts]
     with patch("nexus.chunker.chunk_file", return_value=[_chunk(), _chunk(text="", idx=1, count=2)]):
         r = _index_code_file(repo/"main.py", repo, "code__repo", "voyage-code-3",
-                             col, db, None, git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+                             col, db, None, now_iso="2026-01-01T00:00:00", score=1.0,
                              embed_fn=fake_embed_fn)
     assert r == 1
     assert len(embed_calls) == 1
@@ -1795,7 +1829,7 @@ def test_index_code_file_raises_when_all_chunks_empty(tmp_path):
     with patch("nexus.chunker.chunk_file", return_value=[_chunk(text="",fname="e.py",idx=i,count=3,ls=i,le=i) for i in range(3)]):
         with pytest.raises(UnextractableContentError, match="empty"):
             _index_code_file(repo/"e.py", repo, "code__repo", "voyage-code-3",
-                             col, db, v, git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+                             col, db, v, now_iso="2026-01-01T00:00:00", score=1.0)
     v.embed.assert_not_called(); db.upsert_chunks_with_embeddings.assert_not_called()
 
 
@@ -1955,7 +1989,7 @@ def _run_code(tmp_path, chunks=None, cache=None):
     ch = chunks or [_chunk()]; v = _voyage(len(ch))
     with patch("nexus.chunker.chunk_file", return_value=ch):
         return _index_code_file(repo/"main.py", repo, "code__repo", "voyage-code-3",
-                                col, db, v, git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+                                col, db, v, now_iso="2026-01-01T00:00:00", score=1.0,
                                 **_skip_kwargs(cache))
 
 def _run_prose(tmp_path, content="Line one\nLine two\n", cache=None):
@@ -1967,7 +2001,7 @@ def _run_prose(tmp_path, content="Line one\nLine two\n", cache=None):
     repo = tmp_path / "repo"; repo.mkdir(); f = repo / "notes.txt"; f.write_text(content)
     db, col = _mock_db()
     return _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
-                             col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+                             col, db, "fake-key", now_iso="2026-01-01T00:00:00", score=1.0,
                              **_skip_kwargs(cache))
 
 def _run_pdf(tmp_path, cache=None, n=1):
@@ -1992,7 +2026,7 @@ def _run_pdf(tmp_path, cache=None, n=1):
     with patch("nexus.doc_indexer._pdf_chunks", return_value=prep), \
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None):
         return _index_pdf_file(f, repo, "docs__repo", "voyage-context-3",
-                               col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+                               col, db, "fake-key", now_iso="2026-01-01T00:00:00", score=1.0,
                                embed_fn=lambda texts: [[0.1] * 3 for _ in texts],
                                **_skip_kwargs(cache))
 
@@ -2625,7 +2659,7 @@ def _cap_code(tmp_path, chunks):
     db.upsert_chunks_with_embeddings.side_effect = lambda *a, **kw: cap.extend(kw.get("metadatas", a[4] if len(a)>4 else []))
     with patch("nexus.chunker.chunk_file", return_value=chunks):
         _index_code_file(repo/"main.py", repo, "code__repo", "voyage-code-3",
-                         col, db, _voyage(len(chunks)), git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+                         col, db, _voyage(len(chunks)), now_iso="2026-01-01T00:00:00", score=1.0)
     return cap
 
 def test_code_indexer_chunk_text_hash(tmp_path):
@@ -2647,7 +2681,7 @@ def _cap_prose(tmp_path, content, ext):
     docs: list[str] = []; metas: list[dict] = []; db, col = _mock_db()
     db.upsert_chunks_with_embeddings.side_effect = lambda *a, **kw: (docs.extend(kw.get("documents",a[2] if len(a)>2 else [])), metas.extend(kw.get("metadatas",a[4] if len(a)>4 else [])))
     _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
-                      col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+                      col, db, "fake-key", now_iso="2026-01-01T00:00:00", score=1.0)
     return metas, docs
 
 def _upload_kwargs(db):
@@ -2671,7 +2705,7 @@ def test_prose_fallback_upload_sends_delete_keys(tmp_path):
     repo = tmp_path / "repo"; repo.mkdir(); f = repo / "notes.txt"; f.write_text("Line one\nLine two\n")
     db, col = _mock_db()
     _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
-                      col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+                      col, db, "fake-key", now_iso="2026-01-01T00:00:00", score=1.0)
     _assert_names_dropped_owned_keys(_upload_kwargs(db))
 
 
@@ -2681,7 +2715,7 @@ def test_code_fallback_upload_sends_delete_keys(tmp_path):
     db, col = _mock_db(); ch = [_chunk()]
     with patch("nexus.chunker.chunk_file", return_value=ch):
         _index_code_file(repo/"main.py", repo, "code__repo", "voyage-code-3",
-                         col, db, _voyage(len(ch)), git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+                         col, db, _voyage(len(ch)), now_iso="2026-01-01T00:00:00", score=1.0)
     _assert_names_dropped_owned_keys(_upload_kwargs(db))
 
 def test_prose_indexer_markdown_metadata(tmp_path):

@@ -19,9 +19,14 @@ whose source the run never had is ``None``. A summary that had to be cut to fit 
 **Measurement counters (nexus-jypmj.3.10), additive to version 1.** ``coverage`` gains ``reply_classes``,
 ``reply_by_stream``, ``assessment_call_log`` (``[stream, facets, reply_class]`` per call, at most 40, and
 ``assessment_call_log_truncated``), ``accepted_records``, ``unusable_calls``, ``raised_calls``, ``failure_cause``
-(``raised_call``, ``unusable_reply``, ``mixed`` or ``none``), ``facets_conflicted`` (the conflicted subset of
-``facets.covered``), ``unassessed_by_cause`` and ``repair_entered``; ``repair`` gains ``entered``. No existing key
-changed meaning, so the version stays 1. The engine stores ``run_summary`` as opaque JSONB and checks only that it is an
+(``raised_call``, ``unusable_reply``, ``mixed``, ``budget_skip``, ``deadline_skip`` or ``none``), ``facets_conflicted`` (the conflicted subset of
+``facets.covered``), ``unassessed_by_cause`` and ``repair_entered``; ``repair`` gains ``entered``.
+**Skip causes (shakedown 7.89.0 umbrella class c).** ``coverage`` also gains ``skipped_budget_calls`` and
+``skipped_deadline_calls``, per planned call that never started (``unassessed_by_cause`` is per facet and reads 0 when
+the one call that ran covered every facet). ``failure_cause`` gains the values ``budget_skip`` and ``deadline_skip``,
+used only when at least one call ran and other planned calls were skipped, so a run of that shape that used to read
+``none`` now names its cause. An assessment skipped whole (no call ran) still reads ``none``. The key set only grows and
+no existing value is redefined, so the version stays 1. The engine stores ``run_summary`` as opaque JSONB and checks only that it is an
 object, holds no U+0000 and fits the size cap (``TelemetryHandler.parseRunSummary``), so no engine change is needed.
 The cut ladder drops ``coverage.assessment_call_log`` before ``eligibility`` and ``request``; the aggregates survive
 until ``coverage`` itself goes. All of it is closed names and counts: no question, facet or evidence text, with or
@@ -194,6 +199,7 @@ def _coverage_block(coverage: Any) -> dict[str, Any] | None:
     assessment = coverage.ledger.assessment
     block["assessment_latency_ms"] = assessment.latency_ms
     block["assessment_skipped_items"] = assessment.skipped_items
+    block["assessment_anchors_total"] = assessment.anchors_total
     # nexus-jypmj.3.10, additive to version 1: what each assessment call came back as (closed names and counts),
     # the failed outcome split into an unusable reply and a raised call. ``assessment_call_log`` lists
     # ``[stream, facets, reply_class]`` per call, in order.
@@ -203,6 +209,10 @@ def _coverage_block(coverage: Any) -> dict[str, Any] | None:
     block["unusable_calls"] = assessment.unusable_calls
     block["raised_calls"] = assessment.raised_calls
     block["failure_cause"] = assessment.failure_cause
+    # Planned calls that never started because the allowance or the deadline share was spent (per call; the
+    # unassessed_by_cause counters are per facet and miss a skipped call whose facets another call covered).
+    block["skipped_budget_calls"] = assessment.skipped_budget_calls
+    block["skipped_deadline_calls"] = assessment.skipped_deadline_calls
     block["assessment_call_log"] = [[c.stream, c.facets, c.reply] for c in assessment.call_log[:_MAX_CALLS_LISTED]]
     block["assessment_call_log_truncated"] = len(assessment.call_log) > _MAX_CALLS_LISTED
     return block

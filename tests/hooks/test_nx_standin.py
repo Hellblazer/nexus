@@ -185,7 +185,7 @@ def test_the_tool_descriptions_give_the_tables_sizes() -> None:
         )
     }
     assert rows == {
-        "Local": ("0.8", "1.0", "2.8 to 3.0"), "Cloud": ("0.5", "0.6", "2.0 to 2.3"), "CLI only": ("0.5", "0.6", "2.0 to 2.3"),
+        "Local": ("0.8", "1.0", "2.6 to 2.9"), "Cloud": ("0.5", "0.6", "1.9 to 2.2"), "CLI only": ("0.5", "0.6", "1.9 to 2.2"),
     }, rows
     for choice in ("Local", "Cloud", "CLI only"):
         mac, linux, disk = rows[choice]

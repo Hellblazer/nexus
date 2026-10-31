@@ -64,6 +64,13 @@ from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 from nexus.db.t2.records import AspectRecord, HighlightRecord
 
+
+@pytest.fixture(autouse=True)
+def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module tests the aspect queue TABLE path, so it says so: the unset
+    default is ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1)."""
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+
 _SRC_T2_DIR = Path(__file__).resolve().parent.parent.parent / "src" / "nexus" / "db" / "t2"
 _BYPASS_PATTERN = re.compile(r"self\._client\.(get|post|put|delete|patch|request)\(")
 

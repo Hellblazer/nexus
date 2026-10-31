@@ -122,6 +122,9 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "ttl_days",
     "frecency_score",
     "source_agent",
+    # Retired writer (nexus-6pfgb.4): no factory call stamps it. It stays accepted so an
+    # old row echoed back by a read-modify-write (commands/enrich.py) still validates;
+    # the key-table retirement (6pfgb.27) removes it.
     "session_id",
     # RDR-101 Phase 5c dropped ``git_meta`` (consolidated git
     # provenance JSON blob): zero non-self-referential readers in
@@ -134,11 +137,11 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # DT-sourced chunks spend the extra key — file chunks stay under the cap.
     "extraction_source",
     # nexus-1oguj: which PDF-extraction BACKEND actually produced this
-    # chunk's text (``mineru`` | ``pymupdf`` | ``pymupdf_normalized``, or
-    # the honest degraded-aggregate ``mineru+degraded`` when any page settled
-    # below the first rung of RDR-237's per-page ladder; documents indexed
-    # before RDR-237 can carry the values of the extractor it removed, which
-    # stay readable). Load-bearing for retroactively scoping extractor
+    # chunk's text (``mineru`` | ``pymupdf``, or the honest degraded-aggregate
+    # ``mineru+degraded`` when any page settled below the first rung of RDR-237's
+    # per-page ladder, rung 3 included; documents indexed before RDR-237 can carry
+    # the values of the extractor it removed and the legacy ``pymupdf_normalized``,
+    # which stay readable and which nothing writes now). Load-bearing for retroactively scoping extractor
     # regressions (e.g. nexus-gtltb's mineru-corruption blast radius) —
     # previously produced at extraction time and asserted in tests but
     # discarded before storage. Empty for non-PDF content_types
@@ -153,7 +156,11 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # discarded once the process exits) — a deliberately-degraded
     # document became indistinguishable from a silent failure one
     # shakedown cycle later, reproducing this bead's own complaint
-    # shape. Searchable via ``where=quality_gate_overridden=true`` so a
+    # shape. The document's own record is its catalog ``meta``
+    # (nexus-6pfgb.6) and the audit is ``nx catalog list --meta
+    # quality_gate_overridden=true`` (nexus-6pfgb.16): this chunk-row copy
+    # is the LAST WRITER's, so ``where=quality_gate_overridden=true`` loses
+    # a document whose chunk another document indexed later. A
     # shakedown/audit has a durable handle on which documents were
     # accepted with known-degraded text. ``False`` default is dropped by
     # ``normalize`` (see Step 2e) so the common healthy-extraction chunk
@@ -299,8 +306,8 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
         normalised.pop("extraction_source", None)
 
     # Step 2d: drop the nexus-1oguj extraction_method key when empty.
-    # Only PDF chunks pass a real value (mineru / pymupdf /
-    # pymupdf_normalized / mineru+degraded, or a legacy value from before RDR-237);
+    # Only PDF chunks pass a real value (mineru / pymupdf / mineru+degraded,
+    # or a legacy value from before RDR-237, pymupdf_normalized among them);
     # markdown/code/prose chunks never set it and must not spend a metadata
     # slot on "".
     if not normalised.get("extraction_method", ""):
@@ -428,7 +435,6 @@ def make_chunk_metadata(
     ttl_days: int | None = 0,
     frecency_score: float = 0.0,
     source_agent: str = "nexus-indexer",
-    session_id: str = "",
     # Provenance — RDR-139 Layer D. ``file`` default is dropped by normalize.
     extraction_source: str = "file",
     # Provenance — nexus-1oguj. Which PDF extractor produced the chunk's
@@ -475,7 +481,6 @@ def make_chunk_metadata(
         "indexed_at": indexed_at,
         "frecency_score": frecency_score,
         "source_agent": source_agent,
-        "session_id": session_id,
         "extraction_source": extraction_source,
         "extraction_method": extraction_method,
         "quality_gate_overridden": quality_gate_overridden,

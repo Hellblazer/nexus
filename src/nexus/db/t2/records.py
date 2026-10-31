@@ -170,6 +170,12 @@ class TupleRow:
     and an engine that renders no such key; a reader that needs the start and
     finds ``None`` on a claimed row must treat it as unknown and use another
     source.
+
+    ``available_at`` (bead nexus-p909o, RDR-235) is when a delayed or
+    retry-pending row becomes claimable (``out`` ``delay_s``, ``nack``
+    ``retry_after_s``). ``None`` covers a row that was never delayed, a row a
+    claim-clearing path (release, nack, sweep) cleared the mark on, and an
+    engine that renders no such key. A claim itself leaves the past stamp.
     """
 
     id: str
@@ -191,6 +197,7 @@ class TupleRow:
     sender_session: str | None = None
     sender_session_known: bool = False
     claimed_at: str | None = None
+    available_at: str | None = None
 
     def effective_claim_state(self, now: datetime | None = None) -> str | None:
         """``claim_state`` as a reader should see it: a claim whose
@@ -296,6 +303,19 @@ class SubspaceCensus:
     #: counting them, as before). ``0`` from an engine that predates the
     #: field, which cannot tell and so reports none.
     lapsed: int = 0
+    #: Bead nexus-p909o (RDR-235): the part of ``available`` still waiting out
+    #: an ``available_at`` (a retry or an ``out`` delay); ``available`` keeps
+    #: counting it. ``0`` from an engine that predates the field.
+    delayed: int = 0
+    #: Bead nexus-p909o: the oldest ``created_at`` among live unclaimed rows a
+    #: claim could take now (``available_at`` NULL or reached); ``None`` when
+    #: there are none, and also from an engine that predates the field --
+    #: ``claimable_known`` tells the two apart.
+    oldest_claimable_created_at: str | None = None
+    #: ``True`` when the engine rendered ``oldest_claimable_created_at`` (so a
+    #: ``None`` means "no claimable row"), ``False`` when it did not (so a
+    #: ``None`` means "this engine cannot say"). Unknown is the safe default.
+    claimable_known: bool = False
 
 
 @dataclass(frozen=True)
@@ -360,9 +380,9 @@ class WaitSpec:
     a fresh subscription never walks the topic's backlog.
 
     ``wait`` is an internal transport method: the session's own MCP server
-    lifespan waiter (:mod:`nexus.mcp.channel`) is its only caller (RDR-211
-    Open Question 6, Sam's decision). There is no MCP tool or CLI verb for
-    it, so nothing outside that waiter constructs a ``WaitSpec`` today.
+    lifespan waiter (:mod:`nexus.mcp.channel`) was its only caller (RDR-211
+    Open Question 6, Sam's decision); RDR-233 adds ``nx tuple wait``
+    (:mod:`nexus.tuple_wait`) for a session the channel cannot reach.
     """
 
     subspace: str

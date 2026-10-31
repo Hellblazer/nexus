@@ -17,9 +17,10 @@ Fourteen operations (RDR-205 §Technical Design "Operations", verbatim
 signatures — ``in`` is a Python keyword, spelled ``in_`` here; every
 other name matches). RDR-206 added ``renew``; RDR-211 Phase 1 Step 1
 (bead nexus-rplay.9) added ``release``, ``wait`` and ``park_stats`` --
-the latter two are internal transport with no MCP tool or CLI verb (Sam's
-decision, RDR-211 Open Question 6): the session MCP server's own lifespan
-waiter and a later doctor-row bead are their only intended callers:
+the latter two are internal transport with no MCP tool (Sam's decision,
+RDR-211 Open Question 6): the session MCP server's own lifespan waiter, a
+doctor-row bead and, for a session without the channel, ``nx tuple wait``
+(RDR-233) are their callers:
 
     out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
     rd (subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [TupleRow]
@@ -424,6 +425,15 @@ def _check_field_size(field: str, value: str | None, limit: int) -> None:
         )
 
 
+def _check_whole_seconds(field: str, value: int | None) -> None:
+    """Refuse a negative or non-integer seconds value before sending (the
+    engine answers 400 for both; a bool is an int in Python and is not seconds)."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field} must be a whole number of seconds >= 0, got {value!r}")
+
+
 def _check_pattern_sizes(pattern: dict[str, str] | None) -> None:
     if not pattern:
         return
@@ -511,6 +521,9 @@ def _body_to_tuple_row(body: dict[str, Any]) -> TupleRow:
         # predating it) and a null both read as None, which a caller must treat
         # as "unknown, use another source", so no known-flag is carried.
         claimed_at=body.get("claimed_at"),
+        # nexus-p909o (RDR-235): when a delayed row becomes claimable. A missing
+        # key (an engine predating it) and a null both read as None: no delay known.
+        available_at=body.get("available_at"),
     )
 
 
@@ -526,6 +539,12 @@ def _body_to_census(body: dict[str, Any]) -> SubspaceCensus:
         oldest_created_at=body.get("oldest_created_at"),
         newest_created_at=body.get("newest_created_at"),
         lapsed=int(body.get("lapsed", 0)),
+        # nexus-p909o (RDR-235): both absent from an engine that predates them. The
+        # known flag keeps "no claimable row" (key present, null) apart from "this
+        # engine cannot say" (key missing).
+        delayed=int(body.get("delayed", 0)),
+        oldest_claimable_created_at=body.get("oldest_claimable_created_at"),
+        claimable_known="oldest_claimable_created_at" in body,
     )
 
 
@@ -800,6 +819,8 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         *,
         nonce: str | None = None,
         ttl_seconds: int | None = None,
+        delay_s: int | None = None,
+        mode: str | None = None,
     ) -> str:
         """Write a tuple. Idempotent by construction (RDR-205 §Technical
         Design "Operations"): the id is derived from the template's
@@ -811,7 +832,64 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         the engine's own checks (the GLOBAL body cap only — a template's own
         lower ``max_body_bytes`` is engine-side knowledge this client has no
         copy of, so a body under this cap can still be refused engine-side).
+
+        *delay_s* and *mode* (RDR-235 E1/E4, engine-service-v0.1.169, the
+        client floor): each is sent only when set, so an unset call is
+        byte-identical to what it was. *delay_s* is a whole number of
+        seconds before the tuple becomes claimable. *mode* is ``"replace"``
+        or None; use :meth:`out_replace` to also get the engine's outcome.
+        An engine that predates a field would ignore it and answer 200, so
+        this method does not guess: the floor bump is what guarantees the
+        engine knows both.
         """
+        return self._out_raw(
+            subspace, keys, dims, body, nonce, ttl_seconds, delay_s, mode,
+        )["id"]
+
+    def out_replace(
+        self,
+        subspace: str,
+        keys: dict[str, str],
+        dims: dict[str, str] | None = None,
+        body: str | None = None,
+        *,
+        nonce: str,
+        ttl_seconds: int | None = None,
+        delay_s: int | None = None,
+    ) -> tuple[str, str]:
+        """``out`` with ``mode="replace"`` (RDR-235 E4): returns ``(id, outcome)``
+        where *outcome* is ``created``, ``replaced`` or ``dirtied``. Only valid
+        on an ``id_from: keys+nonce`` template (the engine answers 400
+        otherwise), so *nonce* is required.
+
+        An answer with no ``outcome`` means the engine ran a plain out: it
+        predates the field and ignored ``mode``. That is refused here, loud,
+        instead of returned as a replace that did not happen."""
+        if not nonce:
+            raise ValueError("nonce must not be empty: mode=replace is for keys+nonce templates")
+        r = self._out_raw(
+            subspace, keys, dims, body, nonce, ttl_seconds, delay_s, "replace",
+        )
+        outcome = r.get("outcome")
+        if not outcome:
+            raise RuntimeError(
+                "the engine answered a mode=replace out with no 'outcome': it "
+                "predates RDR-235 E4 (engine-service-v0.1.169) and ran a plain out; "
+                "converge the engine to the version this client requires"
+            )
+        return r["id"], outcome
+
+    def _out_raw(
+        self,
+        subspace: str,
+        keys: dict[str, str],
+        dims: dict[str, str] | None,
+        body: str | None,
+        nonce: str | None,
+        ttl_seconds: int | None,
+        delay_s: int | None,
+        mode: str | None,
+    ) -> dict[str, Any]:
         if not subspace:
             raise ValueError("subspace must not be empty")
         _check_field_size("subspace", subspace, _MAX_SUBSPACE_BYTES)
@@ -821,6 +899,9 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             _check_field_size(f"dims.{k}", v, _MAX_FIELD_VALUE_BYTES)
         _check_field_size("nonce", nonce, _MAX_NONCE_BYTES)
         _check_field_size("body", body, _MAX_BODY_BYTES)
+        if mode is not None and mode != "replace":
+            raise ValueError(f"mode must be 'replace' or None, got {mode!r}")
+        _check_whole_seconds("delay_s", delay_s)
         payload: dict[str, Any] = {"subspace": subspace, "keys": keys or {}}
         if dims:
             payload["dims"] = dims
@@ -830,8 +911,11 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["nonce"] = nonce
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
-        r = self._post("/out", payload)
-        return r["id"]
+        if delay_s is not None:
+            payload["delay_s"] = delay_s
+        if mode is not None:
+            payload["mode"] = mode
+        return self._post("/out", payload)
 
     # ── rd / rdp ──────────────────────────────────────────────────────────
 
@@ -1097,16 +1181,36 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         )
         return datetime.fromisoformat(r["lease_until"])
 
-    def nack(self, claim_id: str, claimant: str) -> None:
+    def nack(
+        self,
+        claim_id: str,
+        claimant: str,
+        *,
+        retry_after_s: int | None = None,
+        dead: bool = False,
+    ) -> None:
         """Release the claim; counts an attempt toward the template's
-        ``max_attempts`` (dead-lettered at the cap)."""
+        ``max_attempts`` (dead-lettered at the cap).
+
+        *retry_after_s* (RDR-235 E1) holds the task back for that many whole
+        seconds on the database clock; *dead* (RDR-235 E4) dead-letters it at
+        once, attempt counted. Each is sent only when set, so a plain nack is
+        byte-identical to what it was. They need engine-service-v0.1.169 or
+        later (the client floor): an older engine ignores unknown keys and
+        would run a plain nack, which is why the floor bump carries them."""
         if not claim_id:
             raise ValueError("claim_id must not be empty")
         if not claimant:
             raise ValueError("claimant must not be empty")
         _check_field_size("claim_id", claim_id, _MAX_CLAIM_ID_BYTES)
         _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
-        self._post("/nack", {"claim_id": claim_id, "claimant": claimant})
+        _check_whole_seconds("retry_after_s", retry_after_s)
+        payload: dict[str, Any] = {"claim_id": claim_id, "claimant": claimant}
+        if retry_after_s is not None:
+            payload["retry_after_s"] = retry_after_s
+        if dead:
+            payload["dead"] = True
+        self._post("/nack", payload)
 
     def release(self, claim_id: str, claimant: str) -> None:
         """End a live claim WITHOUT counting an attempt (RDR-211 Phase 1
@@ -1149,11 +1253,10 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         never present with an empty ``tuples``.
 
         Internal transport (RDR-211 Open Question 6, Sam's decision): the
-        session's own MCP server lifespan waiter (a later bead) is the
-        ONLY intended caller. There is deliberately no MCP tool or CLI verb
-        for ``wait`` -- a session parks on its own mailboxes and subscribed
-        board topics through that waiter, never by calling this method
-        directly.
+        session's own MCP server lifespan waiter is its caller, and
+        ``nx tuple wait`` (RDR-233, :mod:`nexus.tuple_wait`) for a
+        session launched without the channel. There is no MCP tool for
+        ``wait``.
 
         Refused BEFORE sending, client-side, with :class:`SchemaViolationError`
         -- the SAME class and reason the engine would refuse it with,
@@ -1269,9 +1372,15 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             return rows
         return rows, (r or {}).get("next_cursor")
 
-    def subspace_stats(self, subspace: str) -> SubspaceCensus:
-        """The exact-name form of :meth:`subspace_list` for one subspace."""
+    def subspace_stats(
+        self, subspace: str, *, timeout: float | None = None,
+    ) -> SubspaceCensus:
+        """The exact-name form of :meth:`subspace_list` for one subspace.
+
+        *timeout* (RDR-235, additive): a per-request cap in seconds, for a
+        caller that shares a longer-timeout client (the queue-depth hook shares
+        the index run's). ``None`` sends the request exactly as before."""
         if not subspace:
             raise ValueError("subspace must not be empty")
-        r = self._get("/subspace_stats", {"subspace": subspace})
+        r = self._get("/subspace_stats", {"subspace": subspace}, timeout=timeout)
         return _body_to_census(r)

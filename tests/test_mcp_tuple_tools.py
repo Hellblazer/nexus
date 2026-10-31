@@ -28,9 +28,11 @@ import time
 import uuid
 from datetime import datetime
 
+import httpx
 import pytest
 
 from nexus.db.t2.http_tuple_store import HttpTupleStore, ReplyNotWrittenError
+from nexus.mcp import core as mcp_core
 
 from nexus.mcp.core import (
     mailbox_send,
@@ -209,6 +211,60 @@ class TestTupleInAckNack:
         )
         assert claim2 is not None
         assert claim2["tuple"]["body"] == "retry-me"
+
+    def test_nack_dead_retry_after_out_delay_and_out_replace_reach_the_engine(self, t2_service_env) -> None:
+        """RDR-235 transport: the MCP tools pass ``dead``, ``retry_after_s``, ``delay_s`` and
+        ``mode="replace"``.
+
+        One scenario, four branches, each assertion naming its own (nexus-9edxe folded the
+        replace test in as the last branch, so a failure above hides it): the delayed task is
+        written FIRST, so a ``delay_s`` the tool dropped would be claimed ahead of the
+        immediate one."""
+        keys = {"queue": "aspects"}
+        claimant = _uniq("claimant")
+        tuple_out("aspects", keys, None, "delayed", nonce=_uniq("doc"), delay_s=3600)
+        tuple_out("aspects", keys, None, "now", nonce=_uniq("doc"))
+        claim = tuple_in("aspects", keys, claimant=claimant, lease_s=30)
+        assert claim is not None
+        assert claim["tuple"]["body"] == "now", "delay_s held the earlier task back"
+        assert "Nacked" in tuple_nack(claim["claim_id"], claimant, retry_after_s=3600)
+        assert tuple_in("aspects", keys, claimant=claimant, lease_s=30) is None, (
+            "retry_after_s held the task back"
+        )
+        stats = tuple_stats("aspects")
+        assert stats["total"] == 2 and stats["dead"] == 0
+
+        doc2 = _uniq("doc")
+        tuple_out("aspects", keys, None, "{}", nonce=doc2, delay_s=0)
+        claim2 = tuple_in("aspects", keys, claimant=claimant, lease_s=30)
+        assert claim2 is not None
+        assert "Nacked" in tuple_nack(claim2["claim_id"], claimant, dead=True)
+        assert tuple_stats("aspects")["dead"] == 1, "dead=True dead-lettered at once"
+
+        # mode="replace" reports the outcome and keeps one row per nonce.
+        doc = _uniq("doc")
+        first = tuple_out("aspects", keys, None, '{"v":1}', nonce=doc, mode="replace")
+        second = tuple_out("aspects", keys, None, '{"v":2}', nonce=doc, mode="replace")
+        (id1, outcome1), (id2, outcome2) = first.split(), second.split()
+        assert (outcome1, outcome2) == ("created", "replaced"), "replace: the outcome"
+        assert id1 == id2, "replace: one nonce is one task id"
+        rows = [r for r in tuple_rd("aspects", keys, n=300) if r["id"] == id1]
+        assert len(rows) == 1 and rows[0]["body"] == '{"v":2}', "replace: the new body, on one row"
+
+    def test_out_mode_replace_without_a_nonce_is_an_error(self, monkeypatch) -> None:
+        """The refusal is the client's, before any request: no engine and no tenant."""
+        def no_request(request: httpx.Request) -> httpx.Response:
+            raise AssertionError(f"a nonce-less replace must not reach the wire: {request.url}")
+
+        store = HttpTupleStore(base_url="http://mock.test", _token="test-token")
+        store._client = httpx.Client(transport=httpx.MockTransport(no_request))
+
+        class _Db:
+            tuples = store
+
+        monkeypatch.setattr(mcp_core, "_t2_index_write", lambda fn, *, op: fn(_Db()))
+        msg = tuple_out("aspects", {"queue": "aspects"}, None, "{}", mode="replace")
+        assert "Error" in msg and "nonce" in msg
 
     def test_ack_unknown_claim_returns_error(self, t2_service_env) -> None:
         msg = tuple_ack("0" * 64, "nobody")

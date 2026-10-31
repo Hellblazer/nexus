@@ -36,7 +36,8 @@ def test_lists_exactly_the_reapable_rows_of_the_fixture(env):
     assert listed == fx.reapable, f"listed {listed}, expected exactly {fx.reapable}\n{result.output}"
     for chash in fx.reapable:
         line = next(line for line in result.output.splitlines() if chash in line)
-        assert "wbfpw19-list orphan" in line  # the chunk's title, from its own metadata
+        # The label is the chunk's text prefix (RDR-236 Phase 3): the row's own title is never read.
+        assert "wbfpw19-list orphan" in line, line
         assert re.search(r"\b\d+d\b", line), line  # age in days, from ownerless_since
         assert "Z" in line  # the timestamps, as the engine reports them
     # Read-only: listing moved nothing.
@@ -49,6 +50,7 @@ def test_lists_exactly_the_reapable_rows_of_the_fixture(env):
     rows = list(client.reapable_chunks(fx.name))
     assert {r["chash"] for r in rows} == fx.reapable
     for r in rows:
+        assert r["text_prefix"].startswith("wbfpw19-list orphan"), r
         assert datetime.fromisoformat(r["ownerless_since"]) >= datetime.fromisoformat(r["last_written_at"]), r
     assert set(client.get_collection(fx.name).get_all_metadata(include_non_live=True)["ids"]) == fx.everything
 

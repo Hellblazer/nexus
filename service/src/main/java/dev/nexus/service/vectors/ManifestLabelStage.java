@@ -6,7 +6,10 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TenantScope;
 
+import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.Record;
+import org.jooq.ResultQuery;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
@@ -19,6 +22,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -82,20 +87,38 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       document's year 0 or empty string is "not recorded" (unlabelled); its citation count 0 is a
  *       count.</li>
  * </ul>
+ * <ul>
+ *   <li>{@code title} (nexus-6pfgb.25) reads {@code catalog_documents.title}; an empty catalog title falls back to
+ *       the chunk row's, so a legacy document keeps matching its row title.</li>
+ *   <li>{@code content_type} (nexus-6pfgb.25) is answered by value, see {@link #CONTENT_TYPE_KEY} and {@link
+ *       ContentType}. {@code source_format} is not a column yet (nexus-6pfgb.23), so the format is derived here
+ *       from the catalog's content type and file extension by the rule that column will carry, and the engine's
+ *       in-SQL pre-filter ({@code manifest_search_<dim>}, vectors-041) derives it by the same expression.</li>
+ * </ul>
  * The catalog document's {@code metadata} keys ({@code tags}, {@code category}, {@code ttl_days} and the
  * rest) are NOT answered here: no writer puts them on a catalog document yet (epic nexus-6pfgb, wave 1), so
  * answering them would only move those filters under the {@link #OVERFETCH} cut for the same answers. They
  * stay predicates on the chunk row, inside the search.
+ *
+ * <p><b>In-SQL pre-filter (nexus-p89h4, nexus-6pfgb.25).</b> The positive form of the predicates {@link
+ * ManifestPushdown} can express (an equality or {@code $in} on a label, {@code title}, {@code source_author} or an
+ * id-valued bib key, {@code content_type} by value, a range on {@code page_number}) is ALSO sent into the search as
+ * an EXISTS on the manifest ({@code manifest_search_<dim>}), so the scan keeps walking until the page is full and a
+ * rare label is found. That EXISTS only admits a chunk; this stage still names the qualifying owner per document,
+ * and it is the exact judge of every operator, so the in-SQL form is built to admit a superset of what the stage
+ * keeps and never less.
+ *
  * Operators, the unlabelled rules, the per-document lowest-passing-position
  * expansion and the cut are the section labels'. An expanded row speaks for its document on the document
  * keys the filter names: the owner's value replaces the chunk row's, and an authoritative absence (an
  * unenriched document's bib) removes the key.
  *
  * <p><b>Known cost.</b> The search is cut at {@link #OVERFETCH} times the limit before this stage
- * filters, so a filter that rejects most of the neighbourhood (a positive filter on a rare label) can
- * return fewer rows than the limit where the old in-index {@code hnsw.iterative_scan} would have kept
- * walking. The filter that matters in practice, a negative one ({@code section_type!=references}),
- * rejects a small fraction.
+ * filters. A positive predicate {@link ManifestPushdown} carries into the search no longer starves on it (the
+ * nexus-p89h4 fix). A predicate it does not carry (a negative operator, {@code indexed_at}, {@code bib_year},
+ * {@code bib_venue}, {@code bib_authors}, {@code bib_citation_count}) still depends on the cut: a filter that
+ * rejects most of the neighbourhood returns fewer rows than the limit. The negative filter that matters in
+ * practice ({@code section_type!=references}) rejects a small fraction.
  */
 final class ManifestLabelStage {
 
@@ -112,8 +135,24 @@ final class ManifestLabelStage {
     static final Set<String> BIB_KEYS = Set.of("bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi");
 
+    /**
+     * {@code title}: the catalog title (the filename for code and prose), the chunk row's only while the catalog
+     * title is empty (nexus-6pfgb.25, Sam's ruling nexus-6pfgb.2). The per-position label is {@code section_title}.
+     */
+    static final String TITLE_KEY = "title";
+
+    /**
+     * {@code content_type}: answered by value (nexus-6pfgb.25, Sam's ruling nexus-6pfgb.3). {@code pdf} and
+     * {@code markdown} read the format the catalog derives for the document ({@link #derivedFormat}), the chunk
+     * row's value when it derives none; every other value ({@code code}, {@code prose}, {@code paper}, {@code
+     * rdr}, {@code knowledge}) reads {@code catalog_documents.content_type}, so {@code prose} includes a markdown
+     * file.
+     */
+    static final String CONTENT_TYPE_KEY = "content_type";
+
     /** Every document-level key this stage answers. */
-    static final Set<String> DOC_KEYS = Set.copyOf(union(Set.of(AUTHOR_KEY, INDEXED_AT_KEY), BIB_KEYS));
+    static final Set<String> DOC_KEYS = Set.copyOf(union(
+        Set.of(AUTHOR_KEY, INDEXED_AT_KEY, TITLE_KEY, CONTENT_TYPE_KEY), BIB_KEYS));
 
     /**
      * The answered keys whose values are numbers. Only these compare numerically across a number and its text
@@ -124,6 +163,75 @@ final class ManifestLabelStage {
 
     /** Every key this stage answers: the per-position labels and the document-level keys. */
     static final Set<String> ANSWERED_KEYS = Set.copyOf(union(LABEL_KEYS, DOC_KEYS));
+
+    /**
+     * A document's answer on {@code content_type}: the catalog's own content type ({@code null} when empty) and the
+     * format {@link #derivedFormat} gives it ({@code null} when it derives none), with the chunk row's value as
+     * the fallback each of them leaves open. The operand picks which one speaks: see {@link #matches}.
+     *
+     * @param rowType the chunk row's {@code content_type}, filled in per hit; {@code null} in the lookup
+     */
+    record ContentType(String catalogType, String format, Object rowType) {
+        ContentType withRow(Object row) {
+            return new ContentType(catalogType, format, row);
+        }
+
+        /** The value an expanded row shows for this document: its format when it has one, else its catalog type. */
+        String display() {
+            return format != null ? format : catalogType;
+        }
+    }
+
+    /** The file extension the way Python's {@code Path.suffix} reads it: no dotfile, no dot in a directory. */
+    private static final Pattern EXTENSION = Pattern.compile("[^/.]\\.([^./]+)$");
+
+    /**
+     * The format the catalog derives for a document (the rule nexus-6pfgb.23's {@code source_format} column will
+     * carry, computed here until it ships): the extension is read first; {@code pdf} (or catalog type {@code pdf}
+     * or {@code paper}) is {@code pdf}, {@code md} and {@code markdown} are {@code markdown} whatever the catalog
+     * type, then catalog {@code code} is {@code code} and {@code prose} or {@code rdr} is {@code prose}. Anything
+     * else (a note, a file with no extension, a type outside the rules) derives none.
+     */
+    static String derivedFormat(String contentType, String filePath) {
+        String ext = null;
+        if (filePath != null) {
+            Matcher m = EXTENSION.matcher(filePath);
+            if (m.find()) {
+                ext = m.group(1).toLowerCase(java.util.Locale.ROOT);
+            }
+        }
+        String type = contentType == null ? "" : contentType;
+        if ("pdf".equals(ext) || "pdf".equals(type) || "paper".equals(type)) {
+            return "pdf";
+        }
+        if ("md".equals(ext) || "markdown".equals(ext)) {
+            return "markdown";
+        }
+        if ("code".equals(type)) {
+            return "code";
+        }
+        if ("prose".equals(type) || "rdr".equals(type)) {
+            return "prose";
+        }
+        return null;
+    }
+
+    /**
+     * Whether a document answers to {@code operand} on {@code content_type}. {@code pdf} and {@code markdown}
+     * are formats: the derived one when the catalog has one, else the chunk row's value. Every other word is a
+     * catalog content type: the catalog's when it has one, else the chunk row's.
+     */
+    static boolean matches(ContentType ct, Object operand) {
+        String wanted = String.valueOf(operand);
+        if ("pdf".equals(wanted) || "markdown".equals(wanted)) {
+            return ct.format() != null ? ct.format().equals(wanted) : wanted.equals(textOf(ct.rowType()));
+        }
+        return ct.catalogType() != null ? ct.catalogType().equals(wanted) : wanted.equals(textOf(ct.rowType()));
+    }
+
+    private static String textOf(Object o) {
+        return o == null ? null : String.valueOf(o);
+    }
 
     private static Set<String> union(Set<String> first, Set<String> second) {
         Set<String> all = new LinkedHashSet<>(first);
@@ -142,7 +250,7 @@ final class ManifestLabelStage {
     static final int OVERFETCH_CEILING = 1200;
 
     /** Chashes per manifest lookup (a bind-parameter budget well under PostgreSQL's 32767). */
-    private static final int LOOKUP_BATCH = 300;
+    private static final int LOOKUP_BATCH = PgVectorRepository.SOURCE_URI_JOIN_BATCH;
 
     private final TenantScope tenantScope;
 
@@ -263,6 +371,16 @@ final class ManifestLabelStage {
     }
 
     private static boolean test(Predicate p, Object label) {
+        if (label instanceof ContentType ct) {
+            return switch (p.operator()) {
+                case "$eq" -> matches(ct, p.operand());
+                case "$ne" -> !matches(ct, p.operand());
+                case "$in" -> ((List<?>) p.operand()).stream().anyMatch(o -> matches(ct, o));
+                case "$nin" -> ((List<?>) p.operand()).stream().noneMatch(o -> matches(ct, o));
+                // A range over content types has no meaning; it reads the value the row would show.
+                default -> test(p, ct.display());
+            };
+        }
         if (label == null || (label instanceof String text && text.isEmpty())) {
             // An explicit empty-string operand names exactly this value: compare it before the unlabelled rule.
             // A missing value (null) counts as empty here; the chunk-row filter matched only a stored "".
@@ -350,8 +468,10 @@ final class ManifestLabelStage {
 
     /**
      * One live manifest occurrence of a chash: the owning document, the position and its own labels, the
-     * document's {@code source_uri} (a row that carries one is re-pointed at the document it speaks for), and
-     * the document's own answers on the document-level keys the filter names.
+     * document's {@code source_uri} (a row that carries one is re-pointed at the document it speaks for), the
+     * position's own span ({@code lineStart}, {@code lineEnd}, {@code charStart}, {@code charEnd}, each NULL
+     * for a row written before the manifest carried spans: nexus-6pfgb.26), and the document's own answers on
+     * the document-level keys the filter names.
      *
      * @param docValues the document's AUTHORITATIVE value for each document-level key the predicates name:
      *                  a key that is present answers for the document (a null value is an authoritative
@@ -359,7 +479,8 @@ final class ManifestLabelStage {
      *                  row (a legacy document). Empty when the filter names no document-level key.
      */
     record Occurrence(String docId, int position, String sectionTitle, String sectionType, Integer pageNumber,
-                      boolean labelsWritten, String sourceUri, Map<String, Object> docValues) {}
+                      boolean labelsWritten, String sourceUri, Integer lineStart, Integer lineEnd,
+                      Integer charStart, Integer charEnd, Map<String, Object> docValues) {}
 
     /** The document-level keys the predicates name. */
     static Set<String> docKeysOf(List<Predicate> predicates) {
@@ -376,22 +497,27 @@ final class ManifestLabelStage {
     private record DocFields(Set<String> keys, Field<String> author, Field<OffsetDateTime> indexedAt,
                              Field<Integer> bibYear, Field<String> bibAuthors, Field<String> bibVenue,
                              Field<Integer> bibCitations, Field<String> bibS2, Field<String> bibOpenAlex,
-                             Field<String> bibDoi, Field<OffsetDateTime> bibEnrichedAt) {
+                             Field<String> bibDoi, Field<OffsetDateTime> bibEnrichedAt,
+                             Field<String> title, Field<String> contentType, Field<String> filePath) {
 
         static DocFields of(Set<String> keys) {
             boolean bib = keys.stream().anyMatch(BIB_KEYS::contains);
+            boolean type = keys.contains(CONTENT_TYPE_KEY);
             return new DocFields(keys,
                 keys.contains(AUTHOR_KEY) ? CATALOG_DOCUMENTS.AUTHOR : null,
                 keys.contains(INDEXED_AT_KEY) ? CATALOG_DOCUMENTS.INDEXED_AT : null,
                 bib ? CATALOG_DOCUMENTS.BIB_YEAR : null, bib ? CATALOG_DOCUMENTS.BIB_AUTHORS : null,
                 bib ? CATALOG_DOCUMENTS.BIB_VENUE : null, bib ? CATALOG_DOCUMENTS.BIB_CITATION_COUNT : null,
                 bib ? CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID : null, bib ? CATALOG_DOCUMENTS.BIB_OPENALEX_ID : null,
-                bib ? CATALOG_DOCUMENTS.BIB_DOI : null, bib ? CATALOG_DOCUMENTS.BIB_ENRICHED_AT : null);
+                bib ? CATALOG_DOCUMENTS.BIB_DOI : null, bib ? CATALOG_DOCUMENTS.BIB_ENRICHED_AT : null,
+                keys.contains(TITLE_KEY) ? CATALOG_DOCUMENTS.TITLE : null,
+                type ? CATALOG_DOCUMENTS.CONTENT_TYPE : null, type ? CATALOG_DOCUMENTS.FILE_PATH : null);
         }
 
         void addTo(List<Field<?>> select) {
             for (Field<?> f : java.util.Arrays.asList(author, indexedAt, bibYear, bibAuthors, bibVenue, bibCitations,
-                                                      bibS2, bibOpenAlex, bibDoi, bibEnrichedAt)) {
+                                                      bibS2, bibOpenAlex, bibDoi, bibEnrichedAt, title, contentType,
+                                                      filePath)) {
                 if (f != null) {
                     select.add(f);
                 }
@@ -415,6 +541,21 @@ final class ManifestLabelStage {
             if (bibYear != null) {
                 bibValues(keys, r.get(bibYear), r.get(bibAuthors), r.get(bibVenue), r.get(bibCitations),
                     r.get(bibS2), r.get(bibOpenAlex), r.get(bibDoi), r.get(bibEnrichedAt) != null, out);
+            }
+            if (title != null) {
+                String t = r.get(title);
+                if (t != null && !t.isBlank()) {
+                    out.put(TITLE_KEY, t);
+                }
+            }
+            if (contentType != null) {
+                String catalogType = r.get(contentType);
+                String format = derivedFormat(catalogType, r.get(filePath));
+                String type = catalogType == null || catalogType.isBlank() ? null : catalogType;
+                if (type != null || format != null) {
+                    // The row's value, the fallback each of the two leaves open, is filled in per hit.
+                    out.put(CONTENT_TYPE_KEY, new ContentType(type, format, null));
+                }
             }
             return out;
         }
@@ -468,21 +609,53 @@ final class ManifestLabelStage {
         for (Map<String, Object> row : rows) {
             Object id = row.get("id");
             Object coll = row.get("collection");
-            if (id instanceof String chash && chash.length() == 64 && coll instanceof String c) {
+            if (id instanceof String chash && PgVectorRepository.HEX64.matcher(chash).matches()
+                    && coll instanceof String c) {
                 chashesByCollection.computeIfAbsent(c, k -> new LinkedHashSet<>()).add(chash);
             }
         }
+        return fetchOccurrences(tenant, chashesByCollection, docKeys, false);
+    }
+
+    /**
+     * The FIRST live owner of each (collection, chash): the occurrence of the lowest {@code doc_id} (in the
+     * database's text collation, so {@code 1.10} sorts before {@code 1.2}), then the lowest position, among
+     * documents that are not tombstoned (nexus-6pfgb.26). This is the one owner a chunk-level search row's
+     * {@code doc_id}, {@code position}, {@code source_uri} and span speak for when no label filter has expanded
+     * the row per document; keyed by {@link #ownerKey}. A chash with no live manifest row has no entry.
+     *
+     * <p>Its own {@code SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id, position}, so the statement
+     * returns one row per chash where {@link #apply}'s lookup returns every occurrence: a boilerplate chunk
+     * held by N documents costs a search window one row, not N.
+     */
+    Map<String, Occurrence> firstOwners(String tenant, Map<String, Set<String>> chashesByCollection) {
+        Map<String, Occurrence> first = new HashMap<>();
+        for (Map.Entry<String, List<Occurrence>> e : fetchOccurrences(tenant, chashesByCollection, Set.of(), true)
+                .entrySet()) {
+            first.put(e.getKey(), e.getValue().get(0));
+        }
+        return first;
+    }
+
+    /** The key {@link #firstOwners} answers under. */
+    static String ownerKey(String collection, String chash) {
+        return key(collection, chash);
+    }
+
+    /**
+     * @param firstOnly one occurrence per chash (the first, by {@code doc_id} then position) instead of all
+     *                  of them; both orders are the database's own, so the two shapes agree on that row
+     */
+    private Map<String, List<Occurrence>> fetchOccurrences(String tenant,
+                                                           Map<String, Set<String>> chashesByCollection,
+                                                           Set<String> docKeys, boolean firstOnly) {
         Map<String, List<Occurrence>> out = new HashMap<>();
         if (chashesByCollection.isEmpty()) {
             return out;
         }
         Field<String> chashHex = ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH);
         DocFields docFields = DocFields.of(docKeys);
-        List<Field<?>> select = new ArrayList<>(List.of(chashHex,
-            CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-            CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
-            CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
-            CATALOG_DOCUMENTS.SOURCE_URI));
+        List<Field<?>> select = occurrenceFields(chashHex);
         docFields.addTo(select);
         tenantScope.withTenant(tenant, ctx -> {
             for (Map.Entry<String, Set<String>> e : chashesByCollection.entrySet()) {
@@ -493,19 +666,7 @@ final class ManifestLabelStage {
                     for (String hex : batch) {
                         keys.add(Chash.fromHex(hex).toBytes());
                     }
-                    var fetched = ctx.select(select)
-                        .from(CATALOG_DOCUMENT_CHUNKS)
-                        .join(CATALOG_DOCUMENTS)
-                            // A tombstoned document owns nothing (nexus-mqd6t): its occurrence is not a hit.
-                            .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                                .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
-                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
-                        .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                            .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(e.getKey()))
-                            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(keys)))
-                        .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
-                        .fetch();
-                    for (var r : fetched) {
+                    for (var r : occurrenceQuery(ctx, tenant, e.getKey(), keys, select, firstOnly).fetch()) {
                         out.computeIfAbsent(key(e.getKey(), r.get(chashHex)), k -> new ArrayList<>())
                            .add(new Occurrence(r.get(CATALOG_DOCUMENT_CHUNKS.DOC_ID),
                                                r.get(CATALOG_DOCUMENT_CHUNKS.POSITION),
@@ -514,6 +675,10 @@ final class ManifestLabelStage {
                                                r.get(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER),
                                                Boolean.TRUE.equals(r.get(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)),
                                                r.get(CATALOG_DOCUMENTS.SOURCE_URI),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.LINE_START),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.LINE_END),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_START),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_END),
                                                docFields.read(r)));
                     }
                 }
@@ -521,6 +686,52 @@ final class ManifestLabelStage {
             return null;
         });
         return out;
+    }
+
+    /** The columns every occurrence statement selects, before the document-level fields the filter names. */
+    private static List<Field<?>> occurrenceFields(Field<String> chashHex) {
+        return new ArrayList<>(List.of(chashHex,
+            CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+            CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
+            CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
+            CATALOG_DOCUMENTS.SOURCE_URI,
+            CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END,
+            CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END));
+    }
+
+    /**
+     * The one statement behind both lookups, for ONE collection and one batch of chashes. Package-private so
+     * a plan test can EXPLAIN the statement production runs, not a copy of it. {@code firstOnly} is {@code
+     * SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id, position}; otherwise every occurrence, ordered
+     * by {@code doc_id}, {@code position}.
+     */
+    static ResultQuery<Record> occurrenceQuery(DSLContext ctx, String tenant, String collection,
+                                               List<byte[]> keys, List<Field<?>> select, boolean firstOnly) {
+        var head = firstOnly
+            ? ctx.select(select).distinctOn(CATALOG_DOCUMENT_CHUNKS.CHASH)
+            : ctx.select(select);
+        List<org.jooq.OrderField<?>> order = new ArrayList<>(3);
+        if (firstOnly) {
+            order.add(CATALOG_DOCUMENT_CHUNKS.CHASH);  // DISTINCT ON (chash) needs it as the leading key
+        }
+        order.add(CATALOG_DOCUMENT_CHUNKS.DOC_ID);
+        order.add(CATALOG_DOCUMENT_CHUNKS.POSITION);
+        return head
+            .from(CATALOG_DOCUMENT_CHUNKS)
+            .join(CATALOG_DOCUMENTS)
+                // A tombstoned document owns nothing (nexus-mqd6t): its occurrence is not a hit.
+                .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
+                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(keys)))
+            .orderBy(order);
+    }
+
+    /** The first and the full lookup, for a test that compares them. */
+    Map<String, List<Occurrence>> allOccurrences(String tenant, Map<String, Set<String>> chashesByCollection) {
+        return fetchOccurrences(tenant, chashesByCollection, Set.of(), false);
     }
 
     private static String key(String collection, String chash) {
@@ -591,13 +802,39 @@ final class ManifestLabelStage {
             m.put("page_number", row.get("page_number"));
         }
         for (String key : docKeys) {
-            m.put(key, o != null && o.docValues().containsKey(key) ? o.docValues().get(key) : row.get(key));
+            Object answer = o != null && o.docValues().containsKey(key) ? o.docValues().get(key) : row.get(key);
+            m.put(key, answer instanceof ContentType ct ? ct.withRow(row.get(key)) : answer);
         }
         return m;
     }
 
     /**
-     * A copy of {@code row} that speaks for one owning document: its id, position and own labels. A written
+     * Writes the owner's manifest span onto {@code row} (nexus-6pfgb.26): {@code line_start}, {@code line_end},
+     * {@code chunk_start_char} and {@code chunk_end_char} are the position's own, where the shared chunk row's
+     * are the last writer's. It writes each field the manifest HAS a value for and nothing else, so a key
+     * the row lacked appears when the owner's manifest holds it; a NULL manifest value leaves that field as
+     * the row has it, which is the row's own value ONLY if the row has not already been given another
+     * owner's (see {@code PgVectorRepository#enrichSearchRows}, {@code labelStageFollows}). NULL is also what
+     * a note, an orphan and a prose or PDF chunk carry for good, not only a row written before the manifest
+     * had spans, so such an owner shows the chunk row's span beside its {@code source_uri}.
+     */
+    static void putSpan(Map<String, Object> row, Occurrence o) {
+        if (o.lineStart() != null) {
+            row.put("line_start", o.lineStart());
+        }
+        if (o.lineEnd() != null) {
+            row.put("line_end", o.lineEnd());
+        }
+        if (o.charStart() != null) {
+            row.put("chunk_start_char", o.charStart());
+        }
+        if (o.charEnd() != null) {
+            row.put("chunk_end_char", o.charEnd());
+        }
+    }
+
+    /**
+     * A copy of {@code row} that speaks for one owning document: its id, position, span and own labels. A written
      * occurrence replaces the chunk row's (foreign) labels outright: an empty title or type is sent as
      * {@code ""} (the chunkers' "none here"), and an unset page removes the key instead of leaving another
      * document's page behind. The document-level keys the filter named, where the document answers them,
@@ -611,6 +848,11 @@ final class ManifestLabelStage {
             // include_source_uri resolved one owner's URI for the shared chunk; this row speaks for o's document.
             copy.put("source_uri", o.sourceUri());
         }
+        putSpan(copy, o);
+        if (copy.containsKey("span")) {
+            // The line-range fallback of a row with no chunk_text_hash names this owner's lines.
+            copy.put("span", PgVectorRepository.spanFromMeta(copy));
+        }
         if (o.labelsWritten()) {
             copy.put("section_title", o.sectionTitle() == null ? "" : o.sectionTitle());
             copy.put("section_type", o.sectionType() == null ? "" : o.sectionType());
@@ -621,10 +863,11 @@ final class ManifestLabelStage {
             }
         }
         for (Map.Entry<String, Object> d : o.docValues().entrySet()) {
-            if (d.getValue() == null) {
+            Object value = d.getValue() instanceof ContentType ct ? ct.display() : d.getValue();
+            if (value == null) {
                 copy.remove(d.getKey());
             } else {
-                copy.put(d.getKey(), d.getValue());
+                copy.put(d.getKey(), value);
             }
         }
         return copy;

@@ -1,0 +1,301 @@
+# RDR-236 Phase 0 (nexus-qyx35): the chunk-row metadata reads of a non-CHUNK key that exist today.
+#
+# Read by tests/test_chunk_metadata_read_lint.py. One table per `file::function` (the function
+# is the dotted class/def chain, no line numbers), one `key = count` per key read there. This
+# is a RATCHET and its direction is down: a read not listed is a finding, and a count above
+# what the scan finds is a finding too, so the commit that moves a reader to the catalog (or
+# the manifest) deletes or lowers its line. Never add a line to make the lint pass: read the
+# value from the key's home instead (src/nexus/tables/chunk-metadata-keys.toml, the `home`
+# column). The note TTL fallback in src/nexus/catalog/note_ttl.py is exempt from this list, but
+# bounded: see [exempt] below.
+#
+# Some entries are not readers of a shared row at all (the extractor and chunker dicts that
+# become a row's metadata, `metadata_schema` itself, the injected T3Database facade). They are
+# listed because the scan cannot tell them apart; the epic's Phase 2 and 4 sweep removes them.
+
+# Bare receivers that ARE a chunk row's metadata at the Phase 2 reader sites, so the lint reads
+# them too (RDR-236 critique S2). `path` opts a name in for the whole file, `path::qualname` for
+# one function and what it nests. Each was read in place: the receiver is a T3 row's metadata,
+# not a catalog entry's meta. An entry that matches no read is stale; delete it.
+[receivers]
+"src/nexus/commands/enrich.py" = ["meta"]
+"src/nexus/catalog/orphan_backfill.py" = ["meta"]
+"src/nexus/health.py" = ["meta"]
+"src/nexus/mcp/core.py::store_get" = ["entry"]
+"src/nexus/mcp/core.py::store_get_many" = ["entry"]
+"src/nexus/mcp/core.py::store_list" = ["e"]
+"src/nexus/exporter.py" = ["meta"]
+"src/nexus/catalog/manifest_backfill.py" = ["meta"]
+"src/nexus/commands/catalog.py" = ["meta", "m"]
+# nexus-6pfgb.10: the backfill verb reads chunk rows by design; every name below is a chunk row's metadata.
+"src/nexus/catalog/meta_backfill.py" = ["chosen", "r", "row"]
+
+# src/nexus/catalog/note_ttl.py is the legacy-fallback module (RF-8): exempt from [sites], but it
+# may read only catalog_doc_id and title and these counts may only fall.
+[exempt]
+[exempt."src/nexus/catalog/note_ttl.py::row_may_give_tags"]
+catalog_doc_id = 1
+title = 1
+
+[exempt."src/nexus/catalog/note_ttl.py::row_names_note"]
+catalog_doc_id = 1
+title = 1
+
+[exempt."src/nexus/catalog/note_ttl.py::row_written_by"]
+catalog_doc_id = 1
+title = 1
+
+[sites]
+[sites."src/nexus/aspect_readers.py::_gather_chroma_chunks_by_field"]
+chunk_index = 2
+
+[sites."src/nexus/catalog/manifest_backfill.py::_fetch_chunk_by_id"]
+chunk_end_char = 1
+chunk_start_char = 1
+line_end = 1
+line_start = 1
+
+[sites."src/nexus/catalog/manifest_backfill.py::_fetch_chunks_by_key"]
+chunk_end_char = 1
+chunk_index = 1
+chunk_start_char = 1
+line_end = 1
+line_start = 1
+
+[sites."src/nexus/catalog/manifest_backfill.py::_forward_hints_for_chashes"]
+catalog_doc_id = 1
+doc_id = 1
+
+# nexus-6pfgb.10: the one-time backfill verb is the sanctioned reader of these legacy row keys until Phase 4
+# deletes them: it copies each into the document's own catalog home (fill-only, single-owner, attributed
+# by the row's indexed_at against the document's), so it reads the shared row on purpose. Listed, not
+# exempt, so the ratchet still counts them and the Phase 4 sweep deletes them with the verb.
+[sites."src/nexus/catalog/meta_backfill.py::_attributable"]
+indexed_at = 1
+
+[sites."src/nexus/catalog/meta_backfill.py::plan_indexed_rows"]
+extraction_method = 1
+extraction_source = 1
+frecency_score = 1
+indexed_at = 1
+quality_gate_overridden = 1
+source_author = 1
+
+[sites."src/nexus/catalog/meta_backfill.py::plan_note"]
+category = 1
+indexed_at = 1
+source_agent = 1
+tags = 1
+
+[sites."src/nexus/catalog/orphan_backfill.py::gather_titled_chunks"]
+chunk_index = 1
+title = 1
+
+[sites."src/nexus/catalog/orphan_backfill.py::link_by_content_hash"]
+chunk_index = 1
+content_hash = 1
+
+[sites."src/nexus/commands/catalog.py::_backfill_papers"]
+bib_authors = 1
+bib_year = 1
+title = 1
+
+[sites."src/nexus/commands/catalog.py::_backfill_per_file_from_t3"]
+doc_id = 2
+source_path = 1
+
+[sites."src/nexus/commands/catalog.py::_backfill_rdrs"]
+doc_id = 2
+source_path = 1
+title = 1
+
+[sites."src/nexus/commands/enrich.py::_backfill_catalog_from_chunks"]
+catalog_doc_id = 1
+content_hash = 1
+
+[sites."src/nexus/commands/enrich.py::_chunk_bib"]
+bib_authors = 1
+bib_citation_count = 1
+bib_doi = 2
+bib_openalex_id = 1
+bib_semantic_scholar_id = 1
+bib_venue = 1
+bib_year = 2
+
+# nexus-6pfgb.28: the id-less bib of a batch-path `--enrich` PDF, read by `--backfill-catalog` (the same
+# recovery verb as _chunk_bib above) into the catalog's empty bib columns.
+[sites."src/nexus/commands/enrich.py::_chunk_idless_bib"]
+bib_authors = 1
+bib_citation_count = 1
+bib_venue = 1
+bib_year = 1
+
+[sites."src/nexus/commands/enrich.py::run_bib_enrichment"]
+catalog_doc_id = 1
+content_hash = 1
+
+[sites."src/nexus/commands/search_cmd.py::search_cmd._doc_chunk_count"]
+chunk_count = 1
+doc_id = 1
+
+[sites."src/nexus/context_annotations.py::annotate"]
+bib_year = 1
+indexed_at = 1
+ttl_days = 1
+
+[sites."src/nexus/db/t3.py::_infer_content_type"]
+content_type = 1
+store_type = 1
+
+[sites."src/nexus/doc_indexer.py::_markdown_chunks"]
+chunk_end_char = 1
+chunk_start_char = 1
+page_number = 1
+section_type = 1
+
+[sites."src/nexus/doc_indexer.py::_pdf_chunks"]
+chunk_end_char = 1
+chunk_start_char = 1
+extraction_method = 2
+page_number = 1
+quality_gate_overridden = 1
+section_title = 1
+section_type = 1
+
+[sites."src/nexus/exporter.py::_locate_legacy_group"]
+chunk_index = 1
+doc_id = 1
+title = 1
+
+[sites."src/nexus/exporter.py::_note_source_evidence"]
+content_hash = 1
+
+[sites."src/nexus/exporter.py::_prepass_groups"]
+doc_id = 1
+
+[sites."src/nexus/exporter.py::import_collection"]
+doc_id = 1
+source_path = 1
+
+[sites."src/nexus/formatters.py::_file_line_no"]
+line_start = 1
+
+[sites."src/nexus/formatters.py::_format_with_bat"]
+line_end = 1
+line_start = 2
+
+[sites."src/nexus/formatters.py::format_plain"]
+line_start = 1
+
+[sites."src/nexus/formatters.py::format_plain_with_context"]
+line_start = 1
+
+# nexus-6pfgb.16: whether the post-pass ran is the owning document's own catalog meta (extraction_method),
+# passed in; the row's extraction_method is the last writer's and is no longer read. The placeholder
+# title is the row's (the engine's where= matches it).
+[sites."src/nexus/health.py::_is_pdf_stub_metadata"]
+title = 1
+
+[sites."src/nexus/health.py::_pdf_stubs_in_collection"]
+content_hash = 1
+
+[sites."src/nexus/mcp/core.py::_row_key"]
+doc_id = 1
+
+[sites."src/nexus/mcp/core.py::_search_render"]
+doc_id = 1
+
+# nexus-6pfgb.12: the doc card's bib_*, indexed_at and ttl_days now come from the owning documents
+# (OWNER_BIB_KEY, OWNER_FACTS_KEY), stamped by search_engine._attach_display_paths. What stays are the
+# grouping fallbacks for a chunk the catalog could not resolve (doc_id, content_hash)
+# and the legacy chunk_count key. nexus-fv2u4: the row's title is neither a label nor a grouping key.
+[sites."src/nexus/mcp/core.py::query"]
+chunk_count = 1
+content_hash = 1
+doc_id = 2
+
+# nexus-6pfgb.13: store_get shows the owning notes' own tags, ttl, index date and title (note_display, from
+# the catalog entries). The row speaks only as the legacy fallback the bead names: a chunk with at most one
+# owner and no catalog value (an unreadable catalog or an unowned chunk, an indexed file's tags until
+# Phase 3, a keyless note stored before nexus-6pfgb.5). ttl_days is read here for that fallback (it
+# is the one new listed read: a keyless sole owner's TTL, shown only when the owner wrote the row).
+[sites."src/nexus/mcp/core.py::store_get"]
+indexed_at = 1
+tags = 1
+title = 1
+ttl_days = 1
+
+[sites."src/nexus/mcp/core.py::store_get_many"]
+section_type = 1
+
+# nexus-6pfgb.13: store_list shows each chunk's title, tags, ttl and index date from its owning notes;
+# the four reads below are the same legacy fallback as store_get's (at most one owner, no catalog value).
+[sites."src/nexus/mcp/core.py::store_list"]
+indexed_at = 1
+tags = 1
+title = 1
+ttl_days = 1
+
+[sites."src/nexus/metadata_schema.py::is_expired"]
+indexed_at = 1
+ttl_days = 1
+
+[sites."src/nexus/pdf_extractor.py::_enforce_extraction_quality"]
+extraction_method = 1
+
+[sites."src/nexus/pipeline_stages.py::_build_chunk_metadata"]
+chunk_end_char = 1
+chunk_start_char = 1
+page_number = 1
+section_title = 1
+section_type = 1
+
+[sites."src/nexus/pipeline_stages.py::_enrich_metadata_from_extraction"]
+extraction_method = 1
+quality_gate_overridden = 1
+
+[sites."src/nexus/pipeline_stages.py::_merge_buffered_provenance"]
+extraction_method = 1
+
+[sites."src/nexus/pipeline_stages.py::extractor_loop"]
+extraction_method = 1
+
+[sites."src/nexus/prose_indexer.py::index_prose_file"]
+chunk_end_char = 1
+chunk_start_char = 1
+section_type = 1
+
+[sites."src/nexus/scoring.py::apply_hybrid_scoring"]
+frecency_score = 1
+
+[sites."src/nexus/scoring.py::_link_owners"]
+doc_id = 1
+
+[sites."src/nexus/search_engine.py::_attach_display_paths"]
+doc_id = 1
+
+[sites."src/nexus/search_engine.py::_attach_doc_ids_from_catalog"]
+doc_id = 3
+
+[sites."src/nexus/search_engine.py::_attach_from_chash_positions"]
+doc_id = 2
+
+[sites."src/nexus/search_engine.py::_display_doc_ids"]
+doc_id = 2
+
+[sites."src/nexus/search_engine.py::_row_agents"]
+source_agent = 1
+
+[sites."src/nexus/search_engine.py::apply_file_diversity_cap"]
+doc_id = 1
+
+# nexus-1nrcu: the one-time rung that copies a chunk row's section label onto a legacy manifest row (the
+# only row it is exact for: a chash with one manifest row). A LEGACY read of the three POSITION keys, and
+# of indexed_at and title for the attribution guards (the date guard meta_backfill uses; the title guard
+# catches a tombstoned co-owner indexed inside its skew); all go with the keys at Phase 4.
+[sites."src/nexus/upgrade_ladder/rungs/manifest_section_labels.py::_labels_from_chunk_row"]
+indexed_at = 1
+page_number = 1
+section_title = 1
+section_type = 1
+title = 1

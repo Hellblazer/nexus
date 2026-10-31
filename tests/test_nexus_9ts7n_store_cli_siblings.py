@@ -76,6 +76,7 @@ def t3(monkeypatch):
     monkeypatch.setattr(store_cmd, "_split_note_text", lambda *a, **k: None)
     monkeypatch.setattr(store_hook, "catalog_chashes_for_title", lambda *a, **k: [])
     monkeypatch.setattr(store_hook, "live_holders_of_chashes", lambda *a, **k: {})
+    monkeypatch.setattr(store_hook, "live_owner_entries", lambda *a, **k: {})  # nexus-6pfgb.13: no catalog owners either (one lookup serves the display)
     monkeypatch.setattr(
         store_cmd, "_reap_catalog_for_doc_ids", lambda ids, **k: t3.reaped.append((tuple(ids), k)),
     )

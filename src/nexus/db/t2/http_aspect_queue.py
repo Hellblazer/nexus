@@ -13,7 +13,7 @@ Config:
 Interface parity (bead nexus-gmiaf.15, RDR-152 P2.5):
     enqueue, claim_next, claim_batch, mark_done, mark_failed,
     mark_retry, reclaim_stale, pending_count, is_drained,
-    list_pending, rename_collection, close
+    list_pending, list_waiting, rename_collection, close
 
 Queue claim strategy: the Java service uses
 ``SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`` — eliminates WAL contention
@@ -25,7 +25,11 @@ all serialization).
 """
 from __future__ import annotations
 
+import json
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -37,6 +41,144 @@ from nexus.db.t2.records import QueueRow
 _log = structlog.get_logger(__name__)
 
 DEFAULT_TENANT: str = "default"
+
+# ── RDR-235: the producer behind NX_ASPECT_QUEUE ─────────────────────────────
+
+#: Selects where :meth:`HttpAspectQueue.enqueue` and ``enqueue_many`` write.
+ASPECT_QUEUE_ENV: str = "NX_ASPECT_QUEUE"
+ASPECT_QUEUE_MODES: tuple[str, str] = ("table", "tuples")
+
+#: The tuple-space subspace, key and the engine release that carries the
+#: ``aspects`` template (RDR-235 E3). One queue per tenant; the collection is a
+#: field of the task body.
+ASPECTS_SUBSPACE: str = "aspects"
+ASPECTS_KEYS: dict[str, str] = {"queue": "aspects"}
+ASPECTS_ENGINE_RELEASE: str = "engine-service-v0.1.169"
+
+#: Concurrent ``out`` calls one ``enqueue_many`` makes. The tuple space has no
+#: batch ``out`` (RDR-235 gate S2); a flush holds at most 16 (onnx-local) or 64
+#: (Voyage) documents, so this is at most 8 and 2 waves. Each call is one
+#: ``out`` on its own id over the shared keep-alive pool.
+ENQUEUE_FANOUT_WORKERS: int = 8
+
+_warned_unknown_modes: set[str] = set()
+
+
+def aspect_queue_mode() -> str:
+    """``"tuples"`` (default) or ``"table"``, read from ``NX_ASPECT_QUEUE`` at
+    call time. An unset or blank value is ``tuples`` (the RDR-235 Activation
+    Step 1 flip, nexus-lnwn1); ``table`` is the explicit opt-out and the
+    rollback. Any other value logs one warning per process and means ``table``,
+    NOT the default: ``table`` is the path every released engine supports and
+    the rollback path the runbook names, so a typo lands on the conservative
+    queue and says so, instead of failing every ingest hook or quietly picking
+    the path that needs the newer engine."""
+    raw = os.environ.get(ASPECT_QUEUE_ENV, "").strip().lower()
+    if raw in ("", "tuples"):
+        return "tuples"
+    if raw == "table":
+        return "table"
+    if raw not in _warned_unknown_modes:
+        _warned_unknown_modes.add(raw)
+        _log.warning(
+            "aspect_queue_mode_unknown_falling_back_to_table",
+            env=ASPECT_QUEUE_ENV, value=raw, allowed=list(ASPECT_QUEUE_MODES),
+        )
+    return "table"
+
+
+@dataclass(frozen=True)
+class AspectTupleCounts:
+    """The ``aspects`` subspace census, reduced to what the diagnostics need
+    (RDR-235 F18). ``available`` is pending work, ``dead`` is the failed count,
+    and ``claimed`` is in flight: it is NOT pending and NOT failed. A task
+    waiting out a retry delay is counted in ``available`` (the census does not
+    render ``available_at``), so ``available`` is an upper bound on what is
+    claimable this second."""
+
+    available: int
+    claimed: int
+    dead: int
+
+
+class AspectQueueEngineUnsupportedError(RuntimeError):
+    """``NX_ASPECT_QUEUE=tuples`` against an engine with no ``aspects``
+    template (it predates ``engine-service-v0.1.169``)."""
+
+
+#: The engine release that carries ``GET /v1/aspects/queue/list_waiting``
+#: (RDR-235 Phase 1 step 3, nexus-5r2sc.3.6): the read the table-to-tuples
+#: migration rung uses. An engine older than this answers 404.
+LIST_WAITING_ENGINE_RELEASE: str = "engine-service-v0.1.170"
+
+
+class AspectQueueListWaitingUnsupportedError(RuntimeError):
+    """The engine has no ``/v1/aspects/queue/list_waiting`` route (it predates
+    ``engine-service-v0.1.170``)."""
+
+
+@dataclass(frozen=True)
+class WaitingRow:
+    """One row of ``list_waiting``: a queue row still owed a worker.
+
+    ``status`` is ``pending`` or ``in_progress``. ``delay_s`` is the whole
+    seconds until the row's ``next_retry_at``, rounded up, computed on the
+    DATABASE clock; 0 when it has none or it has passed. There is no content:
+    the body of a tuples task is identity only.
+    """
+
+    collection: str
+    source_path: str
+    content_hash: str
+    doc_id: str
+    retry_count: int
+    status: str
+    delay_s: int
+
+
+_warned_no_aspects_template: list[bool] = []
+
+
+def aspects_census(store: Any, *, timeout: float | None = None) -> Any:
+    """The ``aspects`` subspace's census from *store* (an ``HttpTupleStore``),
+    or ``None`` when the engine has no ``aspects`` template.
+
+    The readers of the old table (queue-depth hook, drain, requeue-failed)
+    count this side beside the table's (RDR-235). An engine that predates
+    ``engine-service-v0.1.169`` has no such template, and every reader must go
+    on working there exactly as it did: ``None`` means "no tuple side", the
+    caller reads it as zero, and one log line per process says so. Any other
+    failure propagates; a caller decides what an unreadable side means.
+
+    *timeout* caps the one request (seconds); ``None`` sends it unchanged."""
+    from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: table mode never loads it
+
+    try:
+        if timeout is None:
+            return store.subspace_stats(ASPECTS_SUBSPACE)
+        return store.subspace_stats(ASPECTS_SUBSPACE, timeout=timeout)
+    except UnknownSubspaceError:
+        if not _warned_no_aspects_template:
+            _warned_no_aspects_template.append(True)
+            _log.info(
+                "aspects_tuple_template_absent_reading_table_only",
+                needs=ASPECTS_ENGINE_RELEASE,
+            )
+        return None
+
+
+def _identity_body(collection: str, source_path: str, doc_id: str, content_hash: str) -> str:
+    """The task body (RDR-235 E2): the queue row's identity, never text. The
+    worker re-reads the document from T3 chunks or the file."""
+    return json.dumps(
+        {
+            "collection": collection,
+            "source_path": source_path,
+            "doc_id": doc_id,
+            "content_hash": content_hash,
+        },
+        ensure_ascii=False, separators=(",", ":"),
+    )
 
 
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
@@ -113,6 +255,13 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         client: httpx.Client | None = None,
     ) -> None:
         super().__init__(base_url, tenant, _token=_token, timeout=timeout, client=client)
+        # RDR-235: the construction arguments the tuples-mode store is built
+        # from (lazily, on first use), so it resolves its endpoint and token
+        # and self-heals exactly as this store does. Table mode never builds it.
+        self._ctor_base_url = base_url
+        self._ctor_token = _token
+        self._tuple_store: Any = None
+        self._tuple_store_lock = threading.Lock()
         # rename_lock accepted for constructor parity but ignored over HTTP
         # (verbatim behavior preserved from the pre-mixin constructor).
         self.rename_lock: threading.RLock = (
@@ -182,6 +331,12 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise ValueError("collection must not be empty")
         if not source_path:
             raise ValueError("source_path must not be empty")
+        if aspect_queue_mode() == "tuples":
+            # RDR-235 E2: the identity goes out as a replace; ``content`` is
+            # dropped (the worker re-reads the document).
+            self._enqueue_tuple(collection, source_path, content_hash, doc_id)
+            self._signal_wake()
+            return
         # RDR-204 Phase 1 (nexus-f5wwx): the engine no longer
         # auto-registers a collection on first write — ensure it here,
         # once per process per collection (cached), and retry once if
@@ -227,6 +382,8 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not rows:
             return 0
+        if aspect_queue_mode() == "tuples":
+            return self._enqueue_many_tuples(rows)
         try:
             result = self._post("/enqueue_many", {"rows": rows})
             enqueued = int((result or {}).get("enqueued", 0))
@@ -268,6 +425,172 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                         exc_info=True,
                     )
             return enqueued
+
+    # ── RDR-235: the tuples-mode producer ─────────────────────────────────────
+
+    def _tuples(self) -> Any:
+        """The ``HttpTupleStore`` tuples mode writes through, built on first use
+        over this store's own keep-alive pool."""
+        with self._tuple_store_lock:
+            if self._tuple_store is None:
+                from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: table mode never builds it
+
+                self._tuple_store = HttpTupleStore(
+                    self._ctor_base_url, self._tenant,
+                    _token=self._ctor_token, client=self._client,
+                )
+            return self._tuple_store
+
+    def _out_task(self, collection: str, source_path: str, content_hash: str, doc_id: str) -> str:
+        """One ``out`` ``mode=replace`` of the identity body; returns the outcome
+        (``created``, ``replaced`` or ``dirtied``). nonce = ``doc_id`` (a tumbler,
+        unique per document across collections), so a re-enqueue replaces the
+        task and never adds a second. Raises ``TooLargeError`` before any send
+        when the body is over the 4,096-byte cap (a very long ``source_path``)."""
+        from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: table mode never loads it
+
+        body = _identity_body(collection, source_path, doc_id, content_hash)
+        try:
+            _id, outcome = self._tuples().out_replace(
+                ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), None, body, nonce=doc_id,
+            )
+        except UnknownSubspaceError as exc:
+            raise AspectQueueEngineUnsupportedError(
+                f"{ASPECT_QUEUE_ENV}=tuples needs the 'aspects' tuple template, which the "
+                f"engine does not have; it predates {ASPECTS_ENGINE_RELEASE}. Upgrade the "
+                f"engine, or set {ASPECT_QUEUE_ENV}=table to use the table queue."
+            ) from exc
+        return outcome
+
+    def _enqueue_tuple(
+        self, collection: str, source_path: str, content_hash: str, doc_id: str,
+    ) -> None:
+        if not doc_id:
+            raise ValueError(
+                f"doc_id must not be empty when {ASPECT_QUEUE_ENV}=tuples: it is the task's identity"
+            )
+        # The registered-and-not-retired check (O4). A retired name raises
+        # SupersededCollectionWriteError here, before anything is sent to the
+        # tuple space; the tuple engine has no collection_superseded check.
+        from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
+        ensure_collection_registered(collection, registrar=self._catalog_registrar)
+        self._out_task(collection, source_path, content_hash, doc_id)
+
+    def _enqueue_many_tuples(self, rows: list[dict]) -> int:
+        """The batch form for tuples mode: a bounded fan-out of replaces.
+
+        The tuple space has no batch ``out`` (RDR-235 gate S2), so each document
+        is one ``out``, at most :data:`ENQUEUE_FANOUT_WORKERS` at once. Every
+        ``out`` is independent and idempotent, so a batch that stops half way
+        leaves valid tasks behind and a re-run lands on the same ids.
+
+        * A row with no ``collection``, ``source_path`` or ``doc_id`` is skipped
+          and counted in one warning (the table form skips them server-side).
+        * A row whose body is over the cap (``TooLargeError``, refused before
+          send) is skipped with a warning naming its ``doc_id``; its batch-mates
+          still land.
+        * Anything else stops the batch: ``MaxLiveRowsExceeded`` (the tenant is
+          at the template's ceiling), a retired collection, a missing template
+          or a transport failure is not one bad row, and replaying the rest
+          would hit the same wall N times. The remaining rows are not sent, an
+          error is logged with the counts, and the typed error is raised to the
+          caller. Rows that already landed stay.
+
+        Returns the number of tasks written (created, replaced or dirtied).
+        """
+        from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        from nexus.db.t2.http_tuple_store import TooLargeError  # noqa: PLC0415 — deferred: table mode never loads it
+
+        work: list[tuple[str, str, str, str]] = []
+        malformed = 0
+        for row in rows:
+            collection = row.get("collection", "")
+            source_path = row.get("source_path", "")
+            doc_id = row.get("doc_id", "")
+            if not collection or not source_path or not doc_id:
+                malformed += 1
+                continue
+            work.append((collection, source_path, row.get("content_hash", ""), doc_id))
+        if malformed:
+            _log.warning(
+                "aspect_enqueue_many_rows_skipped_malformed",
+                skipped=malformed, row_count=len(rows),
+            )
+        if not work:
+            return 0
+        # O4: refuse a retired name before any out. One check per collection
+        # (cached per process; a retired name raises SupersededCollectionWriteError).
+        for collection in dict.fromkeys(w[0] for w in work):
+            ensure_collection_registered(collection, registrar=self._catalog_registrar)
+
+        stop = threading.Event()
+
+        def one(item: tuple[str, str, str, str]) -> tuple[str, BaseException | None]:
+            if stop.is_set():
+                return "unsent", None
+            try:
+                self._out_task(*item)
+                return "ok", None
+            except TooLargeError as exc:
+                return "too_large", exc
+            except BaseException as exc:  # noqa: BLE001 — surfaced below as the batch's fatal error
+                stop.set()
+                return "fatal", exc
+
+        if len(work) == 1:
+            results = [one(work[0])]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(ENQUEUE_FANOUT_WORKERS, len(work)),
+                thread_name_prefix="aspect-enqueue",
+            ) as pool:
+                results = list(pool.map(one, work))
+
+        enqueued = 0
+        fatal: BaseException | None = None
+        for item, (status, exc) in zip(work, results):
+            if status == "ok":
+                enqueued += 1
+            elif status == "too_large":
+                _log.warning(
+                    "aspect_enqueue_row_skipped_too_large",
+                    collection=item[0], source_path=item[1][:200], doc_id=item[3],
+                    error=str(exc)[:300],
+                )
+            elif status == "fatal" and fatal is None:
+                fatal = exc
+        if enqueued:
+            self._signal_wake()
+        if fatal is not None:
+            _log.error(
+                "aspect_enqueue_many_aborted",
+                collections=sorted({w[0] for w in work}),
+                row_count=len(rows), enqueued=enqueued,
+                unsent=sum(1 for st, _ in results if st == "unsent"),
+                error_type=type(fatal).__name__, error=str(fatal)[:300],
+            )
+            raise fatal
+        return enqueued
+
+    def tuple_counts(self) -> AspectTupleCounts:
+        """The tuple queue's side of the depth, for ``nx doctor`` and the console
+        (RDR-235 F18). Zeros when the ``aspects`` subspace does not exist yet
+        (an engine without the template, or a tenant that never enqueued in
+        ``tuples`` mode): nothing is queued there, so zero is true. Any other
+        failure propagates: the caller must report that side UNKNOWN, never
+        zero. The absent-template rule lives in :func:`aspects_census`, the
+        one reader every table-side consumer shares."""
+        c = aspects_census(self._tuples())
+        if c is None:
+            return AspectTupleCounts(0, 0, 0)
+        return AspectTupleCounts(c.available, c.claimed, c.dead)
+
+    def close(self) -> None:
+        store, self._tuple_store = self._tuple_store, None
+        if store is not None:
+            store.close()
+        super().close()
 
     def claim_next(self) -> QueueRow | None:
         """Atomically claim the oldest pending row via SELECT ... FOR UPDATE SKIP LOCKED.
@@ -414,6 +737,39 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             params["limit"] = limit
         rows: list[dict] = self._get("/list_pending", params)
         return [_body_to_queue_row(r) for r in rows]
+
+    def list_waiting(self, limit: int | None = None) -> list[WaitingRow]:
+        """Return the rows still owed a worker, ``pending`` AND ``in_progress``,
+        in claim order, each with ``status`` and ``delay_s`` (RDR-235 Phase 1
+        step 3). Read-only: it flips nothing, so a row a live worker holds stays
+        as it is.
+
+        Raises :class:`AspectQueueListWaitingUnsupportedError` on an engine that
+        predates ``engine-service-v0.1.170`` (the route answers 404)."""
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = limit
+        try:
+            rows: list[dict] = self._get("/list_waiting", params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise AspectQueueListWaitingUnsupportedError(
+                    f"the engine has no aspects queue list_waiting route; it predates "
+                    f"{LIST_WAITING_ENGINE_RELEASE}"
+                ) from exc
+            raise
+        return [
+            WaitingRow(
+                collection=r.get("collection", ""),
+                source_path=r.get("source_path", ""),
+                content_hash=r.get("content_hash", "") or "",
+                doc_id=r.get("doc_id", "") or "",
+                retry_count=int(r.get("retry_count", 0)),
+                status=r.get("status", ""),
+                delay_s=int(r.get("delay_s", 0)),
+            )
+            for r in rows
+        ]
 
     def list_failed(self, collection: str | None = None) -> list[QueueRow]:
         """Return terminal-failed rows, optionally scoped to one collection."""

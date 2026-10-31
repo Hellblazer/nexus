@@ -19,9 +19,9 @@ nx upgrade
 ```
 
 It converges a set of PRECONDITIONS and then walks the data ladder.
-`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds one rung:
-`rdr192-manifest-backfill`, described below the table. Everything else in
-`nx upgrade` is precondition work:
+`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds four rungs:
+`rdr192-manifest-backfill`, `aspect-queue-tuples`, `note-tags-array` and
+`manifest-section-labels`, each described below the table. Everything else in `nx upgrade` is precondition work:
 
 | Precondition | Converges |
 |---|---|
@@ -103,6 +103,148 @@ credential-only tenant needs no `nx upgrade` of its own
   older version stays open even if a later census finds a residual. The record
   is an attestation, not proof; the reaper's own in-engine census (nexus-2x9xa)
   is what covers that case.
+
+### The `aspect-queue-tuples` rung
+
+RDR-235 moves aspect extraction from the `aspect_extraction_queue` table to the
+engine's `aspects` tuple queue, selected by `NX_ASPECT_QUEUE=tuples`. This rung
+moves the rows the table already holds, so none wait for the table side of the
+worker or strand.
+
+**What flips in this release (RDR-235 Activation Step 1, nexus-lnwn1).** The
+producer default changes: with `NX_ASPECT_QUEUE` unset, the indexer, the MCP
+store path and `nx aspects requeue-failed` now write one task per document to the
+`aspects` tuple queue instead of a row in the table. The required engine rises to
+at least `engine-service-v0.1.170` (the release's pairing line names the exact
+tag), which carries the read this rung needs and the census keys `nx doctor` uses
+for the queue's stall signal. The worker that drains the tuple queue ships in this
+same release: a worker from any earlier release drains only the table, so a
+flipped producer's tasks would sit unclaimed until the template's 90-day
+retention expires them, the tuple queue would fill towards its 10,000-task cap
+(further enqueues then fail and are logged, so new documents get no aspects),
+and the old client's `nx doctor` would show an empty queue. Upgrade every host
+that runs an aspect worker before, or in the same step as, the producer hosts;
+a producer host whose only worker host is older keeps `NX_ASPECT_QUEUE=table`
+until that host is upgraded. A single-host install needs nothing: its own worker
+is upgraded with it. After you upgrade, `nx upgrade` runs this rung once and
+moves the table's waiting rows; a stalled tuple queue shows in `nx doctor`'s
+aspects row.
+
+**Rollback.** Set `NX_ASPECT_QUEUE=table` on the producer hosts. The producer
+then writes the table again, the rung stops being applicable, and the worker
+keeps draining any task already on the tuple queue. Nothing is lost in either
+direction: a row is either still in the table or already a task, and a crash
+between the two steps leaves it in both places, never in neither. An engine older
+than `engine-service-v0.1.169` has no `aspects` template and refuses the
+`tuples` producer with a message naming that release; set `table` there. The
+variable is read by each process at call time, so a long-lived producer (an MCP
+server session, a running indexer) keeps its old setting until it is restarted:
+restart those processes after changing it, in either direction.
+
+- It applies only when `NX_ASPECT_QUEUE` is `tuples` (the default, unset
+  included), the engine has the `aspects` template, and the engine answers
+  `GET /v1/aspects/queue/list_waiting` (`engine-service-v0.1.170`; older
+  engines answer 404). Any other case is reported as not applicable, nothing is
+  recorded, and the rung is detected again at each `nx upgrade`. With
+  `NX_ASPECT_QUEUE=table` it sends no request.
+- Each `pending` or `in_progress` row becomes one `aspects` task (an `out` with
+  `mode=replace`, nonce = `doc_id`, an identity body), then the table row is
+  deleted. A crash between the two leaves the row in both places; the re-run
+  replaces the same task. `pending` rows keep their wait as `delay_s` (seconds to
+  `next_retry_at` on the database clock, clamped to 0 through 7,776,000);
+  `in_progress` rows move with no delay.
+- `failed` rows stay in the table (`nx aspects requeue-failed` re-enqueues
+  them). A row with an empty `doc_id` also stays, for the table worker to drain;
+  a log line counts them.
+- Migrated rows restart at attempts 0: `retry_count` does not travel.
+- `verify()` passes only when it read the waiting rows and none can move; an
+  unreachable read fails the rung with the reason.
+
+### The `note-tags-array` rung
+
+RDR-236 RF-17 makes a note's tags a set. In the note's catalog entry (`meta.tags`)
+they are a JSON array, so a filter can match one tag of several. Clients before
+nexus-6pfgb.38 stored the comma string the CLI and MCP pass, `"arch,decision"`;
+this rung rewrites those strings as arrays, once.
+
+- A note is a catalog document with `content_type` `knowledge` and no `file_path`
+  in a `knowledge__*` collection. Indexed files never carried `meta.tags`.
+- `detect()` is the dry run: it reads every `knowledge__*` collection's listing
+  and reports how many notes hold a string, out of how many it examined. The rung
+  is not applicable only when no catalog is available.
+- `converge()` re-reads each such note just before writing (a put since the
+  listing may have written the array, and that put wins), then sends
+  `meta={"tags": [...]}` alone: the string trimmed, split on commas, de-duplicated,
+  first-seen order kept; `""` becomes `[]`. The engine merges `meta`, so no other
+  key changes. An entry already holding an array, or no `tags` key, is left alone,
+  so a re-run does nothing. Batches of 500 resume on the next call.
+- It is exempt from the RDR-236 backfill's fill-only rule on purpose: the backfill
+  never rewrites a value it finds, and this conversion rewrites the old spelling of
+  the same value. It runs before the backfill, which then writes arrays.
+- `verify()` passes only when every `knowledge__*` listing was read and no note
+  holds a string; a missing or unreadable catalog fails the rung with the reason.
+  The recorded detail names how many notes it examined and how many it converted.
+- Until it has run, readers tolerate the string: `store_get`, `store_list` and the
+  recovery-bundle export split it on read.
+
+### The `manifest-section-labels` rung
+
+catalog-046 gave every manifest row its own section label (`section_title`,
+`section_type`, `page_number`) and a `labels_written` flag. A row written before it
+is *legacy*: NULL labels, flag false, and readers fall back to the shared T3 chunk
+row's label, which belongs to whichever document wrote that chunk last. `doc_indexer`
+skips unchanged files, so a re-index never fills them. This rung fills the rows where
+the chunk row's label is exact (nexus-1nrcu). The scan runs until a completion is
+recorded, then never again: `detect()` answers from the recorded completion (at any
+package version) without listing a document, since `nx doctor`, each session start's
+`nx upgrade --auto` and every walk call it. A row left legacy by design (shared
+chash, no label keys, a chunk titled for another file) stays legacy, and a forced
+re-index of its document is the only later path.
+
+- **The rule.** A legacy row takes the chunk row's label only when its chash has
+  exactly one live manifest row in the tenant, and that row is this one. One *owner*
+  is not enough: a document that holds a chash at two positions has one owner and two
+  rows, and the chunk row holds one label. Rows of any other chash stay legacy.
+- **Four more guards.** The chunk row must carry at least one of the three label
+  keys (a writer that predates labels omitted them; copying `""` would say "no
+  heading" where the truth is "never recorded"). Its `indexed_at` must be no later
+  than the document's plus five minutes (a later row was written by someone else).
+  Its `title` (the last writer's) must name this document: the document's title, its
+  file path or file name, with or without the `:12-30` / `:chunk-3` / `:page-2`
+  suffix the indexers add; a row with no title is not contradicted, and one that
+  names another file stays legacy and is counted as "chunk row not attributable".
+  Just before each write the batch's manifests and ownership are read again; a row
+  that became written, moved or gained a co-owner is skipped.
+- **Orphan-minted documents are skipped.** A document the orphan backfill registered
+  (`meta.backfill_from` is `t3_orphan`) keeps its rows legacy on purpose: the chunk
+  row's label is a former owner's, and the document's `indexed_at` is later than
+  every chunk it holds, so the date guard would not stop the copy. They are counted
+  as "in documents the orphan backfill minted".
+- **Fill-only.** A row already `labels_written` is never touched, an empty label
+  included. The rung never writes a label with the flag false.
+- **Known gap.** Ownership is read from live manifests, so a *tombstoned* document
+  that holds the chash is not counted; no client read lists a tombstoned document's
+  rows. The `indexed_at` and `title` guards are the defence: they cover a former
+  owner whose chunk row was written more than five minutes after the document, or
+  carries another file's title. They do not cover one whose row has no title or the
+  same title (nexus-6pfgb.58 closes it with an engine read). The same gap is
+  documented on `nx catalog backfill-meta`.
+- **Cost.** Until a completion is recorded, `detect()` is the dry run and does the whole scan with no write: it
+  reads every live document's manifest and the chunk rows of the legacy single-row
+  chashes, 50 documents at a time. `converge()` writes through `append_manifest_many`,
+  one request per collection per 50 documents and per 300 rows (a document's rows spill into the next request). The engine restamps a document's
+  `indexed_at` on every manifest write; the rung writes each filled document's
+  stamp back to the value it read at scan, so the attribution guard above and
+  `nx catalog backfill-meta`'s are unaffected and the order of the two does not
+  matter. A document whose stamp cannot be written back is named and the run is
+  DEFERRED.
+- **Reading the result.** The recorded detail counts, apart: rows already written,
+  legacy rows, rows filled, and the legacy rows left alone with the reason (shared
+  with another document, repeated inside the document, chunk without label keys,
+  chunk missing, chunk row not attributable, changed meanwhile, write failed). An
+  empty tenant converges having examined 0 documents, and says so. The rung is not
+  applicable when no catalog is available or the engine has no
+  `/manifest/chash_positions` route.
 
 ### Restoring chunks the reaper quarantined
 
@@ -383,9 +525,15 @@ interrupted — the ETL paths are idempotent and re-converge on
 
 ## If the RDR-231 note-URI backfill halts startup
 
-**Symptom.** The new engine does not come up. Its log
-(`~/.config/nexus/logs/storage_service_native.log` on a local install, the
-deployment's engine log in the cloud) ends with:
+**Symptom.** The new engine does not come up. `nx daemon service start` exits 2,
+within a few seconds when it starts the supervisor directly and after 60 seconds
+when it starts it through an autostart unit (launchd, systemd, Task Scheduler),
+and the upgrade's own finish pass reports a service that did not start or is not
+answering (see "How the halt first shows up" below for the exact text). The
+engine's native log (`~/.config/nexus/logs/storage_service_native.log` on a local
+install, the deployment's engine log in the cloud) contains the reason: the
+message below appears in it several times, once for each link of the exception
+chain, with stack frames between the copies.
 
 ```text
 RDR-231 note-URI backfill halted and nothing was changed: N live chroma:// note row(s) have a live nx-note:// twin. ...
@@ -413,8 +561,48 @@ rewrote none. (Changesets of the same engine tag that sit before
 used only to merge, then stopped.)
 
 **1. List the pairs.** Run this as a role that bypasses row-level security: the
-`postgres` superuser of the nx-managed cluster locally, the operator's
-diagnostic role in the cloud. It is the guard's own test, one row per pair:
+superuser of the nx-managed cluster locally, the operator's diagnostic role in
+the cloud. It is the guard's own test, one row per pair.
+
+Locally the cluster listens only on TCP at `127.0.0.1` (no Unix socket) and
+every `pg_hba.conf` line is `scram-sha-256`. The superuser role is named for the
+OS login that provisioned the cluster (`$USER`), not `postgres`. Its password is
+`PG_SUPERUSER_PASS` and the port is `PG_PORT`, both in `<config>/pg_credentials`
+(`~/.config/nexus` unless `NEXUS_CONFIG_DIR` says otherwise). Use the PostgreSQL
+client nx extracted under `<config>/pg-bundle`; nx never falls back to a host
+`psql`. The cluster keeps running when the service stops, so this works while the
+engine is halted. This opens a session without printing the password or putting
+it on a command line. **It is for Linux and macOS.**
+
+```bash
+CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
+PGPASSWORD="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")" \
+  "$CFG/pg-bundle/bundle/bin/psql" -h 127.0.0.1 \
+  -p "$(sed -n 's/^PG_PORT=//p' "$CFG/pg_credentials")" -U "$USER" -d nexus
+```
+
+Three ways this can differ on your machine:
+
+- **Windows.** The command above does not apply. The superuser role there is
+  `nx_` plus the first 16 hex digits of the SHA-256 of the service account's SID
+  (`windows_superuser_name` in `src/nexus/db/pg_provision.py`), not your login
+  name, and the shell syntax is POSIX. A verb that runs this for you is planned
+  (nexus-bivz3.28); until then there is no copy-and-paste command for Windows.
+- **`role "<you>" does not exist`.** The cluster was provisioned from a process
+  with neither `USER` nor `LOGNAME` set (a service manager, `cron`), and
+  `bootstrap_superuser` falls back to `postgres` for the role. Use `-U postgres`
+  with the same password.
+- **A password prompt nobody can answer.** A cluster that predates
+  `PG_SUPERUSER_PASS` was `trust` with no password. The supervisor converts it to
+  `scram-sha-256`, with a generated password written to `pg_credentials`
+  (`harden_cluster_auth`), the first time it provisions the cluster, and it does
+  that before it starts the engine, so by the time you see this halt the key is
+  there. If `pg_credentials` still has no `PG_SUPERUSER_PASS` line, nx refuses to
+  loosen `pg_hba.conf` (`PgAuthLockedError`); its message says to restore the key
+  from a backup of `pg_credentials`, or to reset the role's password in
+  single-user mode and record it there.
+
+Paste the query below at the psql prompt.
 
 ```sql
 WITH o AS (
@@ -436,16 +624,59 @@ SELECT o.tenant_id, o.tumbler AS chroma_row, t.tumbler AS nx_note_row, o.source_
  ORDER BY o.tenant_id, o.tumbler;
 ```
 
-**2. Merge each pair on the previous engine.** For each row pick the one to
-keep (the canonical; usually the `nx_note_row`, which already has the new
-spelling) and merge the other (the duplicate) into it, in the tenant that owns
-both. The merge frees the duplicate's `source_uri`, aliases it to the canonical
-and moves its links, in one transaction. The CLI call is
-`nx catalog merge <duplicate> <canonical>` and the engine route is
-`POST /v1/catalog/merge` with `{"duplicate": "<tumbler>", "canonical": "<tumbler>"}`.
-Run the query again: it must return no rows.
+**2. Merge each pair on the previous engine.** The merge moves identity, not
+content. In one transaction it clears the duplicate's `source_uri`, gives that
+`source_uri` to the canonical only if the canonical has none (a canonical that
+already has one keeps its own), sets the duplicate's `alias_of` to the canonical,
+and re-points the duplicate's links at the canonical (`CatalogRepository.mergeDocuments`).
+It touches only `catalog_documents` and `catalog_links`: it does not move the
+duplicate's chunks and does not change either row's collection.
 
-**3. Restart on the new engine.** The backfill then passes.
+Compare the two rows of a pair before you merge, because you cannot after.
+`nx catalog show <tumbler>` follows `alias_of`, so once the merge has run, showing
+the duplicate prints the canonical's card. Before the merge, run it on both rows
+and compare `Chunks`, `Collection` and `Indexed`, and read the text each row holds
+(`nx store list` lists the notes with their IDs; `nx store get <id>` prints one).
+Keep, as the canonical, the row whose text you want. That is usually the
+`nx_note_row` (the newer write), but a note stored by `nx store put` before the
+upgrade has its chunks on the `chroma_row`, and a `nx_note_row` registered without
+content shows `Chunks: 0` and an empty `Collection`. Merging the chunk-holding row
+into such an empty one leaves the note's lookups resolving to a row with no chunks.
+
+Then merge the other row (the duplicate) into the one you keep, in the tenant that
+owns both. The CLI call is `nx catalog merge <duplicate> <canonical>` and the
+engine route is `POST /v1/catalog/merge` with
+`{"duplicate": "<tumbler>", "canonical": "<tumbler>"}`. Run the step 1 query
+again: it must return no rows.
+
+If both rows have chunks, the merge does not combine them. The duplicate stays a
+live catalog row, and a chunk is live while any live document owns it (a manifest
+row in the chunk's own collection; `nexus.chunk_live_owners`, which does not look
+at `alias_of`). So the duplicate's chunks still come back from `nx search` and
+`nx store get`, and still appear in `nx store list`, next to the canonical's. If
+you would rather keep both versions, do nothing: the other version stays
+searchable under its own tumbler.
+
+To drop the other version's chunks from reads, delete the duplicate after the
+merge with `nx catalog delete <duplicate>`. It tombstones only that row (the
+engine does not follow the alias for a delete). Chunks that no other live document
+owns then stop appearing in search and `store get`; a chunk with identical text in
+the same collection that the canonical also owns stays. The chunks remain stored:
+`nx catalog restore <duplicate>` brings them back until `nx catalog purge-trash`
+reclaims them after its grace window. The confirmation prompt prints the
+canonical's title next to the duplicate's tumbler, because the prompt resolves
+through the alias; the tumbler is what is deleted.
+
+**3. Restart on the new engine.** The backfill then passes. Three checks that it
+did:
+
+- `nx daemon service status` lists `service_release_version` as the new engine's
+  version (the `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`).
+- In psql (step 1), `SELECT id, exectype FROM public.databasechangelog WHERE id =
+  'note-uri-001-1'` returns the row with `EXECUTED`. Liquibase's own tables are in
+  the `public` schema, not `nexus` (`nexus.databasechangelog` does not exist). The
+  query returns no row while the backfill has not run.
+- `nx catalog show <the canonical>` prints `URI:` with an `nx-note://` spelling.
 
 ### Cloud
 
@@ -468,15 +699,88 @@ in the previous client release's changelog entry (`engine-service-v0.1.165` for
 the client release before RDR-231).
 
 ```bash
-nx daemon service stop                                   # stops the supervisor retrying the halted engine
+nx daemon service stop                                   # normally prints "already stopped": the supervisor exited with the halted engine. Harmless, and it makes sure nothing is retrying
 nx daemon service install-binary engine-service-v0.1.165 --no-pg-bundle   # the PREVIOUS engine tag, binary only
 nx daemon service start                                  # previous engine, same database
-# step 1: list the pairs (psql against the nx-managed cluster, see "Restoring a pg_dump" for its socket)
+# step 1: list the pairs (psql over TCP as the superuser, see step 1 above)
 nx catalog merge <duplicate> <canonical>                 # step 2, once per pair
 nx daemon service stop
 nx daemon service install-binary <the new engine tag>    # the tag in the new client release's changelog entry
 nx daemon service start                                  # the backfill passes; check logs/storage_service_native.log
 ```
+
+**How the halt first shows up.** On a local install you usually meet it in the
+output of the upgrade itself. The first `nx` command after `uv tool upgrade` runs
+the upgrade-finish pass, which installs the pinned engine and starts it; a halted
+engine never answers. What `nx daemon service start` prints in that case
+(the lines are a rehearsal's; the first is stderr noise from a box with no
+`systemctl`):
+
+```text
+Not starting through the autostart unit /home/nexus/.config/systemd/user/nexus-service.service (no_manager: systemctl not found on PATH or at /usr/bin/systemctl, /bin/systemctl); starting the supervisor directly.
+Error: Storage service supervisor exited with code 2 before the service became ready.
+Schema migration failed on port 47055: 2026-10-29 13:56:09,901 ERROR [main] dev.nexus.service.Main - event=schema_migration_failed error="Liquibase migration failed". Engine log: /home/nexus/.config/nexus/logs/storage_service_native.log
+The engine reported: RDR-231 note-URI backfill halted and nothing was changed: 1 live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup
+Supervisor log: /home/nexus/.config/nexus/logs/storage_service.log
+Supervisor stderr: /home/nexus/.config/nexus/logs/storage_service.crash.log
+```
+
+The finish pass carries that text, up to its first 1,000 characters, in a `NEEDS
+HUMAN` line (wrapped here for the page; the line is one):
+
+```text
+NEEDS HUMAN: the storage service did not start (`nx daemon service start` exited 2); the engine
+is NOT converged to v0.1.167. Its reason: Storage service supervisor exited with code 2 before
+the service became ready. Schema migration failed on port 47055: 2026-10-29 13:56:09,901 ERROR
+[main] dev.nexus.service.Main - event=schema_migration_failed error="Liquibase migration
+failed". Engine log: /home/nexus/.config/nexus/logs/storage_service_native.log The engine
+reported: RDR-231 note-URI backfill halted and nothing was changed: 1 live chroma:// note row(s)
+have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST
+/v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs:
+https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup
+Supervisor log: /home/nexus/.config/nexus/logs/storage_service.log Supervisor stderr:
+/home/nexus/.config/nexus/logs/storage_service.crash.log Run `nx daemon service start` to see it
+again, read the engine log, and check `nx doctor`. [cycle] stop rc=0: Storage service stopped
+(pid(s)=352). | start rc=2: Not starting through the autostart unit
+/home/nexus/.config/systemd/user/nexus-service.service (no_manager: systemctl not found on PATH
+or at /usr/bin/systemctl, /bin/systemctl); starting the supervisor directly. Error: Storage
+service supervisor exited with code 2 before the service became ready. S
+```
+
+On a box whose service runs under an autostart unit (launchd on macOS, systemd
+on Linux, Task Scheduler on Windows), `start` goes through the unit and waits 60
+seconds for the service, so its first line is instead `The autostart unit
+<unit> was started but the storage service did not become ready within 60s;
+the service manager keeps restarting the unit.` (on Windows: `Task Scheduler
+restarts the task when it fails.`), followed by `The supervisor reported:
+Schema migration failed ...` and the same `The engine reported: RDR-231
+note-URI backfill halted ...` line, then the log paths. Because that start only
+timed out waiting, the finish pass cannot tell a halt from a slow migration and
+says so: its line reads `NEEDS HUMAN: ... nothing answers yet; the service may
+still be migrating ... UNVERIFIED`, with the same reason text. The `The engine
+reported:` line is the one that decides it: if it names the RDR-231 halt, the
+engine is not migrating, it has stopped, and the steps below apply.
+
+A later `nx daemon restart-stale` installs and starts nothing: the pinned engine
+is already on disk, and a stopped service is an ordinary state that command does
+not restart on its own. Its engine line is neutral:
+
+```text
+engine: installed engine is v0.1.167 (the release dependency); the service is not running (no
+discoverable storage-service lease). Start it with `nx daemon service start` (its output names
+the reason if the engine halts at startup).
+```
+
+It says only that the service is not running. `nx daemon service start` is what
+prints the halt, so run it, or read the engine log.
+
+Client 7.88.0 printed `engine: converged` on that line, from the installed binary
+alone, and its finish line said the service "restarted but its version could not
+be confirmed" with the start output cut at 300 characters, so neither named the
+halt. The fix is first in the next client release after 7.88.0. On 7.88.0,
+`nx daemon service start` still prints the supervisor's `Schema migration failed
+... Liquibase migration failed. Engine log: <path>`; read the RAISE in the log it
+names, then follow the steps above.
 
 `install-binary` also swaps the PostgreSQL bundle by default (`--pg-bundle`), and
 the previous tag ships the bundle it was built with, which can be an older

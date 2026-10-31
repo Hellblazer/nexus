@@ -46,8 +46,8 @@ def test_two_notes_sharing_a_chunk_export_and_import_their_own_keys(t2_service_e
 
     assert set(docs) == {"keys-A", "keys-B"}
     a, b = docs["keys-A"], docs["keys-B"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == ("alpha,one", "design", 7)
-    assert (b["tags"], b["category"], b["ttl_days"]) == ("beta,two", "finding", None)
+    assert (a["tags"], a["category"], a["ttl_days"]) == (["alpha", "one"], "design", 7)
+    assert (b["tags"], b["category"], b["ttl_days"]) == (["beta", "two"], "finding", None)
     assert summary.note_keys_unrecovered == 0
 
     # Importing the bundle back reconciles onto both notes and leaves each with its own keys.
@@ -55,7 +55,7 @@ def test_two_notes_sharing_a_chunk_export_and_import_their_own_keys(t2_service_e
         imported = import_bundle(reader, reader, client, bundle)
     assert imported.docs_failed == 0 and imported.docs_uncertain == 0, imported.doc_failures
 
-    for title, tags, ttl in (("keys-A", "alpha,one", 7), ("keys-B", "beta,two", 0)):
+    for title, tags, ttl in (("keys-A", ["alpha", "one"], 7), ("keys-B", ["beta", "two"], 0)):
         doc = reader.by_source_uri(uri_for(collection, title))
         assert doc is not None
         assert (doc.meta or {}).get("tags") == tags
@@ -120,7 +120,7 @@ def test_a_note_stored_with_no_keys_never_exports_a_departed_co_owners_keys(
 
     summary, docs = _exported(client, tmp_path, collection)
 
-    assert (docs["unset-A"]["tags"], docs["unset-A"]["category"], docs["unset-A"]["ttl_days"]) == ("", "", None)
+    assert (docs["unset-A"]["tags"], docs["unset-A"]["category"], docs["unset-A"]["ttl_days"]) == ([], "", None)
     assert docs["keyed-B"]["ttl_days"] == 7
     assert summary.note_keys_unrecovered == unrecovered
 
@@ -160,9 +160,9 @@ def test_a_keyless_note_that_wrote_its_own_row_exports_the_rows_values(t2_servic
     summary, docs = _exported(client, tmp_path, collection)
 
     assert (docs["legacy-A"]["tags"], docs["legacy-A"]["category"], docs["legacy-A"]["ttl_days"]) == (
-        "alpha", "design", 30)
+        ["alpha"], "design", 30)
     assert (docs["keyed-B"]["tags"], docs["keyed-B"]["category"], docs["keyed-B"]["ttl_days"]) == (
-        "beta", "finding", 7)
+        ["beta"], "finding", 7)
     assert summary.note_keys_unrecovered == 0
 
 
@@ -190,5 +190,5 @@ def test_a_rejected_keyless_note_re_put_with_its_values_exports_them(t2_service_
     second.mkdir()
     summary, docs = _exported(client, second, collection)
     assert (docs["unset-A"]["tags"], docs["unset-A"]["category"], docs["unset-A"]["ttl_days"]) == (
-        "alpha", "design", 30)
+        ["alpha"], "design", 30)
     assert summary.note_keys_unrecovered == 0

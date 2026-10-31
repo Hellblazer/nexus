@@ -60,6 +60,9 @@ __all__ = [
     "NX_REFERENCE_ETAG_CAPTURE_ENV",
     "ReadFail",
     "ReadFailReason",
+    "READ_FAIL_TRANSPORT",
+    "TransportReadFailure",
+    "is_transport_failure",
     "ReadOk",
     "ReadResult",
     "StalenessSignal",
@@ -292,7 +295,49 @@ class ReadOk:
     metadata: dict[str, Any]
 
 
-ReadFailReason = Literal["unreachable", "unauthorized", "scheme_unknown", "empty"]
+ReadFailReason = Literal[
+    "unreachable", "unauthorized", "scheme_unknown", "empty", "transport",
+]
+
+#: The ``ReadFail`` reason for a failure of the NETWORK or the service behind
+#: the read (an httpx transport error, a timeout, a 5xx), as opposed to a fact
+#: about the document. The aspect worker retries it on the RDR-163 ladder and
+#: never drops the extraction (nexus-5r2sc.3.10, RDR-235 gate S3).
+READ_FAIL_TRANSPORT = "transport"
+
+
+class TransportReadFailure(RuntimeError):
+    """A read failed for a reason of the network, not the document.
+
+    Raised by a read-side lookup (the catalog manifest) so the reader can tell
+    "the lookup is down" from "the lookup answered with nothing"; also the
+    exception the table-path worker routes a ``transport`` ``ExtractFail``
+    through, which ``aspect_worker._is_retryable`` accepts.
+    """
+
+
+def is_transport_failure(exc: BaseException) -> bool:
+    """True if *exc* is a transient failure of the transport or the service: an
+    httpx/urllib connectivity error, a timeout, or any HTTP 5xx or 429. A
+    ValueError, an assertion or a 4xx is a fact about the request and is not."""
+    from nexus.retry import (  # noqa: PLC0415 — deferred: retry pulls httpx and the Voyage predicates
+        _extract_status_and_retry_after,
+        _is_retryable_vector_error,
+    )
+
+    if isinstance(exc, TransportReadFailure):
+        return True
+    try:
+        if _is_retryable_vector_error(exc):
+            return True
+        found = _extract_status_and_retry_after(exc)
+    except Exception:  # noqa: BLE001 — a classifier fault must not turn a read failure into a crash
+        return False
+    return found is not None and found[0] >= 500
+
+
+def _transport_or_unreachable(exc: BaseException) -> ReadFailReason:
+    return "transport" if is_transport_failure(exc) else "unreachable"
 
 
 @dataclass(frozen=True)
@@ -304,11 +349,14 @@ class ReadFail:
     Reasons:
 
     * ``unreachable`` — caller could not reach the resource named by
-      the URI. Covers I/O errors, missing files, chroma client errors,
-      and malformed-but-scheme-known URIs (the URI parsed but had no
+      the URI. Covers I/O errors, missing files, and malformed-but-scheme-known URIs (the URI parsed but had no
       collection or no source identifier). Operators distinguish
       transient-network failures from caller-side malformed-URI
       failures via the ``detail`` field.
+    * ``transport`` — the network or the service behind the read failed (an
+      httpx transport error, a timeout, a 5xx from T3, the catalog manifest or
+      an HTTP fetch). A fact about the moment, not the document: the aspect
+      worker retries it on the RDR-163 ladder and never drops the extraction.
     * ``unauthorized`` — caller lacks credentials (HTTPS auth, S3
       ACL). Not retriable without out-of-band intervention.
     * ``scheme_unknown`` — URI scheme has no registered reader (or no
@@ -387,16 +435,27 @@ def _legacy_identity_fields_for(collection: str) -> tuple[str, ...]:
 # ── file:// reader ───────────────────────────────────────────────────────────
 
 
+def file_uri_path(uri: str) -> str:
+    """The absolute path of a ``file://`` URI, or ``""`` (another scheme, or a path that is not absolute).
+
+    The path is whatever follows the scheme, taken VERBATIM (nexus-6pfgb.55, .57): every registration path
+    mints the RAW spelling ``"file://" + path`` (:func:`uri_for`, ``doc_indexer._curator_identity``, the
+    engine's ``deriveSourceUri``), so a ``#``, a ``?`` or a literal ``%25`` in a directory name is part of
+    the path, not a fragment, a query or an escape. A URL parser truncated or unquoted it. A path that is
+    not absolute (``file://relative/x``) is refused rather than anchored on the working directory."""
+    if not uri.startswith("file://"):
+        return ""
+    path = uri[len("file://"):]
+    return path if os.path.isabs(path) else ""
+
+
 def _read_file_uri(uri: str, **_kw: Any) -> ReadResult:
     """Read a ``file://`` URI from disk.
 
-    ``urlparse`` handles ``file:///abs/path`` and
-    ``file://localhost/abs/path`` shapes; the path component is
-    URL-unquoted to recover characters that were percent-encoded at
-    write time (spaces, unicode, etc.).
+    The path is what follows ``file://``, verbatim (see :func:`file_uri_path`): the mint writes the raw
+    path, so nothing is unquoted (nexus-6pfgb.57).
     """
-    parsed = urlparse(uri)
-    path = unquote(parsed.path)
+    path = file_uri_path(uri)
     if not path:
         return ReadFail(reason="unreachable", detail=f"empty path in {uri!r}")
     try:
@@ -452,7 +511,17 @@ def _gather_chroma_chunks_by_field(
     if manifest_lookup is not None and identity_field == "doc_id":
         try:
             rows = manifest_lookup(match_value)
-        except Exception:  # noqa: BLE001 — best-effort row fetch; degrades to empty list
+        except Exception as e:  # noqa: BLE001 — best-effort row fetch; a transport failure is surfaced, anything else degrades to an empty list
+            if is_transport_failure(e):
+                # The manifest is down, not empty: an empty one would read as a
+                # verdict on the document (nexus-5r2sc.3.10).
+                return ReadFail(
+                    reason="transport",
+                    detail=(
+                        f"manifest lookup failed for {match_value!r}: "
+                        f"{type(e).__name__}: {e}"
+                    ),
+                )
             rows = []
         for row in rows or []:
             chash = getattr(row, "chash", None) or (
@@ -551,7 +620,7 @@ def _gather_chroma_chunks_by_field(
                 offset += page_limit
     except Exception as e:  # noqa: BLE001 — boundary catch; error surfaced to caller as a ReadFail result
         return ReadFail(
-            reason="unreachable",
+            reason=_transport_or_unreachable(e),
             detail=(
                 f"chroma.get failed (field={identity_field!r}): "
                 f"{type(e).__name__}: {e}"
@@ -655,7 +724,7 @@ def _read_chroma_uri(
         coll = t3.get_collection(collection)
     except Exception as e:  # noqa: BLE001 — boundary catch; error surfaced to caller as a ReadFail result
         return ReadFail(
-            reason="unreachable",
+            reason=_transport_or_unreachable(e),
             detail=f"get_collection({collection!r}) failed: {type(e).__name__}: {e}",
         )
 
@@ -672,7 +741,7 @@ def _read_chroma_uri(
             doc_id = doc_id_lookup(collection, source_id) or ""
         except Exception as e:  # noqa: BLE001 — boundary catch; error surfaced to caller as a ReadFail result
             return ReadFail(
-                reason="unreachable",
+                reason=_transport_or_unreachable(e),
                 detail=(
                     f"doc_id_lookup({collection!r}, {source_id!r}) raised "
                     f"{type(e).__name__}: {e}"
@@ -699,7 +768,7 @@ def _read_chroma_uri(
         # not silently fall through to legacy probe — the legacy probe
         # would find nothing and the corruption stays hidden behind an
         # ``empty`` report.
-        if result.reason == "unreachable":
+        if result.reason in ("unreachable", "transport"):
             return result
         # doc_id mapped but T3 query returned empty: chunks predate
         # the Phase 4 doc_id write contract. Fall through to legacy
@@ -720,7 +789,7 @@ def _read_chroma_uri(
             return result
         last_fail = result
         # Only ``empty`` is retriable across the next legacy field;
-        # ``unreachable`` (chroma.get raised) means stop probing.
+        # ``unreachable`` and ``transport`` (chroma.get raised) mean stop probing.
         if result.reason != "empty":
             return result
     return last_fail or ReadFail(
@@ -844,7 +913,8 @@ def _read_https_uri(
 
     * 401 / 403 → ``ReadFail(reason='unauthorized')`` (auth fixable
       out of band; not retriable in-process).
-    * 404 / 5xx / network error → ``ReadFail(reason='unreachable')``.
+    * 404 → ``ReadFail(reason='unreachable')``; 5xx / network error →
+      ``ReadFail(reason='transport')`` (retried by the worker).
     * empty body → ``ReadFail(reason='empty')``.
     * chroma-first miss → falls through to httpx (no error surfaced
       from the chroma probe).
@@ -884,7 +954,7 @@ def _read_https_uri(
             response = http_client.get(uri)
         except Exception as e:  # noqa: BLE001 — boundary catch; error surfaced to caller as a ReadFail result
             return ReadFail(
-                reason="unreachable",
+                reason=_transport_or_unreachable(e),
                 detail=f"http fetch failed: {type(e).__name__}: {e}",
             )
     finally:
@@ -899,7 +969,9 @@ def _read_https_uri(
         )
     if status >= 400:
         return ReadFail(
-            reason="unreachable",
+            # 429 and 408 are the rate limit and the request timeout: transient,
+            # like a 5xx, and retried on the ladder (is_transport_failure agrees).
+            reason="transport" if status >= 500 or status in (429, 408) else "unreachable",
             detail=f"HTTP {status} from {uri!r}",
         )
     text = response.text or ""
@@ -1386,9 +1458,8 @@ StalenessSignal = Literal["fresh", "stale", "dangling", "unknown"]
 
 
 def _stat_file_uri(uri: str, **_kw: Any) -> StatResult:
-    """Stat a ``file://`` URI — return current mtime without reading bytes."""
-    parsed = urlparse(uri)
-    path = unquote(parsed.path)
+    """Stat a ``file://`` URI — return current mtime without reading bytes (path verbatim, see :func:`file_uri_path`)."""
+    path = file_uri_path(uri)
     if not path:
         return StatFail(reason="error", detail=f"empty path in {uri!r}")
     try:

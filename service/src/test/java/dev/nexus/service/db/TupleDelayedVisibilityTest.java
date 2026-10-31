@@ -399,6 +399,84 @@ class TupleDelayedVisibilityTest {
         assertThat(census.claimed()).isZero();
     }
 
+    // ── (g2) nexus-p909o: the census tells a delayed row from a claimable one ─
+
+    /** Both census forms must agree: the single-subspace query and the GROUP BY behind subspace_list. */
+    private List<TupleRepository.SubspaceCensus> bothCensuses(Q q) {
+        var stats = repo.subspaceStats(TENANT, q.subspace());
+        var listed = repo.subspaceList(TENANT, q.subspace());
+        assertThat(listed).as("subspace_list returns the one matching subspace").hasSize(1);
+        assertThat(listed.get(0)).as("subspace_list and subspace_stats agree field for field").isEqualTo(stats);
+        return List.of(stats, listed.get(0));
+    }
+
+    @Test
+    void aDelayedRow_countsAsAvailableAndDelayed_andIsNotTheOldestClaimable() {
+        Q q = newQueue();
+        out(q, 60L);
+        for (var c : bothCensuses(q)) {
+            assertThat(c.available()).as("available keeps counting the delayed row").isEqualTo(1);
+            assertThat(c.delayed()).isEqualTo(1);
+            assertThat(c.oldestClaimableCreatedAt()).as("nothing a claim could take now").isNull();
+        }
+    }
+
+    @Test
+    void onceTheDelayElapses_theRowIsClaimable_andNoLongerDelayed() throws Exception {
+        Q q = newQueue();
+        out(q, 60L);
+        moveAvailableAt(q, -30);  // the database clock has passed available_at
+        for (var c : bothCensuses(q)) {
+            assertThat(c.available()).isEqualTo(1);
+            assertThat(c.delayed()).as("no longer waiting").isZero();
+            assertThat(c.oldestClaimableCreatedAt()).as("now the oldest claimable row").isNotNull()
+                    .isEqualTo(c.oldestCreatedAt());
+        }
+    }
+
+    @Test
+    void theOldestClaimable_skipsAnOlderDelayedRow_andAClaimedRow() throws Exception {
+        Q q = newQueue();
+        repo.out(TENANT, q.subspace(), q.pattern(), Map.of("from", "producer"), "delayed-first", "n-1", null, null, 60L);
+        Thread.sleep(20);  // distinct created_at
+        repo.out(TENANT, q.subspace(), q.pattern(), Map.of("from", "producer"), "plain-second", "n-2", null, null, null);
+        var delayedCreated = admin(ctx -> ctx.select(TUPLES.CREATED_AT).from(TUPLES)
+                .where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.SUBSPACE.eq(q.subspace()))
+                        .and(TUPLES.AVAILABLE_AT.isNotNull()))
+                .fetchOne(TUPLES.CREATED_AT));
+        for (var c : bothCensuses(q)) {
+            assertThat(c.available()).isEqualTo(2);
+            assertThat(c.delayed()).isEqualTo(1);
+            assertThat(c.oldestClaimableCreatedAt()).as("the plain row, not the older delayed one").isNotNull()
+                    .isAfter(delayedCreated);
+        }
+        // Claim the plain row: it leaves the claimable set; only the delayed row remains and it is not claimable.
+        claimOrFail(q, "w1");
+        for (var c : bothCensuses(q)) {
+            assertThat(c.available()).isEqualTo(1);
+            assertThat(c.claimed()).isEqualTo(1);
+            assertThat(c.delayed()).isEqualTo(1);
+            assertThat(c.oldestClaimableCreatedAt()).as("a claimed row is not claimable").isNull();
+        }
+    }
+
+    @Test
+    void aRenderedRow_carriesAvailableAt_untilAClaimClearingPathClearsIt() throws Exception {
+        Q q = newQueue();
+        out(q, 60L);
+        var delayed = repo.rd(TENANT, q.subspace(), q.pattern(), 10, null, 0);
+        assertThat(delayed).hasSize(1);
+        assertThat(delayed.get(0).availableAt()).as("the delay is readable on the row").isNotNull();
+        assertThat(delayed.get(0).availableAt().toInstant()).isEqualTo(availableAt(q).toInstant());
+        moveAvailableAt(q, -30);
+        var claimed = claimOrFail(q, "w1");
+        // The claim itself leaves the (now past) stamp; the paths that clear the claim clear it.
+        assertThat(claimed.tuple().availableAt()).as("a claim does not clear it").isNotNull();
+        repo.release(TENANT, claimed.claimId(), "w1");
+        assertThat(repo.rd(TENANT, q.subspace(), q.pattern(), 10, null, 0).get(0).availableAt())
+                .as("release clears it").isNull();
+    }
+
     // ── (h) a parked in does not spin on a delayed row; (i) announce mirrors ──
 
     @Test

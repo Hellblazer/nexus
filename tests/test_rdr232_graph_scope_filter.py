@@ -52,7 +52,8 @@ class _Engine:
     but drops the key (no marker). ``advertise`` False is an engine that predates the capability.
     """
 
-    def __init__(self, nodes, edges, *, advertise=True, honour=True, registry=None, registry_error=None):
+    def __init__(self, nodes, edges, *, advertise=True, honour=True, registry=None, registry_error=None, walk=False):
+        self._walk_fields = walk  # nexus-jypmj.18: advertises ``catalog_graph_node_walk_supported`` and sends ``node_walk``
         self._nodes = nodes
         self._edges = edges
         self._advertise = advertise
@@ -63,9 +64,42 @@ class _Engine:
         self.registry_calls = 0
         self.registry_lifecycle_states: list[str | None] = []
         self.quarantined: list[str] = []
+        self.omit_node_walk = False  # an engine that advertises node_walk and applies the predicate but sends none
 
     def supports_graph_scope_filter(self) -> bool:
         return self._advertise
+
+    def supports_graph_node_walk(self) -> bool:
+        return self._walk_fields
+
+    def _node_walk(self, seeds, direction, keep_ids) -> dict:
+        """Depth and best role of every returned node, over EVERY edge (the removed relays included): the
+        engine's ``node_walk``, by the rule ``traversal_policy._distance_and_role`` applies to a complete edge set."""
+        from nexus.plans.traversal_policy import _ROLE_RANK, link_role
+
+        depth = {str(x): 0 for x in seeds}
+        role: dict[str, str] = {}
+        frontier = list(depth)
+        while frontier:
+            found: dict[str, str] = {}
+            for e in self._edges:
+                for here, there in ((e.from_tumbler, e.to_tumbler), (e.to_tumbler, e.from_tumbler)):
+                    if (here, there) == (e.to_tumbler, e.from_tumbler) and direction == "out":
+                        continue
+                    if (here, there) == (e.from_tumbler, e.to_tumbler) and direction == "in":
+                        continue
+                    if here in frontier and there not in depth:
+                        r = link_role(e.link_type)
+                        if there not in found or _ROLE_RANK[r] < _ROLE_RANK[found[there]]:
+                            found[there] = r
+            for there, r in found.items():
+                depth[there] = depth[frontier[0]] + 1
+                role[there] = r
+            frontier = list(found)
+        return {
+            t: ({"depth": d} if t not in role else {"depth": d, "role": role[t]})
+            for t, d in depth.items() if t in keep_ids
+        }
 
     def list_collections(self, lifecycle_state=None, content_type=None):
         self.registry_calls += 1
@@ -96,6 +130,8 @@ class _Engine:
         keep_ids = {str(n.tumbler) for n in nodes}
         reply["nodes"] = nodes
         reply["edges"] = [e for e in self._edges if e.from_tumbler in keep_ids and e.to_tumbler in keep_ids]
+        if flt is not None and self._honour and self._walk_fields and not self.omit_node_walk:
+            reply["node_walk"] = self._node_walk(seeds, kw.get("direction", "both"), keep_ids)
         return reply
 
     def graph(self, seed, **kw):
@@ -266,6 +302,120 @@ def test_a_registry_that_cannot_be_read_falls_back_to_the_old_engine_path() -> N
     assert rep["scope_prefilter"] == "unavailable" and rep["secondary_omitted"] is True and rep["contained"] is False
 
 
+@pytest.fixture()
+def real_handle_factory(monkeypatch):
+    """The production path: ``_get_catalog()`` -> ``make_catalog_reader()`` builds a NEW ``_SharedServiceCatalogHandle``
+    on every call, over one shared client. The slot is the only seam replaced, by one that holds the test's engine."""
+    from nexus.catalog import factory
+    from nexus.service_handles import SharedClientSlot
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
+    holder: dict = {}
+    slot = SharedClientSlot(lambda: holder["engine"], lambda _client: None)
+    monkeypatch.setattr(factory, "_default_catalog_slot", slot)
+
+    def install(engine):
+        holder["engine"] = engine
+        return engine
+
+    return install
+
+
+def _run_real(**kw):
+    """``traverse`` with nothing patched: the handle comes from the real factory path."""
+    from nexus.mcp.core import traverse
+
+    return traverse(**kw)
+
+
+def test_the_real_factory_hands_a_new_handle_per_call(real_handle_factory) -> None:
+    """The premise of the run-scoped listing: a cache keyed on the catalog handle can never hit in production."""
+    from nexus.mcp_infra import get_catalog
+
+    real_handle_factory(_Engine(*_crowded()))
+    assert get_catalog() is not get_catalog()
+
+
+def test_a_multi_step_run_lists_the_registry_once(real_handle_factory) -> None:
+    """nexus-jypmj.19: every corpus-prefix scoped traverse step used to list every collection. Steps of one run
+    share one listing, across prefixes too, since the shared view is the live registry and not one scope's slice."""
+    from nexus.plans.traversal_policy import registry_listing_scope
+
+    cat = real_handle_factory(_Engine(*_crowded(), registry=[RDR, CODE]))
+    with registry_listing_scope():
+        for scope in ("rdr", "rdr", "code", "rdr"):
+            out = _run_real(seeds=[SEED], link_types=["relates"], policy=_policy(scope))
+            assert out["traversal"]["scope_prefilter"] == "applied"
+    assert cat.registry_calls == 1, "four scoped steps, one registry read"
+    assert [kw["scope_filter"] for kw in cat.graph_kwargs] == [
+        {"collections": [RDR]}, {"collections": [RDR]}, {"collections": [CODE]}, {"collections": [RDR]},
+    ]
+
+
+def test_a_second_run_lists_again_and_sees_a_collection_registered_between_the_runs(real_handle_factory) -> None:
+    from nexus.plans.traversal_policy import registry_listing_scope
+
+    new_rdr = "rdr__1-9__bge-base-en-v15-768__v1"
+    cat = real_handle_factory(_Engine(*_crowded(), registry=[RDR]))
+    with registry_listing_scope():
+        _run_real(seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    cat._registry = [RDR, new_rdr]  # an index or store_put registers it after the first run
+    with registry_listing_scope():
+        _run_real(seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    assert cat.registry_calls == 2
+    assert cat.graph_kwargs[0]["scope_filter"] == {"collections": [RDR]}
+    assert cat.graph_kwargs[1]["scope_filter"] == {"collections": sorted([RDR, new_rdr])}, "no staleness window"
+
+
+def test_a_traverse_outside_a_run_reads_the_registry_each_time(real_handle_factory) -> None:
+    cat = real_handle_factory(_Engine(*_crowded(), registry=[RDR]))
+    for _ in range(2):
+        _run_real(seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    assert cat.registry_calls == 2, "nothing is kept past a call that belongs to no run"
+
+
+def test_a_failed_registry_read_is_not_kept_within_a_run(real_handle_factory) -> None:
+    from nexus.plans.traversal_policy import registry_listing_scope
+
+    cat = real_handle_factory(_Engine(*_crowded(), registry=[RDR], registry_error=RuntimeError("catalog down")))
+    with registry_listing_scope():
+        _run_real(seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+        assert "scope_filter" not in cat.graph_kwargs[0]
+        cat._registry_error = None
+        out = _run_real(seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    assert cat.registry_calls == 2, "the failure left nothing behind to serve"
+    assert cat.graph_kwargs[1]["scope_filter"] == {"collections": [RDR]}
+    assert out["traversal"]["scope_prefilter"] == "applied"
+
+
+def test_plan_run_opens_one_registry_listing_per_run() -> None:
+    """The seam: ``plan_run`` opens the scope, so every step of a run sees the same listing and a second run a new one."""
+    import asyncio
+    import json
+
+    from nexus.plans.match import Match
+    from nexus.plans.runner import plan_run
+    from nexus.plans.traversal_policy import active_registry_listing
+
+    seen: list = []
+
+    async def dispatcher(tool: str, args: dict) -> dict:
+        seen.append(active_registry_listing())
+        return {"ids": [], "tumblers": [], "collections": []}
+
+    plan = {"steps": [{"tool": "traverse", "args": {"seeds": []}}, {"tool": "traverse", "args": {"seeds": []}}]}
+    match = Match(
+        plan_id=7, name="fixture", description="fixture", confidence=0.9, dimensions={"verb": "test"}, tags="",
+        plan_json=json.dumps(plan), required_bindings=[], optional_bindings=[], default_bindings={}, parent_dims=None,
+    )
+    for _ in range(2):
+        asyncio.run(plan_run(match, {}, dispatcher=dispatcher, bundle_operators=False))
+    assert len(seen) == 4 and all(listing is not None for listing in seen)
+    assert seen[0] is seen[1] and seen[2] is seen[3], "the steps of one run share a listing"
+    assert seen[0] is not seen[2], "a second run opens a new one"
+    assert active_registry_listing() is None, "nothing leaks out of the run"
+
+
 def test_a_scope_naming_more_collections_than_the_engine_accepts_is_not_sent() -> None:
     from nexus.plans.traversal_policy import MAX_SCOPE_FILTER_COLLECTIONS
 
@@ -385,3 +535,183 @@ def test_an_unreachable_version_probe_reads_unsupported_and_never_raises() -> No
         return httpx.Response(500, json={"error": "boom"})
 
     assert _client(handler).supports_graph_scope_filter() is False
+
+
+# ── nexus-jypmj.18: a node behind a removed relay keeps its depth and role ──────────────────────────────
+
+
+def _relay_walk():
+    """S (rdr, the seed) -implements-> R (code, out of scope) -implements-> B (rdr), and A (rdr) -implements-> S.
+
+    The engine's predicate removes R and with it the R -> B edge, so B arrives with no edge at all; A keeps
+    its edge. Under a single-role policy the client scores B by what is left.
+    """
+    nodes = [_node(SEED, RDR), _node("1.2.2", RDR), _node("1.2.3", RDR), _node("1.1.9", CODE)]
+    edges = [_edge("1.2.2", SEED, "implements"), _edge(SEED, "1.1.9", "implements"), _edge("1.1.9", "1.2.3", "implements")]
+    return nodes, edges
+
+
+def _relay_run(cat, role: str):
+    return _run(cat, seeds=[SEED], link_types=["implements"], policy=_policy("rdr", require_link_role=role, max_documents=50))
+
+
+def test_a_single_role_policy_keeps_a_node_behind_a_removed_relay_when_the_engine_sends_node_walk() -> None:
+    """The new engine: the predicate is sent, the relay is removed, B has no edge, and B survives on node_walk."""
+    nodes, edges = _relay_walk()
+    cat = _Engine(nodes, edges, walk=True)
+    out = _relay_run(cat, "implementation")
+
+    assert "scope_filter" in cat.graph_kwargs[0], "an engine that carries node_walk is sent the predicate"
+    assert out["traversal"]["scope_prefilter"] == "applied"
+    assert out["tumblers"] == [SEED, "1.2.2", "1.2.3"], "B (1.2.3) kept; A (distance 1) ranks before B (distance 2)"
+    assert out["traversal"]["dropped_role"] == 0
+    assert out["traversal"]["engine_dropped_out_of_scope"] == 1
+
+
+def test_a_single_role_policy_on_an_engine_without_node_walk_walks_unfiltered_and_an_uncapped_walk_loses_nothing() -> None:
+    """The stopgap, an engine of 0.1.168 or 0.1.169: it has the predicate but not node_walk. Under the 500-node cap
+    the client-side narrowing is exact."""
+    nodes, edges = _relay_walk()
+    cat = _Engine(nodes, edges, walk=False)
+    out = _relay_run(cat, "implementation")
+
+    assert "scope_filter" not in cat.graph_kwargs[0], "no predicate for a role-filtering policy without node_walk"
+    assert out["traversal"]["scope_prefilter"] == "unavailable"
+    assert out["tumblers"] == [SEED, "1.2.2", "1.2.3"], "narrowed client-side, over the relay's edges"
+    assert out["traversal"]["dropped_role"] == 0
+    assert out["traversal"]["dropped_out_of_scope"] == 1, "R is dropped by the client's own scope filter"
+
+
+@pytest.mark.parametrize("role", ["factual", None])
+def test_a_role_agnostic_policy_sends_the_predicate_whether_or_not_the_engine_sends_node_walk(role) -> None:
+    nodes, edges = _relay_walk()
+    for walk in (False, True):
+        cat = _Engine(nodes, edges, walk=walk)
+        over = {} if role is None else {"require_link_role": role}
+        out = _run(cat, seeds=[SEED], link_types=["implements"], policy=_policy("rdr", max_documents=50, **over))
+        assert "scope_filter" in cat.graph_kwargs[0], f"walk={walk}"
+        assert out["traversal"]["scope_prefilter"] == "applied"
+        assert "1.2.3" in out["tumblers"], "role 'factual' admits B whatever its role, ranked last"
+
+
+def test_a_capped_single_role_walk_on_an_engine_without_node_walk_keeps_the_seeds_only_and_says_unavailable() -> None:
+    """The limit of the stopgap: unfiltered, the engine cuts the walk at 500 over out-of-scope nodes too, and what
+    survives is an arbitrary sample of the in-scope neighbourhood. Since 7.89.0 that walk keeps its seed documents
+    only (``secondary_omitted``), so the stopgap is NOT 'as 7.88.0' for a walk at the cap."""
+    nodes, _ = _crowded()
+    edges = [_edge(n.tumbler, SEED, "implements") for n in nodes[1:]]
+    cat = _Engine(nodes, edges, walk=False)
+    out = _relay_run(cat, "implementation")
+
+    assert "scope_filter" not in cat.graph_kwargs[0]
+    rep = out["traversal"]
+    assert out["tumblers"] == [SEED], "no in-scope neighbour is returned from an arbitrary sample"
+    assert rep["scope_prefilter"] == "unavailable" and rep["secondary_omitted"] is True
+    assert rep["possibly_truncated"] is True and rep["contained"] is False
+
+
+def test_a_reply_that_applied_the_predicate_but_carries_no_node_walk_is_walked_again_without_it() -> None:
+    """The guard: the probe said node_walk, the marker says the predicate ran, the reply has no node_walk (a replica
+    that predates it, a rollback inside the /version cache window). Scoring B from what is left would drop it as
+    ``related``; the walk is repeated without the predicate and narrowed client-side."""
+    nodes, edges = _relay_walk()
+    cat = _Engine(nodes, edges, walk=True)
+    cat.omit_node_walk = True
+    out = _relay_run(cat, "implementation")
+
+    assert ["scope_filter" in kw for kw in cat.graph_kwargs] == [True, False], "one repeat, without the predicate"
+    assert out["tumblers"] == [SEED, "1.2.2", "1.2.3"], "B behind the removed relay is kept"
+    assert out["traversal"]["dropped_role"] == 0
+    assert out["traversal"]["scope_prefilter"] == "unavailable", "the second walk is the old engine's, and is reported so"
+
+
+def test_a_reply_that_carries_node_walk_is_not_walked_twice() -> None:
+    nodes, edges = _relay_walk()
+    cat = _Engine(nodes, edges, walk=True)
+    _relay_run(cat, "implementation")
+    assert len(cat.graph_kwargs) == 1
+
+
+def test_a_role_agnostic_policy_is_not_walked_again_when_node_walk_is_missing() -> None:
+    """A factual policy never needed node_walk: it ranks every node alike, so the one filtered walk stands."""
+    nodes, edges = _relay_walk()
+    cat = _Engine(nodes, edges, walk=True)
+    cat.omit_node_walk = True
+    _relay_run(cat, "factual")
+    assert len(cat.graph_kwargs) == 1
+
+
+def test_node_walk_wins_over_the_edges_and_a_malformed_entry_is_ignored() -> None:
+    from nexus.plans.traversal_policy import _distance_and_role
+
+    edges = [_edge("a", "b", "relates"), _edge("b", "c", "relates")]
+    dist, role = _distance_and_role(["a"], edges, "out")
+    assert dist == {"a": 0, "b": 1, "c": 2} and role == {"b": "related", "c": "related"}
+
+    walk = {
+        "b": {"depth": 1, "role": "citation"},    # the engine saw a better role than the edges show
+        "c": {"depth": True, "role": "citation"},  # a bool is not a depth
+        "d": {"depth": 2, "role": "implementation"},  # no edge reaches d
+        "e": {"depth": 3, "role": "sideways"},    # an unknown role
+        "f": {"depth": 0, "role": "citation"},    # depth 0 is a seed
+        "a": {"depth": 4, "role": "citation"},    # a seed is never rescored
+        "g": "nonsense",
+        "h": {"depth": 2, "role": ["citation"]},  # an unhashable role must be ignored, not raise TypeError
+        "i": {"depth": 2, "role": {"citation": 1}},
+    }
+    dist, role = _distance_and_role(["a"], edges, "out", walk)
+    assert dist == {"a": 0, "b": 1, "c": 2, "d": 2}
+    assert role == {"b": "citation", "c": "related", "d": "implementation"}
+
+
+def test_the_client_link_role_table_equals_the_engines() -> None:
+    from nexus.plans.traversal_policy import _ROLE_OF_LINK_TYPE
+
+    java = (REPO / "service/src/main/java/dev/nexus/service/db/CatalogRepository.java").read_text()
+    body = java[java.index("public static String linkRole("):]
+    body = body[: body.index("private static int roleRank")]
+    engine: dict[str, str] = {}
+    for labels, role in re.findall(r"case ((?:\"[a-z-]+\"(?:, )?)+) -> \"(\w+)\"", body):
+        for label in re.findall(r"\"([a-z-]+)\"", labels):
+            engine[label] = role
+    assert engine == _ROLE_OF_LINK_TYPE, "CatalogRepository.linkRole and traversal_policy._ROLE_OF_LINK_TYPE drifted"
+
+
+def test_the_client_role_rank_equals_the_engines() -> None:
+    """``CatalogRepository.roleRank`` orders the roles the engine merges ``node_walk`` by; a rank the client's
+    ``_ROLE_RANK`` does not share makes the two pick different roles for one node."""
+    from nexus.plans.traversal_policy import _ROLE_RANK
+
+    java = (REPO / "service/src/main/java/dev/nexus/service/db/CatalogRepository.java").read_text()
+    body = java[java.index("private static int roleRank("):]
+    body = body[: body.index("private static void mergeRole")]
+    engine = {role: int(rank) for role, rank in re.findall(r"case \"(\w+)\" -> (\d+)", body)}
+    default = re.search(r"default -> (\d+)", body)
+    assert engine and default, "the roleRank switch changed shape: update this parse"
+    assert {**engine, "related": int(default.group(1))} == _ROLE_RANK, (
+        "CatalogRepository.roleRank and traversal_policy._ROLE_RANK drifted"
+    )
+
+
+def test_the_client_reads_the_node_walk_capability_strictly() -> None:
+    bodies = iter([{"catalog_graph_node_walk_supported": True}, {"catalog_graph_node_walk_supported": "true"}])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=next(bodies))
+
+    assert _client(handler).supports_graph_node_walk() is True
+    assert _client(handler).supports_graph_node_walk() is False, "a non-boolean true is not true"
+
+
+def test_graph_keeps_the_node_walk_of_the_reply_and_invents_none() -> None:
+    walk = {"1.2.3": {"depth": 2, "role": "implementation"}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={**_EMPTY, "scope_filter": {"applied": True}, "node_walk": walk})
+
+    assert _client(handler).graph("1.2.1", scope_filter={"collections": [RDR]})["node_walk"] == walk
+
+    def bare(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_EMPTY)
+
+    assert "node_walk" not in _client(bare).graph("1.2.1")

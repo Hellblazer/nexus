@@ -88,5 +88,6 @@ def _kmeans_numpy(
 def _cluster_label(best_result: dict[str, Any]) -> str:
     """Extract a human-readable label from the best result in a cluster."""
     meta = best_result.get("metadata", {})
-    # nexus-sis0m.5: the catalog's title when the search attached one.
-    return meta.get("_display_title") or meta.get("title") or meta.get("source") or best_result.get("id", "unknown")
+    # nexus-sis0m.5: the catalog's title when the search attached one, else its path, else the id.
+    # Never the row's own title or source (the last writer's, nexus-fv2u4).
+    return meta.get("_display_title") or meta.get("_display_path") or best_result.get("id", "unknown")

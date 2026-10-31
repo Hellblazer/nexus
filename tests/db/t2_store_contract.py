@@ -302,6 +302,8 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
 T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
     'aspect_queue': {
         'enqueue_many': ['rows'],
+        'list_waiting': ['limit'],  # RDR-235 (nexus-5r2sc.3.6): read by the aspect-queue-tuples rung
+        'tuple_counts': [],  # RDR-235 (nexus-5r2sc.3.5): nx doctor and the console
     },
     'document_aspects': {
         'operator_confidence_aggregate': ['source_uris', 'reducer_kind'],

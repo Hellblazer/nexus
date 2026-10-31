@@ -187,3 +187,61 @@ def test_a_chash_in_two_documents_resolves_to_the_first_doc_id():
     assert _attach_from_chash_positions(results, ["c1"], _Cat()) is True
     assert results[0].metadata["doc_id"] == "1.1.10"
     assert (results[0].metadata["chunk_count"], results[0].metadata["chunk_index"]) == (9, 4)
+
+
+class _SharedChashCat:
+    """A chash held by 1.1.2 (homed in another collection) and 1.1.9 (homed in
+    the hit's own); ``collection`` rides every row as the engine sends it."""
+
+    def __init__(self, with_collection: bool = True):
+        self.rows = [
+            {"chash": "c1", "doc_id": "1.1.2", "position": 0, "chunk_count": 1, "collection": "docs__other"},
+            {"chash": "c1", "doc_id": "1.1.9", "position": 4, "chunk_count": 9, "collection": _COLL},
+        ]
+        if not with_collection:
+            for row in self.rows:
+                del row["collection"]
+        self.calls = 0
+
+    def chash_positions(self, chashes):
+        self.calls += 1
+        return list(self.rows)
+
+
+def test_the_route_prefers_the_owner_homed_in_the_hits_collection():
+    """nexus-6pfgb.52 review: the route is tenant-wide, so the smallest doc_id
+    can be a document in another collection; each row carries its collection."""
+    cat = _SharedChashCat()
+    results = _results(["c1"])
+    assert _attach_from_chash_positions(results, ["c1"], cat) is True
+    md = results[0].metadata
+    assert md["doc_id"] == "1.1.9"
+    assert (md["chunk_count"], md["chunk_index"]) == (9, 4)
+    assert md["_owner_doc_ids"] == ["1.1.2", "1.1.9"], "every owner stays"
+    assert md["_doc_id_inferred"] is True
+    assert cat.calls == 1
+
+
+def test_the_route_falls_back_to_the_smallest_doc_id_when_no_owner_is_homed_in_the_hit():
+    cat = _SharedChashCat()
+    results = _results(["c1"])
+    results[0].collection = "docs__third"
+    assert _attach_from_chash_positions(results, ["c1"], cat) is True
+    assert results[0].metadata["doc_id"] == "1.1.2"
+
+
+def test_the_route_tolerates_rows_without_a_collection():
+    """An engine before the collection field: the smallest doc_id in text order."""
+    cat = _SharedChashCat(with_collection=False)
+    results = _results(["c1"])
+    assert _attach_from_chash_positions(results, ["c1"], cat) is True
+    assert results[0].metadata["doc_id"] == "1.1.2"
+
+
+def test_the_route_never_overrides_a_row_that_named_its_owner():
+    cat = _SharedChashCat()
+    results = _results(["c1"])
+    results[0].metadata["doc_id"] = "1.1.2"
+    assert _attach_from_chash_positions(results, ["c1"], cat) is True
+    assert results[0].metadata["doc_id"] == "1.1.2"
+    assert "_doc_id_inferred" not in results[0].metadata

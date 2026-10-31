@@ -51,7 +51,7 @@ def main() -> int:
         pipeline_index_pdf(
             _PDF, _HASH, _COLLECTION, MagicMock(), db=db,
             embed_fn=lambda texts, model: ([[0.1] * 4 for _ in texts], model),
-            doc_id="1.1.4242", git_meta={}, hooks=HookRegistry(),
+            doc_id="1.1.4242", hooks=HookRegistry(),
         )
     return 99
 

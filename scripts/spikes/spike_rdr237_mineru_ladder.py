@@ -30,13 +30,33 @@ import httpx
 import pymupdf
 
 from nexus._mineru_spawn import _find_free_port, _resolve_mineru_api_bin, _server_env
-from nexus.pdf_extractor import PDFExtractor, _count_formula_markers
+from nexus.pdf_extractor import PDFExtractor
 
 ROOT = Path(__file__).resolve().parents[2]
 MATH_PDF = ROOT / "tests/fixtures/virgo.pdf"
 NON_MATH = [ROOT / "tests/fixtures/tc-sql.pdf", ROOT / "papers/2408.04948.pdf"]
 OUT = ROOT / "scripts/spikes/spike_rdr237_results.json"
 WORD = re.compile(r"[a-z0-9]{3,}")
+
+# Inlined after the Docling removal (nexus-tr1rj.19): this counter was pdf_extractor._count_formula_markers
+# (git show 5ed2d9fa1^:src/nexus/pdf_extractor.py), the auto router's formula pre-screen, deleted with it.
+_FORMULA_BLOCK_PATTERNS = (
+    re.compile(r"\$\$.+?\$\$", re.DOTALL),
+    re.compile(r"\\\(.+?\\\)", re.DOTALL),
+    re.compile(r"\\\[.+?\\\]", re.DOTALL),
+    re.compile(r"\\begin\{equation\*?\}.+?\\end\{equation\*?\}", re.DOTALL),
+    re.compile(r"\\begin\{align\*?\}.+?\\end\{align\*?\}", re.DOTALL),
+)
+_FORMULA_COMMAND_PATTERNS = tuple(
+    re.compile(r"\\" + name + r"\b")
+    for name in ("frac", "sum", "int", "prod", "partial", "nabla", "mathbb", "mathcal")
+)
+
+
+def _count_formula_markers(text: str) -> int:
+    """Block delimiters count once each; command tokens count every occurrence, inside blocks too."""
+    return sum(len(pat.findall(text)) for pat in _FORMULA_BLOCK_PATTERNS + _FORMULA_COMMAND_PATTERNS)
+
 
 WORKER = r'''
 import json, sys, time

@@ -18,6 +18,9 @@ from pathlib import Path
 import pytest
 
 
+pytestmark = pytest.mark.usefixtures("no_mineru_child_probe")  # nexus-vyy65: no real MinerU child import here
+
+
 @pytest.fixture()
 def cfg_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     d = tmp_path / "cfg"

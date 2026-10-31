@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "conexus",
   "display_name": "Conexus",
-  "version": "7.89.0",
+  "version": "7.90.0",
   "description": "Three-tier semantic memory + knowledge management for Claude Desktop chat. Persistent code/docs/RDR indexing, plan-centric retrieval via nx_answer, and a Postgres-backed storage substrate that interoperates with the Claude Code plugin and the nx CLI on the same host.",
   "long_description": "Conexus is the Claude Desktop Extension form of Nexus. Same MCP tools and storage tiers as the Claude Code plugin and the nx CLI, packaged as a .mcpb bundle that uv resolves on first install. Persistent state is served by the storage service (Postgres), which `nx init` provisions — there is no separate daemon to install or talk to. State is shared with any other consumer on the same host (Claude Code plugin, nx CLI, Cowork via SDK bridge).",
   "author": {
@@ -58,7 +58,7 @@
     "include_pdf": {
       "type": "boolean",
       "title": "Include PDF support",
-      "description": "Off by default. Turn on to install PDF indexing (MinerU and torch) into the extension: about 0.28 GB more to download and 1.0 GB more on disk on macOS, plus about 1.2 GB of model weights with the first PDF. Turning it off removes the packages; downloaded model weights stay in their cache. Takes effect the next time the extension starts, which takes longer that first time.",
+      "description": "Off by default. Turn on to install PDF indexing (MinerU and torch) into the extension: about 0.27 GB more to download and 1.0 GB more on disk on macOS, plus about 1.2 GB of model weights with the first PDF. Turning it off removes the packages; downloaded model weights stay in their cache. Takes effect the next time the extension starts, which takes longer that first time.",
       "required": false,
       "default": false
     }

@@ -329,6 +329,8 @@ class EmbedPostureHandlersTest {
         JsonNode body = get("/version", new VersionHandler(refusingPool(),
                 router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
         assertThat(body.get("catalog_graph_scope_filter_supported").asBoolean()).isTrue();
+        // nexus-jypmj.18: the node-walk flag rides the same handler body.
+        assertThat(body.get("catalog_graph_node_walk_supported").asBoolean()).isTrue();
     }
 
     @Test
@@ -339,6 +341,24 @@ class EmbedPostureHandlersTest {
                 router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
         assertThat(body.get("catalog_manifest_row_limit_supported").asBoolean()).isTrue();
         assertThat(body.get("nx_answer_out_of_step_cost_supported").asBoolean()).isTrue();
+    }
+
+    @Test
+    void version_throughTheRealHandler_advertisesTheSearchRowOwnerSpanCapability() throws Exception {
+        // nexus-6pfgb.26: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves
+        // the handler's body actually calls it.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("search_row_owner_span_supported").asBoolean()).isTrue();
+    }
+
+    @Test
+    void version_throughTheRealHandler_advertisesTheChashAllowCapability() throws Exception {
+        // nexus-jypmj: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves the
+        // handler's body actually calls it.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("vector_search_chash_allow_supported").asBoolean()).isTrue();
     }
 
     @Test

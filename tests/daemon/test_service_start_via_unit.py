@@ -333,6 +333,40 @@ class TestUnitStartTimeoutMessage:
         assert "an earlier boot" not in result.output
         assert "keeps restarting" in result.output
 
+    def test_a_schema_migration_halt_carries_the_engine_log_cause(
+        self, config_dir: Path, unit: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+        """nexus-bivz3.25: the unit's supervisor reports a schema-migration halt as the
+        detached one does, naming only ``Liquibase migration failed``; the changeset's
+        RAISE (the RDR-231 halt, real log text) is in the engine's log and must ride
+        the timeout error."""
+        from tests._rdr231_halt import NATIVE_LOG_EXCERPT, RAISE_START, RAISE_URL, SUPERVISOR_LINE
+
+        err_log = tmp_path / "unit-logs" / "nexus-service.err"
+        err_log.parent.mkdir(parents=True)
+        native_log = config_dir / "logs" / "storage_service_native.log"
+        native_log.parent.mkdir(parents=True, exist_ok=True)
+        native_log.write_text(
+            "2026-10-29 13:55:52,384 ERROR [main] dev.nexus.service.Main - event=an_earlier_boot_error\n",
+            encoding="utf-8",
+        )
+
+        def start(argv, *, timeout, **_kw):
+            err_log.write_text(SUPERVISOR_LINE + "\n", encoding="utf-8")
+            with native_log.open("a", encoding="utf-8") as fh:
+                fh.write(NATIVE_LOG_EXCERPT)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(installer, "run_bounded", start)
+        monkeypatch.setattr(installer, "autostart_activation_state", lambda dest, *, tier: ACTIVE)
+        monkeypatch.setattr(daemon_mod, "_UNIT_START_WAIT_S", 0.05)
+        result = _run_start(config_dir)
+        assert result.exit_code == 2
+        assert "Schema migration failed on port 47055" in result.output
+        assert RAISE_START in result.output
+        assert RAISE_URL in result.output
+        assert "an_earlier_boot_error" not in result.output
+
     def test_an_error_from_before_this_start_is_not_reported(
         self, config_dir: Path, unit: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alive: None
     ) -> None:

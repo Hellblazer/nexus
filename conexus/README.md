@@ -217,14 +217,14 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 |-------|-------|---------|-------|---------|
 | architect-planner | architecture | `/conexus:architecture` | opus | Software architecture design, execution plans |
 | code-review-expert | code-review | `/conexus:review-code` | sonnet | Code quality, security, best practices |
-| codebase-deep-analyzer | codebase-analysis | `/conexus:analyze-code` | sonnet | Architecture, patterns, dependency mapping |
+| codebase-deep-analyzer | codebase-analysis | `/conexus:analyze-code` | haiku | Architecture, patterns, dependency mapping |
 | debugger | debugging | `/conexus:debug` | opus | Hypothesis-driven debugging |
 | deep-analyst | deep-analysis | `/conexus:deep-analysis` | opus | Complex problem investigation, root cause |
-| deep-research-synthesizer | research-synthesis | `/conexus:research` | sonnet | Multi-source research with synthesis |
+| deep-research-synthesizer | research-synthesis | `/conexus:research` | haiku | Multi-source research with synthesis |
 | developer | development | `/conexus:implement` | sonnet | TDD implementation, test-first methodology |
 | strategic-planner | strategic-planning | `/conexus:create-plan` | opus | Implementation planning, task decomposition |
 | substantive-critic | substantive-critique | `/conexus:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
-| test-validator | test-validation | `/conexus:test-validate` | sonnet | Test coverage and quality validation |
+| test-validator | test-validation | `/conexus:test-validate` | haiku | Test coverage and quality validation |
 
 ### Retired stub agents — call the MCP tool directly (RDR-080, deleted nexus-cnzei.4)
 

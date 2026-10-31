@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import dataclasses
+import hashlib
 import json
 import re
 import threading
@@ -2932,6 +2934,23 @@ def _append_fanout_excluded_note(text: str, excluded: list[str]) -> str:
     return f"{text}\n[excluded below fan-out floor: {', '.join(excluded)}]"
 
 
+def _chash_allow_dropped(diagnostics: list) -> int:
+    """Rows a document-confined search dropped because the engine returned them outside ``chash_allow`` (nexus-jypmj:
+    the engine ignored the key). 0 for an unconfined search."""
+    return sum(int(getattr(d, "chash_allow_dropped", 0) or 0) for d in diagnostics or ())
+
+
+def _chash_allow_note(diagnostics: list) -> str:
+    """The sentence that tells a reader the engine did not honour the document filter, or ""."""
+    n = _chash_allow_dropped(diagnostics)
+    if not n:
+        return ""
+    return (
+        f"Note: {n} row(s) the engine returned were outside the document filter (chash_allow) and were dropped; "
+        "the engine did not apply the filter on this call."
+    )
+
+
 def _failed_collections_note(diagnostics: list) -> str:
     """The "N collection(s) excluded by service errors" sentence, or ""
     when nothing was excluded (nexus-vply6 fix round 2, point 2 — Sam's
@@ -2977,6 +2996,9 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
     # not searched — a zero-hit must say so or it reads as a genuine miss.
     failed_note = _failed_collections_note(diagnostics)
     suffix = f" {failed_note}" if failed_note else ""
+    allow_note = _chash_allow_note(diagnostics)  # nexus-jypmj: every row the engine returned was outside the filter
+    if allow_note:
+        suffix += f" {allow_note}"
     worst = diagnostics[0].worst_offender()
     if worst is None:
         return base + suffix
@@ -3015,6 +3037,8 @@ def _structured_no_results(diagnostics: list, *, base: str = "No results.") -> d
         # A caller must not have to parse prose to branch on this.
         "threshold_dropped": worst is not None,
     }
+    if _chash_allow_dropped(diagnostics):
+        out["chash_allow_dropped"] = _chash_allow_dropped(diagnostics)
     if worst is not None:
         name, threshold, top_distance = worst
         out["closest_dropped"] = {
@@ -3147,9 +3171,21 @@ def _search_render(
         # retrieved, so a lexical call that reused a vector-only page would be
         # served silently-wrong results inside the 120s TTL.
         # Found by the RDR-217 enrichment pass before the parameter existed.
+        #
+        # The document confinement's chunk-hash restriction (nexus-jypmj,
+        # ``active_chash_allow``) changes WHICH rows come back just as
+        # ``lexical`` does, so it is in the key: a confined call must never
+        # be served an unconfined page (or another document's), and an
+        # unconfined call must never be served the confined one. A digest of
+        # the sorted set, with ``None`` (no restriction) distinct from an
+        # empty list (a restriction that admits nothing).
+        from nexus.plans.document_confinement import active_chash_allow  # noqa: PLC0415 — leaf stdlib module; deferred like this function's other imports
+
+        _allow = active_chash_allow()
+        allow_key = None if _allow is None else hashlib.sha256("\n".join(sorted(_allow)).encode()).hexdigest()
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
-            topic or "", threshold, lexical, boost_window,
+            topic or "", threshold, lexical, boost_window, allow_key,
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -3384,8 +3420,9 @@ def _search_render(
                 "chunk_text_hash": [
                     r.metadata.get("chunk_text_hash", "") for r in page
                 ],
-                **({"warnings": [w for w in (_failed_collections_note(diag), rerank_note) if w]}
-                   if (_failed_collections_note(diag) or rerank_note) else {}),
+                **({"warnings": [w for w in (_failed_collections_note(diag), rerank_note, _chash_allow_note(diag)) if w]}
+                   if (_failed_collections_note(diag) or rerank_note or _chash_allow_note(diag)) else {}),
+                **({"chash_allow_dropped": _chash_allow_dropped(diag)} if _chash_allow_dropped(diag) else {}),
             }
 
         # nexus-onn7s: the reader instruction leads every text render, and
@@ -3416,13 +3453,12 @@ def _search_render(
                     lines.append("")  # blank separator between clusters
                 lines.append(f"── {cluster_label} ──")
                 current_cluster = cluster_label
-            title = r.metadata.get("_display_title") or r.metadata.get("title", "")
-            # nexus-1qed: prefer the catalog-resolved _display_path so
-            # the label survives after the prune verb drops source_path.
-            source = (
-                r.metadata.get("_display_path")
-                or r.metadata.get("source_path", "")
-            )
+            # nexus-fv2u4: the catalog title only. The row's title is the last writer's
+            # (another document's path:lines on a shared chunk) and is never a label.
+            title = r.metadata.get("_display_title", "")
+            # nexus-1qed: the catalog-resolved _display_path. The row's source_path is the last
+            # writer's file, not this document's, and is no longer read (nexus-6pfgb.49).
+            source = r.metadata.get("_display_path", "")
             # Both numbers, because the order comes from the second one.
             # `d=` is the raw vector distance (absolute, lower is better);
             # `s=` is the hybrid score this page was sorted by (relative to
@@ -4086,8 +4122,14 @@ def _collapse_identical_chunk_rows(rows: list[dict]) -> list[dict]:
 def _collapse_identical_chunk_results(results: list) -> list:
     """The :func:`_collapse_identical_chunk_rows` rule for ``SearchResult``
     lists (the plain query path): keyed on ``metadata["chunk_text_hash"]``,
-    the other collections recorded as ``metadata["also_in"]``."""
+    the other collections recorded as ``metadata["also_in"]``.
+
+    nexus-tko2w: a row in the kept row's collection that names a different
+    owning document (a label filter's per-owner expansion) is that document's
+    hit, so it is kept, once per owner, not folded into the first owner's card.
+    """
     kept_by_chash: dict = {}
+    owners_kept: set = set()
     out: list = []
     for r in results:
         chash = (r.metadata or {}).get("chunk_text_hash", "") or ""
@@ -4097,7 +4139,17 @@ def _collapse_identical_chunk_results(results: list) -> list:
         kept = kept_by_chash.get(chash)
         if kept is None:
             kept_by_chash[chash] = r
+            owners_kept.add((chash, _row_key(r)[2]))
             out.append(r)
+            continue
+        owner = _row_key(r)[2]
+        if (
+            r.collection == kept.collection and owner
+            and owner != _row_key(kept)[2]
+        ):
+            if (chash, owner) not in owners_kept:
+                owners_kept.add((chash, owner))
+                out.append(r)
             continue
         if r.collection and r.collection != kept.collection:
             also = kept.metadata.setdefault("also_in", [])
@@ -5088,14 +5140,14 @@ def query(
             lines_svc.append(f"{routing_note_svc}\n{header_svc}")
             lines_svc.append(_READER_INSTRUCTION_LINE())
             lines_svc.append("")
+            # nexus-6pfgb.12 (RF-10): one batched resolve and one batched manifest read for every row
+            # of the page, where each row used to make a round trip of each kind.
+            entries_svc, chunk_counts_svc = _catalog_rows_batch(cat, [row.get("id", "") for row in rows])
             for i, row in enumerate(rows, 1):
                 tumbler_str = row.get("id", "")
                 dist = f"{row.get('distance', 0.0):.4f}"
                 # Re-hydrate from catalog
-                try:
-                    entry_svc = cat.resolve(Tumbler.parse(tumbler_str)) if tumbler_str else None
-                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                    entry_svc = None
+                entry_svc = entries_svc.get(tumbler_str)
                 title_svc = (entry_svc.title if entry_svc else tumbler_str or "")[:70]
                 # Prefer bib_* (RDR-101
                 # enrichment), fall back to the plain author/year fields.
@@ -5103,10 +5155,7 @@ def query(
                 bib_authors_svc = (entry_svc.bib_authors or entry_svc.author) if entry_svc else ""
                 bib_venue_svc = entry_svc.bib_venue if entry_svc else ""
                 bib_citation_count_svc = entry_svc.bib_citation_count if entry_svc else 0
-                try:
-                    chunk_count_svc = len(cat.get_manifest(tumbler_str)) if tumbler_str else 0
-                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                    chunk_count_svc = 0
+                chunk_count_svc = chunk_counts_svc.get(tumbler_str, 0)
                 snippet_svc = row.get("content", "")[:300].replace("\n", " ")
                 collection_svc = row.get("collection", "")
 
@@ -5262,6 +5311,9 @@ def query(
                     r.metadata.get("chunk_text_hash", "") for r in page
                 ],
             }
+            if _chash_allow_dropped(qdiag):
+                structured_result["chash_allow_dropped"] = _chash_allow_dropped(qdiag)
+                structured_result["warnings"] = [_chash_allow_note(qdiag)]
             if graph_batch_info is not None:
                 # nexus-descendants-seed-n1 / substantive critique finding 2:
                 # disclose possible graph-traversal truncation — never
@@ -5273,77 +5325,28 @@ def query(
                 structured_result["graph_scope"] = graph_batch_info
             return structured_result
 
-        # Group by document. RDR-108 Phase 4b (nexus-kosc): post-Phase-3
-        # chunks no longer carry ``doc_id`` in their metadata, so the
-        # canonical mapping is now ``chunk_text_hash -> [doc_id, ...]``
-        # via ``Catalog.docs_for_chashes``. Fall back to the legacy
-        # metadata keys (``content_hash``, ``title``, ``_display_path``,
-        # ``source_path``, chunk id) for chunks the catalog cannot
-        # resolve (catalog absent, orphan chunks, pre-Phase-A chunks).
-        chash_to_doc: dict[str, str] = {}
-        # nexus-voy5 (RDR-108 Phase 4 review S3): chunk_count was
-        # previously read from chunk metadata, but RDR-108 Phase 3
-        # (nexus-bdag) removed it. Resolve via the catalog manifest
-        # once per unique doc_id so the display value matches D2's
-        # "manifest is authoritative" invariant. Empty dict when
-        # the catalog is absent (legacy display falls through to "").
-        doc_to_chunk_count: dict[str, int] = {}
-        try:
-            cat = _get_catalog()
-        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            cat = None
-        if cat is not None:
-            chashes_seen = sorted({
-                r.metadata.get("chunk_text_hash", "")
-                for r in results
-                if r.metadata.get("chunk_text_hash")
-            })
-            if chashes_seen:
-                try:
-                    by_chash = cat.docs_for_chashes(chashes_seen)
-                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                    by_chash = {}
-                # Same chash can appear in multiple docs (identical
-                # content); pick the first deterministically so chunks
-                # group consistently within a single response.
-                for chash, doc_ids in by_chash.items():
-                    if doc_ids:
-                        chash_to_doc[chash] = sorted(doc_ids)[0]
-            # Fetch manifest length for each unique doc_id seen. nexus-tnwm2:
-            # ONE get_manifests round trip for the whole set (it was one
-            # get_manifest per document, serial); the per-doc loop remains
-            # only for a catalog without the batch method.
-            seen_doc_ids = sorted(set(chash_to_doc.values()))
-            batch_manifests: dict | None = None
-            get_many = getattr(cat, "get_manifests", None)
-            if seen_doc_ids and get_many is not None:
-                try:
-                    batch_manifests = get_many(seen_doc_ids)
-                except Exception:  # noqa: BLE001 — graceful degradation; per-doc loop below
-                    batch_manifests = None
-            if batch_manifests is not None:
-                doc_to_chunk_count = {d: len(m) for d, m in batch_manifests.items()}
-            else:
-                for doc_id in seen_doc_ids:
-                    try:
-                        doc_to_chunk_count[doc_id] = len(cat.get_manifest(doc_id))
-                    except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                        continue
+        # Group by document. RDR-108 Phase 4b (nexus-kosc): post-Phase-3 chunks no longer carry
+        # ``doc_id`` in their metadata; ``search_cross_corpus`` stamps the owning document on every hit
+        # (``doc_id``, ``chunk_count``, ``_owner_doc_ids``, the owners' bibliography and agreed facts)
+        # from the lookups it already makes. nexus-6pfgb.12 (RDR-236 Phase 2): this reads those stamps
+        # and makes NO catalog call of its own (it used to repeat ``docs_for_chashes`` and fetch the
+        # manifests again, RF-10). Fall back to the legacy metadata keys (``content_hash``, ``title``,
+        # ``_display_path``, chunk id; never the row's ``source_path``, nexus-6pfgb.49) for chunks the catalog could not resolve
+        # (catalog absent, orphan chunks, pre-Phase-A chunks).
+        from nexus.context_annotations import OWNER_BIB_KEY, OWNER_CHUNK_COUNT_KEY, OWNER_FACTS_KEY  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
         for r in results:
             meta = r.metadata
             doc_key = (
-                chash_to_doc.get(meta.get("chunk_text_hash", ""))
-                or meta.get("doc_id")
+                meta.get("doc_id")
                 or meta.get("content_hash")
-                or meta.get("title")
                 or meta.get("_display_path")
-                or meta.get("source_path")
                 or r.id
             )
             if doc_key not in docs:
                 docs[doc_key] = {
-                    "title": meta.get("_display_title") or meta.get("title") or doc_key[:40],
+                    "title": meta.get("_display_title") or meta.get("_display_path") or doc_key[:40],
                     "collection": r.collection,
                     "distance": r.distance,
                     # tracks the "best chunk"/doc-order key —
@@ -5353,24 +5356,22 @@ def query(
                     "hybrid_score": r.hybrid_score,
                     # RDR-169 Phase B fix round 1: see the sibling guard above.
                     "snippet": (r.content or "")[:300].replace("\n", " "),
-                    "bib_year": meta.get("bib_year", ""),
-                    "bib_authors": meta.get("bib_authors", ""),
-                    "bib_citation_count": meta.get("bib_citation_count", ""),
-                    "bib_venue": meta.get("bib_venue", ""),
-                    # nexus-onn7s: what the annotation line reads.
-                    "indexed_at": meta.get("indexed_at", ""),
-                    "ttl_days": meta.get("ttl_days"),
-                    # nexus-voy5: derive chunk_count from the catalog
-                    # manifest (RDR-108 D2 authoritative source).
-                    # Fall back to legacy metadata for chunks the
-                    # catalog can't resolve (catalog-absent or
-                    # pre-Phase-A chunks).
+                    # nexus-6pfgb.12: the document's OWN bibliography and age facts, stamped from the
+                    # page's one owner lookup. The chunk row's bib_*, indexed_at and ttl_days are the
+                    # last writer's and are not read: a document that states none shows none.
+                    "bib_year": (meta.get(OWNER_BIB_KEY) or {}).get("bib_year", ""),
+                    "bib_authors": (meta.get(OWNER_BIB_KEY) or {}).get("bib_authors", ""),
+                    "bib_citation_count": (meta.get(OWNER_BIB_KEY) or {}).get("bib_citation_count", ""),
+                    "bib_venue": (meta.get(OWNER_BIB_KEY) or {}).get("bib_venue", ""),
+                    # nexus-onn7s: what the annotation line reads (the first, best-scoring hit's owners'
+                    # agreed facts; disagreeing owners state nothing).
+                    "owner_facts": meta.get(OWNER_FACTS_KEY) or {},
+                    # nexus-voy5: the manifest row count of the owning document (RDR-108 D2), stamped
+                    # on the hit when the catalog resolved it; the legacy chunk key only when the
+                    # stamp is absent (an unresolved hit). A stale row's chunk_count never wins.
                     "chunk_count": (
-                        doc_to_chunk_count.get(
-                            chash_to_doc.get(meta.get("chunk_text_hash", "")),
-                            None,
-                        )
-                        or meta.get("chunk_count", "")
+                        meta[OWNER_CHUNK_COUNT_KEY] if OWNER_CHUNK_COUNT_KEY in meta
+                        else meta.get("chunk_count", "")
                     ),
                     # page_count / has_formulas are not in ALLOWED_TOP_LEVEL:
                     # normalize() drops them, so the read always returned "".
@@ -5379,12 +5380,6 @@ def query(
                     # ALLOWED_TOP_LEVEL for PDF chunks now) — it was not
                     # re-added here since this grouped-doc summary wasn't in
                     # that fix's scope, not because it's still dropped.
-                    # nexus-1qed: prefer catalog-resolved _display_path so
-                    # the response survives after source_path is pruned.
-                    "source_path": (
-                        meta.get("_display_path")
-                        or meta.get("source_path", "")
-                    ),
                     "also_in": list(meta.get("also_in", [])),
                     "also_in_ids": list(meta.get("also_in_ids", [])),
                 }
@@ -5468,6 +5463,49 @@ def query(
         return _mcp_tool_error("query", e)
 
 
+def _catalog_rows_batch(cat: Any, tumblers: list[str]) -> tuple[dict[str, Any], dict[str, int]]:
+    """``({tumbler: CatalogEntry}, {tumbler: manifest row count})`` for the rows of one ``query`` page
+    (nexus-6pfgb.12, RF-10): one ``resolve_many`` and one ``get_manifests`` however many rows. A catalog
+    without the batch methods falls back to one call per row, and any failure degrades the display
+    (no entry, no count), never the tool. A tumbler the catalog does not know is absent from both."""
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred; keeps core's import surface flat
+
+    ids = sorted({t for t in tumblers if t})
+    entries: dict[str, Any] = {}
+    counts: dict[str, int] = {}
+    if not ids:
+        return entries, counts
+    resolve_many = getattr(cat, "resolve_many", None)
+    if resolve_many is not None:
+        try:
+            entries = {t: e for t, e in (resolve_many(ids) or {}).items() if e is not None}
+        except Exception:  # noqa: BLE001 — graceful degradation; the rows print without catalog facts
+            entries = {}
+    else:
+        for t in ids:
+            try:
+                if (e := cat.resolve(Tumbler.parse(t))) is not None:
+                    entries[t] = e
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                continue
+    get_manifests = getattr(cat, "get_manifests", None)
+    batch: dict | None = None
+    if get_manifests is not None:
+        try:
+            batch = get_manifests(ids)
+        except Exception:  # noqa: BLE001 — graceful degradation; per-row loop below
+            batch = None
+    if batch is not None:
+        counts = {t: len(m) for t, m in batch.items()}
+    else:
+        for t in ids:
+            try:
+                counts[t] = len(cat.get_manifest(t))
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                continue
+    return entries, counts
+
+
 def _READER_INSTRUCTION_LINE() -> str:  # noqa: N802 — reads as the constant it wraps
     """nexus-onn7s: the response-level reader instruction for ``query``."""
     from nexus.context_annotations import READER_INSTRUCTION  # noqa: PLC0415 — deferred; keeps core's import surface flat
@@ -5476,12 +5514,12 @@ def _READER_INSTRUCTION_LINE() -> str:  # noqa: N802 — reads as the constant i
 
 
 def _annotation_line_for_doc(d: dict) -> str:
-    """nexus-onn7s: the per-document annotation for ``query``'s grouped
-    path, from the chunk metadata the doc dict carries. ``bib_year`` is
-    already printed on the bib line, so it is not repeated here."""
+    """nexus-onn7s: the per-document annotation for ``query``'s grouped path, from the owners' agreed
+    facts the doc dict carries (nexus-6pfgb.12: never the chunk row's, which is the last writer's).
+    ``bib_year`` is already printed on the bib line, so it is not repeated here."""
     from nexus.context_annotations import annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
-    return annotation_line({"indexed_at": d.get("indexed_at", ""), "ttl_days": d.get("ttl_days")})
+    return annotation_line({k: v for k, v in (d.get("owner_facts") or {}).items() if k != "bib_year"})
 
 
 def _annotation_line_for_entry(entry) -> str:
@@ -5623,7 +5661,8 @@ def store_put(
         # env-fallback chain of its own and would otherwise persist a bare
         # empty string for every MCP write with no explicit agent.
         agent_arg = agent.strip() or _os.environ.get("NX_AGENT", "").strip() or "mcp"
-        session_arg = session.strip() or _os.environ.get("NX_SESSION_ID", "").strip()
+        # nexus-6pfgb.4: `session` stays an accepted argument (wire shape) but no chunk row
+        # carries a session_id any more; nothing read it.
         # nexus-0fw11: refuse a placeholder subject BEFORE any engine contact.
         # ``_get_t3()`` runs the managed-engine floor probe in cloud mode, and
         # an unreachable or below-floor engine would otherwise answer first
@@ -5677,7 +5716,7 @@ def store_put(
         try:
             outcome = put_note(
                 content=content, collection=col_name, title=title, tags=tags,
-                category=category, session_id=session_arg, source_agent=agent_arg,
+                category=category, source_agent=agent_arg,
                 ttl_days=ttl_days,
             )
         except NoteUriEngineTooOldError as exc:
@@ -5914,30 +5953,28 @@ def store_get(
         if entry is None:
             where = col_name if len(scope) == 1 else f"any of {len(scope)} knowledge collections"
             return f"Not found: {doc_id!r} in {where} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"
-        title = entry.get("title", "")
-        # nexus-sis0m.5: the chunk row's title is its last writer's, which
-        # names the wrong note when two share this text and a deleted one
-        # after its writer is removed. Asked by title, show that title;
-        # asked by id, name the live documents holding the chunk.
-        holders: list[tuple[str, str]] | None = None  # None: not looked up (asked by title)
-        if not looks_like_hash:
-            title = doc_id
-        else:
-            from nexus.catalog.store_hook import live_holders_of_chashes  # noqa: PLC0415 — deferred for startup cost, as in store_put
-            from nexus.search_engine import owner_titles  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+        # nexus-6pfgb.13 (RDR-236 Phase 2): the chunk row's title, tags, ttl_days and indexed_at are its
+        # last writer's, which names the wrong note when two share this text and a deleted one after
+        # its writer is removed. Each is the OWNING note's own, read from its catalog entry
+        # (``note_display``): asked by title, that note's; asked by id, the live documents holding the
+        # chunk (tags their union, the date and the expiry only where they agree). The row speaks only
+        # where no catalog value exists and the chunk has at most one owner. ONE owner lookup serves
+        # the whole display (it was three reads: holders, tags, degraded pages).
+        from nexus.catalog.store_hook import extraction_lines, live_owner_entries, note_display  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
-            holders = live_holders_of_chashes(col_name, [entry["id"]]).get(entry["id"], [])
-            if holders:
-                title = owner_titles([t for _tb, t in holders]) or title
-        tags = entry.get("tags", "")
-        indexed_at = (entry.get("indexed_at") or "")[:10]
-        # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL for PDF
-        # chunks now (mineru/pymupdf/pymupdf_normalized, or the honest
-        # mixed aggregate mineru+degraded; a legacy value from before RDR-237) — display it when
-        # present. Absent for non-PDF chunks and for chunks indexed
-        # before the fix shipped (new-writes-only, no backfill;
-        # nexus-0qc4b — absence is "unknown", not "not mineru").
-        extraction_method = entry.get("extraction_method", "")
+        owner_map = live_owner_entries(col_name, [entry["id"]])
+        owners = None if owner_map is None else owner_map.get(entry["id"], [])
+        shown = note_display(
+            owners, row=entry, row_title=entry.get("title", ""), row_tags=entry.get("tags", ""),
+            row_ttl_days=entry.get("ttl_days"), row_indexed_at=entry.get("indexed_at") or "",
+            title=None if looks_like_hash else doc_id,
+        )
+        title, tags, indexed_at = shown.title, shown.tags, shown.indexed
+        # nexus-6pfgb.16 (RDR-236 Phase 2): the extractor, the quality-gate override and the text source are
+        # DOCUMENT facts, read from the owning documents' catalog meta (the lines below). The chunk row's
+        # ``extraction_method`` is the last writer's: a clean re-index of one PDF left its method on rows
+        # another PDF still owns. Absence is "unknown" (nexus-0qc4b), so a document with no catalog
+        # value prints no line.
         # nexus-spujb: a note split to its model's token window reads back whole.
         from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
@@ -5952,14 +5989,18 @@ def store_get(
             lines.append(f"Tags:       {tags}")
         if indexed_at:
             lines.append(f"Indexed:    {indexed_at}")
-        if extraction_method:
-            lines.append(f"Extractor:  {extraction_method}")
-            # RDR-237: the pages the ladder settled below MinerU's first rung, read from the
-            # catalog document(s) holding this chunk (one line each). Reuses the holders looked up
-            # above; best-effort, so a catalog fault leaves the line out and `get` still answers.
+        if shown.ttl not in ("permanent", "unknown"):
+            lines.append(f"TTL:        {shown.ttl}")
+        lines.extend(extraction_lines(owners, title=None if looks_like_hash else doc_id))
+        if owners is not None:
+            # RDR-237: the pages the ladder settled below MinerU's first rung, read from the catalog
+            # document(s) holding this chunk (one line each) from the owners already in hand.
             from nexus.catalog.store_hook import degraded_pages_lines  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
-            lines.extend(degraded_pages_lines(col_name, entry["id"], holders=holders))
+            lines.extend(degraded_pages_lines(
+                col_name, entry["id"],
+                owners=[o for o in owners if looks_like_hash or (getattr(o, "title", "") or "") == doc_id],
+            ))
         if split is not None:
             lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
         if also_titled:
@@ -6009,6 +6050,67 @@ def without_source_notes() -> Iterator[None]:
         yield
     finally:
         _SOURCE_NOTES_ON.reset(token)
+
+#: What one ``store_get_many(structured=True)`` call learned from the catalog, handed to an in-process
+#: caller that needs the same facts, so it does not ask the catalog again (nexus-6pfgb.50, RF-10).
+@dataclasses.dataclass
+class OwnerLookups:
+    """``asked`` is False until the call reaches the owner lookup (so a call that failed or was
+    stubbed leaves the caller on its own lookup). ``owner_rows`` is ``chash_positions`` grouped by
+    chash, tenant-wide and unfiltered (``None``: the catalog could not answer). ``entries`` are the
+    owner entries the source-notes read resolved (``doc_id`` -> ``CatalogEntry``), which covers the
+    owners in each chunk's own collection when notes are on, and none when they are off."""
+
+    asked: bool = False
+    owner_rows: dict[str, list[dict]] | None = None
+    entries: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+_OWNER_LOOKUPS: contextvars.ContextVar[OwnerLookups | None] = contextvars.ContextVar(
+    "nexus_store_get_many_owner_lookups", default=None,
+)
+
+
+@contextlib.contextmanager
+def capturing_owner_lookups() -> Iterator[OwnerLookups]:
+    """Within the block, ``store_get_many(structured=True)`` records the owner rows and entries it
+    fetched into the yielded :class:`OwnerLookups`. The wire result is unchanged. For the plan
+    runner's chash path, which classifies the same chunks by their owners right after hydrating
+    them (nexus-6pfgb.50).
+
+    One ``store_get_many`` call per block is the contract. ``asked`` and ``owner_rows`` are
+    overwritten by each call while ``entries`` accumulates, so a second call in the same block would
+    pair the second call's rows with the first call's entries. The contextvar is reset on every exit,
+    a raise included, so nothing captured leaks into a following step."""
+    lookups = OwnerLookups()
+    token = _OWNER_LOOKUPS.set(lookups)
+    try:
+        yield lookups
+    finally:
+        _OWNER_LOOKUPS.reset(token)
+
+
+#: Whether ``store_get_many(structured=True)`` reads each chunk's section type from its owners'
+#: manifest rows. On by default; a caller that holds every label already turns it off with
+#: :func:`without_owner_section_types` (nexus-sx1t0). With the source notes off as well, the call makes
+#: no owner lookup at all.
+_OWNER_SECTION_TYPES_ON: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nexus_store_get_many_owner_section_types", default=True,
+)
+
+
+@contextlib.contextmanager
+def without_owner_section_types() -> Iterator[None]:
+    """Within the block, ``store_get_many(structured=True)`` returns each chunk row's own stored
+    ``section_type`` (``section_type_basis`` ``"stored"``) and makes no ``chash_positions`` call for
+    it. For a caller that takes every label from the owning document's own manifest row (the plan
+    runner's tumbler hydration, when no document in the batch is a legacy one)."""
+    token = _OWNER_SECTION_TYPES_ON.set(False)
+    try:
+        yield
+    finally:
+        _OWNER_SECTION_TYPES_ON.reset(token)
+
 
 #: Sentinel: "fetch the owner rows yourself" (``None`` is a fetch that failed).
 _FETCH_OWNER_ROWS: Any = object()
@@ -6100,6 +6202,8 @@ def resolve_owner_source_notes(
         return notes
     if not isinstance(entries, dict):
         return notes
+    if (lookups := _OWNER_LOOKUPS.get()) is not None:
+        lookups.entries.update({d: e for d, e in entries.items() if e is not None})
     for i, docs in owners_of.items():
         if any(entries.get(d) is None for d in docs):
             # The manifest lists only live rows, so an owner with no entry is an anomaly (a
@@ -6120,6 +6224,15 @@ def _row_key(r) -> tuple:
     return (r.id, r.collection, r.metadata.get("doc_id"), r.metadata.get("position"))
 
 
+#: How a chunk's ``section_type`` was decided, the parallel list ``store_get_many(structured=True)``
+#: returns as ``section_type_basis`` (nexus-sx1t0). ``section_types[i] == ""`` alone cannot tell these
+#: apart: ``"stored"`` with an empty value is an unstamped chunk, ``"ambiguous"`` is owners that disagree.
+SECTION_BASIS_MISSING = "missing"  # the id was not found
+SECTION_BASIS_STORED = "stored"  # the chunk row's own value: no owner, or only legacy owners, answered
+SECTION_BASIS_AGREED = "agreed"  # every owner wrote a label and they all agree (possibly an empty one)
+SECTION_BASIS_AMBIGUOUS = "ambiguous"  # owners disagree, or written and legacy owners are mixed
+
+
 def resolve_owner_section_types(
     chunk_ids: list[str],
     found: list[bool],
@@ -6128,6 +6241,20 @@ def resolve_owner_section_types(
     *,
     owner_rows: Any = _FETCH_OWNER_ROWS,
 ) -> list[str]:
+    """:func:`resolve_owner_section_types_with_basis` without the basis (the labels alone)."""
+    return resolve_owner_section_types_with_basis(
+        chunk_ids, found, collections, stored, owner_rows=owner_rows,
+    )[0]
+
+
+def resolve_owner_section_types_with_basis(
+    chunk_ids: list[str],
+    found: list[bool],
+    collections: list[str],
+    stored: list[str],
+    *,
+    owner_rows: Any = _FETCH_OWNER_ROWS,
+) -> tuple[list[str], list[str]]:
     """The ``section_type`` of each hydrated chunk, read from the catalog manifest of the
     documents that own it (nexus-tko2w, RDR-108).
 
@@ -6150,14 +6277,20 @@ def resolve_owner_section_types(
 
     Best-effort: a catalog that is unreachable, or an engine that predates the
     ``chash_positions`` route, leaves every entry on its stored value.
+
+    Returns ``(labels, basis)``, aligned with *chunk_ids*. ``basis[i]`` is one of the
+    ``SECTION_BASIS_*`` values and says which rule above produced ``labels[i]``, so a caller can tell
+    an unstamped chunk (``"stored"``, ``""``) from an ambiguous one (``"ambiguous"``, ``""``), which
+    the label alone cannot (nexus-sx1t0).
     """
+    basis = [SECTION_BASIS_STORED if ok else SECTION_BASIS_MISSING for ok in found]
     wanted = [i for i, cid in enumerate(chunk_ids) if found[i] and _CHASH_ID.fullmatch(cid or "")]
     if not wanted:
-        return stored
+        return stored, basis
     if owner_rows is _FETCH_OWNER_ROWS:
         owner_rows = _owner_rows_by_chash(chunk_ids, found)
     if owner_rows is None:
-        return stored
+        return stored, basis
     by_chash = owner_rows
     out = list(stored)
     for i in wanted:
@@ -6169,8 +6302,11 @@ def resolve_owner_section_types(
         if not owners or not any(written):
             continue  # no owner, or only legacy owners: the stored value stands
         labels = {str(row.get("section_type") or "") for row in owners}
-        out[i] = next(iter(labels)) if all(written) and len(labels) == 1 else ""
-    return out
+        if all(written) and len(labels) == 1:
+            out[i], basis[i] = next(iter(labels)), SECTION_BASIS_AGREED
+        else:
+            out[i], basis[i] = "", SECTION_BASIS_AMBIGUOUS
+    return out, basis
 
 
 def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
@@ -6341,10 +6477,11 @@ def store_get_many(
     max_chars_per_doc: Annotated[int, Field(description="Per-document truncation cap, in characters.")] = 4000,
     structured: Annotated[bool, Field(
         description=(
-            "Return {contents, missing, section_types} instead of the "
+            "Return {contents, missing, section_types, section_type_basis} instead of the "
             "human-readable string; section_types aligns 1:1 with contents/ids "
             "(\"\" when missing, unstamped, or when the documents that own the "
-            "chunk disagree on its section type)."
+            "chunk disagree on its section type); section_type_basis aligns with "
+            "it and says which: missing, stored, agreed or ambiguous."
         ),
     )] = False,
     limit_per_source: Annotated[int | list[int] | None, Field(
@@ -6362,8 +6499,11 @@ def store_get_many(
     at once (e.g. a plan step's `$stepN.ids` results). Returns a
     human-readable "Hydrated N/M docs" listing with each document's content
     under an `[id]` line and a trailing `Missing: ...` line, or, when
-    `structured=True`, `{contents, missing, section_types, source_notes}`
-    (`source_notes` is one provenance line per entry: the collection it was
+    `structured=True`, `{contents, missing, section_types, section_type_basis,
+    source_notes}` (`section_type_basis` is one of missing, stored, agreed or
+    ambiguous per entry, so an empty section type from an unstamped chunk
+    ("stored") differs from one whose owning documents disagree
+    ("ambiguous"); `source_notes` is one provenance line per entry: the collection it was
     found in, plus the catalog documents' titles and the indexed date, year and
     expiry they agree on; a date the owners disagree on, or that no owner
     states, is left out), or
@@ -6600,10 +6740,22 @@ def store_get_many(
             # label is read from the owning documents' manifest rows (only the structured
             # result carries it, so only that mode pays the lookup).
             found_flags = [entry is not None for entry in entries]
-            owner_rows = _owner_rows_by_chash(id_list, found_flags)
-            section_types = resolve_owner_section_types(
-                id_list, found_flags, entry_collections, section_types, owner_rows=owner_rows,
+            notes_on, section_on = _SOURCE_NOTES_ON.get(), _OWNER_SECTION_TYPES_ON.get()
+            lookups = _OWNER_LOOKUPS.get()
+            # nexus-sx1t0: with both owner reads switched off and no caller capturing the rows, the
+            # call makes no owner lookup at all.
+            owner_rows = (
+                _owner_rows_by_chash(id_list, found_flags)
+                if notes_on or section_on or lookups is not None else None
             )
+            if lookups is not None:
+                lookups.asked, lookups.owner_rows = True, owner_rows
+            if section_on:
+                section_types, section_type_basis = resolve_owner_section_types_with_basis(
+                    id_list, found_flags, entry_collections, section_types, owner_rows=owner_rows,
+                )
+            else:
+                section_type_basis = [SECTION_BASIS_STORED if ok else SECTION_BASIS_MISSING for ok in found_flags]
             # nexus-onn7s: ``source_notes`` rides the same fetch, same alignment, same "" for
             # a missing id -- one line per chunk naming its document, collection and dates,
             # which the plan runner prefixes onto the hydrated content an operator prompt sees.
@@ -6613,12 +6765,16 @@ def store_get_many(
                 resolve_owner_source_notes(
                     id_list, found_flags, entry_collections, owner_rows=owner_rows,
                 )
-                if _SOURCE_NOTES_ON.get() else [""] * len(id_list)
+                if notes_on else [""] * len(id_list)
             )
             return {
                 "contents": contents, "missing": missing,
                 "section_types": section_types,
                 "source_notes": source_notes,
+                # nexus-sx1t0: how each section type was decided (SECTION_BASIS_*). An additive key:
+                # ``section_types`` keeps its meaning, and "" there is an unstamped chunk when the basis
+                # is "stored" and owners that disagree when it is "ambiguous".
+                "section_type_basis": section_type_basis,
             }
 
         # nexus-z4j8d: the human-readable mode of a HYDRATION tool must
@@ -6755,16 +6911,23 @@ def store_list(
         ]
         if also:
             lines.append(also)
+        # nexus-6pfgb.13 (RDR-236 Phase 2): each chunk's title, tags, expiry and index date are its
+        # OWNING note's own (``note_display``), from ONE owner lookup for the whole page; the row's are
+        # the last writer's. The row speaks only for a chunk with no catalog value and at most one
+        # owner: an unowned chunk, or an indexed file's tags until Phase 3's generated columns.
+        from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+
+        owner_map = _store_hook.live_owner_entries(col_name, [e.get("id", "") for e in page])
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
-            title = (e.get("title") or "")[:40]
-            tags = e.get("tags") or ""
-            indexed_at_full = e.get("indexed_at") or ""
-            indexed_at = indexed_at_full[:10]
-            # Same reading as `nx store list` (nexus-njn1a): a ttl_days that cannot lapse is permanent.
-            ttl_str = ttl_listing_label(e.get("ttl_days"), indexed_at_full)
-            tag_str = f"  [{tags}]" if tags else ""
-            lines.append(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
+            shown = _store_hook.note_display(
+                None if owner_map is None else owner_map.get(doc_id, []),
+                row=e, row_title=e.get("title") or "", row_tags=e.get("tags") or "",
+                row_ttl_days=e.get("ttl_days"), row_indexed_at=e.get("indexed_at") or "",
+            )
+            title = shown.title[:40]
+            tag_str = f"  [{shown.tags}]" if shown.tags else ""
+            lines.append(f"  {doc_id}  {title:<40}  {shown.ttl:<24}  {shown.indexed}{tag_str}")
         shown_end = offset + len(page)
         # A full page is the live signal that more rows may follow; the stored
         # total can exceed the live rows and point at an empty page. "Full" is
@@ -6824,7 +6987,9 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
         # accepts. Surfaced whole so the list -> get flow round-trips; see
         # DocumentListing.handle.
         title = (doc.title or "untitled")[:50]
-        indexed = (doc.entry.get("indexed_at") or "")[:10]
+        # nexus-6pfgb.13: the document's own index date (the catalog column); a chunk-keyed row with no
+        # catalog document shows its chunk row's.
+        indexed = (doc.indexed_at or doc.entry.get("indexed_at") or "")[:10]
         lines.append(f"  {i:3d}. {doc.handle}  {title:<50}  {doc.chunks:>4} chunks  {indexed}")
     return _cap_text_result("\n".join(lines), "store_list")
 
@@ -7781,6 +7946,12 @@ def tuple_out(
     ttl_seconds: Annotated[int | None, Field(
         description="Optional explicit TTL, capped at the template's retention ceiling.",
     )] = None,
+    delay_s: Annotated[int | None, Field(
+        description="Whole seconds before the tuple can be claimed; at most the template's retention.",
+    )] = None,
+    mode: Annotated[str | None, Field(
+        description="`replace` rewrites the same-id task (keys+nonce templates only); the result adds the outcome.",
+    )] = None,
 ) -> str:
     """Write a tuple into the RDR-205 Linda tuple space (`out`).
 
@@ -7794,7 +7965,9 @@ def tuple_out(
     Returns the tuple id, lowercase hex. On a keys+nonce template a nonce
     names one write: the same nonce with a different body or dims is
     refused as `NonceReuseConflict`, naming the id; mint a fresh nonce for
-    a new message.
+    a new message. With `mode="replace"` a repeat of the nonce rewrites the
+    task instead, and the result is `<id> <outcome>` (`created`, `replaced`
+    or `dirtied`).
 
     Size limits (refused with the `TooLarge` typed error before any write):
     - `body`: at most 4096 bytes UTF-8 (a template may set a lower cap; the
@@ -7804,9 +7977,19 @@ def tuple_out(
     - `nonce`: at most 128 bytes UTF-8.
     """
     try:
+        if mode == "replace":
+            tuple_id, outcome = _t2_index_write(
+                lambda db: db.tuples.out_replace(
+                    subspace, keys, dims, body, nonce=nonce or "",
+                    ttl_seconds=ttl_seconds, delay_s=delay_s,
+                ),
+                op="tuple_out",
+            )
+            return f"{tuple_id} {outcome}"
         tuple_id = _t2_index_write(
             lambda db: db.tuples.out(
                 subspace, keys, dims, body, nonce=nonce, ttl_seconds=ttl_seconds,
+                delay_s=delay_s, mode=mode,
             ),
             op="tuple_out",
         )
@@ -8027,6 +8210,12 @@ def tuple_ack(
 def tuple_nack(
     claim_id: Annotated[str, Field(description="The claim id returned by `tuple_in`.")],
     claimant: Annotated[str, Field(description="Must match the identity that made the claim.")],
+    retry_after_s: Annotated[int | None, Field(
+        description="Whole seconds to hold the task back before it can be claimed again.",
+    )] = None,
+    dead: Annotated[bool, Field(
+        description="Dead-letter the task at once instead of returning it to available.",
+    )] = False,
 ) -> str:
     """Release a claimed tuple back to available (`nack`).
 
@@ -8036,7 +8225,10 @@ def tuple_nack(
     """
     try:
         _t2_index_write(
-            lambda db: db.tuples.nack(claim_id, claimant), op="tuple_nack",
+            lambda db: db.tuples.nack(
+                claim_id, claimant, retry_after_s=retry_after_s, dead=dead,
+            ),
+            op="tuple_nack",
         )
         return f"Nacked claim {claim_id}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -9173,13 +9365,29 @@ def traverse(
     kw = dict(depth=depth, direction=direction, link_types=effective_types or None)
     if parsed_policy is not None:
         # nexus-jypmj.1.13: hand the engine the scope as a predicate it applies before its node cut.
-        scope_filter = _engine_scope_filter(catalog, parsed_policy.allowed_collections)
+        scope_filter = _engine_scope_filter(
+            catalog, parsed_policy.allowed_collections, require_link_role=parsed_policy.require_link_role,
+        )
         if scope_filter is not None:
             kw["scope_filter"] = scope_filter
-    if len(seed_tumblers) == 1:
-        result = catalog.graph(seed_tumblers[0], **kw)
-    else:
-        result = catalog.graph_many(seed_tumblers, **kw)
+    def walk(walk_kw: dict) -> Any:
+        if len(seed_tumblers) == 1:
+            return catalog.graph(seed_tumblers[0], **walk_kw)
+        return catalog.graph_many(seed_tumblers, **walk_kw)
+
+    result = walk(kw)
+    if (
+        parsed_policy is not None and "scope_filter" in kw and parsed_policy.require_link_role != "factual"
+        and isinstance(result, dict) and isinstance(result.get("scope_filter"), dict)
+        and result["scope_filter"].get("applied") is True and not isinstance(result.get("node_walk"), dict)
+    ):
+        # nexus-jypmj.18: the predicate ran (the marker says so) but the reply carries no node_walk, so a node behind
+        # a removed relay would score as ``related`` and a role-filtering policy would drop it. The capability probe
+        # said the engine sends one: a replica that predates it, or a rollback inside the probe's cache window.
+        # Walk once more without the predicate and narrow by scope on the client, as an engine without node_walk is.
+        _log.warning("traverse_node_walk_missing_rewalk", role=parsed_policy.require_link_role)
+        kw = {k: v for k, v in kw.items() if k != "scope_filter"}
+        result = walk(kw)
 
     nodes = result.get("nodes") or []
     if parsed_policy is not None:
@@ -9190,6 +9398,7 @@ def traverse(
             # The marker is the only evidence the predicate ran: a 200 from an engine that ignored the key
             # carries none, and then the walk is reported as the old engine's.
             engine_scope=marker if isinstance(marker, dict) and marker.get("applied") is True else None,
+            node_walk=result.get("node_walk") if isinstance(result.get("node_walk"), dict) else None,
         )
     tumblers = [str(n.tumbler) for n in nodes if hasattr(n, "tumbler")]
     collections = sorted({
@@ -9238,7 +9447,29 @@ def traverse(
     return out
 
 
-def _engine_scope_filter(catalog: Any, scope: Any) -> "dict | None":
+def _live_collection_names(catalog: Any) -> tuple[str, ...]:
+    """The live registered collection names, read through ``catalog`` once per plan run (nexus-jypmj.19).
+
+    Inside a plan run (:func:`~nexus.plans.traversal_policy.registry_listing_scope`, opened by ``plan_run``) the
+    steps share one listing, every corpus prefix included, so a multi-step run reads the registry once. Nothing
+    outlives the run: a later run, after an index or ``store_put`` registered a collection, reads it afresh. A
+    cache keyed on the catalog handle would not work, since ``_get_catalog()`` returns a new handle per call.
+    Outside a run (a direct ``traverse``) every call reads. A failed read raises and keeps nothing. Routing reads
+    the live view only (nexus-bc7ps): a quarantine-<name> row must not reach the predicate.
+    """
+    from nexus.plans import traversal_policy as tp  # noqa: PLC0415 — deferred, like traverse's other imports
+
+    def read() -> tuple[str, ...]:
+        return tuple(sorted({
+            str(row["name"]) for row in catalog.list_collections(lifecycle_state="live")
+            if isinstance(row, dict) and row.get("name")
+        }))
+
+    listing = tp.active_registry_listing()
+    return read() if listing is None else listing.get(read)
+
+
+def _engine_scope_filter(catalog: Any, scope: Any, *, require_link_role: str = "factual") -> "dict | None":
     """The ``scope_filter`` predicate for the engine's ``/traverse``, or ``None`` when none can or need be sent.
 
     None for an unrestricting scope (none, ``all``), for a catalog that does not advertise
@@ -9249,6 +9480,12 @@ def _engine_scope_filter(catalog: Any, scope: Any) -> "dict | None":
     it admits (``ScopeConstraint.admits``, the one place the prefix rule lives), so the engine only ever compares
     names. A registry that cannot be read, or one that names more collections than the engine accepts, sends
     nothing: the walk is then the old engine's and is disclosed as such.
+
+    A single-role policy (*require_link_role* other than ``factual``) sends the predicate only to an engine that
+    advertises ``catalog_graph_node_walk_supported`` (nexus-jypmj.18). The predicate removes an out-of-scope relay
+    and its edges, so without the engine's per-node depth and role a node reached only through one scores as
+    ``related`` and a role-filtering policy drops it (G06: 25 of 30 in-scope documents). Such a policy walks
+    unfiltered on an older engine and narrows by scope client-side, as it did before the predicate existed.
     """
     from nexus.plans import traversal_policy as tp  # noqa: PLC0415 — deferred, like traverse's other imports
 
@@ -9262,16 +9499,21 @@ def _engine_scope_filter(catalog: Any, scope: Any) -> "dict | None":
         return None
     if not supported:
         return None
+    if require_link_role != "factual":
+        try:
+            walk_probe = getattr(catalog, "supports_graph_node_walk", None)
+            carries_walk = callable(walk_probe) and walk_probe() is True
+        except Exception as exc:  # noqa: BLE001 — a capability probe never fails the walk; the unfiltered walk is the answer
+            _log.warning("traverse_node_walk_probe_failed", error=str(exc))
+            carries_walk = False
+        if not carries_walk:
+            return None
     if scope.kind == "subtree":
         return {"subtree": scope.value}
     if scope.kind == "collection":
         return {"collections": [scope.value]}
     try:
-        names = sorted({
-            # Routing reads the live view only (nexus-bc7ps): a quarantine-<name> row must not reach the predicate.
-            str(row["name"]) for row in catalog.list_collections(lifecycle_state="live")
-            if isinstance(row, dict) and row.get("name") and scope.admits(str(row["name"]))
-        })
+        names = sorted(n for n in _live_collection_names(catalog) if scope.admits(n))
     except Exception as exc:  # noqa: BLE001 — no predicate we could not build is sent; the walk is disclosed as unscoped-by-engine
         _log.warning("traverse_scope_filter_registry_failed", scope=scope.value, error=str(exc))
         return None
@@ -9297,7 +9539,7 @@ def _traverse_policy_failed(reason: str, *, warnings: list[str] | None = None) -
 
 def _traverse_with_policy(
     catalog: Any, nodes: list, edges: list, seeds: list, policy: Any,
-    *, direction: str, warnings: list[str], engine_scope: "dict | None" = None,
+    *, direction: str, warnings: list[str], engine_scope: "dict | None" = None, node_walk: "dict | None" = None,
 ) -> dict:
     """``traverse`` under a :class:`~nexus.plans.traversal_policy.TraversalPolicy` (RDR-232 s3).
 
@@ -9317,6 +9559,7 @@ def _traverse_with_policy(
             kinds = {c: collection_kind(c) for c in {str(getattr(n, "physical_collection", "") or "") for n in nodes}}
         selection = tp.select_documents(
             nodes, edges, seeds, policy, direction=direction, collection_kinds=kinds, engine_scope=engine_scope,
+            node_walk=node_walk,
         )
     except Exception as exc:  # noqa: BLE001 — any policy failure omits the graph stream; it never widens
         return _traverse_policy_failed(f"{type(exc).__name__}: {exc}", warnings=warnings)
@@ -9335,7 +9578,8 @@ def _traverse_with_policy(
     if report["secondary_omitted"]:
         warnings.append(
             "traverse: the engine cut this scoped walk at its node cap without the scope predicate "
-            "(catalog_graph_scope_filter_supported absent, or its scope_filter marker missing from the reply), "
+            "(catalog_graph_scope_filter_supported absent, its scope_filter marker missing from the reply, or a "
+            "single-role policy on an engine without catalog_graph_node_walk_supported), "
             "so the cut may have spent its slots on out-of-scope documents; secondary graph evidence omitted, "
             "only the seed documents are returned"
         )
@@ -10643,7 +10887,8 @@ async def _nx_answer_active_project(
     its outcome is on ``request.active_project``: when the session's project is reliable and the question's
     text does not name another one, the request's owner becomes ``inferred``. An inferred owner qualifies
     source resolution only; it is applied after the ``_nx_owners`` run binding was built, and
-    ``request_owners`` ignores it, so it never narrows the secondary streams (nexus-jypmj.1.18).
+    ``request_owners`` ignores it, so it narrows no secondary stream by itself (nexus-jypmj.1.18); the one-source
+    rule (``nexus.plans.single_source``) narrows to the document it chose when no other project carries the number.
 
     *project_names* are the words the question puts where a project name could stand. Only a registered owner
     name counts as one (case-insensitively), so ``in detail`` is no project and ``the conexus RDR-084`` is.
@@ -10861,11 +11106,33 @@ def _manifest_sampler(cat: Any) -> "Callable[[list[str], int], Any] | None":
     return None
 
 
+async def _nx_answer_chash_allow_supported() -> bool:
+    """Whether the engine applies ``chash_allow`` on its search routes (``GET /version``'s
+    ``vector_search_chash_allow_supported``, nexus-jypmj), read BEFORE any request carries the key: an engine
+    without the flag answers 200 and ignores it (a collection-wide answer), and the cloud edge trims ``/version`` to
+    an allowlist. The probe is a (cached) HTTP read, so it runs in a worker thread. Never raises: a client with no
+    probe (an in-memory test client), a failed probe and a flag that is not a JSON ``true`` all read as unsupported,
+    the direction in which no secondary step is dispatched."""
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+
+    def _probe() -> bool:
+        probe = getattr(_get_t3(), "supports_chash_allow", None)
+        return callable(probe) and probe() is True
+
+    try:
+        return bool(await asyncio.to_thread(_probe))
+    except Exception as exc:  # noqa: BLE001 — a capability probe never fails an answer; unsupported is the safe reading
+        _log.warning("nx_answer_chash_allow_probe_failed", error=type(exc).__name__)
+        return False
+
+
 async def _nx_answer_primary_stream(
     resolution: NamedSourceResolution | None,
     lifecycle: "LifecycleStream | None" = None,
     *,
     deadline: float | None = None,
+    one_source: bool = False,
+    narrowed: bool = False,
 ) -> "tuple[PrimaryEvidence | None, ReservedStream | None]":
     """Read the resolved named sources and build the reserved stream (RDR-232, nexus-jypmj.1.6).
 
@@ -10883,6 +11150,9 @@ async def _nx_answer_primary_stream(
     *lifecycle* (nexus-jypmj.1.7) supplies the T2 records of a resolved RDR; they lead the reserved
     share, ahead of the chunks, and do not depend on the T3 read: a failed chunk read still yields a
     stream of the records.
+
+    *one_source* and *narrowed* are ``RequestCoverage.names_one_source`` and whether the run narrowed its secondary
+    streams to that source (nexus-4xmpv): the item cap and the reserved share are read from them, once, here.
     """
     if resolution is None or not resolution.resolved():
         return None, None
@@ -10899,6 +11169,7 @@ async def _nx_answer_primary_stream(
             # The capability probe is a (cached) HTTP read, so it runs here with the rest of the blocking I/O.
             return select_primary_evidence(
                 resolution, cat=cat, fetch_chunks=fetch, deadline=deadline, manifest_sampler=_manifest_sampler(cat),
+                one_source=one_source, narrowed=narrowed,
             )
 
         evidence = await asyncio.wait_for(
@@ -10911,7 +11182,11 @@ async def _nx_answer_primary_stream(
     except Exception as exc:  # noqa: BLE001 — an unreadable source is disclosed, never a failed answer
         _log.warning("nx_answer_primary_evidence_failed", error=str(exc))
         evidence = PrimaryEvidence(error=type(exc).__name__, caps=resolution.caps)
-    return evidence, ReservedStream.from_evidence(evidence, extra=records)
+    from nexus.plans.reserved_stream import RESERVED_SHARE_MAX, RESERVED_SHARE_NARROWED  # noqa: PLC0415 — deferred; matches this module's convention
+
+    return evidence, ReservedStream.from_evidence(
+        evidence, extra=records, share_max=RESERVED_SHARE_NARROWED if narrowed else RESERVED_SHARE_MAX,
+    )
 
 
 def _autoalias_bindings(
@@ -11504,6 +11779,7 @@ async def _nx_answer_plan_miss(
     if coverage is not None and enforce_eligibility:
         few_shot_matches = _eligibility.eligible_matches(
             _eligibility.coerce_kind(coverage.answer_kind), few_shot_matches,
+            1 if coverage.names_one_source else 0,
         )
     few_shot_block = _format_plan_few_shot(few_shot_matches)
     if few_shot_block:
@@ -12206,7 +12482,8 @@ async def nx_answer(
     _evidence_request = _nx_answer_question_sources(_evidence_request, _request_coverage)
     # nexus-jypmj.2.4: the third tier, after the explicit owner/project and the owner scope: the session's
     # project, only when it is reliable and nothing explicit qualified an RDR source. Applied after the
-    # `_nx_owners` binding above, so an inferred owner never narrows the secondary streams.
+    # `_nx_owners` binding above, so an inferred owner narrows no stream by itself; the one-source rule below narrows to
+    # the document an inferred owner chose only when no other project carries the number (nexus-jypmj).
     # The two stages share ONE budget (PrimaryEvidenceCaps.max_seconds, or the answer's own deadline if sooner).
     from nexus.plans.request_coverage import project_name_candidates  # noqa: PLC0415 — deferred; matches this module's convention
 
@@ -12242,6 +12519,37 @@ async def nx_answer(
             )
 
         _request_coverage = _nx_answer_isolated("withdraw_unqualified", _request_coverage, _withdraw_unqualified)
+    # RDR-232 section 2a (nexus-4xmpv, nexus-jypmj; Sam, 2026-10-30): a synthesis or unknown request that names exactly
+    # ONE source reads that DOCUMENT. Once it resolved to one document, the run's scope binding becomes the document's
+    # collection (defense in depth; the caller's own document address is kept) and its owner binding the document's
+    # owner, and the runner's section 2a and owner narrowing apply them to EVERY retrieval step of EVERY plan. The
+    # document itself is the run's DocumentConfinement, built once the primary read has the manifest's chunk hashes
+    # (below): the engine's chunk filter on search/query, the document's address on traverse, and no dispatch for a step
+    # that cannot be confined. Replaces the strategy deny-list.
+    # ``_step_scope`` is the scope the steps run under (the collection, or the caller's document address); ``scope``
+    # stays what the caller gave (plan matching, the inline planner's corpus hint, plan growth and the envelope's
+    # ``scope`` read that: the planner is not handed a collection name, so a plan it grows does not pin the next
+    # question to this document's collection). The envelope's ``effective_scope`` is the document's tumbler.
+    # ``None`` when the request is not one the rule concerns; a fault in the derivation is an ``applied: false`` verdict.
+    from nexus.plans.owner_narrowing import OWNERS_BINDING as _OWNERS_BINDING  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.single_source import (  # noqa: PLC0415 — deferred; matches this module's convention
+        derive_single_source_narrowing as _derive_single_source,
+        unavailable_single_source_narrowing as _unavailable_single_source,
+    )
+
+    _single_source = _nx_answer_isolated(
+        "single_source_narrowing", _unavailable_single_source(_request_coverage, scope), _derive_single_source,
+        _request_coverage, _named_sources, scope,
+    )
+    _step_scope = scope
+    _engine_filter = False
+    if _single_source is not None and _single_source.applied:
+        # Asked only for a run that is confined: the capability probe is a (cached) HTTP read.
+        _engine_filter = await _nx_answer_chash_allow_supported()
+        _single_source = _single_source.with_confinement("engine_filter" if _engine_filter else "steps_not_run")
+        _step_scope = _single_source.step_scope
+        _caller_run["_nx_scope"] = _step_scope
+        _caller_run[_OWNERS_BINDING] = _single_source.owner
     # RDR-232 Phase 2 (nexus-jypmj.2.3): the answer-kind eligibility filter for this request. Handed to
     # plan_match, which asks it of every branch's candidates; enforcing unless NX_ANSWER_KIND_ELIGIBILITY turns
     # the gate off (nexus-jypmj.2.8; shadow: the filter counts what it would exclude and excludes nothing).
@@ -12257,6 +12565,9 @@ async def nx_answer(
         shadow_reason=(
             "disabled_by_setting" if not _gate_on else None if _extract_on else "extraction_disabled"
         ),
+        # nexus-4xmpv: a synthesis or unknown request that names exactly one source does not admit citation-traversal;
+        # the count is RequestCoverage.names_one_source, the one place that decides it.
+        named_source_count=1 if _request_coverage.names_one_source else 0,
     )
     # nexus-jypmj.16: a failed extraction leaves THIS request on its first-pass kind (the gate keeps enforcing,
     # by design); a run of failures in one process is that regime every time, so it warns once per process.
@@ -12310,7 +12621,7 @@ async def nx_answer(
         try:
             diag = build_evidence_diagnostics(
                 steps=_diag_inputs["steps"], tools=plan_tools(_diag_inputs["plan_json"]),
-                scope=ScopeConstraint.parse(scope), scope_diagnostics=_scope_diagnostics,
+                scope=ScopeConstraint.parse(_step_scope), scope_diagnostics=_scope_diagnostics,
                 resolved_args=_diag_inputs["resolved_args"], recorder=_reducer_recorder,
                 reserved=_reserved_stream, primary=_primary_evidence, lifecycle=_lifecycle,
                 named_sources=_named_sources, reducer_expected=_diag_inputs["reducer_expected"],
@@ -12462,6 +12773,7 @@ async def nx_answer(
                     ) if _named_sources else ()
                 ),
                 _active_notice,
+                _single_source.disclosure() if _single_source is not None else None,
             )
             if line
         ]
@@ -12583,6 +12895,9 @@ async def nx_answer(
             # detail, ...}], dropped, catalog_calls}. None when no source
             # was named.
             "named_sources": _named_sources.to_wire() if _named_sources else None,
+            # nexus-4xmpv: the one-source rule's verdict ({applied, source, collection, owner, caller_scope,
+            # effective_scope, reason}); ``None`` when the request is not one it concerns.
+            "single_source_narrowing": _single_source.to_wire() if _single_source is not None else None,
             # RDR-232 Phase 1 (nexus-jypmj.1.6): the primary evidence read from the resolved
             # sources (per-document coverage, selected items by position, caps hit) and what the
             # runner did with it (merged step, secondary items cut or deduplicated, reserved
@@ -13180,6 +13495,12 @@ async def nx_answer(
     # Step 2 below (previously computed twice) so the pre-Step-2 budget
     # check and the single-step guard agree on the same classification.
     plan_class = _nx_answer_classify_plan(best)
+    if plan_class == "single_query" and _single_source is not None and _single_source.applied:
+        # nexus-jypmj: the single_query fast path has no primary evidence stream and calls ``query`` outside the runner,
+        # so it would read every project's documents. A run confined to one document goes through ``plan_run``, which
+        # confines the plan's query step to the document (or does not run it) and reserves the primary read.
+        _log.info("nx_answer_single_query_not_taken_document_confined", plan_id=best.plan_id)
+        plan_class = "needs_operators"
 
     # ── Pre-Step-2 budget check (nexus-nyry9.2, RDR-196 .r2) ──────────────
     # Step 1 above — the plan-match gate, and on a miss, the inline LLM
@@ -13471,7 +13792,7 @@ async def nx_answer(
             from nexus.plans.evidence import ScopeConstraint, narrow_corpus, narrow_subtree  # noqa: PLC0415 — deferred; matches this module's convention
 
             _single_query_fast_path = True
-            _fast_scope = ScopeConstraint.parse(scope)
+            _fast_scope = ScopeConstraint.parse(_step_scope)
             _fast_subtree = ""
             if _fast_scope.kind == "subtree":
                 _fast_narrowing, _fast_subtree = narrow_subtree(
@@ -13488,10 +13809,10 @@ async def nx_answer(
                 _log.warning(
                     "nx_answer_single_query_scope_conflict",
                     plan_id=best.plan_id, plan_corpus=_fast_narrowing.plan_corpus,
-                    caller_scope=scope,
+                    caller_scope=_step_scope,
                 )
                 no_match = (
-                    f"No matching evidence found for {question!r} in scope {scope!r}. "
+                    f"No matching evidence found for {question!r} in scope {_step_scope!r}. "
                     f"The plan's one retrieval step was skipped (plan_id={best.plan_id}); "
                     f"{_nx_answer_scope_conflict_sentence(_scope_diagnostics)} — pass a scope "
                     "the plan's corpus covers, or use search/query directly."
@@ -13635,7 +13956,7 @@ async def nx_answer(
                         steps=[
                             {"ids": [], "tumblers": [], "scope_conflict": _fast_owner_marker or {
                                 "step_index": 0, "tool": "query", "plan_corpus": _fast_narrowing.plan_corpus,
-                                "caller_scope": scope, "scope_kind": _fast_scope.kind}}
+                                "caller_scope": _step_scope, "scope_kind": _fast_scope.kind}}
                             if _fast_conflict else {
                                 "ids": [c["id"] for c in chunks],
                                 "chunk_collections": [c["collection"] for c in chunks],
@@ -13773,9 +14094,25 @@ async def nx_answer(
         await _nx_answer_lifecycle_stream(_named_sources, deadline=deadline)
         if _request_coverage.wants_lifecycle_stream else None
     )
-    _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources, _lifecycle, deadline=deadline)
+    _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(
+        _named_sources, _lifecycle, deadline=deadline, one_source=_request_coverage.names_one_source,
+        narrowed=_single_source is not None and _single_source.applied,
+    )
     if _reserved_stream is not None:
         _plan_run_kwargs["reserved_stream"] = _reserved_stream
+    # nexus-jypmj (Sam, 2026-10-30): the document confinement, from the manifest hashes the primary read held. The run
+    # then confines every secondary step to the document; the verdict learns the primary read's S of M chunks and the
+    # mode the run settled on (an engine with no chunk filter, or a document with no hashes, runs no secondary step).
+    _document_confinement = None
+    if _single_source is not None and _single_source.applied:
+        from nexus.plans.document_confinement import build_confinement as _build_confinement  # noqa: PLC0415 — deferred; matches this module's convention
+
+        _document_confinement = _build_confinement(
+            tumbler=_single_source.tumbler, collection=_single_source.collection, evidence=_primary_evidence,
+            engine_filter=_engine_filter,
+        )
+        _single_source = _single_source.with_primary(_primary_evidence, _document_confinement)
+        _plan_run_kwargs["document_confinement"] = _document_confinement
     # RDR-232 Phase 3 (nexus-jypmj.3.3): the coverage boundary, built from the inputs this call already holds (the
     # ones `_evidence_diagnostics_now` hands build_evidence_diagnostics) and given to the runner, which assesses the
     # terminal reduction's evidence before dispatching it. It rides `_plan_run_kwargs`, so the continuation
@@ -13789,9 +14126,10 @@ async def nx_answer(
         from nexus.plans.evidence import ScopeConstraint as _ScopeConstraint  # noqa: PLC0415 — as above
 
         _plan_run_kwargs["coverage_boundary"] = _CoverageBoundary(
-            request=_request_coverage, scope=_ScopeConstraint.parse(scope), named_sources=_named_sources,
+            request=_request_coverage, scope=_ScopeConstraint.parse(_step_scope), named_sources=_named_sources,
             primary=_primary_evidence, lifecycle=_lifecycle, owner_resolution=_evidence_request.owner.to_wire(),
             dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
+            confinement=_document_confinement,
         )
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline
@@ -14381,6 +14719,8 @@ async def nx_answer(
         notice = _render_non_answer_notice(
             _shape, plan_id=best.plan_id, step_count=len(result.steps),
             chunk_refs=_notice_refs,
+            unread_items=_verdict.coverage.ledger.assessment.skipped_items if _verdict.coverage is not None else 0,
+            total_items=_verdict.coverage.ledger.assessment.anchors_total if _verdict.coverage is not None else 0,
         )
         try:
             with _t2_ctx() as db:

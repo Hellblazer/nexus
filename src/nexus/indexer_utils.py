@@ -644,19 +644,57 @@ def _h1_is_section_heading(h1: str) -> bool:
     return core in _H1_SECTION_HEADINGS
 
 
+# Metadata titles that a producer wrote, not an author (nexus-tr1rj.22). "Microsoft Word - x.docx" is
+# Word's window title at print time; Office, LibreOffice and print drivers also leave "untitled", a bare
+# file name or a "Slide 1" behind. Such a title beats a real first heading unless it is rejected here.
+_PRODUCER_PREFIX = re.compile(r"^microsoft (?:word|powerpoint|excel|publisher|visio|project)\b\s*[-\u2013\u2014]")
+_PLACEHOLDER_WORDS = re.compile(
+    r"^(?:untitled|new document|no title|title|default|document|slide|page|presentation|"
+    r"powerpoint presentation|microsoft word document|word document)"
+    r"(?:[\s_-]*(?:document|presentation|spreadsheet|page))?[\s_-]*\d*$"
+)
+_FILE_NAME_ENDING = re.compile(
+    r"\.(?:pdf|docx?|dotx?|pptx?|xlsx?|odt|odp|ods|rtf|txt|tex|md|html?|indd|ps|dvi|wpd)$"
+)
+
+
+def _pdf_title_is_placeholder(title: str, pdf_path: Path) -> bool:
+    """True when the PDF metadata *title* is a producer artifact, not a title.
+
+    Rejected: empty or punctuation-only text; ``untitled``, ``Document1``, ``Slide 1`` and kin; anything
+    that ends in a document file extension (a bare or path file name); a one-token title equal to the PDF's
+    own file name or stem; and any ``Microsoft Word - ...`` style title (the prefix marks the rest as a file
+    or window name, so the remainder is not used either, even when it has no extension). The sibling of
+    :func:`_h1_is_section_heading`: what it rejects falls through to the first H1, then the file name.
+    """
+    if not isinstance(title, str):
+        return True
+    text = " ".join(title.split()).strip("()[]\"'")
+    if not any(ch.isalnum() for ch in text):
+        return True
+    low = text.lower()
+    if _PRODUCER_PREFIX.match(low) or _PLACEHOLDER_WORDS.match(low) or _FILE_NAME_ENDING.search(low):
+        return True
+    # A title equal to the file name is a producer echo only when the name is one token
+    # ("2512.11001", "report_final"); a file named after the paper's real title
+    # ("Attention Is All You Need.pdf") keeps that title.
+    return " " not in low and low in {pdf_path.stem.lower(), pdf_path.name.lower()}
+
+
 def resolve_pdf_title(metadata: dict, pdf_path: Path, text: str | None) -> str:
     """Resolve a PDF's document title — the ONE chain for both PDF paths.
 
     ``pdf_title`` (the title in the PDF's own metadata, which both extractors
-    now read through PyMuPDF) -> first H1 of *text* -> normalised filename stem
-    (:func:`derive_title`). Before 2026-08-19 a MinerU document always fell to
+    now read through PyMuPDF; a producer placeholder such as ``Microsoft Word - x.docx``,
+    ``untitled`` or a bare file name does not count, see :func:`_pdf_title_is_placeholder`)
+    -> first H1 of *text* -> normalised filename stem (:func:`derive_title`). Before 2026-08-19 a MinerU document always fell to
     the stem (``papers/2512.11001.pdf`` -> ``"2512.11001"``) even though its
     markdown opens with ``# <title>``; passing the extracted text lets the
     H1 win when the PDF declares no title. Used by ``doc_indexer._pdf_chunks``
     and the streaming post-pass in ``pipeline_stages``.
     """
     extracted = str(metadata.get("pdf_title") or "").strip()
-    if extracted:
+    if extracted and not _pdf_title_is_placeholder(extracted, pdf_path):
         return extracted
     if text:
         for line in text.splitlines():
@@ -668,43 +706,6 @@ def resolve_pdf_title(metadata: dict, pdf_path: Path, text: str | None) -> str:
                     return derive_title(pdf_path, body=None)
                 break
     return derive_title(pdf_path, body=text)
-
-
-def detect_git_metadata(path: Path) -> dict[str, str]:
-    """Return git provenance metadata for the repo containing *path*.
-
-    Walks up via :func:`find_repo_root`, then collects:
-
-      * ``git_project_name`` — basename of the repo root
-      * ``git_branch`` — current branch name
-      * ``git_commit_hash`` — full SHA of HEAD
-      * ``git_remote_url`` — ``origin`` URL (empty when no remote)
-
-    Returns an empty dict when *path* is not inside a git repository
-    so callers can ``**``-merge the result without conditional logic.
-    Indexer-side code (PDF / markdown / pipeline) needs this so chunks
-    carry the same provenance the repo-walk path gets via
-    ``indexer._git_metadata`` (nexus-2my fix #3).
-    """
-    repo = find_repo_root(path)
-    if repo is None:
-        return {}
-
-    def _run(args: list[str]) -> str:
-        try:
-            r = run_bounded(
-                args, cwd=repo, timeout=10,
-            )
-        except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
-            return ""
-        return r.stdout.strip() if r.returncode == 0 else ""
-
-    return {
-        "git_project_name": repo.name,
-        "git_branch": _run(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
-        "git_commit_hash": _run(["git", "rev-parse", "HEAD"]),
-        "git_remote_url": _run(["git", "remote", "get-url", "origin"]),
-    }
 
 
 def _path_glob_match(parts: tuple[str, ...], segs: list[str]) -> bool:
@@ -1555,7 +1556,7 @@ def run_file_loop(
     concurrency: int,
     on_file: Callable[[Path, int, float], None] | None,
     on_stage_timers: Callable[[Path, object], None] | None,
-    on_skip: Callable[[Path, str], None] | None = None,
+    on_skip: Callable[[Path, str, str], None] | None = None,
 ) -> int:
     """Drive one per-file indexing loop, sequentially or with a bounded pool.
 
@@ -1599,7 +1600,10 @@ def run_file_loop(
       summary here with no mechanized gate to notice. Catching only the
       one type this loop actually needs removes that coupling entirely.
       Logged loudly (``index_file_skipped_unextractable``, naming the
-      file and the reason), reported via ``on_skip`` when given, the file
+      file and the reason), reported via ``on_skip(file, reason, error_class)``
+      when given (``error_class`` is the raised type's own name, so a
+      subclass such as ``AllPagesUnextractedError`` is not folded into its
+      parent), the file
       counted as 0 chunks written (identical to a staleness skip), and
       the loop CONTINUES — this file's failure never cancels not-yet-
       started files and never aborts the run. This is the "this file
@@ -1685,6 +1689,7 @@ def run_file_loop(
         t0 = time.monotonic()
         timers = _make_timers()
         skip_reason: str | None = None
+        skip_class = ""
         try:
             chunks = index_one(file, score, timers)
         except UnextractableContentError as exc:
@@ -1698,6 +1703,7 @@ def run_file_loop(
             )
             chunks = 0
             skip_reason = str(exc)
+            skip_class = type(exc).__name__
         except Exception as exc:
             # nexus-1jtob: NAME THE FILE. Both loop paths let an unrecognised
             # exception escape ``run_file_loop`` -- the sequential path by
@@ -1737,7 +1743,7 @@ def run_file_loop(
             if skip_reason is not None:
                 skipped[0] += 1
                 if on_skip is not None:
-                    on_skip(file, skip_reason)
+                    on_skip(file, skip_reason, skip_class)
             if chunks > 0:
                 written[0] += 1
             if on_file:

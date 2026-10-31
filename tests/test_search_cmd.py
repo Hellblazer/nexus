@@ -432,9 +432,9 @@ def test_m_flag_limits_results(runner: CliRunner, cloud_env) -> None:
 def test_reverse_flag_reverses_output_order(runner: CliRunner, cloud_env) -> None:
     results_pool = [
         _make_result("first", "alpha content", distance=0.1,
-                     metadata={"source_path": "alpha.py", "line_start": 1}),
+                     metadata={"_display_path": "alpha.py", "line_start": 1}),
         _make_result("second", "beta content", distance=0.2,
-                     metadata={"source_path": "beta.py", "line_start": 1}),
+                     metadata={"_display_path": "beta.py", "line_start": 1}),
     ]
     mock_t3 = _mock_t3()
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
@@ -513,7 +513,7 @@ def test_json_zero_hits_emits_valid_json(runner: CliRunner, search_ctx) -> None:
 @pytest.mark.t2_tenant
 def test_context_A_accepted(runner: CliRunner, cloud_env) -> None:
     content = "line1\nline2\nline3\nline4\nline5"
-    results_pool = [_make_result("r1", content, metadata={"source_path": "foo.py", "line_start": 10})]
+    results_pool = [_make_result("r1", content, metadata={"_display_path": "foo.py", "line_start": 10})]
     mock_t3 = _mock_t3()
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
          patch("nexus.commands.search_cmd.search_cross_corpus", return_value=results_pool), \
@@ -548,7 +548,7 @@ def test_format_plain_with_context_shows_correct_lines() -> None:
     from nexus.formatters import format_plain_with_context
     content = "\n".join(f"line{i}" for i in range(10))
     r = SearchResult(id="x", content=content, distance=0.1, collection="c",
-                     metadata={"source_path": "file.py", "line_start": 0})
+                     metadata={"_display_path": "file.py", "line_start": 0})
     lines = format_plain_with_context([r], lines_after=3)
     content_lines = [ln for ln in lines if ln.strip()]
     assert len(content_lines) <= 4
@@ -558,7 +558,7 @@ def test_format_plain_with_context_zero_equals_format_plain() -> None:
     from nexus.formatters import format_plain, format_plain_with_context
     content = "alpha\nbeta\ngamma"
     r = SearchResult(id="x", content=content, distance=0.1, collection="c",
-                     metadata={"source_path": "file.py", "line_start": 5})
+                     metadata={"_display_path": "file.py", "line_start": 5})
     assert format_plain([r]) == format_plain_with_context([r], lines_after=0)
 
 
@@ -574,7 +574,7 @@ def test_hybrid_flag_still_returns_results(runner: CliRunner, cloud_env, tmp_pat
     """
     semantic_result = _make_result(
         "sem1", "semantic content", collection="code__myrepo",
-        metadata={"source_path": "file.py", "line_start": 1},
+        metadata={"_display_path": "file.py", "line_start": 1},
     )
     mock_t3 = _mock_t3(["code__myrepo"])
     with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
@@ -856,7 +856,7 @@ def search_corpus() -> T3Database:
         ids=[f"code-{t}" for t, _ in _CODE_DOCS],
         documents=[txt for _, txt in _CODE_DOCS],
         metadatas=[{
-            "title": t, "source_path": f"/repo/{t}.py", "file_path": f"/repo/{t}.py",
+            "title": t, "source_path": f"/repo/{t}.py",
             "line_start": 1, "line_end": txt.count("\n") + 1, "frecency_score": 0.5,
         } for t, txt in _CODE_DOCS],
     )
@@ -866,7 +866,7 @@ def search_corpus() -> T3Database:
         ids=[f"know-{t}" for t, _ in _KNOWLEDGE_DOCS],
         documents=[txt for _, txt in _KNOWLEDGE_DOCS],
         metadatas=[{
-            "title": t, "source_path": f"/docs/{t}.md", "file_path": f"/docs/{t}.md",
+            "title": t, "source_path": f"/docs/{t}.md",
             "line_start": 1, "line_end": 1, "frecency_score": 0.5,
         } for t, txt in _KNOWLEDGE_DOCS],
     )

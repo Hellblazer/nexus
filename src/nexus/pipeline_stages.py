@@ -375,7 +375,6 @@ def _build_chunk_metadata(
     corpus: str,
     embedding_model: str,
     now_iso: str,
-    git_meta: dict | None = None,
 ) -> dict:
     """Build chunk metadata with fields known at chunk time.
 
@@ -386,11 +385,6 @@ def _build_chunk_metadata(
     RDR-108 Phase 3 retired ``chunk_index``, ``chunk_count``, ``doc_id``
     from chunk metadata; the catalog ``document_chunks`` manifest is now
     authoritative for document-to-chunk binding.
-
-    *git_meta* — accepted for backwards compatibility; the schema dropped
-    git provenance from chunk metadata (RDR-101 Phase 5c). Catalog Document
-    carries it at the document level. Parameter retained so existing call
-    sites do not need to drop the kwarg simultaneously.
 
     nexus-w94eo: ``title``/``source_author`` are OMITTED from the returned
     dict rather than stamped as ``""`` placeholders. They are ALWAYS unknown
@@ -454,7 +448,6 @@ def _embed_and_write_batch(
     corpus: str,
     target_model: str,
     now_iso: str,
-    git_meta: dict | None = None,
 ) -> tuple[int, str]:
     """Embed and write a batch of chunks. Returns (count_written, actual_model)."""
     if not chunks_to_embed:
@@ -511,7 +504,6 @@ def _embed_and_write_batch(
             corpus=corpus,
             embedding_model=actual_model,
             now_iso=now_iso,
-            git_meta=git_meta,
         )
         db.write_chunk(content_hash, chunk.chunk_index, chunk.text, chunk_id,
                         metadata=meta, embedding=emb_bytes)
@@ -531,7 +523,6 @@ def chunker_loop(
     pdf_path: str = "",
     corpus: str = "",
     target_model: str = "voyage-context-3",
-    git_meta: dict | None = None,
     doc_id: str = "",
 ) -> None:
     """Incrementally chunk pages as they arrive, overlapping with extraction.
@@ -643,7 +634,7 @@ def chunker_loop(
 
         batch_kwargs = dict(
             pdf_path=pdf_path, corpus=corpus, target_model=current_model,
-            now_iso=now_iso, git_meta=git_meta,
+            now_iso=now_iso,
         )
 
         if is_final:
@@ -1053,6 +1044,14 @@ def extraction_record(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     did or the extractor reports no map (a non-ladder extractor): the hook writes it on EVERY
     extraction, because the catalog merge never removes a key and so a clean re-extract can clear
     an old map only by replacing it with ``{}`` (RDR-237).
+
+    ``quality_gate_overridden`` and ``extraction_source`` (nexus-6pfgb.6) are the document's other
+    extraction facts; their home is the catalog document's meta, because on a chunk row they are the
+    last writer's. A record built from real extraction metadata carries the override as an EXPLICIT
+    boolean (``False`` on a clean extraction: the merge never retracts, so a clean re-extract clears
+    an old ``True`` only by overwriting it) and the source (``file`` for a PDF). *metadata* of
+    ``None`` or empty means no extraction ran: neither key is in the record, so nothing reads as
+    "not overridden". The record is idempotent: feeding it its own output returns it unchanged.
     """
     meta = metadata or {}
     raw = meta.get("extraction_pages")
@@ -1071,15 +1070,26 @@ def extraction_record(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
                 pages[str(rung)] = sorted(kept)
             elif nums:
                 _log.warning("extraction_record_skipped_a_malformed_rung", rung=str(rung), pages=repr(nums))
-    return {"extraction_method": str(meta.get("extraction_method") or ""), "extraction_pages": pages}
+    record: dict[str, Any] = {"extraction_method": str(meta.get("extraction_method") or ""), "extraction_pages": pages}
+    if meta:
+        record["quality_gate_overridden"] = bool(meta.get("quality_gate_overridden", False))
+        record["extraction_source"] = str(meta.get("extraction_source") or "file")
+    return record
 
 
 def _catalog_extraction_meta(extraction: Mapping[str, Any]) -> dict[str, Any]:
     """The ``meta`` keys one extraction record writes: ``extraction_pages`` always (``{}`` when
-    clean), ``extraction_method`` only when the extractor named one."""
+    clean), ``extraction_method`` only when the extractor named one, ``quality_gate_overridden``
+    whenever the record states it (an explicit ``False`` included, nexus-6pfgb.6) and
+    ``extraction_source`` when it names one. A record that does not state the override leaves the
+    key out: absent means unknown, and the merge would not retract an old value anyway."""
     meta: dict[str, Any] = {"extraction_pages": dict(extraction.get("extraction_pages") or {})}
     if extraction.get("extraction_method"):
         meta["extraction_method"] = str(extraction["extraction_method"])
+    if "quality_gate_overridden" in extraction:
+        meta["quality_gate_overridden"] = bool(extraction["quality_gate_overridden"])
+    if extraction.get("extraction_source"):
+        meta["extraction_source"] = str(extraction["extraction_source"])
     return meta
 
 
@@ -1124,6 +1134,112 @@ def record_pdf_extraction_on_document(
             writer.close()
 
 
+def _catalog_bib_fields(bib: Mapping[str, Any], *, current_count: int = 0) -> dict[str, Any]:
+    """The catalog document columns a Semantic Scholar lookup sets (``bib_*``), real values only.
+
+    The engine sets every column it is sent, an empty string and a zero included, so a field
+    the lookup did not find is left out: a later, poorer lookup cannot erase what an earlier one
+    wrote. Semantic Scholar answers a citation count of 0 for a record it knows too little about,
+    so a zero count is fill-only: it is sent only where the catalog holds no count yet
+    (*current_count* is 0), and a positive count always replaces. An empty lookup (a miss) yields
+    ``{}``, and no ``bib_enriched_at``, so a miss never reads as enriched.
+    """
+    if not bib:
+        return {}
+    fields: dict[str, Any] = {}
+    if bib.get("year"):
+        fields["bib_year"] = int(bib["year"])
+    if bib.get("authors"):
+        fields["bib_authors"] = str(bib["authors"])
+    if bib.get("venue"):
+        fields["bib_venue"] = str(bib["venue"])
+    count = bib.get("citation_count")
+    if isinstance(count, int) and (count > 0 or not current_count):
+        fields["bib_citation_count"] = count
+    if bib.get("semantic_scholar_id"):
+        fields["bib_semantic_scholar_id"] = str(bib["semantic_scholar_id"])
+    if fields:
+        fields["bib_enriched_at"] = datetime.now(UTC).isoformat()
+    return fields
+
+
+def _catalog_pdf_bib_hook(
+    doc_id: str,
+    pdf_path: Path,
+    collection_name: str,
+    bib: Mapping[str, Any] | None,
+    *,
+    corpus: str = "",
+) -> bool:
+    """Write an ``--enrich`` lookup to the catalog document's ``bib_*`` columns (nexus-6pfgb.28).
+
+    The catalog document is where a ``bib_*`` filter is answered from (the engine's label stage
+    treats the columns as authoritative), so a lookup that only reached chunk rows read as
+    unenriched. The document is named by *doc_id*, or, when the run resolved none, by the file
+    path under the corpus's curator owner; never by title (nexus-6pfgb.21: a title match is how
+    one document's bib reached another's).
+
+    ``author`` and ``year`` are FILL-ONLY: set from the lookup only where the catalog column is
+    empty, the register-time posture of :func:`_catalog_pdf_hook`. The match is title-fuzzy, so it
+    must not overwrite a value another writer set; the ``bib_*`` columns are the lookup's own and
+    are written whenever it found them, except a zero ``bib_citation_count``, which is fill-only (a poorer
+    lookup cannot replace a real count). ``meta.references`` rides only when non-empty (the engine
+    merges ``meta`` and an empty value would overwrite).
+
+    Returns True when a write was sent. Never raises: the PDF is indexed either way, and a failure
+    logs ``catalog_pdf_bib_not_recorded`` naming the document.
+    """
+    fields = _catalog_bib_fields(bib or {})
+    if not fields:
+        return False
+    reader = None
+    writer = None
+    try:
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        reader = make_catalog_reader()
+        if reader is None:
+            _log.warning("catalog_pdf_bib_not_recorded", reason="no_catalog_reader",
+                         file_path=str(pdf_path), collection=collection_name)
+            return False
+        if not doc_id:
+            from nexus.doc_indexer import _lookup_existing_doc_id  # noqa: PLC0415 - deferred to avoid circular import at module load
+            doc_id = _lookup_existing_doc_id(reader, str(pdf_path.resolve()), corpus)
+        if not doc_id:
+            _log.warning("catalog_pdf_bib_not_recorded", reason="no_document",
+                         file_path=str(pdf_path), collection=collection_name)
+            return False
+        entry = reader.resolve(doc_id)
+        fields = _catalog_bib_fields(
+            bib or {}, current_count=getattr(entry, "bib_citation_count", 0) or 0,
+        )
+        if not fields:
+            return False
+        update: dict[str, Any] = dict(fields)
+        if entry is not None:
+            if bib.get("authors") and not (getattr(entry, "author", "") or "").strip():
+                update["author"] = str(bib["authors"])
+            if bib.get("year") and not getattr(entry, "year", 0):
+                update["year"] = int(bib["year"])
+        if bib.get("references"):
+            update["meta"] = {"references": list(bib["references"])}
+        writer = make_catalog_writer()
+        writer.update(doc_id, **update)
+        return True
+    except Exception as exc:  # noqa: BLE001 - best-effort: the PDF is indexed either way; named, not raised
+        _log.warning("catalog_pdf_bib_not_recorded", reason="update_failed", error=str(exc),
+                     doc_id=doc_id, file_path=str(pdf_path), collection=collection_name)
+        return False
+    finally:
+        for client in (writer, reader):
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001 - "never raises": a failed close is named, not raised
+                    _log.warning("catalog_pdf_bib_close_failed", doc_id=doc_id,
+                                 file_path=str(pdf_path), collection=collection_name, exc_info=True)
+
+
 def _catalog_pdf_hook(
     pdf_path: Path,
     collection_name: str,
@@ -1141,7 +1257,9 @@ def _catalog_pdf_hook(
     ``meta`` on BOTH branches, the update of an existing row and the registration of a new one
     (and the update that follows a registration which resolved onto an existing row, because the
     engine's register returns that row untouched). ``extraction_pages`` is always written, ``{}``
-    when clean. ``None`` writes nothing.
+    when clean. So are ``quality_gate_overridden`` (an explicit boolean, ``False`` on a clean
+    extraction) and ``extraction_source`` (nexus-6pfgb.6): the document's own extraction facts,
+    which a shared chunk row cannot hold per document. ``None`` writes nothing.
 
     Runs that record NO extraction metadata, each with a ``catalog_pdf_extraction_not_recorded``
     warning that names the document (``reason`` says which):
@@ -1786,7 +1904,6 @@ def pipeline_index_pdf(
     extractor: str = DEFAULT_EXTRACTOR,
     corpus: str = "",
     target_model: str = "voyage-context-3",
-    git_meta: dict | None = None,
     force: bool = False,
     force_re_embed: bool = False,
     doc_id: str = "",
@@ -1798,8 +1915,14 @@ def pipeline_index_pdf(
     extraction_stats: dict | None = None,
     title_override: str = "",
     on_write_started: Callable[[], None] | None = None,
+    enrich: bool = False,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
+
+    *enrich* (nexus-6pfgb.28), when True, looks the resolved title up in Semantic Scholar once,
+    after the catalog hook, and writes the result to the catalog document's ``bib_*`` columns
+    (:func:`_catalog_pdf_bib_hook`) before the completion stamp. Chunk rows get no ``bib_*`` key
+    on this path. A dry run looks nothing up.
 
     *extraction_stats* (nexus-i0cwh), when given, receives ``page_count``
     and ``pages_with_text`` from the extraction result once the extract
@@ -1926,13 +2049,6 @@ def pipeline_index_pdf(
 
     # Normalize to absolute so staleness checks are path-form-independent.
     pdf_path = pdf_path.resolve()
-
-    # Resolve git provenance once at the entrypoint so chunker_loop and
-    # _build_chunk_metadata can stamp every chunk without re-detecting
-    # (nexus-2my fix #3).
-    if git_meta is None:
-        from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 - deferred to avoid circular import at module load
-        git_meta = detect_git_metadata(pdf_path)
 
     # RDR-102 Phase A: pre-flight catalog registration for the streaming
     # path. When called via index_pdf (the routing case) the caller already
@@ -2081,7 +2197,7 @@ def pipeline_index_pdf(
                     chunker_loop, content_hash, db, cancel, embed_fn,
                     extraction_done=extraction_done, chunking_done=chunking_done,
                     pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
-                    git_meta=git_meta, doc_id=doc_id,
+                    doc_id=doc_id,
                 )
                 all_futures.add(chunk_future)
                 if hooks is None:
@@ -2352,6 +2468,16 @@ def pipeline_index_pdf(
                 source_uri=source_uri,
                 extraction=extraction_record(_meta),
             )
+            if enrich:
+                # Best effort as a whole, the lookup included: ``enrich`` catches only httpx and
+                # ValueError, and ``_catalog_pdf_bib_hook`` closes its clients in a ``finally``,
+                # so either can raise into the tail that has not yet stamped the document complete.
+                try:
+                    from nexus.bib_enricher import enrich as _bib_enrich  # noqa: PLC0415 - deferred: the lookup is a network call and --enrich is opt-in
+                    _catalog_pdf_bib_hook(doc_id, pdf_path, collection, _bib_enrich(title), corpus=corpus)
+                except Exception as exc:  # noqa: BLE001 - best-effort: the PDF is indexed either way; named, not raised
+                    _log.warning("catalog_pdf_bib_not_recorded", reason="lookup_or_hook_raised", error=str(exc),
+                                 doc_id=doc_id, file_path=str(pdf_path), collection=collection)
 
             # RDR-089 document-grain chain — once per PDF boundary at the
             # streaming pipeline tail. content="" (PDF text streamed not
@@ -2458,8 +2584,12 @@ def _enrich_metadata_from_extraction(
     never reached. A row another document restamped between this PDF's upload and
     this post-pass (its ``content_hash`` is not *content_hash*) is now written: its
     ``title``, ``source_author`` and ``extraction_method`` are replaced by this PDF's
-    (the last-writer-wins limitation until those keys live in the catalog,
-    nexus-6pfgb.6, and the chunk-row keys are retired, nexus-6pfgb.27). Nothing else
+    (the last-writer-wins limitation of the chunk row; this PDF's own value is now also on its
+    catalog document's ``meta``, written by :func:`_catalog_pdf_hook`, nexus-6pfgb.6, where it is
+    its alone; the chunk-row keys go with nexus-6pfgb.27). The restamped-row co-owner loss
+    (nexus-ahm18's comment on nexus-6pfgb.6: a restamped row should not replace a co-owner's
+    ``extraction_method``) is retired by nexus-6pfgb.27, which removes these writes, and the
+    readers are moved off the row by nexus-6pfgb.16. Nothing else
     is touched on such a row: no ``delete_keys`` (the co-owner's
     ``quality_gate_overridden`` audit flag is never removed, and this PDF's own flag
     is not set on it), and a key whose value here is empty is skipped, so a

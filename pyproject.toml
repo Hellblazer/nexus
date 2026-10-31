@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.89.0"
+version = "7.90.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -147,10 +147,14 @@ dependencies = [
 # incident release); embedding output for BAAI/bge-base-en-v1.5 was compared
 # 0.7.4 vs 0.8.1, with onnxruntime also moving 1.24.2 -> 1.31.0: max abs diff
 # 1.3e-4, min cosine 0.9999996 (not bit-identical; stored vectors come from the
-# engine's own ONNX runtime, which is unaffected, so nothing re-embeds). pillow 13
-# stays out of reach: every fastembed through 0.9.0 caps
-# pillow<13.
-local = ["fastembed>=0.8.1,<0.9"]
+# engine's own ONNX runtime, which is unaffected, so nothing re-embeds).
+# nexus-tr1rj.21 (2026-10-29): now >=0.9.1,<0.10. Every fastembed through 0.9.0
+# capped pillow<13; 0.9.1 (2026-10-24, "allow Pillow 13", fastembed #830) admits
+# pillow<14, so the lock takes pillow 13.0.0, which fixes the 37 advisories that
+# stayed open on 12.3.0. 0.9.0 is skipped for that reason. Nexus uses fastembed
+# for one thing: TextEmbedding for the local bge-base embedder in
+# src/nexus/db/local_ef.py.
+local = ["fastembed>=0.9.1,<0.10"]
 # nexus-2k66t.4.2 (Sam, 2026-10-23): the PDF stack is an extra, fetched on demand.
 # mineru, torch, torchvision and pdftext, with the layout extractor RDR-237 later
 # removed, were 57-65% of the download and 49% of the installed size (T2 nexus/install-weight-measurement-2026-10-23), and
@@ -225,9 +229,8 @@ pdf = [
     # lock stays on transformers 4.57.6. Nine advisories remain on it (three
     # have no fixed release; the rest are fixed only in 5.x), so they stay
     # until a mineru release both admits transformers 5 and passes the gates
-    # above. Pillow stays on 12.3.0 for a different reason: every fastembed
-    # through 0.9.0 cap pillow<13, and 13.0.0 (2026-10-16) is
-    # the only release that fixes the 37 advisories left on 12.3.0.
+    # above. Pillow no longer stays behind: fastembed 0.9.1 admits pillow 13
+    # (nexus-tr1rj.21), and the lock is on 13.0.0.
     "mineru[pipeline]>=3.1.11,<3.1.12",
     # nexus-gqrg0 (GH #1533) round 2: the override below only reaches an
     # invoking-project resolve (uv sync in this checkout, or a generation
@@ -348,6 +351,7 @@ markers = [
     "t2_tenant: provision the opt-in test tenant for this test or module (the default substrate, optin; under NX_TEST_T2_SUBSTRATE=none the marker is a no-op, and only a t2_tenant parameter still provisions) — nexus-j23ni, tests/_storage_touch_guard.py",
     "fresh_tenant: opt OUT of the per-worker tenant pool (on by default since nexus-7zloy; NX_TEST_TENANT_POOL=0 turns it off for a whole run) and mint and drop this test's own tenant: for a test that mints or drops tenants, rotates or revokes the tenant's token, or needs a tenant with never-used partition leaves - nexus-fpwj1, tests/_tenant_pool.py",
     "expects_unresolvable_endpoint: the test constructs ServiceEndpointUnresolvableError / T1ServerNotFoundError on purpose (a resolver-subject test); exempt from the storage-touch guard, and reported stale when it never does — nexus-j23ni, tests/_storage_touch_guard.py",
+    "external_engine_ok: the test may run against an EXTERNAL engine and tenant (NX_TEST_EXTERNAL_ENGINE_URL + NX_TEST_EXTERNAL_TENANT_TOKEN, both set) instead of the session engine's minted tenant; no other test reads them, so a stray pair cannot point the suite at production. The operator also states NX_ALLOW_PROD_WRITE; the harness never sets it — nexus-ckejb, tests/_external_engine.py",
     "real_engine_probe: the test exercises the real nexus.db.serving_engine_version.probe_serving_engine_version (HTTP) rather than the autouse stub in tests/conftest.py — RDR-231, nexus-bivz3.15/.16",
     "plan_grow_generalizer: opt OUT of the unit suite's stubbed grow-time match-text generalizer (nexus-93cc6) — for tests exercising _generalize_grown_match_description itself, which MUST patch claude_dispatch and never reach a real subprocess",
     "mandatory_regression_pin: a release/CI-gate test (nexus-moht0 vacuous-gate class) that MUST exercise a real external dependency (live git tags, an authenticated network call) rather than a mock, per its bead's own 'measure the detector against a deliberately broken fix' acceptance criterion. Always ALSO carries `integration` (excluded from default addopts, since it needs an environment the unit `test` job deliberately does not provide — full git history / GITHUB_TOKEN). A skip here must never read as a pass — see the pytest_sessionfinish non-vacuity guard in tests/conftest.py, NX_MANDATORY_PIN_SKIP_BUDGET.",

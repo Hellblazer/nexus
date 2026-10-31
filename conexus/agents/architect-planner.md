@@ -5,6 +5,7 @@ description: Designs comprehensive software architecture and creates phased exec
 model: opus
 color: green
 effort: high
+disallowedTools: [mcp__plugin_sn_serena]
 ---
 
 ## Usage Examples

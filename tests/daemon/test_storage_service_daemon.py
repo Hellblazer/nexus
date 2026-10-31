@@ -56,6 +56,7 @@ from nexus.daemon.storage_service_daemon import (
     stop_storage_service,
     start_storage_service,
 )
+from tests._child_process import NEVER_ALIVE_PID
 from tests._module_seam import module_time, patch_in, patch_time
 
 
@@ -344,7 +345,7 @@ class TestStorageServiceSupervisorUnit:
         """If the service health probe fails, StorageServiceStartError is raised."""
         sup = _make_supervisor(config_dir, clock, service_port=19999)
 
-        fake_proc = _FakeProc(pid=42500)
+        fake_proc = _FakeProc(pid=NEVER_ALIVE_PID)  # the readiness failure SIGTERMs its group for real
 
         with (
             patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN),
@@ -1432,7 +1433,7 @@ class TestRunStorageSupervisorFunction:
         e.g. macOS) must still be found and terminated. Falsifies the
         pre-fix code, which signalled ONLY ``supervisor_pid`` and returned
         immediately — the engine pid never appears in any kill call."""
-        supervisor_pid, engine_pid = 970105, 970106
+        supervisor_pid, engine_pid = NEVER_ALIVE_PID, NEVER_ALIVE_PID + 4  # the stop SIGTERMs the supervisor pid for real
         _write_stale_or_fresh_lease(
             config_dir,
             supervisor_pid=supervisor_pid,
@@ -3026,6 +3027,85 @@ class TestExitReasonReaders:
             fh.write("Unrecognized option: --bogus\n")
         assert ssd.last_engine_error_line(log, 0) == "Unrecognized option: --bogus"
 
+    # ── nexus-bivz3.25: the root cause under a schema-migration ERROR line ──
+
+    def test_root_cause_of_the_real_rdr231_halt_is_the_raise_not_a_frame(
+        self, tmp_path: Path
+    ) -> None:
+        """On the rehearsal's real log, ``last_engine_error_line`` picks the
+        logback ERROR (``Liquibase migration failed``) plus the PostgreSQL
+        ``Where:`` continuation, neither of which is what the operator must do.
+        ``last_engine_root_cause`` is the last ``Caused by:`` of that ERROR's
+        trace, with the exception class and the driver's ``ERROR: `` stripped."""
+        from nexus.daemon import storage_service_daemon as ssd
+        from tests._rdr231_halt import NATIVE_LOG_EXCERPT, RAISE_START, RAISE_URL
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(NATIVE_LOG_EXCERPT, encoding="utf-8")
+
+        cause = ssd.last_engine_root_cause(log, 0)
+
+        assert cause is not None
+        assert cause.startswith(RAISE_START)
+        assert cause.endswith(RAISE_URL)
+        assert "Caused by" not in cause and "PSQLException" not in cause
+
+    def test_root_cause_is_none_without_an_error_line_or_a_caused_by(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        assert ssd.last_engine_root_cause(log, 0) is None
+        log.write_text(self._ERR + "\n\tat dev.nexus.service.Main.main(Main.java:1)\n", encoding="utf-8")
+        assert ssd.last_engine_root_cause(log, 0) is None, "an ERROR with no Caused by has no root cause"
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write("2026-10-11 02:10:04,000 INFO  [main] d.n.service.Main - retry\n")
+            fh.write("Caused by: java.lang.IllegalStateException: belongs to no ERROR trace\n")
+        assert ssd.last_engine_root_cause(log, 0) is None, "a Caused by after a later INFO line is not the ERROR's trace"
+
+    _MIG = (
+        "2026-10-11 02:10:03,114 ERROR [main] dev.nexus.service.Main - "
+        'event=schema_migration_failed error="Liquibase migration failed"'
+    )
+
+    def test_root_cause_respects_the_mark_and_redacts(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            self._MIG + "\nCaused by: java.lang.IllegalStateException: an earlier boot\n", encoding="utf-8"
+        )
+        mark = log.stat().st_size
+        assert ssd.last_engine_root_cause(log, mark) is None
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(self._MIG + "\n")
+            fh.write("Caused by: org.postgresql.util.PSQLException: ERROR: connection refused password=hunter2 host=x\n")
+        cause = ssd.last_engine_root_cause(log, mark)
+        assert cause is not None and cause.startswith("connection refused")
+        assert "hunter2" not in cause
+
+    def test_root_cause_ignores_a_later_unrelated_error(self, tmp_path: Path) -> None:
+        """nexus-bivz3.25 confirmation round: a later ERROR that is not the
+        migration failure must not lend its cause to the migration's line."""
+        from nexus.daemon import storage_service_daemon as ssd
+        from tests._rdr231_halt import NATIVE_LOG_EXCERPT, RAISE_START
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            NATIVE_LOG_EXCERPT.rstrip("\n") + "\n" + self._ERR + "\n"
+            "Caused by: java.io.IOException: disk full\n",
+            encoding="utf-8",
+        )
+        cause = ssd.last_engine_root_cause(log, 0)
+        assert cause is not None and cause.startswith(RAISE_START)
+        assert "disk full" not in cause
+
+    def test_root_cause_needs_a_migration_failure_line(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(self._ERR + "\nCaused by: java.io.IOException: disk full\n", encoding="utf-8")
+        assert ssd.last_engine_root_cause(log, 0) is None
+
     _INFO ="2026-10-11 02:10:04,000 INFO  [main] d.n.service.Main - shutdown complete"
 
     def test_boot_failure_reason_reports_only_a_final_error(self, tmp_path: Path) -> None:
@@ -3337,6 +3417,59 @@ class TestEnsureStorageSupervisor:
         assert str(config_dir / "logs" / "storage_service.log") in msg
         assert str(config_dir / "logs" / "storage_service.crash.log") in msg
         assert sleeps == []
+
+    # ── nexus-bivz3.25: a schema-migration halt carries the engine's own cause ──
+
+    def test_schema_migration_halt_carries_the_raise_from_the_engine_log(
+        self, config_dir: Path
+    ) -> None:
+        """The RDR-231 halt as the 2026-10-29 rehearsal left it. The supervisor's
+        crash-log line names only ``Liquibase migration failed``; the RAISE that
+        says what to do (and the runbook URL) is in the engine's native log, at the
+        end of a Caused by chain. The start error must carry it, so every caller of
+        ``nx daemon service start`` shows it."""
+        from tests._rdr231_halt import RAISE_START, RAISE_URL, SUPERVISOR_LINE, failed_start_message
+
+        msg = failed_start_message(config_dir)
+
+        assert "exited with code 2" in msg
+        assert "Schema migration failed on port 47055" in msg, "the supervisor's own line stays"
+        assert RAISE_START in msg
+        assert RAISE_URL in msg
+        assert "PgStatement" not in msg and "Where: PL/pgSQL" not in msg, "frames and continuations are not the cause"
+        assert "an_earlier_boot_error" not in msg, "an earlier boot's ERROR is not this start's"
+        assert SUPERVISOR_LINE.removeprefix("Error: ") in msg
+
+    def test_a_supervisor_error_that_is_not_a_migration_halt_gains_no_engine_cause(
+        self, config_dir: Path, monkeypatch
+    ) -> None:
+        """The engine-log cause is attached for a schema-migration failure only: a
+        supervisor that reports another failure (Postgres did not start) already
+        said why, and an unrelated Caused by in the engine log must not be
+        presented as the reason."""
+        import nexus.commands.daemon as daemon_mod
+        from nexus.daemon.storage_service_daemon import StorageServiceStartError
+        from tests._rdr231_halt import NATIVE_LOG_EXCERPT, RAISE_START
+
+        logs = config_dir / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        native_log, crash_log = logs / "storage_service_native.log", logs / "storage_service.crash.log"
+
+        def _popen(*_a, **_k):
+            native_log.write_text(NATIVE_LOG_EXCERPT, encoding="utf-8")
+            crash_log.write_text("Error: PostgreSQL did not start: port 41283 is in use\n", encoding="utf-8")
+            return _FakeProc(pid=42793, returncode=2)
+
+        self._no_wait(monkeypatch, daemon_mod)
+        with (
+            patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]),
+            patch.object(daemon_mod, "_popen", side_effect=_popen),
+        ):
+            with pytest.raises(StorageServiceStartError) as exc_info:
+                daemon_mod.ensure_storage_supervisor(config_dir)
+        msg = str(exc_info.value)
+        assert "PostgreSQL did not start: port 41283 is in use" in msg
+        assert RAISE_START not in msg
 
     def test_supervisor_exit_reports_the_supervisors_own_error(
         self, config_dir: Path, monkeypatch
@@ -5065,7 +5198,7 @@ class TestWaitForServiceReadyMigrationAware:
         pre-nexus-8vp0i wording (operators and any external tooling key on
         it)."""
         sup = _make_supervisor(config_dir, clock)
-        fake_proc = _FakeProc(pid=51002)
+        fake_proc = _FakeProc(pid=NEVER_ALIVE_PID)  # the readiness failure SIGTERMs its group for real
         with (
             patch.object(
                 sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN
@@ -5086,7 +5219,7 @@ class TestWaitForServiceReadyMigrationAware:
 
         monkeypatch.setattr(ssd_mod, "_MIGRATION_STALL_TIMEOUT", 0.2)
         sup = _make_supervisor(config_dir, clock)
-        fake_proc = _FakeProc(pid=51003)
+        fake_proc = _FakeProc(pid=NEVER_ALIVE_PID)  # the readiness failure SIGTERMs its group for real
 
         log_lines = iter([["event=schema_migration_start"]])
 

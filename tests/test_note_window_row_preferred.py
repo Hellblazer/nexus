@@ -236,7 +236,7 @@ def _stamped(collection: str) -> list[str]:
     pieces = ["first piece", "second piece"]
     rows = [{"chash": f"{i:064x}"} for i in range(len(pieces))]
     chunks = _chunk_payload(
-        collection, pieces, rows, title="t", tags="", category="", session_id="",
+        collection, pieces, rows, title="t", tags="", category="",
         source_agent="", ttl_days=None, catalog_doc_id="1.1.1", content_type="prose",
     )
     return [c["metadata"]["embedding_model"] for c in chunks]

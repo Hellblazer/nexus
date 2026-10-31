@@ -223,12 +223,26 @@ class NoteWriteResult:
     recovered: bool = False
 
 
-def note_manifest_rows(manifest_metadatas: Sequence[dict]) -> list[dict]:
+def note_manifest_rows(manifest_metadatas: Sequence[dict], pieces: Sequence[str] | None = None) -> list[dict]:
     """Manifest rows for a note, from :func:`~nexus.catalog.store_hook.note_manifest_metadata`.
 
     The fields a note's manifest row carries: ``chash``, ``position`` (the piece's
-    ``chunk_index``, else its index), ``chunk_index``, the note-relative character span.
+    ``chunk_index``, else its index), ``chunk_index``, the note-relative character span, and the three
+    section label keys, ALWAYS PRESENT (nexus-jz86a): their presence is what tells the engine the row's
+    labels are the document's own answer (``labels_written``). Without them the row is legacy and a
+    reader falls back to the shared chunk row's label, which is whichever document wrote the chunk last.
+    The note's own answer is its own text: when *pieces* are given, ``section_title`` is the Markdown
+    section each piece begins in (:func:`nexus.plans.primary_evidence.derive_content_labels`, the rule
+    the primary-evidence reader applied to the text while the rows were legacy; develop red at
+    32c0a680f, the RDR-232 golden fixture lost its labels), else ``""``. ``section_type`` is ``""``
+    (a note has no chunk kind) and ``page_number`` is ``None`` for "no page", as
+    :func:`nexus.mcp_infra._manifest_chunk_rows` sends it.
     """
+    labels: list[str] = []
+    if pieces:
+        from nexus.plans.primary_evidence import derive_content_labels  # noqa: PLC0415 — deferred: plans imports the catalog
+
+        labels = [cl.label or "" for cl in derive_content_labels(list(pieces))]
     rows = [
         {
             "chash": m.get("chunk_text_hash", ""),
@@ -238,6 +252,9 @@ def note_manifest_rows(manifest_metadatas: Sequence[dict]) -> list[dict]:
             "line_end": m.get("line_end") or None,
             "char_start": m.get("chunk_start_char") or None,
             "char_end": m.get("chunk_end_char") or None,
+            "section_title": labels[i] if i < len(labels) else "",
+            "section_type": "",
+            "page_number": None,
         }
         for i, m in enumerate(manifest_metadatas or [])
     ]
@@ -246,7 +263,7 @@ def note_manifest_rows(manifest_metadatas: Sequence[dict]) -> list[dict]:
 
 def _chunk_payload(
     collection: str, pieces: Sequence[str], rows: Sequence[dict], *,
-    title: str, tags: str, category: str, session_id: str, source_agent: str,
+    title: str, tags: str, category: str, source_agent: str,
     ttl_days: int | None, catalog_doc_id: str, content_type: str,
 ) -> list[dict]:
     """The ``chunks`` array: one ``{chash, text, metadata}`` per DISTINCT piece.
@@ -282,7 +299,6 @@ def _chunk_payload(
             category=category,
             ttl_days=ttl_days,
             source_agent=source_agent,
-            session_id=session_id,
         )
         if catalog_doc_id:
             meta["catalog_doc_id"] = catalog_doc_id
@@ -299,7 +315,6 @@ def write_note(
     title: str = "",
     tags: str = "",
     category: str = "",
-    session_id: str = "",
     source_agent: str = "",
     ttl_days: int | None = None,
     content_type: str | None = None,
@@ -356,10 +371,10 @@ def write_note(
     from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — deferred: circular-dep avoidance
 
     _first, manifest_metadatas = note_manifest_metadata(pieces)
-    rows = note_manifest_rows(manifest_metadatas)
+    rows = note_manifest_rows(manifest_metadatas, pieces)
     chunks = _chunk_payload(
         collection, pieces, rows, title=title, tags=tags, category=category,
-        session_id=session_id, source_agent=source_agent, ttl_days=ttl_days,
+        source_agent=source_agent, ttl_days=ttl_days,
         catalog_doc_id=catalog_doc_id, content_type=content_type or chunk_content_type_for_collection(collection),
     )
     result = NoteWriteResult(
@@ -621,7 +636,6 @@ def put_note(
     title: str = "",
     tags: str = "",
     category: str = "",
-    session_id: str = "",
     source_agent: str = "",
     ttl_days: int | None = None,
     content_type: str | None = None,
@@ -711,7 +725,7 @@ def put_note(
     try:
         write = write_note(
             catalog_doc_id=doc, collection=collection, pieces=pieces, content_hash=content_hash,
-            title=title, tags=tags, category=category, session_id=session_id,
+            title=title, tags=tags, category=category,
             source_agent=source_agent, ttl_days=ttl_days, content_type=content_type, cat=cat,
             stamp=False)
     except StampRefusedError as exc:

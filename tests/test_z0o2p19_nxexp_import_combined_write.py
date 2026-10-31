@@ -626,14 +626,19 @@ def test_the_exported_vector_replaces_a_stored_one_including_a_chash_another_doc
     # Stored before the import: `shared` owned by live document X, `lone` ownerless, both with
     # vectors that are NOT the file's.
     seed_chunks_direct(dst, [shared, lone], [shared_text, lone_text],
-                       [{"chunk_text_hash": shared, "bib_year": 2020}, {"chunk_text_hash": lone}],
+                       [{"chunk_text_hash": shared, "bib_year": 2020, "title": "x-title", "tags": "xtag",
+                         "line_start": 5},
+                        {"chunk_text_hash": lone}],
                        embeddings=[_vec(1).tolist(), _vec(2).tolist()])
     doc_x = str(cat.register(owner=owner, title="x.py", content_type="code", physical_collection=dst,
                              source_uri=f"file:///z0o2p19/{dst}/x.py"))
     cat.write_manifest(doc_x, [{"chash": shared, "position": 0}], collection=dst)
     file_vecs = {shared: _vec(11), lone: _vec(12), fresh: _vec(13)}
+    # nexus-6pfgb.18: the file's rows carry document keys (title, tags, ttl_days) and a position key
+    # (line_start) the way an export of the last-writer row does.
     records = [{
-        "id": c, "document": t, "metadata": {"chunk_text_hash": c},
+        "id": c, "document": t,
+        "metadata": {"chunk_text_hash": c, "title": "y-title", "tags": "ytag", "ttl_days": 9, "line_start": 99},
         "embedding": file_vecs[c].tobytes(),
         "owner": {"source_uri": uri_y, "title": "y.py", "content_type": "code", "position": p},
     } for p, (c, t) in enumerate([(shared, shared_text), (lone, lone_text), (fresh, fresh_text)])]
@@ -649,6 +654,17 @@ def test_the_exported_vector_replaces_a_stored_one_including_a_chash_another_doc
     assert [c for _, c in _manifest(reader, doc_x)] == [shared], "document X still owns the shared chunk"
     kept = client.get_collection(dst).get(ids=[shared], include=["metadatas"])["metadatas"][0]
     assert kept.get("bib_year") == 2020, "metadata is merged: a key the export omits survives on a shared chunk"
+    # nexus-6pfgb.18: importing document Y restamps no document or position key on the row document X
+    # owns; X keeps its title, tags and line span, and Y's ttl_days never lands.
+    assert (kept.get("title"), kept.get("tags"), kept.get("line_start")) == ("x-title", "xtag", 5), kept
+    assert "ttl_days" not in kept, kept
+    # A row nobody else owns gets no document key either (the catalog entry the import registers holds
+    # them) but keeps its own position key.
+    rows = client.get_collection(dst).get(ids=[lone, fresh], include=["metadatas"])["metadatas"]
+    assert len(rows) == 2, "the unshared rows were not examined"
+    for m in rows:
+        assert not {"title", "tags", "ttl_days"} & set(m), m
+        assert m.get("line_start") == 99, m
 
 
 def test_the_cli_says_how_many_stored_vectors_the_file_replaced(t2_service_env, tmp_path):
@@ -1332,6 +1348,73 @@ def test_export_writes_the_owners_key_only_when_complete_and_its_manifest_rows(s
     assert owners["c3"]["key_registered"] is False
 
 
+class _ReindexingReader(_StubOwnerReader):
+    """A reader whose document 1.1.1 is re-indexed between its two entry reads (nexus-6pfgb.1).
+
+    The log names the order of the reads. ``resolve_many`` answers from ``entry_reads``: the first
+    call returns the first state, every later call the second. The manifests are always the OLD
+    ones, as they are when the re-index lands after the manifest read."""
+
+    def __init__(self, first: tuple[str, ...], then: tuple[str, ...]) -> None:
+        # (run id, key) or (run id, key, index_state); the state defaults to "complete"
+        super().__init__("complete")
+        self.log: list[str] = []
+        self._states = [first, then]
+        self._resolves = 0
+
+    def docs_for_chashes(self, chashes):
+        self.log.append("docs_for_chashes")
+        return super().docs_for_chashes(chashes)
+
+    def get_manifests(self, tumblers):
+        self.log.append("get_manifests")
+        return super().get_manifests(tumblers)
+
+    def resolve_many(self, tumblers):
+        self.log.append("resolve_many")
+        run_id, key, *state = self._states[min(self._resolves, 1)]
+        self._resolves += 1
+        out = super().resolve_many(tumblers)
+        e = out["1.1.1"]
+        e.index_content_hash, e.index_run_id, e.meta = key, run_id, {"content_hash": key}
+        e.index_state = state[0] if state else "complete"
+        out["1.1.2"].index_run_id = "run-b"
+        return out
+
+
+_KB = "ef" * 32
+
+
+@pytest.mark.parametrize(
+    "first,then",
+    [
+        pytest.param(("run-1", _KA), ("run-2", _KB), id="re-index-to-a-new-key"),
+        pytest.param(("run-1", _KA), ("run-2", _KA), id="two-re-indexes-back-to-the-same-key"),
+        # A run that began before the first read and finished before the second: beginIndexRun wrote the
+        # run id and the key at the start, so both fences are equal and only the state moved.
+        pytest.param(("run-1", _KA, "indexing"), ("run-1", _KA, "complete"), id="run-in-flight-at-the-first-read-completes"),
+    ],
+)
+def test_a_reindex_between_the_entry_reads_drops_the_key_and_its_registration_witness(first, then) -> None:
+    """nexus-6pfgb.1: the entry is read before the manifests and again after them. When the document's
+    fence (run id, key) differs between the two reads, the manifest rows and chunks read in between may
+    belong to neither, so the record carries no key and no registration witness (the importer then
+    cannot stamp the old rows with the new key). A document that did not move keeps both."""
+    reader = _ReindexingReader(first, then)
+    owners = _resolve_export_owners(reader, ["c1", "c2", "c3"], "docs__s")
+    assert owners["c1"]["index_content_hash"] == "" and owners["c1"]["key_registered"] is False
+    assert owners["c1"]["manifest_rows"] == 2, "the rows read are reported as read"
+    assert owners["c3"]["index_content_hash"] == "cd" * 32, "a document that did not move keeps its key"
+    # The first entry read comes before the manifests: that order is what the comparison rests on.
+    assert reader.log == ["docs_for_chashes", "resolve_many", "get_manifests", "resolve_many"], reader.log
+
+
+def test_a_quiescent_source_keeps_the_key_and_its_registration_witness() -> None:
+    reader = _ReindexingReader(("run-1", _KA), ("run-1", _KA))
+    owners = _resolve_export_owners(reader, ["c1", "c2", "c3"], "docs__s")
+    assert owners["c1"]["index_content_hash"] == _KA and owners["c1"]["key_registered"] is True
+
+
 def _native_pdf(cat, owner, coll: str, name: str, key: str, texts: list[str]) -> str:
     """A natively indexed, complete pdf document owning *texts* at positions 0..n-1."""
     uri = f"file:///mjikf/{coll}/{name}.pdf"
@@ -1380,19 +1463,24 @@ def test_a_whole_imported_pdf_keeps_its_native_key_and_joins_a_native_copy_a_tru
         assert by_title["b"].index_content_hash not in (kb, ka), by_title["b"]   # truncated: unique key
 
         # nexus-3ajpd invariant: an import never writes a fence or derived key into a chunk's
-        # ``content_hash``; every chunk keeps the exported record's own value. The exporter's chunk-row
-        # witness (:func:`_note_source_evidence`) can only MISS because of this: a key no chunk carries
-        # is never trusted, so the document gets the unique key (never a wrong one).
+        # ``content_hash``. Since nexus-6pfgb.18 it writes no ``content_hash`` at all: the key is a
+        # document key, held by the catalog entry the import registers, and the exported record's value
+        # (the last writer's) stays out of the target row. The exporter's chunk-row witness
+        # (:func:`_note_source_evidence`) reads the EXPORT record, not the stored row, so the document
+        # still gets the unique key (never a wrong one).
         exported = {r["id"]: r["metadata"].get("content_hash") for r in _read_nxexp(f)}
         assert len(exported) >= 4 and all(v in (ka, kb) for v in exported.values()), exported   # non-vacuous
         stored = client.get_collection(dst).get(ids=list(exported), include=["metadatas"])
         stored_hash = {i: m.get("content_hash") for i, m in zip(stored["ids"], stored["metadatas"])}
-        assert stored_hash == exported, (stored_hash, exported)
+        assert len(stored_hash) == len(exported), "the imported chunks were not examined"
+        # a's chunks sit on rows the native copy ("a-native") already wrote with ka; b's key lands nowhere
+        assert set(stored_hash.values()) <= {None, ka}, stored_hash
         derived = {e.index_content_hash for e in copies}
         # exactly one key beyond a's: b's own unique one (a copy that got a third key, or b stamped
         # with a's, would fail this; ``b in derived`` could not, derived being built from the copies)
         assert derived - {ka} == {by_title["b"].index_content_hash}, derived
         assert not (derived - {ka}) & set(stored_hash.values()), "a derived key landed on a chunk"
+        assert kb not in stored_hash.values(), "the import restamped a document key onto a chunk row"
 
         writer = make_catalog_writer()
         try:

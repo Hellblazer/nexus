@@ -174,7 +174,7 @@ def perform_self_install(
 
     *progress* (nexus-2k66t.4.2) passes the builder's stderr (uv's download
     progress) through to this process's stderr while it runs, for the
-    on-demand PDF install, where a 390 MB fetch with no output reads as a hang.
+    on-demand PDF install, where a 374 MB fetch with no output reads as a hang.
     Failure diagnosis reads the same captured text either way.
 
     *add_extras* (nexus-pffc4) MERGES with the receipt's existing extras —

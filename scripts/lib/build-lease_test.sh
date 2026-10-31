@@ -38,6 +38,11 @@ _fake_repo() {
     cp "$HERE/build-lease.sh" "$repo/scripts/lib/build-lease.sh"
 }
 
+# A pid no process can hold: above Linux's maximum pid_max (4194304, 2^22) and macOS's
+# pids (which stay below 100000), so _build_lease_pid_alive and _build_lease_group_alive always read it dead.
+# A reaped child's pid is NOT dead for long: the kernel reuses it (nexus-5aotg).
+NEVER_ALIVE_PID=99999999
+
 # ── Test 1: acquire/release roundtrip ────────────────────────────────────
 echo "Test 1: acquire/release roundtrip"
 repo1="$WORKDIR/repo1"
@@ -88,14 +93,11 @@ echo "Test 3: stale-pid takeover (dead holder, no WARNING-free silent skip)"
 repo3="$WORKDIR/repo3"
 _fake_repo "$repo3"
 leasedir3="$repo3/service/.build-lease/stale"
-# Manufacture a lease left behind by a holder that is definitely dead: spawn
-# a subprocess, let it exit, and record its (now-reusable but currently
-# unassigned) pid -- this is the same "run it, capture its pid, let it
-# finish" technique used for guaranteed-dead pids elsewhere in this repo's
-# shell test suite.
-( exit 0 ) &
-dead_pid=$!
-wait "$dead_pid" 2>/dev/null
+# Manufacture a lease left behind by a holder that is definitely dead. The pid is
+# NEVER_ALIVE_PID, above every kernel's pid ceiling: a reaped child's pid can be
+# handed to a new process within a second on a busy runner, which turned this
+# "dead" holder live (CI shard 5/6, 2026-10-29).
+dead_pid="$NEVER_ALIVE_PID"
 mkdir -p "$leasedir3"
 printf '%s\n' "$dead_pid" > "$leasedir3/pid"
 printf '%s\n' "2020-01-01T00:00:00Z" > "$leasedir3/ts"
@@ -404,7 +406,7 @@ else
             bad "root's group $foreign_pgid read as DEAD: a second user would reclaim a live build lease"
         fi
     fi
-    if bash -c "source '$repo10/scripts/lib/build-lease.sh'; _build_lease_group_alive 3999999"; then
+    if bash -c "source '$repo10/scripts/lib/build-lease.sh'; _build_lease_group_alive $NEVER_ALIVE_PID"; then
         bad "a group that does not exist read as alive"
     else
         ok "a group that does not exist still reads as dead"
@@ -453,7 +455,7 @@ out12="$WORKDIR/untrack12.out"; rm -f "$out12"
 bash -c "
     source '$repo12/scripts/lib/build-lease.sh'
     build_lease_acquire untrack || exit 9
-    sleep 300 & dead=\$!; kill -9 \$dead; wait \$dead 2>/dev/null
+    dead=$NEVER_ALIVE_PID
     build_lease_track_pid untrack \$dead
     echo TRACKED > '$out12'
     sleep 2
@@ -470,7 +472,7 @@ rm -f "$out12"
 bash -c "
     source '$repo12/scripts/lib/build-lease.sh'
     build_lease_acquire untrack || exit 9
-    sleep 300 & dead=\$!; kill -9 \$dead; wait \$dead 2>/dev/null
+    dead=$NEVER_ALIVE_PID
     build_lease_track_pid untrack \$dead
     build_lease_untrack_pid untrack
     echo UNTRACKED > '$out12'
@@ -545,7 +547,7 @@ if [[ $rc13 -eq 0 && "$(_ev_lines "$ev13")" == 1 && "$line13" == *" waited_s=5 o
 # 13f: stale reclaim -> one stale_reclaimed line naming the dead holder
 rm -f "$ev13"
 mkdir -p "$leasedir13/corpse"
-sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+dead13="$NEVER_ALIVE_PID"
 printf '%s\n' "$dead13" > "$leasedir13/corpse/pid"; echo "2026-01-01T00:00:00Z" > "$leasedir13/corpse/ts"; echo dead-agent > "$leasedir13/corpse/label"
 out13="$(NX_LEASE_EVENTS_LOG="$ev13" bash -c "source '$lib13'; build_lease_acquire corpse && build_lease_release corpse" 2>&1)"; rc13=$?
 line13="$(head -1 "$ev13" 2>/dev/null)"
@@ -577,7 +579,7 @@ if [[ $badrc13 -eq $goodrc13 && "$badout13" == "$good13" ]]; then ok "an unwrita
 mkdir -p "$WORKDIR/a-dir-log"
 for how13 in "$bad_log13" "$WORKDIR/a-dir-log"; do
     mkdir -p "$leasedir13/corpse2"
-    sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+    dead13="$NEVER_ALIVE_PID"
     printf '%s\n' "$dead13" > "$leasedir13/corpse2/pid"; echo dead-agent > "$leasedir13/corpse2/label"
     badout13="$(NX_LEASE_EVENTS_LOG="$how13" bash -c "set -e; source '$lib13'; build_lease_acquire corpse2 >/dev/null 2>&1; build_lease_release corpse2; echo SURVIVED" 2>&1)"
     if [[ "$badout13" == SURVIVED ]]; then ok "an unwritable log (${how13##*/}) under set -e does not abort a successful stale reclaim"; else bad "set -e caller (${how13##*/}): [$badout13]"; fi
@@ -599,7 +601,7 @@ rm -rf "$leasedir13/suite"
 rm -f "$ev13"
 sleep 25 & peer13=$!
 mkdir -p "$leasedir13/raced" "$WORKDIR/fakebin13"
-sleep 300 & dead13=$!; kill -9 "$dead13"; wait "$dead13" 2>/dev/null
+dead13="$NEVER_ALIVE_PID"
 printf '%s\n' "$dead13" > "$leasedir13/raced/pid"; echo dead-agent > "$leasedir13/raced/label"
 # a peer wins the reclaim between our read and our mv: the lease is the peer's by the time ours fails
 cat > "$WORKDIR/fakebin13/mv" <<MV
@@ -681,22 +683,24 @@ d14=$(( $(date +%s) - t14 ))
 if [[ $rc14c -eq 75 && "$out14c" == *"label=unknown"* && $d14 -le 2 ]]; then ok "14c: a holder that never populates is still refused, after a bounded wait (${d14}s)"; else bad "14c: rc $rc14c after ${d14}s: $out14c"; fi
 # 14d: a DEAD holder with an unpopulated lease is reclaimed without the wait
 rm -rf "${root14:?}/popwin"
-( exit 0 ) & dead14=$!
-wait "$dead14" 2>/dev/null
+dead14="$NEVER_ALIVE_PID"   # a reaped child's pid could be reused and polled as live for the full 2 s
 mkdir -p "$root14/popwin"
 printf '%s\n' "$dead14" > "$root14/popwin/pid"
 t14=$(date +%s)
-out14d="$(bash -c "source '$lib14'; build_lease_acquire popwin" 2>&1)"
+# "Without the wait" is proven against a wait that would be visible: 100 polls of 1 s, so a
+# contender that waited would cost 100 s, and a bound of 10 s is safe under CI load (develop
+# 18f805d8a, shard 5: the old 1 s bound read 2 s on a whole-second clock with no wait taken).
+out14d="$(_BUILD_LEASE_POPULATE_POLLS=100 _BUILD_LEASE_POPULATE_POLL_S=1 bash -c "source '$lib14'; build_lease_acquire popwin" 2>&1)"
 rc14d=$?
 d14=$(( $(date +%s) - t14 ))
-if [[ $rc14d -eq 0 && "$out14d" == *WARNING* && $d14 -le 1 ]]; then ok "14d: a dead holder's unpopulated lease is reclaimed at once (${d14}s)"; else bad "14d: rc $rc14d after ${d14}s: $out14d"; fi
+if [[ $rc14d -eq 0 && "$out14d" == *WARNING* && $d14 -le 10 ]]; then ok "14d: a dead holder's unpopulated lease is reclaimed at once (${d14}s, a wait would cost 100 s)"; else bad "14d: rc $rc14d after ${d14}s: $out14d"; fi
 # 14e: an uncontended acquire never reaches the wait (no pid file to wait on)
 rm -rf "${root14:?}/popwin"
 t14=$(date +%s)
-bash -c "source '$lib14'; build_lease_acquire popwin" >/dev/null 2>&1
+_BUILD_LEASE_POPULATE_POLLS=100 _BUILD_LEASE_POPULATE_POLL_S=1 bash -c "source '$lib14'; build_lease_acquire popwin" >/dev/null 2>&1
 rc14e=$?
 d14=$(( $(date +%s) - t14 ))
-if [[ $rc14e -eq 0 && $d14 -le 1 ]]; then ok "14e: an uncontended acquire adds no wait (${d14}s)"; else bad "14e: rc $rc14e after ${d14}s"; fi
+if [[ $rc14e -eq 0 && $d14 -le 10 ]]; then ok "14e: an uncontended acquire adds no wait (${d14}s, a wait would cost 100 s)"; else bad "14e: rc $rc14e after ${d14}s"; fi
 kill -9 "$live14" 2>/dev/null
 wait "$live14" 2>/dev/null
 

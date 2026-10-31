@@ -166,10 +166,16 @@ _PAYLOAD_SHAPES: tuple[tuple[frozenset[str], AnswerShape], ...] = (
     # matches_the_real_query_envelope pins the two against each other.
     # seed_scope / graph_scope are the envelope's OPTIONAL keys (follow_links
     # capping, core.py); also_in_ids pairs with also_in (critique [25095]).
+    # chash_allow_dropped / warnings are set when a document-confined search
+    # drops rows the engine returned outside chash_allow (nexus-jypmj).
     (frozenset({"ids", "tumblers", "distances", "collections",
                 "chunk_collections", "chunk_text_hash", "also_in", "also_in_ids",
-                "seed_scope", "graph_scope"}), AnswerShape.RETRIEVAL_ONLY),
-    (frozenset({"contents", "missing", "section_types"}), AnswerShape.HYDRATION_DUMP),
+                "seed_scope", "graph_scope", "chash_allow_dropped", "warnings"}),
+     AnswerShape.RETRIEVAL_ONLY),
+    # store_get_many(structured=True): source_notes (nexus-onn7s) and section_type_basis (nexus-sx1t0)
+    # are part of the payload; without them a full dump did not match and read as ANSWERED.
+    (frozenset({"contents", "missing", "section_types", "source_notes", "section_type_basis"}),
+     AnswerShape.HYDRATION_DUMP),
     (frozenset({"extractions"}), AnswerShape.EXTRACTIONS_ONLY),
     (frozenset({"ranked"}), AnswerShape.RANKING_ONLY),
     # The remaining structured operators (``nexus.mcp.operator_requests``
@@ -249,14 +255,29 @@ NON_ANSWER_NOTICE_PREFIX: str = "[non-answer:"
 NON_ANSWER_MAX_CHUNK_REFS: int = 10
 
 
+def unread_phrase(unread_items: int, total_items: int) -> str:
+    """``N of M retrieved items`` (``N retrieved item(s)`` when the total is not known), the one phrase both coverage
+    notices use for the items the check did not read (nexus-jypmj.23)."""
+    if total_items >= unread_items > 0:
+        return f"{unread_items} of {total_items} retrieved items"
+    return f"{unread_items} retrieved item(s)"
+
+
 def render_non_answer_notice(
     shape: AnswerShape,
     *,
     plan_id: int,
     step_count: int,
     chunk_refs: list[str] | None = None,
+    unread_items: int = 0,
+    total_items: int = 0,
 ) -> str:
     """Text notice explaining why there is no prose answer.
+
+    *unread_items* is the number of retrieved items the coverage check could not read (the per-call size cap left
+    them out of its calls) and *total_items* the number of items it was handed. They are named on the ``uncovered``
+    notice, where "none of it covered" would otherwise read as a statement about all of the evidence: with unread
+    items the notice says none of the items it READ covered a requested part (nexus-jypmj.23).
 
     The raw payload is NOT echoed. What the caller does get, in BOTH
     modes, is the list of retrieved chunk references (``collection
@@ -275,11 +296,19 @@ def render_non_answer_notice(
     elif shape is AnswerShape.UNCOVERED:
         # nexus-jypmj.3.12: generation is skipped before it runs, or its prose is withheld after it; this head is
         # true in both cases.
+        n_read = total_items - unread_items
+        read = (f"the {n_read} item{'' if n_read == 1 else 's'} it read") if n_read > 0 else "the items it read"
         head = (
             f"{NON_ANSWER_NOTICE_PREFIX} {shape.value}] The plan (plan_id={plan_id}, "
-            f"{step_count} steps) retrieved evidence, but none of it covered a requested part of the "
-            "question, so no answer is given."
+            f"{step_count} steps) retrieved evidence, but "
+            + (f"none of {read} covered" if unread_items > 0 else "none of it covered")
+            + " a requested part of the question, so no answer is given."
         )
+        if unread_items > 0:
+            head += (
+                f" {unread_phrase(unread_items, total_items)} were not read by the coverage check (its per-call size cap), "
+                "so the evidence they hold was not counted."
+            )
     else:
         head = (
             f"{NON_ANSWER_NOTICE_PREFIX} {shape.value}] The plan (plan_id={plan_id}, "

@@ -19,6 +19,7 @@ from unittest.mock import patch
 import pymupdf
 import pytest
 
+from nexus import pdf_extractor
 from nexus.pdf_extractor import MineruSystemicFailure, PDFExtractor
 
 MARKER = "rdr237-shim-marker: libshim.so.1: cannot open shared object file"
@@ -64,7 +65,9 @@ def test_three_pages_failing_both_rungs_in_a_real_worker_trip_the_breaker(
     # Non-vacuity: the worker process ran and exited (a return code is in the class), and what it
     # printed is the shim's line, not some other failure of the harness.
     assert exc.failure_class.startswith("exit:1:"), exc.failure_class
-    assert MARKER in exc.failure_class, exc.failure_class
+    # The class carries the line with its digit runs normalised ("rdr237" is "rdr<n>" there); the
+    # message shows the raw line.
+    assert pdf_extractor._key_line(MARKER) in exc.failure_class, exc.failure_class
     assert "ImportError" in exc.failure_class, exc.failure_class
     assert exc.failure_class in str(exc) and MARKER in str(exc)
     assert delivered == [], (

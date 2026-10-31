@@ -7,6 +7,7 @@ import click
 import structlog
 
 from nexus.config import get_telemetry_config, get_tuning_config, load_config
+from nexus.context_annotations import DISPLAY_SOURCE_PATH_KEY
 from nexus.corpus import is_conformant_collection_name, resolve_corpus
 from nexus.commands.store import _t3
 from nexus.formatters import (
@@ -547,14 +548,22 @@ def search_cmd(
         return
 
     # Python-side path scoping (ChromaDB has no $startswith operator).
-    # nexus-1qed: prefer the catalog-resolved _display_path so post-prune
-    # chunks that no longer carry source_path still match the scope.
+    # nexus-1qed: the catalog-resolved _display_path (often repo-relative) or,
+    # nexus-6pfgb.53, the owner's absolute local path (_display_source_path), which
+    # is what an absolute PATH names. The row's source_path is the last writer's
+    # file and is not read (nexus-6pfgb.49).
     if resolved is not None:
+        # A scope is a directory or a file: equal to it, or below it past a
+        # separator, so /a/scope does not select /a/scope2/x.py.
+        scope_prefix = resolved.rstrip(os.sep) + os.sep
+
+        def _within(p: str) -> bool:
+            return p == resolved or p.startswith(scope_prefix)
+
         results = [
             r for r in results
-            if (r.metadata.get("_display_path") or "").startswith(resolved)
-            or r.metadata.get("file_path", "").startswith(resolved)
-            or r.metadata.get("source_path", "").startswith(resolved)
+            if _within(r.metadata.get("_display_path") or "")
+            or _within(r.metadata.get(DISPLAY_SOURCE_PATH_KEY) or "")
         ]
         if not results:
             if json_out:
@@ -732,15 +741,11 @@ def search_cmd(
         for line in format_vimgrep(results, query=query):
             click.echo(line)
     elif files_only:
-        # nexus-1qed: prefer the catalog-resolved _display_path so
-        # files-only output stays correct after the prune verb drops
-        # source_path from chunk metadata.
+        # nexus-1qed: the catalog-resolved _display_path (nexus-6pfgb.49: never
+        # the row's source_path, the last writer's file).
         seen: set[str] = set()
         for r in results:
-            file_path = (
-                r.metadata.get("_display_path")
-                or r.metadata.get("source_path", "")
-            )
+            file_path = r.metadata.get("_display_path", "")
             if file_path and file_path not in seen:
                 seen.add(file_path)
                 click.echo(file_path)

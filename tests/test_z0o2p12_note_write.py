@@ -241,7 +241,7 @@ class TestOneRequest:
         pieces = _pieces("meta", 1)
         doc = _register("z0o2p12-meta", pieces)
         write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, title="z0o2p12-meta",
-                   tags="a,b", category="cat", source_agent="agent-x", session_id="sess",
+                   tags="a,b", category="cat", source_agent="agent-x",
                    ttl_days=30, cat=real_cat)
         got = vec.get_collection(_COLLECTION).get(ids=[_chash(pieces[0])], include=["metadatas"])
         meta = got["metadatas"][0]
@@ -686,13 +686,13 @@ class TestChunkMetadata:
         got = vec.get_collection(collection).get(ids=[chash], include=["metadatas"])
         return got["metadatas"][0]
 
-    def test_session_content_type_and_indexed_at_reach_the_engine(self, vec, real_cat):
+    def test_content_type_and_indexed_at_reach_the_engine_and_session_id_does_not(self, vec, real_cat):
         pieces = _pieces("meta-full", 1)
         doc = _register("z0o2p12-meta-full", pieces)
-        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, session_id="sess-42",
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
                    source_agent="agent-x", cat=real_cat)
         meta = self._meta(vec, _chash(pieces[0]))
-        assert meta["session_id"] == "sess-42"
+        assert "session_id" not in meta  # nexus-6pfgb.4: no reader, no writer
         assert meta["content_type"] == "prose"
         assert meta["indexed_at"][:2] == "20", meta["indexed_at"]
         assert meta["source_agent"] == "agent-x"
@@ -732,6 +732,24 @@ class TestChunkMetadata:
         meta = self._meta(vec, chash)
         assert meta["tags"] == "new", "the key the note sets is refreshed"
         assert (meta["bib_year"], meta["bib_venue"]) == (2024, "VLDB"), "a key another writer set is kept"
+
+        # nexus-jz86a (same state, one more reader): a document-level label another writer left on the
+        # shared chunk row is not the note's. The note's manifest row is WRITTEN and unlabelled, so a
+        # reader does not fall back to the row; before the fix the row carried no label keys, was legacy,
+        # and store_get_many read the other document's "references" as the note's own.
+        from nexus.mcp.core import resolve_owner_section_types_with_basis
+
+        vec.get_collection(_COLLECTION).update(ids=[chash], metadatas=[{"section_type": "references"}])
+        assert self._meta(vec, chash)["section_type"] == "references", "control: the chunk row holds it"
+        from nexus.catalog.factory import make_catalog_reader
+
+        reader = make_catalog_reader()
+        (row,) = reader.get_manifest(doc)
+        assert (row.labels_written, row.section_title, row.section_type, row.page_number) == (True, "", "", None)
+        (owner,) = reader.chash_positions([chash])
+        assert (owner["labels_written"], owner["section_type"]) == (True, "")
+        assert resolve_owner_section_types_with_basis([chash], [True], [_COLLECTION], ["references"]) == (
+            [""], ["agreed"]), "the note's own answer is no label, not the row's"
 
     def test_a_permanent_reput_of_a_ttld_note_drops_its_ttl(self, vec, real_cat):
         """nexus-z0o2p.34 (critique 5b): the merge keeps a stored key the incoming metadata omits. A

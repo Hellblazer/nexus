@@ -25,7 +25,8 @@ caller's scope is dropped (the coverage ledger does that). Contradicted facets a
 * :data:`MAX_REPAIR_QUERIES` (6): the whole repair, not per facet. Six unsupported facets against two targets
   would be twelve; the order above decides which six run.
 * :data:`REPAIR_RESULTS_PER_QUERY` (5) and :data:`MAX_REPAIR_ITEMS` (12): chunks asked for, and chunks that
-  may join the reduction's input. The supplement sits under the reserved share (50) and the positional cap (100).
+  may join the reduction's input. The supplement sits beside the reserved share (50, or 88 for a run confined to one document: 88 + 12 = 100) under
+  the positional cap (100).
 * :data:`REPAIR_DEADLINE_SHARE` (0.3) of the deadline left when the repair starts, capped at
   :data:`REPAIR_ALLOWANCE_CAP_S` (90 s), and the repair is not started under :data:`MIN_REPAIR_ALLOWANCE_S`
   (20 s). The allowance covers the retrieval (at most :data:`REPAIR_RETRIEVAL_SHARE`, 0.4, of it) and the
@@ -47,6 +48,7 @@ from typing import Any, Literal
 from nexus.plans.request_coverage import Facet
 
 __all__ = [
+    "MAX_ANCHORS_PER_ASSESSMENT_CALL",
     "MAX_REPAIR_ITEMS",
     "MAX_REPAIR_QUERIES",
     "MIN_REPAIR_ALLOWANCE_S",
@@ -55,6 +57,7 @@ __all__ = [
     "REPAIR_ALLOWANCE_CAP_S",
     "REPAIR_DEADLINE_SHARE",
     "REPAIR_RESULTS_PER_QUERY",
+    "REPAIR_RESULTS_PER_QUERY_UNFILTERED",
     "REPAIR_RETRIEVAL_SHARE",
     "RepairHit",
     "RepairOutcome",
@@ -71,6 +74,10 @@ __all__ = [
 MAX_REPAIR_QUERIES: int = 6
 #: Chunks one query asks for.
 REPAIR_RESULTS_PER_QUERY: int = 5
+#: Chunks one query asks for when the run is confined to one document but the engine has no chunk filter
+#: (nexus-jypmj): the query reads the whole collection and the document's chunks are filtered from the page, so the
+#: page is wider (40 of the collection's top hits; the repair's chunk-hash membership test keeps only the document's).
+REPAIR_RESULTS_PER_QUERY_UNFILTERED: int = 40
 #: New chunks that may join the terminal reduction's input.
 MAX_REPAIR_ITEMS: int = 12
 #: The repair may use this share of the deadline left when it starts ...
@@ -83,6 +90,16 @@ MIN_REPAIR_ALLOWANCE_S: float = 20.0
 REPAIR_RETRIEVAL_SHARE: float = 0.4
 #: No query is started with less of the retrieval allowance than this.
 MIN_REPAIR_QUERY_S: float = 1.0
+
+#: Anchors one assessment call reads (nexus-jypmj.17). A stream with more is split into balanced packs of at most this
+#: many, each its own call over the same facet group, so a 65-anchor graph stream is four calls of 16-17 and not
+#: one call that outran the 60 s timeout (nexus-jypmj.3.10 canary: the 10-15 anchor streams answered in about 20 s
+#: each, the 65-anchor one did not in 60). Splitting rather than lengthening the timeout keeps every call close to a
+#: size already seen to finish, lets the packs run concurrently, and loses one pack's anchors, not the stream's, when a
+#: call fails. It sends each item once per facet group either way, so the input tokens barely change; only the
+#: per-call instruction repeats. Unmeasured as accuracy or latency-per-anchor (same status as the facet cap).
+#: Defined here, beside the repair's call estimate that counts packs, and re-exported by ``coverage_ledger``.
+MAX_ANCHORS_PER_ASSESSMENT_CALL: int = 20
 
 _MAX_QUERY_CHARS = 500
 _WS = re.compile(r"\s+")
@@ -102,6 +119,10 @@ class RepairReport:
     boundary the runner gave no retrieval hooks. ``not_merged`` is repair evidence the reduction's input
     did not hold after the merge (a plan shape with no list-valued evidence argument): the ledger is then
     unchanged and nothing unassessed reaches the reduction.
+
+    When the first round left anchors unread (nexus-jypmj.23) the repair reassesses them even if its retrieval
+    brings nothing in; the outcome then names what the retrieval did (``retrieval_failed``, ``not_merged`` or
+    ``no_new_evidence``, never ``completed``) and ``detail`` says the unread anchors were reassessed.
     """
 
     outcome: RepairOutcome = "not_attempted"
@@ -211,9 +232,29 @@ def unresolved_note(unresolved: Sequence[tuple[Facet, str]]) -> str:
     return "\n".join(lines)
 
 
-def planned_reassessment_calls(facet_count: int, max_facets_per_call: int) -> int:
-    """Calls the reassessment will make: the repair evidence is one stream, so one call per group of facets."""
-    return max(1, math.ceil(facet_count / max(1, max_facets_per_call)))
+def planned_reassessment_calls(
+    facet_count: int, max_facets_per_call: int, *, unread_per_stream: Sequence[int] = (), full_facets: int = 0,
+    anchors_per_stream: Sequence[int] = (), items_per_call: int = MAX_ANCHORS_PER_ASSESSMENT_CALL,
+) -> int:
+    """Calls the reassessment after a repair will make (nexus-jypmj.23), in the plan the assessment itself uses:
+    one call per (stream, facet group, pack of at most *items_per_call* items).
+
+    * The *facet_count* repair targets form the delta pass over the new anchors and the first round's unread
+      ones: one pack for the repair evidence, counted as a single pack, and ``ceil(n / items_per_call)`` packs for
+      each stream that holds *n* unread items (*unread_per_stream*, one entry per stream), per facet group.
+    * The *full_facets* required facets that are neither covered, contradicted nor repair targets are assessed
+      against every anchor, so per facet group one pack for the repair evidence and the packs of each stream's
+      anchors (*anchors_per_stream*).
+
+    It is an estimate, not a bound: repair evidence is counted as one pack although items retrieved from several
+    streams can need one pack in each, so it can undercount by that. The assessment's own per-call budget check is
+    what bounds the spend."""
+    cap, per = max(1, max_facets_per_call), max(1, items_per_call)
+    delta_groups = max(1, math.ceil(facet_count / cap))
+    calls = delta_groups * (1 + sum(math.ceil(max(0, n) / per) for n in unread_per_stream))
+    if full_facets > 0:
+        calls += math.ceil(full_facets / cap) * (1 + sum(math.ceil(max(0, n) / per) for n in anchors_per_stream))
+    return calls
 
 
 def build_repair_queries(

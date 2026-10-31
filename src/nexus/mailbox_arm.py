@@ -169,7 +169,7 @@ def tuple_surface_available(
     return available
 
 
-def mailbox_arm_instruction(session_id: str) -> str:
+def mailbox_arm_instruction(session_id: str, *, channel: bool = True) -> str:
     """The literal subscribe-instruction text for *session_id*. Pure text
     -- no I/O, no probing -- so tests and the mailbox skill can both call
     it directly.
@@ -189,7 +189,8 @@ def mailbox_arm_instruction(session_id: str) -> str:
 
     RDR-211 (Sam's decision of 2026-09-16): this replaces the deleted
     Monitor-arm instruction outright, not as a fallback alongside it --
-    the channel is the only push path now, and the ``UserPromptSubmit``
+    the channel is the push path for a session launched with it (
+    RDR-233 adds ``nx tuple wait`` for one launched without), and the ``UserPromptSubmit``
     drain hook is the unconditional floor beneath it regardless of whether
     a session ever reaches the channel. Names the development-channel
     launch flag and its per-launch confirmation dialog as setup (Sam's
@@ -199,14 +200,31 @@ def mailbox_arm_instruction(session_id: str) -> str:
     dialog-free plugin form and the alias that makes either form stick,
     in the same one-line byte budget (see ``TestGuidanceByteBudgetIntegration``
     in ``tests/test_hooks.py``).
+
+    *channel* ``False`` (RDR-233, bead nexus-7hzb2) is a session whose
+    ``claude`` process carries no channel launch flag (the Claude Desktop Code
+    tab cannot add one): the launch-flag advice is useless there, so it is
+    replaced by the channel-free push path, ``nx tuple wait`` run as a
+    background task and re-run only when a wake's output says to (a superseded,
+    session-changed or refused exit says not to). No longer than the channel
+    form, so the same budget covers both.
     """
-    return (
+    lead = (
         f"{ARM_MARKER}: call "
         f'mcp__plugin_conexus_nexus__tuple_subscribe("mailbox/<name>") once, '
         "with <name> from a fresh ListAgents call now, never from memory (it "
         "changes on resume), so peers can reach this session by name via "
-        f"mailbox_send; mailbox/{session_id} is already subscribed and "
-        "delivered over the channel regardless. "
+        f"mailbox_send; mailbox/{session_id} is already subscribed"
+    )
+    if not channel:
+        return lead + (
+            ". This session was launched without the channel, so nothing pushes "
+            "to it: run `nx tuple wait` with run_in_background now, and again "
+            "after each wake that says to, to be woken by new mail and board "
+            "posts; mail also arrives at your next prompt via the drain hook."
+        )
+    return lead + (
+        " and delivered over the channel regardless. "
         "The channel is a Claude Code research preview: launch with "
         "--channels plugin:conexus@nexus-plugins (dialog-free once "
         "allowlisted) or --dangerously-load-development-channels "
@@ -232,4 +250,8 @@ def arm_block(session_id: str | None, *, config_dir: Path | None = None) -> str:
         config_dir = _nx_config.nexus_config_dir()
     if not tuple_surface_available(config_dir):
         return ""
-    return mailbox_arm_instruction(session_id)
+    from nexus.channel_launch import channel_launch_state  # noqa: PLC0415 — deferred: one ps read, this path only
+
+    # RDR-233: only a definite "no flag" switches to the channel-free wording;
+    # "cannot tell" (None) keeps the channel wording this line always had.
+    return mailbox_arm_instruction(session_id, channel=channel_launch_state() is not False)

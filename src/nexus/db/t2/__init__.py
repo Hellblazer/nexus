@@ -808,7 +808,12 @@ class T2Database:
         )
         return swept
 
-    def complete_aspect(self, record_fields: dict[str, Any]) -> bool:
+    def complete_aspect(
+        self,
+        record_fields: dict[str, Any],
+        claim_id: str | None = None,
+        claimant: str | None = None,
+    ) -> bool:
         """Persist an extracted aspect and clear its queue row in one call.
 
         nexus-zir76 (RDR-128 follow-up): the aspect worker previously
@@ -839,10 +844,41 @@ class T2Database:
         an orphaned queue row under OLD). The ``mark_done`` call
         re-acquires RENAME_LOCK via the now-guarded mutator; the RLock
         makes the re-entrant acquisition safe.
+
+        RDR-235 (bead nexus-5r2sc.3.1): the optional *claim_id* and
+        *claimant* are the tuple-queue era's persist call. They are plain
+        ``str | None`` keywords because the daemon wire passes JSON-shaped
+        values. Given together: the upsert goes through the engine's claim
+        fence (``POST /v1/aspects/upsert`` with the pair), and then
+        ``self.tuples.ack(claim_id, claimant)`` consumes the task, in place
+        of ``aspect_queue.mark_done``; the whole call stays under the one
+        ``RENAME_LOCK``. A lapsed claim at the fence raises
+        :class:`~nexus.db.t2.http_tuple_store.ClaimNotFoundError` (404) or
+        ``ClaimOwnershipError`` / ``ClaimTaskMismatchError`` (403) with
+        nothing written, nothing acked and the table untouched; the caller
+        drops the result and does not retry. A lapse between the write and
+        the ack leaves the row written and the ack raises
+        ``ClaimNotFoundError``; the next claim of the task overwrites the
+        same row. A retired collection name raises
+        :class:`~nexus.collection_errors.SupersededCollectionWriteError`
+        with the claim still live. Given one of the two: ``ValueError``.
+        Given neither: today's path, unchanged.
         """
         from nexus.db.t2.records import AspectRecord  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
+        if (claim_id is None) != (claimant is None):
+            raise ValueError("complete_aspect: claim_id and claimant must be given together")
         record = AspectRecord(**record_fields)
         with self.RENAME_LOCK:
-            upserted = self.document_aspects.upsert(record)
-            self.aspect_queue.mark_done(record.collection, record.source_path)
+            if claim_id is None:
+                upserted = self.document_aspects.upsert(record)
+                self.aspect_queue.mark_done(record.collection, record.source_path)
+            else:
+                # RDR-235: the task is a tuple, so the write is fenced on the
+                # live claim (a 403/404 raises the typed error here, before
+                # the ack: no ack, no retry, no table touch) and the claim is
+                # consumed with the tuple ack instead of the table's mark_done.
+                upserted = self.document_aspects.upsert(
+                    record, claim_id=claim_id, claimant=claimant,
+                )
+                self.tuples.ack(claim_id, claimant)
         return upserted

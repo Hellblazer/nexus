@@ -1,5 +1,32 @@
 # Changelog
 
+## [7.90.0] - 2026-10-31
+
+Plugin version aligned with conexus 7.90.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `sn/hooks/scripts/subagent_start.py` (nexus-j6un5.5): drops the Serena and Context7 sections for a conexus agent whose frontmatter denies that server.
+- `conexus/skills/architecture/SKILL.md` (nexus-j6un5.5): Serena symbol discovery is main-session work before the dispatch, since architect-planner denies the shared Serena.
+- `conexus/agents/architect-planner.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/code-review-expert.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/debugger.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/deep-analyst.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/developer.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/strategic-planner.md` (nexus-j6un5.5): frontmatter denies the shared Serena server and Context7, about 10K tokens off every dispatch's context.
+- `conexus/agents/substantive-critic.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/codebase-deep-analyzer.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5. Denies the shared Serena server and Context7 (nexus-j6un5.5).
+- `conexus/agents/deep-research-synthesizer.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5. Denies the shared Serena server (nexus-j6un5.5).
+- `conexus/agents/test-validator.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5. Denies the shared Serena server and Context7 (nexus-j6un5.5).
+- `conexus/commands/rdr-audit.md` (nexus-j6un5.6): the audit's dispatch step passes `model: "sonnet"` to deep-research-synthesizer, which now defaults to haiku.
+- `conexus/skills/codebase-analysis/SKILL.md` (nexus-j6un5.6): names haiku as codebase-deep-analyzer's model.
+- `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-j6un5.6): the classification dispatches deep-research-synthesizer with `model: "sonnet"` (header, step 5 and Agent Invocation), since the agent now defaults to haiku.
+- `conexus/skills/rdr-research/SKILL.md` (nexus-j6un5.6): names haiku as both agents' model.
+- `conexus/skills/research-synthesis/SKILL.md` (nexus-j6un5.6): haiku is the default; multi-source synthesis passes `model: "sonnet"`.
+- `conexus/skills/orchestration/SKILL.md` (nexus-j6un5.4): mechanical beads dispatch the developer with `model: "haiku"`, labelled `dev-model:haiku` or `dev-model:sonnet` for the comparison; a failed Haiku round is re-dispatched on Sonnet. The debugger note says conexus agents have no shared Serena, so symbol tracing happens in the main session (nexus-j6un5.5).
+- `conexus/commands/setup.md` (nexus-tr1rj.18): the setup command's install-size rows and slim line carry the figures re-measured on 7.89.0, whose PDF support is MinerU and torch alone (Local about 0.8 GB down, 2.6 to 2.9 GB on disk; Cloud and CLI only about 0.5 GB down, 1.9 to 2.2 GB on disk; PDF support 0.27 GB down on macOS, 0.37 GB on Linux). Deferred because the same bead changes user-facing strings in `src/`.
+- `conexus/launch/nx_standin.py` (nexus-tr1rj.18): the stand-in's size rows and slim description carry the same re-measured figures as the real server's `src/nexus/mcp/setup_tools.py`. Deferred because the same bead changes user-facing strings in `src/`.
+- `conexus/launch/nx_setup.py` (nexus-b0y6w): the setup credentials page listens with a backlog of twice its connection cap (a full backlog is a suspected, not reproduced, contributor to a Windows CI flake). Deferred because the same bead changes `src/` and `service/`.
+- `conexus/skills/mailbox/SKILL.md` (nexus-7hzb2, RDR-233): a session launched without the channel flag runs `nx tuple wait` with `run_in_background` and re-runs it only when its output says to; the no-poll-loop rule now covers a loop of the session's own beside the channel, the drain hook and this verb; names `--force` for a flagged session whose channel never registers and the `Bash(nx tuple wait:*)` allow rule. The verb and the SessionStart line that asks for it ship in the wheel, so this waits for the client release.
+
 ## [7.89.0] - 2026-10-29
 
 Plugin version aligned with conexus 7.89.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).

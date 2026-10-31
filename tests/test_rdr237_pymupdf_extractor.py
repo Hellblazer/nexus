@@ -282,6 +282,31 @@ def test_a_document_whose_every_page_pymupdf_cannot_read_is_not_told_to_be_ocred
     assert "repair or re-export" in message and "OCR the PDF first" not in message
 
 
+def test_a_document_mixing_unreadable_and_image_only_pages_names_both_causes(
+    stack_absent, tmp_path, monkeypatch,
+) -> None:
+    """Page 2 raises in PyMuPDF and pages 1, 3 and 4 are real image-only pages: neither "OCR it" nor
+    "repair it" alone is true of the document, so the message names both causes with their page counts."""
+    pdf = _make_pdf(tmp_path / "mixed.pdf", [None, _P1, None, None])
+    real = pdfx._pymupdf_page_text
+
+    def second_page_raises(page):
+        if page.number == 1:
+            raise RuntimeError("bad xref on page 2")
+        return real(page)
+
+    monkeypatch.setattr(pdfx, "_pymupdf_page_text", second_page_raises)
+
+    with pytest.raises(UnextractableContentError) as err:
+        PDFExtractor().extract(pdf, extractor="pymupdf")
+
+    message = str(err.value)
+    assert "every page of mixed.pdf is unextracted" in message
+    assert "PyMuPDF could not read 1 page(s)" in message and "bad xref on page 2" in message
+    assert "repair or re-export" in message
+    assert "3 page(s) are image-only" in message and "OCR the PDF first" in message
+
+
 def test_a_password_protected_pdf_says_so_and_is_not_told_to_be_ocred(stack_absent, tmp_path) -> None:
     plain = _make_pdf(tmp_path / "plain.pdf", [_P1])
     locked = tmp_path / "locked.pdf"
@@ -345,14 +370,16 @@ def test_the_quality_gate_remedy_fits_the_extractor_that_produced_the_text(metho
 
 
 _STACK_BLOCKER = """
-import importlib.abc, sys
+import importlib.abc, json, sys
 
 BLOCKED = ("mineru", "torch", "torchvision", "pdftext")
+ATTEMPTS = []  # every refused import, whether or not the importer caught the ImportError
 
 
 class _Block(importlib.abc.MetaPathFinder):
     def find_spec(self, name, path=None, target=None):
         if name.split(".")[0] in BLOCKED:
+            ATTEMPTS.append(name)
             raise ImportError("BLOCKED stack import: " + name)
         return None
 
@@ -361,12 +388,20 @@ sys.meta_path.insert(0, _Block())
 if sys.argv[1] == "--import":
     __import__(sys.argv[2])
     sys.exit(0)
+if sys.argv[1] == "--guarded-import":
+    try:
+        __import__(sys.argv[2])
+    except ImportError:
+        pass
+    print("ATTEMPTS=" + json.dumps(ATTEMPTS))
+    sys.exit(0)
 from pathlib import Path
 
 from nexus.pdf_extractor import PDFExtractor
 
 result = PDFExtractor().extract(Path(sys.argv[1]), extractor="pymupdf")
 print("METHOD=" + result.metadata["extraction_method"] + " PAGES=" + str(result.metadata["page_count"]))
+print("ATTEMPTS=" + json.dumps(ATTEMPTS))
 """
 
 
@@ -406,6 +441,17 @@ def test_the_pymupdf_path_imports_none_of_the_pdf_stack_even_where_it_is_install
 
     assert code == 0, err[-2000:]
     assert "METHOD=pymupdf PAGES=3" in out
+    assert "ATTEMPTS=[]" in out, (
+        "the finder records every refused import, so one wrapped in try/except ImportError shows here too: " + out
+    )
+
+
+def test_the_attempt_record_sees_a_stack_import_the_importer_swallowed(tmp_path) -> None:
+    """The control for the record: a guarded ``import torch`` leaves the process healthy (exit 0) and is
+    visible only in the attempt list, which is what the test above asserts is empty."""
+    code, out, err = _run_blocked(tmp_path, "--guarded-import", "torch")
+    assert code == 0, err[-2000:]
+    assert 'ATTEMPTS=["torch"]' in out
 
 
 @pytest.mark.parametrize("module", ["mineru", "torch", "torchvision", "pdftext"])
@@ -931,7 +977,6 @@ def _repo_doubles(config: dict):
     mocks: dict[str, MagicMock] = {}
     patches = {
         "nexus.frecency.batch_frecency": {"return_value": {}},
-        "nexus.indexer._git_metadata": {"return_value": {}},
         "nexus.config.load_config": {"return_value": config},
         "nexus.config.get_credential": {"return_value": "fake-key"},
         "nexus.mcp_infra.get_t3": {"return_value": db},
@@ -1333,7 +1378,7 @@ def test_the_repo_pdf_indexer_hands_its_extractor_to_the_chunker(tmp_path, monke
     pdf.write_bytes(b"%PDF-1.4 x")
 
     indexer._index_pdf_file(
-        pdf, tmp_path, "docs__c__m__v1", "m", MagicMock(), MagicMock(), "k", {}, "now", 1.0,
+        pdf, tmp_path, "docs__c__m__v1", "m", MagicMock(), MagicMock(), "k", "now", 1.0,
         force=True, extractor="pymupdf",
     )
     assert [kw["extractor"] for kw in seen] == ["pymupdf"]

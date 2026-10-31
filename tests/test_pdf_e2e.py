@@ -20,7 +20,7 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 
 from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import index_pdf
-from nexus.indexer import _git_metadata, _index_pdf_file
+from nexus.indexer import _index_pdf_file
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -215,7 +215,6 @@ class TestIndexPdfFileE2E:
         collection_name = "docs__pdf-e2e-git__voyage-context-3__v1"
         model = index_model_for_collection(collection_name)
         col = local_t3.get_or_create_collection(collection_name)
-        git_meta = _git_metadata(pdf_git_repo_e2e)
         now_iso = datetime.now(UTC).isoformat()
 
         # nexus-sghyo: nexus.indexer._index_pdf_file's embed_fn shape is
@@ -230,7 +229,6 @@ class TestIndexPdfFileE2E:
             col=col,
             db=local_t3,
             voyage_key="vk_test",
-            git_meta=git_meta,
             now_iso=now_iso,
             score=0.5,
             embed_fn=lambda texts: _local_embed(texts, model)[0],

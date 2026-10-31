@@ -1368,6 +1368,21 @@
           },
           "claimant": {
             "type": "string"
+          },
+          "dead": {
+            "default": false,
+            "type": "boolean"
+          },
+          "retry_after_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -1394,6 +1409,17 @@
             ],
             "default": null
           },
+          "delay_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "dims": {
             "anyOf": [
               {
@@ -1413,6 +1439,17 @@
               "type": "string"
             },
             "type": "object"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "nonce": {
             "anyOf": [

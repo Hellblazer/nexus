@@ -64,6 +64,15 @@ ARMS: Final[tuple[Arm, ...]] = (
     Arm("haiku", "haiku", "haiku"),
 )
 
+#: Every arm ``--arms`` can name. The pinned 5.5 arms (nexus-j6un5.2) name a
+#: full model id and a version-exact family, so a dispatch the CLI resolves
+#: to another generation counts as a family violation, not as data.
+ARMS_BY_NAME: Final[dict[str, Arm]] = {
+    **{a.name: a for a in ARMS},
+    "sonnet-5-5": Arm("sonnet-5-5", "claude-sonnet-5-5", "sonnet-5-5"),
+    "haiku-5-5": Arm("haiku-5-5", "claude-haiku-5-5", "haiku-5-5"),
+}
+
 
 class BudgetExceeded(RuntimeError):
     pass
@@ -74,10 +83,12 @@ def guard_budget(*, spent: float) -> None:
         raise BudgetExceeded(f"cumulative spend {spent:.4f} USD reached the ceiling {BUDGET_CEILING_USD}")
 
 
-def dispatch_order(operators: list[str], *, n: int) -> list[tuple[str, int, str]]:
+def dispatch_order(
+    operators: list[str], *, n: int, arms: tuple[Arm, ...] = ARMS,
+) -> list[tuple[str, int, str]]:
     """(operator, round, arm) in pre-registered order: per operator, per
     round, arms interleaved."""
-    return [(op, i, arm.name) for op in operators for i in range(n) for arm in ARMS]
+    return [(op, i, arm.name) for op in operators for i in range(n) for arm in arms]
 
 
 def within_arm_pairs(n: int) -> list[tuple[int, int]]:
@@ -146,9 +157,12 @@ async def _dispatch_one(operator: str, arm: Arm, *, timeout: float) -> dict[str,
     }
 
 
-def analyze(records: list[dict[str, Any]]) -> dict[str, Any]:
+def analyze(records: list[dict[str, Any]], *, reference: str = "fable") -> dict[str, Any]:
     """Pure: per operator x arm cost summary, within-arm noise, cross-arm
-    agreement, and the pre-registered verdict."""
+    agreement, and the pre-registered verdict, every arm judged against
+    *reference*. The default keeps the nexus-ztunv keys (``fable_void``,
+    ``cost_ratio_vs_fable``); another reference writes ``reference_void``
+    and ``cost_ratio_vs_<reference>``."""
     out: dict[str, Any] = {"operators": {}, "total_cost_usd": 0.0, "n_dispatches": len(records)}
     costs_known = [r["cost_usd"] for r in records if r.get("cost_usd") is not None]
     out["total_cost_usd"] = sum(costs_known)
@@ -176,45 +190,48 @@ def analyze(records: list[dict[str, Any]]) -> dict[str, Any]:
                     for i, j in within_arm_pairs(len(outputs[a]))
                 ]),
             }
-        fable_cost = entry["arms"].get("fable", {}).get("cost", {}).get("mean")
+        ref_cost = entry["arms"].get(reference, {}).get("cost", {}).get("mean")
         for a in entry["arms"]:
             c = entry["arms"][a]["cost"]["mean"]
-            entry["arms"][a]["cost_ratio_vs_fable"] = (
-                c / fable_cost if (c is not None and fable_cost) else None
+            entry["arms"][a][f"cost_ratio_vs_{reference}"] = (
+                c / ref_cost if (c is not None and ref_cost) else None
             )
         for a, b in itertools.combinations(sorted(arms), 2):
             entry["cross"][f"{a}_vs_{b}"] = summarize_scores([
                 score(op, outputs[a][i], outputs[b][j])
                 for i, j in cross_arm_pairs(len(outputs[a]), len(outputs[b]))
             ])
-        fable_noise_min = entry["arms"].get("fable", {}).get("noise", {}).get("min")
-        fable_arm = entry["arms"].get("fable")
-        fable_void = fable_arm is None or fable_arm["family_violations"] > 0
-        entry["fable_void"] = fable_void
+        ref_noise_min = entry["arms"].get(reference, {}).get("noise", {}).get("min")
+        ref_arm = entry["arms"].get(reference)
+        ref_void = ref_arm is None or ref_arm["family_violations"] > 0
+        entry["fable_void" if reference == "fable" else "reference_void"] = ref_void
         for a in arms:
-            if a == "fable":
+            if a == reference:
                 continue
-            key = "_vs_".join(sorted(["fable", a]))
+            key = "_vs_".join(sorted([reference, a]))
             entry["verdicts"][a] = arm_verdict(
                 min_vs_fable=entry["cross"].get(key, {}).get("min"),
                 threshold=threshold,
                 failures=entry["arms"][a]["failures"] + entry["arms"][a]["family_violations"],
-                fable_noise_min=fable_noise_min,
-                fable_void=fable_void,
+                fable_noise_min=ref_noise_min,
+                fable_void=ref_void,
             )
         out["operators"][op] = entry
     return out
 
 
-async def run(operators: list[str], *, n: int, out_path: _Path, timeout: float) -> dict[str, Any]:
+async def run(
+    operators: list[str], *, n: int, out_path: _Path, timeout: float,
+    arms: tuple[Arm, ...] = ARMS, reference: str = "fable",
+) -> dict[str, Any]:
     state: dict[str, Any] = (
         json.loads(out_path.read_text()) if out_path.exists()
         else {"started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "records": []}
     )
     records: list[dict[str, Any]] = state["records"]
     done = {(r["operator"], r["round"], r["arm"]) for r in records}
-    arms_by_name = {a.name: a for a in ARMS}
-    for op, i, arm_name in dispatch_order(operators, n=n):
+    arms_by_name = {a.name: a for a in arms}
+    for op, i, arm_name in dispatch_order(operators, n=n, arms=arms):
         if (op, i, arm_name) in done:
             continue
         spent = sum(r["cost_usd"] for r in records if r.get("cost_usd") is not None)
@@ -226,11 +243,11 @@ async def run(operators: list[str], *, n: int, out_path: _Path, timeout: float) 
             f"[{op}/{arm_name}][{i}] cost={rec['cost_usd']} model={rec['canonical_model']} "
             f"elapsed={rec['elapsed_s']:.1f}s error={rec['error']} spent={spent + (rec['cost_usd'] or 0):.2f}"
         )
-        state["analysis"] = analyze(records)
+        state["analysis"] = analyze(records, reference=reference)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(state, indent=2, default=str))
     state["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    state["analysis"] = analyze(records)
+    state["analysis"] = analyze(records, reference=reference)
     out_path.write_text(json.dumps(state, indent=2, default=str))
     return state
 
@@ -241,13 +258,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--n", type=int, default=N_PER_ARM_DEFAULT)
     p.add_argument("--out", type=_Path, default=DEFAULT_OUT)
     p.add_argument("--timeout", type=float, default=120.0)
+    p.add_argument("--arms", default=",".join(a.name for a in ARMS),
+                   help=f"comma-separated, from {sorted(ARMS_BY_NAME)}")
+    p.add_argument("--reference", default="fable",
+                   help="the arm every other arm is judged against; must be in --arms")
     args = p.parse_args(argv)
+    arm_names = [a for a in args.arms.split(",") if a]
+    bad = [a for a in arm_names if a not in ARMS_BY_NAME]
+    if bad:
+        p.error(f"unknown arms {bad}; known: {sorted(ARMS_BY_NAME)}")
+    if args.reference not in arm_names:
+        p.error(f"--reference {args.reference!r} is not in --arms {arm_names}")
+    arms = tuple(ARMS_BY_NAME[a] for a in arm_names)
     ops = [o for o in args.operators.split(",") if o]
     unknown = [o for o in ops if o not in BUILDERS]
     if unknown:
         p.error(f"unknown operators {unknown}; known: {sorted(BUILDERS)}")
     try:
-        state = asyncio.run(run(ops, n=args.n, out_path=args.out, timeout=args.timeout))
+        state = asyncio.run(run(ops, n=args.n, out_path=args.out, timeout=args.timeout,
+                                arms=arms, reference=args.reference))
     except BudgetExceeded as exc:
         print(f"ABORTED: {exc}")
         return 2
@@ -257,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     for op, e in a["operators"].items():
         print(f"{op} (thr {e['threshold']}):")
         for arm, s in e["arms"].items():
-            print(f"  {arm:6} cost mean {s['cost']['mean']} x{s['cost_ratio_vs_fable']} "
+            print(f"  {arm:6} cost mean {s['cost']['mean']} x{s[f'cost_ratio_vs_{args.reference}']} "
                   f"noise min {s['noise']['min']} fails {s['failures']} models {s['canonical_models']}")
         for k, s in e["cross"].items():
             print(f"  {k}: mean {s['mean']} min {s['min']}")

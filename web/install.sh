@@ -56,7 +56,7 @@ main() {
 	                   as --yes.
 	  --no-autostart   With --local: do not start the service at login. Passed to
 	                   `nx init` as --no-autostart.
-	  --slim           Leave PDF support out: the download falls to about 0.25 GB for the
+	  --slim           Leave PDF support out: the download falls to about 0.2 GB (0.25 GB on Linux) for the
 	                   command-line tool (about 0.55 GB with --local). The first PDF you
 	                   index then fetches it (`nx self install --extras pdf` does it
 	                   ahead of time).
@@ -68,8 +68,8 @@ main() {
 	and says so. By default the build installs everything, PDF support included
 	(MinerU and torch): it downloads about 0.5 GB on macOS and 0.6 GB on Linux
 	for the command-line tool, and the service adds the rest of the --local figure. The
-	sizes were measured on 7.86.0 on macOS and Linux (2026-10-25); Windows was not measured.
-	Disk use is about 2.0 to 2.3 GB for the command-line tool and 2.8 to 3.0 GB with --local.
+	sizes were measured on 7.89.0 on macOS and Linux (2026-10-29); Windows was not measured.
+	Disk use is about 1.9 to 2.2 GB for the command-line tool and 2.6 to 2.9 GB with --local.
 	None of them is a promise.
 
 	Platforms: Apple Silicon Mac on macOS 14 or later, Linux on x86-64 or arm64. An Intel

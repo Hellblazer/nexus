@@ -42,6 +42,7 @@ def scope(monkeypatch):
     )
     monkeypatch.setattr(store_cmd, "_t3", lambda **_: t3)
     monkeypatch.setattr(store_cmd, "_split_note_text", lambda *a, **k: None)  # no catalog: an unsplit note
+    monkeypatch.setattr("nexus.catalog.store_hook.live_owner_entries", lambda *a, **k: {})  # nexus-6pfgb.13: no catalog read (the one owner lookup of the display)  # nor tags (nexus-6pfgb.38)
     return t3, ids
 
 

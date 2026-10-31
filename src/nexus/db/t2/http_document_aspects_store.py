@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 import structlog
@@ -44,6 +44,56 @@ DEFAULT_TENANT: str = "default"
 # instance. See ``nx memory get -p nexus -t design-bikit-refreshable-http-store-mixin.md``.
 from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+from nexus.db.t2.http_tuple_store import _raise_typed
+
+
+class AspectUpsertBadRequestError(RuntimeError):
+    """A claim-fenced ``POST /v1/aspects/upsert`` was answered 400 (RDR-235 E5).
+
+    The engine refuses a malformed request before it opens a transaction:
+    one of ``claim_id`` / ``claimant`` without the other, a blank value, a
+    missing required field, a blank ``doc_id``. Nothing was written and the
+    claim is untouched. DELIBERATELY NOT a ``TupleError``: those are the
+    claim's own refusals (the lapsed-claim family a worker drops on), and a
+    400 is a caller bug a worker must not treat as a lapsed claim. Carries
+    the engine's ``error`` text."""
+
+
+class AspectUpsertConflictError(RuntimeError):
+    """A claim-fenced ``POST /v1/aspects/upsert`` was answered 409 for an
+    integrity conflict (the engine's class-23 typed-DB ladder, RDR-235 E5).
+
+    Nothing was written, the claim is untouched and still live. NOT the
+    409 a retired collection name gets: that one stays
+    :class:`~nexus.collection_errors.SupersededCollectionWriteError`, raised
+    by the HTTP layer before this module sees it, because the worker answers
+    it differently (it ``release``s the still-live claim). Not a
+    ``TupleError`` either."""
+
+
+def _raise_fenced_refusal(exc: httpx.HTTPStatusError) -> NoReturn:
+    """Re-raise a claim-fenced upsert's HTTP refusal as its own typed error.
+
+    403 and 404 carry the tuple space's own error codes and become the
+    ``TupleError`` family the worker already branches on
+    (``ClaimNotFoundError``, ``ClaimOwnershipError``,
+    ``ClaimTaskMismatchError``); a code this client has no class for
+    re-raises the bare ``HTTPStatusError`` unchanged. 400 and the integrity
+    409 get the two classes above. Anything else is re-raised as it came.
+    """
+    status = exc.response.status_code
+    if status in (403, 404):
+        _raise_typed(exc)
+    try:
+        body = exc.response.json()
+        detail = body.get("error") if isinstance(body, dict) else None
+    except Exception:  # noqa: BLE001 — boundary catch: an unreadable body still gets the typed class
+        detail = None
+    if status == 400:
+        raise AspectUpsertBadRequestError(detail or "HTTP 400") from exc
+    if status == 409:
+        raise AspectUpsertConflictError(detail or "HTTP 409") from exc
+    raise exc
 
 
 def _record_to_body(record: AspectRecord) -> dict[str, Any]:
@@ -172,12 +222,37 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     # ── Public API — mirrors DocumentAspects ──────────────────────────────────
 
-    def upsert(self, record: AspectRecord) -> bool:
+    def upsert(
+        self,
+        record: AspectRecord,
+        *,
+        claim_id: str | None = None,
+        claimant: str | None = None,
+    ) -> bool:
         """Persist *record* — complete overwrite if the key already exists.
 
         Returns True when the row was written; False when rejected by the
         confidence gate (confidence < 0.3).
+
+        RDR-235 E5 (bead nexus-5r2sc.3.1): with *claim_id* and *claimant*
+        (both or neither; one alone is a ``ValueError`` before any request)
+        the engine fences the write on the live tuple claim, in the upsert's
+        own transaction. The pair is sent only when given, so a request
+        without it is byte-identical to the unfenced one. The engine's
+        refusals then surface typed: :class:`ClaimNotFoundError` (404, the
+        claim lapsed), :class:`ClaimOwnershipError` and
+        :class:`ClaimTaskMismatchError` (403), :class:`AspectUpsertBadRequestError`
+        (400) and :class:`AspectUpsertConflictError` (409 integrity). A
+        retired collection name is still
+        :class:`~nexus.collection_errors.SupersededCollectionWriteError`.
+        None of them is retried here, and none leaves a row written. Only
+        the fenced call translates; an unfenced refusal is the bare
+        ``httpx.HTTPStatusError`` it always was.
         """
+        if (claim_id is None) != (claimant is None) or (
+            claim_id is not None and not (claim_id and claimant)
+        ):
+            raise ValueError("claim_id and claimant must be given together, both non-empty")
         if not record.extracted_at:
             raise ValueError("extracted_at must not be empty")
         if not record.model_version:
@@ -201,11 +276,20 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         # registered-but-chunkless row between registration and this
         # write.
         from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
-        r = write_with_registration_retry(
-            record.collection,
-            lambda: self._post("/upsert", _record_to_body(record)),
-            registrar=self._catalog_registrar,
-        )
+        body = _record_to_body(record)
+        if claim_id is not None:
+            body["claim_id"] = claim_id
+            body["claimant"] = claimant
+        try:
+            r = write_with_registration_retry(
+                record.collection,
+                lambda: self._post("/upsert", body),
+                registrar=self._catalog_registrar,
+            )
+        except httpx.HTTPStatusError as exc:
+            if claim_id is None:
+                raise
+            _raise_fenced_refusal(exc)
         return bool(r.get("written", False))
 
     def get(self, collection: str, source_path: str) -> AspectRecord | None:

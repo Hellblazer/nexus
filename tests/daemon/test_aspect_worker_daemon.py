@@ -308,3 +308,64 @@ def test_live_heartbeat_loop_detects_fencing(tmp_path) -> None:
     finally:
         d1.stop()
         d2.stop()
+
+
+# ── RDR-235 (nexus-5r2sc.3.3): the stop sweep releases tuple claims ──────────
+
+
+class _ClaimHoldingWorker(_FakeWorker):
+    """A worker that holds tuple claims: ``release_held_claims`` is the hook the
+    daemon's stop sweep calls after the worker has stopped."""
+
+    def __init__(self, held: int = 3) -> None:
+        super().__init__()
+        self.held = held
+        self.order: list[str] = []
+
+    def stop(self, timeout: float = 10.0) -> None:
+        super().stop(timeout)
+        self.order.append("stop")
+
+    def release_held_claims(self) -> int:
+        self.order.append("release")
+        released, self.held = self.held, 0
+        return released
+
+
+def test_stop_releases_held_tuple_claims_after_the_worker_stopped(tmp_path: Path) -> None:
+    worker = _ClaimHoldingWorker(held=3)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
+    d.start()
+    d.stop()
+    assert worker.order == ["stop", "release"], "release runs once, after stop, so claims in flight are the worker's last"
+    assert worker.held == 0
+
+
+def test_a_fenced_daemon_still_releases_its_own_claims(tmp_path: Path) -> None:
+    """The table sweep is skipped when fenced (the successor owns the scope);
+    a tuple claim is held under THIS process's claimant strings, so releasing it
+    can never touch the successor's work."""
+    worker = _ClaimHoldingWorker(held=2)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
+    d.start()
+    d._supervisor.fenced = True  # a newer owner won the scope
+    d.stop()
+    assert worker.order == ["stop", "release"]
+
+
+def test_a_release_that_raises_does_not_block_the_rest_of_the_stop(tmp_path: Path) -> None:
+    class _Raising(_ClaimHoldingWorker):
+        def release_held_claims(self) -> int:
+            raise RuntimeError("engine down")
+
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_Raising, queue_factory=_NoopQueue)
+    d.start()
+    d.stop()
+    assert _registry(tmp_path).discover("tenant-A") is None, "the lease was still relinquished"
+
+
+def test_a_worker_fake_without_the_hook_stops_as_before(tmp_path: Path) -> None:
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker, queue_factory=_NoopQueue)
+    d.start()
+    d.stop()
+    assert _registry(tmp_path).discover("tenant-A") is None

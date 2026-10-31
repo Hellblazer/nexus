@@ -1052,12 +1052,12 @@ _MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("doc_indexer.py", "index_pdf", "small-path enrichment dropped ahead of the stamp",
      "        _register_in_catalog(metadatas_list, len(metadatas_list))\n", ""),
     ("doc_indexer.py", "index_markdown", "markdown stamp dropped from the metadata branch",
-     "            _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri)\n            _stamp_last()\n",
-     "            _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri)\n"),
+     "            _catalog_markdown_hook(\n                md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri,\n                extraction_source=extraction_source,\n            )\n            _stamp_last()\n",
+     "            _catalog_markdown_hook(\n                md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri,\n                extraction_source=extraction_source,\n            )\n"),
     ("doc_indexer.py", "index_markdown", "markdown hands over no pending stamp", "pending_stamp=_stamps,", ""),
     ("doc_indexer.py", "index_markdown", "markdown stamps ahead of its enrichment",
-     "                _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri)\n                _stamp_last()\n",
-     "                _stamp_last()\n                _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri)\n"),
+     "                _catalog_markdown_hook(\n                    md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri,\n                    extraction_source=extraction_source,\n                )\n                _stamp_last()\n",
+     "                _stamp_last()\n                _catalog_markdown_hook(\n                    md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri,\n                    extraction_source=extraction_source,\n                )\n"),
     # the three oversize fallbacks
     ("code_indexer.py", "index_code_file", "oversize code: defer dropped", "force_re_embed=ctx.force_re_embed, defer_completion=True,", "force_re_embed=ctx.force_re_embed,"),
     ("code_indexer.py", "index_code_file", "oversize code: stamp deleted", "complete_oversize_write(_pending)", "pass"),
@@ -1075,7 +1075,9 @@ _MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "fire_note_chains(outcome, content, hooks=_hooks)", "outcome = stamp_note(outcome)\n        fire_note_chains(outcome, content, hooks=_hooks)"),
     # the .nxexp import
     ("exporter.py", "_ensure", "import writer built without the deferral", "defer_completion=True,", ""),
-    ("exporter.py", "flush", "import stamps deleted", "stamped = writer.complete_documents(result.landed)", "stamped = None"),
+    # nexus-6pfgb.45: the page's landed documents pass through _stamp_note_keys first, so the
+    # completion call reads ``ready``; the mutation still deletes the stamp.
+    ("exporter.py", "flush", "import stamps deleted", "stamped = writer.complete_documents(ready)", "stamped = None"),
     # the ChunkBatcher flush
     ("chunk_batcher.py", "_flush_batch", "flush stamp deleted", "self._on_batch_stamp(", "(lambda *a: None)("),
 )

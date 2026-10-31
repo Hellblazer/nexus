@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from tests._child_process import NEVER_ALIVE_PID
 from tests._module_seam import patch_in, patch_time
 
 
@@ -79,7 +80,8 @@ class TestMineruStart:
 
     def test_start_health_timeout(self, runner, pid_file):
         import httpx
-        proc = MagicMock(); proc.pid = 99; proc.poll.return_value = None
+        # The start's health-timeout path SIGTERMs proc.pid for real: no live process may own it.
+        proc = MagicMock(); proc.pid = NEVER_ALIVE_PID; proc.poll.return_value = None
         with patch_in(("nexus.commands.mineru", "nexus._mineru_spawn"), "subprocess.Popen", return_value=proc), \
              patch("nexus.commands.mineru.httpx.get", side_effect=httpx.ConnectError("refused")), \
              patch_time("nexus.commands.mineru", "sleep"), \

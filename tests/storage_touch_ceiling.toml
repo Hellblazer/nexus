@@ -40,8 +40,9 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4945
+provisioned_tests = 4961
 tolerance_tests = 0
+# 4962 -> 4961 (nexus-ru672, 2026-10-30): tests/test_pdf_subsystem.py::test_no_git_repo_empty_git_fields deleted (tautological after the git_* writer removal; reduce-only ceiling lowered in the commit that lowers the count)
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
 # row of that run reads the session engine, so the test needs its tenant (t2_tenant). CI 39698506258 (a0d079992)
@@ -63,6 +64,108 @@ tolerance_tests = 0
 # the integration marker in this commit, outside python_unit. tests/test_z0o2p17_promote_note_write.py's four
 # promote-TTL-cap cases (40000, 10**8, 2**31-1, 10**12) are folded into one test; the module marks every test
 # t2_tenant because each promote writes a real note through put_note, so that one test needs its tenant.
+# 4945 -> 4982 (nexus-5r2sc.3, 2026-10-29, under Sam's 2026-10-25 ruling): the RDR-235 client half adds 37 tests that need
+# the real engine, down from 85 by making the mock-transport and pure-function cases tenant-free and folding
+# near-duplicates into scenarios. Tenant-free now: the nine claim-fence upsert cases in tests/db/test_http_aspects_stores.py
+# (the collection registration that reads the real catalog is stubbed), the flag parsing and the blank-doc_id refusal in
+# the producer file, the nonce-less replace refusal in tests/test_mcp_tuple_tools.py, and the two failure-shape cases of
+# tuple_counts. Each remaining test fails with its code deleted. Per file (count added over merge base 2b7b12bfb):
+#   tests/test_http_aspect_queue_tuples_producer.py +10: table mode sends nothing (default and a typo), a CLI row and an MCP
+#     note are identity bodies, a re-enqueue and a re-batch replace by doc_id, the batch fan-out is bounded, bad rows are
+#     skipped, the tenant ceiling stops a batch and the single form raises, the enqueue hook logs the refusal, a retired
+#     name is refused before any out, a missing template is refused naming the release, a failed batch is a counted row.
+#   tests/test_aspect_worker_tuples.py +9: five slots claim five tasks (one-claimant control inside), the park cap and its
+#     refusal, a deleted document is dropped while a present one is extracted, one pass over four failure classes, renewal
+#     inside the deadline, a hung extraction past it, the 409 arms (release then bounded dead), an MCP note task, and the two
+#     queue alternations.
+#   tests/test_aspect_persist_claim_fence.py +5: persist with a claim (RENAME_LOCK probe inside), without one, the four fence
+#     refusals, a lapse between write and ack, the pair rule.
+#   tests/test_aspects_requeue_failed_tuples.py +5: list, dry-run and revive a dead task (an available one untouched), collection
+#     scope with limit, since-paging, a table failure beside a dead task, the queue-depth sum on the real engine.
+#   tests/test_5r2sc_aspect_flush_batch_failure_tripwire.py +2: the tuples-mode flush counts a refused batch, and its table-mode
+#     control, each through a real index_repository().
+#   tests/test_http_tuple_store_rdr235_transport.py +2 and tests/test_mcp_tuple_tools.py +2: out mode=replace outcomes, and
+#     one scenario each for delay_s, nack dead and retry_after_s against the engine.
+#   tests/test_http_aspect_queue_tuple_counts.py +1 (the three-way census), tests/test_aspect_drain_protocol.py +1 (the drain
+#     CLI against live, dead and failed rows).
+# 4982 -> 4988 (nexus-5r2sc.3.6 and .3.7, 2026-10-29, same ruling): the migration rung and the MVV.
+#   tests/upgrade/test_aspect_queue_migration_rung.py +4: list_waiting against pending, in_progress, backed-off and failed
+#     rows on the real engine; the move (an in_progress row, a 900 s backoff, a failed row and its pending sibling on one
+#     doc_id, a worker-held row) with a second run changing nothing; a crash between out and delete leaving one task.
+#   tests/test_rdr235_mvv_aspect_queue_tuples.py +2: the RDR-235 MVV journey (eight bullets, engine-clock timing) and
+#     scenario 24 (a second process's out wakes a parked worker); scenario 25 is slow-marked and runs by name.
+# 4988 -> 4996 (nexus-5r2sc.3.9 and .3.10, 2026-10-29, same ruling): the fix round after the review gate, +8 over merge base
+# 879830218. Each runs against the real engine because the defect was in what the engine's queue does with the verdict.
+#   tests/test_aspect_worker_tuples.py +6: a T3 get that raises a transport error, a T3 5xx and a manifest lookup that raises
+#     each keep the task (attempts 1, not dead), with the empty-read control still dropped (4); a persist 500 is a ladder
+#     retry and a 400 is still dead (2).
+#   tests/test_aspects_requeue_failed_tuples.py +2: requeue-failed with the flag at tuples deletes the failed table row by
+#     (collection, source_path), skips a blank doc_id row and leaves a pending sibling; the doctor goes green and a second
+#     run has nothing to do.
+# 4996 -> 4972 (nexus-9edxe, 2026-10-30, Sam's 2026-10-30 ask "keep going on the tenant consolidation"): round 2 over the
+# RDR-235 client-half tests, -24. Reduce-only. tests/test_aspect_worker_tuples.py, tests/test_aspect_worker.py and
+# tests/test_health_tuple_doctor_rows.py were not touched (their own round). Per file (count over merge base 2b7b12bfb,
+# before -> after):
+#   tests/test_http_aspect_queue_tuples_producer.py 10 -> 2: the table-mode, bounded fan-out, skipped-row, tenant-ceiling and
+#     missing-template cases now run over an httpx.MockTransport behind the real HttpTupleStore (the 429 and 404 are the
+#     engine's typed error bodies, so the client's own mapping is exercised) and mint no tenant. Two engine tests stay: the
+#     producer journey (identity bodies, replace by doc_id, a retired name, and the tuple_counts census moved in from
+#     test_http_aspect_queue_tuple_counts.py) and the two hook_failures writers. The recorded nonce mutation (doc_id +
+#     source_path) is now killed twice: by the journey's step 3 and by the mock fan-out test's nonce == doc_id check.
+#   tests/test_aspects_requeue_failed_tuples.py 7 -> 2: a dead-task journey (since paging, revive, collection scope, the queue
+#     depth, and the drain CLI's exit codes) and a failed-table-row journey (table mode, tuples mode, the blank-doc_id row).
+#     A step that needs an empty queue drains it; the mark_done mutation of requeue-failed is killed by step 3 of the second.
+#   tests/test_aspect_persist_claim_fence.py 5 -> 2: scenario 9's two halves in one test, the four refusals and the
+#     lapse-after-write in another; the pair rule runs against a stand-in that fails on any attribute read, with no tenant.
+#     The claim-branch mutation (mark_done for ack) still reds both engine tests.
+#   tests/upgrade/test_aspect_queue_migration_rung.py 4 -> 1: flag at table, list_waiting, the move and the crash rerun in one
+#     journey; the delete-by-doc_id mutation is killed by step 3's failed row and pending sibling on one doc_id.
+#   tests/test_5r2sc_aspect_flush_batch_failure_tripwire.py 2 -> 1: both modes through two real index_repository() runs.
+#   tests/test_http_tuple_store_rdr235_transport.py 2 -> 1 and tests/test_mcp_tuple_tools.py +2 -> +1: the replace outcome is
+#     the last branch of the delay/nack scenario in each.
+#   tests/test_aspect_drain_protocol.py +1 -> 0 and tests/test_http_aspect_queue_tuple_counts.py 1 -> 0: their engine tests
+#     are steps of the journeys above. tests/test_rdr235_mvv_aspect_queue_tuples.py stays 2 (the MVV journey and scenario 24).
+#   A fold hides its later steps behind an earlier failure; every assertion in a journey names its step.
+# 4972 -> 4960 (nexus-9edxe round 3, 2026-10-30, same ask): the worker-side tests, -12. Reduce-only. The branch total over
+# merge base 2b7b12bfb is now 15 (= 4960 - 4945): worker_tuples 3, producer 2, requeue-failed 2, persist fence 2, MVV 2, rung 1,
+# tripwire 1, transport 1, mcp tuple tools 1. tests/test_aspect_worker.py (29) and tests/test_health_tuple_doctor_rows.py
+# (2) mint the same number at 2b7b12bfb: they are base tests, not RDR-235 additions, and are left alone. Per file (count over
+# the merge base, before -> after):
+#   tests/test_aspect_worker_tuples.py 15 -> 3: three engine journeys. (1) claims and leases: scenario 6 (five slots, five
+#     tasks, the one-claimant F25 control), 15 (tasks in five collections, then an idle queue: exactly one parked in under the
+#     slot-0 claimant, no refusal over three rounds), 7a (renewed past a 2 s lease inside the deadline) and 7b (hung past a 1 s
+#     deadline, the lease lapses, the late result writes and acks nothing). (2) verdicts as queue states: gate S3 (four failure
+#     classes keyed on source path, the retryable two held back by the ladder) then scenario 16 on the queue S3 left (present,
+#     late and never-present documents, the delay proven by the engine's available_at stamp, not by an immediate re-claim).
+#     (3) task shapes and queue interplay: scenario 14 (an MCP note is a text-free identity task read through the manifest), the
+#     alternation (tuples mode drains table rows and tasks; table mode drains leftover tasks), scenario 10 (the 409 release arm,
+#     then the bounded dead arm; last, because it leaves a dead row).
+#   Tenant-free, in tests/test_aspect_worker.py (+7 test ids, 0 tenants): the T3 transport error, the T3 5xx, the raising
+#     manifest and the empty-read control run the REAL extractor and reader over a stub T3 and catalog behind the fake tuple queue
+#     (a parametrized test: four ids); the persist 500 and the 400 control (two ids); the park-cap refusal as a failed claim. The
+#     queue state those cases asserted on the engine (attempts 1, not dead, released) is the verdict the fake records (a nack
+#     with dead=False and retry_after_s, or an ack for the control); the engine's own ladder and dead states stay covered by S3,
+#     the 409 arms and tests/test_http_tuple_store_rdr235_transport.py. The engine-side park-cap case never made the engine
+#     refuse (it replaced HttpTupleStore.in_), so the fake is the same fault.
+#   Kills that survive (re-applied one at a time, red, restored byte for byte): infra_unavailable acked (journey 2 and the unit
+#     verdict map), transport acked as dropped (the unit ids t3-connect-error, t3-5xx, manifest-raises), 409 bound removed
+#     (journey 3), first-claim gone verdict dropped (journey 2), renewer ignoring the deadline and renewer loop body emptied
+#     (journey 1), one claimant for every slot and parking on every slot (journey 1), persist 5xx routed dead (unit id
+#     500-is-a-ladder-retry), park-cap refusal not reported failed, no table turn in tuples mode and table mode skipping tuple
+#     tasks (journey 3 and the unit loop tests). A fold hides its later steps behind an earlier failure; every assertion in a
+#     journey names its step. Left unfolded: nothing in the file; the MVV file is untouched.
+# 4960 -> 4961 (nexus-fx9k2, 2026-10-30, same ask): +1, the RDR-235 MVV's three seams in one engine journey,
+# tests/test_rdr235_mvv_seams.py::test_the_three_seams_the_mvv_approximated. It needs the real engine because each seam is a
+# fact about what the engine holds: a real index_repository() whose flush hook leaves four identity-body tasks (seam 1), the
+# real rdr-frontmatter-v1 extractor reading chunks through the catalog manifest into document_aspects rows (seam 2), and one
+# batch-of-5 pass that leaves two consumed, one nacked with the ladder's available_at stamp and one dead (seam 3), then a
+# second pass that consumes the retried one. Folded into one test, not three, so the ceiling rises by one. Fails with its code
+# deleted: manifest lookup stubbed to [] reds seam 2, retryable errors routed dead reds seam 3, a zero ladder interval reds the
+# available_at stamp. DDL-per-run ratchet untouched (no changeset).
+# 4961 -> 4962 (nexus-7hzb2, 2026-10-30): +1, RDR-233's `nx tuple wait` against a real engine. CI 41025078317
+# (83235a663) counted 4971 with its ten engine tests as separate tests; they are folded into one journey,
+# tests/test_tuple_wait.py::test_wait_against_a_real_engine, which runs all ten scenarios and reports each failure
+# by name. DDL-per-run ratchet untouched (no changeset).
 measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992), 39713947919 (da8c08fdc)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default

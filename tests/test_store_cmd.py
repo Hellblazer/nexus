@@ -142,8 +142,10 @@ def _stats(name: str, count: int) -> dict:
 
 
 def _search_result(content="chunk", **overrides):
+    # nexus-6pfgb.51: the display path is the catalog-resolved ``_display_path`` key the search
+    # page stamps; the row's ``source_path`` is no longer read by any formatter.
     base = {"id": "abc1", "content": content, "distance": 0.1,
-            "source_path": "./sec.md", "line_start": 1}
+            "_display_path": "./sec.md", "line_start": 1}
     base.update(overrides)
     return base
 
@@ -739,9 +741,9 @@ def test_search_path_filters_results_by_file_path(runner, mock_search, tmp_path)
     def fake_search(query, collection_names, n_results=10, where=None):
         return [
             _search_result(content="inside src", id="r1",
-                           source_path=str(src_dir / "file.py"), file_path=str(src_dir / "file.py")),
+                           _display_path=str(src_dir / "file.py")),
             _search_result(content="outside src", id="r2", distance=0.2,
-                           source_path=str(other_dir / "file.py"), file_path=str(other_dir / "file.py")),
+                           _display_path=str(other_dir / "file.py")),
         ]
 
     mock_search.search.side_effect = fake_search
@@ -1105,3 +1107,10 @@ def test_store_list_offers_a_next_page_only_after_a_full_page(runner):
         full = runner.invoke(main, ["store", "list", "-c", "knowledge__x__model-ctx__v1", "--limit", "1"])
     assert "Next page" not in short.output, short.output
     assert "Next page: --offset 1" in full.output, full.output
+
+
+@pytest.fixture(autouse=True)
+def _no_catalog_tags(monkeypatch):
+    """nexus-6pfgb.38: store list/get look a note's tags up in the catalog; these tests stub the T3 and
+    have no catalog, so the lookup is stubbed (tests/test_6pfgb38_tags_display.py covers it)."""
+    monkeypatch.setattr("nexus.catalog.store_hook.live_owner_entries", lambda *a, **k: {})  # nexus-6pfgb.13: no catalog read (the one owner lookup of the display)

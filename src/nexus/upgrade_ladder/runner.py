@@ -39,6 +39,8 @@ from enum import Enum
 
 import structlog
 
+from nexus.redact import redact_credentials
+
 from nexus.upgrade_ladder.completion import derive_ladder_position
 from nexus.upgrade_ladder.deadline import Deadline, bound
 from nexus.upgrade_ladder.protocol import CompletionLedger, ProgressReporter, Rung, RungStatus
@@ -116,13 +118,17 @@ def pending_rungs(registry: LadderRegistry) -> list[tuple[str, RungStatus]]:
         try:
             out.append((rung.name, rung.detect()))
         except Exception as exc:  # noqa: BLE001 — one broken rung must not blind the sweep, and must not read as converged
-            _log.warning("ladder_detect_failed", rung=rung.name, error=str(exc))
+            # A rung that reaches T3 can carry the engine's 401 body, which echoes the rejected
+            # credential; this text reaches the `nx doctor` row and the log, so it is redacted here,
+            # once, for every rung (develop red at 32c0a680f, test_fanout_floor_census_redacts_credentials).
+            error = redact_credentials(str(exc))
+            _log.warning("ladder_detect_failed", rung=rung.name, error=error)
             out.append((
                 rung.name,
                 RungStatus(
                     applicable=True,
                     converged=False,
-                    pending_detail=f"cannot determine state: {exc}",
+                    pending_detail=f"cannot determine state: {error}",
                 ),
             ))
     return out

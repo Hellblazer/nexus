@@ -61,6 +61,9 @@ class TestTheFlagsTheClientReadsAreTheOnesTheEngineSends:
         assert catalog.supports_manifest_row_limit() is True
         assert tel_store._supports_nx_answer_out_of_step_cost() is True
 
+    def test_the_node_walk_capability_reads_true_from_the_real_version(self, catalog):
+        assert catalog.supports_graph_node_walk() is True
+
 
 class TestGraphScopeFilter:
     def _fixture(self, cat):
@@ -107,6 +110,75 @@ class TestGraphScopeFilter:
         with pytest.raises(httpx.HTTPStatusError) as caught:
             catalog._post("/traverse", {"seeds": [seed], "scope_filter": {"collections": "rdr"}}, mutates=False)
         assert caught.value.response.status_code == 400
+
+
+class TestNodeWalkEqualsTheClientsOwnScoring:
+    """nexus-jypmj.18, the differential: the engine's ``node_walk`` for a scoped walk is what
+    ``traversal_policy._distance_and_role`` computes over the COMPLETE edge set, which is what the unfiltered walk of
+    the same graph returns (it is far under the 500-node cap). The Java tests pin hand-built cases and the unit tests
+    pin the client against a double that re-implements the rule; this is the one place the two real implementations
+    meet on the same graph."""
+
+    LINKS = [  # (from, to, type): S1, S2 seeds; R1, R2 out-of-scope relays; the rest in scope
+        ("S1", "R1", "implements"), ("R1", "A", "cites"), ("S1", "B", "relates"), ("S2", "B", "cites"),
+        ("S2", "R2", "relates"), ("R2", "C", "implements"), ("R2", "D", "relates"), ("C", "E", "cites"),
+        ("F", "S1", "implements"), ("A", "S1", "relates"), ("G", "R1", "cites"), ("S2", "H", "implements"),
+        ("S2", "H", "quotes"), ("D", "I", "supersedes"), ("R1", "I", "implements"), ("S1", "J", "relates"),
+    ]
+    TYPES = ["implements", "cites", "relates", "quotes", "supersedes"]
+
+    def _build(self, cat):
+        names = sorted({n for frm, to, _ in self.LINKS for n in (frm, to)})
+        tumbler = {
+            n: _register(cat, f"diff-{n}", CODE_COL if n.startswith("R") else RDR_COL, "code" if n.startswith("R") else "rdr")
+            for n in names
+        }
+        for frm, to, kind in self.LINKS:
+            cat._post("/link", {"from_tumbler": tumbler[frm], "to_tumbler": tumbler[to], "link_type": kind, "created_by": "it"})
+        return tumbler
+
+    @pytest.mark.parametrize("direction", ["out", "in", "both"])
+    def test_every_returned_node_carries_the_depth_and_role_the_client_computes_over_the_complete_edges(
+        self, catalog, direction,
+    ):
+        from nexus.plans.traversal_policy import _distance_and_role
+
+        t = self._build(catalog)
+        seeds = [t["S1"], t["S2"]]
+        full = catalog.graph_many(seeds, depth=3, direction=direction, link_types=self.TYPES)
+        scoped = catalog.graph_many(
+            seeds, depth=3, direction=direction, link_types=self.TYPES, scope_filter={"collections": [RDR_COL]},
+        )
+
+        assert len(full["nodes"]) < 100, "far under the engine's 500-node cap: the unfiltered edge set is complete"
+        assert "node_walk" not in full, "a walk without the predicate carries no node_walk"
+        dist, role = _distance_and_role(seeds, full["edges"], direction)
+        walk = scoped["node_walk"]
+        returned = {str(n.tumbler) for n in scoped["nodes"]}
+        assert returned == set(walk), "node_walk states every node it returned and no other"
+        in_scope = {str(n.tumbler) for n in full["nodes"] if n.physical_collection == RDR_COL}
+        assert returned == in_scope | set(seeds), "the predicate removed the relays and nothing else"
+
+        for node in sorted(returned):
+            assert walk[node]["depth"] == dist[node], (direction, node, walk[node], dist[node])
+            if node in seeds:
+                assert "role" not in walk[node]
+            else:
+                assert walk[node]["role"] == role[node], (direction, node, walk[node], role[node])
+
+        # Non-vacuity: scoring from the edges the scoped reply returns (the client's behaviour before node_walk) gets
+        # some node wrong, so node_walk is doing work the equality above would not otherwise be testing.
+        edge_dist, edge_role = _distance_and_role(seeds, scoped["edges"], direction)
+        misscored = {
+            n for n in returned - set(seeds)
+            if edge_dist.get(n) != dist[n] or edge_role.get(n) != role[n]
+        }
+        assert misscored, f"{direction}: no node was reached through a removed relay, so the walk proves nothing"
+        non_seed = returned - set(seeds)
+        assert len(non_seed) >= 3, (direction, non_seed)
+        if direction == "both":
+            assert {walk[n]["role"] for n in non_seed} == {"citation", "implementation", "related"}
+            assert max(walk[n]["depth"] for n in non_seed) >= 2
 
 
 class TestManifestRowLimit:

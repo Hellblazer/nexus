@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import re
 import shlex
 import sys
 from collections.abc import Callable
@@ -22,6 +23,10 @@ from nexus.db.t3 import T3Database
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
 from nexus.ttl import parse_ttl
+
+# C0 (NUL, tab, CR, LF, ESC ...), DEL and C1 controls: stored chunk text printed to an operator's terminal must
+# not move the cursor, overwrite a line or start an escape sequence (CSI is ESC [ or the single C1 byte 0x9b).
+_CONTROL_CHARS: re.Pattern[str] = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _t3(*, prefetch_routing_listing: bool = False) -> T3Database:
@@ -160,7 +165,7 @@ def put_cmd(
     try:
         outcome = put_note(
             content=content, collection=col_name, title=title, tags=tags,
-            category=category, session_id=session_id, source_agent=agent,
+            category=category, source_agent=agent,
             ttl_days=ttl_days,
         )
     except (PutOversizedError, NoteUriEngineTooOldError) as exc:
@@ -295,18 +300,21 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
     # cheap count); the rows listed are live ones, so after a delete the
     # two differ (shakeout 7.64.1 F10). Name it rather than imply live.
     click.echo(f"{col_name}  (showing {shown_start}-{shown_end}; {total} stored)\n" + also)
+    # nexus-6pfgb.13 (RDR-236 Phase 2): as the MCP store_list, each chunk's title, tags, expiry and
+    # index date are its owning note's own (note_display), from one owner lookup for the page.
+    from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    owner_map = _store_hook.live_owner_entries(col_name, [e.get("id", "") for e in entries])
     for e in entries:
         doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
-        title = (e.get("title") or "")[:40]
-        tags = e.get("tags") or ""
-        indexed_at_full = e.get("indexed_at") or ""
-        indexed_at = indexed_at_full[:10]
-        # Derive expiry from indexed_at + ttl_days (expires_at no longer stored). A row's ttl_days is
-        # whatever a writer stored: ttl_listing_label reads one that cannot lapse as permanent
-        # instead of aborting the listing (nexus-njn1a).
-        ttl_str = ttl_listing_label(e.get("ttl_days"), indexed_at_full)
-        tag_str = f"  [{tags}]" if tags else ""
-        click.echo(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
+        shown = _store_hook.note_display(
+            None if owner_map is None else owner_map.get(doc_id, []),
+            row=e, row_title=e.get("title") or "", row_tags=e.get("tags") or "",
+            row_ttl_days=e.get("ttl_days"), row_indexed_at=e.get("indexed_at") or "",
+        )
+        title = shown.title[:40]
+        tag_str = f"  [{shown.tags}]" if shown.tags else ""
+        click.echo(f"  {doc_id}  {title:<40}  {shown.ttl:<24}  {shown.indexed}{tag_str}")
 
     # A full page is the live signal that more rows may follow; the stored
     # total can exceed the live rows and point at an empty page (review of
@@ -353,7 +361,10 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
     (``nexus.chunk_orphaned_at``). An engine that does not return the key (one older than the field)
     gets the write age in its place, which is at least the grace for every listed chunk but can
     overstate how long the chunk has been ownerless. ``last_written_at`` and ``created_at`` are
-    printed beside it; ``created_at`` is write-once, so it is never the grace clock."""
+    printed beside it; ``created_at`` is write-once, so it is never the grace clock.
+
+    ``title`` and ``catalog_doc_id`` are the chunk's MANIFEST owner's (RDR-236 Phase 3), blank/``-`` for a chunk
+    no manifest row names; ``text_prefix``, the first 80 characters of the chunk's text, is the last column."""
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred for startup cost (nexus.db.http_vector_client)
 
     reapable_chunks = getattr(db, "reapable_chunks", None)
@@ -377,16 +388,19 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
             if shown == 0:
                 click.echo(
                     f"{col_name}  (chash, ownerless_since, days ownerless, last_written_at, "
-                    f"created_at, title, catalog_doc_id)\n"
+                    f"created_at, title, catalog_doc_id, text_prefix)\n"
                 )
             written = row.get("last_written_at") or ""
             ownerless = row.get("ownerless_since") or written
             created = row.get("created_at") or ""
             title = (row.get("title") or "")[:40]
             doc = row.get("catalog_doc_id") or "-"
+            # RDR-236 Phase 3: title and catalog_doc_id are the manifest owner's, so an ownerless chunk shows
+            # neither; the first 80 characters of its text (engine 0.1.171 and later) are what names it.
+            prefix = _CONTROL_CHARS.sub(" ", row.get("text_prefix") or "")
             click.echo(
                 f"  {row.get('chash', '')}  {ownerless}  {_age_days(ownerless):>5}  {written}  "
-                f"{created}  {title:<40}  {doc}"
+                f"{created}  {title:<40}  {doc}" + (f"  {prefix}" if prefix else "")
             )
             shown += 1
     except VectorServiceError as exc:
@@ -450,7 +464,7 @@ def _list_documents(db: T3Database, col_name: str, *, also: str = "") -> None:
     # value — see its display path).
     for i, doc in enumerate(docs, 1):
         title = (doc.title or "untitled")[:60]
-        indexed = (doc.entry.get("indexed_at") or "")[:10]
+        indexed = (doc.indexed_at or doc.entry.get("indexed_at") or "")[:10]  # nexus-6pfgb.13: the document's own date first
         click.echo(f"  {i:3d}. {title:<60}  {doc.chunks:>4} chunks  {indexed}")
 
 
@@ -519,32 +533,46 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
     if split is not None:
         entry = {**entry, "content": split[1], "chunk_count": split[2]}
 
+    # nexus-6pfgb.13 (RDR-236 Phase 2): the owning notes' own title, tags, expiry and index date
+    # (note_display), one owner lookup for the whole display; the row speaks only where no catalog
+    # value exists. The text form prints them; ``--json`` keeps the chunk row's keys as they are (the
+    # last writer's, as before) and adds them as ``note``.
+    from nexus.catalog.store_hook import live_owner_entries, note_display  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    owner_map = live_owner_entries(col_name, [entry["id"]])
+    owners = None if owner_map is None else owner_map.get(entry["id"], [])
+    shown = note_display(
+        owners, row=entry, row_title=entry.get("title", ""), row_tags=entry.get("tags", ""),
+        row_ttl_days=entry.get("ttl_days"), row_indexed_at=entry.get("indexed_at") or "",
+    )
+
     if json_out:
         import json  # noqa: PLC0415 — stdlib import kept branch-local
-        out = {**entry, "collection": col_name}
-        if entry.get("extraction_method"):
+        out = {**entry, "collection": col_name, "note": {
+            "title": shown.title, "tags": shown.tags, "indexed": shown.indexed, "ttl": shown.ttl,
+        }}
+        # nexus-6pfgb.16: each owning document's own extraction facts (the chunk row's are the last
+        # writer's), ONLY when some owner states any, so a note's JSON is unchanged.
+        from nexus.catalog.store_hook import degraded_pages_for_chunk, extraction_facts  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+        if facts := extraction_facts(owners):
+            out["extraction"] = facts
+        if owners is not None:
             # RDR-237: the text form prints the degraded pages of the catalog document(s) holding
             # this chunk, so the machine form carries them too, as `degraded_pages`: a list of
             # {tumbler, title, extraction_pages}, ONLY when some document has any (a clean or
             # non-PDF chunk's JSON is unchanged). A script finding degraded documents reads this
             # instead of scraping the text line.
-            from nexus.catalog.store_hook import degraded_pages_for_chunk  # noqa: PLC0415 — deferred to avoid CLI startup cost
-
-            rows, _n = degraded_pages_for_chunk(col_name, entry["id"])
+            rows, _n = degraded_pages_for_chunk(col_name, entry["id"], owners=owners)
             if rows:
                 out["degraded_pages"] = [
                     {"tumbler": t, "title": title, "extraction_pages": pages} for t, title, pages in rows
                 ]
         click.echo(json.dumps(out, indent=2))
     else:
-        title = entry.get("title", "")
-        tags = entry.get("tags", "")
-        indexed_at = (entry.get("indexed_at") or "")[:10]
-        # nexus-1oguj: mirrors the MCP store_get display (mcp/core.py) —
-        # extraction_method is canonical for PDF chunks now; absent for
-        # non-PDF chunks and for chunks indexed before the fix shipped
-        # (new-writes-only, no backfill; nexus-0qc4b).
-        extraction_method = entry.get("extraction_method", "")
+        title, tags, indexed_at = shown.title, shown.tags, shown.indexed
+        # nexus-6pfgb.16: as the MCP store_get, the extractor, override and source are the owning
+        # documents' catalog facts (extraction_lines), never the chunk row's.
         click.echo(f"ID:         {entry['id']}")
         click.echo(f"Collection: {col_name}")
         if title:
@@ -553,12 +581,15 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
             click.echo(f"Tags:       {tags}")
         if indexed_at:
             click.echo(f"Indexed:    {indexed_at}")
-        if extraction_method:
-            click.echo(f"Extractor:  {extraction_method}")
-            # RDR-237: same line as the MCP store_get, from the same helper.
-            from nexus.catalog.store_hook import degraded_pages_lines  # noqa: PLC0415 — deferred to avoid CLI startup cost
+        if shown.ttl not in ("permanent", "unknown"):
+            click.echo(f"TTL:        {shown.ttl}")
+        from nexus.catalog.store_hook import degraded_pages_lines, extraction_lines  # noqa: PLC0415 — deferred to avoid CLI startup cost
 
-            for line in degraded_pages_lines(col_name, entry["id"]):
+        for line in extraction_lines(owners):
+            click.echo(line)
+        if owners is not None:
+            # RDR-237: same line as the MCP store_get, from the same helper.
+            for line in degraded_pages_lines(col_name, entry["id"], owners=owners):
                 click.echo(line)
         click.echo(f"\n{entry.get('content', '')}")
 

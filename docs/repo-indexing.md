@@ -147,7 +147,7 @@ domain-specific codebases where many files share vocabulary.
 Each chunk carries metadata: `filename`, `source_path`, `file_extension`,
 `programming_language`, `line_start`, `line_end`,
 `ast_chunked` (bool), `class_name`, `method_name`, `content_hash`, `frecency_score`,
-`embedding_model`, `git_commit_hash`, `git_project_name`, `git_branch`, `git_remote_url`.
+`embedding_model`. (The flat `git_*` keys are retired from the chunk row, RDR-236 Phase 0; the catalog document carries the owner's head commit.)
 
 ## Prose Chunking
 

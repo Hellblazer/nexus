@@ -31,6 +31,9 @@ pytestmark = pytest.mark.lint
 
 WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 _LAB_RUNNER = re.compile(r"['\"]lab-[a-z0-9]+")
+#: The pool's macOS classes (hellmini) have no ``/dev/shm``; a pytest job there keeps its
+#: bytecode on the job's own work dir, which the pool discards after the job (nexus-vdhcl).
+_MAC_POOL_RUNNER = re.compile(r"['\"]lab-mac-[a-z0-9]+")
 _PYTHON_USERS = re.compile(r"\b(uv|pytest|python3?)\b")
 
 
@@ -39,7 +42,8 @@ def pool_pytest_jobs(docs: dict[str, dict]) -> list[tuple[str, str, dict]]:
     found = []
     for fname, doc in docs.items():
         for jid, spec in (doc.get("jobs") or {}).items():
-            if not _LAB_RUNNER.search(str(spec.get("runs-on", ""))):
+            runs_on = str(spec.get("runs-on", ""))
+            if not _LAB_RUNNER.search(runs_on) or _MAC_POOL_RUNNER.search(runs_on):
                 continue
             if any("pytest" in str(st.get("run", "")) for st in spec.get("steps", [])):
                 found.append((fname, jid, spec))
@@ -105,6 +109,17 @@ def test_every_lab_pool_pytest_job_keeps_bytecode_on_dev_shm() -> None:
     )
     for fname, jid, spec in jobs:
         assert prefix_problems(spec) == [], f"{fname}:{jid}"
+
+
+def test_a_macos_pool_pytest_job_is_not_a_dev_shm_job() -> None:
+    """nexus-vdhcl: the mac-arm64 CA-3 leg runs pytest on hellmini's ``lab-mac-s`` class, where
+    ``/dev/shm`` does not exist; the detector leaves it out and keeps a Linux class in."""
+    docs = _load()
+    assert ("ci.yml", "ca3-pgvector-bundle-macos") not in [(f, j) for f, j, _ in pool_pytest_jobs(docs)]
+    spec = copy.deepcopy(docs["ci.yml"]["jobs"]["ca3-pgvector-bundle-macos"])
+    assert "lab-mac-s" in str(spec["runs-on"]), "non-vacuity: the mac leg names the mac pool class"
+    spec["runs-on"] = "${{ vars.NX_CI_POOL == 'off' && 'ubuntu-latest' || 'lab-6c18g' }}"  # the quoted literal the detector reads
+    assert pool_pytest_jobs({"x.yml": {"jobs": {"mac-on-linux": spec}}}) == [("x.yml", "mac-on-linux", spec)]
 
 
 def _ci_test_job() -> dict:

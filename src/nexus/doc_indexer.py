@@ -299,6 +299,51 @@ def _metadata_for_doc_id(col: Any, doc_id: str) -> list[dict]:
     return batch.get("metadatas", [])
 
 
+def _catalog_absolute_identity(doc_id: str) -> str:
+    """The catalog's ABSOLUTE ``file_path`` for *doc_id*, or "" (relative, unresolvable, or a read failure).
+
+    A document outside any repo registers under a curator owner by its absolute path
+    (:func:`_curator_identity`, nexus-njn1a), while a repo document registers relative to its repo root.
+    The post-store document hook must be handed the path the catalog holds: the aspect queue row keys on
+    it, and a relative spelling of an absolute identity made ``nx index rdr <dir>`` outside a repo
+    write a second aspect row beside the one ``nx enrich aspects`` writes (nexus-b0y6w, shakedown 7.89.0 class e).
+    Read-only and best-effort: "" means the caller keeps the spelling it already had; a failed read logs a
+    warning that says so.
+    """
+    if not doc_id:
+        return ""
+    reader = None
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
+
+        reader = make_catalog_reader()
+        entry = reader.by_doc_id(doc_id)
+        fp = str(getattr(entry, "file_path", "") or "") if entry is not None else ""
+        return fp if fp and Path(fp).is_absolute() else ""
+    except Exception:  # noqa: BLE001 — best-effort: a failed read keeps the caller's existing spelling
+        _log.warning(
+            "catalog_absolute_identity_lookup_failed_relative_key_used", doc_id=doc_id, exc_info=True,
+        )
+        return ""
+    finally:
+        if reader is not None:
+            reader.close()
+
+
+def _hook_source_key(md_path: Path, base_path: Path | None, doc_id: str) -> str | None:
+    """The path the post-store document hook is keyed on, or ``None`` to key on ``str(md_path)``.
+
+    Only a caller with a *base_path* (``nx index rdr`` through ``batch_index_markdowns``, which pays one catalog
+    read per document) has a relative spelling to get wrong; every other caller (``nx index md``, ``nx dt index``,
+    collection reindex) makes no catalog read. With a *base_path* the key is the catalog's own absolute path when
+    the document registered under one (a curator-owned document outside any repo), else the *base_path*-relative
+    path the repo owner registered.
+    """
+    if not base_path:
+        return None
+    return _catalog_absolute_identity(doc_id) or make_relative(md_path, base_path)
+
+
 def _doc_id_for_path(file_path: Path) -> str:
     """Best-effort READ-ONLY document identity for a source path, or "".
 
@@ -1232,6 +1277,7 @@ def _register_or_lookup_doc_id(
                     # scrolling back through WARNING-level structlog output.
                     from nexus.mcp_infra import _record_physical_collection_reconciled  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
                     _record_physical_collection_reconciled()
+            _restamp_rdr_frontmatter(writer, existing, file_path, content_type)
             return (str(existing.tumbler), False) if with_created else str(existing.tumbler)
 
         # nexus-u8n4r: refuse registration when the identity about to be
@@ -1303,15 +1349,9 @@ def _register_or_lookup_doc_id(
         # indexer writes), so the named-source sibling rule reads it without the aspect worker. Passed only
         # when there is one, so a writer double that predates ``meta`` is untouched for every other type.
         _register_extra: dict = {}
-        if content_type == "rdr":
-            from nexus.catalog.rdr_canonical import rdr_frontmatter_meta  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-
-            try:
-                _stamp = rdr_frontmatter_meta(file_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError):
-                _stamp = {}
-            if _stamp:
-                _register_extra["meta"] = _stamp
+        _stamp = _rdr_frontmatter_stamp(file_path, content_type)
+        if _stamp:
+            _register_extra["meta"] = _stamp
         _write_result = writer.register(
             owner=owner,
             title=title or file_path.stem,
@@ -1375,6 +1415,41 @@ def _register_or_lookup_doc_id(
             writer.close()
         if reader is not None:
             reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
+
+
+def _rdr_frontmatter_stamp(file_path: Path, content_type: str) -> dict:
+    """The catalog ``meta`` stamp for an RDR file's frontmatter id (nexus-jypmj.7), or ``{}`` for any other
+    content type or a file that cannot be read. An unparseable header stamps null (nexus-jypmj.20); an empty file
+    has no header at all, which the shared rule reads as parsed with no id, the same as the repo indexer's
+    (:func:`nexus.indexer._rdr_register_stamp`)."""
+    if content_type != "rdr":
+        return {}
+    from nexus.catalog.rdr_canonical import rdr_frontmatter_meta_from_bytes  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+
+    try:
+        return rdr_frontmatter_meta_from_bytes(file_path.read_bytes())
+    except OSError:
+        return {}
+
+
+def _restamp_rdr_frontmatter(writer: Any, existing: Any, file_path: Path, content_type: str) -> None:
+    """Bring an EXISTING RDR registration's frontmatter stamp up to date (nexus-jypmj.20, code review M5 of
+    nexus-jypmj.7). The stamp used to be written only when ``nx index rdr <file>`` minted the document, so
+    re-indexing a registration made before the stamp, or one whose header changed, left it stale. Written only
+    when the stored value differs, so a warm re-index writes nothing. Advisory: the tumbler is already
+    resolved, so a failed write is logged and the run goes on."""
+    stamp = _rdr_frontmatter_stamp(file_path, content_type)
+    if not stamp:
+        return
+    meta = getattr(existing, "meta", None)
+    meta = meta if isinstance(meta, dict) else {}
+    missing = object()
+    if all(meta.get(k, missing) == v for k, v in stamp.items()):
+        return
+    try:
+        writer.update(existing.tumbler, meta=stamp)
+    except Exception:  # noqa: BLE001 — boundary catch: advisory stamp write, must never discard a resolved tumbler
+        _log.warning("rdr_frontmatter_restamp_failed", tumbler=str(existing.tumbler), exc_info=True)
 
 
 def _make_local_embed_fn() -> tuple[EmbedFn, str]:
@@ -2406,7 +2481,6 @@ def _pdf_chunks(
     chunk_chars: int | None = None,
     bib_enrich_enabled: bool = False,
     extractor: str = DEFAULT_EXTRACTOR,
-    git_meta: dict | None = None,
     doc_id: str = "",
     allow_degraded_extraction: bool = False,
     extraction_stats: dict | None = None,
@@ -2451,16 +2525,9 @@ def _pdf_chunks(
     gate that fails loud on space-stripped/garbage extraction output.
     Default ``False``.
 
-    *git_meta* — flat ``git_*`` provenance dict. When ``None`` the function
-    auto-detects via :func:`nexus.indexer_utils.detect_git_metadata` from
-    ``pdf_path``. Pass an explicit value when the caller has already
-    resolved it (the repo-walk path does this once per repo). Empty dict
-    when *pdf_path* is not in a git repository — :func:`normalize` then
-    omits ``git_meta`` per the empty-set rule (nexus-2my fix #3).
+    Chunks carry no git provenance (RDR-101 Phase 5c); the catalog Document does, so this
+    spawns no git subprocess (nexus-ru672).
     """
-    if git_meta is None:
-        from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        git_meta = detect_git_metadata(pdf_path)
     # RDR-237: no ``on_heartbeat`` here, on purpose. The heartbeat stamps a pipeline row's
     # ``updated_at`` so a concurrent run does not take the row over, and this path has no
     # pipeline row (it extracts, then chunks and embeds in memory). The RDR's Progress section
@@ -2514,6 +2581,10 @@ def _pdf_chunks(
     if bib_enrich_enabled:
         from nexus.bib_enricher import enrich as bib_enrich  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         bib = bib_enrich(source_title)
+    if extraction_stats is not None and bib:
+        # nexus-6pfgb.28: index_pdf writes the lookup to the catalog document's bib_* columns
+        # (the chunk rows' bib_* keys below are retired by nexus-6pfgb.27).
+        extraction_stats["bib"] = bib
 
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
@@ -2560,7 +2631,6 @@ def _markdown_chunks(
     corpus: str,
     *,
     base_path: Path | None = None,
-    git_meta: dict | None = None,
     doc_id: str = "",
     extraction_source: str = "file",
     collection_name: str = "",
@@ -2569,16 +2639,9 @@ def _markdown_chunks(
 
     *collection_name* decides the token window; see :func:`_pdf_chunks`.
 
-    *git_meta* — flat ``git_*`` provenance dict. ``None`` triggers
-    auto-detection from *md_path* via
-    :func:`nexus.indexer_utils.detect_git_metadata`. Empty dict outside
-    a git repo (nexus-2my fix #3).
+    Chunks carry no git provenance (RDR-101 Phase 5c), so no subprocess runs (nexus-ru672).
     """
     from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-
-    if git_meta is None:
-        from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        git_meta = detect_git_metadata(md_path)
 
     raw_text = md_path.read_text(encoding="utf-8")
     frontmatter, body = parse_frontmatter(raw_text, source=str(md_path), strict=True)
@@ -2631,7 +2694,7 @@ def _markdown_chunks(
             indexed_at=now_iso,
             embedding_model=target_model,
             title=source_title,
-            source_author=str(frontmatter.get("author", "")),
+            source_author=_frontmatter_author(frontmatter),
             section_title=chunk.metadata.get("header_path", ""),
             section_type=chunk.metadata.get("section_type", ""),
             tags="markdown",
@@ -3085,6 +3148,7 @@ def index_pdf(
                     on_doc_registered=_note_fallback_mint,
                     on_write_started=_note_write_started,
                     extraction_stats=_extraction_stats,
+                    enrich=enrich,
                 )
             except Exception as exc:
                 _rollback_if_freshly_minted(exc)
@@ -3267,7 +3331,7 @@ def index_pdf(
             # nexus-uxg4u: never touch the catalog on a dry run.
             return
         try:
-            from nexus.pipeline_stages import _catalog_pdf_hook  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+            from nexus.pipeline_stages import _catalog_pdf_hook, extraction_record  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             _catalog_pdf_hook(
                 pdf_path, col_name,
                 title=meta_list[0].get("title", "") if meta_list else "",
@@ -3278,12 +3342,20 @@ def index_pdf(
                 source_uri=source_uri,
                 # RDR-237: the method and the rung-to-pages map come from the extraction result
                 # (filled into ``_extraction_stats`` by ``_pdf_chunks``), not from the chunks:
-                # the map is document-level and no chunk carries it.
-                extraction={
-                    "extraction_method": _extraction_stats.get("extraction_method", ""),
-                    "extraction_pages": _extraction_stats.get("extraction_pages", {}),
-                },
+                # the map is document-level and no chunk carries it. nexus-6pfgb.6: so do the
+                # quality-gate override (an explicit boolean) and the source, read back from the
+                # stats ``_pdf_chunks`` filled with this same record.
+                extraction=extraction_record(_extraction_stats),
             )
+            # nexus-6pfgb.28: the --enrich lookup goes to the catalog document's bib_* columns,
+            # which a bib_* filter is answered from. Before the stamp, like the rest of the
+            # catalog enrichment (nexus-z0o2p.34). Never raises.
+            if _extraction_stats.get("bib"):
+                from nexus.pipeline_stages import _catalog_pdf_bib_hook  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+                _catalog_pdf_bib_hook(
+                    str(_mint_state["doc_id"] or ""), pdf_path, col_name,
+                    _extraction_stats["bib"], corpus=corpus,
+                )
         except Exception:  # noqa: BLE001 — catalog registration is non-fatal; indexing continues
             # Non-fatal, but never silent: the document is indexed and its catalog record
             # (and the extraction method and degraded pages on it) is missing.
@@ -3568,18 +3640,35 @@ def index_pdf(
     return len(prepared)
 
 
-def _parse_md_title_year(md_path: Path) -> tuple[str, int]:
-    """Parse frontmatter title + year for *md_path* (nexus-ivzw8).
+def _frontmatter_author(frontmatter: dict) -> str:
+    """The catalog author of a markdown file's frontmatter ``author`` (nexus-6pfgb.7).
 
-    Returns ``(stem, 0)`` when there is no frontmatter or parsing fails —
+    A string is kept as written, trimmed; a list (flow or block YAML) becomes its items joined with
+    ``", "``, the shape a PDF's author takes. Anything else, and an empty value, is ``""``: the author
+    is sent to the catalog only when it is a real value.
+    """
+    raw = frontmatter.get("author")
+    if isinstance(raw, (list, tuple)):
+        return ", ".join(str(a).strip() for a in raw if a is not None and str(a).strip())
+    return str(raw).strip() if isinstance(raw, str) else ""
+
+
+def _parse_md_frontmatter(md_path: Path) -> tuple[str, int, str]:
+    """Parse frontmatter title, year and author for *md_path* (nexus-ivzw8, nexus-6pfgb.7).
+
+    Returns ``(stem, 0, "")`` when there is no frontmatter or parsing fails —
     the same defaults the pre-flight registration used before the fix.
     Year comes from the first of ``created``/``date``/``accepted_date``.
+    Author is the frontmatter ``author`` (:func:`_frontmatter_author`), read the way the chunk rows'
+    ``source_author`` is (the YAML parse of the block), and ``""`` when it is absent or the block does
+    not parse.
     Extracted from the markdown hook so the PRE-FLIGHT registration can
     use the same values (the update branch's stem-guard backfill and the
     fresh-registration path must agree on the parse).
     """
     title = md_path.stem
     year = 0
+    author = ""
     try:
         text = md_path.read_text(encoding="utf-8")
         if text.startswith("---"):
@@ -3594,20 +3683,29 @@ def _parse_md_title_year(md_path: Path) -> tuple[str, int]:
                     if dm:
                         year = int(dm.group(1))
                         break
+            author = _frontmatter_author(parse_frontmatter(text, source=str(md_path))[0])
     except Exception:  # noqa: BLE001 — best-effort parse; stem/0 defaults preserved, logged for diagnosis
         import structlog  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
         structlog.get_logger(__name__).debug(
             "catalog_markdown_frontmatter_parse_failed",
             path=str(md_path), exc_info=True,
         )
-    return title, year
+    return title, year, author
 
 
 def _catalog_markdown_hook(
     md_path: Path, collection_name: str, content_type: str, corpus: str, chunk_count: int,
-    *, base_path: Path | None = None, source_uri: str = "",
+    *, base_path: Path | None = None, source_uri: str = "", extraction_source: str = "file",
 ) -> None:
     """Register markdown document in catalog after indexing. Silently skipped if absent.
+
+    *extraction_source* (nexus-6pfgb.6) is where the text came from: ``file`` for a markdown file,
+    ``dt_content`` (or ``dt_ocr`` / ``dt_transcribe``) for DEVONthink text. It is a fact about this
+    document, so its home is the catalog document's ``meta``, written on every leg of the hook (the
+    update of an existing row, the registration of a new one, and the update that follows a
+    registration which resolved onto an existing row, because the engine's register returns that
+    row without merging ``meta``). Markdown has no extraction method and no quality gate: neither
+    key is written.
 
     nexus-3lswy WARNING: this registers under a SEPARATE "curator" owner
     (see ``owner_name``/``curator_owner_tumbler_by_name`` below), distinct
@@ -3640,7 +3738,9 @@ def _catalog_markdown_hook(
 
         # Derive title and year from frontmatter or filename (shared with the
         # pre-flight registration, nexus-ivzw8).
-        title, year = _parse_md_title_year(md_path)
+        title, year, author = _parse_md_frontmatter(md_path)
+        # The document keys of this registration (RDR-236 Phase 1): sent with a real value only.
+        doc_meta: dict[str, Any] = {"extraction_source": extraction_source or "file"}
 
         owner_name = corpus if corpus else "standalone-docs"
         # Curator-only lookup — see _register_or_lookup_doc_id for
@@ -3712,6 +3812,11 @@ def _catalog_markdown_hook(
                 update_kwargs["title"] = title
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
+            # nexus-6pfgb.7: the PDF hook's fill-only rule (``pipeline_stages._catalog_pdf_hook``): the
+            # catalog author is curated once set, so a re-index fills an empty column and never overwrites.
+            if author and not (getattr(existing, "author", "") or "").strip():
+                update_kwargs["author"] = author
+            update_kwargs["meta"] = doc_meta
             writer.update(existing.tumbler, **update_kwargs)
             if derived_source_uri and not from_repo_owner and not getattr(existing, "source_uri", ""):
                 # nexus-njn1a: a curator document an earlier release registered by a relative path has
@@ -3789,10 +3894,11 @@ def _catalog_markdown_hook(
             _write_result = writer.register(
                 owner=owner, title=title, content_type=content_type,
                 file_path=fp, physical_collection=collection_name,
-                chunk_count=chunk_count, year=year,
+                chunk_count=chunk_count, year=year, author=author,
                 source_mtime=source_mtime,
                 source_uri=source_uri,
                 with_created=True,
+                meta=doc_meta,
             )
             _created = created_from_register_result(_write_result)
             announce_cross_owner_mint(
@@ -3814,6 +3920,19 @@ def _catalog_markdown_hook(
                     target_collection=collection_name, file_path=fp,
                     owner=owner,
                 )
+                # register() returned an existing row untouched (no ``meta`` merge): the record rides an
+                # update, and so does the author, under the same fill-only rule as the branch above
+                # (nexus-6pfgb.7): only where the resolved row's author is empty.
+                _resolved_tumbler = tumbler_from_register_result(_write_result)
+                _resolved_update: dict = {"meta": doc_meta}
+                if author:
+                    try:
+                        _resolved = reader.resolve(_resolved_tumbler)
+                    except Exception:  # noqa: BLE001 — advisory read: without it the author is simply not filled
+                        _resolved = None
+                    if _resolved is not None and not (getattr(_resolved, "author", "") or "").strip():
+                        _resolved_update["author"] = author
+                writer.update(_resolved_tumbler, **_resolved_update)
     except Exception as exc:  # noqa: BLE001 — best-effort catalog markdown hook; logged + audited, cleanup in finally
         # nexus-ou4tb (site from the e9ru2 review): an indexed markdown doc
         # that never reached the catalog is invisible to every catalog-routed
@@ -3969,7 +4088,7 @@ def index_markdown(
     # chunks (CatalogIdentityMissingError) rather than store them ownerless.
     # nexus-ivzw8: thread the frontmatter title/year into the PRE-FLIGHT
     # registration so a fresh Document row never carries the stem default.
-    _fm_title, _fm_year = _parse_md_title_year(md_path)
+    _fm_title, _fm_year, _fm_author = _parse_md_frontmatter(md_path)
     # with_created (nexus-o19i0): whether THIS call minted the Document. Same
     # defensive unpack as index_pdf (nexus-uxg4u): a test double patching this
     # function returns a bare ``str`` whatever kwargs it is given, and a bare
@@ -3979,6 +4098,7 @@ def index_markdown(
         content_type=content_type,
         physical_collection=col_name,
         title=_fm_title,
+        author=_fm_author,
         year=_fm_year,
         base_path=base_path,
         source_uri=source_uri,
@@ -3998,7 +4118,9 @@ def index_markdown(
         _markdown_chunks, doc_id=doc_id, extraction_source=extraction_source,
         collection_name=col_name,
     )
-    source_key = make_relative(md_path, base_path) if base_path else None
+    # The hook chain keys the aspect queue on this path, so it is the catalog's own spelling of the
+    # document (nexus-b0y6w class e); only a base_path caller pays the catalog read.
+    source_key = _hook_source_key(md_path, base_path, doc_id)
     # The write's completion stamp is sent below, after the catalog enrichment (RDR-223,
     # nexus-z0o2p.34): _index_document hands it back instead of sending it.
     _stamps: "list[_DeferredOwnerWrite]" = []
@@ -4037,7 +4159,10 @@ def index_markdown(
             assert isinstance(raw, int)
             count = raw
             if count > 0:
-                _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri)
+                _catalog_markdown_hook(
+                    md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri,
+                    extraction_source=extraction_source,
+                )
                 _stamp_last()
                 # nexus-y8qtj: end-of-run fork check (see index_pdf for rationale).
                 _forks = _check_document_fork(doc_id, col_name)
@@ -4049,7 +4174,10 @@ def index_markdown(
         metadatas: list[dict] = raw
         sections = sum(1 for m in metadatas if m.get("section_title", ""))
         if metadatas:
-            _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri)
+            _catalog_markdown_hook(
+                md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri,
+                extraction_source=extraction_source,
+            )
             _stamp_last()
             _forks = _check_document_fork(doc_id, col_name)
             if on_fork_detected is not None:

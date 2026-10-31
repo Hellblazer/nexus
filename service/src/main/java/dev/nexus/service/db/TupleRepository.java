@@ -13,7 +13,7 @@ import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Record1;
-import org.jooq.Record9;
+import org.jooq.Record11;
 import org.jooq.ResultQuery;
 import org.jooq.SelectConditionStep;
 import org.jooq.SelectLimitStep;
@@ -429,6 +429,12 @@ public final class TupleRepository {
      * <p>{@code claimedAt} (bead nexus-x907o): when the CURRENT claim started, or {@code
      * null} when the row is unclaimed or its claim predates the column. Set by the claim,
      * cleared wherever {@code claimId} is cleared, never moved by renew.
+     *
+     * <p>{@code availableAt} (bead nexus-p909o, RDR-235): when a delayed or retry-pending row
+     * becomes claimable ({@code out delay_s}, {@code nack retry_after_s}), or {@code null}
+     * when the row was never delayed or a claim-clearing path (release, nack, sweep) cleared the
+     * mark; a claim itself leaves the (by then past) stamp. Rendered so a reader can
+     * tell a task waiting out a delay from a claimable one.
      */
     public record TupleRow(
             byte[] id, String subspace, String template,
@@ -438,7 +444,7 @@ public final class TupleRepository {
             OffsetDateTime consumedAt, String consumedBy,
             OffsetDateTime expiresAt, OffsetDateTime createdAt,
             OffsetDateTime announcedAt, int announceCount,
-            String senderSession, OffsetDateTime claimedAt) {
+            String senderSession, OffsetDateTime claimedAt, OffsetDateTime availableAt) {
     }
 
     public record ClaimedTuple(TupleRow tuple, String claimId) {
@@ -480,7 +486,8 @@ public final class TupleRepository {
     public record SubspaceCensus(
             String subspace, long total, long available, long claimed, long dead,
             long consumed, long expiredUnpurged,
-            OffsetDateTime oldestCreatedAt, OffsetDateTime newestCreatedAt, long lapsed) {
+            OffsetDateTime oldestCreatedAt, OffsetDateTime newestCreatedAt, long lapsed,
+            long delayed, OffsetDateTime oldestClaimableCreatedAt) {
     }
 
     /** {@code subspace_list}'s paged form (nexus-xapt8): {@code nextCursor} is
@@ -2259,7 +2266,7 @@ public final class TupleRepository {
                         CLAIM_STATE_CLAIMED, claimant, newClaimId, leaseUntil, attempts,
                         null, null, expiresAtForClaim, row.getCreatedAt(),
                         row.getAnnouncedAt(), row.getAnnounceCount(), row.getSenderSession(),
-                        claimedAt);
+                        claimedAt, row.getAvailableAt()); // a claim leaves it; the claim-clearing paths clear it
                 return Optional.of(new ClaimedTuple(claimed, newClaimId));
             }
             return Optional.empty(); // NX_TUPLE_CLAIM_PASSES exhausted: the probe result
@@ -3299,7 +3306,8 @@ public final class TupleRepository {
      * {@code LIMIT}: built once here so the paging method and the plan-shape test share it. Package-private for that
      * test.
      */
-    static SelectLimitStep<Record9<String, Long, Long, Long, Long, Long, OffsetDateTime, OffsetDateTime, Long>>
+    static SelectLimitStep<Record11<String, Long, Long, Long, Long, Long, OffsetDateTime, OffsetDateTime, Long, Long,
+            OffsetDateTime>>
             subspaceCensusQuery(DSLContext ctx, String tenant, String prefix, String after) {
         Condition cond = TUPLES.TENANT_ID.eq(tenant);
         if (prefix != null && !prefix.isBlank()) {
@@ -3325,7 +3333,9 @@ public final class TupleRepository {
                         DSL.min(TUPLES.CREATED_AT),
                         DSL.max(TUPLES.CREATED_AT),
                         DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
-                                .and(TUPLES.LEASE_UNTIL.lt(now))).cast(Long.class))
+                                .and(TUPLES.LEASE_UNTIL.lt(now))).cast(Long.class),
+                        DSL.count().filterWhere(delayedCond(live, now)).cast(Long.class),
+                        DSL.min(TUPLES.CREATED_AT).filterWhere(claimableCond(live, now)))
                 .from(TUPLES)
                 .where(cond)
                 .groupBy(TUPLES.SUBSPACE)
@@ -3358,8 +3368,10 @@ public final class TupleRepository {
                 OffsetDateTime oldest = rec.get(6, OffsetDateTime.class);
                 OffsetDateTime newest = rec.get(7, OffsetDateTime.class);
                 long lapsed = rec.get(8, Long.class);
+                long delayed = rec.get(9, Long.class);
+                OffsetDateTime oldestClaimable = rec.get(10, OffsetDateTime.class);
                 out.add(new SubspaceCensus(subspace, available + claimed + dead, available, claimed, dead,
-                        consumed, expiredUnpurged, oldest, newest, lapsed));
+                        consumed, expiredUnpurged, oldest, newest, lapsed, delayed, oldestClaimable));
             }
             return new SubspacePage(out, nextCursor);
         });
@@ -3390,7 +3402,9 @@ public final class TupleRepository {
                         DSL.min(TUPLES.CREATED_AT),
                         DSL.max(TUPLES.CREATED_AT),
                         DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
-                                .and(TUPLES.LEASE_UNTIL.lt(now))).cast(Long.class))
+                                .and(TUPLES.LEASE_UNTIL.lt(now))).cast(Long.class),
+                        DSL.count().filterWhere(delayedCond(live, now)).cast(Long.class),
+                        DSL.min(TUPLES.CREATED_AT).filterWhere(claimableCond(live, now)))
                 .from(TUPLES)
                 .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq(subspace)))
                 .fetchOne();
@@ -3403,8 +3417,29 @@ public final class TupleRepository {
         OffsetDateTime oldest = rec.value6();
         OffsetDateTime newest = rec.value7();
         long lapsed = rec.value8();
+        long delayed = rec.value9();
+        OffsetDateTime oldestClaimable = rec.value10();
         return new SubspaceCensus(subspace, available + claimed + dead, available, claimed, dead,
-                consumed, expiredUnpurged, oldest, newest, lapsed);
+                consumed, expiredUnpurged, oldest, newest, lapsed, delayed, oldestClaimable);
+    }
+
+    /**
+     * nexus-p909o (RDR-235): a live unclaimed row whose {@code available_at} is still ahead of the
+     * database clock. It is a SUBSET of {@code available} (which keeps counting it), so a reader can
+     * tell a task waiting out a retry from one a worker could claim now.
+     */
+    private static Condition delayedCond(Condition live, Field<OffsetDateTime> now) {
+        return live.and(TUPLES.CLAIM_STATE.isNull()).and(TUPLES.AVAILABLE_AT.gt(now));
+    }
+
+    /**
+     * nexus-p909o: a live unclaimed row a claim could take now ({@code available_at} NULL or reached).
+     * {@code available} minus {@code delayed} counts these; the census reports the oldest one's
+     * {@code created_at}, the age a stalled consumer shows.
+     */
+    private static Condition claimableCond(Condition live, Field<OffsetDateTime> now) {
+        return live.and(TUPLES.CLAIM_STATE.isNull())
+                .and(TUPLES.AVAILABLE_AT.isNull().or(TUPLES.AVAILABLE_AT.le(now)));
     }
 
     // ── shared helpers ───────────────────────────────────────────────────────
@@ -3491,7 +3526,7 @@ public final class TupleRepository {
                 r.getLeaseUntil(), r.getAttempts(),
                 r.getConsumedAt(), r.getConsumedBy(),
                 r.getExpiresAt(), r.getCreatedAt(),
-                announcedAt, announceCount, r.getSenderSession(), r.getClaimedAt());
+                announcedAt, announceCount, r.getSenderSession(), r.getClaimedAt(), r.getAvailableAt());
     }
 
     private static JSONB toJsonb(Map<String, String> map) {

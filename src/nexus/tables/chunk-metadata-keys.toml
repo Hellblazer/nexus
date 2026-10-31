@@ -1,0 +1,295 @@
+# RDR-236 Phase 0 (nexus-qyx35): the chunk-metadata key table, the checked
+# form of the RDR's Technical Design "The key table". Ships inside the
+# package (src/nexus/tables/) like rdr-lifecycle.toml; load it through
+# nexus.tables.chunk_metadata_keys (which wraps load_packaged_table).
+#
+# One row per key (or per group of keys that share a determinant and a
+# home). `match.key` names the key; `emit` carries what the RDR's table
+# columns say about it. Every row is ONE LINE per inline table on purpose:
+# the Java pin (ChunkMetadataKeysTest) reads this file with a line parser,
+# not a TOML library.
+#
+# emit fields
+#   class     where the key lives after normalization, fixed by its
+#             determinant:
+#               CHUNK     K, or a part of K (tenant, collection, chash,
+#                         embedding_model), determines it. Stays on the row.
+#               DOCUMENT  a catalog document D determines it. Home is
+#                         catalog_documents (column, meta key or GENERATED
+#                         column) and leaves the row.
+#               POSITION  one manifest position Pn determines it. Home is
+#                         catalog_document_chunks and leaves the row.
+#               ROW       the physical row determines it; written only by
+#                         the engine. Stays; a client write is refused.
+#               LEGACY    retired vocabulary, readable on old rows, swept.
+#               NOT_ROW   listed so no one looks for it on the row.
+#   kind      metadata-key (a key of the chunks.metadata JSON), column
+#             (a chunks column), table (a whole table), catalog (a catalog
+#             column). Only metadata-key rows reach the generated Java sets.
+#   on_row    where the key stands TODAY, against the write-time allowlist
+#             (metadata_schema.ALLOWED_TOP_LEVEL):
+#               allowed      in ALLOWED_TOP_LEVEL and written by
+#                            make_chunk_metadata.
+#               unvalidated  a live writer sends it past normalize() and
+#                            validate() (the enrich writer's update-metadata,
+#                            the pipeline post-pass, the note writer after
+#                            normalize, the repo PDF dict).
+#               engine       written only by the engine.
+#               stored       on old rows only; no live writer. May still be in
+#                            ALLOWED_TOP_LEVEL so an old row echoed back by a
+#                            read-modify-write validates (session_id, until 6pfgb.27).
+#               absent       never on a chunk row (catalog meta key, column).
+#   home      where the value lives after normalization.
+#   remedy    the census remedy class (T2 nexus/x54wv-shared-row-key-census-
+#             2026-10-26 (2/2)): R1 read it from the catalog owner, R2 stop
+#             writing it, R3 give it a catalog home, R4 the engine answers it
+#             from the catalog or manifest, R5 select rows by the manifest,
+#             R6 protected, document only; keep (stays as it is); n/a.
+#   remedy_reader  optional: the remedy for the key's READERS when it differs
+#             from the writer's `remedy` (same vocabulary). The census splits
+#             the two for catalog_doc_id, doc_id and content_hash (R2 stops the
+#             writer, R5 selects rows by the manifest instead of the key) and
+#             title (R1 for the display readers, R5 for the selectors). The read
+#             lint's finding text quotes it, because a finding is a reader.
+#   moved_by  the epic nexus-6pfgb bead (".N") or phase that moves it.
+#
+# The parity test (tests/test_chunk_metadata_keys_table.py) holds
+# CHUNK + DOCUMENT + POSITION rows with on_row = allowed equal to
+# ALLOWED_TOP_LEVEL, and make_chunk_metadata's output to the same set.
+#
+# KIND. The checker's "decision-table" kind demands a guard dimension each
+# group is proved over; this table is a total lookup, key -> row, with none.
+# "state-machine" is the checker's kind without that obligation. What the
+# checker proves here is match totality (every key in the domain is named by a
+# row) and no overlap (no key is named by two).
+#
+# THE LEGACY-FALLBACK MODULE (plan-audit r1 residual, nexus-qyx35). The read
+# lint exempts "the legacy-fallback module"; there is no such module and
+# none is created (creating one means moving ~80 reads, which is Phase 2).
+# The fallback surface is named instead: src/nexus/catalog/note_ttl.py is
+# exempt whole (the note TTL rules read the row until the keyless-note
+# count is zero, RF-8); every other row read of a non-CHUNK key is an
+# entry in tests/chunk_metadata_read_sites.toml, file and function, and the
+# count only falls (tests/test_chunk_metadata_read_lint.py).
+#
+# THE TWO INCONSISTENCIES (RDR-236 Technical Design, settled here).
+# 1. ManifestLabelStage answers bib_openalex_id and bib_doi but
+#    ALLOWED_TOP_LEVEL does not hold them (the enrich writer sends them
+#    through update-metadata, unvalidated). Settled: they are NOT added to
+#    ALLOWED_TOP_LEVEL, which is the list Phase 4 shrinks. The table records
+#    them as DOCUMENT keys with on_row = unvalidated; the engine check's log
+#    mode (Phase 4) sees the enrich writer, and 6pfgb.28/.12 remove it.
+# 2. The bypass collections (taxonomy__*, quarantine-*) are exempt from
+#    normalize (db/t3._BYPASS_SCHEMA_PREFIXES). Settled: the prefixes are
+#    named once, here, under [chunk_metadata]; a test pins them equal to
+#    _BYPASS_SCHEMA_PREFIXES; the Java check and the CHECK exempt them;
+#    whether the sweep strips quarantine rows is settled by 6pfgb.40 (they stay
+#    unswept until it lands); taxonomy__* is never swept.
+# And the question Phase 0 owes: does normalize strip doc_id and the git
+# keys on the repo PDF path? normalize does (the git_* keys are popped, doc_id
+# is cargo), but no production writer on that path calls it: HttpVectorClient
+# forwards the hand-built dict as is, and only the injected T3Database
+# facade normalizes. So doc_id and the flat git keys reached the engine.
+# Settled: the git keys' writer is removed in Phase 0 (this bead; nothing
+# reads them); doc_id stays on that dict until 6pfgb.39, because the
+# engine's manifest-less census forward join reads it (RF-19).
+
+[table]
+id = "chunk-metadata-keys"
+kind = "state-machine"
+version = 1
+
+[chunk_metadata]
+# Collections whose writes bypass the canonical chunk schema. Equal to
+# nexus.db.t3._BYPASS_SCHEMA_PREFIXES (pinned by a test).
+bypass_prefixes = ["taxonomy__", "quarantine-"]
+
+[dimensions.key]
+domain = [
+  "chunk_text_hash", "embedding_model",
+  "content_type", "title", "source_author",
+  "bib_year", "bib_authors", "bib_venue", "bib_citation_count", "bib_semantic_scholar_id",
+  "bib_openalex_id", "bib_doi", "bib_enriched_by",
+  "indexed_at", "tags", "category", "ttl_days", "put_at",
+  "extraction_method", "quality_gate_overridden", "extraction_source",
+  "frecency_score", "frecency_computed_at", "source_agent", "session_id", "catalog_doc_id", "content_hash",
+  "section_title", "section_type", "page_number",
+  "line_start", "line_end", "chunk_start_char", "chunk_end_char",
+  "quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at",
+  "last_written_at", "retention", "collection",
+  "chunk_type", "doc_id", "chunk_index", "chunk_count", "source_path", "store_type", "corpus",
+  "git_meta", "git_project_name", "git_branch", "git_commit_hash", "git_remote_url",
+  "nexus.frecency", "lifecycle_state", "tumbler", "index_state",
+]
+
+# ---- CHUNK -----------------------------------------------------------------
+
+[[row]]
+id = "chunk-text-hash"
+match = { key = "chunk_text_hash" }
+emit = { class = "CHUNK", kind = "metadata-key", on_row = "allowed", home = "the chunk row, CHECKed equal to the chash column", remedy = "keep", moved_by = "phase 4 CHECK (6pfgb.43)" }
+
+[[row]]
+id = "embedding-model"
+match = { key = "embedding_model" }
+emit = { class = "CHUNK", kind = "metadata-key", on_row = "allowed", home = "the chunk row, CHECKed equal to the column of the same name", remedy = "keep", moved_by = "phase 4 CHECK (6pfgb.43)" }
+
+# ---- DOCUMENT --------------------------------------------------------------
+
+[[row]]
+id = "content-type"
+match = { key = "content_type" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "catalog_documents.content_type, or the GENERATED source_format column for pdf and markdown; row fallback while the column is absent", remedy = "R3", moved_by = "6pfgb.23, 6pfgb.25" }
+
+[[row]]
+id = "title"
+match = { key = "title" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "catalog_documents.title; the per-position label of code, prose and repo PDFs is derived display text stored nowhere", remedy = "R1", remedy_reader = "R5", moved_by = "6pfgb.25, 6pfgb.27, 6pfgb.39; census rows 10, 11, 13, 14 (the selectors) are R5, rows 15 and 17 (the delete and legacy-probe paths) are R6, protected" }
+
+[[row]]
+id = "source-author"
+match = { key = "source_author" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "catalog_documents.author; row fallback while empty (markdown authors predate their home)", remedy = "R3", moved_by = "6pfgb.7; R3 is plan 6pfgb, not the census (R2 there)" }
+
+[[row]]
+id = "bib-columns"
+match = { key = ["bib_year", "bib_authors", "bib_venue", "bib_citation_count", "bib_semantic_scholar_id"] }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "the catalog_documents bib_* columns, authoritative, no fallback", remedy = "R1", moved_by = "6pfgb.28, 6pfgb.12" }
+
+[[row]]
+id = "bib-ids-unvalidated"
+match = { key = ["bib_openalex_id", "bib_doi"] }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "unvalidated", home = "the catalog_documents bib_openalex_id and bib_doi columns; the enrich writer sends them past ALLOWED_TOP_LEVEL through update-metadata (inconsistency 1)", remedy = "R1", moved_by = "6pfgb.28, 6pfgb.12" }
+
+[[row]]
+id = "bib-enriched-by"
+match = { key = "bib_enriched_by" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "absent", home = "catalog document meta key beside bib_enriched_at; never a row key", remedy = "R3", moved_by = "6pfgb.32" }
+
+[[row]]
+id = "indexed-at"
+match = { key = "indexed_at" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "catalog_documents.indexed_at (row fallback while NULL); the note TTL clock is meta put_at; the row's own write time is the column last_written_at", remedy = "R1", moved_by = "6pfgb.13" }
+
+[[row]]
+id = "tags"
+match = { key = "tags" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "notes: a JSON array in the document meta, filtered by containment (the comma string is legacy); indexed files: a GENERATED one-element array from file_path", remedy = "R3", moved_by = "6pfgb.38, 6pfgb.8" }
+
+[[row]]
+id = "category"
+match = { key = "category" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "notes: document meta; indexed files: GENERATED from content_type", remedy = "R3", moved_by = "6pfgb.8; R3 is plan 6pfgb, not the census (R2 there)" }
+
+[[row]]
+id = "ttl-days"
+match = { key = "ttl_days" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "document meta; 0 or absent is permanent; put_at present whenever ttl_days > 0", remedy = "R3", moved_by = "6pfgb.5, 6pfgb.15 done; CHECK 6pfgb.44" }
+
+[[row]]
+id = "put-at"
+match = { key = "put_at" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "absent", home = "document meta; the note TTL clock", remedy = "R3", moved_by = "6pfgb.15 done; CHECK 6pfgb.44" }
+
+[[row]]
+id = "extraction-provenance"
+match = { key = ["extraction_method", "quality_gate_overridden", "extraction_source"] }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "document meta (absent = unknown; explicit false for the override)", remedy = "R3", moved_by = "6pfgb.6, 6pfgb.16" }
+
+[[row]]
+id = "frecency-score"
+match = { key = "frecency_score" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "document meta with a computed_at; the scorer reads the attributed owner", remedy = "R3", moved_by = "6pfgb.9" }
+
+[[row]]
+id = "frecency-computed-at"
+match = { key = "frecency_computed_at" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "absent", home = "document meta beside frecency_score; written by every index repo run; read by nothing yet", remedy = "R3", moved_by = "6pfgb.9" }
+
+[[row]]
+id = "source-agent"
+match = { key = "source_agent" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "document meta (notes done in 6pfgb.5)", remedy = "R3", moved_by = "6pfgb.17, 6pfgb.5; R3 is plan 6pfgb, not the census (R1 or R2 there)" }
+
+[[row]]
+id = "session-id"
+match = { key = "session_id" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "stored", home = "none: zero readers, retired; no writer since 6pfgb.4; ALLOWED_TOP_LEVEL still accepts it for an old row echoed back until 6pfgb.27", remedy = "R2", moved_by = "6pfgb.4, 6pfgb.27" }
+
+[[row]]
+id = "catalog-doc-id"
+match = { key = "catalog_doc_id" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "unvalidated", home = "the manifest is the owner record; read by the note TTL rules until the keyless-note count is zero and by the engine's manifest-less census forward join until 6pfgb.39", remedy = "R2", remedy_reader = "R5", moved_by = "6pfgb.27 (writer), 6pfgb.39 (readers); census 2/2 row 19, RF-19" }
+
+[[row]]
+id = "content-hash"
+match = { key = "content_hash" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "catalog_documents.index_content_hash (3ajpd); the row writer in metadata_schema still stamps it", remedy = "R2", remedy_reader = "R5", moved_by = "3ajpd done; writer 6pfgb.27; readers select by the manifest (census 2/2 section 5 item 3)" }
+
+# ---- POSITION --------------------------------------------------------------
+
+[[row]]
+id = "labels"
+match = { key = ["section_title", "section_type", "page_number"] }
+emit = { class = "POSITION", kind = "metadata-key", on_row = "allowed", home = "catalog_document_chunks (catalog-046), one manifest row for the chash, not one owner", remedy = "R4", moved_by = "tko2w, jz86a, 1nrcu" }
+
+[[row]]
+id = "spans"
+match = { key = ["line_start", "line_end", "chunk_start_char", "chunk_end_char"] }
+emit = { class = "POSITION", kind = "metadata-key", on_row = "allowed", home = "catalog_document_chunks line_start, line_end, char_start, char_end; the flattened search-row fields and file:line are re-pointed", remedy = "R4", moved_by = "6pfgb.26, 6pfgb.19" }
+
+# ---- ROW -------------------------------------------------------------------
+
+[[row]]
+id = "quarantine-keys"
+match = { key = ["quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at"] }
+emit = { class = "ROW", kind = "metadata-key", on_row = "engine", home = "the row; refused from a client write; quarantined_by implies quarantined_at (CHECK); the quarantine-* bypass prefix stays exempt from the allow-list", remedy = "R6", moved_by = "stays; CHECK phase 4; restore fix 6pfgb.40" }
+
+[[row]]
+id = "row-columns"
+match = { key = ["last_written_at", "retention", "collection"] }
+emit = { class = "ROW", kind = "column", on_row = "absent", home = "columns of nexus.chunks", remedy = "keep", moved_by = "stays" }
+
+# ---- LEGACY ----------------------------------------------------------------
+
+[[row]]
+id = "chunk-type"
+match = { key = "chunk_type" }
+emit = { class = "LEGACY", kind = "metadata-key", on_row = "unvalidated", home = "none: dead; the pipeline post-pass still writes table_page past validate", remedy = "R2", moved_by = "6pfgb.27" }
+
+[[row]]
+id = "doc-id"
+match = { key = "doc_id" }
+emit = { class = "LEGACY", kind = "metadata-key", on_row = "unvalidated", home = "RDR-108 Phase 3 legacy; the repo PDF dict (indexer.py) still sets it; read by the engine's manifest-less census forward join until 6pfgb.39, kept on quarantine-* rows until j67ix.1", remedy = "R2", remedy_reader = "R5", moved_by = "6pfgb.39, sweep; readers select by the manifest (census 2/2 row 19)" }
+
+[[row]]
+id = "chunk-index-count"
+match = { key = ["chunk_index", "chunk_count"] }
+emit = { class = "LEGACY", kind = "metadata-key", on_row = "stored", home = "chunk_index lives on as the manifest column (CHECK equal to position); chunk_count is dropped", remedy = "R2", moved_by = "6pfgb.39, sweep" }
+
+[[row]]
+id = "source-path"
+match = { key = "source_path" }
+emit = { class = "LEGACY", kind = "metadata-key", on_row = "stored", home = "none (RDR-102 D2); the engine's /reapable and reaper audit display read it until 6pfgb.39", remedy = "R2", moved_by = "6pfgb.39, sweep" }
+
+[[row]]
+id = "routing-legacy"
+match = { key = ["store_type", "corpus"] }
+emit = { class = "LEGACY", kind = "metadata-key", on_row = "stored", home = "none (RDR-101 Phase 5c); the catalog document carries the binding", remedy = "R2", moved_by = "sweep" }
+
+[[row]]
+id = "git-keys"
+match = { key = ["git_meta", "git_project_name", "git_branch", "git_commit_hash", "git_remote_url"] }
+emit = { class = "LEGACY", kind = "metadata-key", on_row = "stored", home = "none (RDR-101 Phase 5c); the repo PDF dict's writer is removed by nexus-qyx35", remedy = "R2", moved_by = "nexus-qyx35 (writer), sweep" }
+
+# ---- NOT_ROW ---------------------------------------------------------------
+
+[[row]]
+id = "frecency-table"
+match = { key = "nexus.frecency" }
+emit = { class = "NOT_ROW", kind = "table", on_row = "absent", home = "a third, chunk-keyed home for frecency_score and ttl_days with no client writer found: retire it, or list its writer and reader", remedy = "n/a", moved_by = "6pfgb.42 settles; the writers are unconfirmed (census 1/2)" }
+
+[[row]]
+id = "catalog-columns"
+match = { key = ["lifecycle_state", "tumbler", "index_state"] }
+emit = { class = "NOT_ROW", kind = "catalog", on_row = "absent", home = "catalog columns (RDR-222 fence fields are index_state, index_content_hash, run id, started); listed so no one looks for them on the row", remedy = "n/a", moved_by = "n/a" }

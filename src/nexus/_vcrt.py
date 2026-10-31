@@ -30,6 +30,18 @@ VC_RUNTIME_DLLS: tuple[str, ...] = ("msvcp140.dll", "msvcp140_1.dll")
 PDF_ONLY_DLLS: tuple[str, ...] = ("msvcp140_atomic_wait.dll",)
 PDF_STACK_DLLS: tuple[str, ...] = (*VC_RUNTIME_DLLS, *PDF_ONLY_DLLS)
 
+#: How every Python child that imports mineru, torch or onnxruntime starts (nexus-vyy65).
+#: ``import nexus`` runs ``nexus._add_vc_runtime_dirs`` (nexus/__init__.py), which puts the
+#: app-local VC++ DLLs on the DLL search path of THAT process. ``os.add_dll_directory`` is per
+#: process and Python >= 3.8 on Windows does not search PATH for an extension module's
+#: dependent DLLs, so a child that skips this dies with ``ImportError: DLL load failed while
+#: importing onnxruntime_pybind11_state`` on a box with no VC++ redistributable. It must come
+#: before the first mineru/torch/onnxruntime import. Cost: the ``nexus`` package init, which
+#: imports ``nexus._vcrt`` (stdlib only) and, on Windows, also primes the OS trust store
+#: (``truststore.inject_into_ssl()``: no network, it only swaps ssl's context class); it loads no
+#: other nexus submodule.
+MINERU_CHILD_PROLOGUE = "import nexus  # noqa: F401 -- runs _add_vc_runtime_dirs() (nexus-vyy65)\n"
+
 #: Subdirectory of the config dir the provisioner fills.
 VCRT_SUBDIR = "vcrt"
 

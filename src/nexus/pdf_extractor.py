@@ -33,6 +33,7 @@ import time
 import httpx
 import structlog
 
+from nexus._vcrt import MINERU_CHILD_PROLOGUE
 from nexus.config import DEFAULT_EXTRACTOR, resolve_extractor
 from nexus.errors import ExtractionQualityError, UnextractableContentError
 from nexus.redact import redact_credentials
@@ -91,6 +92,9 @@ def _mineru_do_parse():  # noqa: ANN202 — mineru's callable type is not import
 # substituted into the worker script template below.
 _MINERU_OOM_EXIT = 42
 
+#: How long a restart waits for the replacement server's /health (models are cached by the OS).
+_RESTART_HEALTH_WAIT_S = 60.0
+
 #: nexus-5ny9r: how long a "no live MinerU server" verdict is trusted before
 #: the next page re-probes the endpoint (one cheap /health, no autostart).
 _MINERU_SERVER_RECHECK_S = 60.0
@@ -101,16 +105,27 @@ _MINERU_SERVER_RECHECK_S = 60.0
 _MINERU_DEFAULT_SLOTS = 3
 
 
-def _mineru_server_slots() -> int:
-    """How many requests the MinerU server parses at once, read the way MinerU reads it.
+#: RDR-237: how long the slot count's ``/health`` read waits. The server answers it from its event
+#: loop even with every slot held, so a longer wait only delays a restart that is already due.
+_MINERU_HEALTH_SLOTS_TIMEOUT_S = 2.0
 
-    MinerU (``cli/fast_api.py``) pins the server to ONE slot on macOS whatever the environment
-    says, and elsewhere takes ``MINERU_API_MAX_CONCURRENT_REQUESTS`` when it is a positive
-    integer, else 3. The server inherits the environment of the process that spawned it, which
-    is this one when nexus started it. An abandoned parse holds its slot until it finishes (the
-    parse runs in a thread nothing can cancel), which is what makes the count decide when a
-    server that timed out is replaced (RDR-237).
+
+def _mineru_server_slots(url: str | None = None) -> int:
+    """How many requests the MinerU server parses at once.
+
+    With *url*, the server's own answer wins: ``/health`` reports ``max_concurrent_requests``
+    (MinerU 3.1.11 ``fast_api.py``), and that also covers a server this process did not start (``nx
+    mineru start``, launchd) whose environment is not ours. When the server does not say (it is
+    unreachable, answered with an error, or sent no positive integer), and with no *url*, the count
+    is read the way MinerU reads it: ONE slot on macOS whatever the environment says, else
+    ``MINERU_API_MAX_CONCURRENT_REQUESTS`` when it is a positive integer, else 3. An abandoned
+    parse holds its slot until it finishes (the parse runs in a thread nothing can cancel), which is
+    what makes the count decide when a server that timed out is replaced (RDR-237).
     """
+    if url:
+        live = _live_server_slots(url)
+        if live is not None:
+            return live
     if sys.platform == "darwin":
         return 1
     raw = os.environ.get("MINERU_API_MAX_CONCURRENT_REQUESTS")
@@ -122,6 +137,21 @@ def _mineru_server_slots() -> int:
         if slots > 0:
             return slots
     return _MINERU_DEFAULT_SLOTS
+
+
+def _live_server_slots(url: str) -> int | None:
+    """The positive integer the server at *url* reports as ``max_concurrent_requests``, else None."""
+    try:
+        resp = httpx.get(f"{url.rstrip('/')}/health", timeout=_MINERU_HEALTH_SLOTS_TIMEOUT_S)
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 — a failed probe is no evidence; the caller keeps its estimate
+        return None
+    slots = payload.get("max_concurrent_requests") if isinstance(payload, dict) else None
+    if isinstance(slots, int) and not isinstance(slots, bool) and slots > 0:
+        return slots
+    return None
 
 
 #: nexus-11x9o: how much of the per-batch worker's stderr (its last bytes) rides
@@ -151,16 +181,37 @@ def _read_stderr_tail(path: Path) -> str:
 _STDERR_LINE_CAP = 300
 
 
+#: RDR-237: what a progress bar redraw looks like (tqdm: ``45%|####5 | 9/20 [00:03<00:04, 2.9it/s]``).
+#: A worker killed mid-run leaves one of these as its last stderr line, and which frame it is
+#: differs from page to page, so it must never become part of a failure class.
+_STDERR_PROGRESS = re.compile(r"\d+%\||\d+/\d+ \[\d|\b\d+(?:\.\d+)?\s*(?:it/s|s/it)\b")
+
+
+#: RDR-237: one complete tqdm frame, up to its closing ``]``, with the short ``<description>:`` tqdm
+#: writes before the percentage. tqdm redraws with ``\r`` and no newline, so a real message written
+#: next can share the frame's physical line; removing the frame keeps the message.
+_STDERR_FRAME = re.compile(r"(?:[^|\[\]\r\n]{0,60}?:\s*)?\d+%\|[^|\r\n]*\|[^\[\]\r\n]*\[[^\]\r\n]*\]")
+
+
 def _last_stderr_line(tail: str) -> str:
-    """The last non-empty line of a (redacted) stderr *tail*; ``""`` when there is none."""
+    """The last non-empty line of a (redacted) stderr *tail* that is not a progress-bar frame;
+    ``""`` when there is none. ``splitlines`` also splits on the carriage returns tqdm redraws with,
+    and a frame glued to a message on one line is cut out of it (see :data:`_STDERR_FRAME`)."""
     for line in reversed(tail.splitlines()):
-        if line.strip():
-            return line.strip()[:_STDERR_LINE_CAP]
+        rest = _STDERR_FRAME.sub("", line).strip()
+        # what is left of a frame whose postfix held a ``]`` is punctuation, not a message
+        if any(ch.isalnum() for ch in rest) and not _STDERR_PROGRESS.search(rest):
+            return rest[:_STDERR_LINE_CAP]
     return ""
 
 
+# nexus-vyy65: the prologue (``import nexus``) comes first, before the first mineru import. The
+# worker is a fresh ``python -c`` child that never imported nexus, so on Windows without the VC++
+# redistributable it could not load onnxruntime/torch from nx's app-local DLLs until it ran
+# ``_add_vc_runtime_dirs`` for itself. ``nx doctor --check-mineru`` starts its child probe the
+# same way (``_mineru_spawn.MINERU_CHILD_PROLOGUE``).
 _MINERU_WORKER_SCRIPT = '''
-import json, sys, os
+__MINERU_CHILD_PROLOGUE__import json, sys, os
 from pathlib import Path
 from mineru.cli.common import do_parse
 
@@ -185,7 +236,7 @@ except MemoryError:
     # MineruMemoryError. os._exit (not sys.exit) to skip pool/daemon-thread teardown.
     os._exit(__MINERU_OOM_EXIT__)
 os._exit(0)
-'''.replace("__MINERU_OOM_EXIT__", str(_MINERU_OOM_EXIT))
+'''.replace("__MINERU_CHILD_PROLOGUE__", MINERU_CHILD_PROLOGUE).replace("__MINERU_OOM_EXIT__", str(_MINERU_OOM_EXIT))
 
 _log = structlog.get_logger(__name__)
 
@@ -247,9 +298,10 @@ class MineruWorkerError(RuntimeError):
     pages of one broken install would never compare equal by it.
 
     *timed_out*: the worker was killed at its per-page budget. *returncode*: its
-    exit status (``None`` for a timeout). *stderr_last_line*: the last non-empty
-    line of its stderr tail (what ``mineru_subprocess_failed`` already logs), the
-    line that names an ``ImportError`` or a missing weight file.
+    exit status (``None`` for a timeout); *signal* (a property) is the signal behind a
+    negative one. *stderr_last_line*: the last non-empty line of its stderr tail that is
+    not a progress-bar frame (what ``mineru_subprocess_failed`` already logs), the line
+    that names an ``ImportError`` or a missing weight file.
     """
 
     def __init__(
@@ -260,6 +312,13 @@ class MineruWorkerError(RuntimeError):
         self.timed_out = timed_out
         self.returncode = returncode
         self.stderr_last_line = stderr_last_line
+
+    @property
+    def signal(self) -> int | None:
+        """The signal that ended the worker (``9`` for SIGKILL), ``None`` for a timeout and for an
+        exit status. A negative ``returncode`` is POSIX's "killed by signal -N"; Windows exit
+        codes are never negative."""
+        return -self.returncode if self.returncode is not None and self.returncode < 0 else None
 
 
 class MineruMemoryError(MineruWorkerError):
@@ -282,6 +341,28 @@ class MineruMemoryError(MineruWorkerError):
 from nexus._mineru_health import MineruMachineResourceError  # noqa: E402
 
 
+#: RDR-237: what to do when the worker is killed by the OS (``signal:9``) or stopped at its memory
+#: ceiling (``oom*``). The install is fine, so "repair the install" would send the operator the wrong way.
+_MINERU_MEMORY_REMEDY = (
+    "the worker was killed by the OS, usually out of memory. Free memory or use a machine with more; "
+    "keep `pdf.mineru_page_batch` at 1 (more pages per worker run need more memory); on Linux "
+    "`pdf.mineru_memory_ceiling_mb` makes the worker fail with a memory error instead of being killed."
+)
+
+
+def _is_memory_class(failure_class: str) -> bool:
+    """True for the failure classes that mean the worker ran out of memory: ``signal:9`` (the
+    OOM-killer or macOS jetsam), ``oom``, and ``oom:<rc>:<line>`` when the line is about memory.
+    Under a memory ceiling every non-zero exit becomes ``MineruMemoryError``, so an
+    ``oom:1:ImportError ...`` is a broken install that happened to run with a ceiling set."""
+    if failure_class in ("signal:9", "oom"):
+        return True
+    if failure_class.startswith("oom:"):
+        line = failure_class.split(":", 2)[2] if failure_class.count(":") >= 2 else ""
+        return bool(re.search(r"memory|alloc", line, re.IGNORECASE))
+    return False
+
+
 class MineruSystemicFailure(Exception):
     """Consecutive pages failed both MinerU rungs with one failure class (RDR-237).
 
@@ -289,30 +370,42 @@ class MineruSystemicFailure(Exception):
     stops instead of being indexed page by page from its text layer. An
     ``Exception`` and not a ``RuntimeError`` on purpose: the ladder's descend
     rule is ``except RuntimeError``, and this must never be read as one page's
-    failure. *failure_class* is the class key (``timeout``, ``exit:<rc>:<line>``,
-    ``oom:<line>``); *stderr_line* the worker's last stderr line, when it had one.
+    failure. *failure_class* is the class key (``timeout``, ``signal:<n>``, ``oom``,
+    ``oom:<rc>:<line>``, ``exit:<rc>:<line>``; see :func:`_failure_class`); *stderr_line* the worker's last stderr line, when it had one.
     """
 
     def __init__(self, failure_class: str, stderr_line: str, pages: list[int], file_name: str) -> None:
         self.failure_class = failure_class
         self.stderr_line = stderr_line
         self.pages = pages
+        self.file_name = file_name
         shown = f"; the worker's last stderr line: {stderr_line!r}" if stderr_line else ""
+        memory = _is_memory_class(failure_class)
+        first = "free memory first" if memory else "repair the install first"
         kept = (
-            "No page was kept, and a rerun starts from page 1, so repair the install first."
+            f"No page was kept, and a rerun starts from page 1, so {first}."
             if pages[0] <= 1
             else f"The pages before page {pages[0]} stay in the kept buffer, so a rerun "
-            f"does not write them again, but MinerU runs over them again, so repair "
-            f"the install first."
+            f"does not write them again, but MinerU runs over them again, so {first}."
+        )
+        cause = (
+            f"That points at the machine's memory, not at the pages: {_MINERU_MEMORY_REMEDY}"
+            if memory
+            else "That points at the install or the machine, not at the pages: run `nx doctor`."
         )
         super().__init__(
             f"MinerU failed on {len(pages)} consecutive pages of {file_name} "
             f"(pages {pages[0]}-{pages[-1]}), with and without formulas, "
-            f"all with failure class {failure_class!r}{shown}. That points at the "
-            f"install or the machine, not at the pages: run `nx doctor`. {kept} "
+            f"all with failure class {failure_class!r}{shown}. {cause} {kept} "
             f"`pdf.ladder_breaker` sets how many pages stop a "
             f"document (0 turns the check off)."
         )
+
+    def __reduce__(self) -> tuple:
+        # The base class keeps only the message, so the default reconstruction calls
+        # ``MineruSystemicFailure(message)`` and raises TypeError: a process-pool caller could not
+        # get this exception back. Rebuild it from the four values that make the message.
+        return (type(self), (self.failure_class, self.stderr_line, self.pages, self.file_name))
 
 
 #: What stops a run's MinerU work (nexus-tr1rj.13). Both name the install or the machine, not the
@@ -326,14 +419,37 @@ def mineru_stop_reason(exc: BaseException) -> tuple[str, str, str]:
     command prints on its ``Stopped:`` line: ``Stopped: <what> on <file> (<detail>); N remaining
     PDF(s) not attempted. <remedy>``."""
     if isinstance(exc, MineruSystemicFailure):
-        return (
-            "MinerU failed systemically", f"failure class {exc.failure_class}",
-            "Repair the install (`nx doctor`), then rerun.",
+        remedy = (
+            f"{_MINERU_MEMORY_REMEDY} Then rerun." if _is_memory_class(exc.failure_class)
+            else "Repair the install (`nx doctor`), then rerun."
         )
+        return ("MinerU failed systemically", f"failure class {exc.failure_class}", remedy)
     # MineruMachineResourceError has one raise site today (exhausted POSIX named semaphores), and its
     # message IS the platform's remedy (``nexus._mineru_health.semaphore_remedy``, about 400 characters).
     # The detail stays short and the remedy appears once, so the Stopped line stays one readable line.
     return ("MinerU cannot run on this machine", "POSIX named semaphores exhausted", str(exc))
+
+
+class AllPagesUnextractedError(UnextractableContentError):
+    """MinerU failed on every page of the document, with and without formulas, and no page has a
+    text layer to fall back to (RDR-237).
+
+    A subclass of :class:`UnextractableContentError` so every caller that already catches that keeps
+    working, and a type of its own because the two mean different things. A plain
+    ``UnextractableContentError`` is a file with nothing in it (blank, image-only under the text-only
+    extractor): a rerun changes nothing, so a batch skips it. This is the extractor failing on a file
+    that probably has text: a rerun after the install is repaired, or an OCR pass, does change it. A
+    batch command reports it as an extraction failure and fails its exit over it (``nx dt index``
+    counts it with the records that failed; ``nx index pdf`` already fails over any exception).
+
+    *total_pages*: the document's page count. *last_error*: what sent the last page down its rungs
+    (``rung 1: <class>; rung 2: <class>``).
+    """
+
+    def __init__(self, message: str, *, total_pages: int = 0, last_error: str = "") -> None:
+        super().__init__(message)
+        self.total_pages = total_pages
+        self.last_error = last_error
 
 
 class MineruServerTimeout(MineruWorkerError):
@@ -392,29 +508,70 @@ class PageOutcome:
 #: Settled methods below rung 1, in rung order: the keys of ``extraction_pages``.
 _DEGRADED_METHODS: tuple[str, ...] = ("mineru-no-formula", "pymupdf-text", "unextracted")
 
-#: A dropped server connection (RDR-237): the page moves on, and the failure has no class.
-_DROPPED_CONNECTION = (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError)
+#: A dropped server connection (RDR-237): the page moves on, and the failure has no class. In a real
+#: run :meth:`PDFExtractor._mineru_run_isolated` absorbs these (restart, one retry, then the
+#: subprocess), so the failure the ladder and the breaker see is the subprocess's own; this tuple
+#: covers a drop that still reaches the ladder.
+_DROPPED_CONNECTION = (
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError, httpx.RemoteProtocolError,
+)
 
 _UNCLASSIFIED = "unclassified"
+
+#: RDR-237: values that differ from page to page inside an otherwise identical stderr line.
+_KEY_PATH = re.compile(r"""(?<![\w.])(?:/|[A-Za-z]:[\\/]|~/)[^\s'"),;]*""")
+_KEY_HEX = re.compile(r"\b0x[0-9a-fA-F]+\b")
+_KEY_DIGITS = re.compile(r"\d{3,}")
+
+
+def _key_line(line: str) -> str:
+    """*line* with the parts that change from page to page replaced, for use inside a failure class.
+
+    A per-page temp path, a pid, a hex address or a byte count in the worker's last stderr line would
+    give every page its own class and the breaker would never count two pages as alike. Absolute
+    and ``~`` paths become ``<path>``, hex addresses ``<addr>``, runs of three or more digits ``<n>``;
+    the exception type and the message words stay, and so do one- and two-digit numbers."""
+    line = _KEY_PATH.sub("<path>", line)
+    line = _KEY_HEX.sub("<addr>", line)
+    return _KEY_DIGITS.sub("<n>", line)
 
 
 def _failure_class(exc: BaseException) -> str:
     """The class key of one attempt's failure, built from attributes and never message text.
 
-    ``timeout``; ``oom:<stderr line>`` (a memory ceiling turns ANY non-zero exit into a
-    :class:`MineruMemoryError`, so the line keeps a missing library apart from a real
-    out-of-memory kill); ``exit:<returncode>:<stderr line>``; ``unclassified`` for a failure
-    with no worker facts (no output, a dropped connection), which the breaker never counts.
+    Keyed on what the worker did, in this order, so that two pages failing the same way get the
+    same key and the breaker counts them:
+
+    * ``timeout``: the worker was killed at its page budget.
+    * ``signal:<n>``: the OS killed it (``signal:9`` is the OOM-killer or macOS jetsam). The
+      stderr line is NOT part of the key: a killed worker's last line is whatever progress frame
+      it was on.
+    * ``oom``: it exited with the in-process ``MemoryError`` sentinel; stderr is again no part of it.
+    * ``oom:<returncode>:<stderr line>``: a memory ceiling turns ANY non-zero exit into a
+      :class:`MineruMemoryError`; the line keeps a missing library apart from a real exhaustion.
+    * ``exit:<returncode>:<stderr line>``: any other non-zero exit; the line names an ``ImportError``
+      or a missing weight file.
+
+    The stderr line in the last two keys goes through :func:`_key_line` first, so a temp path, pid,
+    address or byte count that differs per page does not give each page its own class.
+    * ``unclassified``: no worker facts (a "produced no output" ``RuntimeError``, a dropped server
+      connection). The breaker never counts it (see :class:`_SystemicFailureCounter`).
+
     There is no ``http:<status>`` class: a server error falls to the subprocess path, so the
     subprocess failure is the terminal one.
     """
-    if isinstance(exc, MineruMemoryError):
-        return f"oom:{exc.stderr_last_line}"
     if isinstance(exc, MineruWorkerError):
         if exc.timed_out:
             return "timeout"
+        if exc.signal is not None:
+            return f"signal:{exc.signal}"
+        if isinstance(exc, MineruMemoryError):
+            if exc.returncode == _MINERU_OOM_EXIT:
+                return "oom"
+            line = _key_line(exc.stderr_last_line)
+            return f"oom:{exc.returncode}:{line}" if exc.returncode is not None else f"oom:{line}"
         if exc.returncode is not None:
-            return f"exit:{exc.returncode}:{exc.stderr_last_line}"
+            return f"exit:{exc.returncode}:{_key_line(exc.stderr_last_line)}"
     return _UNCLASSIFIED
 
 
@@ -435,10 +592,12 @@ def _is_pipeline_cancel(exc: BaseException) -> bool:
 class _SystemicFailureCounter:
     """The breaker's count: pages that failed rungs 1 and 2 with one class, in a row.
 
-    A page counts only when both rungs failed with the same class and that class is not
-    ``unclassified``; it extends the run when the class equals the previous counted page's
-    and restarts it at one otherwise. A page that settled on rung 1 or 2, or whose two
-    rungs failed differently or without a class, resets the count. *threshold* 0 never trips.
+    The rule, stated once: a page counts only when BOTH rungs failed with the SAME class and
+    that class is not ``unclassified``; it extends the run only when the class equals the
+    previous counted page's, and restarts it at one otherwise. A page that settled on rung 1
+    or 2, whose two rungs failed differently, or without a class, resets the count. The
+    ladder passes ``unclassified`` for a page whose rung 1 dropped the server connection, so
+    that page never counts. *threshold* 0 never trips.
     """
 
     def __init__(self, threshold: int) -> None:
@@ -1704,6 +1863,10 @@ class PDFExtractor:
         # Why the last _restart_broken_mineru_server call replaced nothing (nexus-tr1rj.25); ""
         # when it replaced the server or has not run.
         self._restart_skipped: str = ""
+        # The pid of the server ANOTHER process had already started when the last restart took the
+        # election (a concurrent trigger; this process stopped and spawned nothing); None otherwise
+        # (nexus-tr1rj.26).
+        self._restart_taken_over_by: int | None = None
         # The line a restart prints once it is decided (nexus-tr1rj.25); set only around the
         # timed-out-server restart, which knows the pages. None: nothing is announced.
         self._restart_announce: Callable[[], None] | None = None
@@ -2200,11 +2363,13 @@ class PDFExtractor:
             # there is never read as MinerU failing.
             page = s + 1
             rng_end = e if e is not None else total_pages
-            if isinstance(rung1_exc, _DROPPED_CONNECTION):
+            dropped_first = isinstance(rung1_exc, _DROPPED_CONNECTION)
+            if dropped_first:
                 # The server dropped us. Retry rung 1 ONCE on the subprocess path
-                # with formulas on, before giving up the formulas. The dropped
-                # connection itself is unclassified; the retry's failure, if any,
-                # is a new one and has its own class.
+                # with formulas on, before giving up the formulas. RDR-237 (Bounds): a dropped
+                # connection counts toward neither the restart rule nor the breaker, so this page
+                # is kept out of the breaker count whatever the retry then does; the retry's own
+                # failure class is still logged and named in the page's error.
                 _log.warning("mineru_dropped_connection_retry", page=page, path=str(pdf_path),
                              error=type(rung1_exc).__name__)
                 try:
@@ -2243,7 +2408,7 @@ class PDFExtractor:
             class2 = _failure_class(rung2_exc)
             _log.warning("mineru_page_rung_failed", page=page, rung=2, failure_class=class2,
                          path=str(pdf_path))
-            tripped = breaker.failed(page, class1, class2)
+            tripped = breaker.failed(page, _UNCLASSIFIED if dropped_first else class1, class2)
             if tripped is not None:
                 # The held window is dropped, never flushed: it stays out of the kept buffer.
                 raise MineruSystemicFailure(
@@ -2338,10 +2503,11 @@ class PDFExtractor:
             # Rungs 1 to 3 failed on every page and none has a text layer: indexing
             # this would write nothing, and say so by returning an empty document.
             last = outcomes[max(outcomes)].error
-            raise UnextractableContentError(
+            raise AllPagesUnextractedError(
                 f"every page of {fname} is unextracted: MinerU failed on all {total_pages} "
                 f"pages with and without formulas ({last}) and none has a text layer. "
-                f"Run `nx doctor` for the MinerU install, or OCR the PDF first."
+                f"Run `nx doctor` for the MinerU install, or OCR the PDF first.",
+                total_pages=total_pages, last_error=last or "",
             )
 
         md_text = "\n".join(md_parts)
@@ -2771,8 +2937,10 @@ class PDFExtractor:
                     _pid_file_path().unlink(missing_ok=True)
                     info = None
                 if info is not None and is_process_alive(info["pid"]):
-                    # A concurrent trigger already restarted — probe it below.
+                    # A concurrent trigger already restarted — probe it below. The caller's
+                    # progress line says another process did it (nexus-tr1rj.26).
                     port = info["port"]
+                    self._restart_taken_over_by = info["pid"]
                 else:
                     if info is not None:
                         _pid_file_path().unlink(missing_ok=True)
@@ -2789,7 +2957,7 @@ class PDFExtractor:
 
         # Poll health for up to 60s (models already cached in memory by OS)
         url = f"http://127.0.0.1:{port}/health"
-        deadline = _time.monotonic() + 60
+        deadline = _time.monotonic() + _RESTART_HEALTH_WAIT_S
         # RDR-237: this wait is an attempt that writes no page. It opens with a heartbeat and
         # ticks again every 60 s (a wait this long ticks once; the interval is the lifecycle's).
         from nexus.daemon.mineru_lifecycle import HEARTBEAT_EVERY_S  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
@@ -2852,7 +3020,7 @@ class PDFExtractor:
         does (the first abandoned parse finishes on its own and delays nothing). Rung 2 requests
         are not counted. *exc* is the ``httpx`` timeout, for the log.
         """
-        from nexus.config import get_mineru_page_timeout_s  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.config import get_mineru_page_timeout_s, get_mineru_server_url  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         pages = self._mineru_attempt_pages(start, end)
         budget_s = get_mineru_page_timeout_s() * pages
@@ -2863,14 +3031,16 @@ class PDFExtractor:
         )
         if rung_one:
             self._server_timeout_pages.append(label)
-            if len(self._server_timeout_pages) >= (1 if _mineru_server_slots() <= 1 else 2):
-                self._restart_timed_out_server()
+            # The slot count is the live server's own (its /health), else the platform estimate.
+            slots = _mineru_server_slots(get_mineru_server_url())
+            if len(self._server_timeout_pages) >= (1 if slots <= 1 else 2):
+                self._restart_timed_out_server(slots=slots)
         return MineruServerTimeout(
             f"MinerU server did not answer within {budget_s}s (pages {start}–{end}, path={pdf_path})",
             timed_out=True,
         )
 
-    def _restart_timed_out_server(self) -> None:
+    def _restart_timed_out_server(self, *, slots: int | None = None) -> None:
         """Replace the registered server whose rung-1 requests timed out, or mark it down.
 
         Only through :meth:`_restart_broken_mineru_server`, so the machine-wide cooldown and the
@@ -2893,7 +3063,7 @@ class PDFExtractor:
                 and spawn_policy_allows(url):
             _log.warning(
                 "mineru_server_timeout_restart", pages=timed_out, old_pid=info.get("pid"),
-                slots=_mineru_server_slots(),
+                slots=slots if slots is not None else _mineru_server_slots(),
             )
             self._restart_skipped = ""
             # "replacing it" is printed from inside the restart, once it is decided (after the
@@ -2908,16 +3078,27 @@ class PDFExtractor:
                 restarted = self._restart_broken_mineru_server(info)
             finally:
                 self._restart_announce = None
+            taken_over_by = self._restart_taken_over_by
             if restarted:
-                _progress(
-                    f"  MinerU server timed out on page(s) {pages} — replaced it "
-                    f"(old pid {info.get('pid')})."
+                # nexus-tr1rj.26: the pid file named a different live server once the election was
+                # held, so another process had already replaced this one; this process spawned nothing.
+                who = (
+                    f"another process already replaced it (old pid {info.get('pid')}, now pid {taken_over_by})"
+                    if taken_over_by is not None else f"replaced it (old pid {info.get('pid')})"
                 )
+                _progress(f"  MinerU server timed out on page(s) {pages} — {who}.")
                 return
-            _progress(
-                f"  MinerU server timed out on page(s) {', '.join(timed_out)} — "
-                f"{_restart_skip_text(self._restart_skipped, info.get('pid'))}"
-            )
+            if taken_over_by is not None:
+                _progress(
+                    f"  MinerU server timed out on page(s) {pages} — another process replaced it "
+                    f"(now pid {taken_over_by}) and that server did not come up; later pages run in a "
+                    "subprocess for now."
+                )
+            else:
+                _progress(
+                    f"  MinerU server timed out on page(s) {', '.join(timed_out)} — "
+                    f"{_restart_skip_text(self._restart_skipped, info.get('pid'))}"
+                )
         else:
             _log.warning(
                 "mineru_server_timeout_not_restartable", pages=timed_out, url=url,
@@ -3048,6 +3229,7 @@ class PDFExtractor:
         from nexus._mineru_health import claim_broken_restart  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         self._restart_skipped = ""
+        self._restart_taken_over_by = None
         if info is None or not isinstance(info.get("pid"), int):
             self._restart_skipped = "no-pid"
             return False
@@ -3160,13 +3342,13 @@ class PDFExtractor:
                     cwd=stable_daemon_cwd(),
                     **isolation_popen_kwargs(),  # own process group (POSIX) / job object (Windows)
                 )
-            # Use killpg(getpgid(pid)) rather than killpg(pid) directly —
-            # with start_new_session=True the pgid equals pid at spawn time,
-            # but by the time we kill the child may be dead and the PID
-            # recycled by the kernel. getpgid() resolves the current pgid
-            # from the live PID slot (raises ProcessLookupError if the
-            # process is already gone, which we swallow). Matches the
-            # session.py:301 idiom (indexing review C1).
+            # While the worker is alive (not yet reaped) its pid is ours and
+            # kill_tree resolves its group from it (killpg(getpgid(pid))).
+            # Once proc.wait() has reaped it, the pid is free for the kernel to
+            # hand to anyone, and getpgid() then names the NEW owner's group:
+            # the post-exit sweeps below pass reaped=True and use only the
+            # group id recorded here (develop lost runner at 7eb199896 shard 1,
+            # tests/test_reaped_worker_pid_never_signalled.py).
             # nexus-5ny9r: the worker's session id, recorded while it is
             # alive. start_new_session=True makes pgid == pid at spawn; once
             # the worker exits and is reaped, safe_killpg's os.getpgid(pid)
@@ -3182,11 +3364,21 @@ class PDFExtractor:
             # already covers it.
             worker_job = contain(proc)
 
-            def _killpg_safe() -> None:
+            def _killpg_safe(*, reaped: bool = False) -> None:
                 # Delegated to nexus.util.process_group so the mock-guard +
                 # error-swallow contract is consistent across every
                 # subprocess cleanup site in the codebase.
                 from nexus.util.process_group import kill_tree, safe_killpg_group  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+                if reaped and worker_job is None:
+                    # The worker exited and proc.wait() reaped it: its pid may
+                    # already be another process's, so nothing is resolved from
+                    # it (kill_tree would SIGKILL that process's whole group).
+                    # Its pool children, if any, are still in the group recorded
+                    # at spawn. A Windows job is a handle, not a pid, and is
+                    # still closed below.
+                    safe_killpg_group(worker_pgid)
+                    return
 
                 # On Windows, kill_tree closes the job (reaching the whole
                 # pool the worker spawned) when containment succeeded at
@@ -3212,7 +3404,10 @@ class PDFExtractor:
                         proc.kill()
                 safe_killpg_group(worker_pgid)
 
-            live = _LiveWorker(_killpg_safe)
+            # stop_mineru_workers runs on another thread and can land after this
+            # thread's proc.wait() reaped the worker (returncode set) but before
+            # the finally below unregisters it: the reap state decides then.
+            live = _LiveWorker(lambda: _killpg_safe(reaped=proc.returncode is not None))
             with _LIVE_MINERU_WORKERS_LOCK:
                 _LIVE_MINERU_WORKERS.add(live)
             run_cancel = getattr(_RUN_CANCEL, "event", None)
@@ -3244,13 +3439,13 @@ class PDFExtractor:
             if live.stopped:
                 # nexus-4vx0a: killed by stop_mineru_workers, not by memory:
                 # the SIGKILL return code must not be read as an OOM.
-                _killpg_safe()
+                _killpg_safe(reaped=True)
                 raise MineruWorkerStopped(
                     f"MinerU worker stopped: the run was interrupted (pages {start}–{end}, path={pdf_path})"
                 )
             if returncode != 0:
                 # Clean up any orphaned children in the process group
-                _killpg_safe()
+                _killpg_safe(reaped=True)
                 # RDR-148 Gap 5: 3-way OOM classification. A memory exhaustion
                 # surfaces three ways: (1) OS OOM-killer / macOS jetsam ->
                 # negative SIGKILL returncode; (2) an RLIMIT_AS breach caught
@@ -3282,7 +3477,7 @@ class PDFExtractor:
                     msg, returncode=returncode, stderr_last_line=_last_stderr_line(stderr_tail),
                 )
             # Kill any lingering workers in the process group
-            _killpg_safe()
+            _killpg_safe(reaped=True)
 
             pdf_name = pdf_path.name
             base = Path(result_dir) / pdf_name / "auto"
@@ -3502,6 +3697,15 @@ class PDFExtractor:
                 f"repair or re-export the PDF."
             )
         if not any(m == "pymupdf-text" for m in outcomes.values()):
+            if unreadable:
+                # Some pages raised, the rest are image-only: neither "OCR it" nor "repair it" alone is true.
+                raise UnextractableContentError(
+                    f"every page of {fname} is unextracted, from two causes. PyMuPDF could not read "
+                    f"{len(unreadable)} page(s) (the first error: {unreadable[0]}): repair or re-export "
+                    f"the PDF. The other {total_pages - len(unreadable)} page(s) are image-only, with no "
+                    f"text layer: OCR the PDF first, or index it with `--extractor mineru` (needs the "
+                    f"PDF stack)."
+                )
             raise UnextractableContentError(
                 f"every page of {fname} is unextracted: `--extractor pymupdf` reads only a PDF's own "
                 f"text layer, and none of its {total_pages} page(s) has one. OCR the PDF first, or "

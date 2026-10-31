@@ -115,9 +115,9 @@ def test_two_notes_with_identical_text_each_keep_their_own_keys(cat):
         "note-B", _CHASH, _COLLECTION, tags="beta,two", category="finding", ttl_days=30, source_agent="agent-b")
     assert created_a and created_b and a != b
     assert _note_keys(cat.docs[a]) == {
-        "tags": "alpha,one", "category": "design", "ttl_days": 7, "source_agent": "agent-a"}
+        "tags": ["alpha", "one"], "category": "design", "ttl_days": 7, "source_agent": "agent-a"}
     assert _note_keys(cat.docs[b]) == {
-        "tags": "beta,two", "category": "finding", "ttl_days": 30, "source_agent": "agent-b"}
+        "tags": ["beta", "two"], "category": "finding", "ttl_days": 30, "source_agent": "agent-b"}
     assert cat.docs[a].meta["doc_id"] == cat.docs[b].meta["doc_id"] == _CHASH
 
 
@@ -128,7 +128,7 @@ def test_an_unset_key_is_never_sent(cat):
         tumbler, _ = catalog_store_hook_tracked(title, _CHASH, _COLLECTION, ttl_days=ttl)
         assert _no_put_at(cat.docs[tumbler]) == {"doc_id": _CHASH}
     only_tags, _ = catalog_store_hook_tracked("only-tags", _CHASH, _COLLECTION, tags="x")
-    assert _no_put_at(cat.docs[only_tags]) == {"doc_id": _CHASH, "tags": "x"}
+    assert _no_put_at(cat.docs[only_tags]) == {"doc_id": _CHASH, "tags": ["x"]}
 
 
 def test_a_reput_under_the_same_title_replaces_the_keys(cat):
@@ -138,7 +138,7 @@ def test_a_reput_under_the_same_title_replaces_the_keys(cat):
         "reput", "cd" * 32, _COLLECTION, tags="new", category="finding", ttl_days=3, source_agent="agent-b")
     assert second == first and not created
     assert _note_keys(cat.docs[first]) == {
-        "tags": "new", "category": "finding", "ttl_days": 3, "source_agent": "agent-b"}
+        "tags": ["new"], "category": "finding", "ttl_days": 3, "source_agent": "agent-b"}
     assert cat.docs[first].meta["doc_id"] == "cd" * 32
 
 
@@ -147,7 +147,7 @@ def test_a_reput_that_leaves_a_key_unset_retracts_it(cat):
     first, _ = catalog_store_hook_tracked(
         "retract", _CHASH, _COLLECTION, tags="old", category="design", ttl_days=7, source_agent="agent-a")
     catalog_store_hook_tracked("retract", "cd" * 32, _COLLECTION, tags="kept")
-    assert _note_keys(cat.docs[first]) == {"tags": "kept", "category": "", "ttl_days": 0, "source_agent": ""}
+    assert _note_keys(cat.docs[first]) == {"tags": ["kept"], "category": "", "ttl_days": 0, "source_agent": ""}
 
 
 def test_a_reput_that_changes_nothing_adds_no_unset_keys(cat):
@@ -160,11 +160,11 @@ def test_note_catalog_meta_returns_the_undo():
     from nexus.catalog.store_hook import note_catalog_meta  # noqa: PLC0415 - absent before nexus-6pfgb.5: import here so the other pins fail by assertion on a tree without it
 
     write, revert = note_catalog_meta(
-        tags="new", ttl_days=3, prior={"tags": "old", "category": "design", "ttl_days": 7})
-    assert write == {"tags": "new", "category": "", "ttl_days": 3}
-    assert revert == {"tags": "old", "category": "design", "ttl_days": 7}
+        tags="new", ttl_days=3, prior={"tags": ["old"], "category": "design", "ttl_days": 7})
+    assert write == {"tags": ["new"], "category": "", "ttl_days": 3}
+    assert revert == {"tags": ["old"], "category": "design", "ttl_days": 7}
     write, revert = note_catalog_meta(tags="x", prior=None)
-    assert write == {"tags": "x"} and revert == {"tags": ""}
+    assert write == {"tags": ["x"]} and revert == {"tags": []}
 
 
 def test_a_failed_reput_restores_the_old_keys_with_the_stamp(cat):
@@ -194,7 +194,7 @@ def test_a_failed_reput_does_not_overwrite_a_newer_puts_keys(cat):
     # a concurrent put of the same content lands its own keys on the same entry
     catalog_store_hook_tracked("cas", "cd" * 32, _COLLECTION, tags="newer", ttl_days=30, source_agent="agent-b")
     newer = dict(cat.docs[tumbler].meta)
-    assert newer["tags"] == "newer" and newer["doc_id"] == "cd" * 32
+    assert newer["tags"] == ["newer"] and newer["doc_id"] == "cd" * 32
 
     restore_pre_call_stamp(
         tumbler, failing["doc_id"], "cd" * 32, failing.get("note_meta"), failing.get("note_meta_stamped"))
@@ -210,7 +210,7 @@ def test_a_same_title_same_text_reput_through_the_chash_dedup_replaces_and_retra
     assert cat.docs_for_chashes([_CHASH]) == {_CHASH: [first]}
     again, created = catalog_store_hook_tracked("dedup", _CHASH, _COLLECTION, tags="new", source_agent="agent-b")
     assert again == first and not created and len(cat.registers) == 1
-    assert _note_keys(cat.docs[first]) == {"tags": "new", "category": "", "ttl_days": 0, "source_agent": "agent-b"}
+    assert _note_keys(cat.docs[first]) == {"tags": ["new"], "category": "", "ttl_days": 0, "source_agent": "agent-b"}
 
 
 def test_a_failed_same_text_reput_through_the_chash_dedup_restores_the_old_keys(cat):
@@ -231,7 +231,7 @@ def test_a_ghost_reconcile_writes_the_notes_keys_and_retracts_what_the_ghost_hel
         "ghosted", _CHASH, _COLLECTION, tags="fresh", category="design", source_agent="agent-g")
     assert out == ghost and not created and not cat.registers
     assert _note_keys(cat.docs[ghost]) == {
-        "tags": "fresh", "category": "design", "ttl_days": 0, "source_agent": "agent-g"}
+        "tags": ["fresh"], "category": "design", "ttl_days": 0, "source_agent": "agent-g"}
     assert cat.docs[ghost].meta["doc_id"] == _CHASH
 
 
@@ -242,13 +242,13 @@ def test_two_titles_with_one_chash_each_keep_their_own_keys_with_the_dedup_looku
     assert cat.docs_for_chashes([_CHASH]) == {_CHASH: [a]}
     b, created = catalog_store_hook_tracked("live-B", _CHASH, _COLLECTION, tags="beta", ttl_days=30)
     assert created and b != a
-    assert _note_keys(cat.docs[a]) == {"tags": "alpha", "ttl_days": 7}
-    assert _note_keys(cat.docs[b]) == {"tags": "beta", "ttl_days": 30}
+    assert _note_keys(cat.docs[a]) == {"tags": ["alpha"], "ttl_days": 7}
+    assert _note_keys(cat.docs[b]) == {"tags": ["beta"], "ttl_days": 30}
     # and a re-put of A with the shared text still lands on A, not on B
     again, _ = catalog_store_hook_tracked("live-A", _CHASH, _COLLECTION, tags="alpha2")
     assert again == a
-    assert _note_keys(cat.docs[a]) == {"tags": "alpha2", "ttl_days": 0}
-    assert _note_keys(cat.docs[b]) == {"tags": "beta", "ttl_days": 30}
+    assert _note_keys(cat.docs[a]) == {"tags": ["alpha2"], "ttl_days": 0}
+    assert _note_keys(cat.docs[b]) == {"tags": ["beta"], "ttl_days": 30}
 
 
 def test_put_note_gives_each_of_two_identical_notes_its_own_keys(cat, no_row_lookup):
@@ -266,9 +266,9 @@ def test_put_note_gives_each_of_two_identical_notes_its_own_keys(cat, no_row_loo
     b = put("pn-B", tags="beta", category="finding", ttl_days=30, source_agent="agent-b")
     assert a != b
     assert _note_keys(cat.docs[a]) == {
-        "tags": "alpha", "category": "design", "ttl_days": 7, "source_agent": "agent-a"}
+        "tags": ["alpha"], "category": "design", "ttl_days": 7, "source_agent": "agent-a"}
     assert _note_keys(cat.docs[b]) == {
-        "tags": "beta", "category": "finding", "ttl_days": 30, "source_agent": "agent-b"}
+        "tags": ["beta"], "category": "finding", "ttl_days": 30, "source_agent": "agent-b"}
 
 
 def test_a_put_note_whose_write_is_refused_leaves_the_old_keys(cat, no_row_lookup):
@@ -287,7 +287,7 @@ def test_a_put_note_whose_write_is_refused_leaves_the_old_keys(cat, no_row_looku
     assert out.status == note_write.NOT_LANDED
     meta = cat.docs[first].meta
     assert meta["doc_id"] == before["doc_id"]
-    assert (meta["tags"], meta["ttl_days"], meta.get("category", "")) == ("old", 7, "")
+    assert (meta["tags"], meta["ttl_days"], meta.get("category", "")) == (["old"], 7, "")
 
 
 def _refused(doc: str) -> note_write.NoteWriteError:
@@ -307,7 +307,7 @@ def test_a_minted_row_that_cannot_be_rolled_back_loses_the_failed_puts_keys(cat,
         out = _put("6pfgb5 minted refused", tags="never", category="x", ttl_days=7, source_agent="agent-m")
     assert out.status == note_write.NOT_LANDED and out.minted
     (doc,) = cat.docs.values()
-    assert _no_put_at(doc) == {"doc_id": "", "tags": "", "category": "", "ttl_days": 0, "source_agent": ""}
+    assert _no_put_at(doc) == {"doc_id": "", "tags": [], "category": "", "ttl_days": 0, "source_agent": ""}
 
 
 def test_a_minted_row_that_cannot_be_rolled_back_after_an_unexpected_error_loses_the_keys(cat, no_row_lookup):
@@ -317,7 +317,7 @@ def test_a_minted_row_that_cannot_be_rolled_back_after_an_unexpected_error_loses
          pytest.raises(RuntimeError, match="boom"):
         _put("6pfgb5 minted boom", tags="never", ttl_days=7)
     (doc,) = cat.docs.values()
-    assert _no_put_at(doc) == {"doc_id": "", "tags": "", "ttl_days": 0}
+    assert _no_put_at(doc) == {"doc_id": "", "tags": [], "ttl_days": 0}
 
 
 def test_a_put_note_that_fails_unexpectedly_leaves_the_old_keys(cat, no_row_lookup):
@@ -332,7 +332,7 @@ def test_a_put_note_that_fails_unexpectedly_leaves_the_old_keys(cat, no_row_look
         _put("6pfgb5 boom two", title="boom", tags="new", category="x")
     meta = cat.docs[first].meta
     assert meta["doc_id"] == before["doc_id"]
-    assert (meta["tags"], meta["ttl_days"], meta.get("category", "")) == ("old", 7, "")
+    assert (meta["tags"], meta["ttl_days"], meta.get("category", "")) == (["old"], 7, "")
 
 
 # ── put_at: the note's own TTL clock (nexus-6pfgb.15) ────────────────────────────────────────
@@ -372,3 +372,47 @@ def test_a_reput_restarts_the_clock_and_a_failed_one_restores_it(cat):
 
     assert cat.docs[first].meta["put_at"] == "2026-10-01T00:00:00+00:00", (
         "a put that did not land must not restart the old note's TTL")
+
+
+# ── tags are a JSON array (nexus-6pfgb.38, RDR-236 RF-17) ───────────────────────────────────────
+
+
+def test_a_note_put_with_comma_tags_stores_a_json_array(cat):
+    """RF-17: tags are a set. The CLI and MCP pass the comma string through unsplit; the catalog
+    entry's meta holds the array, so a containment filter can match one tag of several."""
+    tumbler, _ = catalog_store_hook_tracked("arr", _CHASH, _COLLECTION, tags="arch,decision")
+    assert cat.docs[tumbler].meta["tags"] == ["arch", "decision"]
+
+
+def test_the_tag_array_is_trimmed_deduplicated_and_ordered(cat):
+    tumbler, _ = catalog_store_hook_tracked("arr-clean", _CHASH, _COLLECTION, tags=" b, a ,,b,a, c ")
+    assert cat.docs[tumbler].meta["tags"] == ["b", "a", "c"]
+
+
+def test_a_reput_without_tags_retracts_a_legacy_string_and_an_array_to_empty(cat):
+    legacy = cat.seed_ghost("legacy-str", meta={"tags": "arch,decision"})
+    catalog_store_hook_tracked("legacy-str", _CHASH, _COLLECTION)
+    assert cat.docs[legacy].meta["tags"] == []
+    arr, _ = catalog_store_hook_tracked("arr-retract", "cd" * 32, _COLLECTION, tags="x,y")
+    assert cat.docs[arr].meta["tags"] == ["x", "y"]
+    catalog_store_hook_tracked("arr-retract", "ef" * 32, _COLLECTION)
+    assert cat.docs[arr].meta["tags"] == []
+
+
+def test_a_prior_empty_legacy_string_counts_as_unset():
+    """A legacy "" is the old unset sentinel: a put with no tags leaves it, it is not rewritten to []."""
+    from nexus.catalog.store_hook import note_catalog_meta  # noqa: PLC0415 - see test_note_catalog_meta_returns_the_undo
+
+    for prior in ({"tags": ""}, {"tags": []}, {"tags": None}, {}):
+        assert note_catalog_meta(prior=prior) == ({}, {}), prior
+    write, revert = note_catalog_meta(prior={"tags": "arch,decision"})
+    assert write == {"tags": []} and revert == {"tags": "arch,decision"}, "the legacy string is restored verbatim"
+    write, revert = note_catalog_meta(tags="a", prior={"tags": ["z"]})
+    assert write == {"tags": ["a"]} and revert == {"tags": ["z"]}
+
+
+def test_note_catalog_meta_accepts_a_list_of_tags_too():
+    from nexus.catalog.store_hook import note_catalog_meta  # noqa: PLC0415 - see test_note_catalog_meta_returns_the_undo
+
+    write, _ = note_catalog_meta(tags=["a", " b", "a"])
+    assert write == {"tags": ["a", "b"]}

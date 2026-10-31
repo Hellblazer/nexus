@@ -16,6 +16,7 @@ from nexus.scoring import (
     quality_score,
     round_robin_interleave,
 )
+from nexus.context_annotations import OWNER_QUALITY_KEY
 from nexus.types import SearchResult
 from tests.conftest import catalog_row_for_collection_name
 
@@ -511,7 +512,9 @@ def test_quality_score_alpha_ignores_age():
 
 def _qr(dist: float = 0.3, coll: str = "knowledge__papers",
         bib_count: int = 0, **meta: object) -> SearchResult:
-    m = {"bib_citation_count": bib_count}
+    # nexus-6pfgb.12: the boost reads the OWNING document's citations, stamped on the hit by
+    # ``_attach_display_paths``; the chunk row's ``bib_citation_count`` is the last writer's and is not read.
+    m = {OWNER_QUALITY_KEY: {"bib_citation_count": bib_count}} if bib_count else {}
     m.update(meta)
     return SearchResult(id="r1", content="chunk", distance=dist,
                         collection=coll, metadata=m)
@@ -571,7 +574,7 @@ def test_no_circular_imports():
 def test_format_vimgrep():
     from nexus.formatters import format_vimgrep
     r = SearchResult(id="1", content="def foo():", distance=0.1,
-                     collection="code__r", metadata={"source_path": "./foo.py", "line_start": 10})
+                     collection="code__r", metadata={"_display_path": "./foo.py", "line_start": 10})
     assert format_vimgrep([r]) == ["./foo.py:10:0:def foo():"]
 
 
@@ -719,6 +722,76 @@ class TestLinkBoost:
 
         assert r.hybrid_score == original_score
         cat.links_from_batch.assert_called_once()
+
+    # ── nexus-6pfgb.20 (RDR-236 Phase 2, census row 23): every owner's links count ──────────
+
+    @staticmethod
+    def _shared(doc_id="1.1.1", owners=("1.1.1", "1.1.2")):
+        meta = {"doc_id": doc_id}
+        if owners is not None:
+            meta["_owner_doc_ids"] = list(owners)
+        return SearchResult(
+            id="shared", content="text", distance=0.3, collection="code__test", metadata=meta, hybrid_score=0.5,
+        )
+
+    @staticmethod
+    def _links(by_owner):
+        from unittest.mock import MagicMock
+
+        cat = MagicMock()
+        cat.links_from_batch.return_value = {k: [{"link_type": t} for t in v] for k, v in by_owner.items()}
+        return cat
+
+    def test_a_shared_chunk_is_boosted_by_the_second_owners_links(self):
+        """Failing-first pin (row 23): the first owner has no links, the second is linked."""
+        cat = self._links({"1.1.2": ["implements"]})
+        r = self._shared()
+
+        apply_link_boost([r], cat)
+
+        assert r.hybrid_score == pytest.approx(0.5 + 0.15)
+        cat.links_from_batch.assert_called_once()
+        assert set(cat.links_from_batch.call_args.args[0]) == {"1.1.1", "1.1.2"}
+
+    def test_a_row_without_owner_ids_boosts_from_its_doc_id_alone(self):
+        cat = self._links({"1.1.1": ["implements"]})
+        r = self._shared(owners=None)
+
+        apply_link_boost([r], cat)
+
+        assert r.hybrid_score == pytest.approx(0.5 + 0.15)
+        assert set(cat.links_from_batch.call_args.args[0]) == {"1.1.1"}
+
+    def test_two_linked_owners_together_stay_under_the_cap(self):
+        cat = self._links({"1.1.1": ["implements"], "1.1.2": ["implements"]})
+        r = self._shared()
+
+        apply_link_boost([r], cat)
+
+        assert r.hybrid_score == pytest.approx(0.5 + 0.15)
+
+    def test_owners_without_links_leave_the_score_alone(self):
+        cat = self._links({})
+        r = self._shared()
+
+        apply_link_boost([r], cat)
+
+        assert r.hybrid_score == 0.5
+
+    def test_the_whole_page_makes_one_catalog_call_and_the_owners_are_capped(self):
+        from nexus.context_annotations import OWNER_RESOLVE_CAP
+
+        crowd = [f"1.2.{i}" for i in range(OWNER_RESOLVE_CAP + 5)]
+        cat = self._links({crowd[0]: ["implements"], crowd[-1]: ["implements"]})
+        a = self._shared("1.2.0", crowd)
+        b = self._shared("1.1.1", ("1.1.1", "1.1.2"))
+
+        apply_link_boost([a, b], cat)
+
+        cat.links_from_batch.assert_called_once()
+        asked = set(cat.links_from_batch.call_args.args[0])
+        assert asked == set(crowd[:OWNER_RESOLVE_CAP]) | {"1.1.1", "1.1.2"}
+        assert a.hybrid_score == pytest.approx(0.5 + 0.15)  # the attributed owner is always asked
 
 
 # ── Topic boost (RDR-070, nexus-aym) ─────────────────────────────────────

@@ -84,19 +84,6 @@ FLUSH_CONCURRENCY: int = min(3, QUOTAS.MAX_CONCURRENT_WRITES)
 #: pass owns them if the directory is not excluded from it.
 RDR_DIR_NON_RDR_BASENAMES: frozenset[str] = frozenset({"readme.md", "agents.md", "claude.md"})
 
-def _git_metadata(repo: Path) -> dict:
-    """Collect git metadata for *repo*. Returns empty strings for missing values."""
-    def run(args: list[str]) -> str:
-        r = run_bounded(args, cwd=repo, timeout=10)
-        return r.stdout.strip() if r.returncode == 0 else ""
-
-    return {
-        "git_project_name": repo.name,
-        "git_branch": run(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
-        "git_commit_hash": run(["git", "rev-parse", "HEAD"]),
-        "git_remote_url": run(["git", "remote", "get-url", "origin"]),
-    }
-
 
 # _should_ignore is imported from indexer_utils (as `should_ignore`) above.
 # The local name `_should_ignore` is preserved for backward compatibility.
@@ -1180,6 +1167,19 @@ def _catalog_progress(
 _STAMP_MISSING = object()
 
 
+def _rdr_register_stamp(content_type: str, raw: bytes | None) -> dict:
+    """The RDR frontmatter stamp (nexus-jypmj.7) for the bytes the indexer just hashed, or ``{}`` when there is
+    nothing to stamp: not an RDR, or *raw* is ``None`` (the file could not be read, which says nothing about its
+    header). An EMPTY file is read, and stamps what ``nx index rdr`` stamps for it
+    (:func:`nexus.doc_indexer._rdr_frontmatter_stamp`): the shared rule calls a file with no header at all parsed
+    with no id, so it overwrites the id the document carried before the file was emptied (nexus-jypmj.20)."""
+    if content_type != "rdr" or raw is None:
+        return {}
+    from nexus.catalog import rdr_canonical  # noqa: PLC0415 — deferred: read at call time so a test can replace the stamp
+
+    return rdr_canonical.rdr_frontmatter_meta_from_bytes(raw)
+
+
 def _register_time_meta(rel_path: str, file_hash: str, extra: dict | None = None) -> dict | None:
     """Build a register/update-time ``meta`` dict for *rel_path*.
 
@@ -1544,19 +1544,12 @@ def _catalog_hook(
                 raw_bytes = abs_path.read_bytes()
                 file_hash = _hl.sha256(raw_bytes).hexdigest()
             except OSError:
-                raw_bytes, file_hash = b"", ""
+                raw_bytes, file_hash = None, ""
 
             # nexus-jypmj.7: the RDR's frontmatter id is recorded on the catalog document, synchronously, so
             # the named-source sibling rule does not wait for the aspect worker. The header is read from the
-            # bytes just hashed; a header that does not parse stamps nothing.
-            rdr_stamp: dict = {}
-            if content_type == "rdr" and raw_bytes:
-                from nexus.catalog import rdr_canonical  # noqa: PLC0415 — deferred: read at call time so a test can replace the stamp
-
-                try:
-                    rdr_stamp = rdr_canonical.rdr_frontmatter_meta(raw_bytes.decode("utf-8"))
-                except UnicodeDecodeError:
-                    rdr_stamp = {}
+            # bytes just hashed; a header that does not parse stamps null (nexus-jypmj.20), which overwrites an earlier id.
+            rdr_stamp = _rdr_register_stamp(content_type, raw_bytes)
 
             try:
                 existing = (
@@ -2625,6 +2618,8 @@ def index_repository(
                         chunk_flush_throttled_files=stats.get("chunk_flush_throttled_files", 0),
                         transient_upsert_deferred_files=stats.get("transient_upsert_deferred_files", 0),
                         identity_less_dropped_files=stats.get("identity_less_dropped_files", 0),
+                        pdf_mineru_tripped=stats.get("pdf_mineru_tripped", 0),
+                        pdf_mineru_not_attempted=len(stats.get("pdf_mineru_not_attempted_paths") or ()),
                     )
                 else:
                     _set_owner_head_hash(repo, _current_head(repo))
@@ -2692,6 +2687,69 @@ def _build_frecency_doc_id_map(
     except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
         _log.debug("frecency_doc_id_map_failed", exc_info=True)
     return file_to_doc_id
+
+
+def _frecency_computed_at() -> str:
+    """The instant a frecency pass computed its scores, as the ISO UTC stamp the catalog keeps."""
+    from datetime import UTC, datetime  # noqa: PLC0415 — deliberate function-scoped import (the module imports datetime lazily everywhere)
+
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _write_frecency_meta(
+    doc_scores: "dict[str, float]", computed_at: str, *, writer: "object | None" = None,
+) -> int:
+    """RDR-236 Phase 1 (nexus-6pfgb.9): stamp each document's frecency on its catalog ``meta``.
+
+    ``frecency_score`` is a document key: the T3 chunk row a shared chunk carries holds the last
+    writer's file score, so the scorer reads the attributed owner's catalog value instead. Frecency
+    is computed against now(), so the score travels with its ``frecency_computed_at``.
+
+    Sends ONLY those two keys per document; the catalog merges ``meta`` (jsonb ``||``), so nothing
+    else on it is read or re-asserted (the nexus-vhyar lesson). A score that is not a finite number
+    is not stamped. One ``update_many`` batch per page when the writer has it, else one ``update``
+    per document, a failed document skipped (nexus-ou4tb: isolate the file, not the run). Best
+    effort as a whole: an absent or failing catalog logs and returns what was written, never
+    raising into the index run. Returns the number of documents stamped.
+    """
+    import math  # noqa: PLC0415 — deliberate function-scoped import (stdlib, used only here)
+
+    updates = [
+        {"tumbler": str(doc_id), "meta": {"frecency_score": float(score), "frecency_computed_at": computed_at}}
+        for doc_id, score in doc_scores.items()
+        if doc_id and isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)
+    ]
+    if not updates:
+        return 0
+    created: "object | None" = None
+    try:
+        if writer is None:
+            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+            created = writer = make_catalog_writer()
+        update_many = getattr(writer, "update_many", None)
+        if callable(update_many):
+            counts = update_many(updates)
+            return sum(1 for c in counts if c) if counts is not None else len(updates)
+        stamped = 0
+        for u in updates:
+            try:
+                writer.update(u["tumbler"], meta=u["meta"])  # type: ignore[attr-defined]
+                stamped += 1
+            except Exception:  # noqa: BLE001 — nexus-ou4tb: one document's failed stamp must not stop the rest
+                _log.warning("frecency_meta_stamp_failed", doc_id=u["tumbler"], exc_info=True)
+        return stamped
+    except Exception:  # noqa: BLE001 — best-effort: the catalog stamp never breaks an index run
+        _log.warning("frecency_meta_stamp_batch_failed", documents=len(updates), exc_info=True)
+        return 0
+    finally:
+        # A writer this call made is closed here; one the caller handed in is the caller's.
+        close = getattr(created, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 — best-effort: a failed close never breaks an index run
+                _log.debug("frecency_meta_writer_close_failed", exc_info=True)
 
 
 def _run_index_frecency_only(repo: Path, registry: "object") -> None:
@@ -2765,6 +2823,14 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     # the per-file loop below — nexus-afudo (2026-08-05) deleted the
     # legacy source_path-keyed filter they used to fall through to.
     file_to_doc_id = _build_frecency_doc_id_map(repo, list(frecency_map.keys()))
+
+    # RDR-236 Phase 1 (nexus-6pfgb.9): the catalog is where a document's frecency lives; one
+    # write per document, not per collection or chunk. The per-chunk row write below stays until
+    # nexus-6pfgb.27 retires it: clients on an older release still read the score from the row.
+    _write_frecency_meta(
+        {file_to_doc_id[f]: s for f, s in frecency_map.items() if f in file_to_doc_id},
+        _frecency_computed_at(),
+    )
 
     # Update frecency in all three content-type collections (nexus-e0w01).
     collection_names = [code_collection]
@@ -3079,7 +3145,7 @@ def _hold_pdfs_without_stack(
                 _log.error(
                     "pdf_not_indexed_mineru_bounds", path=str(path), repo=str(repo), problem=_bounds_problem,
                 )
-            pdf_stack.record_skipped([*already_held, *_needing], repo=repo)
+            pdf_stack.record_skipped([*already_held, *_needing], repo=repo, cause=pdf_stack.SKIP_CAUSE_BOUNDS)
             if on_phase is not None and not already_held:
                 on_phase(
                     f"{len(_needing)} PDF(s) NOT indexed this run (code and prose proceed): {_bounds_problem}"
@@ -3179,6 +3245,17 @@ def _contain_mineru_stop(fn: "Callable[[], int]", file: "Path", stop: _MineruSto
     Same containment shape as :func:`_contain_extraction_quality_gate`; unlike it, the stop also
     short-circuits the remaining PDFs, because each would trip the same breaker after its own
     timeouts. Any other exception propagates unchanged.
+
+    Unlike ``nx index pdf``, this does not roll back a freshly registered catalog row. That is
+    deliberate, not an omission (nexus-b0y6w, shakedown 7.89.0 umbrella class b): the repo run
+    registers every file in Pass 1, in one batch, and has no per-file "minted by this call" record.
+    ``_reconcile_needs_fence`` fail-stamps only the documents Pass 1 put in ``needs_fence``, the
+    newly registered and the content-changed ones (``index_state='failed'``, nexus-hg2dw). A
+    ``failed`` row is what makes the next run re-index the file (``stale_fence_doc_ids``). An
+    unchanged, already complete PDF that trips is not in ``needs_fence``: it stays ``complete``
+    with its old chunks, and the next run sees it as unchanged. The ``--since-head`` base stays put
+    while any PDF is tripped or not attempted (``since_head_base_not_advanced``), so the file stays
+    in the next git delta either way.
     """
     from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
 
@@ -3268,7 +3345,6 @@ def _index_code_file(
     col: object,
     db: object,
     voyage_client: object,
-    git_meta: dict,
     now_iso: str,
     score: float,
     chunk_lines: int | None = None,
@@ -3316,7 +3392,6 @@ def _index_code_file(
         repo_path=repo,
         corpus=collection_name,
         embedding_model=target_model,
-        git_meta=git_meta,
         now_iso=now_iso,
         score=score,
         chunk_lines=chunk_lines,
@@ -3340,7 +3415,6 @@ def _index_prose_file(
     col: object,
     db: object,
     voyage_key: str,
-    git_meta: dict,
     now_iso: str,
     score: float,
     force: bool = False,
@@ -3379,7 +3453,6 @@ def _index_prose_file(
         repo_path=repo,
         corpus=collection_name,
         embedding_model=target_model,
-        git_meta=git_meta,
         now_iso=now_iso,
         score=score,
         force=force,
@@ -3403,7 +3476,6 @@ def _index_pdf_file(
     col: object,
     db: object,
     voyage_key: str,
-    git_meta: dict,
     now_iso: str,
     score: float,
     force: bool = False,
@@ -3529,7 +3601,10 @@ def _index_pdf_file(
             "ttl_days": 0,
             "frecency_score": float(score),
             "doc_id": catalog_doc_id,
-            **{k: v for k, v in git_meta.items() if v},
+            # RDR-236 Phase 0 (nexus-qyx35): no flat ``git_*`` keys here. They are LEGACY
+            # (RDR-101 Phase 5c), nothing reads them from a chunk row, and this dict never
+            # passed ``normalize``, so they reached the engine. ``doc_id`` stays until
+            # nexus-6pfgb.39: the engine's manifest-less census forward join reads it.
         }
         metadatas.append(augmented)
 
@@ -5296,9 +5371,6 @@ def _run_index(
     tuning = _tuning_from_dict(cfg.get("tuning", {}))
     effective_chunk_lines: int | None = chunk_lines if chunk_lines is not None else tuning.code_chunk_lines
 
-    # Collect git metadata once for all chunks
-    git_meta = _git_metadata(repo)
-
     # nexus-fltb4 (--since-head): git-diff-driven incremental scope. When a
     # usable delta exists, ONLY the changed files are walked/indexed, the
     # full-collection staleness pulls are skipped, deleted paths get their
@@ -5344,6 +5416,7 @@ def _run_index(
 
     # Compute frecency scores in a single git log pass
     frecency_map = batch_frecency(repo, decay_rate=tuning.decay_rate, timeout=tuning.git_log_timeout)
+    _frecency_computed = _frecency_computed_at()  # RDR-236 Phase 1: one stamp for the whole run
 
     # Build absolute RDR path set for exclusion (resolved, so symlink/..
     # normalization matches the classification loop's ``path.resolve()``
@@ -5644,6 +5717,13 @@ def _run_index(
         if _pdf_held:
             _held = set(_pdf_held)
             pdf_files = [(sc, f) for sc, f in pdf_files if f not in _held]
+    elif delta_changed is None:
+        # nexus-tr1rj.26: a full walk that finds no PDF has nothing left to hold. A record an
+        # earlier run wrote for this repo (the PDFs were deleted, or the repo no longer has any)
+        # would otherwise stay, and the doctor row that names `nx index repo` as its remedy could
+        # never be cleared by it. A --since-head walk lists only the changed files, so "no PDF
+        # in it" says nothing about the repo and leaves the record alone.
+        _bounds_pdf_stack.record_skipped([], repo=repo)
 
     # GH #371 + #436: surface the oversize-skip set so the operator
     # knows what got dropped. Single structured log + on_phase line
@@ -6059,6 +6139,15 @@ def _run_index(
     if on_phase is not None:
         on_phase(
             f"Catalog registration done ({time.monotonic() - _catalog_t0:.1f}s)"
+        )
+
+    # RDR-236 Phase 1 (nexus-6pfgb.9): each document's frecency goes on its catalog meta beside
+    # the run's computed_at (the chunk rows below keep it until nexus-6pfgb.27). Paged batches,
+    # not a round trip per file; best effort, so a catalog that cannot take it never stops indexing.
+    if file_to_doc_id:
+        _write_frecency_meta(
+            {file_to_doc_id[f]: frecency_map.get(f, 0.0) for f, _ct, _col in indexed_for_catalog if f in file_to_doc_id},
+            _frecency_computed,
         )
 
     # nexus-hg2dw / critique round 2 (T2 critique-nexus-hg2dw-36602c67f
@@ -6746,11 +6835,18 @@ def _run_index(
                     lambda t2: t2.aspect_queue.enqueue_many(rows),
                     op="aspect_enqueue",
                 )
-            except Exception:  # noqa: BLE001 — enqueue is best-effort; ingest must never block on it (RDR-089 P0.1)
+            except Exception as _enq_exc:  # noqa: BLE001 — enqueue is best-effort; ingest must never block on it (RDR-089 P0.1)
                 _log.warning(
                     "aspect_enqueue_many_batch_failed",
-                    collection=collection, count=len(rows), exc_info=True,
+                    collection=collection, count=len(rows),
+                    error_type=type(_enq_exc).__name__, exc_info=True,
                 )
+                # RDR-235: a refusal here (MaxLiveRowsExceeded) must be counted,
+                # not only logged; the single-document hook does the same.
+                from nexus.db.t2.http_aspect_queue import aspect_queue_mode  # noqa: PLC0415 — deferred: keeps the table path's imports as they were
+                if aspect_queue_mode() == "tuples":
+                    from nexus.aspect_worker import record_batch_enqueue_failure  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
+                    record_batch_enqueue_failure(collection, len(rows), _enq_exc)
             else:
                 # Auto-spawn gate (mirrors aspect_extraction_enqueue_hook's own
                 # gate exactly — see its docstring for the unit-suite rationale).
@@ -6877,10 +6973,12 @@ def _run_index(
     # "systemic_extraction_failure" at the return dict.
     # Declared before the FIRST run_file_loop call (code files) since all
     # four loops below share this one collector.
-    _skipped_files: list[tuple[str, str]] = []
+    # Each entry is (path, reason, error_class): the class is the raised type's own name
+    # (``UnextractableContentError``, or its subclass ``AllPagesUnextractedError``).
+    _skipped_files: list[tuple[str, str, str]] = []
 
-    def _on_skip(file: Path, reason: str) -> None:
-        _skipped_files.append((str(file), reason))
+    def _on_skip(file: Path, reason: str, error_class: str) -> None:
+        _skipped_files.append((str(file), reason, error_class))
 
     # Index code files → code__ (voyage-code-3, AST chunking)
     # NOTE: calls _index_code_file (the module-level wrapper) so that tests
@@ -6903,7 +7001,7 @@ def _run_index(
         # engine that starts emitting 503 under embed-admission saturation.
         return _contain_transient_upsert(lambda: _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
-            voyage_client, git_meta, now_iso, score,
+            voyage_client, now_iso, score,
             chunk_lines=effective_chunk_lines,
             force=force,
             force_re_embed=force_re_embed,
@@ -6957,7 +7055,7 @@ def _run_index(
         # identical _contain_transient_upsert to close that gap.
         return _contain_transient_upsert(lambda: _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
-            voyage_key, git_meta, now_iso, score,
+            voyage_key, now_iso, score,
             force=force,
             force_re_embed=force_re_embed,
             timeout=read_timeout_seconds,
@@ -6998,7 +7096,7 @@ def _run_index(
         return _contain_transient_upsert(lambda: _contain_extraction_quality_gate(
             lambda: _contain_mineru_stop(lambda: _index_pdf_file(
                 file, repo, docs_collection, docs_model, docs_col, db,
-                voyage_key, git_meta, now_iso, score,
+                voyage_key, now_iso, score,
                 force=force,
                 force_re_embed=force_re_embed,
                 timeout=read_timeout_seconds,
@@ -7101,7 +7199,7 @@ def _run_index(
         _log.debug("indexing", file=str(file))
         return _contain_transient_upsert(lambda: _index_prose_file(
             file, repo, rdr_col_name, rdr_model, rdr_col, db,
-            voyage_key, git_meta, now_iso, score,
+            voyage_key, now_iso, score,
             force=force,
             force_re_embed=force_re_embed,
             timeout=read_timeout_seconds,
@@ -7144,7 +7242,7 @@ def _run_index(
         _log.error(
             "index_files_skipped_unextractable",
             count=len(_skipped_files),
-            files=sorted(f for f, _ in _skipped_files)[:20],
+            files=sorted(f for f, _, _ in _skipped_files)[:20],
         )
         if on_phase is not None:
             on_phase(
@@ -7533,14 +7631,12 @@ def _run_index(
     # above is written as one durable row (nexus.index_failures) in ONE
     # batch transaction, tagged with a fresh run_id so a later `nx index
     # failures --run-id ...` or `nx doctor --check-index-failures` can find
-    # exactly this run's backlog. error_class is hardcoded to
-    # UnextractableContentError's name rather than threaded through
-    # run_file_loop's on_skip callback: nexus-deyd5's classification
-    # boundary is the ONLY thing that ever sets skip_reason (see
-    # indexer_utils.run_file_loop._process), so it is the only class that
-    # can reach here — enriching the callback signature to derive it would
-    # touch the very classification this bead's scope fence excludes from
-    # change, for no behavioral gain today.
+    # exactly this run's backlog. error_class is the raised type's own name,
+    # threaded through run_file_loop's on_skip callback (nexus-q6nw0): the
+    # loop catches UnextractableContentError, which now has a subclass,
+    # AllPagesUnextractedError (MinerU failed on every page of a PDF), and a
+    # class-wide `nx index failures --acknowledge --error-class
+    # UnextractableContentError` must not silence that extractor failure.
     #
     # The write is advisory, matching every other telemetry call site's
     # posture (record_hook_failure et al.): a transport failure here must
@@ -7579,8 +7675,8 @@ def _run_index(
             _tel_store = HttpTelemetryStore(client=current_index_run_t2_client())
             _tel_store.record_index_failures_batch(
                 [
-                    (str(path), "UnextractableContentError", reason, "")
-                    for path, reason in _skipped_files
+                    (str(path), error_class, reason, "")
+                    for path, reason, error_class in _skipped_files
                 ],
                 run_id=_index_run_id,
             )

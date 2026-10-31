@@ -54,9 +54,10 @@ def _expected_keys_for_content_type(content_type: str) -> set[str]:
     # drop-when-False contract — only a chunk indexed under
     # --allow-degraded-extraction after a real gate failure carries it;
     # pinned population is tests/test_metadata_quality_gate_overridden.py.
+    # nexus-6pfgb.4: ``session_id`` is still accepted on an old row but no writer stamps it.
     return ALLOWED_TOP_LEVEL - bib_keys - {
         "git_meta", "extraction_source", "extraction_method",
-        "quality_gate_overridden",
+        "quality_gate_overridden", "session_id",
     }
 
 
@@ -185,6 +186,8 @@ def _full_keyset_minus_optional() -> set[str]:
         "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id",
         "git_meta",
+        # nexus-6pfgb.4: still accepted on an old row, no longer written.
+        "session_id",
         # RDR-139 Layer D: extraction_source defaults to ``file`` and is
         # dropped by normalize (absent == file); only DT chunks carry it.
         "extraction_source",
@@ -219,6 +222,7 @@ def test_pdf_indexer_emits_full_keyset(tmp_repo: Path) -> None:
     assert prepared, "fixture PDF should produce at least one chunk"
     expected = _full_keyset_minus_optional()
     for _, _, meta in prepared:
+        assert "session_id" not in meta  # nexus-6pfgb.4
         missing = expected - set(meta.keys())
         assert not missing, (
             f"_pdf_chunks dropped: {missing}; got keys {sorted(meta.keys())}"

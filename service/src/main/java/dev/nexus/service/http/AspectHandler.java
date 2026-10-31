@@ -64,6 +64,7 @@ import java.util.Optional;
  *   GET   /v1/aspects/queue/pending_count         count pending rows
  *   GET   /v1/aspects/queue/is_drained            check drained
  *   GET   /v1/aspects/queue/list_pending          list pending (limit= optional)
+ *   GET   /v1/aspects/queue/list_waiting          list pending AND in_progress rows with status and delay_s (seconds to next_retry_at on the DB clock, whole, rounded up, 0 when null or past); no content; limit= optional (nexus-5r2sc.3.6, engine-service-v0.1.170)
  *   GET   /v1/aspects/queue/list_failed           list terminal-failed (collection= optional)
  *   POST  /v1/aspects/queue/rename_collection     rename collection in queue
  *   POST  /v1/aspects/queue/import                ETL import of queue row
@@ -140,6 +141,7 @@ public final class AspectHandler implements HttpHandler {
                 case "/queue/pending_count"             -> handleQueuePendingCount(exchange, tenant, method);
                 case "/queue/is_drained"                -> handleQueueIsDrained(exchange, tenant, method);
                 case "/queue/list_pending"              -> handleQueueListPending(exchange, tenant, method);
+                case "/queue/list_waiting"              -> handleQueueListWaiting(exchange, tenant, method);
                 case "/queue/list_failed"               -> handleQueueListFailed(exchange, tenant, method);
                 case "/queue/rename_collection"         -> handleQueueRenameCollection(exchange, tenant, method);
                 case "/queue/import"                    -> handleQueueImport(exchange, tenant, method);
@@ -659,6 +661,13 @@ public final class AspectHandler implements HttpHandler {
         String limitStr = parseQuery(ex.getRequestURI()).get("limit");
         int limit = limitStr != null ? Integer.parseInt(limitStr) : 0;
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(repo.listPending(tenant, limit)));
+    }
+
+    private void handleQueueListWaiting(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}"); return; }
+        String limitStr = parseQuery(ex.getRequestURI()).get("limit");
+        int limit = limitStr != null ? Integer.parseInt(limitStr) : 0;
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(repo.listWaiting(tenant, limit)));
     }
 
     private void handleQueueListFailed(HttpExchange ex, String tenant, String method) throws IOException {

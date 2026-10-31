@@ -334,7 +334,7 @@ def test_a_note_written_as_several_pieces_exports_its_whole_text_in_position_ord
     _header, records = read_bundle(tmp_path / "b.jsonl")
     doc = {r["title"]: r for r in records if r["record"] == "knowledge_doc"}["title-a"]
     assert doc["content"] == "first piece, second piece, third piece"
-    assert (doc["tags"], doc["category"], doc["ttl_days"]) == ("own-tags", "own-cat", 9)
+    assert (doc["tags"], doc["category"], doc["ttl_days"]) == (["own-tags"], "own-cat", 9)
     assert summary.docs_exported == 3
     assert summary.notes_incomplete == 0
     assert len(t3.chunk_rows_requests) == 1, t3.chunk_rows_requests
@@ -377,7 +377,7 @@ def test_a_split_note_whose_first_piece_another_note_restamped_takes_its_keys_fr
     _header, records = read_bundle(tmp_path / "b.jsonl")
     doc = {r["title"]: r for r in records if r["record"] == "knowledge_doc"}["title-a"]
     assert doc["content"] == "first piece, second piece, "
-    assert (doc["tags"], doc["category"], doc["ttl_days"]) == ("own-tags", "own-cat", 9)
+    assert (doc["tags"], doc["category"], doc["ttl_days"]) == (["own-tags"], "own-cat", 9)
     assert (KNOW, "title-a") not in summary.note_keys_unrecovered_notes
 
 
@@ -487,7 +487,7 @@ def test_bundle_is_plain_jsonl(fake_catalog, tmp_path):
     lines = (tmp_path / "b.jsonl").read_text(encoding="utf-8").splitlines()
     parsed = [json.loads(l) for l in lines]      # every line is plain JSON
     assert parsed[0]["format"] == "nexus-recovery-bundle"
-    assert parsed[0]["format_version"] == 1
+    assert parsed[0]["format_version"] == 2
     # docs precede links (import resolves links against just-imported docs)
     kinds = [p.get("record") for p in parsed[1:]]
     assert kinds == sorted(kinds, key=lambda k: 0 if k == "knowledge_doc" else 1)
@@ -564,6 +564,15 @@ def test_import_is_idempotent_on_links(fake_catalog, tmp_path):
     # nothing new is created.
     assert s2.links_created == 0
     assert s2.links_merged == s1.links_created + s1.links_merged
+
+
+def test_read_bundle_still_reads_a_version_1_bundle(tmp_path):
+    """Version 2 only changed what a note's ``tags`` is (a list, nexus-6pfgb.38); the importer
+    accepts both shapes, so a bundle an older client wrote reads as before."""
+    p = tmp_path / "v1.jsonl"
+    p.write_text(json.dumps({"format": "nexus-recovery-bundle", "format_version": 1}) + "\n")
+    header, records = read_bundle(p)
+    assert header["format_version"] == 1 and records == []
 
 
 def test_read_bundle_refuses_future_format(tmp_path):
@@ -935,8 +944,8 @@ def test_two_notes_sharing_a_chunk_each_export_their_own_tags_category_and_ttl(f
 
     assert summary.docs_exported == 2
     a, b = docs["note-a"], docs["note-b"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == ("alpha,one", "design", 7)
-    assert (b["tags"], b["category"], b["ttl_days"]) == ("beta", "finding", 30)
+    assert (a["tags"], a["category"], a["ttl_days"]) == (["alpha", "one"], "design", 7)
+    assert (b["tags"], b["category"], b["ttl_days"]) == (["beta"], "finding", 30)
     assert summary.note_keys_unrecovered == 0
 
 
@@ -994,7 +1003,7 @@ def test_an_entry_with_any_note_key_is_authoritative_over_a_single_owner_row(
     summary, docs = _export_docs(url, t3, tmp_path)
 
     a = docs["note-a"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == ("", "", None)
+    assert (a["tags"], a["category"], a["ttl_days"]) == ([], "", None)
     assert summary.note_keys_unrecovered == 0
 
 
@@ -1006,7 +1015,7 @@ def test_a_legacy_note_on_a_shared_chunk_with_an_empty_row_is_not_counted(fake_c
     t3.rows[CH_S].update({"tags": "", "category": "", "ttl_days": None})
     summary, docs = _export_docs(url, t3, tmp_path)
 
-    assert (docs["note-a"]["tags"], docs["note-a"]["ttl_days"]) == ("", None)
+    assert (docs["note-a"]["tags"], docs["note-a"]["ttl_days"]) == ([], None)
     assert summary.note_keys_unrecovered == 0
 
 
@@ -1019,8 +1028,8 @@ def test_a_legacy_note_on_a_shared_chunk_is_not_given_the_last_writers_values(fa
     summary, docs = _export_docs(url, t3, tmp_path)
 
     a = docs["note-a"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == ("", "", None)
-    assert docs["note-b"]["tags"] == "beta"
+    assert (a["tags"], a["category"], a["ttl_days"]) == ([], "", None)
+    assert docs["note-b"]["tags"] == ["beta"]
     assert summary.note_keys_unrecovered == 1
 
 
@@ -1038,7 +1047,7 @@ def test_a_legacy_note_alone_on_an_unstamped_row_takes_its_tags_and_category_but
     summary, docs = _export_docs(url, t3, tmp_path)
 
     a = docs["note-a"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == ("beta", "finding", None)
+    assert (a["tags"], a["category"], a["ttl_days"]) == (["beta"], "finding", None)
     assert "note-b" not in docs, "B has no manifest left: a ghost, not an owner"
     assert summary.note_keys_unrecovered_notes == [(KNOW, "note-a")]
 
@@ -1053,7 +1062,7 @@ def test_a_legacy_note_alone_on_an_unstamped_row_with_no_ttl_is_fully_recovered(
     t3.rows[CH_S]["ttl_days"] = None
     summary, docs = _export_docs(url, t3, tmp_path)
 
-    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == ("beta", "finding")
+    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == (["beta"], "finding")
     assert summary.note_keys_unrecovered == 0
 
 
@@ -1070,7 +1079,7 @@ def test_a_note_with_no_keys_of_its_own_never_takes_a_departed_co_owners_keys(fa
     summary, docs = _export_docs(url, t3, tmp_path)
 
     a = docs["note-a"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == ("", "", None)
+    assert (a["tags"], a["category"], a["ttl_days"]) == ([], "", None)
     assert summary.note_keys_unrecovered == 1
 
 
@@ -1084,8 +1093,8 @@ def test_a_note_with_no_keys_that_is_the_rows_last_writer_takes_the_rows_values(
     summary, docs = _export_docs(url, t3, tmp_path)
 
     a, b = docs["note-a"], docs["note-b"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == ("beta", "finding", 30)
-    assert (b["tags"], b["category"], b["ttl_days"]) == ("", "", None)
+    assert (a["tags"], a["category"], a["ttl_days"]) == (["beta"], "finding", 30)
+    assert (b["tags"], b["category"], b["ttl_days"]) == ([], "", None)
     assert summary.note_keys_unrecovered == 1
 
 
@@ -1112,7 +1121,7 @@ def test_a_row_is_a_keyless_notes_own_only_when_both_its_stamp_and_its_title_are
     summary, docs = _export_docs(url, t3, tmp_path)
 
     a = docs["note-a"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == ("beta", "finding", None)
+    assert (a["tags"], a["category"], a["ttl_days"]) == (["beta"], "finding", None)
     assert summary.note_keys_unrecovered == 1
 
 
@@ -1143,7 +1152,7 @@ def test_a_legacy_row_with_ttl_zero_exports_as_permanent(fake_catalog, tmp_path)
     state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}
     t3.rows[CH_S].update({"ttl_days": 0, "catalog_doc_id": "1.9.1", "title": "note-a"})
     _summary, docs = _export_docs(url, t3, tmp_path)
-    assert docs["note-a"]["tags"] == "beta", "the row is A's own write"
+    assert docs["note-a"]["tags"] == ["beta"], "the row is A's own write"
     assert docs["note-a"]["ttl_days"] is None
 
 
@@ -1178,7 +1187,7 @@ def test_a_split_keyless_note_with_an_own_written_piece_makes_no_owner_lookup(fa
     t3.rows[CH_T] = {"id": CH_T, "content": " and more", "tags": "other", "category": "", "ttl_days": None}
     _summary, docs = _export_docs(url, t3, tmp_path)
 
-    assert docs["note-a"]["tags"] == "beta"
+    assert docs["note-a"]["tags"] == ["beta"]
     assert state.docs_for_chashes_requests == []
 
 
@@ -1194,7 +1203,7 @@ def test_a_failed_owner_lookup_withholds_tags_and_never_the_backup(fake_catalog,
                         lambda self, chashes: (_ for _ in ()).throw(RuntimeError("catalog 503")))
     summary, docs = _export_docs(url, t3, tmp_path)
 
-    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == ("", "")
+    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == ([], "")
     assert summary.note_keys_unrecovered_notes == [(KNOW, "note-a")]
 
 
@@ -1208,7 +1217,7 @@ def test_an_owner_in_another_collection_does_not_count_against_sole_ownership(fa
     t3.rows[CH_S]["ttl_days"] = None
     summary, docs = _export_docs(url, t3, tmp_path)
 
-    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == ("beta", "finding")
+    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == (["beta"], "finding")
     assert (KNOW, "note-a") not in summary.note_keys_unrecovered_notes
     assert state.docs_for_chashes_requests == [[CH_S]]
 
@@ -1227,7 +1236,7 @@ def test_a_split_legacy_note_takes_tags_from_its_first_unstamped_sole_owned_piec
 
     a = docs["note-a"]
     assert a["content"] == "shared text and more"
-    assert (a["tags"], a["category"], a["ttl_days"]) == ("own", "mine", None)
+    assert (a["tags"], a["category"], a["ttl_days"]) == (["own"], "mine", None)
     assert (KNOW, "note-a") not in summary.note_keys_unrecovered_notes
 
 
@@ -1415,3 +1424,55 @@ def test_residue_counter_still_counts_chroma_residue_by_physical_collection(
     summary = ExportSummary()
     rb.select_store_put_documents(entries, {}, summary)
     assert summary.file_routed_excluded == 1
+
+
+# ── tags are a JSON array in the bundle (nexus-6pfgb.38, RDR-236 RF-17) ─────
+
+
+def test_an_export_carries_a_notes_tags_as_the_array_from_its_catalog_meta(fake_catalog, tmp_path):
+    url, state = fake_catalog
+    t3 = _FakeT3()
+    _shared_pair(
+        state, t3,
+        a_meta={"tags": ["alpha", "one"], "category": "design", "ttl_days": 7},
+        b_meta={"tags": [], "category": "finding"},
+    )
+    _summary, docs = _export_docs(url, t3, tmp_path)
+    assert docs["note-a"]["tags"] == ["alpha", "one"]
+    assert docs["note-b"]["tags"] == [], "a retracted array is no tag, whatever the shared row says"
+
+
+def test_an_export_splits_a_legacy_string_in_catalog_meta_into_the_array(fake_catalog, tmp_path):
+    """A note stored before nexus-6pfgb.38 that the conversion rung has not reached yet."""
+    url, state = fake_catalog
+    t3 = _FakeT3()
+    _shared_pair(state, t3, a_meta={"tags": "alpha, one,alpha"}, b_meta={"tags": ""})
+    _summary, docs = _export_docs(url, t3, tmp_path)
+    assert docs["note-a"]["tags"] == ["alpha", "one"]
+    assert docs["note-b"]["tags"] == []
+
+
+def test_a_keyless_note_takes_its_rows_comma_string_as_an_array(fake_catalog, tmp_path):
+    """The fallback from a chunk row (legacy notes carry no tags in catalog meta): the row keeps a
+    comma string, the record carries the array."""
+    url, state = fake_catalog
+    t3 = _FakeT3()
+    _shared_pair(state, t3, a_meta={}, b_meta={})
+    state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}
+    t3.rows[CH_S].update({"tags": "beta, gamma", "catalog_doc_id": "1.9.1", "title": "note-a"})
+    _summary, docs = _export_docs(url, t3, tmp_path)
+    assert docs["note-a"]["tags"] == ["beta", "gamma"]
+
+
+@pytest.mark.parametrize(
+    ("record_tags", "expected"),
+    [(["alpha", "one"], "alpha,one"), ("alpha,one", "alpha,one"), ([], ""), ("", ""), (None, "")],
+    ids=["array", "legacy-string", "empty-array", "empty-string", "absent"],
+)
+def test_the_import_accepts_an_array_and_a_legacy_string(note_writer, record_tags, expected):
+    import nexus.catalog.recovery_bundle as rb
+
+    calls, _hooks, _ = note_writer
+    rec = {**_REC, "tags": record_tags}
+    rb._default_import_doc(_FakeT3(), rec)
+    assert calls[0]["tags"] == expected

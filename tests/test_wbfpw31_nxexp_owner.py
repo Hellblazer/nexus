@@ -245,6 +245,10 @@ def test_round_trip_multi_batch_document_stays_owned(t2_service_env, tmp_path, m
         assert copy is not None
         assert copy.physical_collection == dst
         assert str(copy.tumbler) != orig_id
+        # nexus-6pfgb.45, against the real engine: the imported note's catalog entry was keyless, so
+        # the import stamped put_at (now) and ttl_days 0 (permanent) through the writer's update
+        assert copy.meta.get("ttl_days") == 0, copy.meta
+        assert datetime.fromisoformat(copy.meta["put_at"]) <= datetime.now(UTC)
         rows = sorted(reader.get_manifest(str(copy.tumbler)), key=lambda r: r.position)
         assert [r.chash for r in rows] == chashes
 
@@ -252,6 +256,7 @@ def test_round_trip_multi_batch_document_stays_owned(t2_service_env, tmp_path, m
         assert orig is not None
         assert str(orig.tumbler) == orig_id
         assert orig.physical_collection == src
+        assert "ttl_days" not in orig.meta and "put_at" not in orig.meta, "the import must not stamp the source note"
         orig_rows = sorted(reader.get_manifest(orig_id), key=lambda r: r.position)
         assert [r.chash for r in orig_rows] == chashes, "source manifest must survive the import"
 

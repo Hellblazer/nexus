@@ -438,9 +438,11 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         String legacyCol = col("knowledge");
         String cleanCol = col("knowledge");
         String legacyDoc = "rp.legacy." + seq.incrementAndGet();
-        registerNote(t, legacyDoc, legacyCol, null);
-        // A live legacy note: its chunk names the document and no manifest row ever existed.
-        String legacyChunk = orphan(t, legacyCol, "legacy", Map.of("catalog_doc_id", legacyDoc));
+        // A live legacy note: no manifest row ever existed. The tenant's rdr192 record exists, so the census no
+        // longer reads the chunk row's catalog_doc_id (RDR-236 Phase 3): the note names its chunk by the REVERSE
+        // path, its own metadata.doc_id equal to the chash.
+        registerNote(t, legacyDoc, legacyCol, Map.of("doc_id", Chash.ofText(legacyCol + "/legacy").toHex()));
+        String legacyChunk = orphan(t, legacyCol, "legacy");
         String legacyNeighbour = orphan(t, legacyCol, "debris");
         String cleanDebris = orphan(t, cleanCol, "debris");
 
@@ -1339,11 +1341,18 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
             assertThat(d.get("reason").asText()).isEqualTo("FLOOR_EXCEEDED");
             assertThat(d.get("candidates").asLong()).isEqualTo(100);
             assertThat(d.get("total").asLong()).isEqualTo(300);
-            assertThat(d.get("sample")).as("up to five title/source_path rows").hasSize(5);
+            assertThat(d.get("sample")).as("up to five sample rows").hasSize(5);
             for (var row : d.get("sample")) {
-                assertThat(row.get("title").asText()).startsWith("Doc ");
-                assertThat(row.get("source_path").asText()).startsWith("/src/file");
+                // RDR-236 Phase 3: the row's title and source_path (stale on a shared chunk, swept in Phase 4) are
+                // never shown. Chunk text is never persisted either: nexus_diag reads gc_audit across tenants
+                // under a content-free premise (grants-nexus-diag-4), so a stored sample row is chash, title,
+                // source_path and nothing else.
+                assertThat(row.fieldNames()).toIterable().containsExactlyInAnyOrder("chash", "title", "source_path");
+                assertThat(row.get("title").isNull()).as("no manifest owner, no title").isTrue();
+                assertThat(row.get("source_path").isNull()).isTrue();
             }
+            assertThat(a.details()).doesNotContain("Doc ").doesNotContain("/src/file")
+                .doesNotContain("text_prefix").doesNotContain("bulk");
         });
 
         // The state changes: the collection leaves `live`. A new reason is a new row.
@@ -1367,13 +1376,13 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void aCensusRefusalAuditRowNamesTheLegacyChunksByTitleAndSourcePath() throws Exception {
+    void aCensusRefusalAuditRowNamesTheLegacyChunksByChash_neverByTheirTextOrTheRowsTitleOrSourcePath() throws Exception {
         String t = newTenant();
         openGate(t);
         String c = col("knowledge");
         String doc = "rp.legacy." + seq.incrementAndGet();
-        registerNote(t, doc, c, null);
-        orphan(t, c, "legacy", Map.of("catalog_doc_id", doc, "title", "Legacy note", "source_path", "/notes/legacy.md"));
+        registerNote(t, doc, c, Map.of("doc_id", Chash.ofText(c + "/legacy").toHex()));   // the reverse path
+        orphan(t, c, "legacy", Map.of("title", "Stale row title", "source_path", "/stale/row/path.md"));
         orphan(t, c, "debris");
 
         reaper(t).runOnce(Duration.ZERO);
@@ -1382,9 +1391,50 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
             var d = readJson(a.details());
             assertThat(d.get("reason").asText()).isEqualTo("CENSUS_LEGACY_UNMANIFESTED");
             assertThat(d.get("sample")).hasSize(1);
-            assertThat(d.get("sample").get(0).get("title").asText()).isEqualTo("Legacy note");
-            assertThat(d.get("sample").get(0).get("source_path").asText()).isEqualTo("/notes/legacy.md");
+            assertThat(d.get("sample").get(0).fieldNames()).toIterable()
+                .containsExactlyInAnyOrder("chash", "title", "source_path");
+            assertThat(a.details()).doesNotContain("text_prefix").doesNotContain("legacy text");
+            assertThat(d.get("sample").get(0).get("title").isNull()).isTrue();
+            assertThat(d.get("sample").get(0).get("source_path").isNull()).isTrue();
+            assertThat(a.details()).doesNotContain("Stale row title").doesNotContain("/stale/row/path.md");
         });
+    }
+
+    /**
+     * RDR-236 Phase 3 (nexus-6pfgb.39): {@link ReaperRepository#describe} labels a chunk by {@code
+     * left(chunk_text, 80)} and by its MANIFEST owner's title and file path where one exists. The chunk row
+     * carries another document's title and source path; neither may be returned.
+     */
+    @Test
+    void describeLabelsAChunkByItsTextPrefixAndManifestOwner_neverByTheRowsTitleOrSourcePath() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String ownerCol = col("knowledge");
+        String longSeed = "d".repeat(100);
+        String hex = orphan(t, c, longSeed, Map.of("title", "STALE title", "source_path", "/stale/path.md",
+            "catalog_doc_id", "stale-doc"));
+        String ownerless = orphan(t, c, "alone", Map.of("title", "STALE alone", "source_path", "/stale/alone.md"));
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, t, ownerCol);
+            PgContainerHelper.insertChunks(ctx, t, ownerCol, List.of(hex), List.of("owner side text"),
+                List.of(new float[384]), List.of(Map.of()));
+            PgContainerHelper.ownChunks(ctx, t, ownerCol, hex);
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.FILE_PATH, "/the/owner/file.md")
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq("own-" + ownerCol)))
+               .execute();
+        }
+
+        var labels = store.describe(t, c, List.of(hex, ownerless));
+
+        var owned = labels.stream().filter(l -> hex.equals(l.chash())).findFirst().orElseThrow();
+        assertThat(owned.textPrefix()).isEqualTo((longSeed + " text").substring(0, 80));
+        assertThat(owned.title()).isEqualTo("Owner own-" + ownerCol);
+        assertThat(owned.sourcePath()).isEqualTo("/the/owner/file.md");
+        var alone = labels.stream().filter(l -> ownerless.equals(l.chash())).findFirst().orElseThrow();
+        assertThat(alone.textPrefix()).isEqualTo("alone text");
+        assertThat(alone.title()).isNull();
+        assertThat(alone.sourcePath()).isNull();
     }
 
     @Test

@@ -392,7 +392,10 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(outcome.moved()).isEqualTo(1L);
         assertThat(outcome.sample()).hasSize(1);
         assertThat(outcome.sample().get(0).get("chash")).isEqualTo(chashOrphan);
-        assertThat(outcome.sample().get(0).get("title")).isEqualTo("Orphan Doc");
+        // RDR-236 Phase 3: the row's title ("Orphan Doc", stale on a shared chunk and swept in Phase 4) is never
+        // shown; an orphan with no manifest owner is labelled by the start of its text.
+        assertThat(outcome.sample().get(0).get("title")).isNull();
+        assertThat(outcome.sample().get(0).get("text_prefix")).isEqualTo("orphan text");
 
         // Zero wire cost is verified separately (Python-side call-spy), but the
         // SERVER-SIDE effect is verified here: origin loses exactly the orphan,
@@ -402,6 +405,116 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(chunkText(quarantineCol, chashOrphan)).isEqualTo("orphan text");
         assertThat(metadataField(quarantineCol, chashOrphan, "origin_collection")).isEqualTo(originCol);
         assertThat(metadataField(quarantineCol, chashOrphan, "quarantined_at")).isEqualTo("2026-08-10T00:00:00Z");
+    }
+
+    /**
+     * RDR-236 Phase 3 (nexus-6pfgb.39): the audit sample of both gc functions labels a moved chunk by
+     * {@code left(chunk_text, 80)} and by its MANIFEST owner's title, never by the chunk row's title.
+     */
+    @Test
+    void quarantineOrphans_sampleCarriesTheTextPrefixAndTheManifestOwnersTitle_neverTheRowTitle() throws Exception {
+        String originCol = originCol("p3-sample");
+        String ownerCol = originCol("p3-sample-owner");
+        String quarantineCol = quarantineCol("p3-sample");
+        String chash = ch("gcq-p3-sample");
+        seedChunk(TENANT_A, originCol, chash, "x".repeat(100), "STALE row title");
+        seedChunk(TENANT_A, ownerCol, chash, "owner side", "owner side title");
+        seedManifest(TENANT_A, "gcq.doc.p3owner", chash, ownerCol);   // an owner in ANOTHER collection
+
+        var outcome = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-08-10T00:00:00Z", 20);
+
+        assertThat(outcome.sample()).hasSize(1);
+        assertThat(outcome.sample().get(0).get("title")).isEqualTo("GC quarantine fixture gcq.doc.p3owner");
+        assertThat(outcome.sample().get(0).get("text_prefix")).isEqualTo("x".repeat(80));
+        assertThat(outcome.sample().toString()).doesNotContain("STALE");
+    }
+
+    @Test
+    void quarantineOrphansBounded_sampleCarriesTheTextPrefixAndTheManifestOwnersTitle_neverTheRowTitle()
+            throws Exception {
+        String originCol = originCol("p3-bsample");
+        String ownerCol = originCol("p3-bsample-owner");
+        String quarantineCol = quarantineCol("p3-bsample");
+        String owned = ch("gcq-p3-bsample-owned");
+        String alone = ch("gcq-p3-bsample-alone");
+        seedChunk(TENANT_A, originCol, owned, "x".repeat(100), "STALE row title");
+        seedChunk(TENANT_A, originCol, alone, "alone text", "STALE alone title");
+        seedChunk(TENANT_A, ownerCol, owned, "owner side", "owner side title");
+        seedManifest(TENANT_A, "gcq.doc.p3bowner", owned, ownerCol);
+
+        var outcome = vectorRepo.quarantineOrphansBounded(TENANT_A, originCol, quarantineCol,
+            "2026-08-10T00:00:00Z", 20, 10);
+
+        assertThat(outcome.sample()).hasSize(2);
+        var o = outcome.sample().stream().filter(m -> owned.equals(m.get("chash"))).findFirst().orElseThrow();
+        assertThat(o.get("title")).isEqualTo("GC quarantine fixture gcq.doc.p3bowner");
+        assertThat(o.get("text_prefix")).isEqualTo("x".repeat(80));
+        var n = outcome.sample().stream().filter(m -> alone.equals(m.get("chash"))).findFirst().orElseThrow();
+        assertThat(n.get("title")).isNull();
+        assertThat(n.get("text_prefix")).isEqualTo("alone text");
+        assertThat(outcome.sample().toString()).doesNotContain("STALE");
+    }
+
+    /**
+     * Two properties of the gc sample (nexus-6pfgb.39, review round 1). An owner is LIVE: a chunk whose only
+     * manifest owner is tombstoned is labelled by its text and has a null title, and where a live document also
+     * names it the live one is the owner though the tombstoned one sorts first. And chunk text never reaches
+     * {@code gc_audit} (read across tenants by nexus_diag under a content-free premise, grants-nexus-diag-4): the
+     * audit row of a move holds the chashes and counts only.
+     */
+    @Test
+    void gcSample_aTombstonedOwnerIsNoOwner_andTheAuditRowHoldsNoChunkText() throws Exception {
+        for (boolean bounded : new boolean[] {false, true}) {
+            String tag = bounded ? "p3-tomb-b" : "p3-tomb";
+            String originCol = originCol(tag);
+            String ownerCol = originCol(tag + "-owner");
+            String quarantineCol = quarantineCol(tag);
+            String deadOnly = ch("gcq-" + tag + "-dead");
+            String both = ch("gcq-" + tag + "-both");
+            seedChunk(TENANT_A, originCol, deadOnly, "tombtext ".repeat(12), "STALE dead title");
+            seedChunk(TENANT_A, originCol, both, "bothtext ".repeat(12), "STALE both title");
+            seedChunk(TENANT_A, ownerCol, deadOnly, "owner side dead", "owner side title");
+            seedChunk(TENANT_A, ownerCol, both, "owner side both", "owner side title");
+            seedManifest(TENANT_A, "gcq.doc." + tag + ".a-dead", deadOnly, ownerCol);
+            seedManifest(TENANT_A, "gcq.doc." + tag + ".a-tomb", both, ownerCol);
+            seedManifest(TENANT_A, "gcq.doc." + tag + ".b-live", both, ownerCol);
+            try (var su = pg.createConnection("")) {
+                DSL.using(su, SQLDialect.POSTGRES).update(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS)
+                   .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now())
+                   .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A))
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER.in(
+                        "gcq.doc." + tag + ".a-dead", "gcq.doc." + tag + ".a-tomb"))
+                   .execute();
+            }
+
+            List<Map<String, Object>> sample = bounded
+                ? vectorRepo.quarantineOrphansBounded(TENANT_A, originCol, quarantineCol, "2026-08-10T00:00:00Z", 20, 10)
+                    .sample()
+                : vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-08-10T00:00:00Z", 20)
+                    .sample();
+
+            assertThat(sample).as(tag).hasSize(2);
+            var d = sample.stream().filter(m -> deadOnly.equals(m.get("chash"))).findFirst().orElseThrow();
+            assertThat(d.get("title")).as(tag + ": a tombstoned owner owns nothing").isNull();
+            assertThat(d.get("text_prefix")).isEqualTo(("tombtext ".repeat(12)).substring(0, 80));
+            var b = sample.stream().filter(m -> both.equals(m.get("chash"))).findFirst().orElseThrow();
+            assertThat(b.get("title")).as(tag + ": the live owner wins").isEqualTo("GC quarantine fixture gcq.doc." + tag + ".b-live");
+
+            try (var su = pg.createConnection("")) {
+                var audit = DSL.using(su, SQLDialect.POSTGRES).select(
+                        dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.DETAILS,
+                        dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.CHASHES)
+                    .from(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT)
+                    .where(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.TENANT_ID.eq(TENANT_A))
+                    .and(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.COLLECTION.eq(originCol))
+                    .fetch();
+                assertThat(audit).as(tag + ": one audit row for the move").hasSize(1);
+                // The full column text, not Record.toString(), which cuts every cell at 50 characters.
+                String stored = audit.get(0).value1().data() + " " + audit.get(0).value2().data();
+                assertThat(stored).doesNotContain("tombtext").doesNotContain("bothtext").doesNotContain("text_prefix");
+                assertThat(stored).as("the chashes are there").contains(deadOnly);
+            }
+        }
     }
 
     // ── EQUIVALENCE: no orphans ───────────────────────────────────────────────

@@ -13,6 +13,13 @@ from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 
 
 @pytest.fixture(autouse=True)
+def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module tests the aspect queue TABLE path, so it says so: the unset
+    default is ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1)."""
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+
+
+@pytest.fixture(autouse=True)
 def _no_real_catalog_registration(monkeypatch: pytest.MonkeyPatch):
     """RDR-204 Phase 1 (nexus-f5wwx): ``HttpAspectQueue.enqueue`` now
     routes through ``nexus.corpus.write_with_registration_retry``,

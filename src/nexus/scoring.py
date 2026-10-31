@@ -2,11 +2,12 @@
 """Pure scoring primitives: normalization, hybrid scoring, reranking, interleaving."""
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 import structlog
 
+from nexus.context_annotations import OWNER_FRECENCY_KEY, OWNER_QUALITY_KEY, OWNER_RESOLVE_CAP
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
@@ -422,11 +423,21 @@ def apply_hybrid_scoring(
         model_of=model_of,
     )
     distances = [_effective_distance(r, calibration_factors) for r in basis]
-    frecencies = [
-        r.metadata.get("frecency_score", 0.0)
-        for r in basis
-        if is_code_by_collection[r.collection]
-    ]
+    # RDR-236 Phase 1 (nexus-6pfgb.9): a hit scores by its attributed owner's catalog frecency
+    # (``_owner_frecency``, set from the page's one owner lookup; the best of the owners' scores
+    # when the row named no document, see ``DOC_ID_INFERRED_KEY``). The chunk row carries the
+    # LAST WRITER's file score, so it is read only for a chunk that has at most one owner (a
+    # legacy chunk nothing has stamped yet); a shared chunk whose owner states none scores 0.0.
+    # One value per hit, so the window below and the per-hit read agree.
+    frecency_of: dict[int, float] = {}
+    for r in (*basis, *results):
+        if id(r) in frecency_of or not is_code_by_collection[r.collection]:
+            continue
+        value = r.metadata.get(OWNER_FRECENCY_KEY)
+        if value is None and len(r.metadata.get("_owner_doc_ids") or ()) <= 1:
+            value = r.metadata.get("frecency_score", 0.0)
+        frecency_of[id(r)] = float(value or 0.0)
+    frecencies = [frecency_of[id(r)] for r in basis if is_code_by_collection[r.collection]]
 
     for r in results:
         # Invert: distances are dissimilarity (smaller = better), so best match → v_norm=1.0.
@@ -457,7 +468,7 @@ def apply_hybrid_scoring(
             # simply 0.0 for them; code__ keeps its existing frecency-
             # window blend.
             if is_code_by_collection[r.collection]:
-                f_score = r.metadata.get("frecency_score", 0.0)
+                f_score = frecency_of[id(r)]
                 f_norm = min_max_normalize(f_score, frecencies) if frecencies else 0.0
                 if window is not None:
                     f_norm = min(1.0, max(0.0, f_norm))
@@ -502,11 +513,17 @@ def apply_quality_boost(
     results: list[SearchResult],
     boost_weight: float = _QUALITY_BOOST_WEIGHT,
 ) -> list[SearchResult]:
-    """Boost hybrid_score of results that have bibliographic quality metadata.
+    """Boost hybrid_score of results whose owning document has bibliographic quality metadata.
 
     Mutates ``hybrid_score`` in place: ``score += boost_weight × quality_score``.
-    Only applies to knowledge__/docs__/rdr__ collections.  Results without
-    ``bib_citation_count`` are untouched.
+    Only applies to knowledge__/docs__/rdr__ collections.
+
+    The citation count and year are the OWNING document's, stamped on the hit as
+    ``OWNER_QUALITY_KEY`` by ``search_engine._attach_display_paths`` from the owner lookup the page
+    already makes (nexus-6pfgb.12, RDR-236). A chunk row's ``bib_citation_count`` is its last writer's,
+    so an unenriched document sharing a chunk with an enriched one took the other's boost, and a clean
+    re-index never cleared it; the row is not read. A hit with no stamp (no catalog in scope, no owner
+    resolved, an owner that states no citations) is untouched.
     """
     from datetime import date  # noqa: PLC0415 — branch-local helper import
 
@@ -514,10 +531,11 @@ def apply_quality_boost(
     for r in results:
         if not r.collection.startswith(_QUALITY_ELIGIBLE_PREFIXES):
             continue
-        count = int(r.metadata.get("bib_citation_count", 0))
+        stamp = r.metadata.get(OWNER_QUALITY_KEY) or {}
+        count = int(stamp.get("bib_citation_count", 0) or 0)
         if count <= 0:
             continue
-        bib_year = r.metadata.get("bib_year", "")
+        bib_year = stamp.get("bib_year", "")
         age_days = 0.0
         if bib_year:
             try:
@@ -540,13 +558,44 @@ _LINK_BOOST_WEIGHTS: dict[str, float] = {
 _DEFAULT_LINK_BOOST_WEIGHT: float = 0.15
 
 
+def _link_owners(r: SearchResult, homes: Mapping[str, str] | None = None) -> list[str]:
+    """The documents whose links boost *r*: the hit's ``doc_id`` first, then the rest of the
+    documents holding its chunk (``_owner_doc_ids``, stamped by the search's catalog attach),
+    at most :data:`~nexus.context_annotations.OWNER_RESOLVE_CAP` of them.
+
+    ``_owner_doc_ids`` is tenant-wide (a chash is a function of text alone), so *homes* (doc_id to
+    physical collection, from the page's display lookup) drops an owner known to live in another
+    collection than the hit's (nexus-6pfgb.47). An owner *homes* does not name stays: a lookup that
+    failed or skipped a document must not switch the boost off.
+
+    A chunk two documents share is one row, and ``doc_id`` is whichever owner the lookup
+    named first, so reading it alone ignored every other owner's links (RDR-236, nexus-6pfgb.20).
+    When the engine names one attributed owner deterministically (nexus-6pfgb.26), narrowing
+    this to that owner is a change to this function only.
+    """
+    did = r.metadata.get("doc_id", "")
+    owners = list(dict.fromkeys([did, *(r.metadata.get("_owner_doc_ids") or ())]))
+    if homes:
+        owners = [o for o in owners if homes.get(o, "") in ("", r.collection)]
+    return [o for o in owners if o][:OWNER_RESOLVE_CAP]
+
+
 def apply_link_boost(
     results: list[SearchResult],
     catalog: Any,
     boost_weight: float = _DEFAULT_LINK_BOOST_WEIGHT,
     type_weights: dict[str, float] | None = None,
+    homes: Callable[[], Mapping[str, str]] | None = None,
 ) -> list[SearchResult]:
     """Boost hybrid_score for results whose source documents have outgoing links.
+
+    *homes* (nexus-6pfgb.47) returns the page's ``doc_id -> physical_collection`` map, from the display
+    lookup the search already runs; it is called once, after the link call, so the two overlap. An
+    owner it places in another collection than the hit's contributes no links.
+
+    A hit's source documents are every owner of its chunk (:func:`_link_owners`); its signal is
+    the sum of their link signals, capped at 1.0 below, from ONE ``links_from_batch`` call for
+    the page.
 
     nexus-1qed (RDR-101 Phase 4): keyed on the catalog ``doc_id`` rather
     than on the legacy ``source_path``. The catalog projects ``doc_id``
@@ -562,11 +611,8 @@ def apply_link_boost(
     tw = type_weights if type_weights is not None else _LINK_BOOST_WEIGHTS
 
     # Collect unique doc_ids from results.
-    doc_ids: set[str] = set()
-    for r in results:
-        did = r.metadata.get("doc_id", "")
-        if did:
-            doc_ids.add(did)
+    owners_of = [_link_owners(r) for r in results]
+    doc_ids: set[str] = {o for owners in owners_of for o in owners}
 
     if not doc_ids:
         return results
@@ -598,12 +644,19 @@ def apply_link_boost(
             w = tw.get(link_type, 0.0)
             tumbler_signal[from_t] = tumbler_signal.get(from_t, 0.0) + w
 
+    if homes is not None:
+        try:
+            home_map = homes()
+        except Exception:  # noqa: BLE001 — best-effort: a failed display lookup leaves every owner counted, as before
+            _log.debug("scoring_link_boost_homes_failed", exc_info=True)
+            home_map = {}
+        owners_of = [_link_owners(r, home_map) for r in results]
+
     # Apply boost.
-    for r in results:
-        did = r.metadata.get("doc_id", "")
-        if not did:
+    for r, owners in zip(results, owners_of):
+        if not owners:
             continue
-        signal = min(tumbler_signal.get(did, 0.0), 1.0)
+        signal = min(sum(tumbler_signal.get(o, 0.0) for o in owners), 1.0)
         if signal > 0:
             r.hybrid_score += boost_weight * signal
 

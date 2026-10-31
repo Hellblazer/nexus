@@ -1077,6 +1077,45 @@ def engine_boot_failure_reason(log_path: Path, start_offset: int = 0) -> str | N
     return None if fatal is None else _reason_text(fatal)
 
 
+#: ``Caused by: <exception class>: <message>``; the class is not part of the cause.
+_ENGINE_CAUSED_BY = re.compile(r"^Caused by: [\w.$]+: (?P<message>.*)$")
+
+
+def last_engine_root_cause(log_path: Path, start_offset: int) -> str | None:
+    """The root cause under the engine's last schema-migration ERROR line: the
+    message of the last ``Caused by:`` in that line's trace, read from what the
+    log gained at or after *start_offset*. ``None`` when there is no such line or
+    its trace has no cause. Anchored on ``event=schema_migration_failed`` so a
+    later, unrelated ERROR's cause is never reported as the migration's.
+
+    A schema migration that fails logs ``event=schema_migration_failed
+    error="Liquibase migration failed"`` and then the exception chain, whose last
+    link carries the database's own message (a changeset's ``RAISE``, with the
+    action to take). :func:`last_engine_error_line` stops at the ERROR line and
+    the continuation line after the cause. The exception class and PostgreSQL's
+    ``ERROR: `` prefix are dropped; only the trace that follows the ERROR line
+    counts (it ends at the next logback line). Credential values are redacted.
+    """
+    lines = _log_lines_since(log_path, start_offset)
+    last_error = next(
+        (
+            i
+            for i in range(len(lines) - 1, -1, -1)
+            if _ENGINE_ERROR_LINE.match(lines[i]) and "event=schema_migration_failed" in lines[i]
+        ),
+        None,
+    )
+    if last_error is None:
+        return None
+    cause: str | None = None
+    for line in lines[last_error + 1 :]:
+        if _ENGINE_LOGBACK_LINE.match(line):
+            break
+        if (m := _ENGINE_CAUSED_BY.match(line)) is not None:
+            cause = m.group("message").removeprefix("ERROR: ")
+    return None if cause is None else _reason_text(cause)
+
+
 def last_supervisor_error_line(crash_log: Path, start_offset: int) -> str | None:
     """The supervisor's own start failure: the last ``Error: ...`` line the
     ``--foreground`` command wrote to its crash-channel log at or after
@@ -1115,6 +1154,21 @@ def engine_exit_reason(marks: dict[Path, int]) -> tuple[Path, str] | None:
         reason = last_engine_error_line(path, mark)
         if reason is not None:
             return path, reason
+    return None
+
+
+def engine_root_cause(marks: dict[Path, int]) -> tuple[Path, str] | None:
+    """``(log path, root cause)`` from the first engine log that changed since
+    *marks* was taken and has one (:func:`last_engine_root_cause`), else ``None``."""
+    for path, mark in marks.items():
+        try:
+            if path.stat().st_size == mark:
+                continue
+        except OSError:
+            continue
+        cause = last_engine_root_cause(path, mark)
+        if cause is not None:
+            return path, cause
     return None
 
 

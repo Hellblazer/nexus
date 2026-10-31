@@ -45,7 +45,10 @@ def _chunks_filling(method: str, pages: dict):
 
     def fake(file, content_hash, model, now_iso, corpus, *, extraction_stats=None, **kw):
         if extraction_stats is not None:
-            extraction_stats.update({"extraction_method": method, "extraction_pages": pages, "page_count": 12})
+            extraction_stats.update({
+                "extraction_method": method, "extraction_pages": pages, "page_count": 12,
+                "quality_gate_overridden": False, "extraction_source": "file",
+            })
         return [("id1", "Page 1", {"source_title": "T", "page_number": 1, "source_path": str(file),
                                    "corpus": corpus, "embedding_model": model, "store_type": "prose",
                                    "source_agent": "nexus-indexer"})]
@@ -69,7 +72,7 @@ def _index(tmp_path: Path, method: str, pages: dict, *, doc_id: str = "1.1.7", w
             patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
         count = _index_pdf_file(
-            pdf, repo, "docs__repo", "voyage-context-3", col, db, "fake-key", git_meta={},
+            pdf, repo, "docs__repo", "voyage-context-3", col, db, "fake-key",
             now_iso="2026-01-01T00:00:00", score=1.0, embed_fn=lambda texts: [[0.1] * 3 for _ in texts],
             doc_id_resolver=lambda p: doc_id, hooks=MagicMock(),
         )
@@ -80,7 +83,8 @@ def test_a_degraded_pdf_indexed_by_the_repo_indexer_records_its_map(tmp_path) ->
     count, writer, _pdf = _index(tmp_path, "mineru+degraded", DEGRADED)
     assert count == 1
     assert writer.updates == [
-        ("1.1.7", {"meta": {"extraction_method": "mineru+degraded", "extraction_pages": DEGRADED}}),
+        ("1.1.7", {"meta": {"extraction_method": "mineru+degraded", "extraction_pages": DEGRADED,
+                           "quality_gate_overridden": False, "extraction_source": "file"}}),
     ]
     assert writer.closed
 
@@ -89,7 +93,9 @@ def test_a_clean_re_extract_through_the_repo_indexer_writes_an_empty_map(tmp_pat
     """The service merges ``meta`` key by key and never removes one, so a clean run clears an old
     map only by writing ``extraction_pages`` whole, ``{}`` included."""
     _count, writer, _pdf = _index(tmp_path, "mineru", {})
-    assert writer.updates == [("1.1.7", {"meta": {"extraction_method": "mineru", "extraction_pages": {}}})]
+    assert writer.updates == [("1.1.7", {"meta": {
+        "extraction_method": "mineru", "extraction_pages": {},
+        "quality_gate_overridden": False, "extraction_source": "file"}})]
 
 
 def test_a_file_with_no_catalog_document_logs_that_nothing_was_recorded(tmp_path) -> None:
@@ -160,7 +166,7 @@ def test_the_record_lands_before_the_chunks_are_embedded_and_uploaded(tmp_path) 
             patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
             patch("nexus.catalog.factory.make_catalog_writer", return_value=_OrderedWriter()):
         _index_pdf_file(
-            pdf, repo, "docs__repo", "bge-base-en-v1.5", col, db, "fake-key", git_meta={},
+            pdf, repo, "docs__repo", "bge-base-en-v1.5", col, db, "fake-key",
             now_iso="2026-01-01T00:00:00", score=1.0, embed_fn=embed,
             doc_id_resolver=lambda p: "1.1.7", hooks=MagicMock(),
         )

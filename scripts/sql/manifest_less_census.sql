@@ -25,6 +25,24 @@
 -- tumbler wins any further tie. See ManifestLessCensusIntegrationTest#
 -- reverseTieBreak_prefersTheMostConservativeBucket_deterministicallyAcrossLiteralAndBoundForms.
 --
+-- RDR-236 PHASE 3 (nexus-6pfgb.39): THE FORWARD JOIN STAYS ON, UNCONDITIONALLY.
+-- The forward key (catalog_doc_id, falling back to doc_id) lives on the
+-- chunk ROW, and the RDR-236 Phase 4 sweep will remove document keys from
+-- rows. Until it does, a manifest row lost AFTER the rdr192 backfill rung
+-- converged leaves its chunk carrying the key, and that key is the only way to
+-- name the chunk's document: the manifest-heal (nexus-8o06q) re-indexes
+-- exactly such a document, so dropping the join for a tenant that has its
+-- 'rdr192-manifest-backfill' completion record (a first version of this change
+-- did) read those chunks no-owner and the heal found nothing to re-index.
+-- Once the sweep has removed the keys the join matches nothing, by
+-- construction, so it needs no gate. The census is unchanged by Phase 3.
+-- PRECONDITION FOR THE SWEEP: `nx t3 census-manifest-less --all
+-- --require-zero legacy-unmanifested` reads zero on the install before the
+-- Phase 4 sweep (a stranded note the rung cannot heal is healed by hand, or
+-- its collection stays unswept); the rdr192 rung refuses to run after the
+-- sweep, because it attributes by the same row keys (pinned by
+-- nexus-6pfgb.43, not here).
+--
 -- WHY THERE IS NO metadata ->> 'doc_id' INDEX (catalog-038 dropped in
 -- round 3; mechanism corrected in round 4):
 -- Structural reason first, and it is sufficient on its own: after the

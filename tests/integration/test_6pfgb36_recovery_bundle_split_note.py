@@ -84,10 +84,10 @@ def test_a_split_note_exports_its_whole_text_and_round_trips_through_import(t2_s
     assert docs["split-keyed"]["content"] == keyed_body
     assert docs["split-keyless"]["content"] == keyless_body
     assert (docs["split-keyed"]["tags"], docs["split-keyed"]["category"],
-            docs["split-keyed"]["ttl_days"]) == ("alpha", "design", 7)
+            docs["split-keyed"]["ttl_days"]) == (["alpha"], "design", 7)
     # The keyless note wrote its own first piece, so the first piece's row values are its own.
     assert (docs["split-keyless"]["tags"], docs["split-keyless"]["category"],
-            docs["split-keyless"]["ttl_days"]) == ("beta", "finding", 30)
+            docs["split-keyless"]["ttl_days"]) == (["beta"], "finding", 30)
     assert summary.notes_incomplete == 0
 
     imported = import_bundle(reader, reader, client, bundle)

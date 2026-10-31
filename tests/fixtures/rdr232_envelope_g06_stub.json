@@ -196,6 +196,7 @@
   ],
   "assessment": {
    "accepted_records": 9,
+   "anchors_total": 12,
    "call_log": [
     [
      "vector",
@@ -246,6 +247,8 @@
     "raised": 0,
     "support": 2
    },
+   "skipped_budget_calls": 0,
+   "skipped_deadline_calls": 0,
    "skipped_items": 0,
    "streams": [
     "vector",
@@ -709,7 +712,7 @@
  "reserved_stream": null,
  "run_summary": {
   "detail": "digest_match",
-  "digest": "sha256:5189c22536238befaa03b8fdde3a33566219c05370afa8ec89d5a9712cf207ba",
+  "digest": "sha256:46d2a787a84da3d46db3b0dc5493eca93e2cf15c7ff55ae64a2b0aa5454d5a3f",
   "persisted_coverage_state": "partial",
   "persistence": "persisted",
   "returned_coverage_state": "partial",
@@ -717,6 +720,7 @@
  },
  "scope_diagnostics": [],
  "scope_normalized": null,
+ "single_source_narrowing": null,
  "step_count": 4,
  "steps": [
   {

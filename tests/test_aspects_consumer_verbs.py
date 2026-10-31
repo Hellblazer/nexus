@@ -27,6 +27,13 @@ from nexus.commands.aspects import aspects_group
 
 from tests._catalog_fixture_ops import register_real_doc_id
 
+
+@pytest.fixture(autouse=True)
+def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module tests the aspect queue TABLE path, so it says so: the unset
+    default is ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1)."""
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+
 # hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
 # now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the
 # engine's POST /v1/aspects/queue/enqueue 400 -- see the identical cache in

@@ -94,6 +94,10 @@ def _isolate_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             return write_fn(db)
 
     monkeypatch.setattr(infra, "t2_index_write", _direct_index_write)
+    # This module's drain, hook and batch classes test the TABLE producer, so they
+    # say so: the unset default is "tuples" since nexus-lnwn1. The tuple-loop
+    # tests set their own mode (TestTupleLoop._start).
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
     return db_path
 
 
@@ -1382,6 +1386,80 @@ class TestRetryLadderRouting:
         assert db.aspect_queue.calls[0][0] == "failed"
 
 
+class TestTransportReadFailureOnTheTable:
+    """nexus-5r2sc.3.10: on the table path an ``ExtractFail(transport)`` is a
+    backed-off retry (terminal only at the budget), never ``mark_done``. This
+    CHANGES the table path: every ExtractFail reason used to be dropped. A
+    permanent reason (the control) still is."""
+
+    class _Queue(_FakeQueue):
+        def mark_done(self, collection, source_path) -> None:  # noqa: ANN001
+            self.calls.append(("done", collection, source_path))
+
+    class _Db:
+        def __init__(self, queue) -> None:  # noqa: ANN001
+            self.aspect_queue = queue
+
+        def complete_aspect(self, fields) -> None:  # noqa: ANN001
+            raise AssertionError("an unreadable source persists nothing")
+
+    def _env(self, monkeypatch):  # noqa: ANN001
+        import nexus.commands.enrich as enrich
+        import nexus.mcp_infra as infra
+
+        queue = self._Queue()
+        db = self._Db(queue)
+        monkeypatch.setattr(infra, "t2_index_write", lambda fn: fn(db))
+        monkeypatch.setattr(enrich, "_build_catalog_manifest_lookup", lambda: None)
+        return queue
+
+    def _row(self, sp: str, retry_count: int = 0):
+        import types
+
+        return types.SimpleNamespace(
+            collection="knowledge__delos", source_path=sp, content="", doc_id="",
+            retry_count=retry_count,
+        )
+
+    def test_single_row_transport_is_retried_a_permanent_reason_is_done_and_the_budget_is_terminal(
+        self, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.aspect_extractor import ExtractFail
+        from nexus.aspect_worker import _RETRY_MAX_ATTEMPTS, AspectExtractionWorker
+
+        queue = self._env(monkeypatch)
+        reason_for = {"/t.md": "transport", "/p.md": "unreachable", "/cap.md": "transport"}
+        monkeypatch.setattr(
+            "nexus.aspect_worker._extract_aspects",
+            lambda **kw: ExtractFail(uri="u", reason=reason_for[kw["source_path"]], detail="d"),
+        )
+        w = AspectExtractionWorker(poll_interval=10.0)
+        w._process_row(self._row("/t.md"))
+        w._process_row(self._row("/p.md"))
+        w._process_row(self._row("/cap.md", retry_count=_RETRY_MAX_ATTEMPTS))
+        kinds = {c[2]: c[0] for c in queue.calls}
+        assert kinds == {"/t.md": "retry", "/p.md": "done", "/cap.md": "failed"}, queue.calls
+
+    def test_batch_transport_is_retried_beside_a_dropped_neighbour(self, monkeypatch) -> None:  # noqa: ANN001
+        from nexus.aspect_extractor import ExtractFail
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        queue = self._env(monkeypatch)
+
+        def fake_batch(items, *_a, **_k):  # noqa: ANN001, ANN202
+            return [
+                ExtractFail(uri="u", reason="transport" if sp == "/t.md" else "unreachable", detail="d")
+                for _c, sp, *_ in items
+            ]
+
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch", fake_batch)
+        AspectExtractionWorker(poll_interval=10.0)._process_batch(
+            [self._row("/t.md"), self._row("/p.md")],
+        )
+        kinds = {c[2]: c[0] for c in queue.calls}
+        assert kinds == {"/t.md": "retry", "/p.md": "done"}, queue.calls
+
+
 # ── nexus-w8lg1: the queue row carries the CATALOG doc_id ────────────────────
 
 
@@ -1930,9 +2008,12 @@ class TestBestEffortQueueDepthSharedClient:
 
         _best_effort_queue_depth()  # return value not asserted -- may be None on a slow/absent daemon; the CONSTRUCTION shape is what's under test
 
-        assert len(tally) == 1, (
-            f"expected the diagnostic to build exactly 1 dedicated "
-            f"httpx.Client() outside an active index run; got {len(tally)}"
+        # RDR-235: one dedicated client per store it reads, the table queue
+        # and the `aspects` tuple store (each 2 s, never shared with a run).
+        assert len(tally) == 2, (
+            f"expected the diagnostic to build exactly 2 dedicated "
+            f"httpx.Client() (queue + tuple store) outside an active index "
+            f"run; got {len(tally)}"
         )
 
     def test_inside_an_index_run_shares_the_run_client_and_keeps_its_cap(
@@ -1985,3 +2066,879 @@ class TestBestEffortQueueDepthSharedClient:
             f"sharing the run's (longer-timeout) client; got "
             f"{captured_timeouts}"
         )
+
+
+# ── RDR-235: the worker on the aspects tuple queue (nexus-5r2sc.3.3) ─────────
+#
+# Unit level: a fake HttpTupleStore with the engine's one-claim-per-claimant
+# rule (F25), so the slot fan-out, the verdict map, the 409 bound and the loop's
+# alternation are asserted without an engine. The engine-backed scenarios are in
+# tests/test_aspect_worker_tuples.py.
+
+import json as _json
+import threading as _threading
+from types import SimpleNamespace as _NS
+
+
+class _FakeTuples:
+    """The slice of ``HttpTupleStore`` the worker uses, with F25: a claimant that
+    holds a claim is handed the same claim again."""
+
+    def __init__(self, bodies=(), *, attempts=0, order=None) -> None:  # noqa: ANN001
+        self.tasks = [
+            _NS(id=f"task{i}", body=b if isinstance(b, str) else _json.dumps(b), attempts=attempts)
+            for i, b in enumerate(bodies)
+        ]
+        self.held: dict = {}
+        self.calls: list[tuple] = []
+        self.order = order if order is not None else []
+        self.fail_ack_once = False
+        self.raise_on: dict = {}
+        self.park_sleep = 0.0
+        self._n = 0
+        self._lock = _threading.Lock()
+
+    def _take(self, claimant):  # noqa: ANN001
+        with self._lock:
+            if claimant in self.held:
+                return self.held[claimant]
+            if not self.tasks:
+                return None
+            row = self.tasks.pop(0)
+            self._n += 1
+            got = (row, f"claim{self._n}")
+            self.held[claimant] = got
+            return got
+
+    def _maybe_raise(self, op) -> None:  # noqa: ANN001
+        exc = self.raise_on.get(op)
+        if exc is not None:
+            raise exc
+
+    def inp(self, subspace, keys, *, claimant, lease_s):  # noqa: ANN001
+        self.calls.append(("inp", claimant, lease_s))
+        self.order.append("inp")
+        self._maybe_raise("inp")
+        return self._take(claimant)
+
+    def in_(self, subspace, keys, *, claimant, lease_s, timeout_s=0):  # noqa: ANN001
+        self.calls.append(("in_", claimant, lease_s, timeout_s))
+        self.order.append("in_")
+        self._maybe_raise("in_")
+        got = self._take(claimant)
+        if got is None and self.park_sleep:
+            time.sleep(self.park_sleep)
+        return got
+
+    def _end(self, op, claim_id, claimant, **kw) -> None:  # noqa: ANN001
+        self.calls.append((op, claim_id, claimant, kw))
+        self._maybe_raise(op)
+        if op == "ack" and self.fail_ack_once:
+            self.fail_ack_once = False
+            raise RuntimeError("transport blip")
+        with self._lock:
+            if self.held.get(claimant, (None, None))[1] == claim_id:
+                del self.held[claimant]
+
+    def ack(self, claim_id, claimant):  # noqa: ANN001
+        self._end("ack", claim_id, claimant)
+
+    def nack(self, claim_id, claimant, *, retry_after_s=None, dead=False):  # noqa: ANN001
+        self._end("nack", claim_id, claimant, retry_after_s=retry_after_s, dead=dead)
+
+    def release(self, claim_id, claimant):  # noqa: ANN001
+        self._end("release", claim_id, claimant)
+
+    def renew(self, claim_id, claimant, lease_s):  # noqa: ANN001
+        self.calls.append(("renew", claim_id, claimant, lease_s))
+        self._maybe_raise("renew")
+
+    def _drop(self, claimant, claim_id) -> None:  # noqa: ANN001
+        with self._lock:
+            if self.held.get(claimant, (None, None))[1] == claim_id:
+                del self.held[claimant]
+
+    def ops(self, name):  # noqa: ANN001
+        return [c for c in self.calls if c[0] == name]
+
+
+class _FakeTable:
+    def __init__(self, rows=(), order=None) -> None:  # noqa: ANN001
+        self.rows = list(rows)
+        self.claims = 0
+        self.done: list = []
+        self.order = order if order is not None else []
+
+    def claim_batch(self, n):  # noqa: ANN001
+        self.claims += 1
+        self.order.append("table")
+        out, self.rows = self.rows[:n], self.rows[n:]
+        return out
+
+    def mark_done(self, collection, source_path):  # noqa: ANN001
+        self.done.append((collection, source_path))
+
+    def mark_failed(self, *a, **k):  # noqa: ANN001
+        pass
+
+    def mark_retry(self, *a, **k):  # noqa: ANN001
+        pass
+
+
+class _FakeTupleDb:
+    def __init__(self, tuples, table=None) -> None:  # noqa: ANN001
+        self.tuples = tuples
+        self.aspect_queue = table or _FakeTable()
+        self.completed: list = []
+        self.complete_raises: list = []
+
+    def complete_aspect(self, fields, claim_id=None, claimant=None):  # noqa: ANN001
+        if claim_id is not None and self.complete_raises:
+            raise self.complete_raises.pop(0)
+        self.completed.append((fields["source_path"], claim_id, claimant))
+        if claim_id is not None:
+            self.tuples.calls.append(("persist", claim_id, claimant))
+            self.tuples._drop(claimant, claim_id)  # what the real call's ack does
+        return True
+
+
+def _queue_row(source_path, doc_id):  # noqa: ANN001
+    from nexus.db.t2.records import QueueRow
+
+    return QueueRow(collection="knowledge__delos", source_path=source_path, content_hash="",
+                    content="x", retry_count=0, doc_id=doc_id)
+
+
+def _task_body(i=0, collection="knowledge__delos", doc_id=None):  # noqa: ANN001
+    return {"collection": collection, "source_path": f"/p{i}.md",
+            "doc_id": doc_id or f"1.1.{i}", "content_hash": "h"}
+
+
+@pytest.fixture
+def tuple_env(monkeypatch: pytest.MonkeyPatch):
+    """Route the worker's service calls to a fake db and record the tuple module's
+    log events (``capture_logs`` cannot see a logger that bound on first use)."""
+    import nexus.aspect_worker as aw
+    import nexus.mcp_infra as infra
+
+    events: list[str] = []
+
+    class _Events:
+        def __getattr__(self, level):  # noqa: ANN001
+            return lambda event, **kw: events.append(event)
+
+    monkeypatch.setattr("nexus.aspect_worker_tuples._log", _Events())
+    state = _NS(events=events, gone=set(), db=None)
+
+    def install(db):  # noqa: ANN001
+        state.db = db
+        monkeypatch.setattr(infra, "t2_index_write", lambda fn, **kw: fn(db))
+
+    class _Cat:
+        def by_doc_id(self, doc_id):  # noqa: ANN001
+            return None if doc_id in state.gone else _NS(tumbler=doc_id)
+
+    monkeypatch.setattr(aw, "_resolve_catalog_reader", lambda: _Cat())
+    state.install = install
+    return state
+
+
+def _record_for(collection, source_path):  # noqa: ANN001
+    from nexus.aspect_extractor import AspectRecord
+
+    return AspectRecord(
+        collection=collection, source_path=source_path, problem_formulation="P",
+        proposed_method=None, experimental_datasets=[], experimental_baselines=[],
+        experimental_results=None, extras={}, confidence=0.9,
+        extracted_at="2026-10-29T00:00:00+00:00", model_version="m", extractor_name="e",
+    )
+
+
+def _tuple_worker(**opts):  # noqa: ANN001
+    from nexus.aspect_worker import AspectExtractionWorker
+
+    return AspectExtractionWorker(poll_interval=0.05, tuple_options=opts or None)
+
+
+class TestTupleWorkerIdentity:
+    def test_slot_claimants_fit_the_128_byte_ceiling_whatever_the_tenant(self) -> None:
+        from nexus.aspect_worker_tuples import worker_id
+        from nexus.db.t2.http_tuple_store import _MAX_CLAIMANT_BYTES
+
+        w = worker_id("é" * 4000, pid=2**31, nonce="deadbeef")
+        for slot in range(5):
+            assert len(f"{w}:{slot}".encode()) <= _MAX_CLAIMANT_BYTES
+
+    def test_two_workers_in_one_process_get_different_ids(self) -> None:
+        a, b = _tuple_worker(), _tuple_worker()
+        assert a._worker_id != b._worker_id, "the start nonce differs per worker"
+
+    def test_the_constants_equal_the_producers(self) -> None:
+        from nexus.aspect_worker_tuples import KEYS, SUBSPACE
+        from nexus.db.t2.http_aspect_queue import ASPECTS_KEYS, ASPECTS_SUBSPACE
+
+        assert (SUBSPACE, KEYS) == (ASPECTS_SUBSPACE, ASPECTS_KEYS)
+
+
+class TestTupleSlotFanOut:
+    def test_an_idle_batch_is_four_inp_and_one_parked_in_with_an_explicit_lease(
+        self, tuple_env,  # noqa: ANN001
+    ) -> None:
+        tuples = _FakeTuples()
+        tuple_env.install(_FakeTupleDb(tuples))
+        side = _tuple_worker()._tuple_side
+
+        claims, failed = side.claim_batch(park=True)
+
+        assert claims == [] and not failed
+        w = side.worker_id
+        assert sorted(c[1] for c in tuples.calls) == sorted(f"{w}:{s}" for s in range(5))
+        assert [c for c in tuples.calls if c[0] == "inp"] == [
+            ("inp", f"{w}:{s}", 600) for s in (1, 2, 3, 4)
+        ]
+        assert tuples.ops("in_") == [("in_", f"{w}:0", 600, 25)], "slot 0 parks 25 s with a 600 s lease"
+
+    def test_without_a_park_every_slot_is_an_inp(self, tuple_env) -> None:  # noqa: ANN001
+        tuples = _FakeTuples()
+        tuple_env.install(_FakeTupleDb(tuples))
+        side = _tuple_worker()._tuple_side
+        side.claim_batch(park=False)
+        assert tuples.ops("in_") == [] and len(tuples.ops("inp")) == 5
+
+    def test_a_worker_holding_claims_does_not_park(self, tuple_env) -> None:  # noqa: ANN001
+        tuples = _FakeTuples([_task_body(i) for i in range(2)])
+        tuple_env.install(_FakeTupleDb(tuples))
+        side = _tuple_worker()._tuple_side
+        claims, _ = side.claim_batch(park=True)
+        assert len(claims) == 2
+        assert tuples.ops("in_") == [], "claims in hand: slot 0 probes instead of sitting in a park"
+
+    def test_five_tasks_are_five_claimants(self, tuple_env) -> None:  # noqa: ANN001
+        tuples = _FakeTuples([_task_body(i) for i in range(5)])
+        tuple_env.install(_FakeTupleDb(tuples))
+        side = _tuple_worker()._tuple_side
+        claims, _ = side.claim_batch(park=True)
+        assert sorted(c.slot for c in claims) == [0, 1, 2, 3, 4]
+        assert len({c.claimant for c in claims}) == 5 and len({c.task_id for c in claims}) == 5
+
+    def test_a_failed_ack_is_re_served_on_its_own_slot_and_finished(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        tuples = _FakeTuples([_task_body(0)])
+        tuple_env.install(_FakeTupleDb(tuples))
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects",
+                            lambda content, source_path, collection, **kw: None)
+        tuples.fail_ack_once = True
+        side = _tuple_worker()._tuple_side
+        first, _ = side.claim_batch(park=False)
+        side.process(first)
+        assert len(side.held()) == 1, "the ack failed: the claim is still held"
+
+        again, _ = side.claim_batch(park=False)
+
+        assert [(c.slot, c.claim_id) for c in again] == [(first[0].slot, first[0].claim_id)]
+        side.process(again)
+        assert side.held() == [] and len(tuples.ops("ack")) == 2
+
+    def test_a_park_cap_refusal_from_the_engine_is_a_failed_claim_not_a_crash(
+        self, tuple_env,  # noqa: ANN001
+    ) -> None:
+        """Scenario 15's refusal arm (moved here from the engine journey in
+        tests/test_aspect_worker_tuples.py, nexus-9edxe round 3): the engine's
+        per-claimant park cap answers the parked ``in_``; the batch reports a failed
+        claim. The engine journey never made the engine refuse (it replaced
+        ``HttpTupleStore.in_``), so this is the same fault on the fake."""
+        from nexus.db.t2.http_tuple_store import ParkCapExceededError
+
+        tuples = _FakeTuples()
+        tuples.raise_on["in_"] = ParkCapExceededError("cap")
+        tuple_env.install(_FakeTupleDb(tuples))
+        side = _tuple_worker()._tuple_side
+
+        claims, failed = side.claim_batch(park=True)
+
+        assert claims == [] and failed, "a park-cap refusal is a failed claim"
+        assert len(tuples.ops("inp")) == 4, "the four probing slots still ran"
+
+
+class TestClaimRenewerBound:
+    def test_renewal_stops_at_the_deadline_and_never_resumes(self) -> None:
+        from nexus.aspect_worker_tuples import ClaimRenewer, HeldClaim
+
+        renewed: list = []
+        claims = [HeldClaim(i, f"w:{i}", f"c{i}", f"t{i}", 0, None) for i in range(5)]
+        r = ClaimRenewer(claims, renewed.append, interval_s=0.02, deadline_s=0.15,
+                         lapse_errors=(KeyError,))
+        r.start()
+        time.sleep(0.6)
+        n = len(renewed)
+        time.sleep(0.2)
+        r.stop()
+        assert r.stopped_at_deadline, "past the deadline the renewer gave up"
+        assert len(renewed) == n and 0 < n <= 5 * 8, "bounded: a handful of rounds, then silence"
+        assert {c.claim_id for c in renewed} == {f"c{i}" for i in range(5)}, "every claim, by its own id"
+
+    def test_stop_before_the_deadline_ends_it(self) -> None:
+        from nexus.aspect_worker_tuples import ClaimRenewer, HeldClaim
+
+        renewed: list = []
+        r = ClaimRenewer([HeldClaim(0, "w:0", "c0", "t0", 0, None)], renewed.append,
+                         interval_s=0.02, deadline_s=60.0, lapse_errors=(KeyError,))
+        r.start()
+        time.sleep(0.1)
+        r.stop()
+        n = len(renewed)
+        time.sleep(0.1)
+        assert len(renewed) == n and not r.stopped_at_deadline
+
+    def test_a_lost_claim_is_dropped_from_the_set(self) -> None:
+        from nexus.aspect_worker_tuples import ClaimRenewer, HeldClaim
+
+        seen: list = []
+
+        def renew(c):  # noqa: ANN001
+            seen.append(c.claim_id)
+            if c.claim_id == "c0":
+                raise KeyError("lapsed")
+
+        claims = [HeldClaim(0, "w:0", "c0", "t0", 0, None), HeldClaim(1, "w:1", "c1", "t1", 0, None)]
+        r = ClaimRenewer(claims, renew, interval_s=0.02, deadline_s=60.0, lapse_errors=(KeyError,))
+        r.start()
+        time.sleep(0.2)
+        r.stop()
+        assert seen.count("c0") == 1 and seen.count("c1") >= 3
+
+    def test_the_deadline_formula_is_the_extractors_worst_case_plus_the_margin(self) -> None:
+        from nexus.aspect_extractor import worst_case_extract_seconds
+        from nexus.aspect_worker_tuples import RENEW_DEADLINE_MARGIN_S
+
+        # five one-document sub-batches: 5 * (3 * 180 + (2 + 5) * 1.25)
+        assert worst_case_extract_seconds(5) == pytest.approx(2743.75)
+        assert worst_case_extract_seconds(1) == pytest.approx(548.75)
+        side = _tuple_worker()._tuple_side
+        assert side._deadline_s(5) == pytest.approx(2743.75 + RENEW_DEADLINE_MARGIN_S)
+
+    def test_extraction_keeps_the_claims_renewed_and_stops_before_the_verdicts(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        tuples = _FakeTuples([_task_body(0), _task_body(1)])
+        tuple_env.install(_FakeTupleDb(tuples))
+
+        def slow(items, **kw):  # noqa: ANN001
+            time.sleep(0.3)
+            return [_record_for(c, s) for (c, s, *_r) in items]
+
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch", slow)
+        side = _tuple_worker(renew_every_s=0.05, deadline_s=lambda n: 30.0)._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+
+        renews = tuples.ops("renew")
+        assert {(r[1], r[2]) for r in renews} == {(c.claim_id, c.claimant) for c in claims}
+        assert all(r[3] == 600 for r in renews)
+        first_verdict = min(i for i, c in enumerate(tuples.calls) if c[0] in ("persist", "ack", "nack"))
+        assert all(c[0] != "renew" for c in tuples.calls[first_verdict:]), "stopped before the verdicts"
+
+
+class TestTupleVerdictMap:
+    def _run(self, tuple_env, monkeypatch, result, *, attempts=0, body=None, db_setup=None):  # noqa: ANN001
+        tuples = _FakeTuples([body if body is not None else _task_body(0)], attempts=attempts)
+        db = _FakeTupleDb(tuples)
+        if db_setup:
+            db_setup(db)
+        tuple_env.install(db)
+        if isinstance(result, BaseException):
+            def raiser(**kw):  # noqa: ANN001
+                raise result
+            monkeypatch.setattr("nexus.aspect_worker._extract_aspects", raiser)
+        else:
+            monkeypatch.setattr("nexus.aspect_worker._extract_aspects", lambda **kw: result)
+        side = _tuple_worker()._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+        return tuples, db
+
+    @pytest.mark.parametrize(
+        "result, op",
+        [(None, "ack"), (ValueError("bad"), "nack"), (_record_for("knowledge__delos", "/p0.md"), "persist-ack")],
+        ids=["acked-as-dropped", "dead", "persisted"],
+    )
+    def test_a_terminal_verdict_forgets_the_tasks_409_memory(
+        self, tuple_env, monkeypatch, result, op,  # noqa: ANN001
+    ) -> None:
+        """nexus-5r2sc.3.9 L3: only a successful persist popped the task id, so a
+        task acked or dead-lettered after one 409 left its entry, and a later
+        unrelated 409 for the same task in this process went straight to dead."""
+        tuples = _FakeTuples([_task_body(0)], attempts=0)
+        db = _FakeTupleDb(tuples)
+        tuple_env.install(db)
+        if isinstance(result, BaseException):
+            def raiser(**kw):  # noqa: ANN001, ANN202
+                raise result
+            monkeypatch.setattr("nexus.aspect_worker._extract_aspects", raiser)
+        else:
+            monkeypatch.setattr("nexus.aspect_worker._extract_aspects", lambda **kw: result)
+        side = _tuple_worker()._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        (claim,) = claims
+        side._superseded[claim.task_id] = 1  # an earlier 409 for this task
+        side.process(claims)
+        assert tuples.ops("ack") or tuples.ops("nack") or db.completed, "a verdict was reached"
+        assert claim.task_id not in side._superseded
+
+    def test_a_record_is_persisted_with_the_claim_pair_and_the_persist_call_acks(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        tuples, db = self._run(tuple_env, monkeypatch, _record_for("knowledge__delos", "/p0.md"))
+        assert len(db.completed) == 1 and db.completed[0][1].startswith("claim")
+        assert tuples.ops("ack") == [] and tuples.ops("nack") == [], "complete_aspect acks; the worker does not"
+
+    def test_none_and_a_permanent_read_failure_are_acked_as_dropped(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.aspect_extractor import ExtractFail
+
+        for result in (None, ExtractFail(uri="u", reason="unreachable", detail="d")):
+            tuples, db = self._run(tuple_env, monkeypatch, result)
+            assert len(tuples.ops("ack")) == 1 and db.completed == []
+
+    def test_infra_unavailable_is_a_retryable_nack_on_the_ladder_never_a_drop(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.aspect_extractor import ExtractFail
+        from nexus.aspect_worker import _RETRY_BASE_SECONDS
+
+        r = ExtractFail(uri="u", reason="infra_unavailable", detail="T3 down")
+        for attempts in (0, 2):
+            tuples, _ = self._run(tuple_env, monkeypatch, r, attempts=attempts)
+            assert tuples.ops("ack") == []
+            (nack,) = tuples.ops("nack")
+            base = _RETRY_BASE_SECONDS * 2 ** attempts
+            assert nack[3]["dead"] is False
+            assert 0.8 * base - 1 <= nack[3]["retry_after_s"] <= 1.2 * base, "indexed by the claimed tuple's attempts"
+
+    def test_a_transport_read_failure_is_a_ladder_nack_never_a_drop(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.aspect_extractor import ExtractFail
+
+        r = ExtractFail(uri="u", reason="transport", detail="T3 ConnectError")
+        tuples, _ = self._run(tuple_env, monkeypatch, r, attempts=1)
+        assert tuples.ops("ack") == []
+        (nack,) = tuples.ops("nack")
+        assert nack[3]["dead"] is False and nack[3]["retry_after_s"] > 0
+        tuples, _ = self._run(tuple_env, monkeypatch, r, attempts=5)
+        (nack,) = tuples.ops("nack")
+        assert nack[3] == {"retry_after_s": None, "dead": True}, "the budget (5) is spent: dead"
+
+    def test_a_retryable_raise_is_a_ladder_nack_and_the_cap_is_dead(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        import httpx
+
+        tuples, _ = self._run(tuple_env, monkeypatch, httpx.ConnectError("down"), attempts=1)
+        (nack,) = tuples.ops("nack")
+        assert nack[3]["dead"] is False and nack[3]["retry_after_s"] > 0
+        tuples, _ = self._run(tuple_env, monkeypatch, httpx.ConnectError("down"), attempts=5)
+        (nack,) = tuples.ops("nack")
+        assert nack[3] == {"retry_after_s": None, "dead": True}, "the budget (5) is spent: dead"
+
+    def test_a_non_retryable_raise_is_dead_at_once(self, tuple_env, monkeypatch) -> None:  # noqa: ANN001
+        tuples, _ = self._run(tuple_env, monkeypatch, ValueError("bad"))
+        (nack,) = tuples.ops("nack")
+        assert nack[3] == {"retry_after_s": None, "dead": True}
+
+    def test_an_unattributable_row_is_dead(self, tuple_env, monkeypatch) -> None:  # noqa: ANN001
+        # a file-routed collection with no source_uri and no resolvable doc
+        rec = _record_for("rdr__nx", "/p0.md")
+        tuples, db = self._run(
+            tuple_env, monkeypatch, rec, body=_task_body(0, collection="rdr__nx"),
+        )
+        (nack,) = tuples.ops("nack")
+        assert nack[3]["dead"] is True and db.completed == []
+
+    def test_a_malformed_body_is_dead_and_never_extracted(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        for body in ("not json", {"collection": "k"}, _json.dumps([1])):
+            tuples, db = self._run(tuple_env, monkeypatch, None, body=body)
+            (nack,) = tuples.ops("nack")
+            assert nack[3]["dead"] is True and db.completed == []
+
+    def test_a_missing_document_is_retried_once_then_acked_as_dropped_without_extraction(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        """nexus-1o3ft: the first claim of a task whose document is not visible is a
+        short ladder nack (the catalog row may land a moment after the wake); the
+        second claim of a still-missing document is the ack-as-dropped."""
+        from nexus.aspect_worker import _RETRY_BASE_SECONDS
+
+        tuple_env.gone.add("1.1.0")
+        calls: list = []
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects", lambda **kw: calls.append(kw))
+        for attempts in (0, 1):
+            tuple_env.events.clear()
+            tuples = _FakeTuples([_task_body(0)], attempts=attempts)
+            tuple_env.install(_FakeTupleDb(tuples))
+            side = _tuple_worker()._tuple_side
+            claims, _ = side.claim_batch(park=False)
+            side.process(claims)
+            assert calls == []
+            if attempts == 0:
+                assert tuples.ops("ack") == [], "the first gone verdict is never a drop"
+                (nack,) = tuples.ops("nack")
+                assert nack[3]["dead"] is False
+                assert 0.8 * _RETRY_BASE_SECONDS - 1 <= nack[3]["retry_after_s"] <= 1.2 * _RETRY_BASE_SECONDS
+                assert "aspect_task_doc_not_visible_yet" in tuple_env.events
+                assert "aspect_task_dropped_missing_doc" not in tuple_env.events
+            else:
+                assert tuples.ops("nack") == [] and len(tuples.ops("ack")) == 1
+                assert "aspect_task_dropped_missing_doc" in tuple_env.events
+                assert "aspect_task_doc_not_visible_yet" not in tuple_env.events
+
+    def test_a_catalog_that_cannot_answer_is_not_a_missing_document(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        class _Down:
+            def by_doc_id(self, d):  # noqa: ANN001
+                raise RuntimeError("catalog down")
+
+        monkeypatch.setattr("nexus.aspect_worker._resolve_catalog_reader", lambda: _Down())
+        tuples, db = self._run(tuple_env, monkeypatch, _record_for("knowledge__delos", "/p0.md"))
+        assert len(db.completed) == 1 and "aspect_task_dropped_missing_doc" not in tuple_env.events
+
+    def test_a_lapsed_claim_drops_the_result_and_does_not_ack(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.db.t2.http_tuple_store import ClaimNotFoundError, ClaimOwnershipError
+
+        for exc in (ClaimNotFoundError("gone"), ClaimOwnershipError("not yours")):
+            tuples, db = self._run(
+                tuple_env, monkeypatch, _record_for("knowledge__delos", "/p0.md"),
+                db_setup=lambda d, e=exc: d.complete_raises.append(e),
+            )
+            assert db.completed == []
+            assert tuples.ops("ack") == [] and tuples.ops("nack") == [] and tuples.ops("release") == []
+
+    def test_a_bad_request_is_dead_and_a_conflict_climbs_the_ladder(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.db.t2.http_document_aspects_store import (
+            AspectUpsertBadRequestError,
+            AspectUpsertConflictError,
+        )
+
+        rec = _record_for("knowledge__delos", "/p0.md")
+        tuples, _ = self._run(tuple_env, monkeypatch, rec,
+                              db_setup=lambda d: d.complete_raises.append(AspectUpsertBadRequestError("400")))
+        assert tuples.ops("nack")[0][3]["dead"] is True
+        tuples, _ = self._run(tuple_env, monkeypatch, rec,
+                              db_setup=lambda d: d.complete_raises.append(AspectUpsertConflictError("409")))
+        assert tuples.ops("nack")[0][3]["dead"] is False and tuples.ops("nack")[0][3]["retry_after_s"]
+
+    @pytest.mark.parametrize(
+        "code, dead",
+        [(500, False), (400, True)],
+        ids=["500-is-a-ladder-retry", "400-control-is-dead"],
+    )
+    def test_a_bare_http_status_on_the_persist_call_is_a_ladder_retry_only_for_5xx(
+        self, tuple_env, monkeypatch, code, dead,  # noqa: ANN001
+    ) -> None:
+        """nexus-5r2sc.3.9 M2 (moved off the engine, nexus-9edxe round 3): the persist
+        call raises a bare ``httpx.HTTPStatusError`` (the real ``complete_aspect``
+        adds nothing around ``HttpDocumentAspectsStore.upsert``). The generic retry
+        predicate accepts only 429/502/503/504, so a computed extraction was
+        dead-lettered on a 500; a 5xx is the ladder's retry and a 4xx stays dead."""
+        import httpx
+
+        req = httpx.Request("POST", "http://engine/v1/aspects/upsert")
+        exc = httpx.HTTPStatusError(str(code), request=req, response=httpx.Response(code, request=req))
+        tuples, db = self._run(
+            tuple_env, monkeypatch, _record_for("knowledge__delos", "/p0.md"),
+            db_setup=lambda d: d.complete_raises.append(exc),
+        )
+
+        assert db.complete_raises == [], "the persist call was reached exactly once"
+        assert db.completed == [] and tuples.ops("ack") == []
+        (nack,) = tuples.ops("nack")
+        if dead:
+            assert nack[3] == {"retry_after_s": None, "dead": True}
+        else:
+            assert nack[3]["dead"] is False and nack[3]["retry_after_s"] > 0
+
+    @pytest.mark.parametrize(
+        "case",
+        ["t3-connect-error", "t3-5xx", "manifest-raises", "control-empty-read-is-dropped"],
+    )
+    def test_a_transport_failure_reading_t3_or_the_manifest_is_a_ladder_nack_never_a_drop(
+        self, tuple_env, monkeypatch, case,  # noqa: ANN001
+    ) -> None:
+        """nexus-5r2sc.3.10 Critical 1 (moved off the engine, nexus-9edxe round 3): a
+        transport failure reading T3 or the catalog manifest is a fact about the
+        network, not the document. The REAL extractor and reader run (an MCP note
+        task carries no text, so the extractor reads it through the manifest); only
+        T3 and the catalog are stand-ins. The verdict is the worker's, and the fake
+        queue records it exactly as the engine would be told."""
+        import httpx
+
+        collection = "knowledge__nx235t-abc123__bge-base-en-v15-768__v1"
+        rows = [_NS(chash=c * 64, position=i) for i, c in enumerate("ab")]
+
+        class _Cat:
+            def get_manifest(self, doc_id):  # noqa: ANN001
+                if case == "manifest-raises":
+                    raise httpx.ConnectError("catalog unreachable")
+                return rows
+
+        calls: list = []
+
+        def get(**kw):  # noqa: ANN001
+            calls.append(kw)
+            if case == "t3-connect-error":
+                raise httpx.ConnectError("T3 unreachable")
+            if case == "t3-5xx":
+                req = httpx.Request("POST", "http://t3/v1/vectors/get")
+                raise httpx.HTTPStatusError("500", request=req, response=httpx.Response(500, request=req))
+            return {"ids": [], "documents": [], "metadatas": []}
+
+        t3 = _NS(get_collection=lambda name: _NS(get=get))
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: _Cat())
+        monkeypatch.setattr("nexus.aspect_extractor.get_t3", lambda: t3)
+        tuples = _FakeTuples([_task_body(0, collection=collection)], attempts=0)
+        tuple_env.install(_FakeTupleDb(tuples))
+        side = _tuple_worker()._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        assert len(claims) == 1
+
+        side.process(claims)
+
+        if case != "manifest-raises":
+            assert calls, "the read reached T3: the failure is the stub's, not an earlier skip"
+        if case == "control-empty-read-is-dropped":
+            assert len(tuples.ops("ack")) == 1 and tuples.ops("nack") == [], "an empty read is acked as dropped"
+        else:
+            assert tuples.ops("ack") == [], f"{case}: a transport failure is never a drop"
+            (nack,) = tuples.ops("nack")
+            assert nack[3]["dead"] is False and nack[3]["retry_after_s"] > 0, (case, nack)
+
+
+class TestSupersededBound:
+    def _side(self, tuple_env, monkeypatch, n=1):  # noqa: ANN001
+        tuples = _FakeTuples([_task_body(0)] * n)
+        db = _FakeTupleDb(tuples)
+        tuple_env.install(db)
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects",
+                            lambda **kw: _record_for("knowledge__delos", "/p0.md"))
+        return tuples, db, _tuple_worker()._tuple_side
+
+    def test_first_409_releases_and_the_repeat_is_nacked_dead(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.collection_errors import SupersededCollectionWriteError
+
+        tuples, db, side = self._side(tuple_env, monkeypatch)
+        db.complete_raises += [SupersededCollectionWriteError("old", "new")] * 2
+
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+        assert len(tuples.ops("release")) == 1 and tuples.ops("nack") == []
+
+        tuples.tasks.append(_NS(id="task0", body=_json.dumps(_task_body(0)), attempts=0))
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+        assert len(tuples.ops("release")) == 1
+        (nack,) = tuples.ops("nack")
+        assert nack[3]["dead"] is True and "aspect_worker_superseded_repeat_dead" in tuple_env.events
+        assert db.completed == []
+
+    def test_a_release_that_answers_claim_not_found_is_not_an_error(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.collection_errors import SupersededCollectionWriteError
+        from nexus.db.t2.http_tuple_store import ClaimNotFoundError
+
+        tuples, db, side = self._side(tuple_env, monkeypatch)
+        db.complete_raises.append(SupersededCollectionWriteError("old", "new"))
+        tuples.raise_on["release"] = ClaimNotFoundError("lapsed meanwhile")
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)  # does not raise
+        assert side.held() == [], "a claim the engine no longer knows is forgotten"
+        assert "aspect_worker_verdict_failed" not in tuple_env.events
+
+    def test_a_successful_task_forgets_its_409_history(self, tuple_env, monkeypatch) -> None:  # noqa: ANN001
+        from nexus.collection_errors import SupersededCollectionWriteError
+
+        tuples, db, side = self._side(tuple_env, monkeypatch)
+        db.complete_raises.append(SupersededCollectionWriteError("old", "new"))
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+        assert "task0" in side._superseded
+        tuples.tasks.append(_NS(id="task0", body=_json.dumps(_task_body(0)), attempts=0))
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+        assert "task0" not in side._superseded and len(db.completed) == 1
+
+
+class TestStandDownReleasesClaims:
+    def test_a_self_fault_releases_every_held_claim_and_stands_down(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        import nexus.aspect_worker as aw
+
+        tuples = _FakeTuples([_task_body(i) for i in range(3)])
+        tuple_env.install(_FakeTupleDb(tuples))
+        faults: list = []
+        w = _tuple_worker()
+        w.set_self_fault_handler(faults.append)
+
+        def boom(items, **kw):  # noqa: ANN001
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch", boom)
+        side = w._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+
+        assert len(tuples.ops("release")) == 3, "all three claims released: no attempt counted"
+        assert tuples.ops("nack") == [] and tuples.ops("ack") == []
+        assert len(faults) == 1 and faults[0].startswith("host_resource_exhausted")
+        assert w.self_fault() is not None and w.is_claiming_stopped()
+        assert side.held() == []
+        assert aw  # the latch is the existing one
+
+    def test_release_held_claims_is_the_daemon_stop_sweep(self, tuple_env) -> None:  # noqa: ANN001
+        tuples = _FakeTuples([_task_body(i) for i in range(2)])
+        tuple_env.install(_FakeTupleDb(tuples))
+        w = _tuple_worker()
+        w._tuple_side.claim_batch(park=False)
+        assert len(w._tuple_side.held()) == 2
+        assert w.release_held_claims() == 2
+        assert len(tuples.ops("release")) == 2 and w._tuple_side.held() == []
+        assert w.release_held_claims() == 0
+
+
+class TestTupleLoop:
+    def _start(self, tuple_env, monkeypatch, *, tuples, table=None, mode="tuples", batch_size=5, **kw):  # noqa: ANN001
+        if mode:
+            monkeypatch.setenv("NX_ASPECT_QUEUE", mode)
+        else:
+            monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
+        db = _FakeTupleDb(tuples, table)
+        tuple_env.install(db)
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects",
+                            lambda content, source_path, collection, **k: _record_for(collection, source_path))
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch",
+                            lambda items, **k: [_record_for(c, s) for (c, s, *_r) in items])
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        w = AspectExtractionWorker(
+            poll_interval=0.3, batch_size=batch_size, tuple_options={"park_timeout_s": 1, **kw},
+        )
+        w.start()
+        return w, db
+
+    def test_tuples_mode_idle_parks_and_checks_the_table_once_per_poll(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        tuples = _FakeTuples()
+        tuples.park_sleep = 0.05
+        table = _FakeTable()
+        w, _db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table)
+        try:
+            time.sleep(1.0)
+        finally:
+            w.stop(timeout=5)
+        assert len(tuples.ops("in_")) >= 5, "slot 0 parks again and again"
+        assert 2 <= table.claims <= 5, f"table checked on the poll interval, not every park: {table.claims}"
+
+    def test_table_mode_never_parks_and_probes_both_queues_each_poll(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        tuples, table = _FakeTuples(), _FakeTable()
+        w, _db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table, mode="table")
+        try:
+            time.sleep(0.9)
+        finally:
+            w.stop(timeout=5)
+        assert tuples.ops("in_") == [], "a table-mode worker holds no park"
+        assert len(tuples.ops("inp")) >= 10 and table.claims >= 2
+
+    def test_table_mode_still_drains_leftover_tuple_tasks(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        tuples = _FakeTuples([_task_body(i) for i in range(3)])
+        w, db = self._start(tuple_env, monkeypatch, tuples=tuples, mode="table")
+        try:
+            _wait_until(lambda: len(db.completed) == 3, timeout=5)
+        finally:
+            w.stop(timeout=5)
+
+    def test_an_engine_without_the_template_logs_once_and_skips_tuple_claiming(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.db.t2.http_tuple_store import UnknownSubspaceError
+
+        tuples = _FakeTuples()
+        tuples.raise_on["inp"] = UnknownSubspaceError("aspects")
+        table = _FakeTable([_queue_row("/t.md", "1.1.1")])
+        w, db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table)
+        try:
+            _wait_until(lambda: table.rows == [] and db.completed, timeout=5)
+            time.sleep(0.8)
+        finally:
+            w.stop(timeout=5)
+        assert tuple_env.events.count("aspect_worker_tuples_unsupported_by_engine") == 1
+        assert len(tuples.calls) == 1, "one request, then none: develop stays usable on an older engine"
+        assert table.claims >= 2, "the table is still drained"
+
+    def test_pending_table_rows_and_tuple_tasks_alternate_and_neither_starves(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        order: list = []
+        rows = [_queue_row(f"/t{i}.md", f"1.2.{i}") for i in range(4)]
+        table = _FakeTable(rows, order)
+        tuples = _FakeTuples([_task_body(i) for i in range(4)], order=order)
+        w, db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table, batch_size=2)
+        try:
+            _wait_until(lambda: len(db.completed) == 8, timeout=5)
+        finally:
+            w.stop(timeout=5)
+        assert table.rows == [] and tuples.tasks == [], "both queues drained"
+        first_park = order.index("in_") if "in_" in order else len(order)
+        assert order[:first_park].count("table") >= 2, "the table was claimed again before any park"
+        assert "inp" in order[:first_park], "tuple turns ran as probes while the table had rows"
+        assert order.index("inp") < order.index("table", order.index("inp")), "the two queues interleave"
+
+
+class TestTupleLoopFailureAndShortResults:
+    def test_a_failed_tuple_claim_in_tuples_mode_retries_quickly_not_on_the_poll_interval(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
+        monkeypatch.setattr("nexus.aspect_worker._TUPLE_CLAIM_RETRY_S", 0.05)
+        tuples = _FakeTuples()
+        tuples.raise_on["inp"] = RuntimeError("engine blip")
+        tuple_env.install(_FakeTupleDb(tuples))
+        w = AspectExtractionWorker(poll_interval=30.0, tuple_options={"park_timeout_s": 1})
+        w.start()
+        try:
+            _wait_until(lambda: len(tuples.ops("inp")) >= 6, timeout=3)
+        finally:
+            w.stop(timeout=5)
+
+    def test_an_extractor_that_returns_fewer_results_than_claims_releases_the_rest(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        tuples = _FakeTuples([_task_body(i) for i in range(3)])
+        tuple_env.install(_FakeTupleDb(tuples))
+        monkeypatch.setattr(
+            "nexus.aspect_worker._extract_aspects_batch",
+            lambda items, **kw: [_record_for(c, s) for (c, s, *_r) in items][:1],
+        )
+        side = _tuple_worker()._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+        assert len(tuples.ops("release")) == 2 and len(tuples.ops("persist")) == 1
+        assert side.held() == []

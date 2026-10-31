@@ -5,6 +5,7 @@ description: Reviews code for quality, security, and best practices. Use proacti
 model: sonnet
 color: purple
 effort: high
+disallowedTools: [mcp__plugin_sn_serena]
 ---
 
 ## Usage Examples

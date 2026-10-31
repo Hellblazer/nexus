@@ -3,7 +3,7 @@
 """The PDF stack on demand (nexus-2k66t.4.2).
 
 MinerU, torch, torchvision and pdftext are the ``pdf`` extra. A fresh
-install goes without them (57-65% of the download, 49% of the installed size);
+install goes without them (62-65% of the download, 54-62% of the installed size, measured on 7.89.0);
 the first PDF index fetches them. An EXISTING install carries them forward on
 its first post-split upgrade (``install_layout.receipt_predates_pdf_split``).
 
@@ -151,7 +151,7 @@ VCRT_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
 #: Said once, on stderr, before uv starts (the design's wording).
 INSTALL_NOTICE = (
-    "Installing PDF support for conexus {version}: about 285 MB (macOS) / 390 MB (Linux) "
+    "Installing PDF support for conexus {version}: about 272 MB (macOS) / 374 MB (Linux) "
     "download, 1.0 GB (macOS) / 1.3 GB (Linux) on disk, kept by future upgrades. Model weights follow with "
     "the first PDF you index: about 1.2 GB."
 )
@@ -339,7 +339,7 @@ def state() -> StackState:
 def policy() -> str:
     """``install`` (the default) or ``refuse``. ``NX_PDF_STACK`` wins over the
     ``pdf_stack.auto_install`` config key. An unreadable value refuses: a
-    typo must not start a 390 MB download."""
+    typo must not start a 374 MB download."""
     raw = os.environ.get(POLICY_ENV, "").strip().lower()
     if raw:
         if raw in (POLICY_INSTALL, POLICY_REFUSE):
@@ -990,9 +990,17 @@ def _skipped_path() -> Path:
     return _config.nexus_config_dir() / _SKIPPED_RECORD
 
 
-def record_skipped(paths: list[Path], *, repo: Path | None = None) -> None:
+#: Why a run held PDFs (nexus-tr1rj.26): the PDF stack is missing and could not be installed, or an
+#: unusable MinerU time limit (``pdf.mineru_page_timeout_s`` x ``pdf.mineru_page_batch``). The doctor
+#: says which; a record written before the cause existed is a stack hold.
+SKIP_CAUSE_STACK = "stack"
+SKIP_CAUSE_BOUNDS = "mineru_bounds"
+
+
+def record_skipped(paths: list[Path], *, repo: Path | None = None, cause: str = SKIP_CAUSE_STACK) -> None:
     """Write the PDFs a refusing ``nx index repo`` run did not index, so
-    ``nx doctor`` can count them. Replaces the previous record for *repo*."""
+    ``nx doctor`` can count them. Replaces the previous record for *repo*, cause included
+    (*cause* is :data:`SKIP_CAUSE_STACK` or :data:`SKIP_CAUSE_BOUNDS`)."""
     path = _skipped_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1002,7 +1010,9 @@ def record_skipped(paths: list[Path], *, repo: Path | None = None) -> None:
         data = {}
     key = str(repo) if repo is not None else ""
     if paths:
-        data[key] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "paths": sorted(str(p) for p in paths)}
+        data[key] = {
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "paths": sorted(str(p) for p in paths), "cause": cause,
+        }
     else:
         data.pop(key, None)
     try:
@@ -1015,15 +1025,46 @@ def record_skipped(paths: list[Path], *, repo: Path | None = None) -> None:
         _log.warning("pdf_stack_skipped_record_unwritable", error=str(exc))
 
 
-def skipped_count() -> int:
-    """How many PDFs refusing runs left un-indexed (0 when none, or unreadable)."""
+def _repo_still_exists(repo_key: object) -> bool:
+    """False only for a record keyed on a repo path that is gone (the empty key, a PDF with no
+    repo, has nothing to be gone)."""
+    if not isinstance(repo_key, str) or not repo_key:
+        return True
+    try:
+        return Path(repo_key).exists()
+    except (OSError, ValueError):
+        return False
+
+
+def skipped_count(cause: str | None = None, *, existing_repos_only: bool = False) -> int:
+    """How many PDFs refusing runs left un-indexed (0 when none, or unreadable); with *cause*,
+    only those held for it (a record that names none is a stack hold).
+
+    Never raises: the doctor calls it outside a guard, and the file is one a person can edit or a
+    crash can truncate. An entry that is not an object, or whose ``paths`` is not a list, holds
+    nothing; a path that is not a string is not counted. With *existing_repos_only* a record whose
+    repo directory is gone is ignored (nothing remains there for a rerun to index, and the rerun
+    the doctor would name cannot clear it, nexus-tr1rj.26).
+    """
     try:
         data = json.loads(_skipped_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return 0
     if not isinstance(data, dict):
         return 0
-    return sum(len(v.get("paths", [])) for v in data.values() if isinstance(v, dict))
+    total = 0
+    for repo_key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        paths = entry.get("paths")
+        if not isinstance(paths, list):
+            continue
+        if cause is not None and entry.get("cause", SKIP_CAUSE_STACK) != cause:
+            continue
+        if existing_repos_only and not _repo_still_exists(repo_key):
+            continue
+        total += sum(1 for p in paths if isinstance(p, str))
+    return total
 
 
 # ── the upgrade rule: an existing install carries the stack forward ──────────

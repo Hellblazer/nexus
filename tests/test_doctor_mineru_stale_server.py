@@ -28,6 +28,8 @@ from nexus import pdf_stack, upgrade_finish
 from nexus.commands import doctor
 from nexus.pdf_stack import StackState
 
+pytestmark = pytest.mark.usefixtures("no_mineru_child_probe")  # nexus-vyy65: no real MinerU child import here
+
 
 class _Health(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 — http.server's name

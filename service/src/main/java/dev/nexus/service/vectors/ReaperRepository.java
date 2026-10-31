@@ -104,27 +104,33 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
         });
     }
 
-    /** A chunk named by its chash, with the two fields an operator recognises it by. Either may be null. */
-    public record ChunkLabel(String chash, String title, String sourcePath) {}
+    /**
+     * A chunk named by its chash, with what an operator recognises it by: {@code textPrefix} (the first 80 characters of
+     * its text, always present for a stored chunk) and, where a manifest row names an owner, that document's catalog
+     * {@code title} and file path ({@code sourcePath}). Either of the last two may be null.
+     */
+    public record ChunkLabel(String chash, String title, String sourcePath, String textPrefix) {}
 
     /**
-     * The {@code title} and {@code source_path} the chunk's own metadata carries, for the chunks of {@code collection}
-     * named by {@code chashHex}. Display only: a refusal's audit row names a handful of what it refused to move, so
-     * an operator can tell a stale index from a mass orphaning without a database shell. A chash that is no longer
+     * The label of each chunk of {@code collection} named by {@code chashHex}: {@code left(chunk_text, 80)} and the
+     * title and file path of the document its MANIFEST names as owner (RDR-236 Phase 3, {@link ChunkOwnerLabel}),
+     * never the chunk row's own {@code title} or {@code source_path}, which are last-writer-wins on a shared chunk and
+     * are swept in Phase 4. Display only: a refusal's audit row names a handful of what it refused to move, so an
+     * operator can tell a stale index from a mass orphaning without a database shell. A chash that is no longer
      * stored is simply absent.
      */
     public List<ChunkLabel> describe(String tenant, String collection, List<String> chashHex) {
         if (chashHex.isEmpty()) return List.of();
         List<byte[]> keys = chashHex.stream().map(h -> dev.nexus.service.db.Chash.fromHex(h).toBytes()).toList();
-        Field<String> title = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "title");
-        Field<String> sourcePath = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "source_path");
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(CHUNKS.CHASH, title, sourcePath).from(CHUNKS)
+            ctx.select(CHUNKS.CHASH, ChunkOwnerLabel.TITLE, ChunkOwnerLabel.FILE_PATH, ChunkOwnerLabel.textPrefix())
+               .from(CHUNKS)
+               .leftJoin(ChunkOwnerLabel.ownerLateral()).on(DSL.trueCondition())
                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)).and(CHUNKS.CHASH.in(keys)))
                .orderBy(CHUNKS.CHASH)
                .fetch(r -> new ChunkLabel(HexFormat.of().formatHex(r.value1()),
-                   r.value2() == null || r.value2().isEmpty() ? null : r.value2(),
-                   r.value3() == null || r.value3().isEmpty() ? null : r.value3())));
+                   ChunkOwnerLabel.blankToNull(r.value2()), ChunkOwnerLabel.blankToNull(r.value3()),
+                   ChunkOwnerLabel.blankToNull(r.value4()))));
     }
 
     /**

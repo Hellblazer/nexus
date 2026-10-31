@@ -366,18 +366,49 @@ class TestExtractionRecord:
             "extraction_pages": {"pymupdf-text": [12, 3], "mineru-no-formula": [7]},
             "page_count": 12,
         }) == {"extraction_method": "mineru+degraded",
-               "extraction_pages": {"pymupdf-text": [3, 12], "mineru-no-formula": [7]}}
+               "extraction_pages": {"pymupdf-text": [3, 12], "mineru-no-formula": [7]},
+               "quality_gate_overridden": False, "extraction_source": "file"}
 
     def test_drops_empty_rungs_and_reads_a_missing_map_as_clean(self):
         from nexus.pipeline_stages import extraction_record
 
         assert extraction_record({"extraction_method": "mineru", "extraction_pages": {"unextracted": []}}) == {
-            "extraction_method": "mineru", "extraction_pages": {}}
+            "extraction_method": "mineru", "extraction_pages": {},
+            "quality_gate_overridden": False, "extraction_source": "file"}
         # A non-ladder extractor reports no map: the record says "none degraded", never "unknown".
         assert extraction_record({"extraction_method": "pymupdf_normalized"}) == {
-            "extraction_method": "pymupdf_normalized", "extraction_pages": {}}
+            "extraction_method": "pymupdf_normalized", "extraction_pages": {},
+            "quality_gate_overridden": False, "extraction_source": "file"}
+        # No extraction metadata at all: no extraction ran, so the override and the source are
+        # unknown (absent), never "not overridden" (nexus-6pfgb.6).
         assert extraction_record(None) == {"extraction_method": "", "extraction_pages": {}}
-        assert extraction_record({"extraction_pages": "garbage"}) == {"extraction_method": "", "extraction_pages": {}}
+        assert extraction_record({}) == {"extraction_method": "", "extraction_pages": {}}
+        assert extraction_record({"extraction_pages": "garbage"}) == {
+            "extraction_method": "", "extraction_pages": {},
+            "quality_gate_overridden": False, "extraction_source": "file"}
+
+    def test_the_override_is_an_explicit_boolean_and_the_record_is_idempotent(self):
+        """nexus-6pfgb.6: ``quality_gate_overridden`` is ``False`` on a clean extraction and ``True`` on
+        an override, and a record fed back through ``extraction_record`` (the batch route reads its own
+        stats back) is unchanged."""
+        from nexus.pipeline_stages import extraction_record
+
+        clean = extraction_record({"extraction_method": "mineru", "page_count": 3})
+        assert clean["quality_gate_overridden"] is False
+        over = extraction_record({"extraction_method": "pymupdf", "quality_gate_overridden": True})
+        assert over["quality_gate_overridden"] is True
+        assert extraction_record(over) == over and extraction_record(clean) == clean
+        assert extraction_record({"extraction_method": "x", "extraction_source": "dt_content"})["extraction_source"] == "dt_content"
+
+    def test_the_catalog_meta_sends_the_override_explicitly_and_only_what_the_record_states(self):
+        from nexus.pipeline_stages import _catalog_extraction_meta, extraction_record
+
+        assert _catalog_extraction_meta(extraction_record({"extraction_method": "mineru"})) == {
+            "extraction_pages": {}, "extraction_method": "mineru",
+            "quality_gate_overridden": False, "extraction_source": "file"}
+        # A record that never states the override (no extraction ran) leaves the key out, so the merge
+        # cannot overwrite an earlier real value with a guess.
+        assert _catalog_extraction_meta(extraction_record(None)) == {"extraction_pages": {}}
 
     @pytest.mark.parametrize("bad_pages", [["x", 3], [None, 3], [4.5, 3], [True, 3], "3,4"])
     def test_a_malformed_map_is_skipped_and_named_never_raised(self, bad_pages):
@@ -401,3 +432,77 @@ class TestExtractionRecord:
             assert rec["extraction_pages"]["mineru-no-formula"] == [3]
             assert {e["event"] for e in cap} == {"extraction_record_skipped_a_malformed_page"}
         assert all(e["log_level"] == "warning" for e in cap)
+
+
+class TestCatalogBibFields:
+    """nexus-6pfgb.28: what an ``--enrich`` lookup sends to the catalog document's columns. The engine
+    sets every column it is sent, an empty string and a zero included, so only real values go; the
+    document is written against the real service by ``tests/integration/test_rdr223_pdf_journey.py``."""
+
+    def test_a_full_lookup_names_every_column_and_stamps_enriched_at(self):
+        from nexus.pipeline_stages import _catalog_bib_fields
+
+        fields = _catalog_bib_fields({
+            "year": 2019, "venue": "OSDI", "authors": "A, B", "citation_count": 42,
+            "semantic_scholar_id": "ss1", "references": ["r1"],
+        })
+        assert {k: v for k, v in fields.items() if k != "bib_enriched_at"} == {
+            "bib_year": 2019, "bib_venue": "OSDI", "bib_authors": "A, B", "bib_citation_count": 42,
+            "bib_semantic_scholar_id": "ss1"}
+        assert fields["bib_enriched_at"]
+
+    def test_a_miss_sends_nothing_and_so_stamps_nothing(self):
+        from nexus.pipeline_stages import _catalog_bib_fields
+
+        assert _catalog_bib_fields({}) == {}
+
+    def test_empty_values_are_left_out_but_a_zero_citation_count_is_a_count(self):
+        from nexus.pipeline_stages import _catalog_bib_fields
+
+        fields = _catalog_bib_fields({"year": 0, "venue": "", "authors": "", "citation_count": 0,
+                                      "semantic_scholar_id": ""})
+        assert set(fields) == {"bib_citation_count", "bib_enriched_at"}
+        assert fields["bib_citation_count"] == 0
+
+    def test_a_close_that_raises_does_not_escape_the_hook(self, monkeypatch):
+        """Review L2: the hook promises never to raise; a client whose close() raised used to
+        propagate out of its ``finally``."""
+        from pathlib import Path
+
+        import nexus.catalog.factory as factory
+        from nexus.pipeline_stages import _catalog_pdf_bib_hook
+
+        class _Client:
+            def __init__(self):
+                self.updates = []
+
+            def resolve(self, doc_id):
+                return None
+
+            def update(self, doc_id, **kw):
+                self.updates.append(kw)
+
+            def close(self):
+                raise RuntimeError("socket gone")
+
+        client = _Client()
+        monkeypatch.setattr(factory, "make_catalog_reader", lambda: client)
+        monkeypatch.setattr(factory, "make_catalog_writer", lambda: client)
+
+        sent = _catalog_pdf_bib_hook("1.1.1", Path("/data/p.pdf"), "docs__x", {"year": 2019})
+
+        assert sent is True and client.updates[0]["bib_year"] == 2019
+
+    def test_a_zero_count_fills_only_where_the_catalog_has_no_count_yet(self):
+        """Semantic Scholar answers 0 for a record it knows too little about, so a zero must never
+        replace a count the catalog already holds (nexus-6pfgb.28 review I2). A positive count
+        always replaces: a newer lookup is a newer count."""
+        from nexus.pipeline_stages import _catalog_bib_fields
+
+        zero = {"year": 0, "venue": "", "authors": "", "citation_count": 0, "semantic_scholar_id": ""}
+        assert _catalog_bib_fields(zero, current_count=42) == {}, "nothing real to send, nothing stamped"
+        assert _catalog_bib_fields({**zero, "venue": "OSDI"}, current_count=42).keys() == {
+            "bib_venue", "bib_enriched_at"}
+        assert _catalog_bib_fields({**zero, "citation_count": 50}, current_count=42)[
+            "bib_citation_count"] == 50
+        assert _catalog_bib_fields(zero, current_count=0)["bib_citation_count"] == 0

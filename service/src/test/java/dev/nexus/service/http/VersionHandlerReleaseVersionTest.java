@@ -171,6 +171,13 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"catalog_graph_scope_filter_supported\":true");
     }
 
+    @Test
+    void versionAdvertisesTheGraphNodeWalkAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogGraphNodeWalkCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_graph_node_walk_supported\":true");
+    }
+
     // ── nexus-jypmj.6: the manifest get_many per-document row limit ──
 
     @Test
@@ -187,5 +194,23 @@ class VersionHandlerReleaseVersionTest {
         var body = new StringBuilder();
         VersionHandler.appendNxAnswerOutOfStepCostCapabilityField(body);
         assertThat(body.toString()).isEqualTo(",\"nx_answer_out_of_step_cost_supported\":true");
+    }
+
+    // ── nexus-6pfgb.26: a search row's source_uri and span come from one manifest owner ──
+
+    @Test
+    void versionAdvertisesTheSearchRowOwnerSpanAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendSearchRowOwnerSpanCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"search_row_owner_span_supported\":true");
+    }
+
+    // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──
+
+    @Test
+    void versionAdvertisesTheChashAllowRestrictionAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendVectorSearchChashAllowCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"vector_search_chash_allow_supported\":true");
     }
 }

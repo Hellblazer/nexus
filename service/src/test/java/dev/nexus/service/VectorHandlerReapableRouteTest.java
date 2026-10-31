@@ -9,6 +9,7 @@ import dev.nexus.service.PgVectorRepositoryContractTest.FakeEmbedder;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.vectors.ReaperRepository;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -268,7 +269,9 @@ class VectorHandlerReapableRouteTest {
         Map<String, Object> body = reapable(TOKEN_A, COL_A, Map.of());
 
         Map<String, Object> r1 = chunks(body).stream().filter(c -> fx.r1().equals(c.get("chash"))).findFirst().get();
-        assertThat(r1.get("title")).isEqualTo("r1.txt:1-1");
+        assertThat(r1.get("title")).as("R1's row carries a title but the manifest names no owner: none is shown")
+            .isNull();
+        assertThat(r1.get("text_prefix")).as("the label of an ownerless chunk is its text").isEqualTo("r1 text");
         assertThat(r1).as("every item carries the grace clock").containsKey("ownerless_since");
         assertThat(r1.get("catalog_doc_id")).as("R1 names no document").isNull();
         assertThat(OffsetDateTime.parse((String) r1.get("created_at"))).isBefore(OffsetDateTime.now().minusDays(30));
@@ -276,7 +279,94 @@ class VectorHandlerReapableRouteTest {
             .isBefore(OffsetDateTime.now().minusDays(30));
         Map<String, Object> r6 = chunks(body).stream().filter(c -> fx.r6().equals(c.get("chash"))).findFirst().get();
         assertThat(r6.get("catalog_doc_id")).as("R6 names its (other-collection) owner").isEqualTo("d6");
-        assertThat(r6.get("title")).isNull();
+        assertThat(r6.get("title")).as("R6's owner is d6, titled by the catalog").isEqualTo("doc d6");
+    }
+
+    /**
+     * RDR-236 Phase 3 (nexus-6pfgb.39): the chunk row's {@code title}, {@code source_path} and {@code catalog_doc_id}
+     * are last-writer-wins on a shared chunk and are removed by the Phase 4 sweep, so the listing labels a chunk by
+     * the first 80 characters of its text and by its MANIFEST owner. This row carries another document's title,
+     * source path and document id; none of them may be shown.
+     */
+    @Test
+    void aStaleRowTitleAndSourcePathAreNeverShown_theTextPrefixAndTheManifestOwnerAre() throws Exception {
+        String col = "knowledge__reaproute-stale__minilm-l6-v2-384__v1";
+        String other = "knowledge__reaproute-stale-owner__minilm-l6-v2-384__v1";
+        register(TENANT_A, col);
+        register(TENANT_A, other);
+        String seed = "s".repeat(100);
+        Map<String, Object> stale = Map.of("title", "STALE title of another document",
+            "source_path", "/stale/of/another.md", "catalog_doc_id", "stale-doc", "doc_id", "stale-doc");
+        String owned = chunk(TENANT_A, col, seed, Duration.ofDays(40), stale);
+        chunk(TENANT_A, other, seed, Duration.ofDays(1), Map.of());   // the same seed is the same chash there
+        doc(TENANT_A, "own-doc", other, false, null);
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.FILE_PATH, "/the/owner/path.md")
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A).and(CATALOG_DOCUMENTS.TUMBLER.eq("own-doc"))).execute());
+        manifest(TENANT_A, "own-doc", other, owned);
+        String keyless = chunk(TENANT_A, col, "keyless", Duration.ofDays(40), stale);
+
+        Map<String, Object> body = reapable(TOKEN_A, col, Map.of());
+
+        Map<String, Object> o = item(body, owned);
+        assertThat(o.get("title")).as("the catalog's title for the manifest owner").isEqualTo("doc own-doc");
+        assertThat(o.get("catalog_doc_id")).isEqualTo("own-doc");
+        assertThat((String) o.get("text_prefix")).as("left(chunk_text, 80)").isEqualTo("s".repeat(80));
+        Map<String, Object> k = item(body, keyless);
+        assertThat(k.get("title")).as("no manifest owner: no title, whatever the row says").isNull();
+        assertThat(k.get("catalog_doc_id")).isNull();
+        assertThat(k.get("text_prefix")).isEqualTo("keyless text");
+        assertThat(body.toString()).doesNotContain("STALE").doesNotContain("stale-doc").doesNotContain("another.md");
+
+        var rows = repo.reapableChunks(TENANT_A, col, null, null, 10, 0);
+        var ro = rows.stream().filter(r -> owned.equals(r.chash())).findFirst().get();
+        assertThat(ro.sourcePath()).as("the owner's file path, not the row's source_path")
+            .isEqualTo("/the/owner/path.md");
+        var rk = rows.stream().filter(r -> keyless.equals(r.chash())).findFirst().get();
+        assertThat(rk.sourcePath()).isNull();
+    }
+
+    /**
+     * An owner is a LIVE document (house rule nexus-mqd6t: a tombstoned document owns nothing). A chunk whose only
+     * manifest owner is tombstoned shows no title, document id or path in /reapable and in describe; where a live
+     * document also names it, the live one is the owner even though the tombstoned one sorts first.
+     */
+    @Test
+    void aTombstonedManifestOwnerIsNoOwner_reapableAndDescribeShowNoLabel() throws Exception {
+        String col = "knowledge__reaproute-tomb__minilm-l6-v2-384__v1";
+        String other = "knowledge__reaproute-tomb-owner__minilm-l6-v2-384__v1";
+        register(TENANT_A, col);
+        register(TENANT_A, other);
+        Duration old = Duration.ofDays(40);
+        String dead = chunk(TENANT_A, col, "dead-owner", old, Map.of());
+        chunk(TENANT_A, other, "dead-owner", Duration.ofDays(1), Map.of());
+        doc(TENANT_A, "tomb-only", other, true, null);
+        manifest(TENANT_A, "tomb-only", other, dead);
+        String both = chunk(TENANT_A, col, "both-owners", old, Map.of());
+        chunk(TENANT_A, other, "both-owners", Duration.ofDays(1), Map.of());
+        doc(TENANT_A, "a-tombstoned", other, true, null);
+        doc(TENANT_A, "b-live", other, false, null);
+        manifest(TENANT_A, "a-tombstoned", other, both);
+        manifest(TENANT_A, "b-live", other, both);
+
+        Map<String, Object> body = reapable(TOKEN_A, col, Map.of());
+
+        Map<String, Object> d = item(body, dead);
+        assertThat(d.get("title")).as("a tombstoned owner owns nothing").isNull();
+        assertThat(d.get("catalog_doc_id")).isNull();
+        Map<String, Object> b = item(body, both);
+        assertThat(b.get("catalog_doc_id")).as("the live owner, though the tombstoned one sorts first")
+            .isEqualTo("b-live");
+        assertThat(b.get("title")).isEqualTo("doc b-live");
+
+        var rows = repo.reapableChunks(TENANT_A, col, null, null, 10, 0);
+        assertThat(rows.stream().filter(r -> dead.equals(r.chash())).findFirst().get().sourcePath()).isNull();
+
+        var labels = new ReaperRepository(new TenantScope(svcDs)).describe(TENANT_A, col, List.of(dead, both));
+        var ld = labels.stream().filter(l -> dead.equals(l.chash())).findFirst().get();
+        assertThat(ld.title()).as("describe: a tombstoned owner owns nothing").isNull();
+        assertThat(ld.sourcePath()).isNull();
+        var lb = labels.stream().filter(l -> both.equals(l.chash())).findFirst().get();
+        assertThat(lb.title()).isEqualTo("doc b-live");
     }
 
     @Test
@@ -541,9 +631,16 @@ class VectorHandlerReapableRouteTest {
     @Test
     void everyReapableChunkFieldHoldsItsOwnColumn() throws Exception {
         String col = "knowledge__reaproute-fields__minilm-l6-v2-384__v1";
+        String ownerCol = "knowledge__reaproute-fields-owner__minilm-l6-v2-384__v1";
         register(TENANT_A, col);
+        register(TENANT_A, ownerCol);
         String hex = chunk(TENANT_A, col, "fields-1", Duration.ofDays(200),
-            Map.of("title", "The Title", "source_path", "/the/source/path.md", "catalog_doc_id", "1.2.3"));
+            Map.of("title", "Stale Title", "source_path", "/stale/path.md", "catalog_doc_id", "9.9.9"));
+        chunk(TENANT_A, ownerCol, "fields-1", Duration.ofDays(1), Map.of());
+        doc(TENANT_A, "1.2.3", ownerCol, false, null);
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.FILE_PATH, "/the/source/path.md")
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.2.3"))).execute());
+        manifest(TENANT_A, "1.2.3", ownerCol, hex);
         recordOrphaning(TENANT_A, col, hex, Duration.ofDays(31));
 
         List<PgVectorRepository.ReapableChunk> rows = repo.reapableChunks(TENANT_A, col, null, null, 10, 0);
@@ -557,9 +654,10 @@ class VectorHandlerReapableRouteTest {
         assertThat(OffsetDateTime.parse(r.ownerlessSince()))
             .as("ownerlessSince is the orphaning record, not the path")
             .isBetween(now.minusDays(31).minusMinutes(5), now.minusDays(31).plusMinutes(5));
-        assertThat(r.title()).isEqualTo("The Title");
-        assertThat(r.catalogDocId()).isEqualTo("1.2.3");
-        assertThat(r.sourcePath()).as("sourcePath is the source_path metadata, not the clock")
+        assertThat(r.title()).as("the manifest owner's catalog title").isEqualTo("doc 1.2.3");
+        assertThat(r.catalogDocId()).as("the manifest owner, not the row's catalog_doc_id").isEqualTo("1.2.3");
+        assertThat(r.sourcePath()).as("the owner's file path, not the clock and not the row's source_path")
             .isEqualTo("/the/source/path.md");
+        assertThat(r.textPrefix()).isEqualTo("fields-1 text");
     }
 }

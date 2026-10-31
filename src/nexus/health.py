@@ -22,6 +22,7 @@ from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
 from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
+from nexus.util.nx_argv import which_off_cwd
 
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader
@@ -3035,7 +3036,9 @@ def _check_pdf_support() -> list[HealthResult]:
             *_check_mineru_importable(),
         ]
     plan = pdf_stack.install_plan()
-    held = pdf_stack.skipped_count()
+    # nexus-tr1rj.26: only the PDFs held for the stack wait for it; a MinerU-limit hold is the
+    # "PDF settings" row's to say.
+    held = pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK, existing_repos_only=True)
     held_note = (
         f"; {held} PDF(s) a background run could not index are waiting for it" if held else ""
     )
@@ -3090,6 +3093,58 @@ def _check_installer_rebuild() -> list[HealthResult]:
         label="Dependency lock", ok=False, warn=True, detail=note,
         fix_suggestions=[f"Rebuild with the release's lock: {pdf_stack.REBUILD_RETRY_COMMAND}"],
     )]
+
+
+def _check_pdf_config() -> list[HealthResult]:
+    """RDR-237 (nexus-489n1): the ``[pdf]`` settings the next PDF run would refuse.
+
+    A ``[pdf]`` integer setting that holds no integer (``PdfConfigError``, which names the key),
+    or a MinerU time limit whose ``mineru_page_timeout_s`` x ``mineru_page_batch`` is above the
+    240 s bound (:func:`nexus.pdf_stack.mineru_bounds_problem`, not asked of the text-only
+    extractor, which never reaches MinerU). Red: every PDF index stops on it. The MinerU server
+    row cannot say so (reading the server URL reads this same section and raises, and that row
+    swallows it), which is why this is its own row.
+
+    PDFs an ``nx index repo`` run held on the limit (nexus-tr1rj.26; the record names its cause, so
+    the PDF-support row does not blame the stack for them) are counted here: in the red row, and,
+    once the settings are usable again but no run has cleared the record, in a warning that names
+    the rerun. Not applicable, no row, when the settings can be used and nothing is held: a virgin
+    box and every box that never set one.
+    """
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+    from nexus.config import PdfConfigError, get_pdf_config  # noqa: PLC0415 — deferred import (startup cost)
+
+    held = pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS, existing_repos_only=True)
+    held_note = f" {held} PDF(s) a run held on it are not indexed." if held else ""
+    try:
+        extractor = get_pdf_config().extractor
+        problem = pdf_stack.mineru_bounds_problem(extractor)
+    except PdfConfigError as exc:
+        return [HealthResult(
+            label="PDF settings", ok=False,
+            detail=f"{exc}; every PDF index stops on it.{held_note}",
+            fix_suggestions=[f"Set it: nx config set pdf.{exc.key}=<integer>"],
+        )]
+    except Exception:  # noqa: BLE001 — an unreadable config is the config rows' finding, not this one's
+        return []
+    if problem is not None:
+        return [HealthResult(
+            label="PDF settings", ok=False,
+            detail=f"{problem} Every MinerU PDF index stops on it.{held_note}",
+            fix_suggestions=[
+                "Lower one: nx config set pdf.mineru_page_timeout_s=<seconds> (or pdf.mineru_page_batch=<pages>)",
+            ],
+        )]
+    if held:
+        return [HealthResult(
+            label="PDF settings", ok=False, warn=True,
+            detail=(
+                f"the MinerU time limits are usable now, but {held} PDF(s) a run held on them are "
+                "not indexed yet"
+            ),
+            fix_suggestions=["Index them: nx index repo <path> (a run that indexes them clears this)"],
+        )]
+    return []
 
 
 def _check_mineru_server() -> list[HealthResult]:
@@ -3881,6 +3936,32 @@ def _check_llm_key_persistence() -> list[HealthResult]:
     )]
 
 
+_CLAUDE_VERSION_TIMEOUT_S = 5.0
+
+
+def _claude_cli_problem() -> str | None:
+    """Why the ``claude`` on PATH may not run at all, else ``None`` (nexus-jypmj.21).
+
+    Runs ``claude --version`` once, bounded: a process spawn, not a model call. It catches a broken install
+    (a dangling shim, a missing runtime, a wrong-architecture binary) that PATH presence alone reads as healthy.
+    The text carries its own verdict: a failed start says the CLI cannot run, a run that outlasts the bound says
+    it may be unable to (a slow cold start looks the same). It cannot see a CLI that starts but cannot answer
+    (signed out, offline): only an extraction call shows that, and no doctor row does.
+    """
+    path = which_off_cwd("claude")
+    if path is None:
+        return None
+    try:
+        proc = run_bounded([path, "--version"], timeout=_CLAUDE_VERSION_TIMEOUT_S, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return f"`claude --version` did not finish in {_CLAUDE_VERSION_TIMEOUT_S:g}s, so the CLI may be unable to run"
+    except OSError as exc:
+        return f"`claude --version` could not start ({exc.__class__.__name__}), so the CLI cannot run"
+    if proc.returncode != 0:
+        return f"`claude --version` exited {proc.returncode}, so the CLI cannot run"
+    return None
+
+
 def _check_answer_kind_extraction() -> list[HealthResult]:
     """nexus-jypmj.16 (RDR-232): can the structured request extraction that feeds the answer-kind gate run here?
 
@@ -3888,12 +3969,14 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
     open, and the answer-kind gate enforces on whatever kind comes back. When the call fails the request keeps
     its first-pass kind and the gate keeps enforcing (per request, by design), and the first-pass-only regime is
     the one that failed the held-out lookup measurement. A process in which the call fails every time warns once
-    in its log (``answer_kind_gate_extraction_failing``); this row reads the same preconditions without a model
-    call. Never prints a key.
+    in its log (``answer_kind_gate_extraction_failing``, only while the gate enforces); this row reads the same
+    preconditions without a model call, so a backend that fails each call is not visible in it. Never prints a key.
 
     * The extraction or the gate is switched off, or the box has no LLM backend at all (search and storage only;
       the "LLM backend" row says so): not applicable, a pass. The fresh-install bar is zero warnings.
-    * A usable ``cli`` or ``anthropic`` backend: a pass naming the backend and the model.
+    * A usable ``cli`` backend whose ``claude --version`` fails: a soft warning (nexus-jypmj.21). One that starts
+      is a pass, and says that only the process's own log shows whether it can answer. A usable ``anthropic``
+      backend: a pass naming the backend and the model; it has no probe either, and says so.
     * An ``openai_compat`` endpoint (it runs its configured model, not the measured one) or a backend setting
       that cannot serve: a soft warning with the reason and the switches.
     """
@@ -3915,6 +3998,7 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
             )]
         status = backend_status()
         model = coverage_mod.extraction_model(os.environ)
+        cli_problem = _claude_cli_problem() if status.available and status.name == "cli" else None
     except Exception as exc:  # noqa: BLE001 - a doctor row must not crash `nx doctor`
         return [HealthResult(label=label, ok=False, warn=True, detail=f"could not determine: {exc}")]
     switches = [
@@ -3922,7 +4006,25 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
         f"or set {eligibility_mod.ANSWER_KIND_ELIGIBILITY_ENV}=0 to switch it off",
     ]
     if status.available and status.name in ("cli", "anthropic"):
-        return [HealthResult(label=label, ok=True, detail=f"runs on {status.name} ({status.reason}), model {model}")]
+        if cli_problem:
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=f"cli ({status.reason}) but {cli_problem}; when the extraction fails, requests keep "
+                       "their first-pass kind while the answer-kind gate keeps enforcing on it (the regime that "
+                       "lost lookup recall in the held-out measurement)",
+                fix_suggestions=["reinstall or repair the claude CLI, or nx config set anthropic_api_key <key>", *switches],
+            )]
+        unseen = (
+            "claude --version ran; whether it answers is not checked here" if status.name == "cli"
+            else "the key is not exercised here"
+        )
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"runs on {status.name} ({status.reason}), model {model}; no model call is made ({unseen}), "
+                   "so a backend that fails each call is not shown here: each request's outcome is in the answer "
+                   "envelope's request_coverage.extraction, and the log line answer_kind_gate_extraction_failing "
+                   "fires only after repeated failures while the gate enforces",
+        )]
     if status.available:
         return [HealthResult(
             label=label, ok=False, warn=True,
@@ -7887,6 +7989,25 @@ _TUPLE_STALE_UNCLAIMED_AGE_S: int = 3600  # 1 hour
 #: independent numbers answering different questions (when does autovacuum
 #: run vs. when should a human look).
 _TUPLE_DEAD_RATIO_WARN: float = 0.20
+#: A table's ratio is judged only once its dead rows pass twice its own
+#: autovacuum trigger, ``autovacuum_vacuum_threshold +
+#: autovacuum_vacuum_scale_factor * reltuples``: 50 (PostgreSQL's default
+#: base threshold) plus 0.01 x live rows (tuples-001-baseline and
+#: tuples-007-deliveries set the 0.01 scale factor; reltuples is taken as live
+#: rows). Below the trigger autovacuum is not due; between the trigger and
+#: twice it, autovacuum is due and may simply not have run yet (its naptime is
+#: about a minute), which on a small, busy queue table reads 90% or more. The
+#: row exists to catch autovacuum NOT keeping up, so that window is not a
+#: finding. Without a floor a fresh install with one live and one dead tuple
+#: read 50% and failed doctor (nexus-j6un5, the 7.90.0 fresh-install MVV).
+_TUPLE_AUTOVAC_BASE_THRESHOLD: int = 50
+_TUPLE_AUTOVAC_SCALE_FACTOR: float = 0.01
+_TUPLE_AUTOVAC_SLACK: float = 2.0
+
+
+def _tuple_dead_rows_floor(live: int) -> float:
+    """Dead rows past which a tuple table's ratio counts (see the constants above)."""
+    return _TUPLE_AUTOVAC_SLACK * (_TUPLE_AUTOVAC_BASE_THRESHOLD + _TUPLE_AUTOVAC_SCALE_FACTOR * live)
 
 #: NexusService.SWEEP_INTERVAL_HOURS is 6h; NexusService.java:154's own
 #: comment treats 3x that (18h) as the slack budget before a single
@@ -7902,6 +8023,13 @@ _TUPLE_PARK_SLOTS_WARN_RATIO: float = 0.75
 #: RDR-211 Scale and Limits item 3: "a doctor row ... warning above 1,000
 #: available or at any dead task".
 _TUPLE_QUEUE_DEPTH_WARN_AVAILABLE: int = 1000
+
+#: The same threshold for the ``aspects`` template (nexus-4tvhk, Sam
+#: 2026-10-30): twice the routine bulk backlog measured for it, which peaks at
+#: 1,200 available (nexus-5r2sc.1.3, scenario 25 sizing). At the queue/*
+#: value a routine bulk index turned the row to a warning while the consumer
+#: was healthy. ``queue/<name>`` keeps :data:`_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE`.
+_TUPLE_ASPECTS_DEPTH_WARN_AVAILABLE: int = 2400
 
 #: RDR-211 Technical Design "Delivery" / bead nexus-rplay.13: "last wake
 #: older than a bound ... (e.g. more than 3 x 25 s ago while alive)". 3x
@@ -8004,6 +8132,14 @@ def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
     return bool(template.get("take", {}).get("enabled", True))
 
 
+def _is_aspects_template(template: dict | None) -> bool:
+    """True for the RDR-235 ``aspects`` queue template (the literal one-segment
+    name, the same spelling the producer writes through)."""
+    from nexus.db.t2.http_aspect_queue import ASPECTS_SUBSPACE  # noqa: PLC0415 — deferred: CLI startup cost
+
+    return template is not None and template.get("name") == ASPECTS_SUBSPACE
+
+
 _TUPLE_UNCLAIMED_LABEL = "tuples.oldest_unclaimed"
 
 
@@ -8022,6 +8158,18 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
     whose oldest unclaimed tuple falls outside the first page is a known,
     documented limitation of a census check, not a silent miss (nothing
     here claims exhaustive coverage past one page).
+
+    RDR-235 gate S4 and nexus-p909o: the ``aspects`` queue template is a bulk
+    backlog by design (about 136 documents an hour per worker), and a retry-
+    delayed task counts as available, so the flat threshold on the oldest
+    unclaimed row could not tell a busy healthy consumer from a stuck one. An
+    engine that renders the census's ``oldest_claimable_created_at`` (the
+    oldest live unclaimed row whose ``available_at`` is null or reached) lets
+    this row measure aspects against that instead: a task waiting out a retry
+    is not stuck. Older than the threshold is red only when no claim is in
+    flight (``claimed`` minus ``lapsed`` is 0), because a draining backlog has
+    claims; with claims in flight it is a warning. An engine without the field
+    keeps the skip (``_check_tuple_queue_depth`` still covers aspects).
 
     Two review fixes (nexus-em75s.12): a subspace whose resolved template
     has ``take.enabled: false`` (e.g. ``ledger/<session_id>`` — read-only
@@ -8130,6 +8278,7 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
         )]
 
     stale: list[str] = []
+    draining: list[str] = []
     reported: list[str] = []
     for census in subspaces:
         if census.available <= 0:
@@ -8144,6 +8293,36 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
             # nexus-sis0m.2: a lock template's available token IS the idle
             # lock; its age is how long nobody has held it, not stuck work
             # (shakeout 7.64.1 Surface E F7 flagged lock/ci-develop-push).
+            continue
+        if _is_aspects_template(template):
+            # RDR-235 gate S4. The aspects queue is a bulk backlog by design: one
+            # worker drains about 136 documents an hour, so a routine
+            # 1,000-document index leaves the oldest unclaimed task older than
+            # this flat threshold for hours while the consumer is healthy and
+            # busy, and a backoff-delayed task counts as available. Without the
+            # census's claimable age (an engine that predates it) the queue-depth
+            # row is the only aspects signal, so skip here.
+            if not getattr(census, "claimable_known", False):
+                continue
+            # nexus-p909o: age is the oldest task a worker could claim NOW; a
+            # delayed-only backlog has none and is not stuck.
+            claimable_dt = _parse_tuple_timestamp(census.oldest_claimable_created_at)
+            delayed = getattr(census, "delayed", 0)
+            if claimable_dt is None:
+                reported.append(f"{census.subspace}=none claimable (delayed={delayed})")
+                continue
+            age_s = (datetime.now(UTC) - claimable_dt).total_seconds()
+            reported.append(f"{census.subspace}={_fmt_age(age_s)}")
+            if age_s > _TUPLE_STALE_UNCLAIMED_AGE_S:
+                # A lapsed claim is a dead worker's leftover (reclaimed lazily by
+                # the next claim attempt), not activity.
+                live_claims = census.claimed - getattr(census, "lapsed", 0)
+                if live_claims > 0:
+                    draining.append(
+                        f"{census.subspace} ({_fmt_age(age_s)} old, {live_claims} claim(s) in flight)"
+                    )
+                else:
+                    stale.append(f"{census.subspace} ({_fmt_age(age_s)} old, no claim in flight)")
             continue
         census_oldest_dt = _parse_tuple_timestamp(census.oldest_created_at)
         if census_oldest_dt is not None:
@@ -8197,10 +8376,27 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
                 f"{len(stale)} subspace(s) with an unclaimed tuple older "
                 f"than {_fmt_age(_TUPLE_STALE_UNCLAIMED_AGE_S)}: "
                 + "; ".join(stale)
+                + (
+                    "; also draining past the threshold: " + "; ".join(draining)
+                    if draining else ""
+                )
             ),
             fix_suggestions=[
                 "Check for a stuck or absent consumer on the named "
                 "subspace(s): nx tuple rd <subspace>",
+            ],
+        )]
+    if draining:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"{len(draining)} queue(s) draining a backlog older than "
+                f"{_fmt_age(_TUPLE_STALE_UNCLAIMED_AGE_S)}, with claims in flight: "
+                + "; ".join(draining)
+            ),
+            fix_suggestions=[
+                "A worker is claiming, so this is a slow drain, not a stall; "
+                "watch it with: nx tuple stats <subspace>",
             ],
         )]
     return [HealthResult(label=label, ok=True, detail="; ".join(reported) or "none")]
@@ -8579,6 +8775,7 @@ def _check_tuple_table_bloat(
     worst_ratio = 0.0
     worst_table = ""
     details: list[str] = []
+    skipped = 0
     for line in lines:
         parts = line.split("|")
         if len(parts) != 5:
@@ -8591,11 +8788,16 @@ def _check_tuple_table_bloat(
             continue
         total = live + dead
         ratio = (dead / total) if total > 0 else 0.0
-        if ratio > worst_ratio:
+        floor = _tuple_dead_rows_floor(live)
+        judged = dead > floor
+        if judged and ratio > worst_ratio:
             worst_ratio, worst_table = ratio, relname
+        if not judged:
+            skipped += 1
         details.append(
             f"{relname}: dead_ratio={ratio:.2%} live={live} dead={dead} "
             f"last_autovacuum={last_vac or 'never'}"
+            + ("" if judged else f" (not judged: dead <= {floor:.0f})")
         )
 
     if worst_ratio > _TUPLE_DEAD_RATIO_WARN:
@@ -8607,7 +8809,11 @@ def _check_tuple_table_bloat(
             ),
             fix_suggestions=[f"VACUUM ANALYZE nexus.{worst_table};"],
         )]
-    return [HealthResult(label=label, ok=True, detail="; ".join(details) or "none")]
+    note = (
+        "; a ratio counts only past twice the table's autovacuum trigger"
+        if skipped else ""
+    )
+    return [HealthResult(label=label, ok=True, detail=("; ".join(details) or "none") + note)]
 
 
 _TUPLE_SWEEP_LABEL = "tuples.sweep_freshness"
@@ -8881,18 +9087,24 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
     """RDR-211 Phase 1 Step 3 doctor row 2 (bead nexus-rplay.12): the
     census ``available``/``dead`` counts (``SubspaceCensus``, via
     ``HttpTupleStore.subspace_list``/``registry``) for subspaces that
-    resolve to the take-enabled ``queue/<name>`` template ONLY -- board
-    (take disabled), mailbox, lock, ledger, and directory subspaces never
-    count here regardless of row counts (RDR-211 Scale and Limits item 3:
-    "a doctor row over the census available and dead counts for QUEUE
-    subspaces").
+    resolve to the take-enabled ``queue/<name>`` template or, since RDR-235
+    F18, the take-enabled ``aspects`` template ONLY -- board (take disabled),
+    mailbox, lock, ledger, and directory subspaces never count here
+    regardless of row counts (RDR-211 Scale and Limits item 3: "a doctor row
+    over the census available and dead counts for QUEUE subspaces"). The
+    aspects queue is a queue by the same definition. On an engine without the
+    census's claimable age (nexus-p909o) this row is the only one that covers
+    it, since ``_check_tuple_unclaimed_age`` skips it (gate S4); its detail
+    names the delayed count (the retry-waiting part of ``available``) where the
+    engine reports it.
 
     WARN above :data:`_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE` available tuples
+    (:data:`_TUPLE_ASPECTS_DEPTH_WARN_AVAILABLE` on the ``aspects`` queue)
     on any queue, or at any dead-lettered task on any queue.
 
     Not applicable -- ``ok=True`` with an explicit "informational" detail,
-    never a plain OK -- when the tenant carries no ``queue/<name>``
-    subspace at all (the nexus-7zhag doctrine: a new doctor row is
+    never a plain OK -- when the tenant carries no ``queue/<name>`` or
+    ``aspects`` subspace at all (the nexus-7zhag doctrine: a new doctor row is
     not-applicable, never green-by-default, when its subject is simply
     absent -- a virgin or ordinary box that has never used a queue
     template).
@@ -8962,34 +9174,63 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
         )]
 
     queues = []
+    caps: dict[str, int] = {}
+    # nexus-4tvhk: the available-count warn threshold per subspace (aspects has its own).
+    thresholds: dict[str, int] = {}
+    # nexus-p909o: aspects subspaces whose engine reports the delayed count.
+    delayed_note: dict[str, str] = {}
     for census in subspaces:
         template = _resolve_tuple_template(templates, census.subspace)
         if template is None:
             continue
         name = template.get("name", "")
-        if not name.startswith("queue/"):
+        if not (name.startswith("queue/") or _is_aspects_template(template)):
             continue
         if not bool(template.get("take", {}).get("enabled", True)):
             continue
         queues.append(census)
+        thresholds[census.subspace] = (
+            _TUPLE_ASPECTS_DEPTH_WARN_AVAILABLE if _is_aspects_template(template)
+            else _TUPLE_QUEUE_DEPTH_WARN_AVAILABLE
+        )
+        if _is_aspects_template(template) and getattr(census, "claimable_known", False):
+            delayed_note[census.subspace] = f"delayed={census.delayed}"
+        max_live = template.get("max_live_rows")
+        if isinstance(max_live, int) and max_live > 0:
+            caps[census.subspace] = max_live
 
     if not queues:
         return [HealthResult(
             label=label, ok=True,
-            detail="informational — no queue/<name> subspaces exist on this tenant",
+            detail=(
+                "informational — no queue/<name> or aspects subspaces exist "
+                "on this tenant"
+            ),
         )]
 
-    over_available = [c for c in queues if c.available > _TUPLE_QUEUE_DEPTH_WARN_AVAILABLE]
+    over_available = [c for c in queues if c.available > thresholds[c.subspace]]
     with_dead = [c for c in queues if c.dead > 0]
 
     if over_available or with_dead:
-        parts = [f"{c.subspace} (available={c.available})" for c in over_available]
-        parts += [f"{c.subspace} (dead={c.dead})" for c in with_dead]
+        parts = [
+            f"{c.subspace} (available={c.available}"
+            + (f", {delayed_note[c.subspace]}" if c.subspace in delayed_note else "")
+            + ")"
+            for c in over_available
+        ]
+        # A dead task is unconsumed, so it counts against the template's
+        # max_live_rows for as long as it is kept (aspects: 90 days). Show the
+        # dead share of that cap, where the template states one.
+        parts += [
+            f"{c.subspace} (dead={c.dead}"
+            + (f" of {caps[c.subspace]} max live rows" if c.subspace in caps else "")
+            + ")"
+            for c in with_dead
+        ]
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(
-                f"{len(over_available)} queue(s) above "
-                f"{_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE} available and "
+                f"{len(over_available)} queue(s) above their available threshold and "
                 f"{len(with_dead)} queue(s) with a dead task: " + "; ".join(parts)
             ),
             fix_suggestions=[
@@ -8997,7 +9238,11 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
                 "nx tuple stats <subspace>",
             ],
         )]
-    detail = "; ".join(f"{c.subspace}: available={c.available} dead={c.dead}" for c in queues)
+    detail = "; ".join(
+        f"{c.subspace}: available={c.available} dead={c.dead}"
+        + (f" {delayed_note[c.subspace]}" if c.subspace in delayed_note else "")
+        for c in queues
+    )
     return [HealthResult(label=label, ok=True, detail=detail)]
 
 
@@ -9647,11 +9892,17 @@ def _check_embedding_profile() -> list[HealthResult]:
     dormant = _names("dormant")
     results.append(
         HealthResult(
-            label=_DORMANT_LABEL, ok=False,
-            detail=f"{len(dormant)} collection(s) referenced but empty: {_name_list(dormant)}",
+            # A warn, not a fail: the ghost sweep already marked these, which is the state this row reports
+            # (shakedown 7.89.0 class d: a red row nothing but a re-index or reference removal can clear).
+            label=_DORMANT_LABEL, ok=False, warn=True,
+            detail=(
+                f"{len(dormant)} dormant collection(s), referenced but empty "
+                f"(marked by the ghost sweep): {_name_list(dormant)}"
+            ),
             fix_suggestions=[
-                "referenced but empty: re-index it (nx collection reindex <name>) "
-                "or remove the references",
+                "referenced but empty: re-index it (nx collection reindex <name>), then "
+                "nx catalog sweep-ghosts --apply sets it live again (an engine before the "
+                "nexus-b0y6w sweep leaves it dormant), or remove the references",
             ],
         ) if dormant else HealthResult(label=_DORMANT_LABEL, ok=True, detail="none")
     )
@@ -11204,32 +11455,39 @@ _PDF_STUB_MAX_NAMED = 10
 _PDF_STUB_NO_URI = "content_hash "
 
 
-def _is_pdf_stub_metadata(meta: dict) -> bool:
-    """True when a PDF chunk still carries the streaming uploader's
-    placeholder metadata: empty title AND no ``extraction_method``.
+def _is_pdf_stub_metadata(meta: dict, *, document_has_method: bool) -> bool:
+    """True when a PDF chunk row still carries the streaming uploader's placeholder title (the engine
+    filter matches ``title == ""``) AND the document that owns it records no ``extraction_method`` in its
+    catalog ``meta`` -- the post-pass that fills both in never landed for that document.
 
-    Both halves are needed. A PDF chunk written before nexus-1oguj has no
-    ``extraction_method`` but has a title, and is healthy. ``normalize``
-    drops an empty ``extraction_method``, so absent and empty mean the same.
+    Both halves are needed. A PDF whose extractor returned no title has an empty title but a recorded
+    method, and is healthy. *document_has_method* is the OWNING document's own catalog fact
+    (nexus-6pfgb.16, RDR-236 Phase 2): the chunk row's ``extraction_method`` is the last writer's, so a
+    clean re-index of document B left the row saying "extracted" over a document A whose post-pass never
+    landed. A document indexed before nexus-6pfgb.6 has no method in its meta until
+    ``nx catalog backfill-meta`` (nexus-6pfgb.10) or its next index run, and is named here until then.
     """
-    return not meta.get("title") and not meta.get("extraction_method")
+    return not meta.get("title") and not document_has_method
 
 
 def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dict[str, int], bool]:
-    """Placeholder-metadata PDF chunks in one collection, keyed by source.
+    """Placeholder-metadata PDF chunks in one collection, keyed by owning document's source.
 
-    Returns ``(source -> chunk count, truncated)``. The source is the
-    catalog source URI, or ``"content_hash <prefix>"`` when the engine
-    resolves none. Since RDR-192 Step 5 (nexus-wbfpw.10) every chunk this
-    read returns has a live owner in its own collection -- a chunk with no
-    manifest row at all is invisible here, not merely unnamed -- so a null
-    source means the owning document was registered without a URI, never
-    "no manifest names this chunk"; a manifest-less stub is the RDR-192
-    reaper's business, not this check's. The engine filters on
-    ``content_type`` and the literal empty ``title`` the uploader writes;
-    ``extraction_method`` is checked here, because the vector bridge has no
-    absent-key predicate. Raises on a read failure; the caller names it.
+    Returns ``(source -> chunk count, truncated)``. The source is the owning document's catalog source
+    URI (its path when it has none), or ``"content_hash <prefix>"`` when it has neither. Since RDR-192
+    Step 5 (nexus-wbfpw.10) every chunk this read returns has a live owner in its own collection -- a
+    chunk with no manifest row at all is invisible here, not merely unnamed -- so a null source means
+    the owning document was registered without a URI, never "no manifest names this chunk"; a
+    manifest-less stub is the RDR-192 reaper's business, not this check's. The engine filters on
+    ``content_type`` and the literal empty ``title`` the uploader writes; whether the post-pass ran is
+    judged per OWNING document from its catalog ``meta`` (``extraction_method``), because the row's is
+    the last writer's and the vector bridge has no absent-key predicate. A chunk two documents hold is
+    counted under each document that records no method. One owner lookup per page; a catalog that
+    cannot be read raises, so the collection is reported as NOT CHECKED, never as clean. Raises on a
+    read failure; the caller names it.
     """
+    from nexus.catalog.store_hook import live_owner_entries  # noqa: PLC0415 — deferred to avoid circular import
+
     # Not get_collection(): that re-lists every collection in the tenant to
     # prove existence, one extra stats round trip per collection, and the
     # caller has just listed them.
@@ -11245,14 +11503,25 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
         )
         metas = page.get("metadatas") or []
         uris = page.get("source_uris") or []
+        ids = page.get("ids") or []
+        owners: dict[str, list] = {}
+        if metas:
+            looked_up = live_owner_entries(name, [c for c in ids if c])
+            if looked_up is None:
+                raise RuntimeError("the catalog could not be read, so no document's extraction record can be judged")
+            owners = looked_up
         for i, meta in enumerate(metas):
             meta = meta or {}
-            if not _is_pdf_stub_metadata(meta):
-                continue
-            source = (uris[i] if i < len(uris) else "") or (
-                _PDF_STUB_NO_URI + (str(meta.get("content_hash", ""))[:12] or "?")
-            )
-            stubs[source] = stubs.get(source, 0) + 1
+            chash = ids[i] if i < len(ids) else ""
+            for owner in owners.get(chash, []):
+                owner_meta = getattr(owner, "meta", None) or {}
+                if not _is_pdf_stub_metadata(meta, document_has_method=bool(owner_meta.get("extraction_method"))):
+                    continue
+                source = (
+                    getattr(owner, "source_uri", "") or getattr(owner, "file_path", "")
+                    or (uris[i] if i < len(uris) else "")
+                ) or (_PDF_STUB_NO_URI + (str(meta.get("content_hash", ""))[:12] or "?"))
+                stubs[source] = stubs.get(source, 0) + 1
         if len(metas) < page_size:
             return stubs, False
     # Every page was full. Truncated only if a row exists past the cap; an
@@ -12186,6 +12455,7 @@ def run_health_checks(
     results.extend(_check_leftover_docling_cache())  # RDR-237; not applicable without a cache
     results.extend(_check_installer_rebuild())
     results.extend(_check_mineru_server())
+    results.extend(_check_pdf_config())  # RDR-237; not applicable unless a [pdf] setting is unusable
     results.extend(_check_t2_schema_applied())
     results.extend(_check_t2_dropped_writes())
     # RDR-207 (bead nexus-l3yuc.10): informational; not applicable where no

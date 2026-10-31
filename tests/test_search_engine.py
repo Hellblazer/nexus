@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nexus.context_annotations import OWNER_QUALITY_KEY
 from nexus.formatters import format_json, format_vimgrep
 from nexus.scoring import (
     apply_hybrid_scoring,
@@ -140,7 +141,7 @@ def test_format_vimgrep():
     results = [
         SearchResult(id="1", content="    def authenticate(user, token):",
                      distance=0.1, collection="code__r",
-                     metadata={"source_path": "./auth.py", "line_start": 42}),
+                     metadata={"_display_path": "./auth.py", "line_start": 42}),
     ]
     lines = format_vimgrep(results)
     assert lines[0] == "./auth.py:42:0:    def authenticate(user, token):"
@@ -920,6 +921,131 @@ class TestAttachDocIdsFromCatalog:
             "Phase-3 chunk did NOT receive link boost. The attach helper "
             "did not inject doc_id, OR apply_link_boost regressed."
         )
+
+
+class TestFallbackOwnerChoice:
+    """nexus-6pfgb.52: the manifest fallback (engine without ``chash_positions``)
+    picks ONE owner for a chash several documents hold. The pick must not depend
+    on the lookup's order, must prefer a document homed in the hit's own
+    collection, and must cost no catalog call beyond the reverse lookup."""
+
+    CHASH = "d" * 64
+
+    @staticmethod
+    def _hit(collection: str = "docs__c", chash: str = CHASH, rid: str = "r") -> SearchResult:
+        return SearchResult(
+            id=rid, content="x", distance=0.1, collection=collection,
+            metadata={"chunk_text_hash": chash},
+        )
+
+    @staticmethod
+    def _catalog(
+        owners: list[str], homes: dict[str, str], chash: str = CHASH,
+        manifests: dict[str, list] | None = None,
+    ):
+        """A with-manifests catalog: ``homes`` maps doc_id -> the collection its
+        manifest row for the chash is stamped with. ``manifests`` replaces the
+        default one-row manifest for the documents it names."""
+        from nexus.catalog.types import ManifestRow
+        built = {
+            d: [ManifestRow(position=0, chash=chash, collection=homes[d])] for d in owners
+        }
+        built.update(manifests or {})
+        manifests = built
+
+        class _Cat:
+            calls: list[str] = []
+
+            def docs_and_manifests_for_chashes(self, chashes):
+                self.calls.append("docs_and_manifests_for_chashes")
+                return {chash: list(owners)}, manifests
+
+            def get_manifests(self, doc_ids):
+                self.calls.append("get_manifests")
+                return {}
+
+            def get_manifest(self, doc_id):
+                self.calls.append("get_manifest")
+                return []
+
+        cat = _Cat()
+        cat.calls = []
+        return cat
+
+    def test_choice_does_not_depend_on_lookup_order(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        picked = []
+        for order in (["1.1.9", "1.1.2"], ["1.1.2", "1.1.9"]):
+            catalog = MagicMock()
+            del catalog.docs_and_manifests_for_chashes
+            catalog.docs_for_chashes.return_value = {self.CHASH: order}
+            r = self._hit()
+            _attach_doc_ids_from_catalog([r], catalog=catalog)
+            picked.append(r.metadata["doc_id"])
+            assert r.metadata["_owner_doc_ids"] == order, "every owner kept, in lookup order"
+            assert r.metadata["_doc_id_inferred"] is True
+        assert picked == ["1.1.2", "1.1.2"]
+
+    def test_prefers_owner_homed_in_the_hits_collection(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        # 1.1.2 sorts first but lives in another collection; 1.1.9 is the hit's own.
+        for order in (["1.1.2", "1.1.9"], ["1.1.9", "1.1.2"]):
+            cat = self._catalog(order, {"1.1.2": "docs__other", "1.1.9": "docs__c"})
+            r = self._hit("docs__c")
+            _attach_doc_ids_from_catalog([r], catalog=cat)
+            assert r.metadata["doc_id"] == "1.1.9", order
+            assert r.metadata["_owner_doc_ids"] == order
+            assert r.metadata["_doc_id_inferred"] is True
+            assert r.metadata["chunk_count"] == 1
+
+    def test_each_hit_takes_the_owner_of_its_own_collection(self):
+        """One chash seen in two collections: each hit resolves its own owner, not
+        the first hit's (the choice was once keyed by chash alone)."""
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        from nexus.catalog.types import ManifestRow
+        from nexus.search_engine import OWNER_CHUNK_COUNT_KEY
+        # 1.1.9 is a three-row document holding the chash at position 1: the
+        # re-key from chash to result index shows in the per-hit count and index
+        # (a chash-keyed choice stamps hit a with 1.1.9's 3 and 1).
+        three_rows = [
+            ManifestRow(position=0, chash="p" * 64, collection="docs__b"),
+            ManifestRow(position=1, chash=self.CHASH, collection="docs__b"),
+            ManifestRow(position=2, chash="q" * 64, collection="docs__b"),
+        ]
+        cat = self._catalog(
+            ["1.1.2", "1.1.9"], {"1.1.2": "docs__a", "1.1.9": "docs__b"},
+            manifests={"1.1.9": three_rows},
+        )
+        in_a, in_b = self._hit("docs__a", rid="ra"), self._hit("docs__b", rid="rb")
+        _attach_doc_ids_from_catalog([in_a, in_b], catalog=cat)
+        assert (in_a.metadata["doc_id"], in_b.metadata["doc_id"]) == ("1.1.2", "1.1.9")
+        got = [
+            (r.metadata["chunk_count"], r.metadata["chunk_index"], r.metadata[OWNER_CHUNK_COUNT_KEY])
+            for r in (in_a, in_b)
+        ]
+        assert got == [(1, 0, 1), (3, 1, 3)]
+
+    def test_no_owner_in_the_hits_collection_falls_back_to_smallest(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        cat = self._catalog(["1.1.9", "1.1.2"], {"1.1.2": "docs__x", "1.1.9": "docs__y"})
+        r = self._hit("docs__c")
+        _attach_doc_ids_from_catalog([r], catalog=cat)
+        assert r.metadata["doc_id"] == "1.1.2"
+
+    def test_no_catalog_call_beyond_the_reverse_lookup(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        cat = self._catalog(["1.1.2", "1.1.9"], {"1.1.2": "docs__other", "1.1.9": "docs__c"})
+        _attach_doc_ids_from_catalog([self._hit("docs__c")], catalog=cat)
+        assert cat.calls == ["docs_and_manifests_for_chashes"]
+
+    def test_a_row_that_named_its_owner_keeps_it(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        cat = self._catalog(["1.1.2", "1.1.9"], {"1.1.2": "docs__c", "1.1.9": "docs__c"})
+        r = self._hit("docs__c")
+        r.metadata["doc_id"] = "1.1.9"
+        _attach_doc_ids_from_catalog([r], catalog=cat)
+        assert r.metadata["doc_id"] == "1.1.9"
+        assert "_doc_id_inferred" not in r.metadata
 
 
 # ── Per-collection error isolation (nexus-pebfx.8) ──────────────────────────
@@ -2259,7 +2385,8 @@ class TestApplyRankingBoosts:
             SearchResult(
                 id="highly_cited", content="b", distance=0.15,
                 collection="knowledge__r",
-                metadata={"bib_citation_count": 5000, "bib_year": "2024"},
+                # nexus-6pfgb.12: the owning document's citations, as _attach_display_paths stamps them
+                metadata={OWNER_QUALITY_KEY: {"bib_citation_count": 5000, "bib_year": 2024}},
             ),
         ]
         out = apply_ranking_boosts(results, hybrid=False)
@@ -2458,7 +2585,7 @@ class TestBoostWindow:
     def test_cap_with_window_keeps_window_overflow_ahead_of_the_tail(self):
         def r(i, f):
             return SearchResult(id=i, content="x", distance=0.1, collection="code__t",
-                                metadata={"source_path": f})
+                                metadata={"doc_id": f})
 
         rows = [r("a1", "A"), r("a2", "A"), r("a3", "A"), r("b1", "B"), r("c1", "C")]
         assert [x.id for x in apply_file_diversity_cap(rows)] == ["a1", "a2", "b1", "c1", "a3"]
@@ -2493,8 +2620,10 @@ class TestBoostWindow:
 class TestApplyFileDiversityCap:
     def _r(self, *, id: str, doc_id: str | None = None,
            source_path: str | None = None, file_path: str | None = None,
-           dist: float = 0.1) -> SearchResult:
+           display_path: str | None = None, dist: float = 0.1) -> SearchResult:
         meta: dict = {}
+        if display_path is not None:
+            meta["_display_path"] = display_path
         if doc_id is not None:
             meta["doc_id"] = doc_id
         if source_path is not None:
@@ -2518,17 +2647,24 @@ class TestApplyFileDiversityCap:
         # first 2 occurrences kept in place; the rest pushed to the tail.
         assert [r.id for r in out] == ["0", "1", "2", "3"]
 
-    def test_falls_back_to_source_path_when_no_doc_id(self):
-        results = [self._r(id=str(i), source_path="a.py") for i in range(3)]
-        out = apply_file_diversity_cap(results, max_per_file=2)
-        # 3rd occurrence (no doc_id, same source_path) is overflow -> tail.
-        assert [r.id for r in out] == ["0", "1", "2"]
+    def test_a_display_path_without_a_doc_id_is_not_a_file_identity(self):
+        """nexus-6pfgb.56: ``_attach_display_paths`` sets ``_display_path`` only for a hit that has a doc_id,
+        and the cap reads doc_id first, so a ``_display_path`` is never the winning key. A hit that has one
+        without a doc_id is a state the producer cannot emit; it keys on its own id like any other."""
+        a1, a2 = self._r(id="a1", display_path="a.py"), self._r(id="a2", display_path="a.py")
+        b = self._r(id="b", display_path="b.py")
+        out = apply_file_diversity_cap([a1, a2, b], max_per_file=1)
+        assert [r.id for r in out] == ["a1", "a2", "b"]
 
-    def test_falls_back_to_file_path_when_no_doc_id_or_source_path(self):
-        results = [self._r(id=str(i), file_path="a.py") for i in range(3)]
-        out = apply_file_diversity_cap(results, max_per_file=2)
-        assert [r.id for r in out] == ["0", "1", "2"]
-        assert out[-1].id == "2"  # 3rd occurrence pushed to the tail
+    def test_a_stale_row_path_is_never_a_file_identity(self):
+        """nexus-6pfgb.56: a row's ``source_path`` (the last writer's file) and the legacy ``file_path``
+        key no writer leaves group nothing. Three same-path rows stay in order; capped as one file the
+        second would drop behind ``b``."""
+        for key in ("source_path", "file_path"):
+            a1, a2 = self._r(id="a1", **{key: "a.py"}), self._r(id="a2", **{key: "a.py"})
+            b = self._r(id="b")
+            out = apply_file_diversity_cap([a1, a2, b], max_per_file=1)
+            assert [r.id for r in out] == ["a1", "a2", "b"], key
 
     def test_no_file_identity_never_caps_against_each_other(self):
         """Results with no doc_id/source_path/file_path fall back to
