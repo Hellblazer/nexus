@@ -102,8 +102,7 @@ def test_step_10_runs_the_app_sequence_in_order_for_a_path_run() -> None:
     s10 = step(10)
     before(s10, "REVIEW render", "get_document", "`from` 0", "`BLOCKS=` path", "REVIEW translate", "propose_edits",
            "`PROPOSED=` path", "REVIEW proposed", "Tell the author to accept or reject each suggestion in the app")
-    assert "`next`" in s10 and "`limit`" in s10  # paged
-    assert "every page in order as one JSON list" in s10  # the shape _load_blocks takes
+    assert "`next`" in s10  # paged
     assert "--blocks-file '<blocks>'" in s10 and "--from-file '<proposed>'" in s10
     assert "When `sent` is 0 skip" in s10  # no propose_edits call and no `proposed`
     assert "copied whole and unchanged" in s10
@@ -157,14 +156,48 @@ def test_step_11_keeps_the_stdin_runs_numbered_review() -> None:
     assert "groups of 2 to 4" in s11 and "more than 16" in s11
 
 
-def test_step_12_uses_the_apply_args_then_returns_the_app_to_the_file() -> None:
+def clean_buffer() -> str:
+    """The paragraph of step 12 that undoes the app's unsaved changes before the real apply writes the file."""
+    s12 = step(12)
+    return s12[s12.index("    Before the real apply"):s12.index("    On exit 1 with `--accept`")]
+
+
+def test_step_12_uses_the_apply_args_cleans_the_app_buffer_then_applies_then_reopens() -> None:
+    """Defect 3: a file written under the app's unsaved changes raises its changed-on-disk dialog, so undo comes first."""
     s12 = step(12)
     assert "`apply_args` that `REVIEW decisions` printed" in s12
-    before(s12, "--dry-run", "Apply these changes?", "without `--dry-run`",
-           "MarkupEditor undo tool", "`hasChanges` is false", "open_document tool on the document again", "Don't Save")
-    assert "accepted + rejected + 3" in s12 and "accepted and rejected in the app" in s12
+    first = s12[:s12.index("    Before the real apply")]
+    before(first, "--dry-run", "Apply these changes?", 'When the author picks "Apply"', "Before the real apply",
+           "without `--dry-run`")
+    before(s12, "Before the real apply", "MarkupEditor undo tool", "`hasChanges` is false", "Only then run the same command",
+           "open_document tool on the document again", "Don't Save")
+    cb = clean_buffer()
+    before(cb, "decisions are already read", "app_state", "MarkupEditor undo tool", "`hasChanges` is false",
+           "Only then run the same command without `--dry-run`")
+    assert "accepted + rejected + 3" in cb and "accepted and rejected in the app" in cb
     assert "app_state tool as in step 6b" in s12
     assert "after a successful apply, after \"Cancel\"" in s12
+
+
+def test_the_clean_buffer_paragraph_says_why_and_keeps_the_dry_run_gate() -> None:
+    cb = clean_buffer()
+    for needle in ("changed on disk", "Reload from Disk", "Keep My Changes", "unsaved changes", "stalls",
+                   "does not report", "dry run still holds", "does not touch the file", "that sent suggestions", ONE_SERVER):
+        assert needle in cb, needle
+
+
+def test_a_buffer_that_does_not_clear_still_goes_on_to_the_apply_and_names_the_dialog() -> None:
+    cb = clean_buffer()
+    assert "did not clear" in cb and "go on all the same" in cb and "dialog" in cb
+
+
+def test_the_fallback_sends_the_author_to_reload_from_disk_never_keep_my_changes() -> None:
+    cp = closing()
+    fallback = cp[cp.index("Resource temporarily unavailable"):]
+    for needle in ("connection", "changed-on-disk dialog", "does not report", '"Reload from Disk"', 'never "Keep My Changes"',
+                   "holds every applied edit"):
+        assert needle in fallback, needle
+    assert cp.index("open_document tool on the document again") < cp.index("Resource temporarily unavailable")
 
 
 def test_the_answer_route_does_not_read_the_app_again() -> None:
@@ -241,8 +274,8 @@ def test_a_save_prompt_is_answered_before_the_retry_offer_when_the_polls_run_out
 
 def test_the_closing_url_check_treats_private_and_symlinks_as_the_same_file() -> None:
     """G2c gap 2: without 6b's rule a /var or symlinked path skips undo and tells the author a false thing."""
-    s12 = step(12)
-    check = s12[s12.index("First call the app_state tool."):s12.index("do not call the undo tool")]
+    check = clean_buffer()
+    check = check[check.index("First call the app_state tool."):check.index("do not call the undo tool")]
     assert "`/private` prefix or a symbolic link is the same file" in check, check
 
 
@@ -307,11 +340,14 @@ def test_6b_refuses_html_before_it_opens_anything() -> None:
 
 def test_the_closing_paragraph_reads_app_state_first_and_skips_undo_for_another_file() -> None:
     """S2c and S3: undo also undoes the author's own changes, and in another document."""
+    cb = clean_buffer()
+    before(cb, "app_state", "`url`", "not the document", "do not call the undo tool", "undo tool")
+    assert "accepted + rejected + 3" in cb
+    assert "at most as many times as the author accepted in the app plus 3" not in cb
+    assert "when `hasChanges` is already false" in cb or "`hasChanges` is already false" in cb
     cp = closing()
-    before(cp, "app_state", "`url`", "not the document", "do not call the undo tool", "undo tool")
-    assert "accepted + rejected + 3" in cp
-    assert "at most as many times as the author accepted in the app plus 3" not in cp
-    assert "when `hasChanges` is already false" in cp or "`hasChanges` is already false" in cp
+    before(cp, "app_state", "`url`", "not the document", "do not call the open_document tool", "open_document tool on")
+    assert "undo tool" not in cp.split("Resource temporarily unavailable")[0].split("After any real apply")[1]  # the reopen only
 
 
 def test_the_closing_paragraph_says_dont_save_at_the_reopen_where_the_prompt_appears() -> None:
@@ -327,19 +363,53 @@ def test_the_closing_paragraph_reopens_after_any_real_apply_but_undoes_only_what
     """F3: apply writes the file while the app shows the old text; that holds with sent 0 and for chat-only accepts."""
     cp = closing()
     assert "any real apply" in cp and "whether or not suggestions were sent" in cp
-    assert "undo only when suggestions were sent" in cp or "Undo only when suggestions were sent" in cp
+    assert "only when suggestions were sent" in cp
+    assert "buffer is already clean" in cp  # a successful apply has nothing left to undo
     assert "`sent` 0" in cp
 
 
 def test_a_stale_get_document_read_tells_the_model_to_open_the_file_again() -> None:
     """Review S3: a url mismatch must end in open_document, not in a stopped turn."""
-    item1 = step(10)[step(10).index("1. Call the MarkupEditor get_document"):step(10).index("2. Run `REVIEW translate")]
-    assert "open_document" in item1 and "step 6b" in item1
+    item = item1()
+    assert "open_document" in item and "step 6b" in item
 
 
-def test_get_document_pages_are_about_40_blocks_and_a_saved_reply_is_copied_as_a_file() -> None:
-    """S5: a 200-block page does not stay inline; the saved file is copied, never retyped."""
-    item1 = step(10)[step(10).index("1. Call the MarkupEditor get_document"):step(10).index("2. Run `REVIEW translate")]
-    assert "`limit` 40" in item1 and "`limit` 200" not in TEXT
-    assert "saves a reply to a file" in item1 and "`cp '<saved file>' '<blocks>'`" in item1
-    assert "a file copy" in item1
+def item1() -> str:
+    return step(10)[step(10).index("1. Call the MarkupEditor get_document"):step(10).index("2. Run `REVIEW translate")]
+
+
+def test_get_document_is_called_with_no_limit_and_paged_by_next() -> None:
+    """Defect 1: `limit` is the most characters of block Markdown a reply holds (default 100000), not a block count."""
+    item = item1()
+    assert "`limit` 40" not in TEXT and "`limit` 200" not in TEXT
+    before(item, "`from` 0", "no `limit`", "characters", "`from` set to the reply's `next`", "until a reply has no `next`")
+    assert "not blocks" in item or "not a count of blocks" in item
+
+
+def test_every_page_goes_to_its_own_file_and_translate_takes_one_blocks_file_each() -> None:
+    """Defect 2: no page is retyped or merged by the model; page 1 is the BLOCKS= path, the others sit beside it."""
+    item = item1()
+    assert "one JSON list" not in item and "read each saved page" not in item
+    before(item, "`BLOCKS=` path", "`<work>/blocks-2.json`", "`<work>/blocks-3.json`")
+    assert "`cp '<saved file>' '<blocks>'`" in item and "`cp '<saved file>' '<work>/blocks-2.json'`" in item
+    assert "saves a reply to a file" in item and "a file copy" in item
+    assert "Write" in item and "short" in item  # a reply that stays inline is Written, page by page
+    s10 = step(10)
+    translate = s10[s10.index("2. Run `REVIEW translate"):s10.index("3. When `sent` is 0")]
+    before(translate, "--blocks-file '<blocks>'", "one `--blocks-file` for each further page", "in order",
+           "--blocks-file '<work>/blocks-2.json'")
+
+
+def test_the_page_files_are_named_as_an_exception_to_the_no_invented_paths_rule() -> None:
+    s5 = step(5)
+    assert "blocks-2.json" in s5 and "page" in s5 and "`BLOCKS=`" in s5
+
+
+def test_the_script_takes_blocks_file_once_for_each_page() -> None:
+    parser = REVIEW.read_text(encoding="utf-8")
+    assert re.search(r'add_argument\("--blocks-file",[^)]*action="append"', parser, re.DOTALL)
+
+
+def test_a_page_with_a_changed_buffer_or_another_url_ends_the_turn_for_any_page() -> None:
+    item = item1()
+    assert "If a reply says `hasChanges` is true" in item and "If its `url` is not the document" in item

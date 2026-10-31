@@ -55,5 +55,10 @@ def test_list_suggestions_holds_ids_this_run_did_not_propose() -> None:
 
 def test_notes_answer_each_question_the_plan_asked() -> None:
     notes = (FIXTURES / "NOTES.md").read_text(encoding="utf-8")
-    for label in ("a. **Key names", "b. **Locating", "c. **Reply size", "d. **Saving", "e. **Suggestion ids", "f. **open_document"):
+    for label in ("a. **Key names", "b. **Locating", "c. **Reply size", "d. **Saving", "e. **Suggestion ids", "f. **open_document",
+                  "h. **The changed-on-disk dialog"):
         assert label in notes
+    dialog = notes[notes.index("h. **The changed-on-disk dialog"):]
+    for needle in ("Reload from Disk", "Keep My Changes", "Resource temporarily unavailable", "`modalWindow`", "BEFORE the real apply"):
+        assert needle in dialog, needle
+    assert "saves a large reply to a file" in notes and "not a block count" in notes

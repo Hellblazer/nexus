@@ -10,13 +10,14 @@ to stderr with exit 1; memory.py's exit code 3 (T2 unavailable) passes through.
   review.py render TARGET --work WORK [--file F] [--genre G]
   review.py apply --work WORK [--accept SPEC] [--hold SPEC] [--reject SPEC] [--reasons-file F] [--reason N=TEXT]... [--dry-run]
   review.py log-retry --work WORK
-  review.py translate --work WORK --blocks-file F
+  review.py translate --work WORK --blocks-file F [--blocks-file F2 ...]
   review.py proposed --work WORK --from-file F
   review.py decisions --work WORK [--from-file F] [--accept SPEC] [--reject SPEC] [--hold SPEC]
 
 The MarkupEditor review (nexus-scmcs.2): the author decides in the app's suggestions and never saves there, so
 `apply` stays the only writer of the document, the only store of rejections and the only session logger. `translate`
-reads get_document's blocks (F, written inside WORK) and writes WORK/propose.json, the payload of one propose_edits
+reads get_document's blocks (F, written inside WORK; a long document's pages are one --blocks-file each, in order, and
+must join up: each page's `next` is the next page's first block) and writes WORK/propose.json, the payload of one propose_edits
 call plus the refused edits (cause: not-found, ambiguous, formatting, code-block, metadata, spans-lines, no-change);
 it prints {edits, sent, refused}. `proposed` reads propose_edits' reply (F), checks it holds one result per edit
 sent, and writes WORK/suggestions.json (edit number, suggestion id, find, replace) and adds the app's refusals
@@ -804,49 +805,66 @@ def _same_file(url: str, expected: Path) -> bool:
     return os.path.realpath(url) == os.path.realpath(expected)
 
 
-def _load_blocks(raw: str, work: Path, target: Path) -> list[Obj]:
+def _load_blocks(raws: list[str], work: Path, target: Path) -> list[Obj]:
     """The blocks of get_document's reply: one reply, or the pages of a long document one after another.
+
+    `raws` are the --blocks-file paths in page order (the skill copies each page the harness saved to its own file);
+    a file holds one reply or a JSON list of replies, and the pages of every file are joined in the order given.
 
     The blocks must be the whole of THIS run's document, unchanged: `translate` claims an old text occurs exactly
     once in them. So the read is refused when a page says the buffer has unsaved changes, when `url` is not `target`
-    (open_document can report "Opened" while the previous document is still shown), when the last page still has
-    `next` (the reply was cut), or when the block indexes are not contiguous from 0 or `firstEditable`.
+    (open_document can report "Opened" while the previous document is still shown), when a page's `next` is not the
+    first block of the page that follows it (gaps, overlaps, pages out of order), when the last page still has `next`
+    (the reply was cut), or when the block indexes are not contiguous from 0 or `firstEditable`.
     """
-    path = _work_input(raw, work, "--blocks-file")
-    value = _read_json_value(path, "--blocks-file", raw, "the blocks")
-    pages = value if isinstance(value, list) and value and all(isinstance(v, dict) and "blocks" in v for v in value) \
-        else [value]
+    pages: list[Any] = []
+    for raw in raws:
+        path = _work_input(raw, work, "--blocks-file")
+        value = _read_json_value(path, "--blocks-file", raw, "the blocks")
+        pages.extend(value if isinstance(value, list) and value and all(isinstance(v, dict) and "blocks" in v for v in value)
+                     else [value])
     blocks: list[Obj] = []
-    for page in pages:
+    by_page: list[list[Obj]] = []
+    for number, page in enumerate(pages, start=1):
+        at = f" (page {number} of {len(pages)})" if len(pages) > 1 else ""
         if not isinstance(page, dict):
             raise _user("--blocks-file: expected get_document's reply, with a `blocks` list, `url` and `hasChanges`")
         if page.get("view") == "source":
-            raise _user("--blocks-file: the app is in its source view, which has no blocks; "
+            raise _user(f"--blocks-file: the app is in its source view{at}, which has no blocks; "
                         "ask the author to switch back to the document view, then read the document again")
         items = page.get("blocks")
         if not isinstance(items, list):
             raise _user("--blocks-file: expected get_document's reply, with a `blocks` list")
         if page.get("hasChanges") is True:
-            raise _user("--blocks-file: the app's buffer has unsaved changes (hasChanges is true), so these blocks are "
-                        "not the file's text; undo the changes or reopen the file, then read the document again")
+            raise _user(f"--blocks-file: the app's buffer has unsaved changes{at} (hasChanges is true), so these blocks "
+                        "are not the file's text; undo the changes or reopen the file, then read the document again")
         url = page.get("url")
         if not isinstance(url, str) or not url:
-            raise _user("--blocks-file: the reply names no `url`, so it cannot be checked against this run's file; "
+            raise _user(f"--blocks-file: the reply{at} names no `url`, so it cannot be checked against this run's file; "
                         "write get_document's reply as it came back")
         if not _same_file(url, target):
-            raise _user(f"--blocks-file: the app shows {url}, not this run's file {target} (url); open the file, wait "
+            raise _user(f"--blocks-file: the app shows {url}{at}, not this run's file {target} (url); open the file, wait "
                         "until app_state's url is the file's and modalWindow is empty, then read the document again")
+        if not items:
+            raise _user(f"--blocks-file: the reply{at} holds no blocks")
+        for b in items:
+            if (not isinstance(b, dict) or not isinstance(b.get("index"), int) or not isinstance(b.get("hash"), str)
+                    or not isinstance(b.get("markdown"), str)):
+                raise _user(f"--blocks-file: every block{at} needs an integer index, a hash and its markdown")
+        by_page.append(cast("list[Obj]", items))
         blocks.extend(cast("list[Obj]", items))
     if not blocks:
         raise _user("--blocks-file: the reply holds no blocks")
     if pages[-1].get("next") is not None:
         raise _user(f"--blocks-file: the last page still has `next` ({pages[-1]['next']}): the reply was cut short, so "
-                    "blocks are missing; read on from `next` and put every page in the file")
+                    "blocks are missing; read on from `next` and give every page, one --blocks-file each, in order")
+    for number, (page, following) in enumerate(zip(pages, by_page[1:]), start=1):
+        if page.get("next") != following[0]["index"]:
+            raise _user(f"--blocks-file: the pages are not contiguous: page {number} says `next` is {page.get('next')} but "
+                        f"page {number + 1} starts at block {following[0]['index']}; give the pages in order, each read "
+                        "from the previous page's `next`, none twice and none missing")
     seen: set[int] = set()
     for b in blocks:
-        if (not isinstance(b, dict) or not isinstance(b.get("index"), int) or not isinstance(b.get("hash"), str)
-                or not isinstance(b.get("markdown"), str)):
-            raise _user("--blocks-file: every block needs an integer index, a hash and its markdown")
         if b["index"] in seen:
             raise _user(f"--blocks-file: block {b['index']} appears twice (pages that overlap)")
         seen.add(b["index"])
@@ -856,7 +874,7 @@ def _load_blocks(raw: str, work: Path, target: Path) -> list[Obj]:
     if indexes[0] not in starts or any(y != x + 1 for x, y in zip(indexes, indexes[1:])):
         raise _user(f"--blocks-file: the block indexes are not contiguous from {' or '.join(str(x) for x in sorted(starts))} "
                     f"(they run {indexes[:6]}{'...' if len(indexes) > 6 else ''}): blocks are missing or out of order; "
-                    "read the whole document and put every page in the file in order")
+                    "read the whole document and give every page, one --blocks-file each, in order")
     return blocks
 
 
@@ -1248,8 +1266,8 @@ def _parser() -> argparse.ArgumentParser:
                     help='a JSON list [{"answers": "Q4", "old": "...", "new": "..."}] inside WORK (written with Write)')
     tr = sub.add_parser("translate", help="turn the placed edits into one propose_edits payload")
     tr.add_argument("--work", required=True)
-    tr.add_argument("--blocks-file", required=True, metavar="FILE",
-                    help="get_document's reply, written with Write to the BLOCKS= path")
+    tr.add_argument("--blocks-file", required=True, action="append", metavar="FILE",
+                    help="get_document's reply, written to the BLOCKS= path; once more for each further page, in order")
     pr = sub.add_parser("proposed", help="record the app's reply to propose_edits")
     pr.add_argument("--work", required=True)
     pr.add_argument("--from-file", required=True, metavar="FILE",

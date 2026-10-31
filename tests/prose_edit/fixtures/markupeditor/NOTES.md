@@ -29,8 +29,13 @@ b. **Locating edits.**
    - The app rewrites list markers (`-` becomes `*`) and table rules (`|---|` becomes
      `| --- |`) in its Markdown.
    - Curly quotes come back as typed.
-c. **Reply size.** The harness does not save a get_document reply to a file. The model has
-   to copy it with Write. Use `from` and `limit` to read only the blocks that hold edits.
+c. **Reply size.** `limit` is the most characters of block Markdown a get_document reply
+   holds (default 100000), not a block count; `next` is the block index to pass as `from`.
+   Read with `from` 0, no `limit`, then `from` = `next`. A short document comes back inline.
+   A long one comes back in pages (the trial's 183-block document: two pages, about 190K
+   characters) and the harness saves a large reply to a file instead of showing it
+   (hand trial 2026-10-31), so the skill copies each saved page to its own file and
+   `REVIEW translate` takes one `--blocks-file` for each.
 d. **Saving from the app rewrites the whole file.** Saving after one accepted four-word edit
    on a copy of docs/collections.md took it from 226 lines to 98: every paragraph unwrapped,
    table rules and list markers rewritten, the final newline dropped. A pending suggestion
@@ -59,3 +64,13 @@ f. **open_document reports too early.** It replied "Opened" while the app was st
    after the reply even with no prompt: a get_document sent straight after "Opened" returned
    the previous document. Before calling get_document, poll app_state until `url` is the
    target and `modalWindow` is empty.
+h. **The changed-on-disk dialog.** When the file changes under a buffer with unsaved changes,
+   the app raises its own dialog, "<file> changed on disk. This document has unsaved changes.
+   Reloading will discard them.", with "Reload from Disk" and "Keep My Changes" (hand trial
+   2026-10-31). The accepted suggestions are those unsaved changes. While the dialog is up the
+   Assistants connection stalls (app_state errors "Resource temporarily unavailable", then the
+   connection closes) and app_state does not report it as `modalWindow`. With a clean buffer the
+   app reloaded without a dialog. **Consequence:** the skill undoes in the app until `hasChanges`
+   is false BEFORE the real apply writes the file (the dry run hashes the file, which undo does
+   not touch), then reopens it; if app_state fails after apply, the author chooses "Reload from
+   Disk", never "Keep My Changes".

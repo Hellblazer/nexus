@@ -267,6 +267,118 @@ def test_pages_that_leave_a_gap_between_them_are_refused(prose: Prose, repo: Pat
                                            {**w, "blocks": w["blocks"][3:]}], "contiguous")
 
 
+# ---------------------------------------------------------------------------
+# One --blocks-file for each page of a long document (nexus-scmcs.2.17, defect 2)
+# ---------------------------------------------------------------------------
+
+
+def two_pages(repo: Path, cut: int = 3) -> tuple[dict, dict]:
+    """get_document's two pages of TEXT: the first cut at block `cut`, which its `next` names."""
+    whole = app_blocks(TEXT, target_url(repo))
+    return {**whole, "blocks": whole["blocks"][:cut], "next": cut}, {**whole, "blocks": whole["blocks"][cut:]}
+
+
+def translate_pages(prose: Prose, work: Path, *pages: object):
+    """`translate` with one --blocks-file for each page, written inside WORK as blocks.json, blocks-2.json, ..."""
+    argv: list[str] = []
+    for i, page in enumerate(pages, start=1):
+        name = "blocks.json" if i == 1 else f"blocks-{i}.json"
+        argv += ["--blocks-file", str(write_json(work / name, page))]
+    return run_review(prose, "translate", "--work", str(work), *argv)
+
+
+def refused_pages(prose: Prose, repo: Path, mutate, needle: str) -> None:
+    """Pages broken by `mutate(first, second)`, one file each, are refused naming `needle`; nothing is written."""
+    work, _ = start(prose, repo, EDITS, text=TEXT)
+    proc = translate_pages(prose, work, *mutate(*two_pages(repo)))
+    assert proc.returncode == 1, proc.stdout
+    assert needle in proc.stderr, proc.stderr
+    assert not (work / "propose.json").exists()
+
+
+def test_one_blocks_file_for_each_page_merges_them_in_order(prose: Prose, repo: Path) -> None:
+    work, _ = start(prose, repo, EDITS, text=TEXT)
+    proc = translate_pages(prose, work, *two_pages(repo))
+    assert proc.returncode == 0, proc.stderr
+    paged = json.loads(proc.stdout)
+    whole = review_ok(prose, "translate", "--work", str(work), "--blocks-file",
+                      str(write_json(work / "blocks.json", app_blocks(TEXT, target_url(repo)))))
+    assert paged["sent"] == whole["sent"] == 4 and paged["edits"] == whole["edits"]  # non-vacuity: edits cross the cut
+    assert paged["refused"] == whole["refused"]
+
+
+def test_three_pages_in_three_files_merge(prose: Prose, repo: Path) -> None:
+    work, _ = start(prose, repo, EDITS, text=TEXT)
+    whole = app_blocks(TEXT, target_url(repo))
+    pages = [{**whole, "blocks": whole["blocks"][:2], "next": 2}, {**whole, "blocks": whole["blocks"][2:5], "next": 5},
+             {**whole, "blocks": whole["blocks"][5:]}]
+    proc = translate_pages(prose, work, *pages)
+    assert proc.returncode == 0 and json.loads(proc.stdout)["sent"] == 4, proc.stderr
+
+
+def test_a_file_holding_a_list_of_replies_is_still_accepted_beside_another_file(prose: Prose, repo: Path) -> None:
+    work, _ = start(prose, repo, EDITS, text=TEXT)
+    whole = app_blocks(TEXT, target_url(repo))
+    first = [{**whole, "blocks": whole["blocks"][:2], "next": 2}, {**whole, "blocks": whole["blocks"][2:4], "next": 4}]
+    proc = translate_pages(prose, work, first, {**whole, "blocks": whole["blocks"][4:]})
+    assert proc.returncode == 0 and json.loads(proc.stdout)["sent"] == 4, proc.stderr
+
+
+def test_pages_given_out_of_order_are_refused(prose: Prose, repo: Path) -> None:
+    refused_pages(prose, repo, lambda a, b: (b, a), "next")
+
+
+def test_a_first_page_whose_next_is_not_the_second_pages_first_block_is_refused(prose: Prose, repo: Path) -> None:
+    refused_pages(prose, repo, lambda a, b: ({**a, "next": 2}, b), "contiguous")  # overlap: block 2 comes twice
+    refused_pages(prose, repo, lambda a, b: ({**a, "next": 4}, b), "contiguous")  # gap: block 3 is claimed missing
+
+
+def test_a_second_page_that_starts_after_the_first_pages_next_is_refused(prose: Prose, repo: Path) -> None:
+    refused_pages(prose, repo, lambda a, b: (a, {**b, "blocks": b["blocks"][1:]}), "contiguous")
+
+
+def test_a_page_with_no_next_followed_by_another_page_is_refused(prose: Prose, repo: Path) -> None:
+    refused_pages(prose, repo, lambda a, b: ({k: v for k, v in a.items() if k != "next"}, b), "next")
+
+
+def test_the_same_page_given_twice_is_refused(prose: Prose, repo: Path) -> None:
+    refused_pages(prose, repo, lambda a, b: (a, a, b), "contiguous")
+
+
+def test_a_last_page_file_that_still_has_next_is_refused(prose: Prose, repo: Path) -> None:
+    refused_pages(prose, repo, lambda a, b: (a, {**b, "blocks": b["blocks"][:1], "next": 4}), "next")
+
+
+def test_the_second_page_is_checked_for_url_has_changes_and_the_source_view(prose: Prose, repo: Path) -> None:
+    refused_pages(prose, repo, lambda a, b: (a, {**b, "url": str(repo / "docs" / "other.md")}), "url")
+    refused_pages(prose, repo, lambda a, b: (a, {k: v for k, v in b.items() if k != "url"}), "url")
+    refused_pages(prose, repo, lambda a, b: (a, {**b, "hasChanges": True}), "hasChanges")
+    refused_pages(prose, repo, lambda a, b: (a, {**b, "view": "source"}), "source view")
+
+
+def test_the_first_page_is_checked_when_the_second_is_clean(prose: Prose, repo: Path) -> None:
+    refused_pages(prose, repo, lambda a, b: ({**a, "hasChanges": True}, b), "hasChanges")
+    refused_pages(prose, repo, lambda a, b: ({**a, "url": str(repo / "docs" / "other.md")}, b), "url")
+
+
+def test_a_second_page_with_a_block_that_has_no_hash_or_an_empty_list_is_refused(prose: Prose, repo: Path) -> None:
+    refused_pages(prose, repo, lambda a, b: (a, {**b, "blocks": [{"index": 3, "markdown": "x"}, *b["blocks"][1:]]}), "hash")
+    refused_pages(prose, repo, lambda a, b: (a, {**b, "blocks": []}), "holds no blocks")
+
+
+def test_a_page_file_outside_the_work_directory_or_unreadable_is_refused(prose: Prose, repo: Path) -> None:
+    work, _ = start(prose, repo, EDITS, text=TEXT)
+    first, second = two_pages(repo)
+    outside = write_json(prose.tmp / "blocks-2.json", second)
+    proc = run_review(prose, "translate", "--work", str(work), "--blocks-file", str(write_json(work / "blocks.json", first)),
+                      "--blocks-file", str(outside))
+    assert proc.returncode == 1 and "work" in proc.stderr and not (work / "propose.json").exists()
+    (work / "blocks-2.json").write_text("{not json", encoding="utf-8")
+    proc = run_review(prose, "translate", "--work", str(work), "--blocks-file", str(work / "blocks.json"),
+                      "--blocks-file", str(work / "blocks-2.json"))
+    assert proc.returncode == 1 and "blocks-2.json" in proc.stderr and not (work / "propose.json").exists()
+
+
 def test_a_buffer_with_unsaved_changes_is_refused(prose: Prose, repo: Path) -> None:
     refused_blocks(prose, repo, lambda w: {**w, "hasChanges": True}, "hasChanges")
 

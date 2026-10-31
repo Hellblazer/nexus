@@ -48,6 +48,21 @@ def test_the_real_get_document_reply_goes_through_translate(prose: Prose, repo: 
         assert got["note"].startswith(f"Edit {n}")
 
 
+def test_the_real_get_document_reply_in_two_pages_goes_through_translate_as_it_does_whole(prose: Prose, repo: Path) -> None:
+    """A long document comes back in pages the harness saves to files: one --blocks-file each, the real keys on both."""
+    work, whole = translated_real(prose, repo)
+    cut = len(DOC["blocks"]) // 2
+    # get_document with `from` 0 cut the reply at block `cut` and said so in `next`; `from` = `next` gave the rest
+    first = {**DOC, "url": str(repo / REL), "blocks": DOC["blocks"][:cut], "next": cut}
+    second = {**DOC, "url": str(repo / REL), "blocks": DOC["blocks"][cut:]}
+    (work / "propose.json").unlink()
+    out = review_ok(prose, "translate", "--work", str(work), "--blocks-file", str(write_json(work / "blocks.json", first)),
+                    "--blocks-file", str(write_json(work / "blocks-2.json", second)))
+    assert out["sent"] == whole["sent"] == 7 and out["edits"] == whole["edits"] and out["refused"] == whole["refused"]
+    assert 0 < cut < len(DOC["blocks"]) and any(e["block"] >= cut for e in out["edits"])  # edits land on both pages
+    assert any(e["block"] < cut for e in out["edits"])
+
+
 def test_the_real_propose_edits_reply_goes_through_proposed(prose: Prose, repo: Path) -> None:
     work, _ = translated_real(prose, repo)
     # the captured reply, one result for each edit translate sent, in the call's own order
