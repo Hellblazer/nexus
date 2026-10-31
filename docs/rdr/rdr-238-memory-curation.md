@@ -160,6 +160,27 @@ here are the ones each pass found on a named page or table.
 - **Verified (paper):** surveyed coding harnesses keep a small eager index and
   load bodies on demand (Harness Engineering, p.48-49).
 - **Verified (local):** worktree sessions share one memory directory.
+- **⚠️ Documented** (docs only): Claude Code loads the first 200 lines or
+  25 KB of `MEMORY.md`, whichever comes first, and reads topic files only on
+  demand. The directory is keyed on the git repository. After a write, Claude
+  Code itself reminds the writer to shorten the index near those limits. Our
+  index is 136 lines and 15 KB, under both. *Source: code.claude.com/docs/en/memory,
+  read 2026-10-31; T2 `238-research-1`.*
+- **✅ Verified** (spike): the docs say a subagent does not get the main
+  conversation's auto memory (forks excepted), but at Claude Code 2.1.316, 55
+  of 58 subagents dispatched after the 2026-10-31 restart had `MEMORY.md` in
+  their instructions. This is version-dependent, so the budget is justified by
+  main sessions alone, and the subagent saving is a bonus while it lasts.
+  *Source: subagent transcripts; T2 `238-research-2`.*
+- **✅ Verified** (spike): about 200 of 3,115 non-gate T2 rows (about 6%) are
+  earlier members of a title chain a later row replaces, mostly round-N and
+  per-sha series. A single link column is enough (A2 holds). *Source: T2
+  `238-research-3`.*
+- **✅ Verified** (spike): 14-day baseline over 188 main sessions: em dash in
+  prose 11.2 per 100 sessions; `git stash` 4.3; full-disk `find` 2.1;
+  Claude-Session trailer 1.1; backtick in a quoted nx or bd argument 1.1. Only
+  the em dash rule has the volume for a 14-day comparison. *Source: T2
+  `238-research-4`.*
 - **Assumed:** moving a rule out of the always-loaded index into an
   on-demand tier does not lower compliance with it. No paper measures this
   for rules over a long session. This is A3, measured in Phase 2.
@@ -168,9 +189,9 @@ here are the ones each pass found on a named page or table.
 
 - **A1:** Claude Code loads `MEMORY.md` into each session's and subagent's
   context, whole, up to a documented line limit, and loads no other file in
-  the memory directory unprompted. Verification: Claude Code documentation
-  plus a transcript of a fresh subagent. If the limit is lower than the
-  budget, the budget is the limit.
+  the memory directory unprompted. **Resolved 2026-10-31:** the limit is 200
+  lines or 25 KB; topic files load on demand; subagents get the index at
+  2.1.316 although the docs say they should not (research 1 and 2).
 - **A2:** A replacement link (one column) is enough for T2. Superseded rows
   are a small share and nobody needs "what was true on date D" queries.
   Verification: a census of rows a reader would mark superseded. If
@@ -238,6 +259,9 @@ files, unindexed files, oversized files and superseded rows still served.
    its existing SessionStart budget) that reads the repo's memory directory
    and prints at most one line: over budget, an unindexed file, or a file
    named in another file's `supersedes` that still exists. Silent when clean.
+   Claude Code already reminds a writer near its own 200-line and 25 KB
+   limits (research 1); this check is the tighter budget we choose, plus the
+   two checks Claude Code does not make.
 6. **Curation report.** `nx memory curate [--files] [--t2]`: unread files
    over N days (read counts from transcripts until RDR-209 Phase 0b gives T2
    a true read counter), unindexed files, files over the promotion size, and
@@ -363,10 +387,12 @@ cases, Java tests against PG.
 
 #### Step 1: Measure
 
-Before any move: pick ten rules whose violations show in transcripts (for
-example em dashes in written text, `git add -A` attempts, AI attribution,
-unwrapped heavy runs on chas) and count violations per 100 sessions over 14
-days.
+Before any move: count violations per 100 main sessions for rules whose
+violations show in transcripts. The baseline is already taken (research 4).
+The em dash rule has the volume for a 14-day window. The rare rules (`git
+stash`, full-disk `find`, the Claude-Session trailer, backticks in quoted
+arguments) are pooled into one rate over 60 days, because at about one
+session in a hundred a 14-day window cannot tell a change from noise.
 
 #### Step 2: Split
 
@@ -375,8 +401,8 @@ the rest. Record what moved and why.
 
 #### Step 3: Re-measure
 
-Count the same ten rules over the next 14 days. A rule whose rate rises
-returns to the always tier.
+Count the same rules over the same windows after the split. A rule whose
+rate rises returns to the always tier.
 
 ### Phase 3: Promotion
 

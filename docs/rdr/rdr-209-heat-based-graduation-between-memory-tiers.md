@@ -372,6 +372,18 @@ The division rule for positive-TTL rows; tests for both kinds of row.
 
 Does not depend on Phases 0b to 2 and can land first.
 
+Research 2 (2026-10-31) shapes it: only about 72% of the 2,320 gate-record
+titles name a bead, so a title-only rollup misses about 23%. And the
+`phase-review-gate` skill says nothing enforces its close step. So step 0
+comes first, and the trigger is `rdr-close` and the close of the phase's
+review bead, not the skill alone.
+
+0. Reviewer and developer write-backs carry `bead:` and `rdr:` tags (the
+   agent definitions' T2 write-back lines), so new gate records map to a
+   phase without parsing the title. Older records are mapped by title, and
+   the ones that do not map are listed under "unmapped" in the pointer record
+   and keep no TTL.
+
 1. At an RDR phase close (the `phase-review-gate` skill's close step, and
    `rdr-close`), write one T3 record per phase. It lists every gate-record
    title for that phase's beads, each one's verdict line, and the shas it
