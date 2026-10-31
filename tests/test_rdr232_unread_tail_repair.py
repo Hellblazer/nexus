@@ -17,6 +17,7 @@ The size cap is patched down so a dozen fixture items stand in for the 305.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from unittest.mock import patch
 
@@ -25,6 +26,7 @@ import pytest
 from nexus.plans import coverage_ledger
 from nexus.plans.coverage_ledger import CoverageBoundary
 from nexus.plans.coverage_repair import MAX_REPAIR_ITEMS, MAX_REPAIR_QUERIES
+from nexus.plans.run_summary import RunSummaryInputs, build_run_summary
 from tests import test_rdr232_coverage_ledger as ledger_fixture
 from tests.test_rdr232_coverage_ledger import _cov, _request, _tag_lines
 from tests.test_rdr232_coverage_repair import RepairDispatcher, _run
@@ -73,11 +75,14 @@ def _check(*, tail: str | None, only: tuple[str, ...] = ("f1",)):
     return check
 
 
-async def _drive(vector: int, *, facets: int = 1, tail: str | None = "supports", repair_hits: list[str] | None = None, **boundary: Any):
-    d = RepairDispatcher(_check(tail=tail), repair_hits=repair_hits)
+async def _drive(
+    vector: int, *, facets: int = 1, tail: str | None = "supports", repair_hits: list[str] | None = None,
+    check: Any = None, dispatcher: Any = None, run_kw: dict[str, Any] | None = None, **boundary: Any,
+):
+    d = dispatcher or RepairDispatcher(check or _check(tail=tail), repair_hits=repair_hits)
     with patch.object(ledger_fixture, "VECTOR_TEXTS", _vector_texts(vector)), \
          patch.object(coverage_ledger, "ASSESSMENT_MAX_ITEM_CHARS", CAP):
-        result = await _run(d, CoverageBoundary(request=_request(facets), **boundary))
+        result = await _run(d, CoverageBoundary(request=_request(facets), **boundary), **(run_kw or {}))
     return d, _cov(result)
 
 
@@ -203,18 +208,171 @@ async def test_unsupported_facets_are_queried_before_unread_tail_facets() -> Non
 
 
 @pytest.mark.asyncio
-async def test_with_room_for_both_the_tail_facet_is_queried_second() -> None:
-    d, _ = await _drive(12, facets=2, max_repair_queries=2)
-    assert [a["query"] for a in d.repair_searches()] == [
-        "what the document says about topic 2", "what the document says about topic 1"]
+async def test_with_room_for_both_the_tail_facet_is_still_never_queried() -> None:
+    """A mixed repair retrieves for the unsupported facets only; the tail facet is reassessed against its unread anchors."""
+    d, cov = await _drive(12, facets=2, max_repair_queries=2)
+    assert [a["query"] for a in d.repair_searches()] == ["what the document says about topic 2"]
+    assert cov.repair.queries == 1 and cov.repair.unread_facet_ids == ("f1",)
 
 
 @pytest.mark.asyncio
-async def test_the_repair_budget_is_unchanged_and_still_binds_a_tail_repair() -> None:
+async def test_the_repair_budget_is_unchanged_and_still_binds_a_mixed_repair() -> None:
     assert (MAX_REPAIR_ITEMS, MAX_REPAIR_QUERIES) == (12, 6), "Sam's ruling spends the existing budget, it does not raise it"
     hits = [f"repair hit number {i:02d} with some text" for i in range(30)]
-    d, cov = await _drive(12, repair_hits=hits)
-    assert len(d.repair_searches()) == 1, "one tail facet, one plan target, one query"
+    d, cov = await _drive(12, facets=2, repair_hits=hits)
+    assert len(d.repair_searches()) == 1, "one unsupported facet, one plan target, one query"
     assert 0 < cov.repair.items_merged <= MAX_REPAIR_ITEMS
     assert cov.repair.queries <= MAX_REPAIR_QUERIES and cov.ledger.rounds == 2
     assert d.tools.count("generate") == 1
+
+
+# ── a tail-only repair retrieves nothing (nexus-x3eoc / nexus-z6yvk review follow-up) ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_tail_only_repair_makes_no_retrieval_call_and_reassesses_the_unread_anchors() -> None:
+    """Nothing is missing from what was retrieved when no facet is unsupported, only unread: no query, no chunk fetch
+    for the repair, and the one reassessment reads the tail."""
+    d, cov = await _drive(12)
+    assert d.repair_searches() == [], "no targeted query"
+    assert d.tools.count("search") == 1 and d.tools.count("store_get_many") == 1, "only the plan's own retrieval and fetch"
+    r = cov.repair
+    assert (r.outcome, r.reason, r.queries, r.items_found, r.items_merged) == ("completed", "unread_tail", 0, 0, 0)
+    assert "no unsupported facet" in r.detail and "reassessed" in r.detail
+    assert cov.ledger.rounds == 2 and _anchor(cov, "TAIL").item_id in cov.ledger.assessment.read_ids, "the tail was read"
+    f1 = cov.ledger.finding("f1")
+    assert f1 is not None and f1.state == "covered" and _anchor(cov, "TAIL").item_id in f1.evidence_ids
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_repair_retrieves_for_the_unsupported_facet_only() -> None:
+    d, cov = await _drive(12, facets=2)
+    assert [a["query"] for a in d.repair_searches()] == ["what the document says about topic 2"]
+    assert (cov.repair.reason, cov.repair.queries) == ("unsupported_and_unread_tail", 1)
+
+
+# ── what a repair does not do ────────────────────────────────────────────────────────────────────────────────
+
+
+def _head_contradicts(items: str, instruction: str) -> dict:
+    payload = json.loads(items)
+    return {"ok": True, "evidence": [
+        {"item_id": next(i["id"] for i in payload if "HEAD" in i["text"]) if any("HEAD" in i["text"] for i in payload) else payload[0]["id"],
+         "quote": f"[{tag}] head", "role": "contradicts" if any("HEAD" in i["text"] for i in payload) else "neutral"}
+        for tag in _tag_lines(instruction)
+    ]}
+
+
+@pytest.mark.asyncio
+async def test_a_contradicted_facet_is_never_repaired_however_much_of_its_evidence_is_unread() -> None:
+    """A repair for a contradicted facet would be a search for agreement: the tail trigger takes covered facets only."""
+    _, first = await _drive(12, check=_head_contradicts, max_repair_queries=0)
+    f1 = first.ledger.finding("f1")
+    assert f1 is not None and f1.state == "contradicted", "fixture: f1 is contradicted with 8 of 13 anchors unread"
+    assert first.ledger.assessment.skipped_items == 8 and first.unread_tail_facet_ids == ()
+    d, cov = await _drive(12, check=_head_contradicts)
+    assert cov.repair.outcome == "not_attempted" and not cov.repair_entered
+    assert d.repair_searches() == [] and cov.ledger.rounds == 1 and cov.repair_target_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_a_contradicted_facet_beside_an_unsupported_one_stays_out_of_the_repair_targets() -> None:
+    def check(items: str, instruction: str) -> dict:
+        reply = _head_contradicts(items, instruction)
+        for rec in reply["evidence"]:
+            if rec["quote"].startswith("[f2]"):
+                rec["role"] = "neutral"
+        return reply
+
+    _, cov = await _drive(12, facets=2, check=check)
+    assert cov.repair.facet_ids == ("f2",) and cov.repair.unread_facet_ids == () and cov.repair.reason == "unsupported"
+
+
+# ── an unaffordable tail repair, and a reassessment that gives nothing ───────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_tail_repair_the_usd_allowance_cannot_carry_is_skipped_and_the_covered_facet_stands() -> None:
+    d = RepairDispatcher(_check(tail="supports"), usage_cost=0.5)
+    _, cov = await _drive(12, dispatcher=d, run_kw={"budget_usd_remaining": 1.05})
+    assert cov.repair.outcome == "skipped_budget" and d.repair_searches() == []
+    assert (cov.repair.reason, cov.repair.unread_facet_ids) == ("unread_tail", ("f1",)), "the report still says why it was due"
+    f1 = cov.ledger.finding("f1")
+    assert f1 is not None and (f1.state, f1.evidence_ids) == ("covered", (_anchor(cov, "HEAD").item_id,))
+    assert cov.ledger.rounds == 1 and cov.state == "complete" and d.tools.count("generate") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_tail_repair_with_too_little_deadline_is_skipped_and_the_covered_facet_stands() -> None:
+    d = RepairDispatcher(_check(tail="supports"))
+    _, cov = await _drive(12, dispatcher=d, run_kw={"deadline": time.monotonic() + 40.0})
+    assert cov.repair.outcome == "skipped_deadline" and d.repair_searches() == []
+    assert (cov.repair.reason, cov.repair.unread_facet_ids) == ("unread_tail", ("f1",))
+    f1 = cov.ledger.finding("f1")
+    assert f1 is not None and (f1.state, f1.evidence_ids) == ("covered", (_anchor(cov, "HEAD").item_id,))
+    assert cov.ledger.rounds == 1 and d.tools.count("generate") == 1
+
+
+def _tail_call_fails(items: str, instruction: str) -> dict:
+    if "TAIL" in items:
+        raise RuntimeError("down")
+    return _check(tail="supports")(items, instruction)
+
+
+def _tail_call_unusable(items: str, instruction: str) -> dict:
+    if "TAIL" in items:
+        return {"ok": True, "evidence": []}
+    return _check(tail="supports")(items, instruction)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("check", [_tail_call_fails, _tail_call_unusable], ids=["call_raised", "reply_unusable"])
+async def test_a_reassessment_that_fails_leaves_the_covered_finding_as_it_was(check) -> None:
+    d, cov = await _drive(12, check=check)
+    assert d.tools.count("operator_check") == 3, "the tail reassessment was attempted"
+    f1 = cov.ledger.finding("f1")
+    head = _anchor(cov, "HEAD")
+    assert f1 is not None and (f1.state, f1.reason, f1.evidence_ids) == ("covered", "", (head.item_id,))
+    assert _anchor(cov, "TAIL").item_id not in cov.ledger.assessment.read_ids
+    assert cov.state == "complete" and cov.repair.outcome == "completed"
+
+
+# ── the run summary and the counts keep the two repair populations apart ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_run_summary_reads_a_tail_only_repair_as_entered_with_nothing_repairable_and_says_why() -> None:
+    def summary(cov):
+        return build_run_summary(
+            RunSummaryInputs(), outcome="ok", plan_id=7, step_count=3, duration_ms=1, cost_usd=None, trace=False,
+            coverage=cov, terminal_reached=True,
+        )
+
+    _, tail_only = await _drive(12)
+    r = summary(tail_only)["repair"]
+    assert r["entered"] is True and r["facets_repairable"] == 0, "no unsupported facet: nothing for a retrieval to help"
+    assert (r["reason"], r["unread_tail_facets"], r["attempts"]) == ("unread_tail", 1, 1)
+    _, mixed = await _drive(12, facets=2)
+    r = summary(mixed)["repair"]
+    assert (r["reason"], r["unread_tail_facets"], r["entered"]) == ("unsupported_and_unread_tail", 1, True)
+    assert r["facets_repairable"] == 1, "f2 stayed unsupported after the repair: the FINAL ledger's repairable gap"
+    _, none = await _drive(8)
+    assert summary(none)["repair"] == {
+        "attempts": 0, "facets_repairable": 0, "entered": False, "reason": "", "unread_tail_facets": 0}
+    counts = mixed.counts()
+    assert (counts["repair_facets"], counts["repair_unread_tail_facets"]) == (2, 1)
+
+
+# ── more targets than one call carries: unsupported facets are reassessed first ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_with_more_than_six_targets_the_unsupported_facets_are_reassessed_before_the_tail_facet() -> None:
+    """f1 is covered with most anchors unread, f2..f8 are unsupported: seven unsupported plus one tail facet is two
+    groups of at most six. In request order f1 would sit in the first group and f8 in the second; a skip of the
+    second group (deadline or USD) must drop the tail facet, not an unsupported one."""
+    d, cov = await _drive(12, facets=8)
+    assert cov.repair.facet_ids == ("f2", "f3", "f4", "f5", "f6", "f7", "f8", "f1")
+    tail_calls = [c for c in d.args_of("operator_check") if "TAIL" in c["items"]]
+    groups = [_tag_lines(c["check_instruction"]) for c in tail_calls]
+    assert groups == [["f2", "f3", "f4", "f5", "f6", "f7"], ["f8", "f1"]], groups

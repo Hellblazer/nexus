@@ -705,7 +705,7 @@ def plan_match(
         _over += n  # extra budget for potential conflict drops
     if available_bindings is not None:
         _over += n  # and for unrunnable-plan drops (nexus-0yrjr)
-    _eligibility_enforced = eligibility is not None and eligibility.enforce
+    _eligibility_enforced = eligibility is not None and eligibility.enforces_any
     if _eligibility_enforced:
         _over += n  # and for answer-kind drops (nexus-jypmj.2.3)
     # (plan_id, binding) for every candidate dropped as unrunnable; drained

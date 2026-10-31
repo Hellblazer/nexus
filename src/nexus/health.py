@@ -3967,9 +3967,10 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
 
     ``nx_answer`` makes one cheap model call (Haiku, measured) on the requests its deterministic pass leaves
     open, and the answer-kind gate enforces on whatever kind comes back. When the call fails the request keeps
-    its first-pass kind and its gate runs in shadow (per request, nexus-x3eoc: it reports and excludes nothing), and
-    the first-pass-only regime is the one that failed the held-out lookup measurement. A process in which the call fails every time warns once
-    in its log (``answer_kind_gate_extraction_failing``, only while the gate would otherwise enforce); this row reads the same
+    its first-pass kind and its answer-kind rows run in shadow (per request, nexus-x3eoc: they report and exclude
+    nothing; the one-source rule still excludes), and the first-pass-only regime is the one that failed the held-out
+    lookup measurement. A process in which the call fails every time warns once in its log
+    (``answer_kind_gate_extraction_failing``, only while the gate would otherwise enforce); this row reads the same
     preconditions without a model call, so a backend that fails each call is not visible in it. Never prints a key.
 
     * The extraction or the gate is switched off, or the box has no LLM backend at all (search and storage only;
@@ -4002,16 +4003,18 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
     except Exception as exc:  # noqa: BLE001 - a doctor row must not crash `nx doctor`
         return [HealthResult(label=label, ok=False, warn=True, detail=f"could not determine: {exc}")]
     switches = [
-        f"set {coverage_mod.EXTRACT_ENV}=0 to run the answer-kind gate in shadow",
-        f"or set {eligibility_mod.ANSWER_KIND_ELIGIBILITY_ENV}=0 to switch it off",
+        f"set {coverage_mod.EXTRACT_ENV}=0 to stop paying the failed extraction call's wait on every request "
+        "(a request whose call fails already runs the answer-kind rows in shadow, so the switch forfeits only "
+        "their refusal of wrong-shape plans for requests whose call would have worked; the one-source rule still holds)",
+        f"or set {eligibility_mod.ANSWER_KIND_ELIGIBILITY_ENV}=0 to switch the whole gate off, the one-source rule included",
     ]
     if status.available and status.name in ("cli", "anthropic"):
         if cli_problem:
             return [HealthResult(
                 label=label, ok=False, warn=True,
                 detail=f"cli ({status.reason}) but {cli_problem}; when the extraction fails, requests keep "
-                       "their first-pass kind and the answer-kind gate runs in shadow for them (it excludes "
-                       "nothing; first-pass kinds alone are the regime that lost lookup recall in the held-out measurement)",
+                       "their first-pass kind and the answer-kind gate runs in shadow for them (its answer-kind rows exclude nothing and the one-source rule still holds; "
+                       "first-pass kinds alone are the regime that lost lookup recall in the held-out measurement)",
                 fix_suggestions=["reinstall or repair the claude CLI, or nx config set anthropic_api_key <key>", *switches],
             )]
         unseen = (
@@ -4031,7 +4034,7 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
             detail=f"{status.name} backend ({status.reason}): the extraction runs on the endpoint's configured model, "
                    f"not the measured {coverage_mod.DEFAULT_EXTRACT_MODEL}; a model that answers outside the closed "
                    "schema leaves the request on its first-pass kind and runs the gate in shadow for it "
-                   "(it excludes nothing; first-pass kinds alone are the regime that lost lookup recall in the held-out measurement)",
+                   "(its answer-kind rows exclude nothing and the one-source rule still holds; first-pass kinds alone are the regime that lost lookup recall in the held-out measurement)",
             fix_suggestions=switches,
         )]
     if status.reason == NO_BACKEND_MESSAGE:
@@ -4042,7 +4045,7 @@ def _check_answer_kind_extraction() -> list[HealthResult]:
     return [HealthResult(
         label=label, ok=False, warn=True,
         detail=f"{status.reason}. The extraction cannot run, so requests keep their first-pass kind and the "
-               "answer-kind gate runs in shadow for them (it excludes nothing; first-pass kinds alone are the regime that lost lookup recall in the held-out measurement)",
+               "answer-kind gate runs in shadow for them (its answer-kind rows exclude nothing and the one-source rule still holds; first-pass kinds alone are the regime that lost lookup recall in the held-out measurement)",
         fix_suggestions=["nx config set anthropic_api_key <key>", "or set llm.backend in ~/.config/nexus/config.yml", *switches],
     )]
 

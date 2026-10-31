@@ -1527,12 +1527,14 @@ async def structured_extract(
 # ── a persistently failing extraction ────────────────────────────────────────────────────────────────────────
 
 #: Extraction outcomes that mean the call was made and gave nothing usable. ``ok`` and ``unchanged`` are the
-#: working outcomes; ``disabled``, ``not_needed`` and ``skipped_deadline`` made no call and say nothing.
+#: working outcomes; ``disabled``, ``not_needed`` and ``skipped_deadline`` made no call and say nothing to the health
+#: counter. (``skipped_deadline`` still runs that request's gate in shadow, ``extraction_skipped``, because the
+#: call it needed did not happen; it is not a failure of the backend, so it is not counted here.)
 FAILED_OUTCOMES: frozenset[str] = frozenset({"error", "timeout", "invalid"})
 _WORKING_OUTCOMES: frozenset[str] = frozenset({"ok", "unchanged"})
 
 #: This many failed calls in a row, in one process, make the failure persistent (nexus-jypmj.16). One failure is a
-#: per-request event and stays silent: the request keeps its first-pass kind and the gate fails closed.
+#: per-request event and stays silent: the request keeps its first-pass kind and its answer-kind rows run in shadow.
 PERSISTENT_FAILURE_THRESHOLD = 3
 
 _health_lock = threading.Lock()
@@ -1543,11 +1545,11 @@ _failing_warned = False
 def note_extraction_outcome(outcome: str, *, gate_enforcing: bool) -> bool:
     """Count one request's extraction *outcome*; warn once per process when the failures are persistent.
 
-    A failed extraction leaves the request on its first-pass kind and runs the answer-kind gate in shadow for that
-    request (nexus-x3eoc: it reports what it would exclude and excludes nothing). First-pass kinds alone are the regime that failed the held-out
-    lookup measurement, so a process in which the call fails every time (no ``claude`` CLI and no API key, an
-    ``openai_compat`` endpoint that answers outside the schema, a timeout every time) enforces in it with no
-    signal. After :data:`PERSISTENT_FAILURE_THRESHOLD` failures in a row this logs ``answer_kind_gate_extraction_failing``
+    A failed extraction leaves the request on its first-pass kind and runs the answer-kind rows of the gate in shadow
+    for that request (nexus-x3eoc: they report what they would exclude and exclude nothing; the one-source rule still
+    excludes). First-pass kinds alone are the regime that failed the held-out lookup measurement, so a process in
+    which the call fails every time (no ``claude`` CLI and no API key, an ``openai_compat`` endpoint that answers
+    outside the schema, a timeout every time) serves every request on that regime with no signal. After :data:`PERSISTENT_FAILURE_THRESHOLD` failures in a row this logs ``answer_kind_gate_extraction_failing``
     once per streak, the first time that happens while *gate_enforcing* (a gate in shadow loses nothing to it, and
     does not use the warning up). A working outcome ends the run and re-arms the warning, so a later streak after a
     recovery warns again (nexus-jypmj.21); an outcome with no call is ignored. Returns whether this call logged the
@@ -1572,13 +1574,16 @@ def note_extraction_outcome(outcome: str, *, gate_enforcing: bool) -> bool:
         last_outcome=outcome,
         consequence=(
             "the latest extraction calls in this process all failed, so requests keep their first-pass kinds, the "
-            "regime that lost lookup recall in the held-out measurement, and the answer-kind gate runs in shadow "
-            "for each: it reports what it would exclude and excludes nothing"
+            "regime that lost lookup recall in the held-out measurement; each such request runs the answer-kind "
+            "rows of the gate in shadow (it reports what they would exclude and none of them excludes a plan, while "
+            "the one-source rule still does), and each request has waited for the failed call"
         ),
         remedy=(
             "run `nx doctor` (row 'Answer-kind extraction') to see why; make an LLM backend available "
-            "(the claude CLI, or nx config set anthropic_api_key), or set NX_ANSWER_STRUCTURED_EXTRACT=0 "
-            "to run the gate in shadow, or NX_ANSWER_KIND_ELIGIBILITY=0 to switch it off"
+            "(the claude CLI, or nx config set anthropic_api_key); or set NX_ANSWER_STRUCTURED_EXTRACT=0 to stop "
+            "the failed call's wait on every request (the answer-kind rows then never refuse a wrong-shape plan, "
+            "which failing requests already forfeit; the one-source rule still holds); or set "
+            "NX_ANSWER_KIND_ELIGIBILITY=0 to switch the whole gate off, the one-source rule included"
         ),
     )
     return True

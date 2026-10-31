@@ -12556,20 +12556,25 @@ async def nx_answer(
     # the gate off (nexus-jypmj.2.8; shadow: the filter counts what it would exclude and excludes nothing).
     # The gate also runs in shadow while the structured extraction is switched off (the measured failing regime
     # is the gate on deterministic kinds alone) and, for just that request, when its extraction call failed
-    # (timeout, error, answer outside the schema; nexus-x3eoc, Sam 2026-10-31): it still judges and reports what
-    # it would exclude and excludes nothing. A library that still holds undeclared builtins degrades it just
-    # before plan_match (below). The reason that applies first wins: disabled_by_setting, extraction_disabled,
-    # extraction_failed, library_not_reseeded.
+    # (timeout, error, answer outside the schema; nexus-x3eoc, Sam 2026-10-31) or was skipped for lack of time
+    # (skipped_deadline, extraction_skipped): it still judges and reports what the answer-kind rows would exclude
+    # and excludes none of them, but the one-source rule (nexus-4xmpv) keeps excluding (`enforced_reasons`). A
+    # library that still holds undeclared builtins degrades it just before plan_match (below). The reason that
+    # applies first wins: disabled_by_setting, extraction_disabled, extraction_failed, extraction_skipped,
+    # library_not_reseeded.
     # Reported in the envelope as `plan_eligibility`, always present.
     _gate_on = _eligibility.eligibility_enforced(_os.environ)
     _extract_on = _extraction_enabled(_os.environ)
     _extract_failed = _extract_on and _request_coverage.extraction.outcome in _EXTRACTION_FAILED_OUTCOMES
+    # skipped_deadline: the call was needed and left out for lack of budget, so the request is on its first-pass kind
+    # exactly as after a failed call (Sam 2026-10-31); it is not a failure for the health counter (FAILED_OUTCOMES).
+    _extract_skipped = _extract_on and _request_coverage.extraction.outcome == "skipped_deadline"
     _plan_eligibility = _eligibility.EligibilityFilter(
         _request_coverage.answer_kind, _request_coverage.kind_decision,
-        enforce=_gate_on and _extract_on and not _extract_failed,
+        enforce=_gate_on and _extract_on and not _extract_failed and not _extract_skipped,
         shadow_reason=(
             "disabled_by_setting" if not _gate_on else "extraction_disabled" if not _extract_on
-            else "extraction_failed" if _extract_failed else None
+            else "extraction_failed" if _extract_failed else "extraction_skipped" if _extract_skipped else None
         ),
         # nexus-4xmpv: a synthesis or unknown request that names exactly one source does not admit citation-traversal;
         # the count is RequestCoverage.names_one_source, the one place that decides it.

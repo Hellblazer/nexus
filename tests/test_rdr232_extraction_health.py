@@ -66,6 +66,20 @@ def test_a_run_of_failures_warns_exactly_once_at_the_threshold(outcome: str) -> 
     assert "nx doctor" in event["remedy"]
 
 
+def test_the_warning_says_what_the_switch_saves_and_what_shadow_forfeits_not_that_it_turns_shadow_on() -> None:
+    """Review of 3d4e36494: failing requests already run in shadow, so NX_ANSWER_STRUCTURED_EXTRACT=0 is not 'to run the
+    gate in shadow'. It saves the failed call's wait on every request; the answer-kind rows then never refuse a
+    wrong-shape plan (already lost per failing request), and the one-source rule still holds."""
+    with capture_logs() as logs:
+        _note(["error"] * rc.PERSISTENT_FAILURE_THRESHOLD)
+    (event,) = _warnings(logs)
+    remedy, consequence = event["remedy"], event["consequence"]
+    assert "to run the gate in shadow" not in remedy
+    assert "NX_ANSWER_STRUCTURED_EXTRACT=0 to stop the failed call's wait on every request" in remedy
+    assert "wrong-shape plan" in remedy and "one-source rule still holds" in remedy
+    assert "enforcing" not in consequence and "in shadow" in consequence and "one-source rule" in consequence
+
+
 def test_a_success_ends_the_run() -> None:
     n = rc.PERSISTENT_FAILURE_THRESHOLD
     with capture_logs() as logs:
@@ -261,6 +275,17 @@ class TestAnswerKindExtractionRow:
         assert mention in row.detail and "--version" in row.detail and "first-pass" in row.detail
         assert "cannot run" in row.detail and "may be unable" not in row.detail
         assert any("NX_ANSWER_STRUCTURED_EXTRACT" in f for f in row.fix_suggestions)
+
+    @needs_sh
+    def test_the_row_does_not_claim_the_gate_enforces_and_does_not_promise_shadow_from_the_switch(self, monkeypatch, tmp_path) -> None:
+        """Review of 3d4e36494: a failing request's gate is already in shadow; the switch saves the call's wait."""
+        _claude_stub(monkeypatch, tmp_path, "exit 1\n")
+        (row,) = _check_answer_kind_extraction()
+        assert "runs in shadow" in row.detail and "one-source rule still holds" in row.detail
+        assert "keeps enforcing" not in row.detail and "gate enforces" not in row.detail
+        switch = next(f for f in row.fix_suggestions if "NX_ANSWER_STRUCTURED_EXTRACT" in f)
+        assert "to run the answer-kind gate in shadow" not in switch
+        assert "failed extraction call's wait on every request" in switch and "wrong-shape plans" in switch
 
     @needs_sh
     def test_a_cli_that_hangs_warns_within_the_bound(self, monkeypatch, tmp_path) -> None:

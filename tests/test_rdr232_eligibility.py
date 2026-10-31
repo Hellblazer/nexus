@@ -898,7 +898,9 @@ def test_the_filter_wire_shape() -> None:
         "request_kind", "kind_decision", "enforced", "shadow_reason", "library_check", "builtins_checked",
         "undeclared_builtins", "undeclared_builtin_names", "branches",
         "excluded_total", "excluded_plan_ids", "returned", "selected", "fallback_reason",
+        "enforced_reasons", "enforced_excluded_total",  # additive: the exclusions that stay enforced in a shadow
     }
+    assert wire["enforced_reasons"] == [] and wire["enforced_excluded_total"] == wire["excluded_total"] == 1
     assert wire["shadow_reason"] is None and wire["library_check"] is None and wire["builtins_checked"] is None
     assert wire["undeclared_builtins"] is None and wire["undeclared_builtin_names"] == []
     assert wire["request_kind"] == "synthesis" and wire["kind_decision"] == "heuristic"

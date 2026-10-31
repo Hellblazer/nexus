@@ -547,7 +547,7 @@ def test_a_failed_extraction_outranks_an_unreseeded_library_and_costs_no_library
 
 def test_a_shadow_reason_outside_the_closed_set_is_refused() -> None:
     assert el.SHADOW_REASONS == {
-        "disabled_by_setting", "extraction_disabled", "extraction_failed", "library_not_reseeded",
+        "disabled_by_setting", "extraction_disabled", "extraction_failed", "extraction_skipped", "library_not_reseeded",
     }
     filt = el.EligibilityFilter("synthesis", "heuristic", enforce=True)
     with pytest.raises(ValueError, match="not_a_reason"):
@@ -579,6 +579,12 @@ def test_every_shadow_reason_nx_answer_emits_is_in_the_set_and_the_set_has_no_un
     with monkeypatch.context() as m:  # one request's failed extraction (nexus-x3eoc)
         m.setattr("nexus.operators.dispatch.claude_dispatch", _FailingDispatch(RuntimeError("down")))
         out, _, _ = _drive(_OPEN_QUESTION, [LOOKUP_473, SYNTH_12], _HITS, db=_library_db(_library_rows(undeclared=1)))
+        emitted.add(out["plan_eligibility"]["shadow_reason"])
+    with monkeypatch.context() as m:  # and one whose extraction call was skipped for lack of time (Sam 2026-10-31)
+        m.setattr("nexus.operators.dispatch.claude_dispatch", _FailingDispatch(RuntimeError("never called")))
+        out, _, _ = _drive(
+            _OPEN_QUESTION, [LOOKUP_473, SYNTH_12], _HITS, db=_library_db(_library_rows(undeclared=1)), budget_seconds=0.5,
+        )
         emitted.add(out["plan_eligibility"]["shadow_reason"])
     assert emitted == el.SHADOW_REASONS
     # and no other reason is written anywhere a filter is built or degraded

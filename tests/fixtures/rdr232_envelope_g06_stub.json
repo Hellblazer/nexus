@@ -366,6 +366,7 @@
   "repair_noted_facets": 2,
   "repair_outcome": "no_new_evidence",
   "repair_queries": 1,
+  "repair_unread_tail_facets": 0,
   "requested_facet_ids": [
    "f1",
    "f2",
@@ -585,6 +586,8 @@
   },
   "builtins_checked": null,
   "enforced": true,
+  "enforced_excluded_total": 0,
+  "enforced_reasons": [],
   "excluded_plan_ids": [],
   "excluded_total": 0,
   "fallback_reason": null,
@@ -714,7 +717,7 @@
  "reserved_stream": null,
  "run_summary": {
   "detail": "digest_match",
-  "digest": "sha256:2226fdbb9df6dff71f5962708ef404ada12c1058eba565e2f38c43d7f63ce4a6",
+  "digest": "sha256:cfdb3bc677b1cd4d9e4e0f80324c16d911b6e31e085a61ac6f0297f05eb7b139",
   "persisted_coverage_state": "partial",
   "persistence": "persisted",
   "returned_coverage_state": "partial",

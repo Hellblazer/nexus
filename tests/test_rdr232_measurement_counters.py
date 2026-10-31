@@ -496,7 +496,9 @@ async def test_repair_switched_off_is_not_entered_even_with_a_gap() -> None:
 async def test_a_run_with_no_assessment_has_no_new_counters_to_report() -> None:
     s = build_run_summary(RunSummaryInputs(), outcome="ok", plan_id=None, step_count=0, duration_ms=1, cost_usd=None,
                           trace=True, coverage=None, terminal_reached=False)
-    assert s["coverage"] is None and s["repair"] == {"attempts": 0, "facets_repairable": 0, "entered": False}
+    assert s["coverage"] is None and s["repair"] == {
+        "attempts": 0, "facets_repairable": 0, "entered": False, "reason": "", "unread_tail_facets": 0,
+    }
 
 
 # ── the envelope carries the same counts ────────────────────────────────────────────────────────────────────

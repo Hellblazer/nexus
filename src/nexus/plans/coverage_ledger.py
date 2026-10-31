@@ -97,8 +97,12 @@ calls are ``StepRecord``s past the plan's own step indices, so the shared USD ac
 ``nx_answer_steps`` primary key see them without a new step source.
 
 The one repair (nexus-jypmj.3.2): :meth:`CoverageBoundary.run` is ``evaluate`` plus at most one repair, and
-it is what the runner calls. When the first ledger has facets in :attr:`CoverageResult.repair_facet_ids`
-(assessed, nothing held bears on them), the boundary retrieves for them (:mod:`nexus.plans.coverage_repair`:
+it is what the runner calls. It enters for two reasons (:data:`nexus.plans.coverage_repair.REPAIR_REASONS`):
+facets in :attr:`CoverageResult.repair_facet_ids` (assessed, nothing held bears on them), and, since nexus-z6yvk,
+covered facets in :attr:`CoverageResult.unread_tail_facet_ids` (strictly more than half of the ledger's anchors
+were never read). Only the unsupported facets are retrieved for: a repair with none makes no retrieval query and goes
+straight to reassessing the unread anchors. For the unsupported facets the boundary retrieves
+(:mod:`nexus.plans.coverage_repair`:
 primary source and explicit scope first, deterministic queries, bounded allowance and USD), asks the runner
 to merge the new chunks into the reduction's input (:mod:`nexus.plans.repair_stream`) and to hand back the
 input it now holds, and recomputes the ledger once with ``evaluate(view, prior=result)``. The skip decision
@@ -584,8 +588,9 @@ class CoverageResult:
 
     @property
     def repair_entered(self) -> bool:
-        """Whether the boundary went into the repair step at all (a repairable gap and repair switched on), whatever
-        it then found: ``repair.outcome`` is ``not_attempted`` only when it did not."""
+        """Whether the boundary went into the repair step at all (a repairable gap or a mostly-unread covered facet,
+        and repair switched on), whatever it then found: ``repair.outcome`` is ``not_attempted`` only when it did
+        not. ``repair.reason`` says which."""
         return self.repair.outcome != "not_attempted"
 
     def counts(self) -> dict[str, Any]:
@@ -599,7 +604,10 @@ class CoverageResult:
             "facets_required": len(self.ledger.findings), "facets": by_state, "anchors": len(self.ledger.anchors),
             "rounds": self.ledger.rounds, "assessment_outcome": a.outcome, "assessment_calls": a.calls,
             "facets_per_call": list(a.facets_per_call), "rejected_records": a.rejected_records,
+            # ``repair_facets`` is every facet the repair targeted; ``repair_unread_tail_facets`` is the covered ones among
+            # them, reassessed for an unread tail and not missing anything (nexus-z6yvk): the difference is the missing.
             "repair_outcome": self.repair.outcome, "repair_facets": len(self.repair.facet_ids),
+            "repair_unread_tail_facets": len(self.repair.unread_facet_ids),
             "repair_queries": self.repair.queries, "repair_items_found": self.repair.items_found,
             "repair_items_merged": self.repair.items_merged, "repair_noted_facets": self.repair.noted_facets,
             # nexus-jypmj.3.10: additive. ``facets.covered`` still counts a conflicted facet; this is the subset.
@@ -1010,6 +1018,9 @@ class CoverageBoundary:
             if f.id not in blocked and f.id not in keep and (p := prior_by_id.get(f.id)) is not None
             and (f.id in tail or (p.state == "unsupported" and p.reason == REPAIRABLE_REASON))
         ]
+        # Unsupported facets first: a deadline or USD skip drops a whole facet group, and with more targets than one
+        # call carries it must be the covered-with-an-unread-tail facets that fall into the dropped group (stable sort).
+        delta.sort(key=lambda f: f.id in tail)
         delta_ids = {f.id for f in delta}
         full = [f for f in request.facets if f.id not in blocked and f.id not in keep and f.id not in delta_ids]
         assessed: dict[str, FacetFinding] = {}
@@ -1220,6 +1231,9 @@ class CoverageBoundary:
         by_id = {f.id: f for f in (self.request.facets if self.request else ())}
         facets = [by_id[i] for i in targets if i in by_id]
         unsupported_ids = set(first.repair_facet_ids)
+        # No unsupported facet: nothing is missing from what was retrieved, only unread, so no retrieval query is made
+        # and the repair is the reassessment of the unread anchors (nexus-z6yvk follow-up).
+        retrieval_skipped = not unsupported_ids
         primary, primary_subtree, plan = self._repair_targets(view)
         confinement = self.confinement
         # Without the engine's chunk filter a repair query reads the whole collection, so the siblings of the document
@@ -1228,21 +1242,19 @@ class CoverageBoundary:
             REPAIR_RESULTS_PER_QUERY_UNFILTERED
             if confinement is not None and not getattr(confinement, "sends_filter", False) else REPAIR_RESULTS_PER_QUERY
         )
-        # Unsupported facets against every target first, then the covered facets with most anchors unread against what
-        # budget is left: the covered facets never take a query an unsupported facet could have had.
+        # Retrieval is for the unsupported facets only; the covered facets with most anchors unread are reassessed
+        # against the unread anchors, never queried for (they were retrieved for already).
         queries: list[RepairQuery] = []
-        for group in ([f for f in facets if f.id in unsupported_ids], [f for f in facets if f.id not in unsupported_ids]):
-            room = self.max_repair_queries - len(queries)
-            if room > 0:
-                queries += build_repair_queries(
-                    group, primary_collections=primary, plan_targets=plan, max_queries=room,
-                    limit=limit, primary_subtree=primary_subtree,
-                )
-        if confinement is not None and getattr(confinement, "sends_filter", False):
-            for q in queries:
-                q.args["chash_allow"] = confinement.allow_list()
-        if not queries:
-            return done("no_target", detail="no primary collection or plan retrieval scope to ask")
+        if not retrieval_skipped:
+            queries = build_repair_queries(
+                [f for f in facets if f.id in unsupported_ids], primary_collections=primary, plan_targets=plan,
+                max_queries=self.max_repair_queries, limit=limit, primary_subtree=primary_subtree,
+            )
+            if confinement is not None and getattr(confinement, "sends_filter", False):
+                for q in queries:
+                    q.args["chash_allow"] = confinement.allow_list()
+            if not queries:
+                return done("no_target", detail="no primary collection or plan retrieval scope to ask")
 
         # retrieval: bounded to its share of the allowance (the queries get three quarters of it, the chunk
         # fetch the rest), stopped by the first failure
@@ -1301,7 +1313,9 @@ class CoverageBoundary:
                     break
         if not new and not unread_first:
             return done("no_new_evidence", queries=issued, found=found, detail="the chunks fetched were already held")
-        if failure and not hits:
+        if retrieval_skipped:
+            pass  # nothing was asked, so nothing failed or came back empty: the outcome is the reassessment's
+        elif failure and not hits:
             retrieval_note = ("retrieval_failed", f"a repair query failed: {failure}")
         elif not hits:
             retrieval_note = ("no_new_evidence", "the targeted queries found nothing not already held")
@@ -1346,6 +1360,8 @@ class CoverageBoundary:
             detail = f"{why}; the {len(unread_first)} anchors the first round left unread were reassessed"
             return done(outcome, queries=issued, found=found, merged=merged, detail=detail, result=final)
         detail = f"a repair query failed: {failure}; the queries after it were not issued" if failure else ""
+        if retrieval_skipped:
+            detail = f"no unsupported facet, so no retrieval query was made; the {len(unread_first)} anchors the first round left unread were reassessed"
         return done("completed", queries=issued, found=found, merged=merged, detail=detail, result=final)
 
     async def _assess(

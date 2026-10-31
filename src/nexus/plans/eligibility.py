@@ -33,6 +33,9 @@ The abstract-themes plan stays allowed (Sam, 2026-10-30): the deny-list holds ci
 row admits curated synthesis plans. The plan is named by what it declares, the ``strategy`` dimension of a curated
 (builtin) row, listed in :data:`SINGLE_SOURCE_EXCLUDED_STRATEGIES`, so a re-seeded library with new plan ids is
 still covered. The count of named sources is :attr:`RequestCoverage.names_one_source` (``nx_answer`` passes 1 or 0).
+This rule is the one exclusion that keeps excluding while the request's extraction failed or was skipped
+(Sam, 2026-10-31, nexus-x3eoc): the answer-kind rows of the matrix then run in shadow and the filter reports it
+(``enforced_reasons``, below), but a request left ``unknown`` by a failed call is the case this rule exists for.
 Nothing else changes: a request naming two sources or none still admits it, and the matrix rows above are
 untouched. The request is not left without a plan: the matcher offers its other eligible synthesis plans and
 otherwise ``nx_answer`` plans inline.
@@ -70,22 +73,29 @@ blank or anything else enforces), over the default :data:`ANSWER_KIND_ELIGIBILIT
 gate WOULD exclude, but :meth:`EligibilityFilter.admit` keeps every candidate and the matcher's output,
 metrics and over-fetch are identical to a call that passed no filter.
 
-The gate is not enforced in three cases that are not the setting (RDR-232 section 1: such a builtin reads as
+The gate is not enforced in four cases that are not the setting (RDR-232 section 1: such a builtin reads as
 unattested until a reseed, and the gate is not enabled before every builtin carries its declaration; the
-measured failing regime is the gate with deterministic kinds only). ``nx_answer`` runs the request's filter in
-shadow (built so, or degraded with :meth:`EligibilityFilter.degrade_to_shadow`) when (1) the structured request
-extraction is switched off (``extraction_disabled``), or (2) this request's extraction call failed
-(``extraction_failed``: a timeout, an error or an answer outside the schema; nexus-x3eoc, Sam 2026-10-31). The
-request keeps its first-pass kind, the regime that failed the held-out measurement, so the gate reports what it
-would exclude and excludes nothing; the next request is unaffected, and ``request_coverage.extraction.outcome``
-in the envelope names which failure. Or (3) the plan library holds a builtin template, a row a reseed can fix, with no declaration
-(``library_not_reseeded``). The library check counts only builtin-tagged rows of the global tier whose
+measured failing regime is the gate with deterministic kinds only). ``nx_answer`` runs the request's filter
+in shadow (built so, or degraded with :meth:`EligibilityFilter.degrade_to_shadow`) when (1) the structured
+request extraction is switched off (``extraction_disabled``), (2) this request's extraction call failed
+(``extraction_failed``: a timeout, an error or an answer outside the schema; nexus-x3eoc, Sam 2026-10-31),
+(3) the call was needed but skipped for lack of time budget (``extraction_skipped``, Sam 2026-10-31), or (4)
+the plan library holds a builtin template, a row a reseed can fix, with no declaration
+(``library_not_reseeded``). In (2) and (3) the request keeps its first-pass kind, the regime that failed the
+held-out measurement, so the answer-kind rows report what they would exclude and exclude nothing; the next
+request is unaffected, and ``request_coverage.extraction.outcome`` in the envelope names which. The one-source
+rule above is NOT one of those rows: it keeps excluding under (2) and (3) (Sam 2026-10-31), because its reason
+is exactly that a failed extraction leaves a single-source request unknown. The envelope says so:
+``enforced`` is false, ``shadow_reason`` names the case, and ``enforced_reasons`` lists the exclusion reasons
+that still exclude (``["single_source_synthesis"]``; empty in every other case). The library check counts only
+builtin-tagged rows of the global tier whose
 dimensions match a shipped template (or a retired one, which a reseed deletes), so an orphan the seed loader
 leaves in place cannot hold the library in shadow for good, and it reports how many such rows it examined
 (``builtins_checked``): a library with none enforces, and ``builtins_checked`` of 0 says the check had nothing
 to examine. The upgrade ladder's plan-library axis reconciles builtins (``seed_plan_templates(reconcile=True)``)
 on upgrade, which writes the declarations, so an upgraded install enforces. Precedence when several apply:
-``disabled_by_setting``, then ``extraction_disabled``, then ``extraction_failed``, then ``library_not_reseeded`` (a filter already in shadow
+``disabled_by_setting``, then ``extraction_disabled``, then ``extraction_failed``, then ``extraction_skipped``
+(only one of the two applies to a request), then ``library_not_reseeded`` (a filter already in shadow
 is not checked against the library).
 
 The matcher calls :meth:`EligibilityFilter.admit` last on each branch, after every other drop (unmet
@@ -158,10 +168,20 @@ ANSWER_KIND_ELIGIBILITY_ENV = "NX_ANSWER_KIND_ELIGIBILITY"
 
 #: ``shadow_reason`` values the envelope reports (and the only ones :meth:`EligibilityFilter.degrade_to_shadow`
 #: accepts): the setting turned the gate off, the structured request extraction is switched off, this request's
-#: extraction call failed (nexus-x3eoc), or the library still holds builtins without their declaration.
+#: extraction call failed (nexus-x3eoc) or was skipped for lack of time (Sam 2026-10-31), or the library still
+#: holds builtins without their declaration.
 SHADOW_REASONS: frozenset[str] = frozenset(
-    {"disabled_by_setting", "extraction_disabled", "extraction_failed", "library_not_reseeded"}
+    {"disabled_by_setting", "extraction_disabled", "extraction_failed", "extraction_skipped", "library_not_reseeded"}
 )
+
+#: The exclusion reasons that stay ENFORCED while the filter is in shadow, by ``shadow_reason`` (Sam 2026-10-31,
+#: nexus-x3eoc ruling A): the one-source rule keeps excluding citation-traversal when the extraction failed or was
+#: skipped, because a request whose extraction did not run is one the rule exists for (it leaves a single-source
+#: request ``unknown``). Every other exclusion in those shadows is reported and not enforced.
+SHADOW_ENFORCED_REASONS: dict[str, frozenset[str]] = {
+    "extraction_failed": frozenset({"single_source_synthesis"}),
+    "extraction_skipped": frozenset({"single_source_synthesis"}),
+}
 
 #: ``library_check`` values the envelope reports: ``checked`` (the library was read and counted) or
 #: ``unreadable`` (it was not: no count in the cache and the listing failed). ``null`` means no check ran
@@ -570,7 +590,8 @@ class EligibilityFilter:
     """Judges matcher candidates for one request and keeps the account the envelope reports.
 
     Mutable on purpose: the matcher fills the branch counts, ``nx_answer`` adds the returned summary and
-    the fallback reason. With ``enforce`` False it judges and counts and admits everything.
+    the fallback reason. With ``enforce`` False it judges and counts and admits everything, except the reasons
+    in :attr:`enforced_reasons`.
     """
 
     def __init__(
@@ -595,6 +616,7 @@ class EligibilityFilter:
         }
         self._judged: dict[int, tuple[PlanStanding, Verdict]] = {}
         self._excluded_ids: list[int] = []
+        self._enforced_excluded = 0
         self._returned: dict[str, int] | None = None
         self._selected: dict[str, Any] | None = None
         self._fallback: str | None = None
@@ -617,7 +639,29 @@ class EligibilityFilter:
         counts["reasons"][verdict.reason] = counts["reasons"].get(verdict.reason, 0) + 1
         if isinstance(plan_id, int) and plan_id not in self._excluded_ids:
             self._excluded_ids.append(plan_id)
-        return not self.enforce
+        if self.enforce or verdict.reason in self.enforced_reasons:
+            self._enforced_excluded += 1
+            return False
+        return True
+
+    @property
+    def enforced_reasons(self) -> tuple[str, ...]:
+        """The exclusion reasons that exclude although ``enforce`` is False (:data:`SHADOW_ENFORCED_REASONS`): the
+        one-source rule while the request's extraction failed or was skipped. Empty when the filter enforces
+        everything (``enforce``) or enforces nothing."""
+        if self.enforce:
+            return ()
+        return tuple(sorted(SHADOW_ENFORCED_REASONS.get(self.shadow_reason or "", ())))
+
+    @property
+    def enforces_any(self) -> bool:
+        """Whether any candidate can be dropped: the filter enforces, or a reason stays enforced in its shadow."""
+        return self.enforce or bool(self.enforced_reasons)
+
+    @property
+    def enforced_excluded_total(self) -> int:
+        """Candidates :meth:`admit` actually dropped (judged ineligible AND enforced), over all branches."""
+        return self._enforced_excluded
 
     @property
     def excluded_total(self) -> int:
@@ -683,12 +727,14 @@ class EligibilityFilter:
             "kind_decision": self.decision,
             "enforced": self.enforce,
             "shadow_reason": self.shadow_reason,
+            "enforced_reasons": list(self.enforced_reasons),
             "library_check": self.library_check,
             "builtins_checked": self.builtins_checked,
             "undeclared_builtins": self.undeclared_builtins,
             "undeclared_builtin_names": list(self.undeclared_builtin_names),
             "branches": {b: {**c, "reasons": dict(c["reasons"])} for b, c in self._branches.items()},
             "excluded_total": self.excluded_total,
+            "enforced_excluded_total": self._enforced_excluded,
             "excluded_plan_ids": self._excluded_ids[:_MAX_LISTED_IDS],
             "returned": dict(self._returned) if self._returned is not None else None,
             "selected": dict(self._selected) if self._selected is not None else None,
@@ -701,15 +747,15 @@ def fallback_reason(
 ) -> str | None:
     """Why ``nx_answer`` went to the inline planner; ``None`` when a library plan was selected.
 
-    ``all_candidates_ineligible`` only when the gate is enforcing and refused something: in shadow mode
-    nothing was refused, so exclusion is not why nothing matched.
+    ``all_candidates_ineligible`` only when the gate refused something (``enforce``, or a reason that stays
+    enforced in its shadow): a candidate that was only reported was kept, so exclusion is not why nothing matched.
     """
     if force_dynamic:
         return "force_dynamic"
     if hit:
         return None
     if not matches:
-        if filt is not None and filt.enforce and filt.excluded_total:
+        if filt is not None and filt.enforced_excluded_total:
             return "all_candidates_ineligible"
         return "no_plan_candidates"
     return "below_confidence_floor"
