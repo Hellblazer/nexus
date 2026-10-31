@@ -72,4 +72,16 @@ Each question a run asks, which genre a file is, which edits to accept, which to
 
 Where no other plugin has a skill of the same name, `/prose-edit` works as a short form.
 
+### Cut-only, for the site-page review gate
+
+`/prose-edit` is the author's own command: Claude Code does not let a model call it. A repository whose site-page review gate is a model needs a voice pass it can call, so the plugin has a second skill, `conexus-prose-edit:prose-cut`, that a model can invoke. It runs the same scripts and the same editor in cut-only mode: every edit only removes words, paragraph proposals are cuts, and the editor raises no queries.
+
+| Command | Does |
+|---|---|
+| `conexus-prose-edit:prose-cut web/page.html --mode cut-only --voice-card card.txt --word-budget 900 --genre how-to --budget 20` | Proposes cuts against the voice card in `card.txt`. Prints the work directory (`WORK=`) and the filtered proposal with the word count: the page's prose words, the budget, the words the cuts remove and the words left. The page is unchanged. |
+| `conexus-prose-edit:prose-cut count web/page.html` | Prints `{"words": N}`: the page's prose words in the unit of `words.document`, for picking the word budget and reporting the final count. |
+| `conexus-prose-edit:prose-cut decide <WORK> --accept 1,3 --reject 2 --hold 4` | Records the decisions: applies the accepted cuts, stores the rejected ones for that page so the editor does not propose them again, and leaves the held ones alone. It runs `apply`'s dry run and then the real run, with no question. Every cut run is decided, `--accept none` included. |
+
+The word budget is a target and not a cap: the editor cuts toward it where words repeat or are filler, and `words` in the output shows the gap (`removed` counts sentence edits only; paragraph cuts are advice the caller applies or ignores, take no decide number and are never stored). The filter checks that a cut only removes words and adds no markup, and warns on a cut that removes a negation (contractions included) or a limit such as only, must or unless, and on a markdown cut that leaves emphasis unpaired: it is a structural check, and the meaning is the reader's. The given voice card is used for that run whatever card is stored for the page, and it is never stored. On an HTML page the nav, heading, button and sample-output elements are protected along with code, tables, quotes, comments and the head.
+
 A repository with `.claude/skills/site-page/SKILL.md` gets that page's section 3 rules as an extra layer for how-to pages and essays; a repository without it simply has no such layer.

@@ -9,9 +9,12 @@ Errors go to stderr with exit 1; memory.py's own exit codes (3: T2 unavailable) 
 
   brief.py parse TOKEN...        the invocation, one token per argv, printed as JSON
   brief.py build TARGET [--genre G] [--budget N] [--file F] [--work] [--site-page FILE]
+                              [--mode cut-only --voice-card FILE --word-budget N]
                                  the brief text for the editor agent, on stdout
-  brief.py filter TARGET [--budget N] [--file F] [--save F | --work DIR]
+  brief.py filter TARGET [--budget N] [--file F] [--save F | --work DIR] [--mode cut-only --word-budget N]
                                  the agent's reply on stdin -> filtered proposal JSON
+  brief.py count TARGET          {"words": N}, the prose words of PATH or PATH:START-END in the unit of a cut-only
+                                 run's words.document
   brief.py tmpdir [--ready]      a fresh temporary directory outside the repository; --ready prints WORK= and the
                                  absolute path of INPUT, REPLY, FILTERED, REASONS, ENTRY and CARD inside it
   brief.py site-layer [--site-page FILE] [--genre G]
@@ -40,14 +43,24 @@ A build whose --file is not in a work directory writes no file and prints the br
 Grammar (`parse`; every token is one argv element, never a shell string):
 
   <target> [--genre G] [--budget N]       edit run; budget defaults to 10
+  <path>[:<start>-<end>] --mode cut-only --voice-card FILE --word-budget N [--genre G] [--budget N]
+                                          cut-only run (RDR-221 Step 3.1), run through the prose-cut skill
+  decide WORK --accept SPEC [--reject SPEC] [--hold SPEC] [--reasons-file F]
+                                          the caller's decisions on a cut-only run -> review.py apply
+  count <path>[:<start>-<end>]            the prose word count of a page, for the caller that picks a word budget
   rejections <path> [--remove N]          -> memory.py rejections
   exemplar <genre> <path>:<start>-<end>   -> memory.py exemplar-add
 
-A file named `rejections` or `exemplar` is reached as `-- rejections` or `./rejections`.
-`--mode`, `--voice-card` and `--word-budget` are Phase 3 (Step 3.1) and are refused.
+A file named `rejections`, `exemplar`, `setup`, `decide` or `count` is reached as `-- rejections` or `./rejections`.
+Cut-only is refused unless all of --mode cut-only, --voice-card and --word-budget are given, on a stdin run, and
+for a card that is missing, unreadable, not UTF-8, empty or longer than memory.py's VOICE_CARD_MAX. The given card is
+the run's voice card whatever card is stored, and is never stored. --word-budget is a target the brief states and
+`filter` reports on, not a cap: nothing is dropped for it. --budget still caps the sentence edits.
 
-`parse` prints {"mode": "edit", path, range, stdin, genre, budget, target} or
-{"mode": "rejections"|"exemplar", ..., "memory_argv": [...]}.
+`parse` prints {"mode": "edit", path, range, stdin, genre, budget, target},
+{"mode": "cut-only", ..., word_budget, voice_card_file (absolute)},
+{"mode": "decide", work, apply_argv: [...]} (the arguments `review.py apply` takes, for its dry run and then the
+real run), {"mode": "count", path, range, target} or {"mode": "rejections"|"exemplar", ..., "memory_argv": [...]}.
 
 Section 3 of the brief (the style sheet) ends every bullet with its layer, "(layer: document|genre|repo|user)",
 and states the rule: an entry from a narrower layer that contradicts a broader one wins (document > genre > repo >
@@ -70,6 +83,24 @@ edit whose old string has no occurrence inside the range and outside quote, code
 frontmatter and HTML pre/table/blockquote/style/script/head blocks. Every drop is listed
 under "dropped" with a cause: rejected, over-budget, not-found, outside-range,
 protected-region. That the old string occurs exactly once is the apply step's check.
+
+Cut-only (`--mode cut-only --word-budget N`): an edit must pass removes_words_only (its new string is empty, or its
+words are a proper subsequence of the old string's; punctuation and capitalisation may change) or it is dropped as
+not-a-cut. Only a paragraph proposal with action cut stays (the rest are dropped as not-a-cut, one whose quoted phrases
+sit only inside protected regions as protected-region), and every query moves to dropped_queries with the cause
+cut-only. A cut whose new string holds more of any symbol than the old string (markup such as `<`, `*` or `[`, or a
+symbol standing in for a word such as `&` or `/`; letters, digits and sentence punctuation are exempt) is dropped as
+not-a-cut. A kept cut that removes a negation (not, never, a word ending in n't) or a limit (only, must, unless), or
+a markdown cut that leaves a `*` or a backtick unpaired, adds a warning (never a drop): the check is structural, the
+meaning is the reader's.
+The output gains "mode", "word_budget" and "words" {document, budget, removed, after, counts}, where document
+counts the visible words outside protected spans and markup (entities read as characters; a range run counts the
+range), removed counts the sentence edits only (paragraph cuts are advice and are not counted: counts says so);
+an `after` above the budget adds a warning and drops nothing. A cut-only run alone protects, for an html file, nav,
+h1 to h6, button and samp too (_CUT_ONLY_TAGS; a normal html run and markdown are unchanged).
+A work directory whose brief.md says `Mode: cut-only` (or that holds card.txt) is a cut-only run's: `filter` with
+`--save` or `--work` there refuses unless --mode cut-only and --word-budget are given, and review.py takes the
+run as cut-only from the directory.
 `--save FILE` also writes the printed JSON to FILE, which must sit directly inside a work
 directory: review.py (the review loop, Steps 1.1 and 1.5) reads that file as its input, so the
 model never retypes it. `--save` and `--work` are exclusive; the review loop deletes WORK itself.
@@ -90,6 +121,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from html import unescape
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any, cast
@@ -101,7 +133,7 @@ MEMORY = HERE / "memory.py"
 # The site-page style sheet a repository keeps for its how-to pages and essays; a repository without one has no
 # site layer (nexus-scmcs: the skill ships as a plugin, so the sheet is the repository's, not a sibling skill).
 SITE_PAGE_IN_REPO = Path(".claude") / "skills" / "site-page" / "SKILL.md"
-COMMANDS = ("parse", "build", "filter", "tmpdir", "rmtmp", "site-layer", "setup", "suggest-genre")
+COMMANDS = ("parse", "build", "filter", "count", "tmpdir", "rmtmp", "site-layer", "setup", "suggest-genre")
 SITE_GENRES = ("how-to", "exploration-essay")
 # Section 3 bullets that apply to some site genres only (nexus-ger02.23): the bullet's opening words, and the
 # genres it is dropped for. "No semicolons" is for web/ how-to pages; a docs/exploration essay may use them.
@@ -151,7 +183,8 @@ GENRE_NEIGHBOURS: dict[str, tuple[str, ...]] = {
 }
 # Which mapped file `setup` offers to try first: the kinds of document a newcomer most likely has, in this order.
 TRY_ORDER = ("reference-doc", "how-to", "exploration-essay", "rdr", "changelog", "commit-message")
-PHASE3_FLAGS = ("--mode", "--voice-card", "--word-budget")
+CUT_ONLY = "cut-only"
+CARD_FILE = "card.txt"  # the given voice card, copied into a cut-only run's work directory
 TREATMENT_KEYS = {
     "ignored": "site_page_section3_ignored",
     "query_only": "site_page_section3_query_only",
@@ -192,7 +225,8 @@ def _user(message: str) -> Exception:
 
 _USAGE = (
     "usage: <path>[:<start>-<end>] [--genre G] [--budget N] | - [--genre G] [--budget N] | "
-    "rejections <path> [--remove N] | exemplar <genre> <path>:<start>-<end>"
+    "<path>[:<start>-<end>] --mode cut-only --voice-card FILE --word-budget N | "
+    "decide WORK --accept SPEC | rejections <path> [--remove N] | exemplar <genre> <path>:<start>-<end>"
 )
 
 
@@ -236,8 +270,6 @@ def _scan(tokens: list[str], value_flags: tuple[str, ...]) -> tuple[list[tuple[s
             literal = True
         else:
             flag, inline = _split_flag(token)
-            if flag in PHASE3_FLAGS:
-                raise _user(f"{flag} is not built yet (RDR-221 Step 3.1)")
             if flag not in value_flags:
                 raise _user(f"unknown flag {flag}")
             if flag in flags:
@@ -263,8 +295,44 @@ def _genre_arg(raw: str) -> str:
     return raw
 
 
+def read_voice_card(raw: str) -> tuple[str, str]:
+    """(absolute path, text) of a cut-only run's voice card file; UserError when it cannot be the run's card.
+    The text is stripped and held to memory.py's limit, the same rules as a stored card."""
+    path = os.path.abspath(raw)
+    try:
+        text = Path(path).read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise _user(f"voice card {raw}: not UTF-8 text: {exc}") from exc
+    except OSError as exc:
+        raise _user(f"voice card {raw}: cannot read it: {exc}") from exc
+    if not text:
+        raise _user(f"voice card {raw}: the file is empty")
+    if len(text) > _MEM.VOICE_CARD_MAX:
+        raise _user(f"voice card {raw}: the card is {len(text)} characters; the limit is {_MEM.VOICE_CARD_MAX}")
+    return path, text
+
+
+def cut_only_flags(flags: dict[str, str], *, card: bool) -> Obj | None:
+    """The cut-only part of an invocation from its flag values: None when none of the three flags is given,
+    else {"word_budget", and with `card` the "voice_card_file" and "voice_card"}, or UserError. `filter` takes
+    no card (card False): it needs only the mode and the word budget."""
+    if not any(f in flags for f in ("--mode", "--voice-card", "--word-budget")):
+        return None
+    if flags.get("--mode") != CUT_ONLY:
+        if "--mode" in flags:
+            raise _user(f"--mode {flags['--mode']!r}: the only mode is {CUT_ONLY}")
+        raise _user(f"--voice-card and --word-budget need --mode {CUT_ONLY}")
+    missing = [f for f in (("--voice-card",) if card else ()) + ("--word-budget",) if f not in flags]
+    if missing:
+        raise _user(f"--mode {CUT_ONLY} needs {' and '.join(missing)}")
+    out: Obj = {"word_budget": _positive("--word-budget", flags["--word-budget"])}
+    if card:
+        out["voice_card_file"], out["voice_card"] = read_voice_card(flags["--voice-card"])
+    return out
+
+
 def _parse_edit(tokens: list[str]) -> Obj:
-    positionals, flags = _scan(tokens, ("--genre", "--budget", "--remove"))
+    positionals, flags = _scan(tokens, ("--genre", "--budget", "--remove", "--mode", "--voice-card", "--word-budget"))
     if "--remove" in flags:
         raise _user("--remove belongs to `rejections <path> --remove N`")
     if not positionals:
@@ -276,6 +344,9 @@ def _parse_edit(tokens: list[str]) -> Obj:
     given = _unmention(given, literal_path)
     genre = _genre_arg(flags["--genre"]) if "--genre" in flags else None
     budget = _positive("--budget", flags["--budget"]) if "--budget" in flags else DEFAULT_BUDGET
+    cut = cut_only_flags(flags, card=True)
+    if cut is not None and given == "-" and not literal_path:
+        raise _user(f"{CUT_ONLY} needs a path: a stdin run has no page to cut")
     if given == "-" and not literal_path:
         if genre is None:
             raise _user("a stdin run needs --genre: stdin has no path to infer it from")
@@ -283,8 +354,42 @@ def _parse_edit(tokens: list[str]) -> Obj:
                 "budget": budget, "target": "-"}
     path, rng = (given, None) if literal_path else _range_of(given)
     target = given if rng is not None else path
+    if cut is not None:
+        return {"mode": CUT_ONLY, "path": path, "range": rng, "stdin": False, "genre": genre, "budget": budget,
+                "word_budget": cut["word_budget"], "voice_card_file": cut["voice_card_file"], "target": target}
     return {"mode": "edit", "path": path, "range": rng, "stdin": False, "genre": genre,
             "budget": budget, "target": target}
+
+
+def _parse_decide(tokens: list[str]) -> Obj:
+    """`decide WORK --accept SPEC ...` as the arguments review.py apply takes. --accept is required: a decision
+    that accepts nothing says `--accept none`, so no run of cut-only ends without the caller deciding."""
+    positionals, flags = _scan(tokens, ("--accept", "--reject", "--hold", "--reasons-file"))
+    if not positionals:
+        raise _user("decide needs the work directory a cut-only run printed on its WORK= line")
+    if len(positionals) > 1:
+        raise _user(f"decide takes one work directory, got {len(positionals)}")
+    if "--accept" not in flags:
+        raise _user("decide needs --accept: deciding is not optional, and --accept none says nothing was accepted")
+    work = positionals[0][0]
+    argv = ["--work", work]
+    for flag in ("--accept", "--reject", "--hold", "--reasons-file"):
+        if flag in flags:
+            argv += [flag, flags[flag]]
+    return {"mode": "decide", "work": work, "apply_argv": argv}
+
+
+def _parse_count(tokens: list[str]) -> Obj:
+    """`count <path>[:<start>-<end>]`: the page whose prose words the caller wants. No flag, no stdin."""
+    positionals, _ = _scan(tokens, ())
+    if len(positionals) != 1:
+        raise _user(f"count takes one path, got {len(positionals)}: count <path>[:<start>-<end>]")
+    given, literal_path = positionals[0]
+    given = _unmention(given, literal_path)
+    if given == "-" and not literal_path:
+        raise _user("count needs a path: a stdin run has no page to count")
+    path, rng = (given, None) if literal_path else _range_of(given)
+    return {"mode": "count", "path": path, "range": rng, "target": given if rng is not None else path}
 
 
 def _parse_rejections(tokens: list[str]) -> Obj:
@@ -330,6 +435,10 @@ def parse_invocation(tokens: list[str]) -> Obj:
         return _parse_rejections(tokens[1:])
     if tokens[0] == "exemplar":
         return _parse_exemplar(tokens[1:])
+    if tokens[0] == "decide":
+        return _parse_decide(tokens[1:])
+    if tokens[0] == "count":
+        return _parse_count(tokens[1:])
     if tokens[0] == "setup":
         if len(tokens) > 1:
             raise _user("setup takes no arguments")
@@ -600,8 +709,12 @@ def _document_rejections(read: Obj) -> list[str]:
 
 
 def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str | None = None,
-                 header: list[str] | None = None) -> str:
-    """The editor's brief, in the RDR order, from a memory.py `read` result."""
+                 header: list[str] | None = None, cut: Obj | None = None) -> str:
+    """The editor's brief, in the RDR order, from a memory.py `read` result.
+
+    `cut` makes it a cut-only brief (nexus-ger02.10): {"card": the run's voice card, "word_budget": N,
+    "prose_words": M, "html": bool}. The given card replaces any stored one; section 5 states M and N; section 6
+    allows removals only; an html target gets one more paragraph."""
     genre = str(read["genre"])
     merged = cast(Obj, read["merged"])
     scalars = cast(Obj, merged.get("scalars") or {})
@@ -611,7 +724,12 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
     layers = cast(Obj, read.get("layers") or {})
     doc_layer = cast("Obj | None", layers.get("document"))
     card = cast("Obj | None", (doc_layer or {}).get("voice_card"))
+    given = cast("str | None", cut["card"]) if cut is not None else None
+    if given is not None:
+        card = {"text": given}
     out: list[str] = ["# Editing brief", "", f"Genre: {genre}"]
+    if cut is not None:
+        out.append(f"Mode: {CUT_ONLY}")
     if input_file:
         out.append(f"Input: the text under \"Text to edit\" below (a stdin run, saved at {input_file}; "
                    "no repository path, no document record). Edit only this text.")
@@ -652,7 +770,13 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
     if notes:  # the genre's notes hold whether or not an exemplar is shown
         out += ["", "Genre notes:", _bullets(notes, lambda _n: "genre")]
     out += ["", "## 2. Voice card", ""]
-    if card:
+    if given is not None:
+        out += ["The page's author supplied this voice card for this run. It is author-approved: it is your "
+                "anchor. Do not rebuild it from the document. Use it as written to tell a device from a defect. "
+                "Return it unchanged in the \"voice_card\" field. If the document shows a device the card does "
+                "not list, say so in the note, never in the card.",
+                "", "<voice_card>", given, "</voice_card>"]
+    elif card:
         out += ["The author approved this voice card for this document on "
                 f"{str(card.get('at', ''))[:10]}. It is author-approved: it is your anchor. Do not rebuild it "
                 "from the document, which has been edited since it was written. Use it as written to tell a "
@@ -703,6 +827,34 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
         out += ([""] if nad else []) + rejected
     if not nad and not rejected:
         out.append("None stored.")
+    if cut is not None:
+        scope = f"lines {rng['start']}-{rng['end']}" if rng else "the document"
+        out += ["", "## 5. Budget", "",
+                f"Propose at most {budget} sentence edits. Fewer is right when fewer are earned. "
+                "Paragraph proposals are not counted.",
+                f"The prose of {scope} has {cut['prose_words']} words: the visible words outside protected "
+                "regions and markup, an entity counted as the character it stands for. The word budget is "
+                f"{cut['word_budget']} words. It is a target and not a limit: cut toward it only where words "
+                "repeat or are filler, and never cut an earned word to reach it. A text already within it needs "
+                "only the cuts that repeat what the text already says."]
+        out += ["", "## 6. Cut-only", "",
+                "Every edit only removes words: its new string is its old string with words taken out, or empty. "
+                "No edit adds, replaces, reorders or re-inflects a word; punctuation or capitalisation may change "
+                "beside a removal. No edit adds markup: no tag, no entity, no `*`, `~`, backtick or `_` that its "
+                "old string does not already hold. Paragraph proposals are cuts only (action cut): do not propose a merge, a move "
+                "or a split. Raise no queries: a word that may be earned stays. Cut what repeats: when a word, "
+                "clause or sentence repeats what the text already says, or is a filler word, propose the cut. "
+                "Never cut a voice-card device, however this section or a diagnostic reads. Never put in content "
+                "or claims."]
+        if cut["html"]:
+            out += ["", "The document is HTML. An old string is raw source: entities as written (`&amp;` stays "
+                    "`&amp;`) and source line breaks exact. An edit never contains or touches a tag, so a sentence "
+                    "with inline code or a link is cut only inside one text run. Text inside the nav, h1 to h6, "
+                    "button, pre, code, kbd, samp, table, blockquote, svg, style, script and head elements and "
+                    "inside comments is protected."]
+        if input_text is not None:
+            out += ["", "## Text to edit", "", "<document>", input_text.rstrip("\n"), "</document>"]
+        return "\n".join(out) + "\n"
     out += ["", "## 5. Budget", "",
             f"Propose at most {budget} sentence edits. Fewer is right when fewer are earned. "
             "Paragraph proposals and queries are not counted."]
@@ -806,6 +958,10 @@ def cmd_build(a: argparse.Namespace) -> str:
     if not stdin and a.file:
         raise _user("--file is only for a stdin run (target -)")
     budget = _positive("--budget", a.budget)
+    cut_flags = cut_only_flags({f: v for f, v in (("--mode", a.mode), ("--voice-card", a.voice_card),
+                                                  ("--word-budget", a.word_budget)) if v is not None}, card=True)
+    if cut_flags is not None and stdin:
+        raise _user(f"{CUT_ONLY} needs a path: a stdin run has no page to cut")
     genre: str | None = _genre_arg(a.genre) if a.genre else None
     if genre is None:
         if not stdin:
@@ -843,7 +999,18 @@ def cmd_build(a: argparse.Namespace) -> str:
               "Genre paths: " + (", ".join(found) if found else "none")]
     if rel:
         header.append(f"Exclude from the search: {rel}")
-    brief = render_brief(read, budget, a.file if stdin else None, text, header)
+    cut: Obj | None = None
+    if cut_flags is not None:
+        page = root / str(rel)
+        try:
+            page_text = page.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise _user(f"cannot read {page} as UTF-8 text: {exc}") from exc
+        is_html = page.suffix.lower() in (".html", ".htm")
+        window = _range_span(page_text, cast("Obj | None", read.get("range")))
+        cut = {"card": cut_flags["voice_card"], "word_budget": cut_flags["word_budget"], "html": is_html,
+               "prose_words": prose_word_count(page_text, is_html, window)}
+    brief = render_brief(read, budget, a.file if stdin else None, text, header, cut)
     if a.work and stdin:
         raise _user("--work is for a path run; a stdin run already has its work directory")
     work: Path | None = None
@@ -858,6 +1025,8 @@ def cmd_build(a: argparse.Namespace) -> str:
     # the id goes into the file only: stdout and the dispatch prompt never carry it, so a reply that names it read it
     brief_file = work / BRIEF_FILE
     brief_file.write_text(f"{brief}\n{ID_LABEL}{brief_sha(brief.encode('utf-8'))}\n", encoding="utf-8")
+    if cut is not None:
+        (work / CARD_FILE).write_text(str(cut["card"]), encoding="utf-8")
     ready = ready_paths(work, READY_BUILD) if a.work else ""
     return f"{head}{DISPATCH_LABEL}{dispatch_prompt(brief_file)}\n{ready}\n{brief}"
 
@@ -900,16 +1069,20 @@ def extract_proposal(text: str) -> Obj:
 
 Span = tuple[int, int]
 _HTML_TAGS = ("pre", "table", "blockquote", "style", "script", "head", "svg", "code", "kbd")
+# Protected for an html file in a cut-only run only (nexus-ger02.10): navigation, headings, buttons and sample output
+# are not prose to cut on a web page. A normal html run edits them, and so does a markdown file that carries one inline.
+_CUT_ONLY_TAGS = ("nav", "h1", "h2", "h3", "h4", "h5", "h6", "button", "samp")
 _FENCE_OPEN = re.compile(r"^\s*(`{3,}|~{3,})")
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|[0-9]{1,9}[.)])\s")
 _TABLE_DELIM = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
 _BLOCK_START = re.compile(r"^\s*(?:#{1,6}\s|`{3,}|~{3,}|[-*_]{3,}\s*$)")
 
 
-def _html_spans(text: str) -> list[Span]:
-    """Comments and whole (nested-aware) pre, table, blockquote, style, script, head, svg, code, kbd."""
+def _html_spans(text: str, cut_only: bool = False) -> list[Span]:
+    """Comments and whole (nested-aware) pre, table, blockquote, style, script, head, svg, code, kbd; with
+    `cut_only` (an html file in a cut-only run) also nav, h1 to h6, button and samp."""
     spans = [m.span() for m in re.finditer(r"<!--.*?-->", text, re.DOTALL)]
-    for tag in _HTML_TAGS:
+    for tag in (*_HTML_TAGS, *_CUT_ONLY_TAGS) if cut_only else _HTML_TAGS:
         opener = re.compile(rf"<{tag}\b[^>]*>", re.IGNORECASE)
         token = re.compile(rf"<(/?){tag}\b[^>]*>", re.IGNORECASE)
         pos = 0
@@ -1040,12 +1213,13 @@ def _destination_spans(text: str) -> list[Span]:
     return spans
 
 
-def protected_spans(text: str, html: bool = False) -> list[Span]:
+def protected_spans(text: str, html: bool = False, cut_only: bool = False) -> list[Span]:
     """Character spans no edit may touch: frontmatter, fenced and indented code, quotes, tables,
     comments, HTML code-like blocks, and in markdown the link destinations and the attribute values
-    of inline HTML. An HTML file gets only the HTML rules (its tags are checked apart)."""
+    of inline HTML. An HTML file gets only the HTML rules (its tags are checked apart); a cut-only
+    run of one adds the nav, heading, button and samp elements."""
     if html:
-        return _html_spans(text)
+        return _html_spans(text, cut_only=cut_only)
     return _markdown_spans(text) + _html_spans(text) + _destination_spans(text)
 
 
@@ -1159,6 +1333,95 @@ def edit_problem(text: str, old: str, spans: list[Span], rng: Span | None) -> st
     return "protected-region" if in_range else "outside-range"
 
 
+_WORD = re.compile(r"[\w'\u2019-]+")
+
+
+def _words(text: str) -> list[str]:
+    """The words of `text` in order, case-folded: runs of letters, digits, apostrophes and hyphens, with an entity
+    read as the character it stands for. A run of apostrophes and hyphens alone is not a word."""
+    return [w for token in _WORD.findall(unescape(text)) if (w := token.casefold().strip("'\u2019-"))]
+
+
+def removes_words_only(old: str, new: str) -> bool:
+    """True when `new` is `old` with words taken out: empty, or its words a proper subsequence of `old`'s.
+    Punctuation and capitalisation may change; a word added, replaced, inflected or moved makes it False."""
+    if not new.strip():
+        return True
+    gone, kept = _words(old), _words(new)
+    if len(kept) >= len(gone):
+        return False
+    rest = iter(gone)
+    return all(word in rest for word in kept)
+
+
+_SENTENCE_MARKS = frozenset(".,;:!?'\"‘’“”-–—")  # what a cut may move around
+_WEIGHTY = frozenset({
+    "not", "no", "never", "only", "must", "may", "cannot", "without",
+    "nor", "neither", "none", "nothing", "nobody", "unless", "except",
+})
+
+
+def is_weighty(word: str) -> bool:
+    """A word whose removal can turn a sentence's meaning around: a negation, a contracted one, or a limit."""
+    return word in _WEIGHTY or word.endswith(("n't", "n’t"))
+
+
+def adds_markup(old: str, new: str, html: bool) -> bool:
+    """True when `new` holds more of any symbol than `old`: a markup character (`<`, `*`, a backtick, `[`, `#`),
+    or a symbol standing in for a word (`&`, `/`, `+`, `<`). Letters, digits, spaces and sentence punctuation are
+    exempt. An html file is compared with its entities read, so `&mdash;` turned into `&amp;` counts as an `&`.
+    Taking words out never adds one, so a cut that does is a rewrite."""
+    if html:
+        old, new = unescape(old), unescape(new)
+    return any(
+        new.count(ch) > old.count(ch)
+        for ch in set(new)
+        if not ch.isalnum() and not ch.isspace() and ch not in _SENTENCE_MARKS
+    )
+
+
+def _marks(text: str) -> dict[str, int]:
+    """How many `**` runs, lone `*` and backticks `text` holds: a `**` is counted once, never as two `*`."""
+    strong = text.count("**")
+    return {"**": strong, "*": text.count("*") - 2 * strong, "`": text.count("`")}
+
+
+def unpaired_markup(old: str, new: str) -> list[str]:
+    """The markdown emphasis or code marks that `old` holds in pairs and `new` leaves one short of a pair."""
+    before, after = _marks(old), _marks(new)
+    return [m for m in before if before[m] % 2 == 0 and after[m] % 2 == 1]
+
+
+def is_cut(old: str, new: str, html: bool) -> bool:
+    """The one rule of a cut-only edit, shared by filter and apply: words out, no words in, no markup in."""
+    return removes_words_only(old, new) and not adds_markup(old, new, html)
+
+
+def removed_words(old: str, new: str) -> list[str]:
+    """The words `new` leaves out of `old`, in order. `new` is a subsequence of `old` (removes_words_only)."""
+    kept = iter(_words(new))
+    want = next(kept, None)
+    out: list[str] = []
+    for word in _words(old):
+        if word == want:
+            want = next(kept, None)
+        else:
+            out.append(word)
+    return out
+
+
+def prose_word_count(text: str, html: bool, window: Span | None = None) -> int:
+    """The visible words of `text` outside the protected spans and every tag, entities read as characters; with
+    `window` (a range run) only those characters. This is the number a cut-only brief and filter call the document's,
+    so an html page is counted with the cut-only element set."""
+    masked = list(text)
+    for a, b in [*protected_spans(text, html=html, cut_only=True), *html_tag_spans(text)]:
+        for i in range(max(a, 0), min(b, len(text))):
+            masked[i] = " "
+    lo, hi = window if window is not None else (0, len(text))
+    return len(_words("".join(masked[lo:hi])))
+
+
 def _n_of(item: object) -> int:
     n = cast(Obj, item).get("n") if isinstance(item, dict) else None
     return n if isinstance(n, int) else 10**9
@@ -1179,6 +1442,14 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
     if not stdin and a.file:
         raise _user("--file is only for a stdin run (target -)")
     budget = _positive("--budget", a.budget)
+    cut_flags = cut_only_flags({f: v for f, v in (("--mode", a.mode), ("--word-budget", a.word_budget))
+                                if v is not None}, card=False)
+    if cut_flags is not None and stdin:
+        raise _user(f"{CUT_ONLY} needs a path: a stdin run has no page to cut")
+    held = work_file(a.save).parent if a.save else work_dir(a.work) if a.work else None
+    if cut_flags is None and held is not None and cut_only_work(held):
+        raise _user(f"{held} belongs to a {CUT_ONLY} run (its brief says Mode: {CUT_ONLY}): pass --mode {CUT_ONLY} "
+                    "and --word-budget N, or the filter would let an edit that adds words through")
     proposal = extract_proposal(reply)
     over: list[Any] = []
     raw_edits = proposal.get("edits")
@@ -1208,11 +1479,14 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
     except (OSError, UnicodeDecodeError) as exc:
         raise _user(f"cannot read {source} as UTF-8 text: {exc}") from exc
     is_html = source.suffix.lower() in (".html", ".htm")
-    spans = protected_spans(text, html=is_html)
+    spans = protected_spans(text, html=is_html, cut_only=cut_flags is not None)
     tags = html_tag_spans(text) if is_html else []
     window = _range_span(text, rng)
     kept: list[Obj] = []
     for e in cast("list[Obj]", result.get("edits") or []):
+        if cut_flags is not None and not is_cut(str(e["old"]), str(e.get("new") or ""), is_html):
+            dropped.append({"n": e["n"], "old": e["old"], "new": e.get("new"), "cause": "not-a-cut"})
+            continue
         cause = edit_problem(text, str(e["old"]), spans, window)
         if cause is None and tags and edit_problem(text, str(e["old"]), tags, window) is not None:
             cause = "markup"
@@ -1224,6 +1498,8 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
                 warnings.append(f"edit {e['n']} spanned more than one sentence; narrowed to the sentence it changes")
                 e = {**e, "old": narrowed[0], "new": narrowed[1]}
                 sentences = sentence_span(narrowed[0])
+                if cut_flags is not None and not is_cut(narrowed[0], narrowed[1], is_html):
+                    cause = "not-a-cut"
             else:
                 cause = "multi-sentence"
         if cause:
@@ -1231,6 +1507,15 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
             continue
         if sentences == "maybe":
             warnings.append(f"edit {e['n']} may cover more than one sentence")
+        if cut_flags is not None:
+            old_text, new_text = str(e["old"]), str(e.get("new") or "")
+            lost = [w for w in dict.fromkeys(removed_words(old_text, new_text)) if is_weighty(w)]
+            if lost:  # a structural check cannot see meaning: the caller reads this cut for it
+                names = ", ".join(json.dumps(w) for w in lost)
+                warnings.append(f"edit {e['n']} removes {names}: read it for meaning (the cut check is structural)")
+            if not is_html and (marks := unpaired_markup(old_text, new_text)):
+                names = ", ".join(json.dumps(m) for m in marks)
+                warnings.append(f"edit {e['n']} leaves {names} without its pair: check the markup")
         kept.append(e)
     dropped.sort(key=_n_of)
 
@@ -1245,6 +1530,9 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
     queries: list[Obj] = []
     dropped_queries: list[Obj] = []
     for q in cast("list[Obj]", result.get("queries") or []):
+        if cut_flags is not None:  # a cut-only run asks nothing: a doubt about a word means the word stays
+            dropped_queries.append({"n": q["n"], "anchor": q["anchor"], "cause": "cut-only"})
+            continue
         place = where_is(str(q["anchor"]))
         if place == "inside":
             queries.append(q)
@@ -1253,26 +1541,63 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
                                     "cause": "anchor-not-found" if place == "absent" else "outside-range"})
     paragraphs: list[Obj] = []
     dropped_paragraphs: list[Obj] = []
+    covered = [*spans, *tags]
+
+    def only_protected(needle: str) -> bool:
+        spots = _occurrences(text, needle)
+        return bool(spots) and all(any(i < b and a < i + len(needle) for a, b in covered) for i in spots)
+
     for pr in cast("list[Obj]", result.get("paragraphs") or []):
+        if cut_flags is not None and str(pr.get("action", "")).strip().lower() != "cut":
+            dropped_paragraphs.append({"n": pr["n"], "paragraphs": pr.get("paragraphs"), "cause": "not-a-cut"})
+            continue
         phrases = _quoted_phrases(str(pr.get("paragraphs", "")))
         places = [where_is(ph) for ph in phrases]
         if window is not None and places and "inside" not in places and "outside" in places:
             dropped_paragraphs.append({"n": pr["n"], "paragraphs": pr.get("paragraphs"),
                                        "cause": "outside-range"})
             continue
+        if cut_flags is not None and phrases and all(only_protected(ph) for ph in phrases):
+            dropped_paragraphs.append({"n": pr["n"], "paragraphs": pr.get("paragraphs"),
+                                       "cause": "protected-region"})
+            continue
         if window is not None and "inside" not in places:
             warnings.append(f"paragraph proposal {pr['n']} could not be placed inside the range")
         paragraphs.append(pr)
+    cut_report: Obj = {}
+    if cut_flags is not None:
+        target_words = int(cut_flags["word_budget"])
+        document = prose_word_count(text, is_html, window)
+        removed = sum(max(0, len(_words(str(e["old"]))) - len(_words(str(e.get("new") or "")))) for e in kept)
+        words = {"document": document, "budget": target_words, "removed": removed, "after": document - removed,
+                 "counts": "sentence edits only"}  # paragraph cuts are advice and are not in `removed`
+        if words["after"] > target_words:  # a target, not a cap: the cuts stay and the author sees the gap
+            warnings.append(f"after these cuts the prose is {words['after']} words, over the word budget of "
+                            f"{target_words}; nothing was dropped for it")
+        cut_report = {"mode": CUT_ONLY, "word_budget": target_words, "words": words}
     for brief_warning in _brief_warnings(a, proposal):
         warnings.append(brief_warning)
         sys.stderr.write(f"brief.py: {brief_warning}\n")
     return {**result, "edits": kept, "dropped": dropped, "queries": queries,
             "dropped_queries": dropped_queries, "paragraphs": paragraphs,
-            "dropped_paragraphs": dropped_paragraphs, "warnings": warnings}
+            "dropped_paragraphs": dropped_paragraphs, "warnings": warnings, **cut_report}
 
 
 _BRIEF_FILE_ID = re.compile(r"(?s)(.*\n)\nBrief id: ([0-9a-f]{12})\n")
 _CARD_IN_BRIEF = re.compile(r"\n<voice_card>\n(.*?)\n</voice_card>\n", re.DOTALL)
+
+
+def cmd_count(target: str) -> Obj:
+    """{"words": N}: the prose words of a page (or of its line range) in the unit a cut-only run's words.document
+    uses, so the caller picks a word budget and reports the final count in the number the filter reports."""
+    where = memory_json(["repo", target])
+    source = Path(str(where["root"])) / str(where["path"])
+    try:
+        text = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _user(f"cannot read {source} as UTF-8 text: {exc}") from exc
+    window = _range_span(text, cast("Obj | None", where.get("range")))
+    return {"words": prose_word_count(text, source.suffix.lower() in (".html", ".htm"), window)}
 
 
 def _brief_warnings(a: argparse.Namespace, proposal: Obj) -> list[str]:
@@ -1351,6 +1676,18 @@ WORK_SENTINEL = ".prose-edit-work"
 WORK_BUILDING_PREFIX = ".prose-edit-building-"
 WORK_MAX_AGE = 2 * 3600
 _WORK_NAME = re.compile(r"prose-edit-[a-z0-9_]{8}")
+
+
+def cut_only_work(work: Path) -> bool:
+    """True when `work` holds a cut-only run: its brief's header says `Mode: cut-only`, or it holds the given card.
+    The header is the lines above section 1, so a document that quotes the line cannot make an ordinary run one."""
+    if (work / CARD_FILE).is_file():
+        return True
+    try:
+        brief = (work / BRIEF_FILE).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return f"Mode: {CUT_ONLY}" in brief.split("\n## 1. ", 1)[0].splitlines()
 
 
 def _is_work_dir(real: Path, base: Path) -> bool:
@@ -1626,10 +1963,17 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--work", action="store_true",
                    help="path run: make the work directory now and name it on the first line (WORK=<dir>)")
     b.add_argument("--site-page")
+    b.add_argument("--mode", help="cut-only: the brief allows removals only (with --voice-card and --word-budget)")
+    b.add_argument("--voice-card", help="cut-only: a file holding the voice card for this run, never stored")
+    b.add_argument("--word-budget", help="cut-only: the word count to cut toward (a target, not a cap)")
+    c = sub.add_parser("count", help="the prose words of a page, as JSON")
+    c.add_argument("target")
     f = sub.add_parser("filter", help="the agent's reply on stdin to filtered proposal JSON")
     f.add_argument("target")
     f.add_argument("--budget", default=str(DEFAULT_BUDGET))
     f.add_argument("--file")
+    f.add_argument("--mode", help="cut-only: drop an edit that adds a word, keep paragraph cuts only, drop queries")
+    f.add_argument("--word-budget", help="cut-only: the word count to cut toward; reported, never enforced")
     f.add_argument("--work", help="delete this work directory after a successful filter")
     f.add_argument("--save", help="also write the filtered JSON to this file inside a work directory")
     t = sub.add_parser("tmpdir", help="a fresh work directory outside the repository")
@@ -1672,6 +2016,8 @@ def main(argv: list[str] | None = None) -> int:
             if save is not None:
                 save.write_text(text_out, encoding="utf-8")
             sys.stdout.write(text_out)
+        elif args.cmd == "count":
+            sys.stdout.write(json.dumps(cmd_count(args.target)) + "\n")
         elif args.cmd == "tmpdir":
             made = cmd_tmpdir()
             sys.stdout.write(f"WORK={made}\n" + ready_paths(made, list(READY_FILES)) if args.ready else made + "\n")
