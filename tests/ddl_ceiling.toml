@@ -108,9 +108,12 @@ migration_wal_bytes_per_worker = 11038000
 # 2160 -> 2166 (2026-10-30): vectors-042-1 (nexus-jypmj, RDR-232 chash_allow, text_gated_search_allowed_384/768/1024) adds six DDL
 # statements to a fresh migration: 3 CREATE OR REPLACE FUNCTION and their 3 GRANT EXECUTE, the shape vectors-038-1 added (the guard
 # DO block is not DDL).
-# 2166 -> 2168 (2026-10-31): vectors-043-1 (nexus-yye8l.21, nexus.request_ledger_tenants) adds two DDL statements to a fresh
-# migration: 1 CREATE TABLE and 1 from the runAlways grants loop for the new table (the vectors-037-1 accounting per table).
-migration_ddl_per_worker = 2168
+# 2166 -> 2172 (2026-10-31): vectors-043 (nexus-yye8l.21, nexus.request_ledger_tenants) adds six DDL statements to a fresh
+# migration: 1 CREATE TABLE and 1 from the runAlways grants loop for the new table (the vectors-037-1 accounting per table),
+# 1 CREATE OR REPLACE FUNCTION (the register-tenant trigger function), 1 CREATE TRIGGER (BEFORE INSERT on request_ledger),
+# and the backfill's ALTER TABLE ... NO FORCE ROW LEVEL SECURITY and its FORCE restore (the INSERT ... SELECT is not DDL).
+# Measured on the laptop (macOS), 2026-10-31: tests/test_scenario_journeys.py, one worker, ddl: migration=2172.
+migration_ddl_per_worker = 2172
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
     RDR-222 Phase 2 prerequisite (nexus-yye8l.21): nexus.request_ledger_tenants, the set of tenants that have
-    ever held a request_ledger row, so the retention arm can visit every one of them.
+    ever held a request_ledger row, so the retention arm can visit every one of them. Four changesets: the
+    table, the trigger function, the trigger, and the backfill of tenants already holding ledger rows.
 
     THE PROBLEM. The retention arm deletes a tenant's old ledger rows one tenant at a time (RequestLedger.retain,
     under withTenant), so it needs a tenant list. nexus.request_ledger is FORCE ROW LEVEL SECURITY, so under
@@ -11,24 +12,42 @@
     after it expires) kept its ledger rows for ever. A test that read the ledger as the superuser would have
     "worked" and proved nothing (the vectors-029 header says the same about a superuser-run migration).
 
-    THE TABLE. One row per tenant, written by the claim path in the same transaction as the tenant's ledger
-    insert (INSERT ... ON CONFLICT DO NOTHING), so a ledger row cannot exist without its tenant row. The
+    THE TABLE. One row per tenant, written by a BEFORE INSERT trigger on nexus.request_ledger (below), so
+    NO insert into the ledger, by any code path or by hand, can leave a ledger row without its tenant row. The
     primary key is the index the enumeration uses (a full scan of a table with one row per tenant, bounded by
     the statement timeout the retention arm already applies). Rows are never deleted: pruning a tenant whose
-    ledger is empty would race a concurrent first claim (the claim's DO NOTHING takes no lock on the existing
+    ledger is empty would race a concurrent first claim (the trigger's DO NOTHING takes no lock on the existing
     row, so a delete in between would leave a live ledger row with no tenant row). The table is as large as the
     number of tenants that ever made a keyed request.
 
-    No tenant_id RLS, deliberately, the posture of nexus.tuple_tenants (tuples-001-3) and service_tokens: the
-    table names tenants and holds no tenant-owned data, and the arm that reads it must see every tenant's row.
-    nexus_svc DML comes from the runAlways grants-nexus-svc.xml loop, with no edit there. nexus_diag gets no
-    grant: nothing in it is diagnostic that service_tokens does not already show.
+    THE TRIGGER (vectors-043-2, -3). RequestLedger.claim used to write the registry row itself. That kept the
+    invariant only for that one insert site, and RDR-222 Phase 2 adds a second one (an inline claim in the
+    partition transaction), so the invariant moved into the database. The function is SECURITY INVOKER, the
+    standing default here: the writer is nexus_svc, which holds INSERT on the registry through the runAlways
+    grants loop, and the registry has no RLS, so a definer would add nothing. Under FORCE RLS on the ledger the
+    function never touches the ledger (it inserts only into the registry), so the ledger policy does not reach
+    it. search_path is pinned and every name is schema-qualified. The registry row is inserted BEFORE the ledger
+    row, so the lock order stays registry, then ledger: two first claims for one brand-new tenant serialise on
+    the registry's primary-key entry until the first commits and then the second's DO NOTHING proceeds, and
+    neither holds anything the other needs, so they cannot deadlock. BEFORE INSERT fires before ON CONFLICT is
+    resolved, so a claim that loses to an existing ledger row still runs the registry DO NOTHING; the tenant is
+    already registered then, so nothing changes.
 
-    Tenants that wrote ledger rows before this changeset are not in the table until they claim again. They keep
-    the coverage they had: the retention arm still visits the reaper's tenants as well. Only such a tenant that
-    also loses its last token before its next keyed request stays unretained, as every such tenant did before.
-    There is no backfill: the ledger is FORCE RLS, so migration-time DML could not read it, and the table is
-    DDL only, so this changeset needs no rehearsal seed.
+    THE BACKFILL (vectors-043-4). Tenants that held ledger rows before this changeset include exactly the
+    population the registry exists for: a tenant already without a token at deploy cannot authenticate, so it
+    can never make the keyed request that would register it. The backfill copies every distinct tenant_id of
+    nexus.request_ledger into the registry. The ledger is FORCE ROW LEVEL SECURITY and the migrator is
+    nexus_admin (NOSUPERUSER NOBYPASSRLS), which would see no row, so the changeset toggles NO FORCE around the
+    INSERT ... SELECT and restores FORCE after, the aspects-004-1 and catalog-014-0 idiom (the owner is exempt
+    from RLS while FORCE is off; the changeset is one transaction, so a failure restores FORCE). It runs AFTER
+    the trigger exists, so a ledger insert that lands between the two registers itself and the backfill
+    covers every earlier row; the reverse order would lose the rows written between them. The toggle takes
+    ACCESS EXCLUSIVE on nexus.request_ledger for the length of one scan of a table bounded by the seven-day
+    retention. Additive: it writes only to the new table and changes no existing row, so it carries no DATA
+    EFFECT line.
+
+    nexus_svc DML on the registry comes from the runAlways grants-nexus-svc.xml loop, with no edit there.
+    nexus_diag gets no grant: nothing in it is diagnostic that service_tokens does not already show.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -46,6 +65,54 @@ CREATE TABLE nexus.request_ledger_tenants (
 );
         </sql>
         <rollback>DROP TABLE IF EXISTS nexus.request_ledger_tenants CASCADE</rollback>
+    </changeSet>
+
+    <changeSet id="vectors-043-2" author="nexus-yye8l.21">
+        <comment>Trigger function: a ledger row registers its tenant (SECURITY INVOKER, pinned search_path)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.request_ledger_register_tenant()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+    SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+    INSERT INTO nexus.request_ledger_tenants (tenant_id)
+    VALUES (NEW.tenant_id)
+    ON CONFLICT (tenant_id) DO NOTHING;
+    RETURN NEW;
+END;
+$fn$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.request_ledger_register_tenant()</rollback>
+    </changeSet>
+
+    <changeSet id="vectors-043-3" author="nexus-yye8l.21">
+        <comment>BEFORE INSERT trigger on request_ledger: register the row's tenant in request_ledger_tenants</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TRIGGER trg_request_ledger_register_tenant
+    BEFORE INSERT ON nexus.request_ledger
+    FOR EACH ROW
+    EXECUTE FUNCTION nexus.request_ledger_register_tenant();
+        </sql>
+        <rollback>DROP TRIGGER IF EXISTS trg_request_ledger_register_tenant ON nexus.request_ledger</rollback>
+    </changeSet>
+
+    <changeSet id="vectors-043-4" author="nexus-yye8l.21">
+        <comment>Backfill request_ledger_tenants from the tenants already holding request_ledger rows (additive: inserts into the new table only)</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.request_ledger NO FORCE ROW LEVEL SECURITY;
+
+INSERT INTO nexus.request_ledger_tenants (tenant_id, first_seen)
+SELECT DISTINCT tenant_id, now()
+  FROM nexus.request_ledger
+ON CONFLICT (tenant_id) DO NOTHING;
+
+ALTER TABLE nexus.request_ledger FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- Rows of the table vectors-043-1's rollback drops; nothing to restore on their own. -->
+        </rollback>
     </changeSet>
 
 </databaseChangeLog>

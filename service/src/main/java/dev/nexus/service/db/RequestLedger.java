@@ -244,26 +244,19 @@ public final class RequestLedger {
             UUID nonce = UUID.randomUUID();
             int inserted;
             try {
-                inserted = withClaimLockBound(tenant, requestId, ctx -> {
-                    // nexus-yye8l.21: the tenant is recorded in the SAME transaction as its first ledger row,
-                    // so the retention arm can enumerate it whatever happens to its service tokens. An
-                    // existing row is a lookup, not a write.
-                    ctx.insertInto(REQUEST_LEDGER_TENANTS)
-                        .set(REQUEST_LEDGER_TENANTS.TENANT_ID, tenant)
-                        .onConflictDoNothing()
-                        .execute();
-                    return ctx.insertInto(REQUEST_LEDGER)
-                        .set(REQUEST_LEDGER.TENANT_ID, tenant)
-                        .set(REQUEST_LEDGER.REQUEST_ID, requestId)
-                        .set(REQUEST_LEDGER.ROUTE, route)
-                        .set(REQUEST_LEDGER.BODY_SHA256, bodySha256)
-                        .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
-                        .set(REQUEST_LEDGER.HOLDER, nonce)
-                        .set(REQUEST_LEDGER.STARTED_AT, clock())
-                        .set(REQUEST_LEDGER.LEASE_UNTIL, leaseUntil)
-                        .onConflictDoNothing()
-                        .execute();
-                });
+                // The tenant's request_ledger_tenants row is written by the BEFORE INSERT trigger on this
+                // insert (vectors-043, nexus-yye8l.21), in the same statement and transaction.
+                inserted = withClaimLockBound(tenant, requestId, ctx -> ctx.insertInto(REQUEST_LEDGER)
+                    .set(REQUEST_LEDGER.TENANT_ID, tenant)
+                    .set(REQUEST_LEDGER.REQUEST_ID, requestId)
+                    .set(REQUEST_LEDGER.ROUTE, route)
+                    .set(REQUEST_LEDGER.BODY_SHA256, bodySha256)
+                    .set(REQUEST_LEDGER.STATE, IN_FLIGHT)
+                    .set(REQUEST_LEDGER.HOLDER, nonce)
+                    .set(REQUEST_LEDGER.STARTED_AT, clock())
+                    .set(REQUEST_LEDGER.LEASE_UNTIL, leaseUntil)
+                    .onConflictDoNothing()
+                    .execute());
             } catch (ClaimLockTimeout timeout) {
                 return settleAfterLockTimeout(tenant, requestId, route, bodySha256, timeout);
             }
@@ -374,8 +367,8 @@ public final class RequestLedger {
     /**
      * Run one claim statement in its own tenant transaction under {@code lock_timeout} =
      * {@link #CLAIM_LOCK_TIMEOUT_MS}, sent in the same round trip as the tenant stamp. A lock wait that trips
-     * (SQLSTATE 55P03) is a {@link ClaimLockTimeout}: the statement was the claim's only write and it did not
-     * happen. Any other failure propagates unchanged.
+     * (SQLSTATE 55P03) is a {@link ClaimLockTimeout}: the statement (with the registry write its trigger makes)
+     * was the claim's only write and it did not happen. Any other failure propagates unchanged.
      */
     private <T> T withClaimLockBound(String tenant, UUID requestId, Function<DSLContext, T> work) {
         try {
@@ -546,8 +539,10 @@ public final class RequestLedger {
     }
 
     /**
-     * Every tenant that has held a ledger row, from {@code nexus.request_ledger_tenants} (nexus-yye8l.21): the
-     * claim path writes the tenant in the transaction of its first ledger insert. The ledger is FORCE RLS, so
+     * Every tenant that has held a ledger row, from {@code nexus.request_ledger_tenants} (nexus-yye8l.21): a
+     * BEFORE INSERT trigger on {@code request_ledger} writes the tenant in the transaction of its first ledger
+     * insert, whatever code path makes the insert, and vectors-043-4 backfilled the tenants whose rows predate
+     * the table. The ledger is FORCE RLS, so
      * the tenants cannot be read from it without naming each one; this table has no RLS and one row per tenant,
      * a primary-key scan. Bounded by {@code statementBound} ({@code SET LOCAL statement_timeout}): the retention
      * arm builds its tenant list with this before any pass runs, so an unbounded read would stall the shared

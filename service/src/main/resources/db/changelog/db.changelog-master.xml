@@ -1937,8 +1937,9 @@
 
     <!--
         Bead nexus-yye8l.21 (RDR-222): nexus.request_ledger_tenants, one row per tenant that has held a request_ledger
-        row, so the retention arm visits every ledger tenant and not only those holding a service token. One CREATE
-        TABLE, no RLS (the tuple_tenants posture), no row DML. After vectors-042 (current tail), before the
+        row, so the retention arm visits every ledger tenant and not only those holding a service token. The table (no
+        RLS, the tuple_tenants posture), a BEFORE INSERT trigger on request_ledger that registers the row's tenant, and a
+        NO FORCE-wrapped backfill of the tenants already holding ledger rows. After vectors-042 (current tail), before the
         grants-nexus-svc.xml runAlways block, which gives nexus_svc its DML.
     -->
     <include file="db/changelog/vectors-043-request-ledger-tenants.xml"/>

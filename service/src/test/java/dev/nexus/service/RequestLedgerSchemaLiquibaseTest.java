@@ -141,6 +141,28 @@ class RequestLedgerSchemaLiquibaseTest {
         }
     }
 
+    @Test
+    void theRegisterTenantTrigger_isABeforeInsertRowTriggerOnTheLedger_withAnInvokerFunctionAndAPinnedSearchPath()
+            throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var triggers = ctx.fetch("""
+                SELECT t.tgname, pg_get_triggerdef(t.oid) AS def, p.prosecdef, p.proconfig::text AS cfg
+                  FROM pg_trigger t
+                  JOIN pg_proc p ON p.oid = t.tgfoid
+                 WHERE t.tgrelid = 'nexus.request_ledger'::regclass AND NOT t.tgisinternal
+                """);
+            assertThat(triggers).hasSize(1);
+            var trigger = triggers.get(0);
+            assertThat(trigger.get("tgname", String.class)).isEqualTo("trg_request_ledger_register_tenant");
+            assertThat(trigger.get("def", String.class))
+                .contains("BEFORE INSERT ON nexus.request_ledger", "FOR EACH ROW",
+                    "nexus.request_ledger_register_tenant()");
+            assertThat(trigger.get("prosecdef", Boolean.class)).as("SECURITY INVOKER").isFalse();
+            assertThat(trigger.get("cfg", String.class)).contains("search_path=pg_catalog, pg_temp");
+        }
+    }
+
     // ── Test 3: the CHECK constraints reject what they name ─────────────────
 
     @Test
