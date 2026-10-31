@@ -405,7 +405,7 @@ def test_a_plain_unattended_upgrade_that_outlasts_the_holder_does_not_start_and_
     plain_upgrade, monkeypatch,
 ) -> None:
     """The lockstep child waits for the lock (the hook starts an `--auto` in the same instant) and, when the
-    holder outlasts the wait, exits 75, so its starter sees 'did not run' and leaves the marker stale for the
+    holder outlasts the wait, exits 75; its detached starter wrote the marker at spawn, so the plain run's extra work waits for the
     next session. A silent 0 would mark it done."""
     _managed_note_tags_registry(monkeypatch)
     monkeypatch.setenv(UNATTENDED_ENV, "1")

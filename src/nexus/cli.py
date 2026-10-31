@@ -182,7 +182,9 @@ def main(ctx: click.Context, verbose: bool) -> None:
     # child per session start; on 2026-10-31 nineteen walked the cloud catalog at once because the only lock in
     # the path was a rung's, taken after detect(). A second `--auto` exits 0 here, silently. A PLAIN unattended
     # `nx upgrade` (the lockstep child) does work `--auto` skips, so it WAITS for a holder (PLAIN_WAIT_S) and
-    # only then exits 75, which its starter reads as "did not run" and retries next session. The kernel drops
+    # only then exits 75; its detached starter already wrote the version marker at spawn, so the plain run's
+    # extra work (plugin convergence, agents and hooks refresh) waits for the next version or ref drift or a
+    # manual `nx upgrade` (bead: PLAIN_WAIT_S is below the 900 s --auto ceiling). The kernel drops
     # the lock with the process, so a killed holder never wedges the next run.
     if argv_is_unattended_upgrade(sys.argv[1:]):
         _auto_lock = acquire_auto_lock() if argv_is_auto_upgrade(sys.argv[1:]) else acquire_auto_lock_waiting()
