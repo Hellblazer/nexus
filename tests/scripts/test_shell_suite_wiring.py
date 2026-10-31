@@ -103,6 +103,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -147,6 +148,22 @@ def _bin_bash_is_pre_4() -> bool:
     )
     return probe.returncode != 0
 
+
+def _lock_suite_has_flock_tests() -> bool:
+    """True when ``lock_test.sh``'s flock tests (10-11, nexus-fuz9t) run on this host: flock(1)
+    installed and a bash of 4.1 or newer (the ``{fd}`` redirection). Elsewhere (darwin) the
+    suite prints one skip line and reports 30, so the floor follows the host as the
+    /bin/bash one above does; on a host that runs them, 37 means they were not skipped."""
+    if shutil.which("flock") is None:
+        return False
+    probe = subprocess.run(
+        ["bash", "-c", "(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 401 ))"],
+        capture_output=True,
+        check=False,
+    )
+    return probe.returncode == 0
+
+
 # Floors are the exact passed count measured 2026-09-14 (nexus-fcjt7) --
 # tight enough to catch a suite quietly running fewer assertions than it
 # used to, loose enough that adding a new assertion to one of these suites
@@ -163,7 +180,7 @@ SUITES = [
     # Round 2 (nexus-fcjt7): found by the substantive-critic pass on round 1
     # plus a re-check of round 1's own "already wired" claim about the two
     # build-lease suites (see module docstring).
-    _Suite("tests/e2e/lib/lock_test.sh", 30),
+    _Suite("tests/e2e/lib/lock_test.sh", 37 if _lock_suite_has_flock_tests() else 30),
     # 32: 35 until nexus-boz84 dropped the per-harness wall-clock assertion (3 harnesses,
     # one assertion each); the output checks still prove no harness body ran.
     _Suite("tests/e2e/lib/harness_lock_test.sh", 32),

@@ -142,6 +142,22 @@
 # readback; any sign of a lost race or nesting discards rather than
 # trusts a bare `mv` exit code, since nesting itself exits 0).
 #
+# LIVENESS UNDER PID NAMESPACES (nexus-fuz9t, lab-run #88): a pid is only
+# meaningful inside the PID namespace that issued it. Two jobs on one pool
+# host (the same user, a shared /tmp, so the same fixed lock root) can sit in
+# different namespaces, where the other job's holder pid reads as "does not
+# exist" and a live lock is reclaimed. On a host with flock(1) and bash 4.1+
+# the holder therefore also takes flock(LOCK_EX) on `holder.flock` inside the
+# lockdir and keeps the descriptor open until lock_release (or its death, which
+# the kernel turns into a release). The lock is private to the lockdir inode, so
+# the mv-claim and the reclaim rename carry it along. _lock_is_stale asks the
+# lock first: held (or unreadable) is live, free is dead whatever the pid says,
+# and a lockdir with no holder.flock (made by an older tree, or on darwin, where
+# flock is absent) keeps the pid and start-token rule. The descriptor is
+# inherited by the holder's children (bash cannot mark it close-on-exec), which
+# errs towards keeping the lock: a daemon that outlives a crashed holder keeps
+# it live until the daemon exits.
+#
 # API:
 #   lock_acquire <lockdir-path> [timeout_s]
 #       Returns 0 once the lock is held by this process ($$). Default
@@ -210,6 +226,79 @@ _lock_pid_exists() {
     kill -0 "$pid" 2>/dev/null
 }
 
+# Holder-side flock (see LIVENESS UNDER PID NAMESPACES above).
+_LOCK_FLOCK_FILE="holder.flock"
+#: "lockdir|fd" for every flock this shell holds.
+_LOCK_FD_REG=()
+#: Set by _lock_flock_take: the descriptor it opened, or empty.
+_LOCK_NEW_FD=""
+
+# _lock_flock_ok — flock(1) is installed and this bash has the {var} redirection.
+_lock_flock_ok() {
+    (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1) )) || return 1
+    command -v flock >/dev/null 2>&1
+}
+
+# _lock_flock_take <staging-dir> — create <dir>/holder.flock, open it and take
+# LOCK_EX on it BEFORE the dir is moved into place, so a lockdir is never
+# visible with a lock file nobody holds yet. Leaves the descriptor in
+# _LOCK_NEW_FD (empty where there is no flock). A failure to take it is not an
+# error: the lockdir is then a pid-rule lockdir.
+_lock_flock_take() {
+    _LOCK_NEW_FD=""
+    _lock_flock_ok || return 0
+    local fd
+    if ! { exec {fd}>"$1/$_LOCK_FLOCK_FILE"; } 2>/dev/null; then
+        return 0
+    fi
+    if ! flock -n "$fd" 2>/dev/null; then
+        exec {fd}>&-
+        rm -f "$1/$_LOCK_FLOCK_FILE"
+        return 0
+    fi
+    _LOCK_NEW_FD="$fd"
+}
+
+# _lock_flock_drop_new — close the descriptor _lock_flock_take opened (the claim lost).
+_lock_flock_drop_new() {
+    local fd="$_LOCK_NEW_FD"
+    _LOCK_NEW_FD=""
+    [[ -n "$fd" ]] || return 0
+    exec {fd}>&-
+}
+
+# _lock_fd_register <lockdir> <fd> / _lock_fd_close <lockdir>
+_lock_fd_register() { _LOCK_FD_REG+=("$1|$2"); }
+_lock_fd_close() {
+    local entry fd keep=()
+    for entry in ${_LOCK_FD_REG[@]+"${_LOCK_FD_REG[@]}"}; do
+        if [[ "${entry%|*}" == "$1" ]]; then
+            fd="${entry##*|}"
+            exec {fd}>&-
+        else
+            keep+=("$entry")
+        fi
+    done
+    _LOCK_FD_REG=(${keep[@]+"${keep[@]}"})
+}
+
+# _lock_flock_state <lockdir> — what <lockdir>/holder.flock says about the holder:
+# "none" (no lock file: a pid-rule lockdir), "live" (the lock is held),
+# "dead" (it was free), "unknown" (a lock file is there but cannot be tried;
+# the caller treats that as live). The probe holds the lock for the length of
+# `true`, so two reclaimers probing at once may each read "live" and retry.
+_lock_flock_state() {
+    local f="$1/$_LOCK_FLOCK_FILE" rc=0
+    [[ -e "$f" ]] || { echo none; return 0; }
+    _lock_flock_ok || { echo unknown; return 0; }
+    flock -n -E 200 "$f" true 2>/dev/null || rc=$?
+    case "$rc" in
+        0) echo dead ;;
+        200) echo live ;;
+        *) echo unknown ;;
+    esac
+}
+
 # _lock_is_stale <lockdir> — 0 (stale, reclaimable) or 1 (live holder, or
 # indeterminate — treated as live to stay on the safe side). ALWAYS
 # echoes the pid value it actually inspected (possibly empty) to stdout
@@ -228,6 +317,12 @@ _lock_is_stale() {
         # not observable yet. Caller will retry.
         return 1
     fi
+    # The holder's flock decides when there is one: a pid from another PID
+    # namespace reads as nonexistent here (nexus-fuz9t).
+    case "$(_lock_flock_state "$lockdir")" in
+        live | unknown) return 1 ;;
+        dead) return 0 ;;
+    esac
     if ! _lock_pid_exists "$holder_pid"; then
         return 0 # holder pid demonstrably does not exist -> stale
     fi
@@ -270,6 +365,7 @@ lock_acquire() {
         if mkdir "$fresh" 2>/dev/null; then
             printf '%s\n' "$$" >"$fresh/pid"
             _lock_start_token "$$" >"$fresh/start_token"
+            _lock_flock_take "$fresh"
             if [[ ! -e "$lockdir" ]] && mv "$fresh" "$lockdir" 2>/dev/null; then
                 # Test-only seam (RDR-184 P0 re-round Test 5b): widen the
                 # gap between the claiming mv succeeding and this
@@ -282,6 +378,8 @@ lock_acquire() {
                     sleep "${NX_LOCK_TEST_WIDEN_SECONDS:-1}"
                 fi
                 if [[ "$(cat "$lockdir/pid" 2>/dev/null)" == "$$" ]]; then
+                    [[ -z "$_LOCK_NEW_FD" ]] || _lock_fd_register "$lockdir" "$_LOCK_NEW_FD"
+                    _LOCK_NEW_FD=""
                     return 0
                 fi
                 # The mv "succeeded" (exit 0) but $lockdir/pid doesn't
@@ -290,12 +388,14 @@ lock_acquire() {
                 # Do not claim success. Clean up ONLY our own nested
                 # artifact (never the other occupant's content) and
                 # retry from the top.
+                _lock_flock_drop_new
                 rm -rf "${lockdir:?}/$(basename "$fresh")" 2>/dev/null
             else
                 # Lost the race outright (something occupied $lockdir
                 # between our check and our mv, or the mv itself
                 # failed) — our populated temp dir is private and
                 # nobody else can see it; discard and retry.
+                _lock_flock_drop_new
                 rm -rf "$fresh" 2>/dev/null
             fi
         fi
@@ -396,5 +496,7 @@ lock_release() {
         return 1
     fi
 
+    # Remove first, close after: the flock keeps a reclaimer out until the dir is gone.
     rm -rf "$lockdir"
+    _lock_fd_close "$lockdir"
 }

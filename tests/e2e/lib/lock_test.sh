@@ -868,6 +868,86 @@ kill -9 "$live_pid3" 2>/dev/null || true
 wait "$live_pid3" 2>/dev/null
 rm -rf "$LOCKDIR"
 
+# ── Tests 10-11: the holder's flock decides liveness (nexus-fuz9t) ───────
+# lab-run #88 puts each CI job in its own PID namespace: a holder in another
+# job's namespace has a pid that does not exist here. These run real holder
+# processes; where there is no flock (darwin) the lockdir is a pid-rule lockdir
+# and the suite floor in tests/scripts/test_shell_suite_wiring.py does not count
+# them.
+if _lock_flock_ok; then
+    echo "Test 10: a live holder whose recorded pid is invisible is not reclaimed"
+    LOCKDIR="$WORKDIR/nsvisible.lock"
+    bash -c "source '$HERE/lock.sh'; lock_acquire '$LOCKDIR' 0 || exit 9; exec sleep 30" &
+    ns_holder=$!
+    for _ in $(seq 1 50); do
+        [[ -f "$LOCKDIR/holder.flock" && -s "$LOCKDIR/pid" ]] && break
+        sleep 0.1
+    done
+    if [[ -f "$LOCKDIR/holder.flock" ]]; then
+        ok "a holder on this host keeps holder.flock in its lockdir"
+    else
+        bad "no holder.flock after a successful acquire -- the lockdir is a pid-rule lockdir"
+    fi
+    # What a sibling job sees: a pid that names nothing in its own namespace.
+    bash -c 'exit 0' &
+    gone_pid=$!
+    wait "$gone_pid" 2>/dev/null
+    printf '%s\n' "$gone_pid" >"$LOCKDIR/pid"
+    echo unknown >"$LOCKDIR/start_token"
+    if _lock_is_stale "$LOCKDIR" >/dev/null; then
+        bad "_lock_is_stale called a lock held by a live flock holder stale because its pid does not exist here"
+    else
+        ok "_lock_is_stale reads the held flock as live although the recorded pid does not exist here"
+    fi
+    if lock_acquire "$LOCKDIR" 0 2>/dev/null; then
+        bad "lock_acquire took a lock whose holder is alive and holds its flock (false-dead reclaim)"
+        rm -rf "$LOCKDIR"
+    else
+        ok "lock_acquire refused the live holder's lock"
+    fi
+    if [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$gone_pid" && -f "$LOCKDIR/holder.flock" ]]; then
+        ok "the live holder's lockdir was left untouched"
+    else
+        bad "the live holder's lockdir was moved or rewritten"
+    fi
+    kill -9 "$ns_holder" 2>/dev/null || true
+    wait "$ns_holder" 2>/dev/null
+    rm -rf "$LOCKDIR"
+
+    echo "Test 11: a dead holder's lock is reclaimed although its recorded pid names a live process"
+    LOCKDIR="$WORKDIR/nsdead.lock"
+    bash -c "source '$HERE/lock.sh'; lock_acquire '$LOCKDIR' 0 || exit 9; exec sleep 30" &
+    dead_holder=$!
+    for _ in $(seq 1 50); do
+        [[ -f "$LOCKDIR/holder.flock" && -s "$LOCKDIR/pid" ]] && break
+        sleep 0.1
+    done
+    kill -9 "$dead_holder" 2>/dev/null || true
+    wait "$dead_holder" 2>/dev/null
+    # The pid rule alone would call this live: a running process with its own start token.
+    printf '%s\n' "$$" >"$LOCKDIR/pid"
+    _lock_start_token "$$" >"$LOCKDIR/start_token"
+    if _lock_is_stale "$LOCKDIR" >/dev/null; then
+        ok "_lock_is_stale reads the released flock as dead whatever the pid says"
+    else
+        bad "_lock_is_stale kept a lock whose flock holder is dead"
+    fi
+    if lock_acquire "$LOCKDIR" 0 2>/dev/null && [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$$" ]]; then
+        ok "lock_acquire reclaimed the dead holder's lock and records this process"
+        lock_release "$LOCKDIR"
+    else
+        bad "lock_acquire did not reclaim a lock whose flock holder is dead"
+        rm -rf "$LOCKDIR"
+    fi
+    if [[ -d "$LOCKDIR" ]]; then
+        bad "lockdir still present after lock_release"
+    else
+        ok "lock_release removed the lockdir and dropped the flock"
+    fi
+else
+    echo "Test 10-11: skipped (no flock(1) or bash older than 4.1 on this host; pid-rule lockdirs only)"
+fi
+
 echo
 echo "lock_test.sh: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]
