@@ -5955,10 +5955,11 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   excluded, and the object reports what the gate would exclude; `shadow_reason` says why:
   `disabled_by_setting` (`NX_ANSWER_KIND_ELIGIBILITY` is off), `extraction_disabled`
   (`NX_ANSWER_STRUCTURED_EXTRACT` is off: the gate on first-pass kinds alone is the
-  regime that failed the held-out lookup measurement; one request's extraction that
-  times out or errors does not do this, that request keeps enforcing on the first
-  pass's kind) or `library_not_reseeded`. When several apply the first in that order
-  wins. `library_not_reseeded` means the plan library holds builtin templates with no
+  regime that failed the held-out lookup measurement), `extraction_failed` (this
+  request's extraction call timed out, errored or answered outside the schema, so it
+  keeps the first pass's kind: the gate runs in shadow for that request only, nexus-x3eoc;
+  `request_coverage.extraction.outcome` names which failure) or `library_not_reseeded`.
+  When several apply the first in that order wins. `library_not_reseeded` means the plan library holds builtin templates with no
   answer-kind declaration: `library_check` is `checked`, `builtins_checked` is how
   many builtin rows a reseed can fix were examined, `undeclared_builtins` how many
   of them lack the declaration and `undeclared_builtin_names` names up to 8, each as

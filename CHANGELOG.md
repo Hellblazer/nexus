@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The answer-kind gate runs in shadow for a request whose structured extraction call failed, instead of enforcing on the first-pass kind** (nexus-x3eoc, RDR-232; client change, works on every engine). A timeout, an error or an answer outside the schema leaves the request on its first-pass kind, the regime the held-out measurement failed on (lookup recall 21 to 15); the gate used to keep enforcing there, protected only by the 0 of 112 failures observed. That request's `plan_eligibility` now reports `enforced: false` with `shadow_reason: "extraction_failed"`, still counts what it would have excluded, and excludes no plan; `request_coverage.extraction.outcome` names the failure. The next request is judged afresh. The `answer_kind_gate_extraction_failing` warning still fires after a run of failures, and its text and the `nx doctor` "Answer-kind extraction" row now say the gate is in shadow rather than enforcing.
+
 ## [7.90.0] - 2026-10-31
 
 Pairs with engine-service-v0.1.171 (REQUIRED_ENGINE_VERSION moves from v0.1.169; the engine deployed to the managed service before this client tag, every wire entry being additive). Upgrade aspect worker hosts before producer hosts: this release makes the aspects tuple queue the default (NX_ASPECT_QUEUE=tuples) and the worker's tuple side ships in it too.

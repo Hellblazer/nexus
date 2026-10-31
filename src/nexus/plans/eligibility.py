@@ -70,19 +70,22 @@ blank or anything else enforces), over the default :data:`ANSWER_KIND_ELIGIBILIT
 gate WOULD exclude, but :meth:`EligibilityFilter.admit` keeps every candidate and the matcher's output,
 metrics and over-fetch are identical to a call that passed no filter.
 
-The gate is not enforced in two cases that are not the setting (RDR-232 section 1: such a builtin reads as
+The gate is not enforced in three cases that are not the setting (RDR-232 section 1: such a builtin reads as
 unattested until a reseed, and the gate is not enabled before every builtin carries its declaration; the
-measured failing regime is the gate with deterministic kinds only). ``nx_answer`` degrades the request's filter
-to shadow, with :meth:`EligibilityFilter.degrade_to_shadow`, when (1) the structured request extraction is
-switched off (``extraction_disabled``; a per-request extraction failure keeps the gate enforcing), or (2) the
-plan library holds a builtin template, a row a reseed can fix, with no declaration
+measured failing regime is the gate with deterministic kinds only). ``nx_answer`` runs the request's filter in
+shadow (built so, or degraded with :meth:`EligibilityFilter.degrade_to_shadow`) when (1) the structured request
+extraction is switched off (``extraction_disabled``), or (2) this request's extraction call failed
+(``extraction_failed``: a timeout, an error or an answer outside the schema; nexus-x3eoc, Sam 2026-10-31). The
+request keeps its first-pass kind, the regime that failed the held-out measurement, so the gate reports what it
+would exclude and excludes nothing; the next request is unaffected, and ``request_coverage.extraction.outcome``
+in the envelope names which failure. Or (3) the plan library holds a builtin template, a row a reseed can fix, with no declaration
 (``library_not_reseeded``). The library check counts only builtin-tagged rows of the global tier whose
 dimensions match a shipped template (or a retired one, which a reseed deletes), so an orphan the seed loader
 leaves in place cannot hold the library in shadow for good, and it reports how many such rows it examined
 (``builtins_checked``): a library with none enforces, and ``builtins_checked`` of 0 says the check had nothing
 to examine. The upgrade ladder's plan-library axis reconciles builtins (``seed_plan_templates(reconcile=True)``)
 on upgrade, which writes the declarations, so an upgraded install enforces. Precedence when several apply:
-``disabled_by_setting``, then ``extraction_disabled``, then ``library_not_reseeded`` (a filter already in shadow
+``disabled_by_setting``, then ``extraction_disabled``, then ``extraction_failed``, then ``library_not_reseeded`` (a filter already in shadow
 is not checked against the library).
 
 The matcher calls :meth:`EligibilityFilter.admit` last on each branch, after every other drop (unmet
@@ -154,9 +157,11 @@ ANSWER_KIND_ELIGIBILITY_ENABLED: bool = True
 ANSWER_KIND_ELIGIBILITY_ENV = "NX_ANSWER_KIND_ELIGIBILITY"
 
 #: ``shadow_reason`` values the envelope reports (and the only ones :meth:`EligibilityFilter.degrade_to_shadow`
-#: accepts): the setting turned the gate off, the structured request extraction is switched off, or the
-#: library still holds builtins without their declaration.
-SHADOW_REASONS: frozenset[str] = frozenset({"disabled_by_setting", "extraction_disabled", "library_not_reseeded"})
+#: accepts): the setting turned the gate off, the structured request extraction is switched off, this request's
+#: extraction call failed (nexus-x3eoc), or the library still holds builtins without their declaration.
+SHADOW_REASONS: frozenset[str] = frozenset(
+    {"disabled_by_setting", "extraction_disabled", "extraction_failed", "library_not_reseeded"}
+)
 
 #: ``library_check`` values the envelope reports: ``checked`` (the library was read and counted) or
 #: ``unreadable`` (it was not: no count in the cache and the listing failed). ``null`` means no check ran

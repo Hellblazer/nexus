@@ -12309,6 +12309,7 @@ async def nx_answer(
     )
     from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — call-time module read so a test's patch of the constant is honored (RDR-232 nexus-jypmj.2.3)
     from nexus.plans.request_coverage import extraction_enabled as _extraction_enabled  # noqa: PLC0415 — deferred; the gate follows the extraction switch (nexus-jypmj.2.8)
+    from nexus.plans.request_coverage import FAILED_OUTCOMES as _EXTRACTION_FAILED_OUTCOMES  # noqa: PLC0415 — deferred; a failed extraction runs the gate in shadow for its request (nexus-x3eoc)
     from nexus.plans.request_coverage import note_extraction_outcome as _note_extraction_outcome  # noqa: PLC0415 — deferred; the process-level signal of a failing extraction (nexus-jypmj.16)
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -12554,26 +12555,32 @@ async def nx_answer(
     # plan_match, which asks it of every branch's candidates; enforcing unless NX_ANSWER_KIND_ELIGIBILITY turns
     # the gate off (nexus-jypmj.2.8; shadow: the filter counts what it would exclude and excludes nothing).
     # The gate also runs in shadow while the structured extraction is switched off (the measured failing regime
-    # is the gate on deterministic kinds alone; a per-request extraction failure keeps enforcing), and a library
-    # that still holds undeclared builtins degrades it just before plan_match (below). The reason that applies
-    # first wins: disabled_by_setting, extraction_disabled, library_not_reseeded.
+    # is the gate on deterministic kinds alone) and, for just that request, when its extraction call failed
+    # (timeout, error, answer outside the schema; nexus-x3eoc, Sam 2026-10-31): it still judges and reports what
+    # it would exclude and excludes nothing. A library that still holds undeclared builtins degrades it just
+    # before plan_match (below). The reason that applies first wins: disabled_by_setting, extraction_disabled,
+    # extraction_failed, library_not_reseeded.
     # Reported in the envelope as `plan_eligibility`, always present.
     _gate_on = _eligibility.eligibility_enforced(_os.environ)
     _extract_on = _extraction_enabled(_os.environ)
+    _extract_failed = _extract_on and _request_coverage.extraction.outcome in _EXTRACTION_FAILED_OUTCOMES
     _plan_eligibility = _eligibility.EligibilityFilter(
-        _request_coverage.answer_kind, _request_coverage.kind_decision, enforce=_gate_on and _extract_on,
+        _request_coverage.answer_kind, _request_coverage.kind_decision,
+        enforce=_gate_on and _extract_on and not _extract_failed,
         shadow_reason=(
-            "disabled_by_setting" if not _gate_on else None if _extract_on else "extraction_disabled"
+            "disabled_by_setting" if not _gate_on else "extraction_disabled" if not _extract_on
+            else "extraction_failed" if _extract_failed else None
         ),
         # nexus-4xmpv: a synthesis or unknown request that names exactly one source does not admit citation-traversal;
         # the count is RequestCoverage.names_one_source, the one place that decides it.
         named_source_count=1 if _request_coverage.names_one_source else 0,
     )
-    # nexus-jypmj.16: a failed extraction leaves THIS request on its first-pass kind (the gate keeps enforcing,
-    # by design); a run of failures in one process is that regime every time, so it warns once per process.
+    # nexus-jypmj.16: a failed extraction leaves THIS request on its first-pass kind and runs its gate in shadow
+    # (nexus-x3eoc); a run of failures in one process is that regime every time, so it warns once per process,
+    # while the gate would otherwise enforce (its setting is on and the extraction is not switched off).
     _nx_answer_isolated(
         "extraction_health", False, _note_extraction_outcome, _request_coverage.extraction.outcome,
-        gate_enforcing=_plan_eligibility.enforce,
+        gate_enforcing=_gate_on and _extract_on,
     )
     # Set by the single_query fast path, which has no primary evidence stream: the
     # named-source notice then says so instead of implying the document was read.

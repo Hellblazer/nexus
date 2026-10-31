@@ -32,6 +32,7 @@ from tests.test_rdr232_eligibility import (
     LOOKUP_473,
     SYNTH_12,
     _drive,
+    _extraction_that_works,
 )
 
 OFF_VALUES = ["0", "false", "off", "no", "OFF", " False ", "No"]
@@ -476,25 +477,78 @@ class _FailingDispatch:
         raise self.error
 
 
+_OPEN_QUESTION = "Tell me about plan matching."
+_HITS = [(473, 0.1), (12, 0.4)]
+
+
 @pytest.mark.parametrize("error, outcome", [
     (RuntimeError("claude exited 1"), "error"),
     (asyncio.TimeoutError(), "timeout"),
 ])
-def test_a_failing_extraction_call_keeps_the_gate_enforcing(error, outcome, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only the SETTING degrades the gate; one request's failed extraction leaves the first-pass kind and enforces."""
+def test_a_failing_extraction_call_runs_that_requests_gate_in_shadow(error, outcome, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-x3eoc (Sam, 2026-10-31): a request whose extraction call fails keeps its first-pass kind, the regime
+    the held-out measurement failed, so the gate reports what it would exclude and excludes nothing."""
     fake = _FailingDispatch(error)
     monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", fake)
-    env, _, _ = _drive("Tell me about plan matching.", [LOOKUP_473, SYNTH_12], [(473, 0.1), (12, 0.4)])
+    env, miss, seen = _drive(_OPEN_QUESTION, [LOOKUP_473, SYNTH_12], _HITS)
     assert fake.calls == 1 and env["request_coverage"]["extraction"]["outcome"] == outcome
     wire = env["plan_eligibility"]
+    assert wire["enforced"] is False and wire["shadow_reason"] == "extraction_failed"
+    assert seen[0]["eligibility"].enforce is False
+    assert wire["excluded_plan_ids"] == [473] and wire["branches"]["cosine"]["excluded"] == 1, "the would-be exclusion is reported"
+    assert env["plan_id"] == 473 and wire["selected"]["plan_id"] == 473, "and the plan is still selected: nothing was excluded"
+    assert wire["fallback_reason"] is None and not miss.called
+
+
+def test_an_extraction_answer_outside_the_schema_runs_the_gate_in_shadow(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def invalid(prompt, schema, **kw):  # noqa: ARG001
+        return {"answer_kind": "not-a-kind"}
+
+    monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", invalid)
+    env, _, _ = _drive(_OPEN_QUESTION, [LOOKUP_473, SYNTH_12], _HITS)
+    assert env["request_coverage"]["extraction"]["outcome"] == "invalid"
+    assert env["plan_eligibility"]["enforced"] is False and env["plan_eligibility"]["shadow_reason"] == "extraction_failed"
+    assert env["plan_id"] == 473
+
+
+def test_a_failed_extraction_degrades_only_its_own_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The next request, whose extraction answers, enforces again: no state carries over."""
+    with monkeypatch.context() as failing:
+        failing.setattr("nexus.operators.dispatch.claude_dispatch", _FailingDispatch(RuntimeError("down")))
+        first, _, _ = _drive(_OPEN_QUESTION, [LOOKUP_473, SYNTH_12], _HITS)
+    assert first["plan_eligibility"]["enforced"] is False
+    monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", _extraction_that_works)
+    second, _, _ = _drive(_OPEN_QUESTION, [LOOKUP_473, SYNTH_12], _HITS)
+    assert second["request_coverage"]["extraction"]["outcome"] == "unchanged"
+    wire = second["plan_eligibility"]
     assert wire["enforced"] is True and wire["shadow_reason"] is None
+    assert wire["excluded_plan_ids"] == [473] and second["plan_id"] == 12
+
+
+def test_the_gates_own_switch_outranks_a_failed_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(el.ANSWER_KIND_ELIGIBILITY_ENV, "0")
+    monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", _FailingDispatch(RuntimeError("down")))
+    env, _, _ = _drive(_OPEN_QUESTION, [LOOKUP_473, SYNTH_12], _HITS)
+    assert env["request_coverage"]["extraction"]["outcome"] == "error"
+    assert env["plan_eligibility"]["shadow_reason"] == "disabled_by_setting"
+
+
+def test_a_failed_extraction_outranks_an_unreseeded_library_and_costs_no_library_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", _FailingDispatch(RuntimeError("down")))
+    db = _library_db(_library_rows(undeclared=2))
+    env, _, _ = _drive(_OPEN_QUESTION, [LOOKUP_473, SYNTH_12], _HITS, db=db)
+    wire = env["plan_eligibility"]
+    assert wire["shadow_reason"] == "extraction_failed" and wire["library_check"] is None
+    db.plans.list_active_plans.assert_not_called()
 
 
 # ── the shadow reasons are a closed set ──────────────────────────────────────────────────────────────────────
 
 
 def test_a_shadow_reason_outside_the_closed_set_is_refused() -> None:
-    assert el.SHADOW_REASONS == {"disabled_by_setting", "extraction_disabled", "library_not_reseeded"}
+    assert el.SHADOW_REASONS == {
+        "disabled_by_setting", "extraction_disabled", "extraction_failed", "library_not_reseeded",
+    }
     filt = el.EligibilityFilter("synthesis", "heuristic", enforce=True)
     with pytest.raises(ValueError, match="not_a_reason"):
         filt.degrade_to_shadow("not_a_reason")
@@ -522,6 +576,10 @@ def test_every_shadow_reason_nx_answer_emits_is_in_the_set_and_the_set_has_no_un
     run(**{el.ANSWER_KIND_ELIGIBILITY_ENV: "0"})
     run(**{rc.EXTRACT_ENV: "0"})
     run()  # the unreseeded library
+    with monkeypatch.context() as m:  # one request's failed extraction (nexus-x3eoc)
+        m.setattr("nexus.operators.dispatch.claude_dispatch", _FailingDispatch(RuntimeError("down")))
+        out, _, _ = _drive(_OPEN_QUESTION, [LOOKUP_473, SYNTH_12], _HITS, db=_library_db(_library_rows(undeclared=1)))
+        emitted.add(out["plan_eligibility"]["shadow_reason"])
     assert emitted == el.SHADOW_REASONS
     # and no other reason is written anywhere a filter is built or degraded
     src = Path(__file__).resolve().parents[1] / "src" / "nexus"

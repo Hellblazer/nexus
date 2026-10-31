@@ -1543,8 +1543,8 @@ _failing_warned = False
 def note_extraction_outcome(outcome: str, *, gate_enforcing: bool) -> bool:
     """Count one request's extraction *outcome*; warn once per process when the failures are persistent.
 
-    A failed extraction leaves the request on its first-pass kind and the answer-kind gate keeps enforcing on it
-    (per-request fail-closed is the design). First-pass kinds alone are the regime that failed the held-out
+    A failed extraction leaves the request on its first-pass kind and runs the answer-kind gate in shadow for that
+    request (nexus-x3eoc: it reports what it would exclude and excludes nothing). First-pass kinds alone are the regime that failed the held-out
     lookup measurement, so a process in which the call fails every time (no ``claude`` CLI and no API key, an
     ``openai_compat`` endpoint that answers outside the schema, a timeout every time) enforces in it with no
     signal. After :data:`PERSISTENT_FAILURE_THRESHOLD` failures in a row this logs ``answer_kind_gate_extraction_failing``
@@ -1571,8 +1571,9 @@ def note_extraction_outcome(outcome: str, *, gate_enforcing: bool) -> bool:
         consecutive_failures=failures,
         last_outcome=outcome,
         consequence=(
-            "the answer-kind gate is enforcing on first-pass request kinds alone, the regime that lost "
-            "lookup recall in the held-out measurement; the latest extraction calls in this process all failed"
+            "the latest extraction calls in this process all failed, so requests keep their first-pass kinds, the "
+            "regime that lost lookup recall in the held-out measurement, and the answer-kind gate runs in shadow "
+            "for each: it reports what it would exclude and excludes nothing"
         ),
         remedy=(
             "run `nx doctor` (row 'Answer-kind extraction') to see why; make an LLM backend available "

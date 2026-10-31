@@ -2,10 +2,10 @@
 """nexus-jypmj.16 (b): a persistently failing structured extraction is signalled once per process and in `nx doctor`.
 
 A per-request extraction failure (no ``claude`` CLI and no API key, an ``openai_compat`` endpoint that answers
-outside the closed schema, a timeout) leaves that request on its first-pass kind and the answer-kind gate keeps
-enforcing: per-request fail-closed is the design. The first-pass-only regime is also the one that failed the
-held-out lookup measurement, so a process in which the call fails every time was enforcing in it with no sign
-anywhere. The process now warns once after a run of failures, and ``nx doctor`` carries an "Answer-kind
+outside the closed schema, a timeout) leaves that request on its first-pass kind and, since nexus-x3eoc, runs its
+answer-kind gate in shadow (it reports and excludes nothing). The first-pass-only regime is the one that failed the
+held-out lookup measurement, so a process in which the call fails every time loses the gate on every request with
+no sign anywhere. The process warns once after a run of failures, and ``nx doctor`` carries an "Answer-kind
 extraction" row that reads the same preconditions without a model call.
 
 Tenant-free. The warning is pinned on the tracker and end to end through ``nx_answer``; the row follows
@@ -130,13 +130,15 @@ def test_an_unknown_outcome_is_ignored_not_counted() -> None:
 
 
 def test_nx_answer_warns_once_after_repeated_failed_extractions() -> None:
-    """End to end: the suite-wide guard makes every extraction call fail (outcome ``error``), the gate enforces."""
+    """End to end: the suite-wide guard makes every extraction call fail (outcome ``error``); each request's gate runs
+    in shadow (nexus-x3eoc) and the process still warns once, because the gate would otherwise enforce."""
     n = rc.PERSISTENT_FAILURE_THRESHOLD
     with capture_logs() as logs:
         for i in range(n + 2):
             env, _, _ = _drive("Tell me about plan matching.", [LOOKUP_473, SYNTH_12], [(473, 0.1), (12, 0.4)])
             assert env["request_coverage"]["extraction"]["outcome"] == "error"
-            assert env["plan_eligibility"]["enforced"] is True
+            assert env["plan_eligibility"]["enforced"] is False
+            assert env["plan_eligibility"]["shadow_reason"] == "extraction_failed"  # nexus-x3eoc
             assert len(_warnings(logs)) == (1 if i + 1 >= n else 0), f"after request {i + 1}"
     (event,) = _warnings(logs)
     assert event["consecutive_failures"] == n
@@ -222,10 +224,10 @@ class TestAnswerKindExtractionRow:
     def test_a_healthy_cli_says_what_the_row_did_not_check(self, claude) -> None:
         """nexus-jypmj.21: green must not claim more than it looked at, and must not misdescribe where a failing
         backend does show: each request's outcome is in the envelope's request_coverage.extraction, and the log line
-        fires only after repeated failures while the gate enforces. No doctor row shows it."""
+        fires only after repeated failures while the gate would otherwise enforce. No doctor row shows it."""
         (row,) = _check_answer_kind_extraction()
         assert row.ok and "no model call" in row.detail and "answer_kind_gate_extraction_failing" in row.detail
-        assert "request_coverage.extraction" in row.detail and "while the gate enforces" in row.detail
+        assert "request_coverage.extraction" in row.detail and "while the gate would otherwise enforce" in row.detail
         assert "shows only" not in row.detail
 
     def test_a_probe_that_raises_is_a_warning_not_a_crash(self, monkeypatch) -> None:
