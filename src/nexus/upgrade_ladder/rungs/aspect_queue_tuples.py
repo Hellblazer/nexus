@@ -67,9 +67,10 @@ import math
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 import structlog
 
-from nexus.db.t2.http_tuple_store import MaxLiveRowsExceededError, TooLargeError
+from nexus.db.t2.http_tuple_store import CensusTimeoutError, MaxLiveRowsExceededError, TooLargeError
 from nexus.db.t2.http_aspect_queue import (
     ASPECT_QUEUE_ENV,
     ASPECTS_ENGINE_RELEASE as ASPECTS_ENGINE_TAG,  # aliased: the ladder lint bans identifiers containing 'lease' outside preconditions
@@ -104,6 +105,25 @@ TEMPLATE_RETENTION_S = 7_776_000
 
 #: Rows moved per ``converge`` call before it returns RESUMABLE.
 DEFAULT_BATCH_LIMIT = 500
+
+#: Rows ``detect()`` asks ``list_waiting`` for (nexus-s72c5). ``detect`` runs at every
+#: ``nx upgrade --auto`` (each session start) and every ``nx doctor``; it needs only "is
+#: there any row that can move", and a page this size answers that whenever the table is
+#: small or its head holds one. Only a FULL page with no movable row in it falls back to the
+#: whole read (a table whose first rows are all ones that stay: no doc_id, oversize, ...),
+#: so a backlog is never reported converged because of where the limit cut it. ``converge``
+#: and ``verify`` read the whole table: they move rows and confirm the move.
+DETECT_READ_LIMIT = 50
+
+#: The request cap (seconds) on the ``aspects`` census ``detect()`` makes to learn whether the engine has the
+#: template (nexus-s72c5). The census counts the subspace's rows, and the answer used here is only "is there a
+#: template"; a census that runs past this, or that the engine's own statement timeout cuts, makes ``detect``
+#: say pending with the reason, not raise. ``converge`` and ``verify`` send it unchanged.
+DETECT_CENSUS_TIMEOUT_S = 10.0
+
+
+class _CensusSlow(RuntimeError):
+    """The template census ran past its cap or the engine's own statement timeout."""
 
 
 def clamp_delay(delay_s: object) -> int:
@@ -166,36 +186,50 @@ class AspectQueueTuplesRung:
             return f"{ASPECT_QUEUE_ENV} is not 'tuples'"
         return ""
 
-    def _read_waiting(self, queue: Any) -> list[WaitingRow] | str:
-        """The waiting rows, or the skip reason when the engine has no route."""
+    def _read_waiting(self, queue: Any, limit: int | None = None) -> list[WaitingRow] | str:
+        """The waiting rows (the first *limit* in claim order when given, else all), or the skip
+        reason when the engine has no route."""
         try:
-            return list(queue.list_waiting())
+            return list(queue.list_waiting() if limit is None else queue.list_waiting(limit=limit))
         except AspectQueueListWaitingUnsupportedError:
             return (
                 f"the engine has no list_waiting route; it predates "
                 f"{LIST_WAITING_ENGINE_TAG}"
             )
 
-    def _probe(self) -> tuple[str, list[WaitingRow]]:
+    def _read_queue(self, limit: int | None = None) -> list[WaitingRow] | str:
+        queue = self._queue_factory()
+        try:
+            return self._read_waiting(queue, limit)
+        finally:
+            _close(queue)
+
+    def _probe(self, limit: int | None = None) -> tuple[str, list[WaitingRow]]:
         """``(skip_reason, rows)``: a non-empty reason means not applicable (and
-        no rows). Any other failure of a read propagates."""
+        no rows). Any other failure of a read propagates. *limit* bounds the
+        waiting-row read to its first rows (see :data:`DETECT_READ_LIMIT`)."""
         reason = self._skip_reason()
         if reason:
             return reason, []
         tuples = self._tuples_factory()
         try:
-            if aspects_census(tuples) is None:
+            try:
+                census = (
+                    aspects_census(tuples) if limit is None
+                    else aspects_census(tuples, timeout=DETECT_CENSUS_TIMEOUT_S)
+                )
+            except (CensusTimeoutError, httpx.TimeoutException) as exc:
+                if limit is None:
+                    raise
+                raise _CensusSlow(str(exc) or type(exc).__name__) from exc
+            if census is None:
                 return (
                     f"the engine has no 'aspects' tuple template; it predates "
                     f"{ASPECTS_ENGINE_TAG}"
                 ), []
         finally:
             _close(tuples)
-        queue = self._queue_factory()
-        try:
-            rows = self._read_waiting(queue)
-        finally:
-            _close(queue)
+        rows = self._read_queue(limit)
         if isinstance(rows, str):
             return rows, []
         return "", rows
@@ -209,19 +243,41 @@ class AspectQueueTuplesRung:
         ]
 
     def detect(self) -> RungStatus:
-        reason, rows = self._probe()
+        """Bounded (nexus-s72c5): the waiting-row read asks for the first
+        :data:`DETECT_READ_LIMIT` rows, because converged needs only "is there a
+        row that can move". A full page with none movable in it could hide one
+        behind the rows that stay, so that case alone reads the whole table."""
+        try:
+            reason, rows = self._probe(limit=DETECT_READ_LIMIT)
+        except _CensusSlow as exc:
+            return RungStatus(
+                applicable=True,
+                converged=False,
+                pending_detail=(
+                    "the 'aspects' tuple census did not answer within "
+                    f"{DETECT_CENSUS_TIMEOUT_S:g}s ({exc}); `nx upgrade` checks and moves the rows"
+                ),
+            )
         if reason:
             _log.info("aspect_queue_rung_skipped", reason=reason)
             return RungStatus(applicable=False, converged=False, pending_detail=reason)
+        truncated = len(rows) >= DETECT_READ_LIMIT
         movable = self._movable(rows)
+        if not movable and truncated:
+            whole = self._read_queue()
+            if isinstance(whole, str):
+                _log.info("aspect_queue_rung_skipped", reason=whole)
+                return RungStatus(applicable=False, converged=False, pending_detail=whole)
+            rows, truncated = whole, False
+            movable = self._movable(rows)
         if not movable:
             return RungStatus(applicable=True, converged=True)
         return RungStatus(
             applicable=True,
             converged=False,
             pending_detail=(
-                f"{len(movable)} queued row(s) still in the table, to move to "
-                f"'{ASPECTS_SUBSPACE}' tasks"
+                f"{'at least ' if truncated else ''}{len(movable)} queued row(s) still in the table, "
+                f"to move to '{ASPECTS_SUBSPACE}' tasks"
             ),
         )
 

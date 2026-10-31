@@ -39,7 +39,7 @@ from nexus.db.t2.http_aspect_queue import (
     WaitingRow,
     _identity_body,
 )
-from nexus.db.t2.http_tuple_store import HttpTupleStore, UnknownSubspaceError
+from nexus.db.t2.http_tuple_store import CensusTimeoutError, HttpTupleStore, UnknownSubspaceError
 from nexus.upgrade_ladder.deadline import Deadline, bound
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung, RungStatus
 from nexus.upgrade_ladder.registry import (
@@ -51,6 +51,8 @@ from nexus.upgrade_ladder.registry import (
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
 from nexus.upgrade_ladder.rungs.aspect_queue_tuples import (
     DEFAULT_BATCH_LIMIT,
+    DETECT_CENSUS_TIMEOUT_S,
+    DETECT_READ_LIMIT,
     TEMPLATE_RETENTION_S,
     AspectQueueTuplesRung,
     clamp_delay,
@@ -85,10 +87,13 @@ class World:
     leak_failed: bool = False
     # nonce -> an exception the out_replace for that task raises
     out_errors: dict[str, Exception] = field(default_factory=dict)
+    # the template census: an exception it raises, and the request cap each call carried
+    census_error: Exception | None = None
+    census_timeouts: list[float | None] = field(default_factory=list)
 
     # table side ----------------------------------------------------------
     def list_waiting(self, limit: int | None = None) -> list[WaitingRow]:
-        self.events.append(("list_waiting",))
+        self.events.append(("list_waiting", limit))
         if self.read_error is not None:
             raise self.read_error
         if not self.route:
@@ -96,7 +101,7 @@ class World:
         out = list(self.rows)
         if self.leak_failed:
             out += self.failed
-        return out
+        return out if limit is None else out[:limit]  # the engine's limit= is the first rows in claim order
 
     def mark_done(self, collection: str = "", source_path: str = "", *, doc_id: str = "") -> int:
         self.events.append(("mark_done", collection, source_path, doc_id))
@@ -109,6 +114,9 @@ class World:
     # tuple side ----------------------------------------------------------
     def subspace_stats(self, subspace: str, *, timeout: float | None = None):
         self.events.append(("subspace_stats", subspace))
+        self.census_timeouts.append(timeout)
+        if self.census_error is not None:
+            raise self.census_error
         if not self.template:
             raise UnknownSubspaceError("no aspects template")
         return object()
@@ -421,6 +429,81 @@ class TestSkips:
         assert status.applicable and not status.converged, "detect re-reads the table each run"
         runner.run()
         assert w.rows == [] and "1.1.9" in w.tasks
+
+
+# ── detect reads a bounded page (nexus-s72c5) ────────────────────────────────
+
+
+def _limits(w: World) -> list[int | None]:
+    return [e[1] for e in w.calls("list_waiting")]
+
+
+class TestDetectIsBounded:
+    """``detect`` runs at every ``nx upgrade --auto`` and ``nx doctor``; converged needs only 'is there a
+    row that can move', so it asks for a page, not the table. ``converge`` and ``verify`` read it whole."""
+
+    def test_a_large_backlog_is_detected_from_one_bounded_read(self) -> None:
+        w = World(rows=[_row(f"/{i}.md", f"1.1.{i}") for i in range(1, 2001)])
+        status = w.rung().detect()
+        assert (status.applicable, status.converged) == (True, False)
+        assert _limits(w) == [DETECT_READ_LIMIT], "one read, and it carries the limit"
+        assert DETECT_READ_LIMIT <= 100, "a small page, not a table"
+        assert status.pending_detail.startswith(f"at least {DETECT_READ_LIMIT} queued row(s)")
+
+    def test_a_small_table_is_counted_exactly(self) -> None:
+        w = World(rows=[_row("/a.md", "1.1.1"), _row("/b.md", "1.1.2")])
+        status = w.rung().detect()
+        assert status.pending_detail.startswith("2 queued row(s)"), "a short page is the whole table"
+        assert _limits(w) == [DETECT_READ_LIMIT]
+
+    def test_an_empty_table_is_converged_after_one_bounded_read(self) -> None:
+        w = World()
+        assert w.rung().detect() == RungStatus(applicable=True, converged=True)
+        assert _limits(w) == [DETECT_READ_LIMIT]
+
+    def test_a_full_page_of_rows_that_cannot_move_does_not_hide_a_movable_one_behind_it(self) -> None:
+        stay = [_row(f"/stay{i}.md", "") for i in range(DETECT_READ_LIMIT)]  # no doc_id: they stay in the table
+        w = World(rows=[*stay, _row("/late.md", "1.1.9")])
+        status = w.rung().detect()
+        assert (status.applicable, status.converged) == (True, False), "converged would be a lie"
+        assert _limits(w) == [DETECT_READ_LIMIT, None], "the bounded page, then the whole table"
+        assert status.pending_detail.startswith("1 queued row(s)")
+
+    def test_a_full_page_that_is_the_whole_table_and_cannot_move_converges(self) -> None:
+        w = World(rows=[_row(f"/stay{i}.md", "") for i in range(DETECT_READ_LIMIT)])
+        assert w.rung().detect() == RungStatus(applicable=True, converged=True)
+        assert _limits(w) == [DETECT_READ_LIMIT, None]
+
+    def test_the_template_census_in_detect_carries_a_request_cap_and_converge_and_verify_send_it_unchanged(self) -> None:
+        w = World(rows=[_row("/a.md", "1.1.1")])
+        rung = w.rung()
+        rung.detect()
+        assert w.census_timeouts == [DETECT_CENSUS_TIMEOUT_S]
+        rung.converge(Report())
+        rung.verify()
+        assert w.census_timeouts[1:] == [None, None]
+
+    @pytest.mark.parametrize("error", [
+        CensusTimeoutError("the census ran too long"), httpx.ReadTimeout("slow"),
+    ], ids=["engine-statement-timeout", "client-request-cap"])
+    def test_a_census_that_times_out_in_detect_is_pending_with_its_reason_not_a_raise(self, error: Exception) -> None:
+        w = World(rows=[_row("/a.md", "1.1.1")], census_error=error)
+        status = w.rung().detect()
+        assert (status.applicable, status.converged) == (True, False), "unknown is pending: not converged, not skipped"
+        assert "census" in status.pending_detail and f"{DETECT_CENSUS_TIMEOUT_S:g}s" in status.pending_detail
+        assert _limits(w) == [], "no waiting-row read after the census failed"
+
+    def test_a_census_that_times_out_in_converge_still_raises(self) -> None:
+        w = World(rows=[_row("/a.md", "1.1.1")], census_error=CensusTimeoutError("the census ran too long"))
+        with pytest.raises(CensusTimeoutError):
+            w.rung().converge(Report())
+
+    def test_converge_and_verify_still_read_the_whole_table(self) -> None:
+        w = World(rows=[_row(f"/{i}.md", f"1.1.{i}") for i in range(1, 8)])
+        rung = w.rung(batch_limit=3)
+        assert rung.converge(Report()).outcome is ConvergeOutcome.RESUMABLE
+        rung.verify()
+        assert set(_limits(w)) == {None}, "no bounded read outside detect"
 
 
 # ── verify: a positive signal only ───────────────────────────────────────────

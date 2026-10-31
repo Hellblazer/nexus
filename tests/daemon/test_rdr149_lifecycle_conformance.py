@@ -2347,7 +2347,25 @@ if os.environ.get("STANDIN_JOB") == "1":
 (cd / "ready.tmp").write_text(json.dumps({"supervisor": me, "engine": engine.pid}))
 os.replace(cd / "ready.tmp", cd / "ready.json")
 ignore = os.environ.get("STANDIN_IGNORE") == "1"
+# The harness (the pytest process) may die before its cleanup runs; a stand-in that only
+# waits for its stop file then polls forever as an orphan (one ran 13 hours, 2026-10-31).
+# POSIX only: on Windows os.kill(pid, 0) would TerminateProcess the harness.
+_harness = int(os.environ.get("STANDIN_HARNESS_PID") or 0)
+def harness_gone():
+    if os.name == "nt" or not _harness:
+        return False
+    try:
+        os.kill(_harness, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+ticks = 0
 while True:
+    ticks += 1
+    if ticks % 50 == 0 and harness_gone():
+        sys.exit(3)
     if not ignore and (cd / f"stop-{me}").exists():
         (cd / f"stop-{engine.pid}").write_text("x")
         engine.wait()
@@ -2362,13 +2380,71 @@ from pathlib import Path
 
 cd = Path(__file__).parent
 stop = cd / f"stop-{os.getpid()}"
+# The harness (the pytest process) may die before its cleanup runs; a stand-in that only
+# waits for its stop file then polls forever as an orphan (one ran 13 hours, 2026-10-31).
+# POSIX only: on Windows os.kill(pid, 0) would TerminateProcess the harness.
+_harness = int(os.environ.get("STANDIN_HARNESS_PID") or 0)
+def harness_gone():
+    if os.name == "nt" or not _harness:
+        return False
+    try:
+        os.kill(_harness, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+ticks = 0
 while not stop.exists():
+    ticks += 1
+    if ticks % 50 == 0 and harness_gone():
+        sys.exit(3)
     time.sleep(0.02)
 if os.environ.get("STANDIN_ENGINE_IGNORE") == "1":
     time.sleep(120)
 time.sleep(float(os.environ.get("STANDIN_ENGINE_DELAY", "1.0")))
 (cd / "engine_exit.txt").write_text(repr(time.time()))
 '''
+
+
+@pytest.mark.skipif(_WIN, reason="the harness check is POSIX only: os.kill(pid, 0) on Windows terminates the pid")
+@pytest.mark.parametrize("script", ["supervisor", "engine"])
+def test_a_stand_in_whose_harness_died_exits_instead_of_polling_forever(tmp_path: Path, script: str) -> None:
+    """A pytest run killed before ``_Stack.close`` left the engine stand-in polling for
+    a stop file that never came (an orphan under launchd for 13 hours, 2026-10-31).
+    Each stand-in now exits once the harness pid it was given is gone."""
+    harness = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # noqa: S603
+    (tmp_path / "engine_standin.py").write_text(_ENGINE_STANDIN, encoding="utf-8")
+    (tmp_path / "supervisor_standin.py").write_text(_SUPERVISOR_STANDIN, encoding="utf-8")
+    argv = [sys.executable, str(tmp_path / f"{script}_standin.py")]
+    if script == "supervisor":
+        argv += ["daemon", "service", "start", "--foreground", "--config-dir", str(tmp_path)]
+    env = {**os.environ, "STANDIN_HARNESS_PID": str(harness.pid), "STANDIN_IGNORE": "1"}
+    child = subprocess.Popen(argv, env=env)  # noqa: S603
+    engine_pid = None
+    try:
+        if script == "supervisor":
+            deadline = time.monotonic() + 30
+            while not (tmp_path / "ready.json").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            engine_pid = json.loads((tmp_path / "ready.json").read_text(encoding="utf-8"))["engine"]
+        time.sleep(1.5)
+        assert child.poll() is None, "non-vacuity: the stand-in waits while its harness lives"
+        harness.kill()
+        harness.wait(timeout=10)
+        assert child.wait(timeout=10) == 3
+        if engine_pid is not None:
+            deadline = time.monotonic() + 10
+            while pid_running(engine_pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert not pid_running(engine_pid), "the supervisor's engine child exits too"
+    finally:
+        for p in (child, harness):
+            with contextlib.suppress(OSError):
+                p.kill()
+        if engine_pid is not None:
+            with contextlib.suppress(OSError):
+                os.kill(engine_pid, signal.SIGKILL)
 
 
 class _StopFileConsoleApi(_ScriptedConsoleApi):
@@ -2399,7 +2475,7 @@ class _Stack:
         self.proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
             [sys.executable, str(script), "daemon", "service", "start", "--foreground",
              "--config-dir", str(directory)],
-            env={**os.environ, **env},
+            env={**os.environ, "STANDIN_HARNESS_PID": str(os.getpid()), **env},
             **_OWN_GROUP,
         )
         ready = directory / "ready.json"

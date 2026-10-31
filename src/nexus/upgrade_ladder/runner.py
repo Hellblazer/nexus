@@ -269,9 +269,12 @@ class LadderRunner:
         recorded. A detect that raises is not work to defer: it returns False so
         the walk does not stop at the deadline, and :meth:`_run_rung` calls
         detect again and reports the failure as FAILED instead of hiding it
-        behind a deferral."""
+        behind a deferral. The deadline is bound for the call, as it is for a
+        rung's run: this probe is made once the deadline has passed, and a
+        detect that scans (nexus-6pfgb.60) must stop at once and say pending."""
         try:
-            status = rung.detect()
+            with bound(self._deadline):
+                status = rung.detect()
         except Exception:  # noqa: BLE001 — surfaced by _run_rung, which reports the detect failure
             return False
         if not status.applicable:

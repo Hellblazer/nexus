@@ -10,6 +10,7 @@ engine is a step of ``tests/upgrade/test_rdr192_manifest_backfill_substrate.py``
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -56,6 +57,31 @@ class _PositionProbe:
         return getattr(self._row, name)
 
 
+class Memo:
+    """The T2 note the rung keeps its remembered clean scan in, in memory."""
+
+    def __init__(self) -> None:
+        self.note: dict | None = None
+        self.loads = 0
+        self.saves = 0
+        self.fail_load = False
+        self.clears = 0
+
+    def load(self) -> dict | None:
+        self.loads += 1
+        if self.fail_load:
+            raise RuntimeError("T2 down")
+        return None if self.note is None else dict(self.note)
+
+    def save(self, note: dict) -> None:
+        self.saves += 1
+        self.note = dict(note)
+
+    def clear(self) -> None:
+        self.clears += 1
+        self.note = None
+
+
 class World:
     """Live documents, their manifests, and the T3 chunk rows; the reader, the writer and the T3 stub."""
 
@@ -73,6 +99,11 @@ class World:
         self.updates: list[tuple[str, dict]] = []
         self.probe_positions = False
         self.listings = 0
+        self.doc_counts = 0  # /stats reads
+        self.stats_override: dict | None = None  # a /stats that does not move (a change the counts cannot see)
+        self.owner_reads = 0
+        self.memo = Memo()
+        self.now = datetime(2026, 2, 2, tzinfo=UTC)
         self.position_reads = 0
         self.before_second_manifest_read = None  # called with self, once, before the re-read
         self._manifest_reads = 0
@@ -102,6 +133,21 @@ class World:
         self.listings += 1
         return [SimpleNamespace(**vars(d)) for d in self.docs.values()]  # fresh entries, as the HTTP reader returns
 
+    def stats(self) -> dict:
+        """The engine's /stats: live documents and the manifest rows of live documents (catalog-019)."""
+        self.doc_counts += 1
+        if self.stats_override is not None:
+            return dict(self.stats_override)
+        return {"doc_count": len(self.docs), "chunk_count": sum(len(rows) for d, rows in self.manifests.items() if d in self.docs)}
+
+    def doc_count(self) -> int:
+        """The reader's document count, from the same /stats read (what the HTTP reader does)."""
+        return self.stats()["doc_count"]
+
+    def engine_reads(self) -> tuple[int, int, int, int, int]:
+        """Everything but the count: listings, manifest reads, owner reads, chunk reads, counts."""
+        return (self.listings, self._manifest_reads, self.owner_reads, len(self.chunk_reads), self.doc_counts)
+
     def get_manifests(self, doc_ids: list[str]) -> dict[str, list[ManifestRow]]:
         self._manifest_reads += 1
         if self._manifest_reads == 2 and self.before_second_manifest_read:
@@ -112,6 +158,7 @@ class World:
         return {d: list(self.manifests[d]) for d in doc_ids if self.manifests.get(d)}
 
     def chash_positions(self, chashes: list[str]) -> list[dict] | None:
+        self.owner_reads += 1
         if not self.route:
             return None
         wanted = set(chashes)
@@ -177,6 +224,8 @@ class World:
 
     def rung(self, **kw) -> ManifestSectionLabelsRung:
         kw.setdefault("record_fn", lambda: None)  # no completion on file: the default would ask the engine's ledger
+        kw.setdefault("memo_store", self.memo)  # shared across the world's rungs, as the T2 note is across processes
+        kw.setdefault("now_fn", lambda: self.now)
         return ManifestSectionLabelsRung(
             reader_factory=lambda: None if self.no_catalog else self,
             writer_factory=lambda: self, t3_factory=lambda: self, **kw)
@@ -514,6 +563,234 @@ def test_an_unreadable_ledger_is_not_a_record_and_the_scan_runs(world: World) ->
     status = world.rung(record_fn=broken).detect()
 
     assert (status.applicable, status.converged) == (True, False) and world.listings == 1
+
+
+# ── a clean scan is remembered; detect honours the --auto time limit (nexus-6pfgb.60) ──────────────────
+
+
+def _shared_chash_only(world: World) -> None:
+    """Two documents holding one chash: legacy by design, nothing fillable, for as long as both live."""
+    for t in ("1.1.1", "1.1.2"):
+        world.doc(t)
+        world.row(t, 0, h(1))
+    _labelled(world, h(1))
+
+
+def _remembered(world: World) -> None:
+    """A clean scan remembered, the way the rung does it: ``verify`` is the memo's one writer."""
+    rung = world.rung()
+    assert rung.verify() is True
+    assert world.memo.note is not None
+
+
+def test_nothing_fillable_is_scanned_once_then_detect_makes_one_bounded_read(world: World) -> None:
+    """Rows legacy by design (shared chash) used to be rescanned by every ``nx doctor`` and every walk that had
+    not recorded yet. A verified clean scan is remembered; the next detect reads ``/stats`` and nothing else."""
+    _shared_chash_only(world)
+    _remembered(world)
+    assert world.listings == 1
+
+    before = world.engine_reads()
+    again = world.rung().detect()  # another process, same T2 note
+
+    assert (again.applicable, again.converged) == (True, True)
+    after = world.engine_reads()
+    assert after[:4] == before[:4], "no listing, no manifest read, no owner read, no chunk read"
+    assert after[4] - before[4] == 1, "exactly one bounded read: /stats"
+
+
+def test_a_remembered_scan_is_dropped_by_age_by_a_changed_count_and_by_a_failed_read(world: World) -> None:
+    _shared_chash_only(world)
+    _remembered(world)
+    assert world.listings == 1
+
+    world.now += timedelta(hours=25)
+    world.rung().detect()
+    assert world.listings == 2, "older than the age bound: scanned again"
+
+    world.now -= timedelta(hours=25)
+    world.doc("1.1.3")  # a document arrived
+    world.rung().detect()
+    assert world.listings == 3, "a different document count: scanned again"
+
+    world.memo.note = None
+    _remembered(world)
+    listings = world.listings
+    world.row("1.1.3", 0, h(9))  # a manifest row arrived for a document already counted: only the row count moves
+    world.rung().detect()
+    assert world.listings == listings + 1, "a different manifest row count: scanned again"
+
+    world.memo.note = None
+    _remembered(world)
+    listings = world.listings
+    world.memo.fail_load = True
+    world.rung().detect()
+    assert world.listings == listings + 1, "an unreadable note is no note"
+
+
+def test_a_malformed_memo_is_no_memo(world: World) -> None:
+    _shared_chash_only(world)
+    for bad in ({}, {"documents": "2", "chunks": 2, "clean_at": "x"}, {"documents": True, "chunks": 2, "clean_at": "2026-02-02T00:00:00+00:00"},
+                {"documents": 2, "chunks": 2, "clean_at": "not a date"}, {"documents": 2, "chunks": 2, "clean_at": "2026-02-03T00:00:00+00:00"},
+                {"documents": -1, "chunks": 2, "clean_at": "2026-02-02T00:00:00+00:00"},
+                {"documents": 2, "clean_at": "2026-02-02T00:00:00+00:00"},  # a note from before the row count was a key
+                {"documents": 2, "chunks": None, "clean_at": "2026-02-02T00:00:00+00:00"}):
+        world.memo.note = bad
+        before = world.listings
+        assert world.rung().detect().converged is True
+        assert world.listings == before + 1, f"{bad!r} must not stand in for a scan"
+
+
+def test_verify_remembers_nothing_fillable_and_clears_the_note_on_a_fillable_row(world: World) -> None:
+    _one_fillable_and_one_newer_row(world)
+    world.memo.note = {"clean_at": world.now.isoformat(), "documents": 99, "chunks": 99}
+    rung = world.rung()
+    status = rung.detect()
+    assert (status.applicable, status.converged) == (True, False)
+    assert world.memo.note is not None, "detect is read-only: the stale note is left for verify"
+    assert rung.verify() is False
+    assert world.memo.note is None, "verify clears it"
+    world.rung().detect()
+    assert world.listings == 3, "a pending rung is scanned every time: its answer changes as rows are filled"
+
+
+def test_detect_writes_nothing_whatever_it_finds(world: World) -> None:
+    """The ladder protocol says detect is read-only (doctor, --dry-run, the version callout, upgrade_finish all
+    call it). Clean catalog, fillable catalog, a stale note present: not one put or clear on the T2 note."""
+    _shared_chash_only(world)
+    assert world.rung().detect().converged is True
+    world.memo.note = {"clean_at": world.now.isoformat(), "documents": 99, "chunks": 99}
+    world.rung().detect()
+    world.doc("1.1.9")
+    world.row("1.1.9", 0, h(5))
+    _labelled(world, h(5))
+    assert world.rung().detect().converged is False
+    assert (world.memo.saves, world.memo.clears) == (0, 0)
+    assert world.memo.note == {"clean_at": world.now.isoformat(), "documents": 99, "chunks": 99}
+
+
+def test_verify_never_reads_the_memo_it_is_the_gate_for_the_record(world: World) -> None:
+    _shared_chash_only(world)
+    rung = world.rung()
+    _remembered(world)
+    # a fillable row appears behind counts that do not move: detect (by design) can still say converged
+    world.row("1.1.1", 1, h(7))
+    _labelled(world, h(7))
+    world.stats_override = {"doc_count": 2, "chunk_count": 2}
+    assert rung.detect().converged is True
+    listings = world.listings
+    loads = world.memo.loads
+    assert rung.verify() is False, "verify scans, and sees it"
+    assert world.listings == listings + 1
+    assert world.memo.loads == loads, "and never read the memo to do it"
+    assert world.memo.note is None, "and the memo it contradicted is gone"
+
+
+def _walk(world: World, rung: ManifestSectionLabelsRung | None = None):
+    ledger = InMemoryCompletionLedger()
+    runner = LadderRunner(LadderRegistry((rung or world.rung(),)), ledger, package_version_fn=lambda: "9.9.9")
+    return runner.run(), ledger
+
+
+def test_a_doctor_run_before_the_backfill_does_not_poison_the_walk_that_follows(world: World) -> None:
+    """Review F1 of 125fb9a4f. ``nx doctor`` (detect, and any verify) runs on a pre-backfill catalog: documents
+    with no manifest rows, nothing fillable. The RDR-192 backfill then writes legacy rows for the same
+    documents, so the document count does not move. The walk must scan and fill, not trust the earlier answer
+    and fail verify (VERIFY_FAILED stops the walk and leaves every later rung NOT_ATTEMPTED)."""
+    world.doc("1.1.1")
+    doctor = world.rung()
+    assert doctor.detect().converged is True
+    doctor.verify()  # the memo's writer; with detect writing nothing, this is the only way a note appears
+    # the earlier rung's work: a legacy row for a document already counted
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+
+    report, ledger = _walk(world)
+
+    assert [r.outcome for r in report.runs] == [RungOutcome.RECORDED], [(r.outcome, r.detail) for r in report.runs]
+    assert world.labels("1.1.1") == [(0, "Refs", "references", 9, True)]
+    assert ledger.verified_rungs() == frozenset({RUNG_MANIFEST_SECTION_LABELS})
+
+
+def test_a_memo_that_stands_over_a_fillable_row_defers_the_walk_and_clears_the_note(world: World) -> None:
+    """A change the counts cannot see (here a /stats that does not move) leaves the memo standing. The walk's
+    verify then finds a fillable row: converge never ran, so this is a deferral, never VERIFY_FAILED."""
+    world.doc("1.1.1")
+    _remembered(world)
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.stats_override = {"doc_count": 1, "chunk_count": 0}  # still reads as the remembered shape
+
+    report, ledger = _walk(world)
+
+    assert [r.outcome for r in report.runs] == [RungOutcome.DEFERRED], [(r.outcome, r.detail) for r in report.runs]
+    assert "outdated" in report.runs[0].detail
+    assert world.memo.note is None
+    assert world.appends == [], "converge did not run"
+    assert ledger.verified_rungs() == frozenset()
+
+    world.stats_override = None
+    again, _ = _walk(world)  # the next walk scans and fills
+    assert [r.outcome for r in again.runs] == [RungOutcome.RECORDED]
+
+
+def test_a_verify_refusal_after_a_scan_that_ran_converge_is_still_a_failure(world: World) -> None:
+    """The deferral is only for a verdict taken from the memo: a refusal after converge ran stays VERIFY_FAILED."""
+    _one_fillable_and_one_newer_row(world)
+    rung = world.rung()
+    assert rung.detect().converged is False
+    rung.converge(Report())
+    world.row("1.1.1", 5, h(77))  # a fillable row appears after the fill
+    _labelled(world, h(77))
+    assert rung.verify() is False
+    assert rung.verify_deferred() is False
+
+
+def test_detect_stops_before_listing_when_the_auto_time_limit_has_passed(world: World, monkeypatch) -> None:
+    _one_fillable_and_one_newer_row(world)
+    monkeypatch.setattr("nexus.upgrade_ladder.rungs.manifest_section_labels.active_expired", lambda: True)
+
+    status = world.rung().detect()
+
+    assert (status.applicable, status.converged) == (True, False), "unknown is pending, never converged"
+    assert "time limit" in status.pending_detail
+    assert world.engine_reads() == (0, 0, 0, 0, 0), "not one catalog read after the limit, the /stats count included"
+    assert world.memo.note is None and world.memo.saves == 0
+
+
+def test_detect_stops_between_batches_at_the_limit_and_remembers_nothing(world: World, monkeypatch) -> None:
+    for t in ("1.1.1", "1.1.2", "1.1.3", "1.1.4"):
+        world.doc(t)
+        world.row(t, 0, h(int(t[-1])))
+    calls = iter([False, False, True])  # before the first read, before the first batch; the limit passes before the second
+    monkeypatch.setattr(
+        "nexus.upgrade_ladder.rungs.manifest_section_labels.active_expired", lambda: next(calls, True))
+
+    status = world.rung(doc_batch=2).detect()
+
+    assert (status.applicable, status.converged) == (True, False)
+    assert "read 2 document(s)" in status.pending_detail
+    assert world._manifest_reads == 1, "one batch read, the second not started"
+    assert world.memo.note is None, "an unfinished scan is not a clean one"
+
+
+def test_a_walk_past_the_auto_deadline_does_no_catalog_read_in_the_would_do_work_probe(world: World) -> None:
+    """The runner asks every rung ``detect()`` once the deadline has passed, to know whether to defer. That call
+    must see the deadline too, or a full-catalog dry run runs after the limit it was meant to honour."""
+    from nexus.upgrade_ladder.deadline import Deadline
+
+    _one_fillable_and_one_newer_row(world)
+    clock = [0.0]
+    deadline = Deadline(60, clock=lambda: clock[0])
+    clock[0] = 61.0
+    ledger = InMemoryCompletionLedger()
+    runner = LadderRunner(LadderRegistry((world.rung(),)), ledger, package_version_fn=lambda: "9.9.9", deadline=deadline)
+
+    report = runner.run()
+
+    assert [r.outcome for r in report.runs] == [RungOutcome.DEFERRED]
+    assert world.engine_reads()[:4] == (0, 0, 0, 0), "no listing, manifest, owner or chunk read after the deadline"
+    assert world.appends == []
 
 
 # ── attribution by title ─────────────────────────────────────────────────────

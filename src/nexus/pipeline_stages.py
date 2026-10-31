@@ -29,12 +29,13 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, wait, ALL_COMPLETED, FIRST_EXCEPTION
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from nexus.catalog.types import ManifestRow
     from nexus.hook_registry import HookRegistry
 
+import httpx
 import structlog
 
 from nexus.config import DEFAULT_EXTRACTOR
@@ -50,7 +51,7 @@ from nexus.pdf_extractor import (
 )
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
 from nexus.retry import _vector_with_retry
-from nexus.util.termination import TerminationRequested, sigterm_raises
+from nexus.util.termination import TerminationRequested, interrupts_deferred, sigterm_raises
 
 _log = structlog.get_logger(__name__)
 
@@ -58,6 +59,15 @@ _log = structlog.get_logger(__name__)
 #: within one slice: CPython runs Python signal handlers on the main thread only, and an untimed
 #: wait there need not wake when the OS delivered the signal to a stage thread.
 _STAGE_WAIT_SLICE_S = 1.0
+
+#: The cap on each engine request an interrupted run's cleanup sends, each sent once (nexus-euczk).
+#: The default client budget (about 30 s, a retry and a lease wait per call) let an unreachable
+#: engine hold a SIGTERM'd process open for minutes while the cleanup's calls timed out in turn.
+_RELEASE_TIMEOUT_S = 5.0
+
+#: How an interrupted run's release ended: the row is failed, a newer run owns it (the engine
+#: fenced the write), or the engine could not be reached (a transport error or a timeout).
+ReleaseOutcome = Literal["released", "fenced", "unreached"]
 
 _UPLOAD_BATCH_SIZE = 128  # Conservative vs ChromaDB's 300 limit — matches _INCREMENTAL_BATCH_SIZE in doc_indexer
 _EMBED_BATCH_SIZE = 32  # Smaller than batch path (128) — favours heartbeat freshness in streaming
@@ -187,6 +197,44 @@ def _merge_buffered_provenance(
         metadata["extraction_method"] = "mineru+degraded"
 
 
+def _foreign_pages(rows: list[dict[str, Any]], extractor: str) -> dict[int, str]:
+    """``{1-based page: extractor}`` for the buffer rows another ``--extractor`` wrote (nexus-hvwif).
+
+    Each page row records the extractor of the run that wrote it (``extractor`` in its
+    ``metadata_json``, stamped by :func:`extractor_loop`). A row with no stamp (a buffer an older
+    build wrote) is not counted: what wrote it is unknown, and a guess would warn on ordinary
+    resumes, since MinerU's own ladder settles pages on the same text-layer rungs ``pymupdf`` makes."""
+    foreign: dict[int, str] = {}
+    for row in rows:
+        meta = row.get("metadata_json")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except ValueError:
+                continue
+        written_by = meta.get("extractor") if isinstance(meta, dict) else None
+        if isinstance(written_by, str) and written_by and written_by != extractor:
+            foreign[int(row.get("page_index", 0)) + 1] = written_by
+    return foreign
+
+
+def _warn_resumed_foreign_pages(pdf_path: Path, content_hash: str, extractor: str, pages: dict[int, str]) -> None:
+    """Say that a resumed run keeps buffered pages another ``--extractor`` made (nexus-hvwif).
+
+    The pipeline row records no extraction flags, so a rerun under another ``--extractor``
+    resumes the pages an earlier run buffered. The record is honest (each page's rung is kept),
+    but nothing told the user that the run they asked for did not extract those pages;
+    ``--force`` starts the document clean."""
+    numbers = sorted(pages)
+    _log.warning(
+        "pipeline_resume_kept_other_extractor_pages",
+        file_path=str(pdf_path), content_hash=content_hash, extractor=extractor,
+        written_by=sorted(set(pages.values())), kept_pages=len(numbers), first_pages=numbers[:10],
+        remedy="these pages were extracted by an earlier run with another --extractor and are not "
+               "extracted again; rerun with --force to extract the whole document with " + extractor,
+    )
+
+
 def extractor_loop(
     pdf_path: Path,
     content_hash: str,
@@ -218,6 +266,8 @@ def extractor_loop(
     #: buffered page text is not kept alive for the whole extraction.
     buffered_rungs: dict[int, str] = {}
     unknown_pages: list[int] = []
+    #: Buffered pages another ``--extractor`` wrote (nexus-hvwif).
+    foreign: dict[int, str] = {}
 
     # Resume fast path: if all pages already in buffer, skip extraction.
     if (state and state["total_pages"] is not None
@@ -252,10 +302,14 @@ def extractor_loop(
         actual_pages = len(buffered_rows)
         if actual_pages >= state["total_pages"]:
             stored_meta = json.loads(state["extraction_meta"])
+            foreign = _foreign_pages(buffered_rows, extractor)
+            if foreign:
+                _warn_resumed_foreign_pages(pdf_path, content_hash, extractor, foreign)
             if extraction_done is not None:
                 extraction_done.set()
             return ExtractionResult(text="", metadata=stored_meta)
         buffered_rungs, unknown_pages = _buffer_provenance(buffered_rows)
+        foreign = _foreign_pages(buffered_rows, extractor)
         del buffered_rows
         # The claimed prefix isn't backed by real WAL data — the ENTIRE
         # claimed prefix is suspect (clear_orphan_wal is all-or-nothing
@@ -282,7 +336,12 @@ def extractor_loop(
         buffered_rows = db.read_pages(content_hash)
         pages_extracted_at_start = len(buffered_rows)
         buffered_rungs, unknown_pages = _buffer_provenance(buffered_rows)
+        foreign = _foreign_pages(buffered_rows, extractor)
         del buffered_rows
+
+    if foreign:
+        # nexus-hvwif: the pages the buffer holds are not extracted again (``on_page`` skips them).
+        _warn_resumed_foreign_pages(pdf_path, content_hash, extractor, foreign)
 
     #: Pages settled so far, as the counter counts them (a list so ``on_page`` can move it).
     settled = [pages_extracted_at_start]
@@ -295,7 +354,8 @@ def extractor_loop(
         run_rungs.update(_page_rungs(page_metadata, page_index))
         if page_index < pages_extracted_at_start:
             return
-        db.write_page(content_hash, page_index, page_text, metadata=page_metadata)
+        # nexus-hvwif: the row records which extractor wrote it, so a rerun under another can say so.
+        db.write_page(content_hash, page_index, page_text, metadata={**(page_metadata or {}), "extractor": extractor})
         db.update_progress(content_hash, pages_extracted=page_index + 1)
         settled[0] = max(settled[0], page_index + 1)
 
@@ -1598,14 +1658,17 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
     return actual
 
 
-def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc: BaseException) -> bool:
+def _mark_failed_and_reset_wal(
+    db: HttpPipelineDB, content_hash: str, first_exc: BaseException, *, timeout: float | None = None,
+) -> ReleaseOutcome:
     """Terminal bookkeeping for a failed pipeline run: mark the row failed
     and wipe its WAL. Never raises: the caller re-raises *first_exc*, and
-    nothing here may mask it. Returns True when the engine FENCED the
+    nothing here may mask it. Returns ``"fenced"`` when the engine FENCED the
     bookkeeping (nexus-8vu8p: a newer resume took the run over between
     the original failure and this cleanup; the row and its WAL belong to
     the new owner, and the caller must not stamp the catalog document
-    failed either), False otherwise.
+    failed either), ``"unreached"`` when the engine could not be reached
+    (nexus-euczk), ``"released"`` otherwise.
 
     nexus-33q80: ``clear_orphan_wal`` now zeroes ``chunks_uploaded`` (and
     ``pages_extracted``, nexus-gl99l's own counter) on the pipeline row in
@@ -1620,10 +1683,13 @@ def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc:
     uploaded-inflation-nexus-6m9zy [26147]). Two client calls could never
     be atomic; one engine call now is, so the second call and its
     ``pipeline_chunks_uploaded_reset_failed_after_wal_wipe`` failure log
-    are gone."""
+    are gone.
+
+    *timeout* caps each request and sends it once; an interrupted run passes
+    :data:`_RELEASE_TIMEOUT_S` (nexus-euczk)."""
     try:
-        db.mark_failed(content_hash, error=str(first_exc))
-        db.clear_orphan_wal(content_hash)
+        db.mark_failed(content_hash, error=str(first_exc), timeout=timeout)
+        db.clear_orphan_wal(content_hash, timeout=timeout)
     except PipelineRunFenced as fenced:
         _log.warning(
             "pipeline_run_fenced_at_cleanup",
@@ -1633,15 +1699,16 @@ def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc:
             current_epoch=fenced.current_epoch,
             original_error=str(first_exc),
         )
-        return True
-    except Exception:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
+        return "fenced"
+    except Exception as exc:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
         _log.warning(
             "pipeline_terminal_mark_failed",
             content_hash=content_hash,
             original_error=str(first_exc),
             exc_info=True,
         )
-    return False
+        return "unreached" if isinstance(exc, httpx.TransportError) else "released"
+    return "released"
 
 
 def _discard_buffer_for_text_only(db: HttpPipelineDB, pdf_path: Path, content_hash: str) -> bool:
@@ -1792,8 +1859,8 @@ def _reconcile_resumed_run(db: HttpPipelineDB, doc_id: str, content_hash: str) -
 
 def _release_interrupted_run(
     db: HttpPipelineDB, content_hash: str, interrupt: BaseException, stage_error: BaseException | None = None,
-) -> bool:
-    """Give the pipeline row back after a SIGTERM or Ctrl-C (nexus-4vx0a).
+) -> ReleaseOutcome:
+    """Give the pipeline row back after a SIGTERM, SIGHUP or Ctrl-C (nexus-4vx0a, nexus-eq03c).
 
     The row moves to ``failed``, so the next run of the document is answered
     ``resuming`` at once instead of ``PipelineConflictRunning`` until the
@@ -1803,29 +1870,38 @@ def _release_interrupted_run(
     only add pages to the buffer, never leave a wiped WAL under a counter that
     would skip pages on resume. *stage_error*, when a stage had failed before the
     interrupt, is recorded too (the release then stands in for that failure's
-    WAL wipe, which is unsafe while a stage still runs). Never raises. Returns
-    True when the engine fenced the write (a newer run owns the row and nothing
-    of it is this run's to touch), False otherwise."""
-    reason = "interrupted by SIGTERM" if isinstance(interrupt, TerminationRequested) else "interrupted"
+    WAL wipe, which is unsafe while a stage still runs). Never raises. Each
+    request is capped at :data:`_RELEASE_TIMEOUT_S` and sent once (nexus-euczk),
+    so an unreachable engine cannot hold the interrupted process open. Returns
+    ``"fenced"`` when the engine fenced the write (a newer run owns the row and
+    nothing of it is this run's to touch), ``"unreached"`` when the engine could
+    not be reached, ``"released"`` otherwise (a /fail the engine refused with an
+    error is logged and counts as released: the engine was there)."""
+    reason = f"interrupted by {interrupt.signal_name}" if isinstance(interrupt, TerminationRequested) else "interrupted"
     if stage_error is not None:
         reason = f"{reason} after a stage failed ({stage_error})"
     try:
-        db.mark_failed(content_hash, error=f"{reason}; the buffer is kept and the next run resumes it")
+        db.mark_failed(
+            content_hash, error=f"{reason}; the buffer is kept and the next run resumes it",
+            timeout=_RELEASE_TIMEOUT_S,
+        )
     except PipelineRunFenced as fenced:
         _log.warning(
             "pipeline_run_fenced_at_interrupt",
             content_hash=content_hash, pipeline_id=fenced.pipeline_id,
             run_epoch=fenced.run_epoch, current_epoch=fenced.current_epoch,
         )
-        return True
-    except Exception:  # noqa: BLE001 — boundary catch: the interrupt must propagate, not a /fail transport error
+        return "fenced"
+    except Exception as exc:  # noqa: BLE001 — boundary catch: the interrupt must propagate, not a /fail transport error
         _log.warning("pipeline_interrupt_release_failed", content_hash=content_hash, exc_info=True)
-        return False
+        return "unreached" if isinstance(exc, httpx.TransportError) else "released"
     _log.info("pipeline_run_released_on_interrupt", content_hash=content_hash, reason=reason)
-    return False
+    return "released"
 
 
-def _release_systemic_failure(db: HttpPipelineDB, content_hash: str, failure: MineruSystemicFailure) -> bool:
+def _release_systemic_failure(
+    db: HttpPipelineDB, content_hash: str, failure: MineruSystemicFailure, *, timeout: float | None = None,
+) -> ReleaseOutcome:
     """Give the pipeline row back after the MinerU breaker tripped (RDR-237), buffer KEPT.
 
     The failure says the install or the machine is failing, which says nothing about the
@@ -1836,25 +1912,45 @@ def _release_systemic_failure(db: HttpPipelineDB, content_hash: str, failure: Mi
     Chunks of earlier pages that already reached T3 stay there, as an interrupted run's do; no
     catalog manifest is written for the document because the run never reaches the
     tail. The recorded error names the failure class and the worker's last stderr line (the
-    exception's message). Never raises. Returns True when the engine fenced the write."""
+    exception's message). Never raises. Returns what :func:`_mark_failed_and_reset_wal` returns.
+    *timeout*: see that function."""
     try:
-        db.mark_failed(content_hash, error=str(failure))
+        db.mark_failed(content_hash, error=str(failure), timeout=timeout)
     except PipelineRunFenced as fenced:
         _log.warning(
             "pipeline_run_fenced_at_systemic_failure",
             content_hash=content_hash, pipeline_id=fenced.pipeline_id,
             run_epoch=fenced.run_epoch, current_epoch=fenced.current_epoch,
         )
-        return True
-    except Exception:  # noqa: BLE001 — boundary catch: the failure must propagate, not a /fail transport error
+        return "fenced"
+    except Exception as exc:  # noqa: BLE001 — boundary catch: the failure must propagate, not a /fail transport error
         _log.warning("pipeline_systemic_failure_release_failed", content_hash=content_hash, exc_info=True)
-        return False
+        return "unreached" if isinstance(exc, httpx.TransportError) else "released"
     _log.warning(
         "pipeline_run_released_on_systemic_failure",
         content_hash=content_hash, failure_class=failure.failure_class,
         stderr_line=failure.stderr_line, buffer="kept",
     )
-    return False
+    return "released"
+
+
+def _stamp_interrupted(doc_id: str, dry_run: bool, released: ReleaseOutcome | None, error: str) -> None:
+    """Stamp the catalog document of a run an interrupt stopped before any stage failed.
+
+    A fenced release means a newer run owns the document: no stamp, and the deferred
+    superseded-vector sweep is dropped (nexus-4pj54). An unreached engine (nexus-euczk) gets no
+    stamp either, since the catalog write would wait out the same unreachable engine at the full
+    client budget; the sweep is dropped all the same, as ``_fence_fail`` would have."""
+    if not doc_id or dry_run:
+        return
+    if released in ("fenced", "unreached"):
+        if released == "unreached":
+            _log.warning("pipeline_interrupt_catalog_stamp_skipped", doc_id=doc_id, reason="engine unreachable")
+        from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 - deferred to avoid circular import at module load
+        discard_deferred_superseded_vectors(doc_id)
+        return
+    from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
+    _fence_fail(doc_id, error)
 
 
 def _extractor_loop_bound_to_cancel(
@@ -2095,7 +2191,18 @@ def pipeline_index_pdf(
         _force_t3_orphan_cleanup(t3, collection, content_hash)
 
     # Pre-flight: check if pipeline should run before resolving credentials.
-    result = db.create_pipeline(content_hash, str(pdf_path), collection)
+    # nexus-euczk: the create makes the row 'running' server-side, and only its answer gives the
+    # client the pipeline_id and run_epoch a release needs. An interrupt is therefore held for
+    # the length of the call and acted on when it returns, and the row is released here.
+    try:
+        with interrupts_deferred():
+            result = db.create_pipeline(content_hash, str(pdf_path), collection)
+    except (KeyboardInterrupt, TerminationRequested) as exc:
+        # A create that failed holds no row of ours: release only one this client now names,
+        # never the bare hash, which would fail another process's live run of the document.
+        if db.pipeline_id_for(content_hash) is not None:
+            _release_interrupted_run(db, content_hash, exc)
+        raise
     if result not in ("created", "resuming"):
         # nexus-edjmu: a document-identity create never answers "skip" (a
         # leftover completed row is reset engine-side and answered
@@ -2176,7 +2283,7 @@ def pipeline_index_pdf(
         chunking_done = threading.Event()
         first_exc: BaseException | None = None
         interrupt: BaseException | None = None
-        released_fenced = False
+        released: ReleaseOutcome | None = None
 
         # Not a `with` block: its exit is shutdown(wait=True), which an interrupted run must not
         # take, since a stage inside an uninterruptible call would hold the exit for minutes.
@@ -2247,19 +2354,14 @@ def pipeline_index_pdf(
                     interrupt = exc
                     stop_mineru_workers()
                     if first_exc is None:
-                        released_fenced = _release_interrupted_run(db, content_hash, exc)
+                        released = _release_interrupted_run(db, content_hash, exc)
                 elif first_exc is None:
                     first_exc = exc
         finally:
             pool.shutdown(wait=interrupt is None, cancel_futures=interrupt is not None)
 
         if interrupt is not None and first_exc is None:
-            if doc_id and not dry_run and not released_fenced:
-                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
-                _fence_fail(doc_id, str(interrupt) or type(interrupt).__name__)
-            elif doc_id and released_fenced:
-                from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 - deferred to avoid circular import at module load
-                discard_deferred_superseded_vectors(doc_id)
+            _stamp_interrupted(doc_id, dry_run, released, str(interrupt) or type(interrupt).__name__)
             raise interrupt
 
         if first_exc is None:
@@ -2299,6 +2401,9 @@ def pipeline_index_pdf(
             # discovered either as the stage's own exception or inside the
             # cleanup's /fail call, hence both checks.
             fenced = isinstance(first_exc, PipelineRunFenced)
+            # nexus-euczk: an interrupted run's cleanup sends each request once, briefly.
+            cleanup_timeout = _RELEASE_TIMEOUT_S if interrupt is not None else None
+            unreached = False
             if fenced:
                 _log.warning(
                     "pipeline_run_fenced",
@@ -2313,24 +2418,29 @@ def pipeline_index_pdf(
                 # skips pages on resume, so the row is released with its buffer kept instead; a
                 # deterministic failure is wiped by the next run, which fails the same way with
                 # every stage stopped.
-                fenced = _release_interrupted_run(db, content_hash, interrupt, stage_error=first_exc)
+                outcome = _release_interrupted_run(db, content_hash, interrupt, stage_error=first_exc)
             elif isinstance(first_exc, MineruSystemicFailure):
                 # RDR-237: the MinerU install or machine is failing, not this document. Keep the
                 # buffer (a rerun skips the writes of the pages already buffered, though MinerU
                 # re-extracts them); wiping it would also redo those writes for a cause the PDF
                 # did not have.
-                fenced = _release_systemic_failure(db, content_hash, first_exc)
+                outcome = _release_systemic_failure(db, content_hash, first_exc, timeout=cleanup_timeout)
             else:
-                fenced = _mark_failed_and_reset_wal(db, content_hash, first_exc)
+                outcome = _mark_failed_and_reset_wal(db, content_hash, first_exc, timeout=cleanup_timeout)
+            if not fenced:
+                fenced = outcome == "fenced"
+                # Only an interrupted run skips the stamp for an unreachable engine; a run that
+                # failed on its own still tries it at the full budget, as before.
+                unreached = interrupt is not None and outcome == "unreached"
             # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
             # below cannot be masked by a fence-write failure. nexus-uxg4u:
             # never touch the catalog on a dry run (doc_id is already "" in
             # that case per the pre-flight gate above, but check explicitly
             # for the same defense-in-depth reason as the fence-begin gate).
-            if doc_id and not dry_run and not fenced:
+            if doc_id and not dry_run and not fenced and not unreached:
                 from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
                 _fence_fail(doc_id, str(first_exc))
-            elif doc_id and fenced:
+            elif doc_id and (fenced or unreached):
                 # nexus-4pj54: the fenced path skips _fence_fail, which is where
                 # a failed run's deferred superseded-vector sweep is discarded.
                 # Discard it here instead: this run no longer owns the manifest,
