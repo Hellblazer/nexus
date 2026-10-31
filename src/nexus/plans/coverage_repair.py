@@ -56,6 +56,7 @@ __all__ = [
     "NOTE_PREFIX",
     "REPAIR_ALLOWANCE_CAP_S",
     "REPAIR_DEADLINE_SHARE",
+    "REPAIR_REASONS",
     "REPAIR_RESULTS_PER_QUERY",
     "REPAIR_RESULTS_PER_QUERY_UNFILTERED",
     "REPAIR_RETRIEVAL_SHARE",
@@ -66,6 +67,7 @@ __all__ = [
     "RepairTarget",
     "build_repair_queries",
     "repair_allowance",
+    "repair_reason",
     "unresolved_note",
     "usd_affordable",
 ]
@@ -104,6 +106,19 @@ MAX_ANCHORS_PER_ASSESSMENT_CALL: int = 20
 _MAX_QUERY_CHARS = 500
 _WS = re.compile(r"\s+")
 
+#: Why a repair ran (:attr:`RepairReport.reason`): a facet was assessed and nothing held bears on it (``unsupported``),
+#: a covered facet had most of its anchors left unread by the assessment's size cap (``unread_tail``, nexus-z6yvk), or
+#: both. Empty when no repair ran.
+REPAIR_REASONS: tuple[str, ...] = ("unsupported", "unread_tail", "unsupported_and_unread_tail")
+
+
+def repair_reason(*, unsupported: bool, unread_tail: bool) -> str:
+    """The :data:`REPAIR_REASONS` name for a repair that targets unsupported facets, unread-tail facets, or both."""
+    if unsupported and unread_tail:
+        return "unsupported_and_unread_tail"
+    return "unread_tail" if unread_tail else "unsupported" if unsupported else ""
+
+
 RepairOutcome = Literal[
     "not_attempted", "completed", "no_new_evidence", "not_merged", "retrieval_failed", "no_target",
     "skipped_deadline", "skipped_budget", "unavailable",
@@ -123,6 +138,10 @@ class RepairReport:
     When the first round left anchors unread (nexus-jypmj.23) the repair reassesses them even if its retrieval
     brings nothing in; the outcome then names what the retrieval did (``retrieval_failed``, ``not_merged`` or
     ``no_new_evidence``, never ``completed``) and ``detail`` says the unread anchors were reassessed.
+
+    ``facet_ids`` are the facets the repair targeted: the unsupported ones first, then the covered facets whose
+    anchors were mostly unread (nexus-z6yvk); ``unread_facet_ids`` is the second group and ``reason`` names which
+    groups there were (:data:`REPAIR_REASONS`; both empty when no repair ran). Both are additive to the wire shape.
     """
 
     outcome: RepairOutcome = "not_attempted"
@@ -134,12 +153,17 @@ class RepairReport:
     detail: str = ""
     #: Unresolved facets named to the terminal generation by the coverage note (``0``: no note was delivered).
     noted_facets: int = 0
+    #: Why the repair ran (:data:`REPAIR_REASONS`), and which of ``facet_ids`` were covered facets with most of their
+    #: anchors unread (nexus-z6yvk).
+    reason: str = ""
+    unread_facet_ids: tuple[str, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         return {
             "outcome": self.outcome, "facet_ids": list(self.facet_ids), "queries": self.queries,
             "items_found": self.items_found, "items_merged": self.items_merged, "latency_ms": self.latency_ms,
             "detail": self.detail, "noted_facets": self.noted_facets,
+            "reason": self.reason, "unread_facet_ids": list(self.unread_facet_ids),
         }
 
 

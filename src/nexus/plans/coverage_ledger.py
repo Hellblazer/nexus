@@ -148,11 +148,13 @@ from nexus.plans.coverage_repair import (
     REPAIR_RETRIEVAL_SHARE,
     RepairHit,
     RepairOutcome,
+    RepairQuery,
     RepairReport,
     RepairTarget,
     build_repair_queries,
     planned_reassessment_calls,
     repair_allowance,
+    repair_reason,
     unresolved_note,
     usd_affordable,
 )
@@ -541,6 +543,23 @@ class CoverageResult:
     @property
     def repair_facet_ids(self) -> tuple[str, ...]:
         return tuple(f.facet_id for f in self.ledger.findings if f.state == "unsupported" and f.reason == REPAIRABLE_REASON)
+
+    @property
+    def unread_tail_facet_ids(self) -> tuple[str, ...]:
+        """Covered facets whose anchors were MOSTLY left unread (nexus-z6yvk, Sam 2026-10-31): strictly more than half of
+        the ledger's anchors were never read, the per-call size cap having left them out. Every facet is assessed against
+        every anchor, so the unread share is the ledger's own. A covered facet is repaired for these although it is
+        covered: support in the unread tail is otherwise never read. A contradicted facet is not (a repair would be a
+        search for agreement), and an unsupported one is already a repair target."""
+        a = self.ledger.assessment
+        if a.anchors_total <= 0 or 2 * len(a.unread_ids) <= a.anchors_total:
+            return ()
+        return tuple(f.facet_id for f in self.ledger.findings if f.state == "covered")
+
+    @property
+    def repair_target_ids(self) -> tuple[str, ...]:
+        """What the one repair targets: the unsupported facets first, then the covered facets with most anchors unread."""
+        return self.repair_facet_ids + tuple(i for i in self.unread_tail_facet_ids if i not in self.repair_facet_ids)
 
     @property
     def unresolved_facet_ids(self) -> tuple[str, ...]:
@@ -975,17 +994,21 @@ class CoverageBoundary:
 
         anchor_ids = {a.item_id for a in anchors}
         # A covered or contradicted finding stands only while the evidence it cites is still in the reducer's input.
-        keep = {
+        stands = {
             fid for fid, f in prior_by_id.items()
             if f.state in ("covered", "contradicted") and set(f.evidence_ids) <= anchor_ids
         }
+        # A covered facet with most of its anchors unread is reassessed against the unread ones (nexus-z6yvk); what it
+        # already holds stands, the reassessment can only add to it.
+        tail = stands & set(prior.unread_tail_facet_ids) if prior is not None else set()
+        keep = stands - tail
         # A repairable gap was assessed against what the first round READ, so only the new anchors and the anchors
         # that round left unread (the per-call size cap, nexus-jypmj.23) can change it; every other facet that is not
         # decided is assessed against all of them.
         delta = [
             f for f in request.facets
             if f.id not in blocked and f.id not in keep and (p := prior_by_id.get(f.id)) is not None
-            and p.state == "unsupported" and p.reason == REPAIRABLE_REASON
+            and (f.id in tail or (p.state == "unsupported" and p.reason == REPAIRABLE_REASON))
         ]
         delta_ids = {f.id for f in delta}
         full = [f for f in request.facets if f.id not in blocked and f.id not in keep and f.id not in delta_ids]
@@ -1016,6 +1039,8 @@ class CoverageBoundary:
                 findings_list.append(FacetFinding(f.id, "unsupported", (), blocked[f.id]))
             elif f.id in keep:
                 findings_list.append(prior_by_id[f.id])
+            elif f.id in tail and earlier is not None:
+                findings_list.append(_with_tail_evidence(earlier, assessed.get(f.id)))
             elif f.id in assessed and not (assessed[f.id].state == "unassessed" and earlier is not None and earlier.state == "unsupported"):
                 findings_list.append(assessed[f.id])
             elif earlier is not None and earlier.state == "unsupported":
@@ -1040,16 +1065,23 @@ class CoverageBoundary:
         returns the first ledger with the reason in :attr:`CoverageResult.repair`.
         """
         first = await self.evaluate(view)
-        targets = first.repair_facet_ids
+        targets = first.repair_target_ids
         result = first
         if targets and self.max_repair_queries > 0:
             try:
                 result = await self._repair(view, first, targets)
             except Exception as exc:  # noqa: BLE001 — a repair failure never fails the answer; the first ledger stands
                 _log.warning("nx_answer_coverage_repair_failed", error=type(exc).__name__)  # the type only: an exception's text can carry prompt text
-                result = replace(first, repair=RepairReport("retrieval_failed", targets, detail=f"{type(exc).__name__}"))
+                result = replace(first, repair=RepairReport(
+                    "retrieval_failed", targets, detail=f"{type(exc).__name__}", **self._why(first)))
                 self._withdraw(view)
         return self._note_unresolved(view, result)
+
+    @staticmethod
+    def _why(first: CoverageResult) -> dict[str, Any]:
+        """The repair report's ``reason`` and ``unread_facet_ids`` for a repair of *first*'s targets (nexus-z6yvk)."""
+        unsupported, tail = first.repair_facet_ids, tuple(i for i in first.unread_tail_facet_ids if i not in first.repair_facet_ids)
+        return {"reason": repair_reason(unsupported=bool(unsupported), unread_tail=bool(tail)), "unread_facet_ids": tail}
 
     @staticmethod
     def _withdraw(view: BoundaryView) -> None:
@@ -1161,7 +1193,8 @@ class CoverageBoundary:
 
         def done(outcome: RepairOutcome, *, queries: int = 0, found: int = 0, merged: int = 0, detail: str = "", result: CoverageResult | None = None) -> CoverageResult:
             report = RepairReport(
-                outcome, targets, queries, found, merged, int((time.monotonic() - started) * 1000), detail)
+                outcome, targets, queries, found, merged, int((time.monotonic() - started) * 1000), detail,
+                **self._why(first))
             return replace(result or first, repair=report)
 
         if view.retrieve is None or view.fetch is None or view.install_supplement is None or view.rehydrate is None:
@@ -1183,8 +1216,10 @@ class CoverageBoundary:
         if not usd_affordable(view.remaining_usd(), None if estimate is None else estimate * planned):
             return done("skipped_budget", detail="the USD allowance could not carry the reassessment")
 
-        wanted = set(targets)
-        facets = [f for f in (self.request.facets if self.request else ()) if f.id in wanted]
+        # The targets are in priority order, unsupported facets first (nexus-z6yvk): the query budget goes to them first.
+        by_id = {f.id: f for f in (self.request.facets if self.request else ())}
+        facets = [by_id[i] for i in targets if i in by_id]
+        unsupported_ids = set(first.repair_facet_ids)
         primary, primary_subtree, plan = self._repair_targets(view)
         confinement = self.confinement
         # Without the engine's chunk filter a repair query reads the whole collection, so the siblings of the document
@@ -1193,10 +1228,16 @@ class CoverageBoundary:
             REPAIR_RESULTS_PER_QUERY_UNFILTERED
             if confinement is not None and not getattr(confinement, "sends_filter", False) else REPAIR_RESULTS_PER_QUERY
         )
-        queries = build_repair_queries(
-            facets, primary_collections=primary, plan_targets=plan, max_queries=self.max_repair_queries,
-            limit=limit, primary_subtree=primary_subtree,
-        )
+        # Unsupported facets against every target first, then the covered facets with most anchors unread against what
+        # budget is left: the covered facets never take a query an unsupported facet could have had.
+        queries: list[RepairQuery] = []
+        for group in ([f for f in facets if f.id in unsupported_ids], [f for f in facets if f.id not in unsupported_ids]):
+            room = self.max_repair_queries - len(queries)
+            if room > 0:
+                queries += build_repair_queries(
+                    group, primary_collections=primary, plan_targets=plan, max_queries=room,
+                    limit=limit, primary_subtree=primary_subtree,
+                )
         if confinement is not None and getattr(confinement, "sends_filter", False):
             for q in queries:
                 q.args["chash_allow"] = confinement.allow_list()
@@ -1580,6 +1621,19 @@ class _CallOutcome:
     why: str = ""
     records: list[Mapping[str, Any]] | None = None
     error: Exception | None = None
+
+
+def _with_tail_evidence(earlier: FacetFinding, new: FacetFinding | None) -> FacetFinding:
+    """A covered facet after its unread anchors were read (nexus-z6yvk): it stays covered whatever they say. A supporting
+    item adds to its evidence, a contradicting one marks it ``conflicted``, and a reassessment that found nothing, failed
+    or was skipped leaves the finding as it was. Reading more never takes support away."""
+    if new is None or new.state not in ("covered", "contradicted"):
+        return earlier
+    conflicted = earlier.reason == CONFLICTED_REASON or new.state == "contradicted" or new.reason == CONFLICTED_REASON
+    return FacetFinding(
+        earlier.facet_id, "covered", tuple(sorted(set(earlier.evidence_ids) | set(new.evidence_ids))),
+        CONFLICTED_REASON if conflicted else "",
+    )
 
 
 def _balanced_chunks[T](items: Sequence[T], cap: int) -> list[list[T]]:
