@@ -245,7 +245,7 @@ public final class RequestLedger {
             int inserted;
             try {
                 // The tenant's request_ledger_tenants row is written by the BEFORE INSERT trigger on this
-                // insert (vectors-043, nexus-yye8l.21), in the same statement and transaction.
+                // insert (vectors-046, nexus-yye8l.21), in the same statement and transaction.
                 inserted = withClaimLockBound(tenant, requestId, ctx -> ctx.insertInto(REQUEST_LEDGER)
                     .set(REQUEST_LEDGER.TENANT_ID, tenant)
                     .set(REQUEST_LEDGER.REQUEST_ID, requestId)
@@ -541,7 +541,7 @@ public final class RequestLedger {
     /**
      * Every tenant that has held a ledger row, from {@code nexus.request_ledger_tenants} (nexus-yye8l.21): a
      * BEFORE INSERT trigger on {@code request_ledger} writes the tenant in the transaction of its first ledger
-     * insert, whatever code path makes the insert, and vectors-043-4 backfilled the tenants whose rows predate
+     * insert, whatever code path makes the insert, and vectors-046-4 backfilled the tenants whose rows predate
      * the table. The ledger is FORCE RLS, so
      * the tenants cannot be read from it without naming each one; this table has no RLS and one row per tenant,
      * a primary-key scan. Bounded by {@code statementBound} ({@code SET LOCAL statement_timeout}): the retention

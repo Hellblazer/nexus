@@ -147,10 +147,10 @@ class ManifestLabelStageTest {
             "section_type", "body", "quality_gate_overridden", true, "source_author", w("$ne", "x")));
 
         assertThat(split.active()).isTrue();
-        // tags and quality_gate_overridden have no catalog writer yet: they stay predicates on the chunk row.
-        assertThat(split.rest()).containsOnlyKeys("lang", "tags", "quality_gate_overridden");
+        // nexus-6pfgb.29: tags and quality_gate_overridden are answered per document now; only lang stays a chunk-row predicate.
+        assertThat(split.rest()).containsOnlyKeys("lang");
         assertThat(split.labels()).extracting(ManifestLabelStage.Predicate::key)
-            .containsExactly("bib_year", "section_type", "source_author");
+            .containsExactly("tags", "bib_year", "section_type", "quality_gate_overridden", "source_author");
     }
 
     @Test
@@ -159,15 +159,124 @@ class ManifestLabelStageTest {
         // nexus-6pfgb.3); this pin used to list them as unanswered, changed on purpose.
         for (String key : List.of("source_author", "indexed_at", "bib_year", "bib_authors", "bib_venue",
                 "bib_citation_count", "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi",
-                "section_title", "section_type", "page_number", "title", "content_type")) {
+                "section_title", "section_type", "page_number", "title", "content_type",
+                // nexus-6pfgb.29: the catalog-meta keys, answered per owning document with a row fallback.
+                "tags", "category", "ttl_days", "source_agent", "extraction_method",
+                "quality_gate_overridden", "extraction_source", "frecency_score")) {
             assertThat(ManifestLabelStage.split(w(key, "v")).active()).as(key).isTrue();
         }
-        // The catalog meta keys have no writer (epic nexus-6pfgb wave 1), so answering them would only put
-        // those filters under the overfetch cut.
-        for (String key : List.of("tags", "category", "ttl_days", "source_agent", "extraction_method",
-                "quality_gate_overridden", "extraction_source", "frecency_score", "chunk_text_hash")) {
+        // Everything else stays a predicate on the chunk row, inside the search.
+        for (String key : List.of("chunk_text_hash", "lang", "frecency_computed_at", "put_at", "bib_enriched_by")) {
             assertThat(ManifestLabelStage.split(w(key, "v")).active()).as(key).isFalse();
         }
+        assertThat(ManifestLabelStage.META_KEYS).containsExactlyInAnyOrder("tags", "category", "ttl_days",
+            "source_agent", "extraction_method", "quality_gate_overridden", "extraction_source", "frecency_score");
+    }
+
+    // ── nexus-6pfgb.29: the catalog-meta keys ───────────────────────────────
+
+    private static boolean passes(Map<String, Object> where, Map<String, Object> value) {
+        return ManifestLabelStage.passes(ManifestLabelStage.split(where).labels(), value);
+    }
+
+    @Test
+    void tagsAreASet_aPositiveOperatorMatchesAnyMember_aNegativeOneNone() {
+        Map<String, Object> note = w("tags", List.of("arch", "decision"));
+        assertThat(passes(w("tags", "arch"), note)).isTrue();
+        assertThat(passes(w("tags", "decision"), note)).isTrue();
+        assertThat(passes(w("tags", "arc"), note)).as("a prefix is not a tag").isFalse();
+        assertThat(passes(w("tags", w("$in", List.of("zzz", "decision"))), note)).isTrue();
+        assertThat(passes(w("tags", w("$in", List.of("zzz"))), note)).isFalse();
+        assertThat(passes(w("tags", w("$ne", "arch")), note)).as("$ne: none of the tags is arch").isFalse();
+        assertThat(passes(w("tags", w("$ne", "other")), note)).isTrue();
+        assertThat(passes(w("tags", w("$nin", List.of("x", "decision"))), note)).isFalse();
+        assertThat(passes(w("tags", w("$nin", List.of("x", "y"))), note)).isTrue();
+        assertThat(passes(w("tags", w("$gte", "a")), note)).as("a range over a set has no meaning").isFalse();
+    }
+
+    @Test
+    void aDocumentWithNoTag_answersTheEmptyString_likeAnyUnlabelledValue() {
+        for (Object none : java.util.Arrays.asList(null, List.of())) {
+            Map<String, Object> value = w("tags", none);
+            assertThat(passes(w("tags", "arch"), value)).as("tags=arch on %s", none).isFalse();
+            assertThat(passes(w("tags", ""), value)).as("tags='' on %s", none).isTrue();
+            assertThat(passes(w("tags", w("$ne", "arch")), value)).as("$ne arch on %s", none).isTrue();
+            assertThat(passes(w("tags", w("$ne", "")), value)).as("$ne '' on %s", none).isFalse();
+        }
+        assertThat(passes(w("tags", ""), w("tags", List.of("arch")))).as("a tagged document is not untagged").isFalse();
+    }
+
+    @Test
+    void tagSet_splitsAStoredValueTheWayTheClientDoes() {
+        assertThat(ManifestLabelStage.tagSet(" arch , decision,,arch ,")).containsExactly("arch", "decision");
+        assertThat(ManifestLabelStage.tagSet(List.of(" a ", "b", "", "a"))).containsExactly("a", "b");
+        assertThat(ManifestLabelStage.tagSet("")).isEmpty();
+        assertThat(ManifestLabelStage.tagSet(null)).isEmpty();
+        assertThat(ManifestLabelStage.tagSet(7)).as("a number holds no tag").isEmpty();
+    }
+
+    @Test
+    void ttlDaysAndFrecencyScoreAreNumeric_aNumberAndItsTextCompareEqual_rangesCompareAsNumbers() {
+        assertThat(passes(w("ttl_days", 7), w("ttl_days", 7))).isTrue();
+        assertThat(passes(w("ttl_days", "7"), w("ttl_days", 7))).isTrue();
+        assertThat(passes(w("ttl_days", 7), w("ttl_days", "7"))).as("a stored text 7 (a legacy chunk row)").isTrue();
+        assertThat(passes(w("ttl_days", 7), w("ttl_days", 70))).isFalse();
+        assertThat(passes(w("ttl_days", w("$gte", 7)), w("ttl_days", 30))).isTrue();
+        assertThat(passes(w("ttl_days", w("$gt", 7)), w("ttl_days", 7))).isFalse();
+        assertThat(passes(w("frecency_score", w("$gte", 0.5)), w("frecency_score", 0.75))).isTrue();
+        assertThat(passes(w("frecency_score", w("$lt", 0.5)), w("frecency_score", "0.25"))).isTrue();
+        assertThat(passes(w("frecency_score", w("$gte", 0.5)), w("frecency_score", "abc"))).as("not a number").isFalse();
+        // Zero is a value (ttl_days 0 is permanent), not an absence.
+        assertThat(passes(w("ttl_days", 0), w("ttl_days", 0))).isTrue();
+    }
+
+    @Test
+    void theStringMetaKeysCompareAsExactStrings() {
+        for (String key : List.of("category", "source_agent", "extraction_method", "extraction_source")) {
+            assertThat(passes(w(key, "x"), w(key, "x"))).as(key).isTrue();
+            assertThat(passes(w(key, "x"), w(key, "X"))).as(key + " is case-exact").isFalse();
+            assertThat(passes(w(key, w("$in", List.of("y", "x"))), w(key, "x"))).as(key).isTrue();
+            assertThat(passes(w(key, w("$ne", "x")), w(key, "x"))).as(key).isFalse();
+            assertThat(passes(w(key, "x"), w(key, null))).as(key + " absent").isFalse();
+        }
+        // An id-shaped value is a string: "0042" is not "42" on a string key.
+        assertThat(passes(w("category", "42"), w("category", "0042"))).isFalse();
+    }
+
+    @Test
+    void qualityGateOverridden_theJsonBooleanAndItsLowerCaseTextCompareEqual_nothingElseDoes() {
+        assertThat(passes(w("quality_gate_overridden", true), w("quality_gate_overridden", true))).isTrue();
+        assertThat(passes(w("quality_gate_overridden", "true"), w("quality_gate_overridden", true))).isTrue();
+        assertThat(passes(w("quality_gate_overridden", true), w("quality_gate_overridden", "true"))).isTrue();
+        assertThat(passes(w("quality_gate_overridden", false), w("quality_gate_overridden", false))).isTrue();
+        assertThat(passes(w("quality_gate_overridden", true), w("quality_gate_overridden", false))).isFalse();
+        // The planner's two literal forms are true/"true"; a capitalised text is neither.
+        assertThat(passes(w("quality_gate_overridden", true), w("quality_gate_overridden", "True"))).isFalse();
+        assertThat(passes(w("quality_gate_overridden", "True"), w("quality_gate_overridden", true))).isFalse();
+    }
+
+    @Test
+    void readMeta_aKeyTheMetaHasAnswersForTheDocument_aMissingOrNullOneFallsBackToTheRow() {
+        Map<String, Object> out = new HashMap<>();
+        ManifestLabelStage.readMeta(org.jooq.JSONB.valueOf(
+            "{\"tags\":[\"arch\",\" b \"],\"category\":\"\",\"ttl_days\":0,\"frecency_score\":0.75,"
+            + "\"quality_gate_overridden\":false,\"source_agent\":null}"),
+            ManifestLabelStage.META_KEYS, out);
+
+        assertThat(out).containsEntry("tags", List.of("arch", "b"))
+            .containsEntry("category", "").containsEntry("ttl_days", 0)
+            .containsEntry("frecency_score", 0.75).containsEntry("quality_gate_overridden", false);
+        // Absent (extraction_method) and JSON null (source_agent): no entry, so the chunk row answers.
+        assertThat(out).doesNotContainKeys("source_agent", "extraction_method", "extraction_source");
+
+        Map<String, Object> onlyNamed = new HashMap<>();
+        ManifestLabelStage.readMeta(org.jooq.JSONB.valueOf("{\"category\":\"c\",\"ttl_days\":3}"),
+            java.util.Set.of("category"), onlyNamed);
+        assertThat(onlyNamed).containsOnlyKeys("category");
+
+        Map<String, Object> none = new HashMap<>();
+        ManifestLabelStage.readMeta(null, ManifestLabelStage.META_KEYS, none);
+        assertThat(none).isEmpty();
     }
 
     @Test

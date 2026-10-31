@@ -1936,13 +1936,40 @@
     <include file="db/changelog/vectors-042-text-gated-search-allowed.xml"/>
 
     <!--
+        Bead nexus-6pfgb.62 (RDR-236 Phase 3 gate): nexus.catalog_source_format(content_type, file_path), the one
+        IMMUTABLE SQL definition of the derived source format. One new function plus a nexus_svc EXECUTE grant, and
+        the three manifest_search_<dim> bodies replaced to call it (CREATE OR REPLACE, signatures and grants kept),
+        no DATA EFFECT. After vectors-042 (current tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-043-catalog-source-format.xml"/>
+
+    <!--
+        Bead nexus-6pfgb.29 (RDR-236 Phase 3): manifest_search_<dim> answers the catalog-meta keys (tags, category,
+        ttl_days, source_agent, extraction_method, quality_gate_overridden, extraction_source, frecency_score) per
+        owning document, the chunk row as the fallback while the meta lacks the key. One new function
+        (nexus.catalog_tag_set) plus a nexus_svc EXECUTE grant, and the three manifest_search_<dim> bodies replaced
+        (CREATE OR REPLACE, signatures and grants kept), no DATA EFFECT. After vectors-043 (current tail), before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-044-manifest-search-meta-keys.xml"/>
+
+    <!--
+        Bead nexus-6pfgb.61 (RDR-236 Phase 3, assumption A8): the manifest EXISTS of manifest_search_<dim> builds the
+        keys of its per-occurrence object only when the compiled predicate names them, which cuts the per-candidate cost
+        by about a third. One new function (nexus.manifest_names_key) plus a nexus_svc EXECUTE grant, and the three
+        manifest_search_<dim> bodies replaced (CREATE OR REPLACE, signatures and grants kept), no DATA EFFECT. After
+        vectors-044 (current tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-045-manifest-search-named-keys.xml"/>
+
+    <!--
         Bead nexus-yye8l.21 (RDR-222): nexus.request_ledger_tenants, one row per tenant that has held a request_ledger
         row, so the retention arm visits every ledger tenant and not only those holding a service token. The table (no
         RLS, the tuple_tenants posture), a BEFORE INSERT trigger on request_ledger that registers the row's tenant, and a
-        NO FORCE-wrapped backfill of the tenants already holding ledger rows. After vectors-042 (current tail), before the
+        NO FORCE-wrapped backfill of the tenants already holding ledger rows. After vectors-045 (current tail), before the
         grants-nexus-svc.xml runAlways block, which gives nexus_svc its DML.
     -->
-    <include file="db/changelog/vectors-043-request-ledger-tenants.xml"/>
+    <include file="db/changelog/vectors-046-request-ledger-tenants.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

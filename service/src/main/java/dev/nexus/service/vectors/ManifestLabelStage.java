@@ -6,8 +6,12 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TenantScope;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.JSONB;
 import org.jooq.Record;
 import org.jooq.ResultQuery;
 
@@ -95,10 +99,23 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       from the catalog's content type and file extension by the rule that column will carry, and the engine's
  *       in-SQL pre-filter ({@code manifest_search_<dim>}, vectors-041) derives it by the same expression.</li>
  * </ul>
- * The catalog document's {@code metadata} keys ({@code tags}, {@code category}, {@code ttl_days} and the
- * rest) are NOT answered here: no writer puts them on a catalog document yet (epic nexus-6pfgb, wave 1), so
- * answering them would only move those filters under the {@link #OVERFETCH} cut for the same answers. They
- * stay predicates on the chunk row, inside the search.
+ * <p><b>Catalog-meta keys (nexus-6pfgb.29).</b> The eight keys the catalog document's {@code metadata} holds,
+ * {@link #META_KEYS}, are answered per owning document too. nexus-6pfgb.24 had taken them out because no writer
+ * stamped them yet and answering them then only moved those filters under the {@link #OVERFETCH} cut for the same
+ * answers; the wave-1 writers (store_put, import, the meta backfill) now do, and a rare value is found by the same
+ * in-SQL EXISTS as a rare label ({@link ManifestPushdown}), so they are answered here. The rule per key is the
+ * presence fallback: a document whose meta HAS the key (a JSON value that is not null) answers for itself, an empty
+ * value included (the catalog has no way to retract a key, so an empty value is the writer's answer); a document
+ * whose meta lacks it takes the chunk row's value, exactly what the filter read before this change, so documents
+ * stamped before the writers existed behave as they did. Typing per key: {@code category}, {@code source_agent},
+ * {@code extraction_method} and {@code extraction_source} compare as exact strings; {@code ttl_days} and {@code
+ * frecency_score} are numeric ({@link #NUMERIC_KEYS}: {@code 7} equals {@code "7"}, ranges compare as numbers);
+ * {@code quality_gate_overridden} is a boolean whose JSON form {@code true} and text form {@code "true"} compare
+ * equal, any other spelling ({@code "True"}) does not; {@code tags} is a SET (RDR-236 RF-17): the meta holds a JSON
+ * array (a legacy comma string is split on commas, each tag trimmed, empties dropped, the chunk row's comma string
+ * the same), a positive operator matches when ANY tag matches, a negative one when NONE does, and a document with
+ * no tag answers the empty string like any unlabelled value. A row this stage returns for a filter that names
+ * {@code tags} shows the owner's tags as the chunk row's own comma-separated text.
  *
  * <p><b>In-SQL pre-filter (nexus-p89h4, nexus-6pfgb.25).</b> The positive form of the predicates {@link
  * ManifestPushdown} can express (an equality or {@code $in} on a label, {@code title}, {@code source_author} or an
@@ -150,16 +167,27 @@ final class ManifestLabelStage {
      */
     static final String CONTENT_TYPE_KEY = "content_type";
 
+    /** {@code tags}: a set, see the class comment. */
+    static final String TAGS_KEY = "tags";
+
+    /**
+     * The keys the catalog document's {@code metadata} holds (nexus-6pfgb.29): answered from the document's meta when
+     * it HAS the key, from the chunk row when it lacks it.
+     */
+    static final Set<String> META_KEYS = Set.of(TAGS_KEY, "category", "ttl_days", "source_agent",
+        "extraction_method", "quality_gate_overridden", "extraction_source", "frecency_score");
+
     /** Every document-level key this stage answers. */
     static final Set<String> DOC_KEYS = Set.copyOf(union(
-        Set.of(AUTHOR_KEY, INDEXED_AT_KEY, TITLE_KEY, CONTENT_TYPE_KEY), BIB_KEYS));
+        Set.of(AUTHOR_KEY, INDEXED_AT_KEY, TITLE_KEY, CONTENT_TYPE_KEY), union(BIB_KEYS, META_KEYS)));
 
     /**
      * The answered keys whose values are numbers. Only these compare numerically across a number and its text
      * ({@code 5} and {@code "5"}); every other key is a string and compares as an exact string, so an id such
      * as {@code "0042"} is not {@code "42"} and {@code "1e3"} is not {@code "1000"}.
      */
-    static final Set<String> NUMERIC_KEYS = Set.of("page_number", "bib_year", "bib_citation_count");
+    static final Set<String> NUMERIC_KEYS = Set.of("page_number", "bib_year", "bib_citation_count",
+        "ttl_days", "frecency_score");
 
     /** Every key this stage answers: the per-position labels and the document-level keys. */
     static final Set<String> ANSWERED_KEYS = Set.copyOf(union(LABEL_KEYS, DOC_KEYS));
@@ -371,6 +399,21 @@ final class ManifestLabelStage {
     }
 
     private static boolean test(Predicate p, Object label) {
+        // A document with no tag answers the empty string, as an unlabelled value does.
+        return testValue(p, label instanceof List<?> set && set.isEmpty() ? null : label);
+    }
+
+    private static boolean testValue(Predicate p, Object label) {
+        if (label instanceof List<?> tags) {
+            // A SET (tags): a positive operator matches when any member does, a negative one when none does.
+            return switch (p.operator()) {
+                case "$eq" -> tags.stream().anyMatch(t -> sameText(t, p.operand()));
+                case "$ne" -> tags.stream().noneMatch(t -> sameText(t, p.operand()));
+                case "$in" -> ((List<?>) p.operand()).stream().anyMatch(o -> tags.stream().anyMatch(t -> sameText(t, o)));
+                case "$nin" -> ((List<?>) p.operand()).stream().noneMatch(o -> tags.stream().anyMatch(t -> sameText(t, o)));
+                default -> false;  // a range over a set of names has no meaning
+            };
+        }
         if (label instanceof ContentType ct) {
             return switch (p.operator()) {
                 case "$eq" -> matches(ct, p.operand());
@@ -378,7 +421,7 @@ final class ManifestLabelStage {
                 case "$in" -> ((List<?>) p.operand()).stream().anyMatch(o -> matches(ct, o));
                 case "$nin" -> ((List<?>) p.operand()).stream().noneMatch(o -> matches(ct, o));
                 // A range over content types has no meaning; it reads the value the row would show.
-                default -> test(p, ct.display());
+                default -> testValue(p, ct.display());
             };
         }
         if (label == null || (label instanceof String text && text.isEmpty())) {
@@ -405,6 +448,10 @@ final class ManifestLabelStage {
             case "$lt" -> comparable(label, p.operand(), numeric) && compare(label, p.operand()) < 0;
             default -> throw new IllegalStateException("operator validated in split: " + p.operator());
         };
+    }
+
+    private static boolean sameText(Object member, Object operand) {
+        return String.valueOf(member).equals(String.valueOf(operand));
     }
 
     private static boolean isEmptyString(Object operand) {
@@ -498,7 +545,8 @@ final class ManifestLabelStage {
                              Field<Integer> bibYear, Field<String> bibAuthors, Field<String> bibVenue,
                              Field<Integer> bibCitations, Field<String> bibS2, Field<String> bibOpenAlex,
                              Field<String> bibDoi, Field<OffsetDateTime> bibEnrichedAt,
-                             Field<String> title, Field<String> contentType, Field<String> filePath) {
+                             Field<String> title, Field<String> contentType, Field<String> filePath,
+                             Field<JSONB> metadata) {
 
         static DocFields of(Set<String> keys) {
             boolean bib = keys.stream().anyMatch(BIB_KEYS::contains);
@@ -511,13 +559,14 @@ final class ManifestLabelStage {
                 bib ? CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID : null, bib ? CATALOG_DOCUMENTS.BIB_OPENALEX_ID : null,
                 bib ? CATALOG_DOCUMENTS.BIB_DOI : null, bib ? CATALOG_DOCUMENTS.BIB_ENRICHED_AT : null,
                 keys.contains(TITLE_KEY) ? CATALOG_DOCUMENTS.TITLE : null,
-                type ? CATALOG_DOCUMENTS.CONTENT_TYPE : null, type ? CATALOG_DOCUMENTS.FILE_PATH : null);
+                type ? CATALOG_DOCUMENTS.CONTENT_TYPE : null, type ? CATALOG_DOCUMENTS.FILE_PATH : null,
+                keys.stream().anyMatch(META_KEYS::contains) ? CATALOG_DOCUMENTS.METADATA : null);
         }
 
         void addTo(List<Field<?>> select) {
             for (Field<?> f : java.util.Arrays.asList(author, indexedAt, bibYear, bibAuthors, bibVenue, bibCitations,
                                                       bibS2, bibOpenAlex, bibDoi, bibEnrichedAt, title, contentType,
-                                                      filePath)) {
+                                                      filePath, metadata)) {
                 if (f != null) {
                     select.add(f);
                 }
@@ -557,8 +606,106 @@ final class ManifestLabelStage {
                     out.put(CONTENT_TYPE_KEY, new ContentType(type, format, null));
                 }
             }
+            if (metadata != null) {
+                readMeta(r.get(metadata), keys, out);
+            }
             return out;
         }
+    }
+
+    private static final ObjectMapper META_MAPPER = new ObjectMapper();
+
+    /**
+     * The document's answer for each catalog-meta key the filter names, into {@code out}: a key the meta HAS (a JSON
+     * value that is not null) answers for the document, whatever it holds; a key it lacks is left out so the chunk
+     * row answers (the presence fallback, see the class comment).
+     */
+    static void readMeta(JSONB metadata, Set<String> keys, Map<String, Object> out) {
+        if (metadata == null) {
+            return;
+        }
+        JsonNode meta;
+        try {
+            meta = META_MAPPER.readTree(metadata.data());
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("catalog_documents.metadata is not JSON: " + e.getMessage(), e);
+        }
+        for (String key : keys) {
+            JsonNode v = META_KEYS.contains(key) ? meta.get(key) : null;
+            if (v == null || v.isNull()) {
+                continue;
+            }
+            out.put(key, TAGS_KEY.equals(key) ? tagSet(v) : metaScalar(v));
+        }
+    }
+
+    /** A meta value as the Java value the predicates compare: a number, a boolean, or the text of anything else. */
+    private static Object metaScalar(JsonNode v) {
+        if (v.isNumber()) {
+            return v.numberValue();
+        }
+        if (v.isBoolean()) {
+            return v.booleanValue();
+        }
+        return v.isTextual() ? v.textValue() : v.toString();
+    }
+
+    /**
+     * The tags a stored value holds, as a list: a JSON array (each element's text), or a string (the legacy comma
+     * form) split on commas; every tag trimmed of ASCII whitespace and empties dropped, duplicates removed,
+     * first-seen order kept. Any other value holds no tag.
+     *
+     * <p>The trim is the ASCII set {@code nexus.catalog_tag_set} (vectors-044) trims with, NOT {@link String#strip}
+     * (Unicode): the in-search EXISTS tests membership of the SQL set and the stage trims the rest with this one,
+     * so a wider trim here would pass a stored {@code "<U+2003>arch"} through the stage that the EXISTS had already
+     * dropped. ASCII was chosen over widening the SQL to {@code \s}: the function stays a plain IMMUTABLE
+     * {@code btrim}, no regex per tag, and vectors-044 needs no edit. The client's {@code split_note_tags} strips
+     * Unicode whitespace too, which only matters one way: a tag the client writes never carries surrounding
+     * Unicode whitespace, so nothing it stored is cut differently here; a tag written by another path with such
+     * whitespace is kept whole on both server sides and matches only an operand that carries it.
+     */
+    static List<String> tagSet(Object stored) {
+        List<String> raw = new ArrayList<>();
+        if (stored instanceof JsonNode node) {
+            if (node.isArray()) {
+                node.forEach(e -> {
+                    if (!e.isNull()) {  // jsonb_array_elements_text gives SQL NULL for a JSON null, which is no tag
+                        raw.add(e.isTextual() ? e.textValue() : e.toString());
+                    }
+                });
+            } else if (node.isTextual()) {
+                raw.addAll(java.util.Arrays.asList(node.textValue().split(",", -1)));
+            }
+        } else if (stored instanceof List<?> items) {
+            items.forEach(e -> raw.add(String.valueOf(e)));
+        } else if (stored instanceof String text) {
+            raw.addAll(java.util.Arrays.asList(text.split(",", -1)));
+        }
+        Set<String> tags = new LinkedHashSet<>();
+        for (String t : raw) {
+            String trimmed = trimAscii(t);
+            if (!trimmed.isEmpty()) {
+                tags.add(trimmed);
+            }
+        }
+        return List.copyOf(tags);
+    }
+
+    /** The ASCII whitespace {@code nexus.catalog_tag_set} trims: space, tab, CR, LF, form feed, vertical tab. */
+    private static String trimAscii(String t) {
+        int from = 0;
+        int to = t.length();
+        while (from < to && isTagSpace(t.charAt(from))) {
+            from++;
+        }
+        while (to > from && isTagSpace(t.charAt(to - 1))) {
+            to--;
+        }
+        return t.substring(from, to);
+    }
+
+    private static boolean isTagSpace(char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\u000b';
     }
 
     /** A catalog timestamp as the chunk rows' own {@code indexed_at} text, so range operands compare alike. */
@@ -803,6 +950,9 @@ final class ManifestLabelStage {
         }
         for (String key : docKeys) {
             Object answer = o != null && o.docValues().containsKey(key) ? o.docValues().get(key) : row.get(key);
+            if (TAGS_KEY.equals(key) && answer != null) {
+                answer = tagSet(answer);  // the chunk row's comma string, or a list, as a set (the meta's is one already)
+            }
             m.put(key, answer instanceof ContentType ct ? ct.withRow(row.get(key)) : answer);
         }
         return m;
@@ -864,6 +1014,9 @@ final class ManifestLabelStage {
         }
         for (Map.Entry<String, Object> d : o.docValues().entrySet()) {
             Object value = d.getValue() instanceof ContentType ct ? ct.display() : d.getValue();
+            if (TAGS_KEY.equals(d.getKey()) && value instanceof List<?> tags) {
+                value = tags.stream().map(String::valueOf).collect(java.util.stream.Collectors.joining(","));
+            }
             if (value == null) {
                 copy.remove(d.getKey());
             } else {

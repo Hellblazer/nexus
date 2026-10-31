@@ -20,7 +20,7 @@
     row, so a delete in between would leave a live ledger row with no tenant row). The table is as large as the
     number of tenants that ever made a keyed request.
 
-    THE TRIGGER (vectors-043-2, -3). RequestLedger.claim used to write the registry row itself. That kept the
+    THE TRIGGER (vectors-046-2, -3). RequestLedger.claim used to write the registry row itself. That kept the
     invariant only for that one insert site, and RDR-222 Phase 2 adds a second one (an inline claim in the
     partition transaction), so the invariant moved into the database. The function is SECURITY INVOKER, the
     standing default here: the writer is nexus_svc, which holds INSERT on the registry through the runAlways
@@ -33,7 +33,7 @@
     resolved, so a claim that loses to an existing ledger row still runs the registry DO NOTHING; the tenant is
     already registered then, so nothing changes.
 
-    THE BACKFILL (vectors-043-4). Tenants that held ledger rows before this changeset include exactly the
+    THE BACKFILL (vectors-046-4). Tenants that held ledger rows before this changeset include exactly the
     population the registry exists for: a tenant already without a token at deploy cannot authenticate, so it
     can never make the keyed request that would register it. The backfill copies every distinct tenant_id of
     nexus.request_ledger into the registry. The ledger is FORCE ROW LEVEL SECURITY and the migrator is
@@ -55,7 +55,7 @@
     xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
-    <changeSet id="vectors-043-1" author="nexus-yye8l.21">
+    <changeSet id="vectors-046-1" author="nexus-yye8l.21">
         <comment>Create request_ledger_tenants (RDR-222 ledger retention visits every ledger tenant)</comment>
         <sql splitStatements="true" stripComments="false">
 CREATE TABLE nexus.request_ledger_tenants (
@@ -67,7 +67,7 @@ CREATE TABLE nexus.request_ledger_tenants (
         <rollback>DROP TABLE IF EXISTS nexus.request_ledger_tenants CASCADE</rollback>
     </changeSet>
 
-    <changeSet id="vectors-043-2" author="nexus-yye8l.21">
+    <changeSet id="vectors-046-2" author="nexus-yye8l.21">
         <comment>Trigger function: a ledger row registers its tenant (SECURITY INVOKER, pinned search_path)</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.request_ledger_register_tenant()
@@ -87,7 +87,7 @@ $fn$;
         <rollback>DROP FUNCTION IF EXISTS nexus.request_ledger_register_tenant()</rollback>
     </changeSet>
 
-    <changeSet id="vectors-043-3" author="nexus-yye8l.21">
+    <changeSet id="vectors-046-3" author="nexus-yye8l.21">
         <comment>BEFORE INSERT trigger on request_ledger: register the row's tenant in request_ledger_tenants</comment>
         <sql splitStatements="true" stripComments="false">
 CREATE TRIGGER trg_request_ledger_register_tenant
@@ -98,7 +98,7 @@ CREATE TRIGGER trg_request_ledger_register_tenant
         <rollback>DROP TRIGGER IF EXISTS trg_request_ledger_register_tenant ON nexus.request_ledger</rollback>
     </changeSet>
 
-    <changeSet id="vectors-043-4" author="nexus-yye8l.21">
+    <changeSet id="vectors-046-4" author="nexus-yye8l.21">
         <comment>Backfill request_ledger_tenants from the tenants already holding request_ledger rows (additive: inserts into the new table only)</comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.request_ledger NO FORCE ROW LEVEL SECURITY;
@@ -111,7 +111,7 @@ ON CONFLICT (tenant_id) DO NOTHING;
 ALTER TABLE nexus.request_ledger FORCE ROW LEVEL SECURITY;
         </sql>
         <rollback>
-            <!-- Rows of the table vectors-043-1's rollback drops; nothing to restore on their own. -->
+            <!-- Rows of the table vectors-046-1's rollback drops; nothing to restore on their own. -->
         </rollback>
     </changeSet>
 

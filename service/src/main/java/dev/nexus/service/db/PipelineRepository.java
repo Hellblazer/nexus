@@ -425,9 +425,19 @@ public final class PipelineRepository {
                       .set(PDF_PIPELINE.EXTRACTION_META, metadataJson == null ? "" : metadataJson));
     }
 
+    /**
+     * Completes only a live run (nexus-euczk): a row already {@code failed} or
+     * {@code completed} is left as it is. An interrupted client releases its row
+     * as {@code failed}, keeping the buffer for the next run, while its uploader
+     * thread may still be between its cancel check and this write; without the
+     * guard that straggler turned the released row {@code completed}, and the next
+     * create wiped the buffer as a finished leftover. A no-op answers as a write
+     * does, so an older client sees no change.
+     */
     public void markCompleted(String tenant, PipelineRef ref) {
         setPipelineField(tenant, ref,
-            ctx -> ctx.update(PDF_PIPELINE).set(PDF_PIPELINE.STATUS, "completed"));
+            ctx -> ctx.update(PDF_PIPELINE).set(PDF_PIPELINE.STATUS, "completed"),
+            PDF_PIPELINE.STATUS.in("running", "resuming"));
     }
 
     public void markFailed(String tenant, PipelineRef ref, String error) {
@@ -442,6 +452,10 @@ public final class PipelineRepository {
     }
 
     private void setPipelineField(String tenant, PipelineRef ref, UpdateStart start) {
+        setPipelineField(tenant, ref, start, DSL.noCondition());
+    }
+
+    private void setPipelineField(String tenant, PipelineRef ref, UpdateStart start, Condition only) {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         tenantScope.withTenant(tenant, ctx -> {
             LockedRun run = lockRun(ctx, tenant, ref);
@@ -450,7 +464,8 @@ public final class PipelineRepository {
             start.begin(ctx)
                  .set(PDF_PIPELINE.UPDATED_AT, now)
                  .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
-                         .and(PDF_PIPELINE.PIPELINE_ID.eq(id)))
+                         .and(PDF_PIPELINE.PIPELINE_ID.eq(id))
+                         .and(only))
                  .execute();
             return null;
         });

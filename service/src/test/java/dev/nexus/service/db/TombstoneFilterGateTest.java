@@ -269,6 +269,12 @@ class TombstoneFilterGateTest {
      * particular gate mechanism did.
      */
     private static final List<ExemptEntry> TOMBSTONE_EXEMPT = List.of(
+        new ExemptEntry("CatalogRepository.java", "tombstonedChashHolders",
+            "nexus-6pfgb.58: naming the manifest rows of TOMBSTONED documents is the contract. The manifest-"
+            + "section-labels rung copies a chunk row's label onto a legacy row only when the chash has one "
+            + "owner, and every live read hides a deleted co-owner that may have written the label last; "
+            + "the join requires DELETED_AT.isNotNull() (the mirror of liveParentDoc), and the read returns "
+            + "the chash, doc_id, position and collection only, no document content"),
         new ExemptEntry("CatalogRepository.java", "registeredDocIds",
             "existence pre-check for append_many (RDR-223): answers 'is there a catalog_documents row', "
             + "tombstoned rows included, exactly like requireDocumentExists (a selectOne the gate does not "

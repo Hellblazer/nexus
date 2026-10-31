@@ -105,9 +105,13 @@ def served_pipeline() -> Iterator[tuple[str, InMemoryPipelineEngine]]:
 
 
 @posix_only
+@pytest.mark.parametrize("sig", ["SIGTERM", "SIGHUP"])
 def test_sigterm_mid_extraction_releases_the_row_for_an_immediate_retry(
-    tmp_path: Path, served_pipeline: tuple[str, InMemoryPipelineEngine],
+    tmp_path: Path, served_pipeline: tuple[str, InMemoryPipelineEngine], sig: str,
 ) -> None:
+    """SIGHUP (nexus-eq03c) is what a closing terminal or a dropped ssh session sends; it releases
+    the row as SIGTERM does and still ends the process as SIGHUP."""
+    signum = getattr(signal, sig)
     url, engine = served_pipeline
     pdf = tmp_path / "blocked.pdf"
     pdf.write_bytes(f"nexus-4vx0a {tmp_path}".encode())
@@ -154,7 +158,7 @@ def test_sigterm_mid_extraction_releases_the_row_for_an_immediate_retry(
         with pytest.raises(PipelineConflictRunning):
             retry.create_pipeline(content_hash, str(pdf.resolve()), _COLLECTION)
 
-        child.send_signal(signal.SIGTERM)
+        child.send_signal(signum)
         try:
             rc = child.wait(timeout=_EXIT_BUDGET_S)
         except subprocess.TimeoutExpired:
@@ -164,14 +168,14 @@ def test_sigterm_mid_extraction_releases_the_row_for_an_immediate_retry(
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
-            pytest.fail(f"the child was still running {_EXIT_BUDGET_S}s after SIGTERM\n{err_path.read_text()}")
-        assert rc == -signal.SIGTERM, (
-            f"SIGTERM must still end the process as SIGTERM (re-delivered), got rc={rc!r}\n{err_path.read_text()}"
+            pytest.fail(f"the child was still running {_EXIT_BUDGET_S}s after {sig}\n{err_path.read_text()}")
+        assert rc == -signum, (
+            f"{sig} must still end the process as {sig} (re-delivered), got rc={rc!r}\n{err_path.read_text()}"
         )
 
         assert retry.create_pipeline(content_hash, str(pdf.resolve()), _COLLECTION) == "resuming"
         state = retry.get_pipeline_state(content_hash)
-        assert "interrupted by SIGTERM" in (state.get("error") or ""), state
+        assert f"interrupted by {sig}" in (state.get("error") or ""), state
         pages = retry.read_pages(content_hash)
         assert [p["page_index"] for p in pages] == [0, 1, 2], "the killed run's pages are kept for the resume"
         assert len(engine.rows_for(content_hash)) == 1, "the retry resumed the killed run's row"
@@ -358,7 +362,7 @@ def test_a_fenced_run_does_not_mark_the_new_owners_row() -> None:
     new_owner._client = old_run._client
     assert new_owner.create_pipeline("h4vx0a", "/a.pdf", "docs__test") == "resuming"
 
-    assert _release_interrupted_run(old_run, "h4vx0a", TerminationRequested(signal.SIGTERM)) is True
+    assert _release_interrupted_run(old_run, "h4vx0a", TerminationRequested(signal.SIGTERM)) == "fenced"
     (row,) = engine.rows_for("h4vx0a")
     assert row["status"] == "resuming", "the new owner's row was moved by the fenced run"
     assert "interrupted" not in (row.get("error") or "")
@@ -367,7 +371,7 @@ def test_a_fenced_run_does_not_mark_the_new_owners_row() -> None:
 def test_release_reports_an_unfenced_release() -> None:
     db, engine = make_fake_engine_db()
     db.create_pipeline("h4vx0a-ok", "/a.pdf", "docs__test")
-    assert _release_interrupted_run(db, "h4vx0a-ok", KeyboardInterrupt()) is False
+    assert _release_interrupted_run(db, "h4vx0a-ok", KeyboardInterrupt()) == "released"
     (row,) = engine.rows_for("h4vx0a-ok")
     assert row["status"] == "failed"
     assert row["error"].startswith("interrupted;")

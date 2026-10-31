@@ -442,7 +442,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   hygiene-008-2 nexus-0rxvg
                 //   catalog-044-3 nexus-6pbwx
                 //   note-uri-001-1 nexus-bivz3.5
-                //   vectors-043-4 nexus-yye8l.21
+                //   vectors-046-4 nexus-yye8l.21
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -1117,14 +1117,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
                 }
 
-                // ── vectors-043-4 (nexus-yye8l.21): the backfill copies every tenant that already holds
+                // ── vectors-046-4 (nexus-yye8l.21): the backfill copies every tenant that already holds
                 // request_ledger rows into request_ledger_tenants. request_ledger (vectors-033) is FORCE RLS,
-                // and the registry, its trigger and the backfill do not exist until vectors-043, so the rows
-                // are seeded just before vectors-043-1: no trigger exists to register them, which leaves the
+                // and the registry, its trigger and the backfill do not exist until vectors-046, so the rows
+                // are seeded just before vectors-046-1: no trigger exists to register them, which leaves the
                 // backfill as the only thing that can. The tenants are ones with no service_tokens row in
                 // this fixture, the population the registry exists for (a tenant that cannot authenticate
                 // can never register itself by a keyed request). ────────────────────────────────────────────
-                migrateUpTo(adminDs, "vectors-043-1");
+                migrateUpTo(adminDs, "vectors-046-1");
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
                     seedRequestLedgerRows(su);
@@ -1132,7 +1132,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 try (Connection admin = adminDs.getConnection()) {
                     assertThat(dsl(admin).fetchCount(REQUEST_LEDGER))
                         .as("FORCE RLS must hide the seeded request_ledger rows from the non-BYPASSRLS "
-                            + "owner — vectors-043-4's own toggle-wrap target")
+                            + "owner — vectors-046-4's own toggle-wrap target")
                         .isEqualTo(0);
                 }
 
@@ -1196,14 +1196,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(1);
                 }
 
-                // ── vectors-043-4's own effect (nexus-yye8l.21): both seeded tenants are registered, exactly
+                // ── vectors-046-4's own effect (nexus-yye8l.21): both seeded tenants are registered, exactly
                 // once, no other tenant is, the ledger rows are untouched, and FORCE RLS is back on the ledger
                 // (a backfill that left it off would let every role read every tenant's rows). ──────────────
                 try (Connection su = pg.createConnection("")) {
                     var ctx = DSL.using(su, SQLDialect.POSTGRES);
                     assertThat(ctx.select(REQUEST_LEDGER_TENANTS.TENANT_ID).from(REQUEST_LEDGER_TENANTS)
                             .orderBy(REQUEST_LEDGER_TENANTS.TENANT_ID).fetch(REQUEST_LEDGER_TENANTS.TENANT_ID))
-                        .as("vectors-043-4 must register exactly the tenants that held ledger rows")
+                        .as("vectors-046-4 must register exactly the tenants that held ledger rows")
                         .containsExactly("ledger-backfill-a", "ledger-backfill-b");
                     assertThat(ctx.fetchCount(REQUEST_LEDGER))
                         .as("the backfill reads the ledger and changes none of its rows")
@@ -1212,7 +1212,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(rls).isNotNull();
                     assertThat(rls.enabled()).isTrue();
                     assertThat(rls.forced())
-                        .as("vectors-043-4 must restore FORCE ROW LEVEL SECURITY on request_ledger")
+                        .as("vectors-046-4 must restore FORCE ROW LEVEL SECURITY on request_ledger")
                         .isTrue();
                 }
 
@@ -2834,7 +2834,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
     }
 
     /**
-     * vectors-043-4's input: ledger rows for two tenants (two rows for one, one for the other), written as the
+     * vectors-046-4's input: ledger rows for two tenants (two rows for one, one for the other), written as the
      * superuser before the registry's trigger exists. Tenant names are ones no fixture token names.
      */
     private static void seedRequestLedgerRows(Connection su) {

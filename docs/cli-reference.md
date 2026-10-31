@@ -1478,7 +1478,7 @@ traceback) if the target is not a well-formed tumbler.
 ### nx catalog merge
 
 ```
-nx catalog merge DUPLICATE CANONICAL
+nx catalog merge DUPLICATE CANONICAL [--force]
 ```
 
 Collapse `DUPLICATE` into `CANONICAL` in ONE engine transaction
@@ -1512,6 +1512,12 @@ tumbler not found (including one belonging to a different tenant, which
 reads identically to "not found" under RLS); a `DUPLICATE` already aliased
 to some OTHER canonical (settle that alias first); or a merge that would
 close an alias cycle.
+
+The merge moves identity and links, never chunks or the collection
+(nexus-bivz3.27). When `DUPLICATE` holds chunks and `CANONICAL` holds none,
+the merged document would read as having no chunks, so the command refuses
+and suggests merging the other way; `--force` merges anyway. Every merge
+prints both chunk counts (`chunks: duplicate N, canonical M`).
 
 ### nx catalog gc
 

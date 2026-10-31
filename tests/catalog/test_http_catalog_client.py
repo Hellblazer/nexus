@@ -776,7 +776,16 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 for doc_id, doc_rows in sorted(manifest.items())
                 for row in doc_rows if row["chash"] in wanted
             ]
-            self._send_json({"rows": rows, "count": len(rows)})
+            if body.get("include_tombstoned") is True:
+                # nexus-6pfgb.58: the manifest rows of TOMBSTONED documents holding a requested chash, beside the
+                # live rows; the key is sent only when the request asked, so a request without it is unchanged.
+                # Each branch sends a dict LITERAL: the route census (ROW_ENVELOPE_KEYS) reads only literals.
+                gone = [{"chash": CHASH_B, "doc_id": "1.1.9", "position": 3, "collection": "knowledge__fake__v1"}
+                        ] if CHASH_B in wanted else []
+                self._send_json({"rows": rows, "count": len(rows),
+                                 "tombstoned": gone, "tombstoned_count": len(gone)})
+            else:
+                self._send_json({"rows": rows, "count": len(rows)})
         elif op == "/manifest/docs_for_chashes":
             # Real server: {"tumblers": [tumbler_string, ...], "count": N}
             # (flat list, SELECT DISTINCT) — count reconciled client-side
@@ -1681,6 +1690,91 @@ class TestHttpCatalogClientRoundTrip:
             "labels_written": False,
         }]
         assert client.chash_positions([]) == []
+
+    def test_chash_positions_with_tombstoned_journey(self, client: HttpCatalogClient) -> None:
+        """nexus-6pfgb.58: the live rows are the ones chash_positions returns, and the tombstoned document's
+        manifest row for a chash it holds comes back from the same request."""
+        rows, tombstoned = client.chash_positions_with_tombstoned([CHASH_A, CHASH_B, "f" * 64])
+        assert rows == client.chash_positions([CHASH_A, CHASH_B, "f" * 64])
+        assert tombstoned == [
+            {"chash": CHASH_B, "doc_id": "1.1.9", "position": 3, "collection": "knowledge__fake__v1"}]
+        assert client.chash_positions_with_tombstoned([CHASH_A]) == (rows, [])
+        assert client.chash_positions_with_tombstoned([]) == ([], [])
+
+    def test_chash_positions_sends_no_include_tombstoned_key(self, client: HttpCatalogClient, monkeypatch) -> None:
+        """The plain read posts the body it always did, so an engine sees no change from it."""
+        posted: list[dict] = []
+        real = client._post
+
+        def _post(path, body=None, **kw):
+            posted.append(dict(body or {}))
+            return real(path, body, **kw)
+
+        monkeypatch.setattr(client, "_post", _post)
+        client.chash_positions([CHASH_A])
+        client.chash_positions_with_tombstoned([CHASH_A])
+        assert posted == [{"chashes": [CHASH_A]}, {"chashes": [CHASH_A], "include_tombstoned": True}]
+
+    def test_an_engine_that_ignores_the_flag_is_cannot_say_not_none(self, client: HttpCatalogClient, monkeypatch) -> None:
+        """An engine before the key answers the live rows and no ``tombstoned``: the holders are UNKNOWN (None),
+        which a caller must not read as an empty list."""
+        monkeypatch.setattr(client, "_post", lambda path, body=None, **kw: {"rows": [], "count": 0})
+        assert client.chash_positions_with_tombstoned([CHASH_A]) == ([], None)
+
+    def test_a_truncated_tombstoned_list_is_refused_and_backs_off_only_the_tombstoned_read(self, client: HttpCatalogClient, monkeypatch) -> None:
+        calls: list[str] = []
+
+        def _post(path, body=None, **kw):
+            calls.append(path)
+            return {"rows": [], "count": 0, "tombstoned": [], "tombstoned_count": 2}
+
+        monkeypatch.setattr(client, "_post", _post)
+        with pytest.raises(RuntimeError, match="tombstoned list is malformed"):
+            client.chash_positions_with_tombstoned([CHASH_A])
+        # The failure backs off the tombstoned reader alone: the live rows were fine, so the search-attach reader
+        # (chash_positions) keeps its route for the window instead of falling back to the manifest path.
+        assert client.chash_positions_with_tombstoned([CHASH_A]) is None
+        assert calls == ["/manifest/chash_positions"]
+        assert client.chash_positions([CHASH_A]) == []
+        assert calls == ["/manifest/chash_positions"] * 2
+
+    def test_a_malformed_rows_page_still_backs_off_both_reads(self, client: HttpCatalogClient, monkeypatch) -> None:
+        calls: list[str] = []
+
+        def _post(path, body=None, **kw):
+            calls.append(path)
+            return {"rows": [], "count": 3}
+
+        monkeypatch.setattr(client, "_post", _post)
+        with pytest.raises(RuntimeError, match="malformed or truncated"):
+            client.chash_positions_with_tombstoned([CHASH_A])
+        assert client.chash_positions([CHASH_A]) is None
+        assert client.chash_positions_with_tombstoned([CHASH_A]) is None
+        assert calls == ["/manifest/chash_positions"]
+
+    def test_one_page_without_the_key_makes_the_whole_read_cannot_say(self, client: HttpCatalogClient, monkeypatch) -> None:
+        import nexus.catalog.http_catalog_client as hcc  # noqa: PLC0415 — test-local import
+
+        monkeypatch.setattr(hcc, "_DOCS_FOR_CHASHES_PAGE", 1)
+        pages = iter([
+            {"rows": [], "count": 0, "tombstoned": [{"chash": "a" * 64, "doc_id": "1.1.1", "position": 0,
+                                                       "collection": "c"}], "tombstoned_count": 1},
+            {"rows": [], "count": 0},
+        ])
+        monkeypatch.setattr(client, "_post", lambda path, body=None, **kw: next(pages))
+        assert client.chash_positions_with_tombstoned(["a" * 64, "b" * 64]) == ([], None)
+
+    def test_the_tombstoned_read_pages_like_the_rows(self, client: HttpCatalogClient, monkeypatch) -> None:
+        import nexus.catalog.http_catalog_client as hcc  # noqa: PLC0415 — test-local import
+
+        monkeypatch.setattr(hcc, "_DOCS_FOR_CHASHES_PAGE", 1)
+        chashes = ["a" * 64, "b" * 64, "c" * 64]
+        monkeypatch.setattr(client, "_post", lambda path, body=None, **kw: {
+            "rows": [], "count": 0,
+            "tombstoned": [{"chash": body["chashes"][0], "doc_id": "1.1.9", "position": 0, "collection": "c"}],
+            "tombstoned_count": 1})
+        rows, tombstoned = client.chash_positions_with_tombstoned(chashes)
+        assert rows == [] and [t["chash"] for t in tombstoned] == chashes
 
     def test_docs_and_manifests_for_chashes_journey(self, client: HttpCatalogClient) -> None:
         """nexus-w032x: the reverse lookup returns the manifests it fetched,

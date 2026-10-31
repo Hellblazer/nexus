@@ -844,8 +844,8 @@ class TestMarkFailedAndResetWal:
             f"non-atomicity nexus-33q80 removes"
         )
         mock_db.update_progress.assert_not_called()
-        mock_db.mark_failed.assert_called_once_with("hX", error="boom")
-        mock_db.clear_orphan_wal.assert_called_once_with("hX")
+        mock_db.mark_failed.assert_called_once_with("hX", error="boom", timeout=None)
+        mock_db.clear_orphan_wal.assert_called_once_with("hX", timeout=None)
 
 
 class TestPipelineIndexPdf:

@@ -1167,7 +1167,7 @@ public final class NexusService {
      * {@code withTenant} delete pass per tenant, cutoff = {@code now} minus the retention days. Tenants are
      * {@link #reaperTenants()} (the default tenant plus every tenant in {@code service_tokens}) together with every
      * tenant in {@code request_ledger_tenants}, which a BEFORE INSERT trigger on the ledger fills with the tenant of
-     * each ledger row (nexus-yye8l.21; vectors-043 also backfilled the tenants already holding rows). The second set
+     * each ledger row (nexus-yye8l.21; vectors-046 also backfilled the tenants already holding rows). The second set
      * is what reaches a tenant that lost its last token: the ledger is FORCE RLS, so its tenants cannot be listed
      * from the ledger itself. If reading that set throws, it is logged and the cycle still runs the reaper's
      * tenants. Not {@link #runScheduledTupleSweep}'s
