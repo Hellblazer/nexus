@@ -964,3 +964,40 @@ def test_the_memo_closes_the_store_it_opens(monkeypatch) -> None:
     memo.save({"a": 1})
     memo.clear()
     assert events == ["get", "close", "put", "close", "delete", "close"]
+
+
+# ── nexus-75w5d: no unattended census of a managed service ───────────────────
+
+
+def test_an_unattended_converge_on_a_managed_service_censuses_nothing_and_defers() -> None:
+    """The census is one engine scan per collection (a per-chunk anti-join, no statement timeout on the
+    route) and the record is keyed by package version, so every box re-derives it after a version bump.
+    Unattended against a managed service: no census call, no lock, no backfill."""
+    from nexus.upgrade_ladder.unattended import unattended_run
+
+    tenant = FakeTenant({"knowledge__a": 7})
+    with unattended_run():
+        result = tenant.rung(managed_fn=lambda: True).converge(_Reporter())
+    assert result.outcome is ConvergeOutcome.DEFERRED
+    assert "interactive `nx upgrade`" in result.detail
+    assert tenant.censuses == 0 and tenant.backfilled == []
+    assert tenant.lock.entered == 0, "refused before the lock"
+
+
+def test_an_unattended_converge_on_a_local_engine_and_an_interactive_one_on_a_managed_service_still_census() -> None:
+    from nexus.upgrade_ladder.deadline import Deadline, bound
+    from nexus.upgrade_ladder.unattended import unattended_run
+
+    local = FakeTenant({"knowledge__a": 7})
+    with unattended_run():
+        local.rung(managed_fn=lambda: False).converge(_Reporter())
+    assert local.censuses >= 1
+
+    interactive = FakeTenant({"knowledge__a": 7})
+    interactive.rung(managed_fn=lambda: True).converge(_Reporter())
+    assert interactive.censuses >= 1
+
+    clocked = FakeTenant({"knowledge__a": 7})  # a bound deadline is a clock, not the unattended signal
+    with bound(Deadline(900)):
+        clocked.rung(managed_fn=lambda: True).converge(_Reporter())
+    assert clocked.censuses >= 1

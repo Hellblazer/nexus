@@ -160,23 +160,45 @@ def main(ctx: click.Context, verbose: bool) -> None:
     ctx.obj["verbose"] = verbose
     configure_logging("cli", verbose=verbose)
 
-    # nexus-75w5d: the single-instance lock of `nx upgrade --auto`, taken FIRST: before the
-    # tripwire, the stranded-install detector and the finish pass below (which asks every rung
-    # detect()), and so before any rung is asked anything. The hook starts one detached child per
-    # session start; on 2026-10-31 nineteen walked the cloud catalog at once because the only lock
-    # in the path was a rung's, taken after detect(). A second `--auto` exits 0 here, silently.
-    # The kernel drops the lock with the process, so a killed holder never wedges the next run.
-    from nexus.util.upgrade_auto_lock import acquire_auto_lock, argv_is_auto_upgrade  # noqa: PLC0415 — stdlib-only, deferred like the rest of this callback
+    # nexus-75w5d: an UNATTENDED run is one nobody is watching: `nx upgrade --auto`, or any `nx` run with
+    # NX_UPGRADE_UNATTENDED=1 in its environment (the lockstep action's detached PLAIN `nx upgrade` carries
+    # it; it has no --auto and binds no deadline). The signal goes up FIRST, before the finish pass below
+    # (which asks every rung detect()), so a rung that would walk a managed catalog refuses there too.
+    from nexus.util.upgrade_auto_lock import (  # noqa: PLC0415 — stdlib-only, deferred like the rest of this callback
+        acquire_auto_lock,
+        acquire_auto_lock_waiting,
+        argv_is_auto_upgrade,
+        argv_is_unattended_upgrade,
+        env_unattended,
+    )
 
-    if argv_is_auto_upgrade(sys.argv[1:]):
-        _auto_lock = acquire_auto_lock()
+    if env_unattended() or argv_is_auto_upgrade(sys.argv[1:]):
+        from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — only an unattended run pays for the ladder package
+
+        ctx.with_resource(unattended_run())
+
+    # The single-instance lock of an unattended `nx upgrade`, taken before the tripwire, the stranded-install
+    # detector and the finish pass below, and so before any rung is asked anything. The hook starts one detached
+    # child per session start; on 2026-10-31 nineteen walked the cloud catalog at once because the only lock in
+    # the path was a rung's, taken after detect(). A second `--auto` exits 0 here, silently. A PLAIN unattended
+    # `nx upgrade` (the lockstep child) does work `--auto` skips, so it WAITS for a holder (PLAIN_WAIT_S) and
+    # only then exits 75, which its starter reads as "did not run" and retries next session. The kernel drops
+    # the lock with the process, so a killed holder never wedges the next run.
+    if argv_is_unattended_upgrade(sys.argv[1:]):
+        _auto_lock = acquire_auto_lock() if argv_is_auto_upgrade(sys.argv[1:]) else acquire_auto_lock_waiting()
         if _auto_lock.held_by_other:
             import structlog  # noqa: PLC0415 — deferred import
 
             structlog.get_logger(__name__).info(
                 "upgrade_auto_already_running", holder_pid=_auto_lock.holder_pid(),
             )
-            ctx.exit(0)
+            if argv_is_auto_upgrade(sys.argv[1:]):
+                ctx.exit(0)
+            click.echo(
+                "another unattended `nx upgrade` still holds the lock; this run did not start and is retried later",
+                err=True,
+            )
+            ctx.exit(75)
         ctx.call_on_close(_auto_lock.release)
 
     # nexus-utpuw.12 / design point 6: one readlink at spawn. A shim-launched

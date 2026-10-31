@@ -220,13 +220,13 @@ def test_verify_counts_what_it_read(world: World) -> None:
 def test_an_unattended_run_on_a_managed_service_lists_nothing(world: World) -> None:
     """detect() lists every note of every knowledge__* collection on every call, with no record or memo to
     answer from. Under --auto against a managed service it reads nothing."""
-    from nexus.upgrade_ladder.deadline import Deadline, bound
+    from nexus.upgrade_ladder.unattended import unattended_run
 
     world.add("1.1.1", {"tags": "a,b"})
     reads: list[str] = []
     world.distinct_doc_collections = lambda: reads.append("collections") or []  # type: ignore[method-assign]
 
-    with bound(Deadline(900)):
+    with unattended_run():
         status = world.rung(managed_fn=lambda: True).detect()
 
     assert (status.applicable, status.converged) == (False, False)
@@ -241,9 +241,11 @@ def test_the_scan_still_runs_locally_under_auto_and_interactively_on_a_managed_s
     import contextlib
 
     from nexus.upgrade_ladder.deadline import Deadline, bound
+    from nexus.upgrade_ladder.unattended import unattended_run
 
     world.add("1.1.1", {"tags": "a,b"})
-    with bound(Deadline(900)) if bound_deadline else contextlib.nullcontext():
+    # (False, True): local engine, unattended. (True, False): managed, interactive. A bound deadline alone is a clock.
+    with unattended_run(bound_deadline), bound(Deadline(900)) if not bound_deadline else contextlib.nullcontext():
         status = world.rung(managed_fn=lambda: managed).detect()
     assert (status.applicable, status.converged) == (True, False)
     assert "1 note(s) of 1" in status.pending_detail

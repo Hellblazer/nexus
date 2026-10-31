@@ -184,6 +184,11 @@ def _spawn_detached(argv: list[str], stderr: IO[bytes] | int = subprocess.DEVNUL
     from nexus.util.stable_cwd import current_project_root, detached_spawn_kwargs  # noqa: PLC0415 — stdlib-only, function-level so the hook module itself stays import-light
 
     common.update(detached_spawn_kwargs(project_root=current_project_root()))
+    # nexus-75w5d: the child is unattended by its flag, and says so in its environment too, so every
+    # nx process it starts in turn sees one signal, not two.
+    from nexus.util.upgrade_auto_lock import UNATTENDED_ENV  # noqa: PLC0415 — stdlib-only, function-level so the hook module itself stays import-light
+
+    common["env"] = {**common.get("env", os.environ), UNATTENDED_ENV: "1"}
     if not _IS_WINDOWS:
         return subprocess.Popen(argv, start_new_session=True, **common)  # noqa: S603 — argv list, resolved binary, no shell
     base = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP

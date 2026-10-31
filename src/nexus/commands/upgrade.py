@@ -98,7 +98,11 @@ def upgrade(
         # third mechanism the Gap-4 criterion bans. Genuine decisions the
         # walk cannot derive (source-gone, billed re-embed) surface from
         # INSIDE the rung; pending state is reported by `nx doctor`.
-        with _standing_consent(assume_yes):
+        # nexus-75w5d: `--auto` is UNATTENDED, whatever the deadline says (the root group also sets this
+        # for NX_UPGRADE_UNATTENDED=1, which a plain `nx upgrade` started by a hook carries).
+        from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        with _standing_consent(assume_yes), unattended_run(auto_mode):
             _run_ladder(dry_run=dry_run, auto_mode=auto_mode, deadline=deadline)
 
         # nexus-g7ijj: an install that converged purely via `nx upgrade`
@@ -441,8 +445,8 @@ def _run_ladder(
 
         for rung in registry:
             try:
-                # `--auto --dry-run` is still unattended: bind the deadline so a rung's detect() sees it
-                # (nexus-75w5d). Interactive `--dry-run` has none, and binds none.
+                # `--auto --dry-run` binds the deadline too, so a rung's detect() keeps its clock; whether the
+                # run is unattended is the contextvar upgrade() set, not this. Interactive `--dry-run` binds none.
                 with bound(deadline):
                     status = rung.detect()
             except Exception as exc:  # noqa: BLE001 — dry-run truth: report the broken rung, keep reporting the rest

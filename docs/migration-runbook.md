@@ -189,27 +189,39 @@ this rung rewrites those strings as arrays, once.
 
 ### `nx upgrade --auto`: one at a time, and what it does on a managed service
 
-The SessionStart hook starts a detached `nx upgrade --auto` per session start
-(nexus-75w5d, 7.91.0; 7.90.0 started them without a gate and nineteen walked the cloud
-catalog at once).
+The SessionStart hook starts a detached `nx upgrade --auto` per session start, and the
+plugin's version-lockstep action starts a detached plain `nx upgrade` on a plugin/CLI
+version skew or a ref drift (nexus-75w5d, 7.91.0; 7.90.0 started `--auto` children
+without a gate and nineteen walked the cloud catalog at once).
 
-- **One at a time per config dir.** `--auto` takes an OS lock on
+- **Unattended means an explicit signal, not a deadline.** `nx upgrade --auto`, and any
+  `nx` run with `NX_UPGRADE_UNATTENDED=1` in its environment, is unattended. The hook and
+  the lockstep action set that variable on the children they start; a person who runs
+  `nx upgrade` by hand does not have it set.
+- **One at a time per config dir.** An unattended `nx upgrade` takes an OS lock on
   `<config dir>/upgrade-auto.lock` before anything else runs (before the finish pass
-  and before any rung's `detect()`). A second `--auto` exits 0 at once and silently;
-  the hook checks the same lock before it forks. A holder that dies frees the lock,
-  so a stale pid in the file blocks nothing. An interactive `nx upgrade` takes no
-  lock and is not blocked by one.
-- **Managed service: no unattended walk.** Under `--auto` against a managed service
-  (`service_url` set), a rung whose `detect()` would read the whole catalog or a whole
-  table, with no completion record and no remembered clean scan to answer from,
-  reads nothing and reports itself not applicable, naming the interactive run. The
-  rungs: `manifest-section-labels`, `note-tags-array`, and the whole-table fallback of
-  `aspect-queue-tuples`. **The first scan on a managed tenant is an interactive `nx
-  upgrade`** (once; it records the completion, and `--auto` answers from the record
-  from then on). A local engine keeps the walk under `--auto`, bounded by the deadline
+  and before any rung's `detect()`). A second `--auto` exits 0 at once and silently; a
+  plain unattended `nx upgrade` (the lockstep child) waits up to 10 minutes and then exits
+  75, so its starter retries it next session. The hook checks the same lock before it
+  forks. A holder that dies frees the lock, so a stale pid in the file blocks nothing. An
+  interactive `nx upgrade` takes no lock and is not blocked by one.
+- **Managed service: no unattended walk.** "Managed" means `not is_local_mode()`: a
+  `service_url` is configured and `NX_LOCAL=0` or `install.mode` is `managed`. A service
+  on a LAN host counts as managed, because the rule protects capacity other boxes share.
+  In an unattended run against a managed service, a rung whose `detect()` would read the
+  whole catalog or a whole table, with no completion record and no remembered clean scan
+  to answer from, reads nothing and reports itself not applicable, naming the interactive
+  run. The rungs: `manifest-section-labels`, `note-tags-array`, and the whole-table
+  fallback of `aspect-queue-tuples`. The `rdr192-manifest-backfill` census (one engine
+  scan per collection) is refused the same way in `converge()`: reported deferred, no
+  census call. The version-transition callout that any `nx` command can print asks every
+  `detect()` as an unattended run too. **On a managed tenant the labels, note-tags and
+  RDR-192 rungs therefore run only on a deliberate interactive `nx upgrade`, run once from
+  one box** (the completion record is per tenant, so that one run converges every box).
+  A local engine keeps the walk when unattended, bounded by the deadline
   (`NX_UPGRADE_AUTO_DEADLINE_SECONDS`).
 - **Kill switch.** `NX_UPGRADE_AUTO=0` in the environment makes the hook spawn nothing.
-  To find a stray: `ps -eo pid,args | grep 'nx upgrade --auto'`.
+  To find a stray: `ps -eo pid,args | grep 'nx upgrade'`.
 
 ### The `manifest-section-labels` rung
 

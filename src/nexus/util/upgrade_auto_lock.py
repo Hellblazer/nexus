@@ -22,10 +22,25 @@ on every session start and must stay import-light.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 LOCK_NAME = "upgrade-auto.lock"
+
+#: The explicit "this run is unattended" signal (nexus-75w5d). ``nx upgrade --auto`` is unattended by
+#: its flag; a PLAIN ``nx upgrade`` started by a plugin hook (the version-lockstep action) has no flag
+#: and no deadline, so its starter sets this variable instead. Set at CLI start it makes the run
+#: unattended (:mod:`nexus.upgrade_ladder.unattended`) and single-instance (this module's lock).
+#: A bare string in the plugin script (stdlib-only, imports nothing from ``nexus``): keep the two equal.
+UNATTENDED_ENV = "NX_UPGRADE_UNATTENDED"
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def env_unattended(environ: Mapping[str, str] | None = None) -> bool:
+    """True when ``NX_UPGRADE_UNATTENDED`` is set to a true value (``1``, ``true``, ``yes``, ``on``)."""
+    env = os.environ if environ is None else environ
+    return env.get(UNATTENDED_ENV, "").strip().lower() in _TRUE_VALUES
 
 
 def _config_dir() -> Path:
@@ -39,15 +54,25 @@ def lock_path(config_dir: Path | None = None) -> Path:
     return (config_dir if config_dir is not None else _config_dir()) / LOCK_NAME
 
 
-def argv_is_auto_upgrade(argv: list[str]) -> bool:
-    """True when *argv* (without the program name) is a real ``nx upgrade --auto`` run.
+def _is_upgrade_run(argv: list[str]) -> bool:
+    """True for an ``upgrade`` subcommand that runs something (``--help`` runs nothing).
 
     The root group takes only flags, so the subcommand is the first token that is not
-    one (the same reading ``nexus.upgrade_finish.upgrade_invocation`` makes). ``--help``
-    runs nothing, so it is not an auto run."""
+    one (the same reading ``nexus.upgrade_finish.upgrade_invocation`` makes)."""
     if next((a for a in argv if not a.startswith("-")), None) != "upgrade":
         return False
-    return "--auto" in argv and "--help" not in argv and "-h" not in argv
+    return "--help" not in argv and "-h" not in argv
+
+
+def argv_is_auto_upgrade(argv: list[str]) -> bool:
+    """True when *argv* (without the program name) is a real ``nx upgrade --auto`` run."""
+    return _is_upgrade_run(argv) and "--auto" in argv
+
+
+def argv_is_unattended_upgrade(argv: list[str], environ: Mapping[str, str] | None = None) -> bool:
+    """True for ``nx upgrade --auto`` and for any ``nx upgrade`` run with ``NX_UPGRADE_UNATTENDED``
+    set (the lockstep action's detached child). These take the lock; an interactive one does not."""
+    return _is_upgrade_run(argv) and ("--auto" in argv or env_unattended(environ))
 
 
 @dataclass
@@ -115,11 +140,44 @@ def acquire_auto_lock(config_dir: Path | None = None) -> AutoLock:
     return AutoLock(fd=fd, held_by_other=False, path=path)
 
 
+#: The probe sleeps this long and tries once more before it answers "held" (nexus-75w5d, review B1):
+#: the probe takes the lock for an instant, so two hooks probing together each see the other's grab.
+_PROBE_RETRY_DELAY_S = 0.05
+
+
 def auto_lock_held(config_dir: Path | None = None) -> bool:
     """True when a live process holds the lock: a probe that takes and drops it at once.
-    Fails open (``False``) on any error, so the hook spawns and the child decides."""
+    A first "held" is tried once more after a short pause, so a concurrent probe's instant grab does not
+    read as a holder. Fails open (``False``) on any error, so the hook spawns and the child decides."""
+    import time  # noqa: PLC0415 — stdlib; only the probe sleeps
+
+    for attempt in range(2):
+        lock = acquire_auto_lock(config_dir)
+        if not lock.held_by_other:
+            lock.release()
+            return False
+        if attempt == 0:
+            time.sleep(_PROBE_RETRY_DELAY_S)
+    return True
+
+
+#: How long a PLAIN unattended ``nx upgrade`` (the lockstep action's child) waits for a holder before it gives
+#: up with exit 75 (nexus-75w5d). It waits, where ``--auto`` exits at once, because it does work ``--auto``
+#: skips (plugin convergence, the engine install) and the SessionStart hook starts an ``--auto`` at the same
+#: moment as the lockstep action: an instant refusal would lose that work to a run that only reads. An
+#: ``--auto`` holder ends at its own time limit (default 900 s) at the latest, between rungs.
+PLAIN_WAIT_S = 600.0
+_PLAIN_POLL_S = 1.0
+
+
+def acquire_auto_lock_waiting(timeout_s: float | None = None, config_dir: Path | None = None) -> AutoLock:
+    """:func:`acquire_auto_lock`, polled once a second until the holder goes or *timeout_s* passes. Returns
+    the last answer, so ``held_by_other`` is still true when the holder outlasted the wait."""
+    import time  # noqa: PLC0415 — stdlib; only a waiter needs it
+
+    deadline = time.monotonic() + (PLAIN_WAIT_S if timeout_s is None else timeout_s)
     lock = acquire_auto_lock(config_dir)
-    if lock.held_by_other:
-        return True
-    lock.release()
-    return False
+    while lock.held_by_other and time.monotonic() < deadline:
+        time.sleep(_PLAIN_POLL_S)
+        lock = acquire_auto_lock(config_dir)
+    return lock

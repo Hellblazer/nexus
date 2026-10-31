@@ -797,9 +797,9 @@ def test_a_walk_past_the_auto_deadline_does_no_catalog_read_in_the_would_do_work
 
 
 def _bound_auto():
-    from nexus.upgrade_ladder.deadline import Deadline, bound
+    from nexus.upgrade_ladder.unattended import unattended_run
 
-    return bound(Deadline(900))
+    return unattended_run()
 
 
 def test_auto_on_a_managed_service_with_no_record_and_no_memo_reads_nothing_and_is_not_applicable(world: World) -> None:
@@ -826,7 +826,17 @@ def test_auto_on_a_local_engine_keeps_the_walk(world: World) -> None:
 
 def test_interactive_on_a_managed_service_keeps_the_walk(world: World) -> None:
     _one_fillable_and_one_newer_row(world)
-    status = world.rung(managed_fn=lambda: True).detect()  # no deadline bound: not an --auto run
+    status = world.rung(managed_fn=lambda: True).detect()  # not unattended
+    assert (status.applicable, status.converged) == (True, False)
+    assert world.listings >= 1
+
+
+def test_a_bound_deadline_alone_is_a_clock_not_the_unattended_signal(world: World) -> None:
+    from nexus.upgrade_ladder.deadline import Deadline, bound
+
+    _one_fillable_and_one_newer_row(world)
+    with bound(Deadline(900)):
+        status = world.rung(managed_fn=lambda: True).detect()
     assert (status.applicable, status.converged) == (True, False)
     assert world.listings >= 1
 
@@ -853,6 +863,7 @@ def test_auto_on_a_managed_service_with_a_standing_memo_is_converged_on_one_boun
 def test_a_managed_auto_walk_skips_the_rung_and_reads_nothing(world: World) -> None:
     """Through the runner, as ``nx upgrade --auto`` runs it: SKIPPED_NOT_APPLICABLE, nothing recorded."""
     from nexus.upgrade_ladder.deadline import Deadline
+    from nexus.upgrade_ladder.unattended import unattended_run
 
     _one_fillable_and_one_newer_row(world)
     ledger = InMemoryCompletionLedger()
@@ -861,7 +872,8 @@ def test_a_managed_auto_walk_skips_the_rung_and_reads_nothing(world: World) -> N
         package_version_fn=lambda: "9.9.9", deadline=Deadline(900),
     )
 
-    report = runner.run()
+    with unattended_run():
+        report = runner.run()
 
     assert [r.outcome for r in report.runs] == [RungOutcome.SKIPPED_NOT_APPLICABLE]
     assert world.engine_reads() == (0, 0, 0, 0, 0)

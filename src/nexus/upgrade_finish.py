@@ -3328,10 +3328,18 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
             f"upgrade-ladder registry: {exc}"
         ]
 
+    # nexus-75w5d: this callout needs a CHEAP "is it pending?", not a scan. It runs in the root group
+    # of whichever `nx` command wins the one-shot version-transition claim (a plain `nx search` on a
+    # managed box included), so every detect() here runs as an UNATTENDED run: a rung that would walk a
+    # managed catalog or table reports itself not applicable instead (`nx doctor` and an interactive
+    # `nx upgrade` still scan, and say so).
+    from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred, CLI startup cost
+
     lines: list[str] = []
     for rung in rungs:
         try:
-            status = rung.detect()
+            with unattended_run():
+                status = rung.detect()
         except Exception as exc:  # noqa: BLE001 — must surface, not silently drop
             lines.append(
                 f"rung '{rung.name}' status unknown — detect failed: {exc}"
