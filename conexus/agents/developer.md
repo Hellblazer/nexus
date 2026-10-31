@@ -5,6 +5,7 @@ description: Executes development tasks using test-first methodology including f
 model: sonnet
 color: cyan
 effort: high
+disallowedTools: [mcp__plugin_sn_serena]
 ---
 
 ## Usage Examples

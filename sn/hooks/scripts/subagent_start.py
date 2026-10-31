@@ -28,11 +28,15 @@ deadlocking any larger body (``tests/hooks/test_heredoc_pipe_budget.py``).
 That reason is gone here, but the files are, and the markdown stays
 editable as markdown.
 
-Both sections go to every subagent (nexus-jbt5x). The former task-text
+Both sections go to every subagent (nexus-jbt5x), except an agent whose
+frontmatter denies the server the section is about (nexus-j6un5.5): telling
+an agent to ToolSearch a server it cannot call costs it a turn. The denial
+sets below are kept equal to ``conexus/agents/*.md`` by
+``tests/test_sn_plugin.py::TestDeniedServersGetNoSection``; this hook cannot
+read another plugin's frontmatter at run time. The former task-text
 heuristic skipped Serena for any prompt containing "investigate", "audit",
 "package", "dependency" or "migrate", which is most debugger and developer
-briefs; the two together are about 3 KB, cheaper than one subagent
-re-deriving a tool name.
+briefs; that was guessing, this is the agent's own declaration.
 
 The only branch is on the caller's cwd (nexus-ftpk3): a subagent dispatched
 with ``isolation: "worktree"`` runs in a LINKED git worktree, and Serena's
@@ -63,6 +67,19 @@ _HERE = pathlib.Path(__file__).resolve().parent
 WORKTREE_SECTION = "worktree-section.md"
 SERENA_SECTION = "serena-section.md"
 CONTEXT7_SECTION = "context7-section.md"
+
+#: Agent types whose frontmatter denies the shared Serena server / Context7.
+SERENA_DENIED: frozenset[str] = frozenset({
+    "conexus:architect-planner", "conexus:code-review-expert",
+    "conexus:codebase-deep-analyzer", "conexus:debugger", "conexus:deep-analyst",
+    "conexus:deep-research-synthesizer", "conexus:developer",
+    "conexus:strategic-planner", "conexus:substantive-critic",
+    "conexus:test-validator",
+})
+CONTEXT7_DENIED: frozenset[str] = frozenset({
+    "conexus:codebase-deep-analyzer", "conexus:strategic-planner",
+    "conexus:test-validator",
+})
 
 
 def _section(name: str) -> str:
@@ -114,13 +131,25 @@ def _in_worktree(payload: str) -> bool:
         return False
 
 
+def _agent_type(payload: str) -> str:
+    """The payload's ``agent_type``, or '' when it cannot be read (both sections then go)."""
+    try:
+        value = json.loads(payload).get("agent_type")
+    except Exception:  # noqa: BLE001 — an unreadable payload degrades to the full injection
+        return ""
+    return value if isinstance(value, str) else ""
+
+
 def build(payload: str) -> str:
     """The ``additionalContext`` body for a dispatch carrying *payload*."""
+    agent = _agent_type(payload)
     parts = []
     if _in_worktree(payload):
         parts.append(_section(WORKTREE_SECTION))
-    parts.append(_section(SERENA_SECTION))
-    parts.append(_section(CONTEXT7_SECTION))
+    if agent not in SERENA_DENIED:
+        parts.append(_section(SERENA_SECTION))
+    if agent not in CONTEXT7_DENIED:
+        parts.append(_section(CONTEXT7_SECTION))
     return "".join(parts)
 
 

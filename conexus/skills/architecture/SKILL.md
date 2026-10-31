@@ -22,7 +22,7 @@ explicitly for the cheap end of the table below:
 
 ## Code Navigation
 
-**REQUIRED SUB-SKILL:** Use **/conexus:serena-code-nav** for symbol-level architecture discovery. Combine with `nx search --hybrid` for semantic discovery — Serena for precision, nx search for conceptual queries.
+**REQUIRED SUB-SKILL (main session):** Use **/conexus:serena-code-nav** for symbol-level architecture discovery before dispatching, and put the symbol map in the relay: architect-planner's frontmatter denies the shared Serena (nexus-j6un5.5). Combine with `nx search --hybrid` for semantic discovery — Serena for precision, nx search for conceptual queries.
 
 `--hybrid` and `--lexical` are different flags doing different jobs, and the names invite conflating them. `--hybrid` RE-RANKS vector results by git frecency for code corpora; it never changes which rows come back. `--lexical` ADDS hits from the engine's exact-text indexes (full-text + trigram) to the vector results; it changes which rows come back and is what finds a rare identifier a semantic search misses (measured 0.167 -> 0.698 precision@10 on rare tokens, RDR-217). Reach for `--lexical` when you know the token; `--hybrid` when you want recently-touched code ranked higher.
 

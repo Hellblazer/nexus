@@ -5,6 +5,7 @@ description: Creates phased TDD-driven implementation plans and decomposes compl
 model: opus
 color: indigo
 effort: high
+disallowedTools: [mcp__plugin_sn_serena, mcp__plugin_sn_context7]
 ---
 
 ## Usage Examples

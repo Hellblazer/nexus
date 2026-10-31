@@ -1,6 +1,7 @@
 ---
 name: worktree-developer
 description: Developer for worktree-isolated dispatches. Owns its own Serena MCP server rooted at the worktree, so symbol-level editing is safe there. Use with isolation "worktree" for implementation work that needs replace_symbol_body, insert_*_symbol, rename_symbol, or find_referencing_symbols inside the worktree.
+disallowedTools: [mcp__plugin_sn_serena]
 mcpServers:
   - serena-wt:
       type: stdio

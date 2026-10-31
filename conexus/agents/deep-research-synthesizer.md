@@ -5,6 +5,7 @@ description: Conducts comprehensive research across the conexus knowledge store,
 model: haiku
 color: teal
 effort: medium
+disallowedTools: [mcp__plugin_sn_serena]
 ---
 
 ## Usage Examples

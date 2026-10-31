@@ -47,15 +47,24 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/agents/codebase-deep-analyzer.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5.
-- `conexus/agents/deep-research-synthesizer.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5.
-- `conexus/agents/test-validator.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5.
+- `sn/hooks/scripts/subagent_start.py` (nexus-j6un5.5): drops the Serena and Context7 sections for a conexus agent whose frontmatter denies that server.
+- `conexus/skills/architecture/SKILL.md` (nexus-j6un5.5): Serena symbol discovery is main-session work before the dispatch, since architect-planner denies the shared Serena.
+- `conexus/agents/architect-planner.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/code-review-expert.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/debugger.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/deep-analyst.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/developer.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/strategic-planner.md` (nexus-j6un5.5): frontmatter denies the shared Serena server and Context7, about 10K tokens off every dispatch's context.
+- `conexus/agents/substantive-critic.md` (nexus-j6un5.5): frontmatter denies the shared Serena server, about 10K tokens off every dispatch's context.
+- `conexus/agents/codebase-deep-analyzer.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5. Denies the shared Serena server and Context7 (nexus-j6un5.5).
+- `conexus/agents/deep-research-synthesizer.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5. Denies the shared Serena server (nexus-j6un5.5).
+- `conexus/agents/test-validator.md` (nexus-j6un5.6): runs on Haiku 5.5 instead of Sonnet 5.5. Denies the shared Serena server and Context7 (nexus-j6un5.5).
 - `conexus/commands/rdr-audit.md` (nexus-j6un5.6): the audit's dispatch step passes `model: "sonnet"` to deep-research-synthesizer, which now defaults to haiku.
 - `conexus/skills/codebase-analysis/SKILL.md` (nexus-j6un5.6): names haiku as codebase-deep-analyzer's model.
 - `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-j6un5.6): the classification dispatches deep-research-synthesizer with `model: "sonnet"` (header, step 5 and Agent Invocation), since the agent now defaults to haiku.
 - `conexus/skills/rdr-research/SKILL.md` (nexus-j6un5.6): names haiku as both agents' model.
 - `conexus/skills/research-synthesis/SKILL.md` (nexus-j6un5.6): haiku is the default; multi-source synthesis passes `model: "sonnet"`.
-- `conexus/skills/orchestration/SKILL.md` (nexus-j6un5.4): mechanical beads dispatch the developer with `model: "haiku"`, labelled `dev-model:haiku` or `dev-model:sonnet` for the comparison; a failed Haiku round is re-dispatched on Sonnet.
+- `conexus/skills/orchestration/SKILL.md` (nexus-j6un5.4): mechanical beads dispatch the developer with `model: "haiku"`, labelled `dev-model:haiku` or `dev-model:sonnet` for the comparison; a failed Haiku round is re-dispatched on Sonnet. The debugger note says conexus agents have no shared Serena, so symbol tracing happens in the main session (nexus-j6un5.5).
 
 
 ## Deferred to the next client release

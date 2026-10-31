@@ -5,6 +5,7 @@ description: Provides thorough analysis of complex problems and intricate system
 model: opus
 color: blue
 effort: high
+disallowedTools: [mcp__plugin_sn_serena]
 ---
 
 ## Usage Examples
