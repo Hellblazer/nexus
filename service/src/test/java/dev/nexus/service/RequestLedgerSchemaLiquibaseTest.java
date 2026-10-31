@@ -2,8 +2,10 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -146,20 +148,33 @@ class RequestLedgerSchemaLiquibaseTest {
             throws Exception {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            var triggers = ctx.fetch("""
-                SELECT t.tgname, pg_get_triggerdef(t.oid) AS def, p.prosecdef, p.proconfig::text AS cfg
-                  FROM pg_trigger t
-                  JOIN pg_proc p ON p.oid = t.tgfoid
-                 WHERE t.tgrelid = 'nexus.request_ledger'::regclass AND NOT t.tgisinternal
-                """);
+            // Typed jOOQ over pg_catalog, as the raw-SQL and string-literal gates require (TaxonomySchemaLiquibaseTest).
+            Table<?> pgTrigger = DSL.table(DSL.name("pg_trigger")).as("t");
+            Table<?> pgProc = DSL.table(DSL.name("pg_proc")).as("p");
+            Table<?> pgClass = DSL.table(DSL.name("pg_class")).as("cl");
+            Table<?> pgNamespace = DSL.table(DSL.name("pg_namespace")).as("n");
+            Field<Object> tOid = DSL.field(DSL.name("t", "oid"));
+            Field<String> tgname = DSL.field(DSL.name("t", "tgname"), String.class);
+            Field<String> def = DSL.function("pg_get_triggerdef", String.class, tOid);
+            Field<Boolean> prosecdef = DSL.field(DSL.name("p", "prosecdef"), Boolean.class);
+            Field<String[]> proconfig = DSL.field(DSL.name("p", "proconfig"), String[].class);
+            var triggers = ctx.select(tgname, def, prosecdef, proconfig)
+                .from(pgTrigger)
+                .join(pgProc).on(DSL.field(DSL.name("p", "oid")).eq(DSL.field(DSL.name("t", "tgfoid"))))
+                .join(pgClass).on(DSL.field(DSL.name("cl", "oid")).eq(DSL.field(DSL.name("t", "tgrelid"))))
+                .join(pgNamespace).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("cl", "relnamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("cl", "relname"), String.class).eq("request_ledger"))
+                .and(DSL.field(DSL.name("t", "tgisinternal"), Boolean.class).isFalse())
+                .fetch();
             assertThat(triggers).hasSize(1);
             var trigger = triggers.get(0);
-            assertThat(trigger.get("tgname", String.class)).isEqualTo("trg_request_ledger_register_tenant");
-            assertThat(trigger.get("def", String.class))
+            assertThat(trigger.get(tgname)).isEqualTo("trg_request_ledger_register_tenant");
+            assertThat(trigger.get(def))
                 .contains("BEFORE INSERT ON nexus.request_ledger", "FOR EACH ROW",
                     "nexus.request_ledger_register_tenant()");
-            assertThat(trigger.get("prosecdef", Boolean.class)).as("SECURITY INVOKER").isFalse();
-            assertThat(trigger.get("cfg", String.class)).contains("search_path=pg_catalog, pg_temp");
+            assertThat(trigger.get(prosecdef)).as("SECURITY INVOKER").isFalse();
+            assertThat(trigger.get(proconfig)).contains("search_path=pg_catalog, pg_temp");
         }
     }
 

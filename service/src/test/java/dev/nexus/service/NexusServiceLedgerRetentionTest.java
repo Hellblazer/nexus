@@ -22,6 +22,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
+import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER_TENANTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -272,16 +273,16 @@ class NexusServiceLedgerRetentionTest {
             recording);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "ALTER TABLE nexus.request_ledger_tenants RENAME TO request_ledger_tenants_away");
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(REQUEST_LEDGER_TENANTS)
+                .renameTo(DSL.name("request_ledger_tenants_away")).execute();
             try {
                 List<RequestLedger.RetentionPass> passes = service.runScheduledLedgerRetention(NOW);
 
                 assertThat(passes).extracting(RequestLedger.RetentionPass::tenant).contains("default");
                 assertThat(passes).allMatch(p -> !p.failed());
             } finally {
-                su.createStatement().execute(
-                    "ALTER TABLE nexus.request_ledger_tenants_away RENAME TO request_ledger_tenants");
+                DSL.using(su, SQLDialect.POSTGRES).alterTable(DSL.table(DSL.name("nexus", "request_ledger_tenants_away")))
+                    .renameTo(DSL.name("request_ledger_tenants")).execute();
             }
             assertThat(exists("default", defaultOld)).as("the default tenant's pass still ran").isFalse();
             assertThat(exists("default", defaultFresh)).isTrue();
