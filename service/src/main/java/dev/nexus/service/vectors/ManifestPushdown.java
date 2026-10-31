@@ -47,6 +47,21 @@ import java.util.Set;
  * (the boolean through the planner's tolerant JSON-or-text form), {@code ttl_days} and {@code frecency_score} like
  * {@code page_number}, ranges included.
  *
+ * <p><b>Short pages (nexus-6pfgb.61, RDR-236 assumption A8).</b> Below the cardinality router's threshold (20,000
+ * rows by default) the exact plan runs and the EXISTS is evaluated over every row, so the page is complete. Above it
+ * the EXISTS is a filter on the HNSW scan under {@code hnsw.iterative_scan}, which stops at {@code
+ * hnsw.max_scan_tuples} or its memory budget: a rare label whose chunks rank past the cap yields the ones the walk
+ * reached, a SHORT page that is not empty, which the empty-page re-run (nexus-bq06h) never repaired. Measured on 21,000
+ * chunks with the cap at its 1,000 minimum: 1 of 3 rows found. The repair is {@code
+ * PgVectorRepository#exactOnUnderReturn} with {@code rerunWhenShort}: a statement that carries this predicate and
+ * returns fewer rows than asked is re-run once exact. The EXISTS is a correlated SubPlan per HNSW candidate (pinned
+ * in PlainSearchTextGatedSearchExplainTest), about 17 microseconds a candidate measured against 3 for the chunk-row
+ * filter it replaced. The cost is the per-occurrence object, not the plan shape: building it in the WHERE, which does
+ * let PostgreSQL convert the EXISTS to a semi-join, did not change the time and doubled the plan time of a search
+ * (the engine inlines the function body on every call). vectors-045 builds only the keys the predicate names, which
+ * cuts the cost by about a third; a predicate written as a column test the planner has statistics for would let it
+ * drive from the manifest and find a rare label in milliseconds, and is a larger change to the function interface.
+ *
  * <p>The compiled form reuses {@link PgVectorRepository#planWhere}, so the operators, the tolerant number-or-text
  * equality and the three-valued jsonpath rules are the search's own, with one exception: a NUMERIC range on
  * a numeric key ({@code page_number}, nexus-6pfgb.64; {@code ttl_days} and {@code frecency_score}, nexus-6pfgb.29) is compiled here. {@link PgVectorRepository#planWhere} keeps the retired

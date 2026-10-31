@@ -115,7 +115,11 @@ migration_wal_bytes_per_worker = 11038000
 # 2171 -> 2176 (2026-10-31): vectors-044-1 (nexus-6pfgb.29, manifest_search meta keys, nexus.catalog_tag_set) adds five DDL statements, the
 # vectors-043-1 shape: 1 CREATE OR REPLACE FUNCTION (catalog_tag_set), its 1 GRANT EXECUTE, and 3 CREATE OR REPLACE FUNCTION replacing the
 # manifest_search_384/768/1024 bodies again (no re-grant); the post-condition DO block is not DDL. Counted from the changeset's statements.
-migration_ddl_per_worker = 2176
+# 2176 -> 2181 (2026-10-31): vectors-045-1 (nexus-6pfgb.61, the manifest EXISTS builds only the object keys its predicate names, nexus.manifest_names_key)
+# adds five DDL statements, the vectors-043-1 shape: 1 CREATE OR REPLACE FUNCTION (manifest_names_key), its 1 GRANT EXECUTE, and 3 CREATE OR REPLACE
+# FUNCTION replacing the manifest_search_384/768/1024 bodies again (no re-grant); the post-condition DO block is not DDL. Measured on chas, 2026-10-31,
+# merged tree (043 +5, 044 +5, 045 +5): ddl: migration=2181 (tests/test_scenario_journeys.py with the batch's other substrate files).
+migration_ddl_per_worker = 2181
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
