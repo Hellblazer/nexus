@@ -700,7 +700,7 @@ _STEPREF_RE = re.compile(r"^\$step(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$")
 #: carries the chain internally. The KEY string lives in
 #: :mod:`nexus.plans.bundle` (``DEFERRED_REF_KEY``) so a rename or typo
 #: on either side can't silently drop the sentinel (substantive-critic C2).
-from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY, _extract_tool_name  # noqa: E402
+from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY, _extract_tool_name, is_operator_tool as _is_operator_tool  # noqa: E402
 import nexus.operators.dispatch as _dispatch_mod  # noqa: E402
 from nexus.plans.evidence_diagnostics import (  # noqa: E402
     active_recorder,
@@ -1526,6 +1526,34 @@ def _mark_reserved_step(index: int, steps: list[dict[str, Any]]) -> None:
     set_reserved_step(index, feeds_from=producers)
 
 
+def _reads_retrieved_evidence(index: int, steps: list[dict[str, Any]]) -> bool:
+    """True when plan step *index* reads retrieved evidence directly (RDR-232, nexus-jypmj): it carries ``ids``, or
+    an evidence arg refers to the output of a step that is not an operator (a fetch, a retrieval, a traversal).
+
+    A step that reads only another operator's output (a ``summarize`` over ``$step3.aggregates``, a ``generate``
+    over ``$step5.ranked``) is not one: the evidence it reduces reached it through that operator. The repair
+    supplement is merged at the steps of a one-by-one trailing run that are.
+    """
+    raw = steps[index].get("args", {}) or {}
+    if raw.get("ids"):
+        return True
+    found = False
+
+    def _walk(value: Any) -> None:
+        nonlocal found
+        if isinstance(value, list):
+            for item in value:
+                _walk(item)
+        elif isinstance(value, str) and (m := _STEPREF_RE.match(value)):
+            ref = int(m.group(1)) - 1
+            if 0 <= ref < len(steps) and not _is_operator_tool(_extract_tool_name(steps[ref])):
+                found = True
+
+    for key in _RESERVED_EVIDENCE_KEYS:
+        _walk(raw.get(key))
+    return found
+
+
 def _scope_conflict_output(
     narrowing: "CorpusNarrowing | OwnerNarrowing", *, step_index: int, tool: str,
 ) -> dict[str, Any]:
@@ -1925,7 +1953,9 @@ def _boundary_evidence(args: dict[str, Any], captured: list[list[str]]) -> tuple
             texts.extend(v for v in value if isinstance(v, str) and v and not isinstance(v, _StepId))
         elif isinstance(value, str) and value.strip() and not isinstance(value, _StepId):
             observed = True
-            texts.append(value)
+            # A list that held a deferred bundle ref was joined into one string (``repr`` of the ref included).
+            if _DEFERRED_REF_KEY not in value:
+                texts.append(value)
     return texts, observed
 
 
@@ -2647,6 +2677,12 @@ def _hydrate_operator_args(
             note_reducer_input(_merged)
             if _merged is not _texts:
                 args[target_key] = _merged
+        elif isinstance(_listed, list) and any(isinstance(v, dict) and _DEFERRED_REF_KEY in v for v in _listed):
+            # Texts beside a deferred bundle ref (``[$step4.contents, $step5.extractions]`` in a bundle): not merged
+            # (the ref is the earlier step's output, inline), but the texts are what the step reads, and the ref's
+            # ``repr`` joined into the prompt below is no evidence (nexus-jypmj).
+            if _held := [v for v in _listed if isinstance(v, str) and v]:
+                note_reducer_input(_held)
 
     if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
         args["content"] = "\n\n".join(str(x) for x in args["content"] if x)
@@ -3108,11 +3144,12 @@ async def _plan_run_impl(
     withheld that would otherwise have run).
 
     ``coverage_boundary`` (RDR-232 Phase 3, nexus-jypmj.3.1): ``None`` (the default) changes nothing.
-    When set, the runner stops at the LAST dispatch segment if it is an operator segment (an isolated
-    operator step, or a fused operator bundle), reads the input that segment's first evidence-consuming
-    step will be handed (hydrated once; see ``_HYDRATES_ATTR``), and calls
-    :meth:`~nexus.plans.coverage_ledger.CoverageBoundary.evaluate` on it BEFORE dispatching the segment.
-    The result is :attr:`PlanResult.coverage`. When it says ``skip_generation`` the segment is not
+    When set, the runner stops at the START of the plan's trailing run of operator steps (a fused operator
+    bundle, or, for a dispatcher that does not bundle, the first isolated step of that run), reads the evidence
+    the run's steps will be handed (the union over the run's steps, deferred refs excluded; hydrated once; see
+    ``_HYDRATES_ATTR``), and calls
+    :meth:`~nexus.plans.coverage_ledger.CoverageBoundary.evaluate` on it BEFORE dispatching the run.
+    The result is :attr:`PlanResult.coverage`. When it says ``skip_generation`` the run is not
     dispatched: its slots get the bundle-intermediate sentinel and, for the terminal slot,
     ``{"text": ..., "coverage_skipped": True}``, so a later ``$stepN`` reference still resolves and no
     ``StepRecord`` is invented. The plan prefix is never re-run. The assessment calls are ``StepRecord``s
@@ -3125,10 +3162,12 @@ async def _plan_run_impl(
     target, then one ``store_get_many`` of the hits) run through the same dispatcher, each a ``StepRecord`` of
     source ``sql`` numbered past the plan like the assessment calls, inside the repair's own allowance and the
     one USD accumulator. The new chunks are installed in the run's :class:`~nexus.plans.repair_stream.
-    RepairSupplement`, the terminal segment's input is read a second time with them merged (after the
+    RepairSupplement`, the run's input is read a second time with them merged (after the
     reserved items, ahead of the plan's own, under the same positional cap), and the ledger is recomputed once.
-    That second reading is what the terminal step is dispatched with; the prefix is not re-run. The supplement
-    is returned as :attr:`PlanResult.repair_supplement`.
+    That second reading is what the run's first step is dispatched with; the prefix is not re-run. A run that is
+    dispatched one by one (no operator bundling, or the oversized-bundle fallback) hands the supplement to each
+    of its steps that reads retrieved evidence directly, not only the first, so the answering step sees what the
+    ledger assessed. The supplement is returned as :attr:`PlanResult.repair_supplement`.
 
     With ``continuation_cut_at_step`` at the terminal operator segment, the cut no longer fires before the
     boundary: the boundary and its repair run on the segment's input, the segment stops after them undispatched
@@ -3534,6 +3573,45 @@ async def _plan_run_impl(
         _boundary_s = time.monotonic() - _boundary_started
         return coverage_result
 
+    def _name_merge_steps(indices: Sequence[int]) -> None:
+        """Name the steps of a one-by-one trailing run that are handed the repair supplement: those that read
+        retrieved evidence directly (:func:`_reads_retrieved_evidence`). A fused bundle names none."""
+        supplement = active_supplement()
+        if supplement is not None:
+            supplement.merge_steps = frozenset(i for i in indices if _reads_retrieved_evidence(i, steps))
+
+    def _read_rest_of_run(indices: Sequence[int], *, hydrate: bool) -> tuple[list[str], bool]:
+        """The evidence texts the steps *indices* of the boundary run will read, as the bundle builder reads them: each
+        step's args resolved with the run's own steps deferred, hydrated with capture (when the dispatcher hydrates), and
+        read by :func:`_boundary_evidence`. A step that cannot be read is left to its own dispatch, which raises where it
+        always did."""
+        texts_out: list[str] = []
+        observed_out = False
+        deferred_indices = set(_boundary_run)
+        try:
+            for bi in indices:
+                bstep = steps[bi]
+                btool = _extract_tool(bstep)
+                b_resolved = _resolve_args(
+                    bstep.get("args", {}) or {}, bindings=merged, step_outputs=step_outputs,
+                    deferred_step_indices=deferred_indices, step_index=bi,
+                )
+                b_resolved = _drop_intent_from_list_args(b_resolved, intent=merged.get("intent"))
+                if hydrate:
+                    _mark_reserved_step(bi, steps)
+                    _, b_prepared, b_captured = _hydrate_capturing(btool, b_resolved, capture=True)
+                else:
+                    b_prepared, b_captured = b_resolved, []
+                step_texts, step_observed = _boundary_evidence(b_prepared, b_captured)
+                texts_out.extend(step_texts)
+                observed_out = observed_out or step_observed
+        except Exception as exc:  # noqa: BLE001 — the boundary reads what it can; the step's own dispatch raises where it always did
+            _log.warning("nx_answer_coverage_run_read_failed", error=type(exc).__name__)
+        finally:
+            if hydrate and indices:
+                _mark_reserved_step(_boundary_run[0], steps)
+        return texts_out, observed_out
+
     def _cut_here(at_index: int) -> None:
         """The continuation cut fires at the segment starting at *at_index*."""
         nonlocal continuation_cut_applied
@@ -3769,6 +3847,9 @@ async def _plan_run_impl(
                         max_chars=MAX_BUNDLE_PROMPT_CHARS,
                         bundle_plan_indices=list(seg.plan_indices),
                     )
+                    if _bundle_at_boundary:
+                        # Dispatched one by one, each step that reads retrieved evidence directly is its own reduction.
+                        _name_merge_steps(seg.plan_indices)
                     for bi in seg.plan_indices:
                         _mark_reserved_step(bi, steps)
                         bstep = steps[bi]
@@ -4174,14 +4255,23 @@ async def _plan_run_impl(
                         _log.warning("nx_answer_coverage_prehydration_failed", error=type(exc).__name__)
                         _captured = []
                 _step_texts, _step_observed = _boundary_evidence(resolved, _captured)
+                # The run's other steps are dispatched one by one after this one; each that reads retrieved evidence
+                # directly is its own reduction, so it is read here (the union the bundle builder reads) and is
+                # handed the repair supplement at its own dispatch.
+                _name_merge_steps(_boundary_run)
+                _more_texts, _more_observed = _read_rest_of_run(_boundary_run[1:], hydrate=_prehydrated)
+                _step_texts, _step_observed = _step_texts + _more_texts, _step_observed or _more_observed
 
                 def _rehydrate_isolated() -> tuple[list[str], bool]:
-                    """The terminal step's input with the repair evidence merged. The step is handed the args
+                    """The run's evidence with the repair evidence merged. The first step is handed the args
                     this reading produced, whatever the dispatcher does (the merge is the runner's)."""
                     nonlocal resolved, _prehydrated
+                    _mark_reserved_step(index, steps)  # noqa: B023
                     _, again, again_captured = _hydrate_capturing(tool, dict(_unhydrated), capture=True)  # noqa: B023
                     resolved, _prehydrated = again, True
-                    return _boundary_evidence(again, again_captured)
+                    first_texts, first_observed = _boundary_evidence(again, again_captured)
+                    more_texts, more_observed = _read_rest_of_run(_boundary_run[1:], hydrate=True)
+                    return first_texts + more_texts, first_observed or more_observed
 
                 _cov = await _run_coverage_boundary(_step_texts, _step_observed, index, _rehydrate_isolated)
                 _seg_started_at += _boundary_s

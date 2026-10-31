@@ -650,11 +650,11 @@ FetchCall = Callable[..., Awaitable[Sequence[SupplementItem]]]
 
 @dataclass
 class BoundaryView:
-    """What the runner hands the boundary at the terminal reduction.
+    """What the runner hands the boundary at the start of the plan's trailing operator run.
 
-    ``evidence_texts`` are the texts the first evidence-consuming step of the terminal segment will be
-    given (the reserved stream merged, the cap applied) and ``observed`` says whether that input could be
-    read at all. ``step_outputs`` and ``tools`` are the executed prefix, for the deterministic checks.
+    ``evidence_texts`` are the texts the run's evidence-consuming steps will be given, read before the first
+    of them dispatches (the reserved stream merged, the cap applied; a step that reads another step of the run
+    contributes nothing) and ``observed`` says whether that input could be read at all. ``step_outputs`` and ``tools`` are the executed prefix, for the deterministic checks.
     ``check`` performs one assessment call through the runner's dispatcher and accounts for it;
     ``remaining_seconds`` / ``remaining_usd`` return what is left of the answer's deadline and USD allowance
     (``None`` for no limit).
@@ -677,6 +677,7 @@ class BoundaryView:
     check: CheckCall
     remaining_seconds: Callable[[], float | None]
     remaining_usd: Callable[[], float | None]
+    #: The plan index of the first step of the trailing operator run: where the boundary sits.
     terminal_step: int | None = None
     retrieve: RetrieveCall | None = None
     fetch: FetchCall | None = None

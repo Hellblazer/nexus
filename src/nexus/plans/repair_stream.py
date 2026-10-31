@@ -17,7 +17,11 @@ text equals a supplement item (a source note aside) is dropped from the plan's l
 
 The merge happens once per run, at one plan step (``merged_step``); a re-hydration of that same step (the
 boundary's own second hydration, the oversized-bundle fallback, the continuation envelope's replay) merges
-again, so every route to the reduction sees the same evidence. A later operator is not given it again.
+again, so every route to the reduction sees the same evidence. A later operator is not given it again, with one
+exception: when the operators of the trailing run are dispatched one by one (a dispatcher that does not bundle, or the
+oversized-bundle fallback), each of them that reads the retrieved evidence directly is its own reduction, so the runner
+names those steps (:attr:`RepairSupplement.merge_steps`) and each is handed the supplement. A fused bundle names none:
+its later operators read the first one's output inline.
 
 State lives in a ``ContextVar`` so the dispatcher, the bundle path and the continuation envelope (all
 callers of ``_hydrate_operator_args``) share it without a signature change. ``plan_run`` creates one per
@@ -70,6 +74,9 @@ class RepairSupplement:
     merged_step: int | None = None
     current_step: int | None = None
     deduped_secondary: int = 0
+    #: Plan steps, besides ``merged_step``, that merge too: the evidence-reading operators of a trailing run that
+    #: dispatches one by one. Empty (the default) keeps the merge at one step.
+    merge_steps: frozenset[int] = frozenset()
     _held: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     def __post_init__(self) -> None:
@@ -87,14 +94,20 @@ class RepairSupplement:
         self.note = note
 
     def should_merge(self) -> bool:
-        """Items or a note to merge, at the first evidence-consuming operator or a re-hydration of that same step."""
-        return bool(self.items or self.note) and (not self.merged or self.merged_step == self.current_step)
+        """Items or a note to merge, at the first evidence-consuming operator, a re-hydration of that same step, or
+        any step the runner named in :attr:`merge_steps`."""
+        return bool(self.items or self.note) and (
+            not self.merged or self.merged_step == self.current_step or self.current_step in self.merge_steps
+        )
 
     def merge(self, secondary: Sequence[Any]) -> list[Any]:
         """The note, then the supplement's texts, ahead of *secondary*, which loses any item the supplement holds."""
         kept = [s for s in secondary if not (isinstance(s, str) and strip_source_note(s) in self._held)]
         self.deduped_secondary = len(secondary) - len(kept)
-        self.merged, self.merged_step = True, self.current_step
+        # The first merging step stays the one a re-hydration of "that same step" means (the envelope replays it).
+        self.merged = True
+        if self.merged_step is None or self.current_step not in self.merge_steps:
+            self.merged_step = self.current_step
         return ([self.note] if self.note else []) + [i.text for i in self.items] + kept
 
     def provenance(self, text: str) -> SupplementItem | None:
@@ -106,6 +119,7 @@ class RepairSupplement:
 
     def reset_run(self) -> None:
         self.merged, self.merged_step, self.current_step, self.deduped_secondary = False, None, None, 0
+        self.merge_steps = frozenset()
 
 
 _ACTIVE: ContextVar[RepairSupplement | None] = ContextVar("nexus_repair_supplement", default=None)
