@@ -33,8 +33,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>The SQL function answers {@code [""]} for no tag (so an untagged document answers the empty string); the Java
  * one answers an empty list, and the comparison reads the sentinel as empty. Order and duplicates are not
- * compared: a test of membership cannot see them. Whitespace parity is ASCII (space, tab, CR, LF, FF, VT); the
- * client's {@code split_note_tags} strips Unicode whitespace too, which neither server copy claims.
+ * compared: a test of membership cannot see them. Both server copies trim ASCII whitespace only (space, tab, CR,
+ * LF, FF, VT); a tag with Unicode whitespace at its ends (U+2003, U+3000, U+00A0) is kept whole by both, and the
+ * matrix holds such rows. The client's {@code split_note_tags} strips Unicode whitespace too: one way only, since a
+ * tag the client writes never carries it.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TagSetParityTest {
@@ -58,7 +60,9 @@ class TagSetParityTest {
         "{\"a\":1}",
         "[\"x\",5,true]",
         "[\"a\",null,\"b\"]",
-        "[\"dup\",\"dup\",\"Dup\"]");
+        "[\"dup\",\"dup\",\"Dup\"]",
+        "[\"\u2003arch\",\"arch\",\"\u3000\",\"\u00a0x\u00a0\"]",
+        "\"\u2003arch, \u3000decision\u2003,arch\"");
 
     PostgreSQLContainer<?> pg;
 

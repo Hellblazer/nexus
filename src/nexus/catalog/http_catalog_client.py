@@ -4158,7 +4158,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         count a tombstoned co-owner; this is the read that can. ``tombstoned`` is ``None`` when the engine answered
         the live rows but sent no ``tombstoned`` key (an engine before this key): that is "cannot say", never
         "none", and a caller that needs the tombstoned holders must stop on it. The result is ``None`` when the
-        route is absent, exactly as for :meth:`chash_positions`, which shares its backoff.
+        route is absent, exactly as for :meth:`chash_positions`, which shares that backoff; a malformed
+        ``tombstoned`` list backs off this reader alone, so :meth:`chash_positions` keeps working.
         """
         return self._chash_positions(chashes, include_tombstoned=True)
 
@@ -4168,6 +4169,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         backoff = getattr(self, "_chash_positions_backoff", None)
         if backoff is not None and _monotonic() - backoff[0] < backoff[1]:
             return None
+        if include_tombstoned:
+            # A malformed tombstoned list backs off only this reader: the live rows route is healthy, and the
+            # search-attach callers of chash_positions must not lose it for a window over a list they never ask for.
+            gone_backoff = getattr(self, "_chash_tombstoned_backoff", None)
+            if gone_backoff is not None and _monotonic() - gone_backoff[0] < gone_backoff[1]:
+                return None
         unique = list(dict.fromkeys(c for c in chashes if c))
         rows: list[dict] = []
         tombstoned: list[dict] = []
@@ -4210,7 +4217,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 reported = False  # an engine that predates the key ignored the flag
                 continue
             if not isinstance(gone, list) or "tombstoned_count" not in result or len(gone) != int(result["tombstoned_count"]):
-                self._chash_positions_backoff = (_monotonic(), _CHASH_POSITIONS_FAILURE_RETRY_S)
+                self._chash_tombstoned_backoff = (_monotonic(), _CHASH_POSITIONS_FAILURE_RETRY_S)
                 raise RuntimeError(
                     "manifest/chash_positions tombstoned list is malformed or truncated "
                     f"(keys {sorted(result)}); refusing a partial tombstoned-holder read"

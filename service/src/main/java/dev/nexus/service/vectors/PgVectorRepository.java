@@ -1764,7 +1764,7 @@ public final class PgVectorRepository {
                     // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
                     // exactOnUnderReturn for the nexus-bq06h exact fallback.
                     result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null,
-                                             manifestPredicate);
+                                             manifestPredicate, tenant, String.join(",", colls));
                 }
                 completed = true;
                 return result;
@@ -3734,7 +3734,7 @@ public final class PgVectorRepository {
         if (wherePlan.manifest() != null) {
             return exactSelectFrom(ctx, nResults,
                 manifestSearchFn(dim, queryVec, gateQueryText, null, colls, wherePlan, nResults, model, tenant),
-                rebind ? statementTimeoutMs : null, true);
+                rebind ? statementTimeoutMs : null, true, tenant, String.join(",", colls));
         }
         org.jooq.Table<?> hnswFirstFn = switch (dim) {
             case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
@@ -7650,13 +7650,24 @@ FROM scope s
     private static <R extends Result<? extends Record>> R exactOnUnderReturn(
             DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
             java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort) {
+        return exactOnUnderReturn(ctx, nResults, fetch, rebindTimeoutMs, rerunWhenShort, null, null);
+    }
+
+    /**
+     * As above; {@code tenant} and {@code collection} only name the statement in the short-page re-run's log lines,
+     * so the cost of a re-run is attributable (they may be null). Package-visible so the failure path can be pinned
+     * against a real transaction ({@code ShortPageRerunFailureTest}).
+     */
+    static <R extends Result<? extends Record>> R exactOnUnderReturn(
+            DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
+            java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort, String tenant, String collection) {
         R first = fetch.get();
         boolean empty = first.isEmpty();
         if (!empty && !(rerunWhenShort && first.size() < nResults)) {
             return first;
         }
         if (!empty) {
-            return shortPageRerun(ctx, nResults, fetch, rebindTimeoutMs, first);
+            return shortPageRerun(ctx, nResults, fetch, rebindTimeoutMs, first, tenant, collection);
         }
         PgSession.disableIndexScanForExactFallback(ctx);
         if (rebindTimeoutMs != null) {
@@ -7672,7 +7683,7 @@ FROM scope s
     /** The exact re-run of a short, non-empty page; see {@link #exactOnUnderReturn}. */
     private static <R extends Result<? extends Record>> R shortPageRerun(
             DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
-            java.util.function.IntSupplier rebindTimeoutMs, R first) {
+            java.util.function.IntSupplier rebindTimeoutMs, R first, String tenant, String collection) {
         java.sql.Savepoint[] taken = new java.sql.Savepoint[1];
         ctx.connection(conn -> taken[0] = conn.setSavepoint());
         try {
@@ -7683,8 +7694,8 @@ FROM scope s
             long start = System.nanoTime();
             R exact = fetch.get();
             SHORT_PAGE_RERUNS.incrementAndGet();
-            log.info("event=vector_short_page_rerun indexed_rows={} exact_rows={} n_results={} rerun_ms={}",
-                     first.size(), exact.size(), nResults, (System.nanoTime() - start) / 1_000_000);
+            log.info("event=vector_short_page_rerun tenant={} collection={} indexed_rows={} exact_rows={} n_results={} rerun_ms={}",
+                     tenant, collection, first.size(), exact.size(), nResults, (System.nanoTime() - start) / 1_000_000);
             ctx.connection(conn -> conn.releaseSavepoint(taken[0]));
             return exact.size() >= first.size() ? exact : first;
         } catch (RuntimeException e) {
@@ -7698,8 +7709,8 @@ FROM scope s
                 log.warn("event=vector_short_page_rerun_rollback_failed error={}", rollbackFailure.getMessage());
                 throw e;
             }
-            log.warn("event=vector_short_page_rerun_failed indexed_rows={} n_results={} error={}",
-                     first.size(), nResults, String.valueOf(e.getMessage()).replace('\n', ' '));
+            log.warn("event=vector_short_page_rerun_failed tenant={} collection={} indexed_rows={} n_results={} error={}",
+                     tenant, collection, first.size(), nResults, String.valueOf(e.getMessage()).replace('\n', ' '));
             return first;
         }
     }
@@ -7729,7 +7740,14 @@ FROM scope s
     private static <R extends Record> Result<R> exactSelectFrom(
             DSLContext ctx, int nResults, org.jooq.Table<R> fn,
             java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort) {
-        return exactOnUnderReturn(ctx, nResults, () -> ctx.selectFrom(fn).fetch(), rebindTimeoutMs, rerunWhenShort);
+        return exactSelectFrom(ctx, nResults, fn, rebindTimeoutMs, rerunWhenShort, null, null);
+    }
+
+    private static <R extends Record> Result<R> exactSelectFrom(
+            DSLContext ctx, int nResults, org.jooq.Table<R> fn,
+            java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort, String tenant, String collection) {
+        return exactOnUnderReturn(ctx, nResults, () -> ctx.selectFrom(fn).fetch(), rebindTimeoutMs, rerunWhenShort,
+                                  tenant, collection);
     }
 
     /** Count of exact re-runs of a short, non-empty page that carried a manifest predicate (nexus-6pfgb.61). */

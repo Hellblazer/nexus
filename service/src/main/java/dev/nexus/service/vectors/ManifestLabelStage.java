@@ -652,8 +652,17 @@ final class ManifestLabelStage {
 
     /**
      * The tags a stored value holds, as a list: a JSON array (each element's text), or a string (the legacy comma
-     * form) split on commas; every tag trimmed and empties dropped, duplicates removed, first-seen order kept (the
-     * rule {@code split_note_tags} applies on the client). Any other value holds no tag.
+     * form) split on commas; every tag trimmed of ASCII whitespace and empties dropped, duplicates removed,
+     * first-seen order kept. Any other value holds no tag.
+     *
+     * <p>The trim is the ASCII set {@code nexus.catalog_tag_set} (vectors-044) trims with, NOT {@link String#strip}
+     * (Unicode): the in-search EXISTS tests membership of the SQL set and the stage trims the rest with this one,
+     * so a wider trim here would pass a stored {@code "<U+2003>arch"} through the stage that the EXISTS had already
+     * dropped. ASCII was chosen over widening the SQL to {@code \s}: the function stays a plain IMMUTABLE
+     * {@code btrim}, no regex per tag, and vectors-044 needs no edit. The client's {@code split_note_tags} strips
+     * Unicode whitespace too, which only matters one way: a tag the client writes never carries surrounding
+     * Unicode whitespace, so nothing it stored is cut differently here; a tag written by another path with such
+     * whitespace is kept whole on both server sides and matches only an operand that carries it.
      */
     static List<String> tagSet(Object stored) {
         List<String> raw = new ArrayList<>();
@@ -674,12 +683,29 @@ final class ManifestLabelStage {
         }
         Set<String> tags = new LinkedHashSet<>();
         for (String t : raw) {
-            String trimmed = t.strip();
+            String trimmed = trimAscii(t);
             if (!trimmed.isEmpty()) {
                 tags.add(trimmed);
             }
         }
         return List.copyOf(tags);
+    }
+
+    /** The ASCII whitespace {@code nexus.catalog_tag_set} trims: space, tab, CR, LF, form feed, vertical tab. */
+    private static String trimAscii(String t) {
+        int from = 0;
+        int to = t.length();
+        while (from < to && isTagSpace(t.charAt(from))) {
+            from++;
+        }
+        while (to > from && isTagSpace(t.charAt(to - 1))) {
+            to--;
+        }
+        return t.substring(from, to);
+    }
+
+    private static boolean isTagSpace(char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\u000b';
     }
 
     /** A catalog timestamp as the chunk rows' own {@code indexed_at} text, so range operands compare alike. */

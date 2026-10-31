@@ -776,15 +776,16 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 for doc_id, doc_rows in sorted(manifest.items())
                 for row in doc_rows if row["chash"] in wanted
             ]
-            reply = {"rows": rows, "count": len(rows)}
             if body.get("include_tombstoned") is True:
                 # nexus-6pfgb.58: the manifest rows of TOMBSTONED documents holding a requested chash, beside the
                 # live rows; the key is sent only when the request asked, so a request without it is unchanged.
+                # Each branch sends a dict LITERAL: the route census (ROW_ENVELOPE_KEYS) reads only literals.
                 gone = [{"chash": CHASH_B, "doc_id": "1.1.9", "position": 3, "collection": "knowledge__fake__v1"}
                         ] if CHASH_B in wanted else []
-                reply["tombstoned"] = gone
-                reply["tombstoned_count"] = len(gone)
-            self._send_json(reply)
+                self._send_json({"rows": rows, "count": len(rows),
+                                 "tombstoned": gone, "tombstoned_count": len(gone)})
+            else:
+                self._send_json({"rows": rows, "count": len(rows)})
         elif op == "/manifest/docs_for_chashes":
             # Real server: {"tumblers": [tumbler_string, ...], "count": N}
             # (flat list, SELECT DISTINCT) — count reconciled client-side
@@ -1720,7 +1721,7 @@ class TestHttpCatalogClientRoundTrip:
         monkeypatch.setattr(client, "_post", lambda path, body=None, **kw: {"rows": [], "count": 0})
         assert client.chash_positions_with_tombstoned([CHASH_A]) == ([], None)
 
-    def test_a_truncated_tombstoned_list_is_refused_and_backs_off(self, client: HttpCatalogClient, monkeypatch) -> None:
+    def test_a_truncated_tombstoned_list_is_refused_and_backs_off_only_the_tombstoned_read(self, client: HttpCatalogClient, monkeypatch) -> None:
         calls: list[str] = []
 
         def _post(path, body=None, **kw):
@@ -1730,7 +1731,24 @@ class TestHttpCatalogClientRoundTrip:
         monkeypatch.setattr(client, "_post", _post)
         with pytest.raises(RuntimeError, match="tombstoned list is malformed"):
             client.chash_positions_with_tombstoned([CHASH_A])
-        # The failure backs off the route for both reads, as a malformed rows page does.
+        # The failure backs off the tombstoned reader alone: the live rows were fine, so the search-attach reader
+        # (chash_positions) keeps its route for the window instead of falling back to the manifest path.
+        assert client.chash_positions_with_tombstoned([CHASH_A]) is None
+        assert calls == ["/manifest/chash_positions"]
+        assert client.chash_positions([CHASH_A]) == []
+        assert calls == ["/manifest/chash_positions"] * 2
+
+    def test_a_malformed_rows_page_still_backs_off_both_reads(self, client: HttpCatalogClient, monkeypatch) -> None:
+        calls: list[str] = []
+
+        def _post(path, body=None, **kw):
+            calls.append(path)
+            return {"rows": [], "count": 3}
+
+        monkeypatch.setattr(client, "_post", _post)
+        with pytest.raises(RuntimeError, match="malformed or truncated"):
+            client.chash_positions_with_tombstoned([CHASH_A])
+        assert client.chash_positions([CHASH_A]) is None
         assert client.chash_positions_with_tombstoned([CHASH_A]) is None
         assert calls == ["/manifest/chash_positions"]
 
