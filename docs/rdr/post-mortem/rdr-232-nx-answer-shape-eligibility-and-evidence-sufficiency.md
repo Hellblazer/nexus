@@ -103,7 +103,7 @@ No `SYNTHESIS.md` exists in `docs/rdr/post-mortem/`; no pattern is cited. Diverg
 - **A request whose extraction call fails keeps the gate enforcing on first-pass kinds** (nexus-x3eoc), the regime measured as failing. It rests on the observed 0 of 112 extraction failures; nothing counts or alarms on a run of failures beyond the once-per-streak log warning. Whether to degrade such a request to shadow is Sam's decision.
 - **Covered facets with most of their anchors unread are never repaired** (nexus-z6yvk). H12, H13 and H28 read 116 to 156 of 261 to 325 anchors; the rest is the tail of the graph stream.
 - **Unknown-kind grown plans are still admitted for lookups.** The wrong-shape exposure the new lookup row removed for synthesis plans remains for them, and no measured run selected one (plan growth was off).
-- **Caps and repair.** The `max_documents` and `max_chunks` calibration; clause-facet repair yield (0 of 5 tries); the repair keep-or-drop call, which was recommended "keep" and is Sam's.
+- **Caps and repair.** The `max_documents` and `max_chunks` calibration; clause-facet repair yield (0 of 5 tries); the repair keep-or-drop call, which was recommended "keep" and is Sam's (nexus-uxyyt); and the continuation cap for long narrowed runs, also Sam's (nexus-bwlwl).
 - **Unmeasured**, as the RDR's Performance Expectations lists: the full golden set on the concurrent design, small budgets (nexus-jypmj.22), an oracle for the large requests, and the `claude -p` backend under load.
 
 ## What the next person should take from this

@@ -169,7 +169,7 @@ class PrimaryEvidenceCaps:
     #:   secondary items (the reserved ones lead).
     #: * ``reserved_stream.RESERVED_SHARE_NARROWED`` = 88 of them are reserved for a narrowed run (50 otherwise); the
     #:   other 12 are the coverage repair's supplement (``coverage_repair.MAX_REPAIR_ITEMS`` = 12), because the document
-    #:   confinement (nexus-jypmj) leaves a plan no secondary item of its own, so nothing else needs the slots.
+    #:   confinement (nexus-jypmj) leaves a plan only its confined secondary items, which take what the repair leaves.
     #:   88 + 12 = 100, pinned by a test.
     #: * Of the 88, ``LifecycleCaps.max_records`` = 6 lead for T2 lifecycle records, so the chunk cap is 88 - 6 = 82.
     #:   82 chunks at the corpus's 500 to 1,000 characters is 41,000 to 82,000 characters, so the character cap

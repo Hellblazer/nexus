@@ -59,9 +59,9 @@ __all__ = [
 RESERVED_SHARE_MAX: int = 50
 
 #: The same bound for a run that confines every secondary retrieval step to its one named document
-#: (``nexus.plans.single_source``, ``nexus.plans.document_confinement``; nexus-4xmpv, nexus-jypmj): a plan keeps no
-#: secondary items of its own, so the primary takes 88 of the 100 slots and the coverage repair's supplement
-#: (``coverage_repair.MAX_REPAIR_ITEMS`` = 12) takes the other 12. The full arithmetic (the chunk cap 82 = 88 - 6
+#: (``nexus.plans.single_source``, ``nexus.plans.document_confinement``; nexus-4xmpv, nexus-jypmj): a plan keeps only
+#: its confined secondary items, so the primary takes 88 of the 100 slots and the coverage repair's supplement
+#: (``coverage_repair.MAX_REPAIR_ITEMS`` = 12) takes the other 12 ahead of them. The full arithmetic (the chunk cap 82 = 88 - 6
 #: lifecycle records, the 60,000-character and 120,000-character bounds) is stated once, on
 #: ``PrimaryEvidenceCaps.max_narrowed_source_items``. A test pins the sum 88 + 12 = 100.
 RESERVED_SHARE_NARROWED: int = 88

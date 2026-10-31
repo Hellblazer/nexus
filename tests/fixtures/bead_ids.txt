@@ -2753,6 +2753,7 @@ nexus-bo5lv
 nexus-bocft
 nexus-boz39
 nexus-boz84
+nexus-bpikw
 nexus-bpzt7
 nexus-bq06h
 nexus-bq06h.1
@@ -2783,6 +2784,7 @@ nexus-bw20n
 nexus-bw20n.1
 nexus-bw65
 nexus-bwct4
+nexus-bwlwl
 nexus-bwulw
 nexus-bwulw.1
 nexus-bxcgh
@@ -7540,6 +7542,7 @@ nexus-uxg4u
 nexus-uxg4u.1
 nexus-uxkq5
 nexus-uxkq5.1
+nexus-uxyyt
 nexus-uy35j
 nexus-uy5du
 nexus-uybp6
