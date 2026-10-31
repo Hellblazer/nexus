@@ -11,10 +11,12 @@ fills them. The upgrade ladder (RDR-185) is the standing mechanism for a one-tim
 the fill is a rung: ``nx upgrade`` runs it once the engine is at the pinned tag.
 
 THE RULE (RDR-236, "position labels"). A legacy row takes the chunk row's label only when the label is
-exact: the chash has exactly ONE live manifest row in the tenant, and that row is this one. Not "one
-owner": a document that holds a chash at two positions has one owner and two rows, and the chunk row
-holds one label (RF-16 counted 4976 such groups in 1752 documents). Rows of a chash held by more than
-one row stay legacy; the counts say how many, with in-document repeats apart from cross-document sharing.
+exact: the chash has exactly ONE live manifest row in the tenant, that row is this one, and NO tombstoned
+document holds the chash. Not "one owner": a document that holds a chash at two positions has one owner and
+two rows, and the chunk row holds one label (RF-16 counted 4976 such groups in 1752 documents). Rows of a
+chash held by more than one row stay legacy; the counts say how many, with in-document repeats apart from
+cross-document sharing. A tombstoned holder is a former owner whose label the chunk row may carry: it is
+read through ``chash_positions_with_tombstoned`` and a chash it holds is left legacy (nexus-6pfgb.58).
 
 THREE MORE GUARDS, each a count in the summary.
 
@@ -30,15 +32,19 @@ THREE MORE GUARDS, each a count in the summary.
 * The chunk row's ``title`` (the last writer's) must name this document: its title, its file path or file
   name, with or without the per-chunk suffix the indexers add (``:12-30``, ``:chunk-3``, ``:page-2``); a row
   that carries no title is not contradicted. This catches what the date guard cannot: a co-owner indexed
-  within the skew and then tombstoned, whose row the live ownership read does not count.
+  within the skew and then deleted AND purged, whose manifest rows no ownership read can still name.
 * Just before the write, the batch's manifests are read again. A row that became written, or no longer
-  holds the same chash at that position, is skipped, and so is a chash that has gained a second row.
+  holds the same chash at that position, is skipped, and so is a chash that has gained a second row or
+  a tombstoned holder.
 
-KNOWN GAP, shared with ``meta_backfill``. Ownership is read from LIVE manifests (``chash_positions``,
-which filters tombstoned documents), so a TOMBSTONED co-owner is not counted: the RDR asks for it, and no
-client read on this engine lists a tombstoned document's manifest rows. The ``indexed_at`` and ``title``
-guards stand against a departed co-owner that wrote last; they do not cover one whose chunk row carries no
-title or the same title as this document. Closing the gap is an engine read (nexus-6pfgb.58).
+TOMBSTONED CO-OWNERS (nexus-6pfgb.58). Ownership is read from LIVE manifests, which hide a deleted
+document, so before this read a chash whose only other holder was tombstoned counted as single-row and its
+label could be that holder's. The engine's ``/manifest/chash_positions`` now takes ``include_tombstoned`` and
+lists the manifest rows of tombstoned documents beside the live rows; a chash with such a holder is left
+legacy and counted. An engine that predates the key sends no list, which is "cannot say": the rung is then
+not applicable and converge DEFERS, because filling without the read is the gap this closes. The
+``indexed_at`` and ``title`` guards still stand against a departed owner whose document the engine purged
+(its manifest rows are gone with it, so no read can name it).
 
 SIDE EFFECT OF THE ONLY WRITE ROUTE, AND ITS REPAIR. The fill goes through ``append_manifest_many``, which
 upserts by position and, on a conflict, rewrites only ``chash``, ``collection``, the three labels and
@@ -55,7 +61,8 @@ WHAT IT DOES.
   detect   : converged at once when this tenant's completion is on file (any package version: the rung is a
              one-time transition, and rows that stay legacy by design stay legacy until a forced re-index).
              Otherwise read-only, and the dry run: the full scan with no write. Applicable unless no catalog
-             is available or the engine has no ``chash_positions`` route. Converged when no legacy row is
+             is available, the engine has no ``chash_positions`` route or it cannot list tombstoned holders
+             (nexus-6pfgb.58). Converged when no legacy row is
              fillable; rows that stay legacy (multi-row chash, no label keys, ...) are not pending.
   converge : the same scan, writing each batch of :data:`DOC_BATCH` documents through
              ``append_manifest_many``, one request per collection per ~50 documents and per 300 rows
@@ -124,6 +131,11 @@ class RouteAbsent(RuntimeError):
     """The engine has no ``chash_positions`` route: single-row ownership cannot be told."""
 
 
+class TombstonedHoldersUnreadable(RouteAbsent):
+    """The engine answers ``chash_positions`` but cannot list tombstoned holders (it predates
+    ``include_tombstoned``): a chash's deleted co-owners cannot be counted, so nothing may be filled."""
+
+
 @dataclass
 class Counts:
     """What one scan saw. Every row of a legacy manifest lands in exactly one of the skip buckets, the
@@ -137,6 +149,7 @@ class Counts:
     filled: int = 0
     multi_row_cross_document: int = 0   # the chash has rows in more than one document
     multi_row_in_document: int = 0      # the chash recurs inside this one document
+    tombstoned_co_owner: int = 0        # a deleted (tombstoned) document also holds the chash
     stale_listing: int = 0              # the one row chash_positions names is not this row
     chunk_missing: int = 0              # no live chunk row for the chash
     chunk_without_label_keys: int = 0   # the chunk row carries none of the three keys
@@ -159,7 +172,8 @@ class Counts:
             f"{self.documents} document(s), {self.rows} row(s): {self.written_already} already written, "
             f"{self.legacy} legacy ({self.fillable} fillable, {self.filled} filled; left legacy: "
             f"{self.multi_row_cross_document} shared with another document, {self.multi_row_in_document} "
-            f"repeated inside the document, {self.chunk_without_label_keys} chunk with no label keys, "
+            f"repeated inside the document, {self.tombstoned_co_owner} also held by a deleted document, "
+            f"{self.chunk_without_label_keys} chunk with no label keys, "
             f"{self.orphan_minted} in documents the orphan backfill minted, {self.chunk_missing} chunk missing, {self.chunk_newer_than_document + self.chunk_without_indexed_at + self.chunk_titled_for_another} "
             f"chunk row not attributable to the document, {self.stale_listing + self.raced} changed "
             f"meanwhile, {self.write_failed} write failed, {self.restore_failed} indexed_at not restored)"
@@ -269,7 +283,7 @@ def _row_collection(row: Any, doc: Any) -> str:
 
 class ManifestSectionLabelsRung:
     """The rung. Collaborators are injected for tests: *reader_factory* (``all_documents``,
-    ``get_manifests``, ``chash_positions``, ``close``; ``None`` when no catalog is available),
+    ``get_manifests``, ``chash_positions_with_tombstoned``, ``close``; ``None`` when no catalog is available),
     *writer_factory* (``append_manifest_many``, ``close``) and *t3_factory* (``get_collection``)."""
 
     name = RUNG_NAME
@@ -333,7 +347,7 @@ class ManifestSectionLabelsRung:
                     legacy.append((doc, row))
         if not legacy:
             return
-        owners = self._owner_rows(reader, sorted({r.chash for _d, r in legacy}))
+        owners, deleted = self._owner_rows(reader, sorted({r.chash for _d, r in legacy}))
 
         single: list[tuple[Any, Any]] = []
         for doc, row in legacy:
@@ -344,7 +358,10 @@ class ManifestSectionLabelsRung:
                 else:
                     counts.multi_row_cross_document += 1
             elif len(held) == 1 and (str(held[0]["doc_id"]), int(held[0]["position"])) == (str(doc.tumbler), int(row.position)):
-                single.append((doc, row))
+                if deleted.get(row.chash):
+                    counts.tombstoned_co_owner += 1  # a deleted document held it too: its label may be the chunk row's
+                else:
+                    single.append((doc, row))
             else:
                 counts.stale_listing += 1
 
@@ -384,14 +401,26 @@ class ManifestSectionLabelsRung:
         self._write(reader, writer, plan, counts)
 
     @staticmethod
-    def _owner_rows(reader: Any, chashes: list[str]) -> dict[str, list[dict]]:
-        rows = reader.chash_positions(chashes) if hasattr(reader, "chash_positions") else None
-        if rows is None:
-            raise RouteAbsent("the engine has no /manifest/chash_positions route")
-        out: dict[str, list[dict]] = {}
+    def _owner_rows(reader: Any, chashes: list[str]) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+        """``(live, deleted)``: the live manifest rows holding each chash, and the rows of tombstoned documents
+        holding it. Raises :class:`RouteAbsent` when the engine has no route, :class:`TombstonedHoldersUnreadable`
+        when it cannot list the tombstoned holders: neither is 'nobody holds it'."""
+        read = getattr(reader, "chash_positions_with_tombstoned", None)
+        got = read(chashes) if read is not None else None
+        if got is None:
+            raise RouteAbsent("the engine has no /manifest/chash_positions route (with tombstoned holders)")
+        rows, tombstoned = got
+        if tombstoned is None:
+            raise TombstonedHoldersUnreadable(
+                "the engine's /manifest/chash_positions cannot list tombstoned holders (no include_tombstoned): "
+                "a chash's deleted co-owners cannot be counted, so no label is copied")
+        live: dict[str, list[dict]] = {}
         for row in rows:
-            out.setdefault(row["chash"], []).append(row)
-        return out
+            live.setdefault(row["chash"], []).append(row)
+        deleted: dict[str, list[dict]] = {}
+        for row in tombstoned:
+            deleted.setdefault(row["chash"], []).append(row)
+        return live, deleted
 
     def _write(self, reader: Any, writer: Any, plan: list[tuple[Any, Any, str, dict[str, Any]]], counts: Counts) -> None:
         """Re-read the batch just before writing, drop what changed, and append the rest per collection."""
@@ -399,14 +428,14 @@ class ManifestSectionLabelsRung:
         stamps = {str(d.tumbler): getattr(d, "indexed_at", "") for d, _r, _c, _l in plan}  # as read at scan
         fresh = reader.get_manifests(docs) or {}
         fresh_rows = {t: {r.position: r for r in rows} for t, rows in fresh.items()}  # one index for the batch
-        again = self._owner_rows(reader, sorted({r.chash for _d, r, _c, _l in plan}))
+        again, again_deleted = self._owner_rows(reader, sorted({r.chash for _d, r, _c, _l in plan}))
         by_collection: dict[str, dict[str, list[dict]]] = {}
         for doc, row, collection, labels in plan:
             tumbler = str(doc.tumbler)
             now = fresh_rows.get(tumbler, {}).get(row.position)
             if (
                 now is None or now.chash != row.chash or getattr(now, "labels_written", False)
-                or len(again.get(row.chash, [])) != 1
+                or len(again.get(row.chash, [])) != 1 or again_deleted.get(row.chash)
             ):
                 counts.raced += 1
                 continue

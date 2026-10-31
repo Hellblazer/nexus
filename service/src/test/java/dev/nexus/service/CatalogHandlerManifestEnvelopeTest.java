@@ -267,6 +267,72 @@ class CatalogHandlerManifestEnvelopeTest {
         assertThat(first.get("chunk_count")).isEqualTo(first.get("doc_id").equals(t1) ? 2 : 1);
     }
 
+    // ── nexus-6pfgb.58: include_tombstoned ──────────────────────────────────────
+
+    private void deleteDoc(String tumbler) throws Exception {
+        var resp = post("/v1/catalog/delete", mapper.writeValueAsString(Map.of("tumbler", tumbler)));
+        assertThat(resp.statusCode()).as("delete: " + resp.body()).isEqualTo(200);
+        assertThat(mapper.readValue(resp.body(), MAP_T).get("deleted")).isEqualTo(1);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void chashPositions_includeTombstoned_namesTheTombstonedHolders_andLeavesRowsAndCountAlone() throws Exception {
+        var coll = "knowledge__t58-owner__v1";
+        var live = registerDoc("t58.owner", "t58 live", "file:///t58/live.md");
+        var gone = registerDoc("t58.owner", "t58 gone", "file:///t58/gone.md");
+        var alone = registerDoc("t58.owner", "t58 alone", "file:///t58/alone.md");
+        String shared = "5a".repeat(32), onlyGone = "5b".repeat(32), onlyLive = "5c".repeat(32), unrelated = "5d".repeat(32);
+        writeManifestRows(live, coll, List.of(shared, onlyLive));
+        writeManifestRows(gone, coll, List.of(onlyGone, shared));
+        writeManifestRows(alone, coll, List.of(unrelated));
+        deleteDoc(gone);
+
+        var chashes = List.of(shared, onlyGone, onlyLive, unrelated);
+        var plain = mapper.readValue(post("/v1/catalog/manifest/chash_positions",
+            mapper.writeValueAsString(Map.of("chashes", chashes))).body(), MAP_T);
+        var flagged = mapper.readValue(post("/v1/catalog/manifest/chash_positions",
+            mapper.writeValueAsString(Map.of("chashes", chashes, "include_tombstoned", true))).body(), MAP_T);
+
+        // rows and count are what they were: the tombstoned document is still invisible there.
+        assertThat(flagged.get("rows")).isEqualTo(plain.get("rows"));
+        assertThat(flagged.get("count")).isEqualTo(plain.get("count"));
+        var liveRows = (List<Map<String, Object>>) plain.get("rows");
+        assertThat(liveRows).extracting(r -> r.get("chash") + "@" + r.get("doc_id"))
+            .containsExactlyInAnyOrder(shared + "@" + live, onlyLive + "@" + live, unrelated + "@" + alone);
+
+        var tombstoned = (List<Map<String, Object>>) flagged.get("tombstoned");
+        assertThat(flagged.get("tombstoned_count")).isEqualTo(tombstoned.size());
+        assertThat(tombstoned).extracting(r -> r.get("chash") + "@" + r.get("doc_id"))
+            .as("the shared chash's deleted holder and the deleted document's own chash; no live document")
+            .containsExactlyInAnyOrder(shared + "@" + gone, onlyGone + "@" + gone);
+        var sharedRow = tombstoned.stream().filter(r -> shared.equals(r.get("chash"))).findFirst().orElseThrow();
+        assertThat(sharedRow).containsEntry("position", 1).containsEntry("collection", coll);
+    }
+
+    @Test
+    void chashPositions_withoutTheFlag_orWithItNotTrue_isTheReplyItWas_noTombstonedKeys() throws Exception {
+        var coll = "knowledge__t58b-owner__v1";
+        var gone = registerDoc("t58b.owner", "t58b gone", "file:///t58b/gone.md");
+        String held = "6a".repeat(32);
+        writeManifestRows(gone, coll, List.of(held));
+        deleteDoc(gone);
+
+        for (Map<String, Object> request : List.<Map<String, Object>>of(
+                Map.of("chashes", List.of(held)),
+                Map.of("chashes", List.of(held), "include_tombstoned", false),
+                Map.of("chashes", List.of(held), "include_tombstoned", "true"))) {
+            var body = mapper.readValue(post("/v1/catalog/manifest/chash_positions",
+                mapper.writeValueAsString(request)).body(), MAP_T);
+            assertThat(body.keySet()).as("reply keys for %s", request).containsExactlyInAnyOrder("rows", "count");
+        }
+        // The flagged reply for a chash no tombstoned document holds carries an empty list, not a missing key.
+        var none = mapper.readValue(post("/v1/catalog/manifest/chash_positions",
+            mapper.writeValueAsString(Map.of("chashes", List.of("6b".repeat(32)), "include_tombstoned", true))).body(), MAP_T);
+        assertThat(none).containsEntry("tombstoned_count", 0);
+        assertThat((List<?>) none.get("tombstoned")).isEmpty();
+    }
+
     @Test
     void chashPositions_overBatchCap_returns400() throws Exception {
         var resp = post("/v1/catalog/manifest/chash_positions",

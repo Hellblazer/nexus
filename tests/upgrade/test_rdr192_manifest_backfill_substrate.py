@@ -159,11 +159,16 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
     repeat = doc("repeat", [(c_repeat, 0), (c_repeat, 1)])
     written = doc("written", [(c_written, 0)], section_title="", section_type="", page_number=None)
     bare = doc("bare", [(c_bare, 0)])
+    # nexus-6pfgb.58: a chash a LIVE document holds alone and a deleted document also held. The live read sees one
+    # row, so only the tombstoned-holder read keeps its label from being copied.
+    c_ghost = seed_chunk(tenant, coll, "ghost 1nrcu", labelled)
+    ghost_live, ghost_gone = doc("ghost-live", [(c_ghost, 0)]), doc("ghost-gone", [(c_ghost, 0)])
+    cat.delete_document(ghost_gone)
 
-    before = {t: cat.get_manifest(t) for t in (single, shared_a, shared_b, repeat, written, bare)}
+    before = {t: cat.get_manifest(t) for t in (single, shared_a, shared_b, repeat, written, bare, ghost_live)}
     assert [r.labels_written for r in before[written]] == [True], "control: an empty-labelled row is written"
-    assert all(not r.labels_written for t in (single, shared_a, shared_b, repeat, bare) for r in before[t])
-    legacy_rows = legacy_note_rows + 1 + 2 + 2 + 1
+    assert all(not r.labels_written for t in (single, shared_a, shared_b, repeat, bare, ghost_live) for r in before[t])
+    legacy_rows = legacy_note_rows + 1 + 2 + 2 + 1 + 1
 
     # The walk above recorded this rung in the tenant's ledger, so a default rung answers "converged" at once
     # (the short-circuit, pinned at the end). The rung under test is the one with no completion on file.
@@ -185,7 +190,7 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
     assert (filled.chash, filled.position, filled.chunk_index, filled.line_start) == (
         before[single][0].chash, 0, before[single][0].chunk_index, before[single][0].line_start), \
         "only the chash, labels and flag are written; the rest of the row is the engine's own"
-    for t in (shared_a, shared_b, repeat, bare):
+    for t in (shared_a, shared_b, repeat, bare, ghost_live):
         assert [r.labels_written for r in cat.get_manifest(t)] == [False] * len(before[t]), t
     assert [(r.section_title, r.section_type, r.labels_written) for r in cat.get_manifest(written)] == [("", "", True)]
     assert {t: cat.resolve(t).indexed_at for t in stamp_before} == stamp_before, (
