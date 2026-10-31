@@ -697,7 +697,7 @@ def test_a_hard_killed_streaming_upload_is_finished_by_one_rerun_without_extract
     path = _write_pdf(tmp_path, marker)
     every = [_sha(x) for x in lines]
 
-    def _row_left_behind_not_running(db, content_hash, first_exc):
+    def _row_left_behind_not_running(db, content_hash, first_exc, *, timeout=None):
         db.mark_failed(content_hash, error="killed")   # no clear_orphan_wal: the buffer survives
         return False
 
@@ -911,7 +911,7 @@ def test_a_dry_run_never_touches_the_row_of_a_real_run_of_the_same_bytes(tmp_pat
 
         killed.setattr(di, "_fence_fail", lambda *a, **k: None)
         killed.setattr(ps, "_mark_failed_and_reset_wal",
-                       lambda db, content_hash, first_exc: (db.mark_failed(content_hash, error="killed"), False)[1])
+                       lambda db, content_hash, first_exc, *, timeout=None: (db.mark_failed(content_hash, error="killed"), False)[1])
         requests_per_batch = -(-128 // min(_cap(), 300))
         with _traffic(die_after=2 * requests_per_batch - 1):
             with pytest.raises(ClientDied):
