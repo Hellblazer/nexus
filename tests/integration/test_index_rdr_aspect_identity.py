@@ -4,7 +4,7 @@
 
 A document outside any repo registers in the catalog by its ABSOLUTE path (a curator owner,
 nexus-njn1a), but the index-time post-store hook was handed the path RELATIVE to the directory
-(``docs/rdr/rdr-001-alpha.md``). The aspect queue row therefore keyed on a path the catalog does not
+(``docs/rdr/rdr-001-alpha.md``). The aspect queue task therefore keyed on a path the catalog does not
 hold: ``aspect_source_path_uncanonical`` at index time, ``aspect_uri_for_relative_without_root`` in the
 worker, and a second aspect row beside the one ``nx enrich aspects`` writes under the absolute path.
 
@@ -13,6 +13,7 @@ row the hook wrote is what is read back.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -24,6 +25,14 @@ from nexus.db.t2 import T2Database
 from tests._catalog_fixture_ops import documents_by_file_path
 
 pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
+
+
+def _queued_source_paths(db: T2Database) -> list[str]:
+    """The source paths the producer queued, read from the ``aspects`` tuple
+    queue the default producer writes (RDR-235 Activation Step 1, nexus-lnwn1):
+    one task per document, its identity body carrying ``source_path``."""
+    tasks = db.tuples.rd("aspects", {"queue": "aspects"}, n=300)
+    return [json.loads(t.body)["source_path"] for t in tasks]
 
 
 def _project(root: Path) -> list[Path]:
@@ -58,9 +67,9 @@ def test_index_rdr_outside_a_git_repo_queues_the_catalog_identity(
     assert all(Path(i).is_absolute() for i in identities), identities
 
     with T2Database(tmp_path / "unused.db") as db:
-        queued = [r.source_path for r in db.aspect_queue.list_pending()]
+        queued = _queued_source_paths(db)
     assert sorted(queued) == sorted(identities), (
-        "one queue row per document, keyed on the path the catalog holds"
+        "one queue task per document, keyed on the path the catalog holds"
     )
 
 
@@ -79,5 +88,5 @@ def test_index_rdr_inside_a_git_repo_still_queues_the_repo_relative_identity(
     assert res.exit_code == 0, res.output
 
     with T2Database(tmp_path / "unused.db") as db:
-        queued = sorted(r.source_path for r in db.aspect_queue.list_pending())
+        queued = sorted(_queued_source_paths(db))
     assert queued == sorted(f"docs/rdr/{f.name}" for f in files)
