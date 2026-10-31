@@ -2,7 +2,8 @@
 title: "CI Status From GitHub Webhooks to the Tuple Space"
 id: RDR-220
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-10-31
 priority: medium
 author: Sam
 reviewed-by: self
