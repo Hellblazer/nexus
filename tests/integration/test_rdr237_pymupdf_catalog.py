@@ -189,10 +189,10 @@ def test_a_pymupdf_rerun_over_a_tripped_mineru_run_starts_clean_and_records_pymu
         written.append(page_index)
         return real_write_page(self, content_hash, page_index, page_text, metadata=metadata)
 
-    def _slow_clear(self, content_hash):
+    def _slow_clear(self, content_hash, *, timeout=None):
         time.sleep(1.5)  # long enough for a chunker started beside the wipe to read the old pages
         wipes.append(time.monotonic())
-        return real_clear(self, content_hash)
+        return real_clear(self, content_hash, timeout=timeout)
 
     with monkeypatch.context() as rerun:
         bound_the_polling(rerun)
