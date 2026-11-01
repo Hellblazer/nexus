@@ -533,12 +533,15 @@ def main() -> int:
                     f.unlink(missing_ok=True)
                 for f in Path("/tmp").glob(f"nexus-continuation-restart-rs_*-{sid}-*"):
                     f.unlink(missing_ok=True)
-            # The killed sessions' MCP servers and hooks can still write logs for a moment.
-            for _ in range(5):
-                shutil.rmtree(home, ignore_errors=True)
-                if not home.exists():
+            # The killed sessions' MCP servers and hooks outlive the tmux server for a while and
+            # keep writing logs under the scratch HOME: wait until no process names it (60 s at most).
+            for _ in range(30):
+                if subprocess.run(["pgrep", "-f", str(home)], capture_output=True).returncode != 0:
                     break
                 time.sleep(2)
+            shutil.rmtree(home, ignore_errors=True)
+            if home.exists():
+                print(f"[sandbox] could not remove {home}; it holds no credentials (deleted above)", flush=True)
         else:
             print(f"[sandbox] kept {home} (transcripts, restart log, handoffs under /tmp)"
                   + (f"; tmux server {sb.sock} left running: tmux -L {sb.sock} kill-server when done" if a.keep else ""),
