@@ -208,6 +208,8 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         # rule); used only by scan_orphaned_pipelines.
         self._clock = lambda: datetime.now(UTC)
         self._buffer_lock = threading.Lock()
+        # One flush at a time (see flush). Taken before _buffer_lock, never inside it.
+        self._flush_lock = threading.Lock()
         self._page_buffer: dict[str, list[dict[str, Any]]] = {}
         self._chunk_buffer: dict[str, list[dict[str, Any]]] = {}
         self._progress_buffer: dict[str, dict[str, int]] = {}
@@ -574,27 +576,41 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         transient engine error loses nothing — the next flush retries; the
         engine's upserts (REPLACE pages / IGNORE chunks) make the retry
         idempotent. *timeout*: see :meth:`_post_fenced`.
+
+        Flushes are serialised (nexus-4vx0a flake, CI run 41298836805). A flush pops the buffer
+        before it posts, so a second, concurrent flush found it empty and returned at once; the
+        interrupt release (``mark_failed`` from ``_release_interrupted_run``) then sent ``/fail``
+        and the process died while a stage thread's ``/pages`` POST was still in flight, and the
+        pages the release promises to keep were lost. A flush with *timeout* waits at most that
+        long for the in-flight one and raises ``TimeoutError`` past it (``mark_failed`` logs that
+        and still sends ``/fail``), so an unreachable engine still cannot hold an interrupted
+        process open (nexus-euczk).
         """
-        with self._buffer_lock:
-            pages = self._page_buffer.pop(content_hash, [])
-            chunks = self._chunk_buffer.pop(content_hash, [])
-            progress = self._progress_buffer.pop(content_hash, {})
-        ref = self._ref(content_hash)
+        if not self._flush_lock.acquire(timeout=-1 if timeout is None else timeout):
+            raise TimeoutError(f"flush of {content_hash} waited {timeout}s for an in-flight flush")
         try:
-            if pages:
-                self._post_fenced("/v1/pipeline/pages", {**ref, "pages": pages}, timeout=timeout)
-            if chunks:
-                self._post_fenced("/v1/pipeline/chunks", {**ref, "chunks": chunks}, timeout=timeout)
-            if progress:
-                self._post_fenced("/v1/pipeline/progress", {**ref, "fields": progress}, timeout=timeout)
-        except BaseException:
             with self._buffer_lock:
-                self._page_buffer[content_hash] = pages + self._page_buffer.get(content_hash, [])
-                self._chunk_buffer[content_hash] = chunks + self._chunk_buffer.get(content_hash, [])
-                merged = dict(progress)
-                merged.update(self._progress_buffer.get(content_hash, {}))
-                self._progress_buffer[content_hash] = merged
-            raise
+                pages = self._page_buffer.pop(content_hash, [])
+                chunks = self._chunk_buffer.pop(content_hash, [])
+                progress = self._progress_buffer.pop(content_hash, {})
+            ref = self._ref(content_hash)
+            try:
+                if pages:
+                    self._post_fenced("/v1/pipeline/pages", {**ref, "pages": pages}, timeout=timeout)
+                if chunks:
+                    self._post_fenced("/v1/pipeline/chunks", {**ref, "chunks": chunks}, timeout=timeout)
+                if progress:
+                    self._post_fenced("/v1/pipeline/progress", {**ref, "fields": progress}, timeout=timeout)
+            except BaseException:
+                with self._buffer_lock:
+                    self._page_buffer[content_hash] = pages + self._page_buffer.get(content_hash, [])
+                    self._chunk_buffer[content_hash] = chunks + self._chunk_buffer.get(content_hash, [])
+                    merged = dict(progress)
+                    merged.update(self._progress_buffer.get(content_hash, {}))
+                    self._progress_buffer[content_hash] = merged
+                raise
+        finally:
+            self._flush_lock.release()
 
     def flush_all(self) -> None:
         with self._buffer_lock:

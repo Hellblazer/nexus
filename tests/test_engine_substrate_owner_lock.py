@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
+from nexus.daemon.service_registry import process_command
 from tests import _engine_substrate as sub
 from tests._module_seam import setattr_in
 from tests._engine_substrate import (
@@ -93,6 +94,20 @@ def _holding(lock: Path, *, wrap: tuple[str, ...] = ()):
 def _cannot_lock(path: Path) -> bool:
     """True while some other process holds *path*'s flock."""
     return subprocess.run([sys.executable, "-c", _TRY_LOCK, str(path)], check=False).returncode == 1
+
+
+def _wait_for_cmdline(proc: subprocess.Popen, budget_s: float = 10.0) -> None:
+    """Return once *proc*'s command line is readable, as the sweep will read it.
+
+    ``Popen`` returns when the exec closes the child's close-on-exec pipe, which the kernel does
+    before the new image's argv is in place: for that moment ``/proc/<pid>/cmdline`` reads empty,
+    and ``_identify_leg`` reads an empty command line as a dead leg (no PID-reuse warning, the
+    cluster reaped). A sweep within a millisecond of ``Popen`` on a loaded runner hits it."""
+    deadline = time.monotonic() + budget_s
+    while not process_command(proc.pid):
+        assert proc.poll() is None, f"the leg exited at startup (rc={proc.returncode})"
+        assert time.monotonic() < deadline, f"pid {proc.pid}'s command line never became readable"
+        time.sleep(0.01)
 
 
 # ── The sidecar cluster ─────────────────────────────────────────────────────────
@@ -167,6 +182,7 @@ class TestSidecarClusterOwnerLock:
         """The lock replaces only the owner-liveness test; the PID-reuse guard on the legs stays."""
         live_leg = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
+            _wait_for_cmdline(live_leg)
             d = _cluster(tmp_path, owner_pid=os.getpid())
             (d / _SIDECAR_FILENAME).write_text(json.dumps({
                 "owner_pytest_pid": os.getpid(),
