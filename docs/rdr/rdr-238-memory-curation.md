@@ -1,5 +1,5 @@
 ---
-title: "Memory Curation: Supersession, a Bounded Always-Loaded Index, and Procedures That Run Instead of Being Recalled"
+title: "Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves"
 id: RDR-238
 type: Feature
 status: draft
@@ -12,7 +12,7 @@ related_issues: [nexus-qo7ie]
 related_rdrs: [RDR-057, RDR-207, RDR-209, RDR-074, RDR-192]
 ---
 
-# RDR-238: Memory Curation: Supersession, a Bounded Always-Loaded Index, and Procedures That Run Instead of Being Recalled
+# RDR-238: Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
@@ -22,7 +22,9 @@ related_rdrs: [RDR-057, RDR-207, RDR-209, RDR-074, RDR-192]
 `nexus/memory-survey-papers-agent-memory-2026-10-31` and
 `nexus/memory-survey-papers-context-load-2026-10-31`). Sam approved the
 direction the same day: one RDR for supersession, the index and promotion to
-skills; gate records go to RDR-209 as an amendment.
+skills; gate records go to RDR-209 as an amendment. Sam's review the same day
+changed supersession to deletion and moved promotion out (see Revision
+History).
 
 ## Problem Statement
 
@@ -31,10 +33,9 @@ T3 permanent knowledge, and Claude Code's file memory
 (`~/.claude/projects/<repo>/memory/`, one rule per file, indexed by
 `MEMORY.md`). We have machinery for writing memory and, since RDR-207, for
 expiring it. We have none for curating it: saying that one entry replaces
-another, deciding what is worth loading into every context, or turning a rule
-that has grown into a procedure into the thing that holds procedures, a skill.
-Sam's phrase for the job is garbage collection. The collector has no roots,
-no marks and no schedule.
+another, and deciding what is worth loading into every context. Sam's phrase
+for the job is garbage collection. The collector has no roots, no marks and no
+schedule.
 
 ### Enumerated gaps to close
 
@@ -48,8 +49,9 @@ until someone deletes it by hand, and T2 has no deletion habit at all
 this matters: an obsolete version of a fact in context did more harm than an
 unrelated one, taking Qwen2.5 from 100% to 44.6%, and every harmful flip in
 its final intervention was a stale selection. A TTL ages an entry; it never
-says what replaced it. The fix delivers a supersession mark on T2 rows and on
-memory files, and reads that skip superseded entries by default.
+says what replaced it. The fix delivers a way for a write to name the entry it
+replaces, and the replaced entry is deleted, on T2 rows and on memory files.
+The new entry keeps one line of lineage naming what it replaced.
 
 #### Gap 2: The always-loaded index has no budget and no admission rule
 
@@ -65,23 +67,7 @@ instructions, and between the two `CLAUDE.md` files and the index we carry
 well over 100 rules. The fix delivers a token budget for the index, a stated
 admission rule, and an on-demand tier for everything else.
 
-#### Gap 3: Procedures are stored as memory
-
-The largest memory files are procedures, not rules:
-`feedback_test_runs_before_push.md` (32 KB), `feedback_release_and_develop_ci.md`
-(27 KB), `feedback_hand_kept_enumerations.md` (22 KB),
-`feedback_destructive_action_guards.md` (14 KB). They are read when someone
-remembers to read them, and each index line has to summarise a whole
-procedure. Skills are where this project keeps procedures: they load on
-demand from a one-line listing. "Lifelong Context Adaptation through
-Bidirectional Memory–Skill Learning" is the one paper that tests promotion:
-memory and skills together reached 63.2% on ALFWorld against 50.5% for skills
-alone, so the source episodes stay as evidence, and admission is gated (a
-skill passes 10 of 13 audit checks). No nexus path promotes a memory to a
-skill. The fix delivers a promotion criterion, a target for each kind of
-procedure, and a loss check before the source shrinks.
-
-#### Gap 4: Curation depends on the writer remembering to do it
+#### Gap 3: Curation depends on the writer remembering to do it
 
 Every rule above is a habit today, and habits drift: the index grew one line
 per memory, files were split from a bundle and never indexed (a few dozen
@@ -101,58 +87,23 @@ its engine template and 40,785 rows stayed (nexus-onjvw). Sam: "we want to be
 sure we're paying attention to things and ensuring we're not generating a lot
 of heat and waste." The fix also delivers a last-use signal for every store of
 state this project owns, read on a schedule: the curation report's cold-state
-section (Technical Design 6).
+section (Technical Design 4).
 
-#### Gap 5: Procedures are recalled or improvised instead of run
-
-Gap 3 moves a procedure out of memory into a skill, but a skill is still text
-a model reads and then carries out from its own reading. Many of the
-procedures in memory have one right answer, and for those the safe form is a
-command that does the work. Evidence from one session (2026-10-31, the session
-that wrote this RDR):
-
-- Six transcript scans were written by hand as throwaway heredocs (subagent
-  model mix and cost, plugin and tool use, memory-file reads, a rule-violation
-  baseline, the auto-memory census by Claude Code version, gate-record title
-  mapping). This RDR's Phase 2 and its curation report need the same scans
-  again. `scripts/skill_routing_census.py` (nexus-dg7i6.1) is one such
-  instrument already, kept as a script for one question.
-- `nx rdr preamble rdr-research -- add` takes the finding as bare shell
-  arguments. A finding with semicolons was split by the shell into commands,
-  one of which ran as `git stash 8 sessions...` (git refused it), and three
-  records were truncated and had to be rewritten. A memory file names this
-  exact hazard (`feedback_rdr_research_add_text_is_shell_parsed.md`); the rule
-  was in memory and did not prevent it.
-- Gate-record tags (nexus-qo7ie.1) are free text inside a `memory_put` call,
-  so an agent can misspell or omit them, and the RDR-209 rollup inherits
-  whatever was typed.
-- The largest memory file, `feedback_test_runs_before_push.md` (32 KB), is a
-  decision procedure for which tests to run before a push. Two selectors
-  already compute part of it (`scripts/select_affected_integration_tests.py`,
-  `scripts/select_docs_reader_tests.py`); the rest is recalled.
-
-The harness survey points the same way: in its ablation, tools (+3.3 points)
-and middleware (+2.2) carried the gain, and the system prompt alone made
-results worse (Harness Engineering, p.66). The fix delivers a rule for when a
-procedure becomes a command, a rule for which front door a command gets, and
-the four commands this project needs first.
-
-The front door matters because nexus already has two. Over the 30 days to
-2026-10-31, sessions made about 21,000 nexus MCP tool calls (`memory_get`
-9,394, `memory_put` 5,582, `memory_search` 2,108, `mailbox_send` 1,680) and
-about 1,200 `nx` CLI calls (`nx rdr preamble` 333, `nx memory get` 132,
-`nx memory list` 96, then the catalog verbs). Agents use MCP; the CLI is
-mostly the RDR preamble and hand reads. Neither door is chosen by rule
-today.
+Procedures stored as memory, and procedures recalled or improvised instead of
+run, moved to their own RDR on 2026-10-31 (nexus-qo7ie.2): they become
+sandboxed Lua scripts on a Lua runtime (nexus-mdbds.1), not new Python verbs
+or MCP tools. The removed text stays in the history of branch
+`feature/nexus-qo7ie-memory-curation-rdr`, in the draft as filed before this
+revision.
 
 ## Relationship to Prior RDRs
 
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
-| RDR-057 Progressive Formalization Across Memory Tiers | Origin of the tier model | Its "graduation" idea is the T2 to T3 case. This RDR is the curation case beside it: replacement, admission to context, and promotion out of memory into skills. |
-| RDR-207 Summarization at the T2 Expiry Boundary | Reused | It owns what expiry may destroy (quarantine, rollup, reap only rolled-up rows). A superseded T2 row is handed to that machinery by giving it a TTL; this RDR adds no deletion path of its own. |
+| RDR-057 Progressive Formalization Across Memory Tiers | Origin of the tier model | Its "graduation" idea is the T2 to T3 case. This RDR is the curation case beside it: replacement and admission to context. |
+| RDR-207 Summarization at the T2 Expiry Boundary | Beside, no shared path | It owns what expiry may destroy (quarantine, rollup, reap only rolled-up rows). Replacement is not expiry: a writer names a row and the engine deletes it in the same transaction. Phase 1 Step 1 confirms the delete takes the path an explicit `memory_delete` takes. |
 | RDR-209 Heat-Based Graduation Between Memory Tiers | Sibling, draft | It owns heat and graduation, and takes the gate-record rollup as an amendment (same date). Its Phase 0b, a read counter that means "a caller read this row", is the signal this RDR's index audit would use for T2; until it lands, the audit counts reads from transcripts. |
-| RDR-074 Permanence Mode | Deferred, compatible | A permanent row can still be superseded. Supersession is a statement about currency, not lifetime. |
+| RDR-074 Permanence Mode | Deferred, compatible | Permanence guards a row against expiry. A writer who names a permanent row as the one it replaces is an explicit act, not expiry. |
 | RDR-192 Superseded Note Chunks Outlive Manifest-Less Is-Live | Different layer | It concerns T3 chunks a re-put replaced. This RDR concerns whole T2 rows and memory files a writer replaced. No shared code. |
 
 Searched the RDR corpus for: rollup, quarantine, expiry, consolidation,
@@ -186,10 +137,6 @@ live T2 listing:
   index. Sessions in sibling worktrees share the primary repo's memory
   directory (no `nexus-wt` project directory has its own, checked
   2026-10-31).
-- Skills for this repo live in two places: conexus plugin skills
-  (`conexus/skills/`, shipped to every conexus user) and repo-local skills
-  (`.claude/skills/`: `release`, `engine-release`, `site-page`,
-  `test-authoring`).
 
 ## Research Findings
 
@@ -247,29 +194,28 @@ here are the ones each pass found on a named page or table.
   the memory directory unprompted. **Resolved 2026-10-31:** the limit is 200
   lines or 25 KB; topic files load on demand; subagents get the index at
   2.1.316 although the docs say they should not (research 1 and 2).
-- **A2:** A replacement link (one column) is enough for T2. Superseded rows
-  are a small share and nobody needs "what was true on date D" queries.
-  Verification: a census of rows a reader would mark superseded. If
-  as-of-date queries turn out to matter, the bitemporal alternative comes
-  back.
+- **A2:** Deleting the replaced row, and keeping only its name on the new row,
+  loses nothing anyone needs. Replaced rows are a small share (research 3) and
+  nobody needs "what was true on date D" queries, or the old row's content,
+  once the new row exists. Verification: a census of rows a reader would mark
+  replaced. If as-of-date queries turn out to matter, the bitemporal
+  alternative comes back.
 - **A3:** Rules moved to the on-demand tier keep their compliance.
   Verification: Phase 2's before-and-after sample.
-- **A4:** The largest memory files can be turned into skills without losing
-  a rule. Verification: Phase 3's loss check on each promotion.
 
 ## Proposed Solution
 
 ### Approach
 
-Mark, then bound, then promote, then make the three run without anyone
+Delete what is replaced, bound the index, then make both run without anyone
 remembering them.
 
-**Supersession (Gap 1).** A T2 write may name the row it replaces. The
-engine records the link on the old row in the same transaction, and reads
-skip superseded rows unless asked. A superseded row gets a TTL, so RDR-207's
-quarantine and rollup retire it on the existing path. Memory files get the
-same idea in frontmatter: the new file names the files it replaces, and the
-old file is deleted or reduced to a pointer.
+**Supersession by deletion (Gap 1).** A T2 write may name the row it
+replaces. In the same transaction the engine deletes the old row and writes
+the new one with one line of lineage, `replaces: <old title>`. Memory files do
+the same: the new file names what it replaces in frontmatter, and the old file
+is deleted. Lineage is that one line and nothing else; the replaced content is
+gone.
 
 **A bounded index (Gap 2).** `MEMORY.md` keeps an **always** tier under a
 token budget (proposed: 1.5K tokens, about 40 lines). A rule enters it only if
@@ -278,105 +224,44 @@ it binds on most turns of most sessions and is not already stated in a
 **on-demand** index file in the same directory, which `MEMORY.md` names in one
 line so a session knows where to look.
 
-**Promotion, by what the memory holds (Gaps 3 and 5).** A memory file is a
-promotion candidate when its "How to apply" is a procedure (ordered steps, or
-more than about 8 KB) or a bright line. Its target depends on what it holds:
-
-| The memory holds | Target | Why | Example |
-| --- | --- | --- | --- |
-| A procedure that needs judgment | Skill | Loads on demand; the model applies it | release checklist, review gate |
-| A fixed sequence with a right answer | Command (an `nx` verb or a `scripts/` tool) | Runs the same way every time; nothing to misremember | what to run before a push |
-| A bright line that must always hold | Hook | Claude Code's docs: memory is context, a hook is enforcement | no `git stash`, no full-disk `find` |
-
-A nexus-repo procedure becomes a repo-local skill or command; a practice every
-conexus user should follow ships in the plugin; Sam's personal rules stay as
-memory. The target cites its source files, and the source shrinks to the rule
-and its why, plus a pointer to the skill, command or hook.
-
-**The first four commands (Gap 5).** In order of payoff:
-
-1. `nx transcripts`: named, read-only queries over Claude Code session
-   transcripts. It absorbs `scripts/skill_routing_census.py` and the six scans
-   above, and is the measurement layer for Phase 2, the curation report and
-   RDR-209's heat work until its read counter lands.
-2. `nx gate record`: writes a gate record from structured fields and derives
-   its title and tags, so no agent types a tag.
-3. `nx preflight`: reads the diff, names its change class, and runs the right
-   checks, composing the existing selectors.
-4. Text from stdin or a file for every verb that stores prose (`nx rdr
-   preamble rdr-research -- add`, `nx memory put`, and the bead text the
-   skills write through `bd`), so prose never passes through shell parsing.
-
-**One implementation, two front doors (Gap 5).** Every capability is one
-Python function. The MCP tool and the CLI verb are thin wrappers over it, and
-which wrappers exist follows a rule:
-
-| Capability | Front door | Why |
-| --- | --- | --- |
-| Hot, agent-called, structured input (memory, search, store, scratch, mailbox, tuples) | MCP, with a CLI twin | Agents call it thousands of times; it must work where there is no shell |
-| Agent-written prose (gate records, research findings) | MCP first, CLI twin with stdin | MCP arguments are structured JSON, so no shell parsing |
-| Human, CI and admin work (doctor, upgrade, index, preflight, transcripts) | CLI only | It runs in a shell anyway; an MCP schema would be dead weight |
-| An MCP tool nobody calls | Dropped from MCP | Even deferred, it costs its name in every context and its upkeep |
-
-The reasons behind the rule, as measured or documented:
-
-- **Reach.** A verb needs a shell and an installed `nx`. Claude Desktop chat,
-  claude.ai on the web, Cowork and mobile have no shell, so MCP is the only
-  door there.
-- **Input safety.** Gap 5's shell split happened on the CLI path; the same
-  text through `memory_put` arrives byte for byte.
-- **Enforcement.** A hook matches an MCP tool by its exact name; on Bash it
-  parses command strings, which is where false refusals come from (the
-  subagent git guard denied read-only `git merge-base` lines in four of five
-  Haiku runs on 2026-10-31, and the primary-checkout guard refused two
-  worktree commits from this session because a compound command began with
-  `cd`).
-- **Context cost.** Claude Code defers most MCP tools to a name, so the cost
-  gap is the always-loaded set (8 nexus tools, 4.4K tokens) and about 0.4K of
-  deferred names, not the full catalogue.
-
-**Habits that run themselves (Gap 4).** Three checks: the index budget is
-checked at SessionStart and over budget prints one line; a `supersedes` field
-is required when a memory file reverses another (checked by the same hook,
-which compares a new file's text against what it says it replaces); and a
-curation report runs at each release's post-release step, listing unread
-files, unindexed files, oversized files and superseded rows still served.
+**Habits that run themselves (Gap 3).** Three checks: the index budget is
+checked at SessionStart and over budget prints one line; a `replaces` field is
+required when a memory file reverses another, and the old file must be gone
+(checked by the same hook, which compares a new file's text against what it
+says it replaces); and a curation report runs at each release's post-release
+step, listing unread files, unindexed files, oversized files and live rows a
+later row appears to replace without naming them.
 
 ### Technical Design
 
-1. **T2 schema.** Changeset `memory-006-supersession.xml`: nullable
-   `superseded_by BIGINT` referencing `nexus.memory(id)` within the same
-   tenant and project, `superseded_at TIMESTAMPTZ`, and a partial index on
-   live rows. All DDL through Liquibase.
-2. **T2 write.** `memory_put` and `/v1/memory` gain an optional `supersedes`
-   (an id or an exact title in the same project). In one transaction, the
-   engine writes the new row and stamps the old one, and sets the old row's
-   TTL to 30 days if it had none. A missing or cross-project target is
-   refused, and the new row is not written. Additive on the wire; recorded in
-   the wire-contract ledger.
-3. **T2 read.** Search and list skip superseded rows by default and take
-   `include_superseded`. `memory_get` on a superseded row returns it with a
-   first line naming its replacement, so an old link still resolves and says
-   where to go.
-4. **File-memory frontmatter.** An optional `supersedes: [name, ...]`. The
-   index check (5) reads it.
-5. **SessionStart curation check.** A conexus hook verb (stdlib only, under
+1. **T2 write.** `memory_put` and `/v1/memory` gain an optional `replaces`
+   (an id or an exact title in the same tenant and project). In one
+   transaction, the engine deletes the target row and writes the new row with
+   `replaces: <old title>` as the first line of its content (not repeated if
+   the content already starts with it). A missing target, a target in another
+   project, or the row being written is refused, and nothing is written or
+   deleted. No schema change and no Liquibase changeset: the lineage is a line
+   of content, not a column. Additive on the wire; recorded in the
+   wire-contract ledger.
+2. **File-memory frontmatter.** An optional `replaces: [name, ...]`. The
+   index check (3) reads it.
+3. **SessionStart curation check.** A conexus hook verb (stdlib only, under
    its existing SessionStart budget) that reads the repo's memory directory
    and prints at most one line: over budget, an unindexed file, or a file
-   named in another file's `supersedes` that still exists. Silent when clean.
+   named in another file's `replaces` that still exists. Silent when clean.
    Claude Code already reminds a writer near its own 200-line and 25 KB
    limits (research 1); this check is the tighter budget we choose, plus the
    two checks Claude Code does not make.
-6. **Curation report.** `nx memory curate [--files] [--agents] [--t2]`. `--agents`
+4. **Curation report.** `nx memory curate [--files] [--agents] [--t2]`. `--agents`
    covers the reviewers' own memory directories under
    `~/.claude/agent-memory/` (nexus-qo7ie.1 gave both reviewers `memory: user`):
    index length against the 40-line cap their definitions state, entries with
    no repo named, and concurrent-write damage, since two sessions running the
    same reviewer edit one `MEMORY.md` and the last writer wins. `--files`: unread files
    over N days (read counts from transcripts until RDR-209 Phase 0b gives T2
-   a true read counter), unindexed files, files over the promotion size, and
+   a true read counter), unindexed files, files over 8 KB, and
    live T2 rows that a later row names in its title or body as replaced
-   (a heuristic list for a person to confirm, never an automatic mark).
+   (a heuristic list for a person to confirm, never an automatic delete).
    `--cold [--days N]`: every store of state with no write and no read in N
    days (default 30), wherever it lives. Each row gives the store, its last
    write, its last read, its size and its owner if known:
@@ -384,81 +269,36 @@ files, unindexed files, oversized files and superseded rows still served.
      dictionary's `writers` (the tuple-space dictionary draft, nexus-mdbds); a template whose `writers` is empty
      and that has no live subspace is listed by name;
    - T2 namespaces and memory files, from read and write counts;
-   - MCP tools and CLI verbs, from `nx transcripts tools` (the front-door
-     census, Phase 5 Step 4);
-   - context injected per session and per dispatch, from `nx transcripts
-     loads`, so a large always-loaded item with no use shows as tokens.
+   - MCP tools and CLI verbs, from the transcript queries of the procedures
+     RDR (nexus-qo7ie.2);
+   - context injected per session and per dispatch, from the same transcript
+     queries, so a large always-loaded item with no use shows as tokens.
    Report only: retiring a cold store is a person's decision, and one that
    deletes data rides its own change (as nexus-onjvw does for the ledger).
-   The report runs at each release's post-release step (Phase 4), so waste
+   The report runs at each release's post-release step (Phase 3), so waste
    shows while it is small.
-7. **Promotion recipe.** A section in the `writing-nx-skills` skill: the
-   criterion, the target choice, the citation of sources, and a loss check in
-   which `substantive-critic` compares the skill with its source files and
-   lists every rule the skill lacks. A promotion lands only with an empty
-   list. The same loss check applies when the target is a command or a hook.
-8. **`nx transcripts <query> [--since D] [--project P] [--json]`.** Reads
-   `~/.claude/projects/*/` session and subagent transcripts read-only; never
-   writes there and never prints message bodies by default (counts, names,
-   ids, sizes), since transcripts hold everything a session saw. Queries,
-   each a function with a fixture test: `agents` (dispatches by agent type
-   and model, starting context, turns, errors, estimated cost); `tools` (calls
-   per tool and MCP server, deferred versus called); `skills` (the
-   skill-routing census, ported); `memory` (memory-file reads and writes, and
-   what loaded into a subagent's instructions); `violations` (named rule
-   detectors, the Phase 2 baseline); `loads` (instruction files and their
-   types per dispatch, the auto-memory census). Cost uses one price table in
-   code, dated, and says it is an estimate.
-9. **`nx gate record --kind review|critique|confirm|fixround --bead B [--rdr N]
-   --sha S --outcome justified|partial|not-justified (--body-file F | -)`.**
-   Writes T2 project `<repo>` with the title
-   `<kind>-<sha>-<slug>-<date>`, tags `kind:gate,bead:B[,rdr:N]`, and no TTL,
-   through the same MCP and CLI paths, and refuses an outcome outside the
-   verdict vocabulary the review agents already mandate. Under the
-   front-door rule it is agent-written prose, so its first door is an MCP
-   tool, `gate_record`, with the same fields; the CLI verb is the twin. The
-   agents' T2 write-back line then names `gate_record` instead of a
-   free-text tag string, and `tests/test_gate_record_tags_lint.py` moves to
-   pin its use.
-10. **`nx preflight [--base REF] [--run]`.** Classifies the diff (Python, engine
-    `service/`, plugin surface, docs, workflow YAML, schema changeset) and
-    prints the checks each class needs: ruff on touched files, the change
-    class's tripwire tests, the affected-integration and docs-reader selectors,
-    the drift ledger when the plugin surface changed, the gate-jar staleness
-    check when `service/` changed, actionlint for workflows. `--run` runs the
-    light ones locally and prints the `lab-remote` line for heavy ones, never
-    running a heavy one on the laptop. The classes and their checks are a
-    checked table in `src/nexus/tables/`, so a new class is a row, not prose.
-11. **Prose on stdin.** `--body-file PATH` and `-` (stdin) on `nx rdr preamble
-    rdr-research -- add`, `nx memory put` and `nx gate record`; the skills that
-    record findings or write bead text pass prose that way, and a lint flags a
-    skill example that puts prose in a bare argument.
 
 ### Existing Infrastructure Audit
 
 | Need | Exists | Plan |
 | --- | --- | --- |
-| Retire a T2 row | RDR-207 quarantine and rollup | Reuse by setting a TTL on supersede |
-| Schema change | Liquibase memory changesets 001-005 | Add 006 |
+| Delete a T2 row | Explicit `memory_delete` | Reuse its path inside the replacing put's transaction |
+| Schema change | Liquibase memory changesets 001-005 | None needed; lineage is a content line |
 | SessionStart hook verbs | conexus `nx-hook` dispatch | One more verb |
 | Transcript read counts | Ad hoc scan (survey, 2026-10-31) | Make it `nx memory curate --files` |
-| Skill authoring rules | `writing-nx-skills` skill | Add the promotion section |
-| Transcript instruments | `scripts/skill_routing_census.py`; six ad hoc scans | Fold into `nx transcripts` |
-| Test selection | `scripts/select_affected_integration_tests.py`, `scripts/select_docs_reader_tests.py` | Compose in `nx preflight` |
-| Verdict vocabulary | `tests/test_review_agent_verdict_vocabulary_lint.py` | `nx gate record` enforces it at write |
-| Closed vocabularies | `src/nexus/tables/` | Preflight's change classes become a table |
 
 ### Decision Rationale
 
-Supersession is filtered at the read, because the paper's failure is at
-retrieval: the reader cannot tell the obsolete fact from the current one once
-both are in context. Retirement reuses RDR-207 so there is one deletion path.
+Replacement is deletion because the paper's failure is at retrieval, and the
+cost shows whenever the stale copy is retrievable at all: the reader cannot
+tell the obsolete fact from the current one once both are in context
+(Obsolete Facts, Table 17). A mark plus a filter keeps the stale row one flag
+and one direct read away from that failure, and makes every reader and every
+future code path keep the promise to skip it. Deleting the row removes the
+failure instead of guarding against it, and the `replaces:` line keeps the
+only part of the lineage anyone has asked for, the name of what was replaced.
 The index is bounded by a budget, not curated by taste, because a budget
-checked by a hook survives a busy week and taste does not. Promotion keeps
-its sources because the one paper that tests it found sources and skills
-together beat skills alone. A fixed sequence becomes a command because a
-procedure that is read and then carried out can be misread, and today's
-evidence (Gap 5) is that it was, with the rule against it sitting in memory.
+checked by a hook survives a busy week and taste does not.
 
 ## Alternatives Considered
 
@@ -489,50 +329,39 @@ routing papers show implicit retrieval failing at scale.
 **Reason for rejection:** not rejected; deferred until Phase 2 measures A3.
 If the on-demand tier works, this is a refinement of it.
 
-### Alternative 3: Keep procedures as skills only
-
-Promote every procedure to a skill and build no commands.
-
-**Pros:** no code; skills are already on-demand.
-
-**Cons:** a skill is still read and then carried out; the shell-parsing
-failure in Gap 5 happened with the rule in memory, and a skill would have been
-the same text one level up.
-
-**Reason for rejection:** a procedure with one right answer is cheaper to run
-than to reread. Skills stay the target for procedures that need judgment.
-
 ### Briefly Rejected
 
-- **Delete on supersede:** loses the lineage the papers keep, and the
-  history the fix-round reads use.
-- **Move every procedure into conexus plugin skills:** ships Sam's personal
-  and nexus-only rules to every conexus user.
+- **Mark the old row and filter reads (the first draft):** leaves the stale
+  row stored and retrievable by flag or by direct read; see Decision
+  Rationale.
 
 ## Trade-offs
 
 ### Consequences
 
-- One more engine changeset and an additive wire field.
+- An additive wire field (`replaces`) and no engine changeset.
+- A replaced row is gone; only its name survives, on the new row.
 - A session sees fewer rules up front and has to look in the on-demand index
   for the rest.
-- Promotion adds skills to the listing (about 30 to 100 tokens each), against
-  the index lines it removes.
 
 ### Risks and Mitigations
 
 - **A rule drops out of the always tier and stops being followed.**
   Mitigation: Phase 2 measures compliance before and after, and the rule goes
   back if its violations rise.
+- **A write names the wrong row and deletes it.** Mitigation: the target must
+  be an exact title or id in the same tenant and project, the new row records
+  the name it replaced, and the engine has point-in-time recovery.
 - **The heuristic report marks a live row as replaced.** Mitigation: the
-  report only lists; a person or the writer sets the mark.
+  report only lists; the writer names the replacement and the engine deletes
+  only a row a write names.
 - **The SessionStart line becomes noise.** Mitigation: at most one line,
   silent when clean, and the budget is set from the Phase 2 measurement.
 
 ### Failure Modes
 
-- Supersede target missing: refused, nothing written, error names the
-  target.
+- Replace target missing, in another project, or the row being written:
+  refused, nothing written or deleted, error names the target.
 - Hook cannot read the memory directory: silent, logged to `hook.log`;
   never blocks a session.
 
@@ -546,22 +375,24 @@ than to reread. Skills stay the target for procedures that need judgment.
 
 ### Minimum Viable Validation
 
-On a test substrate: write row A, then row B with `supersedes=A`; search
-returns B and not A; `memory_get(A)` names B on its first line; A carries a
-30-day TTL; a `supersedes` naming a row in another project is refused and B is
-not written.
+On a test substrate: write row A, then row B with `replaces=A`. A is gone:
+`memory_get(A)` finds nothing and search does not return it. B exists and its
+content starts with the line `replaces: A`. A `replaces` naming a row in
+another project is refused, and B is not written.
 
-### Phase 1: T2 supersession
+### Phase 1: T2 replacement by deletion
 
-#### Step 1: Changeset and engine write path
+#### Step 1: Engine write path
 
-`memory-006-supersession.xml`, the stamp in the put transaction, the refusal
-cases, Java tests against PG.
+The delete and the write in one put transaction, the lineage line, the
+refusal cases (missing target, other project, self), confirmation that the
+delete takes the path of an explicit `memory_delete`, Java tests against PG.
+No changeset.
 
 #### Step 2: Client and MCP
 
-`memory_put(supersedes=...)`, `include_superseded` on search and list, the
-`memory_get` first line, wire-ledger entry, Python tests against the engine.
+`memory_put(replaces=...)`, wire-ledger entry, Python tests against the
+engine.
 
 ### Phase 2: The bounded index
 
@@ -584,57 +415,17 @@ the rest. Record what moved and why.
 Count the same rules over the same windows after the split. A rule whose
 rate rises returns to the always tier.
 
-### Phase 3: Promotion
-
-Promote the four largest procedural files, one at a time, each with its loss
-check, starting with `feedback_test_runs_before_push.md`.
-
-### Phase 4: Habits
+### Phase 3: Habits
 
 The SessionStart check, `nx memory curate`, and a curation step in the
 release skill's post-release section.
-
-### Phase 5: Commands (Gap 5)
-
-Can start before Phases 1 to 4; Phase 2's measurement uses step 1.
-
-#### Step 1: `nx transcripts`
-
-Port the skill-routing census and the six scans as queries, each with a
-fixture transcript test. Done when this RDR's research 2 to 5 can be
-re-derived from it.
-
-#### Step 2: Prose on stdin
-
-`--body-file` and `-` on the three verbs; update the skills' examples; add
-the lint.
-
-#### Step 3: `nx gate record`
-
-The verb, the agents' write-back lines naming it, and the lint moved to pin
-it.
-
-#### Step 4: Front-door census
-
-With `nx transcripts tools`, list every nexus MCP tool and CLI verb with its
-30-day call count and caller (main session, subagent, human). Apply the
-front-door table: each MCP tool nobody calls is a drop candidate, each hot
-capability without a twin gets one. The result is a list for Sam to approve,
-never an automatic removal, and dropping an MCP tool is a wire change with a
-ledger entry.
-
-#### Step 5: `nx preflight`
-
-The change-class table, the classifier, and the composed selectors. Done
-when its output for the last ten develop pushes matches what was actually
-run or should have been.
 
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Superseded T2 rows | `nx memory list --include-superseded` | `nx memory get` | RDR-207 expiry | `nx memory curate --t2` | engine PITR |
-| Memory files | `ls` the memory directory | the file | by hand, after `supersedes` | SessionStart check, `nx memory curate --files` | Time Machine |
+| Replaced T2 rows | none; the row is gone, its name is on the new row | `nx memory get` of the new row | the replacing write | `nx memory curate --t2` | engine PITR |
+| Memory files | `ls` the memory directory | the file | by the writer, with `replaces` | SessionStart check, `nx memory curate --files` | Time Machine |
 
 ### New Dependencies
 
@@ -642,24 +433,15 @@ None.
 
 ## Test Plan
 
-- Engine: supersede in one transaction; refusal leaves both rows unchanged;
-  partial index used by the live-row search (EXPLAIN).
-- Client: default search hides superseded rows; `include_superseded` shows
-  them; `memory_get` first line.
+- Engine: replace in one transaction (old row gone, new row has the lineage
+  line); refusal (missing target, other project, self) leaves both rows
+  unchanged; a chain A, B, C leaves only C with `replaces: B`.
+- Client: after a replacing put, search and `memory_get` no longer find the
+  old row.
 - Hook: over budget prints one line; clean prints nothing; an unreadable
   directory is silent and exits 0; each case fails with its check deleted.
 - Curate: each report section on a fixture directory with one planted case
   and one clean case.
-- Transcripts: each query against a fixture transcript with known counts; a
-  test that no query prints a message body unless asked.
-- Gate record: title and tags derived exactly; an outcome outside the
-  vocabulary refused with nothing written.
-- Preflight: each change class against a fixture diff; a heavy check is never
-  run locally.
-- Stdin: a finding containing `;`, backticks and `$(...)` stored byte for
-  byte.
-- Front doors: a lint that every MCP tool and CLI verb wrapping one
-  capability call the same function, so the twins cannot drift.
 
 ## Validation
 
@@ -670,8 +452,9 @@ compliance counts from transcripts, stored in T2 with the scan script.
 
 ### Performance Expectations
 
-The supersede stamp adds one indexed update to a put. The SessionStart check
-reads one directory of about 150 small files, well under its hook budget.
+A replacing put adds one indexed lookup and one delete to the put. The
+SessionStart check reads one directory of about 150 small files, well under
+its hook budget.
 
 ## Finalization Gate
 
@@ -710,3 +493,4 @@ reads one directory of about 150 small files, well under its hook budget.
 | 2026-10-31 | Gap 5 added at Sam's direction: procedures that run instead of being recalled. Promotion gains three targets (skill, command, hook), and Phase 5 builds `nx transcripts`, prose on stdin, `nx gate record` and `nx preflight`. Title widened to match. |
 | 2026-10-31 | Front-door rule added to Gap 5 at Sam's direction: one implementation, MCP and CLI as thin wrappers, chosen by caller and reach; `nx gate record` becomes the MCP tool `gate_record` first; Phase 5 Step 4 is a front-door census. |
 | 2026-10-31 | Cold-state section added at Sam's direction (heat and waste): Gap 4 names the day's five cases, and `nx memory curate --cold` reports every store with no write and no read in N days, report only. |
+| 2026-10-31 | Sam's review: supersession becomes deletion; Gaps 3 and 5 (procedures) move to nexus-qo7ie.2 as Lua scripts on the runtime of nexus-mdbds.1; gaps renumbered; title changed. |
