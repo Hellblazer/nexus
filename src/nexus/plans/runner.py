@@ -703,6 +703,7 @@ _STEPREF_RE = re.compile(r"^\$step(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$")
 from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY, _extract_tool_name, is_operator_tool as _is_operator_tool  # noqa: E402
 import nexus.operators.dispatch as _dispatch_mod  # noqa: E402
 from nexus.plans.evidence_diagnostics import (  # noqa: E402
+    _per_chunk_collections,
     active_recorder,
     capture_reducer_input,
     note_reducer_input,
@@ -723,6 +724,7 @@ from nexus.plans.repair_stream import (  # noqa: E402
     supplement_scope,
 )
 from nexus.plans.traversal_policy import registry_listing_scope  # noqa: E402
+from nexus.operators.witness import EvidenceRecord, bind as _bind_witness, defer_binding as _defer_binding  # noqa: E402
 
 #: RDR-232 Phase 3 (nexus-jypmj.3.1). A dispatcher carrying this attribute runs :func:`_hydrate_operator_args`
 #: itself (the default dispatcher does). The coverage boundary has to read the terminal reduction's hydrated
@@ -2391,6 +2393,149 @@ def _merge_reserved_explicit_inputs(
     return value
 
 
+# ── Witness Schema v1 evidence records (RDR-088 amendment 2026-11-01, nexus-z1d0l.1.2) ───────────────────
+#
+# A check step fed by a retrieval step builds one EvidenceRecord per item the model is shown. The records
+# ride beside the args under ``_evidence_records`` (a private key, popped before the prompt, the bundle
+# composer and the MCP surface, as ``_truncation_metadata`` is); the retrieval step's per-chunk output
+# reaches hydration under ``_evidence_source``. Whoever holds the records binds the reply once.
+
+_EVIDENCE_SOURCE_KEY: str = "_evidence_source"
+_EVIDENCE_RECORDS_KEY: str = "_evidence_records"
+
+
+def _with_evidence_source(
+    tool: str, raw_args: dict[str, Any], resolved: dict[str, Any], step_outputs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """*resolved* plus ``_evidence_source`` for a check/verify step whose ``ids`` are whole ``$stepN.ids``
+    references (one, or a list of them): the aligned ``ids`` / ``tumblers`` / ``chunk_collections`` /
+    ``chunk_text_hash`` of the source retrieval output, concatenated in reference order. Anything else
+    (other operators, literal ids, a reference to a step that has no such output) comes back unchanged."""
+    if _OPERATOR_TOOL_MAP.get(tool, tool) not in ("operator_check", "operator_verify") or "ids" not in resolved:
+        return resolved
+    raw_ids = raw_args.get("ids")
+    refs = raw_ids if isinstance(raw_ids, list) else [raw_ids]
+    out_ids: list[str] = []
+    tumblers: list[str] = []
+    cols: list[str] = []
+    hashes: list[str] = []
+    for ref in refs:
+        m = _STEPREF_RE.match(ref) if isinstance(ref, str) else None
+        if m is None or m.group(2) != "ids" or not 0 <= int(m.group(1)) - 1 < len(step_outputs):
+            return resolved
+        prior = step_outputs[int(m.group(1)) - 1]
+        ids = prior.get("ids") if isinstance(prior, dict) else None
+        if not isinstance(ids, list):
+            return resolved
+        n = len(ids)
+
+        def aligned(key: str) -> list[str]:
+            vals = prior.get(key)
+            return [str(v or "") for v in vals] if isinstance(vals, list) and len(vals) == n else [""] * n
+
+        out_ids.extend(str(i) for i in ids)
+        tumblers.extend(aligned("tumblers"))
+        hashes.extend(aligned("chunk_text_hash"))
+        cols.extend(_per_chunk_collections(prior, n))
+    resolved_ids = resolved["ids"]
+    if not isinstance(resolved_ids, list) or [str(i) for i in resolved_ids] != out_ids:
+        return resolved  # the hydration will read ids the source output does not line up with
+    return {**resolved, _EVIDENCE_SOURCE_KEY: {
+        "ids": out_ids, "tumblers": tumblers, "chunk_collections": cols, "chunk_text_hash": hashes,
+    }}
+
+
+def _single_owner(owner_rows: dict[str, list[dict]] | None, chash: str, collection: str | None) -> str | None:
+    """The one document owning *chash* (in *collection*, when a row names its collection), else ``None``:
+    no owner set, no owner, or several (a shared chash is ambiguous, never a guess)."""
+    if not owner_rows:
+        return None
+    docs = list(dict.fromkeys(
+        row["doc_id"] for row in owner_rows.get(chash, ())
+        if row.get("doc_id") and (not collection or not row.get("collection") or row["collection"] == collection)
+    ))
+    return docs[0] if len(docs) == 1 else None
+
+
+def _named_collection(collections: Any) -> str | None:
+    """The one conformant collection name *collections* (a hydration arg) names, else ``None``: a scope alias
+    (``knowledge``) or several collections name no one chunk's collection."""
+    if isinstance(collections, list) and len(collections) == 1:
+        collections = collections[0]
+    return collections if isinstance(collections, str) and "__" in collections else None
+
+
+_CHASH_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _position_identities(
+    ids: list[Any], contents: list[str], *, evidence_source: Any, collections: Any, tumbler_path: bool,
+    owner_lookups: Any,
+) -> dict[str, Any]:
+    """Shown text -> the ``(tumbler, chash, collection)`` of each position that produced it, in position order.
+
+    Taken from the hydrated positions BEFORE the empty-content filter, the merges and the cap. A tumbler-id
+    position IS its document. A chash position takes its collection from the retrieval step's per-chunk output
+    (when that output lines up with *ids*), else the one collection the step names; its tumbler only when the
+    owner rows the hydration fetched show exactly one owning document. The retrieval step's own tumbler is not
+    read: search may have picked one of several owners of a shared chunk, and the step output does not say."""
+    from collections import deque  # noqa: PLC0415 — as the module's other lazy imports
+
+    source = evidence_source if (
+        isinstance(evidence_source, dict) and [str(x) for x in evidence_source.get("ids", ())] == [str(i) for i in ids]
+    ) else None
+    cols = source.get("chunk_collections") if source else None
+    rows = owner_lookups.owner_rows if owner_lookups is not None and owner_lookups.asked else None
+    named = _named_collection(collections)
+    queues: dict[str, Any] = {}
+    for i, (cid, text) in enumerate(zip(ids, contents)):
+        if not text:
+            continue
+        collection = (cols[i] or None) if isinstance(cols, list) and i < len(cols) else None
+        collection = collection or named
+        if tumbler_path:
+            ident = (str(cid), None, collection)
+        else:
+            chash = str(cid) if _CHASH_RE.fullmatch(str(cid)) else None
+            ident = (_single_owner(rows, chash, collection) if chash else None, chash, collection)
+        queues.setdefault(text, deque()).append(ident)
+    return queues
+
+
+def _check_records_for(
+    texts: list[str], queues: dict[str, Any], reserved: ReservedStream | None, supplement: RepairSupplement | None,
+) -> list[EvidenceRecord]:
+    """One record per final shown text, ids ``e1, e2, ...`` in order. A text a retrieval position produced takes
+    that position's identity (``queues``: shown text -> identities in position order); a reserved or repair
+    item takes its own provenance; any other text (the coverage note, a plan literal) has none. The record
+    text is the body, without the ``[source: ...]`` note the hydration prefixes."""
+    from nexus.plans.reserved_stream import strip_source_note  # noqa: PLC0415 — as the module's other lazy imports
+
+    records: list[EvidenceRecord] = []
+    for k, text in enumerate(texts):
+        item_id = f"e{k + 1}"
+        queue = queues.get(text)
+        held = next((i for i in reserved.items if i.text == text), None) if reserved is not None else None
+        repaired = supplement.provenance(text) if supplement is not None else None
+        if queue:
+            tumbler, chash, collection = queue.popleft()
+            records.append(EvidenceRecord(item_id, strip_source_note(text), tumbler, chash, collection))
+        elif held is not None:
+            records.append(EvidenceRecord(item_id, held.raw, held.doc_id or None, held.chash or None, held.collection or None))
+        elif repaired is not None:
+            records.append(EvidenceRecord(
+                item_id, strip_source_note(text), repaired.tumbler or None, repaired.chash or None, repaired.collection or None,
+            ))
+        else:
+            records.append(EvidenceRecord(item_id, strip_source_note(text)))
+    return records
+
+
+def _render_check_items(texts: list[str], records: list[EvidenceRecord]) -> str:
+    """The ``items`` the model reads: ``[{"id","text"}]``, text as hydrated (the source note stays)."""
+    return json.dumps([{"id": r.item_id, "text": t} for r, t in zip(records, texts)], ensure_ascii=False)
+
+
 def _hydrate_operator_args(
     tool: str, args: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
@@ -2412,6 +2557,9 @@ def _hydrate_operator_args(
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
+    evidence_source = args.get(_EVIDENCE_SOURCE_KEY)
+    if _EVIDENCE_SOURCE_KEY in args:
+        args = {k: v for k, v in args.items() if k != _EVIDENCE_SOURCE_KEY}
     # RDR-232 (nexus-jypmj.1.20): set once the explicit-``inputs`` pass-through below has merged the
     # reserved stream and recorded the evidence, so the Pattern A site does not merge it again (a
     # second merge would count the primary items as deduplicated secondary ones).
@@ -2520,6 +2668,15 @@ def _hydrate_operator_args(
             _rs_dups = [k for k, (cid, c) in enumerate(zip(id_list_raw, contents)) if c and _rs.is_primary_chash(str(cid))]
             for k in _rs_dups:
                 contents[k] = ""
+        # Witness Schema v1: the identity of each hydrated position, taken BEFORE the empty filter, the
+        # merges and the cap drop the alignment between a text and the retrieval step's hit.
+        _idents: dict[str, Any] = {}
+        if resolved_tool == "operator_check":
+            _idents = _position_identities(
+                id_list_raw, contents, evidence_source=evidence_source, collections=args.get("collections"),
+                tumbler_path=bool(id_list_raw) and all(_is_tumbler_shaped(str(i)) for i in id_list_raw),
+                owner_lookups=None if all(_is_tumbler_shaped(str(i)) for i in id_list_raw) else owner_lookups,
+            )
         non_empty = [c for c in contents if c]
         _supp = active_supplement()
         if _supp is not None and _supp.should_merge():
@@ -2563,7 +2720,11 @@ def _hydrate_operator_args(
             non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
         note_reducer_input(non_empty)  # nexus-jypmj.1.8: reads the final list, changes nothing
         args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
-        if resolved_tool == "operator_summarize":
+        if resolved_tool == "operator_check" and non_empty:
+            _records = _check_records_for(non_empty, _idents, _rs if _rs_merge else None, _supp)
+            args.setdefault("items", _render_check_items(non_empty, _records))
+            args[_EVIDENCE_RECORDS_KEY] = _records
+        elif resolved_tool == "operator_summarize":
             args.setdefault("content", "\n\n".join(non_empty))
         elif resolved_tool == "operator_generate":
             args.setdefault("context", "\n\n".join(non_empty))
@@ -2645,7 +2806,12 @@ def _hydrate_operator_args(
             value = _merge_reserved_explicit_inputs(value, args, tool, resolved_tool)
             note_reducer_input(value)  # nexus-jypmj.1.8: the explicit-inputs reducer input, after merge and cap
             if target_key == "items":
-                value = json.dumps(value)
+                if resolved_tool == "operator_check" and value and all(isinstance(v, str) for v in value):
+                    _records = _check_records_for(value, {}, active_reserved_stream(), active_supplement())
+                    args[_EVIDENCE_RECORDS_KEY] = _records
+                    value = _render_check_items(value, _records)
+                else:
+                    value = json.dumps(value)
         args[target_key] = value
         # nexus-mm5tx follow-up (code-review T2 [24199]): same zero-
         # evidence short-circuit as the ids-auto-hydration branch above
@@ -2700,7 +2866,13 @@ def _hydrate_operator_args(
         "operator_rank", "operator_compare", "operator_filter",
         "operator_check", "operator_groupby",
     ) and isinstance(args.get("items"), list):
-        args["items"] = json.dumps(args["items"])
+        _listed_items = args["items"]
+        if resolved_tool == "operator_check" and _listed_items and all(isinstance(v, str) for v in _listed_items):
+            _records = _check_records_for(_listed_items, {}, active_reserved_stream(), active_supplement())
+            args[_EVIDENCE_RECORDS_KEY] = _records
+            args["items"] = _render_check_items(_listed_items, _records)
+        else:
+            args["items"] = json.dumps(_listed_items)
     # RDR-093 Phase 2 follow-up (code-review S-2): operator_aggregate's
     # positional arg is `groups`, not `items`, so it doesn't share the
     # coercion path above. When a plan step resolves `$stepN.groups`
@@ -2773,6 +2945,11 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     _precomputed_result = args.pop("_precomputed_result", None)
     if _precomputed_result is not None:
         return _precomputed_result
+
+    # Witness Schema v1 (nexus-z1d0l.1.2): the records hydration built for a check step. Popped here so the
+    # kwargs-drop pass never sees them; the runner binds the reply once, below, and the tool is told not to.
+    _witness_records = args.pop(_EVIDENCE_RECORDS_KEY, None)
+    args.pop(_EVIDENCE_SOURCE_KEY, None)
 
     # nexus-mm5tx follow-up (code-review T2 [24199]): hydration filtered
     # this operator's evidence to zero items (either the ids-auto-
@@ -2951,7 +3128,8 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # nexus-jypmj: the document confinement's chunk-hash restriction is not a tool parameter; it rides a context value
     # that ``search_cross_corpus`` reads once and sends on every engine call. The deadline path below copies this
     # context, so the value reaches the worker thread.
-    with chash_allow_scope(_chash_allow):
+    _bind_here = _witness_records is not None and resolved_tool == "operator_check"
+    with chash_allow_scope(_chash_allow), _defer_binding() if _bind_here else contextlib.nullcontext():
         if inspect.iscoroutinefunction(fn):
             result = await fn(**args)
         elif call_deadline.get() is not None:
@@ -3017,6 +3195,8 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
             }
         return {"text": result}
     if isinstance(result, dict):
+        if _bind_here:
+            result = _bind_witness(result, _witness_records, "check")
         # RDR-093 S-1: merge runner-attached truncation metadata onto
         # the operator's return dict so plan authors see when the
         # _OPERATOR_MAX_INPUTS cap fired. Scoped to operator_groupby
@@ -3743,6 +3923,8 @@ async def _plan_run_impl(
                 # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
                 deferred_indices = set(seg.plan_indices)
                 _bundle_at_boundary = _at_boundary(seg)
+                #: Witness Schema v1: the evidence records of each bundled check step whose items the host hydrated.
+                _bundle_records: dict[int, list[EvidenceRecord]] = {}
 
                 def _build_bundle_steps(capture: bool) -> tuple[list[OperatorBundleStep], list[str], bool]:
                     """Resolve and hydrate each step of the bundle: its steps, and (when *capture*) the texts
@@ -3751,6 +3933,7 @@ async def _plan_run_impl(
                     built: list[OperatorBundleStep] = []
                     texts_out: list[str] = []
                     observed_out = False
+                    _bundle_records.clear()
                     for bi in seg.plan_indices:
                         bstep = steps[bi]
                         btool = _extract_tool(bstep)
@@ -3765,6 +3948,7 @@ async def _plan_run_impl(
                         b_resolved = _drop_intent_from_list_args(
                             b_resolved, intent=merged.get("intent"),
                         )
+                        b_resolved = _with_evidence_source(btool, b_raw_args, b_resolved, step_outputs)
                         # Capture source collection(s) BEFORE hydration strips
                         # them from args, so the composer can attach a "source:"
                         # line to the prompt for parallel-branch attribution.
@@ -3786,6 +3970,11 @@ async def _plan_run_impl(
                         # including bundle-aware metadata propagation); the
                         # structlog warning still fires from _hydrate.
                         b_prepared.pop("_truncation_metadata", None)
+                        # Witness Schema v1: the records stay host-side (never in the prompt); the terminal
+                        # check step's are used to bind the bundle's reply below.
+                        _held_records = b_prepared.pop(_EVIDENCE_RECORDS_KEY, None)
+                        if _held_records is not None:
+                            _bundle_records[bi] = _held_records
                         # nexus-mm5tx follow-up (code-review T2 [24199]):
                         # strip the zero-evidence marker so it never leaks
                         # into the bundled prompt, same as the truncation
@@ -3873,6 +4062,8 @@ async def _plan_run_impl(
                         b_resolved = _drop_intent_from_list_args(
                             b_resolved, intent=merged.get("intent"),
                         )
+                        if getattr(dispatch, _HYDRATES_ATTR, False):
+                            b_resolved = _with_evidence_source(btool, b_raw_args, b_resolved, step_outputs)
                         # RDR-196 .p1b: per-bi timing, NOT the segment-aggregate
                         # timer below — this loop dispatches N separate
                         # ToolDispatcher calls (the oversized-bundle fallback),
@@ -4064,6 +4255,12 @@ async def _plan_run_impl(
                             "expected dict"
                         ),
                     )
+                # Witness Schema v1: a terminal check/verify is bound after the bundle returns. Its records exist
+                # only when its evidence is host-hydrated; when its input is an earlier step's model output inside
+                # the bundle there are none, and every item comes back unresolved with requires_review.
+                _terminal_verb = _OPERATOR_TOOL_MAP.get(_extract_tool(steps[seg.plan_indices[-1]]), "").removeprefix("operator_")
+                if _terminal_verb in ("check", "verify"):
+                    bundle_result = _bind_witness(bundle_result, _bundle_records.get(seg.plan_indices[-1]), _terminal_verb)
                 step_outputs.append(bundle_result)
                 _log.info(
                     "nx_answer_step_complete",
@@ -4249,6 +4446,8 @@ async def _plan_run_impl(
             # BEFORE the timeout below is computed (the assessment spends part of the deadline) and before
             # the step dispatches. A dispatcher that hydrates (the default one) is handed the args this
             # hydration produced, once; any other is handed the resolved args as before.
+            if getattr(dispatch, _HYDRATES_ATTR, False):
+                resolved = _with_evidence_source(tool, raw_args, resolved, step_outputs)
             _prehydrated = False
             if _at_boundary(seg):
                 _captured: list[list[str]] = []

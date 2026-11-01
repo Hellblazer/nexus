@@ -1494,8 +1494,11 @@ class TestHydrateInputsTranslation:
             {"inputs": ["doc-a", "doc-b"], "check_instruction": "agree"},
         )
         assert tool == "operator_check"
+        # Witness Schema v1 (nexus-z1d0l.1.2): the model is shown [{"id","text"}] and the runner holds the records.
+        records = args.pop("_evidence_records")
+        assert [(r.item_id, r.text) for r in records] == [("e1", "doc-a"), ("e2", "doc-b")]
         assert args == {
-            "items": json.dumps(["doc-a", "doc-b"]),
+            "items": json.dumps([{"id": "e1", "text": "doc-a"}, {"id": "e2", "text": "doc-b"}]),
             "check_instruction": "agree",
         }
 
@@ -1629,7 +1632,12 @@ class TestHydrateInputsTranslation:
             )
         assert tool == f"operator_{op}"
         assert "ids" not in args and "collections" not in args
-        assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
+        if op == "check":  # Witness Schema v1: id/text rendering, records held by the runner
+            assert args["items"] == json.dumps(
+                [{"id": "e1", "text": "doc-a body"}, {"id": "e2", "text": "doc-b body"}])
+            assert [r.text for r in args.pop("_evidence_records")] == ["doc-a body", "doc-b body"]
+        else:
+            assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
         assert args[key] == value
 
     @pytest.mark.t2_tenant

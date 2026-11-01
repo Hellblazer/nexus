@@ -183,6 +183,12 @@ _PAYLOAD_SHAPES: tuple[tuple[frozenset[str], AnswerShape], ...] = (
     (frozenset({"items", "rationale"}), AnswerShape.OPERATOR_PAYLOAD),
     (frozenset({"ok", "evidence"}), AnswerShape.OPERATOR_PAYLOAD),
     (frozenset({"verified", "reason", "citations"}), AnswerShape.OPERATOR_PAYLOAD),
+    # Witness Schema v1 (RDR-088 amendment 2026-11-01, nexus-z1d0l.1.2): the versioned check and verify
+    # payloads. The legacy sets above stay: a versionless payload is read as it was.
+    (frozenset({"schema_version", "ok", "evidence", "rejected", "uncovered", "requires_review"}),
+     AnswerShape.OPERATOR_PAYLOAD),
+    (frozenset({"schema_version", "verified", "reason", "evidence", "rejected", "requires_review", "citations"}),
+     AnswerShape.OPERATOR_PAYLOAD),
     (frozenset({"groups"}), AnswerShape.OPERATOR_PAYLOAD),
 )
 

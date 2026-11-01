@@ -207,19 +207,24 @@ class TestFilterGolden:
 
 
 class TestCheckGolden:
+    """Witness Schema v1 (RDR-088 amendment 2026-11-01): the model is shown
+    ``[{"id","text"}]`` items and asked for ``{item_id, quote, role}``."""
+
     def test_prompt_and_schema(self) -> None:
+        items = '[{"id": "a", "text": "alpha"}]'
         prompt, schema = req.build_check_request(
-            items='[{"id": "a"}]', check_instruction="all items agree",
+            items=items, check_instruction="all items agree",
         )
         assert prompt == (
             "Check whether the following items are consistent with this "
             "claim or question: all items agree\n"
             "Set ok=true when every item supports the claim, false when at "
             "least one item contradicts it. Populate 'evidence' with a "
-            "record per item containing a short grounding 'quote' and a "
-            "'role' of 'supports', 'contradicts', or 'neutral'. Keep quotes "
-            "short enough to be verifiable against the source item.\n\n"
-            'Items:\n[{"id": "a"}]'
+            "record per item containing the 'item_id' of the item shown, a "
+            "short grounding 'quote' copied verbatim from that item's text, "
+            "and a 'role' of 'supports', 'contradicts', or 'neutral'. Keep "
+            "quotes short enough to be verifiable against the source item.\n\n"
+            'Items:\n[{"id": "a", "text": "alpha"}]'
         )
         assert schema == {
             "type": "object",
@@ -245,6 +250,15 @@ class TestCheckGolden:
             },
         }
 
+    def test_plain_text_items_are_shown_as_the_e1_record(self) -> None:
+        prompt, _ = req.build_check_request(items="just prose", check_instruction="x")
+        assert 'Items:\n[{"id": "e1", "text": "just prose"}]' in prompt
+
+    def test_model_schema_never_asks_for_identity(self) -> None:
+        _, schema = req.build_check_request(items="x", check_instruction="y")
+        item = schema["properties"]["evidence"]["items"]
+        assert set(item["properties"]) == {"item_id", "quote", "role"}
+
 
 class TestVerifyGolden:
     def test_prompt_and_schema(self) -> None:
@@ -255,25 +269,39 @@ class TestVerifyGolden:
             "Verify whether the following claim is grounded in the evidence "
             "provided.\n\n"
             "Claim: X is true\n\n"
-            "Evidence:\nthe evidence text\n\n"
+            'Evidence:\n[{"id": "e1", "text": "the evidence text"}]\n\n'
             "Set verified=true only when the claim is directly supported by "
             "the evidence. Provide a concise 'reason' explaining the "
-            "verdict. Populate 'citations' with locators (section, page, "
-            "table, or quoted span snippets) that pinpoint the supporting "
-            "or contradicting passages."
+            "verdict. Populate 'evidence' with a record per passage that "
+            "supports or contradicts the claim: the 'item_id' of the "
+            "evidence item shown, a short 'quote' copied verbatim from that "
+            "item's text, and a 'role' of 'supports', 'contradicts', or "
+            "'neutral'."
         )
         assert schema == {
             "type": "object",
-            "required": ["verified", "reason", "citations"],
+            "required": ["verified", "reason", "evidence"],
             "properties": {
                 "verified": {"type": "boolean"},
                 "reason": {"type": "string"},
-                "citations": {
+                "evidence": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": req._CHECK_EVIDENCE_ITEM_SCHEMA,
                 },
             },
         }
+
+    def test_schema_has_no_citations_and_no_identity(self) -> None:
+        _, schema = req.build_verify_request(claim="c", evidence="e")
+        assert "citations" not in schema["properties"]
+        assert set(schema["properties"]["evidence"]["items"]["properties"]) == {"item_id", "quote", "role"}
+
+    def test_evidence_is_never_sniffed_for_json(self) -> None:
+        import json
+        ev = '[{"id": "x", "text": "y"}]'
+        prompt, _ = req.build_verify_request(claim="c", evidence=ev)
+        shown = json.loads(prompt.split("Evidence:\n", 1)[1].split("\n\nSet verified", 1)[0])
+        assert shown == [{"id": "e1", "text": ev}]
 
 
 class TestGroupbyGolden:

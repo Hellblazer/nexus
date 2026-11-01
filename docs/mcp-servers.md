@@ -102,8 +102,8 @@ The plan verbs and what each does:
 | `summarize` | Summarize content (citation-aware via `cited=True`) |
 | `generate` | Generate text following a template, grounded in `context` |
 | `filter` | Narrow items by a natural-language criterion (RDR-088 §D.4). Returns `{items, rationale[{id, reason}]}` |
-| `check` | Cross-item consistency probe (RDR-088 §D.2). Returns `{ok, evidence[{item_id, quote, role}]}` |
-| `verify` | Single-claim verification against one evidence source (RDR-088 §D.2). Returns `{verified, reason, citations[]}` |
+| `check` | Cross-item consistency probe (RDR-088 §D.2). Returns the versioned witness payload `{schema_version: 1, ok, evidence[{item_id, quote, role, state, span, tumbler, chash, collection}], rejected[], uncovered[], requires_review}`; `state` is `bound`, `unattributed`, `unresolved` or `ambiguous`, and the host (not the model) writes it, `span` and the source fields |
+| `verify` | Single-claim verification against one evidence source (RDR-088 §D.2). Returns `{schema_version: 1, verified, reason, evidence[...same items as check], rejected[], requires_review, citations[]}`; `citations` is deprecated (host-derived quotes of bound and unattributed items) and goes at `schema_version: 2` |
 | `groupby` | Partition items by a natural-language key into `[{key_value, items}]` (RDR-093 §D.4). SQL fast-path over `document_aspects` when items carry catalog identity, else `claude -p` |
 | `aggregate` | Reduce each `groupby` group to a per-group summary (RDR-093 §D.4). Pairs with `groupby` for the `filter → groupby → aggregate` pipeline |
 

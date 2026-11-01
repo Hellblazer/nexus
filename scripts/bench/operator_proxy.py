@@ -83,6 +83,7 @@ from bench.operator_proxy_metrics import (
 # function does not make vacuous (the call itself is still one AST
 # substitution slot in each builder's f-string, exactly like core.py's).
 from nexus.context_annotations import source_clause
+from nexus.operators.witness import records_from_verify_evidence, shown_check_items, shown_items
 
 #: Fixed, seeded input set (RDR-196 .p2a DO 5's "cheap set of inputs" +
 #: "operator tests' existing fixtures + spike_5q corpus hydrations").
@@ -112,6 +113,15 @@ _CHECK_EVIDENCE_ITEM_SCHEMA: dict = {
 
 def _items_json() -> str:
     return json.dumps(FIXTURE_ITEMS)
+
+
+def verify_citations(output: dict) -> list[Any]:
+    """The grounding strings of a verify output: the legacy ``citations`` locators when present, else the
+    ``quote`` of each ``evidence`` item (Witness Schema v1: the model no longer emits ``citations``)."""
+    cites = output.get("citations") or []
+    if cites:
+        return list(cites)
+    return [e.get("quote", "") for e in output.get("evidence", []) if isinstance(e, dict)]
 
 
 def build_filter() -> tuple[str, dict]:
@@ -248,10 +258,11 @@ def build_check() -> tuple[str, dict]:
         f"claim or question: {claim}\n"
         f"Set ok=true when every item supports the claim, false when at "
         f"least one item contradicts it. Populate 'evidence' with a "
-        f"record per item containing a short grounding 'quote' and a "
-        f"'role' of 'supports', 'contradicts', or 'neutral'. Keep quotes "
-        f"short enough to be verifiable against the source item.\n\n"
-        f"Items:\n{_items_json()}{source_clause(_items_json())}"
+        f"record per item containing the 'item_id' of the item shown, a "
+        f"short grounding 'quote' copied verbatim from that item's text, "
+        f"and a 'role' of 'supports', 'contradicts', or 'neutral'. Keep "
+        f"quotes short enough to be verifiable against the source item.\n\n"
+        f"Items:\n{shown_check_items(_items_json())}{source_clause(_items_json())}"
     )
     schema: dict = {
         "type": "object",
@@ -277,21 +288,23 @@ def build_verify() -> tuple[str, dict]:
         f"Verify whether the following claim is grounded in the evidence "
         f"provided.\n\n"
         f"Claim: {claim}\n\n"
-        f"Evidence:\n{evidence}\n\n"
+        f"Evidence:\n{shown_items(records_from_verify_evidence(evidence))}\n\n"
         f"Set verified=true only when the claim is directly supported by "
         f"the evidence. Provide a concise 'reason' explaining the "
-        f"verdict. Populate 'citations' with locators (section, page, "
-        f"table, or quoted span snippets) that pinpoint the supporting "
-        f"or contradicting passages."
+        f"verdict. Populate 'evidence' with a record per passage that "
+        f"supports or contradicts the claim: the 'item_id' of the "
+        f"evidence item shown, a short 'quote' copied verbatim from that "
+        f"item's text, and a 'role' of 'supports', 'contradicts', or "
+        f"'neutral'."
         f"{source_clause(evidence)}"
     )
     schema: dict = {
         "type": "object",
-        "required": ["verified", "reason", "citations"],
+        "required": ["verified", "reason", "evidence"],
         "properties": {
             "verified": {"type": "boolean"},
             "reason": {"type": "string"},
-            "citations": {"type": "array", "items": {"type": "string"}},
+            "evidence": {"type": "array", "items": _CHECK_EVIDENCE_ITEM_SCHEMA},
         },
     }
     return prompt, schema
@@ -405,6 +418,7 @@ def degrade_verify(output: dict) -> dict:
     degraded = copy.deepcopy(output)
     degraded["verified"] = not bool(output.get("verified"))
     degraded["citations"] = []
+    degraded.pop("evidence", None)
     return degraded
 
 
@@ -475,7 +489,7 @@ def degrade_verify_wrong_grounding(output: dict) -> dict:
     Raises:
         DegenerateGroundingError: *output*'s citations are already empty.
     """
-    citations = output.get("citations", [])
+    citations = verify_citations(output)
     if not citations:
         raise DegenerateGroundingError(
             "operator_verify: real output's citations are already empty "
@@ -485,6 +499,8 @@ def degrade_verify_wrong_grounding(output: dict) -> dict:
         )
     degraded = copy.deepcopy(output)
     degraded["citations"] = []
+    if "evidence" in degraded:
+        degraded["evidence"] = []
     return degraded
 
 
@@ -563,6 +579,8 @@ def graded_degrade_verify(output: dict) -> dict:
     citations = degraded.get("citations", [])
     if citations:
         degraded["citations"] = citations[1:]
+    elif degraded.get("evidence"):
+        degraded["evidence"] = degraded["evidence"][1:]
     return degraded
 
 
@@ -634,8 +652,8 @@ def score(operator_name: str, output_a: dict, output_b: dict) -> float | None:
         # see citation_tokens' docstring for why (2026-08-21 revision
         # after a live strong-vs-strong positive control failed under
         # the original exact-string design).
-        tokens_a = citation_tokens(output_a.get("citations", []))
-        tokens_b = citation_tokens(output_b.get("citations", []))
+        tokens_a = citation_tokens(verify_citations(output_a))
+        tokens_b = citation_tokens(verify_citations(output_b))
         return bool_plus_jaccard(
             bool(output_a.get("verified")), bool(output_b.get("verified")),
             tokens_a, tokens_b,

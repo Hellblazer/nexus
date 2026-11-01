@@ -277,7 +277,8 @@ class TestComposeBundlePrompt:
     def test_verify_step_renders_claim_and_verification_schema(self):
         """RDR-088 Phase 2: a bundled verify step must render its claim
         verbatim and the terminal schema must declare verified + reason +
-        citations as required keys."""
+        evidence as required keys; evidence items are the SAME model-facing
+        item as check's (Witness Schema v1, nexus-z1d0l.1.2)."""
         bundle = OperatorBundle(steps=(
             OperatorBundleStep(
                 1, "extract", {"fields": "passage",
@@ -293,10 +294,16 @@ class TestComposeBundlePrompt:
         assert "claim-sentinel-verify-abc" in prompt
         # The downstream input for verify is evidence, not items.
         assert "output text from STEP 1" in prompt
-        assert {"verified", "reason", "citations"}.issubset(
+        assert {"verified", "reason", "evidence"}.issubset(
             set(schema["required"]),
         )
         assert schema["properties"]["verified"]["type"] == "boolean"
+        assert "citations" not in schema["properties"]
+        from nexus.mcp.operator_requests import _CHECK_EVIDENCE_ITEM_SCHEMA
+
+        assert schema["properties"]["evidence"]["items"] == _CHECK_EVIDENCE_ITEM_SCHEMA
+        assert "`evidence`" in prompt and "item_id" in prompt
+        assert "citations" not in prompt
 
     def test_groupby_step_renders_key_and_inline_items_schema(self):
         """RDR-093 Phase 1: a bundled groupby step must render its

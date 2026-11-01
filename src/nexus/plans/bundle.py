@@ -531,8 +531,9 @@ def _describe_step(
             "  Emit a JSON object with keys `ok` (boolean: true when "
             "every item supports the claim, false when at least one "
             "contradicts) and `evidence` (array of `{item_id, quote, "
-            "role}` records where role is one of `supports`, "
-            "`contradicts`, `neutral`)."
+            "role}` records: `item_id` is the id of the item shown, "
+            "`quote` is copied verbatim from that item's text, and role "
+            "is one of `supports`, `contradicts`, `neutral`)."
         )
 
     elif verb == "verify":
@@ -547,8 +548,11 @@ def _describe_step(
         lines.append(
             "  Emit a JSON object with keys `verified` (boolean), "
             "`reason` (short string explaining the verdict), and "
-            "`citations` (array of locator strings pinpointing the "
-            "passages that ground the verdict)."
+            "`evidence` (array of `{item_id, quote, role}` records, one "
+            "per passage that supports or contradicts the claim: "
+            "`item_id` is the id of the evidence item shown, `quote` is "
+            "copied verbatim from that item's text, and role is one of "
+            "`supports`, `contradicts`, `neutral`)."
         )
 
     elif verb == "groupby":
@@ -696,15 +700,18 @@ def _terminal_schema(tool: str) -> dict[str, Any]:
             },
         }
     if verb == "verify":
+        # Witness Schema v1 (RDR-088 amendment 2026-11-01): verify returns the same model-facing
+        # evidence items as check, imported from the one definition.
+        from nexus.mcp.core import _CHECK_EVIDENCE_ITEM_SCHEMA  # noqa: PLC0415 — deferred to avoid circular import (mcp.core)
         return {
             "type": "object",
-            "required": ["verified", "reason", "citations"],
+            "required": ["verified", "reason", "evidence"],
             "properties": {
                 "verified": {"type": "boolean"},
                 "reason": {"type": "string"},
-                "citations": {
+                "evidence": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": _CHECK_EVIDENCE_ITEM_SCHEMA,
                 },
             },
         }

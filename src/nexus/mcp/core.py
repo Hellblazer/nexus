@@ -9174,18 +9174,33 @@ async def operator_check(
     """Check a claim's consistency across N peer items, via an LLM subprocess.
 
     Use `operator_verify` instead for a single claim against a single
-    evidence source (1-to-1, not 1-to-N). Returns a composable
-    `{ok: bool, evidence: list[{item_id, quote, role}]}` payload, where
-    role is one of "supports", "contradicts", "neutral", so plan steps can
-    branch deterministically on `ok`.
+    evidence source (1-to-1, not 1-to-N). Returns a versioned, host-bound
+    payload `{schema_version: 1, ok: bool, evidence: list[item], rejected:
+    list[str], uncovered: list[str], requires_review: bool}` so plan steps
+    can branch deterministically on `ok`. Each item is `{item_id, quote,
+    role, state, span, tumbler, chash, collection}`: role is one of
+    "supports", "contradicts", "neutral"; state is "bound", "unattributed",
+    "unresolved" or "ambiguous". The model supplies only item_id, quote and
+    role; the host tests the quote against the item's own text and writes
+    state, span and the source fields, and a value the model puts in them
+    is never read. An item_id outside the supplied items is dropped and
+    listed in `rejected`; `uncovered` lists items no supports or contradicts
+    item names. Only a "bound" item is a valid witness; a direct call has no
+    known source, so its quotes come back "unattributed" at best.
+    `requires_review` is true when any item is not bound or the verdict is
+    not backed by bound support.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
+    from nexus.operators.witness import bind, binding_deferred, records_from_check_items  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
     prompt, schema = build_check_request(items, check_instruction)
-    return await claude_dispatch(
+    raw = await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_check",
     )
+    if binding_deferred():
+        return raw  # the plan runner holds the records and binds once
+    return bind(raw, records_from_check_items(items), "check")
 
 
 async def operator_verify(
@@ -9204,17 +9219,29 @@ async def operator_verify(
     """Verify a single claim against a single evidence source, via an LLM subprocess.
 
     Use `operator_check` instead when the claim must hold across N peer
-    items rather than one evidence source. Returns
-    `{verified: bool, reason: str, citations: list[str]}`, where citations
-    are span anchors or locators from the evidence text.
+    items rather than one evidence source. Returns a versioned, host-bound
+    payload `{schema_version: 1, verified: bool, reason: str, evidence:
+    list[item], rejected: list[str], requires_review: bool, citations:
+    list[str]}`. Each item has the same shape and rules as `operator_check`'s
+    (`{item_id, quote, role, state, span, tumbler, chash, collection}`); the
+    evidence is one item, `e1`, so the model cites item_id "e1" and the host
+    tests each quote against the evidence text. A direct call has no known
+    source, so a quote comes back "unattributed" at best; only a "bound"
+    item is a valid witness. `citations` is deprecated: the host derives it
+    as the quotes of bound and unattributed items, and it goes at
+    schema_version 2.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
+    from nexus.operators.witness import bind, binding_deferred, records_from_verify_evidence  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
     prompt, schema = build_verify_request(claim, evidence)
-    return await claude_dispatch(
+    raw = await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_verify",
     )
+    if binding_deferred():
+        return raw  # the plan runner holds the records and binds once
+    return bind(raw, records_from_verify_evidence(evidence), "verify")
 
 
 # HISTORY (RDR-093 Phase 1, Paper §D.4 GroupBy operator). Group
