@@ -1165,15 +1165,26 @@ public final class NexusService {
     /**
      * One cycle of the request-ledger retention arm (RDR-222 Phase 1, bead nexus-yye8l.3): one
      * {@code withTenant} delete pass per tenant, cutoff = {@code now} minus the retention days. Tenants are
-     * {@link #reaperTenants()}, the default tenant plus every tenant in {@code service_tokens}, not
-     * {@link #runScheduledTupleSweep}'s {@code tuple_tenants}, which is tuple-specific. Every keyed request is
-     * authenticated, so every ledger tenant holds a token; a tenant that lost its last token is skipped until it
-     * holds one again, the safe direction (a liveness gap, never a wrong deletion). A live lease is later than the
-     * cutoff, so a running attempt's row is never deleted. A tenant's failure is logged and the next still runs.
-     * Package-private so a test drives the exact method the scheduler runs.
+     * {@link #reaperTenants()} (the default tenant plus every tenant in {@code service_tokens}) together with every
+     * tenant in {@code request_ledger_tenants}, which a BEFORE INSERT trigger on the ledger fills with the tenant of
+     * each ledger row (nexus-yye8l.21; vectors-046 also backfilled the tenants already holding rows). The second set
+     * is what reaches a tenant that lost its last token: the ledger is FORCE RLS, so its tenants cannot be listed
+     * from the ledger itself. If reading that set throws, it is logged and the cycle still runs the reaper's
+     * tenants. Not {@link #runScheduledTupleSweep}'s
+     * {@code tuple_tenants}, which is tuple-specific, and no other tenant enumeration changes. A live lease is
+     * later than the cutoff, so a running attempt's row is never deleted. A tenant's failure is logged and the
+     * next still runs. Package-private so a test drives the exact method the scheduler runs.
      */
     List<dev.nexus.service.db.RequestLedger.RetentionPass> runScheduledLedgerRetention(OffsetDateTime now) {
-        return requestLedger.retainAll(reaperTenants(), now.minusDays(requestLedgerRetentionDays));
+        var tenants = new java.util.LinkedHashSet<String>(reaperTenants());
+        try {
+            tenants.addAll(requestLedger.ledgerTenants(SweepBounds.STATEMENT_TIMEOUT));
+        } catch (RuntimeException e) {
+            // The registry read failed: still run the passes for the reaper's tenants this cycle, and the next
+            // cycle reads the registry again. A thrown list read must not skip tenants that need no registry.
+            log.warn("event=request_ledger_tenants_list_failed; retention runs for the reaper tenants only this cycle", e);
+        }
+        return requestLedger.retainAll(List.copyOf(tenants), now.minusDays(requestLedgerRetentionDays));
     }
 
     /** The one request ledger the keyed handlers and the status route share. Package-private so a route test can drive its claim seam. */

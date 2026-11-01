@@ -2,8 +2,10 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -113,6 +115,66 @@ class RequestLedgerSchemaLiquibaseTest {
             List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", "request_ledger");
             assertThat(policies).hasSize(1);
             assertThat(policies.get(0).policyname()).isEqualTo("tenant_isolation");
+        }
+    }
+
+    // ── nexus-yye8l.21: the tenant registry the retention arm enumerates ────
+
+    @Test
+    void requestLedgerTenants_isAKeyedTenantListWithNoRls() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Map<String, String> actual = new TreeMap<>();
+            for (String col : PgCatalogProbes.columnNames(ctx, "nexus", "request_ledger_tenants")) {
+                PgCatalogProbes.ColumnInfo info = PgCatalogProbes.columnInfo(ctx, "nexus", "request_ledger_tenants", col);
+                actual.put(col, info.udtName() + " " + info.isNullable());
+            }
+            assertThat(actual).isEqualTo(new TreeMap<>(Map.of("tenant_id", "text NO", "first_seen", "timestamptz NO")));
+            Map<String, String> constraints = PgCatalogProbes.constraintDefinitionsIn(ctx, List.of("nexus")).stream()
+                .filter(c -> c.table().equals("request_ledger_tenants"))
+                .collect(Collectors.toMap(
+                    PgCatalogProbes.ConstraintDefinition::conname,
+                    PgCatalogProbes.ConstraintDefinition::definition));
+            assertThat(constraints).containsOnlyKeys("request_ledger_tenants_pk");
+            assertThat(constraints.get("request_ledger_tenants_pk")).isEqualTo("PRIMARY KEY (tenant_id)");
+            PgCatalogProbes.RowSecurity rls = PgCatalogProbes.rowSecurity(ctx, "nexus", "request_ledger_tenants");
+            assertThat(rls).isNotNull();
+            assertThat(rls.enabled()).as("no RLS: the retention arm must see every tenant's row").isFalse();
+        }
+    }
+
+    @Test
+    void theRegisterTenantTrigger_isABeforeInsertRowTriggerOnTheLedger_withAnInvokerFunctionAndAPinnedSearchPath()
+            throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // Typed jOOQ over pg_catalog, as the raw-SQL and string-literal gates require (TaxonomySchemaLiquibaseTest).
+            Table<?> pgTrigger = DSL.table(DSL.name("pg_trigger")).as("t");
+            Table<?> pgProc = DSL.table(DSL.name("pg_proc")).as("p");
+            Table<?> pgClass = DSL.table(DSL.name("pg_class")).as("cl");
+            Table<?> pgNamespace = DSL.table(DSL.name("pg_namespace")).as("n");
+            Field<Object> tOid = DSL.field(DSL.name("t", "oid"));
+            Field<String> tgname = DSL.field(DSL.name("t", "tgname"), String.class);
+            Field<String> def = DSL.function("pg_get_triggerdef", String.class, tOid);
+            Field<Boolean> prosecdef = DSL.field(DSL.name("p", "prosecdef"), Boolean.class);
+            Field<String[]> proconfig = DSL.field(DSL.name("p", "proconfig"), String[].class);
+            var triggers = ctx.select(tgname, def, prosecdef, proconfig)
+                .from(pgTrigger)
+                .join(pgProc).on(DSL.field(DSL.name("p", "oid")).eq(DSL.field(DSL.name("t", "tgfoid"))))
+                .join(pgClass).on(DSL.field(DSL.name("cl", "oid")).eq(DSL.field(DSL.name("t", "tgrelid"))))
+                .join(pgNamespace).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("cl", "relnamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("cl", "relname"), String.class).eq("request_ledger"))
+                .and(DSL.field(DSL.name("t", "tgisinternal"), Boolean.class).isFalse())
+                .fetch();
+            assertThat(triggers).hasSize(1);
+            var trigger = triggers.get(0);
+            assertThat(trigger.get(tgname)).isEqualTo("trg_request_ledger_register_tenant");
+            assertThat(trigger.get(def))
+                .contains("BEFORE INSERT ON nexus.request_ledger", "FOR EACH ROW",
+                    "nexus.request_ledger_register_tenant()");
+            assertThat(trigger.get(prosecdef)).as("SECURITY INVOKER").isFalse();
+            assertThat(trigger.get(proconfig)).contains("search_path=pg_catalog, pg_temp");
         }
     }
 

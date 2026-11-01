@@ -7,7 +7,8 @@ usage: verdicts.py OUT_DIR [--root REPO_ROOT]
 OUT_DIR holds the files run-scenario.sh writes: NAME.jsonl (stream-json), NAME.rc, and for
 run-canaries.sh also work-dirs-before.txt and work-dirs-after.txt. A run's kind is its name
 without a trailing -N. Exit 1 when any run fails; exit 3 when none failed but a run was
-NOT-MEASURABLE (it proves nothing, so it is never a pass); 0 only when every run passed.
+NOT-MEASURABLE or VACUOUS (it proves nothing, so it is never a pass) or a scenario was NOT-RUN (a runner skipped it on
+purpose and wrote "NAME: reason" to not-run.txt; it has no transcript); 0 only when every run passed.
 
 The kinds that edit a document (xanadu, linda, refrain, qa, qb, qc, protected, budget, range, compression) are scored on
 the post-filter proposal: the last `brief.py filter` output in the transcript, which is what the author sees.
@@ -48,6 +49,10 @@ NOT-MEASURABLE):
              human to read. The lists were read off the documents; a listed phrase the document no longer holds
              exactly once makes the run NOT-MEASURABLE.
              xanadu and linda notes also count the semicolon queries (since nexus-ger02.23 the no-semicolons rule does not apply to essays, so it reads 0)
+The cut-only kinds (RDR-221 Step 3.1, nexus-ger02.10; the prose-cut skill; run-cut.sh) have oracles of their own, stated
+here and not borrowed from brief.py (see CUTONLY below): cutonly (cutonly-1), cutonly-1d (the decide turn), cutonly-repeat
+(cutonly-2, which reads cutonly-1d) and cutonly-web. A run whose point is not exercised is VACUOUS, which exits 3 like
+NOT-MEASURABLE.
 Every doc-editing kind and the stdin run also need proof that the line-editor subagent read WORK/brief.md: a Read
 of that file by the subagent, before its reply, with a non-error result that carries the file's last line
 (`Brief id: <id>`), and a reply whose brief_sha is that id. The id is in the file and nowhere in the dispatch prompt,
@@ -80,11 +85,14 @@ the author which edits to accept, so it leaves one work directory (the copy and 
 """
 from __future__ import annotations
 
+import difflib
+import html
 import json
 import re
 import shlex
 import sys
 from collections import Counter
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -99,9 +107,12 @@ DOCS: dict[str, str | None] = {
     "refrain": FX + "refrain-no-twin.md", "qa": FX + "qualifiers-a.md", "qb": FX + "qualifiers-b.md",
     "qc": FX + "qualifiers-c.md", "protected": FX + "protected.md", "budget": FX + "protected.md",
     "range": FX + "range-notes.md", "compression": FX + "compression.md",
+    "cutonly": FX + "review-scenario.md", "cutonly-web": "web/getting-started.html",
 }
 _JSON_BLOCK = re.compile(r"^[ \t]*```json[ \t]*\n(.*?)\n[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE)
 PASS, FAIL, NOT_MEASURABLE = "PASS", "FAIL", "NOT-MEASURABLE"
+VACUOUS = "VACUOUS"  # the run could not have failed the check it exists for: it proves nothing, like NOT-MEASURABLE
+NOT_RUN = "NOT-RUN"
 # What the author deliberately did, read off each document, in two groups. ALWAYS-PROTECTED (DEVICES): refrains,
 # repeated openings, closing lines and the unexplained SQL: an edit overlapping one fails the run (RDR-221 Test
 # Plan 2). CARD-CONDITIONAL (CARD_DEVICES): the three-item constructions. Sam's ruling of 2026-09-30: a three-item
@@ -839,8 +850,295 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
     return PASS, note
 
 
+# ---------------------------------------------------------------------------
+# Cut-only (RDR-221 Step 3.1, nexus-ger02.10): oracles of their own
+# ---------------------------------------------------------------------------
+#
+#   cutonly         cutonly-1: a cut run on a copy of fixtures/review-scenario.md with --genre how-to. At least one edit
+#                   survived the filter, every one only removes words (CUTONLY_WORD, the subsequence rule below), there
+#                   is no query and no paragraph proposal but a cut, no MarkupEditor tool and no AskUserQuestion, no
+#                   Write outside a prose-edit work directory (no copy of the page, no write to it), the build and the
+#                   filter ran with --mode cut-only, the line-editor read brief.md, and the WORK directory was printed.
+#   cutonly-web     the same on web/getting-started.html, never decided: no surviving edit touches an excluded element
+#                   (EXCLUDED_ELEMENTS and comments, located by html.parser from the page's own text). The note counts
+#                   the protected-region drops, and a run whose raw editor reply held no edit inside an excluded element
+#                   is VACUOUS: the protection was not exercised, whatever the filter let through.
+#   cutonly-1d      the decide turn that resumes cutonly-1: `review.py apply` ran with --dry-run and then the same
+#                   arguments without it, no question was asked, and the real run stored the rejection.
+#   cutonly-repeat  cutonly-2, a fresh cut run on the same copy: the change cutonly-1d rejected (the words its dry run
+#                   listed under reject) does not survive the filter. VACUOUS when the editor never proposes it again.
+CUTONLY_WORD = re.compile(r"[0-9A-Za-z\u00c0-\u024f]+(?:['\u2019][0-9A-Za-z]+)*")
+EXCLUDED_ELEMENTS = frozenset({"pre", "table", "blockquote", "style", "script", "head", "svg", "code", "kbd",
+                               "nav", "h1", "h2", "h3", "h4", "h5", "h6", "button", "samp"})
+_WORK_DIR = re.compile(r"prose-edit-[a-z0-9_]{8}")
+
+
+def cut_tokens(text: str) -> list[str]:
+    """The words of an edit's text, lower-cased, an entity read as its character."""
+    return [w.lower() for w in CUTONLY_WORD.findall(html.unescape(text))]
+
+
+def only_removes_words(old: str, new: str) -> bool:
+    """True when `new` is empty or its words are a proper subsequence of `old`'s (punctuation and case aside)."""
+    if not new.strip():
+        return True
+    gone, kept = cut_tokens(old), cut_tokens(new)
+    if len(kept) >= len(gone):
+        return False
+    rest = iter(gone)
+    return all(word in rest for word in kept)
+
+
+def removed_words(old: str, new: str) -> tuple[str, ...]:
+    """The words `new` leaves out of `old`, in order: the identity of a cut however much text it was quoted in."""
+    gone, kept = cut_tokens(old), cut_tokens(new)
+    out: list[str] = []
+    for tag, i1, i2, _, _ in difflib.SequenceMatcher(a=gone, b=kept, autojunk=False).get_opcodes():
+        if tag in ("delete", "replace"):
+            out += gone[i1:i2]
+    return tuple(out)
+
+
+class _Excluded(HTMLParser):
+    """The character spans of a page's excluded elements and comments, from the page's own text."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self.text = text
+        self.starts = [0]
+        for line in text.split("\n"):
+            self.starts.append(self.starts[-1] + len(line) + 1)
+        self.open: list[tuple[str, int]] = []
+        self.spans: list[tuple[int, int]] = []
+
+    def _here(self) -> int:
+        line, col = self.getpos()
+        return self.starts[line - 1] + col
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in EXCLUDED_ELEMENTS:
+            self.open.append((tag, self._here()))
+
+    def handle_endtag(self, tag: str) -> None:
+        for i in range(len(self.open) - 1, -1, -1):
+            if self.open[i][0] == tag:
+                start = self.open[i][1]
+                del self.open[i:]
+                if not self.open:
+                    self.spans.append((start, self.text.find(">", self._here()) + 1))
+                return
+
+    def handle_comment(self, data: str) -> None:
+        here = self._here()
+        self.spans.append((here, self.text.find("-->", here) + 3))
+
+
+def excluded_spans(text: str) -> list[tuple[int, int]]:
+    parser = _Excluded(text)
+    parser.feed(text)
+    parser.close()
+    if parser.open:
+        parser.spans.append((parser.open[0][1], len(text)))  # an unclosed element runs to the end
+    return parser.spans
+
+
+def _flag_values(command: str, script: str, verb: str) -> list[str] | None:
+    """The tokens after `<script>.py <verb>` of a Bash command, or None when it runs something else."""
+    if not runs_script(command, script, verb):
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    return tokens[tokens.index(verb) + 1:] if verb in tokens else None
+
+
+def _cut_flags_present(command: str, script: str, verb: str) -> bool:
+    after = _flag_values(command, script, verb)
+    if after is None:
+        return False
+    given = {a.split("=", 1)[0]: (a.split("=", 1)[1] if "=" in a else after[i + 1] if i + 1 < len(after) else "")
+             for i, a in enumerate(after) if a.startswith("--")}
+    return given.get("--mode") == "cut-only" and bool(given.get("--word-budget"))
+
+
+def _bash_commands(events: list[Obj]) -> list[tuple[str, str]]:
+    return [(tid, str(inp.get("command", ""))) for tid, name, inp, _ in tool_uses(events) if name == "Bash"]
+
+
+def _cutonly_conduct(events: list[Obj], c: Obj) -> list[str]:
+    """What every cut-only run must not do: scope or denial violations, a tool the skill has no use for, a Write
+    outside a work directory (the page, a copy of it), an unread brief."""
+    problems: list[str] = []
+    if c["grep_scope"] or c["rdr_reads"] or c["off_list_bash"] or c["denied"]:
+        problems.append(f"scope or denial violations (grep_scope={len(c['grep_scope'])} rdr_reads={len(c['rdr_reads'])} "
+                        f"off_list_bash={len(c['off_list_bash'])} denied={c['denied']})")
+    for _, name, inp, _ in tool_uses(events):
+        if "markupeditor" in name.lower() or name == "AskUserQuestion":
+            problems.append(f"the run called {name}: prose-cut has no app and asks no question")
+        elif name in ("Write", "Edit", "NotebookEdit") and not _WORK_DIR.search(str(inp.get("file_path", ""))):
+            problems.append(f"the run wrote {inp.get('file_path')!r}, which is not inside a prose-edit work directory")
+    return problems
+
+
+def cutonly_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> tuple[str, str]:
+    """cutonly (cutonly-1) and cutonly-web: the post-filter proposal of a cut run."""
+    if not any(n == "Agent" for _, n, _, _ in tool_uses(events, sub=False)):
+        return FAIL, "the line-editor was never dispatched"
+    problems = _cutonly_conduct(events, c)
+    unread = brief_read_problem(events)
+    if unread:
+        problems.append(unread)
+    commands = _bash_commands(events)
+    if not any(_cut_flags_present(cmd, "brief", "build") for _, cmd in commands):
+        problems.append("no `brief.py build` ran with --mode cut-only and a --word-budget")
+    runs = filter_runs(events)
+    if not any(_cut_flags_present(cmd, "brief", "filter") for cmd, _ in runs):
+        problems.append("no `brief.py filter` ran with --mode cut-only and a --word-budget")
+    if not _WORK_DIR.search(final_text(events)):
+        problems.append("the final message does not print the WORK directory the caller decides with")
+    if not runs:
+        return (FAIL, "; ".join(problems)) if problems else (
+            NOT_MEASURABLE, "no `brief.py filter` output in the transcript: the post-filter proposal cannot be read")
+    command, proposal = runs[-1]
+    edits = [e for e in proposal.get("edits") or [] if isinstance(e, dict)]
+    if proposal.get("mode") != "cut-only":
+        problems.append("the filter output does not say mode cut-only")
+    budget, _ = filter_arguments(command)
+    if budget is not None and len(edits) > budget:
+        problems.append(f"{len(edits)} edits survived the filter against a budget of {budget}")
+    problems += [f"edit {e.get('n')} adds, replaces or reorders a word: {str(e.get('old'))[:50]!r} -> "
+                 f"{str(e.get('new'))[:50]!r}" for e in edits if not only_removes_words(str(e.get("old", "")), str(e.get("new", "")))]
+    if proposal.get("queries"):
+        problems.append(f"{len(proposal['queries'])} queries survived: a cut-only run raises none")
+    problems += [f"paragraph proposal {p.get('n')} is a {p.get('action')}, not a cut"
+                 for p in proposal.get("paragraphs") or [] if isinstance(p, dict) and p.get("action") != "cut"]
+    drops = _drops_note(proposal)
+    if doc_text is None:
+        return (FAIL, "; ".join(problems) + f"; {drops}") if problems else (
+            NOT_MEASURABLE, "the document is not readable under --root")
+    stale = [e.get("n") for e in edits if str(e.get("old", "")) not in doc_text]
+    if stale:
+        return NOT_MEASURABLE, f"edits {stale} are not in the document: it is not the one the run edited"
+    problems += _nonunique_problems(doc_text, edits)
+    if kind == "cutonly-web":
+        spans = excluded_spans(doc_text)
+        for e in _unique_edits(doc_text, edits):
+            for lo, hi in _spans(doc_text, str(e["old"])):
+                if any(lo < b and a < hi for a, b in spans):
+                    problems.append(f"edit {e.get('n')} sits inside an excluded element or comment "
+                                    f"(line {doc_text.count(chr(10), 0, lo) + 1})")
+    if problems:
+        return FAIL, "; ".join(problems) + f"; {drops}"
+    if not edits:
+        return NOT_MEASURABLE, f"no edit survived the filter, so there is nothing to check; {drops}"
+    note = f"{len(edits)} cuts, all word-removing; words {json.dumps(proposal.get('words'))}; {drops}"
+    if kind == "cutonly-web":
+        refused = sum(1 for d in proposal.get("dropped") or [] if isinstance(d, dict) and d.get("cause") == "protected-region")
+        note += f"; protected-region drops: {refused}"
+        spans = excluded_spans(doc_text)
+        tried = [e for e in (editor_reply(events) or {}).get("edits") or [] if isinstance(e, dict) and e.get("old")
+                 and any(a < hi and lo < b for lo, hi in _spans(doc_text, str(e.get("old", ""))) for a, b in spans)]
+        if not tried:
+            return VACUOUS, ("the editor's reply held no edit inside an excluded element, so the filter's protection "
+                             f"was not exercised; {note}")
+    return PASS, note
+
+
+def _apply_runs(events: list[Obj]) -> list[tuple[str, list[str], Obj | None]]:
+    """(the command, its tokens after `apply`, what it printed as JSON) for every `review.py apply` run."""
+    results = tool_results(events)
+    out: list[tuple[str, list[str], Obj | None]] = []
+    for tid, command in _bash_commands(events):
+        after = _flag_values(command, "review", "apply")
+        if after is not None:
+            out.append((command, after, _json_object(results[tid]) if tid in results else None))
+    return out
+
+
+def cutonly_decide_verdict(events: list[Obj], c: Obj) -> tuple[str, str]:
+    """cutonly-1d: a dry run, then the same arguments for real, no question, and the rejection stored."""
+    problems = _cutonly_conduct(events, c)
+    runs = _apply_runs(events)
+    dry = [r for r in runs if "--dry-run" in r[1]]
+    real = [r for r in runs if "--dry-run" not in r[1]]
+    if not dry or not real:
+        return FAIL, "; ".join(problems + [f"decide ran {len(dry)} dry runs and {len(real)} real applies; it must run both"])
+    if runs.index(dry[0]) > runs.index(real[-1]):
+        problems.append("the real apply ran before the dry run")
+    same = [a for a in real[-1][1]] == [a for a in dry[0][1] if a != "--dry-run"]
+    if not same:
+        problems.append("the real apply's arguments are not the dry run's")
+    done = real[-1][2]
+    if done is None or not isinstance(done.get("rejected"), list):
+        problems.append("the real apply printed no result (rejected)")
+    elif not done["rejected"] or done.get("rejections_stored") is not True:
+        problems.append(f"the rejection was not stored (rejected={done.get('rejected')} "
+                        f"rejections_stored={done.get('rejections_stored')})")
+    if problems:
+        return FAIL, "; ".join(problems)
+    return PASS, f"dry run then real apply; rejected {done['rejected'] if done else []} stored; applied " \
+                 f"{[a.get('n') for a in (done or {}).get('applied') or []]}"
+
+
+def rejected_cut(prior: list[Obj]) -> tuple[str, str] | None:
+    """(old, new) of the cut cutonly-1d rejected, read from its dry run's `reject` list."""
+    for _, after, printed in _apply_runs(prior):
+        if "--dry-run" in after and printed:
+            for r in printed.get("reject") or []:
+                if isinstance(r, dict) and "old" in r and "new" in r:
+                    return str(r["old"]), str(r["new"])
+    return None
+
+
+def cutonly_repeat_verdict(events: list[Obj], c: Obj, prior: list[Obj] | None) -> tuple[str, str]:
+    """cutonly-2: the cut cutonly-1d rejected does not come back through the filter."""
+    if prior is None:
+        return NOT_MEASURABLE, "cutonly-1d left no transcript to read the rejected cut from"
+    rejected = rejected_cut(prior)
+    if rejected is None:
+        return NOT_MEASURABLE, "cutonly-1d's dry run lists no rejected cut, so there is nothing to compare"
+    problems = _cutonly_conduct(events, c)
+    runs = filter_runs(events)
+    if not runs:
+        return (FAIL, "; ".join(problems)) if problems else (NOT_MEASURABLE, "no `brief.py filter` output")
+    _, proposal = runs[-1]
+    key = removed_words(*rejected)
+    if not key:
+        return NOT_MEASURABLE, "the rejected cut removes no word, so it cannot be recognised"
+    back = [e for e in proposal.get("edits") or [] if isinstance(e, dict)
+            and removed_words(str(e.get("old", "")), str(e.get("new", ""))) == key]
+    if back:
+        problems.append(f"the rejected cut {' '.join(key)!r} came back as edit {back[0].get('n')}")
+    if problems:
+        return FAIL, "; ".join(problems)
+    reply = editor_reply(events) or {}
+    again = [e for e in reply.get("edits") or [] if isinstance(e, dict)
+             and removed_words(str(e.get("old", "")), str(e.get("new", ""))) == key]
+    if not again:
+        return VACUOUS, (f"the editor did not propose {' '.join(key)!r} again, so the filter's memory of the rejection "
+                         "was not exercised (the brief's section 4 may have kept it away)")
+    dropped = [d for d in proposal.get("dropped") or [] if isinstance(d, dict) and d.get("n") == again[0].get("n")]
+    if not dropped or dropped[0].get("cause") != "rejected":
+        return NOT_MEASURABLE, f"the rejected cut was proposed again and left the filter, but not as rejected: {dropped}"
+    return PASS, f"the editor proposed {' '.join(key)!r} again and the filter dropped it as rejected"
+
+
+def decide_args(events: list[Obj]) -> tuple[str, int, str] | None:
+    """(WORK, the cut to reject, the accept spec) for the decide turn after a cut run: the first surviving cut is
+    rejected and the rest accepted. None when the run printed no WORK or left no cut."""
+    work = next((m.group(1) for v in tool_results(events).values()
+                 for m in [re.search(r"WORK=(\S+prose-edit-[a-z0-9_]{8})", v)] if m), None)
+    runs = filter_runs(events)
+    numbers = sorted(int(e["n"]) for e in (runs[-1][1].get("edits") or []) if isinstance(e, dict)
+                     and isinstance(e.get("n"), int)) if runs else []
+    if work is None or not numbers:
+        return None
+    return work, numbers[0], ",".join(str(n) for n in numbers[1:]) or "none"
+
+
 def verdict(kind: str, events: list[Obj], c: Obj, new_work_dirs: list[str],
-            doc_text: str | None = None) -> tuple[str, str]:
+            doc_text: str | None = None, prior: list[Obj] | None = None) -> tuple[str, str]:
     dispatched = any(n == "Agent" for _, n, _, _ in tool_uses(events, sub=False))
     results = tool_results(events)
     if kind == "canary-nx":
@@ -872,15 +1170,42 @@ def verdict(kind: str, events: list[Obj], c: Obj, new_work_dirs: list[str],
         return ("PASS" if ok else "FAIL"), (f"dispatched={dispatched} filtered={filtered} rendered={rendered} "
                                             f"new-work-dirs={len(new_work_dirs)} denied={c['denied']} "
                                             f"brief-read={unread or 'ok'}")
+    if kind in ("cutonly", "cutonly-web"):
+        return cutonly_verdict(kind, events, c, doc_text)
+    if kind == "cutonly-1d":
+        return cutonly_decide_verdict(events, c)
+    if kind == "cutonly-repeat":
+        return cutonly_repeat_verdict(events, c, prior)
     if kind in DOCS:
         return doc_verdict(kind, events, c, doc_text)
     return NOT_MEASURABLE, f"no verdict is defined for the kind {kind!r}"
+
+
+def not_run_rows(out_dir: Path) -> list[tuple[str, str]]:
+    """[(name, reason)] from not-run.txt: the scenarios a runner skipped on purpose (run-cut.sh writes one there through
+    runner_not_run when a scenario cannot run). A name that also has a transcript was run, so it is not listed."""
+    path = out_dir / "not-run.txt"
+    if not path.is_file():
+        return []
+    rows: list[tuple[str, str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name, sep, reason = line.partition(": ")
+        if sep and name.strip() and not (out_dir / f"{name.strip()}.rc").exists():
+            rows.append((name.strip(), reason.strip()))
+    return rows
 
 
 def main(argv: list[str]) -> int:
     if not argv:
         sys.stdout.write((__doc__ or "") + "\n")
         return 2
+    if argv[0] == "--decide-args":  # run-cut.sh: WORK, the cut to reject and the accept spec, tab separated
+        found = decide_args(load_events(Path(argv[1]))) if len(argv) > 1 and Path(argv[1]).is_file() else None
+        if found is None:
+            sys.stderr.write("verdicts.py: the transcript has no WORK= line or no surviving cut to decide\n")
+            return 1
+        sys.stdout.write(f"{found[0]}\t{found[1]}\t{found[2]}\n")
+        return 0
     out_dir = Path(argv[0])
     root = Path(argv[argv.index("--root") + 1]) if "--root" in argv else Path(__file__).resolve().parents[3]
     before = set((out_dir / "work-dirs-before.txt").read_text().split()) if (out_dir / "work-dirs-before.txt").exists() else set()
@@ -892,19 +1217,26 @@ def main(argv: list[str]) -> int:
     for rc in sorted(out_dir.glob("*.rc")):
         name = rc.stem
         kind = re.sub(r"-[0-9]+$", "", name)
+        if name == "cutonly-2":  # the repeat run is scored against what cutonly-1d rejected
+            kind = "cutonly-repeat"
         events = load_events(out_dir / f"{name}.jsonl")
+        prior = load_events(out_dir / "cutonly-1d.jsonl") if kind == "cutonly-repeat" and (
+            out_dir / "cutonly-1d.jsonl").exists() else None
         doc = DOCS.get(kind)
         doc_text = (root / doc).read_text(encoding="utf-8") if doc and (root / doc).exists() else None
         c = compliance(events, doc_text)
         raw = (out_dir / f"{name}.jsonl").read_text(encoding="utf-8")
         own_dirs = [d for d in new_dirs if d in raw]  # a directory the stdin run is holding for its answer is not another run's
-        v, note = verdict(kind, events, c, own_dirs, doc_text=doc_text)
+        v, note = verdict(kind, events, c, own_dirs, doc_text=doc_text, prior=prior)
         fails += v == FAIL
-        unmeasured += v == NOT_MEASURABLE
+        unmeasured += v in (NOT_MEASURABLE, VACUOUS)
         counts = {k: (len(val) if isinstance(val, list) else val) for k, val in c.items()}
         for k, val in counts.items():
             totals[k] += int(val)
         sys.stdout.write(f"{name:14} {v:5} {note} | {json.dumps(counts)}\n")
+    skipped = not_run_rows(out_dir)
+    for name, reason in skipped:
+        sys.stdout.write(f"{name:14} {NOT_RUN:5} {reason}\n")
     sys.stdout.write(f"TOTALS {json.dumps(dict(totals))} new-work-dirs {new_dirs}\n")
     heads = sorted({h.read_text(encoding="utf-8").strip() for h in out_dir.glob("*.head")} - {""})
     if heads:  # record-run.sh wrote one per run: a batch at more than one sha says so here
@@ -912,7 +1244,7 @@ def main(argv: list[str]) -> int:
     models = sorted({m.read_text(encoding="utf-8").strip() for m in out_dir.glob("*.model")} - {""})
     if models:  # the session model each run recorded (the orchestrator's; the editor's is the agent file's)
         sys.stdout.write(f"MODELS {' '.join(models)}\n")
-    return 1 if fails else (3 if unmeasured else 0)
+    return 1 if fails else (3 if unmeasured or skipped else 0)
 
 
 if __name__ == "__main__":

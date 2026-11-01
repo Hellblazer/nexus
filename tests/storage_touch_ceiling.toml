@@ -40,8 +40,13 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4961
+provisioned_tests = 5009
 tolerance_tests = 0
+# 4961 -> 5009 (nexus-ger02.10, 2026-10-31): +48, the cut-only suite (prose-cut). CI 41217739838 (243cf230e) counted
+# 5009 with nothing else new. Every one of the 48 drives the T2-backed path: tests/prose_edit/test_cut_only.py's
+# filter, render, apply and decide tests read the document's stored rejections and write them (the `prose` fixture),
+# and the next-run test reads them back; its pure tests (parse, the cut check, text pins) mint none. DDL-per-run
+# ratchet untouched (no changeset).
 # 4962 -> 4961 (nexus-ru672, 2026-10-30): tests/test_pdf_subsystem.py::test_no_git_repo_empty_git_fields deleted (tautological after the git_* writer removal; reduce-only ceiling lowered in the commit that lowers the count)
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other

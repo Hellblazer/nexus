@@ -4144,15 +4144,48 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         the route up after an engine upgrade without a restart. Paged and
         count-reconciled like :meth:`docs_and_manifests_for_chashes`.
         """
+        out = self._chash_positions(chashes, include_tombstoned=False)
+        return None if out is None else out[0]
+
+    def chash_positions_with_tombstoned(
+        self, chashes: list[str],
+    ) -> tuple[list[dict], list[dict] | None] | None:
+        """``(rows, tombstoned)``: :meth:`chash_positions`'s live rows and, from the same request, the manifest
+        rows of TOMBSTONED documents holding one of *chashes* (``{chash, doc_id, position, collection}``,
+        nexus-6pfgb.58).
+
+        No live read shows a deleted document's manifest, so a caller deciding "this chash has one owner" could not
+        count a tombstoned co-owner; this is the read that can. ``tombstoned`` is ``None`` when the engine answered
+        the live rows but sent no ``tombstoned`` key (an engine before this key): that is "cannot say", never
+        "none", and a caller that needs the tombstoned holders must stop on it. The result is ``None`` when the
+        route is absent, exactly as for :meth:`chash_positions`, which shares that backoff; a malformed
+        ``tombstoned`` list backs off this reader alone, so :meth:`chash_positions` keeps working.
+        """
+        return self._chash_positions(chashes, include_tombstoned=True)
+
+    def _chash_positions(
+        self, chashes: list[str], *, include_tombstoned: bool,
+    ) -> tuple[list[dict], list[dict] | None] | None:
         backoff = getattr(self, "_chash_positions_backoff", None)
         if backoff is not None and _monotonic() - backoff[0] < backoff[1]:
             return None
+        if include_tombstoned:
+            # A malformed tombstoned list backs off only this reader: the live rows route is healthy, and the
+            # search-attach callers of chash_positions must not lose it for a window over a list they never ask for.
+            gone_backoff = getattr(self, "_chash_tombstoned_backoff", None)
+            if gone_backoff is not None and _monotonic() - gone_backoff[0] < gone_backoff[1]:
+                return None
         unique = list(dict.fromkeys(c for c in chashes if c))
         rows: list[dict] = []
+        tombstoned: list[dict] = []
+        reported = True  # every page carried the tombstoned key (only meaningful when asked)
         for start in range(0, len(unique), _DOCS_FOR_CHASHES_PAGE):
             batch = unique[start : start + _DOCS_FOR_CHASHES_PAGE]
+            request: dict[str, Any] = {"chashes": batch}
+            if include_tombstoned:
+                request["include_tombstoned"] = True
             try:
-                result = self._post("/manifest/chash_positions", {"chashes": batch}, mutates=False)
+                result = self._post("/manifest/chash_positions", request, mutates=False)
             except httpx.HTTPStatusError as exc:
                 if exc.response is not None and exc.response.status_code == 404:
                     self._chash_positions_backoff = (_monotonic(), _CHASH_POSITIONS_RETRY_S)
@@ -4177,7 +4210,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     f"(keys {sorted(result)}); refusing a partial reverse lookup"
                 )
             rows.extend(page)
-        return rows
+            if not include_tombstoned:
+                continue
+            gone = result.get("tombstoned")
+            if gone is None:
+                reported = False  # an engine that predates the key ignored the flag
+                continue
+            if not isinstance(gone, list) or "tombstoned_count" not in result or len(gone) != int(result["tombstoned_count"]):
+                self._chash_tombstoned_backoff = (_monotonic(), _CHASH_POSITIONS_FAILURE_RETRY_S)
+                raise RuntimeError(
+                    "manifest/chash_positions tombstoned list is malformed or truncated "
+                    f"(keys {sorted(result)}); refusing a partial tombstoned-holder read"
+                )
+            tombstoned.extend(gone)
+        return rows, (tombstoned if include_tombstoned and reported else None)
 
     def docs_and_manifests_for_chashes(
         self, chashes: list[str],

@@ -901,7 +901,9 @@ def update_cmd(
 @catalog.command("merge")
 @click.argument("duplicate")
 @click.argument("canonical")
-def merge_cmd(duplicate: str, canonical: str) -> None:
+@click.option("--force", is_flag=True, default=False,
+              help="Merge even when the duplicate holds chunks and the canonical holds none.")
+def merge_cmd(duplicate: str, canonical: str, force: bool) -> None:
     """Collapse DUPLICATE into CANONICAL in one transaction (nexus-z4rpi).
 
     Replaces the manual three-call recipe (--source-uri '' on the
@@ -924,11 +926,26 @@ def merge_cmd(duplicate: str, canonical: str) -> None:
     tumbler not found (including a tumbler in a different tenant), a
     duplicate already aliased to some OTHER canonical, or a merge that
     would close an alias cycle.
+
+    The merge never moves chunks or the collection (nexus-bivz3.27): when
+    the duplicate holds chunks and the canonical holds none, the merged
+    document would read as chunkless, so that case is refused unless
+    --force. Both counts are printed on every merge.
     """
     cat = _get_catalog()
     writer = _get_catalog_writer()
     dup_t = _resolve_tumbler(cat, duplicate)
     canon_t = _resolve_tumbler(cat, canonical)
+    dup_chunks, canon_chunks = (
+        int(getattr(cat.resolve(t), "chunk_count", 0) or 0) for t in (dup_t, canon_t)
+    )
+    if dup_chunks and not canon_chunks and not force:
+        writer.close()
+        raise click.ClickException(
+            f"{dup_t} holds {dup_chunks} chunk(s) and {canon_t} holds none. A merge moves "
+            f"identity and links, never chunks, so {canon_t} would read as having no "
+            f"chunks. Merge the other way ({canon_t} into {dup_t}), or pass --force."
+        )
     try:
         result = writer.merge_documents(dup_t, canon_t)
     except httpx.HTTPStatusError as exc:
@@ -946,7 +963,8 @@ def merge_cmd(duplicate: str, canonical: str) -> None:
         f" (source_uri_moved={result.get('source_uri_moved', False)},"
         f" links_remapped={result.get('links_remapped', 0)},"
         f" links_collapsed={result.get('links_collapsed', 0)},"
-        f" links_dropped={result.get('links_dropped', 0)})"
+        f" links_dropped={result.get('links_dropped', 0)};"
+        f" chunks: duplicate {dup_chunks}, canonical {canon_chunks})"
     )
 
 

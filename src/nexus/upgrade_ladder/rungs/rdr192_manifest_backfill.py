@@ -130,6 +130,7 @@ from typing import Any, Protocol
 
 import structlog
 
+from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service, refuses_unbounded_read
 from nexus.upgrade_ladder.census_progress import (
     CHECKPOINT_EVERY,
     CensusProgress,
@@ -777,6 +778,8 @@ class Rdr192ManifestBackfillRung:
     #: default, whenever it sets the memo).
     progress: CensusProgress | None = None
     lock_factory: Callable[[], contextlib.AbstractContextManager[bool]] = _cross_process_lock
+    #: Is the engine a managed service? (nexus-75w5d: the unattended-run refusal in :meth:`converge`.)
+    managed_fn: Callable[[], bool] = managed_service
     now_fn: Callable[[], datetime] = lambda: datetime.now(UTC)  # noqa: E731 — a dataclass default seam, not a def
     max_passes: int = DEFAULT_MAX_PASSES
     name: str = RUNG_NAME
@@ -878,6 +881,20 @@ class Rdr192ManifestBackfillRung:
         self._last_clean = None
         self._cut_at = None
         self._tally = CensusTally()
+        if refuses_unbounded_read(self.managed_fn):
+            # nexus-75w5d: the census is one engine statement per collection, a per-chunk anti-join
+            # whose cost grows with the collection (112 to 152 s on one 80,000-chunk collection, with no
+            # statement timeout on the route), and the completion record is keyed by package version, so
+            # every box of a tenant re-derives it after each version bump until one box records it. On a
+            # managed service nobody runs that unattended: no census call, no lock, no backfill. The
+            # engine gate ignores the record's version (see detect()), so a record from an older version
+            # keeps the reaper answered; an interactive `nx upgrade` writes the current one.
+            reason = (
+                "unattended `nx upgrade` does not census a managed service's collections "
+                f"(one engine scan each); {INTERACTIVE_REMEDY}"
+            )
+            _log.info("rdr192_backfill_rung_skipped", reason=reason)
+            return ConvergeResult(ConvergeOutcome.DEFERRED, detail=reason)
         try:
             with self.lock_factory() as acquired:
                 if not acquired:

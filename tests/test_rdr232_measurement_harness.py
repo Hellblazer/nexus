@@ -35,6 +35,7 @@ from bench.rdr232_envelope import (  # noqa: E402
     envelope_facts,
     observation_from_envelope,
     repair_by_origin,
+    unread_tail_repair,
 )
 from bench.rdr232_facet_map import DEFAULT_MAP_PATH, load_facet_map, resolve_facets  # noqa: E402
 from bench.schema import load_golden_set  # noqa: E402
@@ -295,6 +296,42 @@ def test_repair_yield_is_split_by_facet_origin_and_assessment_usd_comes_from_the
         {"operator": "search", "cost_usd": 0.0}, {"operator": "operator_check", "cost_usd": 0.0123}, {"operator": "operator_check", "cost_usd": 0.0077},
     ])
     assert assessment_usd(env) == 0.02
+
+
+def _tail_envelope(envelope, *, reason: str, facet_ids: list[str], unread: list[str], covered: list[str]) -> dict[str, Any]:
+    env = json.loads(json.dumps(envelope))
+    cov = env["coverage"]
+    cov["repair"] = dict(cov["repair"], outcome="completed", reason=reason, facet_ids=facet_ids, unread_facet_ids=unread)
+    cov["findings"] = [
+        {"facet_id": fid, "state": "covered", "reason": "conflicted" if fid == "f2" else "", "evidence_ids": ["e1"]}
+        for fid in covered
+    ]
+    return env
+
+
+def test_tail_facets_are_not_counted_as_repaired_targets(envelope) -> None:
+    """A covered facet the repair only reassessed for an unread tail (nexus-z6yvk) was not missing: counting it as a
+    target inflated the repair yield (review of 3d4e36494 / a44f02553)."""
+    both = _tail_envelope(envelope, reason="unsupported_and_unread_tail", facet_ids=["f3", "f1", "f2"], unread=["f1", "f2"],
+                          covered=["f1", "f2", "f3"])
+    obs = observation_from_envelope("q", both)
+    assert (obs.repair.missing, obs.repair.repaired) == (1, 1), "f3 alone was missing; f1 and f2 are tail facets"
+    assert sum(r["targeted"] for r in repair_by_origin(both).values()) == 1
+    assert sum(r["covered_after"] for r in repair_by_origin(both).values()) == 1
+
+
+def test_a_tail_only_repair_has_no_repair_targets_and_its_tail_facets_are_counted_apart(envelope) -> None:
+    tail_only = _tail_envelope(envelope, reason="unread_tail", facet_ids=["f1", "f2"], unread=["f1", "f2"], covered=["f1", "f2"])
+    assert observation_from_envelope("q", tail_only).repair is None
+    assert repair_by_origin(tail_only) == {}
+    assert unread_tail_repair(tail_only) == {"reason": "unread_tail", "facets": 2, "conflicted": 1}
+    assert envelope_facts(tail_only)["unread_tail_repair"] == {"reason": "unread_tail", "facets": 2, "conflicted": 1}
+
+
+def test_a_run_whose_repair_did_not_run_has_no_tail_facets(envelope) -> None:
+    env = json.loads(json.dumps(envelope))
+    env["coverage"]["repair"] = {"outcome": "not_attempted", "facet_ids": [], "unread_facet_ids": [], "reason": ""}
+    assert unread_tail_repair(env) == {"reason": "", "facets": 0, "conflicted": 0}
 
 
 def test_the_scorer_finds_the_assessors_two_known_errors(envelope, oracle) -> None:

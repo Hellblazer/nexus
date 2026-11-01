@@ -701,7 +701,15 @@ async def test_the_cost_estimate_averages_assessment_calls_only_not_the_plans_ow
     before the plan's check spends 1.0, so 0.012 reaches the assessment, and each assessment call costs 0.004: three
     fit. With the check step in the mean the estimate after the first call is 0.502 and nothing else fits (one
     call). Records are told apart by step index: assessment calls are numbered past the plan's own steps."""
-    plan = {"steps": [*PLAN["steps"][:3], {"tool": "operator_check", "args": {"items": "$step3.contents", "check_instruction": "plan check"}}, PLAN["steps"][3]]}
+    # A fetch sits between the plan's check and the terminal step: the boundary precedes the plan's TRAILING operator
+    # run (nexus-jypmj), so a check directly before the terminal operator would run after it, and the budget the
+    # test pins (spent by the check before the assessment) would never be spent.
+    plan = {"steps": [
+        *PLAN["steps"][:3],
+        {"tool": "operator_check", "args": {"items": "$step3.contents", "check_instruction": "plan check"}},
+        PLAN["steps"][2],
+        PLAN["steps"][3],
+    ]}
 
     async def model(args: dict) -> dict:
         sink = llm_types._ambient_usage_sink.get()

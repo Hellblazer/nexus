@@ -959,6 +959,50 @@ class TestBackgroundUpgrade:
         assert seen["kw"]["stdout"] is subprocess.DEVNULL
         assert seen["kw"]["close_fds"] is True
 
+    def test_the_detached_child_is_marked_unattended(self, mod, tmp_path, monkeypatch) -> None:
+        """nexus-75w5d (critic Critical): the child is a PLAIN nx upgrade with no --auto and no deadline.
+        Only this variable tells it nobody is watching, so a managed catalog is not walked once per drift
+        per box. Red when start_background_upgrade does not set it."""
+        self._fake_cli(tmp_path, monkeypatch, mod)
+        monkeypatch.delenv("NX_UPGRADE_UNATTENDED", raising=False)
+        seen: dict = {}
+
+        class FakeProc:
+            pid = 4242
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("x", timeout)
+
+        setattr_in(monkeypatch, mod, "subprocess.Popen", lambda argv, **kw: seen.update(kw) or FakeProc())
+        assert mod.start_background_upgrade() == 4242
+        assert seen["env"]["NX_UPGRADE_UNATTENDED"] == "1"
+
+    def test_the_synchronous_fallbacks_are_marked_unattended_too(self, mod, monkeypatch) -> None:
+        """The bounded fallback (run_cmd) and the ref-drift run are plain nx upgrade as well."""
+        monkeypatch.delenv("NX_UPGRADE_UNATTENDED", raising=False)
+        monkeypatch.setattr(mod, "resolve_nx", lambda: "/usr/bin/nx")
+        envs: list = []
+
+        class _Done:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        setattr_in(monkeypatch, mod, "subprocess.run", lambda *a, **k: envs.append(k.get("env")) or _Done())
+        assert mod.run_cmd(["nx", "upgrade"], timeout=5) is True
+        mod._run_nx_upgrade_for_ref_drift(timeout=5)
+        assert [e["NX_UPGRADE_UNATTENDED"] for e in envs] == ["1", "1"]
+        envs.clear()
+        assert mod.run_cmd(["nx", "--version"], timeout=5) is True
+        assert envs == [None], "only nx upgrade is marked; other commands inherit as before"
+
+    def test_the_variable_name_matches_the_one_the_cli_reads(self, mod) -> None:
+        """This script imports nothing from nexus, so the string is restated; a drift would turn the
+        marker into a no-op that no other test would see."""
+        from nexus.util.upgrade_auto_lock import UNATTENDED_ENV
+
+        assert mod.UNATTENDED_ENV == UNATTENDED_ENV
+
     def test_the_synchronous_step_is_not_run_when_the_detach_started(self, mod, marker, log, monkeypatch) -> None:
         calls = _wire(
             mod, monkeypatch, receipt=True, installed_versions=["1.0.0", "9.9.9"],

@@ -239,13 +239,20 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         with self._buffer_lock:
             return self._run_epochs.get(content_hash)
 
-    def _post_fenced(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _post_fenced(self, path: str, body: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
         """``_post`` for a WRITE: a 409 ``stale_run`` becomes
         :class:`PipelineRunFenced`. One wrapper for every write call site,
         so the translation cannot drift between them. Never retried: 409
-        is outside both of the mixin's retry axes."""
+        is outside both of the mixin's retry axes.
+
+        *timeout* (nexus-euczk), when given, caps this one request and sends
+        it exactly once (``idempotent=False``: no gateway backoff, no
+        re-resolve with its lease wait), for a release that must not hold an
+        interrupted process open against an unreachable engine."""
         try:
-            return self._post(path, body)
+            if timeout is None:
+                return self._post(path, body)
+            return self._post(path, body, timeout=timeout, idempotent=False)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 409:
                 try:
@@ -403,7 +410,7 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         self._post_fenced("/v1/pipeline/complete", self._ref(content_hash))
         self._retire(content_hash)
 
-    def mark_failed(self, content_hash: str, error: str = "") -> None:
+    def mark_failed(self, content_hash: str, error: str = "", *, timeout: float | None = None) -> None:
         """Mark *content_hash* failed with *error* as the audit record.
 
         Flushing pending writes first is still attempted (nexus-146xx.16
@@ -426,16 +433,19 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         buffer on BaseException, while the cleanup wrapper here catches
         only Exception — a KeyboardInterrupt during cleanup propagates
         immediately by design (control-flow exceptions are not swallowed).
+
+        *timeout* (nexus-euczk) caps each request of the call (the cleanup
+        flush's and the /fail) and sends each once; see :meth:`_post_fenced`.
         """
         try:
-            self.flush(content_hash)
+            self.flush(content_hash, timeout=timeout)
         except Exception:  # noqa: BLE001 — boundary catch: the cleanup flush is best-effort, never load-bearing; swallow-and-log so /fail is always attempted with the caller's ORIGINAL error
             _log.warning(
                 "pipeline_mark_failed_cleanup_flush_failed",
                 content_hash=content_hash,
                 exc_info=True,
             )
-        self._post_fenced("/v1/pipeline/fail", {**self._ref(content_hash), "error": error})
+        self._post_fenced("/v1/pipeline/fail", {**self._ref(content_hash), "error": error}, timeout=timeout)
         self._retire(content_hash)
 
     # ── pages ───────────────────────────────────────────────────────────────
@@ -557,13 +567,13 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
 
     # ── flushing ────────────────────────────────────────────────────────────
 
-    def flush(self, content_hash: str) -> None:
+    def flush(self, content_hash: str, *, timeout: float | None = None) -> None:
         """Send *content_hash*'s buffered pages, chunks, and progress.
 
         Raises on HTTP failure with the buffers RESTORED (prepended), so a
         transient engine error loses nothing — the next flush retries; the
         engine's upserts (REPLACE pages / IGNORE chunks) make the retry
-        idempotent.
+        idempotent. *timeout*: see :meth:`_post_fenced`.
         """
         with self._buffer_lock:
             pages = self._page_buffer.pop(content_hash, [])
@@ -572,11 +582,11 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         ref = self._ref(content_hash)
         try:
             if pages:
-                self._post_fenced("/v1/pipeline/pages", {**ref, "pages": pages})
+                self._post_fenced("/v1/pipeline/pages", {**ref, "pages": pages}, timeout=timeout)
             if chunks:
-                self._post_fenced("/v1/pipeline/chunks", {**ref, "chunks": chunks})
+                self._post_fenced("/v1/pipeline/chunks", {**ref, "chunks": chunks}, timeout=timeout)
             if progress:
-                self._post_fenced("/v1/pipeline/progress", {**ref, "fields": progress})
+                self._post_fenced("/v1/pipeline/progress", {**ref, "fields": progress}, timeout=timeout)
         except BaseException:
             with self._buffer_lock:
                 self._page_buffer[content_hash] = pages + self._page_buffer.get(content_hash, [])
@@ -594,9 +604,9 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
 
     # ── cleanup / scan ──────────────────────────────────────────────────────
 
-    def clear_orphan_wal(self, content_hash: str) -> None:
+    def clear_orphan_wal(self, content_hash: str, *, timeout: float | None = None) -> None:
         self._drop_buffers(content_hash)
-        self._post_fenced("/v1/pipeline/clear_wal", self._ref(content_hash))
+        self._post_fenced("/v1/pipeline/clear_wal", self._ref(content_hash), timeout=timeout)
 
     def delete_pipeline_data(
         self,

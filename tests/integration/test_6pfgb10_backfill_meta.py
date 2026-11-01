@@ -9,7 +9,8 @@ One journey over notes and indexed documents whose catalog entries predate the P
 * notes B1 and B2: identical text, one shared row that B2 wrote: B2 takes the row, B1 is skipped and counted;
 * note C: a curated category and no put_at: the category survives, put_at is filled, tags are not;
 * note D: an unstamped legacy row it solely owns: tags and category, put_at, and ttl_days 0 (never the row's 30);
-* papers (never stamped with tags or category: Phase 3 generates them) P1 (sole owner of rows that carry extraction, override True, frecency, author), P2 (curated author
+* papers (never stamped with tags or category by this verb; source_format is derived and stamped on every one,
+  shared chunks included) P1 (sole owner of rows that carry extraction, override True, frecency, author), P2 (curated author
   and extraction_method survive), P3 and P4 (one shared chunk: skipped), P5 (override False is never written),
   P6 (its two rows disagree: residue), P7 (its row is stamped after the document: not attributable);
 
@@ -136,6 +137,8 @@ def test_backfill_meta_journey(t2_service_env):
     assert {t: meta_of(note(t).tumbler) for t in before} == before
     assert dry["keys"]["note.ttl_days"]["stamped"] == 3 and dry["keys"]["note.put_at"]["skipped_shared"] == 1
     assert dry["keys"]["doc.extraction_method"]["skipped_shared"] == 2
+    # nexus-6pfgb.23: source_format is derived from the entry, so every paper counts, shared chunks or not
+    assert dry["keys"]["doc.source_format"]["stamped"] == 9 and dry["keys"]["doc.source_format"]["residue"] == 0
 
     # ── apply ──
     applied = _run("--apply")
@@ -154,7 +157,8 @@ def test_backfill_meta_journey(t2_service_env):
     p1 = meta_of(p["p1"])
     assert (p1["extraction_method"], p1["extraction_source"], p1["quality_gate_overridden"]) == ("mineru", "file", True)
     assert p1["frecency_score"] == 0.4 and p1["frecency_computed_at"] == earlier
-    assert "tags" not in p1 and "category" not in p1, "an indexed document's tags and category are GENERATED columns later"
+    assert "tags" not in p1 and "category" not in p1, "the verb does not backfill an indexed document's tags and category"
+    assert {meta_of(t)["source_format"] for t in p.values()} == {"pdf"}, "derived from (paper, *.pdf), shared chunks included"
     assert reader.resolve(p["p1"]).author == "Ann Lee"
     p2 = meta_of(p["p2"])
     assert p2["extraction_method"] == "curated-method" and reader.resolve(p["p2"]).author == "Curated Author"

@@ -266,6 +266,7 @@ def _eligibility_block(wire: Mapping[str, Any] | None) -> dict[str, Any] | None:
         "request_kind": wire.get("request_kind"),
         "enforced": bool(wire.get("enforced")),
         "shadow_reason": wire.get("shadow_reason"),
+        "enforced_reasons": list(wire.get("enforced_reasons") or ()),
         "excluded_total": _count(wire.get("excluded_total")),
         "branches": {
             name: {"examined": _count(b.get("examined")), "excluded": _count(b.get("excluded"))}
@@ -315,10 +316,17 @@ def build_run_summary(
         "eligibility": _eligibility_block(inputs.eligibility),
         "streams": _streams_block(inputs.diagnostics),
         "scope": {"conflicts": conflicts, "diagnosed_steps": len(inputs.scope_diagnostics)},
+        # ``facets_repairable``: unsupported facets of the FINAL ledger that a retrieval could still help (those the repair
+        # did not fix, when it ran). It never counts covered facets: the covered facets a repair reassessed for an unread
+        # tail (nexus-z6yvk) are ``unread_tail_facets``, so ``entered`` true with ``facets_repairable`` 0 reads as a
+        # tail-only repair, whose ``reason`` is ``unread_tail`` (``""`` when no repair ran; ``reason`` and
+        # ``unread_tail_facets`` are additive).
         "repair": {
             "attempts": attempts,
             "facets_repairable": len(coverage.repair_facet_ids) if coverage is not None else 0,
             "entered": coverage.repair_entered if coverage is not None else False,
+            "reason": coverage.repair.reason if coverage is not None else "",
+            "unread_tail_facets": len(coverage.repair.unread_facet_ids) if coverage is not None else 0,
         },
         "run": {
             "plan_id": plan_id, "step_count": step_count, "duration_ms": duration_ms,

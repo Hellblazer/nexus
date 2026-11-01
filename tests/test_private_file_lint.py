@@ -48,6 +48,7 @@ NON_CREDENTIAL: dict[tuple[str, str], int] = {
     ("src/nexus/db/data_token.py", "_open_mint_lock"): 2,  # O_EXCL create, then reuse open
     ("src/nexus/db/t1.py", "_acquire_t1_mint_lock"): 1,  # the T1 mint flock (nexus-g5mir)
     ("src/nexus/upgrade_ladder/rungs/rdr192_manifest_backfill.py", "_cross_process_lock"): 1,
+    ("src/nexus/util/upgrade_auto_lock.py", "acquire_auto_lock"): 1,  # the nx upgrade --auto single-instance flock; holds only a pid (nexus-75w5d)
     # PID files and a restart-timestamp sentinel.
     ("src/nexus/_mineru_spawn.py", "_write_pid_file"): 1,
     ("src/nexus/commands/console.py", "_write_pid_file"): 1,

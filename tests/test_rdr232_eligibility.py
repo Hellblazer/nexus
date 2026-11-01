@@ -48,6 +48,18 @@ def shadow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(el.ANSWER_KIND_ELIGIBILITY_ENV, "0")
 
 
+async def _extraction_that_works(prompt, schema, **kw):  # noqa: ARG001
+    """A structured extraction that answers inside the schema and adds nothing (outcome ``unchanged``)."""
+    return {"answer_kind": "unknown", "facets": [], "constraints": []}
+
+
+@pytest.fixture
+def working_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suite-wide guard makes every extraction call fail, and a request whose extraction failed runs its gate in
+    shadow (nexus-x3eoc). A test that needs the gate ENFORCING on a request the first pass leaves open asks for this."""
+    monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", _extraction_that_works)
+
+
 # ── the matrix, as a table over every cell ───────────────────────────────────────────────────────────────
 
 #: RDR-232 section 1, "Request kind -> Eligible declared plan kinds", written out here independently of the
@@ -886,7 +898,9 @@ def test_the_filter_wire_shape() -> None:
         "request_kind", "kind_decision", "enforced", "shadow_reason", "library_check", "builtins_checked",
         "undeclared_builtins", "undeclared_builtin_names", "branches",
         "excluded_total", "excluded_plan_ids", "returned", "selected", "fallback_reason",
+        "enforced_reasons", "enforced_excluded_total",  # additive: the exclusions that stay enforced in a shadow
     }
+    assert wire["enforced_reasons"] == [] and wire["enforced_excluded_total"] == wire["excluded_total"] == 1
     assert wire["shadow_reason"] is None and wire["library_check"] is None and wire["builtins_checked"] is None
     assert wire["undeclared_builtins"] is None and wire["undeclared_builtin_names"] == []
     assert wire["request_kind"] == "synthesis" and wire["kind_decision"] == "heuristic"
@@ -1126,7 +1140,7 @@ def test_scenario_2_through_nx_answer_a_lookup_request_keeps_the_lookup_plan(ena
     assert env["plan_eligibility"]["selected"]["eligible"] is True
 
 
-def test_scenario_6_an_unknown_request_with_a_high_confidence_lookup_match_plans_inline(enabled) -> None:
+def test_scenario_6_an_unknown_request_with_a_high_confidence_lookup_match_plans_inline(enabled, working_extraction) -> None:
     question = "Tell me about plan matching."
     env, miss, _ = _drive(question, [LOOKUP_473], [(473, 0.02)])
     assert env["request_coverage"]["answer_kind"] == "unknown"
@@ -1135,7 +1149,7 @@ def test_scenario_6_an_unknown_request_with_a_high_confidence_lookup_match_plans
     assert env["plan_eligibility"]["fallback_reason"] == "all_candidates_ineligible"
 
 
-def test_scenario_5_through_nx_answer_an_unknown_request_does_not_select_the_grown_plan(enabled) -> None:
+def test_scenario_5_through_nx_answer_an_unknown_request_does_not_select_the_grown_plan(enabled, working_extraction) -> None:
     env, miss, _ = _drive("Tell me about plan matching.", [GROWN_UNKNOWN], [(901, 0.05)])
     assert miss.called and env["plan_id"] != 901
 

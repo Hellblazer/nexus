@@ -699,7 +699,7 @@ from __future__ import annotations
 #: (nexus-jypmj). No data-effecting changeset (vectors-040/041 replace
 #: functions with rollback blocks). The pin rises so a local install converges
 #: to an engine that answers all of these.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 171)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 173)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

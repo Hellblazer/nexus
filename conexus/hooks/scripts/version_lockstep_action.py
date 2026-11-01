@@ -416,10 +416,12 @@ def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
         debug(f"{cmd[0]} not found")
         return False
     try:
+        # nexus-75w5d: the bounded synchronous nx upgrade fallback is as unattended as the detached one.
+        env = {**os.environ, UNATTENDED_ENV: "1"} if cmd[0] == "nx" and cmd[1:2] == ["upgrade"] else None
         result = subprocess.run(
             # exe is nx, uv or git: all write UTF-8 on every platform (nexus-ikoqj).
             [exe, *cmd[1:]], capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout,
+            timeout=timeout, env=env,
         )
         if DEBUG and result.stdout:
             debug(f"{cmd[0]} stdout: {result.stdout[:500]}")
@@ -515,6 +517,13 @@ def _popen_detached(argv: list[str], env: dict[str, str], stderr: IO[bytes] | in
         )
 
 
+#: Marks a child nx upgrade as UNATTENDED (nexus-75w5d). The plain nx upgrade this action starts has
+#: no --auto flag and binds no deadline, so without it the child would walk a managed catalog once per
+#: version drift per box. ``nexus.util.upgrade_auto_lock.UNATTENDED_ENV`` is the same string; this script
+#: imports nothing from ``nexus``, so a test keeps the two equal.
+UNATTENDED_ENV = "NX_UPGRADE_UNATTENDED"
+
+
 def start_background_upgrade() -> int | None:
     """Start plain ``nx upgrade`` DETACHED; return its pid, or None when it did not start.
 
@@ -550,6 +559,7 @@ def start_background_upgrade() -> int | None:
     _last_start_state = ""
     env = _stable_child_env(dict(os.environ))
     env["PATH"] = os.path.dirname(nx) + os.pathsep + env.get("PATH", "")
+    env[UNATTENDED_ENV] = "1"
     log = _open_upgrade_log()
     try:
         try:
@@ -601,7 +611,7 @@ def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
             raise FileNotFoundError("nx not found")
         result = subprocess.run(
             [nx, "upgrade"], capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout,
+            timeout=timeout, env={**os.environ, UNATTENDED_ENV: "1"},  # nexus-75w5d: unattended, like the detached run
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"nx upgrade raised for ref-drift reinstall: {exc}")

@@ -128,7 +128,7 @@ class PgVectorManifestDocKeyFilterTest {
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION_E)
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + DOC_E + ".md")
                 .execute();
-            // A: enriched. Its catalog meta says tags=alpha, which no search consults (not an answered key).
+            // A: enriched. Its catalog meta says tags=alpha (an answered key since nexus-6pfgb.29).
             seed.insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC_A)
@@ -288,17 +288,19 @@ class PgVectorManifestDocKeyFilterTest {
     // ── the pins ────────────────────────────────────────────────────────────
 
     @Test
-    void theMetaKeysAreStillAChunkRowFilter_theCatalogMetaIsNotConsulted_oneRowPerChunk() {
-        // No writer puts tags on a catalog document yet, so tags is not an answered key: it is the chunk
-        // row's predicate inside the search, one row per chunk, each naming its first owner (nexus-6pfgb.26;
-        // this pin used to assert no doc_id at all, changed on purpose with the owner keys). A's catalog meta
-        // says alpha and B's beta; the rows say beta (S, Q), stale-row (P) and legacy (L).
-        expect(where("tags", "beta"), "S@A", "Q@B");
+    void theMetaKeysAreAnsweredPerDocument_theRowIsTheFallbackWhileTheMetaLacksTheKey() {
+        // nexus-6pfgb.29 (this pin asserted the opposite until then: tags was a chunk-row filter and the catalog
+        // meta was never consulted). A's catalog meta says alpha and B's beta; C has no meta at all. The rows say
+        // beta (S, the last writer's, and Q), stale-row (P) and legacy (L).
+        // A's meta is the answer for A's chunks whatever the shared row says: S is A's alpha and B's beta.
+        expect(where("tags", "alpha"), "S@A", "P@A");
+        expect(where("tags", "beta"), "S@B", "Q@B");
+        expect(where("tags", "stale-row"));
+        // C's meta lacks the key, so its row's value answers.
         expect(where("tags", "legacy"), "L@C");
-        expect(where("tags", "alpha"));
         var beta = search(where("tags", "beta"));
-        assertThat(beta.stream().map(r -> r.get("doc_id")).toList()).containsExactly(DOC_A, DOC_B);
-        assertThat(beta.stream().map(r -> (String) r.get("id")).distinct().count()).isEqualTo(beta.size());
+        assertThat(beta.stream().map(r -> r.get("doc_id")).toList()).containsExactly(DOC_B, DOC_B);
+        assertThat(beta.stream().map(r -> r.get("tags")).toList()).containsExactly("beta", "beta");
     }
 
     @Test

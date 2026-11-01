@@ -2944,7 +2944,9 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     the setting off to avoid it: with the setting off the eligibility gate runs in shadow (``extraction_disabled``),
     which would hide the gate from every test that drives ``nx_answer``. So the setting stays at its default and
     the dispatch refuses the extraction operator (``request_coverage_extract``): the call fails the way a
-    per-request failure does (outcome ``error``, the gate keeps enforcing) and every other operator reaches the
+    per-request failure does (outcome ``error``; that request's gate then runs in shadow, ``extraction_failed``,
+    nexus-x3eoc, so a test that needs the gate ENFORCING on a request the first pass leaves open asks for the
+    ``working_extraction`` fixture of ``tests/test_rdr232_eligibility.py``) and every other operator reaches the
     real ``claude_dispatch``, except the Phase 3 coverage assessment (an ``operator_check`` call), which is refused
     the same way. A test about the extraction patches ``nexus.operators.dispatch.claude_dispatch``
     itself, which replaces this guard for the test. The switches are cleared so a developer's exported

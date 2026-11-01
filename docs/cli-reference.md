@@ -1478,7 +1478,7 @@ traceback) if the target is not a well-formed tumbler.
 ### nx catalog merge
 
 ```
-nx catalog merge DUPLICATE CANONICAL
+nx catalog merge DUPLICATE CANONICAL [--force]
 ```
 
 Collapse `DUPLICATE` into `CANONICAL` in ONE engine transaction
@@ -1512,6 +1512,12 @@ tumbler not found (including one belonging to a different tenant, which
 reads identically to "not found" under RLS); a `DUPLICATE` already aliased
 to some OTHER canonical (settle that alias first); or a merge that would
 close an alias cycle.
+
+The merge moves identity and links, never chunks or the collection
+(nexus-bivz3.27). When `DUPLICATE` holds chunks and `CANONICAL` holds none,
+the merged document would read as having no chunks, so the command refuses
+and suggests merging the other way; `--force` merges anyway. Every merge
+prints both chunk counts (`chunks: duplicate N, canonical M`).
 
 ### nx catalog gc
 
@@ -1653,7 +1659,7 @@ nx catalog backfill-meta [--apply] [--json]
 One-time, fill-only stamp of the catalog `meta` keys that the RDR-236 Phase 1 homes now write at index and put time, for documents written before them (nexus-6pfgb.10). Dry run by default. A key the entry already holds (a retraction `''` / `0` / `[]` included, tested by presence, not truthiness) and a non-empty catalog column are never touched, and a key is sent only with a real value (the catalog merges `meta`; an explicit empty overwrites). A run that examines no document exits 1.
 
 - **Notes** (`knowledge`): `ttl_days` and `put_at` come only from a chunk row the note itself wrote (`row_written_by`: stamp and title), `put_at` being that row's `indexed_at`. `tags` (written as a JSON array, a legacy comma string split once), `category` and `source_agent` come from that row or, when there is none, from a row of a chunk the note solely owns that `row_may_give_tags` allows. A note recovered that way has no TTL to give: it gets `put_at` and `ttl_days` 0 and leaves the keyless count. An entry that already holds a note key is authoritative: only `put_at` may still be filled, and only from a row with the same TTL.
-- **Indexed documents**: `extraction_method`, `quality_gate_overridden` (only where the rows say `True`), `extraction_source` (only where a row carries a value), `frecency_score` with `frecency_computed_at` (the rows' latest `indexed_at`; a score of 0 is not sent) and the catalog `author` (from `source_author`, a plain string only; where the column is empty) are copied from chunks the document solely owns, when its sampled rows (64 at most, spread over the document) agree and are no later than the document plus five minutes. `tags`, `category` and `source_format` are not backfilled: they become generated columns in RDR-236 Phase 3. A legacy `tags` string is never converted here; the `note-tags-array` upgrade rung does that.
+- **Indexed documents**: `extraction_method`, `quality_gate_overridden` (only where the rows say `True`), `extraction_source` (only where a row carries a value), `frecency_score` with `frecency_computed_at` (the rows' latest `indexed_at`; a score of 0 is not sent) and the catalog `author` (from `source_author`, a plain string only; where the column is empty) are copied from chunks the document solely owns, when its sampled rows (64 at most, spread over the document) agree and are no later than the document plus five minutes. `source_format` (`pdf`, `markdown`, `code` or `prose`, nexus-6pfgb.23) is not read from a chunk at all: it is derived from the entry's own `content_type` and `file_path` by the rule of the engine's `nexus.catalog_source_format` (the extension is read first: `.pdf`, or type `pdf`/`paper`, is `pdf`; `.md`/`.markdown` is `markdown` whatever the type; type `code` is `code`; type `prose`/`rdr` is `prose`), so a document whose chunks are all shared gets it too. A pair the rule derives nothing for is residue, with the reason `no_rule` (it has a path, no rule matched) or `no_file_path` (it has none and its type is outside the rules). The `--json` report carries these under `keys.doc.source_format`. `tags` and `category` of an indexed document are not backfilled: `nx index repo` and the `nx index` verbs stamp them (and `source_format`) in the document's `meta` when they register or update it (nexus-6pfgb.8), a pre-existing document gets them on the next run that touches it, and the engine reads the chunk row until then. A legacy `tags` string is never converted here; the `note-tags-array` upgrade rung does that.
 - Single-owner means `chash_positions` shows exactly one live owner in the chunk's own collection. A document whose chunks are all shared is skipped and counted. A tombstoned co-owner is not counted (no 0.1.165 client read lists one); the `indexed_at` guard stands against a departed co-owner that wrote last. A failed owner or row lookup withholds that document's row-sourced keys and counts it; it never fails the run.
 
 The dry run prints, per key, how many documents were examined, already held it, were skipped as shared, would be stamped, or are residue (the reasons are in `--json`). The `bib_*` columns of documents indexed with `nx index pdf --enrich` on the batch path are filled by `nx enrich bib COLLECTION --backfill-catalog`, which now also accepts chunks that carry year, authors, venue and citation count but no backend id (fill-only, no id written, `bib_enriched_at` set).
@@ -3549,7 +3555,7 @@ only; `--json` output shape is unchanged.
 
 Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and (local-service mode only) the service cross-encoder reranker model.
 
-**LLM backend (nexus-2k66t.3).** The "LLM backend" row names the backend the LLM steps use and why (`cli: claude is on PATH`, `anthropic: claude is not on PATH; the anthropic API is used (anthropic_api_key is set)`, `openai_compat: ...`) and never prints a key. A box with neither `claude` nor a key is reported as not applicable (a pass: search and storage work). It warns when `llm.backend` names a backend that cannot serve (`anthropic` without a key, an `openai_compat` without a base_url and model, an unknown value). The "Answer-kind extraction" row (nexus-jypmj.16) says whether the structured request extraction that feeds the answer-kind gate can run here: it names the backend and model (`runs on cli (claude is on PATH), model haiku`), is not applicable (a pass) when `NX_ANSWER_STRUCTURED_EXTRACT` or `NX_ANSWER_KIND_ELIGIBILITY` is off or the box has no LLM backend at all, and warns for an `openai_compat` endpoint (it runs its configured model, not the measured Haiku) or a backend setting that cannot serve, because every request then keeps its first-pass kind while the gate enforces on it. It makes no model call; for the `cli` backend it runs `claude --version` once (bounded to 5 s) and warns when that fails, because a `claude` that is on PATH but cannot start used to read green. A CLI that starts but cannot answer (signed out, offline) is not seen here, and the row's detail says so. A process whose extraction calls keep failing also logs one `answer_kind_gate_extraction_failing` warning per streak; an extraction that works re-arms it. The "LLM key persistence (GUI spawn)" row warns when the key the chosen backend would use is in shell env only, naming `nx config set anthropic_api_key "$ANTHROPIC_API_KEY"`; it stays silent when `claude` is the backend, so exporting `ANTHROPIC_API_KEY` for other reasons is not nagged.
+**LLM backend (nexus-2k66t.3).** The "LLM backend" row names the backend the LLM steps use and why (`cli: claude is on PATH`, `anthropic: claude is not on PATH; the anthropic API is used (anthropic_api_key is set)`, `openai_compat: ...`) and never prints a key. A box with neither `claude` nor a key is reported as not applicable (a pass: search and storage work). It warns when `llm.backend` names a backend that cannot serve (`anthropic` without a key, an `openai_compat` without a base_url and model, an unknown value). The "Answer-kind extraction" row (nexus-jypmj.16) says whether the structured request extraction that feeds the answer-kind gate can run here: it names the backend and model (`runs on cli (claude is on PATH), model haiku`), is not applicable (a pass) when `NX_ANSWER_STRUCTURED_EXTRACT` or `NX_ANSWER_KIND_ELIGIBILITY` is off or the box has no LLM backend at all, and warns for an `openai_compat` endpoint (it runs its configured model, not the measured Haiku) or a backend setting that cannot serve, because every request then keeps its first-pass kind, and the answer-kind gate runs in shadow for it (it reports what it would exclude and excludes no plan; the one-source rule still excludes citation-traversal for a request naming exactly one source). It makes no model call; for the `cli` backend it runs `claude --version` once (bounded to 5 s) and warns when that fails, because a `claude` that is on PATH but cannot start used to read green. A CLI that starts but cannot answer (signed out, offline) is not seen here, and the row's detail says so. A process whose extraction calls keep failing also logs one `answer_kind_gate_extraction_failing` warning per streak; an extraction that works re-arms it. The warning and the row both name the choice: `NX_ANSWER_STRUCTURED_EXTRACT=0` saves the failed call's wait on every request, and what a shadow gate forfeits (refusing a wrong-shape plan) a failing process has already lost. The "LLM key persistence (GUI spawn)" row warns when the key the chosen backend would use is in shell env only, naming `nx config set anthropic_api_key "$ANTHROPIC_API_KEY"`; it stays silent when `claude` is the backend, so exporting `ANTHROPIC_API_KEY` for other reasons is not nagged.
 
 Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + reachability check that always runs (not behind a `--check-*` flag). Unconfigured (the default — most installs) reports a loud-but-passing skip line, since self-minting is optional and the static `service_token` path runs unchanged. When `mint_token` IS configured it routes through `DataTokenManager`'s own process-wide, TTL-cached singleton (never a throwaway manager — nexus-ssqk9 fixed a residue-discipline bug where the check used to mint a FRESH token on every single `nx doctor` invocation) and reports which of three things happened on success, plus the granted TTL: MINTED a fresh token, REUSED one already live in-process, or REUSED one borrowed from the cross-process lease file (nexus-9c7t9, below). A real `nx doctor` invocation is its own fresh subprocess with an empty in-process cache, so its own two outcomes are "minted a fresh" (no lease existed yet, or it had gone stale) or "reused the cached (lease file)" (a prior `nx` invocation's mint is still fresh); "reused the cached (in-process)" is observable only inside a long-lived process such as the MCP server. Degrades to a soft warning (never fatal, never a silent "ok") on an unresolvable endpoint or a rejected mint. If the credential is bound to a tenant other than `"default"` (see `mint_tenant` above), configure `mint_tenant` too — the doctor check mints against `mint_tenant` (or `"default"`) exactly like every other call site; an unconfigured `mint_tenant` against a mint-locked credential bound to a different tenant surfaces as the same 403 the `mint_tenant` table entry above documents. The managed edge forwards the client's `Authorization` on `/v1` unvalidated (conexus-qomd), so a successful mint means the engine checked this credential and its tenant.
 
@@ -5937,7 +5943,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   considered may serve the request's answer kind, from the compatibility matrix in
   RDR-232 section 1. `{request_kind, kind_decision, enforced, shadow_reason,
   library_check, builtins_checked, undeclared_builtins, undeclared_builtin_names, branches,
-  excluded_total, excluded_plan_ids, returned, selected, fallback_reason}`.
+  excluded_total, excluded_plan_ids, returned, selected, fallback_reason, enforced_reasons,
+  enforced_excluded_total}`.
   `request_kind` and `kind_decision` are those of `request_coverage`. `branches` has
   `cosine`, `category_route` (the below-floor category route) and `fts` (the FTS5
   fallback), each `{examined, excluded, reasons}`; a reason is `kind_mismatch`,
@@ -5955,10 +5962,18 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   excluded, and the object reports what the gate would exclude; `shadow_reason` says why:
   `disabled_by_setting` (`NX_ANSWER_KIND_ELIGIBILITY` is off), `extraction_disabled`
   (`NX_ANSWER_STRUCTURED_EXTRACT` is off: the gate on first-pass kinds alone is the
-  regime that failed the held-out lookup measurement; one request's extraction that
-  times out or errors does not do this, that request keeps enforcing on the first
-  pass's kind) or `library_not_reseeded`. When several apply the first in that order
-  wins. `library_not_reseeded` means the plan library holds builtin templates with no
+  regime that failed the held-out lookup measurement), `extraction_failed` (this
+  request's extraction call timed out, errored or answered outside the schema, so it
+  keeps the first pass's kind: the answer-kind rows run in shadow for that request only,
+  nexus-x3eoc; `request_coverage.extraction.outcome` names which failure),
+  `extraction_skipped` (the extraction call was needed and skipped for lack of time budget,
+  `skipped_deadline`; handled the same way) or `library_not_reseeded`. In the two
+  extraction shadows the one-source rule (a request naming exactly one source is not given
+  citation-traversal, nexus-4xmpv) keeps excluding: `enforced` is still `false`,
+  `enforced_reasons` is `["single_source_synthesis"]` and `enforced_excluded_total` counts the
+  candidates actually dropped; `excluded_total` and `excluded_plan_ids` still list every
+  would-be exclusion. `enforced_reasons` is `[]` in every other case.
+  When several apply the first in that order wins. `library_not_reseeded` means the plan library holds builtin templates with no
   answer-kind declaration: `library_check` is `checked`, `builtins_checked` is how
   many builtin rows a reseed can fix were examined, `undeclared_builtins` how many
   of them lack the declaration and `undeclared_builtin_names` names up to 8, each as
@@ -6172,7 +6187,13 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   tumbler, t2_record_id}` and carries identity only, never evidence text;
   `sources` and `scope` are the deterministic source and scope rows; `assessment`
   and `repair` report calls, facets per call, latency and outcome, with counts and
-  closed names only. `assessment` also reports what each call came back as
+  closed names only. `repair` also says why it ran (nexus-z6yvk): `reason` is `unsupported`
+  (a facet no held evidence bears on), `unread_tail` (a covered facet with more than half of
+  the ledger's anchors left unread by the assessment's per-call size cap, which the repair then
+  reads) or `unsupported_and_unread_tail`, empty when no repair ran, and `unread_facet_ids` names the
+  facets of the second kind (`facet_ids` lists the unsupported ones first, then those). A covered
+  facet stays covered whatever the unread anchors say: a supporting one adds to its evidence, a
+  contradicting one marks it `conflicted`. The repair budget is unchanged (6 queries, 12 items). `assessment` also reports what each call came back as
   (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
   `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,

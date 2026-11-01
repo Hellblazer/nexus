@@ -29,6 +29,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
+from nexus.catalog.indexed_meta import document_register_meta
 from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import index_model_for_collection, is_conformant_collection_name
 from nexus.db.limits import QUOTAS
@@ -1550,6 +1551,13 @@ def _catalog_hook(
             # the named-source sibling rule does not wait for the aspect worker. The header is read from the
             # bytes just hashed; a header that does not parse stamps null (nexus-jypmj.20), which overwrites an earlier id.
             rdr_stamp = _rdr_register_stamp(content_type, raw_bytes)
+            # nexus-6pfgb.8 and nexus-6pfgb.23 (RDR-236): the document's own tags, category and source_format,
+            # as its row writer stamps them on every chunk. They ride the same ``meta`` the register_many /
+            # update_many payloads already carry, so a document costs no extra request, and a registration
+            # made before they existed is written once and the next run finds it equal (the rdr id's rule,
+            # nexus-jypmj.7). The repo PDF path's category is "prose" where ``nx index pdf`` says "paper"
+            # (recorded in ``nexus.catalog.indexed_meta``, not fixed here).
+            rdr_stamp = {**rdr_stamp, **document_register_meta(content_type, rel_path)}
 
             try:
                 existing = (
@@ -3596,6 +3604,10 @@ def _index_pdf_file(
             **cleaned,
             "title": f"{file.relative_to(repo)}:page-{m.get('page_number', 0)}",
             "tags": "pdf",
+            # RECORDED, not fixed (nexus-6pfgb.8): the repo PDF path says category "prose" where
+            # ``nx index pdf`` (doc_indexer, tags="pdf") says "paper". The catalog meta stamp
+            # (``nexus.catalog.indexed_meta.document_register_meta``) mirrors each path as written, so the
+            # two stay as they are on the document too; a change here changes that mirror and its pin.
             "category": "prose",
             "source_agent": "nexus-indexer",
             "ttl_days": 0,

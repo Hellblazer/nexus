@@ -237,7 +237,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-217](rdr-217-client-lexical-retrieval-leg.md) | A Lexical Leg for the nexus Client: Reach the Engine's FTS Hybrid Route | Feature | Closed | 2026-09-19 |
 | [RDR-218](rdr-218-windows-platform-support.md) | Windows Platform Support: a Low-Friction Plugin Install for the CLI and the Desktop | Architecture | Superseded by RDR-224 | 2026-09-21 |
 | [RDR-219](rdr-219-harness-credentials-never-leave-the-keychain.md) | Harness Credentials Never Leave the Keychain: an Automation Token, Passed by Environment | Architecture | Closed | 2026-09-25 |
-| [RDR-220](rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md) | CI Status From GitHub Webhooks to the Tuple Space | Architecture | Accepted | 2026-09-26 |
+| [RDR-220](rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md) | CI Status From GitHub Webhooks to the Tuple Space | Architecture | Closed | 2026-09-26 |
 | [RDR-221](rdr-221-prose-editor.md) | Prose Editor: an Example-Anchored Line Editor with Memory in T2 | Feature | Accepted | 2026-09-27 |
 | [RDR-222](rdr-222-request-identity-for-mutating-engine-routes.md) | Request Identity for Mutating Engine Routes | Architecture | Accepted | 2026-09-27 |
 | [RDR-223](rdr-223-atomic-chunk-plus-owner-write.md) | Atomic Chunk-Plus-Owner Write on Every Client Path | Architecture | Accepted | 2026-09-28 |
@@ -249,7 +249,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-229](rdr-229-collection-name-becomes-a-label.md) | The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name | Architecture | Draft | 2026-10-17 |
 | [RDR-230](rdr-230-event-keyed-reindex-and-recall-canary.md) | Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes | Architecture | Draft | 2026-10-18 |
 | [RDR-231](rdr-231-note-source-uri-scheme.md) | Note source_uri scheme: replace chroma:// with nx-note:// | Technical Debt | Accepted | 2026-10-23 |
-| [RDR-232](rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md) | nx_answer Answer-Shape Eligibility and Evidence Sufficiency | Architecture | Accepted | 2026-10-23 |
+| [RDR-232](rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md) | nx_answer Answer-Shape Eligibility and Evidence Sufficiency | Architecture | Closed | 2026-10-23 |
 | [RDR-233](rdr-233-channel-free-push-for-sessions-without-the-channel-flag.md) | Channel-Free Push: Wake a Session Launched Without the Channel Flag | Feature | Closed | 2026-10-22 |
 | [RDR-235](rdr-235-aspect-queue-onto-tuple-queue-template.md) | Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays | Architecture | Accepted | 2026-10-26 |
 | [RDR-236](rdr-236-chunk-row-metadata-normalization.md) | Chunk-row metadata normalization: document fields on the catalog document, position fields on the manifest, the chunk row keeps only what its text determines | Architecture | Accepted | 2026-10-26 |

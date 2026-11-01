@@ -411,6 +411,21 @@ class TestPerRowIdentity:
         assert other.read_pages("h1") != [], "A's delete wiped B's pages"
         assert other.get_pipeline_state("h1") is not None
 
+    def test_complete_after_the_run_released_its_row_leaves_it_failed_and_its_buffer(self, db, engine):
+        """nexus-euczk; mirrors PipelineHandlerTest.complete_afterTheRunReleasedItsRow_*."""
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        ref = {"content_hash": "h1", "pipeline_id": db.pipeline_id_for("h1"), "run_epoch": db.run_epoch_for("h1")}
+        db.write_page("h1", 0, "p")
+        db.mark_failed("h1", error="interrupted; the buffer is kept")
+        straggler = db._client.post("http://in-memory-pipeline/v1/pipeline/complete", json=ref)
+        assert straggler.status_code == 200, "a no-op answers as a write does"
+        (row,) = engine.rows_for("h1")
+        assert row["status"] == "failed"
+        again, _ = make_fake_engine_db()
+        again._client = db._client
+        assert again.create_pipeline("h1", "/a.pdf", "docs__test") == "resuming"
+        assert [p["page_index"] for p in again.read_pages("h1")] == [0], "the released buffer is resumed, not wiped"
+
     def test_force_delete_names_the_document(self, db, engine):
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         db.mark_completed("h1")

@@ -37,6 +37,7 @@ from typing import Any
 
 import structlog
 
+from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service, refuses_unbounded_read
 from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
@@ -89,7 +90,9 @@ class NoteTagsArrayRung:
         reader_factory: Callable[[], Any] = _default_reader,
         writer_factory: Callable[[], Any] = _default_writer,
         batch_limit: int = DEFAULT_BATCH_LIMIT,
+        managed_fn: Callable[[], bool] = managed_service,
     ) -> None:
+        self._managed_fn = managed_fn
         self._reader_factory = reader_factory
         self._writer_factory = writer_factory
         self._batch_limit = batch_limit
@@ -128,6 +131,16 @@ class NoteTagsArrayRung:
     # ── detect ───────────────────────────────────────────────────────────────
 
     def detect(self) -> RungStatus:
+        if refuses_unbounded_read(self._managed_fn):
+            # nexus-75w5d: the scan lists every note in every knowledge__* collection, on every call,
+            # with no completion record or memo to answer from. Unattended against a managed service
+            # it reads nothing; an interactive `nx upgrade` (and `nx doctor`) still scans.
+            reason = (
+                "unattended `nx upgrade --auto` does not list every note of a managed catalog; "
+                f"{INTERACTIVE_REMEDY}"
+            )
+            _log.info("note_tags_rung_skipped", reason=reason)
+            return RungStatus(applicable=False, converged=False, pending_detail=reason)
         scanned = self._read()
         if scanned is None:
             reason = "no catalog is available"

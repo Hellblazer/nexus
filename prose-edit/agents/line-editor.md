@@ -43,7 +43,8 @@ Never propose an edit inside, or overlapping, any of these:
 - a table;
 - frontmatter;
 - an HTML comment;
-- an HTML code, kbd or svg element.
+- an HTML code, kbd or svg element;
+- in an HTML file, when the brief says cut-only, a nav, heading (h1 to h6), button or samp element.
 
 Inside any edit, keep inline code, URLs, link targets, identifiers and contract strings quoted from code exactly as they are.
 

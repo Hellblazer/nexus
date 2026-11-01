@@ -108,7 +108,23 @@ migration_wal_bytes_per_worker = 11038000
 # 2160 -> 2166 (2026-10-30): vectors-042-1 (nexus-jypmj, RDR-232 chash_allow, text_gated_search_allowed_384/768/1024) adds six DDL
 # statements to a fresh migration: 3 CREATE OR REPLACE FUNCTION and their 3 GRANT EXECUTE, the shape vectors-038-1 added (the guard
 # DO block is not DDL).
-migration_ddl_per_worker = 2166
+# 2166 -> 2171 (2026-10-31): vectors-043-1 (nexus-6pfgb.62, nexus.catalog_source_format) adds five DDL statements: 1 CREATE OR REPLACE
+# FUNCTION (the new scalar function), its 1 GRANT EXECUTE, and 3 CREATE OR REPLACE FUNCTION replacing the manifest_search_384/768/1024 bodies
+# (signatures and grants kept, so no re-grant); the post-condition DO block is not DDL. Counted from the changeset's statements, not yet
+# measured on a migrated cluster (see the nexus-6pfgb.62 bead for the measured figure).
+# 2171 -> 2176 (2026-10-31): vectors-044-1 (nexus-6pfgb.29, manifest_search meta keys, nexus.catalog_tag_set) adds five DDL statements, the
+# vectors-043-1 shape: 1 CREATE OR REPLACE FUNCTION (catalog_tag_set), its 1 GRANT EXECUTE, and 3 CREATE OR REPLACE FUNCTION replacing the
+# manifest_search_384/768/1024 bodies again (no re-grant); the post-condition DO block is not DDL. Counted from the changeset's statements.
+# 2176 -> 2181 (2026-10-31): vectors-045-1 (nexus-6pfgb.61, the manifest EXISTS builds only the object keys its predicate names, nexus.manifest_names_key)
+# adds five DDL statements, the vectors-043-1 shape: 1 CREATE OR REPLACE FUNCTION (manifest_names_key), its 1 GRANT EXECUTE, and 3 CREATE OR REPLACE
+# FUNCTION replacing the manifest_search_384/768/1024 bodies again (no re-grant); the post-condition DO block is not DDL. Measured on chas, 2026-10-31,
+# merged tree (043 +5, 044 +5, 045 +5): ddl: migration=2181 (tests/test_scenario_journeys.py with the batch's other substrate files).
+# 2181 -> 2187 (2026-10-31): vectors-046 (nexus-yye8l.21, nexus.request_ledger_tenants) adds six DDL statements to a fresh
+# migration: 1 CREATE TABLE and 1 from the runAlways grants loop for the new table (the vectors-037-1 accounting per table),
+# 1 CREATE OR REPLACE FUNCTION (the register-tenant trigger function), 1 CREATE TRIGGER (BEFORE INSERT on request_ledger),
+# and the backfill's ALTER TABLE ... NO FORCE ROW LEVEL SECURITY and its FORCE restore (the INSERT ... SELECT is not DDL).
+# Measured on the laptop (macOS), 2026-10-31: tests/test_scenario_journeys.py, one worker, ddl: migration=2187, merged tree (043 +5, 044 +5, 045 +5, 046 +6).
+migration_ddl_per_worker = 2187
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

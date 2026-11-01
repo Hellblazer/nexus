@@ -7,6 +7,7 @@ Every transcript here is planted: no model runs in this file.
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -111,6 +112,33 @@ def test_every_command_form_the_skill_tells_the_model_to_run_matches_the_allowli
         assert not command.startswith(("cd ", "python3 '", "python3 ./")), command
 
 
+CUT_TEXT = (ROOT / "prose-edit" / "skills" / "prose-cut" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_every_command_form_prose_cut_teaches_matches_the_allowlist_and_the_verdicts() -> None:
+    """prose-cut runs the same three scripts as prose-edit (nexus-ger02.10), so its command forms face the same
+    rule: the prefix text of its table is the one run-scenario.sh allows, and every command it names matches."""
+    v = _verdicts()
+    rows = dict(re.findall(r"^\| (BRIEF|REVIEW) \| `([^`]+)` \|$", CUT_TEXT, re.MULTILINE))
+    assert rows == {name: PREFIXES[name] for name in ("BRIEF", "REVIEW")}
+    spans = _command_spans(CUT_TEXT)
+    assert len(spans) >= 8, spans  # the extraction saw the skill's commands, not a handful
+    assert {s.split(" ")[0] for s in spans} == {"BRIEF", "REVIEW"}
+    allow = _allowlist()
+    own = [r.replace("${CLAUDE_PLUGIN_ROOT}", CHECKOUT + "/prose-edit")
+           for r in re.findall(r"Bash\(([^)]*)\)", CUT_TEXT.split("---\n", 2)[1])]
+    assert len(own) == 2, own  # the skill's own rule: brief.py and review.py, not the scripts directory
+    for span in spans:
+        command = _expand(span)
+        assert any(command.startswith(prefix + " ") for prefix in allow), (span, command)
+        assert any(fnmatch.fnmatchcase(command, rule) for rule in own), (span, command)
+        assert v.is_allowed_bash(command), (span, command)
+        assert not command.startswith(("cd ", "python3 '", "python3 ./")), command
+    head = CUT_TEXT[:CUT_TEXT.index("## Invocation")]
+    assert "Never run `cd`" in head and "unquoted" in head and "`./`" in head
+    assert not NAMES_A_REPAIR.search(CUT_TEXT)
+
+
 def test_the_shapes_the_exit_batch_saw_are_outside_the_allowlist_and_off_list_in_the_verdicts() -> None:
     v = _verdicts()
     allow = _allowlist()
@@ -145,7 +173,8 @@ def test_the_skill_writes_the_prefix_unquoted_from_the_plugin_root_and_forbids_c
 def test_every_runner_goes_through_run_scenario_so_one_allowlist_covers_them_all() -> None:
     scripts = sorted(ACC.glob("*.sh"))
     names = {p.name for p in scripts}
-    assert {"run-scenario.sh", "run-canaries.sh", "run-review.sh", "run-memory-gate.sh", "run-teach.sh"} <= names
+    assert {"run-scenario.sh", "run-canaries.sh", "run-review.sh", "run-memory-gate.sh", "run-teach.sh",
+            "run-cut.sh"} <= names
     for p in scripts:
         text = p.read_text(encoding="utf-8")
         if p.name == "run-scenario.sh":

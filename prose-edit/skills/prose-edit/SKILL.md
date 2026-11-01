@@ -9,7 +9,7 @@ allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/*)
 
 Arguments: $ARGUMENTS
 
-Run every command from the directory this session started in. Never run `cd`, and put nothing in front of a command. Write the command prefix of the table below exactly as it is shown: unquoted, with no `./` and no `cd` before it. The skill's permission rule matches that text, and a quoted or `./`-prefixed script path, or a `cd '<dir>' &&` in front, does not match it. Pass each argument as its own argv token. Never build a shell string from the arguments. Only the arguments after the prefix go in single quotes (a single quote inside one is written `'\''`): a path with a space or a `;` is author input, and so is every token. In a command below, the names of the first column (BRIEF, MEMORY, REVIEW) stand for the prefix text of their row, typed as it is shown, and a `<placeholder>` stands for one argument in single quotes.
+Run every command from the directory this session started in. Never run `cd`, and put nothing in front of a command and nothing after it: no `;`, `&&`, `||`, `|` or `echo` joined to it. The exit code comes back with the result, and a command with anything joined to it no longer matches the permission rule, so it is refused. Write the command prefix of the table below exactly as it is shown: unquoted, with no `./` and no `cd` before it. The skill's permission rule matches that text, and a quoted or `./`-prefixed script path, or a `cd '<dir>' &&` in front, does not match it. Pass each argument as its own argv token. Never build a shell string from the arguments. Only the arguments after the prefix go in single quotes (a single quote inside one is written `'\''`): a path with a space or a `;` is author input, and so is every token. In a command below, the names of the first column (BRIEF, MEMORY, REVIEW) stand for the prefix text of their row, typed as it is shown, and a `<placeholder>` stands for one argument in single quotes.
 
 | Name | Command prefix |
 | --- | --- |
@@ -24,11 +24,12 @@ A document in another checkout (a git worktree, say) is named by its absolute pa
 | Form | Meaning |
 | --- | --- |
 | `<path>[:<start>-<end>] [--genre G] [--budget N]` | Edit run. Budget defaults to 10. A range limits proposals to those lines. |
+| `<path>[:<start>-<end>] --mode cut-only --voice-card F --word-budget N [--genre G] [--budget N]` | Cut-only run. Not run here: the site-page review gate runs it through the `conexus-prose-edit:prose-cut` skill, which a model can invoke and this command cannot. |
 | `- --genre G [--budget N]` | Stdin run. The flags are the first line. The text is everything after the first newline. Nothing is applied. |
 | `rejections <path> [--remove N]` | List a document's stored rejections, or remove number N. |
 | `exemplar <genre> <path>:<start>-<end>` | Store that passage as an exemplar of the genre. |
 | `setup` | Check and finish what runs in this repository need. Run it once per machine and once per repository. |
-| `-- <path>` or `./<path>` | A file named `rejections`, `exemplar` or `setup`. |
+| `-- <path>` or `./<path>` | A file named `rejections`, `exemplar`, `setup`, `decide` or `count`. |
 
 ## Steps
 
@@ -40,6 +41,8 @@ A document in another checkout (a git worktree, say) is named by its absolute pa
    | `rejections` | Run `MEMORY <memory_argv...>`. Show the numbered rejections. Stop. |
    | `exemplar` | Run `MEMORY <memory_argv...>`. Show the stored passage and `duplicate`. Stop. |
    | `setup` | Follow the Setup run section below. Stop. |
+   | `cut-only` | Not run here. Tell the author that cut-only runs through the `conexus-prose-edit:prose-cut` skill, which the site-page review gate calls, and stop. |
+   | `decide`, `count` | The same: they belong to the `conexus-prose-edit:prose-cut` skill. Tell the author and stop. |
    | `edit` | Continue. |
 
    If a `MEMORY` command fails, show stderr and stop.

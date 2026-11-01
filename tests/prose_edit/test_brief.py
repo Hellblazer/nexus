@@ -180,9 +180,9 @@ def test_a_file_named_rejections_or_exemplar_is_reached_with_dash_dash_or_dot_sl
         (["exemplar", "changelog", "a.md"], "range"),
         (["exemplar", "changelog", "a.md:5-2"], "range"),
         (["exemplar", "changelog", "a.md:1-2", "extra"], "usage"),
-        (["a.md", "--mode", "cut-only"], "not built"),
-        (["a.md", "--voice-card", "f"], "not built"),
-        (["a.md", "--word-budget", "5"], "not built"),
+        (["a.md", "--mode", "cut-only"], "--voice-card"),      # cut-only needs its card and word budget
+        (["a.md", "--voice-card", "f"], "--mode cut-only"),
+        (["a.md", "--word-budget", "5"], "--mode cut-only"),
     ],
 )
 def test_malformed_invocations_are_refused_with_a_message(tokens: list[str], fragment: str) -> None:

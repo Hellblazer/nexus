@@ -17,8 +17,12 @@ decides, per document, which keys the catalog may take from those rows, and noth
   recovery-bundle export use; they are not forked here. An entry that already holds a note key is
   authoritative (an absent key is an unset one): only ``put_at`` may still be filled, and only from a row
   whose TTL is the entry's.
-* **Indexed documents**: ``tags``, ``category`` and ``source_format`` are NOT backfilled (RDR-236 Phase 3
-  makes them GENERATED columns). ``extraction_method``, ``quality_gate_overridden`` (only where the rows say ``True``; a
+* **Indexed documents**: ``source_format`` (nexus-6pfgb.23, Sam's option A) is DERIVED from the entry's own
+  ``content_type`` and ``file_path`` by :func:`~nexus.catalog.indexed_meta.catalog_source_format`, the copy of
+  the engine's ``nexus.catalog_source_format``, so it reads no chunk row and needs no ownership: a pair the
+  rule derives nothing for is residue (``no_rule``, or ``no_file_path`` when the entry has no path to read an
+  extension from). ``tags`` and ``category`` are NOT backfilled: a document the repo pass or an index run
+  touches again gets them (nexus-6pfgb.8), and the engine reads the chunk row for the rest. ``extraction_method``, ``quality_gate_overridden`` (only where the rows say ``True``; a
   missing key is never read as ``False``), ``extraction_source`` (only where a row carries a value: an absent key means "file" and is never stamped
   from absence), ``frecency_score`` (with
   ``frecency_computed_at`` set to the latest ``indexed_at`` of the rows that carry it; a score of 0 is the
@@ -49,6 +53,7 @@ from typing import Any
 
 import structlog
 
+from nexus.catalog.indexed_meta import SOURCE_FORMAT_KEY, catalog_source_format
 from nexus.catalog.note_ttl import PUT_SKEW, parse_iso, note_ttl_days, row_may_give_tags, row_written_by
 from nexus.catalog.store_hook import NOTE_META_KEYS, split_note_tags
 from nexus.ttl import MAX_TTL_DAYS
@@ -63,6 +68,8 @@ NOTE_KEYS: tuple[str, ...] = ("put_at", "ttl_days", "tags", "category", "source_
 DOC_KEYS: tuple[str, ...] = (
     "extraction_method", "quality_gate_overridden", "extraction_source", "frecency_score", "author",
 )
+#: The indexed-document keys that are derived from the entry itself, never read from a chunk row.
+DERIVED_DOC_KEYS: tuple[str, ...] = (SOURCE_FORMAT_KEY,)
 
 #: Single-owner rows read per indexed document. A document's chunks come from one index call, so the
 #: values agree across them; reading every row of a 2000-chunk file would move its text for nothing.
@@ -205,6 +212,28 @@ def doc_row_keys_wanted(entry: Any) -> list[str]:
     if not (getattr(entry, "author", "") or "").strip():
         wanted.append("author")
     return wanted
+
+
+def plan_source_format(entry: Any) -> Plan:
+    """The ``source_format`` the catalog may stamp on an indexed *entry* (nexus-6pfgb.23).
+
+    Fill-only by presence: a key the entry's ``meta`` holds (whatever its value) is final. Otherwise the value
+    is the engine's own derivation for the entry's ``content_type`` and ``file_path``, so the stamped document
+    and a derived one agree by construction. Nothing is read from a chunk row, so a document whose chunks are
+    all shared gets it too. A pair the rule derives nothing for is residue: ``no_file_path`` when the entry has
+    no path (a type outside the rules cannot be told from the type alone), else ``no_rule``."""
+    plan = Plan()
+    if SOURCE_FORMAT_KEY in _meta(entry):
+        plan.outcome[SOURCE_FORMAT_KEY] = PRESENT
+        return plan
+    file_path = getattr(entry, "file_path", "") or ""
+    derived = catalog_source_format(getattr(entry, "content_type", "") or "", file_path)
+    if derived is None:
+        plan.outcome[SOURCE_FORMAT_KEY] = "residue:no_rule" if file_path else "residue:no_file_path"
+        return plan
+    plan.meta[SOURCE_FORMAT_KEY] = derived
+    plan.outcome[SOURCE_FORMAT_KEY] = STAMPED
+    return plan
 
 
 _NOT_PLAIN: Any = object()  # repr() of it is unique, so rows that disagree on it still disagree
@@ -508,6 +537,8 @@ def _run_batch(reader: Any, t3: Any, writer: Any | None, entries: list[Any], liv
             parts.append(plans[tid][1])
         elif kind == "doc" and tid not in failed:
             parts.append(plan_indexed_rows(e, [], n_chunks=0))  # every row key already present: counted as such
+        if kind == "doc":
+            parts.append(plan_source_format(e))  # derived from the entry: no lookup, so a failed one does not withhold it
         merged = Plan()
         for p in parts:
             _record(report, kind, p)

@@ -4530,7 +4530,7 @@ class TestFinishPassUnderNxUpgrade:
                 patch("nexus.upgrade_ladder.registry.default_registry", return_value=[self._PendingRung()]):
             return check_version_transition(tmp_path, preview=preview)
 
-    @pytest.mark.parametrize("argv", [["upgrade"], ["upgrade", "--yes"], ["-v", "upgrade", "--auto"]])
+    @pytest.mark.parametrize("argv", [["upgrade"], ["upgrade", "--yes"]])
     def test_nx_upgrade_does_not_ask_a_person_for_what_it_does_next(self, tmp_path, monkeypatch, argv):
         line = self._finish(tmp_path, monkeypatch, argv)
         assert line is not None and "7.86.0 -> 7.86.1" in line
@@ -4541,6 +4541,16 @@ class TestFinishPassUnderNxUpgrade:
         # "converges" is a claim the line cannot make: the rung can defer (lock held, census
         # deadline, engine unreachable, the --auto deadline) or the run can raise first.
         assert "converges" not in line, line
+
+    def test_nx_upgrade_auto_asks_no_rung_detect_and_still_says_it_cycles_the_service(self, tmp_path, monkeypatch):
+        """nexus-75w5d: the unattended run's finish pass does not call any rung's detect() (a rung read here
+        runs before the command's own work and its single-instance lock, and the only rung line it could
+        print is 'this nx upgrade runs it next'). The service line is unchanged."""
+        line = self._finish(tmp_path, monkeypatch, ["-v", "upgrade", "--auto"])
+        assert line is not None and "7.86.0 -> 7.86.1" in line
+        assert "NEEDS HUMAN" not in line, line
+        assert "service (pid 64750) is the storage service — this `nx upgrade` cycles it next" in line
+        assert "rdr192-manifest-backfill" not in line, line
 
     @pytest.mark.parametrize("argv", [["doctor"], ["index", "repo", "."], ["daemon", "restart-stale"]])
     def test_any_other_command_keeps_the_needs_human_lines(self, tmp_path, monkeypatch, argv):

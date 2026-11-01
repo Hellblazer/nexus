@@ -1,0 +1,603 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-6pfgb.62 (RDR-236 Phase 3 gate, critique Significant 3): nexus.catalog_source_format(content_type,
+    file_path), the ONE SQL definition of a catalog document's derived source format.
+
+    THE DEFECT. The derived-format rule lived twice: as an inline CASE (the lateral "f.fmt") in each of the three
+    manifest_search_<dim> bodies of vectors-041, and as ManifestLabelStage.derivedFormat in Java, with no test that
+    the two agree. Drift between them makes the in-search filter stricter than the stage and silently drops rows.
+    When nexus-6pfgb.23 stores the rule as a GENERATED column it would have been a THIRD copy.
+
+    THE FIX. The rule moves into one function, LANGUAGE sql, IMMUTABLE, PARALLEL SAFE, SECURITY INVOKER (the shape
+    vectors-024-2 gave reaper_owns_quarantined_row), so the planner inlines it and the plan of manifest_search_<dim>
+    does not change. The three manifest_search_<dim> bodies are replaced (CREATE OR REPLACE, same signatures, so the
+    grants and every caller stay) and call it. The Java copy stays, because the stage derives the format from two
+    columns it has already read; CatalogSourceFormatParityTest runs derivedFormat and this function over the same
+    (content_type, file_path) matrix and fails when they differ.
+
+    THE RULE (the extension is read first). A last extension of pdf, or a catalog type pdf or paper, is pdf; an
+    extension md or markdown is markdown whatever the catalog type; catalog type code is code; catalog type prose or
+    rdr is prose; anything else (a note, no extension, a type outside the rules, NULL arguments) is NULL. The
+    extension is the one Python's Path.suffix reads: no dotfile, no dot in a directory.
+
+    FOR nexus-6pfgb.23. The GENERATED column source_format is meant to be defined as
+    nexus.catalog_source_format(content_type, file_path); the function is IMMUTABLE so a generated column accepts
+    it. That bead then needs no change to the manifest_search bodies and no second Java edit: it adds the column and
+    may swap "f.fmt" for the column in one new changeset. Not done here.
+
+    No DATA EFFECT: one new function, a grant, three function bodies replaced. Rollback restores the vectors-041
+    bodies first, then drops the function.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-043-1" author="nexus-6pfgb.62">
+        <comment>nexus.catalog_source_format(content_type, file_path) (nexus-6pfgb.62): the one IMMUTABLE SQL definition of the derived source format; manifest_search_384/768/1024 call it instead of an inline CASE. One new function and its nexus_svc grant, three bodies replaced with their signatures and grants kept. No data effect: function definitions and a grant only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_source_format(
+    p_content_type text,
+    p_file_path    text
+) RETURNS text
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SECURITY INVOKER
+AS $$
+    SELECT CASE
+             WHEN lower(substring(p_file_path from '[^/.]\.([^./]+)$')) = 'pdf'
+                  OR p_content_type IN ('pdf', 'paper') THEN 'pdf'
+             WHEN lower(substring(p_file_path from '[^/.]\.([^./]+)$')) IN ('md', 'markdown') THEN 'markdown'
+             WHEN p_content_type = 'code' THEN 'code'
+             WHEN p_content_type IN ('prose', 'rdr') THEN 'prose'
+             ELSE NULL
+           END
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.manifest_search_384(
+    p_query          nexus.vector(384),
+    p_query_text     text,
+    p_chashes        bytea[],
+    p_collections    text[],
+    p_where          jsonb,
+    p_where_path     text,
+    p_manifest_where jsonb,
+    p_manifest_path  text,
+    p_n              int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND (p_chashes IS NULL OR c.chash = ANY(p_chashes))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (p_query_text IS NULL
+            OR c.chunk_tsv @@ plainto_tsquery('english', p_query_text)
+            OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+       AND EXISTS (
+            SELECT 1
+              FROM nexus.catalog_document_chunks m
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+             CROSS JOIN LATERAL (
+                   SELECT nexus.catalog_source_format(d.content_type, d.file_path) AS fmt
+                 ) f
+             CROSS JOIN LATERAL (
+                   SELECT jsonb_build_object(
+                       'section_title', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_title, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_title', 'null'::jsonb), '""'::jsonb) END,
+                       'section_type', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_type, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_type', 'null'::jsonb), '""'::jsonb) END,
+                       'page_number', CASE WHEN m.labels_written
+                           THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END,
+                       'title', CASE WHEN d.title ~ '\S'
+                           THEN to_jsonb(d.title)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END,
+                       'source_author', CASE WHEN COALESCE(d.author, '') ~ '\S'
+                           THEN to_jsonb(d.author)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_doi', to_jsonb(d.bib_doi),
+                       'bib_openalex_id', to_jsonb(d.bib_openalex_id),
+                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
+                       'content_type', to_jsonb(array_remove(ARRAY[
+                           CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
+                           f.fmt,
+                           CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
+                                THEN COALESCE(c.metadata ->> 'content_type', '') END
+                       ], NULL))
+                   ) AS eff
+                 ) e
+             WHERE m.tenant_id  = c.tenant_id
+               AND m.collection = c.collection
+               AND m.chash      = c.chash
+               AND d.deleted_at IS NULL
+               AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
+               AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)
+       )
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.manifest_search_768(
+    p_query          nexus.vector(768),
+    p_query_text     text,
+    p_chashes        bytea[],
+    p_collections    text[],
+    p_where          jsonb,
+    p_where_path     text,
+    p_manifest_where jsonb,
+    p_manifest_path  text,
+    p_n              int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND (p_chashes IS NULL OR c.chash = ANY(p_chashes))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (p_query_text IS NULL
+            OR c.chunk_tsv @@ plainto_tsquery('english', p_query_text)
+            OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+       AND EXISTS (
+            SELECT 1
+              FROM nexus.catalog_document_chunks m
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+             CROSS JOIN LATERAL (
+                   SELECT nexus.catalog_source_format(d.content_type, d.file_path) AS fmt
+                 ) f
+             CROSS JOIN LATERAL (
+                   SELECT jsonb_build_object(
+                       'section_title', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_title, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_title', 'null'::jsonb), '""'::jsonb) END,
+                       'section_type', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_type, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_type', 'null'::jsonb), '""'::jsonb) END,
+                       'page_number', CASE WHEN m.labels_written
+                           THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END,
+                       'title', CASE WHEN d.title ~ '\S'
+                           THEN to_jsonb(d.title)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END,
+                       'source_author', CASE WHEN COALESCE(d.author, '') ~ '\S'
+                           THEN to_jsonb(d.author)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_doi', to_jsonb(d.bib_doi),
+                       'bib_openalex_id', to_jsonb(d.bib_openalex_id),
+                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
+                       'content_type', to_jsonb(array_remove(ARRAY[
+                           CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
+                           f.fmt,
+                           CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
+                                THEN COALESCE(c.metadata ->> 'content_type', '') END
+                       ], NULL))
+                   ) AS eff
+                 ) e
+             WHERE m.tenant_id  = c.tenant_id
+               AND m.collection = c.collection
+               AND m.chash      = c.chash
+               AND d.deleted_at IS NULL
+               AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
+               AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)
+       )
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.manifest_search_1024(
+    p_query          nexus.vector(1024),
+    p_query_text     text,
+    p_chashes        bytea[],
+    p_collections    text[],
+    p_where          jsonb,
+    p_where_path     text,
+    p_manifest_where jsonb,
+    p_manifest_path  text,
+    p_n              int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND (p_chashes IS NULL OR c.chash = ANY(p_chashes))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (p_query_text IS NULL
+            OR c.chunk_tsv @@ plainto_tsquery('english', p_query_text)
+            OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+       AND EXISTS (
+            SELECT 1
+              FROM nexus.catalog_document_chunks m
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+             CROSS JOIN LATERAL (
+                   SELECT nexus.catalog_source_format(d.content_type, d.file_path) AS fmt
+                 ) f
+             CROSS JOIN LATERAL (
+                   SELECT jsonb_build_object(
+                       'section_title', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_title, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_title', 'null'::jsonb), '""'::jsonb) END,
+                       'section_type', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_type, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_type', 'null'::jsonb), '""'::jsonb) END,
+                       'page_number', CASE WHEN m.labels_written
+                           THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END,
+                       'title', CASE WHEN d.title ~ '\S'
+                           THEN to_jsonb(d.title)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END,
+                       'source_author', CASE WHEN COALESCE(d.author, '') ~ '\S'
+                           THEN to_jsonb(d.author)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_doi', to_jsonb(d.bib_doi),
+                       'bib_openalex_id', to_jsonb(d.bib_openalex_id),
+                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
+                       'content_type', to_jsonb(array_remove(ARRAY[
+                           CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
+                           f.fmt,
+                           CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
+                                THEN COALESCE(c.metadata ->> 'content_type', '') END
+                       ], NULL))
+                   ) AS eff
+                 ) e
+             WHERE m.tenant_id  = c.tenant_id
+               AND m.collection = c.collection
+               AND m.chash      = c.chash
+               AND d.deleted_at IS NULL
+               AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
+               AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)
+       )
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.catalog_source_format(text, text) TO nexus_svc;
+
+DO $post$
+DECLARE
+    n int;
+BEGIN
+    SELECT count(*) INTO n
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname = 'catalog_source_format';
+    IF n <> 1 THEN
+        RAISE EXCEPTION 'vectors-043-1: expected exactly 1 catalog_source_format function, found %', n;
+    END IF;
+    SELECT count(*) INTO n
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('manifest_search_384', 'manifest_search_768', 'manifest_search_1024')
+       AND p.prosrc LIKE '%nexus.catalog_source_format(d.content_type, d.file_path)%';
+    IF n <> 3 THEN
+        RAISE EXCEPTION 'vectors-043-1: expected the 3 manifest_search functions to call catalog_source_format, found %', n;
+    END IF;
+END
+$post$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.manifest_search_384(
+    p_query          nexus.vector(384),
+    p_query_text     text,
+    p_chashes        bytea[],
+    p_collections    text[],
+    p_where          jsonb,
+    p_where_path     text,
+    p_manifest_where jsonb,
+    p_manifest_path  text,
+    p_n              int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND (p_chashes IS NULL OR c.chash = ANY(p_chashes))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (p_query_text IS NULL
+            OR c.chunk_tsv @@ plainto_tsquery('english', p_query_text)
+            OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+       AND EXISTS (
+            SELECT 1
+              FROM nexus.catalog_document_chunks m
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+             CROSS JOIN LATERAL (
+                   SELECT CASE
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) = 'pdf'
+                                 OR d.content_type IN ('pdf', 'paper') THEN 'pdf'
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) IN ('md', 'markdown') THEN 'markdown'
+                            WHEN d.content_type = 'code' THEN 'code'
+                            WHEN d.content_type IN ('prose', 'rdr') THEN 'prose'
+                            ELSE NULL
+                          END AS fmt
+                 ) f
+             CROSS JOIN LATERAL (
+                   SELECT jsonb_build_object(
+                       'section_title', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_title, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_title', 'null'::jsonb), '""'::jsonb) END,
+                       'section_type', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_type, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_type', 'null'::jsonb), '""'::jsonb) END,
+                       'page_number', CASE WHEN m.labels_written
+                           THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END,
+                       'title', CASE WHEN d.title ~ '\S'
+                           THEN to_jsonb(d.title)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END,
+                       'source_author', CASE WHEN COALESCE(d.author, '') ~ '\S'
+                           THEN to_jsonb(d.author)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_doi', to_jsonb(d.bib_doi),
+                       'bib_openalex_id', to_jsonb(d.bib_openalex_id),
+                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
+                       'content_type', to_jsonb(array_remove(ARRAY[
+                           CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
+                           f.fmt,
+                           CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
+                                THEN COALESCE(c.metadata ->> 'content_type', '') END
+                       ], NULL))
+                   ) AS eff
+                 ) e
+             WHERE m.tenant_id  = c.tenant_id
+               AND m.collection = c.collection
+               AND m.chash      = c.chash
+               AND d.deleted_at IS NULL
+               AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
+               AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)
+       )
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.manifest_search_768(
+    p_query          nexus.vector(768),
+    p_query_text     text,
+    p_chashes        bytea[],
+    p_collections    text[],
+    p_where          jsonb,
+    p_where_path     text,
+    p_manifest_where jsonb,
+    p_manifest_path  text,
+    p_n              int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND (p_chashes IS NULL OR c.chash = ANY(p_chashes))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (p_query_text IS NULL
+            OR c.chunk_tsv @@ plainto_tsquery('english', p_query_text)
+            OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+       AND EXISTS (
+            SELECT 1
+              FROM nexus.catalog_document_chunks m
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+             CROSS JOIN LATERAL (
+                   SELECT CASE
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) = 'pdf'
+                                 OR d.content_type IN ('pdf', 'paper') THEN 'pdf'
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) IN ('md', 'markdown') THEN 'markdown'
+                            WHEN d.content_type = 'code' THEN 'code'
+                            WHEN d.content_type IN ('prose', 'rdr') THEN 'prose'
+                            ELSE NULL
+                          END AS fmt
+                 ) f
+             CROSS JOIN LATERAL (
+                   SELECT jsonb_build_object(
+                       'section_title', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_title, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_title', 'null'::jsonb), '""'::jsonb) END,
+                       'section_type', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_type, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_type', 'null'::jsonb), '""'::jsonb) END,
+                       'page_number', CASE WHEN m.labels_written
+                           THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END,
+                       'title', CASE WHEN d.title ~ '\S'
+                           THEN to_jsonb(d.title)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END,
+                       'source_author', CASE WHEN COALESCE(d.author, '') ~ '\S'
+                           THEN to_jsonb(d.author)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_doi', to_jsonb(d.bib_doi),
+                       'bib_openalex_id', to_jsonb(d.bib_openalex_id),
+                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
+                       'content_type', to_jsonb(array_remove(ARRAY[
+                           CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
+                           f.fmt,
+                           CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
+                                THEN COALESCE(c.metadata ->> 'content_type', '') END
+                       ], NULL))
+                   ) AS eff
+                 ) e
+             WHERE m.tenant_id  = c.tenant_id
+               AND m.collection = c.collection
+               AND m.chash      = c.chash
+               AND d.deleted_at IS NULL
+               AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
+               AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)
+       )
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.manifest_search_1024(
+    p_query          nexus.vector(1024),
+    p_query_text     text,
+    p_chashes        bytea[],
+    p_collections    text[],
+    p_where          jsonb,
+    p_where_path     text,
+    p_manifest_where jsonb,
+    p_manifest_path  text,
+    p_n              int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND (p_chashes IS NULL OR c.chash = ANY(p_chashes))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (p_query_text IS NULL
+            OR c.chunk_tsv @@ plainto_tsquery('english', p_query_text)
+            OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+       AND EXISTS (
+            SELECT 1
+              FROM nexus.catalog_document_chunks m
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+             CROSS JOIN LATERAL (
+                   SELECT CASE
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) = 'pdf'
+                                 OR d.content_type IN ('pdf', 'paper') THEN 'pdf'
+                            WHEN lower(substring(d.file_path from '[^/.]\.([^./]+)$')) IN ('md', 'markdown') THEN 'markdown'
+                            WHEN d.content_type = 'code' THEN 'code'
+                            WHEN d.content_type IN ('prose', 'rdr') THEN 'prose'
+                            ELSE NULL
+                          END AS fmt
+                 ) f
+             CROSS JOIN LATERAL (
+                   SELECT jsonb_build_object(
+                       'section_title', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_title, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_title', 'null'::jsonb), '""'::jsonb) END,
+                       'section_type', CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_type, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_type', 'null'::jsonb), '""'::jsonb) END,
+                       'page_number', CASE WHEN m.labels_written
+                           THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END,
+                       'title', CASE WHEN d.title ~ '\S'
+                           THEN to_jsonb(d.title)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END,
+                       'source_author', CASE WHEN COALESCE(d.author, '') ~ '\S'
+                           THEN to_jsonb(d.author)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_doi', to_jsonb(d.bib_doi),
+                       'bib_openalex_id', to_jsonb(d.bib_openalex_id),
+                       'bib_semantic_scholar_id', to_jsonb(d.bib_semantic_scholar_id),
+                       'content_type', to_jsonb(array_remove(ARRAY[
+                           CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
+                           f.fmt,
+                           CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
+                                THEN COALESCE(c.metadata ->> 'content_type', '') END
+                       ], NULL))
+                   ) AS eff
+                 ) e
+             WHERE m.tenant_id  = c.tenant_id
+               AND m.collection = c.collection
+               AND m.chash      = c.chash
+               AND d.deleted_at IS NULL
+               AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
+               AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)
+       )
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+DROP FUNCTION IF EXISTS nexus.catalog_source_format(text, text);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

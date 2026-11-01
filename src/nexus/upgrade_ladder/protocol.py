@@ -6,7 +6,8 @@ A rung is one data transition in the single upgrade ladder (T2 schema,
 substrate ETL, …). The seam is ``detect → converge → verify``:
 
 - ``detect()`` is READ-ONLY — it is the ``nx doctor`` / dry-run surface
-  (the ``resolve_pending_steps`` precedent) and must never perform work.
+  (the ``resolve_pending_steps`` precedent) and must never perform work, and
+  writes nothing at all.
   A rung that is N/A for this install/mode reports ``applicable=False``
   and the walk skips it (the nexus-f0pmd detect→skip gate pattern).
 - ``converge(report)`` does the work. It is idempotent and RESUMABLE
@@ -14,9 +15,15 @@ substrate ETL, …). The seam is ``detect → converge → verify``:
   :attr:`ConvergeOutcome.RESUMABLE` per batch; a re-run continues from
   the persisted floor, never duplicating work. Failure is an exception,
   never a verdict.
-- ``verify()`` is READ-ONLY and is the ONLY evidence that lets the runner
-  record the rung complete (RDR-142: the position must never advance past
+- ``verify()`` is READ-ONLY of the data it checks and is the ONLY evidence
+  that lets the runner record the rung complete (RDR-142: the position must never advance past
   deferred or failed work — the guard itself lives in the runner, P0.3).
+
+ONE named write outside ``converge``: ``manifest-section-labels``'s ``verify()``
+saves a cache note (a remembered clean scan, in T2; never rung state, never a
+completion) that its ``detect()`` reads to skip a full-catalog scan. Its
+``detect()`` writes nothing. A rung's ``detect()`` or ``verify()`` that wrote
+anything else would break the dry-run and doctor guarantees.
 
 Verdicts are frozen dataclasses (the ``migrations.py`` Migration/
 StepOutcome precedent): a consumer can never "fix up" a verdict, the

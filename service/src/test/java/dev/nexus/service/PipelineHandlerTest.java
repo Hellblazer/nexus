@@ -440,6 +440,27 @@ class PipelineHandlerTest {
     }
 
     @Test
+    void complete_afterTheRunReleasedItsRow_leavesItFailedAndItsBuffer() throws Exception {
+        // nexus-euczk: an interrupted client releases its row as failed with the buffer kept;
+        // its uploader thread can still send /complete after that. The row stays failed, so the
+        // next create resumes the buffer instead of wiping it as a completed leftover.
+        String hash = "e4-" + "0".repeat(28);
+        long id = pipelineId(create(docCreate(hash, "/tmp/e4.pdf", "knowledge__t")));
+        post("/v1/pipeline/pages", TOKEN, TENANT, """
+            {"pipeline_id":%d,"pages":[{"page_index":0,"page_text":"p","metadata_json":"{}"}]}""".formatted(id));
+        post("/v1/pipeline/fail", TOKEN, TENANT,
+            "{\"pipeline_id\":" + id + ",\"error\":\"interrupted; the buffer is kept\"}");
+
+        var straggler = post("/v1/pipeline/complete", TOKEN, TENANT, "{\"pipeline_id\":" + id + "}");
+        assertThat(straggler.statusCode()).as("a no-op answers as a write does").isEqualTo(200);
+        assertThat(stateById(id).get("status")).isEqualTo("failed");
+
+        var again = create(docCreate(hash, "/tmp/e4.pdf", "knowledge__t"));
+        assertThat(again.get("status")).isEqualTo("resuming");
+        assertThat(pagesById(id)).as("the released buffer is resumed, not wiped").hasSize(1);
+    }
+
+    @Test
     void legacyCreate_secondPathIsTheSameRow_conflictThenSkip() throws Exception {
         // A client older than pipeline-002 sends no identity: one row per
         // hash, exactly the pipeline-001 contract (create_completed_skips

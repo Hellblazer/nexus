@@ -50,6 +50,30 @@ def test_the_skill_dispatches_the_plugins_own_agent_and_preapproves_exactly_its_
     )
 
 
+def test_prose_cut_ships_beside_prose_edit_and_dispatches_the_same_agent_under_the_same_rule() -> None:
+    """nexus-ger02.10: /prose-edit is not model-invocable (pinned), so the site-page gate calls a second skill."""
+    skills = sorted(p.parent.name for p in (PLUGIN / "skills").glob("*/SKILL.md"))
+    assert skills == ["prose-cut", "prose-edit"]
+    cut = (PLUGIN / "skills" / "prose-cut" / "SKILL.md").read_text(encoding="utf-8")
+    manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    agent = _frontmatter(AGENT.read_text(encoding="utf-8"))["name"]
+    assert f"`subagent_type` `{manifest['name']}:{agent}`" in cut
+    assert "disable-model-invocation" not in _frontmatter(cut)
+    # two rules, brief.py and review.py: the skill never reaches memory.py, which prose-edit's rule also admits
+    allowed = _frontmatter(cut)["allowed-tools"]
+    rules = re.findall(r"Bash\(([^)]*)\)", allowed)
+    assert len(rules) == 2 and allowed == " ".join(f"Bash({r})" for r in rules)
+    prefixes = re.findall(r"^\| (?:BRIEF|REVIEW) \| `([^`]+)` \|$", cut, re.MULTILINE)
+    assert len(prefixes) == 2
+    for prefix in prefixes:
+        script = prefix.rsplit("/", 1)[1]
+        assert [fnmatch.fnmatchcase(f"{prefix} parse 'x.md'", rule) for rule in rules].count(True) == 1, prefix
+        assert (PLUGIN / "skills" / "prose-edit" / "scripts" / script).is_file()
+    memory = "python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/memory.py voice-card 'x.md'"
+    assert not any(fnmatch.fnmatchcase(memory, rule) for rule in rules)
+    assert not any(fnmatch.fnmatchcase("python3 ${CLAUDE_PLUGIN_ROOT}/hooks/x.py", rule) for rule in rules)
+
+
 def _worktree(prose: Prose) -> Path:
     wt = prose.cwd.parent / "wt"
     git(prose.cwd, "worktree", "add", "-q", "-b", "side", str(wt))

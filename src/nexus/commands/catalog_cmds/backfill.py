@@ -330,8 +330,10 @@ def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
     catalog column are never touched, and a key is sent only with a real value. Notes (``knowledge``)
     take ``put_at``, ``ttl_days``, ``tags`` (as an array), ``category`` and ``source_agent`` from the row
     the note itself wrote, or ``tags``/``category``/``source_agent``/``put_at`` from a row of a chunk it
-    solely owns. Indexed documents take ``tags`` and ``category`` from the register-time statement of
-    their file kind, and ``extraction_method``, ``quality_gate_overridden`` (only where True),
+    solely owns. Indexed documents take ``source_format`` (``pdf`` / ``markdown`` / ``code`` / ``prose``,
+    nexus-6pfgb.23) as the engine derives it from their ``content_type`` and ``file_path``, with no chunk
+    row read (a pair the rule derives nothing for is residue, ``no_rule`` or ``no_file_path``), and
+    ``extraction_method``, ``quality_gate_overridden`` (only where True),
     ``extraction_source``, ``frecency_score`` (with its computed_at) and an empty ``author`` from chunks
     they solely own, when those rows agree and are no later than the document. A document whose chunks
     are all shared is skipped and counted. A legacy comma string under ``tags`` is left for the array rung.

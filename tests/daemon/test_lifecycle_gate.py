@@ -157,6 +157,11 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # build one generation. The waiter re-checks the current generation and
     # skips the install; no lease, no heartbeat, no daemon-scope election.
     "pdf_stack.py",
+    # `nx upgrade --auto` single-instance lock (nexus-75w5d): a non-blocking
+    # try-lock on <config>/upgrade-auto.lock so a burst of session starts runs
+    # one unattended upgrade, not nineteen. The loser exits 0. The kernel drops
+    # it with the holder; no lease, no heartbeat, no daemon-scope election.
+    "util/upgrade_auto_lock.py",
 })
 
 

@@ -8,6 +8,7 @@ import dev.nexus.service.tuples.TemplateRegistry;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.types.DayToSecond;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.HexFormat;
 import java.util.List;
@@ -261,6 +263,180 @@ class TupleNackDeadTest {
                 .where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.SUBSPACE.eq(q.subspace()))).execute());
         repo.release(TENANT, c.claimId(), "w1");
         assertThat(state(q).claimState()).as("a release is not a failure").isNull();
+    }
+
+    // ── nexus-7rwaj (RDR-235 E4): a dead decision on a DIRTY row requeues it ──
+
+    private record Content(String body, boolean dirty, int attempts, String claimState, String claimId,
+                           String claimant, OffsetDateTime claimedAt, OffsetDateTime leaseUntil,
+                           OffsetDateTime availableAt) {
+    }
+
+    private Content content(Q q) throws Exception {
+        return admin(ctx -> {
+            var r = ctx.selectFrom(TUPLES)
+                    .where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.SUBSPACE.eq(q.subspace()))).fetchOne();
+            assertThat(r).isNotNull();
+            return new Content(r.getBody(), r.getDirty(), r.getAttempts(), r.getClaimState(), r.getClaimId(),
+                    r.getClaimant(), r.getClaimedAt(), r.getLeaseUntil(), r.getAvailableAt());
+        });
+    }
+
+    private void replaceWhileClaimed(Q q, String body) {
+        var r = repo.outReplace(TENANT, q.subspace(), q.pattern(), q.dims(), body, "n-1", null, null, null);
+        assertThat(r.outcome()).as("the claimed row is dirtied, not rewritten under the holder")
+                .isEqualTo(TupleRepository.OutOutcome.DIRTIED);
+    }
+
+    private void setAttempts(Q q, int attempts) throws Exception {
+        admin(ctx -> ctx.update(TUPLES).set(TUPLES.ATTEMPTS, attempts)
+                .where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.SUBSPACE.eq(q.subspace()))).execute());
+    }
+
+    private void lapseLease(Q q) throws Exception {
+        admin(ctx -> ctx.update(TUPLES)
+                .set(TUPLES.LEASE_UNTIL, DSL.currentOffsetDateTime().sub(DayToSecond.valueOf(Duration.ofSeconds(300))))
+                .where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.SUBSPACE.eq(q.subspace()))).execute());
+    }
+
+    private void assertRequeuedWithNewBody(Q q, String body) throws Exception {
+        Content c = content(q);
+        assertThat(c.claimState()).as("available, not dead").isNull();
+        assertThat(c.body()).as("the replaced body survives").isEqualTo(body);
+        assertThat(c.attempts()).as("attempts reset: the new body is a fresh task").isZero();
+        assertThat(c.dirty()).isFalse();
+        assertThat(c.claimId()).isNull();
+        assertThat(c.claimant()).isNull();
+        assertThat(c.claimedAt()).isNull();
+        assertThat(c.leaseUntil()).isNull();
+        assertThat(c.availableAt()).isNull();
+    }
+
+    @Test
+    void nackDeadTrue_onADirtyClaim_requeuesTheRowWithTheNewBody_attemptsReset() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        var c = claimOrFail(q, "w1");
+        setAttempts(q, 1);
+        replaceWhileClaimed(q, "fixed");
+
+        repo.nack(TENANT, c.claimId(), "w1", null, true);
+
+        assertRequeuedWithNewBody(q, "fixed");
+        assertThat(transitions(id)).as("no dead row: the new content was never extracted")
+                .containsExactly("claim", "nack");
+        var again = claimOrFail(q, "w2");
+        assertThat(again.tuple().body()).isEqualTo("fixed");
+        assertThat(again.tuple().attempts()).as("a fresh task starts at attempt 0").isZero();
+    }
+
+    @Test
+    void aReplaceThatLandsBetweenNackDeadsReadAndItsUpdate_isNotDeadLettered() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        var c = claimOrFail(q, "w1");
+        // nack read the row clean; the replace dirties it before nack's UPDATE.
+        TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> {
+            TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
+            replaceWhileClaimed(q, "late-fix");
+        };
+        try {
+            repo.nack(TENANT, c.claimId(), "w1", null, true);
+        } finally {
+            TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
+        }
+
+        assertRequeuedWithNewBody(q, "late-fix");
+        assertThat(transitions(id)).containsExactly("claim", "nack");
+    }
+
+    @Test
+    void nackDeadTrue_onACleanClaim_stillDeadLetters_afterADirtyAckSpentTheMark() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        var first = claimOrFail(q, "w1");
+        replaceWhileClaimed(q, "v2");
+        repo.ack(TENANT, first.claimId(), "w1");   // ack_dirty: back to available, dirty spent
+        var second = claimOrFail(q, "w2");
+
+        repo.nack(TENANT, second.claimId(), "w2", null, true);
+
+        assertThat(content(q).claimState()).isEqualTo("dead");
+        assertThat(transitions(id)).containsExactly("claim", "ack_dirty", "claim", "nack", "dead");
+    }
+
+    @Test
+    void sweepLapseAtMaxAttempts_onADirtyClaim_requeuesTheRowWithTheNewBody() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        claimOrFail(q, "w1");
+        setAttempts(q, 2);   // the lapse counts attempt 3 == max_attempts
+        replaceWhileClaimed(q, "fixed");
+        lapseLease(q);
+
+        var result = repo.releaseLapsedClaimsBatch(TENANT, 10, Duration.ofSeconds(30));
+
+        assertThat(result.deadLettered()).as("the dirty row is not dead-lettered").isZero();
+        assertThat(result.released()).isEqualTo(1);
+        assertRequeuedWithNewBody(q, "fixed");
+        assertThat(transitions(id)).containsExactly("claim", "expire");
+        assertThat(claimOrFail(q, "w2").tuple().body()).isEqualTo("fixed");
+    }
+
+    @Test
+    void sweepLapseAtMaxAttempts_onACleanClaim_stillDeadLetters() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        claimOrFail(q, "w1");
+        setAttempts(q, 2);
+        lapseLease(q);
+
+        var result = repo.releaseLapsedClaimsBatch(TENANT, 10, Duration.ofSeconds(30));
+
+        assertThat(result.deadLettered()).isEqualTo(1);
+        Content c = content(q);
+        assertThat(c.claimState()).isEqualTo("dead");
+        assertThat(c.attempts()).isEqualTo(3);
+        assertThat(transitions(id)).containsExactly("claim", "expire", "dead");
+    }
+
+    @Test
+    void claimOfALapsedDirtyClaimAtMaxAttempts_requeuesTheRowWithTheNewBody_andClaimsIt() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        claimOrFail(q, "w1");
+        setAttempts(q, 2);   // the lapse counts attempt 3 == max_attempts
+        replaceWhileClaimed(q, "fixed");
+        lapseLease(q);
+
+        var again = claimOrFail(q, "w2");
+
+        assertThat(again.tuple().body()).as("the new body, not a dead row").isEqualTo("fixed");
+        assertThat(again.tuple().attempts()).as("reset to 0; a claim does not count an attempt").isZero();
+        Content c = content(q);
+        assertThat(c.claimState()).isEqualTo("claimed");
+        assertThat(c.claimant()).isEqualTo("w2");
+        assertThat(c.attempts()).isZero();
+        assertThat(c.dirty()).isFalse();
+        assertThat(transitions(id)).as("expire, then the new claim; no dead row")
+                .containsExactly("claim", "expire", "claim");
+    }
+
+    @Test
+    void claimOfALapsedCleanClaimAtMaxAttempts_stillDeadLetters() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        claimOrFail(q, "w1");
+        setAttempts(q, 2);
+        lapseLease(q);
+
+        assertThat(repo.inp(TENANT, q.subspace(), q.pattern(), "w2", 30))
+                .as("nothing left to claim: the clean row is dead").isEmpty();
+
+        Content c = content(q);
+        assertThat(c.claimState()).isEqualTo("dead");
+        assertThat(c.attempts()).isEqualTo(3);
+        assertThat(transitions(id)).containsExactly("claim", "expire", "dead");
     }
 
     // ── a dead row can be revived by replace (the requeue-failed path) ───────

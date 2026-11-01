@@ -8300,6 +8300,49 @@ public final class CatalogRepository {
     }
 
     /**
+     * {@code (chash, doc_id, position, collection)} for every manifest row holding one of {@code chashes} whose
+     * document is TOMBSTONED (nexus-6pfgb.58).
+     *
+     * <p>{@link #chashPositions} and {@link #getManifestMany} show live documents only, so no client read could tell
+     * that a chash it counts as held by one row is also held by a document the user deleted. The
+     * manifest-section-labels rung needs exactly that: it copies a chunk row's label onto a legacy manifest row only
+     * when the label is the one owner's, and a tombstoned co-owner may have written it last.
+     *
+     * <p>This read is tombstone-INCLUSIVE by design (its whole purpose is to name tombstoned holders), so it sits
+     * on a named TombstoneFilterGateTest exemption. It reads the manifest row and the document's tombstone and
+     * nothing else: no title, no path, no meta. A purged document (trash purge) has no rows left and does not
+     * appear. Tenant-wide, like {@link #chashPositions}: the row's own collection is returned, not filtered on.
+     *
+     * @return rows ordered by doc_id, then position
+     */
+    // TOMBSTONE-EXEMPT (nexus-6pfgb.58): see the method comment; the join requires DELETED_AT.isNotNull().
+    public List<Map<String, Object>> tombstonedChashHolders(String tenant, List<String> chashes) {
+        if (chashes == null || chashes.isEmpty()) return List.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                                  CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                          .from(CATALOG_DOCUMENT_CHUNKS)
+                          .join(CATALOG_DOCUMENTS)
+                              .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                                  .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
+                                  .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
+                          .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant).and(CHK_CHASH_HEX.in(chashes)))
+                          .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
+                          .fetch();
+            List<Map<String, Object>> out = new ArrayList<>(rows.size());
+            for (var r : rows) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("chash",      r.value1());
+                m.put("doc_id",     r.value2());
+                m.put("position",   r.value3());
+                m.put("collection", r.value4());
+                out.add(m);
+            }
+            return out;
+        });
+    }
+
+    /**
      * Batch-fetch manifest rows for multiple doc_ids (nexus-7lm3q).
      *
      * <p>Executes {@code SELECT ... FROM catalog_document_chunks WHERE doc_id IN (?)}

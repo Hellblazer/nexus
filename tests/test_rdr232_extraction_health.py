@@ -2,10 +2,10 @@
 """nexus-jypmj.16 (b): a persistently failing structured extraction is signalled once per process and in `nx doctor`.
 
 A per-request extraction failure (no ``claude`` CLI and no API key, an ``openai_compat`` endpoint that answers
-outside the closed schema, a timeout) leaves that request on its first-pass kind and the answer-kind gate keeps
-enforcing: per-request fail-closed is the design. The first-pass-only regime is also the one that failed the
-held-out lookup measurement, so a process in which the call fails every time was enforcing in it with no sign
-anywhere. The process now warns once after a run of failures, and ``nx doctor`` carries an "Answer-kind
+outside the closed schema, a timeout) leaves that request on its first-pass kind and, since nexus-x3eoc, runs its
+answer-kind gate in shadow (it reports and excludes nothing). The first-pass-only regime is the one that failed the
+held-out lookup measurement, so a process in which the call fails every time loses the gate on every request with
+no sign anywhere. The process warns once after a run of failures, and ``nx doctor`` carries an "Answer-kind
 extraction" row that reads the same preconditions without a model call.
 
 Tenant-free. The warning is pinned on the tracker and end to end through ``nx_answer``; the row follows
@@ -64,6 +64,22 @@ def test_a_run_of_failures_warns_exactly_once_at_the_threshold(outcome: str) -> 
     assert event["log_level"] == "warning" and event["consecutive_failures"] == n and event["last_outcome"] == outcome
     assert "first-pass" in event["consequence"] and "NX_ANSWER_STRUCTURED_EXTRACT" in event["remedy"]
     assert "nx doctor" in event["remedy"]
+
+
+def test_the_warning_says_what_the_switch_saves_and_what_shadow_forfeits_not_that_it_turns_shadow_on() -> None:
+    """Review of 3d4e36494: failing requests already run in shadow, so NX_ANSWER_STRUCTURED_EXTRACT=0 is not 'to run the
+    gate in shadow'. It saves the failed call's wait on every request; the answer-kind rows then never refuse a
+    wrong-shape plan (already lost per failing request), and the one-source rule stops excluding too, since the
+    extraction-disabled shadow enforces nothing (confirmation review of acea80726)."""
+    with capture_logs() as logs:
+        _note(["error"] * rc.PERSISTENT_FAILURE_THRESHOLD)
+    (event,) = _warnings(logs)
+    remedy, consequence = event["remedy"], event["consequence"]
+    assert "to run the gate in shadow" not in remedy
+    assert "NX_ANSWER_STRUCTURED_EXTRACT=0 to stop the failed call's wait on every request" in remedy
+    assert "wrong-shape plan" in remedy and "one-source rule stops excluding too" in remedy
+    assert "one-source rule still holds" not in remedy
+    assert "enforcing" not in consequence and "in shadow" in consequence and "one-source rule" in consequence
 
 
 def test_a_success_ends_the_run() -> None:
@@ -130,13 +146,15 @@ def test_an_unknown_outcome_is_ignored_not_counted() -> None:
 
 
 def test_nx_answer_warns_once_after_repeated_failed_extractions() -> None:
-    """End to end: the suite-wide guard makes every extraction call fail (outcome ``error``), the gate enforces."""
+    """End to end: the suite-wide guard makes every extraction call fail (outcome ``error``); each request's gate runs
+    in shadow (nexus-x3eoc) and the process still warns once, because the gate would otherwise enforce."""
     n = rc.PERSISTENT_FAILURE_THRESHOLD
     with capture_logs() as logs:
         for i in range(n + 2):
             env, _, _ = _drive("Tell me about plan matching.", [LOOKUP_473, SYNTH_12], [(473, 0.1), (12, 0.4)])
             assert env["request_coverage"]["extraction"]["outcome"] == "error"
-            assert env["plan_eligibility"]["enforced"] is True
+            assert env["plan_eligibility"]["enforced"] is False
+            assert env["plan_eligibility"]["shadow_reason"] == "extraction_failed"  # nexus-x3eoc
             assert len(_warnings(logs)) == (1 if i + 1 >= n else 0), f"after request {i + 1}"
     (event,) = _warnings(logs)
     assert event["consecutive_failures"] == n
@@ -222,10 +240,10 @@ class TestAnswerKindExtractionRow:
     def test_a_healthy_cli_says_what_the_row_did_not_check(self, claude) -> None:
         """nexus-jypmj.21: green must not claim more than it looked at, and must not misdescribe where a failing
         backend does show: each request's outcome is in the envelope's request_coverage.extraction, and the log line
-        fires only after repeated failures while the gate enforces. No doctor row shows it."""
+        fires only after repeated failures while the gate would otherwise enforce. No doctor row shows it."""
         (row,) = _check_answer_kind_extraction()
         assert row.ok and "no model call" in row.detail and "answer_kind_gate_extraction_failing" in row.detail
-        assert "request_coverage.extraction" in row.detail and "while the gate enforces" in row.detail
+        assert "request_coverage.extraction" in row.detail and "while the gate would otherwise enforce" in row.detail
         assert "shows only" not in row.detail
 
     def test_a_probe_that_raises_is_a_warning_not_a_crash(self, monkeypatch) -> None:
@@ -259,6 +277,18 @@ class TestAnswerKindExtractionRow:
         assert mention in row.detail and "--version" in row.detail and "first-pass" in row.detail
         assert "cannot run" in row.detail and "may be unable" not in row.detail
         assert any("NX_ANSWER_STRUCTURED_EXTRACT" in f for f in row.fix_suggestions)
+
+    @needs_sh
+    def test_the_row_does_not_claim_the_gate_enforces_and_does_not_promise_shadow_from_the_switch(self, monkeypatch, tmp_path) -> None:
+        """Review of 3d4e36494: a failing request's gate is already in shadow; the switch saves the call's wait."""
+        _claude_stub(monkeypatch, tmp_path, "exit 1\n")
+        (row,) = _check_answer_kind_extraction()
+        assert "runs in shadow" in row.detail and "one-source rule still holds" in row.detail
+        assert "keeps enforcing" not in row.detail and "gate enforces" not in row.detail
+        switch = next(f for f in row.fix_suggestions if "NX_ANSWER_STRUCTURED_EXTRACT" in f)
+        assert "to run the answer-kind gate in shadow" not in switch
+        assert "failed extraction call's wait on every request" in switch and "wrong-shape plans" in switch
+        assert "the one-source rule too" in switch and "one-source rule still holds" not in switch
 
     @needs_sh
     def test_a_cli_that_hangs_warns_within_the_bound(self, monkeypatch, tmp_path) -> None:

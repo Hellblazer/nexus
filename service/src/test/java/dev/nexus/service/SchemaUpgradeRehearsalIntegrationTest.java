@@ -40,6 +40,8 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static dev.nexus.service.jooq.nexus.Tables.PLANS;
+import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
+import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER_TENANTS;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
@@ -440,6 +442,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   hygiene-008-2 nexus-0rxvg
                 //   catalog-044-3 nexus-6pbwx
                 //   note-uri-001-1 nexus-bivz3.5
+                //   vectors-046-4 nexus-yye8l.21
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -1114,6 +1117,25 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
                 }
 
+                // ── vectors-046-4 (nexus-yye8l.21): the backfill copies every tenant that already holds
+                // request_ledger rows into request_ledger_tenants. request_ledger (vectors-033) is FORCE RLS,
+                // and the registry, its trigger and the backfill do not exist until vectors-046, so the rows
+                // are seeded just before vectors-046-1: no trigger exists to register them, which leaves the
+                // backfill as the only thing that can. The tenants are ones with no service_tokens row in
+                // this fixture, the population the registry exists for (a tenant that cannot authenticate
+                // can never register itself by a keyed request). ────────────────────────────────────────────
+                migrateUpTo(adminDs, "vectors-046-1");
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    seedRequestLedgerRows(su);
+                }
+                try (Connection admin = adminDs.getConnection()) {
+                    assertThat(dsl(admin).fetchCount(REQUEST_LEDGER))
+                        .as("FORCE RLS must hide the seeded request_ledger rows from the non-BYPASSRLS "
+                            + "owner — vectors-046-4's own toggle-wrap target")
+                        .isEqualTo(0);
+                }
+
                 // ── HEAD LEG over a populated database. This is the leg the
                 // v0.1.33 outage proved was untested: catalog-013-0's naked DML
                 // no-ops under RLS here exactly as it did in production; only
@@ -1172,6 +1194,26 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             .and(CATALOG_COLLECTIONS.OWNER_ID.eq("h044subject"))))
                         .as("a knowledge collection keeps its subject")
                         .isEqualTo(1);
+                }
+
+                // ── vectors-046-4's own effect (nexus-yye8l.21): both seeded tenants are registered, exactly
+                // once, no other tenant is, the ledger rows are untouched, and FORCE RLS is back on the ledger
+                // (a backfill that left it off would let every role read every tenant's rows). ──────────────
+                try (Connection su = pg.createConnection("")) {
+                    var ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    assertThat(ctx.select(REQUEST_LEDGER_TENANTS.TENANT_ID).from(REQUEST_LEDGER_TENANTS)
+                            .orderBy(REQUEST_LEDGER_TENANTS.TENANT_ID).fetch(REQUEST_LEDGER_TENANTS.TENANT_ID))
+                        .as("vectors-046-4 must register exactly the tenants that held ledger rows")
+                        .containsExactly("ledger-backfill-a", "ledger-backfill-b");
+                    assertThat(ctx.fetchCount(REQUEST_LEDGER))
+                        .as("the backfill reads the ledger and changes none of its rows")
+                        .isEqualTo(3);
+                    var rls = PgCatalogProbes.rowSecurity(ctx, "nexus", "request_ledger");
+                    assertThat(rls).isNotNull();
+                    assertThat(rls.enabled()).isTrue();
+                    assertThat(rls.forced())
+                        .as("vectors-046-4 must restore FORCE ROW LEVEL SECURITY on request_ledger")
+                        .isTrue();
                 }
 
                 // ── note-uri-001-1's own effect (nexus-bivz3.5), under FORCE RLS for the NOBYPASSRLS
@@ -2789,6 +2831,28 @@ class SchemaUpgradeRehearsalIntegrationTest {
 
     private static String highlightUriOf(String docUri, String tumbler) {
         return sibling(docUri, "hl-" + tumbler);
+    }
+
+    /**
+     * vectors-046-4's input: ledger rows for two tenants (two rows for one, one for the other), written as the
+     * superuser before the registry's trigger exists. Tenant names are ones no fixture token names.
+     */
+    private static void seedRequestLedgerRows(Connection su) {
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        String[][] rows = {
+            {"ledger-backfill-a", "committed"}, {"ledger-backfill-a", "failed"}, {"ledger-backfill-b", "committed"}};
+        for (String[] row : rows) {
+            java.time.OffsetDateTime finished = java.time.OffsetDateTime.now().minusDays(1);
+            ctx.insertInto(REQUEST_LEDGER)
+                .set(REQUEST_LEDGER.TENANT_ID, row[0])
+                .set(REQUEST_LEDGER.REQUEST_ID, java.util.UUID.randomUUID())
+                .set(REQUEST_LEDGER.ROUTE, "/v1/vectors/gc/quarantine-orphans")
+                .set(REQUEST_LEDGER.BODY_SHA256, new byte[32])
+                .set(REQUEST_LEDGER.STATE, row[1])
+                .set(REQUEST_LEDGER.STARTED_AT, finished.minusMinutes(1))
+                .set(REQUEST_LEDGER.FINISHED_AT, finished)
+                .execute();
+        }
     }
 
     private static void seedNoteUriRows(Connection su) throws Exception {

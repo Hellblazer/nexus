@@ -1194,7 +1194,9 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         *retry_after_s* (RDR-235 E1) holds the task back for that many whole
         seconds on the database clock; *dead* (RDR-235 E4) dead-letters it at
-        once, attempt counted. Each is sent only when set, so a plain nack is
+        once, attempt counted, unless the row was replaced while claimed
+        (nexus-7rwaj): the engine then requeues it with the new body and
+        attempts reset to 0. Each is sent only when set, so a plain nack is
         byte-identical to what it was. They need engine-service-v0.1.169 or
         later (the client floor): an older engine ignores unknown keys and
         would run a plain nack, which is why the floor bump carries them."""

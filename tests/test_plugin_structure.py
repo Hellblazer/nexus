@@ -438,12 +438,12 @@ def _frontmatter_description(path: Path) -> str | None:
 # or command changes the count on purpose: the pin makes the addition visible
 # here, and the undescribed check below stops a file with no description from
 # dropping out of the walk unnoticed. sn and tool-spill ship none today;
-# prose-edit ships one skill and one agent.
+# prose-edit ships two skills (prose-edit, prose-cut) and one agent.
 _DESCRIPTION_SURFACES: dict[str, tuple[Path, int]] = {
     "conexus": (PLUGIN_DIR, 67),
     "sn": (REPO_ROOT / "sn", 0),
     "tool-spill": (REPO_ROOT / "tool-spill", 0),
-    "prose-edit": (REPO_ROOT / "prose-edit", 2),
+    "prose-edit": (REPO_ROOT / "prose-edit", 3),
 }
 
 

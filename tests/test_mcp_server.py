@@ -430,57 +430,80 @@ class TestNexusHmxiRoundTripGrandfathering:
         landing a real write — the real substrate is always local/bge
         (see the module docstring's latent-mismatch note), so a genuine
         register_collection call naming voyage-context-3 would 422
-        against it. Fakes what the flow reaches (the catalog writer, the
-        manifest write, document registration) and turns the ``t3``
-        fixture's chunk seed off (it inserts a real ``nexus.chunks`` row,
-        which needs a registered collection the faked writer never
-        creates), so nothing here touches the real substrate; asserts the
-        promoted name AND that the (fake) registrar was actually
-        called with the voyage token, not just that the string
-        happens to appear in the CLI's echo.
+        against it. Fakes what the flow reaches (the manifest write and
+        document registration) and turns the ``t3`` fixture's chunk seed
+        off (it inserts a real ``nexus.chunks`` row, which needs a
+        registered collection), so nothing here touches the real substrate.
+
+        WHAT IS ASSERTED, AND WHAT IS NOT (nexus-1xmv0). The collection is
+        registered by the real ``write_note`` (``HttpCatalogClient.
+        write_manifest_many`` -> ``ensure_collection_registered``), which this
+        module replaces with ``tests/_note_write_double.py``: no registrar is
+        reached on the store path here. This test used to assert a voyage
+        ``register_collection`` on a fake writer; that call came from the
+        aspect queue's 422-retry (``HttpAspectQueue.enqueue`` ->
+        ``write_with_registration_retry``) under the table queue, and under
+        the tuples default the queue's ensure is a cache hit (the ``t3``
+        fixture seeds the collection, with the substrate's bge token, and caches
+        it), so the assertion failed. It asserted a registration the store
+        path never made. What the store path itself decides, and does here, is
+        the promoted NAME it hands to both of its sinks (the document
+        registration and the note write). That is asserted directly.
+
+        NOT COVERED HERE, AND NOT ELSEWHERE: the registration of the promoted
+        voyage-named collection by the real write. ``tests/test_z0o2p12_note_write.py``
+        does not cover it (it uses bge names only), and this test's note double
+        reaches no registrar. A kwargs assertion on ``collection_registration_kwargs(promoted)``
+        was dropped: it is a pure function of the name and cannot fail from a
+        ``store_put`` change. The missing coverage is nexus-a9inu.
         """
         from unittest.mock import MagicMock
 
-        # The post-store hook's aspect enqueue also registers the collection, and
-        # under the tuples default (nexus-lnwn1) it does so against the real
-        # substrate's embedding model, so the (fake) registrar sees a second,
-        # bge-token call instead of the voyage one this test asserts. This test is
-        # about the store path's name promotion, not the aspect queue: pin the table path.
-        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
-        fake_writer = MagicMock()
+        from nexus.catalog import note_write
+
+        # The catalog writer is faked so the fixture seed and the note double's manifest seed
+        # write nowhere: this test pins names, not a landed document. The calls it receives are
+        # NOT asserted: they are the fixture's (bge token) and the queue's, not the store path's.
         monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_writer", lambda **kw: fake_writer,
+            "nexus.catalog.factory.make_catalog_writer", lambda **kw: MagicMock(),
         )
         monkeypatch.setattr(
             "tests._catalog_fixture_ops.seed_manifest_chunks", lambda *a, **kw: None,
         )
         # RDR-192 Step 3a (nexus-wbfpw.28): this test is about client-side
-        # collection-NAME promotion (register_collection, asserted below),
-        # not document registration — ``fake_writer.register(...)``'s
-        # MagicMock return can't unpack into catalog_store_hook_tracked's
-        # ``(tumbler, created)``, which a blank catalog_doc_id now turns
-        # into a fail-loud rollback rather than the old degraded success.
-        # Give document registration a working stand-in so the collection-
+        # collection-NAME promotion, not document registration —
+        # a blank catalog_doc_id now turns into a fail-loud rollback rather
+        # than the old degraded success. Give document registration a working
+        # stand-in (recording what the store path asked it to register) so the
         # promotion assertions below are reached.
-        monkeypatch.setattr(
-            "nexus.catalog.store_hook.catalog_store_hook_tracked",
-            lambda *a, **kw: ("9.9.9", True),
-        )
+        registered_documents: list[dict] = []
 
+        def _register_document(*a, **kw):
+            registered_documents.append(kw)
+            return ("9.9.9", True)
+
+        monkeypatch.setattr("nexus.catalog.store_hook.catalog_store_hook_tracked", _register_document)
+        note_writes: list[str] = []
+        double_write_note = note_write.write_note
+
+        def _recording_write_note(**kw):
+            note_writes.append(kw["collection"])
+            return double_write_note(**kw)
+
+        monkeypatch.setattr(note_write, "write_note", _recording_write_note)
+
+        promoted = "knowledge__greenfield__voyage-context-3__v1"
         result = store_put(
             content="Greenfield content",
             collection="knowledge__greenfield",
             title="greenfield-doc",
         )
         assert "Stored" in result
-        assert "knowledge__greenfield__voyage-context-3__v1" in result
-        fake_writer.register_collection.assert_any_call(
-            "knowledge__greenfield__voyage-context-3__v1",
-            content_type="knowledge",
-            owner_id="greenfield",
-            embedding_model="voyage-context-3",
-            model_version="v1",
+        assert promoted in result
+        assert [d["collection_name"] for d in registered_documents] == [promoted], (
+            "the store path registers the document under the promoted name"
         )
+        assert note_writes == [promoted], "and writes the note under it"
         # ``store_list`` resolves to the same conformant target.
         listing = store_list(collection="knowledge__greenfield", limit=10)
         assert "greenfield-doc" in listing

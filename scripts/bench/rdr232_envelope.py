@@ -14,7 +14,9 @@ What the envelope can and cannot supply:
   anchor, else ``None`` (unlabeled): never from the ledger, because scoring the assessor with its own ledger is
   circular. With no oracle every anchor is unlabeled and ``facet_evidence_coverage`` reads "not measurable".
 * ``repair``: the facets the repair targeted (``missing``) and how many of them the final ledger covers
-  (``repaired``). Retrieval is a known-zero step and the reassessment's cost is not separable from the first round's
+  (``repaired``). A covered facet the repair only reassessed against an unread tail (nexus-z6yvk,
+  ``coverage.repair.unread_facet_ids``) is not a target: it was not missing, and counting it would inflate the yield;
+  :func:`unread_tail_repair` counts those apart. Retrieval is a known-zero step and the reassessment's cost is not separable from the first round's
   in the steps, so ``cost_usd`` is 0.0; the assessment as a whole is in :func:`envelope_facts` (``assessment_usd``).
   Repair yield by facet origin is :func:`repair_by_origin`: ``whole_question`` facets replay the plan's own search, so
   their yield is expected near zero and must be read apart.
@@ -153,8 +155,8 @@ def observation_from_envelope(
         ]
     repair: RepairOutcome | None = None
     rep = cov.get("repair") if isinstance(cov.get("repair"), Mapping) else {}
-    if rep.get("outcome") not in (None, "not_attempted") and rep.get("facet_ids"):
-        targets = set(rep["facet_ids"])
+    targets = _repaired_targets(rep)
+    if targets:
         covered = {f.get("facet_id") for f in cov.get("findings") or [] if isinstance(f, Mapping) and f.get("state") == "covered"}
         repair = RepairOutcome(missing=len(targets), repaired=len(targets & covered), cost_usd=0.0)
     selected: str | None = None
@@ -170,6 +172,32 @@ def observation_from_envelope(
     )
 
 
+def _repaired_targets(rep: Mapping[str, Any]) -> set[str]:
+    """The facets a repair was run FOR: ``facet_ids`` less ``unread_facet_ids``. The latter are facets that were already
+    covered when the repair ran and were only reassessed against anchors the first round never read (nexus-z6yvk); they
+    were not missing, so counting them as targets would inflate the repair yield. They are counted by :func:`unread_tail_repair`."""
+    if rep.get("outcome") in (None, "not_attempted"):
+        return set()
+    tail = {str(i) for i in rep.get("unread_facet_ids") or []}
+    return {str(i) for i in rep.get("facet_ids") or []} - tail
+
+
+def unread_tail_repair(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """The tail half of a repair, apart from the yield: ``reason`` (``unsupported``, ``unread_tail``,
+    ``unsupported_and_unread_tail``, ``""`` when no repair ran), how many covered facets were reassessed for an unread
+    tail, and how many of those the final ledger marks ``conflicted`` (the reassessment found a contradicting item)."""
+    cov = _coverage(envelope)
+    rep = cov.get("repair") if isinstance(cov.get("repair"), Mapping) else {}
+    if rep.get("outcome") in (None, "not_attempted"):
+        return {"reason": "", "facets": 0, "conflicted": 0}
+    tail = {str(i) for i in rep.get("unread_facet_ids") or []}
+    conflicted = {
+        str(f.get("facet_id")) for f in cov.get("findings") or []
+        if isinstance(f, Mapping) and f.get("state") == "covered" and f.get("reason") == "conflicted"
+    }
+    return {"reason": str(rep.get("reason") or ""), "facets": len(tail), "conflicted": len(tail & conflicted)}
+
+
 def repair_by_origin(envelope: Mapping[str, Any]) -> dict[str, dict[str, int]]:
     """Repair yield split by the targeted facet's ORIGIN (``clause``, ``whole_question``, ...): per origin, how many
     facets were targeted and how many the final ledger covers. Empty when no repair ran."""
@@ -177,6 +205,7 @@ def repair_by_origin(envelope: Mapping[str, Any]) -> dict[str, dict[str, int]]:
     rep = cov.get("repair") if isinstance(cov.get("repair"), Mapping) else {}
     if rep.get("outcome") in (None, "not_attempted"):
         return {}
+    targeted = _repaired_targets(rep)
     origin_of = {
         str(f.get("id")): str(f.get("origin") or "unknown")
         for f in (envelope.get("request_coverage") or {}).get("facets") or [] if isinstance(f, Mapping)
@@ -184,6 +213,8 @@ def repair_by_origin(envelope: Mapping[str, Any]) -> dict[str, dict[str, int]]:
     covered = {f.get("facet_id") for f in cov.get("findings") or [] if isinstance(f, Mapping) and f.get("state") == "covered"}
     out: dict[str, dict[str, int]] = {}
     for fid in rep.get("facet_ids") or []:
+        if str(fid) not in targeted:
+            continue
         row = out.setdefault(origin_of.get(str(fid), "unknown"), {"targeted": 0, "covered_after": 0})
         row["targeted"] += 1
         row["covered_after"] += int(fid in covered)
@@ -250,6 +281,7 @@ def envelope_facts(envelope: Mapping[str, Any]) -> dict[str, Any]:
         "repair_entered": bool(cov.get("repair_entered")),
         "repair_outcome": (cov.get("repair") or {}).get("outcome") if isinstance(cov.get("repair"), Mapping) else None,
         "repair_by_origin": repair_by_origin(envelope),
+        "unread_tail_repair": unread_tail_repair(envelope),
         "persistence": summary.get("persistence"),
         "returned_coverage_state": summary.get("returned_coverage_state"),
         "persisted_coverage_state": summary.get("persisted_coverage_state"),
