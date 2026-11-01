@@ -123,9 +123,15 @@ def classify_continuation_cut(
     operator step directly adjacent to a slice of the same run — its own
     buffer-then-flush algorithm makes both impossible), the trailing run
     resolved under ``resolve_dispatch_segments(bundle_operators=True,
-    supports_bundling=True)`` (the production default) can only ever be:
-    empty (NO_SUFFIX), one ``OperatorBundleSlice`` (SHAPE_A), or one
-    ``IsolatedStep`` wrapping a single operator (SHAPE_B).
+    supports_bundling=True)`` (the production default) is: empty
+    (NO_SUFFIX), one ``OperatorBundleSlice`` (SHAPE_A), or one
+    ``IsolatedStep`` wrapping a single operator (SHAPE_B) -- except
+    around a witness. RDR-189 P1 (nexus-z1d0l.1.4): a ``check``/``verify``
+    step ENDS the bundle buffer (``segment_steps``' witness boundary: the
+    host must see its typed output), so a witness FOLLOWED by another
+    operator (``check -> generate``) leaves two adjacent segments in the
+    trailing run and classifies MULTI_UNIT even under the production gate.
+    A witness as the LAST step keeps SHAPE_A / SHAPE_B.
 
     **MULTI_UNIT reachability (nexus-4e75w.3 audit round-2 residual).**
     The original design text worried MULTI_UNIT would fire from
@@ -142,16 +148,18 @@ def classify_continuation_cut(
     classification input. So under the production bundling gate
     (``bundle_operators=True`` and a bundling-capable dispatcher — what
     every real ``nx_answer`` call uses today), MULTI_UNIT is
-    UNREACHABLE for a pure trailing operator suffix — proved above, not
-    asserted. It is genuinely reachable through exactly ONE path this
-    function still covers: ``resolve_dispatch_segments`` with the
+    UNREACHABLE for a pure trailing run of non-witness operators — proved
+    above, not asserted. It is genuinely reachable through two paths this
+    function covers. First, a witness followed by an operator (above; real
+    traffic can hit it, and it falls back to the headless path like every
+    MULTI_UNIT). Second, ``resolve_dispatch_segments`` with the
     bundling gate CLOSED (``bundle_operators=False``, or a dispatcher
     that does not advertise ``supports_bundling``) flattens a >=2-operator
     ``OperatorBundleSlice`` into N separate ``IsolatedStep`` entries —
     N real per-step ``claude -p`` dispatches, not one — which this
     classifier correctly reports as MULTI_UNIT. ``nx_answer``'s own call
     site always resolves the production gate open (bundling enabled), so
-    this branch is defensive there (logged via structlog if it ever
+    this second branch is defensive there (logged via structlog if it ever
     fires) rather than a path real traffic exercises; the test suite
     proves it with ``bundle_operators=False``, a real, non-vacuous
     construction, not a hypothetical.

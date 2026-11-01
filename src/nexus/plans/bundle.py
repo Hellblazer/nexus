@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BUNDLEABLE_OPERATORS",
     "OPERATOR_BUNDLE_NAMES",  # legacy alias — see BUNDLEABLE_OPERATORS
+    "WITNESS_OPERATORS",
     "OperatorBundleStep",
     "OperatorBundle",
     "OperatorBundleSlice",
@@ -52,6 +53,7 @@ __all__ = [
     "MAX_BUNDLE_PROMPT_CHARS",
     "MAX_CONTINUATION_PROMPT_CHARS",
     "is_operator_tool",
+    "is_witness_tool",
     "segment_steps",
     "resolve_dispatch_segments",
     "compose_bundle_prompt",
@@ -115,10 +117,16 @@ MAX_CONTINUATION_PROMPT_CHARS: int = 60_000
 #:    Don't bundle an operator whose failure must be retried in
 #:    isolation.
 #:
+#: 4. (RDR-189 P1, nexus-z1d0l.1.4) Its output must not need to reach the
+#:    host. An operator whose typed output the host reads (``check`` and
+#:    ``verify``, :data:`WITNESS_OPERATORS`) is bundled only as a bundle's
+#:    TERMINAL step, never an intermediate: ``segment_steps`` ends the
+#:    buffer at it.
+#:
 #: Today all ten operators (extract / rank / compare / summarize /
 #: generate / filter / check / verify / groupby / aggregate) satisfy
-#: (1), (2), and (3). Bare and resolved forms are both accepted because
-#: plan YAMLs use either.
+#: (1), (2), and (3); check and verify carry the terminal-only form of (4).
+#: Bare and resolved forms are both accepted because plan YAMLs use either.
 BUNDLEABLE_OPERATORS: frozenset[str] = frozenset({
     "extract", "rank", "compare", "summarize", "generate",
     "filter", "check", "verify", "groupby", "aggregate",
@@ -131,6 +139,20 @@ BUNDLEABLE_OPERATORS: frozenset[str] = frozenset({
 #: Legacy alias — older call sites / docs may reference the prior name.
 #: Prefer ``BUNDLEABLE_OPERATORS`` for new code.
 OPERATOR_BUNDLE_NAMES: frozenset[str] = BUNDLEABLE_OPERATORS
+
+#: The witness operators (RDR-189 P1, nexus-z1d0l.1.4): their typed evidence must reach the host. They
+#: stay in ``BUNDLEABLE_OPERATORS`` (criteria 1-3 above hold), with one further criterion that
+#: ``segment_steps`` enforces: 4. an operator whose output the host must read is only ever a bundle's
+#: TERMINAL step, never an intermediate, because an intermediate's output is ``BUNDLED_INTERMEDIATE``.
+WITNESS_OPERATORS: frozenset[str] = frozenset({
+    "check", "verify", "operator_check", "operator_verify",
+})
+
+
+def is_witness_tool(tool: str) -> bool:
+    """True for a ``check`` / ``verify`` step name (bare or ``operator_*``; an ``mcp__`` prefix is already
+    stripped by :func:`_extract_tool_name`). See :data:`WITNESS_OPERATORS`."""
+    return tool in WITNESS_OPERATORS
 
 # Sentinel stamped into step_outputs for intermediate bundled steps. Any
 # $stepN.<field> reference that tries to look into this dict falls through
@@ -244,6 +266,25 @@ def segment_steps(steps: list[dict[str, Any]]) -> list[Segment]:
     :class:`OperatorBundleSlice` naming the bundle's plan indices.
     Lone operators and non-operator steps each yield :class:`IsolatedStep`.
 
+    **Witness boundary (RDR-189 P1, nexus-z1d0l.1.4).** A ``check`` or ``verify``
+    step (:data:`WITNESS_OPERATORS`) ENDS the buffer it joins: it may be the last
+    step of a bundle, never an earlier one. Rule chosen: *terminal*, not
+    *always isolated*. A bundle's terminal output is stamped host-side, where the
+    runner binds it against the step's evidence records (a witness over a
+    retrieval step's ids keeps its source identity; a witness over an earlier
+    bundled step's model output comes back ``unresolved``, which is the host-bound
+    answer when no record exists). A bundle's intermediate output is the
+    ``BUNDLED_INTERMEDIATE`` sentinel, so a witness there would never reach the
+    host: ``check -> generate`` would hide the typed evidence the amendment exists
+    to expose. Terminal keeps the single dispatch for ``extract -> check`` and the
+    bound-terminal behaviour the runner already has, and costs one extra dispatch
+    only for the witness-then-operator adjacency, which cannot be one dispatch
+    without hiding the witness. ``check -> generate`` therefore yields two
+    :class:`IsolatedStep` entries, and ``extract -> check -> generate`` yields a
+    bundle of the first two and an isolated ``generate``. This function feeds
+    ``plan_run``, the continuation cut classifier and the cost estimate, so all
+    three read the same boundary.
+
     Pure structural analysis — no argument resolution, no dispatch.
     The runner handles both at execution time, where the relevant
     ``step_outputs`` list and ``deferred_step_indices`` are available.
@@ -262,8 +303,11 @@ def segment_steps(steps: list[dict[str, Any]]) -> list[Segment]:
         buffer.clear()
 
     for i, step in enumerate(steps):
-        if is_operator_tool(_extract_tool_name(step)):
+        name = _extract_tool_name(step)
+        if is_operator_tool(name):
             buffer.append(i)
+            if is_witness_tool(name):
+                _flush()  # the witness is this run's last step: the terminal, never an intermediate
         else:
             _flush()
             segments.append(IsolatedStep(plan_index=i, step=step))

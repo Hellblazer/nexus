@@ -137,6 +137,15 @@ def records_from_verify_evidence(evidence: str) -> list[EvidenceRecord]:
     return [EvidenceRecord("e1", evidence if isinstance(evidence, str) else str(evidence))]
 
 
+def shown_verify_evidence(evidence: str) -> str:
+    """The ``Evidence:`` block of a verify prompt. A direct call's plain text is one item ``e1`` (never sniffed
+    for JSON, so a JSON document stays one document). Inside a prerendered scope the runner built the items
+    and the records and *evidence* is their rendering, shown as it is so the model can cite each item's id."""
+    if evidence_prerendered() and isinstance(evidence, str):
+        return evidence
+    return shown_items(records_from_verify_evidence(evidence))
+
+
 def shown_items(records: Sequence[EvidenceRecord]) -> str:
     """What the model is shown for *records*: ``[{"id": ..., "text": ...}, ...]`` and nothing
     else from the record (the coverage ledger's ``_pack`` shape)."""
@@ -157,19 +166,45 @@ def shown_check_items(items: str) -> str:
 _DEFERRED: contextvars.ContextVar[bool] = contextvars.ContextVar("nexus_witness_binding_deferred", default=False)
 
 
+#: Set with :func:`defer_binding` ``(evidence_prerendered=True)``: the ``evidence`` text a verify prompt is
+#: built from is already the ``[{"id","text"}]`` items the runner's records describe, so it is shown as it is
+#: instead of as the one item ``e1``.
+_PRERENDERED: contextvars.ContextVar[bool] = contextvars.ContextVar("nexus_witness_evidence_prerendered", default=False)
+
+
 def binding_deferred() -> bool:
     """True inside :func:`defer_binding`: the operator tool returns the model's raw payload
     because its caller (the plan runner) holds the records and binds."""
     return _DEFERRED.get()
 
 
+def evidence_prerendered() -> bool:
+    """True inside ``defer_binding(evidence_prerendered=True)`` and :func:`prerendered_evidence`: a verify
+    prompt shows its ``evidence`` text as the runner rendered it (see :func:`shown_verify_evidence`)."""
+    return _PRERENDERED.get()
+
+
 @contextlib.contextmanager
-def defer_binding() -> Iterator[None]:
+def defer_binding(*, evidence_prerendered: bool = False) -> Iterator[None]:
+    """Hold binding with the caller. *evidence_prerendered* is for a verify step whose runner built
+    several records: the ``evidence`` it passes is their rendering, and the prompt must show it as such."""
     token = _DEFERRED.set(True)
+    with prerendered_evidence(evidence_prerendered):
+        try:
+            yield
+        finally:
+            _DEFERRED.reset(token)
+
+
+@contextlib.contextmanager
+def prerendered_evidence(on: bool = True) -> Iterator[None]:
+    """Scope in which a verify prompt shows ``evidence`` as already-rendered items (the continuation's
+    request builders run here, outside a dispatch, for a verify step the runner hydrated)."""
+    token = _PRERENDERED.set(on)
     try:
         yield
     finally:
-        _DEFERRED.reset(token)
+        _PRERENDERED.reset(token)
 
 
 # ── the binding ─────────────────────────────────────────────────────────────────────────

@@ -542,3 +542,204 @@ async def test_a_check_with_ids_composes_an_envelope_with_no_evidence_records() 
     text = json.dumps(envelope)  # an EvidenceRecord anywhere in it is not serialisable
     assert "_evidence" not in text and "EvidenceRecord" not in text
     assert '"id": "e1"' in envelope["reduction_spec"]["prompt"]
+
+
+# ── verify fed by ids: claim and evidence hydrated, records held (RDR-189 P1, nexus-z1d0l.1.4) ─────────────
+
+
+def _hydrate_verify(catalog, ids, rows, *, source=None, claim: str | None = "latency drops", extra=None):
+    with patch("nexus.mcp_infra.get_catalog", return_value=catalog), patch(
+        "nexus.mcp.core._get_catalog", return_value=catalog,
+    ), patch("nexus.mcp.core._get_t3", return_value=_t3(rows)), patch(
+        "nexus.mcp.core._read_scope", return_value=[COLL],
+    ):
+        args = {"ids": ids, "collections": COLL, **({"claim": claim} if claim is not None else {}), **(extra or {})}
+        if source is not None:
+            args["_evidence_source"] = source
+        return runner._hydrate_operator_args("verify", args)
+
+
+class TestVerifyIdsHydration:
+    def test_ids_become_claim_plus_evidence_with_no_inputs_argument(self) -> None:
+        catalog = _CountingCatalog(
+            [_plain("1.1.1"), _plain("1.1.2")], [_position(X, "1.1.1"), _position(Y, "1.1.2")],
+        )
+        tool, args = _hydrate_verify(
+            catalog, [X, Y], {X: {"content": "first body"}, Y: {"content": "second body"}},
+            source=_source([X, Y], tumblers=["1.1.1", "1.1.2"]),
+        )
+        assert tool == "operator_verify"
+        assert "inputs" not in args and "ids" not in args and "collections" not in args
+        assert args["claim"] == "latency drops"
+        shown = json.loads(args["evidence"])
+        assert [s["id"] for s in shown] == ["e1", "e2"]
+        assert all(s["text"].endswith(b) for s, b in zip(shown, ["first body", "second body"]))
+
+    def test_the_records_carry_each_items_host_identity_in_position_order(self) -> None:
+        catalog = _CountingCatalog(
+            [_plain("1.1.1"), _plain("1.1.2")], [_position(X, "1.1.1"), _position(Y, "1.1.2")],
+        )
+        _, args = _hydrate_verify(
+            catalog, [X, Y], {X: {"content": "first body"}, Y: {"content": "second body"}},
+            source=_source([X, Y], tumblers=["1.1.1", "1.1.2"]),
+        )
+        assert [(r.item_id, r.text, r.tumbler, r.chash, r.collection) for r in args["_evidence_records"]] == [
+            ("e1", "first body", "1.1.1", X, COLL), ("e2", "second body", "1.1.2", Y, COLL),
+        ]
+
+    def test_an_empty_content_position_is_filtered_without_shifting_the_identities(self) -> None:
+        catalog = _CountingCatalog(
+            [_plain("1.1.1"), _plain("1.1.2")], [_position(X, "1.1.1"), _position(Y, "1.1.2")],
+        )
+        _, args = _hydrate_verify(
+            catalog, [X, Y], {Y: {"content": "second body"}},
+            source=_source([X, Y], tumblers=["1.1.1", "1.1.2"], collections=["knowledge__other", COLL]),
+        )
+        (rec,) = args["_evidence_records"]
+        assert (rec.item_id, rec.tumbler, rec.chash, rec.collection) == ("e1", "1.1.2", Y, COLL)
+
+    def test_tumbler_shaped_ids_are_their_own_document(self) -> None:
+        contents = {"contents": ["doc one body", "doc two body"], "missing": []}
+        with patch.object(runner, "_hydrate_tumbler_ids", return_value=contents):
+            _, args = runner._hydrate_operator_args("verify", {
+                "ids": ["1.1.1", "1.1.2"], "claim": "c",
+                "_evidence_source": _source(["1.1.1", "1.1.2"], collections=[COLL, ""]),
+            })
+        assert [(r.item_id, r.tumbler, r.chash, r.collection) for r in args["_evidence_records"]] == [
+            ("e1", "1.1.1", None, COLL), ("e2", "1.1.2", None, None),
+        ]
+
+    def test_ids_without_a_claim_fail_loudly_before_anything_is_fetched(self) -> None:
+        """Decision (RDR-189 P1): the host never invents a claim. A verify step with ids and no claim is
+        a plan-authoring bug and stops the plan, before store_get_many pays for a fetch."""
+        with patch("nexus.mcp.core.store_get_many") as fetch, pytest.raises(runner.PlanRunOperatorArgMissingError) as err:
+            runner._hydrate_operator_args("verify", {"ids": [X], "collections": COLL})
+        assert err.value.missing_arg == "claim" and err.value.tool == "operator_verify"
+        fetch.assert_not_called()
+
+    @pytest.mark.parametrize("blank", ["", "   ", None])
+    def test_a_blank_claim_is_no_claim(self, blank) -> None:
+        with patch("nexus.mcp.core.store_get_many") as fetch, pytest.raises(runner.PlanRunOperatorArgMissingError):
+            runner._hydrate_operator_args("verify", {"ids": [X], "collections": COLL, "claim": blank})
+        fetch.assert_not_called()
+
+    def test_zero_evidence_still_short_circuits_and_truncation_still_reports(self) -> None:
+        catalog = _CountingCatalog([_plain("1.1.1")], [_position(X, "1.1.1")])
+        _, args = _hydrate_verify(catalog, [X], {})  # X is not in T3: every id hydrates to nothing
+        assert args["_zero_evidence_text"].startswith(runner._NO_EVIDENCE_RESULT_PREFIX)
+        n = runner._OPERATOR_MAX_INPUTS + 2
+        ids = [f"{i:064x}" for i in range(n)]
+        rows = {i: {"content": f"body {k}"} for k, i in enumerate(ids)}
+        _, big = _hydrate_verify(_CountingCatalog([], []), ids, rows)
+        assert big["_truncation_metadata"]["kept_count"] == runner._OPERATOR_MAX_INPUTS
+        assert len(big["_evidence_records"]) == runner._OPERATOR_MAX_INPUTS
+
+    def test_a_step_that_supplies_its_own_evidence_keeps_it_and_gets_no_records(self) -> None:
+        catalog = _CountingCatalog([_plain("1.1.1")], [_position(X, "1.1.1")])
+        _, args = _hydrate_verify(catalog, [X], {X: {"content": "body"}}, extra={"evidence": "mine"})
+        assert args["evidence"] == "mine"
+        assert "_evidence_records" not in args
+
+
+@pytest.mark.asyncio
+async def test_default_dispatcher_shows_each_verify_item_and_binds_the_reply_with_host_identity() -> None:
+    seen: list[str] = []
+
+    async def fake_dispatch(prompt, schema, **kw):
+        seen.append(prompt)
+        return {"verified": True, "reason": "stated", "evidence": [
+            {"item_id": "e2", "quote": "12 ms per request", "role": "supports", "tumbler": "9.9.9"},
+            {"item_id": "e7", "quote": "nothing", "role": "supports"},
+        ]}
+
+    catalog = _owners()
+    with patch.object(dmod, "claude_dispatch", fake_dispatch), patch("nexus.mcp_infra.get_catalog", return_value=catalog), patch(
+        "nexus.mcp.core._get_catalog", return_value=catalog,
+    ), patch("nexus.mcp.core._get_t3", return_value=_t3({X: {"content": BODY_X}, Y: {"content": BODY_Y}})), patch(
+        "nexus.mcp.core._read_scope", return_value=[COLL],
+    ):
+        result = await runner._default_dispatcher("verify", {
+            "ids": [X, Y], "collections": COLL, "claim": "latency drops",
+            "_evidence_source": _source([X, Y], tumblers=["1.1.1", "1.1.2"]),
+        })
+    assert result["schema_version"] == 1
+    (item,) = result["evidence"]
+    assert (item["item_id"], item["state"], item["tumbler"], item["chash"], item["collection"]) == ("e2", "bound", "1.1.2", Y, COLL)
+    assert result["rejected"] == ["e7"] and result["requires_review"] is True
+    # two shown items with their own ids, not one blob that holds a JSON string; no private keys in the prompt
+    assert '"id": "e1"' in seen[0] and '"id": "e2"' in seen[0] and "_evidence" not in seen[0]
+    assert seen[0].count('"id": "e1"') == 1
+
+
+VERIFY_PLAN = [
+    CHECK_PLAN[0],
+    {"tool": "verify", "args": {"ids": "$step1.ids", "collections": "$step1.collections", "claim": "latency drops under batching"}},
+]
+
+
+@pytest.mark.asyncio
+async def test_saved_plan_search_then_verify_runs_with_claim_and_evidence_and_returns_a_bound_witness() -> None:
+    prompts: list[str] = []
+
+    async def fake_dispatch(prompt, schema, **kw):
+        prompts.append(prompt)
+        return {"verified": True, "reason": "stated", "evidence": [{"item_id": "e2", "quote": "12 ms per request", "role": "supports"}]}
+
+    with _env(_owners(), {X: {"content": BODY_X}, Y: {"content": BODY_Y}}), patch.object(dmod, "claude_dispatch", fake_dispatch):
+        result = await runner.plan_run(_plan_match(VERIFY_PLAN), {}, bundle_operators=False)
+    out = result.steps[-1]
+    assert "latency drops under batching" in prompts[0] and "Latency drops to 12 ms" in prompts[0]
+    assert out["schema_version"] == 1 and out["verified"] is True
+    assert [(i["item_id"], i["state"], i["tumbler"], i["chash"], i["collection"]) for i in out["evidence"]] == [("e2", "bound", "1.1.2", Y, COLL)]
+    assert out["requires_review"] is False and out["citations"] == ["12 ms per request"]
+
+
+@pytest.mark.asyncio
+async def test_a_saved_plan_verify_with_ids_and_no_claim_stops_the_plan_at_that_step() -> None:
+    plan = [VERIFY_PLAN[0], {"tool": "verify", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}}]
+    with _env(_owners(), {X: {"content": BODY_X}, Y: {"content": BODY_Y}}), pytest.raises(runner.PlanRunOperatorArgMissingError) as err:
+        await runner.plan_run(_plan_match(plan), {}, bundle_operators=False)
+    assert (err.value.step_index, err.value.missing_arg) == (1, "claim")
+
+
+@pytest.mark.asyncio
+async def test_a_bundled_terminal_verify_with_ids_is_bound_by_the_host_records() -> None:
+    plan = [
+        VERIFY_PLAN[0],
+        {"tool": "rank", "args": {"ids": "$step1.ids", "collections": "$step1.collections", "criterion": "relevance"}},
+        VERIFY_PLAN[1],
+    ]
+    prompts: list[str] = []
+
+    async def fake_bundle(bundle, **kw):
+        prompts.append(bundle_mod.compose_bundle_prompt(bundle)[0])
+        return {"verified": True, "reason": "r", "evidence": [{"item_id": "e2", "quote": "12 ms per request", "role": "supports"}]}
+
+    with _env(_owners(), {X: {"content": BODY_X}, Y: {"content": BODY_Y}}), patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+        result = await runner.plan_run(_plan_match(plan), {}, bundle_operators=True)
+    (item,) = result.steps[-1]["evidence"]
+    assert (item["state"], item["tumbler"], item["chash"]) == ("bound", "1.1.2", Y)
+    assert "_evidence_records" not in prompts[0] and '"id": "e2"' in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_a_verify_with_ids_composes_the_continuation_prompt_the_runner_sent() -> None:
+    """RDR-189 P1 (nexus-z1d0l.1.4): the continuation's Shape B prompt for a hydrated verify is byte-identical
+    to the one the headless runner sent: each item shown with its own id, not one blob that holds a JSON string."""
+    sent: list[str] = []
+
+    async def fake_dispatch(prompt, schema, **kw):
+        sent.append(prompt)
+        return {"verified": True, "reason": "r", "evidence": []}
+
+    match = _plan_match(VERIFY_PLAN)
+    with _env(_owners(), {X: {"content": BODY_X}, Y: {"content": BODY_Y}}), patch.object(dmod, "claude_dispatch", fake_dispatch):
+        result = await runner.plan_run(match, {}, bundle_operators=False)
+        cut = classify_continuation_cut(VERIFY_PLAN)
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=VERIFY_PLAN, bindings={}, step_outputs=result.steps[:1], plan_id=1, run_id=None,
+        )
+    assert envelope is not None
+    prompt = envelope["reduction_spec"]["prompt"]
+    assert prompt == sent[0]
+    assert '"id": "e1"' in prompt and '"id": "e2"' in prompt and "_evidence" not in json.dumps(envelope)

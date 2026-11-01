@@ -157,6 +157,18 @@ def test_bundled_operators_price_as_one_dispatch_not_n() -> None:
     assert "bundle[" in bundled.basis
 
 
+def test_a_witness_ends_the_bundle_so_it_prices_as_its_own_dispatch() -> None:
+    # RDR-189 P1 (nexus-z1d0l.1.4): check -> generate is two dispatches (a witness is never a bundle
+    # intermediate), so it prices as two, not one; a witness as the LAST step still bundles with what
+    # precedes it. The estimate reads the same segmentation the runner uses.
+    split = estimate_plan_cost(_plan_json("search", "check", "generate"), _empty_table())
+    assert split.usd == pytest.approx(2 * STATIC_FALLBACK_COST_USD)
+    assert "bundle[" not in split.basis
+    terminal = estimate_plan_cost(_plan_json("search", "rank", "check"), _empty_table())
+    assert terminal.usd == pytest.approx(STATIC_FALLBACK_COST_USD)
+    assert "bundle[rank,check]" in terminal.basis
+
+
 def test_bundle_prices_at_the_most_expensive_member() -> None:
     # operator_rank has real recorded history (cheap, $0.05); operator_generate
     # has none and falls to the static fallback ($0.23, more expensive).

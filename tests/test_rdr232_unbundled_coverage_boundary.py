@@ -69,6 +69,15 @@ INLINE_PLANS: dict[str, dict[str, Any]] = {
         {"tool": "check", "args": {"items": "$step2.contents", "check_instruction": "do the chunks say anything"}},
         {"tool": "generate", "args": {"context": "$step2.contents", "question": "q"}},
     ]},
+    #: RDR-189 P1 (nexus-z1d0l.1.4): a witness ends a bundle, so this trailing run is a bundle (extract, check) and then an
+    #: isolated generate: one run, two segments.
+    "extract-check-generate": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "extract", "args": {"inputs": "$step2.contents", "fields": "decision"}},
+        {"tool": "check", "args": {"items": "$step3.extractions", "check_instruction": "do the extractions say anything"}},
+        {"tool": "generate", "args": {"context": "$step2.contents", "question": "q"}},
+    ]},
     #: Two retrieval branches, each fetched, then an extract over branch A and a generate over branch B plus the extract:
     #: the evidence of the run is A plus B, the generate's second element is a deferred ref when the run bundles.
     "two-branch-probe": {"steps": [
@@ -433,10 +442,46 @@ async def test_a_plans_own_check_before_the_terminal_operator_dispatches_after_t
     assert "assess" in ucalls.timeline
     last_assessment = max(i for i, t in enumerate(ucalls.timeline) if t == "assess")
     assert ucalls.timeline.index("check") > last_assessment, "the plan's check runs after the boundary, not before it"
-    assert bcalls.timeline.index("bundle") > max(i for i, t in enumerate(bcalls.timeline) if t == "assess")
+    # RDR-189 P1 (nexus-z1d0l.1.4): a witness ends a bundle, so the bundling dispatcher no longer fuses the plan's
+    # check with the generate: both run one by one, as in the unbundled run, and the boundary still precedes the check.
+    assert bcalls.ran == ["check", "generate"] and "bundle" not in bcalls.timeline
+    assert bcalls.timeline.index("check") > max(i for i, t in enumerate(bcalls.timeline) if t == "assess")
     assert _anchor_contents(unbundled) == _anchor_contents(bundled)
     assert unbundled.coverage is not None and bundled.coverage is not None
     assert unbundled.coverage.state == bundled.coverage.state
+
+
+EXTRACT_CHECK_GENERATE = ("extract-check-generate", {})
+
+
+@pytest.mark.asyncio
+async def test_a_trailing_run_a_witness_splits_into_a_bundle_and_an_isolated_step_is_skipped_whole() -> None:
+    """``search, fetch, extract, check, generate``: the bundling run is the bundle (extract, check) then the generate.
+    The boundary sits before the bundle and, on a skip, fills the whole run: nothing dispatches and the later
+    isolated step is not run on its own."""
+    bundled, bcalls = await _run(*EXTRACT_CHECK_GENERATE, bundled=True, supports=False)
+    unbundled, ucalls = await _run(*EXTRACT_CHECK_GENERATE, bundled=False, supports=False)
+    assert bundled.coverage is not None and bundled.coverage.skip_generation
+    assert bcalls.ran == [] and "bundle" not in bcalls.timeline and ucalls.ran == []
+    assert len(bundled.steps) == len(_plan("extract-check-generate")["steps"])
+    assert bundled.steps[2] == BUNDLED_INTERMEDIATE and bundled.steps[3] == BUNDLED_INTERMEDIATE
+    assert bundled.steps[-1][SKIPPED_MARK] is True
+    assert bundled.steps == unbundled.steps
+
+
+@pytest.mark.asyncio
+async def test_a_trailing_run_a_witness_splits_reads_the_whole_runs_evidence_and_runs_in_order_when_covered() -> None:
+    bundled, bcalls = await _run(*EXTRACT_CHECK_GENERATE, bundled=True)
+    unbundled, ucalls = await _run(*EXTRACT_CHECK_GENERATE, bundled=False)
+    assert _anchor_contents(bundled) == _anchor_contents(unbundled) == set(TEXTS)
+    # the bundle (extract + check) is one dispatch after the boundary, then the generate on its own
+    assert bcalls.ran == ["generate"] and len(bcalls.bundles) == 1
+    last_assessment = max(i for i, t in enumerate(bcalls.timeline) if t == "assess")
+    assert bcalls.timeline.index("bundle") > last_assessment
+    assert bcalls.timeline.index("generate") > bcalls.timeline.index("bundle")
+    assert ucalls.ran == ["extract", "check", "generate"]
+    assert bundled.coverage is not None and unbundled.coverage is not None
+    assert bundled.coverage.state == unbundled.coverage.state
 
 
 # ── the repair evidence reaches the answering step ─────────────────────────────────────────────────────────

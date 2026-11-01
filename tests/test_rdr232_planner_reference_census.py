@@ -36,7 +36,14 @@ from nexus.plans.runner import (
 #: ``INSTRUCTION_ARGS``: a newly documented arg that is in neither set fails the census until
 #: someone says which kind it is (and, if it carries evidence, which merge site takes it).
 EVIDENCE_ARGS = frozenset({"inputs", "items", "content", "context"})
-INSTRUCTION_ARGS = frozenset({"fields", "criterion", "focus", "template", "cited"})
+#: ``ids`` (with its ``collections`` scope) is how the witness operators ``check`` and ``verify`` are documented
+#: to take evidence (RDR-189 P1, nexus-z1d0l.1.4): the runner hydrates them in the ids branch of
+#: ``_hydrate_operator_args``, which merges the reserved stream. They are driven by their own rows below.
+IDS_EVIDENCE_ARGS = frozenset({"ids"})
+INSTRUCTION_ARGS = frozenset({
+    "fields", "criterion", "focus", "template", "cited",
+    "check_instruction", "claim", "collections",
+})
 
 _SIGNATURE = re.compile(r"^  (\w+)\(([^)]*)\)", re.MULTILINE)
 
@@ -55,6 +62,9 @@ def _operator_signatures() -> dict[str, list[str]]:
 SIGNATURES = _operator_signatures()
 EVIDENCE_ROWS = sorted(
     (op, arg) for op, args in SIGNATURES.items() for arg in args if arg in EVIDENCE_ARGS
+)
+IDS_ROWS = sorted(
+    (op, arg) for op, args in SIGNATURES.items() for arg in args if arg in IDS_EVIDENCE_ARGS
 )
 
 
@@ -98,15 +108,18 @@ def test_the_census_reads_the_reference_and_is_not_vacuous() -> None:
         assert op in _OPERATOR_TOOL_MAP, (
             f"the reference documents {op!r}, which the runner cannot dispatch"
         )
-        assert any(a in EVIDENCE_ARGS for a in SIGNATURES[op]), (
+        assert any(a in EVIDENCE_ARGS | IDS_EVIDENCE_ARGS for a in SIGNATURES[op]), (
             f"{op}: no evidence arg parsed from {SIGNATURES[op]}"
         )
+    assert {r[0] for r in IDS_ROWS} == {"check", "verify"}, IDS_ROWS
 
 
 @pytest.mark.parametrize("op", sorted(SIGNATURES))
 def test_every_documented_arg_is_classified(op: str) -> None:
     unclassified = [
-        a for a in SIGNATURES[op] if a not in EVIDENCE_ARGS | INSTRUCTION_ARGS
+        a
+        for a in SIGNATURES[op]
+        if a not in EVIDENCE_ARGS | IDS_EVIDENCE_ARGS | INSTRUCTION_ARGS
     ]
     assert unclassified == [], (
         f"{op}: {unclassified} is documented to the planner but the census does not know whether it "
@@ -128,6 +141,24 @@ def test_an_evidence_arg_holding_fetched_texts_reaches_a_merge_site(
     assert items[-2:] == texts, (
         f"{op}({arg}=[...]): the reducer input was not recorded after the merge"
     )
+
+
+@pytest.mark.parametrize(("op", "arg"), IDS_ROWS)
+def test_a_documented_ids_arg_reaches_the_ids_merge_site(op: str, arg: str) -> None:
+    """``check(ids=...)`` / ``verify(ids=...)``: the runner hydrates the ids and merges the stream there."""
+    from unittest.mock import patch
+
+    texts = ["secondary 0", "secondary 1"]
+    args = {arg: ["id-a", "id-b"], "claim": "c", "check_instruction": "c"}
+    with patch("nexus.mcp.core.store_get_many", return_value={"contents": list(texts)}), patch(
+        "nexus.mcp_infra.get_catalog", return_value=None
+    ):
+        items, report = _reducer_input(op, args)
+    assert report["merged"] is True and report["merged_at_step"] == 3, (
+        f"{op}({arg}=[...]) never merged the stream"
+    )
+    assert any("PRIMARY TEXT 0" in i for i in items), items
+    assert items[-2:] == texts
 
 
 @pytest.mark.parametrize(

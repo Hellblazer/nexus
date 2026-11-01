@@ -9926,6 +9926,21 @@ Each requires hydrated text as input — NOT ids/tumblers.
         $step4.contents], never one string that quotes them.
       - Output: {text: str}
 
+  check(check_instruction, ids, collections)
+      - Tests a claim across the retrieved items. Feed it ids=$step1.ids and
+        collections=$step1.collections (the runner hydrates them and keeps
+        each item's source); `check_instruction` is the claim or question.
+      - Output: {ok, evidence: [{item_id, quote, role, state, span,
+        tumbler, chash, collection}], rejected, uncovered, requires_review}.
+        Only an evidence item whose state is "bound" is a valid witness.
+
+  verify(claim, ids, collections)
+      - Tests ONE claim against the retrieved passages. `claim` is the
+        assertion to test and is REQUIRED: a verify step with ids and no
+        claim fails the plan, it is never filled in for you.
+      - Output: {verified, reason, evidence: [same items as check],
+        rejected, requires_review, citations}.
+
 === Correct chain patterns ===
 
 Pattern A (search → hydrate → operate):
@@ -12043,9 +12058,14 @@ async def _nx_answer_plan_miss(
         if not steps:
             raise ValueError("planner returned empty plan")
 
+        # RDR-189 P1 (nexus-z1d0l.1.4): ``check`` and ``verify`` are dispatchable (the runner's
+        # ``_OPERATOR_TOOL_MAP`` carries both) and return the host-bound witness payload, so the
+        # planner may emit them; before this a witness step was dropped and no ad-hoc plan could
+        # reach one.
         _ALLOWED_TOOLS = {
             "search", "query", "traverse", "store_get_many",
             "extract", "rank", "compare", "summarize", "generate",
+            "check", "verify",
         }
         # The LLM planner emits either the bare operator name ("extract") or
         # the resolved MCP tool name ("operator_extract" / full prefix form).
@@ -12061,6 +12081,8 @@ async def _nx_answer_plan_miss(
             "operator_compare": "compare",
             "operator_summarize": "summarize",
             "operator_generate": "generate",
+            "operator_check": "check",
+            "operator_verify": "verify",
         }
         # Catalog tools the LLM might reach for — map to the closest allowed
         # tool (traverse covers link walks; search covers catalog_search use

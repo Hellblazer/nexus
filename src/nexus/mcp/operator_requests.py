@@ -47,7 +47,7 @@ path only.
 from __future__ import annotations
 
 from nexus.context_annotations import source_clause
-from nexus.operators.witness import records_from_verify_evidence, shown_check_items, shown_items
+from nexus.operators.witness import shown_check_items, shown_verify_evidence
 
 from typing import Any, Callable
 
@@ -275,12 +275,15 @@ def build_check_request(items: str, check_instruction: str) -> tuple[str, dict]:
 def build_verify_request(claim: str, evidence: str) -> tuple[str, dict]:
     """Prompt/schema for ``operator_verify``. The evidence is plain text (never
     sniffed for JSON) and is shown as the one item ``e1``; the model returns
-    the same typed evidence items as ``operator_check``."""
+    the same typed evidence items as ``operator_check``. The one exception is
+    a step the plan runner hydrated from ``ids``: its ``evidence`` is the
+    runner's own ``[{"id","text"}]`` rendering, shown as it is inside the
+    runner's prerendered scope (``witness.shown_verify_evidence``)."""
     prompt = (
         f"Verify whether the following claim is grounded in the evidence "
         f"provided.\n\n"
         f"Claim: {claim}\n\n"
-        f"Evidence:\n{shown_items(records_from_verify_evidence(evidence))}\n\n"
+        f"Evidence:\n{shown_verify_evidence(evidence)}\n\n"
         f"Set verified=true only when the claim is directly supported by "
         f"the evidence. Provide a concise 'reason' explaining the "
         f"verdict. Populate 'evidence' with a record per passage that "

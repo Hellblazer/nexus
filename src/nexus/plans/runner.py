@@ -1847,7 +1847,9 @@ _OPERATOR_RESOLVED_TOOLS: frozenset[str] = frozenset(_OPERATOR_TOOL_MAP.values()
 #: Deliberately omitted (a stray ``inputs:`` on these operators must
 #: surface as an authoring bug rather than be silently renamed):
 #:
-#: - ``operator_verify`` (RDR-088): takes scalar ``claim`` and ``evidence``.
+#: - ``operator_verify`` (RDR-088): takes scalar ``claim`` and ``evidence``. A verify step fed by ``ids``
+#:   is hydrated in the ids branch of ``_hydrate_operator_args`` (RDR-189 P1, nexus-z1d0l.1.4), which sets
+#:   ``evidence`` and keeps the author's ``claim``; it never produces ``inputs``.
 #: - ``operator_aggregate`` (RDR-093): takes ``groups`` (a JSON-serialised
 #:   list[{key_value, items}] from a prior groupby step), not ``items``.
 #:   Renaming inputs->items here would silently dispatch with the wrong
@@ -1917,15 +1919,26 @@ def _coverage_skipped_output() -> dict[str, Any]:
 
 
 def _hydrate_capturing(
-    tool: str, args: dict[str, Any], *, capture: bool,
+    tool: str, args: dict[str, Any], *, capture: bool, step_index: int | None = None,
 ) -> tuple[str, dict[str, Any], list[list[str]]]:
-    """:func:`_hydrate_operator_args`, and the lists its hydration reported when *capture* is set."""
-    if not capture:
-        resolved_tool, prepared = _hydrate_operator_args(tool, args)
-        return resolved_tool, prepared, []
-    with capture_reducer_input() as captured:
-        resolved_tool, prepared = _hydrate_operator_args(tool, args)
-    return resolved_tool, prepared, captured
+    """:func:`_hydrate_operator_args`, and the lists its hydration reported when *capture* is set.
+
+    *step_index* is the plan step being hydrated. Hydration refuses a step it cannot supply an argument for
+    (a verify with ``ids`` and no ``claim``) with ``step_index=-1``, as the dispatcher does, because it is not
+    given the index; a caller that knows it passes it and the error is re-raised naming the real step."""
+    try:
+        if not capture:
+            resolved_tool, prepared = _hydrate_operator_args(tool, args)
+            return resolved_tool, prepared, []
+        with capture_reducer_input() as captured:
+            resolved_tool, prepared = _hydrate_operator_args(tool, args)
+        return resolved_tool, prepared, captured
+    except PlanRunOperatorArgMissingError as exc:
+        if step_index is None or exc.step_index >= 0:
+            raise
+        raise PlanRunOperatorArgMissingError(
+            step_index=step_index, tool=exc.tool, missing_arg=exc.missing_arg,
+        ) from exc
 
 
 def _boundary_evidence(args: dict[str, Any], captured: list[list[str]]) -> tuple[list[str], bool]:
@@ -2403,6 +2416,11 @@ def _merge_reserved_explicit_inputs(
 _EVIDENCE_SOURCE_KEY: str = "_evidence_source"
 _EVIDENCE_RECORDS_KEY: str = "_evidence_records"
 
+#: The witness operators and the argument each one's rendered items go in (RDR-189 P1, nexus-z1d0l.1.4).
+#: Both are fed the same ``[{"id","text"}]`` rendering and bound against the same records; check reads them as
+#: ``items`` and verify as ``evidence``.
+_WITNESS_TOOLS: dict[str, str] = {"operator_check": "items", "operator_verify": "evidence"}
+
 
 def _with_evidence_source(
     tool: str, raw_args: dict[str, Any], resolved: dict[str, Any], step_outputs: list[dict[str, Any]],
@@ -2607,6 +2625,14 @@ def _hydrate_operator_args(
             }
 
     if resolved_tool in _OPERATOR_RESOLVED_TOOLS and "ids" in args:
+        # RDR-189 P1 (nexus-z1d0l.1.4), decision: a verify step fed by ``ids`` hydrates its EVIDENCE only. The
+        # claim is the author's assertion and the host never invents one (a claim made up from the ids, the
+        # question or the first passage would let the model grade a statement nobody asked about). No claim,
+        # or a blank one, is a plan-authoring bug and fails here, before ``store_get_many`` pays for a fetch;
+        # ``plan_run`` patches in the step index (the ``step_index=-1`` placeholder, as the dispatcher's own
+        # missing-argument check does).
+        if resolved_tool == "operator_verify" and not (isinstance(args.get("claim"), str) and args["claim"].strip()):
+            raise PlanRunOperatorArgMissingError(step_index=-1, tool=resolved_tool, missing_arg="claim")
         ids = args["ids"]
         collections = args.get("collections", "knowledge")
         id_list_raw = ids if isinstance(ids, list) else [ids]
@@ -2681,7 +2707,7 @@ def _hydrate_operator_args(
         # merges and the cap drop the alignment between a text and the retrieval step's hit.
         _idents: dict[str, Any] = {}
         _tumbler_ids = bool(id_list_raw) and all(_is_tumbler_shaped(str(i)) for i in id_list_raw)
-        if resolved_tool == "operator_check":
+        if resolved_tool in _WITNESS_TOOLS:
             _idents = _position_identities(
                 id_list_raw, contents, evidence_source=evidence_source, collections=args.get("collections"),
                 tumbler_path=_tumbler_ids, owner_lookups=None if _tumbler_ids else owner_lookups,
@@ -2729,12 +2755,16 @@ def _hydrate_operator_args(
             non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
         note_reducer_input(non_empty)  # nexus-jypmj.1.8: reads the final list, changes nothing
         args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
-        if resolved_tool == "operator_check" and non_empty and "items" not in args:
-            # Records only when the runner builds the items: a step that supplies its own keeps its own.
+        _witness_arg = _WITNESS_TOOLS.get(resolved_tool)
+        if _witness_arg is not None and non_empty and _witness_arg not in args:
+            # Records only when the runner builds the items: a step that supplies its own keeps its own. A
+            # verify step's records are the same ones, rendered into ``evidence`` (its claim stays the author's).
             _rows = owner_lookups.owner_rows if not _tumbler_ids and owner_lookups.asked else None
             _records = _check_records_for(non_empty, _idents, _rs if _rs_merge else None, _supp, _rows)
-            args["items"] = _render_check_items(non_empty, _records)
+            args[_witness_arg] = _render_check_items(non_empty, _records)
             args[_EVIDENCE_RECORDS_KEY] = _records
+        elif resolved_tool == "operator_verify":
+            args.setdefault("evidence", "")  # nothing survived the filters: ``_zero_evidence_text`` ends the step
         elif resolved_tool == "operator_summarize":
             args.setdefault("content", "\n\n".join(non_empty))
         elif resolved_tool == "operator_generate":
@@ -3139,8 +3169,12 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # nexus-jypmj: the document confinement's chunk-hash restriction is not a tool parameter; it rides a context value
     # that ``search_cross_corpus`` reads once and sends on every engine call. The deadline path below copies this
     # context, so the value reaches the worker thread.
-    _bind_here = _witness_records is not None and resolved_tool == "operator_check"
-    with chash_allow_scope(_chash_allow), _defer_binding() if _bind_here else contextlib.nullcontext():
+    _witness_verb = "verify" if resolved_tool == "operator_verify" else "check" if resolved_tool == "operator_check" else None
+    _bind_here = _witness_records is not None and _witness_verb is not None
+    # A verify step's ``evidence`` is the runner's rendering of its records: the prompt shows it as such.
+    with chash_allow_scope(_chash_allow), (
+        _defer_binding(evidence_prerendered=_witness_verb == "verify") if _bind_here else contextlib.nullcontext()
+    ):
         if inspect.iscoroutinefunction(fn):
             result = await fn(**args)
         elif call_deadline.get() is not None:
@@ -3207,7 +3241,7 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
         return {"text": result}
     if isinstance(result, dict):
         if _bind_here:
-            result = _bind_witness(result, _witness_records, "check")
+            result = _bind_witness(result, _witness_records, _witness_verb)
         # RDR-093 S-1: merge runner-attached truncation metadata onto
         # the operator's return dict so plan authors see when the
         # _OPERATOR_MAX_INPUTS cap fired. Scoped to operator_groupby
@@ -3590,13 +3624,13 @@ async def _plan_run_impl(
     # ``summarize`` over ``$stepN.aggregates``), which is no evidence and leaves the ledger with no anchors
     # (nexus-jypmj). Assessment calls are numbered past the plan's own step indices ((run_id, step_index) is the
     # primary key of nx_answer_steps) and ride the existing "llm" step source.
-    _trailing = segment_steps(steps)[-1] if steps else None
-    if isinstance(_trailing, OperatorBundleSlice):
-        _boundary_run: tuple[int, ...] = _trailing.plan_indices
-    elif isinstance(_trailing, IsolatedStep) and is_operator_tool(_extract_tool(_trailing.step)):
-        _boundary_run = (_trailing.plan_index,)
-    else:
-        _boundary_run = ()
+    # RDR-189 P1 (nexus-z1d0l.1.4): the run is read off the plan steps, not off the last segment. A witness
+    # (check / verify) ends a bundle, so a trailing run that holds one is several segments (``check -> generate``
+    # is two isolated steps); the last segment alone would put the boundary after the witness.
+    _run_start = len(steps)
+    while _run_start > 0 and is_operator_tool(_extract_tool(steps[_run_start - 1])):
+        _run_start -= 1
+    _boundary_run: tuple[int, ...] = tuple(range(_run_start, len(steps)))
     _boundary_start = _boundary_run[0] if _boundary_run else -1
     #: Plan indices at or below this are skipped by the loop: a skipped boundary fills its unbundled run.
     _skip_through = -1
@@ -3822,8 +3856,9 @@ async def _plan_run_impl(
 
     try:
         for seg in segments:
-            # A skipped boundary already filled the rest of an unbundled run (see the isolated boundary below).
-            if isinstance(seg, IsolatedStep) and seg.plan_index <= _skip_through:
+            # A skipped boundary already filled the rest of a run that spans several segments (an unbundled run, or
+            # one a witness split; see the isolated and bundle boundaries).
+            if (seg.plan_indices[0] if isinstance(seg, OperatorBundleSlice) else seg.plan_index) <= _skip_through:
                 continue
             _cut_pending, _cut_start_index = False, 0
             # nexus-h33x8.6 a4: hard budget check BEFORE dispatching this
@@ -3969,7 +4004,7 @@ async def _plan_run_impl(
                         # Operators skip _check_embedding_domain / scope / caller-
                         # scope injection — those are retrieval-tool concerns.
                         _mark_reserved_step(bi, steps)
-                        _, b_prepared, _bundle_captured = _hydrate_capturing(btool, b_resolved, capture=capture)
+                        _, b_prepared, _bundle_captured = _hydrate_capturing(btool, b_resolved, capture=capture, step_index=bi)
                         if capture:
                             _step_texts, _step_observed = _boundary_evidence(b_prepared, _bundle_captured)
                             texts_out.extend(_step_texts)
@@ -4017,10 +4052,24 @@ async def _plan_run_impl(
                 # before the one fused dispatch. A skip leaves one output per plan step. The repair
                 # (nexus-jypmj.3.2) re-reads the input through the same builder and replaces the bundle.
                 if _bundle_at_boundary:
+                    # RDR-189 P1 (nexus-z1d0l.1.4): a witness ends a bundle, so the trailing run can continue past
+                    # this bundle in isolated steps (``extract, check, generate``: a bundle, then the generate).
+                    # Those steps are read, handed the repair supplement and skipped with the bundle, as an
+                    # unbundled run's steps are; with no witness the list is empty and nothing changes.
+                    _later_run = [i for i in _boundary_run if i > seg.end_index]
+                    if _later_run:
+                        _name_merge_steps(_later_run)
+                        _later_texts, _later_observed = _read_rest_of_run(_later_run, hydrate=True)
+                        _boundary_texts = _boundary_texts + _later_texts
+                        _boundary_observed = _boundary_observed or _later_observed
+
                     def _rehydrate_bundle() -> tuple[list[str], bool]:
                         nonlocal bundle
                         rebuilt, rebuilt_texts, rebuilt_observed = _build_bundle_steps(True)
                         bundle = OperatorBundle(steps=tuple(rebuilt))
+                        if _later_run:
+                            more_texts, more_observed = _read_rest_of_run(_later_run, hydrate=True)
+                            return rebuilt_texts + more_texts, rebuilt_observed or more_observed
                         return rebuilt_texts, rebuilt_observed
 
                     _cov = await _run_coverage_boundary(
@@ -4028,9 +4077,11 @@ async def _plan_run_impl(
                     )
                     _seg_started_at += _boundary_s
                     if _cov is not None and _cov.skip_generation:
-                        for _ in range(len(seg.plan_indices) - 1):
+                        # One output per plan step of the run: placeholders, then the skipped output last.
+                        for _ in range(_boundary_run[-1] - seg.plan_indices[0]):
                             step_outputs.append(dict(BUNDLED_INTERMEDIATE))
                         step_outputs.append(_coverage_skipped_output())
+                        _skip_through = _boundary_run[-1]
                         _log.info(
                             "nx_answer_coverage_generation_skipped", kind="bundle",
                             step_indices=_seg_indices, reason=_cov.reason,

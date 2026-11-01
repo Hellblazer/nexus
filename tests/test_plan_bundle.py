@@ -135,6 +135,60 @@ class TestSegmentation:
         assert segment_steps([]) == []
 
 
+class TestWitnessStepsAreNeverBundleIntermediates:
+    """RDR-189 P1 (nexus-z1d0l.1.4): a ``check`` or ``verify`` step ends the bundle buffer, so it can be a
+    bundle's terminal step (whose output is stamped host-side and bound there) and is never an intermediate
+    (whose output the host never sees). Rule chosen: terminal, not always-isolated."""
+
+    @pytest.mark.parametrize("witness", ["check", "verify", "operator_check", "operator_verify",
+                                          "mcp__plugin_conexus_nexus__operator_check"])
+    def test_witness_then_generate_is_two_isolated_steps(self, witness):
+        segs = segment_steps([
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": witness, "args": {}},
+            {"tool": "generate", "args": {}},
+        ])
+        assert [type(s).__name__ for s in segs] == ["IsolatedStep"] * 3
+        assert [s.plan_index for s in segs] == [0, 1, 2]
+
+    @pytest.mark.parametrize("witness", ["check", "verify"])
+    def test_a_witness_after_operators_is_the_terminal_of_their_bundle(self, witness):
+        segs = segment_steps([
+            {"tool": "extract", "args": {}},
+            {"tool": "rank", "args": {}},
+            {"tool": witness, "args": {}},
+            {"tool": "generate", "args": {}},
+        ])
+        assert isinstance(segs[0], OperatorBundleSlice) and segs[0].plan_indices == (0, 1, 2)
+        assert isinstance(segs[1], IsolatedStep) and segs[1].plan_index == 3
+
+    def test_adjacent_witnesses_do_not_bundle_each_other(self):
+        segs = segment_steps([{"tool": "check", "args": {}}, {"tool": "verify", "args": {}}])
+        assert [type(s).__name__ for s in segs] == ["IsolatedStep", "IsolatedStep"]
+
+    def test_a_witness_between_operators_splits_the_run_after_it(self):
+        segs = segment_steps([
+            {"tool": "extract", "args": {}},
+            {"tool": "verify", "args": {}},
+            {"tool": "rank", "args": {}},
+            {"tool": "summarize", "args": {}},
+        ])
+        assert isinstance(segs[0], OperatorBundleSlice) and segs[0].plan_indices == (0, 1)
+        assert isinstance(segs[1], OperatorBundleSlice) and segs[1].plan_indices == (2, 3)
+
+    def test_no_segment_ever_holds_a_witness_before_its_last_step(self):
+        """The invariant, over every ordering of three steps drawn from witnesses and other operators."""
+        import itertools
+
+        names = ["check", "verify", "extract", "generate"]
+        for combo in itertools.product(names, repeat=3):
+            steps = [{"tool": t, "args": {}} for t in combo]
+            for seg in segment_steps(steps):
+                if isinstance(seg, OperatorBundleSlice):
+                    for pi in seg.plan_indices[:-1]:
+                        assert combo[pi] not in ("check", "verify"), (combo, seg)
+
+
 # ── Prompt composition ────────────────────────────────────────────────────────
 
 
