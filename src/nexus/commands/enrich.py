@@ -2998,7 +2998,12 @@ def _append_validation_row(path: Path, row: dict[str, Any]) -> None:
                 os.truncate(target, cut)
             else:
                 lead = b"\n"
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        if target.exists():
+            fd = os.open(target, os.O_WRONLY | os.O_APPEND)  # a file someone named keeps its own mode and ACL
+        else:
+            from nexus._winsec import open_private  # noqa: PLC0415 — command-local import; deferred to validation path
+
+            fd = open_private(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND)  # a file this run makes is owner-only
         with os.fdopen(fd, "ab") as f:
             f.write(lead + line)
 
