@@ -62,10 +62,14 @@ an inline "Amended 2026-11-01" note pointing here. The contract itself is
     items, not "citation spans".
   - **(v)** 2026-11-01, approved by Sam (nexus-z1d0l.1.3 review): a
     retrieval step's tumbler is never identity, including one search did
-    not infer. Its non-inferred `doc_id` is the shared T3 row's last
-    writer (the defect nexus-tko2w fixed for section labels), so trusting
-    it binds a shared chunk to a guess. Only the catalog owner set (rule 4)
-    or the parent document the step named can supply a tumbler. Edited in
+    not infer. For a chunk two documents share, a non-inferred `doc_id` is
+    a pick among the co-owners, not the document the search was about:
+    from engine 0.1.170 (nexus-6pfgb.26) the engine's first live owner by
+    lowest `doc_id`, and on a legacy row the shared T3 row's last writer
+    (the defect nexus-tko2w fixed for section labels). Trusting it binds a
+    shared chunk to a guess. Only the catalog owner set (rule 4) or the
+    parent document the step named (a tumbler-id hydration, or a reserved
+    primary-stream item's named source) can supply a tumbler. Edited in
     place under § Witness Schema v1, Evidence records and Host binding
     rule 3. A step confined to one document could bind a shared chunk to
     that document when it is one of the chunk's owners; that recall gain
@@ -145,9 +149,9 @@ ledger's `_pack` shape) and nothing else from the record. Who builds the
 records:
 
 - The plan runner, for a check or verify step fed by a retrieval step. It
-  builds the records from that step's output (`ids`, `tumblers`,
-  `chunk_text_hash`, per-chunk collections, the fields the coverage ledger's
-  `_hits` already reads), zipped with the hydrated contents by position
+  builds the records from that step's output (`ids` and the per-chunk
+  collections; a chash-shaped id is its own chash, and the output's
+  `tumblers` are carried but not read), zipped with the hydrated contents by position
   BEFORE the empty-content filter, the supplement and reserved-stream
   merges, and the item cap, which today drop the alignment. The source
   step's output reaches the hydration code through argument resolution
@@ -158,13 +162,15 @@ records:
   owner set, or from the parent document the step itself named (a
   tumbler-id hydration, where each id is its document). *Amended
   2026-11-01 (v): this sentence said a tumbler counted when it was not
-  inferred. A non-inferred `doc_id` is the chunk row's own stored value,
-  and one chunk text is one T3 row, so for a chunk two documents share it
-  names whichever document wrote the row last, not the document the search
-  was about.* Items merged
-  in later (supplement, reserved stream, coverage note) get records from
-  their own provenance (`SupplementItem`, `RepairSupplement.provenance`),
-  or identity-less records when they have none. Records ride beside `args`
+  inferred. For a chunk two documents share, a non-inferred `doc_id` is a
+  pick among the co-owners (the engine's lowest `doc_id` from 0.1.170, the
+  T3 row's last writer on a legacy row), not the document the search was
+  about.* Items merged in later get records as follows: a reserved-stream
+  item from its named source (its `doc_id`, chash and collection); a
+  repair supplement item takes its chash and collection from
+  `RepairSupplement.provenance` and its tumbler only from rule 4's owner
+  set, never from the item's own tumbler; the coverage note and any text
+  with no provenance get identity-less records. Records ride beside `args`
   as a private value that never reaches the dispatched prompt or the MCP
   surface, the same way `_truncation_metadata` does. Ids are minted
   `e1, e2, ...` in record order. Binding happens once, by whoever holds the
