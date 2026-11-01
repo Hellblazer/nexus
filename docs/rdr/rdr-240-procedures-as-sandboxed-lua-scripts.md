@@ -104,7 +104,7 @@ scripts behind it.
 
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
-| RDR-238 Memory Curation | Parent; split from it | It owns supersession by deletion, the bounded index and the curation habits. Its curation report's cold-state section takes MCP tool, CLI verb and injected-context counts from this RDR's transcript queries (RDR-238 Technical Design 4); its round-1 gate (2026-11-01) blocked on that dependency, and its fix made this RDR a prerequisite of its Phase 2 and of `nx memory curate`, calling the argument object `{query, since, project}` and the `memory`, `tools`, `loads` and `violations` queries (RDR-238 Technical Design 5). |
+| RDR-238 Memory Curation | Parent; split from it | It owns supersession by deletion, the bounded index and the curation habits. Its curation report's cold-state section takes MCP tool, CLI verb and injected-context counts from this RDR's transcript queries (RDR-238 Technical Design 4); its round-1 gate (2026-11-01) blocked on that dependency, and its fix made this RDR a prerequisite of its Phase 2 and of `nx memory curate`, calling with the argument object `{query, since, until, project}` the `memory`, `tools`, `loads` and `violations` queries (RDR-238 Technical Design 5). |
 | Lua runtime RDR (nexus-mdbds.1, not yet filed) | Depends on it | It owns the sandbox: the interpreter, what a script may call, the limits on time and memory, and how a host verb is exposed. This RDR states what its four procedures need from that runtime and decides nothing about the runtime itself. |
 | RDR-239 The Tuple-Space Dictionary | Sibling in the same epic (nexus-mdbds) | Stage 1 of the scriptable tuple space. The runtime exposes what the dictionary describes; these procedures read memory and transcripts, not tuples, so they use no dictionary entry in v1. |
 | RDR-209 Heat-Based Graduation | Consumer | Its gate-record rollup reads the tags the gate-record script derives. Until its Phase 0b read counter lands, the transcript queries here are its read-count source. |
@@ -251,11 +251,13 @@ schema.
    tool's description list the library's procedures with one line each.
 4. **Host verbs the four procedures need** (requirements on the runtime RDR,
    which decides their shape):
-   - `transcripts.sessions(since, project)`: yields one record per session
-     or subagent transcript, parsed in Python, with tool calls, instruction
-     loads, model, token counts and sizes. Never message bodies unless the
-     caller passes `bodies=true`, since transcripts hold everything a
-     session saw.
+   - `transcripts.sessions(since, until, project)`: yields one record per
+     session or subagent transcript, parsed in Python, with its session id,
+     whether it is a main session, its tool calls with their inputs (a
+     `memory_get` title, a Bash command) and times, instruction loads,
+     model, token counts and sizes. A tool call's input is not a message
+     body. Never message bodies unless the caller passes `bodies=true`,
+     since transcripts hold everything a session saw.
    - `memory.get`, `memory.list`, `memory.search`: the T2 reads.
    - `memory.put`: the one write verb, granted only to a script whose header
      declares it.
@@ -263,8 +265,12 @@ schema.
      caller's working tree.
    - `tables.get(name)`: a checked table from `src/nexus/tables/`.
 5. **`transcripts`.** Queries, each a function in the script with a fixture
-   test, called with the argument object `{query, since, project}` (`since`
-   a UTC date, `project` a Claude Code project directory name or `all`):
+   test, called with the argument object `{query, since, until, project}`
+   (`since` and `until` UTC dates, `until` defaulting to now, `project` a
+   Claude Code project directory name or `all`). Rows of `memory`, `tools`
+   and `loads` carry a session id, a name, a count, a last-use time and a
+   size; rows of `violations` carry a rule, a count and the number of main
+   sessions in the window (RDR-238 Technical Design 5):
    `agents` (dispatches by agent type and model, starting context,
    turns, errors, estimated cost), `tools` (calls per tool and MCP server,
    deferred against called, and per `nx` CLI verb called through Bash, read

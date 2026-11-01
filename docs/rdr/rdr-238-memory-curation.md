@@ -63,8 +63,9 @@ line. Nothing decides which rules must be in every context and which only need
 to be findable. Over 30 days the files took 225 writes and 68 reads, and the
 reads touched 32 of the 151 files, so most of the value is in the index lines
 and most index lines are rarely acted on. IFScale ("How Many Instructions Can
-LLMs Follow at Once") puts the knee for its best models near 150 simultaneous
-instructions, and between the two `CLAUDE.md` files and the index we carry
+LLMs Follow at Once") finds its threshold-type models holding up to about 150
+simultaneous instructions, on a keyword task the survey says does not map
+directly to ours, and between the two `CLAUDE.md` files and the index we carry
 well over 100 rules. The index is under both of Claude Code's limits today,
 so the case is its growth and that knee, not a harm measured here. The fix
 delivers a token budget for the index, a stated admission rule, and an
@@ -113,7 +114,7 @@ revision.
 | RDR-209 Heat-Based Graduation Between Memory Tiers | Sibling, draft | It owns heat and graduation, and takes the gate-record rollup as an amendment (same date). Its Phase 0b, a read counter that means "a caller read this row", is the signal this RDR's index audit would use for T2; until it lands, the audit counts T2 reads with RDR-240's `memory` transcript query: per title from `memory_get` calls, per project from `memory_search` calls (Technical Design 5). |
 | RDR-240 Procedures as Sandboxed Lua Scripts | Prerequisite of Phase 2 and of `nx memory curate` | Split from this RDR. Its `transcripts` procedure owns transcript scanning; this RDR calls four of its queries and builds no scanner (Technical Design 5). Phase 1 does not depend on it. |
 | RDR-239 The Tuple-Space Dictionary | Accepted; prerequisite of one `--cold` row | Its dictionary view (`writers`, last post time per subspace) is the source of the report's tuple-subspace row; that row waits for it (Technical Design 4). |
-| RDR-205 Session Ledger | Retired | Its ledger template and 40,785 rows outlived their writer (nexus-onjvw): the motivating case for `--cold`. |
+| RDR-205 Linda Tuple Space over Postgres | Closed; its ledger template is being retired | Its `ledger/<session_id>` template and 40,785 rows outlived their writer (nexus-onjvw): one of the cases that motivate `--cold`. |
 | RDR-074 Permanence Mode | Deferred, compatible | Permanence guards a row against expiry only. Naming a permanent row in `replaces` deletes it, because explicit deletion is always the project's prerogative (Sam, 2026-10-31: "expiry is the def; explicit del is always our collective prerogative"). |
 | RDR-192 Superseded Note Chunks Outlive Manifest-Less Is-Live | Different layer | It concerns T3 chunks a re-put replaced. This RDR concerns whole T2 rows and memory files a writer replaced. No shared code. |
 
@@ -167,9 +168,10 @@ here are the ones each pass found on a named page or table.
 - **Documented (paper):** an obsolete version of a fact in context took
   Qwen2.5 from 100% to 44.6% (Obsolete Facts). *Keyword extraction, page not
   spot-checked.*
-- **Documented (paper):** IFScale puts the knee for its best models near 150
-  simultaneous instructions (How Many Instructions Can LLMs Follow at Once).
-  *Keyword extraction, page not spot-checked.*
+- **Documented (paper):** IFScale's threshold-type models hold up to about
+  150 simultaneous instructions on a keyword-insertion task, a number the
+  survey says does not map directly to nexus (How Many Instructions Can LLMs
+  Follow at Once). *Keyword extraction, page not spot-checked.*
 - **Verified (paper):** unvalidated compaction can fall below the
   no-context baseline: one compression from 18,282 to 122 tokens dropped
   accuracy from 66.7% to 57.1% (Agentic Context Management, p.6). A promotion
@@ -194,8 +196,8 @@ here are the ones each pass found on a named page or table.
   *Source: subagent transcripts; T2 `238-research-2`.*
 - **✅ Verified** (spike): about 200 of 3,115 non-gate T2 rows (about 6%) are
   earlier members of a title chain a later row replaces, mostly round-N and
-  per-sha series (gate critiques, research entries, fix checks), which are
-  audit records. This measures how often chains occur, not that a replaced
+  per-sha series (the census names no kinds; commit reviews tagged
+  `commit-review` are one such series in project `nexus`). This measures how often chains occur, not that a replaced
   row's content is unneeded, so it does not verify A2. Its "single link"
   wording describes the abandoned link-column design. *Source: T2
   `238-research-3`.*
@@ -218,12 +220,14 @@ here are the ones each pass found on a named page or table.
   2.1.316 although the docs say they should not (research 1 and 2).
 - **A2 (Assumed):** Deleting the replaced row, and keeping only its name on
   the new row, loses nothing anyone needs, for the row kinds `replaces` may
-  target. Audit records are excluded: `replaces` refuses a target tagged
-  `gate`, `critique`, `research` or `fix-check` (Technical Design 1), so a
-  round-2 critique cannot delete round 1. Replaced rows are a small share
-  (research 3). Verification: at the end of Phase 1, Sam reads 20 rows the
-  report lists as replaced and marks each "content needed" or not; one
-  "needed" brings the bitemporal alternative back.
+  target. Audit records are excluded: `replaces` refuses a target carrying
+  any of the tags `kind:gate`, `gate`, `critique`, `research`, `fix-check` or `commit-review`, matched as whole tags (Technical Design 1), so
+  a round-2 critique cannot delete round 1. Replaced rows are a small share
+  (research 3). Verification: Phase 1 Step 3, before `replaces` is announced
+  to agents: research 3's title-chain method is rerun, Sam reads 20 of the
+  earlier chain members it lists that carry none of those tags, and marks
+  each "content needed" or not; one "needed" brings the bitemporal
+  alternative back before anything is deleted.
 - **A3:** Rules moved to the on-demand tier keep their compliance.
   Verification: Phase 2's before-and-after sample.
 
@@ -254,7 +258,7 @@ checked at SessionStart and over budget prints one line; a memory file that
 replaces another names it in `replaces`, and the same hook reports any file
 that another file names in `replaces` and that still exists, and any index
 entry naming a missing file; and a curation report runs at a release step
-after the release skill's Step 11c, listing unread files, unindexed files,
+after the release skill's Step 12, listing unread files, unindexed files,
 oversized files and live rows a later row appears to replace without naming
 them.
 
@@ -263,19 +267,25 @@ them.
 1. **T2 write.** `memory_put` and `/v1/memory` gain an optional `replaces`:
    an exact title, looked up in the put's own tenant and project. It takes no
    id, so a numeric title such as `238` is never read as an id, and a target
-   in another project cannot be named. The client appends `replaces: <old
-   title>` as the content's last line before sending (not repeated if the
+   in another project cannot be named. `HttpMemoryStore`, the client the
+   MCP tool and the CLI share, appends `replaces: <old title>` as the
+   content's last line before sending (not repeated if the
    content already ends with it), so the stored content equals what was sent
    and `_verify_t2_write_landed` (`src/nexus/mcp/core.py`) still passes. In
    one transaction the engine deletes the target row and writes the new row.
    Refused, with nothing written or deleted: a missing target, the row being
    written, a quarantined target (as `mergeMemories` refuses a quarantined
-   id), and a target tagged `gate`, `critique`, `research` or `fix-check`.
-   The put response echoes the replaced title and the deleted row's content;
+   id), and a target carrying any tag in the set `AUDIT_TAGS` (`kind:gate`, `gate`, `critique`, `research`, `fix-check` or `commit-review`),
+   matched as whole tags, as RDR-209 Phase 3 Step 0 matches `kind:gate`. One
+   named constant holds the set, and the `--t2` list reads the same one.
+   The put response echoes the replaced title and the deleted row's content,
+   and `memory_put`'s result carries that content to the writer;
    the client fails the call when it sent `replaces` and gets no echo, so a
    new client against an engine without the feature (whose `MemoryHandler`
    ignores unknown fields) errors instead of reporting "Stored" with the old
-   row alive. The echo is the row-level recovery: re-put its content. No
+   row alive. Such an old engine has already written the new row by then;
+   the error says the old row is still alive. The echo is the row-level
+   recovery: re-put its content. No
    schema change and no Liquibase changeset: the lineage is a line of
    content, not a column. Additive on the wire; the wire-contract ledger
    entry states both directions (old client: never sends it; new client, old
@@ -290,51 +300,58 @@ them.
    the on-demand index file `MEMORY-ondemand.md` exists, so a repo with
    another layout never sees it. It finds the memory directory from the git
    common directory, so a linked worktree checks its primary's directory.
-   "Indexed" means named in `MEMORY.md` or `MEMORY-ondemand.md`. Size is
-   bytes divided by 4, against `memory.index_budget_tokens` in `.nexus.yml`
-   (default 1500). Claude Code already reminds a writer near its own
+   "Indexed" means named in `MEMORY.md` or `MEMORY-ondemand.md`; the two
+   index files are not themselves checked. Size is `MEMORY.md`'s bytes
+   divided by 4, against `memory.index_budget_tokens` in `.nexus.yml`
+   (default 1500), read by a stdlib line scan for that one key under a
+   top-level `memory:` block, since the hook cannot import a YAML parser; a
+   missing, non-integer or non-positive value means the default. Claude Code already reminds a writer near its own
    200-line and 25 KB limits (research 1); this check is the tighter budget
    we choose, plus the checks Claude Code does not make.
 4. **Curation report.** `nx memory curate [--files] [--t2] [--agents]
-   [--cold [--days N]]`, printed to stdout and stored in T2 as
-   `<repo>/curation-report-<date>`. `--agents`
+   [--cold] [--days N]`, printed to stdout and stored in T2 as
+   `<repo>/curation-report-<date>` with a 90-day TTL. `--days N` (default 30)
+   sets the window for `--files` and `--cold`; for counts read from
+   transcripts, which are kept about 30 days (inferred from file dates,
+   research 9), N is capped at that span and the report prints the span it
+   covered. `--agents`
    covers the reviewers' own memory directories under
    `~/.claude/agent-memory/` (nexus-qo7ie.1 gave both reviewers `memory: user`):
    index length against the 40-line cap their definitions state, entries with
    no repo named, and concurrent-write damage, since two sessions running the
    same reviewer edit one `MEMORY.md` and the last writer wins. `--files`: unread files
-   over N days (read counts from RDR-240's `memory` query until RDR-209
-   Phase 0b gives T2 a true read counter), unindexed files, and files over 8 KB.
+   over N days (read counts from RDR-240's `memory` query), unindexed files,
+   and files over 8 KB other than the two index files.
    `--t2`: live T2 rows that a later row names in its title or body as
    replaced, a heuristic list for a person to confirm and never an automatic
-   delete; it skips rows tagged `gate`, `critique`, `research` or
-   `fix-check`, which `replaces` may not target.
-   `--cold [--days N]`: each store of the four kinds below with no write and
-   no read in N days (default 30). Transcripts are kept about 30 days
-   (inferred from file dates, research 9), so for rows read from transcripts
-   N is capped at that span, and the report prints the span it covered.
-   Each row gives the store, its last write where the store has writes, its
+   delete; it skips rows carrying an `AUDIT_TAGS` tag, which `replaces` may
+   not target. `--t2` also carries RDR-209 Phase 3 Step 4's census flag:
+   gate records older than 30 days whose phase is closed and that have no
+   TTL. RDR-209 owns that flag's rule; this RDR builds the command it runs in.
+   `--cold`: each store of the four kinds below with no write and no use in
+   N days. Each row gives the store, its last write where the store has writes, its
    last use, its size and its owner if known:
    - tuple subspaces, from RDR-239's dictionary view (each subspace's last
      post time and its template's `writers`); a template whose `writers` is
      empty and that has no live subspace is listed by name. This row waits
      for that view;
    - T2 namespaces and memory files, from read and write counts;
-   - MCP tools and CLI verbs, from RDR-240's `tools` query against the full
-     list of tools and verbs (the MCP tool list and the CLI command tree), so
-     a tool or verb never called is listed;
+   - MCP tools and CLI verbs, from RDR-240's `tools` query; `nx memory
+     curate` builds the full list itself (the MCP servers' tool registries
+     and the CLI's command tree) and diffs it in Python, so a tool or verb
+     never called is listed;
    - context injected per main session and per dispatch, from RDR-240's
      `loads` query, joined with the `memory` and `tools` queries for use: an
      injected item is used when a later read or call in the same session
-     names it, so a large always-loaded item never used shows as tokens.
+     names it (rows carry a session id for this join), so a large always-loaded item never used shows as tokens.
    Report only: retiring a cold store is a person's decision, and one that
    deletes data rides its own change (as nexus-onjvw does for the ledger).
-   The report runs at a release step after the release skill's Step 11c
-   (Phase 3), so waste shows while it is small. It never blocks a release.
+   The report runs at a release step after the release skill's Step 12, once
+   the local tool carries the release (Phase 3), so waste shows while it is small. It never blocks a release.
 5. **Transcript queries (the interface to RDR-240).** This RDR builds no
    transcript scanner. RDR-240's `transcripts` procedure is the one owner,
    and this RDR calls it through `run_procedure("transcripts", {query, since,
-   project})` from Python, so `nx memory curate` adds no Lua. It uses four
+   until, project})` from Python, so `nx memory curate` adds no Lua. It uses four
    queries:
    - `memory`: memory-file reads, and T2 reads per title from `memory_get`
      calls and per project from `memory_search` calls (a search call carries
@@ -346,20 +363,24 @@ them.
    - `violations`: the rule detectors, counted per 100 main sessions, for
      Phase 2 Steps 1 and 3.
    Requirements this RDR places on RDR-240, which RDR-240's Technical
-   Design 5 now carries (RDR-240's gate settles their shape): the argument object `{query, since, project}`; the T2 reads in `memory`, per title from
+   Design 4 and 5 now carry (RDR-240's gate settles their shape): the
+   argument object `{query, since, until, project}`; session records that
+   carry each tool call's input (a `memory_get` title, a Bash command), which
+   is not a message body; the T2 reads in `memory`, per title from
    `memory_get` and per project from `memory_search`; main sessions and
    sizes in `loads`; the `nx` CLI verb count in `tools`, which reads Bash
    command text inside the procedure; and `violations` reading message
    bodies inside the procedure, since its detectors scan assistant text and
-   Bash inputs. Each `memory`, `tools` and `loads` row carries a name, a
-   count, a last-use time and a size; `violations` rows carry a rule and a
-   rate per 100 main sessions.
+   Bash inputs; and the row shape: each `memory`, `tools` and `loads` row
+   carries a session id, a name, a count, a last-use time and a size, and
+   each `violations` row carries a rule, a count and the number of main
+   sessions in the window.
 
 ### Existing Infrastructure Audit
 
 | Need | Exists | Plan |
 | --- | --- | --- |
-| Delete a T2 row | Explicit `memory_delete`; `MemoryRepository.deleteById` (by id, no project or quarantine check) | A new repository method: look up by (tenant, project, title), refuse quarantined and audit-tagged targets, delete and write in one transaction, as `mergeMemories` does |
+| Delete a T2 row | Explicit `memory_delete`, which calls `MemoryRepository.delete(tenant, project, title)` (`MemoryHandler.java:449`) with no quarantine check | A new repository method: look up by (tenant, project, title), refuse quarantined and audit-tagged targets, delete and write in one transaction, as `mergeMemories` does |
 | Schema change | Liquibase memory changesets 001-005 | None needed; lineage is a content line |
 | SessionStart hook verbs | conexus `nx-hook` dispatch | One more verb |
 | Transcript read counts | Ad hoc scan (survey, 2026-10-31) | RDR-240's `transcripts` procedure; `nx memory curate` calls it |
@@ -469,7 +490,8 @@ If the on-demand tier works, this is a refinement of it.
 - [ ] RDR-240 Phase 1 Step 1 landed (the runner and the `transcripts`
       procedure). Phase 2 Steps 1 and 3, the transcript-backed rows of
       `nx memory curate` and the release step that runs it wait for it;
-      Phase 1 does not. The SessionStart check waits only for Phase 2 Step 2.
+      Phase 1 does not. The SessionStart check waits for Phase 2 Step 2, so
+      through Phase 2 Step 1 it waits for RDR-240 too.
 
 ### Minimum Viable Validation
 
@@ -491,17 +513,26 @@ write paths. Java tests against PG. No changeset.
 
 #### Step 2: Client and MCP
 
-`memory_put(replaces=...)` appends the lineage line and fails on a missing
-echo; the wire-ledger entry states both directions; Python tests against the
-engine.
+`HttpMemoryStore` appends the lineage line; `memory_put(replaces=...)` fails
+on a missing echo and returns the deleted content in its result; the
+wire-ledger entry states both directions; `tests/test_mcp_wire_snapshot.py`
+is regenerated for the new parameter; Python tests against the engine.
+
+#### Step 3: The A2 read
+
+Before `replaces` is named in any skill or agent brief: rerun research 3's
+title-chain method (group titles after stripping date, sha, round and
+version suffixes), take 20 earlier chain members that carry no `AUDIT_TAGS`
+tag, and Sam marks each "content needed" or not. One "needed" stops the
+feature until the bitemporal alternative is reconsidered.
 
 ### Phase 2: The bounded index
 
 #### Step 1: Measure
 
-Before any move: count violations per 100 main sessions for rules whose
-violations show in transcripts, with RDR-240's `violations` query, over the
-windows just before the split. Research 4's ad hoc scan sized those windows
+Before any move: count violations and main sessions for rules whose
+violations show in transcripts, with RDR-240's `violations` query, over
+windows that end on the day of the split. Research 4's ad hoc scan sized those windows
 and is not the baseline, so before and after come from one scanner.
 The measured domain is five rules: the em dash rule, which has the volume
 for a 14-day window, and four rare rules (`git stash`, full-disk `find`, the
@@ -516,10 +547,14 @@ the rest. Record what moved and why.
 
 #### Step 3: Re-measure
 
-Count the same rules over windows of the same length after the split, with
-the same `violations` query. A rule returns to the always tier when its
-post-split rate exceeds the upper bound of the 95% Poisson interval on its
-pre-split count. Phase 2 ends 30 days after the split. The split is kept
+Count the same rules over windows of the same length that start on the day
+after the split, with the same `violations` query, each taken when its window
+closes. The test is on counts: the expected post-split count is the
+pre-split rate per main session times the post-split main sessions, and a
+rule returns to the always tier when its post-split count exceeds the upper
+bound of the 95% Poisson interval on that expectation. The em dash rule is
+tested alone. The four rare rules are tested as one group, and when the
+group exceeds its bound all four return. Phase 2 ends 30 days after the split. The split is kept
 when no rule returns, the always tier is under its budget, and the `memory`
 query shows moved files being read on demand; if no moved file is read in
 those 30 days, the on-demand tier is not working and the split is revisited.
@@ -542,14 +577,15 @@ dictionary view.
 
 #### Step 4: Release step
 
-A curation step after the release skill's Step 11c that runs `nx memory
-curate` and never blocks the release.
+A curation step after the release skill's Step 12 (the local tool reinstall),
+so the reinstalled `nx` carries the verb, that runs `nx memory curate` and
+never blocks the release.
 
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Replaced T2 rows | none; the row is gone, its name is on the new row | `nx memory get` of the new row | the replacing write | `nx memory curate --t2` | the put response's echo of the deleted content |
+| Replaced T2 rows | none; the row is gone, its name is on the new row | `nx memory get` of the new row | the replacing write | `nx memory curate --t2` | the deleted content `memory_put` returns to the writer, kept only if the writer keeps it |
 | Memory files | `ls` the memory directory | the file | by the writer, with `replaces` | SessionStart check, `nx memory curate --files` | Time Machine |
 
 ### New Dependencies
@@ -561,13 +597,15 @@ interpreter RDR-240's runtime RDR chooses.
 
 - Engine: replace in one transaction (old row gone, new row stored as
   sent, echo carries the old content); refusal (missing target, self,
-  quarantined, tagged `gate`, `critique`, `research` or `fix-check`) leaves
-  both rows unchanged; a numeric title `238` is read as a title; a title that
+  quarantined, and one case per `AUDIT_TAGS` tag, including a target tagged
+  `kind:gate,bead:nexus-x` and one whose body mentions `kind:gate` but whose
+  tags do not, which is not refused) leaves both rows unchanged; a numeric title `238` is read as a title; a title that
   exists only in another project is "missing"; a chain A, B, C leaves only C
   ending `replaces: B`.
 - Client: after a replacing put, search and `memory_get` no longer find the
   old row, and `_verify_t2_write_landed` passes; against an engine stub that
-  returns no echo, the call fails.
+  returns no echo, the call fails; the `memory_put` result carries the
+  deleted content.
 - Hook: over budget, an unindexed file, a replaced file still present and an
   index entry naming a missing file each print one line; clean prints
   nothing; a repo without `MEMORY-ondemand.md` prints nothing; an unreadable
@@ -617,7 +655,8 @@ and topic files load on demand; subagents also get it at Claude Code
 2.1.316, against the docs, so the budget rests on main sessions alone. A2 is
 assumed: research 3 counts title chains, not whether a replaced row's
 content is needed; audit records are excluded as targets, and Sam's read of
-20 listed rows at the end of Phase 1 tests the rest. A3 is open on purpose:
+20 earlier chain members in Phase 1 Step 3 tests the rest before the feature
+is announced. A3 is open on purpose:
 no paper measures it, so Phase 2 measures compliance before and after the
 split with one `violations` query (research 4 only sized the windows), and a
 rule whose rate rises past its bound goes back.
@@ -628,8 +667,9 @@ rule whose rate rises past its bound goes back.
   `/v1/memory` put take no `replaces` today; the field is new and additive.
 - An explicit delete exists: MCP `memory_delete(project, title)`, engine
   `DELETE /v1/memory/delete` (`MemoryHandler`), `MemoryRepository.delete`
-  and `deleteById`. `deleteById` filters by id only and ignores quarantine,
-  so Phase 1 Step 1 adds a method instead of reusing it.
+  and `deleteById`. `memory_delete` calls `delete(tenant, project, title)`
+  (`MemoryHandler.java:449`); neither it nor `deleteById` checks
+  quarantine, so Phase 1 Step 1 adds a method instead of reusing them.
 - `MemoryHandler` sets `FAIL_ON_UNKNOWN_PROPERTIES` to false
   (`MemoryHandler.java:107`), so an engine without the feature ignores
   `replaces`; the echo is what lets a new client notice.
@@ -675,7 +715,7 @@ the report lists it, and any deletion of data rides its own change.
 ### Proportionality
 
 One optional field on an existing write and one repository method, one
-frontmatter field, one hook verb, one report verb with five sections, and a
+frontmatter field, one hook verb, one report verb with four sections, and a
 one-time split of one index file. No schema change. Gaps 1 and 2 and the
 `--files` and `--t2` sections match problems measured in production: stale
 rows that retrieval serves, an index that grows one line per memory, and
