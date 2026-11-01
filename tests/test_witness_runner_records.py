@@ -531,7 +531,10 @@ async def test_a_check_with_ids_composes_an_envelope_with_no_evidence_records() 
         return {"contents": ["doc a text", "doc b text"], "missing": []}
 
     cut = classify_continuation_cut(steps)
-    with patch.object(mcp_core, "store_get_many", stub_store_get_many):
+    catalog = _rows_catalog()  # the owner lookup reads the catalog; never reach real storage
+    with patch.object(mcp_core, "store_get_many", stub_store_get_many), patch(
+        "nexus.mcp_infra.get_catalog", return_value=catalog,
+    ), patch("nexus.mcp.core._get_catalog", return_value=catalog):
         envelope = assemble_continuation_envelope(
             cut=cut, steps=steps, bindings={}, step_outputs=[out], plan_id=1, run_id=None,
         )
