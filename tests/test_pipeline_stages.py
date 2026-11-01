@@ -258,7 +258,12 @@ class TestServiceModeStreaming:
         # of its own.
         t3.upsert_chunks_with_embeddings.assert_not_called()
         (w,) = writer.instances
-        (rows, chunks), = w.batches
+        # The uploader may poll between the two chunks' buffer writes, so the batch
+        # split is timing (as in test_full_pipeline, 7e749db83); the contract is both
+        # chunks, positions [0, 1] in order.
+        rows = [r for rs, _ in w.batches for r in rs]
+        chunks = [c for _, cs in w.batches for c in cs]
+        assert [r["position"] for r in rows] == [0, 1]
         assert len(chunks) == 2
         # The service embeds: no client vector rides the write (RDR-152 Seam B).
         assert all("embedding" not in c for c in chunks)
@@ -1646,7 +1651,10 @@ class TestPipelineIndexPdf:
         assert total == 2, f"expected 2 chunks uploaded; got {total}"
 
         (w,) = writer.instances
-        (rows, chunks), = w.batches
+        # Batch split is timing (the uploader runs while the chunker writes); the
+        # contract is the chunks and their positions in order.
+        rows = [r for rs, _ in w.batches for r in rs]
+        chunks = [c for _, cs in w.batches for c in cs]
         assert len(chunks) == 2
         # Phase 3: no doc_id on chunk metadata.
         for c in chunks:
