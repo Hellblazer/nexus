@@ -34,6 +34,16 @@ NUDGE_SENTENCE = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_recorder_child(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    """In-process runs never start the detached recorder (nexus-mtheb.4)."""
+    from nexus.hooks import agent_dispatch_record  # noqa: PLC0415 — the recorder is replaced where it is used
+
+    spawned: list[tuple] = []
+    monkeypatch.setattr(agent_dispatch_record, "spawn", lambda *a: spawned.append(a) or True)
+    return spawned
+
+
 def _assistant(*blocks: dict) -> dict:
     return {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
 
@@ -374,7 +384,8 @@ def _dispatch(payload: dict) -> subprocess.CompletedProcess:
         text=True,
         encoding=PYTHON_CHILD_ENCODING,
         timeout=60,
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        # No recorder child may reach a real service from a test.
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"), "NX_DISPATCH_COUNTER": "off"},
         check=False,
     )
 

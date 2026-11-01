@@ -165,21 +165,19 @@ def t1_put_count(path: str) -> int | None:
 
 
 def record_dispatch(session_id: str, agent_id: str, agent_type: str, t1_puts: int) -> None:
-    """The seam for the per-dispatch puts counter.
+    """Record this dispatch's T1 put count in the engine (nexus-mtheb.4).
 
-    TODO(nexus-mtheb.4): call the engine route that records one row per
-    dispatch (payload ``session_id``, ``agent_id``, ``agent_type``,
-    ``t1_puts``, ``ts``) once its client method exists on develop; none does
-    yet, so this is a deliberate no-op. It is called once per real stop,
-    including the re-stop after a nudge (``stop_hook_active`` true), whose
-    count is the final one, so the receiver should keep the last row per
-    (session_id, agent_id). An agent type in ``NO_T1_AGENTS`` is never
-    recorded: it cannot put, so it would only dilute the puts-per-dispatch
-    measure. Importing the engine client here would load
-    ``nexus.cli``-class modules into a hook that runs on every real subagent
-    stop (0.8 s measured by RDR-215 research-5); do it behind a deferred
-    import, bounded well inside the hook timeout, and never let it raise.
+    Hands the row to a detached child (:mod:`nexus.hooks.agent_dispatch_record`)
+    and returns at once, so the hook never waits on the network; the child
+    makes one bounded request. Called once per real stop, including the
+    re-stop after a nudge (``stop_hook_active`` true), whose count is the
+    final one; the engine upsert keeps the larger count per (session_id,
+    agent_id). An agent type in ``NO_T1_AGENTS`` is never recorded: it cannot
+    put, so it would only dilute the puts-per-dispatch measure.
     """
+    from nexus.hooks import agent_dispatch_record  # noqa: PLC0415 — stdlib-only at import; deferred so a stop that records nothing pays nothing
+
+    agent_dispatch_record.spawn(session_id, agent_id, agent_type, t1_puts)
 
 
 def _field(data: dict, key: str) -> str:
