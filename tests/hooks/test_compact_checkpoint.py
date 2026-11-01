@@ -49,6 +49,8 @@ NAME = "linda"
 _STANDIN = textwrap.dedent(
     """
     import os, sys, time
+    # As src/nexus/cli.py does on Windows: a cp1252 pipe cannot encode the bead glyphs.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = sys.argv[1:]
     with open(os.environ["FAKE_NX_LOG"], "a", encoding="utf-8") as log:
         log.write(" ".join(args) + "\\n")
@@ -112,6 +114,8 @@ def env(tmp_path: Path, monkeypatch, mod):
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
     monkeypatch.setenv("FAKE_NX_LOG", str(nx_log))
+    # A Windows pipe's encoding, on every platform, so the stand-in's glyphs fail here as they do there.
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
     monkeypatch.delenv("FAKE_NX_HANG", raising=False)
     monkeypatch.delenv("FAKE_BOARD", raising=False)
     monkeypatch.delenv("FAKE_READY", raising=False)
