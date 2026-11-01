@@ -1,6 +1,6 @@
 # RDR-239 Phase 1: the `doc` block for the eight shipped templates
 
-The blocks now live in service/src/main/resources/tuples/templates/ (commit 5429654cb); this file is the Phase 1 review record.
+The blocks now live in service/src/main/resources/tuples/templates/ (commit 506c2e647); this file is the Phase 1 review record.
 
 Revised for gate findings S1, S4 and S7 (nexus-mdbds.2), 2026-11-01.
 
