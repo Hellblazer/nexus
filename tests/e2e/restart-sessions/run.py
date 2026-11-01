@@ -45,8 +45,14 @@ WORDS = {"rs_alpha": "HELIOTROPE", "rs_beta": "QUARTZITE", "rs_draft": "MARZIPAN
 DRAFT_TEXT = "this is an unsent draft the restart must not clobber"
 
 
+#: The harness's own pane reader: always this checkout's script, never the one under test,
+#: so a control run of an older copy is judged by the same oracle.
+ORACLE = REPO / "scripts" / "claude-restart-sessions"
+
+
 def load_script():
-    loader = importlib.machinery.SourceFileLoader("claude_restart_sessions", str(SCRIPT))
+    """The oracle's module (its ``has_draft`` judges the preconditions)."""
+    loader = importlib.machinery.SourceFileLoader("claude_restart_sessions", str(ORACLE))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -256,8 +262,10 @@ def main() -> int:
 
         for name, word in WORDS.items():
             old = before[name]["sessionId"]
+            fresh = name != "rs_draft"
+            if fresh and f"OK {name}: fresh as pid" not in log:
+                continue  # already failed above; waiting for a fresh start the log says never came is time spent for nothing
             try:
-                fresh = name != "rs_draft"
                 d = sb.wait_status(name, {"idle"}, 300, not_sid=old if fresh else "")
             except TimeoutError as exc:
                 failures.append(str(exc))
