@@ -41,8 +41,12 @@
       Python client sends X-Nexus-T1-Session header; Java ScratchHandler passes
       session_id into all queries. Session-close: DELETE FROM t1.scratch WHERE
       tenant_id=? AND session_id=? (called from MCP lifespan on cleanup).
-      TTL sweep: DELETE FROM t1.scratch WHERE ts < now() - interval '24 hours'
+      TTL sweep: delete every row of a session idle past 24 hours, i.e. whose newest
+      put (ts) and newest read (last_accessed) are both older than the cutoff
       (service-internal; catches crashed clients that never called session-close).
+      Originally this was a per-row `ts < now() - interval '24 hours'`; nexus-mtheb.2
+      changed it to the session-idle rule RDR-152 decided. (This is a header comment
+      outside every changeSet, so the edit changes no checksum.)
 
     Column mapping (T1Database fields -> PG):
       id            uuid4 string       -> TEXT (natural id, no BIGSERIAL; scratch rows

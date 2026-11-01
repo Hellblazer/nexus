@@ -286,7 +286,9 @@ class JooqRecordReflectionFeatureTest {
     // Record types (TextGatedSearchAllowed384Record, ...768Record, ...1024Record), +3.
     // 123 -> 124: nexus-yye8l.21 (RDR-222 ledger retention), vectors-046-request-ledger-tenants.xml added the
     // table nexus.request_ledger_tenants, one generated Record type (RequestLedgerTenantsRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 124;
+    // 124 -> 125: nexus-mtheb.4, telemetry-018-agent-dispatches.xml added the table nexus.agent_dispatches (one row
+    // per agent dispatch with its T1 put count), one generated Record type (AgentDispatchesRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 125;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

@@ -127,7 +127,12 @@ migration_wal_bytes_per_worker = 11038000
 # 2187 -> 2193 (2026-10-31): tuples-012-1 (nexus-onjvw, the retired session ledger's purge) adds six DDL statements to a fresh migration:
 # ALTER TABLE ... NO FORCE ROW LEVEL SECURITY and its FORCE restore on each of nexus.tuples, nexus.tuple_claim_log and nexus.tuple_deliveries (the three
 # DELETEs are not DDL), the tuples-003-2 / vectors-046-4 accounting. Counted from the changeset's statements.
-migration_ddl_per_worker = 2193
+# 2193 -> 2199 (2026-11-01): telemetry-018 (nexus-mtheb.4, nexus.agent_dispatches) adds six DDL statements to a fresh migration:
+# 1 CREATE TABLE (its primary key, unique and check constraints are inline), 3 for RLS (ENABLE, FORCE, CREATE POLICY) and 2 from the
+# runAlways grants loop (the table, and its BIGSERIAL id sequence: the attribution of the sixth is inferred from the loop covering ALL
+# SEQUENCES, the total is measured). Measured on chas (scoped substrate run of tests/test_scenario_journeys.py, one worker, lab-m,
+# ddl: migration=2199) on this tree.
+migration_ddl_per_worker = 2199
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

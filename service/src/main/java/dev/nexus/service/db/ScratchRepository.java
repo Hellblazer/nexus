@@ -2,6 +2,7 @@ package dev.nexus.service.db;
 
 import dev.nexus.service.jooq.t1.tables.Scratch;
 import dev.nexus.service.jooq.t1.tables.records.ScratchRecord;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,7 +45,8 @@ import static org.jooq.impl.DSL.*;
  * <ul>
  *   <li>{@link #closeSession} — deletes all rows for (tenant, session_id).
  *       Called from MCP lifespan on exit (promptness guarantee).</li>
- *   <li>{@link #sweepExpired} — deletes rows older than the given cutoff.
+ *   <li>{@link #sweepExpired} / {@link #sweepTenant} — delete every row of a session
+ *       that has been idle since before the given cutoff (see {@link #idleSessionRows}).
  *       Called periodically by a service timer (crash-safety backstop).</li>
  * </ul>
  *
@@ -266,7 +268,34 @@ public final class ScratchRepository {
     }
 
     /**
-     * TTL sweep: delete rows where {@code ts < cutoff}.
+     * The rows of every session that has been idle since before {@code cutoff} (nexus-mtheb.2).
+     *
+     * <p>RDR-152 decided the sweep reaps "rows whose session_id has been idle past a bound". The
+     * first implementation keyed on each row's own put time, so a live session lost every row
+     * 24 h after that row was written. A session's last activity is the newest of its rows' put
+     * time ({@code ts}) and last read ({@code last_accessed}, stamped by {@link #get} and
+     * {@link #search}; {@link #listEntries} does not stamp it). The condition selects a row when
+     * its own {@code ts} is before the cutoff AND no row of its (tenant, session) was put or read
+     * at or after the cutoff. The first conjunct is implied for every row of an idle session
+     * (each row's {@code ts} is at most the session's newest touch) and is what lets the planner
+     * start from {@code idx_scratch_ts}; the NOT EXISTS probes {@code idx_scratch_tenant_session}
+     * (a session holds a handful of rows). No new index is needed.
+     *
+     * <p>A row whose own {@code last_accessed} is past the cutoff finds itself in the NOT EXISTS
+     * and survives with its session, which is the intent: a read keeps the session alive.
+     */
+    private static Condition idleSessionRows(OffsetDateTime cutoff) {
+        Scratch newer = SCRATCH.as("newer");
+        return SCRATCH.TS.lt(cutoff).and(notExists(
+            selectOne().from(newer)
+                .where(newer.TENANT_ID.eq(SCRATCH.TENANT_ID))
+                .and(newer.SESSION_ID.eq(SCRATCH.SESSION_ID))
+                .and(newer.TS.ge(cutoff).or(newer.LAST_ACCESSED.ge(cutoff)))));
+    }
+
+    /**
+     * TTL sweep over every tenant: delete each session that has been idle since before
+     * {@code cutoff} (all of its rows; see {@link #idleSessionRows}).
      * Returns count of deleted rows. Called by a service-internal timer as a
      * crash-safety backstop for sessions that never called session-close.
      *
@@ -278,14 +307,15 @@ public final class ScratchRepository {
      */
     public int sweepExpired(DSLContext superuserDsl, OffsetDateTime cutoff) {
         int deleted = superuserDsl.deleteFrom(SCRATCH)
-            .where(SCRATCH.TS.lt(cutoff))
+            .where(idleSessionRows(cutoff))
             .execute();
         log.info("event=t1_ttl_sweep cutoff={} deleted={}", cutoff, deleted);
         return deleted;
     }
 
     /**
-     * Per-tenant TTL sweep: delete rows for this tenant where {@code ts < cutoff}.
+     * Per-tenant TTL sweep: delete this tenant's sessions that have been idle since before
+     * {@code cutoff} (every row of such a session; see {@link #idleSessionRows}).
      * Uses {@link TenantScope} (tenant-scoped, RLS enforced). Called by the
      * /v1/t1/sweep endpoint for per-tenant cleanup AND by the internal scheduler,
      * which loops it over every token-bearing tenant (nexus-4qq1m) — the
@@ -310,7 +340,7 @@ public final class ScratchRepository {
         return tenantScope.withTenant(tenant, T1_TENANT_GUC, dsl -> {
             SweepBounds.applyStatementTimeout(dsl, statementTimeout);
             int deleted = dsl.deleteFrom(SCRATCH)
-                .where(SCRATCH.TS.lt(cutoff))
+                .where(idleSessionRows(cutoff))
                 .execute();
             log.info("event=t1_tenant_sweep tenant={} cutoff={} deleted={}", tenant, cutoff, deleted);
             return deleted;

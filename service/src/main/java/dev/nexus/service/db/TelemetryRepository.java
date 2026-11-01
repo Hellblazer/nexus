@@ -853,6 +853,119 @@ public final class TelemetryRepository {
         });
     }
 
+    // ── agent_dispatches (nexus-mtheb.4) ───────────────────────────────────────
+
+    /**
+     * Record one agent dispatch with its T1 put count: one row per
+     * {@code (tenant, session_id, agent_id)}, upserted.
+     *
+     * <p>The SubagentStop hook can fire twice for one dispatch (the nudge turn runs a second stop), so a
+     * second record updates the first instead of adding a row. The count and the timestamp each keep the
+     * larger value: a transcript only grows, so a lower figure is never a newer one, and a replayed or
+     * out-of-order record cannot lower what was already counted. A null {@code agentType} keeps the type
+     * already stored.
+     *
+     * @param tsIso ISO-8601 time of the stop; null/blank means now (lenient {@link #parseTs}, the live-write rule)
+     */
+    public void recordAgentDispatch(String tenant,
+                                    String sessionId,
+                                    String agentId,
+                                    String agentType,
+                                    String tsIso,
+                                    int t1Puts) {
+        OffsetDateTime ts = parseTs(tsIso);
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(AGENT_DISPATCHES)
+                .set(AGENT_DISPATCHES.TENANT_ID, tenant)
+                .set(AGENT_DISPATCHES.SESSION_ID, sessionId)
+                .set(AGENT_DISPATCHES.AGENT_ID, agentId)
+                .set(AGENT_DISPATCHES.AGENT_TYPE, agentType)
+                .set(AGENT_DISPATCHES.TS, ts)
+                .set(AGENT_DISPATCHES.T1_PUTS, t1Puts)
+                .onConflict(AGENT_DISPATCHES.TENANT_ID, AGENT_DISPATCHES.SESSION_ID, AGENT_DISPATCHES.AGENT_ID)
+                .doUpdate()
+                .set(AGENT_DISPATCHES.T1_PUTS,
+                    greatest(AGENT_DISPATCHES.T1_PUTS, excluded(AGENT_DISPATCHES.T1_PUTS)))
+                .set(AGENT_DISPATCHES.TS,
+                    greatest(AGENT_DISPATCHES.TS, excluded(AGENT_DISPATCHES.TS)))
+                .set(AGENT_DISPATCHES.AGENT_TYPE,
+                    coalesce(excluded(AGENT_DISPATCHES.AGENT_TYPE), AGENT_DISPATCHES.AGENT_TYPE))
+                .execute();
+            return null;
+        });
+    }
+
+    /**
+     * Per-dispatch rows, newest first, with a summary over the FULL filtered set (independent of
+     * {@code limit}): {@code {rows: [{session_id, agent_id, agent_type, ts, t1_puts}], total,
+     * summary: {dispatches, no_t1_put, t1_puts}}}. {@code no_t1_put} counts the dispatches whose
+     * count is zero, the figure the T1 write-back metric is about. NULL {@code agent_type} crosses the
+     * wire as JSON null.
+     *
+     * @param sessionId filter, or empty for none
+     * @param sinceIso  {@code ts >= since} (strict {@link #parseSinceFilter}), or empty for none
+     * @param agentType filter, or empty for none
+     */
+    public Map<String, Object> listAgentDispatches(String tenant,
+                                                   String sessionId,
+                                                   String sinceIso,
+                                                   String agentType,
+                                                   int limit) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = noCondition();
+            if (sessionId != null && !sessionId.isEmpty()) {
+                cond = cond.and(AGENT_DISPATCHES.SESSION_ID.eq(sessionId));
+            }
+            if (agentType != null && !agentType.isEmpty()) {
+                cond = cond.and(AGENT_DISPATCHES.AGENT_TYPE.eq(agentType));
+            }
+            if (sinceIso != null && !sinceIso.isEmpty()) {
+                cond = cond.and(AGENT_DISPATCHES.TS.ge(parseSinceFilter(sinceIso)));
+            }
+
+            var agg = ctx.select(
+                    count(),
+                    count().filterWhere(AGENT_DISPATCHES.T1_PUTS.eq(0)),
+                    coalesce(sum(AGENT_DISPATCHES.T1_PUTS), java.math.BigDecimal.ZERO))
+                .from(AGENT_DISPATCHES)
+                .where(cond)
+                .fetchOne();
+
+            List<Map<String, Object>> rows = ctx.select(
+                    AGENT_DISPATCHES.SESSION_ID,
+                    AGENT_DISPATCHES.AGENT_ID,
+                    AGENT_DISPATCHES.AGENT_TYPE,
+                    AGENT_DISPATCHES.TS,
+                    AGENT_DISPATCHES.T1_PUTS)
+                .from(AGENT_DISPATCHES)
+                .where(cond)
+                .orderBy(AGENT_DISPATCHES.TS.desc(), AGENT_DISPATCHES.ID.desc())
+                .limit(limit)
+                .fetch()
+                .map(r -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("session_id", r.value1());
+                    m.put("agent_id",   r.value2());
+                    m.put("agent_type", r.value3());
+                    m.put("ts",         utcIso(r.value4()));
+                    m.put("t1_puts",    r.value5());
+                    return m;
+                });
+
+            int dispatches = agg.value1();
+            Map<String, Object> summary = new java.util.LinkedHashMap<>();
+            summary.put("dispatches", dispatches);
+            summary.put("no_t1_put",  agg.value2());
+            summary.put("t1_puts",    agg.value3().longValue());
+
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("rows", rows);
+            out.put("total", dispatches);
+            out.put("summary", summary);
+            return out;
+        });
+    }
+
     /**
      * Fidelity-preserving import for tier_writes (ETL path).
      * Uses {@link #parseTsStrict} — throws on null/blank/malformed {@code tsIso}.
