@@ -121,8 +121,8 @@ _KNOWLEDGE_MAP_SEED = "## Knowledge Map\n\n" + "".join(
     for prefix in ("code", "docs", "knowledge", "rdr")
 )
 
-#: T1: the hook prints ids and tags only, at most ``_T1_INDEX_MAX`` = 15
-#: lines of at most ``_T1_INDEX_LINE_MAX`` = 100 chars (``_T1_INDEX_MAX`` = 8 lines), plus a "(N more)"
+#: T1: the hook prints ids and tags only, at most ``_T1_INDEX_MAX`` = 8
+#: lines of at most ``_T1_INDEX_LINE_MAX`` = 100 bytes, plus a "(N more)"
 #: line (nexus-mtheb), so the section has a worst case and it is seeded: 20
 #: entries whose tag lines run past the clamp, each followed by a content
 #: line the hook must drop. ``nx scratch list`` itself is stubbed in the

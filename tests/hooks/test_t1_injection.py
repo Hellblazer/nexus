@@ -116,7 +116,7 @@ def test_an_index_line_is_clamped_so_tags_cannot_outgrow_the_section(monkeypatch
     tags = ",".join(f"tag{i:03d}" for i in range(100))
     ctx = _ctx("conexus:developer", monkeypatch, scratch_list=f"[abcd0001] {tags}  flagged=False")
     [line] = [ln for ln in ctx.splitlines() if ln.startswith("[abcd0001]")]
-    assert len(line.encode("utf-8")) == subagent_start._T1_INDEX_LINE_MAX
+    assert len(line.encode("utf-8")) == 100
     assert line.endswith("…")
 
 
@@ -202,10 +202,17 @@ def test_the_session_start_context_leads_with_the_t1_contract(monkeypatch) -> No
     assert "name its id in each brief" in out
 
 
-def test_an_index_line_is_clamped_by_bytes_not_characters(monkeypatch) -> None:
-    """A non-ASCII tag is up to 4 bytes a character; the budget counts bytes."""
-    listing = "[abcd0001] " + "\u00e9" * 200 + "  flagged=False\n  content"
+@pytest.mark.parametrize("char", ["\u00e9", "\u4e2d", "\U0001f600"], ids=["2-byte", "3-byte", "4-byte"])
+def test_an_index_line_is_clamped_by_bytes_not_characters(monkeypatch, char: str) -> None:
+    """A non-ASCII tag is up to 4 bytes a character; the budget counts bytes.
+    The cut at byte 97 falls mid-character for the 3- and 4-byte cases, so a
+    clamp that split a character would leave U+FFFD or a short tail."""
+    listing = "[abcd0001] " + char * 200 + "  flagged=False\n  content"
     ctx = _ctx("conexus:developer", monkeypatch, scratch_list=listing)
     [line] = [ln for ln in ctx.splitlines() if ln.startswith("[abcd0001]")]
-    assert len(line.encode("utf-8")) <= 100
+    raw = line.encode("utf-8")
+    assert 100 - len(char.encode("utf-8")) < len(raw) <= 100
+    assert "\ufffd" not in line
+    assert raw.decode("utf-8") == line
     assert line.endswith("\u2026")
+    assert set(line[len("[abcd0001] ") : -1]) == {char}
