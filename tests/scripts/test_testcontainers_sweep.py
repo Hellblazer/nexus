@@ -41,6 +41,8 @@ if mode == "fail":
     sys.exit(1)
 if args[:1] == ["rm"] and mode == "slow-rm":
     time.sleep(float(os.environ.get("FAKE_DOCKER_DELAY", "5")))
+if args[:1] == ["ps"] and mode == "slow-ps":
+    time.sleep(float(os.environ.get("FAKE_DOCKER_DELAY", "5")))
 if args[:1] == ["rm"] and mode == "rm-fails":
     sys.stderr.write("conflict\n")
     sys.exit(1)
@@ -269,3 +271,23 @@ def test_leased_build_run_calls_the_sweep_step_first() -> None:
     body = text[text.index("leased_build_run() {"):]
     first = [ln.strip() for ln in body.splitlines()[1:6] if ln.strip() and not ln.strip().startswith("#")]
     assert "leased_build_sweep_testcontainers" in first
+
+
+def test_a_hung_docker_ps_is_abandoned_at_the_deadline(fake_docker) -> None:
+    env, log, ps = fake_docker
+    ps.write_text(json.dumps([_row("aaa111", OLD, "old")]))
+    t0 = time.monotonic()
+    r = _run({**env, "FAKE_DOCKER_MODE": "slow-ps", "FAKE_DOCKER_DELAY": "8"}, "--deadline", "1.5")
+    assert time.monotonic() - t0 < 6
+    assert r.returncode == 0
+    assert _removed(log) == []
+    assert "did not answer" in r.stderr
+
+
+def test_the_sweep_filters_on_the_label_the_java_recipe_sets() -> None:
+    """A rename on the Java side would make the sweep match nothing, silently."""
+    import re  # noqa: PLC0415 — test-local
+    recipe = (REPO / "service" / "src" / "build" / "java" / "dev" / "nexus" / "build" / "PgContainerRecipe.java").read_text()
+    labels = re.findall(r'withLabel\("([^"]+)"', recipe)
+    assert "dev.nexus.test.run" in labels
+    assert "label=dev.nexus.test.run" in SCRIPT.read_text()
