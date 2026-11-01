@@ -2458,11 +2458,15 @@ def _single_owner(owner_rows: dict[str, list[dict]] | None, chash: str, collecti
 
 
 def _named_collection(collections: Any) -> str | None:
-    """The one conformant collection name *collections* (a hydration arg) names, else ``None``: a scope alias
-    (``knowledge``) or several collections name no one chunk's collection."""
+    """The one collection *collections* (a hydration arg) names, else ``None``: a scope alias
+    (``knowledge``, ``all``) or several collections name no one chunk's collection."""
+    from nexus.corpus import CONTENT_TYPES  # noqa: PLC0415 — deliberate function-scoped import (avoid circular import), as index_model_for_collection above
+
     if isinstance(collections, list) and len(collections) == 1:
         collections = collections[0]
-    return collections if isinstance(collections, str) and "__" in collections else None
+    if not isinstance(collections, str) or "," in collections:
+        return None
+    return None if collections in CONTENT_TYPES or collections in ("", "all") else collections
 
 
 _CHASH_RE = re.compile(r"[0-9a-f]{64}")
