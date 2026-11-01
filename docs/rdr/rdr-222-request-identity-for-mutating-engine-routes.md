@@ -19,7 +19,10 @@ related_rdrs: [RDR-181, RDR-191, RDR-192, RDR-193, RDR-108, RDR-103, RDR-225, RD
 > Prose: see REGISTER.md beside this template.
 
 Draft written read-only against develop b1d900fd6, 2026-09-27. Phase 0 has
-since shipped (`engine-service-v0.1.137`); no other phase has code.
+since shipped (`engine-service-v0.1.137`), and so have Phase 1 and 1a
+(`engine-service-v0.1.162`, ledger retention for a token-less tenant in
+`v0.1.173`, conexus 7.83.1 and 7.91.0). Phase 2 is deferred and Phase 3 is
+design of record only; neither has code. See Status at close.
 
 ## Problem Statement
 
@@ -1336,7 +1339,7 @@ is never refused.
   in `--shakeout`'s index-throughput gate; no local harness runs it earlier
   (T2 `nexus/ulrjq-throughput-ab`).
 
-### Phase 1: ledger + sweeps + status route (closes ll31n)
+### Phase 1 (SHIPPED, engine-service-v0.1.162, conexus 7.83.1): ledger + sweeps + status route (closes ll31n)
 
 - Changeset: table, RLS, grants. Update the three hand-kept lists for a new
   tenant table: the Liquibase schema test for the family,
@@ -1365,7 +1368,7 @@ is never refused.
   `Idempotency-Replayed` response headers (222-research-13).
 - Engine cut, deploy, then the client release (choreography (a)).
 
-### Phase 1a: bounded, keyed expire (Amendment A1, nexus-1579m)
+### Phase 1a (SHIPPED with Phase 1): bounded, keyed expire (Amendment A1, nexus-1579m)
 
 - Measure first, on a PITR fork, never production: read-only
   `EXPLAIN (ANALYZE)` of one page's victim walk at `row_limit` 2,000 and of
@@ -1689,6 +1692,35 @@ and the confirmation round's follow-ups are folded in.
    a new advisory key carrying the RDR-191 marker text.
 3. **Recorded as an amendment under the existing acceptance**, not re-gated.
 
+## Status at close (2026-10-31)
+
+Sam's 2026-10-31 decision pass assigned the RDR-222 Phase 1 finish (T2
+`nexus/sam-decision-pass-2026-10-31`); the phase dispositions below were relayed by wren
+the same day.
+
+- **Phase 0 shipped** in `engine-service-v0.1.137`.
+- **Phase 1 and 1a shipped.** Engine in `engine-service-v0.1.162`; client in
+  conexus 7.83.1, which pinned it. A keyed bounded expire-quarantine sweep
+  through the edge read back `committed` from `GET /v1/requests/<id>` on
+  2026-10-21 (request `3e74554c-c197-4525-8bec-bbfa4083db88`, nexus-yye8l.17).
+  Ledger retention for a tenant that never sends a key (a tenant registry, a
+  BEFORE INSERT trigger and a backfill, changesets vectors-046-1..4, nexus-yye8l.21)
+  shipped in `engine-service-v0.1.173`, deployed 2026-10-31 20:53Z; conexus
+  7.91.0 pins it. The edge passthrough (nexus-yye8l.10) was confirmed by live
+  probes on 2026-10-21 for the 200 and replay paths; the key echo and
+  `Retry-After` on 409 and 503 are pinned by conexus `EdgeProxyHandlerIT`
+  (conexus `a2398338e`, PR #656) rather than probed live, because a live 409
+  or 503 needs an in-flight conflict or a held sweep gate.
+- **Phase 2 stays deferred** (Sam, 2026-09-28). Its case, nexus-wvek6, closed
+  as measured and not material: `raced_embeds_total` read 11 against 14,693
+  chunks embedded (0.075%) on cloud v0.1.160, 2026-10-18. Reopening it needs
+  that counter to read material first.
+- **Phase 3 is closed as design of record only** (Sam, 2026-09-28, no
+  evidence of harm). The text stays so a future run-fence change starts from it.
+- **Still unkeyed** (Technical Design, Sweeps, "Not keyed in Phase 1"):
+  `/gc/quarantine-restore` (nexus-k9kr9), the unbounded and floor-only sweep
+  forms, and the catalog-client mutating routes.
+
 ## Open Questions (for Sam)
 
 All seven are answered: 3 and 4 on 2026-09-27, 1, 2, 5 and 7 on 2026-10-17,
@@ -1796,6 +1828,8 @@ of record; nothing is trimmed. The record is larger than Phase 1 needs
 because it keeps that design.
 
 ## Revision History
+
+- 2026-10-31: Status at close added; Phase 1 and 1a headings marked shipped; the opening status line brought up to date. Phase 2 deferred and Phase 3 design-only, unchanged since 2026-09-28.
 
 - 2026-10-21: Amendment A1 (nexus-1579m): bounded, keyed expire-quarantine (Technical Design 7, Phase 1a, Test Plan 1a, wire bullets); nexus-k9kr9 kept separate with a recommended direction. Recorded under the existing acceptance by Sam's decision (no re-gate); the RDR stays `accepted`. Sources in 222-research-15.
 
