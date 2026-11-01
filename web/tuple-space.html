@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="The Nexus tuple space: one place where sessions, agents, hooks, and peer sessions leave records for each other, take them exclusively, wait for them, and query them, beside the three stores.">
+<meta name="description" content="The Nexus tuple space: one set of small records in the engine's Postgres database where sessions, agents, hooks, and CI leave records for each other, take them exclusively, and wait for them.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
 <title>The Nexus Tuple Space</title>
@@ -140,35 +140,28 @@ ol.plain li,ul.plain li{margin:3px 0}
 details.gloss td:first-child{width:11em;white-space:normal}
 details.gloss.out{max-width:68ch;margin:10px 0}
 details.gloss.out pre.out{margin:0;border:0;border-top:1px solid var(--line);border-radius:0 0 var(--radius) var(--radius)}
-.further .ttl{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
-.shapes td:first-child,.terms td:first-child{font-weight:500;white-space:nowrap}
-.ops{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:18px 0;max-width:68ch}
-@media (max-width:560px){.ops{grid-template-columns:1fr}}
-.op{background:var(--paper);border:1px solid var(--line);border-top:4px solid var(--blue);border-radius:var(--radius);padding:12px 14px;min-width:0}
-.op b{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:18px;font-weight:500;color:var(--blue);display:block}
-.op small{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
-.op p{font-size:14px;margin:4px 0;color:var(--ink-2)}
-.op.take{border-top-color:var(--brass)}.op.take b{color:var(--brass)}
+.terms td:first-child{font-weight:500;white-space:nowrap}
+.lesson .lhead{margin-bottom:4px}
+.pad{padding:0 14px 12px}
 figure.fig .bag{fill:var(--blue-soft);stroke:var(--blue);stroke-width:1.2}
-figure.fig .tuple{fill:var(--paper);stroke:currentColor;stroke-width:1}
-figure.fig .op{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;fill:var(--blue)}
-figure.fig .op.take{fill:var(--brass)}
-figure.fig .take-edge{stroke:var(--brass)}
+figure.fig rect.tuple{fill:var(--paper);stroke:currentColor;stroke-width:1}
+figure.fig .hd{font-weight:600}
+figure.fig .arrow{fill:currentColor;stroke:none}
 </style>
 <script data-goatcounter="https://hellblazer-nexus.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
 <body>
 <div class="wrap">
 
-<nav class="rail" aria-label="Lessons">
+<nav class="rail" aria-label="Sections">
   <div class="eyebrow">The tuple space</div>
   <ol id="toc">
-    <li><a href="#l1">What it does for you</a></li>
-    <li><a href="#l2">Send a message to an agent</a></li>
-    <li><a href="#l3">Ask another session for something</a></li>
-    <li><a href="#l4">See what is coordinating</a></li>
-    <li><a href="#l5">Tools and commands</a></li>
-    <li><a href="#l6">Appendix: how it is built</a></li>
+    <li><a href="#glance">The space at a glance</a></li>
+    <li><a href="#task">One task, end to end</a></li>
+    <li><a href="#kinds">The other kinds</a></li>
+    <li><a href="#decisions">Who decides what</a></li>
+    <li><a href="#limits">Limits and health</a></li>
+    <li><a href="#reference">Reference</a></li>
   </ol>
   <div class="meta"><a href="./">← Install guide</a><br><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="research.html">← Research with Nexus</a><br><a href="research-in-nexus.html">← Research in Nexus</a><br><a href="coordination.html">Coordination →</a><br><a href="how-agents-ship.html">How agents ship →</a></div>
 </nav>
@@ -176,250 +169,227 @@ figure.fig .take-edge{stroke:var(--brass)}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · coordination</span><a href="research-in-nexus.html">← Research in Nexus</a></div>
 <h1>The Nexus Tuple Space</h1>
-<p class="lede">The tuple space is where your Claude Code session, its agents, and the other sessions on your machine leave records for each other: a message to deliver, a request to answer. This page shows the two things you say to use it, what you see when you do, and how it works underneath.</p>
-<p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders. The prompts are examples, and your own words work. Everything on this page is live in the current release. The reference, with the exact parameters of every operation, is <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md">docs/tuple-space.md</a>, the <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space-walkthroughs.md">walkthroughs</a> draw each use as a sequence, <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a> records the design, and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/linda-in-nexus.md">Linda in Nexus</a> explains the thinking behind it: what was borrowed, what was left out, and why.</p>
+<p class="lede">The tuple space is a shared set of small records in the engine's Postgres database. Sessions, agents, hooks, and CI leave records there for each other. Any participant can add a record, read it, or take it. A take is exclusive: when two participants reach for the same record, one gets it. A reader can also wait for a record that has not arrived yet. A task queue, a lock, a board, and a mailbox are the same operations on different record shapes.</p>
+<p class="note">The reference, with the exact parameters of every operation, is <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md">docs/tuple-space.md</a>. The <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space-walkthroughs.md">walkthroughs</a> draw each use as a sequence. <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a> records the design, and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/linda-in-nexus.md">Linda in Nexus</a> explains what was borrowed, what was left out, and why.</p>
 
-<div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
+<div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><div class="tbl"><table class="terms">
 <tr><th>Term</th><th>Meaning</th></tr>
-<tr><td>tuple</td><td>One record in the tuple space. It has keys, dimensions, and a body.</td></tr>
-<tr><td>keys</td><td>The fields a take operation matches on. A take operation must give every key exactly.</td></tr>
-<tr><td>dimensions</td><td>Fields that describe the tuple without being part of a take operation's match. A read can match on them.</td></tr>
-<tr><td>subspace</td><td>A named part of the tuple space, such as the mailbox of one agent. Every tuple belongs to exactly one subspace.</td></tr>
-<tr><td>template</td><td>The rules for one kind of subspace: required keys, allowed dimensions, lifetime, and whether take operations are allowed.</td></tr>
-<tr><td>claim</td><td>The state of a tuple between a take operation and its ack. The taker holds the claim.</td></tr>
-<tr><td>lease</td><td>The time limit on a claim. When the lease ends, the tuple becomes available again.</td></tr>
-<tr><td>ack, nack</td><td>Ack ends a claim and marks the tuple consumed. Nack ends a claim and returns the tuple to the space.</td></tr>
-<tr><td>dead letter</td><td>A tuple that failed three delivery attempts. Nobody can take it, but anybody can read it.</td></tr>
-<tr><td>agent</td><td>A process that a Claude Code session starts to do one task.</td></tr>
-<tr><td>instance</td><td>One Claude Code session, under the name the harness gives it.</td></tr>
-<tr><td>engine</td><td>The Nexus service that owns the database and answers every tuple call.</td></tr>
-<tr><td>hook</td><td>A script that the harness runs automatically around an event, such as a session starting, an agent starting, or a prompt being sent.</td></tr>
-<tr><td>tenant</td><td>One customer of the engine. Every store is separated by tenant, and one credential gives access to one tenant.</td></tr>
-<tr><td>read-many store</td><td>A store where any number of readers see the same entry and nobody can claim it.</td></tr>
-<tr><td>bead</td><td>One tracked unit of work in the project's issue tracker.</td></tr>
-<tr><td>correlation id</td><td>An id that a request carries and its reply repeats, so the two can be paired.</td></tr>
-<tr><td>claim log</td><td>A table with one row for every claim, ack, nack, lease end, and dead letter. Rows are never edited.</td></tr>
-<tr><td>digest</td><td>A short fingerprint of a set of templates. It changes when any template changes.</td></tr>
-</table></details></div>
+<tr><td>tuple</td><td>One record in the space. It has keys, dimensions, and a body. A take operation matches on the keys, and the dimensions only describe the tuple.</td></tr>
+<tr><td>subspace</td><td>A named part of the space, such as one queue. Every tuple belongs to exactly one subspace.</td></tr>
+<tr><td>template</td><td>The rules for one kind of subspace: required keys, allowed dimensions, lifetime, limits, and whether a take is allowed.</td></tr>
+<tr><td>nonce</td><td>A value that the writer chooses to name one write. It is part of the tuple's identity.</td></tr>
+<tr><td>claim, lease</td><td>A claim is the state of a tuple between a take and its end. The lease is the time limit on a claim.</td></tr>
+<tr><td>dead letter</td><td>A tuple that failed its last allowed attempt. Nobody can take it, but anybody can read it.</td></tr>
+</table></div></details></div>
 
-<!-- ============ 1 ============ -->
-<section class="lesson" id="l1">
-<div class="lhead"><span class="lnum">1</span><h2>What it does for you</h2><span class="ltime">5 min</span></div>
-<p class="why">A tuple is a small typed record in a shared space. Any process can add one, read one, or take one, and a take is exclusive: when two processes reach for the same tuple, one gets it and the other does not. A read can wait for a tuple that has not arrived yet. Those two operations, exclusive take and wait, are what the harness, memory, and scratch do not give you, and they are enough for the two situations below.</p>
-
-<h3>Tell an agent something while it works</h3>
-<div class="see">You might say</div>
-<div class="cmd"><pre>Tell the agent that works on <span class="ph">&lt;THE TASK&gt;</span> that the schema changed. Put the message in its mailbox.</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What happens</div>
-<p>Claude writes a message tuple to the agent's mailbox. The text a hook gives the agent at start tells it to check its mailbox before it hands back its result, so it can act on the message first. The message reaches exactly one reader.</p>
-
-<h3>Ask another session for something</h3>
-<div class="see">You might say</div>
-<div class="cmd"><pre>Ask the <span class="ph">&lt;PEER SESSION&gt;</span> session to rebuild its gate jar. Wait for its answer.</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What happens</div>
-<p>Claude writes a request tuple to the other session's mailbox and waits on its own mailbox for the answer. The other session receives the request, does the work, and writes the answer. Nobody relays anything by hand, and an unanswered request stays visible with its age.</p>
-
+<section class="lesson" id="glance">
+<div class="lhead"><h2>The space at a glance</h2></div>
 <figure class="fig">
-<svg viewBox="0 0 760 360" role="img" aria-label="Three kinds of process around one shared tuple space: a session, its agents, and a peer session. Arrows labelled out and in connect each to the space.">
+<svg viewBox="0 0 760 330" role="img" aria-label="Four kinds of participant around one tuple space in Postgres. Your session and its peers write, read, and take. Agents take work and post results. Hooks take what waits for a session and show it. A CI adapter posts build results. The space holds queue tasks, board posts, locks, and mailbox messages.">
   <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
   <marker id="arb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--brass)"/></marker></defs>
-  <text x="380" y="94" text-anchor="middle" class="sm">one tuple space, in postgres</text>
-  <ellipse class="bag" cx="380" cy="185" rx="150" ry="80"/>
-  <rect class="tuple" x="320" y="139" width="120" height="26" rx="3"/><text x="380" y="156" text-anchor="middle" class="lbl">message → agent b</text>
-  <rect class="tuple" x="345" y="173" width="70" height="26" rx="3"/><text x="380" y="190" text-anchor="middle" class="lbl">request</text>
-  <rect class="tuple" x="330" y="207" width="100" height="26" rx="3"/><text x="380" y="224" text-anchor="middle" class="lbl">answer · r-41</text>
+  <text x="380" y="66" text-anchor="middle" class="sm">one tuple space, in postgres</text>
+  <ellipse class="bag" cx="380" cy="165" rx="150" ry="84"/>
+  <rect class="tuple" x="270" y="130" width="100" height="24" rx="3"/><text x="320" y="146" text-anchor="middle" class="lbl">queue task</text>
+  <rect class="tuple" x="390" y="130" width="100" height="24" rx="3"/><text x="440" y="146" text-anchor="middle" class="lbl">board post</text>
+  <rect class="tuple" x="270" y="176" width="100" height="24" rx="3"/><text x="320" y="192" text-anchor="middle" class="lbl">lock</text>
+  <rect class="tuple" x="390" y="176" width="100" height="24" rx="3"/><text x="440" y="192" text-anchor="middle" class="lbl">mailbox message</text>
 
-  <rect class="you" x="20" y="40" width="130" height="44" rx="4"/><text x="85" y="58" text-anchor="middle">your session</text><text x="85" y="74" text-anchor="middle" class="lbl">starts the agents</text>
-  <rect class="box" x="20" y="286" width="130" height="44" rx="4"/><text x="85" y="304" text-anchor="middle">agents</text><text x="85" y="320" text-anchor="middle" class="lbl">started by it</text>
-  <rect class="box" x="610" y="286" width="130" height="44" rx="4"/><text x="675" y="304" text-anchor="middle">peer session</text><text x="675" y="320" text-anchor="middle" class="lbl">same machine</text>
+  <rect class="you" x="20" y="24" width="200" height="66" rx="4"/><text x="120" y="44" text-anchor="middle" class="hd">Sessions</text><text x="120" y="60" text-anchor="middle" class="lbl">yours and its peers</text><text x="120" y="76" text-anchor="middle" class="lbl">write, read, take</text>
+  <rect class="box" x="20" y="240" width="200" height="66" rx="4"/><text x="120" y="260" text-anchor="middle" class="hd">Agents</text><text x="120" y="276" text-anchor="middle" class="lbl">started by a session</text><text x="120" y="292" text-anchor="middle" class="lbl">take work, post results</text>
+  <rect class="box" x="540" y="24" width="200" height="66" rx="4"/><text x="640" y="44" text-anchor="middle" class="hd">Hooks</text><text x="640" y="60" text-anchor="middle" class="lbl">run around harness events</text><text x="640" y="76" text-anchor="middle" class="lbl">take what waits, show it</text>
+  <rect class="box" x="540" y="240" width="200" height="66" rx="4"/><text x="640" y="260" text-anchor="middle" class="hd">CI adapter</text><text x="640" y="276" text-anchor="middle" class="lbl">receives GitHub webhooks</text><text x="640" y="292" text-anchor="middle" class="lbl">posts build results</text>
 
-  <line x1="150" y1="52" x2="300" y2="108" class="dash" marker-end="url(#ar)"/><text x="162" y="44" class="op">out message</text>
-  <line x1="150" y1="76" x2="245" y2="150" class="take-edge" marker-end="url(#arb)"/><text x="150" y="152" class="op take">in, waits</text>
-  <line x1="150" y1="298" x2="262" y2="232" marker-end="url(#ar)"/><text x="162" y="322" class="op">in, read mailbox</text>
-  <line x1="610" y1="298" x2="500" y2="233" class="dash" marker-end="url(#ar)"/><text x="600" y="234" text-anchor="end" class="op">in request</text>
-  <line x1="610" y1="322" x2="470" y2="249" marker-end="url(#ar)"/><text x="600" y="344" text-anchor="end" class="op">out answer</text>
-  <text x="380" y="352" text-anchor="middle" class="sm">brass: your own step</text>
+  <line x1="220" y1="60" x2="293" y2="100" class="you-edge" marker-start="url(#arb)" marker-end="url(#arb)"/>
+  <line x1="220" y1="270" x2="293" y2="231" marker-start="url(#ar)" marker-end="url(#ar)"/>
+  <line x1="540" y1="60" x2="467" y2="100" marker-start="url(#ar)" marker-end="url(#ar)"/>
+  <line x1="540" y1="270" x2="467" y2="231" marker-start="url(#ar)" marker-end="url(#ar)"/>
+  <text x="380" y="322" text-anchor="middle" class="sm">brass: your own session</text>
 </svg>
-<figcaption>Every process talks to the tuple space and to no other process.</figcaption>
+<figcaption>Participants meet only in the space.</figcaption>
 </figure>
 
-<p>The harness, hooks, memory, and scratch keep doing what they do. The tuple space is built from them: a hook gives each agent its mailbox address, the ids the harness assigns are its addresses, and Claude reads it with the same kind of tools it already calls. Lessons 2 and 3 show each situation in more detail, lesson 4 shows how to look at the space, and the <a href="#l6">appendix</a> explains the operations underneath.</p>
+<p>Sessions and agents write records, read them, and take them. Hooks run around harness events. The agent-start hook gives each agent its id and mailbox address. The prompt hook takes the messages that wait for a session and shows them to Claude. CI writes through a webhook adapter, which posts each state change of each run and job to the CI board.</p>
+<p>The harness already has messaging. SendMessage and teammate panes reach a live session or agent by name, and they fit when the reader is running and the answer is quick. The tuple space adds three things at that edge. A take is exclusive, so a task goes to one worker. A wait wakes when a record arrives. A lease returns a task when its holder dies. A record also stays in the engine until it expires, so the reader need not be running when it is written. <a href="coordination.html#cmp">Coordination</a> compares the two point by point and covers messages between sessions and agents.</p>
+<p>Sessions on different machines share one space when they use one engine, as every session does in cloud mode. So the exclusive take and the lease hold across machines. In local mode each machine has its own engine.</p>
 </section>
 
-<!-- ============ 2 ============ -->
-<section class="lesson" id="l2">
-<div class="lhead"><span class="lnum">2</span><h2>Send a message to an agent</h2><span class="ltime">10 min</span></div>
-<p class="why">Every agent has a mailbox, and a message to the agent is a tuple in it. The text a hook gives the agent at start tells it to check its mailbox before it hands back its report, so a correction you send while it works can change that report. No hook reads the mailbox for the agent.</p>
+<section class="lesson" id="task">
+<div class="lhead"><h2>One task, end to end</h2></div>
+<p>A task in a work queue passes through every operation the space has, so it serves as the example for the rest of the page.</p>
+<figure class="fig">
+<svg viewBox="0 0 760 210" role="img" aria-label="The states of one queue task. A producer's out makes it available. In makes it claimed. Ack moves it to consumed. Nack, release, or a lease that ends returns it to available. A failed attempt that reaches the limit moves it to dead letter.">
+  <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+  <rect class="box" x="40" y="70" width="140" height="44" rx="4"/><text x="110" y="90" text-anchor="middle" class="hd">available</text><text x="110" y="105" text-anchor="middle" class="lbl">waiting for a worker</text>
+  <rect class="box" x="310" y="70" width="140" height="44" rx="4"/><text x="380" y="90" text-anchor="middle" class="hd">claimed</text><text x="380" y="105" text-anchor="middle" class="lbl">held under a lease</text>
+  <rect class="box" x="580" y="70" width="140" height="44" rx="4"/><text x="650" y="90" text-anchor="middle" class="hd">consumed</text><text x="650" y="105" text-anchor="middle" class="lbl">work done</text>
+  <rect class="box" x="310" y="150" width="140" height="44" rx="4"/><text x="380" y="170" text-anchor="middle" class="hd">dead letter</text><text x="380" y="185" text-anchor="middle" class="lbl">visible, never taken</text>
+  <line x1="180" y1="92" x2="301" y2="92" marker-end="url(#ar2)"/><text x="241" y="82" text-anchor="middle" class="lbl">in</text>
+  <line x1="450" y1="92" x2="571" y2="92" marker-end="url(#ar2)"/><text x="511" y="82" text-anchor="middle" class="lbl">ack</text>
+  <path d="M380 70 V34 H110 V61" marker-end="url(#ar2)"/><text x="245" y="26" text-anchor="middle" class="lbl">nack, release, or a lease that ends</text>
+  <line x1="380" y1="114" x2="380" y2="141" marker-end="url(#ar2)"/><text x="392" y="134" class="lbl">attempt limit reached</text>
+</svg>
+<figcaption>The states of one queue task.</figcaption>
+</figure>
 
-<h3>The address</h3>
-<p>When Claude starts an agent, a hook gives the agent an id and tells it its mailbox address. You never need the id yourself: describe the agent by its task, as in lesson 1, and Claude resolves it. To see the addresses that exist, ask <em>"List the mailboxes in the tuple space"</em>, and Claude runs a list by prefix.</p>
-<details class="gloss out"><summary>What the agent receives at start</summary><pre class="out">Claimant id: <b>a3f7c2e1d09b4c551</b> — mailbox: <b>mailbox/a3f7c2e1d09b4c551</b></pre></details>
+<h3>Add the task</h3>
+<p>A producer calls <code>out</code> on a subspace such as <code>queue/site-demo</code>. The engine resolves the subspace name to a template and refuses an <code>out</code> that does not fit it. The queue template requires one key, <code>queue</code>, and one dimension, <code>from</code>. A task may carry a shorter lifetime than the template's, set with <code>--ttl-seconds</code>.</p>
+<p>The producer also supplies a nonce. The task's identity comes from its keys, <code>from</code>, and the nonce, never from the insert time. So a retry after a dropped connection lands on the same task. The same nonce with a different body is refused as <code>NonceReuseConflict</code>, because a nonce names one write.</p>
+<div class="cmd"><pre>nx tuple out queue/site-demo --key queue=site-demo --dim from=planner --body "rebuild the gate jar" --nonce job-17 --ttl-seconds 120</pre><button class="copy" type="button">Copy</button></div>
+<details class="gloss out"><summary>What you see: the task, the same task again, and a changed body</summary><pre class="out">$ nx tuple out queue/site-demo … --body "rebuild the gate jar" --nonce job-17
+<b>48ba5b597a1e…</b>
+$ nx tuple out queue/site-demo … --body "rebuild the gate jar" --nonce job-17
+<b>48ba5b597a1e…</b>
+$ nx tuple out queue/site-demo … --body "rebuild something else" --nonce job-17
+Error: <b>NonceReuseConflictError</b>: tuple id 48ba5b597a1e… already exists in subspace 'queue/site-demo' with a different body or dimensions; a nonce names one write, so mint a fresh nonce for a new message, or resend the original body to retry</pre></details>
 
-<h3>Send</h3>
-<div class="see">What Claude does</div>
-<p>One <code>tuple_out</code> call to the agent's mailbox with the message body and a message id that Claude creates. The id becomes the identity of the tuple, so if the connection fails and Claude sends again, the second send lands on the same tuple and the agent never sees the message twice. The tool returns the tuple's id.</p>
-<details class="gloss out"><summary>What you see</summary><pre class="out">tuple_out  subspace: mailbox/a3f7c2e1d09b4c551   keys: {to: a3f7c2e1d09b4c551}
-           dims: {from: <span class="ph">&lt;YOUR SESSION&gt;</span>, kind: directive}   nonce: msg-17
-→ <b>e4175991d6ad…</b></pre></details>
-<p>The body is a pointer, not the content. It names the memory entry, the document, or the scratch note that holds what the agent needs, and the agent opens that item. The <a href="#l6">appendix</a> says why.</p>
+<h3>Claim it</h3>
+<p>A worker calls <code>in</code> with every key the template pins. A take matches on keys alone, and the call must name them all, so a wide pattern cannot claim a task by accident. The engine picks the oldest available task, skips any task that another worker is claiming at that moment, and returns it with a claim id. The task is now claimed, and the worker holds a lease: a time limit after which the engine treats the claim as abandoned. On a queue the lease is at most 900 seconds.</p>
+<p>A worker that finds nothing can wait. With <code>--timeout-s 25</code>, the engine holds the call until a task arrives or the timeout ends. A signal that the engine sends after a write commits wakes the call, so nothing polls. The engine refuses a timeout above 25 seconds with <code>TimeoutTooLong</code>, so a wait of minutes is a loop of waits. When the engine stops for a deploy it wakes every waiter, so a deploy costs one retry.</p>
+<div class="cmd"><pre>nx tuple in queue/site-demo --pattern queue=site-demo --claimant worker-a --lease-s 60</pre><button class="copy" type="button">Copy</button></div>
+<details class="gloss out"><summary>What you see</summary><pre class="out"><b>claim_id=f99cc6e2-759a-4bc2-907f-1f0790fa298f</b>
+  id: 48ba5b597a1e…
+  subspace: queue/site-demo
+  template: queue/&lt;name&gt;
+  keys: {'queue': 'site-demo'}
+  dims: {'from': 'planner'}
+  body: rebuild the gate jar
+  claim_state: claimed</pre></details>
 
-<h3>What the agent sees</h3>
-<p>On its next mailbox read, the agent takes the message with <code>tuple_in</code>, which returns the tuple and a claim id. It acts on the message, then acks the claim.</p>
-<details class="gloss out"><summary>What you see</summary><pre class="out">tuple_in  subspace: mailbox/a3f7c2e1d09b4c551   keys: {to: a3f7c2e1d09b4c551}   claimant: a3f7c2e1d09b4c551
-{
-  "tuple": {
-    "keys": {"to": "a3f7c2e1d09b4c551"},
-    "dims": {"from": "<span class="ph">&lt;YOUR SESSION&gt;</span>", "kind": "directive"},
-    "body": "The schema changed. Read memory <span class="ph">&lt;PROJECT&gt;</span>/<span class="ph">&lt;TITLE&gt;</span> before you write the migration.",
-    "claim_state": "claimed",  "lease_until": "…T16:17:51Z",  "attempts": 0
-  },
-  "claim_id": "<b>ede42f56-3a09-4897-86ee-856b9209ec9c</b>"
-}
-tuple_ack  claim_id: ede42f56-…   claimant: a3f7c2e1d09b4c551
-→ Acked claim ede42f56-…</pre></details>
+<h3>Finish, or give it back</h3>
+<p>A worker whose job runs long calls <code>renew</code> before the lease ends. The engine moves the lease forward but never past the task's own expiry, and it refuses a request above the template's lease cap. A renew never counts as an attempt.</p>
+<p>When the work is done, the worker calls <code>ack</code>, which consumes the task. An <code>ack</code> can carry a reply, which the engine writes in the same transaction. A crash therefore cannot deliver the reply and leave the task to run again. When the work fails, the worker calls <code>nack</code>, which returns the task to the queue and counts one failed attempt. A worker that hands the task back in good order calls <code>release</code>, which returns it without counting an attempt. A worker that crashes calls nothing: its lease ends, the task is claimable again, and the lapse counts as a failed attempt.</p>
+<details class="gloss out"><summary>What you see: a renew, then the ack</summary><pre class="out">$ nx tuple renew --claim-id f99cc6e2-… --claimant worker-a --lease-s 60
+<b>…T05:22:55.375602+00:00</b>
+$ nx tuple ack f99cc6e2-… --claimant worker-a
+<b>Acked claim f99cc6e2-…</b></pre></details>
 
-<h3>Delivery</h3>
-<p>Each message reaches exactly one reader. When two readers take from the same mailbox, the engine hands each message to one of them. A reader that takes a message and then crashes never acks it, so its lease ends, the message becomes available again, and the next reader gets it. A reader whose work is still running renews its lease with <code>tuple_renew</code> before the lease ends, so the message stays with that reader. A nack counts as one failed attempt, and so does a lease that ends without an ack. After three failed attempts, the engine marks the message as a dead letter. Nobody can take it, but anybody can read it, so a message that makes every reader crash stays visible. An unclaimed or dead-lettered message survives at most seven days.</p>
-<p class="note">Neither side has to know when the other is running. The agent reads the space, the sender writes the space, and that is why a shared space works better than a direct message between two processes on different schedules.</p>
+<h3>Fail, and the dead letter</h3>
+<p>After three failed attempts, the engine marks the task as a dead letter. The aspect-extraction queue allows six, because its worker retries on a ladder. Nobody can take a dead letter, but any reader can see it. So a task that makes every worker fail stays visible and does not loop. A task that nobody claims expires after its lifetime, which is two days on a queue.</p>
+<details class="gloss out"><summary>What you see after three claims that each ended in a nack</summary><pre class="out">$ nx tuple stats queue/site-demo
+subspace: queue/site-demo
+total: 1
+available: 0
+claimed: 0
+lapsed: 0
+<b>dead: 1</b>
+consumed: 1
+expired_unpurged: 0
+$ nx tuple in queue/site-demo --pattern queue=site-demo --claimant worker-a --lease-s 30
+No matching tuple.</pre></details>
+
+<h3>The sweep</h3>
+<p>A sweep runs in the engine every six hours. It releases claims whose lease ended and nobody retook, and it dead-letters a task that has reached its attempt limit. It removes expired tuples, consumed tuples past their retention, and old claim-log rows. The claim log gets one row for every claim, ack, nack, lease end, and dead letter. Rows are appended and never edited, except that the purge of a tuple sets its log rows' tuple id to null. The sweep is why a worker that dies costs a delay and no task.</p>
 </section>
 
-<!-- ============ 3 ============ -->
-<section class="lesson" id="l3">
-<div class="lhead"><span class="lnum">3</span><h2>Ask another session for something</h2><span class="ltime">10 min</span></div>
-<p class="why">Every session has a mailbox addressed by its session id, and that mailbox is a channel between any two sessions that share the same engine and the same tenant. That is every session on one machine, and in cloud mode every session on every machine. You name a peer by the name that the harness shows.</p>
-
-<h3>The exchange</h3>
-<p>Behind the instruction in lesson 1, Claude sends a request to the peer's name with kind "request" and a new correlation id, then waits on its own mailbox. The peer receives the request, opens what it names, does the work, and answers with a reply that carries the same correlation id. The request names its subject with a pointer, whether a bead id, a memory title, or a document address, and if the work produced something, the reply names where it was written.</p>
-<details class="gloss out"><summary>What you see, on your side</summary><pre class="out">mailbox_send  to: <b>nexus-8c</b>   kind: request   correlation_id: r-41
-              body: Confirm you're subscribed to the channel. Ack when done.
-→ {"to": "<b>cdeb12b5-…</b>", "address_kind": "<b>session</b>", "from": "5b354c36-…"}
-tuple_in   subspace: mailbox/<b>5b354c36-…</b>   keys: {to: 5b354c36-…}   timeout_s: 25
-{
-  "tuple": {
-    "dims": {"from": "cdeb12b5-…", "kind": "<b>reply</b>", "correlation_id": "<b>r-41</b>", "address_kind": "session"},
-    "body": "Subscribed. I am on the channel now …"
-  },
-  "claim_id": "784e820d-…"
-}
-tuple_ack  … → Acked</pre></details>
-<p>The peer receives the request in one of two ways. With the plugin's hooks, the prompt hook shows the request at the peer's next prompt. When the peer's session has the channel enabled, its nexus MCP server announces a reference to the request, never the body, and that announcement starts the prompt at once. The hook claims the request, acks it and shows it before the peer's turn, so the peer acts on it and claims nothing. The peer then does the work and sends the reply as a new message with the same correlation id, as in the output above. Without the plugin's hooks, the peer claims the request itself with <code>tuple_in</code>, does the work, and calls <code>tuple_ack</code> with the reply. The reply and the ack are then one call, so a crash cannot deliver the reply and leave the request to run again. An unanswered request stays in the mailbox, and lesson 4 shows its age.</p>
-
-<div class="callout rule"><p>The channel needs a flag on every launch: <code>claude --channels plugin:conexus@nexus-plugins</code> or <code>claude --dangerously-load-development-channels server:nexus</code>. <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md#setup-turning-on-push-delivery">Tuple space, "Setup: turning on push delivery"</a> has the exact steps.</p></div>
-<p class="note">To find a peer's name, ask Claude to list the sessions on the machine. Send to the name it shows, such as <code>nexus-8c</code>. The send resolves the name in the session directory and delivers to that session's mailbox.</p>
-
-<h3>Wait for the reply</h3>
-<p>After it sends the request, Claude calls <code>tuple_in</code> on this session's own mailbox with a timeout. If the reply is already there, the call returns at once. If not, the call waits inside the engine and wakes when a tuple arrives in the mailbox or the timeout ends.</p>
-<p>Each call waits for at most twenty-five seconds and then returns what it found, so a wait of minutes is a loop of these calls. The limit keeps every wait shorter than every network timeout between the client and the engine, so a wait can never become a dropped connection.</p>
-<p class="note">The engine wakes a waiting call with a signal, not by polling. When a tuple is written, the engine signals every reader waiting on that subspace once the write is committed, and readers on other subspaces are not signaled. When the engine stops for a deploy, it wakes every waiting call and each returns what it has, so a deploy costs one retry and never a stall.</p>
+<section class="lesson" id="kinds">
+<div class="lhead"><h2>The other kinds</h2></div>
+<p>The other kinds reuse these operations, and the template decides what differs. <code>nx tuple templates</code> lists the templates the engine loaded.</p>
+<p>A board is a topic where take is disabled. Each post is a new tuple, so the board is an append-only log that any number of readers read with <code>rd</code>. A reader that was away resumes from a cursor to see what it missed. A reader waits for the next post with a timeout on <code>rd</code>. The poster's <code>from</code> dimension is what the poster typed, so a post is input and never proof of who wrote it. The CI board has the same shape with a larger cap, because CI writes many posts for each push.</p>
+<p>A lock is a queue of one task for one resource. Its identity is its key alone, so any process can call <code>out</code> to make sure the lock exists. <code>in</code> holds the lock, <code>renew</code> keeps it while the holder works, and <code>release</code> hands it to the next holder. <code>ack</code> is refused on a lock, because a consumed lock could not be taken again. A lock never dead-letters, so when a holder dies and its lease ends, the lock is free.</p>
+<p>The directory maps a session's name to the session that holds it, and a mailbox holds the messages for one session or one agent. <a href="coordination.html">Coordination</a> covers both.</p>
+<div class="tbl"><table>
+<tr><th>Kind</th><th>Take</th><th>Lifetime</th><th>Limits</th></tr>
+<tr><td><code>queue/&lt;name&gt;</code></td><td>yes</td><td>2 days</td><td>10,000 live rows, 3 attempts</td></tr>
+<tr><td><code>aspects</code></td><td>yes</td><td>90 days</td><td>10,000 live rows, 6 attempts</td></tr>
+<tr><td><code>lock/&lt;resource&gt;</code></td><td>yes</td><td>7 days</td><td>never dead-letters</td></tr>
+<tr><td><code>board/&lt;topic&gt;</code></td><td>no</td><td>7 days, or less if the post sets it</td><td>500 live posts, 1,024-byte body</td></tr>
+<tr><td><code>board/ci/&lt;topic&gt;</code></td><td>no</td><td>3 days</td><td>5,000 live posts, 1,024-byte body</td></tr>
+<tr><td><code>mailbox/&lt;address&gt;</code></td><td>yes</td><td>7 days</td><td>3 attempts</td></tr>
+<tr><td><code>directory/&lt;name&gt;</code></td><td>no</td><td>7 days</td><td>no body</td></tr>
+</table></div>
 </section>
 
-<!-- ============ 4 ============ -->
-<section class="lesson" id="l4">
-<div class="lhead"><span class="lnum">4</span><h2>See what is coordinating</h2><span class="ltime">10 min</span></div>
-<p class="why">Tuples are rows with registered shapes, so you can query the coordination state of the whole system: which messages wait, which requests have no answer, which messages failed.</p>
+<section class="lesson" id="decisions">
+<div class="lhead"><h2>Who decides what</h2></div>
+<div class="tbl"><table>
+<tr><th>Decision</th><th>Made by</th></tr>
+<tr><td>Which shapes exist, and their lifetimes and limits</td><td>The templates, which the engine loads from files at start, so every client sees the same shapes</td></tr>
+<tr><td>Whether a write fits its template</td><td>The engine, on every <code>out</code></td></tr>
+<tr><td>Which caller wins a take</td><td>The engine, in one short transaction</td></tr>
+<tr><td>Whether a lease still holds</td><td>The engine's clock</td></tr>
+<tr><td>Whether work is done, failed, or handed back</td><td>The worker, by <code>ack</code>, <code>nack</code>, or <code>release</code></td></tr>
+<tr><td>What a body means and what to do about it</td><td>The producer and the worker. The engine never reads a body.</td></tr>
+<tr><td>Who may write or take</td><td>Any caller that holds the tenant's credential. Nothing below the tenant has an identity the engine could check.</td></tr>
+<tr><td>Whether a session acts on a record</td><td>Claude, in that session. The prompt hook claims and acks a message and shows it to Claude, which decides what to do with it.</td></tr>
+</table></div>
+</section>
 
-<div class="see">You might say</div>
-<div class="cmd"><pre>Which mailboxes hold a message that nobody has taken?</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What Claude does</div>
-<p>Claude lists the mailboxes by prefix. The list gives one line for each mailbox. Then Claude reads a mailbox with an empty pattern, which returns every live tuple in it. Only <code>tuple_rd</code> can do that read, because a take operation must give every key exactly and can never claim by accident with a wide pattern.</p>
-<details class="gloss out"><summary>What you see</summary><pre class="out">$ nx tuple list --prefix mailbox/
-mailbox/0f3c9023-…  total=0 available=0 claimed=0 lapsed=0 dead=0 consumed=31 expired_unpurged=0
-mailbox/9b5eeb37-…  total=1 available=<b>1</b> claimed=0 lapsed=0 dead=0 consumed=20 expired_unpurged=0</pre></details>
-<p class="note">The first mailbox delivered all 31 of its messages. The second holds one message that nobody has taken.</p>
-
-<h3>Three kinds of question</h3>
+<section class="lesson" id="limits">
+<div class="lhead"><h2>Limits and health</h2></div>
+<p>The engine enforces every limit below and refuses a call that breaks one with a named error.</p>
+<div class="tbl"><table>
+<tr><th>Limit</th><th>Value</th><th>When it is broken</th></tr>
+<tr><td>Body</td><td>4,096 bytes, or less if the template sets it</td><td><code>TooLarge</code></td></tr>
+<tr><td>One key, dimension, or pattern value</td><td>256 bytes</td><td><code>TooLarge</code></td></tr>
+<tr><td>One request</td><td>8,192 bytes</td><td>refused before parsing</td></tr>
+<tr><td>One wait</td><td>25 seconds by default</td><td><code>TimeoutTooLong</code></td></tr>
+<tr><td>One lease</td><td>900 seconds on a queue, a lock, or a mailbox</td><td><code>LeaseTooLong</code></td></tr>
+<tr><td>Wait slots</td><td>4 for each claimant, 16 for the engine, by default</td><td><code>ParkCapExceeded</code>: the caller gets the probe result and backs off</td></tr>
+<tr><td>Live rows in a subspace</td><td>the cap in the table above</td><td>the write is refused until rows expire</td></tr>
+<tr><td>Subspaces in one <code>tuple_list</code> page over MCP</td><td>100</td><td>the page ends with the cursor for the next one</td></tr>
+</table></div>
+<p>Three reads show the state of the space. <code>tuple_list</code> and <code>nx tuple list</code> give one line for each subspace with its counts of available, claimed, dead, and consumed tuples. <code>tuple_stats</code> and <code>nx tuple stats</code> give the census of one subspace. <code>tuple_rd</code> and <code>nx tuple rd</code> with an empty pattern return every live tuple in a subspace, each with its state. That includes claimed tuples and dead letters.</p>
+<p><code>nx doctor</code> has seven rows for the space. Each one watches one thing:</p>
 <ul class="plain">
-<li><strong>What is in a subspace.</strong> A read with an empty pattern. For a mailbox it returns every waiting message, including tuples under a live claim and dead letters, each with its state.</li>
-<li><strong>Which subspaces exist, and how full they are.</strong> A list by prefix returns every subspace with counts of available, claimed, dead, and consumed tuples and the oldest and newest timestamps. "Every mailbox with a dead letter" is one call.</li>
-<li><strong>What happened to a tuple.</strong> Every claim, ack, nack, lease end, and dead letter writes one row to the claim log, which is never edited. The history of a message is in that log.</li>
+<li>the age of the oldest unclaimed tuple in each subspace</li>
+<li>a lock held for longer than four times its maximum lease, which is one hour for a lock</li>
+<li>the dead-tuple ratio and the last autovacuum of the tuple table</li>
+<li>the age of the least recently swept tenant</li>
+<li>how full the engine's wait slots are</li>
+<li>how deep a work queue's backlog has grown</li>
+<li>whether this session's push channel is alive</li>
 </ul>
-<details class="gloss out"><summary>What you see</summary><pre class="out">tuple_stats  subspace: mailbox/0f3c9023-…
-{"total": 0, "available": 0, "claimed": 0, "lapsed": 0, "dead": 0, "consumed": 31,
- "expired_unpurged": 0, "oldest_created_at": "…T20:11:13Z", "newest_created_at": "…T00:36:34Z"}</pre></details>
-
-<p>Six rows in <code>nx doctor</code> watch the space: the age of the oldest unclaimed tuple in each subspace, the health of the database table, the age of the last sweep, how full the engine's wait slots are, how deep a work queue has grown, and whether this session's push-delivery channel is alive. The sweep is the job that ends leases nobody renewed, removes expired tuples, and removes old claim-log rows. A healthy space shows small numbers across all six. What these rows catch is a sweep that has stopped, a subspace filling faster than it drains, or a session whose channel push has gone quiet.</p>
+<p>A stopped sweep, a subspace that fills faster than it drains, and a quiet channel each show up in one row.</p>
 </section>
 
-<!-- ============ 5 ============ -->
-<section class="lesson" id="l5">
-<div class="lhead"><span class="lnum">5</span><h2>Tools and commands</h2><span class="ltime">5 min</span></div>
-<p class="why">Most of the time you use none of these directly: the agents read their mailboxes, and Claude calls the tools when you ask it to wait or to send. These are the surfaces for when you want to check for yourself.</p>
+<section class="lesson" id="reference">
+<div class="lhead"><h2>Reference</h2></div>
+<p>Nothing here is needed to read the page. It holds the operations, the surfaces, the comparison with the other stores, and the engine's internals.</p>
 
+<details class="gloss"><summary>The operations</summary><div class="pad">
+<div class="tbl"><table>
+<tr><th>Operation</th><th>Effect</th></tr>
+<tr><td><code>out</code></td><td>Adds a tuple. Its identity comes from fields that the caller supplies, so the same fields give the same tuple.</td></tr>
+<tr><td><code>rd</code></td><td>Reads matching tuples, which stay in the space. A read matches on keys only: equality on any subset of the pinned keys, and an empty pattern matches all. With a timeout it waits for a match, and a cursor resumes after the last row read.</td></tr>
+<tr><td><code>in</code></td><td>Claims one matching tuple. The call pins every key, and exactly one caller wins.</td></tr>
+<tr><td><code>ack</code></td><td>Consumes a claimed tuple, optionally with a reply written in the same transaction. A lock refuses it.</td></tr>
+<tr><td><code>nack</code></td><td>Returns a claimed tuple and counts a failed attempt. It can hold the tuple back for a number of seconds, or dead-letter it at once.</td></tr>
+<tr><td><code>renew</code></td><td>Extends a live lease. It never counts an attempt.</td></tr>
+<tr><td><code>release</code></td><td>Returns a claimed tuple without counting an attempt.</td></tr>
+<tr><td><code>wait</code></td><td>Parks one call across several subspaces, so a session that watches many mailboxes and boards spends one wait slot. The session's own Nexus server calls it. It has no MCP tool, and <code>nx tuple wait</code> is its command-line form, described under <a href="coordination.html#channel">push delivery in Coordination</a>.</td></tr>
+</table></div>
+</div></details>
+
+<details class="gloss"><summary>The surfaces</summary><div class="pad">
 <div class="tbl"><table>
 <tr><th>Surface</th><th>What it is</th></tr>
-<tr><td>MCP tools</td><td><code>mailbox_send</code>, <code>tuple_out</code>, <code>tuple_rd</code>, <code>tuple_in</code>, <code>tuple_ack</code>, <code>tuple_nack</code>, <code>tuple_renew</code>, <code>tuple_release</code>, <code>tuple_registry</code>, <code>tuple_list</code>, <code>tuple_stats</code>, plus three that manage what a session's own channel delivers (<a href="coordination.html">Coordination</a> covers those). Claude calls these inside a session.</td></tr>
-<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>renew</code>, <code>release</code>, <code>templates</code>, <code>list</code>, <code>stats</code>. Hooks and scripts call these. One more: <code>directory</code>, which shows the session that holds a name. <code>release</code> ends a claim without counting it as a failed attempt, unlike <code>nack</code> — the right call for a task or a lock handed back in good order.</td></tr>
+<tr><td>MCP tools</td><td><code>mailbox_send</code>, <code>tuple_out</code>, <code>tuple_rd</code>, <code>tuple_in</code>, <code>tuple_ack</code>, <code>tuple_nack</code>, <code>tuple_renew</code>, <code>tuple_release</code>, <code>tuple_registry</code>, <code>tuple_list</code>, <code>tuple_stats</code>, and three that manage what a session's own channel delivers: <code>tuple_subscribe</code>, <code>tuple_unsubscribe</code>, <code>tuple_subscriptions</code>. Claude calls these inside a session.</td></tr>
+<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>renew</code>, <code>release</code>, <code>wait</code>, <code>templates</code>, <code>list</code>, <code>stats</code>, and <code>directory</code>. Hooks and scripts call these.</td></tr>
 <tr><td>Hooks</td><td>The agent-start hook gives each agent its id and mailbox address. The prompt hook takes the messages that wait for the session and shows them to Claude.</td></tr>
-<tr><td>Skills</td><td><code>/conexus:mailbox</code> holds the rules for sending and reading messages.</td></tr>
-<tr><td><code>nx doctor</code></td><td>The six rows described in <a href="#l4">lesson 4</a>.</td></tr>
+<tr><td>Skill</td><td><code>/conexus:mailbox</code> holds the rules for sending and reading messages.</td></tr>
 </table></div>
-
-<div class="see">From the terminal</div>
-<div class="cmd"><pre>nx tuple templates
-nx tuple list --prefix mailbox/
-nx tuple rd mailbox/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><button class="copy" type="button">Copy</button></div>
-<p>The first command shows the templates and their digest. The second shows every mailbox with counts. The third reads the messages in one mailbox without taking them.</p>
-<details class="gloss out"><summary>What you see</summary><pre class="out">$ nx tuple rd mailbox/5b354c36-… -n 300
-  id: adb98e40…
-  subspace: mailbox/5b354c36-…
-  keys: {'to': '5b354c36-…'}
-  dims: {'from': 'cdeb12b5-…', 'kind': 'reply', 'address_kind': 'session', 'correlation_id': 'r-41'}
-  body: Subscribed. I am on the channel now …
-  claim_state: claimed
-  created_at: 2026-09-15T13:49:27Z</pre></details>
-</section>
-
-<!-- ============ 6 ============ -->
-<section class="lesson" id="l6">
-<div class="lhead"><span class="lnum">6</span><h2>Appendix: how it is built</h2><span class="ltime">reference</span></div>
-<p class="why">Nothing here is needed to use the tuple space. It is here for the reader who wants to know why the operations behave as the lessons say.</p>
-
-<details class="gloss"><summary>The three operations</summary><div style="padding:0 14px 12px">
-<div class="ops">
-<div class="op"><small>add</small><b>out</b><p>Add a tuple. The tuple's identity comes from fields that the caller supplies, so sending the same tuple twice stores it once.</p></div>
-<div class="op"><small>read</small><b>rd</b><p>Read matching tuples. The tuples stay in the space. Any number of readers can read, and with a timeout the read waits until a tuple arrives.</p></div>
-<div class="op take"><small>take</small><b>in</b><p>Claim one matching tuple. Exactly one caller wins. The winner holds a lease and ends it with <code>ack</code>, returns the tuple as a failed attempt with <code>nack</code>, or, if the work was not a failure, hands it back clean with <code>release</code>.</p></div>
-</div>
-<p>A tuple has keys, dimensions, and a body. The keys are what a take operation matches on, and the dimensions describe the tuple without being part of that match. Subspaces divide the space into named parts, and the engine registers a template for each kind of subspace: which keys are required, which dimensions are allowed, how long a tuple lives, and whether take operations are allowed. The engine checks every <code>out</code> against its template and refuses one that does not fit. Only the engine holds the templates, so every client sees the same shapes.</p>
-<p>Three operations with exact meanings are easier to build correctly, easier to analyze, and easier to combine than a larger interface. Each is one short database transaction, so the space scales as the database scales, and a busy subspace does not slow a quiet one. A take operation matches on keys alone and always ends in an ack, a nack, or a release, so you can say exactly what happens to any tuple under any sequence of calls, including a crash between a take operation and its ack.</p>
-<p>Two more operations exist beneath these three, for the session's own delivery rather than for you to call directly. <code>wait</code> parks one call across several subspaces at once, so a session watching many mailboxes and topics spends one slot, not one per thing it watches. For a mailbox, the same call carries the announce cadence. The engine stamps each row it hands back, so the session keeps no cursor for its mail. <code>park_stats</code> reports how full those wait slots are. Neither has an MCP tool or a CLI verb.</p>
 </div></details>
 
-<details class="gloss"><summary>Uses of the same operations</summary><div style="padding:0 14px 12px">
-<div class="tbl"><table class="shapes">
-<tr><th>Use</th><th>Tuple</th><th>Operations</th><th>Today</th></tr>
-<tr><td>mailbox</td><td>one tuple per message, keyed on the recipient</td><td>A sender calls <code>out</code> to the address. The recipient calls <code>in</code> before it acts.</td><td>built</td></tr>
-<tr><td>request and reply</td><td>a request in the peer's mailbox and a reply in yours, sharing an id</td><td>You call <code>out</code> for the request, then <code>in</code> on your own mailbox for the reply.</td><td>built, on the mailbox</td></tr>
-<tr><td>rendezvous</td><td>a tuple that means "I am here" or "I am done"</td><td>One process calls <code>out</code> when it arrives. The other calls <code>rd</code> with a timeout and wakes.</td><td>built, on the mailbox and the board</td></tr>
-<tr><td>work queue</td><td>one tuple per task</td><td>A producer calls <code>out</code> for each task. A worker calls <code>in</code>, then <code>ack</code> when the task is done or <code>release</code> to hand it back for another worker without a failed attempt.</td><td>built</td></tr>
-<tr><td>lock</td><td>one tuple per resource</td><td>A process calls <code>out</code> once to make sure the lock exists, <code>in</code> to hold it, and <code>release</code> to hand it to the next holder. <code>ack</code> is refused on a lock, since an acked tuple could not be taken again.</td><td>built</td></tr>
-<tr><td>announcement</td><td>many tuples in one topic, none of them taken</td><td>Any session calls <code>out</code> to post. Readers call <code>rd</code> with a timeout to wake on the next post, or with a cursor to see what they missed.</td><td>built</td></tr>
-</table></div>
-<p>Seven subspace kinds exist: the mailbox, the directory, which maps a session's name to its session id, a board for announcements, a CI board for build results, a work queue, a lock, and one fixed queue for aspect extraction. <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-211-board-queue-and-lock-tuple-templates.md">RDR-211</a> specifies the board, the queue, and the lock. A new use is a new composition of the three operations rather than new code in the engine, and any use beyond these needs a design record of its own, as RDR-205 says.</p>
-</div></details>
-
-<details class="gloss"><summary>The tuple space and the three stores</summary><div style="padding:0 14px 12px">
+<details class="gloss"><summary>The space and the three stores</summary><div class="pad">
 <div class="tbl"><table>
 <tr><th>Store</th><th>Holds</th><th>Lifetime</th><th>Readers</th></tr>
 <tr><td>Scratch (T1)</td><td>Working notes of one session and its agents</td><td>The session</td><td>Many</td></tr>
 <tr><td>Memory (T2)</td><td>Decisions, findings, and the state of the work, by project and title</td><td>The project</td><td>Many</td></tr>
 <tr><td>Knowledge (T3)</td><td>Documents, chunks, the catalog, and its links</td><td>Permanent</td><td>Many</td></tr>
-<tr><td>Tuple space</td><td>Coordination: who is present, a message, a request</td><td>Days, set by the template</td><td>Many read, one takes</td></tr>
+<tr><td>Tuple space</td><td>Coordination: a task, a lock, a message, a post</td><td>Days, set by the template</td><td>Many read, one takes</td></tr>
 </table></div>
-<p>All four stores share one database and one tenant, so a tuple can name an item in any of the other three, and the reader opens it with the credential it already has. A tuple is a signal about data, so a message carries a pointer to its content, not the content itself: a content hash for a chunk, a catalog address for a document, a project and title for a memory entry. The content is already stored once in the right store, a copy inside a message becomes wrong the moment somebody corrects the original, and a pointer can be checked where a copied value cannot.</p>
+<p>All four stores share one database and one tenant. A tuple can therefore name an item in any of the other three, and the reader opens it with the credential it already has. A tuple is a signal about data, so a body carries a pointer to its content: a content hash for a chunk, a catalog address for a document, a project and title for a memory entry. The content is stored once in the right store. A copy inside a body goes stale when somebody corrects the original, and a pointer can be checked where a copied value cannot.</p>
 </div></details>
 
-<details class="gloss"><summary>Inside the engine</summary><div style="padding:0 14px 12px">
+<details class="gloss"><summary>Inside the engine</summary><div class="pad">
 <ul class="plain">
-<li><strong>One Postgres table holds the tuples.</strong> Subspace, keys, dimensions, body, expiry time, and claim state are columns, and a claim log table beside it records every claim event. The row-level security that separates one tenant's memory from another's applies to tuples unchanged.</li>
-<li><strong>A take is one statement.</strong> In one short transaction, the engine selects the oldest available row for the given keys, skipping any row another transaction holds, then locks it, marks it claimed, and logs the claim. A row someone else holds is skipped rather than waited for.</li>
-<li><strong>A lease bounds every failure.</strong> Every claim has an end time. A reader that crashes loses its claim when the lease ends, and a sweep releases claims that nobody retook. A claim can never outlast its tuple.</li>
-<li><strong>Every out is idempotent: sending the same one twice has no extra effect.</strong> The engine computes a tuple's identity from fields the caller supplies, never from the insert time, so a retry needs no protocol of its own.</li>
-<li><strong>Waiting happens inside the engine.</strong> A waiting read waits on a signal for its subspace, which the engine sends after commit. The client does not poll, the wait holds no connection, and each wait is bounded so the client's own timeouts never fire first.</li>
-<li><strong>Templates are delivered with the engine.</strong> They are files the engine loads and checks at start. A client can ask the engine for the templates and their digest and detect a mismatch instead of guessing.</li>
+<li><strong>One Postgres table holds the tuples.</strong> Subspace, keys, dimensions, body, expiry time, and claim state are columns, and a claim-log table beside it records every claim event. The row-level security that separates one tenant's memory from another's applies to tuples unchanged.</li>
+<li><strong>A take is one statement.</strong> In one short transaction, the engine selects the oldest available row for the given keys, skipping any row another transaction holds, then locks it, marks it claimed, and logs the claim. Every operation is one short transaction, so a busy subspace does not slow a quiet one.</li>
+<li><strong>A lease bounds every failure.</strong> Every claim has an end time, and a claim can never outlast its tuple. A small set of operations with exact meanings makes it possible to say what happens to any tuple under any sequence of calls, including a crash between a take and its ack.</li>
+<li><strong>Waiting happens inside the engine.</strong> A waiting call waits on a signal for its subspace, and a write in another subspace does not wake it. The client does not poll, and each wait is bounded below the client's own timeout, so the engine's cap always fires first.</li>
+<li><strong>Templates are delivered with the engine.</strong> The engine loads them at start and checks them, and a client can ask for the templates and their digest, a short fingerprint that changes when any template changes.</li>
 </ul>
-<p>A claim can be extended. A holder that is still working calls <code>tuple_renew</code> before its lease ends. The engine moves the lease forward, but never past the tuple's own expiry. A renew that asks for more than the template's longest lease is refused. A renew does not count as a failed attempt.</p>
-<p>A reply can travel with the ack that closes a take operation, instead of as a separate call. <code>tuple_ack</code> takes an optional reply. The engine writes the reply and consumes the request in one transaction. Both take effect or neither does, so a crash cannot fall between them.</p>
 </div></details>
 </section>
 
