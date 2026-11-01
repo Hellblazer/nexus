@@ -7834,7 +7834,7 @@ def plan_save(
             )
         # nexus-jypmj.4: a $stepN.field inside other text or an object is never substituted,
         # so the plan would fail at run time (nexus-jypmj.1.19). Refuse it at the door.
-        from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.plans.runner import claimless_verify_reason, find_embedded_step_ref  # noqa: PLC0415 — deferred import; rare/branch-local path
 
         embedded = find_embedded_step_ref(parsed_plan)
         if embedded is not None:
@@ -7842,6 +7842,9 @@ def plan_save(
                 f"Plan not saved: {embedded.ref} sits where the runner will not substitute it "
                 f"({embedded.reason})."
             )
+        # nexus-z1d0l.1.11: a verify step with no claim is refused when the runner reaches it.
+        if (claimless := claimless_verify_reason(parsed_plan)) is not None:
+            return _fail(f"Plan not saved: {claimless}.")
         # RDR-232 Phase 2 (nexus-jypmj.2.1): plan_save never writes an answer-kind declaration.
         # Only the seed loader declares curated and only the nx_answer grow site declares grown,
         # so an embedded key (valid, malformed or an unrelated one of the same name) is removed
@@ -11918,17 +11921,16 @@ def _nx_answer_planner_request_block(coverage: "RequestCoverage | None") -> str:
 async def _claimed_verify_plan(
     plan_json: str, prompt: str, plan_from: Callable[[str], Awaitable[str]], *, may_retry: bool,
 ) -> str:
-    """*plan_json* with no verify step lacking a claim, as far as the planner can get there
-    (nexus-z1d0l.1.11).
+    """*plan_json*, once no verify step in it lacks a claim (nexus-z1d0l.1.11).
 
     ``plan_run`` refuses a verify step with no claim when it reaches it, after the steps before it
     are paid for, and the host never invents a claim. So the planner is asked once more with the
     step named, unless *may_retry* is false (the embedded-ref retry already asked: one retry per
-    answer). If the plan still has one and it is the last step, nothing reads its output: it is
-    dropped with a warning and the answer is the step before it. A claim-less verify step that a
-    later step may read, or the plan's only step, stays, and ``plan_run`` refuses it by name.
+    answer). A plan that still has one raises ``ValueError`` here, before any step runs: nx_answer
+    reports it as a planner failure, and nothing is searched, answered or grown. The step is never
+    dropped, because the answer would then pass for a checked one.
     """
-    from nexus.plans.runner import find_claimless_verify  # noqa: PLC0415 — deferred; runner is heavy and this is the planner path
+    from nexus.plans.runner import claimless_verify_reason, find_claimless_verify  # noqa: PLC0415 — deferred; runner is heavy and this is the planner path
 
     import structlog as _slog4  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
 
@@ -11941,26 +11943,21 @@ async def _claimed_verify_plan(
         try:
             retried = await plan_from(
                 prompt
-                + f"\n\nYour previous plan was refused before it ran: step {index + 1} is a verify step "
-                + "with no claim. The host never invents a claim. Give every verify step a claim (text, "
-                + "or a reference such as $stepN.text), or leave verify out."
+                + f"\n\nYour previous plan cannot run: step {index + 1} is a verify step with no "
+                + "claim. The host never invents a claim. Give every verify step a claim (text, or a "
+                + "reference such as $stepN.text), or leave verify out."
             )
-        except Exception as exc:  # noqa: BLE001 — the retry is best-effort; the first plan stands
+        except Exception as exc:  # noqa: BLE001 — the retry is best-effort; the first plan's refusal below stands
             log.warning(
                 "nx_answer_planner_verify_claim_retry_failed",
                 error_type=type(exc).__name__, error=str(exc)[:200],
             )
         else:
             plan_json = retried
-            index = find_claimless_verify(plan_json)
-            if index is None:
-                return plan_json
-    plan = json.loads(plan_json)
-    steps = plan["steps"]
-    if index == len(steps) - 1 and len(steps) > 1:
-        log.warning("nx_answer_planner_verify_step_dropped", step=index + 1)
-        return json.dumps({**plan, "steps": steps[:-1]})
-    return plan_json
+    reason = claimless_verify_reason(plan_json)
+    if reason is None:
+        return plan_json
+    raise ValueError(f"planner plan cannot run: {reason}")
 
 
 async def _nx_answer_plan_miss(

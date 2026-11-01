@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-189 P1 follow-ups: a check or verify step with no evidence still returns a Witness Schema v1
-payload (nexus-z1d0l.1.10), and the inline planner re-asks once for a verify step with no claim,
-then drops it when it is the last step (nexus-z1d0l.1.11)."""
+payload (nexus-z1d0l.1.10), and a verify step with no claim is caught before any step runs: the
+inline planner re-asks once, then fails by name, and plan_save, the seed loader, the matcher and
+nx plan hygiene refuse it (nexus-z1d0l.1.11)."""
 
 from __future__ import annotations
 
@@ -9,14 +10,28 @@ import json
 from unittest.mock import patch
 
 import pytest
+import yaml
 from structlog.testing import capture_logs
 
+from nexus.commands.plan import _hygiene_scan
 from nexus.mcp import core as mcp_core
 from nexus.plans import runner
+from nexus.plans.matcher import plan_match
+from nexus.plans.seed_loader import load_seed_directory
 from tests.test_6pfgb11_provenance_from_catalog import COLL, X, _position, _t3
 from tests.test_6pfgb50_runner_chash_reuses_rows import _CountingCatalog, _plain
 from tests.test_plan_run import _match
-from tests.test_rdr232_embedded_ref_guards import _planner_run
+from tests.test_rdr232_embedded_ref_guards import (  # noqa: F401 - info_logging is a fixture
+    _Cache,
+    _HygieneLibrary,
+    _Library,
+    _planner_run,
+    _row,
+    _save,
+    _SeedLibrary,
+    _template,
+    info_logging,
+)
 
 # ── nexus-z1d0l.1.10: zero evidence is still a v1 payload ───────────────────────────────
 
@@ -90,6 +105,7 @@ CLAIMED = _steps({"claim": "latency drops"})
         (CLAIMLESS, 1),
         (_steps({"claim": "  "}), 1),
         (_steps({"claim": None}), 1),
+        (_steps({"claim": ["latency drops"]}), 1),
         (CLAIMED, None),
         (_steps({"claim": "$step1.text"}), None),
         ({"steps": [{"tool": "operator_verify", "args": {}}]}, 0),
@@ -98,18 +114,19 @@ CLAIMED = _steps({"claim": "latency drops"})
         ({"no": "steps"}, None),
         (None, None),
     ],
-    ids=["missing", "blank", "null", "claimed", "step_ref", "operator_name", "no_verify", "bad_json", "no_steps", "none"],
+    ids=["missing", "blank", "null", "non_string", "claimed", "step_ref", "operator_name", "no_verify", "bad_json", "no_steps", "none"],
 )
 def test_the_scan_finds_the_first_verify_step_with_no_claim(plan, expected) -> None:
     assert runner.find_claimless_verify(json.dumps(plan) if isinstance(plan, dict) else plan) == expected
+
+
 
 
 def test_a_claimless_verify_is_re_asked_once_naming_the_step(monkeypatch) -> None:
     with capture_logs() as logs:
         match, prompts, cost = _planner_run(monkeypatch, [CLAIMLESS, CLAIMED])
     assert len(prompts) == 2 and prompts[1].startswith(prompts[0])
-    added = prompts[1][len(prompts[0]):]
-    assert "step 2 is a verify step with no claim" in added
+    assert "step 2 is a verify step with no claim" in prompts[1][len(prompts[0]):]
     assert json.loads(match.plan_json) == CLAIMED
     assert cost == pytest.approx(0.50)
     assert [e["step"] for e in logs if e.get("event") == "nx_answer_planner_verify_claim_retry"] == [2]
@@ -120,39 +137,72 @@ def test_a_claimed_plan_is_not_re_asked(monkeypatch) -> None:
     assert len(prompts) == 1 and json.loads(match.plan_json) == CLAIMED
 
 
-def test_a_second_claimless_last_step_is_dropped_and_the_answer_is_the_step_before_it(monkeypatch) -> None:
-    with capture_logs() as logs:
-        match, prompts, _ = _planner_run(monkeypatch, [CLAIMLESS, CLAIMLESS])
-    assert len(prompts) == 2, "one retry, no more"
-    assert json.loads(match.plan_json) == {"steps": CLAIMLESS["steps"][:1]}
-    assert [e["step"] for e in logs if e.get("event") == "nx_answer_planner_verify_step_dropped"] == [2]
+@pytest.mark.parametrize(
+    "second",
+    [
+        CLAIMLESS,
+        _steps({"claim": "latency drops"}, {}),
+        _steps({}, after=[{"tool": "summarize", "args": {"content": "$step2.text"}}]),
+        TimeoutError("planner timed out"),
+    ],
+    ids=["same_again", "a_second_verify_without_one", "one_a_later_step_reads", "retry_failed"],
+)
+def test_a_plan_still_holding_a_claimless_verify_fails_in_the_planner_before_any_step_runs(
+    monkeypatch, second
+) -> None:
+    """Never dropped: an answer without its planned check would pass for a checked one."""
+    with pytest.raises(ValueError, match="is a verify step with no claim") as err:
+        _planner_run(monkeypatch, [CLAIMLESS, second])
+    assert str(err.value).startswith("planner plan cannot run: step ")
 
 
-def test_a_failed_retry_keeps_the_first_plan_and_still_drops_its_claimless_last_step(monkeypatch) -> None:
-    with capture_logs() as logs:
-        match, prompts, _ = _planner_run(monkeypatch, [CLAIMLESS, TimeoutError("planner timed out")])
-    assert len(prompts) == 2
-    assert json.loads(match.plan_json) == {"steps": CLAIMLESS["steps"][:1]}
-    assert any(e.get("event") == "nx_answer_planner_verify_claim_retry_failed" for e in logs)
-
-
-def test_a_claimless_verify_that_a_later_step_reads_is_left_for_plan_run_to_refuse(monkeypatch) -> None:
-    plan = _steps({}, after=[{"tool": "summarize", "args": {"content": "$step2.text"}}])
-    match, prompts, _ = _planner_run(monkeypatch, [plan, plan])
-    assert len(prompts) == 2
-    assert json.loads(match.plan_json) == plan
-    assert runner.find_claimless_verify(match.plan_json) == 1
-
-
-def test_a_plan_that_is_only_a_claimless_verify_is_not_emptied(monkeypatch) -> None:
-    plan = {"steps": [{"tool": "verify", "args": {"ids": ["a"]}}]}
-    match, _, _ = _planner_run(monkeypatch, [plan, plan])
-    assert json.loads(match.plan_json) == plan
-
-
-def test_after_an_embedded_ref_retry_a_claimless_last_verify_is_dropped_without_a_third_call(monkeypatch) -> None:
-    embedded = _steps({}, after=[])
+def test_after_an_embedded_ref_retry_a_claimless_verify_fails_without_a_third_call(monkeypatch) -> None:
+    embedded = _steps({})
     embedded["steps"][0]["args"]["query"] = "see $step9.text"
-    match, prompts, _ = _planner_run(monkeypatch, [embedded, CLAIMLESS])
-    assert len(prompts) == 2, "the embedded-ref retry is the answer's one retry"
-    assert json.loads(match.plan_json) == {"steps": CLAIMLESS["steps"][:1]}
+    calls: list = []
+    with pytest.raises(ValueError, match="step 2 is a verify step with no claim"):
+        try:
+            _planner_run(monkeypatch, [embedded, CLAIMLESS])
+        except IndexError:  # a third planner call would read past the replies
+            calls.append("third")
+            raise
+    assert calls == [], "the embedded-ref retry is the answer's one retry"
+
+
+# The doors a stored plan comes through: each refuses or excludes a claim-less verify by name.
+
+
+def test_plan_save_refuses_a_claimless_verify_and_writes_nothing() -> None:
+    out, writes = _save(CLAIMLESS)
+    assert out.startswith("Plan not saved: step 2 is a verify step with no claim")
+    assert writes == []
+    out, writes = _save(CLAIMED)
+    assert out.startswith("Saved plan: [7]") and len(writes) == 1, "non-vacuity"
+
+
+def test_the_seed_loader_refuses_a_claimless_verify_template(tmp_path) -> None:
+    (tmp_path / "bad.yml").write_text(yaml.safe_dump(_template("bad-claimless", CLAIMLESS)))
+    (tmp_path / "good.yml").write_text(yaml.safe_dump(_template("good-claimed", CLAIMED)))
+    result = load_seed_directory(tmp_path, library=_SeedLibrary())
+    assert result.inserted == ["good.yml"]
+    assert any("bad-claimless" in msg and "verify step with no claim" in msg for _src, msg in result.errors)
+
+
+@pytest.mark.parametrize("path", ["t1", "fts"])
+def test_the_matcher_excludes_a_stored_claimless_verify(path, info_logging) -> None:
+    lib = _Library([_row(1, CLAIMLESS, "does latency drop"), _row(2, CLAIMED, "does latency drop, claimed")])
+    cache = _Cache([(1, 0.01), (2, 0.05)]) if path == "t1" else None
+    with capture_logs() as logs:
+        matches = plan_match(intent="does latency drop", library=lib, cache=cache, min_confidence=0.5)
+    ids = [m.plan_id for m in matches]
+    assert 2 in ids and 1 not in ids
+    excluded = [e for e in logs if e.get("event") == "plan_match_embedded_step_ref_excluded"]
+    assert [(d["plan_id"], d["ref"]) for d in excluded[0]["detail"]] == [(1, "verify")]
+    assert 1 not in lib.bumped
+
+
+def test_hygiene_reports_a_stored_claimless_verify() -> None:
+    rows = [{**_row(1, CLAIMLESS, "claimless"), "verb": "research"}, {**_row(2, CLAIMED, "claimed"), "verb": "research"}]
+    findings = _hygiene_scan(_HygieneLibrary(rows))
+    assert [f["id"] for f in findings] == [1]
+    assert "step 2 is a verify step with no claim" in findings[0]["reason"]

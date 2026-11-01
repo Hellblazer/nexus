@@ -1131,9 +1131,11 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
     (nexus-z1d0l.1.11).
 
     ``plan_run`` refuses such a step when it reaches it (the host never invents a claim), after the
-    steps before it have run and been paid for; the inline planner asks this before the plan runs.
-    A claim that is not a string (a list, a mapping) is left for ``plan_run`` to judge. Anything that
-    is not a plan with a ``steps`` list returns ``None``, as :func:`find_embedded_step_ref` does.
+    steps before it have run and been paid for, so every door a plan comes through asks this first:
+    the inline planner, ``plan_save``, the seed loader, the matcher and ``nx plan hygiene``. A claim
+    that is not a string counts as none, as it does at run time (a deferred-ref mapping exists only
+    inside a running bundle, never in plan JSON). Anything that is not a plan with a ``steps`` list
+    returns ``None``, as :func:`find_embedded_step_ref` does.
     """
     if isinstance(plan, str):
         try:
@@ -1148,9 +1150,21 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
             continue
         args = step.get("args")
         claim = args.get("claim") if isinstance(args, dict) else None
-        if claim is None or (isinstance(claim, str) and not claim.strip()):
+        if not (isinstance(claim, str) and claim.strip()):
             return index
     return None
+
+
+def claimless_verify_reason(plan: "str | dict[str, Any] | None") -> str | None:
+    """Why *plan* cannot run, when :func:`find_claimless_verify` finds a step, else ``None``: the
+    one wording every door reports."""
+    index = find_claimless_verify(plan)
+    if index is None:
+        return None
+    return (
+        f"step {index + 1} is a verify step with no claim; the host never invents one, "
+        "so the runner refuses the step when it reaches it"
+    )
 
 
 def _resolve_args(
