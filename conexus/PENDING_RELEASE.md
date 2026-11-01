@@ -43,11 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v7.91.0)
+## Awaiting the next release (pinned: v7.91.1)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-3lqxv): new stdlib-only script, three modes. `pre` (PreCompact) writes the session's `threads` board entry (exact title match) first, then the working state (`nx command-context continuation`: branch, HEAD, in-progress beads, uncommitted files, open PRs, recent commits) to `<config>/compact-checkpoints/<session_id>.md`, mode 0600, and never vetoes; `post` (PostCompact) appends the compact summary and logs a warning when it names none of the board title, the checkpoint path or an in-flight bead, and archives and stubs a checkpoint whose `written:` stamp is older than 30 minutes instead of refreshing it; `inject` (SessionStart `compact` only) re-injects the checkpoint, capped near 8 KB, judged fresh by its `written:` stamp (30 minutes) and labelled with its age and trigger, from a file read alone.
-- `conexus/hooks/hooks.json` (nexus-3lqxv): adds a PreCompact entry (`compact_checkpoint.py pre`, 45 s), a PostCompact entry (`post`, 10 s) and a separate SessionStart group with matcher `compact` (`inject`, 35 s: the 30 s cold-start allowance every SessionStart entry carries plus its own work); the existing SessionStart group is unchanged.
 
 ## Deferred to the next client release

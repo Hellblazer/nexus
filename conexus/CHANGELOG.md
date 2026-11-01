@@ -1,5 +1,11 @@
 # Changelog
 
+## [7.91.1] - 2026-10-31
+
+Plugin version aligned with conexus 7.91.1. These plugin changes become live at this pin.
+
+- **Working state is written down before a compaction and put back after it** (nexus-3lqxv). Two automatic compactions on one session produced summaries of about 0.5 percent of the context. A new stdlib-only hook script, `compact_checkpoint.py`, runs in three places. On PreCompact (45 s) it writes the session's `threads` board entry (the one titled exactly the session's name) and then the working state from `nx command-context continuation` (branch, HEAD, in-progress beads, uncommitted files, open PRs, recent commits) to `<config>/compact-checkpoints/<session_id>.md`, mode 0600; it never vetoes the compaction. On PostCompact (10 s) it appends the compact summary and logs a warning when the summary names none of the board title, the checkpoint path or an in-flight bead; a checkpoint whose `written:` stamp is over 30 minutes old is archived and stubbed, never refreshed. On SessionStart after a compaction only (matcher `compact`, 35 s) it re-injects the checkpoint, capped near 8 KB, labelled with its age and trigger; it reads one file and makes no nx call. The existing SessionStart group is unchanged. `conexus/hooks/scripts/compact_checkpoint.py`, `conexus/hooks/hooks.json`, `conexus/README.md`.
+
 ## [7.91.0] - 2026-10-31
 
 Plugin version aligned with conexus 7.91.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
