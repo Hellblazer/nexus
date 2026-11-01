@@ -46,6 +46,9 @@ class EvidenceRecord:
     tumbler: str | None = None
     chash: str | None = None
     collection: str | None = None
+    #: False for an item the host merged in that is not evidence to cover (the repair's coverage note): the
+    #: model may cite it, but ``uncovered`` and the ok=true support rule do not count it as an input.
+    is_evidence: bool = True
 
 
 # ── quote / span normalization ──────────────────────────────────────────────────────────
@@ -77,20 +80,24 @@ def normalize_with_map(text: str) -> tuple[str, list[int]]:
     return "".join(out), mapping
 
 
-def _locate(quote: Any, text: str) -> dict[str, int] | None:
-    """The half-open code-point range of the first occurrence of *quote* in *text* after
-    normalization, or ``None`` (an empty or non-string quote never matches)."""
+def _locate(quote: Any, normalized_text: tuple[str, list[int]]) -> dict[str, int] | None:
+    """The half-open code-point range of the first occurrence of *quote* in a record's normalized text
+    (``normalize_with_map`` of it), or ``None``. An empty or non-string quote never matches, and a match may
+    not start or end inside a combining sequence (the next or first matched character is a combining mark),
+    so ``cafe`` does not match the front of ``cafe`` + COMBINING ACUTE."""
     if not isinstance(quote, str):
         return None
-    body = _FACET_TAG.sub("", quote, count=1)
-    needle, _ = normalize_with_map(body)
+    needle, _ = normalize_with_map(_FACET_TAG.sub("", quote, count=1))
     if not needle:
         return None
-    hay, mapping = normalize_with_map(text)
+    hay, mapping = normalized_text
     at = hay.find(needle)
-    if at < 0:
-        return None
-    return {"start": mapping[at], "end": mapping[at + len(needle) - 1] + 1}
+    while at >= 0:
+        end = at + len(needle)
+        if not unicodedata.combining(hay[at]) and not (end < len(hay) and unicodedata.combining(hay[end])):
+            return {"start": mapping[at], "end": mapping[end - 1] + 1}
+        at = hay.find(needle, at + 1)
+    return None
 
 
 # ── records from a caller's arguments ───────────────────────────────────────────────────
@@ -165,22 +172,37 @@ def bind(raw: Any, records: Sequence[EvidenceRecord] | None, operator: str) -> A
 
     *records* are the items the model was shown. ``None`` means no records exist (a bundled
     terminal step whose input was an earlier step's model output): every item is then
-    ``unresolved`` and nothing is rejected. A reply that is not a mapping with an
-    ``evidence`` list is returned as it came (it is not the check/verify shape; nothing is
-    fabricated for it). The host never changes the model's verdict (``ok`` / ``verified``).
+    ``unresolved`` and nothing is rejected. The host never changes the model's verdict
+    (``ok`` / ``verified``); a truthy non-boolean verdict counts as true for ``requires_review``.
+
+    A reply that is not a mapping is returned as it came. A mapping without an ``evidence`` list
+    is malformed and comes back as a v1 payload with no evidence and ``requires_review`` true,
+    except one legacy shape: a verify reply carrying ``citations`` and no ``evidence`` key is what
+    the pre-v1 model schema produced, and is returned unbound. (``bind`` runs only after a v1
+    dispatch, so the ``citations`` key is the one thing that tells a pre-v1 reply apart.)
     """
-    if not isinstance(raw, Mapping) or not isinstance(raw.get("evidence"), list):
+    if not isinstance(raw, Mapping):
         return raw
     verb = operator.removeprefix("operator_")
+    if "evidence" not in raw and verb == "verify" and isinstance(raw.get("citations"), list):
+        return raw
+    entries = raw["evidence"] if isinstance(raw.get("evidence"), list) else []
     by_id = {r.item_id: r for r in records} if records is not None else {}
+    normalized: dict[str, tuple[str, list[int]]] = {}  # each record's text, normalized once per bind
+
+    def norm(rec: EvidenceRecord) -> tuple[str, list[int]]:
+        if rec.item_id not in normalized:
+            normalized[rec.item_id] = normalize_with_map(rec.text)
+        return normalized[rec.item_id]
+
     items: list[dict[str, Any]] = []
     rejected: list[str] = []
-    for entry in raw["evidence"]:
+    for entry in entries:
         if not isinstance(entry, Mapping):
             continue
         item_id = entry.get("item_id")
         quote = entry.get("quote")
-        role = entry.get("role")
+        role = entry.get("role") if entry.get("role") in _ROLES else None
         if records is None:
             items.append(_item(item_id, quote, role, "unresolved", None, None))
             continue
@@ -188,25 +210,24 @@ def bind(raw: Any, records: Sequence[EvidenceRecord] | None, operator: str) -> A
         if rec is None:
             rejected.append(str(item_id))
             continue
-        span = _locate(quote, rec.text)
+        span = _locate(quote, norm(rec))
         if span is not None:
             # Contained in its own record. Rule 3/4: only a named owning document binds.
             state = "bound" if rec.tumbler else ("ambiguous" if rec.chash else "unattributed")
             items.append(_item(item_id, quote, role, state, span, rec))
             continue
-        elsewhere = any(o is not rec and _locate(quote, o.text) is not None for o in (records or ()))
+        elsewhere = any(o is not rec and _locate(quote, norm(o)) is not None for o in records)
         items.append(_item(item_id, quote, role, "ambiguous" if elsewhere else "unresolved", None, None))
 
-    covered = {i["item_id"] for i in items if i["role"] in ("supports", "contradicts")}
-    uncovered = (
-        [r.item_id for r in records if r.item_id not in covered] if (verb == "check" and records is not None) else []
-    )
-    verdict = raw.get("ok") if verb == "check" else raw.get("verified")
+    inputs = [r for r in (records or ()) if r.is_evidence]
+    covered = {str(i["item_id"]) for i in items if i["role"] in ("supports", "contradicts")}
+    uncovered = [r.item_id for r in inputs if r.item_id not in covered] if (verb == "check" and records is not None) else []
+    verdict = bool(raw.get("ok") if verb == "check" else raw.get("verified"))
     bound_supports = {i["item_id"] for i in items if i["state"] == "bound" and i["role"] == "supports"}
-    if verb == "check" and verdict is True and records is not None:
-        unsupported = any(r.item_id not in bound_supports for r in records)  # ok=true needs every input item supported
+    if verb == "check" and verdict and records is not None:
+        unsupported = any(r.item_id not in bound_supports for r in inputs)  # ok=true needs every input item supported
     else:
-        unsupported = verdict is True and not bound_supports
+        unsupported = verdict and not bound_supports
     review = records is None or any(i["state"] != "bound" for i in items) or bool(rejected) or bool(uncovered) or unsupported
 
     out: dict[str, Any] = {"schema_version": SCHEMA_VERSION}

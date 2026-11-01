@@ -64,10 +64,26 @@ class TestPayloadShape:
         bind(raw, [_rec(**IDENT)], "check")
         assert raw == before
 
-    def test_reply_without_an_evidence_list_is_returned_unbound(self):
+    def test_a_pre_v1_citations_only_verify_reply_is_returned_unbound(self):
+        """The one legacy shape: a verify reply that carries ``citations`` and no ``evidence`` key is what the
+        pre-v1 model schema produced. It is read as it was; the host fabricates nothing for it."""
         raw = {"verified": True, "reason": "r", "citations": ["p.3"]}
         assert bind(raw, [_rec()], "verify") == raw
-        assert bind({"ok": True}, [_rec()], "check") == {"ok": True}
+
+    def test_a_v1_reply_with_no_evidence_list_is_malformed_not_legacy(self):
+        """Anything else without an evidence list went through a v1 dispatch and is malformed: schema_version 1,
+        no evidence, review required, and the verdict untouched."""
+        out = bind({"ok": True}, [_rec("e1"), _rec("e2")], "check")
+        assert out["schema_version"] == 1 and out["ok"] is True
+        assert out["evidence"] == [] and out["uncovered"] == ["e1", "e2"] and out["requires_review"] is True
+        out = bind({"verified": True, "reason": "r"}, [_rec()], "verify")
+        assert out["schema_version"] == 1 and out["evidence"] == [] and out["citations"] == []
+        assert out["requires_review"] is True
+        out = bind({"ok": True, "evidence": "not a list"}, [_rec()], "check")
+        assert out["schema_version"] == 1 and out["evidence"] == [] and out["requires_review"] is True
+
+    def test_a_non_mapping_reply_is_returned_as_it_came(self):
+        assert bind("prose", [_rec()], "check") == "prose"
 
 
 class TestBindingRules:
@@ -258,10 +274,22 @@ class TestRequiresReviewAndCoverage:
         assert bind(_check(_item(quote="invented")), [_rec(**IDENT)], "check")["ok"] is True
         assert bind(_verify(_item(quote="invented")), [_rec(**IDENT)], "verify")["verified"] is True
 
-    def test_truthy_non_boolean_verdict_is_not_a_true_verdict(self):
-        out = bind(_verify(_item(quote="invented"), verified="yes"), [_rec(**IDENT)], "verify")
+    def test_truthy_non_boolean_verdict_counts_as_a_true_verdict(self):
+        """No evidence at all, so only the verdict rule can ask for review."""
+        out = bind(_verify(verified="yes"), [_rec(**IDENT)], "verify")
         assert out["verified"] == "yes"  # untouched
-        assert out["requires_review"] is True  # the unbound item
+        assert out["requires_review"] is True
+        out = bind(_check(ok=1), [_rec(**IDENT)], "check")
+        assert out["ok"] == 1 and out["requires_review"] is True
+
+    def test_a_falsy_verdict_with_no_evidence_needs_no_review(self):
+        assert bind(_verify(verified=False), [_rec(**IDENT)], "verify")["requires_review"] is False
+
+    def test_a_merged_coverage_note_is_not_an_input_to_cover(self):
+        note = EvidenceRecord("e1", "NOTE: unresolved facets", is_evidence=False)
+        real = _rec("e2", "real text here", **IDENT)
+        out = bind(_check(_item("e2", "real text")), [note, real], "check")
+        assert out["uncovered"] == [] and out["requires_review"] is False
 
 
 class TestCitations:
@@ -339,3 +367,53 @@ class TestDeferral:
         with witness.defer_binding():
             assert witness.binding_deferred() is True
         assert witness.binding_deferred() is False
+
+
+class TestAdversarialInputs:
+    def test_non_string_item_ids_do_not_raise_on_the_unrecorded_path(self):
+        for bad in ([1, 2], {"a": 1}, None, 5):
+            out = bind(_check(_item(item_id=bad)), None, "check")
+            assert out["evidence"][0]["state"] == "unresolved" and out["requires_review"] is True
+
+    def test_non_string_item_ids_are_rejected_on_the_recorded_path(self):
+        out = bind(_check(_item(item_id=["e1"])), [_rec(**IDENT)], "check")
+        assert out["evidence"] == [] and out["rejected"] == ["['e1']"]
+
+    def test_a_quote_may_not_end_inside_a_combining_sequence(self):
+        rec = _rec(text="cafe\u0301 au lait", **IDENT)  # e + COMBINING ACUTE
+        assert bind(_check(_item(quote="cafe")), [rec], "check")["evidence"][0]["state"] == "unresolved"
+        assert bind(_check(_item(quote="cafe\u0301")), [rec], "check")["evidence"][0]["state"] == "bound"
+
+    def test_a_quote_may_not_start_inside_a_combining_sequence(self):
+        rec = _rec(text="cafe\u0301 au lait", **IDENT)
+        assert bind(_check(_item(quote="\u0301 au")), [rec], "check")["evidence"][0]["state"] == "unresolved"
+
+    def test_a_later_occurrence_that_respects_the_boundary_still_matches(self):
+        rec = _rec(text="cafe\u0301 and then cafe again", **IDENT)
+        it = bind(_check(_item(quote="cafe")), [rec], "check")["evidence"][0]
+        assert it["state"] == "bound"
+        assert rec.text[it["span"]["start"]:it["span"]["end"]] == "cafe"
+        assert it["span"]["start"] > 5
+
+    def test_role_is_normalised_and_an_unknown_role_is_null_and_never_covers(self):
+        out = bind(_check(_item(role="partial"), _item(item_id="e1", role=None)), [_rec(**IDENT)], "check")
+        assert [i["role"] for i in out["evidence"]] == [None, None]
+        assert out["uncovered"] == ["e1"] and out["requires_review"] is True
+        assert bind(_check(_item(role="supports")), [_rec(**IDENT)], "check")["evidence"][0]["role"] == "supports"
+
+    def test_each_record_text_is_normalised_once_per_bind(self):
+        recs = [_rec("e1", "alpha text " * 50, **IDENT), _rec("e2", "beta text " * 50, tumbler="1.2.4", chash=H2, collection="c")]
+        texts = {r.text for r in recs}
+        real = witness.normalize_with_map
+        seen: list[str] = []
+
+        def counting(text):
+            if text in texts:
+                seen.append(text)
+            return real(text)
+
+        quotes = [_item("e1", f"fabricated {i}") for i in range(6)]
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(witness, "normalize_with_map", counting)
+            bind(_check(*quotes), recs, "check")
+        assert sorted(seen) == sorted(texts)  # once each, not per item and per elsewhere-scan

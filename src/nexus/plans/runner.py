@@ -2504,11 +2504,15 @@ def _position_identities(
 
 def _check_records_for(
     texts: list[str], queues: dict[str, Any], reserved: ReservedStream | None, supplement: RepairSupplement | None,
+    owner_rows: dict[str, list[dict]] | None = None,
 ) -> list[EvidenceRecord]:
     """One record per final shown text, ids ``e1, e2, ...`` in order. A text a retrieval position produced takes
-    that position's identity (``queues``: shown text -> identities in position order); a reserved or repair
-    item takes its own provenance; any other text (the coverage note, a plan literal) has none. The record
-    text is the body, without the ``[source: ...]`` note the hydration prefixes."""
+    that position's identity (``queues``: shown text -> identities in position order); a reserved item takes its own
+    named-source identity; a repair item keeps its chash and collection, but its tumbler came from a search step's
+    tumblers (possibly an inferred owner of a shared chunk) and is not read: its tumbler is the one owner *owner_rows*
+    shows, else none. The coverage note is a record the model may cite but not an input to cover
+    (``is_evidence=False``). Any other text has no identity. The record text is the body, without the
+    ``[source: ...]`` note the hydration prefixes."""
     from nexus.plans.reserved_stream import strip_source_note  # noqa: PLC0415 — as the module's other lazy imports
 
     records: list[EvidenceRecord] = []
@@ -2523,11 +2527,12 @@ def _check_records_for(
         elif held is not None:
             records.append(EvidenceRecord(item_id, held.raw, held.doc_id or None, held.chash or None, held.collection or None))
         elif repaired is not None:
-            records.append(EvidenceRecord(
-                item_id, strip_source_note(text), repaired.tumbler or None, repaired.chash or None, repaired.collection or None,
-            ))
+            chash, collection = repaired.chash or None, repaired.collection or None
+            tumbler = _single_owner(owner_rows, chash, collection) if chash else None
+            records.append(EvidenceRecord(item_id, strip_source_note(text), tumbler, chash, collection))
         else:
-            records.append(EvidenceRecord(item_id, strip_source_note(text)))
+            is_note = supplement is not None and bool(supplement.note) and text == supplement.note
+            records.append(EvidenceRecord(item_id, strip_source_note(text), is_evidence=not is_note))
     return records
 
 
@@ -2671,11 +2676,11 @@ def _hydrate_operator_args(
         # Witness Schema v1: the identity of each hydrated position, taken BEFORE the empty filter, the
         # merges and the cap drop the alignment between a text and the retrieval step's hit.
         _idents: dict[str, Any] = {}
+        _tumbler_ids = bool(id_list_raw) and all(_is_tumbler_shaped(str(i)) for i in id_list_raw)
         if resolved_tool == "operator_check":
             _idents = _position_identities(
                 id_list_raw, contents, evidence_source=evidence_source, collections=args.get("collections"),
-                tumbler_path=bool(id_list_raw) and all(_is_tumbler_shaped(str(i)) for i in id_list_raw),
-                owner_lookups=None if all(_is_tumbler_shaped(str(i)) for i in id_list_raw) else owner_lookups,
+                tumbler_path=_tumbler_ids, owner_lookups=None if _tumbler_ids else owner_lookups,
             )
         non_empty = [c for c in contents if c]
         _supp = active_supplement()
@@ -2720,9 +2725,11 @@ def _hydrate_operator_args(
             non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
         note_reducer_input(non_empty)  # nexus-jypmj.1.8: reads the final list, changes nothing
         args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
-        if resolved_tool == "operator_check" and non_empty:
-            _records = _check_records_for(non_empty, _idents, _rs if _rs_merge else None, _supp)
-            args.setdefault("items", _render_check_items(non_empty, _records))
+        if resolved_tool == "operator_check" and non_empty and "items" not in args:
+            # Records only when the runner builds the items: a step that supplies its own keeps its own.
+            _rows = owner_lookups.owner_rows if not _tumbler_ids and owner_lookups.asked else None
+            _records = _check_records_for(non_empty, _idents, _rs if _rs_merge else None, _supp, _rows)
+            args["items"] = _render_check_items(non_empty, _records)
             args[_EVIDENCE_RECORDS_KEY] = _records
         elif resolved_tool == "operator_summarize":
             args.setdefault("content", "\n\n".join(non_empty))
@@ -4258,7 +4265,8 @@ async def _plan_run_impl(
                 # Witness Schema v1: a terminal check/verify is bound after the bundle returns. Its records exist
                 # only when its evidence is host-hydrated; when its input is an earlier step's model output inside
                 # the bundle there are none, and every item comes back unresolved with requires_review.
-                _terminal_verb = _OPERATOR_TOOL_MAP.get(_extract_tool(steps[seg.plan_indices[-1]]), "").removeprefix("operator_")
+                _terminal_tool = _extract_tool(steps[seg.plan_indices[-1]])
+                _terminal_verb = _OPERATOR_TOOL_MAP.get(_terminal_tool, _terminal_tool).removeprefix("operator_")
                 if _terminal_verb in ("check", "verify"):
                     bundle_result = _bind_witness(bundle_result, _bundle_records.get(seg.plan_indices[-1]), _terminal_verb)
                 step_outputs.append(bundle_result)

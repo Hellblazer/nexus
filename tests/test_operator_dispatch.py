@@ -3680,7 +3680,7 @@ class TestOperatorCheck:
         assert result["uncovered"] == ["p1"]
 
     @pytest.mark.asyncio
-    async def test_a_raw_reply_without_an_evidence_list_is_returned_as_it_came(self, monkeypatch) -> None:
+    async def test_a_reply_without_an_evidence_list_is_malformed_and_needs_review(self, monkeypatch) -> None:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_check
 
@@ -3688,7 +3688,9 @@ class TestOperatorCheck:
             return {"ok": True}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        assert await operator_check(items="x", check_instruction="y") == {"ok": True}
+        result = await operator_check(items="x", check_instruction="y")
+        assert result["schema_version"] == 1 and result["ok"] is True
+        assert result["evidence"] == [] and result["requires_review"] is True
 
     @pytest.mark.asyncio
     async def test_binding_is_skipped_when_the_caller_holds_the_records(self, monkeypatch) -> None:

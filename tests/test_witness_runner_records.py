@@ -20,10 +20,14 @@ import pytest
 
 import nexus.operators.dispatch as dmod
 from nexus.mcp.core import operator_verify
+from nexus.mcp import core as mcp_core
 from nexus.operators.witness import EvidenceRecord
 from nexus.plans import bundle as bundle_mod
 from nexus.plans import runner
+from nexus.plans.continuation import classify_continuation_cut
+from nexus.plans.continuation_envelope import assemble_continuation_envelope
 from nexus.plans.match import Match
+from nexus.plans.reserved_stream import PrimaryEvidence, ReservedStream, SelectedChunk, reserved_scope, set_reserved_step
 from nexus.plans.repair_stream import RepairSupplement, SupplementItem, supplement_scope
 from tests.test_6pfgb11_provenance_from_catalog import COLL, X, _entry, _position, _t3
 from tests.test_6pfgb50_runner_chash_reuses_rows import Y, _CountingCatalog, _plain
@@ -123,11 +127,11 @@ class TestChashPathRecords:
         (rec,) = args["_evidence_records"]
         assert (rec.tumbler, rec.collection) == (None, COLL)
 
-    def test_the_private_keys_never_reach_the_dispatched_prompt_args(self) -> None:
+    def test_hydration_consumes_the_source_key_and_leaves_the_records_for_the_dispatcher(self) -> None:
         catalog = _CountingCatalog([_plain("1.1.1")], [_position(X, "1.1.1")])
         _, args = _hydrate_check(catalog, [X], {X: {"content": "body"}}, source=_source([X]))
         assert "_evidence_source" not in args
-        assert "_evidence_records" in args  # popped by the dispatcher / bundle builder, not leaked into them
+        assert "_evidence_records" in args  # the dispatcher and the bundle builder pop it before any prompt
 
 
 class TestMergedItems:
@@ -138,7 +142,8 @@ class TestMergedItems:
             _, args = _hydrate_check(catalog, [X], {X: {"content": "body"}}, source=_source([X], tumblers=["1.1.1"]))
         recs = args["_evidence_records"]
         assert [r.item_id for r in recs] == ["e1", "e2"]
-        assert (recs[0].text, recs[0].tumbler, recs[0].chash) == ("repair body", "1.1.7", Z)
+        # the supplement's tumbler came from a search step's tumblers (possibly an inferred owner): not identity
+        assert (recs[0].text, recs[0].tumbler, recs[0].chash) == ("repair body", None, Z)
         assert (recs[1].text, recs[1].tumbler, recs[1].chash) == ("body", "1.1.1", X)
 
     def test_the_coverage_note_and_unknown_items_get_identity_less_records(self) -> None:
@@ -147,7 +152,7 @@ class TestMergedItems:
         with supplement_scope(supp):
             _, args = _hydrate_check(catalog, [X], {X: {"content": "body"}}, source=_source([X], tumblers=["1.1.1"]))
         note_rec = args["_evidence_records"][0]
-        assert note_rec == EvidenceRecord("e1", "NOTE: unresolved facets")
+        assert note_rec == EvidenceRecord("e1", "NOTE: unresolved facets", is_evidence=False)
 
 
 class TestExplicitItemLists:
@@ -397,3 +402,140 @@ async def test_bundled_verify_has_the_direct_call_key_set_and_is_unresolved() ->
     assert direct["evidence"][0]["state"] == "unattributed"
     assert bundled["evidence"][0]["state"] == "unresolved" and bundled["requires_review"] is True
     assert bundled["citations"] == []
+
+
+# ── fix round (code-review + critique of 59380ce54) ──────────────────────────────────────────────────
+
+
+def _supplement_hydrate(catalog, rows, ids, supp):
+    with supplement_scope(supp):
+        return _hydrate_check(catalog, ids, rows, source=_source(ids))
+
+
+class TestRepairedRecordsNeverBindOnASearchTumbler:
+    def test_a_supplement_chash_shared_by_two_owners_is_ambiguous(self) -> None:
+        catalog = _CountingCatalog(
+            [_plain("1.1.5"), _plain("1.1.6")], [_position(Z, "1.1.5"), _position(Z, "1.1.6")],
+        )
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.5"),))
+        # Z is also hydrated as a normal id, so its owner rows were fetched; the supplement's own tumbler is
+        # one of the two owners (what search's inference would pick) and must not bind
+        _, args = _supplement_hydrate(catalog, {Z: {"content": "repair body"}}, [Z], supp)
+        (rec,) = args["_evidence_records"]
+        assert (rec.text, rec.tumbler, rec.chash) == ("repair body", None, Z)
+
+    def test_a_supplement_chash_with_one_owner_takes_that_owner_not_the_supplement_tumbler(self) -> None:
+        catalog = _CountingCatalog([_plain("1.1.5")], [_position(Z, "1.1.5")])
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.9"),))
+        _, args = _supplement_hydrate(catalog, {Z: {"content": "repair body"}}, [Z], supp)
+        (rec,) = args["_evidence_records"]
+        assert rec.tumbler == "1.1.5"
+
+
+class TestOtherRecordSources:
+    def test_tumbler_shaped_ids_are_their_own_document(self) -> None:
+        contents = {"contents": ["[source: s]\ndoc one body", "doc two body"], "missing": []}
+        with patch.object(runner, "_hydrate_tumbler_ids", return_value=contents):
+            _, args = runner._hydrate_operator_args("check", {
+                "ids": ["1.1.1", "1.1.2"], "check_instruction": "c",
+                "_evidence_source": _source(["1.1.1", "1.1.2"], collections=[COLL, ""]),
+            })
+        recs = args["_evidence_records"]
+        assert [(r.item_id, r.text, r.tumbler, r.chash, r.collection) for r in recs] == [
+            ("e1", "doc one body", "1.1.1", None, COLL), ("e2", "doc two body", "1.1.2", None, None),
+        ]
+
+    def test_a_reserved_stream_item_is_recorded_from_its_raw_text_and_own_identity(self) -> None:
+        chunk = SelectedChunk(
+            source="RDR-084", doc_id="1.2.3", position=0, chash="ab" * 32, collection="rdr__x",
+            label="Section 0", label_source="content", text="PRIMARY TEXT 0",
+        )
+        stream = ReservedStream.from_evidence(PrimaryEvidence(items=(chunk,)))
+        with reserved_scope(stream):
+            set_reserved_step(0, feeds_from=())
+            _, args = runner._hydrate_operator_args("check", {"inputs": ["secondary text"], "check_instruction": "c"})
+        recs = args["_evidence_records"]
+        assert (recs[0].item_id, recs[0].text, recs[0].tumbler, recs[0].chash, recs[0].collection) == (
+            "e1", "PRIMARY TEXT 0", "1.2.3", "ab" * 32, "rdr__x")
+        assert (recs[1].text, recs[1].tumbler) == ("secondary text", None)
+        assert "[primary source" in _shown(args)[0]["text"]  # the model reads the header; the record body does not
+
+    def test_the_explicit_inputs_list_gets_identityless_records_in_list_order(self) -> None:
+        _, args = runner._hydrate_operator_args("check", {"inputs": ["a text", "", "b text"], "check_instruction": "c"})
+        assert [(r.item_id, r.text) for r in args["_evidence_records"]] == [("e1", "a text"), ("e2", "b text")]
+        assert [s["id"] for s in _shown(args)] == ["e1", "e2"]
+        assert "inputs" not in args
+
+    def test_the_coverage_note_is_marked_not_evidence(self) -> None:
+        catalog = _CountingCatalog([_plain("1.1.1")], [_position(X, "1.1.1")])
+        with supplement_scope(RepairSupplement(items=(), note="NOTE: unresolved facets")):
+            _, args = _hydrate_check(catalog, [X], {X: {"content": "body"}}, source=_source([X]))
+        note, real = args["_evidence_records"]
+        assert note.is_evidence is False and real.is_evidence is True
+
+    def test_a_step_that_supplies_its_own_items_gets_no_runner_records(self) -> None:
+        catalog = _CountingCatalog([_plain("1.1.1")], [_position(X, "1.1.1")])
+        mine = json.dumps([{"id": "mine", "text": "author text"}])
+        _, args = _hydrate_check(catalog, [X], {X: {"content": "body"}}, source=_source([X]), extra={"items": mine})
+        assert args["items"] == mine
+        assert "_evidence_records" not in args
+
+
+# ── the bundled terminal is bound in every spelling of the tool name ────────────────────────────────────
+
+_SPELLINGS = ["{v}", "operator_{v}", "mcp__plugin_conexus_nexus__operator_{v}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["check", "verify"])
+@pytest.mark.parametrize("spelling", _SPELLINGS, ids=["bare", "operator", "mcp"])
+async def test_a_bundled_terminal_witness_is_bound_whatever_the_tool_spelling(verb: str, spelling: str) -> None:
+    tool = spelling.format(v=verb)
+    terminal_args = (
+        {"ids": "$step1.ids", "collections": "$step1.collections", "check_instruction": "do they hold"}
+        if verb == "check" else {"claim": "latency drops", "evidence": "$step2.ranked"}
+    )
+    plan = [
+        CHECK_PLAN[0],
+        {"tool": "rank", "args": {"ids": "$step1.ids", "collections": "$step1.collections", "criterion": "relevance"}},
+        {"tool": tool, "args": terminal_args},
+    ]
+    reply = MODEL_REPLY if verb == "check" else {
+        "verified": True, "reason": "r", "evidence": [{"item_id": "e1", "quote": "12 ms", "role": "supports"}],
+    }
+
+    async def fake_bundle(bundle, **kw):
+        return json.loads(json.dumps(reply))
+
+    with _env(_owners(), {X: {"content": BODY_X}, Y: {"content": BODY_Y}}), patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+        result = await runner.plan_run(_plan_match(plan), {}, bundle_operators=True)
+    out = result.steps[-1]
+    assert out["schema_version"] == 1, out
+    assert all("state" in i for i in out["evidence"])
+
+
+# ── the continuation envelope carries no private keys ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_check_with_ids_composes_an_envelope_with_no_evidence_records() -> None:
+
+    steps = [
+        {"tool": "search", "args": {"query": "x", "corpus": "knowledge"}},
+        {"tool": "check", "args": {"ids": "$step1.ids", "collections": "knowledge", "check_instruction": "c"}},
+    ]
+    out = {"ids": ["a", "b"], "tumblers": ["1.1", "1.2"], "distances": [0.1, 0.2], "collections": ["knowledge"],
+           "chunk_text_hash": ["h1", "h2"], "chunk_collections": ["knowledge", "knowledge"]}
+
+    def stub_store_get_many(**kwargs):
+        return {"contents": ["doc a text", "doc b text"], "missing": []}
+
+    cut = classify_continuation_cut(steps)
+    with patch.object(mcp_core, "store_get_many", stub_store_get_many):
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=[out], plan_id=1, run_id=None,
+        )
+    assert envelope is not None
+    text = json.dumps(envelope)  # an EvidenceRecord anywhere in it is not serialisable
+    assert "_evidence" not in text and "EvidenceRecord" not in text
+    assert '"id": "e1"' in envelope["reduction_spec"]["prompt"]

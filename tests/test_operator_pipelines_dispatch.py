@@ -190,7 +190,7 @@ class TestOperatorRankDispatch:
 class TestOperatorCheckDispatch:
     async def test_llm_path_carries_invariant(self):
         items = _items_json({"id": "a", "year": 2024})
-        canned = {"results": [{"id": "a", "ok": True, "reason": ""}]}
+        canned = {"ok": True, "evidence": []}
         with patch(
             "nexus.operators.dispatch.claude_dispatch",
             new=AsyncMock(return_value=canned),
@@ -199,7 +199,7 @@ class TestOperatorCheckDispatch:
                 items=items, check_instruction="year is after 2020",
             )
 
-        assert result == canned
+        assert result["schema_version"] == 1 and result["ok"] is True  # bound by the host (Witness Schema v1)
         prompt = mock_dispatch.call_args.args[0]
         assert "year is after 2020" in prompt
 
@@ -209,7 +209,7 @@ class TestOperatorCheckDispatch:
 
 class TestOperatorVerifyDispatch:
     async def test_dispatch_carries_claim_and_evidence(self):
-        canned = {"verdict": "supported", "confidence": 0.8}
+        canned = {"verified": True, "reason": "listed", "evidence": []}
         with patch(
             "nexus.operators.dispatch.claude_dispatch",
             new=AsyncMock(return_value=canned),
@@ -219,7 +219,7 @@ class TestOperatorVerifyDispatch:
                 evidence="Table 2 lists |X|=1000.",
             )
 
-        assert result == canned
+        assert result["schema_version"] == 1 and result["verified"] is True
         prompt = mock_dispatch.call_args.args[0]
         assert "dataset X has 1000 samples" in prompt
         assert "Table 2 lists" in prompt
