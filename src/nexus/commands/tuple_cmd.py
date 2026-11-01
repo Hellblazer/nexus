@@ -82,8 +82,8 @@ def tuple_group() -> None:
     "--body", default=None,
     help=(
         "Tuple payload -- a short message or signal, not a document. At "
-        "most 4096 bytes UTF-8 (a template may set lower; the ledger's is "
-        "0); refused as TooLarge over the limit. Put longer content in T2 "
+        "most 4096 bytes UTF-8 (a template may set lower; directory/<name>'s "
+        "is 0); refused as TooLarge over the limit. Put longer content in T2 "
         "(memory_put) or T3 (store_put) and pass a reference here "
         "(project/title or document id)."
     ),
@@ -93,8 +93,8 @@ def tuple_group() -> None:
     help=(
         "Caller-minted nonce. REQUIRED for a keys+nonce template (mailbox, "
         "board, board/ci, queue, directory, aspects) -- refused as "
-        "SchemaViolation without one; omit for a keys-only template (ledger, "
-        "lock). An id ingredient only, never "
+        "SchemaViolation without one; omit for a keys-only template (lock/<resource>). "
+        "An id ingredient only, never "
         "echoed back on a read."
     ),
 )
@@ -127,7 +127,7 @@ def tuple_out_cmd(
 #: which is also the client-wide paging ceiling.
 _RD_PAGE: int = 300
 
-#: The default hard bound on --all / --newest: a board or ledger read must
+#: The default hard bound on --all / --newest: a board read must
 #: stay a bounded call even on a subspace far larger than expected.
 _RD_MAX_ROWS_DEFAULT: int = 10_000
 
@@ -528,8 +528,8 @@ def tuple_in_cmd(
     help=(
         "Write a reply into this subspace in the same transaction that "
         "consumes the claim (RDR-206). Must resolve to a keys+nonce "
-        "template (SchemaViolation on a keys-only target, e.g. the "
-        "ledger). Required by every other --reply-* flag."
+        "template (SchemaViolation on a keys-only target, e.g. "
+        "lock/<resource>). Required by every other --reply-* flag."
     ),
 )
 @click.option("--reply-key", "reply_keys", multiple=True, metavar="KEY=VALUE",

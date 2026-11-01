@@ -241,7 +241,7 @@ class ReplySpec:
     after construction has no meaning once it has been serialised.
 
     The reply's target must resolve to a ``keys+nonce`` template. A
-    keys-only target (the ledger) is refused with ``SchemaViolation``, and
+    keys-only target (``lock/<resource>``) is refused with ``SchemaViolation``, and
     an unregistered subspace with ``UnknownSubspace`` -- both BEFORE the
     ack's transaction opens, so a refused reply leaves the request still
     claimed and still ackable, never half-consumed.

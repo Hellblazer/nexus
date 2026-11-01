@@ -46,5 +46,6 @@ it is until moved back deliberately.
 ## Awaiting the next release (pinned: v7.91.1)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
+- `conexus/skills/mailbox/SKILL.md` (nexus-onjvw): the reply-in-ack paragraph names `lock/<resource>`, not the RDR-184 ledger, as its example of a keys-only target the engine refuses with `SchemaViolation`; the ledger template is retired.
 
 ## Deferred to the next client release

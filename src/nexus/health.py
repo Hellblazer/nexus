@@ -9092,7 +9092,7 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
     ``HttpTupleStore.subspace_list``/``registry``) for subspaces that
     resolve to the take-enabled ``queue/<name>`` template or, since RDR-235
     F18, the take-enabled ``aspects`` template ONLY -- board (take disabled),
-    mailbox, lock, ledger, and directory subspaces never count here
+    mailbox, lock, and directory subspaces never count here
     regardless of row counts (RDR-211 Scale and Limits item 3: "a doctor row
     over the census available and dead counts for QUEUE subspaces"). The
     aspects queue is a queue by the same definition. On an engine without the

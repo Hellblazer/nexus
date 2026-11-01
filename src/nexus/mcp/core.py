@@ -8068,7 +8068,7 @@ def tuple_out(
             "when the template's id_from is keys+nonce (mailbox/<address>, "
             "board/<topic>, board/ci/<topic>, queue/<name>, directory/<name>, "
             "aspects); omit "
-            "for a keys-only one (ledger, lock). An id ingredient only, never echoed "
+            "for a keys-only one (lock/<resource>). An id ingredient only, never echoed "
             "back on a read."
         ),
     )] = None,
@@ -8100,7 +8100,7 @@ def tuple_out(
 
     Size limits (refused with the `TooLarge` typed error before any write):
     - `body`: at most 4096 bytes UTF-8 (a template may set a lower cap; the
-      ledger's is 0, null or empty only).
+      `directory/<name>`'s is 0, null or empty only).
     - Each `keys`/`dims` value: at most 256 bytes UTF-8.
     - `subspace`: at most 256 bytes UTF-8.
     - `nonce`: at most 128 bytes UTF-8.
@@ -8308,7 +8308,7 @@ def tuple_ack(
     Pass `reply` to write a reply as the request is consumed; both commit
     together or not at all. The reply's target must resolve to a
     keys+nonce template (e.g. a mailbox address); a keys-only target (e.g.
-    the RDR-184 ledger) is refused. A reply that fails validation leaves
+    `lock/<resource>`) is refused. A reply that fails validation leaves
     the request still claimed and still ackable — nothing is written on
     either side.
 

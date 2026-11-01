@@ -129,7 +129,7 @@ _MAX_REQUEST_BODY_BYTES: int = 8 * 1024
 #: knows the GLOBAL body cap — a template's own (possibly lower)
 #: ``max_body_bytes`` is engine-side knowledge the client has no copy of,
 #: so a body under this cap can still be refused by the engine for a
-#: template with a lower ceiling (the ledger's is 0).
+#: template with a lower ceiling (directory/<name>'s is 0).
 _MAX_BODY_BYTES: int = 4096
 _MAX_FIELD_VALUE_BYTES: int = 256
 _MAX_SUBSPACE_BYTES: int = 256
