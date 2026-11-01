@@ -730,42 +730,116 @@ class TemplateRegistryTest {
         assertTrue(ex.getMessage().contains("alpha/<x>"), ex.getMessage());
     }
 
+    /**
+     * Runs {@link TupleShapeValidator#validateOut} on the very input {@code yaml}'s example
+     * carries, and asserts the boot refusal names {@code expectedField} and quotes that
+     * exception's message verbatim. A copy of the checks inside TemplateRegistry that kept the
+     * same field and the same words would still fail this if its text ever diverged. This is
+     * not a mutation test: it pins the boot check to the validator's own wording, not to the
+     * fact that it calls the validator.
+     */
+    private static void assertRefusalQuotesTheSharedValidator(String yaml, Map<String, String> keys,
+                                                              Map<String, String> dims, String body, String nonce,
+                                                              String expectedField) {
+        TemplateSchema t = loadGroup("directory:/probe", yaml).byName("alpha/<x>");
+        RuntimeException fromValidator = assertThrows(RuntimeException.class,
+                () -> TupleShapeValidator.validateOut(t, keys, dims, body, nonce, false), expectedField);
+        TemplateRegistryException ex = refusedAtBoot(yaml);
+        assertEquals(expectedField, ex.field());
+        assertTrue(ex.getMessage().contains("alpha/<x>"), ex.getMessage());
+        assertTrue(ex.getMessage().contains(fromValidator.getMessage()),
+                "boot refusal '" + ex.getMessage() + "' must contain the validator's '"
+                        + fromValidator.getMessage() + "'");
+    }
+
     @Test
     void exampleShapeFailureIsRefusedNamingTheFieldThroughTheSharedValidator() {
-        TemplateRegistryException ex = refusedAtBoot(GOOD_DOC_TEMPLATE.replace("      d: one\n", "      d: three\n"));
-        assertEquals("doc.example.d", ex.field());
-        assertTrue(ex.getMessage().contains("alpha/<x>"), ex.getMessage());
-        assertTrue(ex.getMessage().contains("not in"), ex.getMessage());
-
-        TemplateRegistryException missing = refusedAtBoot(GOOD_DOC_TEMPLATE.replace("      k: 3889972\n", "      k: \" \"\n"));
-        assertEquals("doc.example.k", missing.field());
-
-        TemplateRegistryException unknown = refusedAtBoot(
-                GOOD_DOC_TEMPLATE.replace("      k: 3889972\n", "      k: v\n      extra: v\n"));
-        assertEquals("doc.example.extra", unknown.field());
+        assertRefusalQuotesTheSharedValidator(GOOD_DOC_TEMPLATE.replace("      d: one\n", "      d: three\n"),
+                Map.of("k", "3889972"), Map.of("d", "three"), "hello", "n1", "doc.example.dims.d");
+        assertRefusalQuotesTheSharedValidator(
+                GOOD_DOC_TEMPLATE.replace("      k: 3889972\n", "      k: \" \"\n"),
+                Map.of("k", " "), Map.of("d", "one"), "hello", "n1", "doc.example.keys.k");
+        assertRefusalQuotesTheSharedValidator(
+                GOOD_DOC_TEMPLATE.replace("      k: 3889972\n", "      k: v\n      extra: v\n"),
+                Map.of("k", "v", "extra", "v"), Map.of("d", "one"), "hello", "n1", "doc.example.keys.extra");
+        assertRefusalQuotesTheSharedValidator(
+                GOOD_DOC_TEMPLATE.replace("      d: one\n", "      d: one\n      zed: v\n"),
+                Map.of("k", "3889972"), Map.of("d", "one", "zed", "v"), "hello", "n1", "doc.example.dims.zed");
+        assertRefusalQuotesTheSharedValidator(GOOD_DOC_TEMPLATE.replace("    nonce: n1\n", ""),
+                Map.of("k", "3889972"), Map.of("d", "one"), "hello", null, "doc.example.nonce");
     }
 
     @Test
-    void exampleSizeFailureIsRefusedNamingTheField() {
-        TemplateRegistryException ex = refusedAtBoot(
-                GOOD_DOC_TEMPLATE.replace("      k: 3889972\n", "      k: " + "v".repeat(257) + "\n"));
-        assertEquals("doc.example.keys.k", ex.field());
-        TemplateRegistryException body = refusedAtBoot(docTemplateYaml("alpha/<x>", "alpha/thing", "b".repeat(280))
-                .replace("retention_seconds: 100\n", "retention_seconds: 100\nmax_body_bytes: 5\n"));
-        assertEquals("doc.example.body", body.field());
+    void exampleSizeFailureIsRefusedNamingTheFieldThroughTheSharedValidator() {
+        String longKey = "v".repeat(257);
+        assertRefusalQuotesTheSharedValidator(
+                GOOD_DOC_TEMPLATE.replace("      k: 3889972\n", "      k: " + longKey + "\n"),
+                Map.of("k", longKey), Map.of("d", "one"), "hello", "n1", "doc.example.keys.k");
+        String longBody = "b".repeat(280);
+        assertRefusalQuotesTheSharedValidator(
+                docTemplateYaml("alpha/<x>", "alpha/thing", longBody)
+                        .replace("retention_seconds: 100\n", "retention_seconds: 100\nmax_body_bytes: 5\n"),
+                Map.of("k", "3889972"), Map.of("d", "one"), longBody, "n1", "doc.example.body");
+    }
+
+    /**
+     * One edit per doc part (and per example field), each a valid document that differs from
+     * {@link #GOOD_DOC_TEMPLATE} in exactly that part. RDR-239 S4 Q2: a doc-only edit changes the
+     * registry digest, for every part, so "the digest changes whenever a template file changes"
+     * holds. The seven parts are summary, writers, readers, fields, body, example, see_also.
+     */
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> docPartEdits() {
+        String g = GOOD_DOC_TEMPLATE;
+        return java.util.stream.Stream.of(
+                org.junit.jupiter.params.provider.Arguments.of("summary",
+                        g.replace("A probe template.", "A probe templatf.")),
+                org.junit.jupiter.params.provider.Arguments.of("writers",
+                        g.replace("  writers: []\n", "  writers:\n    - someone\n")),
+                org.junit.jupiter.params.provider.Arguments.of("readers",
+                        g.replace("nobody reads it", "nobody reads it!")),
+                org.junit.jupiter.params.provider.Arguments.of("fields (description)",
+                        g.replace("    k: the key\n", "    k: the keyy\n")),
+                org.junit.jupiter.params.provider.Arguments.of("fields (value map meaning)",
+                        g.replace("      one: first\n", "      one: firsT\n")),
+                org.junit.jupiter.params.provider.Arguments.of("body",
+                        g.replace("body: free text", "body: free texT")),
+                org.junit.jupiter.params.provider.Arguments.of("example.subspace",
+                        g.replace("subspace: alpha/thing", "subspace: alpha/thing2")),
+                org.junit.jupiter.params.provider.Arguments.of("example.nonce",
+                        g.replace("nonce: n1", "nonce: n2")),
+                org.junit.jupiter.params.provider.Arguments.of("example.keys",
+                        g.replace("k: 3889972", "k: 3889973")),
+                org.junit.jupiter.params.provider.Arguments.of("example.dims",
+                        g.replace("      d: one\n    body", "      d: two\n    body")),
+                org.junit.jupiter.params.provider.Arguments.of("example.body",
+                        g.replace("body: hello", "body: hellp")),
+                org.junit.jupiter.params.provider.Arguments.of("see_also",
+                        g.replace("- RDR-239", "- RDR-240")));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest(name = "a doc-only edit to {0} changes the digest")
+    @org.junit.jupiter.params.provider.MethodSource("docPartEdits")
+    void docBlockEntersTheDigestSoADocOnlyChangeChangesIt(String part, String edited) {
+        String base = loadGroup("test", GOOD_DOC_TEMPLATE).digest();
+        assertNotEquals(GOOD_DOC_TEMPLATE, edited, "the edit for " + part + " must change the file");
+        assertNotEquals(base, loadGroup("test", edited).digest(), "digest unmoved by an edit to " + part);
     }
 
     @Test
-    void docBlockEntersTheDigestSoADocOnlyChangeChangesIt() {
+    void theDigestIsStableForOneDocAndDropsWithoutIt() {
         String withDoc = GOOD_DOC_TEMPLATE;
-        String editedSummary = withDoc.replace("A probe template.", "A different summary.");
-        String editedSeeAlso = withDoc.replace("- RDR-239", "- RDR-240");
         String withoutDoc = withDoc.substring(0, withDoc.indexOf("doc:\n"));
         String base = loadGroup("test", withDoc).digest();
-        assertNotEquals(base, loadGroup("test", editedSummary).digest());
-        assertNotEquals(base, loadGroup("test", editedSeeAlso).digest());
         assertNotEquals(base, loadGroup("test", withoutDoc).digest());
         assertEquals(base, loadGroup("test", withDoc).digest());
+    }
+
+    @Test
+    void theDocPartsListCoversEverySevenParts() {
+        List<String> parts = docPartEdits().map(a -> (String) a.get()[0]).toList();
+        for (String part : List.of("summary", "writers", "readers", "fields", "body", "example", "see_also")) {
+            assertTrue(parts.stream().anyMatch(p -> p.startsWith(part)), "no digest case for doc part " + part);
+        }
     }
 
     @Test
@@ -804,7 +878,7 @@ class TemplateRegistryTest {
         TemplateRegistryException parse = refusedAtBoot(BAD_FIELD_DOC);
         assertEquals("doc.bogus", parse.field());
         TemplateRegistryException example = refusedAtBoot(BAD_EXAMPLE_DOC);
-        assertEquals("doc.example.d", example.field());
+        assertEquals("doc.example.dims.d", example.field());
         assertTrue(example.getMessage().contains("alpha/<x>"), example.getMessage());
     }
 
@@ -812,7 +886,7 @@ class TemplateRegistryTest {
     void badDocInADirectoryTemplateLoadsTheTemplateWithoutDocAndWarnsNamingTemplateAndField() {
         for (var c : List.of(
                 Map.entry(BAD_FIELD_DOC, "doc.bogus"),
-                Map.entry(BAD_EXAMPLE_DOC, "doc.example.d"))) {
+                Map.entry(BAD_EXAMPLE_DOC, "doc.example.dims.d"))) {
             TemplateRegistry[] box = new TemplateRegistry[1];
             List<String> warnings = docDroppedWarnings(() -> box[0] = loadGroup("directory:/probe", c.getKey()));
             TemplateSchema t = box[0].byName("alpha/<x>");
@@ -849,6 +923,43 @@ class TemplateRegistryTest {
         assertEquals(1, warnings.size(), warnings.toString());
         assertNull(box[0].byName("alpha/<x>").doc());
         assertEquals(8, box[0].templates().size());
+    }
+
+    // M1: a directory template that shadows a classpath template's example owner
+
+    private static final String SHADOWING_DIR_TEMPLATE = minimalTemplateYaml("alpha/<a>", 100L);
+
+    private static TemplateRegistry loadClasspathAndDirectory(String classpathYaml, String dirYaml) {
+        return TemplateRegistry.load(List.of(
+                new TemplateRegistry.SourceGroup(TemplateRegistry.SOURCE_RESOURCES,
+                        List.of(new TemplateRegistry.TemplateSource("classpath/alpha.yaml", classpathYaml))),
+                new TemplateRegistry.SourceGroup("directory:/probe",
+                        List.of(new TemplateRegistry.TemplateSource("/probe/shadow.yaml", dirYaml)))),
+                DAYS(180), SWEEP_INTERVAL_SECONDS);
+    }
+
+    @Test
+    void aDirectoryTemplateShadowingAClasspathExampleDropsTheClasspathDocAndBootsWithAWarning() {
+        // alpha/<a> sorts before alpha/<x>, so alpha/thing resolves to the directory template.
+        TemplateRegistry[] box = new TemplateRegistry[1];
+        List<String> warnings = docDroppedWarnings(() ->
+                box[0] = loadClasspathAndDirectory(GOOD_DOC_TEMPLATE, SHADOWING_DIR_TEMPLATE));
+        assertNotNull(box[0].byName("alpha/<x>"), "the shipped template still loads");
+        assertNull(box[0].byName("alpha/<x>").doc(), "its doc is dropped");
+        assertNotNull(box[0].byName("alpha/<a>"));
+        assertEquals(1, warnings.size(), warnings.toString());
+        assertTrue(warnings.get(0).contains("template=alpha/<x>"), warnings.get(0));
+        assertTrue(warnings.get(0).contains("alpha/<a>"), "names the shadowing template: " + warnings.get(0));
+        assertTrue(warnings.get(0).contains("/probe/shadow.yaml"), "names its source: " + warnings.get(0));
+        assertTrue(warnings.get(0).contains("field=doc.example.subspace"), warnings.get(0));
+    }
+
+    @Test
+    void aClasspathTemplateShadowingAClasspathExampleStaysFatalAndNamesTheOwnersSource() {
+        TemplateRegistryException ex = refusedAtBoot(GOOD_DOC_TEMPLATE, SHADOWING_DIR_TEMPLATE);
+        assertEquals("doc.example.subspace", ex.field());
+        assertTrue(ex.getMessage().contains("alpha/<a>"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("f1.yaml"), "names the owner's source: " + ex.getMessage());
     }
 
     // ── helpers ──────────────────────────────────────────────────────────

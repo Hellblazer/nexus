@@ -554,7 +554,9 @@ final class TemplateSchemaParser {
         unknown.removeAll(allowed);
         if (!unknown.isEmpty()) {
             throw breach(source, prefix + unknown.iterator().next(),
-                    "unknown field (not part of the RDR-205 v1 document shape)");
+                    prefix.startsWith("doc.")
+                            ? "unknown field (not part of the RDR-239 doc block)"
+                            : "unknown field (not part of the RDR-205 v1 document shape)");
         }
     }
 

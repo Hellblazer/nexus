@@ -559,6 +559,9 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         TemplateRegistry.Snapshot snap = repo.registry();
+        // No guard for a malformed percent-escape: the JDK HttpServer rejects such a request line
+        // (?x=%zz, ?x=%) with its own 400 before any handler runs, so parseQuery never sees one
+        // (measured 2026-11-01, nexus-mdbds.2.14 L2; it was a 400 before this route read the query too).
         boolean withDoc = "1".equals(parseQuery(ex.getRequestURI()).get("doc"));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("digest", snap.digest());

@@ -467,20 +467,34 @@ public final class TemplateRegistry {
             if (t.doc() == null || t.doc().example() == null) {
                 continue;
             }
+            TemplateRegistryException dropWith;
             try {
-                validateDocExample(t, templates);
+                dropWith = validateDocExample(t, templates, docDroppable, sourceOf);
             } catch (TemplateRegistryException e) {
                 if (!docDroppable.contains(t.name())) {
                     throw e;
                 }
-                warnDocDropped(t.name(), sourceOf.get(t.name()), e);
+                dropWith = e;
+            }
+            if (dropWith != null) {
+                warnDocDropped(t.name(), sourceOf.get(t.name()), dropWith);
                 out.set(i, t.withoutDoc());
             }
         }
         return List.copyOf(out);
     }
 
-    private static void validateDocExample(TemplateSchema t, List<TemplateSchema> templates) {
+    /**
+     * Checks one template's doc example. Throws on a breach; returns a non-null exception, for
+     * the caller to log and act on, when the breach is a droppable (non-classpath) template
+     * shadowing the example subspace of a classpath holder: the holder is shipped and fatal for
+     * its own doc errors, but an operator-supplied directory must not take the engine down over
+     * documentation (S3), so the holder's doc is dropped instead. Returns {@code null} when the
+     * example is sound.
+     */
+    private static TemplateRegistryException validateDocExample(TemplateSchema t, List<TemplateSchema> templates,
+                                                                Set<String> docDroppable,
+                                                                Map<String, String> sourceOf) {
         TemplateDoc.Example ex = t.doc().example();
         try {
             TupleShapeValidator.checkSubspaceSize(ex.subspace());
@@ -493,16 +507,35 @@ public final class TemplateRegistry {
                     + "' resolves to no template; the example must resolve to '" + t.name() + "'");
         }
         if (!owner.name().equals(t.name())) {
-            throw docExampleBreach(t, "subspace", "subspace '" + ex.subspace() + "' resolves to template '"
-                    + owner.name() + "', not to '" + t.name() + "', the template that declares the example");
+            TemplateRegistryException breach = docExampleBreach(t, "subspace", "subspace '" + ex.subspace()
+                    + "' resolves to template '" + owner.name() + "' (from " + sourceOf.get(owner.name())
+                    + "), not to '" + t.name() + "', the template that declares the example");
+            if (docDroppable.contains(owner.name()) && !docDroppable.contains(t.name())) {
+                return breach;
+            }
+            throw breach;
         }
         try {
             TupleShapeValidator.validateOut(t, ex.keys(), ex.dims(), ex.body(), ex.nonce(), false);
         } catch (SchemaViolationException e) {
-            throw docExampleBreach(t, e.field(), e.getMessage());
+            throw docExampleBreach(t, shapeFieldPath(t, ex, e.field()), e.getMessage());
         } catch (TooLargeException e) {
             throw docExampleBreach(t, e.field(), e.getMessage());
         }
+        return null;
+    }
+
+    /** Maps the bare field a shape refusal names back to where it sits in the example (and in
+     *  the file): a key under {@code keys.}, a dimension under {@code dims.}, the nonce bare.
+     *  A size refusal arrives already qualified ({@code keys.k}). */
+    private static String shapeFieldPath(TemplateSchema t, TemplateDoc.Example ex, String field) {
+        if (t.keys().contains(field) || ex.keys().containsKey(field)) {
+            return "keys." + field;
+        }
+        if (t.dimensions().containsKey(field) || ex.dims().containsKey(field)) {
+            return "dims." + field;
+        }
+        return field;
     }
 
     private static TemplateRegistryException docExampleBreach(TemplateSchema t, String exampleField, String detail) {

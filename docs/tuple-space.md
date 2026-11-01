@@ -85,7 +85,20 @@ subspace_list(prefix, limit=None, after=None) -> {subspaces: [{subspace, total, 
                                                                      # unchanged; with limit, next_cursor
                                                                      # carries the cursor for the next page
                                                                      # when the page was truncated
-registry() -> {digest, sources, templates: [TemplateSchema]}
+registry(doc?) -> {digest, sources, templates: [TemplateSchema]}
+                                                            # doc (RDR-239, nexus-mdbds.2.12, additive): the HTTP
+                                                            # route GET /v1/tuples/registry takes ?doc=1 (exactly
+                                                            # that value; doc=0, doc=true or no parameter is off).
+                                                            # With it, each template that carries a doc block gains
+                                                            # one key, doc, appended last: {summary, writers,
+                                                            # readers, fields, body, example, see_also}, each
+                                                            # present only when declared (example: {subspace,
+                                                            # nonce?, keys, dims, body?}, scalars as strings).
+                                                            # A template with no doc block has no doc key either
+                                                            # way. Without doc=1 the response keeps its shape and
+                                                            # carries no doc. The digest is the same with and
+                                                            # without the parameter and covers every doc part, so
+                                                            # a doc-only edit to a template file changes it.
 subspace_stats(subspace) -> {total, available, claimed, lapsed, dead, consumed, expired_unpurged,
                              delayed, oldest_claimable_created_at}
                                                             # delayed (RDR-235, engine-service-v0.1.170) is the part of

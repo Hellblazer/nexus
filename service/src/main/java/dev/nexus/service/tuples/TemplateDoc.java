@@ -29,6 +29,28 @@ public record TemplateDoc(
         Example example,
         List<String> seeAlso) {
 
+    /** Copies every collection immutably, file order kept (the registry snapshot is shared
+     *  across requests; nothing downstream may mutate it). */
+    public TemplateDoc {
+        writers = writers == null ? null : List.copyOf(writers);
+        readers = readers == null ? null : List.copyOf(readers);
+        seeAlso = seeAlso == null ? null : List.copyOf(seeAlso);
+        if (fields != null) {
+            Map<String, Object> copy = new java.util.LinkedHashMap<>();
+            fields.forEach((k, v) -> copy.put(k, immutableDescription(v)));
+            fields = java.util.Collections.unmodifiableMap(copy);
+        }
+        body = body == null ? null : immutableDescription(body);
+    }
+
+    /** A description is a String or a value map; a map is copied in file order. */
+    @SuppressWarnings("unchecked")
+    private static Object immutableDescription(Object o) {
+        return o instanceof Map
+                ? java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>((Map<String, String>) o))
+                : o;
+    }
+
     /** Bytes allowed in one description: a summary, a writers/readers/see_also string, a
      *  fields or body description (S4 Q3). */
     public static final int MAX_TEXT_BYTES = 300;

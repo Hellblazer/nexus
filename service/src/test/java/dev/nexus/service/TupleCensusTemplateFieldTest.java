@@ -194,7 +194,8 @@ class TupleCensusTemplateFieldTest {
     @Test
     void unresolvableSubspace_isRefusedBySubspaceStats() throws Exception {
         var r = getRaw("/v1/tuples/subspace_stats?subspace=retired/x");
-        assertThat(r.statusCode()).as(r.body()).isNotEqualTo(200);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(404);
+        assertThat(MAPPER.readTree(r.body()).get("error").asText()).as(r.body()).isEqualTo("UnknownSubspace");
     }
 
     /** The additive field changes no existing field: names, order (template last) and values. */

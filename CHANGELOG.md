@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Engine: `GET /v1/tuples/subspace_list` rows and `GET /v1/tuples/subspace_stats` gain an additive `template` field naming the template the subspace resolves to (`board/ci/<topic>`, `aspects`, ...), null when none does, so a client no longer copies `TemplateRegistry.resolve` (nexus-mdbds.2.13, RDR-239).
+- Engine: `GET /v1/tuples/registry?doc=1` adds a `doc` key, last, to each template that carries a doc block (summary, writers, readers, fields, body, example, see_also); without `doc=1` the response keeps its shape and carries no `doc`. A template's example is checked at boot by the same validator `out()` uses, and a bad doc in a `NX_TUPLE_TEMPLATE_DIR` template is dropped with a `tuple_template_doc_dropped` warning instead of refusing to boot (nexus-mdbds.2.10, nexus-mdbds.2.12, RDR-239).
+- Engine: the seven shipped templates carry doc blocks, so the registry `digest` takes a new value in the same release (nexus-mdbds.2.11, RDR-239). No client compares a digest against a fixed value.
 
 ## [7.93.0] - 2026-11-01
 

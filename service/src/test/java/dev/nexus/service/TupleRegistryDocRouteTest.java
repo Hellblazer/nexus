@@ -208,6 +208,51 @@ class TupleRegistryDocRouteTest {
         assertThat(get("/v1/tuples/registry?doc=1").get("digest")).isEqualTo(registry.digest());
     }
 
+    /** L6 (nexus-mdbds.2.14): the ledger says doc is appended LAST on the template object. */
+    @Test
+    void docIsTheLastKeyOfATemplateObjectAndTheOtherKeysKeepTheirOrder() throws Exception {
+        Map<String, Object> t = template(get("/v1/tuples/registry?doc=1"), DOCUMENTED);
+        assertThat(List.copyOf(t.keySet())).containsExactly("name", "keys", "dimensions", "id_from", "id_dims",
+                "take", "retention_seconds", "lock", "doc");
+        assertThat(List.copyOf(template(get("/v1/tuples/registry"), DOCUMENTED).keySet()))
+                .containsExactly("name", "keys", "dimensions", "id_from", "id_dims", "take", "retention_seconds",
+                        "lock");
+    }
+
+    /** The default body is the ?doc=1 body with each template's doc removed: same keys, same
+     *  order, same values, digest and sources included. */
+    @Test
+    void theDefaultBodyEqualsTheDocBodyWithEachDocKeyRemoved() throws Exception {
+        Map<String, Object> withDoc = get("/v1/tuples/registry?doc=1");
+        Map<String, Object> plain = get("/v1/tuples/registry");
+        List<?> docTemplates = (List<?>) withDoc.get("templates");
+        assertThat(docTemplates.stream().filter(o -> ((Map<?, ?>) o).containsKey("doc")).count())
+                .as("non-vacuity: at least the documented probe carries a doc").isGreaterThanOrEqualTo(1);
+        for (Object o : docTemplates) {
+            ((Map<?, ?>) o).remove("doc");
+        }
+        assertThat(withDoc).isEqualTo(plain);
+        assertThat(List.copyOf(withDoc.keySet())).isEqualTo(List.copyOf(plain.keySet()));
+        List<?> plainTemplates = (List<?>) plain.get("templates");
+        assertThat(docTemplates).hasSameSizeAs(plainTemplates);
+        for (int i = 0; i < plainTemplates.size(); i++) {
+            assertThat(List.copyOf(((Map<?, ?>) docTemplates.get(i)).keySet()))
+                    .isEqualTo(List.copyOf(((Map<?, ?>) plainTemplates.get(i)).keySet()));
+        }
+    }
+
+    /**
+     * The nearest malformed escape that reaches the handler. {@code %zz} and a lone {@code %}
+     * never do: the JDK HttpServer answers its own 400 while parsing the request line (measured
+     * 2026-11-01), so the route cannot be asked about them. {@code %ff} is not valid UTF-8 and
+     * decodes to U+FFFD: the request is a 200 and the doc flag still reads independently of it.
+     */
+    @Test
+    void anUndecodableButWellFormedEscapeInAnotherParameterDoesNotAffectTheDocFlag() throws Exception {
+        assertThat(template(get("/v1/tuples/registry?x=%ff"), DOCUMENTED)).doesNotContainKey("doc");
+        assertThat(template(get("/v1/tuples/registry?doc=1&x=%ff"), DOCUMENTED)).containsKey("doc");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     @SuppressWarnings("unchecked")

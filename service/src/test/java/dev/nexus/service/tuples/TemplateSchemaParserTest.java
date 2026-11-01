@@ -605,6 +605,122 @@ class TemplateSchemaParserTest {
         assertEquals("7", parsed.body());
     }
 
+    // ── L7 (nexus-mdbds.2.14): the field-naming refusals the cases above leave untested ──
+
+    @Test
+    void writersAndSeeAlsoThatAreNotListsAreRefusedNamingThem() {
+        for (String key : List.of("writers", "readers", "see_also")) {
+            Map<String, Object> block = docBlock();
+            block.put(key, "a lone string");
+            assertNames(refused(docDocument(block)), "doc." + key);
+        }
+    }
+
+    @Test
+    void docFieldsThatIsNotAMappingIsRefusedNamingIt() {
+        Map<String, Object> block = docBlock();
+        block.put("fields", new ArrayList<>(List.of("to")));
+        assertNames(refused(docDocument(block)), "doc.fields");
+    }
+
+    @Test
+    void anEmptyValueMapIsRefusedNamingItsField() {
+        Map<String, Object> block = docBlock();
+        sub(block, "fields").put("from", new LinkedHashMap<String, Object>());
+        TemplateRegistryException ex = refused(docDocument(block));
+        assertNames(ex, "doc.fields.from");
+        assertTrue(ex.getMessage().contains("empty"), ex.getMessage());
+
+        Map<String, Object> bodyBlock = docBlock();
+        bodyBlock.put("body", new LinkedHashMap<String, Object>());
+        assertNames(refused(docDocument(bodyBlock)), "doc.body");
+    }
+
+    @Test
+    void anUnknownFieldInsideTheExampleIsRefusedNamingItAndTheDocBlock() {
+        Map<String, Object> block = docBlock();
+        sub(block, "example").put("zzz", "x");
+        TemplateRegistryException ex = refused(docDocument(block));
+        assertNames(ex, "doc.example.zzz");
+        assertTrue(ex.getMessage().contains("RDR-239 doc block"), ex.getMessage());
+    }
+
+    @Test
+    void anUnknownDocFieldMessageNamesTheDocBlockWhileATopLevelOneKeepsTheV1Shape() {
+        Map<String, Object> block = docBlock();
+        block.put("dimension_values", "x");
+        assertTrue(refused(docDocument(block)).getMessage().contains("RDR-239 doc block"));
+        Map<String, Object> top = validDoc();
+        top.put("bogus", "x");
+        TemplateRegistryException ex = refused(top);
+        assertNames(ex, "bogus");
+        assertTrue(ex.getMessage().contains("RDR-205 v1 document shape"), ex.getMessage());
+    }
+
+    @Test
+    void aNonScalarExampleNonceOrBodyIsRefusedNamingIt() {
+        Map<String, Object> nonce = docBlock();
+        sub(nonce, "example").put("nonce", new ArrayList<>(List.of("n1")));
+        assertNames(refused(docDocument(nonce)), "doc.example.nonce");
+
+        Map<String, Object> body = docBlock();
+        sub(body, "example").put("body", new LinkedHashMap<String, Object>());
+        assertNames(refused(docDocument(body)), "doc.example.body");
+    }
+
+    @Test
+    void exampleKeysOrDimsThatAreNotAMappingAreRefusedNamingThem() {
+        Map<String, Object> keys = docBlock();
+        sub(keys, "example").put("keys", "someone");
+        assertNames(refused(docDocument(keys)), "doc.example.keys");
+
+        Map<String, Object> dims = docBlock();
+        sub(dims, "example").put("dims", new ArrayList<>(List.of("other")));
+        assertNames(refused(docDocument(dims)), "doc.example.dims");
+
+        Map<String, Object> nonScalar = docBlock();
+        sub(sub(nonScalar, "example"), "keys").put("to", new ArrayList<>(List.of("a")));
+        assertNames(refused(docDocument(nonScalar)), "doc.example.keys.to");
+    }
+
+    // L3: the parsed block is a snapshot shared across requests; nothing may mutate it
+
+    @Test
+    void theParsedDocCannotBeMutated() {
+        TemplateDoc d = TemplateSchemaParser.parse("mailbox.yaml", docDocument(docBlock())).doc();
+        assertThrows(UnsupportedOperationException.class, () -> d.writers().add("x"));
+        assertThrows(UnsupportedOperationException.class, () -> d.readers().add("x"));
+        assertThrows(UnsupportedOperationException.class, () -> d.seeAlso().add("x"));
+        assertThrows(UnsupportedOperationException.class, () -> d.fields().put("x", "y"));
+        assertThrows(UnsupportedOperationException.class, () -> d.example().keys().put("x", "y"));
+        assertThrows(UnsupportedOperationException.class, () -> d.example().dims().put("x", "y"));
+
+        Map<String, Object> block = docBlock();
+        Map<String, Object> valueMap = new LinkedHashMap<>();
+        valueMap.put("anything", "in use today");
+        sub(block, "fields").put("from", valueMap);
+        block.put("body", new LinkedHashMap<>(Map.of("text", "the message")));
+        TemplateDoc withMaps = TemplateSchemaParser.parse("t.yaml", docDocument(block)).doc();
+        @SuppressWarnings("unchecked")
+        Map<String, String> fieldMap = (Map<String, String>) withMaps.fields().get("from");
+        assertThrows(UnsupportedOperationException.class, () -> fieldMap.put("x", "y"));
+        @SuppressWarnings("unchecked")
+        Map<String, String> bodyMap = (Map<String, String>) withMaps.body();
+        assertThrows(UnsupportedOperationException.class, () -> bodyMap.put("x", "y"));
+    }
+
+    @Test
+    void theDocDoesNotAliasTheParsedInput() {
+        List<String> writers = new ArrayList<>(List.of("a"));
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("to", "the addressee");
+        TemplateDoc d = new TemplateDoc("s", writers, null, fields, null, null, null);
+        writers.add("late addition");
+        fields.put("late", "addition");
+        assertEquals(List.of("a"), d.writers());
+        assertEquals(Map.of("to", "the addressee"), d.fields());
+    }
+
     // ── byte caps: 300 per description, 4,096 per block (S4 Q3) ─────────────────────
 
     private static String bytes(int n) {
