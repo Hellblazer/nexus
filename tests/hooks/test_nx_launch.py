@@ -640,7 +640,7 @@ def test_a_session_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path)
     uv = shutil.which("uv")
     assert uv, "uv is not on PATH; it starts every entry, so this is a failure, not a skip"
     entries = _entries("SessionStart")
-    assert len(entries) == 9, [e["args"][-2:] for e in entries]
+    assert len(entries) == 10, [e["args"][-2:] for e in entries]  # 9 + the compact-only inject group (nexus-3lqxv)
     session_end = _entries("SessionEnd")
     assert len(session_end) == 1 and session_end[0]["args"][-1] == "nx-session-end-launcher", session_end
     entries = entries + session_end

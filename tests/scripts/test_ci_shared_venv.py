@@ -511,6 +511,16 @@ def test_a_dead_lock_is_taken_over_without_waiting_out_the_limit(
     assert waiter.used and [e.name for e in entries(lab_root)] == [key]
 
 
+def _held(lock: Path) -> bool:
+    """The builder holds *lock*: claim_lock has created a non-empty owner AND hold_lock has touched
+    the heartbeat. Since 819cb9ca2 the owner comes first, so waiting on the owner alone leaves a gap
+    in which the heartbeat does not exist yet (develop red at b9c646dac, CI shard 1)."""
+    try:
+        return bool((lock / "owner").read_text()) and (lock / "heartbeat").exists()
+    except FileNotFoundError:
+        return False
+
+
 def test_a_sigkilled_builder_goes_stale_and_the_next_job_takes_over(
     tmp_path: Path, project_template: Path, lab_root: Path
 ) -> None:
@@ -536,9 +546,9 @@ def test_a_sigkilled_builder_goes_stale_and_the_next_job_takes_over(
     try:
         deadline = time.monotonic() + 120
         locks: list[Path] = []
-        # hold_lock writes heartbeat then owner after its mkdir; a lock seen before then has neither
+        # claim_lock creates owner, then hold_lock touches heartbeat: wait for both (_held)
         while time.monotonic() < deadline:
-            locks = [lk for lk in lock_dirs(lab_root) if (lk / "owner").exists() and (lk / "owner").read_text()]
+            locks = [lk for lk in lock_dirs(lab_root) if _held(lk)]
             if locks:
                 break
             time.sleep(0.2)
@@ -596,7 +606,7 @@ def test_the_heartbeat_outlives_a_lock_moved_aside_and_put_back(
         deadline = time.monotonic() + 120
         locks: list[Path] = []
         while time.monotonic() < deadline:
-            locks = [lk for lk in lock_dirs(lab_root) if (lk / "owner").exists() and (lk / "owner").read_text()]
+            locks = [lk for lk in lock_dirs(lab_root) if _held(lk)]
             if locks:
                 break
             time.sleep(0.2)

@@ -12,6 +12,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -56,7 +57,12 @@ class TestEntries:
     def test_the_session_start_entries_are_hooks_json_as_written(self) -> None:
         hooks = json.loads(HOOKS.read_text(encoding="utf-8"))
         entries = sj.hook_entries(hooks, "SessionStart", "startup", "/plugin", "/project")
-        written = [h for g in hooks["hooks"]["SessionStart"] for h in g["hooks"]]
+        groups = hooks["hooks"]["SessionStart"]
+        selected = [g for g in groups if not g.get("matcher") or re.fullmatch(g["matcher"], "startup")]
+        # The compact-only group (checkpoint re-injection, nexus-3lqxv) must not run at startup, so
+        # the selection has to drop something; a file where every group matches proves nothing here.
+        assert len(selected) < len(groups)
+        written = [h for g in selected for h in g["hooks"]]
         assert len(entries) == len(written) >= 9
         assert entries[0].args[-1] == "/plugin/hooks/scripts/nx_setup_notice.py"
         for entry in entries:

@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.91.1] - 2026-10-31
+
+Pairs with engine-service-v0.1.173 (`REQUIRED_ENGINE_VERSION` unchanged from 7.91.0). A patch release: the conexus plugin's hooks change, and the `nx` code is 7.91.0's. It was meant for the plugin-only fast lane, but the test fix that came with it touches the hook-skew harness, which the lane does not ship, so it was cut as a normal release.
+
+### Added
+- **Working state is written down before a compaction and put back after it** (nexus-3lqxv). Two automatic compactions on one session produced summaries of about 0.5 percent of the context. A new stdlib-only hook script, `compact_checkpoint.py`, runs in three places. On PreCompact (45 s) it writes the session's `threads` board entry (the one titled exactly the session's name) and then the working state from `nx command-context continuation` (branch, HEAD, in-progress beads, uncommitted files, open PRs, recent commits) to `<config>/compact-checkpoints/<session_id>.md`, mode 0600; it never vetoes the compaction. On PostCompact (10 s) it appends the compact summary and logs a warning when the summary names none of the board title, the checkpoint path or an in-flight bead; a checkpoint whose `written:` stamp is over 30 minutes old is archived and stubbed, never refreshed. On SessionStart after a compaction only (matcher `compact`, 35 s) it re-injects the checkpoint, capped near 8 KB, labelled with its age and trigger; it reads one file and makes no nx call. The existing SessionStart group is unchanged. `conexus/hooks/scripts/compact_checkpoint.py`, `conexus/hooks/hooks.json`, `conexus/README.md`.
+
 ## [7.91.0] - 2026-10-31
 
 Pairs with engine-service-v0.1.173 (REQUIRED_ENGINE_VERSION moves from v0.1.171; v0.1.172 was published but never deployed or pinned, because develop gained RDR-222's engine change after it). The engine deploys to the managed service before this client tag; every wire entry is additive.

@@ -58,6 +58,8 @@ WORK_BUDGET_S: dict[str, int] = {
     # hook pins their sum to this figure (tests/hooks/test_version_lockstep_hook.py).
     "version_lockstep_hook.py": 5,
     "mcp-connect-wait": 20,
+    # One file read and one JSON line (nexus-3lqxv); the group's matcher is `compact` only.
+    "compact_checkpoint.py": 5,
 }
 
 
