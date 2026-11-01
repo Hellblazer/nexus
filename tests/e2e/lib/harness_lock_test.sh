@@ -235,27 +235,31 @@ cat >"$SHIM_DIR/id" <<SHIM
 if [[ "\$*" == "-u" ]]; then echo "\${NX_FAKE_UID:?}"; else exec "$REAL_ID" "\$@"; fi
 SHIM
 chmod +x "$SHIM_DIR/id"
+# Two fake uids private to this run: the lock root is a hard-coded /tmp that concurrent CI
+# jobs on one host share, so fixed uids let another run's live lock refuse this one.
+FAKE_A="$(( 1000000 + $(od -An -N3 -tu4 /dev/urandom | tr -d ' ') ))"
+FAKE_B="$(( FAKE_A + 1 ))"
 for name in migration-rehearsal gc-ab sandbox; do
     script="${HARNESS_SCRIPT[$name]}"
     args="${HARNESS_ARGS[$name]}"
     declare -A seen=()
-    for fake in 31337 42424; do
+    for fake in "$FAKE_A" "$FAKE_B"; do
         # shellcheck disable=SC2086
         outu="$(cd "$REPO_ROOT" && PATH="$SHIM_DIR:$PATH" NX_FAKE_UID="$fake" NX_E2E_LOCK_SELFTEST=1 bash "$script" $args 2>&1)"
         seen[$fake]="$(printf '%s\n' "$outu" | sed -n 's/.*lock acquired: \(.*\) (pid .*/\1/p')"
     done
-    if [[ -n "${seen[31337]}" && -n "${seen[42424]}" && "${seen[31337]}" != "${seen[42424]}" \
-          && "${seen[31337]}" == *"-31337/"* && "${seen[42424]}" == *"-42424/"* ]]; then
-        ok "$name: two uids get different lock dirs (${seen[31337]} vs ${seen[42424]})"
+    if [[ -n "${seen[$FAKE_A]}" && -n "${seen[$FAKE_B]}" && "${seen[$FAKE_A]}" != "${seen[$FAKE_B]}" \
+          && "${seen[$FAKE_A]}" == *"-$FAKE_A/"* && "${seen[$FAKE_B]}" == *"-$FAKE_B/"* ]]; then
+        ok "$name: two uids get different lock dirs (${seen[$FAKE_A]} vs ${seen[$FAKE_B]})"
     else
-        bad "$name: lock dir is not per-user: uid 31337 -> '${seen[31337]}', uid 42424 -> '${seen[42424]}'"
+        bad "$name: lock dir is not per-user: uid $FAKE_A -> '${seen[$FAKE_A]}', uid $FAKE_B -> '${seen[$FAKE_B]}'"
     fi
     unset seen
 done
 rm -rf "${SHIM_DIR:?}"
 # The shim runs above create /tmp/nexus-e2e-locks-<fake uid> roots (the harnesses mkdir them).
 # They are empty once every lock is released; remove them so a test run leaves nothing behind.
-rm -rf "/tmp/nexus-e2e-locks-31337" "/tmp/nexus-e2e-locks-42424"
+rm -rf "/tmp/nexus-e2e-locks-$FAKE_A" "/tmp/nexus-e2e-locks-$FAKE_B"
 
 # ── no harness may still name the shared (uid-less) lock root ─────────────
 # Scan the sources: any lock path under the bare "/tmp/nexus-e2e-locks/" root (no uid) is the
