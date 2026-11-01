@@ -7,7 +7,7 @@ nx plan hygiene refuse it (nexus-z1d0l.1.11)."""
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -109,17 +109,17 @@ CLAIMED = _steps({"claim": "latency drops"})
         (CLAIMED, None),
         (_steps({"claim": "$step1.text"}), None),
         ({"steps": [{"tool": "operator_verify", "args": {}}]}, 0),
+        ({"steps": [{"tool": "mcp__plugin_conexus_nexus__operator_verify", "args": {}}]}, 0),
+        ({"steps": [{"tool": "mcp__plugin_conexus_nexus__verify", "args": {"claim": "x"}}]}, None),
         ({"steps": [{"tool": "search", "args": {}}]}, None),
         ("not json", None),
         ({"no": "steps"}, None),
         (None, None),
     ],
-    ids=["missing", "blank", "null", "non_string", "claimed", "step_ref", "operator_name", "no_verify", "bad_json", "no_steps", "none"],
+    ids=["missing", "blank", "null", "non_string", "claimed", "step_ref", "operator_name", "mcp_prefixed", "mcp_prefixed_claimed", "no_verify", "bad_json", "no_steps", "none"],
 )
 def test_the_scan_finds_the_first_verify_step_with_no_claim(plan, expected) -> None:
     assert runner.find_claimless_verify(json.dumps(plan) if isinstance(plan, dict) else plan) == expected
-
-
 
 
 def test_a_claimless_verify_is_re_asked_once_naming_the_step(monkeypatch) -> None:
@@ -154,6 +154,7 @@ def test_a_plan_still_holding_a_claimless_verify_fails_in_the_planner_before_any
     with pytest.raises(ValueError, match="is a verify step with no claim") as err:
         _planner_run(monkeypatch, [CLAIMLESS, second])
     assert str(err.value).startswith("planner plan cannot run: step ")
+    assert str(err.value).endswith("; no step was run")
 
 
 def test_after_an_embedded_ref_retry_a_claimless_verify_fails_without_a_third_call(monkeypatch) -> None:
@@ -167,6 +168,30 @@ def test_after_an_embedded_ref_retry_a_claimless_verify_fails_without_a_third_ca
             calls.append("third")
             raise
     assert calls == [], "the embedded-ref retry is the answer's one retry"
+
+
+@pytest.mark.asyncio
+async def test_nx_answer_returns_the_planner_failure_records_it_and_runs_and_grows_nothing() -> None:
+    async def miss(*_a, **_kw):
+        raise ValueError(f"planner plan cannot run: {runner.claimless_verify_reason(CLAIMLESS)}; no step was run")
+
+    record, library, run = MagicMock(), MagicMock(), AsyncMock()
+    db = MagicMock(plans=library)
+    with patch("nexus.plans.matcher.plan_match", return_value=[]), patch.object(
+        mcp_core, "_nx_answer_plan_miss", AsyncMock(side_effect=miss),
+    ), patch("nexus.plans.runner.plan_run", run), patch.object(mcp_core, "_nx_answer_record_run", record), patch.object(
+        mcp_core, "_t2_ctx",
+    ) as t2, patch.object(mcp_core, "_t2_index_write", lambda fn, **_kw: fn(db)), patch.object(
+        mcp_core, "scratch", return_value="ok",
+    ), patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+        t2.return_value.__enter__.return_value = db
+        out = await mcp_core.nx_answer(question="does latency drop")
+    assert "planner_error" in out and "step 2 is a verify step with no claim" in out
+    run.assert_not_called()
+    assert record.call_count == 1
+    kw = record.call_args.kwargs
+    assert kw["summary_outcome"] == "planner_failure" and kw["step_count"] == 0 and kw["plan_id"] is None
+    assert not any(c[0] == "save_plan" for c in library.method_calls), "nothing is grown"
 
 
 # The doors a stored plan comes through: each refuses or excludes a claim-less verify by name.

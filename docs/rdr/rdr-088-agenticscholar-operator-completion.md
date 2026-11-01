@@ -75,6 +75,19 @@ an inline "Amended 2026-11-01" note pointing here. The contract itself is
     that document when it is one of the chunk's owners; that recall gain
     is nexus-z1d0l.1.12.
 
+**Conformance notes (not amendments; no decision of Sam's).** These record
+how shipped code meets the approved contract, where the text above was
+silent. Each edit point is marked "Conformance note" and points here.
+
+  - **(c1)** 2026-11-01 (nexus-z1d0l.1.10): `requires_review` is true when
+    the host holds no records for the step; `bind` has done so since
+    nexus-z1d0l.1.2 (a bundled step fed by model output). A check or verify
+    step whose evidence hydrates to nothing, dispatched on its own, returns
+    the empty v1 payload with a null verdict instead of a bare `text` dict.
+    It also carries `text`, a key outside the v1 sets that `bind` passes
+    through like any key the host does not own; `nx_answer` reads it, so its
+    answer text and the answer-runs class of such a run are unchanged.
+
 ### Witness Schema v1
 
 **Blast radius.** Two live consumers and three documented surfaces.
@@ -263,7 +276,7 @@ removed from the quote before the test and kept in the returned `quote`.
 `uncovered` (check) lists the input item ids that no `supports` or
 `contradicts` item names. `requires_review` is true when the host holds no
 records for the step (a bundled step fed by model output, or no evidence
-at all), when any item is not
+at all; Conformance note (c1)), when any item is not
 `bound`, when `rejected` or `uncovered` is non-empty, or when the verdict
 (`ok`, `verified`) is true and no `supports` item is `bound`; for check
 with `ok=true`, every input item needs a bound `supports` item. It is the
@@ -293,10 +306,10 @@ Mitigations).
   `evidence` list, a `citations` key included (a model can write it and no
   production dispatch emits it), is malformed and comes back as
   `schema_version: 1` with `evidence: []` and `requires_review: true`.
-  On the isolated dispatch path, a check or verify step whose evidence
-  hydrates to nothing is never sent to the model: the runner returns that
-  same empty payload,
-  with no records, so `requires_review: true`, and with no verdict
+  Conformance note (c1): on the isolated dispatch path, a check or verify
+  step whose evidence hydrates to nothing is never sent to the model: the
+  runner returns that same empty payload, with no records, so
+  `requires_review: true`, and with no verdict
   (`ok` / `verified` null), verify's `reason` set to the zero-evidence
   marker, and the marker also under `text`, where `nx_answer` and the
   answer-runs classifier read it (nexus-z1d0l.1.10). Inside a bundle the

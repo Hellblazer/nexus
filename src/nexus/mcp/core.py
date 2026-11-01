@@ -11957,7 +11957,7 @@ async def _claimed_verify_plan(
     reason = claimless_verify_reason(plan_json)
     if reason is None:
         return plan_json
-    raise ValueError(f"planner plan cannot run: {reason}")
+    raise ValueError(f"planner plan cannot run: {reason}; no step was run")
 
 
 async def _nx_answer_plan_miss(

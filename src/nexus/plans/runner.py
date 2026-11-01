@@ -115,6 +115,8 @@ __all__ = [
     "PlanRunUnresolvedVarError",
     "StepRecord",
     "ToolDispatcher",
+    "claimless_verify_reason",
+    "find_claimless_verify",
     "find_embedded_step_ref",
     "merge_bindings",
     "plan_run",
@@ -1130,12 +1132,14 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
     """The 0-based index of the first verify step with no non-blank ``claim``, else ``None``
     (nexus-z1d0l.1.11).
 
-    ``plan_run`` refuses such a step when it reaches it (the host never invents a claim), after the
-    steps before it have run and been paid for, so every door a plan comes through asks this first:
-    the inline planner, ``plan_save``, the seed loader, the matcher and ``nx plan hygiene``. A claim
-    that is not a string counts as none, as it does at run time (a deferred-ref mapping exists only
-    inside a running bundle, never in plan JSON). Anything that is not a plan with a ``steps`` list
-    returns ``None``, as :func:`find_embedded_step_ref` does.
+    The host never invents a claim, and a step without one cannot be a check: ``plan_run`` refuses it
+    when it reaches it, after the steps before it have run and been paid for, and a bundle would show
+    the model an empty claim. So every door a plan comes through asks this first: the inline planner,
+    ``plan_save``, the seed loader, the matcher and ``nx plan hygiene``. A claim that is not a
+    non-blank string counts as none (a deferred-ref mapping exists only inside a running bundle,
+    never in plan JSON). The tool name is read as ``plan_run`` reads it, an ``mcp__`` prefix
+    stripped. Anything that is not a plan with a ``steps`` list returns ``None``, as
+    :func:`find_embedded_step_ref` does.
     """
     if isinstance(plan, str):
         try:
@@ -1146,7 +1150,10 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
     if not isinstance(steps, list):
         return None
     for index, step in enumerate(steps):
-        if not isinstance(step, dict) or step.get("tool") not in ("verify", "operator_verify"):
+        tool = step.get("tool") if isinstance(step, dict) else None
+        if isinstance(tool, str) and tool.startswith("mcp__"):
+            tool = tool.rsplit("__", 1)[-1]
+        if tool not in ("verify", "operator_verify"):
             continue
         args = step.get("args")
         claim = args.get("claim") if isinstance(args, dict) else None
@@ -1163,7 +1170,7 @@ def claimless_verify_reason(plan: "str | dict[str, Any] | None") -> str | None:
         return None
     return (
         f"step {index + 1} is a verify step with no claim; the host never invents one, "
-        "so the runner refuses the step when it reaches it"
+        "so the step cannot check anything"
     )
 
 
