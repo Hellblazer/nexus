@@ -134,6 +134,11 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # never delivered twice; non-blocking with a budgeted wait, no lease, no
     # heartbeat, no election.
     "hooks/mailbox_drain.py",
+    # The aspect validation files' sibling ``<file>.lock`` (nexus-z1d0l.1.6): serializes append and the
+    # end-of-run prune of aspect_validation.jsonl / aspect_validation_failures.jsonl across concurrent
+    # `nx enrich aspects --validate-sample` runs. A critical section around one file, no lease, no
+    # heartbeat, no election.
+    "commands/enrich.py",
     # config.py's _config_write_lock (nexus-cd1k0.16 finding (8)): serializes
     # read-modify-write of ~/.config/nexus/config.yml across set_config_value
     # / set_credential / unset_credential, cross-process. Same shape as
