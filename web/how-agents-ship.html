@@ -181,7 +181,7 @@ figure.fig .arrow.you{fill:var(--brass)}
 <section class="lesson" id="glance">
 <div class="lhead"><h2>The system at a glance</h2></div>
 <figure class="fig">
-<svg viewBox="0 0 760 450" role="img" aria-label="The laptop holds the sessions and their worktrees. Sessions write records to the tuple space in the managed engine and receive pings back. They push to GitHub and send heavy runs to the lab pool, which also runs some CI jobs. GitHub sends webhooks to an adapter, which posts to the CI board in the tuple space. The conexus instance deploys and gates the engine and exchanges messages through its mailbox. The owner sends decisions to the sessions and approves deploys in the conexus instance.">
+<svg viewBox="0 0 760 450" role="img" aria-label="The laptop holds the sessions and their worktrees. Sessions write records to the tuple space in the managed engine and receive pings back. They push to GitHub and send heavy runs to the lab pool. GitHub and the lab pool exchange CI jobs and their results. GitHub sends webhooks to an adapter, which posts to the CI board in the tuple space. The conexus instance deploys and gates the engine and exchanges messages through its mailbox. The owner sends decisions to the sessions and approves deploys in the conexus instance.">
   <!-- sessions to tuple space, and pings back -->
   <path d="M80 60 V18 H700 V52"/>
   <path class="arrow" d="M700 60 l-4 -9 h8 z"/>
@@ -250,6 +250,12 @@ figure.fig .arrow.you{fill:var(--brass)}
   <rect class="box" x="24" y="394" width="182" height="28" rx="3"/>
   <text x="115" y="413" text-anchor="middle" class="lbl">macOS and Windows builds</text>
 
+  <!-- github and lab pool -->
+  <path d="M282 170 H266 V325 H228"/>
+  <path class="arrow" d="M290 170 l-9 -4 v8 z"/>
+  <path class="arrow" d="M220 325 l9 -4 v8 z"/>
+  <text x="281" y="250" text-anchor="middle" class="lbl" transform="rotate(-90 281 250)">CI jobs</text>
+
   <!-- engine and conexus -->
   <line x1="600" y1="320" x2="600" y2="364"/>
   <path class="arrow" d="M600 320 l-4 9 h8 z"/>
@@ -273,7 +279,7 @@ figure.fig .arrow.you{fill:var(--brass)}
   <text x="500" y="392" text-anchor="middle" class="lbl">go</text>
   <path d="M300 402 H250 V190 H228" class="dash you-edge"/>
   <path class="arrow you" d="M220 190 l9 -4 v8 z"/>
-  <text x="270" y="360" class="lbl" transform="rotate(-90 270 360)">decisions</text>
+  <text x="242" y="398" class="lbl" transform="rotate(-90 242 398)">decisions</text>
 </svg>
 <figcaption>Sessions, CI, and the conexus instance coordinate through the tuple space in the managed engine.</figcaption>
 </figure>
