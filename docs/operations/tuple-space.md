@@ -28,7 +28,7 @@ stuck): older than an hour with no live claim is red; the same backlog with
 claims in flight (`claimed` minus `lapsed` above zero) is a warning, a slow
 drain. An engine without that field (before `engine-service-v0.1.170`) keeps
 the skip, and `tuples.queue_depth` is then the only aspects signal. Subspaces whose
-template disables `take` (`ledger/<session_id>`) are skipped outright —
+template disables `take` (`board/<topic>`, `directory/<name>`) are skipped outright —
 "oldest unclaimed" carries no signal on a read-only template.
 
 **Action**: `nx tuple rd <subspace>` to see what's sitting there, then check
@@ -182,7 +182,7 @@ ORDER BY created_at;
 
 ## Templates change with an engine release, not with a data changeset
 
-The eight templates (`ledger/<session_id>`, `mailbox/<address>`,
+The seven templates (`mailbox/<address>`,
 `directory/<name>`, since RDR-211 `board/<topic>`, `queue/<name>`,
 `lock/<resource>`, since RDR-220 `board/ci/<topic>`, and since RDR-235 the
 literal `aspects`) ship as YAML in engine resources

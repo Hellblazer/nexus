@@ -15,19 +15,19 @@ import java.util.Objects;
  * {@code match_text}, and retention zero meaning never are not part of this
  * shape and are rejected as unknown fields by {@link TemplateSchemaParser}.
  *
- * @param name            the template's full name, e.g. {@code "ledger/<session_id>"}
+ * @param name            the template's full name, e.g. {@code "mailbox/<address>"}
  * @param nameSegments     {@code name} split on {@code "/"}; a {@code "<param>"} segment
  *                          matches exactly one path segment, everything else must match
  *                          literally
  * @param keys             the pinned key set ({@code in}/{@code inp} match every key by
  *                          equality); required and non-empty
  * @param keyValues         per-key allowed value sets (nexus-em75s.36; RDR:844 —
- *                           {@code ledger/<session_id>}'s {@code kind} pinned to {@code
- *                           {start, report}}). A key absent from this map is unconstrained
+ *                           the literal {@code aspects}' {@code queue} pinned to {@code
+ *                           {aspects}}). A key absent from this map is unconstrained
  *                           (any non-blank string); a key present here must, when out()
  *                           supplies it, be one of the listed values. Declared in the
  *                           document shape via {@code keys}'s mapping form, e.g.
- *                           {@code keys: {kind: {values: [start, report]}}} — the smaller
+ *                           {@code keys: {queue: {values: [aspects]}}} — the smaller
  *                           change against moving a values-constrained field to {@link
  *                           #dimensions}, which {@link TemplateSchemaParser} also still
  *                           accepts as the flat {@code keys: [a, b]} list form for keys

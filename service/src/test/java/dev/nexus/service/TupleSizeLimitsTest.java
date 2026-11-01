@@ -188,17 +188,18 @@ class TupleSizeLimitsTest {
     }
 
     @Test
-    void ledgerTemplate_maxBodyBytesZero_nullAndEmptyPass_nonEmptyRefused() {
-        byte[] idNullBody = repo.out(TENANT, "ledger/size-ledger-session",
-                Map.of("agent_id", "a1", "kind", "start"), Map.of("agent_type", "developer"), null, null, null);
+    void directoryTemplate_maxBodyBytesZero_nullAndEmptyPass_nonEmptyRefused() {
+        // directory/<name> declares max_body_bytes: 0, as the retired ledger did.
+        byte[] idNullBody = repo.out(TENANT, "directory/size-dir-1",
+                Map.of("name", "size-dir-1"), Map.of("session_id", "s1"), null, "n1", null);
         assertThat(idNullBody).isNotNull();
 
-        byte[] idEmptyBody = repo.out(TENANT, "ledger/size-ledger-session-2",
-                Map.of("agent_id", "a2", "kind", "start"), Map.of("agent_type", "developer"), "", null, null);
+        byte[] idEmptyBody = repo.out(TENANT, "directory/size-dir-2",
+                Map.of("name", "size-dir-2"), Map.of("session_id", "s2"), "", "n2", null);
         assertThat(idEmptyBody).isNotNull();
 
-        assertThatThrownBy(() -> repo.out(TENANT, "ledger/size-ledger-session-3",
-                Map.of("agent_id", "a3", "kind", "start"), Map.of("agent_type", "developer"), "x", null, null))
+        assertThatThrownBy(() -> repo.out(TENANT, "directory/size-dir-3",
+                Map.of("name", "size-dir-3"), Map.of("session_id", "s3"), "x", "n3", null))
                 .isInstanceOf(TooLargeException.class)
                 .satisfies(e -> assertThat(((TooLargeException) e).limitBytes()).isEqualTo(0L));
     }

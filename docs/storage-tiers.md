@@ -316,10 +316,9 @@ nx store import myrepo-backup.nxexp --collection code__newname
 
 ## Tuple Space (RDR-205)
 
-The tuple space is the ninth T2 store (`db.tuples`, `HttpTupleStore`), for cross-agent and cross-instance coordination metadata (a mailbox, a work queue, a dispatch ledger), not for notes or search hits. Eight templates ship today:
+The tuple space is the ninth T2 store (`db.tuples`, `HttpTupleStore`), for cross-agent and cross-instance coordination metadata (a mailbox, a work queue, a lock), not for notes or search hits. Seven templates ship today:
 
 - **`mailbox/<address>`**: messages to an agent id or a session id, 7-day retention.
-- **`ledger/<session_id>`**: read-only session-lifecycle rows (`kind` in `start`/`report`), 90-day retention.
 - **`directory/<name>`** (RDR-208 Phase 1 Step 1): read-only session-directory lease entries, 7-day retention.
 - **`board/<topic>`**, **`queue/<name>`** and **`lock/<resource>`** (RDR-211): a broadcast board (7 days), a shared work queue (2 days) and a mutual-exclusion lock (7 days when idle).
 - **`board/ci/<topic>`** (RDR-220): CI status posts, 3-day retention.
@@ -373,6 +372,6 @@ Every put also writes `put_at`, the time of that put, the clock the note's own `
 | Project decisions that survive restarts | T2 | Local, fast, searchable |
 | Research findings for future sessions | T3 | Semantic search across time |
 | Indexed code/docs | T3 | Vector similarity + reranking |
-| Cross-agent/cross-instance coordination (mailbox, work queue, a dispatch ledger) | Tuple space (`db.tuples`, the ninth T2 store) | Atomic claim under a lease, `ack`/`nack`, dead letter — not a fit for a note or a search hit; see [Tuple Space](tuple-space.md) |
+| Cross-agent/cross-instance coordination (mailbox, work queue, lock) | Tuple space (`db.tuples`, the ninth T2 store) | Atomic claim under a lease, `ack`/`nack`, dead letter — not a fit for a note or a search hit; see [Tuple Space](tuple-space.md) |
 
 See [cli-reference.md](cli-reference.md) for command details.

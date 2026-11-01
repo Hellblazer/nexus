@@ -171,7 +171,7 @@ final class TemplateSchemaParser {
      * carrying {@code values} — the same allowed-value-set shape {@link #parseDimensions}
      * already gives {@code dimensions} entries, applied here to a key instead of moving
      * the field to {@code dimensions} (RDR-205 §Technical Design "Registry" ~844, e.g.
-     * {@code ledger/<session_id>}'s {@code kind} pinned to {@code {start, report}}). A
+     * the literal {@code aspects}' {@code queue} pinned to {@code {aspects}}). A
      * bare {@code key_name:} entry (no nested {@code values}) is unconstrained, same as
      * the list form.
      */

@@ -17,14 +17,14 @@ class MiniYamlTest {
     @Test
     void parsesScalarsAndNestedMapping() {
         String yaml = """
-                name: ledger/<session_id>
+                name: session-log/<session_id>
                 id_from: keys
                 take:
                   enabled: false
                 retention_seconds: 7776000
                 """;
         Map<String, Object> doc = MiniYaml.parse("t.yaml", yaml);
-        assertEquals("ledger/<session_id>", doc.get("name"));
+        assertEquals("session-log/<session_id>", doc.get("name"));
         assertEquals("keys", doc.get("id_from"));
         assertEquals(7776000L, doc.get("retention_seconds"));
         @SuppressWarnings("unchecked")
@@ -92,7 +92,7 @@ class MiniYamlTest {
     @Test
     void tabsAreRejected() {
         var ex = assertThrows(TemplateRegistryException.class,
-                () -> MiniYaml.parse("t.yaml", "name:\tledger\n"));
+                () -> MiniYaml.parse("t.yaml", "name:\tsession-log\n"));
         assertTrue(ex.getMessage().contains("t.yaml"));
         assertTrue(ex.getMessage().contains("tab"));
     }

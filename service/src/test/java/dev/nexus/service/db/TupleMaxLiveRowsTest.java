@@ -262,7 +262,7 @@ class TupleMaxLiveRowsTest {
     /**
      * A template with no {@code max_live_rows} is unbounded, the behaviour
      * every template had before this field existed. Uses the bundled
-     * {@code ledger/<session_id>} resource template directly -- it declares
+     * {@code directory/<name>} resource template directly -- it declares
      * no {@code max_live_rows} of its own, so this needs no extra template.
      */
     @Test
@@ -270,10 +270,10 @@ class TupleMaxLiveRowsTest {
         String tenant = freshTenant("unbounded");
         String session = "session-unbounded";
         for (int i = 0; i < 20; i++) {
-            repo.out(tenant, "ledger/" + session, Map.of("agent_id", "agent-" + i, "kind", "start"),
-                    Map.of(), null, null, null);
+            repo.out(tenant, "directory/" + session, Map.of("name", session),
+                    Map.of("session_id", "agent-" + i), null, "nonce-" + i, null);
         }
-        var rows = repo.rdp(tenant, "ledger/" + session, null, 300, null);
+        var rows = repo.rdp(tenant, "directory/" + session, null, 300, null);
         assertThat(rows).as("no cap -- every one of the 20 distinct identities landed").hasSize(20);
     }
 

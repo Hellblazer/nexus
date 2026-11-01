@@ -331,7 +331,7 @@ class TenantResetRouteTest {
     void aResetWakesAParkedTupleReadWithTenantReset409() throws Exception {
         String tenant = "rr-park-" + shortId();
         String raw = createTenant(tenant);
-        String subspace = "ledger/park-" + shortId();
+        String subspace = "directory/park-" + shortId();
         CompletableFuture<HttpResponse<String>> parked = CompletableFuture.supplyAsync(() -> {
             try {
                 return post(on, "/v1/tuples/rd", raw, "{\"subspace\":\"" + subspace + "\",\"timeout_s\":8}");

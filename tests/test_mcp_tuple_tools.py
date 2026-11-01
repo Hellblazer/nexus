@@ -332,7 +332,7 @@ class TestTupleInAckNack:
 
     def test_ack_reply_to_keys_only_subspace_leaves_request_claimed(self, t2_service_env) -> None:
         """RDR-206: a reply target that resolves to a ``keys``-only
-        template (the ledger) is a ``SchemaViolation`` raised BEFORE the
+        template (a lock) is a ``SchemaViolation`` raised BEFORE the
         ack's transaction opens, so the request is neither consumed nor
         answered, and the same claimant can still ack it plainly."""
         addr = _uniq("addr")
@@ -344,7 +344,7 @@ class TestTupleInAckNack:
         session_id = _uniq("session")
         msg = tuple_ack(
             claim["claim_id"], claimant,
-            reply={"subspace": f"ledger/{session_id}", "keys": {"agent_id": "a", "kind": "start"}},
+            reply={"subspace": f"lock/{session_id}", "keys": {"resource": session_id}},
         )
         assert "Error" in msg
 
@@ -498,7 +498,7 @@ class TestTupleRegistryListStats:
         assert "templates" in reg
         names = {t.get("name") for t in reg["templates"]}
         assert "mailbox/<address>" in names
-        assert "ledger/<session_id>" in names
+        assert "ledger/<session_id>" not in names, "retired by nexus-onjvw"
         assert "directory/<name>" in names
 
     def test_list_and_stats_reflect_a_written_tuple(self, t2_service_env) -> None:

@@ -232,24 +232,24 @@ class TestCheckTupleUnclaimedAgeBehavior:
         assert r.ok is True
         assert r.detail == "none"
 
-    def test_take_disabled_ledger_subspace_with_day_old_rows_is_ok(self, monkeypatch) -> None:
+    def test_take_disabled_board_subspace_with_day_old_rows_is_ok(self, monkeypatch) -> None:
         """nexus-em75s.12 review fix: a take.enabled=false template (e.g.
-        ledger/<session_id>) is read-only by design -- rows are never
+        board/<topic>) is read-only by design -- rows are never
         claimed, so a day-old row must not trip the staleness finding.
         rd() must never even be called for this subspace."""
         import datetime as _dt
         old = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1)).isoformat().replace("+00:00", "Z")
         rd_calls: list[str] = []
         store = _FakeTupleStore(
-            subspaces=[_FakeSubspace("ledger/sess1", available=1, oldest_created_at=old)],
-            rd_by_subspace={"ledger/sess1": [_FakeTupleRow("id1", old, None)]},
-            templates=[_fake_template("ledger/<session_id>", take_enabled=False)],
+            subspaces=[_FakeSubspace("board/sess1", available=1, oldest_created_at=old)],
+            rd_by_subspace={"board/sess1": [_FakeTupleRow("id1", old, None)]},
+            templates=[_fake_template("board/<topic>", take_enabled=False)],
             rd_calls=rd_calls,
         )
         r = _run_unclaimed(monkeypatch, store)
         assert r.ok is True
         assert r.warn is not True
-        assert "ledger/sess1" not in r.detail
+        assert "board/sess1" not in r.detail
         assert rd_calls == []
 
     def test_an_available_lock_token_is_an_idle_lock_not_stuck_work(self, monkeypatch) -> None:
@@ -274,7 +274,7 @@ class TestCheckTupleUnclaimedAgeBehavior:
     def test_take_disabled_directory_subspace_with_day_old_rows_is_ok(self, monkeypatch) -> None:
         """RDR-208 Phase 1 Step 1 (bead nexus-galkv.1): directory/<name> is
         also take.enabled=false (a lease, re-sent by its holder, never
-        claimed) -- same doctrine as ledger/<session_id> above. A day-old
+        claimed) -- same doctrine as board/<topic> above. A day-old
         row must not trip the staleness finding, and rd() must never even
         be called for this subspace."""
         import datetime as _dt
@@ -363,10 +363,10 @@ class TestCheckTupleUnclaimedAgeBehavior:
         """nexus-em75s.42 review fix: a registry() exception (a transient
         registry blip) must not fall through to checking every subspace as
         claimable -- that risks misreporting a take.enabled=false subspace
-        (e.g. ledger/<session_id>, read-only by design, rows never
+        (e.g. board/<topic>, read-only by design, rows never
         claimed) as a stale-unclaimed HARD finding for a run where the
-        registry merely blipped. A day-old ledger row with a live registry
-        would never even be checked (test_take_disabled_ledger_subspace_
+        registry merely blipped. A day-old board row with a live registry
+        would never even be checked (test_take_disabled_board_subspace_
         with_day_old_rows_is_ok); here the registry raises, so the
         pre-fix code fell back to templates=[] and defaulted this
         subspace to checked, hard-failing the row on a transient blip.
@@ -375,8 +375,8 @@ class TestCheckTupleUnclaimedAgeBehavior:
         old = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1)).isoformat().replace("+00:00", "Z")
         rd_calls: list[str] = []
         store = _FakeTupleStore(
-            subspaces=[_FakeSubspace("ledger/sess1", available=1, oldest_created_at=old)],
-            rd_by_subspace={"ledger/sess1": [_FakeTupleRow("id1", old, None)]},
+            subspaces=[_FakeSubspace("board/sess1", available=1, oldest_created_at=old)],
+            rd_by_subspace={"board/sess1": [_FakeTupleRow("id1", old, None)]},
             registry_exc=RuntimeError("registry temporarily unavailable"),
             rd_calls=rd_calls,
         )
@@ -960,7 +960,6 @@ _ALL_TEMPLATE_KINDS = [
     _queue_template("queue/<name>", take_enabled=True),
     _queue_template("lock/<resource>", take_enabled=True),
     _queue_template("mailbox/<address>", take_enabled=True),
-    _queue_template("ledger/<session_id>", take_enabled=False),
     _queue_template("directory/<name>", take_enabled=False),
 ]
 

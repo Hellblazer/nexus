@@ -252,7 +252,7 @@ class TenantResetLeakCanaryTest {
             "{\"name\":\"knowledge__canary-" + shortId() + "__voyage-context-3__v1\",\"content_type\":\"knowledge\",\"owner_id\":\"canary\",\"embedding_model\":\"voyage-context-3\"}");
         assertThat(coll.statusCode()).as(coll.body()).isEqualTo(200);
 
-        String subspace = "ledger/canary-" + shortId();
+        String subspace = "directory/canary-" + shortId();
         return CompletableFuture.supplyAsync(() -> {
             try {
                 return post("/v1/tuples/rd", raw, "{\"subspace\":\"" + subspace + "\",\"timeout_s\":25}");

@@ -41,37 +41,33 @@ class TemplateRegistryTest {
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
         assertEquals(List.of(TemplateRegistry.SOURCE_RESOURCES), registry.sources());
         List<String> names = registry.templates().stream().map(TemplateSchema::name).toList();
-        // Sorted by name (load() sorts the final list): board, directory, ledger,
+        // Sorted by name (load() sorts the final list): board, directory,
         // lock, mailbox, queue -- RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added
-        // board/<topic>, lock/<resource>, queue/<name> beside the three RDR-205/208
+        // board/<topic>, lock/<resource>, queue/<name> beside the RDR-205/208
         // templates.
         // RDR-220 added board/ci/<topic> (sorts after board/<topic>).
         // RDR-235 E3 added the literal aspects (sorts first).
+        // nexus-onjvw retired ledger/<session_id>: it is not here, and not a resolvable subspace.
         assertEquals(List.of("aspects", "board/<topic>", "board/ci/<topic>", "directory/<name>",
-                "ledger/<session_id>", "lock/<resource>", "mailbox/<address>", "queue/<name>"), names);
+                "lock/<resource>", "mailbox/<address>", "queue/<name>"), names);
+        assertNull(TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS).resolve("ledger/some-session"),
+                "the retired ledger subspace resolves to no template");
     }
 
     @Test
     void resourceTemplatesMatchTheirRdrSpecifiedShape() {
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
-        TemplateSchema ledger = registry.templates().stream()
-                .filter(t -> t.name().equals("ledger/<session_id>")).findFirst().orElseThrow();
-        assertEquals(Set.of("agent_id", "kind"), Set.copyOf(ledger.keys()));
-        assertEquals(List.of("start", "report"), ledger.keyValues().get("kind"));
-        assertFalse(ledger.keyValues().containsKey("agent_id"));
-        assertFalse(ledger.take().enabled());
-        assertEquals(7_776_000L, ledger.retentionSeconds());
-        assertEquals(TemplateSchema.IdFrom.KEYS, ledger.idFrom());
-        // Bead nexus-d9k5h: commit/t2_ref/verify are optional string dims (no
-        // required: true), so their absence from a produced row is never a
-        // schema violation -- only verify's own values allow-list is checked.
-        assertEquals("string", ledger.dimensions().get("commit").type());
-        assertFalse(ledger.dimensions().get("commit").required());
-        assertEquals("string", ledger.dimensions().get("t2_ref").type());
-        assertFalse(ledger.dimensions().get("t2_ref").required());
-        assertEquals("string", ledger.dimensions().get("verify").type());
-        assertFalse(ledger.dimensions().get("verify").required());
-        assertEquals(List.of("present", "absent"), ledger.dimensions().get("verify").values());
+        // The pinned-key value set (nexus-em75s.36) and the optional/allow-listed dimensions
+        // (nexus-d9k5h) the retired ledger/<session_id> carried are exercised, behaviourally, by
+        // TupleRepositoryTest's probe-ro template; the bundled template that pins a key value
+        // today is the literal aspects.
+        TemplateSchema aspects = registry.templates().stream()
+                .filter(t -> t.name().equals("aspects")).findFirst().orElseThrow();
+        assertEquals(Set.of("queue"), Set.copyOf(aspects.keys()));
+        assertEquals(List.of("aspects"), aspects.keyValues().get("queue"));
+        assertTrue(aspects.take().enabled());
+        assertEquals(TemplateSchema.IdFrom.KEYS_NONCE, aspects.idFrom());
+        assertEquals(7_776_000L, aspects.retentionSeconds());
 
         TemplateSchema mailbox = registry.templates().stream()
                 .filter(t -> t.name().equals("mailbox/<address>")).findFirst().orElseThrow();
@@ -111,8 +107,8 @@ class TemplateRegistryTest {
 
     @Test
     void registryDigestChangesWhenATemplateChanges() {
-        String base = minimalTemplateYaml("ledger/<session_id>", 7_776_000L);
-        String changed = minimalTemplateYaml("ledger/<session_id>", 7_000_000L);
+        String base = minimalTemplateYaml("session-log/<session_id>", 7_776_000L);
+        String changed = minimalTemplateYaml("session-log/<session_id>", 7_000_000L);
 
         TemplateRegistry r1 = TemplateRegistry.load(
                 List.of(new TemplateRegistry.SourceGroup("test",
@@ -128,9 +124,9 @@ class TemplateRegistryTest {
 
     @Test
     void registryDigestChangesWhenAKeyGainsAPinnedValueSet() {
-        String unconstrained = minimalTemplateYaml("ledger/<session_id>", 100L);
+        String unconstrained = minimalTemplateYaml("session-log/<session_id>", 100L);
         String constrained = """
-                name: ledger/<session_id>
+                name: session-log/<session_id>
                 keys:
                   agent_id:
                     values: [start, report]
@@ -162,7 +158,7 @@ class TemplateRegistryTest {
      */
     @Test
     void registryDigestChangesWhenLockFlagChanges() {
-        String unlocked = minimalTemplateYaml("ledger/<session_id>", 100L);
+        String unlocked = minimalTemplateYaml("session-log/<session_id>", 100L);
         String locked = unlocked + "lock: true\n";
 
         TemplateRegistry r1 = TemplateRegistry.load(
@@ -190,7 +186,7 @@ class TemplateRegistryTest {
 
     @Test
     void duplicateTemplateNameFailsLoad() {
-        String yaml = minimalTemplateYaml("ledger/<session_id>", 100L);
+        String yaml = minimalTemplateYaml("session-log/<session_id>", 100L);
         var groups = List.of(new TemplateRegistry.SourceGroup("test", List.of(
                 new TemplateRegistry.TemplateSource("first.yaml", yaml),
                 new TemplateRegistry.TemplateSource("second.yaml", yaml))));
@@ -198,14 +194,14 @@ class TemplateRegistryTest {
                 () -> TemplateRegistry.load(groups, DAYS(180), SWEEP_INTERVAL_SECONDS));
         assertTrue(ex.getMessage().contains("second.yaml"), ex.getMessage());
         assertTrue(ex.getMessage().contains("duplicate"), ex.getMessage());
-        assertTrue(ex.getMessage().contains("ledger/<session_id>"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("session-log/<session_id>"), ex.getMessage());
     }
 
     // ── empty parameter segment (load rule, verbatim from May) ─────────
 
     @Test
     void emptyParameterSegmentFailsLoad() {
-        String yaml = minimalTemplateYaml("ledger/<>", 100L);
+        String yaml = minimalTemplateYaml("session-log/<>", 100L);
         var groups = List.of(new TemplateRegistry.SourceGroup("test",
                 List.of(new TemplateRegistry.TemplateSource("bad.yaml", yaml))));
         var ex = assertThrows(TemplateRegistryException.class,
@@ -219,7 +215,7 @@ class TemplateRegistryTest {
     @Test
     void breachingTemplateFileNamesFileAndField() {
         String yaml = """
-                name: ledger/<session_id>
+                name: session-log/<session_id>
                 keys:
                   - agent_id
                 id_from: keys
@@ -240,7 +236,7 @@ class TemplateRegistryTest {
     void bootCheckPassesWhenLogTtlStrictlyExceedsRetentionPlusOneSweepInterval() {
         long retentionSeconds = 100L;
         long logTtlSeconds = retentionSeconds + SWEEP_INTERVAL_SECONDS + 1; // strictly greater
-        String yaml = minimalTemplateYaml("ledger/<session_id>", retentionSeconds);
+        String yaml = minimalTemplateYaml("session-log/<session_id>", retentionSeconds);
         var groups = List.of(new TemplateRegistry.SourceGroup("test",
                 List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
         TemplateRegistry registry = TemplateRegistry.load(groups, logTtlSeconds, SWEEP_INTERVAL_SECONDS);
@@ -251,12 +247,12 @@ class TemplateRegistryTest {
     void bootCheckRefusesOnEquality() {
         long retentionSeconds = 100L;
         long logTtlSeconds = retentionSeconds + SWEEP_INTERVAL_SECONDS; // equality — must refuse
-        String yaml = minimalTemplateYaml("ledger/<session_id>", retentionSeconds);
+        String yaml = minimalTemplateYaml("session-log/<session_id>", retentionSeconds);
         var groups = List.of(new TemplateRegistry.SourceGroup("test",
                 List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
         var ex = assertThrows(TemplateRegistryException.class,
                 () -> TemplateRegistry.load(groups, logTtlSeconds, SWEEP_INTERVAL_SECONDS));
-        assertTrue(ex.getMessage().contains("ledger/<session_id>"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("session-log/<session_id>"), ex.getMessage());
         assertTrue(ex.getMessage().contains("refuses to boot"), ex.getMessage());
     }
 
@@ -264,7 +260,7 @@ class TemplateRegistryTest {
     void bootCheckRefusesWhenLogTtlIsShorter() {
         long retentionSeconds = 100L;
         long logTtlSeconds = retentionSeconds; // far short
-        String yaml = minimalTemplateYaml("ledger/<session_id>", retentionSeconds);
+        String yaml = minimalTemplateYaml("session-log/<session_id>", retentionSeconds);
         var groups = List.of(new TemplateRegistry.SourceGroup("test",
                 List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
         assertThrows(TemplateRegistryException.class,
@@ -282,8 +278,9 @@ class TemplateRegistryTest {
         // 7 since RDR-220 added board/ci/<topic>, which declares no claim-log
         // override either.
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
-        // 8 since RDR-235 E3 added the literal aspects (its own 100-day claim-log TTL).
-        assertEquals(8, registry.templates().size());
+        // 8 since RDR-235 E3 added the literal aspects (its own 100-day claim-log TTL);
+        // 7 again since nexus-onjvw retired ledger/<session_id>.
+        assertEquals(7, registry.templates().size());
     }
 
     @Test
@@ -336,13 +333,13 @@ class TemplateRegistryTest {
     void templateWithNoClaimLogTtlOverride_usesTheEngineDefaultForBootCheckAndAtRuntime() {
         long retentionSeconds = 100L;
         long registryDefault = retentionSeconds + SWEEP_INTERVAL_SECONDS + 1;
-        String yaml = minimalTemplateYaml("ledger/<session_id>", retentionSeconds);
+        String yaml = minimalTemplateYaml("session-log/<session_id>", retentionSeconds);
         var groups = List.of(new TemplateRegistry.SourceGroup("test",
                 List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
 
         TemplateRegistry registry = TemplateRegistry.load(groups, registryDefault, SWEEP_INTERVAL_SECONDS);
 
-        assertEquals(registryDefault, registry.effectiveClaimLogTtlSeconds("ledger/<session_id>"));
+        assertEquals(registryDefault, registry.effectiveClaimLogTtlSeconds("session-log/<session_id>"));
     }
 
     @Test
@@ -465,21 +462,21 @@ class TemplateRegistryTest {
 
     @Test
     void literalNameIsLookedUpBeforeTemplates() {
-        String literal = minimalTemplateYaml("ledger/fixed", 100L);
-        String templated = minimalTemplateYaml("ledger/<session_id>", 100L);
+        String literal = minimalTemplateYaml("session-log/fixed", 100L);
+        String templated = minimalTemplateYaml("session-log/<session_id>", 100L);
         var groups = List.of(new TemplateRegistry.SourceGroup("test", List.of(
                 new TemplateRegistry.TemplateSource("literal.yaml", literal),
                 new TemplateRegistry.TemplateSource("templated.yaml", templated))));
         TemplateRegistry registry = TemplateRegistry.load(groups, DAYS(180), SWEEP_INTERVAL_SECONDS);
 
-        TemplateSchema resolved = registry.resolve("ledger/fixed");
+        TemplateSchema resolved = registry.resolve("session-log/fixed");
         assertNotNull(resolved);
-        assertEquals("ledger/fixed", resolved.name());
+        assertEquals("session-log/fixed", resolved.name());
         assertTrue(resolved.isLiteral());
 
-        TemplateSchema resolvedOther = registry.resolve("ledger/some-session-id");
+        TemplateSchema resolvedOther = registry.resolve("session-log/some-session-id");
         assertNotNull(resolvedOther);
-        assertEquals("ledger/<session_id>", resolvedOther.name());
+        assertEquals("session-log/<session_id>", resolvedOther.name());
 
         assertNull(registry.resolve("mailbox/x"));
     }
@@ -587,8 +584,9 @@ class TemplateRegistryTest {
         assertTrue(registry.sources().get(1).startsWith("directory:"), registry.sources().get(1));
         // 7, not 4: RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added board/<topic>,
         // lock/<resource>, queue/<name> beside the three bundled resource templates;
-        // 8 since RDR-220 added board/ci/<topic>; 9 since RDR-235 E3 added aspects.
-        assertEquals(9, registry.templates().size());
+        // 8 since RDR-220 added board/ci/<topic>; 9 since RDR-235 E3 added aspects;
+        // 8 again since nexus-onjvw retired ledger/<session_id>.
+        assertEquals(8, registry.templates().size());
         assertTrue(registry.templates().stream().anyMatch(t -> t.name().equals("test/<id>")));
     }
 

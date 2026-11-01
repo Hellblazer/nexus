@@ -336,9 +336,9 @@ class TenantKeyedEvictorsTest {
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             Future<List<TupleRepository.TupleRow>> parkedX = pool.submit(() ->
-                tuples.rd(x, "ledger/" + session, null, 10, null, 8));
+                tuples.rd(x, "directory/" + session, null, 10, null, 8));
             Future<List<TupleRepository.TupleRow>> parkedY = pool.submit(() ->
-                tuples.rd(y, "ledger/" + session, null, 10, null, 8));
+                tuples.rd(y, "directory/" + session, null, 10, null, 8));
             awaitParked(2);
 
             long start = System.nanoTime();
@@ -360,7 +360,7 @@ class TenantKeyedEvictorsTest {
             assertThat(tuples.parkStats().globalInUse()).as("only Y is still parked").isEqualTo(1);
 
             // Y is unaffected: a write to Y wakes it and it returns the row.
-            tuples.out(y, "ledger/" + session, Map.of("agent_id", "waker", "kind", "start"), Map.of(), null, null, null);
+            tuples.out(y, "directory/" + session, Map.of("name", session), Map.of("session_id", "waker"), null, "wake-1", null);
             assertThat(parkedY.get(5, TimeUnit.SECONDS)).hasSize(1);
         } finally {
             pool.shutdownNow();

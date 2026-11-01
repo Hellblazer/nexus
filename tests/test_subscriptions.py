@@ -72,7 +72,7 @@ _FIXTURE_TEMPLATES = [
     {"name": "lock/<resource>", "take": {"enabled": True}},
     {"name": "mailbox/<address>", "take": {"enabled": True}},
     {"name": "directory/<name>", "take": {"enabled": False}},
-    {"name": "ledger/<session_id>", "take": {"enabled": False}},
+    {"name": "board/ci/<topic>", "take": {"enabled": False}},
 ]
 
 

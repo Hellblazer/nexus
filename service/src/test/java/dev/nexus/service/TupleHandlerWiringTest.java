@@ -152,9 +152,10 @@ class TupleHandlerWiringTest {
         var body = mapper.readValue(resp.body(), MAP_T);
         assertThat(body).containsKey("digest");
         // 6, not 3: RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added board/<topic>,
-        // lock/<resource>, queue/<name> beside directory/ledger/mailbox.
-        // 7 since RDR-220 added board/ci/<topic>; 8 since RDR-235 E3 added aspects.
-        assertThat((java.util.List<?>) body.get("templates")).hasSize(8);
+        // lock/<resource>, queue/<name> beside directory/mailbox (and the since-retired ledger).
+        // 7 since RDR-220 added board/ci/<topic>; 8 since RDR-235 E3 added aspects;
+        // 7 again since nexus-onjvw retired ledger/<session_id>.
+        assertThat((java.util.List<?>) body.get("templates")).hasSize(7);
     }
 
     /**
@@ -175,26 +176,27 @@ class TupleHandlerWiringTest {
         assertThat((String) body.get("digest")).matches("[0-9a-f]{64}");
 
         var templates = (java.util.List<Map<String, Object>>) body.get("templates");
-        Map<String, Object> ledger = templates.stream()
-                .filter(t -> "ledger/<session_id>".equals(t.get("name")))
+        // The retired ledger/<session_id> carried this test's dimensions-and-pinned-values
+        // assertions (agent_type, the optional commit/t2_ref/verify dims, kind pinned to
+        // {start, report}); aspects (a pinned key) and directory (a required dim) now carry them.
+        Map<String, Object> aspects = templates.stream()
+                .filter(t -> "aspects".equals(t.get("name")))
                 .findFirst().orElseThrow();
+        var keyValues = (Map<String, Object>) aspects.get("key_values");
+        assertThat(keyValues).containsEntry("queue", java.util.List.of("aspects"));
 
-        var ledgerDims = (Map<String, Object>) ledger.get("dimensions");
-        assertThat(ledgerDims).containsKey("agent_type");
-        var agentType = (Map<String, Object>) ledgerDims.get("agent_type");
-        assertThat(agentType.get("type")).isEqualTo("string");
+        Map<String, Object> directory = templates.stream()
+                .filter(t -> "directory/<name>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+        var directoryDims = (Map<String, Object>) directory.get("dimensions");
+        assertThat(directoryDims).containsKey("session_id");
+        var sessionId = (Map<String, Object>) directoryDims.get("session_id");
+        assertThat(sessionId.get("type")).isEqualTo("string");
+        assertThat(directory).doesNotContainKey("key_values");
 
-        // Bead nexus-d9k5h: commit/t2_ref/verify are visible over the wire the
-        // same way agent_type always has been, so a caller can learn verify's
-        // allowed-value set without a separate out-of-band contract.
-        assertThat(ledgerDims).containsKeys("commit", "t2_ref", "verify");
-        var verify = (Map<String, Object>) ledgerDims.get("verify");
-        assertThat(verify.get("type")).isEqualTo("string");
-        assertThat((java.util.List<String>) verify.get("values")).containsExactly("present", "absent");
-
-        var keyValues = (Map<String, Object>) ledger.get("key_values");
-        assertThat(keyValues).containsEntry("kind", java.util.List.of("start", "report"));
-        assertThat(keyValues).doesNotContainKey("agent_id");
+        assertThat(templates.stream().map(t -> (String) t.get("name")))
+                .as("the retired ledger template is gone from the wire registry")
+                .doesNotContain("ledger/<session_id>");
 
         Map<String, Object> mailbox = templates.stream()
                 .filter(t -> "mailbox/<address>".equals(t.get("name")))

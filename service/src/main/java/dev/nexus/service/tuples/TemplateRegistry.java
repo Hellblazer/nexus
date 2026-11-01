@@ -78,7 +78,8 @@ public final class TemplateRegistry {
      * RDR-208 Phase 1 Step 1, bead nexus-galkv.1, and {@code board/<topic>},
      * {@code lock/<resource>}, {@code queue/<name>} from RDR-211 Phase 1
      * Step 2, bead nexus-rplay.8, and the literal one-segment {@code aspects}
-     * from RDR-235 E3, bead nexus-5r2sc.2.4). Loaded by explicit name — never by
+     * from RDR-235 E3, bead nexus-5r2sc.2.4; the RDR-205 {@code ledger/<session_id>}
+     * template was retired by bead nexus-onjvw). Loaded by explicit name — never by
      * classpath directory enumeration, which native image has none of. List
      * order here does not determine {@link #templates()} order — {@link
      * #load} sorts the final list by name — but is still the load order used
@@ -89,7 +90,6 @@ public final class TemplateRegistry {
             "/tuples/templates/board.yaml",
             "/tuples/templates/board-ci.yaml",
             "/tuples/templates/directory.yaml",
-            "/tuples/templates/ledger.yaml",
             "/tuples/templates/lock.yaml",
             "/tuples/templates/mailbox.yaml",
             "/tuples/templates/queue.yaml");
@@ -192,7 +192,7 @@ public final class TemplateRegistry {
      * "<address>"]}) and arbitrary bytes ({@code "mailbox/bad name!"} —
      * space and {@code !} are neither escaped nor rejected). Every real
      * address in this codebase (claimant ids, session ids, instance names —
-     * see {@code conexus/skills/mailbox/SKILL.md}, the ledger/mailbox test
+     * see {@code conexus/skills/mailbox/SKILL.md}, the mailbox test
      * fixtures) is a bare identifier: letters, digits, {@code .}, {@code _},
      * {@code -}. A subspace whose address fails this grammar now simply
      * fails to match ANY template, so {@link #resolve} returns {@code null}

@@ -12,7 +12,8 @@
 # an identity the engine could enforce). kind: an optional free-text label
 # for the post's shape (e.g. "release", "outage"); no fixed values, since
 # a board's topics and their post shapes are not enumerable up front the
-# way ledger's {start, report} is.
+# way a fixed state machine's (the retired session ledger's {start, report})
+# are.
 #
 # id_dims: [from] mirrors mailbox.yaml: "from" also enters the tuple id
 # alongside the minted nonce, so it must be declared required: true.

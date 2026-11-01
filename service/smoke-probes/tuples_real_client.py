@@ -134,19 +134,20 @@ except httpx.HTTPStatusError as exc:  # pragma: no cover -- only if _raise_typed
 # it locally first (RequestTooLargeError/TooLargeError raised client-side,
 # never sent). The genuine engine-only gap is a template's LOWER
 # max_body_bytes, which the client has no copy of (RDR-205 §Technical
-# Design: "no client carries a copy" of the registry) -- ledger/<session_id>
+# Design: "no client carries a copy" of the registry) -- directory/<name>
 # declares max_body_bytes: 0, so even a 1-byte body passes every client-side
 # check and is refused only when the engine itself applies the template's cap.
 oversize_session = f"native-smoke-tuples-oversize-{uuid.uuid4().hex[:12]}"
 try:
     tuples.out(
-        f"ledger/{oversize_session}",
-        {"agent_id": "native-smoke-oversize-agent", "kind": "start"},
-        {"agent_type": "developer"},
+        f"directory/{oversize_session}",
+        {"name": oversize_session},
+        {"session_id": "native-smoke-oversize-session"},
         "x",
+        nonce="native-smoke-oversize-nonce",
     )
     raise AssertionError(
-        "an out() to ledger/<session_id> (max_body_bytes: 0) with a 1-byte "
+        "an out() to directory/<name> (max_body_bytes: 0) with a 1-byte "
         "body must raise TooLargeError from the ENGINE"
     )
 except TooLargeError:
