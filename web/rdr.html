@@ -183,7 +183,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <p>Tell Claude how big the decision is, because that decides how much of the template Claude uses. A bug with one clear cause needs three sections: Problem, Root Cause, and Fix. A design with real alternatives needs the full template.</p>
 <div class="cmd"><pre>This is a bug with one cause. Problem, root cause, fix. Nothing else.</pre><button class="copy" type="button">Copy</button></div>
 <div class="cmd"><pre>This is an architecture change. Use the full template, and we will need real alternatives.</pre><button class="copy" type="button">Copy</button></div>
-<p>The usual problem is too much text, not too little. Claude adds sections one at a time, each for a reason, until the RDR is longer than the decision needs. The skill an RDR needs is cutting, not filling. When Claude adds a section, ask which decision it serves, and remove it if the answer is none.</p>
+<p>The usual problem is too much text, not too little. Claude adds sections one at a time, each for a reason, until the RDR is longer than the decision needs. When Claude adds a section, ask which decision it serves, and remove it if the answer is none.</p>
 
 <h3>Before you stop</h3>
 <p>An RDR of any size takes more than one session. When you stop for the day, change subject, or see the long-conversation warning, run <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/continuation.md"><code>/conexus:continuation</code></a> first (<a href="getting-started.html#handoff">Getting started, lesson 6</a> lists the three cases). The handoff names the RDR file, the open questions, and the first research to do, and the next session continues from there.</p>
@@ -225,7 +225,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <h3>Verify in batches</h3>
 <p>When several Assumed findings each need a small program, verify them together on one branch with one test run. A test run costs the same for one check or for five. Say: <em>"Collect the assumptions that need a test program. Verify them together."</em></p>
 
-<div class="callout rule"><p><strong>Alternatives appear here, not later.</strong> As research shows what is possible, the options become clear. Have Claude write each option into Alternatives Considered as soon as it is clear, with the reasons for and against it. An RDR whose alternatives are written after the decision is an excuse, not a decision.</p></div>
+<div class="callout rule"><p><strong>Alternatives appear here, not later.</strong> Have Claude write each option into Alternatives Considered as soon as it is clear, with the reasons for and against it. An RDR whose alternatives are written after the decision is an excuse, not a decision.</p></div>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li>Ask Claude: <em>"Which findings in RDR <span class="ph">&lt;NUMBER&gt;</span> are still Assumed, and which of those does the design depend on?"</em></li>
@@ -308,13 +308,13 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="lhead"><span class="lnum">5</span><h2>Accept, and the plan follows</h2><span class="ltime">15 min</span></div>
 <p class="why">Accepting is your decision. After it, the RDR is the reference that the code is built against. Acceptance also starts the planning, so the build can run over many sessions and each session knows where the work is.</p>
 
-<p>The planner turns the design into tasks, and it decides anything the design leaves open. Before you accept, ask: <em>"What will the plan have to decide that the RDR does not say?"</em> Settle those points in the RDR while it is still a draft.</p>
+<p>Before you accept, ask: <em>"What will the plan have to decide that the RDR does not say?"</em> Settle those points in the RDR while it is still a draft.</p>
 
 <h3>What acceptance runs</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Accept RDR <span class="ph">&lt;NUMBER&gt;</span>.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude runs <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-accept-checklist/SKILL.md"><code>/conexus:rdr-accept</code></a>. The status becomes <code>accepted</code> and memory records it. Because the RDR has an Implementation Plan, Claude then asks one question, whether to build the tasks now, and the default is yes. Say yes, and the rest happens in this order without more input from you:</p>
+<p>Claude runs <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-accept-checklist/SKILL.md"><code>/conexus:rdr-accept</code></a>. The status becomes <code>accepted</code> and memory records it. Because the RDR has an Implementation Plan, Claude then asks one question, whether to build the tasks now, and the default is yes. Say yes, and the rest happens in this order:</p>
 <ol class="plain">
 <li>The planner agent turns each phase of the Implementation Plan into tasks in the <code>bd</code> task tracker. The tasks have dependencies between them, and all of them belong to one epic that names the RDR.</li>
 <li>The plan audit checks those tasks against the code as it is today: do the files exist, is the order possible, and does the plan assume anything that the code contradicts.</li>
@@ -336,7 +336,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <!-- ============ 6 ============ -->
 <section class="lesson" id="l6">
 <div class="lhead"><span class="lnum">6</span><h2>Build it, across many sessions</h2><span class="ltime">20 min</span></div>
-<p class="why">The build takes days or weeks over many sessions. Two things connect the sessions: the continuation at the end of every session, and the phase review at the end of every phase. The RDR stays the fixed reference for the whole build, and this lesson is about that rhythm, not about writing code.</p>
+<p class="why">The build takes days or weeks over many sessions. Two things connect the sessions: the continuation at the end of every session, and the phase review at the end of every phase. The RDR stays the fixed reference for the whole build, and this lesson is about that rhythm.</p>
 
 <h3>A session in the build</h3>
 <ol class="plain">
@@ -357,7 +357,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 
 <h3>When the build proves the RDR wrong</h3>
 <div class="callout rule"><p><strong>Do not edit the accepted RDR.</strong> If a phase shows that a decision does not work, say so. Have Claude mark the RDR abandoned or superseded, and start a new RDR with what was learned. The new one is short, because most of the research is still valid. The old RDR stays as the record of what was believed and why. An accepted RDR edited to match the code is not a record of anything.</p></div>
-<p>Small things are different. A file name that changed, or a detail that the Approach did not specify, goes into the task and into memory, not into the RDR. The question is whether the decision changed.</p>
+<p>A file name that changed, or a detail that the Approach did not specify, goes into the task and into memory, not into the RDR. The question is whether the decision changed.</p>
 <div class="callout rule"><p><strong>Status and code are two facts.</strong> An RDR's status says what was decided and says nothing about whether code exists. A day of work on tools or documents around an RDR can look like a day of building it in a status report. Ask at any time: <em>"Does RDR <span class="ph">&lt;NUMBER&gt;</span> have code yet, and on which branch?"</em> Claude should give that one-sentence answer in every status report without being asked.</p></div>
 
 <div class="further"><h4>Investigate further</h4><ul>
@@ -384,7 +384,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <p class="note">A post-mortem is worth writing when the build taught something that the RDR did not predict. When it did not, the close is only a status change, and that is correct.</p>
 
 <h3>What remains</h3>
-<p>The next time you or Claude research a similar question, in this project or another that shares the store, the search finds this RDR. The research agent reads it before it reads the web. That is the purpose of the whole cycle: one RDR is a decision, and many RDRs are a memory of how the project thinks.</p>
+<p>The next time you or Claude research a similar question, in this project or another that shares the store, the search finds this RDR. That is the purpose of the whole cycle: one RDR is a decision, and many RDRs are a memory of how the project thinks.</p>
 <figure class="fig"><svg viewBox="0 0 680 275" role="img" aria-label="The RDR cycle. A conversation becomes a draft. Research grows it in cycles. You read and react, sometimes with a critic. A gate checks it within a budget. You accept and the plan follows. Sessions build it, each with a continuation, each phase with a review. You close it. It is indexed into knowledge, where the next RDR finds it."><defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/></marker><marker id="a4-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--brass)" stroke="none"/></marker></defs>
 <rect class="box" x="10" y="20" width="120" height="46" rx="6"/><text x="70" y="40" text-anchor="middle" font-weight="600">conversation</text><text x="70" y="56" text-anchor="middle" class="lbl">problem, options</text>
 <rect class="box" x="160" y="20" width="120" height="46" rx="6"/><text x="220" y="40" text-anchor="middle" font-weight="600">draft</text><text x="220" y="56" text-anchor="middle" class="lbl">rdr-create</text>
