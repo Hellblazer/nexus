@@ -55,5 +55,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/substantive-critique/SKILL.md` (nexus-qo7ie.1): the T2 critique record carries the gate tags and leaves its TTL to the phase-close rollup.
 - `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-qo7ie.1): the T2 row says omitting `ttl` is permanent (nexus-473mx), in place of the stale 30-day default.
 - `conexus/hooks/scripts/compact_checkpoint.py` (nexus-gy317): PreCompact runs the continuation in the worktree named after the session (the payload cwd is the launch checkout, usually the shared primary) and keeps the in-progress beads the `ref:` lines of the session's board entry name, since every session claims under one assignee; it leaves the list whole when nothing on the board matches or `bd` is unavailable.
+- `conexus/skills/nexus/reference.md` (nexus-z1d0l.1.2): the operator table gives `check` and `verify` the witness schema v1 result shape (host-bound evidence items with state, span, tumbler, chash and collection, plus rejected, uncovered and requires_review), in place of the bare `evidence` and `citations` shapes.
+- `conexus/skills/rdr-close/SKILL.md` (site prose pass): says `nx index repo` makes an RDR searchable from the first run, drafts included, and close only re-indexes a changed RDR, in place of saying accept or close indexes it.
 
 ## Deferred to the next client release
