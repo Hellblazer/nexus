@@ -2,12 +2,12 @@
 title: "Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves"
 id: RDR-238
 type: Feature
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-10-31
-accepted_date:
+accepted_date: 2026-11-01
 related_issues: [nexus-qo7ie]
 related_rdrs: [RDR-057, RDR-207, RDR-209, RDR-074, RDR-192, RDR-205, RDR-239, RDR-240]
 ---
@@ -751,3 +751,4 @@ so the rest does not wait for them.
 | 2026-10-31 | Pre-gate revision: Finalization Gate written; the Approach states what the SessionStart hook checks, matching Technical Design 3; A1 prerequisite ticked. |
 | 2026-11-01 | Gate round 2: PASSED (0 Critical, 17 Significant, 0 ship-blockers); commit `0e6eab59c`; critique `nexus_rdr/238-gate-critique-2026-11-01-r2`. |
 | 2026-11-01 | Gate round 3: PASSED (0 Critical, 10 Significant, 0 ship-blockers); commit `3f66127f0`; critique `nexus_rdr/238-gate-critique-2026-11-01-r3`. |
+| 2026-11-01 | Accept residual dispositions (gate round 3): K1, K2, K3, K4, K5 -> nexus-qo7ie.3; S-8, S-9 -> nexus-qo7ie.4; S-7, K6, S-10 -> nexus-qo7ie.5. |
