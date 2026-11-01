@@ -2457,6 +2457,52 @@ class TestGatewayTransientRetry:
         else:
             assert sleeps == list(hv._GATEWAY_RETRY_SLEEPS[:2])
 
+    def test_v1929_another_process_hold_waits_before_the_first_send(self, monkeypatch, tmp_path):
+        """nexus-v1929: a 503 another process recorded holds T3 before it sends."""
+        import json
+        import time
+
+        import nexus.db.http_vector_client as hv
+        from nexus.db import gateway_hold
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / gateway_hold.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": time.time() + 8.0, "strikes": 2, "last_503": time.time()}
+        ))
+        sleeps: list[float] = []
+        monkeypatch.setattr(hv, "_request_once", lambda *a, **k: {"ok": True})
+        module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
+
+        assert hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=5, body=None) == {"ok": True}
+        assert len(sleeps) == 1 and 7.0 <= sleeps[0] <= 8.0 + gateway_hold.MAX_JITTER_S
+
+    def test_v1929_a_503_records_the_shared_hold_and_honours_its_strikes(self, monkeypatch, tmp_path):
+        """nexus-v1929: three strikes already on the box make T3's first 503 wait 20s, not 2s."""
+        import json
+        import time
+
+        import nexus.db.http_vector_client as hv
+        from nexus.db import gateway_hold
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        hold = tmp_path / gateway_hold.HOLD_FILENAME
+        hold.write_text(json.dumps({"not_before": 0.0, "strikes": 3, "last_503": time.time()}))
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise self._http_error(503)
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
+
+        assert hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=5, body=None) == {"ok": True}
+        assert len(sleeps) == 1 and 20.0 <= sleeps[0] <= 20.0 + gateway_hold.MAX_JITTER_S
+        assert json.loads(hold.read_text())["strikes"] == 4
+
     def test_a_deadline_abort_503_is_not_resent_by_the_gateway_loop(self, monkeypatch):
         """nexus-qajw7: an engine 503 marked aborted discarded embedded work;
         resending it 2/5/10 s later runs the whole request to its deadline

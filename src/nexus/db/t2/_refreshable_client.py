@@ -69,12 +69,14 @@ import structlog
 from nexus._log_safe_url import log_endpoint
 from nexus.collection_errors import superseded_write_error_from_body
 from nexus.db.client_identity import client_identity_headers
+from nexus.db import gateway_hold
 from nexus.db.gateway_backoff import (
     _EMBED_WRITE_504_BACKOFF_FLOOR_S,
     _GATEWAY_RETRY_CODES,
     _GATEWAY_RETRY_SLEEPS,
     _is_embed_server_side_write_path,
 )
+from nexus.rate_brake import parse_retry_after
 from nexus.db.service_endpoint import (
     DEFAULT_LEASE_WAIT_BUDGET_S,
     discover_lease_with_wait,
@@ -1334,6 +1336,13 @@ class RefreshableHttpStoreMixin:
         ``refreshable_http_store.gateway_retry`` event name).
         """
         embed_write_path = _is_embed_server_side_write_path(path, kwargs.get("json"))
+        # nexus-v1929: another process's 503 holds this one too, before its first send.
+        if (held_s := gateway_hold.wait_before_attempt()) > 0.0:
+            _log.info(
+                "refreshable_http_store.gateway_hold_wait",
+                store=type(self).__name__, path=path, sleep_s=held_s,
+            )
+            time.sleep(held_s)
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             try:
                 return self._request_once(method, path, **kwargs)
@@ -1342,6 +1351,13 @@ class RefreshableHttpStoreMixin:
                     raise
                 floored = exc.response.status_code == 504 and embed_write_path
                 sleep_s = max(delay, _EMBED_WRITE_504_BACKOFF_FLOOR_S) if floored else delay
+                if exc.response.status_code == 503:
+                    # nexus-v1929: the hold is shared with every client on this config dir.
+                    sleep_s = gateway_hold.record_503(
+                        sleep_s,
+                        retry_after=parse_retry_after(exc.response.headers),
+                        url=self._base_url,
+                    )
                 _log.warning(
                     "vector_gateway_retry_embed_write_504" if floored
                     else "refreshable_http_store.gateway_retry",

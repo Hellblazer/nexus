@@ -997,6 +997,44 @@ class TestGatewayTransientRetry:
 
         assert _REQUEST_COUNT["POST /v1/echo"] == 4
 
+    def test_v1929_another_process_hold_waits_before_the_first_send(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-v1929: a 503 another process recorded holds this store before it sends."""
+        from nexus.db import gateway_hold
+        from nexus.db.t2 import _refreshable_client as mod
+
+        (_config_dir() / gateway_hold.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": time.time() + 8.0, "strikes": 2, "last_503": time.time()}
+        ))
+        sleeps: list[float] = []
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
+        store = _make_echo_store()
+
+        assert store.echo_post("held") == {"echo": {"value": "held"}}
+        assert len(sleeps) == 1 and 7.0 <= sleeps[0] <= 8.0 + gateway_hold.MAX_JITTER_S
+        assert _REQUEST_COUNT["POST /v1/echo"] == 1
+
+    def test_v1929_a_503_records_the_shared_hold_and_honours_its_strikes(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-v1929: three strikes already on the box make this store's first 503 wait 20s, not 2s."""
+        from nexus.db import gateway_hold
+        from nexus.db.t2 import _refreshable_client as mod
+
+        hold = _config_dir() / gateway_hold.HOLD_FILENAME
+        hold.write_text(json.dumps({"not_before": 0.0, "strikes": 3, "last_503": time.time()}))
+        sleeps: list[float] = []
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
+        _GATEWAY_FAIL_QUEUE.extend([503])
+        store = _make_echo_store()
+
+        assert store.echo_post("struck") == {"echo": {"value": "struck"}}
+        assert len(sleeps) == 1 and 20.0 <= sleeps[0] <= 20.0 + gateway_hold.MAX_JITTER_S
+        state = json.loads(hold.read_text())
+        assert state["strikes"] == 4
+        assert state["url"].startswith("http://127.0.0.1:")
+
     def test_500_is_not_gateway_retried(
         self, fake_service, monkeypatch: pytest.MonkeyPatch
     ) -> None:
