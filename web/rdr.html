@@ -183,7 +183,7 @@ details.gloss>.pad{padding:0 14px 12px}
 <path d="M250 161 C250 190, 190 190, 190 163" marker-end="url(#a4)" class="dash"/><text x="320" y="196" text-anchor="middle" class="lbl">each session ends with a continuation</text>
 <rect class="you" x="10" y="115" width="120" height="46" rx="6"/><text x="70" y="135" text-anchor="middle" font-weight="600">close</text><text x="70" y="151" text-anchor="middle" class="lbl">tasks settled</text>
 <line x1="160" y1="138" x2="132" y2="138" marker-end="url(#a4-y)" class="you-edge"/>
-<rect class="box" x="10" y="225" width="160" height="36" rx="6"/><text x="90" y="248" text-anchor="middle" font-weight="600">knowledge store</text>
+<rect class="box" x="10" y="225" width="160" height="36" rx="6"/><text x="90" y="248" text-anchor="middle" font-weight="600">rdr collection</text>
 <line x1="70" y1="161" x2="70" y2="223" marker-end="url(#a4)"/><text x="78" y="196" class="lbl">post-mortem</text>
 <path d="M170 243 L640 243 L640 10 L70 10 L70 18" marker-end="url(#a4)" class="dash"/><text x="420" y="237" text-anchor="middle" class="lbl">indexed from the first nx index repo, found by the next RDR's research</text>
 </svg><figcaption>The cycle from conversation to closed RDR. Orange boxes are your decisions.</figcaption></figure>
@@ -319,7 +319,7 @@ details.gloss>.pad{padding:0 14px 12px}
 <li>Task enrichment adds to each task what a builder needs: the files to change, the tests to run, the rules from the RDR, and any audit finding that applies.</li>
 </ol>
 <p>Then Claude shows you the task tree. You do not start the planner, the audit, or the enrichment yourself, because they are the second half of accepting.</p>
-<p class="note">Say no when the RDR has nothing to build, for example a decision that only changes a rule, or when you want to plan later. You can run the planning chain on its own later with <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/create-plan.md"><code>/conexus:create-plan</code></a>.</p>
+<p class="note">With fewer than two steps you can say no, for example for a decision that only changes a rule, or to plan later. You can run the planning chain on its own later with <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/create-plan.md"><code>/conexus:create-plan</code></a>.</p>
 
 <h3>Read the tree, not the tasks</h3>
 <p>Look at the phases and the dependencies. The first phase should prove that the design works, not only be the easiest one. A phase that produces nothing visible needs a reason. Then say go, or ask for changes.</p>
@@ -371,7 +371,7 @@ details.gloss>.pad{padding:0 14px 12px}
 <h3>Before you close</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>RDR <span class="ph">&lt;NUMBER&gt;</span> is built. What is still open under it?</pre><button class="copy" type="button">Copy</button></div>
-<p>Claude lists every task under the RDR's epic that is open or in progress. For each one, you close it as done or move it to a named later piece of work. Otherwise you keep the RDR open. Claude must not close a blocking task only to pass the gate, and if it proposes that, refuse.</p>
+<p>Claude lists every task under the RDR's epic that is open or in progress. For each one, you close it as done or move it to a named later piece of work. Otherwise you keep the RDR open, or confirm that you close it anyway. Claude must not close a blocking task only to pass the gate, and if it proposes that, refuse.</p>
 
 <h3>Close</h3>
 <div class="see">You might say</div>
@@ -381,7 +381,7 @@ details.gloss>.pad{padding:0 14px 12px}
 <p class="note">If you close an RDR as reverted or abandoned, Claude offers a post-mortem instead of writing one. Both reasons set the status <code>abandoned</code>, and the reason stays in memory and in the post-mortem.</p>
 
 <h3>What remains</h3>
-<p>The RDR file is in the knowledge store from the first <code>nx index repo</code> after you write it, drafts included. Closing adds the post-mortem to the store, and it re-indexes the RDR only if the close changed its text. A later research question finds both when its search includes the <code>rdr</code> collections. One RDR is a decision, and many RDRs are a memory of how the project thinks.</p>
+<p>The RDR file is in its <code>rdr</code> collection from the first <code>nx index repo</code> after you write it, drafts included. Closing adds the post-mortem to the knowledge store, and it re-indexes the RDR only if the close changed its text. A later research question finds both when its search includes the <code>rdr</code> collections. One RDR is a decision, and many RDRs are a memory of how the project thinks.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li>After a close, ask Claude to research a subject near the RDR's subject, with the <code>rdr</code> collections included, and watch it find the RDR.</li>
@@ -397,7 +397,7 @@ details.gloss>.pad{padding:0 14px 12px}
 <div class="gloss-wrap"><details class="gloss"><summary>The six statuses and how they change</summary><div class="pad">
 <div class="tbl"><table>
 <tr><th>Status</th><th>Meaning</th><th>It can move to</th></tr>
-<tr><td>draft</td><td>Under discussion. Change it as much as you want, and do not treat it as a decision yet.</td><td>accepted when you accept it. deferred or abandoned. closed without acceptance, only with a reason, for a decision that shipped without the gate.</td></tr>
+<tr><td>draft</td><td>Under discussion. Change it as much as you want, and do not treat it as a decision yet.</td><td>accepted when you accept it. deferred, superseded or abandoned. closed without acceptance, only with a reason, for a decision that shipped without the gate.</td></tr>
 <tr><td>accepted</td><td>You accepted it. This is now the design, and code can start.</td><td>closed when you close it. deferred, abandoned, or superseded.</td></tr>
 <tr><td>deferred</td><td>Parked. It can return, but only to draft.</td><td>draft, superseded, or abandoned.</td></tr>
 <tr><td>closed</td><td>Built and shipped. The RDR is now a historical record.</td><td>superseded.</td></tr>
