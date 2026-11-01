@@ -1749,6 +1749,8 @@ def _discarded_reduce_steps(
         i for i in range(len(step_outputs))
         if is_operator_tool(extract_tool(steps[i]))
         and not step_outputs[i].get("_bundled_intermediate")
+        # a coverage-skipped step never ran, so it discarded nothing (nexus-z1d0l.1.4)
+        and not step_outputs[i].get("coverage_skipped")
     }
     return sorted(reduce_indices - reachable)
 

@@ -1128,3 +1128,38 @@ class TestBundleModelPin:
     async def test_kill_switch_leaves_bundle_bare(self, monkeypatch):
         monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
         assert "model" not in (await self._run())
+
+
+class TestDeferredScalarArgsRenderAsStepProse:
+    """A scalar arg (verify claim, check instruction, filter criterion, generate template) that is a
+    deferred ref to an earlier bundled step must reach the model as "the `field` output from STEP K",
+    numbered inside the bundle, never as the raw sentinel dict (nexus-z1d0l.1.4 confirmation)."""
+
+    @staticmethod
+    def _ref(plan_index: int, field: str) -> dict:
+        from nexus.plans.bundle import DEFERRED_REF_KEY
+        return {DEFERRED_REF_KEY: True, "step_index": plan_index, "field": field}
+
+    @pytest.mark.parametrize(("tool", "arg"), [
+        ("verify", "claim"),
+        ("check", "check_instruction"),
+        ("filter", "criterion"),
+        ("generate", "template"),
+    ])
+    def test_a_deferred_scalar_arg_names_the_bundle_step(self, tool: str, arg: str) -> None:
+        from nexus.plans.bundle import DEFERRED_REF_KEY
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(4, "summarize", {"inputs": "[{\"id\": \"a\", \"text\": \"x\"}]"}),
+            OperatorBundleStep(5, tool, {arg: self._ref(4, "text")}),
+        ))
+        prompt, _ = compose_bundle_prompt(bundle)
+        assert DEFERRED_REF_KEY not in prompt, prompt
+        assert f"{arg}: the `text` output from STEP 1" in prompt, prompt
+
+    def test_a_literal_scalar_arg_is_still_quoted(self) -> None:
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(1, "summarize", {"inputs": "[{\"id\": \"a\", \"text\": \"x\"}]"}),
+            OperatorBundleStep(2, "verify", {"claim": "the sky is green"}),
+        ))
+        prompt, _ = compose_bundle_prompt(bundle)
+        assert "claim: 'the sky is green'" in prompt

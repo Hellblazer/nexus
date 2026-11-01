@@ -423,6 +423,18 @@ def _fmt_value(
     return v if isinstance(v, str) else str(v)
 
 
+def _fmt_scalar(
+    v: Any,
+    *,
+    plan_to_local: dict[int, int] | None = None,
+) -> str:
+    """Render a scalar operator arg (a claim, instruction, criterion or template): a deferred ref to an
+    earlier bundled step as "the `field` output from STEP K", anything else quoted with ``repr`` as
+    before. Without this a ref reached the model as the raw sentinel dict (nexus-z1d0l.1.4)."""
+    prose = _deferred_ref_prose(v, plan_to_local=plan_to_local)
+    return prose if prose is not None else repr(v)
+
+
 def _render_input_line(
     *,
     label: str,
@@ -498,7 +510,7 @@ def _describe_step(
 
     elif verb == "rank":
         criterion = step.args.get("criterion", "")
-        lines.append(f"  criterion: {criterion!r}")
+        lines.append(f"  criterion: {_fmt_scalar(criterion, plan_to_local=plan_to_local)}")
         lines.extend(_render_input_line(
             label="items", value=step.args.get("items"),
             first=first, position=position,
@@ -549,7 +561,7 @@ def _describe_step(
 
     elif verb == "generate":
         template = step.args.get("template", "")
-        lines.append(f"  template: {template!r}")
+        lines.append(f"  template: {_fmt_scalar(template, plan_to_local=plan_to_local)}")
         lines.extend(_render_input_line(
             label="context", value=step.args.get("context"),
             first=first, position=position,
@@ -561,7 +573,7 @@ def _describe_step(
 
     elif verb == "filter":
         criterion = step.args.get("criterion", "")
-        lines.append(f"  criterion: {criterion!r}")
+        lines.append(f"  criterion: {_fmt_scalar(criterion, plan_to_local=plan_to_local)}")
         lines.extend(_render_input_line(
             label="items", value=step.args.get("items"),
             first=first, position=position,
@@ -578,7 +590,7 @@ def _describe_step(
 
     elif verb == "check":
         instruction = step.args.get("check_instruction", "")
-        lines.append(f"  check_instruction: {instruction!r}")
+        lines.append(f"  check_instruction: {_fmt_scalar(instruction, plan_to_local=plan_to_local)}")
         lines.extend(_render_input_line(
             label="items", value=step.args.get("items"),
             first=first, position=position,
@@ -596,7 +608,7 @@ def _describe_step(
 
     elif verb == "verify":
         claim = step.args.get("claim", "")
-        lines.append(f"  claim: {claim!r}")
+        lines.append(f"  claim: {_fmt_scalar(claim, plan_to_local=plan_to_local)}")
         lines.extend(_render_input_line(
             label="evidence", value=step.args.get("evidence"),
             first=first, position=position,

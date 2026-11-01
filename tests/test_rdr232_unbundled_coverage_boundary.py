@@ -455,6 +455,8 @@ async def test_a_plans_own_check_before_the_terminal_operator_does_not_dispatch_
     # The isolated fill (the check is the first step of the run) marks the unrun witness skipped too.
     assert bundled.steps[2] != BUNDLED_INTERMEDIATE and bundled.steps[2][SKIPPED_MARK] is True
     assert unbundled.steps[2] == bundled.steps[2]
+    # a skipped witness never ran, so it is no discarded reduce branch (nexus-z1d0l.1.4 confirmation)
+    assert bundled.dropped_reduce_steps == [] and unbundled.dropped_reduce_steps == []
 
 
 @pytest.mark.asyncio
@@ -490,6 +492,8 @@ async def test_a_trailing_run_a_witness_splits_into_a_bundle_and_an_isolated_ste
     assert bundled.steps[2] == BUNDLED_INTERMEDIATE, "the extract is an operator that never ran: the bundle placeholder"
     # A witness that never ran is not "consumed inline by a bundle": its slot says it was skipped (nexus-z1d0l.1.4).
     assert bundled.steps[3] != BUNDLED_INTERMEDIATE and bundled.steps[3][SKIPPED_MARK] is True
+    # a skipped witness never ran, so it is no discarded reduce branch (nexus-z1d0l.1.4 confirmation)
+    assert bundled.dropped_reduce_steps == [] and unbundled.dropped_reduce_steps == []
     assert bundled.steps[-1][SKIPPED_MARK] is True
     assert bundled.steps == unbundled.steps
 
