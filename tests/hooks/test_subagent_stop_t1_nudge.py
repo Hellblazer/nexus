@@ -29,8 +29,8 @@ VERB = "subagent-stop-t1-nudge"
 SCRATCH = "mcp__plugin_conexus_nexus__scratch"
 NUDGE_SENTENCE = (
     "You wrote nothing to T1. Put your findings in T1 "
-    "(mcp__plugin_conexus_nexus__scratch action=put, tags <bead>,write-back) "
-    "and return the id."
+    "(mcp__plugin_conexus_nexus__scratch action=put, tagged with your bead id and write-back), "
+    "then repeat your complete final report unchanged, ending with the T1 id."
 )
 
 
@@ -141,6 +141,70 @@ def test_a_bash_nx_scratch_put_counts(tmp_path: Path) -> None:
         ],
     )
     assert nudge.run(_payload(path)).stdout is None
+
+
+@pytest.mark.parametrize(
+    "agent_type",
+    [
+        "web-fetch",
+        "statusline-setup",
+        "claude-code-guide",
+        "plugin-dev:agent-creator",
+        "plugin-dev:skill-reviewer",
+        "plugin-dev:plugin-validator",
+        "conexus-prose-edit:line-editor",
+    ],
+)
+def test_an_agent_with_no_t1_tool_or_a_parsed_return_is_never_nudged(
+    tmp_path: Path, agent_type: str
+) -> None:
+    result = nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type))
+    assert result.stdout is None
+
+
+@pytest.mark.parametrize("agent_type", ["conexus:developer", "worktree-developer", "Explore"])
+def test_an_agent_with_the_t1_tool_is_still_nudged(tmp_path: Path, agent_type: str) -> None:
+    """Non-vacuity for the skip list: it names types, it does not silence all."""
+    result = nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type))
+    assert result.stdout is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "NX_AGENT=dev nx scratch put findings",
+        "cd /tmp && nx scratch put findings",
+        "true; nx scratch put findings",
+        "out=$(nx scratch put findings)",
+    ],
+)
+def test_a_bash_nx_scratch_put_behind_env_or_a_chain_counts(tmp_path: Path, command: str) -> None:
+    path = _write(tmp_path, [_assistant(_use("b1", "Bash", command=command)), _user_result("b1", "Stored")])
+    assert nudge.run(_payload(path)).stdout is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    ['echo "document nx scratch put"', 'grep -rn "nx scratch put" docs/'],
+)
+def test_the_words_nx_scratch_put_inside_an_argument_are_not_a_put(
+    tmp_path: Path, command: str
+) -> None:
+    path = _write(tmp_path, [_assistant(_use("b1", "Bash", command=command)), _user_result("b1", "")])
+    assert nudge.run(_payload(path)).stdout is not None
+
+
+def test_a_put_whose_string_result_starts_with_error_does_not_count(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        [
+            _assistant(_use("p1", SCRATCH, action="put", content="x")),
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "p1", "content": "Error: engine unreachable"},
+            ]}},
+        ],
+    )
+    assert nudge.run(_payload(path)).stdout is not None
 
 
 @pytest.mark.parametrize("action", ["get", "search", "list", "delete"])

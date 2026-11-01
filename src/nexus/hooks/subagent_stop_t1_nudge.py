@@ -56,15 +56,34 @@ from nexus._hook_runtime._io import HookResult, additional_context, never_fail
 
 __all__ = ["NUDGE", "record_dispatch", "run", "t1_put_count"]
 
-#: The one sentence the agent reads. ``<bead>`` is literal: the agent fills it.
+#: What the agent reads. The agent's final message is what its caller
+#: receives, so the nudge asks for the full report again, not the id alone
+#: (review r1 of fd1ca12a5).
 NUDGE = (
     "You wrote nothing to T1. Put your findings in T1 "
-    "(mcp__plugin_conexus_nexus__scratch action=put, tags <bead>,write-back) "
-    "and return the id."
+    "(mcp__plugin_conexus_nexus__scratch action=put, tagged with your bead id and write-back), "
+    "then repeat your complete final report unchanged, ending with the T1 id."
 )
 
+#: Agent types (the part after any ``plugin:`` prefix) that have no T1 tool
+#: or whose return is parsed as a fixed format: a nudge only wastes their turn
+#: or breaks the parse (review r1 of fd1ca12a5).
+NO_T1_AGENTS: frozenset[str] = frozenset({
+    "web-fetch",
+    "statusline-setup",
+    "claude-code-guide",
+    "agent-creator",
+    "skill-reviewer",
+    "plugin-validator",
+    "line-editor",
+})
+
 _ERROR_PREFIX = "Error:"
-_BASH_PUT = re.compile(r"\bnx\s+scratch\s+put\b")
+#: ``nx scratch put`` as a command, at the start of the command line or after
+#: ``;``, ``&``, ``|``, ``(`` or a newline, optionally behind ``VAR=value``
+#: assignments; the same words inside a quoted argument (``echo "nx scratch
+#: put"``, ``grep -rn "nx scratch put" docs/``) are not a put.
+_BASH_PUT = re.compile(r"(?:^|[;&|(\n])\s*(?:\w+=\S*\s+)*nx\s+scratch\s+put\b")
 
 
 def _is_t1_put(name: object, tool_input: object) -> bool:
@@ -163,9 +182,9 @@ def _field(data: dict, key: str) -> str:
 def _decide(payload: dict | None) -> HookResult:
     data = payload if isinstance(payload, dict) else {}
     agent_type = _field(data, "agent_type")
-    if not agent_type:
+    if not agent_type or agent_type.rsplit(":", 1)[-1] in NO_T1_AGENTS:
         return HookResult()
-    puts = t1_put_count(_field(data, "agent_transcript_path"))
+    puts =t1_put_count(_field(data, "agent_transcript_path"))
     if puts is None:
         return HookResult()
     try:
