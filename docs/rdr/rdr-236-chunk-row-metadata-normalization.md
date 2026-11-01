@@ -448,8 +448,8 @@ critiqued once before Sam's gate decision (T2
 - **RF-17 (Decided, Sam 2026-10-26).** tags is a set: a JSON array on the
   document filtered by containment, never a comma string matched by
   equality; indexed files get a one-element array (first ruled as a
-  GENERATED column; replaced by option A, stored in meta), stored in the meta under Sam's option A (2026-10-31; amendment of
-  2026-11-01). The design
+  GENERATED column; replaced by Sam's option A, stored in meta,
+  2026-10-31; amendment of 2026-11-01). The design
   changes the schema analysis forced (database CHECKs behind the Java
   allow-list after a mandatory allow-list-shaped sweep; the derived keys
   of indexed files, GENERATED columns as ruled and stored meta keys under
@@ -1268,8 +1268,10 @@ placeholder) and `no_rule` (any other content type, `markdown` included).
 The engine's chunk-row fallback for a `where` on these keys stays until the
 row keys retire. A re-index fills tags and category only when the key is
 empty, and keeps a non-empty curated value (Sam, 2026-11-01,
-nexus-3ax49); it therefore also closes `ambiguous_indexer` residue, since
-the unfilled key is empty and the indexer that runs knows its own tag. The tags the verb does fill for notes, from a row's comma string, are
+nexus-3ax49); where an indexer re-registers the document it therefore
+also closes `ambiguous_indexer` residue, since the unfilled key is empty
+and that indexer knows its own tag (unchanged documents skip the hooks,
+and the first indexer to fill the key holds it). The tags the verb does fill for notes, from a row's comma string, are
 written as the array (6pfgb.38's form), never as the string. The run asserts it examined at least one document; the
 first live run's counts go on the bead. The backfill, the expiry sweep and the export share the two
 helpers in `note_ttl.py` that implement option B (`row_written_by` for
