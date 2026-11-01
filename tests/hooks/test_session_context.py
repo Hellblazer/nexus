@@ -167,11 +167,14 @@ class TestRunHookResultContract:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
         (tmp_path / "project").mkdir()
 
-    def test_minimal_output_is_just_the_capabilities_block(self, monkeypatch, tmp_path: Path) -> None:
+    def test_minimal_output_is_the_t1_contract_then_the_capabilities_block(self, monkeypatch, tmp_path: Path) -> None:
+        """nexus-mtheb: the top-level T1 contract leads, then the capabilities block."""
         self._isolate(monkeypatch, tmp_path)
         result = session_context.run(None)
         assert result.stdout is not None
-        assert result.stdout.startswith("## nx Capabilities")
+        assert result.stdout.startswith("## T1: the working layer this session shares with its subagents")
+        t1_block = "\n".join(session_context._T1_TOP_LINES)
+        assert result.stdout[len(t1_block) + 1:].startswith("## nx Capabilities")
         assert "## T2 Memory" not in result.stdout
         assert "## Ready Beads" not in result.stdout
         assert "## Hygiene" not in result.stdout
