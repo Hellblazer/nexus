@@ -540,6 +540,44 @@ class TestReadChromaUri:
         assert result.text == "first\n\nsecond\n\nthird"
         assert result.metadata["manifest_ordered"] is True
 
+    def test_reassembly_reports_each_chunk_with_its_manifest_confirmed_chash(self, t3_client):
+        """RDR-189 P1 (nexus-z1d0l.1.6): ``metadata["chunks"]`` is the reassembled chunks in
+        order as ``(chash, text)``, joined by a blank line to make ``text``. A chunk the
+        catalog manifest does not list carries ``""`` -- the host binds only to a chash the
+        manifest vouches for."""
+        from dataclasses import dataclass
+
+        from nexus.aspect_readers import ReadOk, _read_chroma_uri
+
+        col_name = "knowledge__chunks-report"
+        col = t3_client.get_or_create_collection(col_name)
+        listed = ["xxx" + "0" * 61, "yyy" + "0" * 61]
+        col.upsert(
+            ids=["c-1", "c-2", "c-3"],
+            documents=["second", "first", "stray"],
+            metadatas=[
+                {"doc_id": "1.99.7", "chunk_text_hash": listed[1]},
+                {"doc_id": "1.99.7", "chunk_text_hash": listed[0]},
+                {"doc_id": "1.99.7", "chunk_text_hash": "w" * 64, "chunk_index": 9},
+            ],
+        )
+
+        @dataclass
+        class _Row:
+            chash: str
+            position: int
+
+        result = _read_chroma_uri(
+            f"nx-note://{col_name}/anything",
+            t3=t3_client,
+            doc_id_lookup=lambda _c, _s: "1.99.7",
+            manifest_lookup=lambda _d: [_Row(listed[0], 0), _Row(listed[1], 1)],
+        )
+        assert isinstance(result, ReadOk), result
+        assert result.text == "first\n\nsecond\n\nstray"
+        assert result.metadata["chunks"] == ((listed[0], "first"), (listed[1], "second"), ("", "stray"))
+        assert "\n\n".join(t for _, t in result.metadata["chunks"]) == result.text
+
     def test_manifest_ids_select_chunks_when_doc_id_metadata_absent(self, t3_client):
         """nexus-m8a7: post-RDR-108 Phase 3, chunks have no ``doc_id``
         in metadata. The reader must select chunks by their natural
@@ -1997,3 +2035,25 @@ class TestTransportClassification:
             "nx-note://knowledge__x/doc", t3=self._t3(lambda **kw: {}), doc_id_lookup=down,
         )
         assert isinstance(r, ReadFail) and r.reason == "transport"
+
+
+def test_read_indexed_text_reports_chunks_without_nul_bytes(monkeypatch):
+    """RDR-189 P1: ``chunks_out`` gets the ``(chash, text)`` chunks, NUL-stripped like the
+    returned text, so a validator can join them back to exactly that text."""
+    from nexus import aspect_extractor as ae
+    from nexus.aspect_readers import ReadOk
+
+    monkeypatch.setattr(ae, "get_t3", lambda: object())
+    monkeypatch.setattr(
+        ae, "read_source",
+        lambda uri, **_kw: ReadOk(
+            text="a\x00b\n\nc", metadata={"chunks": (("h" * 64, "a\x00b"), ("", "c"))},
+        ),
+    )
+    out: list[tuple[str, str]] = []
+    text = ae.read_indexed_text(collection="knowledge__x", source_path="p", chunks_out=out)
+    assert text == "ab\n\nc"
+    assert out == [("h" * 64, "ab"), ("", "c")]
+    assert "\n\n".join(t for _, t in out) == text
+    # Without chunks_out nothing is collected and the text is unchanged.
+    assert ae.read_indexed_text(collection="knowledge__x", source_path="p") == "ab\n\nc"

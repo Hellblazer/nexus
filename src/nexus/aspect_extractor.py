@@ -1317,6 +1317,7 @@ def read_indexed_text(
     lookup_path: str = "",
     doc_id_lookup: Callable[[str, str], str] | None = None,
     manifest_lookup: Callable[[str], list[Any]] | None = None,
+    chunks_out: list[tuple[str, str]] | None = None,
 ) -> str | None:
     """Return the reassembled T3 chunk text for a document, or ``None``.
 
@@ -1336,6 +1337,13 @@ def read_indexed_text(
     Returns ``None`` (never raises, never falls back to file bytes) when T3
     is unavailable or the source is unreadable; the caller treats that as an
     indeterminate sample to skip, not a verification failure.
+
+    ``chunks_out`` (RDR-189 P1, nexus-z1d0l.1.6): when given, it is extended with
+    one ``(chash, text)`` per reassembled chunk, in order, ``\x00`` removed like
+    the returned text. ``chash`` is the catalog manifest's own hash for the chunk,
+    or ``""`` when the manifest does not list it. The returned text is these
+    texts joined by a blank line. Used to bind a verifier's quotes to chunks on
+    the host.
     """
     uri_identity = lookup_path or source_path
     uri = note_uri(collection, uri_identity, quote_rest=True)
@@ -1350,6 +1358,11 @@ def read_indexed_text(
         manifest_lookup=manifest_lookup,
     )
     if isinstance(result, ReadOk):
+        if chunks_out is not None:
+            chunks_out.extend(
+                (str(chash), str(text).replace("\x00", ""))
+                for chash, text in result.metadata.get("chunks", ())
+            )
         return result.text.replace("\x00", "")
     _log.warning(
         "read_indexed_text_unreadable",

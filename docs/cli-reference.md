@@ -754,9 +754,13 @@ nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku
 | `--all` | Re-extract EVERY document, including ones that already have an aspect row. The pre-7.18.0 default; now opt-in because it re-spends on the whole corpus. Without it, only documents with NO aspect row are processed |
 | `--dry-run` | Report document count + cost estimate (Haiku-class). No API calls, no T2 writes. The read-side skip prediction samples the first 25 entries (one vector-service round-trip each) and projects the skip rate onto the rest (7.21.0, nexus-bocft: one round-trip per entry ran a 407-entry cloud dry-run past five minutes with nothing printed); the exact per-entry verdicts come from the real run |
 | `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the full document text. Disagreements append to `<nexus config dir>/aspect_validation_failures.jsonl` (nexus-xwvwx: never the current working directory). A document whose text is truncated before the check is reported as **unverifiable**, not as a disagreement. Pass 0 to skip. Default 5 |
-| `--validation-out PATH` | Override the validation-failures JSONL path (nexus-xwvwx) |
+| `--validation-out PATH` | Override the validation-failures JSONL path (nexus-xwvwx). Names the failures file only; it keeps its schema |
+| `--validation-all-out PATH` | Override the all-outcomes record, default `<nexus config dir>/aspect_validation.jsonl` (RDR-189 P1). Every sampled record writes one row whatever its outcome: `status` (`verified`, `disagreement`, `unverifiable`, `errored`), `reason_code`, host-bound witness items (`tumbler`, `chash`, `collection` from the catalog manifest, never from the model) and the evidence window. A true verdict with no bound supporting item is `unverifiable`. Must differ from `--validation-out` (resolved paths), or the command refuses before extracting |
+| `--validation-trace` / `--no-validation-trace` | Default on. Off nulls the free text (claims, quotes, verifier reasons) in BOTH validation files and keeps ids, states and counts. The failures file keeps its key set (`extracted_aspects` and `operator_verify_reason` become `null`, `citations` becomes `[]`; `source_path` stays). Unrelated to `nx_answer`'s `trace` |
 | `--re-extract` | Re-run only on rows whose `model_version` is strictly less than `--extractor-version` (and rows that are missing entirely) |
 | `--extractor-version v` | Threshold for `--re-extract` (lexicographic STRICT-less-than) |
+
+Both validation files keep their newest 10,000 complete rows: every append and the prune at the end of a run hold an exclusive lock on a sibling `<file>.lock`; delete a file to start over. They are local to the machine, never synced to T2 or T3.
 
 ### nx enrich aspects-show
 
