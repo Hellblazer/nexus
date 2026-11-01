@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-10-31
 accepted_date:
 related_issues: [nexus-qo7ie]
-related_rdrs: [RDR-057, RDR-207, RDR-209, RDR-074, RDR-192]
+related_rdrs: [RDR-057, RDR-207, RDR-209, RDR-074, RDR-192, RDR-240]
 ---
 
 # RDR-238: Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves
@@ -85,14 +85,17 @@ saturating the cloud edge (nexus-75w5d); about 2,500 permanent gate records;
 and the RDR-205 session ledger, whose writer and readers 7.70.0 deleted while
 its engine template and 40,785 rows stayed (nexus-onjvw). Sam: "we want to be
 sure we're paying attention to things and ensuring we're not generating a lot
-of heat and waste." The fix also delivers a last-use signal for every store of
-state this project owns, read on a schedule: the curation report's cold-state
-section (Technical Design 4).
+of heat and waste." The fix also delivers a last-use signal, read on a
+schedule, for the four kinds of store the curation report's cold-state
+section lists (Technical Design 4): tuple subspaces, T2 namespaces and memory
+files, MCP tools and CLI verbs, and injected context.
 
 Procedures stored as memory, and procedures recalled or improvised instead of
 run, moved to their own RDR on 2026-10-31 (nexus-qo7ie.2): they become
 sandboxed Lua scripts on a Lua runtime (nexus-mdbds.1), not new Python verbs
-or MCP tools. The removed text stays in the history of branch
+or MCP tools. That RDR is now RDR-240, and it is a prerequisite of this
+one's Phase 2 Step 3 and Phase 3: its `transcripts` procedure is the one
+transcript scanner both use (Technical Design 5). The removed text stays in the history of branch
 `feature/nexus-qo7ie-memory-curation-rdr`, in the draft as filed before this
 revision.
 
@@ -102,7 +105,8 @@ revision.
 | --- | --- | --- |
 | RDR-057 Progressive Formalization Across Memory Tiers | Origin of the tier model | Its "graduation" idea is the T2 to T3 case. This RDR is the curation case beside it: replacement and admission to context. |
 | RDR-207 Summarization at the T2 Expiry Boundary | Beside, no shared path | It owns what expiry may destroy (quarantine, rollup, reap only rolled-up rows). Replacement is not expiry: a writer names a row and the engine deletes it in the same transaction. Phase 1 Step 1 confirms the delete takes the path an explicit `memory_delete` takes. |
-| RDR-209 Heat-Based Graduation Between Memory Tiers | Sibling, draft | It owns heat and graduation, and takes the gate-record rollup as an amendment (same date). Its Phase 0b, a read counter that means "a caller read this row", is the signal this RDR's index audit would use for T2; until it lands, the audit counts reads from transcripts. |
+| RDR-209 Heat-Based Graduation Between Memory Tiers | Sibling, draft | It owns heat and graduation, and takes the gate-record rollup as an amendment (same date). Its Phase 0b, a read counter that means "a caller read this row", is the signal this RDR's index audit would use for T2; until it lands, the audit counts reads with RDR-240's `memory` transcript query. |
+| RDR-240 Procedures as Sandboxed Lua Scripts | Prerequisite of Phase 2 Step 3 and Phase 3 | Split from this RDR. Its `transcripts` procedure owns transcript scanning; this RDR calls four of its queries and builds no scanner (Technical Design 5). Phase 1 does not depend on it. |
 | RDR-074 Permanence Mode | Deferred, compatible | Permanence guards a row against expiry only. Naming a permanent row in `replaces` deletes it, because explicit deletion is always the project's prerogative (Sam, 2026-10-31: "expiry is the def; explicit del is always our collective prerogative"). |
 | RDR-192 Superseded Note Chunks Outlive Manifest-Less Is-Live | Different layer | It concerns T3 chunks a re-put replaced. This RDR concerns whole T2 rows and memory files a writer replaced. No shared code. |
 
@@ -258,25 +262,39 @@ later row appears to replace without naming them.
    index length against the 40-line cap their definitions state, entries with
    no repo named, and concurrent-write damage, since two sessions running the
    same reviewer edit one `MEMORY.md` and the last writer wins. `--files`: unread files
-   over N days (read counts from transcripts until RDR-209 Phase 0b gives T2
-   a true read counter), unindexed files, files over 8 KB, and
+   over N days (read counts from RDR-240's `memory` query until RDR-209
+   Phase 0b gives T2 a true read counter), unindexed files, files over 8 KB, and
    live T2 rows that a later row names in its title or body as replaced
    (a heuristic list for a person to confirm, never an automatic delete).
-   `--cold [--days N]`: every store of state with no write and no read in N
-   days (default 30), wherever it lives. Each row gives the store, its last
+   `--cold [--days N]`: each store of the four kinds below with no write and
+   no read in N days (default 30). Each row gives the store, its last
    write, its last read, its size and its owner if known:
    - tuple subspaces, from the census's last post time and from the
      dictionary's `writers` (the tuple-space dictionary draft, nexus-mdbds); a template whose `writers` is empty
      and that has no live subspace is listed by name;
    - T2 namespaces and memory files, from read and write counts;
-   - MCP tools and CLI verbs, from the transcript queries of the procedures
-     RDR (nexus-qo7ie.2);
-   - context injected per session and per dispatch, from the same transcript
-     queries, so a large always-loaded item with no use shows as tokens.
+   - MCP tools and CLI verbs, from RDR-240's `tools` query;
+   - context injected per session and per dispatch, from RDR-240's `loads`
+     query, so a large always-loaded item with no use shows as tokens.
    Report only: retiring a cold store is a person's decision, and one that
    deletes data rides its own change (as nexus-onjvw does for the ledger).
    The report runs at each release's post-release step (Phase 3), so waste
    shows while it is small.
+5. **Transcript queries (the interface to RDR-240).** This RDR builds no
+   transcript scanner. RDR-240's `transcripts` procedure is the one owner,
+   and this RDR calls it through `run_procedure("transcripts", {query, since,
+   project})` from Python, so `nx memory curate` adds no Lua. It uses four
+   queries:
+   - `memory`: memory-file reads, for `--files` and T2 read counts;
+   - `tools`: calls per MCP tool, and per `nx` CLI verb called through Bash,
+     for `--cold`;
+   - `loads`: instruction files loaded per session and per dispatch, with
+     their sizes, for `--cold`;
+   - `violations`: the rule detectors, for Phase 2 Step 3.
+   Each row it needs carries a name, a count, a last-use time and a size
+   (inferred, not read: RDR-240 does not yet state its row fields; its gate
+   settles them). The `nx` CLI verb count in `tools` is a requirement this
+   RDR places on RDR-240.
 
 ### Existing Infrastructure Audit
 
@@ -285,7 +303,7 @@ later row appears to replace without naming them.
 | Delete a T2 row | Explicit `memory_delete` | Reuse its path inside the replacing put's transaction |
 | Schema change | Liquibase memory changesets 001-005 | None needed; lineage is a content line |
 | SessionStart hook verbs | conexus `nx-hook` dispatch | One more verb |
-| Transcript read counts | Ad hoc scan (survey, 2026-10-31) | Make it `nx memory curate --files` |
+| Transcript read counts | Ad hoc scan (survey, 2026-10-31) | RDR-240's `transcripts` procedure; `nx memory curate` calls it |
 
 ### Decision Rationale
 
@@ -372,6 +390,9 @@ If the on-demand tier works, this is a refinement of it.
 - [x] A1 verified (Claude Code's loading of `MEMORY.md`; research 1 and 2).
 - [ ] RDR-209 amendment for gate records filed (this RDR does not depend on
       it landing).
+- [ ] RDR-240 Phase 1 Step 1 landed (the runner and the `transcripts`
+      procedure). Phase 2 Step 3 and Phase 3 wait for it; Phase 1, Phase 2
+      Step 1 and Phase 2 Step 2 do not.
 
 ### Minimum Viable Validation
 
@@ -412,13 +433,16 @@ the rest. Record what moved and why.
 
 #### Step 3: Re-measure
 
-Count the same rules over the same windows after the split. A rule whose
-rate rises returns to the always tier.
+Count the same rules over the same windows after the split, with RDR-240's
+`violations` query. Before it is used, the query is run over research 4's
+window and must reproduce research 4's baseline counts. A rule whose rate
+rises returns to the always tier.
 
 ### Phase 3: Habits
 
 The SessionStart check, `nx memory curate`, and a curation step in the
-release skill's post-release section.
+release skill's post-release section. `nx memory curate` waits for RDR-240
+Phase 1 Step 1; the SessionStart check does not.
 
 ### Day 2 Operations
 
@@ -440,15 +464,15 @@ None.
   old row.
 - Hook: over budget prints one line; clean prints nothing; an unreadable
   directory is silent and exits 0; each case fails with its check deleted.
-- Curate: each report section on a fixture directory with one planted case
-  and one clean case.
+- Curate: each report section on a fixture directory and a fixture
+  transcript directory, with one planted case and one clean case.
 
 ## Validation
 
 ### Testing Strategy
 
 Engine and client tests on real PG; hook tests on fixture directories; Phase 2
-compliance counts from transcripts, stored in T2 with the scan script.
+compliance counts from RDR-240's `violations` query, stored in T2.
 
 ### Performance Expectations
 
@@ -499,8 +523,10 @@ whose rate rises goes back.
 
 Gap 1 maps to Phase 1 (engine and client) and the frontmatter field, Gap 2
 to Phase 2 (measure, split, re-measure), and Gap 3 to Phase 3 (the
-SessionStart check and `nx memory curate`, including `--cold`). Procedures
-and promotion are out of scope (nexus-qo7ie.2), and so is the gate-record
+SessionStart check and `nx memory curate`, including `--cold`). Phase 2
+Step 3 and `nx memory curate` need RDR-240's `transcripts` procedure, a
+prerequisite, so this RDR builds no transcript scanner. Procedures
+and promotion are out of scope (RDR-240), and so is the gate-record
 rollup (RDR-209 Amendment A1). Retiring a cold store is out of scope too:
 the report lists it, and any deletion of data rides its own change.
 
