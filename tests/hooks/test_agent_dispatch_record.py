@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -309,3 +310,25 @@ def test_the_windows_spawn_tries_breakaway_then_falls_back(monkeypatch: pytest.M
     base = rec._CREATE_NO_WINDOW | rec._CREATE_NEW_PROCESS_GROUP
     assert flags == [base | rec._CREATE_BREAKAWAY_FROM_JOB, base]
     assert not any(f & 0x00000008 for f in flags), "DETACHED_PROCESS"
+
+
+def test_the_module_entry_point_is_run_child_so_the_watchdog_is_armed() -> None:
+    """``python -m`` runs the ``__main__`` block; it must go through run_child,
+    or the child runs with no watchdog (confirmation r2 of the counter)."""
+    import ast  # noqa: PLC0415 — test-local
+
+    tree = ast.parse(Path(rec.__file__).read_text(encoding="utf-8"))
+    mains = [
+        node for node in tree.body
+        if isinstance(node, ast.If) and "__main__" in ast.unparse(node.test)
+    ]
+    assert len(mains) == 1
+    called = {n.func.id for n in ast.walk(mains[0]) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "run_child" in called
+    assert "main" not in called
+
+
+def test_the_child_lifetime_stays_short() -> None:
+    """Eight seconds: past the 2 s request and a warm token step, short of a
+    cold mint, and no cap a fan-out of children could pile up behind."""
+    assert rec._CHILD_LIFETIME_S == 8.0
