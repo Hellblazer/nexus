@@ -1435,6 +1435,13 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # (the retired anchored channel, nexus-rbmja.8; two peers' files modified during tests/hooks/). Append-only, one
     # line per commit, never read by any test.
     "session_commits/",
+    # The conexus PreCompact hook (conexus/hooks/scripts/compact_checkpoint.py ``pre``) of any
+    # live Claude Code session on the box writes ``compact-checkpoints/<session_id>.md``, keeps
+    # timestamped prior copies and unlinks the oldest, all in the real config dir of a session
+    # without NEXUS_CONFIG_DIR. MEASURED 2026-11-01 (nexus-z1d0l.1.3 lint run, 18 min serial): a
+    # peer session's compaction ADDED, MODIFIED and REMOVED three files under it, with no test
+    # involved; the 2295-pass run exited 1 on that alone. No unit test names this directory.
+    "compact-checkpoints/",
     # Live aspect-worker daemon's own address/heartbeat registration file
     # (``ttl=3.0``-second heartbeat_epoch bump, same size every write).
     # MEASURED directly (nexus-pfuns round 1): ran `uv run pytest tests/
