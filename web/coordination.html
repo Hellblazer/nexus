@@ -339,7 +339,7 @@ What is waiting in your mailbox?</pre><button class="copy" type="button">Copy</b
 <p>For the first question, Claude reports what <code>nx doctor</code>'s channel row shows for this session: whether the waiter is alive, when it last woke, how many messages it has announced in total, and how many mailboxes had a reference sent and not yet superseded at its last wake. That last count is the waiter's own bookkeeping, not a live query, so a message acked after that wake still counts until the next one. For the second, it reads its mailbox with <code>tuple_rd</code> and takes nothing.</p>
 <details class="gloss out"><summary>What you see: the channel row</summary><pre class="out">✓ tuples.channel_delivery: waiter alive; last wake 7s ago; announced=0, pending=0</pre></details>
 
-<div class="callout rule"><p>The channel needs a flag on every launch: <code>claude --channels plugin:conexus@nexus-plugins</code> or <code>claude --dangerously-load-development-channels server:nexus</code>. <a href="getting-started.html#push-delivery">Getting started, "Turn on push delivery"</a> has the exact steps, including how to set it with an alias.</p></div>
+<div class="callout rule"><p>The channel needs a flag on every launch: <code>claude --channels plugin:conexus@nexus-plugins</code> or <code>claude --dangerously-load-development-channels server:nexus</code>. <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md#setup-turning-on-push-delivery">Tuple space, "Setup: turning on push delivery"</a> has the exact steps, including how to set it with an alias.</p></div>
 
 <div class="see">From a terminal</div>
 <div class="cmd"><pre>nx tuple list --prefix mailbox/  <span class="c"># every mailbox, with counts</span>

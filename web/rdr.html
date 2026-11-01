@@ -162,7 +162,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <p class="lede">An RDR is a decision that you and Claude shape together: the problem, what research found, the options, and the choice. This page follows one RDR from the conversation where it starts to the day you close it.</p>
 <p>With an agent, you can build a lot very quickly. This works well until you want to change direction. Then the work starts to slide: you forget details, Claude guesses where it should ask, and the code no longer follows the decisions that shaped it. Soon neither of you knows what is real, where the work is going, or how it got here. An RDR is traction control for that. It is one record that both of you read, change, and use to steer, so the reasoning does not disappear into chat history.</p>
 <p>When the build proves an RDR wrong, you abandon it and write the next one. The chain of RDRs then becomes the true record of how the work went. Nexus indexes every RDR with the code that implements it, so the next decision on a similar subject finds this one.</p>
-<p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders for your own subject, and the prompts are examples, so your own words work the same. The page uses two ideas from <a href="getting-started.html">Getting started</a>: continuations (<a href="getting-started.html#l2">lesson 2</a>) and renderings (<a href="getting-started.html#l8">lesson 8</a>).</p>
+<p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders for your own subject, and the prompts are examples, so your own words work the same. The page uses two ideas from <a href="getting-started.html">Getting started</a>: continuations (<a href="getting-started.html#handoff">lesson 6</a>) and renderings (<a href="getting-started.html#rendering">the appendix</a>).</p>
 <div class="callout rule"><p><strong>How it works.</strong> Both of you steer. You bring the first ideas, direct the research, and edit the RDR yourself. Claude searches and drafts, and it argues with the draft. It objects when the evidence shows that an idea will not work, whether the idea is yours or its own. Each exchange leaves something in the RDR: a finding, a cut, or a changed option, and the next exchange starts from there. The lifecycle steps are where you record your intent. At acceptance you say "this is what we build against", and at close you say "this is what happened". You make those decisions as part of the conversation.</p>
 <p><strong>Spend most of your time on research and design.</strong> The design is compiled into a plan, and the code is printed from the plan, so a flaw in the design reaches the code unchanged. Where the design leaves a question open, the planner answers it with its own choice, and you find that choice later in the code. Keep iterating until the design is the one you want built.</p></div>
 
@@ -176,7 +176,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="see">You might say</div>
 <div class="cmd"><pre>This is bigger than a patch. Let's make it an RDR. Start from what we just discussed.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude creates the file with <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-create/SKILL.md"><code>/conexus:rdr-create</code></a>. The file gets the next number, the header fields, the section headings, and the status <code>draft</code>. Claude writes the Problem Statement and the open questions from the conversation so far. It also writes a memory entry (<a href="getting-started.html#l4">Getting started, lesson 4</a>) that names the RDR, so later sessions know it exists. The other sections stay empty on purpose.</p>
+<p>Claude creates the file with <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-create/SKILL.md"><code>/conexus:rdr-create</code></a>. The file gets the next number, the header fields, the section headings, and the status <code>draft</code>. Claude writes the Problem Statement and the open questions from the conversation so far. It also writes a memory entry (<a href="getting-started.html#memory">Getting started, memory</a>) that names the RDR, so later sessions know it exists. The other sections stay empty on purpose.</p>
 <p class="note">Claude may also propose the RDR: "This has three possible designs. Do you want an RDR?" The plugin tells Claude to ask before it builds anything with no written design.</p>
 
 <h3>Choose the size now</h3>
@@ -186,7 +186,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <p>The usual problem is too much text, not too little. Claude adds sections one at a time, each for a reason, until the RDR is longer than the decision needs. The skill an RDR needs is cutting, not filling. When Claude adds a section, ask which decision it serves, and remove it if the answer is none.</p>
 
 <h3>Before you stop</h3>
-<p>An RDR of any size takes more than one session. When you stop for the day, change subject, or see the long-conversation warning, run <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/continuation.md"><code>/conexus:continuation</code></a> first (<a href="getting-started.html#l2">Getting started, lesson 2</a> lists the three cases). The handoff names the RDR file, the open questions, and the first research to do, and the next session continues from there.</p>
+<p>An RDR of any size takes more than one session. When you stop for the day, change subject, or see the long-conversation warning, run <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/continuation.md"><code>/conexus:continuation</code></a> first (<a href="getting-started.html#handoff">Getting started, lesson 6</a> lists the three cases). The handoff names the RDR file, the open questions, and the first research to do, and the next session continues from there.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li>Ask Claude to show the new file: <em>"Show me RDR <span class="ph">&lt;NUMBER&gt;</span> as it is now."</em> At this stage it is short, and that is correct.</li>
@@ -237,7 +237,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <!-- ============ 3 ============ -->
 <section class="lesson" id="l3">
 <div class="lhead"><span class="lnum">3</span><h2>Read it, react, repeat</h2><span class="ltime">15 min</span></div>
-<p class="why">Between research cycles, and especially when the Proposed Solution becomes clear, read the whole RDR and work on it. Edit it directly where you know what it should say. Then tell Claude about the edit, so that it can change the same fact in memory. Where you want Claude to find the fix, say what is wrong. This is the rendering loop from <a href="getting-started.html#l8">Getting started, lesson 8</a>, applied to one document.</p>
+<p class="why">Between research cycles, and especially when the Proposed Solution becomes clear, read the whole RDR and work on it. Edit it directly where you know what it should say. Then tell Claude about the edit, so that it can change the same fact in memory. Where you want Claude to find the fix, say what is wrong. This is the rendering loop from <a href="getting-started.html#rendering">the Getting started appendix</a>, applied to one document.</p>
 
 <h3>Ask for a reading</h3>
 <div class="see">You might say</div>
@@ -416,7 +416,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <!-- ============ 8 ============ -->
 <section class="lesson" id="l8">
 <div class="lhead"><span class="lnum">8</span><h2>Reference: the statuses</h2><span class="ltime">reference</span></div>
-<p class="why">RDR means Research, Design, Review, which is the order of the work. The file is a rendering of that work (<a href="getting-started.html#l8">Getting started, lesson 8</a>), written from the stores, and it changes when the work changes. Its status says where the decision stands.</p>
+<p class="why">RDR means Research, Design, Review, which is the order of the work. The file is a rendering of that work (<a href="getting-started.html#rendering">the Getting started appendix</a>), written from the stores, and it changes when the work changes. Its status says where the decision stands.</p>
 <div class="tbl"><table>
 <tr><th>Status</th><th>Meaning</th></tr>
 <tr><td>draft</td><td>Under discussion. Change it as much as you want, and do not treat it as a decision yet.</td></tr>
