@@ -2115,7 +2115,7 @@ class TestResolveT1RoutingTiers:
             "(nexus-1si7z / nexus-jc33g)"
         )
 
-        lifespan_src = inspect.getsource(mcp_core_module._t1_lifespan)
+        lifespan_src = inspect.getsource(mcp_core_module._t1_lifespan_body)
         assert "= resolve_t1_routing_tiers(" in lifespan_src, (
             "_t1_lifespan's Branch 0 must actually CALL the shared "
             "resolve_t1_routing_tiers (not just mention its name) -- a "
