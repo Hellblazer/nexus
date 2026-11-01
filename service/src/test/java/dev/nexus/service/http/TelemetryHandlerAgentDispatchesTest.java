@@ -152,6 +152,23 @@ class TelemetryHandlerAgentDispatchesTest {
         assertThat(row.get("ts")).as("a missing ts is stamped by the engine").isNotNull();
     }
 
+    @Test
+    void aBlankAgentTypeNeverReplacesAStoredTypeAndIsNeverStored() throws Exception {
+        String sid = sid("blank-type");
+        record(TENANT, sid, "b-1", "developer", 1, null);
+        record(TENANT, sid, "b-1", "", 2, null);    // the nudge-turn stop of a harness that gives no type
+        record(TENANT, sid, "b-2", "   ", 0, null); // a blank on the first record
+
+        Map<String, Map<String, Object>> byId = new java.util.HashMap<>();
+        for (Map<String, Object> row : list(TENANT, "session_id=" + sid).rows) {
+            byId.put((String) row.get("agent_id"), row);
+        }
+        assertThat(byId.get("b-1").get("agent_type")).as("a stored type survives a blank one").isEqualTo("developer");
+        assertThat(((Number) byId.get("b-1").get("t1_puts")).intValue()).as("the count still updates").isEqualTo(2);
+        assertThat(byId.get("b-2").get("agent_type")).as("a blank type is stored as no type").isNull();
+        assertThat(ids(list(TENANT, "session_id=" + sid + "&agent_type=developer"))).containsExactly("b-1");
+    }
+
     // ── filters, caps, tenants ───────────────────────────────────────────────
 
     @Test

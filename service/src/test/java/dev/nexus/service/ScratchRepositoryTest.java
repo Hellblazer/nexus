@@ -488,6 +488,35 @@ class ScratchRepositoryTest {
         assertThat(repo.listEntries(t, live)).as("the live session keeps its back-dated row too").hasSize(2);
     }
 
+    @Test
+    void sweepExpired_judgesASessionIdPerTenant() throws Exception {
+        // sweepExpired runs without RLS, so the tenant predicate inside the NOT EXISTS is the only thing
+        // keeping one tenant's live session from protecting another tenant's idle one that has the same
+        // session id (a session id is client-chosen, so two tenants can collide on it).
+        String tIdle = "sweep-xt-idle-" + System.nanoTime();
+        String tLive = "sweep-xt-live-" + System.nanoTime();
+        String shared = "sweep-xt-session-" + System.nanoTime();
+        repo.put(tIdle, shared, uuid(), "idle tenant row", null, null, false, null, null);
+        repo.put(tLive, shared, uuid(), "live tenant early row", null, null, false, null, null);
+        try (Connection su = pg.createConnection("")) {
+            var ctx = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            var scratch = dev.nexus.service.jooq.t1.Tables.SCRATCH;
+            ctx.update(scratch)
+               .set(scratch.TS, OffsetDateTime.now(ZoneOffset.UTC).minusHours(3))
+               .where(scratch.TENANT_ID.in(tIdle, tLive))
+               .execute();
+            // only the live tenant's session writes again; same session id, other tenant
+            repo.put(tLive, shared, uuid(), "live tenant late row", null, null, false, null, null);
+
+            int swept = repo.sweepExpired(ctx, OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
+
+            assertThat(swept).as("exactly the idle tenant's one row, not protected by the other tenant's write")
+                .isEqualTo(1);
+        }
+        assertThat(repo.listEntries(tIdle, shared)).as("the idle tenant's session is reaped").isEmpty();
+        assertThat(repo.listEntries(tLive, shared)).as("the live tenant's session is untouched").hasSize(2);
+    }
+
     // ── Test 17: resolvePrefix — finds full UUID by prefix ───────────────────
 
     @Test

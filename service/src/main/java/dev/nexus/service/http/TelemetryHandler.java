@@ -44,6 +44,11 @@ import java.util.Set;
  *   GET  /v1/telemetry/tier_writes/list        per-row detail incl. target_title, capped page +
  *                                              exact total (nexus-onjvy)
  *   GET  /v1/telemetry/retention/markers       cumulative-deletes retention markers (nexus-24p05)
+ *   POST /v1/telemetry/agent_dispatches/record record one agent dispatch and its T1 put count; an
+ *                                              upsert per (session, agent) that keeps the larger
+ *                                              count and the later ts (nexus-mtheb.4)
+ *   GET  /v1/telemetry/agent_dispatches/list   per-dispatch rows (capped page, newest first) plus an
+ *                                              exact total and a no-T1-put summary (nexus-mtheb.4)
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
  *   POST /v1/telemetry/nx_answer_runs/complete one-transaction run+steps+plan-counters (RDR-203)
  *   GET  /v1/telemetry/nx_answer_runs/query     rows + exact aggregates (nexus-eho3u)
@@ -386,8 +391,8 @@ public final class TelemetryHandler implements HttpHandler {
     /**
      * POST /v1/telemetry/agent_dispatches/record: one agent dispatch and the number of T1 puts it made.
      * Body: {@code session_id}, {@code agent_id}, {@code t1_puts} (required, a whole number >= 0);
-     * {@code agent_type}, {@code ts} (optional). The SubagentStop hook is the caller. Idempotent per
-     * (session, agent): a repeat updates the row and never lowers the count.
+     * {@code agent_type}, {@code ts} (optional; a blank {@code agent_type} counts as absent). The SubagentStop
+     * hook is the caller. Idempotent per (session, agent): a repeat updates the row and never lowers the count.
      */
     private void handleAgentDispatchRecord(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -395,7 +400,10 @@ public final class TelemetryHandler implements HttpHandler {
         String sessionId = requireString(body, "session_id");
         String agentId   = requireString(body, "agent_id");
         int t1Puts       = requireCount(body, "t1_puts");
+        // A blank type is no type: stored as "" it would replace a real type (coalesce keeps the old value
+        // only for NULL) and could not be listed by filter, since an empty filter means no filter.
         String agentType = optStrNull(body, "agent_type");
+        if (agentType != null && agentType.isBlank()) agentType = null;
         String tsIso     = optStr(body, "ts");
         repo.recordAgentDispatch(tenant, sessionId, agentId, agentType, tsIso, t1Puts);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));

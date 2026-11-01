@@ -24,8 +24,9 @@
     NO RETENTION SWEEP, like tier_writes: the rows are tiny and the table is the metric's history.
 
     RLS: the tier_writes policy, GUC nexus.tenant, ENABLE + FORCE + tenant_isolation. nexus_svc DML comes from
-    the runAlways grants-nexus-svc.xml loop with no edit there. nexus_diag gets no grant (tier_writes has none
-    of its own either; nothing here is content).
+    the runAlways grants-nexus-svc.xml loop with no edit there. nexus_diag needs no grant here: it reads every
+    table in the nexus schema through the blanket SELECT and the default privileges in grants-nexus-diag.xml
+    (lines 120-123), which cover this table as they cover tier_writes. RLS still applies to it.
 
     ADDITIVE ONLY: a new table, no existing row touched, so no DATA EFFECT line. An engine without this
     changeset answers the two routes with 404, which the client treats as "counter unavailable".
