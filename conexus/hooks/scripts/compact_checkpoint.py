@@ -107,9 +107,10 @@ _SKEW_S = 300.0
 #: Files older than this are removed from the checkpoint directory on each pre run.
 _PRUNE_AFTER_S = 2 * 24 * 3600.0
 #: A checkpoint whose own ``written:`` stamp is older than this is not injected, and post
-#: does not append to it. It is the prune window, not a freshness window: an idle
-#: compaction's checkpoint is used at the next message, up to two days later; past that
-#: the prune has removed it (nexus-702gy).
+#: does not append to it. It is the prune window, not a freshness window: if a compaction's
+#: summary is used later than it was made (the changelog's deferred idle case, not seen in
+#: the CLI), its checkpoint is restored up to two days later; past that the prune has
+#: removed it, a design limit (nexus-702gy, nexus-ct9sv).
 _MAX_AGE_S = _PRUNE_AFTER_S
 #: Past this age the inject intro says the state may have changed since it was written.
 _STALE_NOTE_S = 10 * 60.0
@@ -146,9 +147,12 @@ _NAME_LINE = "- session name: "
 #: cap, in this order.
 _DROP_FIRST = ("### Recent commits", "### Open PRs", "### Uncommitted")
 _SUMMARY_HEADING = "## Compact summary"
-#: The heading post writes, matched whole: the embedded threads board can carry a block
-#: whose title starts "Compact summary", which a prefix match would take for post's trace.
-_SUMMARY_RE = re.compile(r"(?m)^## Compact summary \(\d{4}-\d\d-\d\dT[^)\n]*\)$")
+#: The heading post writes, matched whole with its UTC stamp: the embedded threads board can
+#: carry a block whose title starts "Compact summary", which a prefix match would take for
+#: post's trace. This narrows the collision; a board title with that exact stamp would still match.
+_SUMMARY_RE = re.compile(
+    rf"(?m)^{re.escape(_SUMMARY_HEADING)} \(\d{{4}}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00\)$"
+)
 
 
 def _config_dir() -> Path:
@@ -629,13 +633,14 @@ def run_post(payload: dict) -> None:
         existing: str | None = path.read_text(encoding="utf-8")
     except OSError:
         existing = None
-    except ValueError:  # undecodable: not this compaction's checkpoint; archived below
+    except ValueError as exc:  # undecodable: not this compaction's checkpoint; archived below
+        _log("WARNING", f"post: {path} is not valid UTF-8 ({exc}); archiving it")
         existing = ""
     if existing is None or _written_age(existing) is None or _summarized(existing):
         # Pre did not run for this compaction (killed at its timeout, a cold start, an error
         # before the write): whatever is here is an earlier compaction's state and must not be
         # appended to or refreshed, or inject would pass it as current. Pairing is by use, not
-        # age: an idle compaction's post can run hours after its pre (nexus-702gy).
+        # age: a deferred summary's post may run hours after its pre (nexus-702gy).
         if existing is not None:
             _archive_and_prune(directory, session_id, time.time())
         _log("WARNING", f"post: no unused pre-compaction checkpoint for session {session_id} "
@@ -643,6 +648,8 @@ def run_post(payload: dict) -> None:
                         "writing a stub, which inject does not emit")
         existing = f"# Compaction checkpoint\n\n- session: {session_id}\n\n{_STUB_BODY}\n"
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # A lone surrogate in the payload would make the UTF-8 write raise and lose the summary.
+    summary = summary.encode("utf-8", "replace").decode("utf-8")
     _write_atomic(path, f"{existing.rstrip()}\n\n{_SUMMARY_HEADING} ({stamp})\n\n{summary.strip()}\n")
 
     name = None
@@ -707,7 +714,10 @@ def run_inject(payload: dict) -> None:
     path = _checkpoint_dir() / f"{session_id}.md"
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
+    except OSError:
+        return
+    except ValueError as exc:
+        _log("WARNING", f"inject: {path} is not valid UTF-8 ({exc}); nothing injected")
         return
     age = _written_age(text)
     if age is None:
@@ -718,7 +728,10 @@ def run_inject(payload: dict) -> None:
     sidecar = path.with_name(f"{session_id}{_INJECTED_SUFFIX}")
     try:
         last = sidecar.read_text(encoding="utf-8").strip()
-    except (OSError, ValueError):  # garbage reads as "not injected": fail toward restoring
+    except OSError:
+        last = ""
+    except ValueError as exc:  # garbage reads as "not injected": fail toward restoring
+        _log("WARNING", f"inject: {sidecar} is not valid UTF-8 ({exc}); treating {path} as not injected")
         last = ""
     if written is not None and last == written:
         _log("INFO", f"inject: {path} (written {written}) was already injected by an earlier compaction; "
@@ -735,11 +748,12 @@ def run_inject(payload: dict) -> None:
     if age < _STALE_NOTE_S:
         lead += ", just before this session was compacted."
     else:
-        # Only the age is known: a compaction whose summary was used later than it was made, or
-        # one whose PreCompact hook failed and found an earlier checkpoint (nexus-702gy).
-        lead += (". That is longer than a compaction takes, so this state may predate this "
-                 "compaction and may have changed since: check git, beads and the board before "
-                 "acting on it.")
+        # Only the age is known. It is this compaction's checkpoint if the summary was used later
+        # than it was made (the changelog's deferred case); it is an earlier one if this
+        # compaction's PreCompact hook failed (nexus-702gy, nexus-mtl98).
+        lead += (". The state may have changed since it was written, and if this compaction's "
+                 "PreCompact hook failed, the checkpoint is an earlier compaction's and may predate "
+                 "this compaction: check git, beads and the board before acting on it.")
     intro = (f"{lead} The state lives in version control, beads and the threads board, "
              "not in the summary.\n\n")
     footer = f"Full checkpoint (with the compact summary): {path}\n"

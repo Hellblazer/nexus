@@ -14,7 +14,7 @@ in front of the model. The contract these tests pin:
   nothing for a used, foreign or past-the-prune-window one (by its ``written:`` stamp,
   not its mtime), and starts no process.
 - pairing is by use, not age: an idle compaction's checkpoint, written when the
-  session went idle and used at the next message, is appended to and injected with
+  session went idle and used later (the deferred case), is appended to and injected with
   its real age, and inject and post work in either order; the live harness runs
   inject first (nexus-702gy).
 - the board entry comes first and is the one titled EXACTLY the session's name.
@@ -586,7 +586,7 @@ class TestPost:
         assert not env.hook_log.exists() or "no unused pre-compaction" not in env.hook_log.read_text(encoding="utf-8")
 
     def test_an_idle_compactions_hours_old_unused_checkpoint_is_appended_to(self, mod, env, monkeypatch) -> None:
-        """Idle compaction: pre ran when the session went idle, post runs at the next message."""
+        """Deferred idle case: pre ran when the session went idle, post runs hours later."""
         path = self._pre(mod, env, monkeypatch)
         restamp(path, 3 * 3600)
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "the idle compaction's summary"})
@@ -656,7 +656,7 @@ class TestInject:
     def test_an_idle_compactions_checkpoint_is_injected_hours_later_with_its_real_age(
         self, mod, env, monkeypatch, order
     ) -> None:
-        """Idle compaction: pre at idle, the summary applied at the next message (nexus-702gy).
+        """Deferred idle case: pre at idle, the summary used hours later (nexus-702gy).
         The docs do not say when post and inject run, so every order is pinned."""
         run(mod, monkeypatch, "pre", pre_payload(trigger="auto"))
         path = env.checkpoints / f"{SID}.md"
@@ -671,7 +671,7 @@ class TestInject:
                 ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1])
         first = ctx.splitlines()[0]
         assert "3 h 5 min ago (trigger auto)" in first
-        assert "may predate this compaction and may have changed since" in first and "just before" not in first
+        assert "The state may have changed since it was written, and if this compaction's PreCompact hook failed, the checkpoint is an earlier compaction's and may predate this compaction: check git, beads and the board before acting on it." in first and "just before" not in first
         assert "state: building" in ctx
         text = path.read_text(encoding="utf-8")
         assert "state: building" in text and text.rstrip().endswith("idle summary"), "post kept the real checkpoint"
@@ -725,6 +725,8 @@ class TestInject:
         run(mod, monkeypatch, "pre", pre_payload())
         (env.checkpoints / f"{SID}.injected").write_bytes(garbage)
         assert "state: building" in self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
+        if garbage == b"\xff\xfe\x80":
+            assert "treating" in env.hook_log.read_text(encoding="utf-8"), "a garbled sidecar is logged"
         assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, ""), "the rewritten sidecar suppresses"
 
     def test_an_undecodable_checkpoint_is_not_injected_and_post_archives_it(self, mod, env, monkeypatch) -> None:
@@ -732,6 +734,7 @@ class TestInject:
         path = env.checkpoints / f"{SID}.md"
         path.write_bytes(b"# Compaction checkpoint\n\xff\xfe\n")
         assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, "")
+        assert "inject: " in env.hook_log.read_text(encoding="utf-8") and "is not valid UTF-8" in env.hook_log.read_text(encoding="utf-8")
         assert run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "s"}) == (0, "")
         assert "no pre-compaction checkpoint for this compaction" in path.read_text(encoding="utf-8")
         assert len([p for p in env.checkpoints.iterdir() if p.name != path.name]) == 1, "the bad file is archived"
@@ -754,19 +757,40 @@ class TestInject:
         assert "no pre-compaction checkpoint for this compaction" in text and "summary two" in text
         assert "summary one" not in text
 
-    def test_a_board_block_titled_compact_summary_is_not_taken_for_posts_heading(self, mod, env, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        "title",
+        ["Compact summary pairing", "Compact summary (2026-11-01 notes)", "Compact summary (2026-11-01T handoff)",
+         "Compact summary (2026-11-01T21:27:09+00:00) and more"],
+        ids=["prefix", "date-only", "date-T-text", "stamp-then-text"],
+    )
+    def test_a_board_block_titled_compact_summary_is_not_taken_for_posts_heading(
+        self, mod, env, monkeypatch, title
+    ) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
         path = env.checkpoints / f"{SID}.md"
         text = path.read_text(encoding="utf-8")
         assert text.count("\n## Working state") == 1
-        path.write_text(text.replace("\n## Working state", "\n## Compact summary pairing\nref: nexus-mtl98\n\n## Working state"),
+        path.write_text(text.replace("\n## Working state", f"\n## {title}\nref: nexus-mtl98\n\n## Working state"),
                         encoding="utf-8")
         ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1])
-        assert "## Compact summary pairing" in ctx and "P2 Auto-continuation" in ctx, "inject cut at the board block"
+        assert f"## {title}" in ctx and "P2 Auto-continuation" in ctx, "inject cut at the board block"
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "this compaction's summary"})
         after = path.read_text(encoding="utf-8")
         assert "P2 Auto-continuation" in after and after.rstrip().endswith("this compaction's summary"), \
             "post took the board block for its own heading and archived the checkpoint"
+
+    def test_posts_heading_is_matched_as_post_writes_it(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "s"})
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert mod._SUMMARY_RE.search(text), "the pattern must match post's own heading"
+        assert mod._SUMMARY_RE.pattern.find(re.escape(mod._SUMMARY_HEADING)) != -1, "built from the heading constant"
+
+    def test_a_summary_with_a_lone_surrogate_is_written_not_lost(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        assert run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "before \ud83d after"}) == (0, "")
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert "## Compact summary (" in text and "before ? after" in text
 
     def test_the_sidecar_is_pruned_with_the_checkpoints(self, mod, env, monkeypatch) -> None:
         env.checkpoints.mkdir(parents=True)
