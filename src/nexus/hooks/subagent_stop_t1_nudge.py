@@ -98,7 +98,7 @@ def _is_t1_put(name: object, tool_input: object) -> bool:
     if name == "Bash":
         command = tool_input.get("command")
         return isinstance(command, str) and _BASH_PUT.search(command) is not None
-    if isinstance(name, str) and name.startswith("mcp__") and name.rsplit("__", 1)[-1] == "scratch":
+    if isinstance(name, str) and name.startswith("mcp__") and name.endswith("__scratch"):
         return str(tool_input.get("action", "")).strip().lower() == "put"
     return False
 
