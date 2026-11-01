@@ -1833,20 +1833,19 @@ async def _t1_lifespan(_app: Any):
     """
     import asyncio  # noqa: PLC0415 — stdlib, deferred like this module's other lifespan imports
 
+    started = False
     release: threading.Thread | None = None
-    deadline = 0.0
     try:
         async with _t1_lifespan_body(_app):
             try:
                 yield
             finally:
+                started = True
                 release = _start_session_name_release()
-                deadline = time.monotonic() + _NAME_RELEASE_TIMEOUT_S
     finally:
-        if release is None:  # the body failed before or without yielding
+        if not started:  # the body failed before or without yielding
             release = _start_session_name_release()
-            deadline = time.monotonic() + _NAME_RELEASE_TIMEOUT_S
-        await asyncio.to_thread(_await_session_name_release, release, deadline)
+        await asyncio.to_thread(_await_session_name_release, release)
 
 
 @asynccontextmanager
@@ -2595,6 +2594,11 @@ _NAME_RELEASE_TIMEOUT_S: float = 3.0
 #: lock: a signal handler on the main thread must never block on one.
 _NAME_RELEASE_THREAD: threading.Thread | None = None
 
+#: The monotonic deadline of that release, set once when it starts, so
+#: every exit path that waits on it (the lifespan, then atexit) shares one
+#: bound instead of each waiting a fresh :data:`_NAME_RELEASE_TIMEOUT_S`.
+_NAME_RELEASE_DEADLINE: float = 0.0
+
 
 def _release_session_names_now() -> None:
     """Release every ``directory/<name>`` row this process leases
@@ -2614,48 +2618,52 @@ def _release_session_names_now() -> None:
         _log.warning("session_name_release_on_exit_failed", error=str(e))
 
 
-def _start_session_name_release() -> threading.Thread:
-    """Start the release on a daemon thread, or return the one in flight."""
-    global _NAME_RELEASE_THREAD
+def _start_session_name_release() -> threading.Thread | None:
+    """Start the release on a daemon thread and set its deadline, or
+    return the one in flight. ``None`` when no thread could be started
+    (resource exhaustion): the caller's exit goes on and the rows lapse
+    by TTL."""
+    global _NAME_RELEASE_THREAD, _NAME_RELEASE_DEADLINE
     running = _NAME_RELEASE_THREAD
     if running is not None and running.is_alive():
         return running
     thread = threading.Thread(
         target=_release_session_names_now, name="nx-mcp-name-release", daemon=True,
     )
+    try:
+        thread.start()
+    except Exception as e:  # noqa: BLE001 — RuntimeError "can't start new thread"; never block the exit
+        _log.warning("session_name_release_on_exit_not_started", error=str(e))
+        return None
+    _NAME_RELEASE_DEADLINE = time.monotonic() + _NAME_RELEASE_TIMEOUT_S
     _NAME_RELEASE_THREAD = thread
-    thread.start()
     return thread
 
 
-def _await_session_name_release(thread: threading.Thread, deadline: float) -> None:
-    """Wait for *thread* until the monotonic *deadline*, then give up."""
-    thread.join(max(0.0, deadline - time.monotonic()))
+def _await_session_name_release(thread: threading.Thread | None) -> None:
+    """Wait for *thread* until the release's shared deadline, then give up."""
+    if thread is None:
+        return
+    thread.join(max(0.0, _NAME_RELEASE_DEADLINE - time.monotonic()))
     if thread.is_alive():
         _log.warning("session_name_release_on_exit_incomplete", timeout_s=_NAME_RELEASE_TIMEOUT_S)
 
 
-def _release_session_names() -> None:
-    """Release this process's peer-directory names, waiting at most
-    :data:`_NAME_RELEASE_TIMEOUT_S`."""
-    thread = _start_session_name_release()
-    _await_session_name_release(thread, time.monotonic() + _NAME_RELEASE_TIMEOUT_S)
-
-
 def _exit_teardown() -> None:
     """The process-exit teardown shared by :func:`_sigterm_handler` and
-    :mod:`atexit`: the name release runs alongside :func:`_t1_shutdown`
-    (the flagged-row drain and token revoke, each bounded on its own), and
-    the release is then awaited up to its deadline. Starting it first and
-    awaiting it last keeps it from delaying the data-bearing T1 steps."""
+    :mod:`atexit`: the name release (nexus-tu84w) runs alongside
+    :func:`_t1_shutdown` (the flagged-row drain and token revoke, each
+    bounded on its own) and is awaited after it, up to its deadline.
+    Starting it first and awaiting it last keeps it from delaying the
+    data-bearing T1 steps, and a failure to start it skips nothing."""
     release = _start_session_name_release()
-    deadline = time.monotonic() + _NAME_RELEASE_TIMEOUT_S
     _t1_shutdown()
-    _await_session_name_release(release, deadline)
+    _await_session_name_release(release)
 
 
 def _sigterm_handler(_signo: int, _frame: Any) -> None:
-    """Run the shutdown path then exit.
+    """Run the shutdown path (:func:`_exit_teardown`: the peer-directory
+    name release alongside :func:`_t1_shutdown`) then exit.
 
     When invoked while the lifespan finally is already running cleanup
     (stdin-EOF + SIGTERM race observed in production after 4.12.0
@@ -15808,10 +15816,11 @@ def main():
     # atexit does NOT run (Python only fires atexit on clean exit),
     # and chroma orphans. The watchdog covers it eventually but
     # the MCP-owned cleanup path simply doesn't run. So we install
-    # the signal handlers for SIGTERM and SIGINT to call
-    # _t1_shutdown directly. atexit stays as the third
+    # the signal handlers for SIGTERM and SIGINT to run
+    # _exit_teardown (the name release alongside _t1_shutdown,
+    # nexus-tu84w) directly. atexit stays as the third
     # belt-and-braces for clean exits via stdin EOF / SystemExit.
-    # _t1_shutdown is idempotent so all three paths can fire
+    # Both steps are idempotent so all three paths can fire
     # without double-cleaning.
     _install_exit_handlers()
     try:

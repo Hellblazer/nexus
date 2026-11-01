@@ -16,6 +16,7 @@ thread holds when SIGTERM lands cannot hold up the exit.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import threading
 import time
@@ -68,6 +69,10 @@ def _armed(fake: _FakeTuples, session_id: str, name: str) -> subs.SubscriptionSe
     return s
 
 
+def _release_and_wait() -> None:
+    core._await_session_name_release(core._start_session_name_release())
+
+
 def _releases(fake: _FakeTuples, name: str) -> list[tuple]:
     return [c for c in fake.calls if c[0] == f"directory/{name}" and c[4] == 1]
 
@@ -105,14 +110,14 @@ def test_the_release_lapses_the_row_this_process_wrote() -> None:
     [(_, _, _, armed_nonce, ttl)] = fake.calls
     assert ttl == int(subs.DIRECTORY_TTL_S)
 
-    core._release_session_names()
+    _release_and_wait()
 
     [release] = _releases(fake, "linda")
     assert release == ("directory/linda", {"name": "linda"}, {"session_id": "sess-exit"}, armed_nonce, 1)
     assert subs._CACHE == {}  # noqa: SLF001
 
     before = len(fake.calls)
-    core._release_session_names()  # a second exit path writes nothing
+    _release_and_wait()  # a second exit path writes nothing
     assert len(fake.calls) == before
 
 
@@ -122,16 +127,50 @@ def test_a_failing_release_never_raises_into_the_exit(monkeypatch) -> None:
         def reset_cache(*_a, **_k):
             raise RuntimeError("engine gone")
     monkeypatch.setattr(core, "_subscriptions", _Broken)
-    core._release_session_names()  # logged on the release thread, not raised
+    logged: list[str] = []
+    monkeypatch.setattr(core._log, "warning", lambda event, **_k: logged.append(event))
+    core._release_session_names_now()  # on the caller's thread: raises if not caught
+    assert logged == ["session_name_release_on_exit_failed"]
 
 
 def test_a_slow_release_is_abandoned_at_its_deadline(monkeypatch) -> None:
     monkeypatch.setattr(core, "_NAME_RELEASE_TIMEOUT_S", 0.3)
     fake = _FakeTuples(delay_s=3.0)
     _armed(fake, "sess-slow", "marlowe")
+    order: list[str] = []
+    monkeypatch.setattr(core, "_t1_shutdown", lambda: order.append("t1_shutdown"))
     started = time.monotonic()
-    core._release_session_names()
+    core._exit_teardown()
     assert time.monotonic() - started < 2.0
+    assert order == ["t1_shutdown"]
+
+
+def test_a_second_exit_path_shares_the_first_ones_deadline(monkeypatch) -> None:
+    """The lifespan abandons a stuck release at its deadline, then atexit
+    runs: it waits out what is left of that deadline, not a fresh one."""
+    monkeypatch.setattr(core, "_NAME_RELEASE_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(core, "_t1_shutdown", lambda: None)
+    fake = _FakeTuples(delay_s=3.0)
+    _armed(fake, "sess-twice", "marginalia")
+    _release_and_wait()  # the lifespan's wait, abandoned at 0.5 s
+    started = time.monotonic()
+    core._exit_teardown()  # atexit: the same release, the same deadline
+    assert time.monotonic() - started < 0.3
+
+
+def test_a_release_that_cannot_start_does_not_stop_the_t1_teardown(monkeypatch) -> None:
+    class _NoThread:
+        def __init__(self, *_a, **_k) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(core.threading, "Thread", _NoThread)
+    order: list[str] = []
+    monkeypatch.setattr(core, "_t1_shutdown", lambda: order.append("t1_shutdown"))
+    core._exit_teardown()
+    assert order == ["t1_shutdown"]
 
 
 def test_sigterm_releases_the_name_and_still_runs_the_t1_teardown(monkeypatch) -> None:
@@ -193,6 +232,8 @@ def test_the_exit_handlers_register_the_release_with_atexit(monkeypatch) -> None
     core._install_exit_handlers()
 
     assert registered == [core._exit_teardown]
+    # and main() installs them: the pre-fix main registered _t1_shutdown inline
+    assert "_install_exit_handlers()" in inspect.getsource(core.main)
     import signal  # noqa: PLC0415 — test-local
 
     assert signals == {signal.SIGTERM: core._sigterm_handler, signal.SIGINT: core._sigterm_handler}
