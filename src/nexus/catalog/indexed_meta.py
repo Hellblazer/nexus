@@ -36,6 +36,13 @@ later consumer that wants the value as a stored key; until one exists, nothing d
   character before the dot: for ``a..md`` the first says ``markdown`` and the second finds no extension, so the catalog type decides
   (``prose``). The keys describe the same file by two rules, as the row writer's tag and the engine's
   derivation always have.
+* FILL ONLY IF EMPTY (Sam's ruling, 2026-11-01, nexus-3ax49). ``tags`` and ``category`` are curatable: a re-index
+  or re-register writes the derived value only where the document holds none (absent, ``None``, ``""`` or
+  ``[]``) and keeps a non-empty value, whatever it says. Every register-time seam that stamps an EXISTING
+  document passes its stamp through :func:`fill_only_meta` with the meta the document already holds. A document
+  the seam registers new has nothing to keep and takes the stamp whole. ``source_format`` is outside the
+  ruling: it is derived from the document's own content type and path (never curated), so it stays an
+  overwrite and its compare is unchanged.
 * A ``content_type`` the indexers do not write (``knowledge``, the ``docs`` the orphan backfill can
   produce, anything else) yields ``{}`` from :func:`document_register_meta`: the values are not invented.
 * The repo indexer's PDF path says category ``prose`` where ``nx index pdf`` says ``paper``. That is
@@ -45,8 +52,12 @@ later consumer that wants the value as a stored key; until one exists, nothing d
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+#: The ``meta`` keys a re-index fills only when the document holds none (Sam's ruling, 2026-11-01, nexus-3ax49).
+FILL_ONLY_KEYS = ("tags", "category")
 
 #: The catalog ``meta`` key the derived format is stamped under.
 SOURCE_FORMAT_KEY = "source_format"
@@ -95,6 +106,20 @@ def source_format_meta(content_type: str | None, file_path: str | None) -> dict[
     """``{"source_format": <derived>}``, or ``{}`` when the rule derives nothing."""
     derived = catalog_source_format(content_type, file_path)
     return {SOURCE_FORMAT_KEY: derived} if derived else {}
+
+
+def _is_unset(value: Any) -> bool:
+    """True for the values a ``tags`` / ``category`` slot may hold while still counting as empty: ``None``,
+    ``""`` and ``[]`` (and any other empty container). Anything else, a legacy string tag included, is held."""
+    return value is None or (isinstance(value, (str, list, tuple, dict, set)) and len(value) == 0)
+
+
+def fill_only_meta(stamp: Mapping[str, Any], held: Mapping[str, Any] | None) -> dict[str, Any]:
+    """*stamp* with each of :data:`FILL_ONLY_KEYS` dropped where *held* (the ``meta`` the document already
+    carries) has a non-empty value: the one rule behind every register-time stamp of an existing document
+    (nexus-3ax49). Every other key of *stamp* passes through unchanged. Returns a new dict."""
+    held = held or {}
+    return {k: v for k, v in stamp.items() if k not in FILL_ONLY_KEYS or _is_unset(held.get(k))}
 
 
 def _prose_tag(suffix: str) -> str:

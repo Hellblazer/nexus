@@ -1348,12 +1348,14 @@ def _catalog_pdf_hook(
     # writer stamps them, ride the same meta write as the extraction record: one update per document, on
     # every leg (the update of an existing row, the registration of a new one, the update after a
     # registration that resolved onto an existing row).
-    from nexus.catalog.indexed_meta import pdf_register_meta, source_format_meta  # noqa: PLC0415 - deferred like the hook's other catalog imports
+    from nexus.catalog.indexed_meta import fill_only_meta, pdf_register_meta, source_format_meta  # noqa: PLC0415 - deferred like the hook's other catalog imports
 
-    def _doc_meta(registered_type: str) -> dict[str, Any]:
+    def _doc_meta(registered_type: str, held: Mapping[str, Any] | None = None) -> dict[str, Any]:
         # The document's category follows the content type the catalog already holds for it (a repo-registered
-        # PDF keeps the repo path's statement); see pdf_register_meta.
-        return {**pdf_register_meta(pdf_path, registered_type), **(extraction_meta or {})}
+        # PDF keeps the repo path's statement); see pdf_register_meta. *held* is the meta of the existing row
+        # being updated: its non-empty tags and category are kept (fill-only, nexus-3ax49). A row this call
+        # registers new passes nothing and takes the stamp whole.
+        return {**fill_only_meta(pdf_register_meta(pdf_path, registered_type), held), **(extraction_meta or {})}
 
     def _not_recorded(reason: str) -> None:
         if extraction_meta is not None:
@@ -1468,7 +1470,7 @@ def _catalog_pdf_hook(
             # RDR-237: the service merges meta key by key (jsonb ||), never removing one, so
             # a clean re-extract clears an old map only because extraction_pages is written
             # whole here, {} included.
-            update_kwargs["meta"] = _doc_meta(getattr(existing, "content_type", "") or "paper")
+            update_kwargs["meta"] = _doc_meta(getattr(existing, "content_type", "") or "paper", getattr(existing, "meta", None))
             writer.update(existing.tumbler, **update_kwargs)
             # nexus-t952k (critique [24114] S1): logged AFTER the write, so
             # the claim "repointed" is only made once the row actually moved.
@@ -1576,7 +1578,7 @@ def _catalog_pdf_hook(
                 except Exception:  # noqa: BLE001 - advisory read: without it the stamp is the source_format alone
                     _resolved = None
                 if _resolved is not None:
-                    _resolved_meta = _doc_meta(getattr(_resolved, "content_type", "") or "paper")
+                    _resolved_meta = _doc_meta(getattr(_resolved, "content_type", "") or "paper", getattr(_resolved, "meta", None))
                 else:
                     _resolved_meta = {**source_format_meta("paper", file_path_str), **(extraction_meta or {})}
                 writer.update(_resolved_tumbler, meta=_resolved_meta)
