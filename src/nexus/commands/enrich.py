@@ -2553,7 +2553,7 @@ def _run_validation_sample(
             _tumbler: str | None = tumbler,
             _timestamp: str = timestamp,
         ) -> None:
-            _append_validation_row(all_path, _all_outcomes_row(
+            _append_validation_row_logged(all_path, _all_outcomes_row(
                 reason_code=reason_code, collection=collection, source_path=_source_path,
                 tumbler=_tumbler, claim_payload=_claim, result=result, window=window,
                 identity_trusted=identity_trusted, trace=trace, timestamp=_timestamp,
@@ -2646,7 +2646,7 @@ def _run_validation_sample(
             unverifiable += 1
         else:
             failures += 1
-        _append_validation_row(failures_path, _failures_row(
+        _append_validation_row_logged(failures_path, _failures_row(
             source_path=source_path, claim_payload=claim_payload, result=result,
             window=window, trace=trace, timestamp=timestamp,
         ))
@@ -2707,7 +2707,9 @@ def _validation_paths(validation_out: str, validation_all_out: str) -> tuple[Pat
         Path(validation_all_out).expanduser() if validation_all_out
         else nexus_config_dir() / _VALIDATION_ALL_OUTCOMES_FILENAME
     )
-    same = failures.resolve() == all_out.resolve()
+    rf, ra = failures.resolve(), all_out.resolve()
+    # Names differing only in case are one file on a case-insensitive filesystem (macOS default).
+    same = rf == ra or (rf.parent == ra.parent and rf.name.casefold() == ra.name.casefold())
     if not same and failures.exists() and all_out.exists():
         same = os.path.samefile(failures, all_out)
     if same:
@@ -2751,7 +2753,10 @@ def _window_records(
     """
     from nexus.operators.witness import EvidenceRecord  # noqa: PLC0415 — command-local import; deferred to validation path
 
-    if not chunks or "\n\n".join(text for _, text in chunks) != content:
+    if not chunks:
+        return None
+    if "\n\n".join(text for _, text in chunks) != content:
+        _log.warning("validate_sample_chunks_do_not_join_evidence", chunks=len(chunks), chars=len(content))
         return None
     out: list[EvidenceRecord] = []
     pos = 0
@@ -2909,20 +2914,74 @@ def _validation_file_lock(target: Path) -> Iterator[None]:
         os.close(fd)
 
 
+def _is_validation_row(line: bytes) -> bool:
+    """True when *line* is one JSON object, the only thing a validation file holds."""
+    try:
+        return isinstance(json.loads(line), dict)
+    except ValueError:
+        return False
+
+
+def _unterminated_tail(target: Path) -> tuple[int, bytes] | None:
+    """``(offset, tail)`` of the bytes after the last newline of a non-empty *target* that does
+    not end in one, else ``None``. Reads one byte unless the file is unterminated."""
+    with open(target, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        if not f.tell():
+            return None
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) == b"\n":
+            return None
+        f.seek(0)
+        data = f.read()
+    cut = data.rfind(b"\n") + 1
+    return cut, data[cut:]
+
+
 def _append_validation_row(path: Path, row: dict[str, Any]) -> None:
     """Append one JSON row under the file lock. The path is resolved (a link is followed
-    to its target), a new file is created 0600, and a torn trailing line is cut off first
-    so the row lands on a line of its own."""
+    to its target) and a new file is created 0600.
+
+    An unterminated last line is never cut unless it is a torn row: it is dropped only when it
+    does not parse as a JSON object AND the line before it does (the file is a validation
+    file). A complete row, a file with no newline at all, or a file whose lines are not rows
+    gets a newline instead, so no complete line of anyone's file is lost. A target that is
+    not a regular file (``/dev/null``, a FIFO) is written without the lock or the tail check.
+    """
     target = path.resolve()
+    line = (json.dumps(row) + "\n").encode("utf-8")
+    if target.exists() and not target.is_file():
+        with open(target, "ab") as f:
+            f.write(line)
+        return
     with _validation_file_lock(target):
-        if target.is_file() and target.stat().st_size:
-            data = target.read_bytes()
-            if not data.endswith(b"\n"):
-                _log.warning("validation_file_torn_tail_dropped", path=str(target))
-                os.truncate(target, data.rfind(b"\n") + 1)
+        lead = b""
+        tail = _unterminated_tail(target) if target.is_file() else None
+        if tail is not None:
+            cut, frag = tail
+            prev = b""
+            if cut:
+                with open(target, "rb") as f:
+                    head = f.read(cut - 1)
+                prev = head[head.rfind(b"\n") + 1:]
+            if cut and not _is_validation_row(frag) and _is_validation_row(prev):
+                _log.warning("validation_file_torn_tail_dropped", path=str(target), bytes=len(frag))
+                os.truncate(target, cut)
+            else:
+                lead = b"\n"
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "ab") as f:
-            f.write((json.dumps(row) + "\n").encode("utf-8"))
+            f.write(lead + line)
+
+
+def _append_validation_row_logged(path: Path, row: dict[str, Any]) -> None:
+    """:func:`_append_validation_row`, with an OS error logged instead of raised: one unwritable
+    file (a read-only directory for its lock, a symlink loop) must not end a run whose
+    extraction is already spent, nor cost the other file its row."""
+    try:
+        _append_validation_row(path, row)
+    except OSError as exc:
+        _log.warning("validation_file_append_failed", path=str(path), error=str(exc))
 
 
 def _prune_validation_file(path: Path, keep: int = _VALIDATION_MAX_ROWS) -> None:
@@ -2945,10 +3004,16 @@ def _prune_validation_file(path: Path, keep: int = _VALIDATION_MAX_ROWS) -> None
         data = target.read_bytes()
         head, sep, torn = data.rpartition(b"\n")
         complete = head.split(b"\n") if sep else []
+        if torn and _is_validation_row(torn):
+            complete, torn = [*complete, torn], b""  # a whole row that lacks its newline is a row
         if len(complete) <= keep and not torn:
             return
+        if not all(_is_validation_row(ln) for ln in complete):
+            # Not a validation file (a user's log named by mistake): the prune never rewrites it.
+            _log.warning("validation_file_prune_skipped_not_rows", path=str(target))
+            return
         if torn:
-            _log.warning("validation_file_torn_tail_dropped", path=str(target))
+            _log.warning("validation_file_torn_tail_dropped", path=str(target), bytes=len(torn))
         kept = b"".join(line + b"\n" for line in complete[-keep:]) if keep else b""
         fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
         try:

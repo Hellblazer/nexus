@@ -2513,3 +2513,109 @@ class TestDocIdLookupSurfacesTransportFailures:
     def test_any_other_failure_still_degrades_to_empty(self, monkeypatch):
         lookup, _ = self._lookup_with(monkeypatch, KeyError("no such column"))
         assert lookup("docs__x", "a.md") == ""
+
+
+class TestValidationFileSafety:
+    """No complete line of anyone's file is lost to the append or the prune (code review of 716b0cc27, B1),
+    an unwritable file does not end a run, and the path refusal covers links and case. Helper-level: no tenant."""
+
+    def test_a_file_with_no_newline_keeps_its_content(self, tmp_path: Path) -> None:
+        from nexus.commands.enrich import _append_validation_row
+
+        p = tmp_path / "notes.txt"
+        p.write_text("my only line, no newline")
+        _append_validation_row(p, {"a": 1})
+        assert p.read_text() == 'my only line, no newline\n{"a": 1}\n'
+
+    def test_a_complete_row_without_its_newline_is_kept(self, tmp_path: Path) -> None:
+        from nexus.commands.enrich import _append_validation_row
+
+        p = tmp_path / "rows.jsonl"
+        p.write_text('{"n": 1}\n{"n": 2}')
+        _append_validation_row(p, {"a": 1})
+        assert p.read_text() == '{"n": 1}\n{"n": 2}\n{"a": 1}\n'
+
+    def test_a_torn_row_after_a_row_is_dropped(self, tmp_path: Path) -> None:
+        from nexus.commands.enrich import _append_validation_row
+
+        p = tmp_path / "rows.jsonl"
+        p.write_text('{"n": 1}\n{"half": ')
+        _append_validation_row(p, {"a": 1})
+        assert p.read_text() == '{"n": 1}\n{"a": 1}\n'
+
+    def test_an_unterminated_line_in_a_file_of_non_rows_is_kept(self, tmp_path: Path) -> None:
+        from nexus.commands.enrich import _append_validation_row
+
+        p = tmp_path / "log.txt"
+        p.write_text("line one\nline two")
+        _append_validation_row(p, {"a": 1})
+        assert p.read_text() == 'line one\nline two\n{"a": 1}\n'
+
+    def test_a_device_target_is_written_without_a_lock_file(self, tmp_path: Path) -> None:
+        from nexus.commands.enrich import _append_validation_row
+
+        _append_validation_row(Path(os.devnull), {"a": 1})
+        assert not Path(os.devnull + ".lock").exists()
+
+    def test_an_unwritable_directory_is_logged_not_raised(self, tmp_path: Path) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.commands.enrich import _append_validation_row_logged
+
+        ro = tmp_path / "ro"
+        ro.mkdir()
+        ro.chmod(0o500)
+        try:
+            with capture_logs() as logs:
+                _append_validation_row_logged(ro / "rows.jsonl", {"a": 1})
+        finally:
+            ro.chmod(0o700)
+        assert any(e["event"] == "validation_file_append_failed" for e in logs)
+
+    def test_prune_leaves_a_file_of_non_rows_alone(self, tmp_path: Path) -> None:
+        from nexus.commands.enrich import _prune_validation_file
+
+        p = tmp_path / "log.txt"
+        body = "".join(f"line {i}\n" for i in range(12))
+        p.write_text(body)
+        _prune_validation_file(p, keep=5)
+        assert p.read_text() == body
+
+    def test_prune_counts_a_complete_unterminated_row(self, tmp_path: Path) -> None:
+        from nexus.commands.enrich import _prune_validation_file
+
+        p = tmp_path / "rows.jsonl"
+        p.write_text("".join(f'{{"n": {i}}}\n' for i in range(4)) + '{"n": 4}')
+        _prune_validation_file(p, keep=2)
+        assert p.read_text() == '{"n": 3}\n{"n": 4}\n'
+
+    def test_names_differing_only_in_case_are_refused(self, tmp_path: Path) -> None:
+        import click
+
+        from nexus.commands.enrich import _validation_paths
+
+        with pytest.raises(click.UsageError):
+            _validation_paths(str(tmp_path / "Foo.jsonl"), str(tmp_path / "foo.jsonl"))
+
+    def test_a_hard_link_to_the_other_file_is_refused(self, tmp_path: Path) -> None:
+        import click
+
+        from nexus.commands.enrich import _validation_paths
+
+        a = tmp_path / "a.jsonl"
+        a.write_text("")
+        (tmp_path / "sub").mkdir()
+        b = tmp_path / "sub" / "b.jsonl"
+        os.link(a, b)
+        with pytest.raises(click.UsageError):
+            _validation_paths(str(a), str(b))
+
+    def test_chunks_that_do_not_join_the_evidence_bind_nothing_and_are_logged(self) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.commands.enrich import _window_records
+
+        with capture_logs() as logs:
+            out = _window_records([("a" * 64, "one"), ("b" * 64, "two")], "one\n\nTWO", 1000, tumbler="1.1.1", collection="c")
+        assert out is None
+        assert any(e["event"] == "validate_sample_chunks_do_not_join_evidence" for e in logs)
