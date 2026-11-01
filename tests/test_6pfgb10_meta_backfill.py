@@ -519,10 +519,10 @@ def test_a_pair_the_rule_derives_nothing_for_is_residue_for_both_keys(content_ty
 
 
 @pytest.mark.parametrize("held", [
-    {"tags": []}, {"tags": ["curated"]}, {"tags": "a, b"}, {"tags": None},
-    {"category": ""}, {"category": "curated"}, {"category": None},
+    {"tags": ["curated"]}, {"tags": "a, b"},                 # a non-empty tags value, a legacy string included
+    {"category": "curated"},
 ])
-def test_a_key_the_entry_holds_is_never_touched_whatever_its_value(held):
+def test_a_key_the_entry_holds_non_empty_is_never_touched(held):
     plan = mb.plan_tags_category(_indexed(held, "paper", "p.pdf"))
     key = next(iter(held))
     other = "category" if key == "tags" else "tags"
@@ -530,9 +530,40 @@ def test_a_key_the_entry_holds_is_never_touched_whatever_its_value(held):
     assert plan.outcome[other] == STAMPED and other in plan.meta, "the other key is still open and still filled"
 
 
-def test_a_document_holding_both_keys_sends_nothing():
-    plan = mb.plan_tags_category(_indexed({"tags": [], "category": ""}, "code", "a.py"))
+@pytest.mark.parametrize("held", [
+    {"tags": []}, {"tags": None}, {"tags": ""},
+    {"category": ""}, {"category": None}, {"category": []},
+])
+def test_a_key_the_entry_holds_empty_is_filled_as_a_re_index_would_fill_it(held):
+    """nexus-3ax49 (Sam's ruling, 2026-11-01): the backfill and a re-index share one definition of empty for an
+    indexed document's tags and category: absent, None, '' and [] are open, anything else is held."""
+    plan = mb.plan_tags_category(_indexed(held, "paper", "p.pdf"))
+    assert plan.meta == {"tags": ["pdf"], "category": "paper"}
+    assert plan.outcome == {"tags": STAMPED, "category": STAMPED}
+
+
+def test_an_empty_key_the_rule_cannot_settle_is_residue_not_a_held_key():
+    plan = mb.plan_tags_category(_indexed({"tags": []}, "prose", "notes/a.txt"))
+    assert plan.meta == {"category": "prose"}
+    assert plan.outcome == {"tags": "residue:ambiguous_indexer", "category": STAMPED}
+
+
+def test_a_document_holding_both_keys_non_empty_sends_nothing():
+    plan = mb.plan_tags_category(_indexed({"tags": ["x"], "category": "y"}, "code", "a.py"))
     assert plan.meta == {} and not plan.has_writes() and plan.outcome == {"tags": PRESENT, "category": PRESENT}
+
+
+def test_the_backfill_and_the_re_index_share_one_definition_of_empty():
+    """A value the re-index helper fills is a key the backfill fills, and the reverse, for every shape."""
+    from nexus.catalog.indexed_meta import fill_only_meta
+
+    stamp = {"tags": ["py"], "category": "code"}
+    for value in (None, "", [], (), {}, ["t"], "a, b", "curated", 0, False):
+        held = {"tags": value, "category": value}
+        plan = mb.plan_tags_category(_indexed(held, "code", "a.py"))
+        re_index_fills = fill_only_meta(stamp, held) == stamp
+        assert (plan.outcome["tags"] == STAMPED) is re_index_fills, repr(value)
+        assert (plan.outcome["category"] == STAMPED) is re_index_fills, repr(value)
 
 
 def test_the_derived_keys_read_no_chunk_row_and_no_manifest():
@@ -588,7 +619,7 @@ def _tags_world():
         _indexed({}, "paper", "q.pdf", "1.5.4"),
         _indexed({}, "prose", "docs/a.txt", "1.5.5"),       # tags ambiguous, category stamped
         _indexed({}, "docs", "x.txt", "1.5.6"),             # no rule for either
-        _indexed({"tags": [], "category": "curated"}, "paper", "r.pdf", "1.5.7"),
+        _indexed({"tags": ["curated-tag"], "category": "curated"}, "paper", "r.pdf", "1.5.7"),
         _entry({}, title="note", tumbler="1.5.8", content_type="knowledge", indexed_at=PUT),
     ]
     return w
@@ -621,7 +652,7 @@ def test_apply_writes_the_derived_keys_and_a_second_run_stamps_nothing():
     assert by["1.5.3"]["category"] == "prose" and by["1.5.4"]["category"] == "paper"
     assert by["1.5.5"].get("category") == "prose" and "tags" not in by["1.5.5"]
     assert "tags" not in by.get("1.5.6", {}) and "category" not in by.get("1.5.6", {})
-    assert by["1.5.7"].get("tags") is None and "category" not in by["1.5.7"], "held keys are never resent"
+    assert "tags" not in by.get("1.5.7", {}) and "category" not in by.get("1.5.7", {}), "non-empty held keys are never resent"
     for e in w.entries:
         if str(e.tumbler) in by:
             e.meta = {**(e.meta or {}), **by[str(e.tumbler)]}
@@ -629,6 +660,21 @@ def test_apply_writes_the_derived_keys_and_a_second_run_stamps_nothing():
     again = mb.backfill_meta(w, w, w, apply=True)
     assert w.updates == []
     assert again.keys["doc.tags"].stamped == 0 and again.keys["doc.category"].stamped == 0
+
+
+def test_apply_fills_a_document_whose_tags_and_category_are_empty_and_keeps_a_non_empty_one():
+    w = _World()
+    w.entries = [
+        _indexed({"tags": [], "category": ""}, "code", "src/a.py", "1.6.1"),
+        _indexed({"tags": None, "category": None}, "code", "src/b.py", "1.6.2"),
+        _indexed({"tags": ["mine"], "category": "mine", "source_format": "code"}, "code", "src/c.py", "1.6.3"),
+    ]
+    report = mb.backfill_meta(w, w, w, apply=True)
+    by = {u["tumbler"]: u["meta"] for u in w.updates}
+    for t in ("1.6.1", "1.6.2"):
+        assert (by[t]["tags"], by[t]["category"]) == (["py"], "code"), by[t]
+    assert "1.6.3" not in by, "a non-empty value is kept: nothing is sent"
+    assert report.keys["doc.tags"].stamped == 2 and report.keys["doc.tags"].present == 1
 
 
 @pytest.mark.parametrize("content_type,path", [

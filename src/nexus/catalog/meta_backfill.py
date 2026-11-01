@@ -8,6 +8,10 @@ decides, per document, which keys the catalog may take from those rows, and noth
 * **Fill-only, by presence.** A key already in the entry's ``meta`` (whatever its value, a retraction
   ``''`` / ``0`` / ``[]`` included) is never touched, and a non-empty catalog column is never replaced.
   A key is sent only with a real value: the catalog merges ``meta`` and an explicit empty overwrites.
+  The one exception is an indexed document's ``tags`` and ``category`` (nexus-3ax49, Sam's ruling of
+  2026-11-01): they are filled when unset by the re-index's own predicate
+  (:func:`~nexus.catalog.indexed_meta.is_unset`: absent, ``None``, ``''``, ``[]``) and kept otherwise, so the
+  backfill and a re-index share one definition of empty. Notes and ``source_format`` keep the presence rule.
 * **Notes** (``content_type`` ``knowledge``, Sam's option B): ``ttl_days`` and ``put_at`` come only from a
   row :func:`~nexus.catalog.note_ttl.row_written_by` accepts (stamp AND title), ``put_at`` being that row's
   ``indexed_at``. ``tags``, ``category`` and ``source_agent`` come from that same row or, when there is
@@ -26,7 +30,7 @@ decides, per document, which keys the catalog may take from those rows, and noth
   register-time rules (:func:`~nexus.catalog.indexed_meta.document_register_meta`, and the type-keyed
   :func:`~nexus.catalog.indexed_meta.pdf_register_meta`: a catalog type ``paper`` at a ``.pdf`` path is what
   ``nx index pdf`` registers, ``pdf`` what the repo PDF path registers), each key by its own presence, with
-  no chunk row read. A key the rule cannot settle is residue with its reason: ``ambiguous_indexer`` (``tags``
+  no chunk row read (each key is open when unset by the predicate above, not only when absent). A key the rule cannot settle is residue with its reason: ``ambiguous_indexer`` (``tags``
   of a prose or rdr file that is not ``.md`` / ``.markdown``: the repo pass tags the extension, ``nx index md``
   tags ``markdown``, and the entry cannot say which ran; both keys of a prose or rdr file at a ``.pdf`` path,
   where ``nx index pdf`` would have stamped ``paper``), ``not_pdf_path`` (both keys of a ``paper`` whose path is
@@ -64,7 +68,7 @@ from typing import Any
 
 import structlog
 
-from nexus.catalog.indexed_meta import SOURCE_FORMAT_KEY, backfill_tags_category, catalog_source_format
+from nexus.catalog.indexed_meta import SOURCE_FORMAT_KEY, backfill_tags_category, catalog_source_format, is_unset
 from nexus.catalog.note_ttl import PUT_SKEW, parse_iso, note_ttl_days, row_may_give_tags, row_written_by
 from nexus.catalog.store_hook import NOTE_META_KEYS, split_note_tags
 from nexus.ttl import MAX_TTL_DAYS
@@ -254,14 +258,15 @@ def plan_tags_category(entry: Any) -> Plan:
     ``file_path`` by :func:`~nexus.catalog.indexed_meta.backfill_tags_category` (which also decides, from the
     catalog type and the path's extension, whether ``nx index pdf`` or the repo PDF path wrote a PDF), so it
     reads no chunk row and a
-    document whose chunks are all shared gets them too. Fill-only by presence, per key: a key the entry's
-    ``meta`` holds (``[]``, ``''`` and a legacy string included) is final and nothing is sent for it. A key
-    the rule cannot settle is residue with its reason, never a guess."""
+    document whose chunks are all shared gets them too. Fill-only, per key, by the re-index's own definition of
+    empty (:func:`~nexus.catalog.indexed_meta.is_unset`, nexus-3ax49): a key that is absent, ``None``, ``''``
+    or ``[]`` is open and filled; any other value, a legacy string included, is held, and nothing is sent for
+    it. A key the rule cannot settle is residue with its reason, never a guess."""
     meta = _meta(entry)
     plan = Plan()
-    open_keys = [k for k in ("tags", "category") if k not in meta]
+    open_keys = [k for k in ("tags", "category") if is_unset(meta.get(k))]
     for key in ("tags", "category"):
-        if key in meta:
+        if key not in open_keys:
             plan.outcome[key] = PRESENT
     if not open_keys:
         return plan

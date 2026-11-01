@@ -42,7 +42,9 @@ later consumer that wants the value as a stored key; until one exists, nothing d
   document passes its stamp through :func:`fill_only_meta` with the meta the document already holds. A document
   the seam registers new has nothing to keep and takes the stamp whole. ``source_format`` is outside the
   ruling: it is derived from the document's own content type and path (never curated), so it stays an
-  overwrite and its compare is unchanged.
+  overwrite and its compare is unchanged. ``nx catalog backfill-meta`` fills these two keys by the same
+  predicate (:func:`is_unset`). The first non-empty stamp is kept across re-index; a wrong one is corrected
+  by hand with ``nx catalog update <tumbler> --meta '{...}'``, and the chunk row's value may differ.
 * A ``content_type`` the indexers do not write (``knowledge``, the ``docs`` the orphan backfill can
   produce, anything else) yields ``{}`` from :func:`document_register_meta`: the values are not invented.
 * The repo indexer's PDF path says category ``prose`` where ``nx index pdf`` says ``paper``. That is
@@ -108,9 +110,11 @@ def source_format_meta(content_type: str | None, file_path: str | None) -> dict[
     return {SOURCE_FORMAT_KEY: derived} if derived else {}
 
 
-def _is_unset(value: Any) -> bool:
+def is_unset(value: Any) -> bool:
     """True for the values a ``tags`` / ``category`` slot may hold while still counting as empty: ``None``,
-    ``""`` and ``[]`` (and any other empty container). Anything else, a legacy string tag included, is held."""
+    ``""`` and ``[]`` (and any other empty container); an absent key reads as ``None``. Anything else, a
+    legacy string tag included, is held. The one definition of empty shared by the re-index
+    (:func:`fill_only_meta`) and ``nx catalog backfill-meta``."""
     return value is None or (isinstance(value, (str, list, tuple, dict, set)) and len(value) == 0)
 
 
@@ -119,7 +123,7 @@ def fill_only_meta(stamp: Mapping[str, Any], held: Mapping[str, Any] | None) -> 
     carries) has a non-empty value: the one rule behind every register-time stamp of an existing document
     (nexus-3ax49). Every other key of *stamp* passes through unchanged. Returns a new dict."""
     held = held or {}
-    return {k: v for k, v in stamp.items() if k not in FILL_ONLY_KEYS or _is_unset(held.get(k))}
+    return {k: v for k, v in stamp.items() if k not in FILL_ONLY_KEYS or is_unset(held.get(k))}
 
 
 def _prose_tag(suffix: str) -> str:

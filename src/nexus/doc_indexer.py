@@ -3749,7 +3749,7 @@ def _catalog_markdown_hook(
         # row writer stamps. One ``meta`` per hook run: it rides every leg below (the update of an existing
         # row, the registration of a new one, the update after a registration that resolved onto an existing
         # row), so a document costs no extra request.
-        from nexus.catalog.indexed_meta import fill_only_meta, markdown_register_meta  # noqa: PLC0415 — deferred like the hook's other catalog imports
+        from nexus.catalog.indexed_meta import FILL_ONLY_KEYS, fill_only_meta, markdown_register_meta  # noqa: PLC0415 — deferred like the hook's other catalog imports
 
         def _meta_for(row_content_type: str, row_file_path: str | Path) -> dict[str, Any]:
             return {**markdown_register_meta(row_content_type, row_file_path), "extraction_source": extraction_source or "file"}
@@ -3954,7 +3954,12 @@ def _catalog_markdown_hook(
                     _resolved = None
                 # The resolved row is another owner's, registered with its own content type and file path: the
                 # stamp is read from them (nexus-6pfgb.23), as on the update branch above.
-                _resolved_update: dict = {"meta": _meta_of_row(_resolved) if _resolved is not None else doc_meta}
+                # A row that cannot be read holds nothing the fill-only rule can be applied to, so it gets no tags
+                # and no category from this call (nexus-3ax49, the PDF hook's fallback): they may be curated.
+                _resolved_update: dict = {
+                    "meta": _meta_of_row(_resolved) if _resolved is not None
+                    else {k: v for k, v in doc_meta.items() if k not in FILL_ONLY_KEYS}
+                }
                 if author and _resolved is not None and not (getattr(_resolved, "author", "") or "").strip():
                     _resolved_update["author"] = author
                 writer.update(_resolved_tumbler, **_resolved_update)

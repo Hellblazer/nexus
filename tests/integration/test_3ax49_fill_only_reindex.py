@@ -193,6 +193,40 @@ def test_the_markdown_hook_keeps_curated_tags_and_category(tmp_path: Path, monke
     assert meta["extraction_source"] == "file" and meta["source_format"] == "markdown", f"non-vacuity: the hook wrote {meta}"
 
 
+def test_the_markdown_hook_keeps_curated_tags_and_category_when_the_resolved_row_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resolved-onto-existing leg reads the resolved row to know what it holds. When that read raises, the
+    hook has no held meta to apply the fill-only rule to, so the update carries no tags and no category at all
+    (the PDF hook's fallback does the same): a curated value must survive, and the rest of the stamp is written."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.doc_indexer import _catalog_markdown_hook
+
+    corpus = "3ax49-md-keep-resolve-raises"
+    md = tmp_path / "keep-unread.md"
+    md.write_text("# keep\n\nbody\n")
+    tumbler = _register_row(corpus, md.resolve(), "prose")
+    _curate(tumbler, **CURATED)
+    monkeypatch.setattr("nexus.doc_indexer._find_curator_document", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.doc_indexer._repo_owner_document_for", lambda *a, **k: None)
+    reads: list[str] = []
+    real_resolve = HttpCatalogClient.resolve
+
+    def _resolve_raises(self, *a, **k):
+        reads.append("resolve")
+        raise RuntimeError("catalog read refused")
+
+    monkeypatch.setattr(HttpCatalogClient, "resolve", _resolve_raises)
+
+    _catalog_markdown_hook(md, _COLLECTION, "prose", corpus, 3)
+
+    monkeypatch.setattr(HttpCatalogClient, "resolve", real_resolve)
+    meta = _held(_only_row(md))
+    assert reads, "non-vacuity: the resolved leg did try to read the resolved row"
+    assert meta["tags"] == CURATED["tags"] and meta["category"] == CURATED["category"], meta
+    assert meta["extraction_source"] == "file" and meta["source_format"] == "markdown", f"non-vacuity: the hook wrote {meta}"
+
+
 @pytest.mark.parametrize("resolved", [False, True], ids=["update-branch", "resolved-onto-existing-branch"])
 @pytest.mark.parametrize("empty", EMPTIES)
 def test_the_markdown_hook_fills_empty_tags_and_category(
