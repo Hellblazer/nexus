@@ -21,8 +21,16 @@ decides, per document, which keys the catalog may take from those rows, and noth
   ``content_type`` and ``file_path`` by :func:`~nexus.catalog.indexed_meta.catalog_source_format`, the copy of
   the engine's ``nexus.catalog_source_format``, so it reads no chunk row and needs no ownership: a pair the
   rule derives nothing for is residue (``no_rule``, or ``no_file_path`` when the entry has no path to read an
-  extension from). ``tags`` and ``category`` are NOT backfilled: a document the repo pass or an index run
-  touches again gets them (nexus-6pfgb.8), and the engine reads the chunk row for the rest. ``extraction_method``, ``quality_gate_overridden`` (only where the rows say ``True``; a
+  extension from). ``tags`` and ``category`` (nexus-9cstf) are derived the same way, by
+  :func:`~nexus.catalog.indexed_meta.backfill_tags_category`, from the content type and path through the
+  register-time rules (:func:`~nexus.catalog.indexed_meta.document_register_meta`, and the type-keyed
+  :func:`~nexus.catalog.indexed_meta.pdf_register_meta`: a catalog type ``paper`` is what ``nx index pdf``
+  registers, ``pdf`` what the repo PDF path registers), each key by its own presence, with no chunk row
+  read. A key the rule cannot settle is residue with its reason: ``ambiguous_indexer`` (``tags`` of a
+  prose or rdr file that is not ``.md`` / ``.markdown``: the repo pass tags the extension, ``nx index md``
+  tags ``markdown``, and the entry cannot say which ran), ``no_extension``, ``no_file_path``, ``no_rule``.
+  The engine's chunk-row fallback for a ``where`` on these keys stays until the row keys retire.
+  ``extraction_method``, ``quality_gate_overridden`` (only where the rows say ``True``; a
   missing key is never read as ``False``), ``extraction_source`` (only where a row carries a value: an absent key means "file" and is never stamped
   from absence), ``frecency_score`` (with
   ``frecency_computed_at`` set to the latest ``indexed_at`` of the rows that carry it; a score of 0 is the
@@ -53,7 +61,7 @@ from typing import Any
 
 import structlog
 
-from nexus.catalog.indexed_meta import SOURCE_FORMAT_KEY, catalog_source_format
+from nexus.catalog.indexed_meta import SOURCE_FORMAT_KEY, backfill_tags_category, catalog_source_format
 from nexus.catalog.note_ttl import PUT_SKEW, parse_iso, note_ttl_days, row_may_give_tags, row_written_by
 from nexus.catalog.store_hook import NOTE_META_KEYS, split_note_tags
 from nexus.ttl import MAX_TTL_DAYS
@@ -69,7 +77,7 @@ DOC_KEYS: tuple[str, ...] = (
     "extraction_method", "quality_gate_overridden", "extraction_source", "frecency_score", "author",
 )
 #: The indexed-document keys that are derived from the entry itself, never read from a chunk row.
-DERIVED_DOC_KEYS: tuple[str, ...] = (SOURCE_FORMAT_KEY,)
+DERIVED_DOC_KEYS: tuple[str, ...] = (SOURCE_FORMAT_KEY, "tags", "category")
 
 #: Single-owner rows read per indexed document. A document's chunks come from one index call, so the
 #: values agree across them; reading every row of a 2000-chunk file would move its text for nothing.
@@ -233,6 +241,33 @@ def plan_source_format(entry: Any) -> Plan:
         return plan
     plan.meta[SOURCE_FORMAT_KEY] = derived
     plan.outcome[SOURCE_FORMAT_KEY] = STAMPED
+    return plan
+
+
+def plan_tags_category(entry: Any) -> Plan:
+    """The ``tags`` and ``category`` the catalog may stamp on an indexed *entry* (nexus-9cstf).
+
+    Derived the way :func:`plan_source_format` derives its key, from the entry's own ``content_type`` and
+    ``file_path`` by :func:`~nexus.catalog.indexed_meta.backfill_tags_category` (which also decides, from the
+    catalog type, whether ``nx index pdf`` or the repo PDF path wrote a PDF), so it reads no chunk row and a
+    document whose chunks are all shared gets them too. Fill-only by presence, per key: a key the entry's
+    ``meta`` holds (``[]``, ``''`` and a legacy string included) is final and nothing is sent for it. A key
+    the rule cannot settle is residue with its reason, never a guess."""
+    meta = _meta(entry)
+    plan = Plan()
+    open_keys = [k for k in ("tags", "category") if k not in meta]
+    for key in ("tags", "category"):
+        if key in meta:
+            plan.outcome[key] = PRESENT
+    if not open_keys:
+        return plan
+    values, residue = backfill_tags_category(getattr(entry, "content_type", "") or "", getattr(entry, "file_path", "") or "")
+    for key in open_keys:
+        if key in values:
+            plan.meta[key] = values[key]
+            plan.outcome[key] = STAMPED
+        else:
+            plan.outcome[key] = f"residue:{residue.get(key, 'no_rule')}"
     return plan
 
 
@@ -538,7 +573,9 @@ def _run_batch(reader: Any, t3: Any, writer: Any | None, entries: list[Any], liv
         elif kind == "doc" and tid not in failed:
             parts.append(plan_indexed_rows(e, [], n_chunks=0))  # every row key already present: counted as such
         if kind == "doc":
-            parts.append(plan_source_format(e))  # derived from the entry: no lookup, so a failed one does not withhold it
+            # derived from the entry: no lookup, so a failed one does not withhold them
+            parts.append(plan_source_format(e))
+            parts.append(plan_tags_category(e))
         merged = Plan()
         for p in parts:
             _record(report, kind, p)

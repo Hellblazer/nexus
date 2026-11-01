@@ -8,7 +8,8 @@ or ``paper``. A chunk shared by two documents holds one row, so the row says the
 document's own ``meta`` says its own. ``source_format`` (``pdf`` / ``markdown`` / ``code`` / ``prose``, the
 chunk vocabulary) is the third such fact. This module is the one place that states them for the catalog,
 mirroring the row writers (``code_indexer``, ``prose_indexer``, ``doc_indexer``, and the repo PDF path in
-``indexer``), and it writes nothing it does not know.
+``indexer``), and it writes nothing it does not know. :func:`backfill_tags_category` is the same statement
+read back from a catalog entry alone (``nx catalog backfill-meta``, nexus-9cstf).
 
 What reads them. ``tags`` and ``category`` ARE read: the engine's manifest stage (vectors-044) answers a
 ``where`` on them from the document's ``meta`` first and from the chunk row only for a document that lacks the
@@ -139,6 +140,49 @@ def document_register_meta(content_type: str, file_path: str | Path) -> dict[str
     else:
         return {}
     return {**out, **source_format_meta(content_type, path)}
+
+
+def backfill_tags_category(
+    content_type: str | None, file_path: str | Path | None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """The ``tags`` and ``category`` an indexed document of *content_type* at *file_path* may be given after
+    the fact, and the reason for each key the entry's own two columns cannot settle (nexus-9cstf).
+
+    Returns ``(values, residue)``: *values* holds only keys with a real value, *residue* maps each other
+    key to its reason. Built on the register-time rules (:func:`document_register_meta`,
+    :func:`pdf_register_meta`), with the one question those rules never faced: which indexer wrote the
+    document, when only the catalog entry is left to say.
+
+    * ``code``: ``category`` ``code``; ``tags`` is the extension (``no_extension`` when the file has none,
+      ``no_file_path`` when the entry has no path).
+    * ``rdr`` and ``prose``: ``category`` ``prose`` from every writer. ``tags`` is ``["markdown"]`` for a
+      ``.md`` / ``.markdown`` file, where the repo pass and the markdown hook (``nx index md`` / ``rdr``,
+      ``collection reindex``, DEVONthink) agree. For any other extension they do NOT (the repo pass tags
+      the extension, ``nx index md`` of the same file tags ``markdown``) and nothing on the entry tells
+      them apart, so ``tags`` is residue ``ambiguous_indexer``.
+    * ``paper`` is what ``nx index pdf`` registers (``["pdf"]``, ``paper``); ``pdf`` is what the repo PDF
+      path registers (``["pdf"]``, ``prose``). The catalog ``content_type`` is the only discriminator, and it
+      is the one :func:`pdf_register_meta` already keys on at register time, so the two paths are not
+      guessed apart here; neither rule reads the path.
+    * Any other type has no rule: both keys are residue, ``no_rule`` or, with no path, ``no_file_path``
+      (the same reasons ``source_format`` gives).
+    """
+    path = str(file_path or "")
+    if content_type == "paper":
+        stamped = pdf_register_meta(path, "paper")
+    elif content_type in ("code", "prose", "rdr", "pdf"):
+        stamped = document_register_meta(content_type, path)
+    else:
+        why = "no_rule" if path else "no_file_path"
+        return {}, {"tags": why, "category": why}
+    values = {k: stamped[k] for k in ("tags", "category") if k in stamped}
+    residue: dict[str, str] = {}
+    if content_type in _PROSE_CONTENT_TYPES and Path(path).suffix.lower() not in _MARKDOWN_SUFFIXES:
+        values.pop("tags", None)  # the repo pass would say the extension, the markdown hook "markdown"
+        residue["tags"] = "ambiguous_indexer" if path else "no_file_path"
+    elif "tags" not in values:
+        residue["tags"] = "no_extension" if path else "no_file_path"
+    return values, residue
 
 
 def _with_tag(tag: str, category: str) -> dict[str, Any]:

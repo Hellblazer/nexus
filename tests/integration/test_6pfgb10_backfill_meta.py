@@ -139,6 +139,9 @@ def test_backfill_meta_journey(t2_service_env):
     assert dry["keys"]["doc.extraction_method"]["skipped_shared"] == 2
     # nexus-6pfgb.23: source_format is derived from the entry, so every paper counts, shared chunks or not
     assert dry["keys"]["doc.source_format"]["stamped"] == 9 and dry["keys"]["doc.source_format"]["residue"] == 0
+    # nexus-9cstf: tags and category are derived the same way (type paper: nx index pdf's stamp)
+    for key in ("doc.tags", "doc.category"):
+        assert dry["keys"][key]["stamped"] == 9 and dry["keys"][key]["residue"] == 0, dry["keys"][key]
 
     # ── apply ──
     applied = _run("--apply")
@@ -157,7 +160,9 @@ def test_backfill_meta_journey(t2_service_env):
     p1 = meta_of(p["p1"])
     assert (p1["extraction_method"], p1["extraction_source"], p1["quality_gate_overridden"]) == ("mineru", "file", True)
     assert p1["frecency_score"] == 0.4 and p1["frecency_computed_at"] == earlier
-    assert "tags" not in p1 and "category" not in p1, "the verb does not backfill an indexed document's tags and category"
+    assert p1["tags"] == ["pdf"] and p1["category"] == "paper", "nexus-9cstf: derived from (paper, *.pdf) like source_format"
+    assert all(meta_of(t)["tags"] == ["pdf"] and meta_of(t)["category"] == "paper" for t in p.values()), \
+        "no chunk read: the shared and disagreeing documents get them too"
     assert {meta_of(t)["source_format"] for t in p.values()} == {"pdf"}, "derived from (paper, *.pdf), shared chunks included"
     assert reader.resolve(p["p1"]).author == "Ann Lee"
     p2 = meta_of(p["p2"])

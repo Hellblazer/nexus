@@ -6,6 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **`nx catalog backfill-meta` now fills `tags` and `category` of indexed documents that lack them, from their own `content_type` and `file_path`** (nexus-9cstf, RDR-236 Phase 1; client change, works on every engine, dry run by default). Until now only documents an indexer touched again got them, so the documents `nx index pdf`, `nx index md`, DEVONthink and the orphan registers skip as unchanged answered a `tags=` or `category=` filter from the shared chunk row indefinitely, and would answer empty once the row keys retire. The rule is the register-time one: code is `code` with the lower-cased extension as its tag, a prose or RDR markdown file is `prose` with `["markdown"]`, a catalog type `paper` (what `nx index pdf` registers) is `paper` with `["pdf"]`, and a catalog type `pdf` (the repo PDF path) is `prose` with `["pdf"]`. No chunk row is read, so a document whose chunks are all shared gets them too. Each key is fill-only by presence (an existing `[]` or `''` is never touched), and a key the entry cannot settle is residue with its reason in the report: `ambiguous_indexer` (the tags of a prose or RDR file that is not markdown, which `nx index repo` and `nx index md` tag differently), `no_extension`, `no_file_path`, `no_rule`. The dry run and `--json` report count `doc.tags` and `doc.category` per key. Notes are unchanged.
+
 ## [7.91.1] - 2026-10-31
 
 Pairs with engine-service-v0.1.173 (`REQUIRED_ENGINE_VERSION` unchanged from 7.91.0). A patch release: the conexus plugin's hooks change, and the `nx` code is 7.91.0's. It was meant for the plugin-only fast lane, but the test fix that came with it touches the hook-skew harness, which the lane does not ship, so it was cut as a normal release.
