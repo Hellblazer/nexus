@@ -23,6 +23,7 @@ AspectDocIdBackfillTest	startEmptyDatabase	WALK	walks to before aspects-004, see
 Pipeline002PerRowIdentityMigrationTest	startEmptyDatabase	WALK	walks to before pipeline-002-1, seeds the pipeline-001 shape, asserts the re-key and the rollback
 Catalog036EmbeddingProfileSchemaLiquibaseTest	startEmptyDatabase	WALK	its two empty-database cases need the state between catalog-036 and hygiene-002-1, and a populated pre-existing row
 TuplesBaselineSchemaLiquibaseTest	startEmptyDatabase	WALK	rolls the tuples changesets back and reapplies them, walks from empty, and cleans legacy oversized rows
+TuplesRetireLedgerLiquibaseTest	startEmptyDatabase	WALK	walks to before tuples-012-1, seeds ledger rows, look-alikes and delivery and claim-log rows in two tenants, applies it, and asserts the purge as a NOBYPASSRLS owner, FORCE RLS restored, and a second run that deletes only a new ledger row
 StagingSchemaDropLiquibaseTest	startEmptyDatabase	WALK	walks to before staging-003, sets up one shape per test (aged rows, foreign grants, non-owner), finishes the walk and asserts the drop
 P225MigrationWalkIntegrationTest	startEmptyDatabase	WALK	runs vectors-030-1 as production does over a seeded pre-walk layout and asserts the partitioned result, its failure and resume paths
 P225DropRetiredIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-036-1 over a seeded pre-walk layout, applies the drop alone, rolls it back and compares the retired tables' catalog shape
