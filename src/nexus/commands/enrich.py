@@ -2857,9 +2857,10 @@ def _all_outcomes_row(
     return {
         "schema_version": _VALIDATION_ROW_SCHEMA_VERSION,
         "claim_id": hashlib.sha256(
-            f"aspects/v1\0{collection}\0{source_path}".encode()
+            f"aspects/v1\0{collection}\0{source_path}".encode("utf-8", "surrogatepass")  # a non-UTF-8 file name
         ).hexdigest(),
-        "claim_digest": hashlib.sha256(claim_text.encode()).hexdigest(),
+        # surrogatepass: a lone surrogate in a model reply must not end the run (NFKC leaves it as it is).
+        "claim_digest": hashlib.sha256(claim_text.encode("utf-8", "surrogatepass")).hexdigest(),
         "collection": collection,
         "tumbler": tumbler,
         "status": status_for(reason_code),
@@ -2921,12 +2922,31 @@ def _validation_file_lock(target: Path) -> Iterator[None]:
         os.close(fd)
 
 
+#: A key every validation row carries: ``schema_version`` (all-outcomes) or ``operator_verify_reason``
+#: (the legacy failures row). A JSON object without either is someone else's line.
+_VALIDATION_ROW_MARKERS: tuple[str, ...] = ("schema_version", "operator_verify_reason")
+
+
 def _is_validation_row(line: bytes) -> bool:
-    """True when *line* is one JSON object, the only thing a validation file holds."""
+    """True when *line* is one JSON object of a validation file's own shape (a marker key present).
+    A user's JSONL log is not a validation file, so the prune and the torn-tail cut leave it alone."""
     try:
-        return isinstance(json.loads(line), dict)
+        obj = json.loads(line)
     except ValueError:
         return False
+    return isinstance(obj, dict) and any(k in obj for k in _VALIDATION_ROW_MARKERS)
+
+
+def _is_torn_row(frag: bytes) -> bool:
+    """True when *frag* is a prefix of a row that never finished: it opens a JSON object and
+    does not parse. Any other unterminated text is a line of its own and is kept."""
+    if not frag.lstrip().startswith(b"{"):
+        return False
+    try:
+        json.loads(frag)
+    except ValueError:
+        return True
+    return False
 
 
 def _unterminated_tail(target: Path) -> tuple[int, bytes] | None:
@@ -2958,7 +2978,9 @@ def _append_validation_row(path: Path, row: dict[str, Any]) -> None:
     target = path.resolve()
     line = (json.dumps(row) + "\n").encode("utf-8")
     if target.exists() and not target.is_file():
-        with open(target, "ab") as f:
+        # O_NONBLOCK: a FIFO with no reader fails (ENXIO, logged by the caller) instead of hanging the run.
+        fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK)
+        with os.fdopen(fd, "ab") as f:
             f.write(line)
         return
     with _validation_file_lock(target):
@@ -2971,7 +2993,7 @@ def _append_validation_row(path: Path, row: dict[str, Any]) -> None:
                 with open(target, "rb") as f:
                     head = f.read(cut - 1)
                 prev = head[head.rfind(b"\n") + 1:]
-            if cut and not _is_validation_row(frag) and _is_validation_row(prev):
+            if cut and _is_torn_row(frag) and _is_validation_row(prev):
                 _log.warning("validation_file_torn_tail_dropped", path=str(target), bytes=len(frag))
                 os.truncate(target, cut)
             else:
@@ -3015,7 +3037,7 @@ def _prune_validation_file(path: Path, keep: int = _VALIDATION_MAX_ROWS) -> None
             complete, torn = [*complete, torn], b""  # a whole row that lacks its newline is a row
         if len(complete) <= keep and not torn:
             return
-        if not all(_is_validation_row(ln) for ln in complete):
+        if not complete or not all(_is_validation_row(ln) for ln in complete) or (torn and not _is_torn_row(torn)):
             # Not a validation file (a user's log named by mistake): the prune never rewrites it.
             _log.warning("validation_file_prune_skipped_not_rows", path=str(target))
             return

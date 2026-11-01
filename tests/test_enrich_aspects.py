@@ -1742,11 +1742,11 @@ class TestValidationAllOutcomes:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         torn = tmp_path / "f.jsonl"
-        torn.write_text('{"keep": 1}\n{"half": ')
+        torn.write_text('{"schema_version": 1, "keep": 1}\n{"half": ')
         _, allout = _sample(tmp_path, monkeypatch, _verdict(verified=False, reason="no", evidence=[]))
         # Append: the fragment is cut off, the earlier row stays, the new row is whole on its own line.
         lines = torn.read_text().splitlines()
-        assert json.loads(lines[0]) == {"keep": 1} and len(lines) == 2
+        assert json.loads(lines[0]) == {"schema_version": 1, "keep": 1} and len(lines) == 2
         assert json.loads(lines[1])["operator_verify_reason"] == "no"
         assert (allout.stat().st_mode & 0o777) == 0o600  # a file the run created is private
 
@@ -1847,13 +1847,13 @@ class TestValidationRulePins:
         import threading
 
         p = tmp_path / "rows.jsonl"
-        before = '{"n": 1}\n{"n": 2}\n{"n": 3}\n'
+        before = '{"schema_version": 1, "n": 1}\n{"schema_version": 1, "n": 2}\n{"schema_version": 1, "n": 3}\n'
         p.write_text(before)
         done = threading.Event()
 
         def work() -> None:
             if op == "append":
-                enrich_mod._append_validation_row(p, {"n": 4})
+                enrich_mod._append_validation_row(p, {"schema_version": 1, "n": 4})
             else:
                 enrich_mod._prune_validation_file(p, keep=1)
             done.set()
@@ -1866,7 +1866,8 @@ class TestValidationRulePins:
             assert p.read_text() == before
         assert done.wait(10)
         worker.join(10)
-        assert p.read_text() == ('{"n": 1}\n{"n": 2}\n{"n": 3}\n{"n": 4}\n' if op == "append" else '{"n": 3}\n')
+        last = '{"schema_version": 1, "n": 3}\n'
+        assert p.read_text() == (before + '{"schema_version": 1, "n": 4}\n' if op == "append" else last)
 
     # ── the row's ids and digests ──────────────────────────────────────────
 
@@ -2676,9 +2677,9 @@ class TestValidationFileSafety:
         from nexus.commands.enrich import _append_validation_row
 
         p = tmp_path / "rows.jsonl"
-        p.write_text('{"n": 1}\n{"half": ')
+        p.write_text('{"schema_version": 1, "n": 1}\n{"half": ')
         _append_validation_row(p, {"a": 1})
-        assert p.read_text() == '{"n": 1}\n{"a": 1}\n'
+        assert p.read_text() == '{"schema_version": 1, "n": 1}\n{"a": 1}\n'
 
     def test_an_unterminated_line_in_a_file_of_non_rows_is_kept(self, tmp_path: Path) -> None:
         from nexus.commands.enrich import _append_validation_row
@@ -2694,6 +2695,7 @@ class TestValidationFileSafety:
         _append_validation_row(Path(os.devnull), {"a": 1})
         assert not Path(os.devnull + ".lock").exists()
 
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the directory's mode")
     def test_an_unwritable_directory_is_logged_not_raised(self, tmp_path: Path) -> None:
         from structlog.testing import capture_logs
 
@@ -2722,9 +2724,10 @@ class TestValidationFileSafety:
         from nexus.commands.enrich import _prune_validation_file
 
         p = tmp_path / "rows.jsonl"
-        p.write_text("".join(f'{{"n": {i}}}\n' for i in range(4)) + '{"n": 4}')
+        row = '{{"schema_version": 1, "n": {}}}'
+        p.write_text("".join(row.format(i) + "\n" for i in range(4)) + row.format(4))
         _prune_validation_file(p, keep=2)
-        assert p.read_text() == '{"n": 3}\n{"n": 4}\n'
+        assert p.read_text() == row.format(3) + "\n" + row.format(4) + "\n"
 
     def test_names_differing_only_in_case_are_refused(self, tmp_path: Path) -> None:
         import click
@@ -2756,3 +2759,50 @@ class TestValidationFileSafety:
             out = _window_records([("a" * 64, "one"), ("b" * 64, "two")], "one\n\nTWO", 1000, tumbler="1.1.1", collection="c")
         assert out is None
         assert any(e["event"] == "validate_sample_chunks_do_not_join_evidence" for e in logs)
+
+    def test_prune_leaves_a_one_line_file_without_a_newline_alone(self, tmp_path: Path) -> None:
+        from nexus.commands.enrich import _prune_validation_file
+
+        p = tmp_path / "notes.txt"
+        p.write_text("precious notes no newline")
+        _prune_validation_file(p, keep=5)
+        assert p.read_text() == "precious notes no newline"
+
+    def test_an_unterminated_text_line_after_a_row_is_kept_on_append(self, tmp_path: Path) -> None:
+        from nexus.commands.enrich import _append_validation_row
+
+        p = tmp_path / "events.jsonl"
+        p.write_text('{"schema_version": 1, "a": 1}\nERROR something')
+        _append_validation_row(p, {"b": 2})
+        assert p.read_text() == '{"schema_version": 1, "a": 1}\nERROR something\n{"b": 2}\n'
+
+    def test_prune_leaves_a_users_own_jsonl_alone(self, tmp_path: Path) -> None:
+        from nexus.commands.enrich import _prune_validation_file
+
+        p = tmp_path / "events.jsonl"
+        body = "".join(f'{{"event": {i}}}\n' for i in range(12))
+        p.write_text(body)
+        _prune_validation_file(p, keep=5)
+        assert p.read_text() == body
+
+    def test_a_fifo_without_a_reader_fails_fast_and_is_logged(self, tmp_path: Path) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.commands.enrich import _append_validation_row_logged
+
+        fifo = tmp_path / "pipe"
+        os.mkfifo(fifo)
+        with capture_logs() as logs:
+            _append_validation_row_logged(fifo, {"a": 1})
+        assert any(e["event"] == "validation_file_append_failed" for e in logs)
+
+    def test_a_lone_surrogate_in_a_claim_or_path_yields_ids_not_an_error(self) -> None:
+        from nexus.commands.enrich import _all_outcomes_row
+
+        row = _all_outcomes_row(
+            reason_code="verifier_rejected", collection="c", source_path="doc\udcff.md", tumbler=None,
+            claim_payload={"a": "x\ud800y"}, result={"verified": False, "reason": "", "evidence": []},
+            window=(False, 0, 0),
+            identity_trusted=False, trace=True, timestamp="2026-11-01T00:00:00Z",
+        )
+        assert len(row["claim_id"]) == 64 and len(row["claim_digest"]) == 64
