@@ -173,7 +173,7 @@ figure.fig .you-edge{stroke:var(--brass)}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · research</span><a href="rdr.html">← Working with RDRs</a></div>
 <h1>Research with Nexus</h1>
-<p class="lede">Nexus keeps the papers you read, the code you write, and the design records that connect them in one store, with links between them. Every reading, proposal, verdict, and result you produce goes into the same store, linked to the paper it came from. A session this week starts from what a session last month read. This page shows what you say to Claude at each step of a piece of research, and what Claude shows you.</p>
+<p class="lede">Nexus keeps the papers you read, the code you write, and the design records that connect them in one store, with links between them. A session this week starts from what a session last month read. This page shows what you say to Claude at each step of a piece of research, and what Claude shows you.</p>
 <p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders. The prompts are examples, and your own words work. Read <a href="getting-started.html">Getting started</a> first for the three stores, the catalog, and renderings. The output blocks on this page are real tool output, trimmed. <a href="research-in-nexus.html">Research in Nexus</a> explains the thinking behind the method: what was borrowed from experimental science, what was left out, and why.</p>
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
 <tr><th>Term</th><th>Meaning</th></tr>
@@ -241,7 +241,7 @@ figure.fig .you-edge{stroke:var(--brass)}
   <line x1="160" y1="178" x2="270" y2="252" class="you-edge" marker-end="url(#arb)"/><text x="300" y="244" class="op you">implements, relates</text>
   <text x="380" y="318" text-anchor="middle" class="sm">brass: the links you add by hand, from a paper to what it concerns in your system</text>
 </svg>
-<figcaption>A paper and the six documents a piece of research produces from it. Each one is registered in the catalog and linked to the paper and to the step before it, so a later session can follow the chain from either end. The brass links are the ones you add: from the paper to the code and the design records it concerns.</figcaption>
+<figcaption>A paper and the six documents a piece of research produces from it. The brass links are the ones you add: from the paper to the code and the design records it concerns.</figcaption>
 </figure>
 <p>Claude, the store, memory, and the web keep doing what they do. The lessons below are what you say to get each document written, linked, and checked, and what you see when it is.</p>
 </section>
@@ -418,7 +418,7 @@ per-operator model and backend selection, plan-level cost/quality optimization, 
 <div class="see">You might say</div>
 <div class="cmd"><pre>Have the critic read the proposals on <span class="ph">&lt;THE PAPER&gt;</span> with access to the code, the schema changelogs, and the design records. For each proposal: survives, survives with amendment, or dies, with the artifact that decides it.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>The critic agent runs with the paths to check. It returns its critique in its own fixed format: the issues it found, each with the evidence, and an outcome of justified, partial, or not justified. Claude then writes a verdict document that says, for each proposal, survives, survives with amendment, or dies, and links it to the proposals and the critique.</p>
+<p>The critic agent runs with the paths to check. It returns its critique in its own fixed format: the issues it found, each with the evidence, and an outcome of justified, partial, or not justified. Claude then writes a verdict document and links it to the proposals and the critique.</p>
 <details class="gloss out"><summary>What you see, from the critic</summary><pre class="out">## Critical Issues
 ### Issue: Proposal 3's central premise is false — the run table has no document-read signal
 - Evidence: service/…/telemetry-001-baseline.xml (changeset telemetry-001-7); telemetry-007-nx-answer-steps.xml
