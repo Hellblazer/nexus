@@ -9,10 +9,13 @@ in front of the model. The contract these tests pin:
 - ``pre`` never vetoes (exit 0 on every path, nothing on stdout), survives a missing
   ``nx`` and a timeout, and writes the file atomically with mode 0600.
 - ``post`` appends and logs a warning when the summary names none of the pointers; it
-  never appends to, or refreshes, a checkpoint whose ``written:`` stamp is old.
-- ``inject`` emits the capped ``additionalContext`` for THIS session only and nothing
-  for a stale (by its ``written:`` stamp, not its mtime) or foreign one, and starts no
-  process.
+  never appends to, or refreshes, a checkpoint an earlier compaction already used.
+- ``inject`` emits the capped ``additionalContext`` for THIS session only, once, and
+  nothing for a used, foreign or past-the-prune-window one (by its ``written:`` stamp,
+  not its mtime), and starts no process.
+- pairing is by use, not age: an idle compaction's checkpoint, written when the
+  session went idle and used at the next message, is appended to and injected with
+  its real age (nexus-702gy).
 - the board entry comes first and is the one titled EXACTLY the session's name.
 - the script imports only the standard library and the plugin's own ``_`` modules.
 """
@@ -553,16 +556,41 @@ class TestPost:
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert code == 0 and "no pre-compaction checkpoint for this compaction" in text and "orphan summary" in text
 
-    def test_an_old_checkpoint_is_archived_and_replaced_by_a_stub_not_appended_to(self, mod, env, monkeypatch) -> None:
+    def test_a_used_checkpoint_is_archived_and_replaced_by_a_stub_not_appended_to(self, mod, env, monkeypatch) -> None:
         path = self._pre(mod, env, monkeypatch)
-        restamp(path, 3 * 3600)
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "the earlier compaction's summary"})
+        # this compaction's pre did not run; post finds the earlier compaction's file
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "this compaction's summary"})
         text = path.read_text(encoding="utf-8")
         assert "state: building" not in text and "- written:" not in text
         assert "no pre-compaction checkpoint for this compaction" in text and "this compaction's summary" in text
+        assert "the earlier compaction's summary" not in text
         archives = [p for p in env.checkpoints.iterdir() if p.name != path.name]
         assert len(archives) == 1 and "state: building" in archives[0].read_text(encoding="utf-8")
-        assert "no fresh pre-compaction checkpoint" in env.hook_log.read_text(encoding="utf-8")
+        assert "no unused pre-compaction checkpoint" in env.hook_log.read_text(encoding="utf-8")
+
+    def test_an_injected_checkpoint_counts_as_used(self, mod, env, monkeypatch) -> None:
+        path = self._pre(mod, env, monkeypatch)
+        run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        assert "- injected: " in path.read_text(encoding="utf-8")
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "a later compaction's summary"})
+        assert "no pre-compaction checkpoint for this compaction" in path.read_text(encoding="utf-8")
+
+    def test_an_idle_compactions_hours_old_unused_checkpoint_is_appended_to(self, mod, env, monkeypatch) -> None:
+        """Idle compaction: pre ran when the session went idle, post runs at the next message."""
+        path = self._pre(mod, env, monkeypatch)
+        restamp(path, 3 * 3600)
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "the idle compaction's summary"})
+        text = path.read_text(encoding="utf-8")
+        assert "state: building" in text and "- written:" in text
+        assert text.rstrip().endswith("the idle compaction's summary")
+        assert [p.name for p in env.checkpoints.iterdir()] == [path.name], "nothing is archived"
+
+    def test_a_checkpoint_past_the_prune_window_is_archived(self, mod, env, monkeypatch) -> None:
+        path = self._pre(mod, env, monkeypatch)
+        restamp(path, mod._MAX_AGE_S + 60)
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "this compaction's summary"})
+        assert "no pre-compaction checkpoint for this compaction" in path.read_text(encoding="utf-8")
 
     def test_has_no_decision_output_and_exits_zero_on_garbage(self, mod, env, monkeypatch) -> None:
         for payload in ("", "nope", {"session_id": "bad id"}):
@@ -604,12 +632,42 @@ class TestInject:
         for bad in ("../" + SID, SID + "/../x", "", None):
             assert run(mod, monkeypatch, "inject", {"session_id": bad})[1] == ""
 
-    def test_a_stale_stamp_gets_nothing_whatever_the_mtime_says(self, mod, env, monkeypatch) -> None:
+    def test_a_stamp_past_the_prune_window_gets_nothing_whatever_the_mtime_says(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
         path = env.checkpoints / f"{SID}.md"
-        restamp(path, 2 * 3600)  # the mtime stays fresh, as after a rewrite
+        restamp(path, mod._MAX_AGE_S + 60)  # the mtime stays fresh, as after a rewrite
         code, out = run(mod, monkeypatch, "inject", {"session_id": SID})
         assert code == 0 and out == ""
+
+    @pytest.mark.parametrize("post_first", [True, False], ids=["post-at-idle", "post-at-next-message"])
+    def test_an_idle_compactions_checkpoint_is_injected_hours_later_with_its_real_age(
+        self, mod, env, monkeypatch, post_first
+    ) -> None:
+        """Idle compaction: pre at idle, the summary applied at the next message (nexus-702gy).
+        The docs do not say when post runs, so both orders are pinned."""
+        run(mod, monkeypatch, "pre", pre_payload(trigger="auto"))
+        path = env.checkpoints / f"{SID}.md"
+        if post_first:
+            run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "idle summary"})
+        restamp(path, 3 * 3600 + 5 * 60)
+        if not post_first:
+            run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "idle summary"})
+        self._no_process(mod, monkeypatch)
+        ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1])
+        first = ctx.splitlines()[0]
+        assert "3 h 5 min ago (trigger auto)" in first
+        assert "may have changed since" in first and "just before" not in first
+        assert "state: building" in ctx
+
+    def test_a_checkpoint_is_injected_once(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        path = env.checkpoints / f"{SID}.md"
+        assert run(mod, monkeypatch, "inject", {"session_id": SID})[1] != ""
+        text = path.read_text(encoding="utf-8")
+        header = text.split("\n## ", 1)[0]
+        assert re.search(r"(?m)^- written: .*\n- injected: \S+$", header), header
+        assert "state: building" in text, "marking keeps the body"
+        assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, "")
 
     def test_a_missing_or_unparseable_stamp_gets_nothing(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
@@ -623,8 +681,9 @@ class TestInject:
         self, mod, env, monkeypatch
     ) -> None:
         """The ship-blocker: pre did not run for this compaction, post must not refresh the old file."""
-        run(mod, monkeypatch, "pre", pre_payload())
-        restamp(env.checkpoints / f"{SID}.md", 3 * 3600)  # the previous compaction's checkpoint
+        run(mod, monkeypatch, "pre", pre_payload())  # the previous compaction, used in full
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "the previous summary"})
+        run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "the summary of this compaction"})
         code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
         assert code == 0 and out == ""
@@ -633,7 +692,15 @@ class TestInject:
         run(mod, monkeypatch, "pre", pre_payload(trigger="auto"))
         restamp(env.checkpoints / f"{SID}.md", 3 * 60)
         ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
-        assert "3 min ago (trigger auto)" in ctx.splitlines()[0]
+        assert "3 min ago (trigger auto), just before this session was compacted." in ctx.splitlines()[0]
+
+    @pytest.mark.parametrize(
+        ("seconds", "label"),
+        [(30, "under a minute"), (89, "under a minute"), (180, "3 min"), (89 * 60, "89 min"),
+         (90 * 60, "1 h 30 min"), (5 * 3600 + 59, "5 h 1 min"), (25 * 3600, "25 h 0 min")],
+    )
+    def test_the_age_label(self, mod, seconds, label) -> None:
+        assert mod._age_label(seconds) == label
 
     def test_a_path_shaped_session_id_cannot_reach_a_file_outside_the_checkpoint_directory(
         self, mod, env, monkeypatch

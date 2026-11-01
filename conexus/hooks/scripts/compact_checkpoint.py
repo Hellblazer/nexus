@@ -32,19 +32,27 @@ claims beads under one assignee (both measured on halcyon's first live compactio
 
 POST appends the ``compact_summary`` to the same file and logs one warning line to
 ``<config>/logs/hook.log`` when the summary names none of the session's board title,
-the checkpoint path, or a bead id from the checkpoint. It never appends to, or
-rewrites, a checkpoint whose ``written:`` stamp is older than the freshness window
-(30 minutes) or missing: that file belongs to an earlier compaction, because pre did
-not run for this one. It archives it, writes a stub that says so, and logs a warning.
-It has no decision control and prints nothing.
+the checkpoint path, or a bead id from the checkpoint. It never appends to a
+checkpoint an earlier compaction already used (it carries a summary or an
+``injected:`` line), or one whose ``written:`` stamp is missing or past the prune
+window: pre did not run for this compaction. It archives that file, writes a stub
+that says so, and logs a warning. It has no decision control and prints nothing.
+
+A checkpoint is paired with its compaction by use, not by age (nexus-702gy). Idle
+compaction (Claude Code ``idleCompaction``) runs PreCompact once the session has sat
+idle for about an hour and applies the summary at the next message, which can come
+hours later; post and inject may run at either time, so an age window would discard
+the very checkpoint the compaction wrote.
 
 INJECT prints ``hookSpecificOutput.additionalContext`` with this session's checkpoint
-(capped near 8 KB) and one line naming the full file. Freshness is judged by the
-file's own ``written:`` stamp, never its mtime (post rewrites the file), and the intro
-states the checkpoint's age and trigger. It reads one file: no network, no ``nx``
-call, because the same event runs seven other verbs and must stay light (nexus-75w5d).
-It prints nothing when no checkpoint exists for this session id, the stamp is missing
-or older than the window, or the file is a stub.
+(capped near 8 KB) and one line naming the full file, then writes an ``injected:``
+line into the file's header so no later compaction injects it again. Age is judged by
+the file's own ``written:`` stamp, never its mtime (post rewrites the file); the intro
+states the real age and trigger, and past ten minutes it says the state may have
+changed since. It reads and rewrites one file: no network, no ``nx`` call, because the
+same event runs seven other verbs and must stay light (nexus-75w5d). It prints nothing
+when no checkpoint exists for this session id, the stamp is missing or past the prune
+window, the file is a stub, or it was already injected.
 
 NEVER VETOES. Every mode exits 0 whatever happens; errors go to ``hook.log`` and
 stderr only. A PreCompact veto on the context-limit recovery path fails the request,
@@ -88,13 +96,16 @@ _BOARD_TIMEOUT_S = 6.0
 #: Bound on ``git worktree list``, run before the continuation call.
 _GIT_TIMEOUT_S = 3.0
 _TOTAL_BUDGET_S = 32.0
-#: A checkpoint whose own ``written:`` stamp is older than this is not injected, and post
-#: does not append to it: it belongs to an earlier compaction.
-_FRESH_S = 30 * 60.0
 #: Clock skew tolerated for a ``written:`` stamp that lies in the future.
 _SKEW_S = 300.0
 #: Files older than this are removed from the checkpoint directory on each pre run.
 _PRUNE_AFTER_S = 2 * 24 * 3600.0
+#: A checkpoint whose own ``written:`` stamp is older than this is not injected, and post
+#: does not append to it. It is the prune window, not a freshness window: an idle
+#: compaction's checkpoint is used at the next message, however late (nexus-702gy).
+_MAX_AGE_S = _PRUNE_AFTER_S
+#: Past this age the inject intro says the state may have changed since it was written.
+_STALE_NOTE_S = 10 * 60.0
 #: Superseded checkpoints kept per session, beside the current one.
 _KEEP_ARCHIVES = 3
 #: Bytes of additionalContext (UTF-8), the footer line included.
@@ -112,6 +123,7 @@ _BD_ROW_RE = re.compile(r"^[\s│├└─]*[○◐●✓❄]\s+([a-z][a-z0-9_]*
 #: A bead id of any repo's prefix in a board ``ref:`` line (``nexus-v1929``, ``labrun-56v.1``).
 _REF_ID_RE = re.compile(r"\b[a-z][a-z0-9_]*-[0-9a-z]{3,}(?:\.\d+)*")
 _WRITTEN_RE = re.compile(r"(?m)^- written: (\S+)\s*$")
+_INJECTED_RE = re.compile(r"(?m)^- injected: \S+\s*$")
 _TRIGGER_RE = re.compile(r"(?m)^- trigger: (.{1,32})$")
 #: Subsections of the continuation output that are not kept: the same-event SessionStart
 #: group (session_context.py) already injects ready beads and memory titles, and
@@ -504,7 +516,7 @@ def _filter_in_progress(shaped: str, board: str) -> str:
 
 def _written_age(text: str, now: datetime | None = None) -> float | None:
     """Seconds since the checkpoint's own ``written:`` stamp, or ``None`` when it is missing,
-    unparseable, in the future beyond clock skew, or older than the freshness window.
+    unparseable, in the future beyond clock skew, or older than ``_MAX_AGE_S``.
 
     Only the header (before the first ``## `` heading) is read. The file's mtime is never
     consulted: post rewrites the file, so an old checkpoint would look new.
@@ -520,7 +532,17 @@ def _written_age(text: str, now: datetime | None = None) -> float | None:
     if stamp.tzinfo is None:
         return None
     age = ((now or datetime.now(timezone.utc)) - stamp).total_seconds()
-    return age if -_SKEW_S <= age <= _FRESH_S else None
+    return age if -_SKEW_S <= age <= _MAX_AGE_S else None
+
+
+def _injected(text: str) -> bool:
+    return _INJECTED_RE.search(text.split("\n## ", 1)[0]) is not None
+
+
+def _used(text: str) -> bool:
+    """True when an earlier compaction already took this checkpoint: post appended its
+    summary, or inject emitted it."""
+    return _injected(text) or f"\n{_SUMMARY_HEADING}" in text
 
 
 def run_pre(payload: dict) -> None:
@@ -592,13 +614,14 @@ def run_post(payload: dict) -> None:
         existing: str | None = path.read_text(encoding="utf-8")
     except OSError:
         existing = None
-    if existing is None or _written_age(existing) is None:
+    if existing is None or _written_age(existing) is None or _used(existing):
         # Pre did not run for this compaction (killed at its timeout, a cold start, an error
         # before the write): whatever is here is an earlier compaction's state and must not be
-        # appended to or refreshed, or inject would pass it as current.
+        # appended to or refreshed, or inject would pass it as current. Pairing is by use, not
+        # age: an idle compaction's post can run hours after its pre (nexus-702gy).
         if existing is not None:
             _archive_and_prune(directory, session_id, time.time())
-        _log("WARNING", f"post: no fresh pre-compaction checkpoint for session {session_id} "
+        _log("WARNING", f"post: no unused pre-compaction checkpoint for session {session_id} "
                         f"({'an older one was archived' if existing is not None else 'none exists'}); "
                         "writing a stub, which inject does not emit")
         existing = f"# Compaction checkpoint\n\n- session: {session_id}\n\n{_STUB_BODY}\n"
@@ -652,7 +675,12 @@ def _fit(body: str, footer: str) -> str:
 
 
 def _age_label(age: float) -> str:
-    return "under a minute" if age < 90 else f"{round(age / 60)} min"
+    if age < 90:
+        return "under a minute"
+    minutes = round(age / 60)
+    if minutes < 90:
+        return f"{minutes} min"
+    return f"{minutes // 60} h {minutes % 60} min"
 
 
 def run_inject(payload: dict) -> None:
@@ -666,18 +694,30 @@ def run_inject(payload: dict) -> None:
         return
     age = _written_age(text)
     if age is None:
-        _log("INFO", f"inject: {path} has no fresh written: stamp (older than {_FRESH_S / 60:.0f} min, "
+        _log("INFO", f"inject: {path} has no usable written: stamp (older than {_MAX_AGE_S / 3600:.0f} h, "
                      "missing, or a stub); nothing injected")
         return
-    trigger_match = _TRIGGER_RE.search(text.split("\n## ", 1)[0])
+    if _injected(text):
+        _log("INFO", f"inject: {path} was already injected by an earlier compaction; nothing injected")
+        return
+    header = text.split("\n## ", 1)[0]
+    trigger_match = _TRIGGER_RE.search(header)
     trigger = trigger_match.group(1) if trigger_match else "unknown"
     # The compact summary is already in the new context; the injection is the state that
     # was written down before it.
     cut = text.find(f"\n{_SUMMARY_HEADING}")
     body = text[:cut] if cut != -1 else text
     body = body.rstrip() + "\n\n"
+    if age < _STALE_NOTE_S:
+        when = "just before this session was compacted."
+    else:
+        # An idle compaction writes its checkpoint when the session goes idle and is applied
+        # at the next message (nexus-702gy).
+        when = ("when this compaction began. A compaction prepared while the session sat idle "
+                "is applied at the next message, so the state may have changed since it was "
+                "written: check git, beads and the board before acting on it.")
     intro = (f"The conexus PreCompact hook wrote this working-state checkpoint {_age_label(age)} ago "
-             f"(trigger {trigger}), just before this session was compacted. The state lives in "
+             f"(trigger {trigger}), {when} The state lives in "
              "version control, beads and the threads board, not in the summary.\n\n")
     footer = f"Full checkpoint (with the compact summary): {path}\n"
     context = _fit(intro + body, footer)
@@ -685,6 +725,13 @@ def run_inject(payload: dict) -> None:
         {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
     ) + "\n")
     sys.stdout.flush()
+    # Mark it used, so a later compaction whose pre did not run cannot inject it again.
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    marked = re.sub(r"(?m)^(- written: \S+)\s*$", rf"\1\n- injected: {stamp}", header, count=1)
+    try:
+        _write_atomic(path, marked + text[len(header):])
+    except OSError as exc:
+        _log("WARNING", f"inject: could not mark {path} injected: {exc}")
 
 
 _MODES = {"pre": run_pre, "post": run_post, "inject": run_inject}
