@@ -1821,6 +1821,26 @@ def _warn_if_harness_oauth_grant_present() -> None:
 
 @asynccontextmanager
 async def _t1_lifespan(_app: Any):
+    """The MCP server lifespan: :func:`_t1_lifespan_body`, then release
+    this process's peer-directory names (nexus-tu84w).
+
+    The body has four branches, each with its own yield and teardown; the
+    release wraps them all so no branch can leave a name live for one
+    ``DIRECTORY_TTL_S`` after a clean exit. It runs after the body's
+    teardown, which closes only T1 state: the lease writes through the T2
+    store, which that teardown does not touch.
+    """
+    import asyncio  # noqa: PLC0415 — stdlib, deferred like this module's other lifespan imports
+
+    try:
+        async with _t1_lifespan_body(_app):
+            yield
+    finally:
+        await asyncio.to_thread(_release_session_names)
+
+
+@asynccontextmanager
+async def _t1_lifespan_body(_app: Any):
     """T1 session lifespan (RDR-105 P4, reshaped at RDR-155 P4b / RDR-158 P3).
 
     Branch 0 (service) is the only branch: route T1 through
@@ -2553,6 +2573,26 @@ def _t1_shutdown() -> None:
     _t1_session_shutdown()
 
 
+def _release_session_names() -> None:
+    """Release every ``directory/<name>`` row this process leases, on a
+    clean exit (nexus-tu84w).
+
+    Without it an exit left the row live for one ``DIRECTORY_TTL_S``
+    (300 s), and a session restarted inside that window shared its name
+    with its own dead predecessor, so ``mailbox_send`` by name was refused
+    as ambiguous. Each release re-sends that lease's own nonce with a
+    one-second TTL, so it lapses only the row this process wrote. Called
+    from the lifespan ``finally``, :func:`_sigterm_handler` and
+    :mod:`atexit`, each BEFORE :func:`_t1_shutdown`; idempotent, because
+    the cache is empty after the first call. Never raises: a failure is
+    logged and the row lapses by TTL, as a crash's row does.
+    """
+    try:
+        _subscriptions.reset_cache()
+    except Exception as e:  # noqa: BLE001 — best-effort on exit; the row lapses by TTL
+        _log.warning("session_name_release_on_exit_failed", error=str(e))
+
+
 def _sigterm_handler(_signo: int, _frame: Any) -> None:
     """Run the shutdown path then exit.
 
@@ -2578,6 +2618,7 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
     # nexus-vpa9q: os._exit skips atexit, so drain queued search
     # telemetry here (bounded) before the process goes.
     _flush_search_telemetry_at_exit()
+    _release_session_names()
     _t1_shutdown()
     _os._exit(0)
 
@@ -15701,6 +15742,9 @@ def main():
     # _t1_shutdown is idempotent so all three paths can fire
     # without double-cleaning.
     atexit.register(_t1_shutdown)
+    # Registered after _t1_shutdown so it runs first (atexit is LIFO),
+    # as on the lifespan and SIGTERM paths (nexus-tu84w).
+    atexit.register(_release_session_names)
     signal.signal(signal.SIGTERM, _sigterm_handler)
     signal.signal(signal.SIGINT, _sigterm_handler)
     try:
