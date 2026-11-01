@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.92.0] - 2026-11-01
+
+Pairs with engine-service-v0.1.174 (REQUIRED_ENGINE_VERSION moves from v0.1.173). The engine deploys to the managed service before this client tag; its one wire entry is additive.
+
+### Changed
+
+- **A gateway 503 now holds every nx process on the box, so concurrent clients stop multiplying retries against an overloaded edge** (nexus-v1929). The T3 and T2/catalog retry loops each backed off on their own clock: on 2026-10-31, 19 concurrent `nx upgrade --auto` processes made about 2,000 retries against a 503ing edge and kept its admission pool at zero. A 503 now writes a not-before time and a strike count to `<config dir>/gateway-hold.json`; both loops wait out the hold before their first send and stretch their 503 retry sleeps to it. Strikes are shared across processes within 60 s, so the hold grows 2, 5, 10, 20, 30 s; a lone process keeps its old 2, 5, 10 s schedule. `Retry-After` lengthens the hold, every hold is capped at 30 s, waiters behind another process's hold add up to 2 s of jitter, and a success clears the strikes. The file is best effort: absent, garbled or unwritable means no shared hold.
+- **A clean MCP server exit releases its session's peer-directory name** (nexus-tu84w). The `directory/<name>` row lived for its 300 s TTL after the session ended, so a session restarted inside that window shared its name with its own dead predecessor, and `mailbox_send` by name was refused as held by two sessions (the 2026-10-31 coordinated restart). On stdin EOF, SIGTERM, SIGINT or a normal exit, nx-mcp now re-sends each lease with its own nonce and a one-second TTL, on its own thread with a 3 s bound alongside the T1 teardown. A crash or SIGKILL still leaves the row for one TTL. RDR-208 is amended to match (Sam's ruling).
+- **The RDR-205 session ledger template is retired** (nexus-onjvw; engine change, ships in engine-service-v0.1.174). `GET /v1/tuples/registry` lists seven templates instead of eight, and any `ledger/...` subspace answers `UnknownSubspace`. The engine migration deletes the rows the template left behind (40,785 on the managed service, none read since 7.70.0 removed the writer and every reader). Irreversible by design.
+
+### Plugin
+
+- The two review agents (`code-review-expert`, `substantive-critic`) get their own agent memory, bounded so it never replaces the T2 gate record, and every gate record the reviewers and the developer write carries `kind:gate`, `bead:` and `rdr:` tags (nexus-qo7ie.1, RDR-209 Amendment A1). The prose-edit line editor starts without the CLAUDE.md files (`omitClaudeMd`). See the plugin changelog.
+
+### Tests
+
+- Test tmp dirs, engine-substrate clusters, integration owner records and e2e lockdirs judge their owner live by a held lock, not a pid, so jobs in separate PID namespaces (lab-run #88) no longer reap each other's live trees (nexus-fuz9t).
+
 ## [7.91.1] - 2026-10-31
 
 Pairs with engine-service-v0.1.173 (`REQUIRED_ENGINE_VERSION` unchanged from 7.91.0). A patch release: the conexus plugin's hooks change, and the `nx` code is 7.91.0's. It was meant for the plugin-only fast lane, but the test fix that came with it touches the hook-skew harness, which the lane does not ship, so it was cut as a normal release.

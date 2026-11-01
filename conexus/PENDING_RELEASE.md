@@ -43,16 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v7.91.1)
+## Awaiting the next release (pinned: v7.92.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-- `conexus/skills/mailbox/SKILL.md` (nexus-onjvw): the reply-in-ack paragraph names `lock/<resource>`, not the RDR-184 ledger, as its example of a keys-only target the engine refuses with `SchemaViolation`; the ledger template is retired.
-- `prose-edit/agents/line-editor.md` (nexus-qo7ie.1): `omitClaudeMd: true`, so the agent starts without the user and project CLAUDE.md files, since its brief carries everything it uses; one line carries the writing-register rule (no em dash in its own text) for a repo with no style sheet.
-- `conexus/agents/code-review-expert.md` (nexus-qo7ie.1): `memory: user` gives the reviewer its own memory directory under `~/.claude/agent-memory/`, and a gate record it writes carries `kind:gate`, `bead:` and `rdr:` tags; a paragraph bounds the agent memory (never replaces the T2 gate record; reusable heuristics only, each naming its repo; index under 40 lines; none under a read-only brief).
-- `conexus/agents/substantive-critic.md` (nexus-qo7ie.1): `memory: user`, the same gate-record tags and memory paragraph, and the completion protocol names the T2 gate record as mandatory.
-- `conexus/agents/developer.md` (nexus-qo7ie.1): a fix-round gate record it writes carries `kind:gate`, `bead:` and `rdr:` tags.
-- `conexus/skills/orchestration/reference.md` (nexus-qo7ie.1): the T2 ttl rule says a gate record is written with no `ttl` and with gate tags, and the phase-close rollup sets its TTL (RDR-209 Amendment A1), in place of passing a ttl for review rounds, which the agent definitions contradicted.
-- `conexus/skills/substantive-critique/SKILL.md` (nexus-qo7ie.1): the T2 critique record carries the gate tags and leaves its TTL to the phase-close rollup.
-- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-qo7ie.1): the T2 row says omitting `ttl` is permanent (nexus-473mx), in place of the stale 30-day default.
 
 ## Deferred to the next client release
