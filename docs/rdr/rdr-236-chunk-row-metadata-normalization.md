@@ -447,8 +447,8 @@ critiqued once before Sam's gate decision (T2
   tenant and must carry tenant_id in its batches.
 - **RF-17 (Decided, Sam 2026-10-26).** tags is a set: a JSON array on the
   document filtered by containment, never a comma string matched by
-  equality; indexed files get a one-element array, a GENERATED column when
-  ruled, stored in the meta under Sam's option A (2026-10-31; amendment of
+  equality; indexed files get a one-element array (first ruled as a
+  GENERATED column; replaced by option A, stored in meta), stored in the meta under Sam's option A (2026-10-31; amendment of
   2026-11-01). The design
   changes the schema analysis forced (database CHECKs behind the Java
   allow-list after a mandatory allow-list-shaped sweep; the derived keys
@@ -698,7 +698,9 @@ has exactly one other home, and the engine enforces the rule on write.
    re-run exactly (nexus-bq06h's `exactOnUnderReturn`, whose trigger today
    is an empty page, extended to a short one there: more than the bound's
    worth of chashes qualify on that branch, so a short page is starved by
-   construction). A hit is reported under the qualifying owner. The
+   construction; this is the design, and as shipped the re-run covers every
+   statement carrying a manifest predicate, see the Proposed Solution). A
+   hit is reported under the qualifying owner. The
    post-search stage keeps the span and source_uri re-pointing, indexed_at
    and the non-id bib_* keys, and the per-owner re-evaluation of every
    label predicate; label filters, which under-fill through the same cut
@@ -845,9 +847,15 @@ schema analysis chose GENERATED columns on `catalog_documents` to avoid
 it; Sam's option A (2026-10-31, amended into this text 2026-11-01) chose
 stored meta keys and accepts the dependency: each key is stamped at
 register time and filled for older documents by `nx catalog backfill-meta`,
-fill-only, and a stamp is not recomputed when content_type or file_path
-later changes. A re-index fills tags and category only when the key is
-empty (nexus-3ax49). frecency_score depends on the document and the time it was
+fill-only. For tags and category, a stamp is not recomputed when
+content_type or file_path later changes: a re-index fills them only when
+the key is empty (absent, null, empty string or empty array) and keeps the
+first non-empty stamp (nexus-3ax49, Sam 2026-11-01), so a wrong or
+order-dependent stamp is corrected by hand with `nx catalog update
+<tumbler> --meta '{...}'` (in batch by `--owner` or `--search`), and a chunk
+row's tags and category, which follow the last writer, may differ from the
+document's. source_format is not covered: it is compared and re-stamped on
+every re-register, and nothing reads the stored key. frecency_score depends on the document and the time it was
 computed (`frecency.py` uses now()), so its home carries a computed_at.
 tags is a set (Sam, 2026-10-26, RF-17): in 4NF a child relation
 (document, tag), in practice a JSON array on the document meta filtered
@@ -903,7 +911,7 @@ the enforcement this RDR adds:
 | chunk_index = position | CHECK (6pfgb.42) | negligible |
 | labels_written false means the labels are NULL | CHECK on `catalog_document_chunks`; not censused by RF-16, counted by the Step 3 dry run first, added in 6pfgb.42's own step (not the chunk routes) | negligible |
 | ttl_days > 0 means put_at present | CHECK on `catalog_documents` meta, counted at the .10 dry run, added NOT VALID only after the Step 2c paired cut (a pre-6pfgb.15 client writes ttl_days without put_at and would be refused by a NOT VALID CHECK; after 2c such a client is already refused, so the ledger entry is the same not-additive one) and VALIDATEd in its own step (6pfgb.44) | negligible |
-| derived document keys (source_format; indexed files' tags and category) | none in the database (option A): stored meta keys stamped at register by one rule per key (`src/nexus/catalog/indexed_meta.py`) and filled for older documents by backfill-meta; a later change to content_type or file_path does not restamp them | one regex per register for source_format |
+| derived document keys (source_format; indexed files' tags and category) | none in the database (option A): stored meta keys stamped at register by one rule per key (`src/nexus/catalog/indexed_meta.py`) and filled for older documents by backfill-meta; a later change to content_type or file_path does not restamp tags and category (a re-index fills them only if empty and keeps the first non-empty stamp; correct by `nx catalog update --meta`), while source_format is re-stamped on every re-register | one regex per register for source_format |
 
 Why both the Java check and the CHECK: the Java check validates what a
 client sends on the write routes, can name the key and its home in a 422,
@@ -1096,9 +1104,12 @@ iterative scan stopped at `hnsw.max_scan_tuples` or the `work_mem` budget
 extends `exactOnUnderReturn` (nexus-bq06h) from an empty page to a short
 one on this branch and, as shipped (nexus-6pfgb.61), on every statement
 carrying a manifest predicate, its recorded residual; the exact branch is
-already exact and never re-runs; a dense-branch page is legitimately short
-only when `n_results` exceeds the qualifying live rows, which the probe's
-count rules out before the search (RF-22). The re-run orders the collection without the index (a
+already exact and never re-runs. This is the design (the catalog-probe
+branch): there a dense-branch page is legitimately short only when
+`n_results` exceeds the qualifying live rows, which the probe's count rules
+out before the search (RF-22). The shipped engine evaluates the manifest
+predicate inside the search instead, with no probe; the text that begins
+"What follows is the shipped" below states that behaviour. The re-run orders the collection without the index (a
 bitmap or sequential scan, then a sort), O(collection) per starved call,
 within the two statement_timeout bounds bq06h records, and is counted. Positive label filters take the same EXISTS on the
 manifest alone (nexus-p89h4, absorbed here), carrying the `labels_written`
@@ -1109,8 +1120,10 @@ predicates per owning document over the admitted chunks (at the document's
 lowest passing position, as today) to name the qualifying owner and its
 labels, and the EXISTS carries the stage's full operator set (`$eq`,
 `$ne`, `$in`, `$nin`, `$gt`, `$gte`, `$lt`, `$lte` on page_number, RF-24),
-negative operators included, so no label predicate is left to the cut. A
-label-only filter has no catalog probe, and its short page is not left
+negative operators included, so no label predicate is left to the cut. What
+follows is the shipped in-engine manifest-predicate behaviour (nexus-6pfgb.61),
+which replaces the probe branch's count-based reasoning above: a label-only
+filter has no catalog probe, and its short page is not left
 alone: the shipped engine re-runs it, which is A8's named guard
 (nexus-6pfgb.61). The HNSW walk that carries the manifest predicate stops
 at `hnsw.max_scan_tuples`, so a rare label ranked past the cap yields only
@@ -1123,9 +1136,13 @@ trigger is any statement carrying a manifest predicate (labels, title,
 content_type, catalog-meta keys), not label-only filters alone, so a
 positive filter that matches fewer than widen(n) chunks in a collection
 above the router threshold pays the re-run every time. Its cost is bounded
-three ways. A collection of at most 20,000 rows (the router threshold)
-already takes the exact plan, so the re-run is never reached there. Above
-it the re-run is one exact statement, O(collection), run under the
+three ways. On the plain-search route, a collection of at most 20,000 rows
+(the router threshold) already takes the exact plan, so the re-run is never
+reached there. The hybrid dense-gate branch is different: it is taken when
+the text gate matches more than SELECTIVE_GATE_MAX (5000) chashes, and
+`PgVectorRepository` passes `rerunWhenShort=true` to it whatever the
+collection's size, so a starved hybrid page pays the re-run in a small
+collection too. Above the threshold, and on that branch, the re-run is one exact statement, O(collection), run under the
 statement_timeout rebound before it (the review of the shipped engine read
 that as 30 s). And it runs under a savepoint, so a timeout or any other
 failure returns the page in hand and logs `vector_short_page_rerun_failed`
@@ -1225,8 +1242,12 @@ filled. Position labels (nexus-1nrcu) copy only when the chash has exactly
 one manifest row in the tenant, not one live owner (RF-16: 4976 groups in
 1752 documents recur inside their own document). tags, category and
 source_format for indexed documents are stamped at register time and filled
-for older documents by this same verb (`nx catalog backfill-meta`), fill-only
-and each key by its own presence. They are derived from the entry's
+for older documents by this same verb (`nx catalog backfill-meta`), fill-only.
+source_format is final by its presence; tags and category of
+indexed documents share one definition of empty with a re-index (absent,
+null, empty string or empty array are filled, any other value is kept;
+`indexed_meta.is_unset`, nexus-3ax49), so the backfill and a re-index fill
+and keep the same values. They are derived from the entry's
 content_type and file_path alone, so no chunk row is read and no ownership
 is judged. source_format (nexus-6pfgb.23) is
 `indexed_meta.catalog_source_format`, the Python copy of the engine's
@@ -1245,9 +1266,10 @@ or rdr file at a `.pdf` path, where `nx index pdf` would have stamped
 entry with no path, such as a `paper` that is an `nx catalog backfill`
 placeholder) and `no_rule` (any other content type, `markdown` included).
 The engine's chunk-row fallback for a `where` on these keys stays until the
-row keys retire. A re-index later fills tags and category only when the key
-is empty, and keeps a non-empty curated value (Sam, 2026-11-01,
-nexus-3ax49). The tags the verb does fill for notes, from a row's comma string, are
+row keys retire. A re-index fills tags and category only when the key is
+empty, and keeps a non-empty curated value (Sam, 2026-11-01,
+nexus-3ax49); it therefore also closes `ambiguous_indexer` residue, since
+the unfilled key is empty and the indexer that runs knows its own tag. The tags the verb does fill for notes, from a row's comma string, are
 written as the array (6pfgb.38's form), never as the string. The run asserts it examined at least one document; the
 first live run's counts go on the bead. The backfill, the expiry sweep and the export share the two
 helpers in `note_ttl.py` that implement option B (`row_written_by` for
@@ -2105,6 +2127,20 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   (2) The Proposed Solution's statement that a label-only page is never
   re-run now describes the shipped engine, which re-runs any page carrying
   a manifest predicate that returns fewer than widen(n) rows (A8's named
-  guard, nexus-6pfgb.61), with its cost bound (router-exact route at or
-  below 20,000 rows never re-runs; rebound statement timeout; savepoint
-  fallback). Beads nexus-xrfev, nexus-9cstf, nexus-3ax49.
+  guard, nexus-6pfgb.61), with its cost bound (the plain-search
+  route at or below 20,000 rows never re-runs, but the hybrid dense-gate
+  branch re-runs at any collection size; rebound statement timeout;
+  savepoint fallback). (3) After Sam's ruling of the same day, the code and
+  the text were reviewed again and corrected: the stale-stamp window ("a
+  stamp is not recomputed when content_type or file_path changes") is
+  scoped to tags and category, since source_format is compared and
+  re-stamped on every re-register and has no reader; the first non-empty
+  tags or category stamp is kept across re-index, with the correction path
+  `nx catalog update <tumbler> --meta '{...}'` (batch by `--owner` or
+  `--search`); `nx catalog backfill-meta` and a re-index share one
+  definition of empty for indexed tags and category, and a re-index closes
+  `ambiguous_indexer` residue by filling the empty key; the probe-branch
+  text of the Proposed Solution is labelled as the design and the
+  in-engine manifest-predicate text as what shipped; and the key-table
+  history line now says the column was "first ruled as GENERATED". Beads
+  nexus-xrfev, nexus-9cstf, nexus-3ax49.
