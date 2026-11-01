@@ -66,8 +66,8 @@ _STANDIN = textwrap.dedent(
               "### Uncommitted\\n M a.py\\n\\n"
               "### Recent commits (last 10 on this branch)\\n" + commits + "\\n\\n"
               "### Open PRs from this branch\\n(none)\\n\\n"
-              "### In-progress beads\\no nexus-3lqxv Auto-continuation\\n"
-              "├── o nexus-3lqxv.2 its child\\no nexus-zz9yx another session's bead\\n\\n"
+              "### In-progress beads\\n◐ nexus-3lqxv ● P2 Auto-continuation\\n"
+              "├── ◐ nexus-3lqxv.2 ● P2 its child\\n◐ nexus-zz9yx ● P2 another session's bead\\n\\n"
               "----\\nTotal: 3 issues\\n\\n"
               "### Ready beads (top 10)\\n" + ready + "\\n\\n### nx memory (x) titles\\nmemo-one\\nmemo-two\\n\\n"
               "### Feedback memories\\nfeedback-one\\n")
@@ -166,7 +166,7 @@ class TestPre:
         assert f"- session: {SID}" in text
         assert "- trigger: auto" in text
         assert "- written: 20" in text and text.count("+00:00") >= 1  # a UTC stamp
-        assert "### In-progress beads" in text and "nexus-3lqxv Auto-continuation" in text
+        assert "### In-progress beads" in text and "P2 Auto-continuation" in text
         assert f"## Threads board entry (threads/{NAME})" in text and "state: building" in text
         assert nx_calls(env) == [
             "command-context continuation", "memory list --project threads", "memory get 101 --project threads"
@@ -232,21 +232,21 @@ class TestPre:
         """Every session claims under one assignee; the board's ref is this session's own list."""
         run(mod, monkeypatch, "pre", pre_payload())
         section = mod._in_progress_section((env.checkpoints / f"{SID}.md").read_text(encoding="utf-8"))
-        assert "nexus-3lqxv Auto-continuation" in section and "nexus-3lqxv.2 its child" in section
+        assert "nexus-3lqxv ● P2 Auto-continuation" in section and "nexus-3lqxv.2 ● P2 its child" in section
         assert "nexus-zz9yx" not in section and "Total:" not in section
-        assert "(2 of 3 in-progress beads" in section
+        assert "(2 of the 3 in-progress beads listed" in section
 
     def test_without_a_board_the_in_progress_list_is_whole(self, mod, env, monkeypatch) -> None:
         monkeypatch.setenv("FAKE_BOARD", "missing")
         run(mod, monkeypatch, "pre", pre_payload())
         section = mod._in_progress_section((env.checkpoints / f"{SID}.md").read_text(encoding="utf-8"))
-        assert "nexus-zz9yx" in section and "in-progress beads: the ones" not in section
+        assert "nexus-zz9yx" in section and "beads listed" not in section
 
     def test_continuation_runs_in_the_worktree_named_after_the_session(self, mod, env, monkeypatch, tmp_path) -> None:
         """The payload cwd is the launch directory (the shared primary); the session works in its worktree."""
         primary = tmp_path / "primary"
         primary.mkdir()
-        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(primary)]
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", "-C", str(primary)]
         subprocess.run([*git, "init", "-q"], check=True)
         subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "root"], check=True)
         for wt in ("linda_2", NAME):  # a prefix-named worktree is not the session's
@@ -263,7 +263,37 @@ class TestPre:
         monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
         run(mod, monkeypatch, "pre", pre_payload(cwd=str(tmp_path)))  # not a repository
         assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == os.path.realpath(tmp_path)
-        assert "- worktree:" not in (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert f"- worktree: none named {NAME};" in (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        ("rows", "board", "kept", "dropped"),
+        [
+            # another repo's prefix and a 3-char hash
+            ("◐ labrun-56v.1.6 ● P2 x\n◐ labrun-a1b ● P2 y", "ref: labrun-56v.1", ["labrun-56v.1.6"], ["labrun-a1b"]),
+            # a legacy 4-char nexus id
+            ("◐ nexus-9clx ● P2 x\n◐ nexus-zz9yx ● P2 y", "ref: nexus-9clx", ["nexus-9clx"], ["nexus-zz9yx"]),
+            # naming a child does not name its siblings
+            ("◐ nexus-z1d0l.1.1 ● P2 x\n└── ◐ nexus-z1d0l.1.5 ● P2 y", "ref: nexus-z1d0l.1.5", ["nexus-z1d0l.1.5"], ["nexus-z1d0l.1.1"]),
+        ],
+        ids=["other-prefix", "legacy-id", "child-exact"],
+    )
+    def test_the_filter_reads_any_bd_row(self, mod, rows, board, kept, dropped) -> None:
+        out = mod._in_progress_section(mod._filter_in_progress(f"### In-progress beads\n{rows}\n", board))
+        assert all(k in out for k in kept) and not any(d in out for d in dropped), out
+
+    @pytest.mark.parametrize(
+        ("rows", "board"),
+        [
+            ("◐ nexus-aaaaa ● P2 claimed after the board was written", "ref: nexus-closd"),  # nothing kept
+            ("- (bd unavailable or no results)", "ref: nexus-3lqxv"),  # a bd outage
+            ("◐ nexus-aaaaa ● P2 mine", "ref: (none yet)\nwaiting_on: nexus-peerx"),  # only a peer's bead
+            ("◐ nexus-aaaaa ● P2 mine", "state: no ref line"),
+        ],
+        ids=["zero-kept", "bd-outage", "waiting-on-only", "no-ref-line"],
+    )
+    def test_the_filter_fails_open(self, mod, rows, board) -> None:
+        shaped = f"### In-progress beads\n{rows}\n\n### Uncommitted\n M a.py\n"
+        assert mod._filter_in_progress(shaped, board) == shaped
 
     def test_survives_a_missing_nx(self, mod, env, monkeypatch) -> None:
         monkeypatch.setattr(mod, "_nx_command", lambda: None)
@@ -421,7 +451,7 @@ class TestInject:
         code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
         ctx = self._ctx(out)
         assert code == 0
-        assert "nexus-3lqxv Auto-continuation" in ctx and "state: building" in ctx
+        assert "P2 Auto-continuation" in ctx and "state: building" in ctx
         assert str(env.checkpoints / f"{SID}.md") in ctx.splitlines()[-1]
         assert "SUMMARY-SENTINEL" not in ctx, "the summary is already in the new context; do not repeat it"
 
@@ -487,7 +517,7 @@ class TestInject:
         assert len(full.encode()) > mod._INJECT_CAP_BYTES * 2
         ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
         assert len(ctx.encode()) <= 8192
-        assert "nexus-3lqxv Auto-continuation" in ctx and "state: building" in ctx
+        assert "P2 Auto-continuation" in ctx and "state: building" in ctx
         assert "commit number 100" not in ctx and "[omitted for size" in ctx
         assert ctx.splitlines()[-1].startswith("Full checkpoint")
 

@@ -105,6 +105,8 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 #: A nexus bead id: ``nexus-`` and five lowercase alphanumerics, optional ``.N`` suffix.
 #: Ordinary hyphenated words (ready-beads, auto-memory) are not ids.
 _BEAD_ID_RE = re.compile(r"\bnexus-[0-9a-z]{5}(?![0-9a-z])(?:\.\d{1,3})?")
+#: A ``bd list`` row: optional tree glyphs, a status glyph, then the bead id (any prefix).
+_BD_ROW_RE = re.compile(r"^[\s│├└─]*[○◐●✓❄]\s+([a-z][a-z0-9_]*(?:-[a-z0-9_]+)*-[0-9a-z]{2,}(?:\.\d+)*)\s")
 _WRITTEN_RE = re.compile(r"(?m)^- written: (\S+)\s*$")
 _TRIGGER_RE = re.compile(r"(?m)^- trigger: (.{1,32})$")
 #: Subsections of the continuation output that are not kept: the same-event SessionStart
@@ -339,6 +341,8 @@ def _git_worktrees(cwd: str | None, timeout: float) -> list[str]:
         _log("WARNING", f"pre: `git worktree list` failed: {type(exc).__name__}: {exc}")
         return []
     if result.returncode != 0:
+        tail = (result.stderr or "").strip().splitlines()[-1:] or [""]
+        _log("WARNING", f"pre: `git worktree list` exited {result.returncode}: {tail[0][:200]}")
         return []
     return [ln[len("worktree "):].strip() for ln in result.stdout.splitlines() if ln.startswith("worktree ")]
 
@@ -352,33 +356,51 @@ def _session_worktree(name: str | None, cwd: str | None) -> str | None:
     """
     if not name:
         return None
-    for path in _git_worktrees(cwd, _GIT_TIMEOUT_S):
-        if Path(path).name == name and os.path.isdir(path):
-            return path
+    try:
+        for path in _git_worktrees(cwd, _GIT_TIMEOUT_S):
+            if Path(path).name == name and os.path.isdir(path):
+                return path
+    except Exception as exc:  # noqa: BLE001 -- a lookup failure keeps the launch directory, never the checkpoint
+        _log("WARNING", f"pre: worktree lookup failed: {type(exc).__name__}: {exc}")
     return None
 
 
+def _named_exactly(token: str, text: str) -> bool:
+    """*token* occurs in *text* as a whole id: ``nexus-z1d0l.1`` is not named by ``nexus-z1d0l.1.5``."""
+    return re.search(rf"(?<![\w.-]){re.escape(token)}(?![\w-]|\.\w)", text) is not None
+
+
 def _filter_in_progress(shaped: str, board: str) -> str:
-    """Keep only the in-progress beads the board entry names (or their children).
+    """Keep the in-progress beads the board entry names, and their children; fail open.
 
-    Every session claims beads under one assignee, so the in-progress list is everyone's.
-    The board entry's ``ref:`` lines are this session's own record of its beads. With no
-    bead id on the board the list is left whole.
+    Every session claims beads under one assignee, so the in-progress list is everyone's,
+    and the board entry's ``ref:`` lines are this session's own record of its beads (a
+    ``waiting_on:`` line names peers' beads, so it is not read). Rows are read by
+    ``bd list``'s row shape (a status glyph, then the id), so any repo's id prefix works.
+    The list is left whole when it has no bead rows (``bd`` unavailable) or when the board
+    names none of them (another repo, a board written before the session's newest claim,
+    a board naming only closed beads): dropping the session's own bead is worse than
+    keeping other sessions'. ``bd`` caps the list (``--limit``), so the count says "listed".
     """
-    own = set(_BEAD_ID_RE.findall(board))
-    if not own:
-        return shaped
     match = re.search(r"(?ms)^(### In-progress beads[^\n]*\n)(.*?)(?=^### |\Z)", shaped)
-    if match is None:
+    refs = "\n".join(ln for ln in board.splitlines() if re.match(r"^\s*ref:", ln))
+    if match is None or not refs:
         return shaped
-    rows = [ln for ln in match.group(2).splitlines() if _BEAD_ID_RE.search(ln)]
+    rows: list[tuple[str, str]] = []
+    for line in match.group(2).splitlines():
+        row = _BD_ROW_RE.match(line)
+        if row:
+            rows.append((row.group(1), line))
 
-    def mine(line: str) -> bool:
-        return any(i == b or i.startswith(b + ".") for i in _BEAD_ID_RE.findall(line)[:1] for b in own)
+    def mine(bead_id: str) -> bool:
+        parts = bead_id.split(".")
+        return any(_named_exactly(".".join(parts[:n]), refs) for n in range(len(parts), 0, -1))
 
-    kept = [ln for ln in rows if mine(ln)]
-    note = (f"({len(kept)} of {len(rows)} in-progress beads: the ones this session's board entry names; "
-            "the rest are other sessions')")
+    kept = [line for bead_id, line in rows if mine(bead_id)]
+    if not kept:
+        return shaped
+    note = (f"({len(kept)} of the {len(rows)} in-progress beads listed: the ones this session's board entry "
+            "names; the others are not named on the board, which may include a bead claimed since it was written)")
     body = "\n".join([*kept, note]) + "\n\n"
     return shaped[: match.start(2)] + body + shaped[match.end(2):].lstrip("\n")
 
@@ -441,6 +463,8 @@ def run_pre(payload: dict) -> None:
         parts.append(f"{_NAME_LINE}{name}")
     if worktree:
         parts.append(f"- worktree: {worktree}")
+    elif name:
+        parts.append(f"- worktree: none named {name}; the working state is the launch directory's")
     parts.append("")
     if name:
         parts.append(f"## Threads board entry ({_BOARD_PROJECT}/{name})\n")
