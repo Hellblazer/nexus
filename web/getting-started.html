@@ -270,7 +270,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="cmd"><pre>Show me the topic map for this project. Which topics appear in both the code and the documentation?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Claude runs <code>nx taxonomy list</code> and <code>nx taxonomy hubs</code>. The hubs are topics that connect several collections, and they are often the most important ideas in the project. You can then limit a search to one topic. Say <em>"Search for <span class="ph">&lt;A QUESTION&gt;</span> inside the topic <span class="ph">&lt;TOPIC&gt;</span> only."</em> Claude gives the topic to the <code>search</code> tool, which leaves out results from other topics.</p>
-<p>When a topic is wrong, say so: <em>"The topic <span class="ph">&lt;TOPIC&gt;</span> should be called <span class="ph">&lt;BETTER NAME&gt;</span>."</em> Claude runs <code>nx taxonomy rename</code>. To move one document to a topic, say <em>"Assign <span class="ph">&lt;DOCUMENT&gt;</span> to the topic <span class="ph">&lt;TOPIC&gt;</span>,"</em> and Claude runs <code>nx taxonomy assign</code>. To review every topic, run <code>nx taxonomy review</code> in the terminal, which goes through them one by one while you accept, rename, or merge each.</p>
+<p>When a topic is wrong, say so: <em>"The topic <span class="ph">&lt;TOPIC&gt;</span> should be called <span class="ph">&lt;BETTER NAME&gt;</span>."</em> Claude runs <code>nx taxonomy rename</code>. To move one chunk to a topic, say <em>"Assign <span class="ph">&lt;CHUNK OR FILE&gt;</span> to the topic <span class="ph">&lt;TOPIC&gt;</span>,"</em> and Claude runs <code>nx taxonomy assign</code>. To review every topic, run <code>nx taxonomy review</code> in the terminal, which goes through them one by one while you accept, rename, or merge each.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md">Document catalog</a>: all link types, and how links change search ranking.</li>
@@ -310,7 +310,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <!-- ============ 5 ============ -->
 <section class="lesson" id="l5">
 <div class="lhead"><span class="lnum">5</span><h2>Record a decision with an RDR</h2></div>
-<p class="why">An RDR (Research, Design, Review) is a short document you write before you write code. It records the problem, what you found out, the options, and the option you chose. Write one when a problem has more than one good solution or a bug needs a real cause. Write one too when a change affects something other people depend on. Closing an RDR indexes it into the knowledge store, so a later search for a similar decision finds it.</p>
+<p class="why">An RDR (Research, Design, Review) is a short document you write before you write code. It records the problem, what you found out, the options, and the option you chose. Write one when a problem has more than one good solution or a bug needs a real cause. Write one too when a change affects something other people depend on. Accepting an RDR indexes it into the knowledge store, and closing it refreshes that copy, so a later search for a similar decision finds it.</p>
 
 <div class="see">You might say</div>
 <div class="cmd"><pre>/conexus:rdr-create</pre><button class="copy" type="button">Copy</button></div>
@@ -389,7 +389,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="see">You might say</div>
 <div class="cmd"><pre>/conexus:upgrade</pre><button class="copy" type="button">Copy</button></div>
 <p>The skill shows what an update would change, then runs it. From the terminal the same update is two commands, <code>nx self install</code> and then <code>nx upgrade</code>, and you always run both.</p>
-<div class="callout"><p><strong>Do not</strong> update with <code>uv tool install conexus</code> or with <code>--force</code>. That command takes the <code>nx</code> shims away from Nexus, so your terminal quietly runs a different install. <code>nx self install</code> puts them back.</p></div>
+<div class="callout"><p><strong>Do not</strong> update with <code>uv tool install conexus</code>. A plain install builds a second copy that Nexus does not use. With <code>--force</code> it also takes the <code>nx</code> shims, so your terminal runs that copy without telling you. <code>nx self install</code> puts them back.</p></div>
 
 <h3>Keep the index current</h3>
 <div class="see">You might say</div>
