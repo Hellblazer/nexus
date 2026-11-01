@@ -3,8 +3,8 @@
 """nexus-qrldo: scripts/testcontainers_sweep.py removes this repo's orphaned
 Testcontainers containers before a Java build.
 
-``~/.testcontainers.properties`` disables Ryuk on the dev boxes, so a killed JVM
-leaves its containers running; on 2026-11-01 29 of them filled the laptop's
+The laptop's ``~/.testcontainers.properties`` disables Ryuk, so a killed JVM
+with Ryuk off leaves its containers running; on 2026-11-01 29 of them filled the laptop's
 colima disk. The sweep removes containers carrying both ``org.testcontainers=true``
 and this repo's ``dev.nexus.test.run`` label, older than the age bound, and never
 fails the build. Driven against a fake ``docker`` on PATH that records its argv

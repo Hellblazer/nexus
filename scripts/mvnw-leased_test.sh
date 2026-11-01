@@ -17,6 +17,9 @@ unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
 # A lab-run grant exports LAB_CPUS, which changes the wrapper's behaviour
 # (nexus-iqmih); the cases that want it set it themselves.
 unset LAB_CPUS GITHUB_ACTIONS
+# The wrapper's Ryuk default is under test (nexus-qrldo); the case that wants
+# a caller's value sets it itself.
+unset TESTCONTAINERS_RYUK_DISABLED
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -82,6 +85,7 @@ cat > "$repo/service/mvnw" <<'STUB'
 {
     echo "CWD=$(pwd)"
     echo "ARGS=$*"
+    echo "RYUK_DISABLED=${TESTCONTAINERS_RYUK_DISABLED-unset}"
 } > "$MVNW_STUB_MARKER"
 exit 0
 STUB
@@ -110,6 +114,12 @@ if [[ -f "$marker" ]]; then
         ok "fake mvnw ran with cwd=service/"
     else
         bad "unexpected cwd: $content (expected CWD=$expected_service_dir)"
+    fi
+    # nexus-qrldo: the build runs with Ryuk on unless the caller says otherwise.
+    if [[ "$content" == *"RYUK_DISABLED=false"* ]]; then
+        ok "the build runs with TESTCONTAINERS_RYUK_DISABLED=false"
+    else
+        bad "Ryuk not switched on for the build: $content"
     fi
 else
     bad "fake mvnw was never invoked (marker file missing) — lease acquire likely failed"
@@ -201,6 +211,11 @@ if [[ "$(cat "$marker1b" 2>/dev/null)" == *"ARGS=-q test -Dtest=Foo"* ]]; then
 else
     bad "mvnw was not run inside lab-run"
 fi
+if [[ "$(cat "$marker1b" 2>/dev/null)" == *"RYUK_DISABLED=false"* ]]; then
+    ok "the build inside lab-run runs with TESTCONTAINERS_RYUK_DISABLED=false"
+else
+    bad "Ryuk not switched on inside lab-run: $(cat "$marker1b" 2>/dev/null)"
+fi
 if [[ ! -d "$leasedir" ]]; then ok "lease released after the --lab-run build"; else bad "lease still held after the --lab-run build"; fi
 
 echo "Test 1c: --lab-run with no lab-run on PATH fails loud and takes no lease"
@@ -223,6 +238,16 @@ out1e="$(LAB_CPUS=8 PATH="$stubbin:$PATH" LABRUN_STUB_MARKER="$WORKDIR/unused-la
 rc1e=$?
 if [[ $rc1e -eq 64 && "$out1e" == *"inside a lab-run grant"* ]]; then ok "rc 64 naming the nested grant"; else bad "rc $rc1e (expected 64): $out1e"; fi
 if [[ ! -f "$marker1e" && ! -d "$leasedir" ]]; then ok "no mvnw run, no lease left"; else bad "mvnw ran or the lease was left held"; fi
+
+# ── Test 1r: a caller's TESTCONTAINERS_RYUK_DISABLED=true survives (nexus-qrldo)
+echo "Test 1r: a caller can still turn Ryuk off"
+marker1r="$WORKDIR/stub-invocation-1r.txt"
+TESTCONTAINERS_RYUK_DISABLED=true MVNW_STUB_MARKER="$marker1r" "$repo/scripts/mvnw-leased.sh" -q validate >/dev/null 2>&1
+if [[ -f "$marker1r" && "$(cat "$marker1r")" == *"RYUK_DISABLED=true"* ]]; then
+    ok "the caller's TESTCONTAINERS_RYUK_DISABLED=true reaches the build"
+else
+    bad "the caller's Ryuk setting was overridden: $(cat "$marker1r" 2>/dev/null)"
+fi
 
 # ── Test 2: refuses (rc 75) and never invokes mvnw when the lease is held ─
 echo "Test 2: mvnw-leased.sh refuses when the lease is already held"

@@ -3,10 +3,14 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Remove this repo's orphaned Testcontainers containers before a Java build (nexus-qrldo).
 
-The dev boxes run Testcontainers with Ryuk disabled
-(``~/.testcontainers.properties``: ``testcontainers.ryuk.disabled=true``, which
-the fenced gates link through for the Maven jar rebuild), so a JVM that is
-killed or exits without stopping its containers leaves them running. On
+The laptop's ``~/.testcontainers.properties`` sets
+``testcontainers.ryuk.disabled=true`` (the fenced gates link it through for the
+Maven jar rebuild), so a JVM that is killed or exits without stopping its
+containers leaves them running. Leased builds now override it with
+``TESTCONTAINERS_RYUK_DISABLED=false`` (``leased_build_run``), so Ryuk reaps their
+containers; this sweep is the backstop for the paths that still run with Ryuk
+off (a bare ``./mvnw``, the local-service gate's own build, a caller's opt-out)
+and for a reap Ryuk missed. On
 2026-11-01 the laptop's colima VM held 29 such ``pgvector/pgvector:pg17``
 containers, up to 39 h old; with their json-file logs and tmpfs PGDATA the
 100 GiB disk filled and a release leg failed with "No space left on device".
