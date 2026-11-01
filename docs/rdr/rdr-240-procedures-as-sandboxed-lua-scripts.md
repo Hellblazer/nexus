@@ -263,12 +263,16 @@ schema.
      caller's working tree.
    - `tables.get(name)`: a checked table from `src/nexus/tables/`.
 5. **`transcripts`.** Queries, each a function in the script with a fixture
-   test: `agents` (dispatches by agent type and model, starting context,
+   test, called with the argument object `{query, since, project}` (`since`
+   a UTC date, `project` a Claude Code project directory name or `all`):
+   `agents` (dispatches by agent type and model, starting context,
    turns, errors, estimated cost), `tools` (calls per tool and MCP server,
-   deferred against called, and per `nx` CLI verb called through Bash, which
-   RDR-238's cold-state report needs), `skills` (the skill-routing census, ported),
-   `memory` (memory-file reads and writes, T2 reads by project and title
-   from `memory_get` and `memory_search` calls, and what loaded into a subagent's
+   deferred against called, and per `nx` CLI verb called through Bash, read
+   from the Bash command text inside the procedure, which RDR-238's
+   cold-state report needs), `skills` (the skill-routing census, ported),
+   `memory` (memory-file reads and writes, T2 reads per title
+   from `memory_get` calls and per project from `memory_search` calls, which
+   carry no title, and what loaded into a subagent's
    instructions), `violations` (named rule detectors, counted per 100 main
    sessions and reading message bodies inside the procedure, RDR-238's Phase
    2 before and after counts), `loads` (instruction files, their types and
