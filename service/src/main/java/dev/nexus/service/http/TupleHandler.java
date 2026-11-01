@@ -95,7 +95,12 @@ import java.util.Optional;
  *   POST /v1/tuples/release         {claim_id, claimant} -&gt; {"released": true}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
  *   GET  /v1/tuples/subspace_list   ?prefix=&amp;limit=&amp;after= -&gt; {"subspaces": [...], "next_cursor"?: "&lt;subspace&gt;"}
- *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, lapsed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
+ *                                   each subspace is a census {subspace, total, available, claimed, dead, consumed,
+ *                                   expired_unpurged, oldest_created_at, newest_created_at, lapsed, delayed,
+ *                                   oldest_claimable_created_at, template}; {@code template} (nexus-mdbds.2.13)
+ *                                   is the name of the template the subspace resolves to, e.g.
+ *                                   {@code board/ci/<topic>}, null when none does
+ *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; the same census object for one subspace
  *   GET  /v1/tuples/park_stats      -&gt; {max_global, max_per_claimant, global_in_use, refused_global,
  *                                        refused_claimant, per_claimant: {claimant: slots}}
  *                                       (RDR-211 Phase 1 Step 1, bead nexus-rplay.7 -- process-wide counters,
@@ -697,6 +702,10 @@ public final class TupleHandler implements HttpHandler {
         // among live unclaimed rows a claim could take now: null when there are none.
         m.put("delayed", c.delayed());
         m.put("oldest_claimable_created_at", c.oldestClaimableCreatedAt());
+        // nexus-mdbds.2.13 (RDR-239): additive. The name of the template TemplateRegistry.resolve returns
+        // for this subspace (e.g. "board/ci/<topic>"), JSON null when none resolves: a subspace_list row
+        // can outlive its template. The key is always written. Appended last, so no existing field moves.
+        m.put("template", repo.resolveTemplateName(c.subspace()));
         return m;
     }
 

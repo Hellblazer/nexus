@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Engine: `GET /v1/tuples/subspace_list` rows and `GET /v1/tuples/subspace_stats` gain an additive `template` field naming the template the subspace resolves to (`board/ci/<topic>`, `aspects`, ...), null when none does, so a client no longer copies `TemplateRegistry.resolve` (nexus-mdbds.2.13, RDR-239).
+
 ## [7.93.0] - 2026-11-01
 
 Pairs with engine-service-v0.1.174 (REQUIRED_ENGINE_VERSION unchanged from 7.92.0). Golden release for the compaction-continuation work.

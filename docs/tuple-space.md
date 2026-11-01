@@ -67,7 +67,12 @@ release(claim_id, claimant) -> {"released": true}          # ownership checked; 
                                                             # a failure (RDR-211)
 subspace_list(prefix, limit=None, after=None) -> {subspaces: [{subspace, total, available, claimed, lapsed,
                            dead, consumed, expired_unpurged, oldest_created_at, newest_created_at,
-                           delayed, oldest_claimable_created_at}], next_cursor?}
+                           delayed, oldest_claimable_created_at, template}], next_cursor?}
+                                                                     # template (nexus-mdbds.2.13, additive) is
+                                                                     # the name of the template the subspace
+                                                                     # resolves to, e.g. board/ci/<topic>; null
+                                                                     # when none does (a row that outlived its
+                                                                     # template). subspace_stats carries it too.
                                                                      # concrete subspaces that exist, ordered
                                                                      # by subspace name; the two timestamps
                                                                      # span all rows, expired included (the
