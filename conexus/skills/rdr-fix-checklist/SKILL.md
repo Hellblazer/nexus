@@ -35,6 +35,9 @@ Prose register: `$RDR_DIR/REGISTER.md`, falling back to `$CLAUDE_PLUGIN_ROOT/res
 
 ## Rules
 
+- After a PASSED gate, fix only the findings Sam names; every other finding goes to accept as a residual.
+- A fix adds no new design: a finding that needs one becomes a residual or its own revision.
+- Run one fix check per change: batch the fix commits, then check the whole range once, never once per commit.
 - A fix changes the fact the critic named and nothing else. A gloss, rationale, parenthetical or count is a separate commit with its own fix check.
 - Every clause a fix adds carries a tool-produced quote from its source or the marker "inferred, not read".
 - A count or a universal (never / always / only / nothing / every / the one / all) needs a census of the whole surface, captured in the research entry as an enumeration; two sites that agree are not a source.

@@ -3472,7 +3472,18 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
 # preamble rdr-fix — the fix step's own surface (nexus-zbdm0)
 # ---------------------------------------------------------------------------
 
+#: The fix-loop rules Sam adopted on 2026-11-01 after the gate-loop census (T2
+#: nexus/rdr-gate-loop-census-2026-11-01: 115 fix checks over 30 RDRs, about 43
+#: percent failing). Printed by ``preamble rdr-fix`` and carried verbatim by the
+#: rdr-fix-checklist and rdr-gate-checklist skills; a test keeps the three equal.
+FIX_LOOP_RULES: tuple[str, ...] = (
+    "After a PASSED gate, fix only the findings Sam names; every other finding goes to accept as a residual.",
+    "A fix adds no new design: a finding that needs one becomes a residual or its own revision.",
+    "Run one fix check per change: batch the fix commits, then check the whole range once, never once per commit.",
+)
+
 _FIX_RULES: tuple[str, ...] = (
+    *FIX_LOOP_RULES,
     "A fix changes the fact the critic named and nothing else; a gloss, rationale, "
     "parenthetical or count is a separate commit with its own fix check.",
     "Every clause the fix adds carries a tool-produced quote from its source, or the "

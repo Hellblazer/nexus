@@ -102,6 +102,9 @@ The fix check is a precondition and never counts toward the round cap.
 
 Fixes go through `/conexus:rdr-fix <id>` (the rdr-fix skill); its preamble prints the findings with their Sites, the diff range and the pre-edit research title. The rules, restated:
 
+- After a PASSED gate, fix only the findings Sam names; every other finding goes to accept as a residual.
+- A fix adds no new design: a finding that needs one becomes a residual or its own revision.
+- Run one fix check per change: batch the fix commits, then check the whole range once, never once per commit.
 - A fix changes the fact the critic named and nothing else. New glosses,
   rationales, parentheticals and counts are a separate commit, gated separately.
 - Every clause a fix adds carries either a tool-produced quote from its source

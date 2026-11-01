@@ -1588,7 +1588,10 @@ _FIX_STATE_CASES = [
              "204-fix-check-{fixed}",
              # nexus-yjf5l.5 (R2): the serial precondition (fix, check, then
              # Layer 1 and Layer 3, never a parallel dispatch) is printed here.
-             "dispatched against the same commit in parallel"],
+             "dispatched against the same commit in parallel",
+             # nexus-qo7ie: the fix-loop rules Sam adopted 2026-11-01.
+             "fix only the findings Sam names", "adds no new design",
+             "Run one fix check per change"],
      "has_ci": ["no fix-check record yet"], "lacks": ["- fine"]},
     {"name": "existing_fix_check_record_is_reported", "scenario": "gated_fixed", "boom": False,
      "entries": {"204-gate-latest": 'outcome: "BLOCKED"\ncommit: {gated}\n',
@@ -2211,3 +2214,18 @@ def test_loose_match_is_refused_when_ambiguous():
     assert not any("off by" in v for v in idx.values()), (
         "two titles sharing every non-digit word must not resolve to either"
     )
+
+
+def test_fix_loop_rules_are_carried_verbatim_by_both_rdr_skills():
+    """The three fix-loop rules (Sam, 2026-11-01; T2
+    nexus/rdr-gate-loop-census-2026-11-01) are printed by ``preamble rdr-fix``
+    through ``_FIX_RULES`` and stated in the rdr-fix-checklist and
+    rdr-gate-checklist skills as the same sentences, so one cannot drift."""
+    from nexus.commands.rdr import _FIX_RULES, FIX_LOOP_RULES
+
+    assert len(FIX_LOOP_RULES) == 3
+    assert set(FIX_LOOP_RULES) <= set(_FIX_RULES)
+    for skill in ("rdr-fix-checklist", "rdr-gate-checklist"):
+        text = (_PLUGIN_DIR / "skills" / skill / "SKILL.md").read_text()
+        missing = [rule for rule in FIX_LOOP_RULES if f"- {rule}" not in text]
+        assert not missing, f"{skill} lacks: {missing}"
