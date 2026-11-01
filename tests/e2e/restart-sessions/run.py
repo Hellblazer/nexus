@@ -8,8 +8,11 @@ checks every outcome, with nothing written to the operator's ~/.claude:
 - a scratch HOME (``.claude.json`` with onboarding done and the work folder trusted),
   with the conexus plugin enabled from the operator's installed plugin cache (read only)
   and a scratch nexus config dir holding a copy of the operator's ``config.yml``, so the
-  sessions' MCP servers and ``nx`` reach the operator's own service. The copy is deleted
-  in every outcome; session mail and scratch rows land in that service and expire;
+  sessions' MCP servers and ``nx`` reach the operator's own service. The copy and the
+  data-token leases minted from it are deleted on every exit the harness sees (pass, fail,
+  SIGTERM, SIGHUP; not SIGKILL, and not under ``--keep``). The sessions write to that
+  service as the operator would: the restart mail expires with its TTL, and nothing here
+  asks a session to write anything permanent, but the harness does not police it;
 - a private tmux server (``-L``, ``-f /dev/null``, a bare bash in every pane);
 - three sessions in a scratch git repo, each told a code word:
   ``rs_alpha`` (launched with the conexus channel, left at its prompt with whatever
@@ -20,9 +23,12 @@ checks every outcome, with nothing written to the operator's ~/.claude:
   --no-update``, exactly as the operator runs it, minus the release install.
 
 Expected: alpha and draft are asked by mail and nochan by typing; all three write a
-handoff and restart with a new session id whose first prompt, on the command line, is
-``cat <handoff>``; the draft is still in rs_draft's prompt once its handoff is written
-(nothing was typed into it); all three then answer their own code word and no other.
+handoff and restart with a new session id whose own argv carries ``-- cat <handoff>``;
+neither mailed session's old transcript holds a typed ask or the draft as a prompt; the
+draft is still in rs_draft's prompt from its complete handoff until its exit, is saved at
+the restart, and is read by the fresh rs_draft with its handoff; all three then answer
+their own code word and no other. The draft cannot outlive the exit in the input box
+itself: exiting Claude Code clears it, so "survives" means saved and handed on.
 
 Continuity is proved from the handoff, not merely observed. Auto memory is off
 (``CLAUDE_CODE_DISABLE_AUTO_MEMORY``, ``autoMemoryEnabled: false``) and the word is given
@@ -33,8 +39,10 @@ session in the same folder with no handoff, must not know any word.
 
 Positive control: ``NX_RESTART_SANDBOX_SCRIPT=<copy>`` runs another copy of the script;
 the pane checks always use this checkout's reader. The pre-cmqe8 copy (develop before
-nexus-cmqe8) fails here: it types every ask, so rs_draft is skipped for its draft and
-resumed, and no ask is logged as sent by mail.
+nexus-cmqe8) fails here. The discriminating checks are rs_draft's (skipped for its
+draft and resumed instead of a fresh start) and the argv check (it typed ``cat`` into the
+fresh sessions); its missing "by mail" log lines would fail any older copy and prove
+nothing on their own.
 
 Run through run.sh (it supplies the automation token, RDR-219). Prints one verdict
 line, ``RESTART SANDBOX PASSED`` or ``RESTART SANDBOX FAILED``, and exits 0 or 1;
@@ -247,20 +255,15 @@ class Sandbox:
 
     def first_mention(self, session_id: str, word: str, handoff: str = "") -> str:
         """Where *word* first appears in a session's transcript: ``handoff_read`` (the result of
-        a tool call whose input names *handoff* or the short copy the script feeds), another
-        ``tool_result``, ``user``, ``assistant``, or ``""`` when it never does."""
+        a tool call whose input names *handoff* itself; the retired /tmp/rh-*.md short copy does
+        not count), another ``tool_result``, ``user``, ``assistant``, or ``""`` when it never does."""
         reads: set[str] = set()
-        # The script feeds `cat /tmp/rh-<old sid8>.md`, a short copy of the handoff named by the
-        # old session id that also sits in the handoff's own name (...-<name>-<sid8>-<stamp>.md).
-        m = re.search(r"-([0-9a-f]{8})-\d{8}-\d{6}\.md$", handoff)
-        short = f"/tmp/rh-{m.group(1)}.md" if m else ""
         for d in self.events(session_id):
             content = (d.get("message") or {}).get("content")
             items = content if isinstance(content, list) else []
             for c in items:
                 if isinstance(c, dict) and c.get("type") == "tool_use":
-                    blob = json.dumps(c.get("input"))
-                    if handoff and (handoff in blob or (short and short in blob)):
+                    if handoff and handoff in json.dumps(c.get("input")):
                         reads.add(str(c.get("id")))
             if word not in json.dumps(d):
                 continue
@@ -322,6 +325,7 @@ def main() -> int:
     # A SIGTERM must still reach the finally below: the private tmux server holds the token in
     # its environment and must not outlive the run.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    signal.signal(signal.SIGHUP, lambda *_: sys.exit(129))  # a closed terminal: same cleanup
     home = Path(tempfile.mkdtemp(prefix="nx-restart-sandbox-"))
     sb = Sandbox(home, f"nx-rs-{os.getpid()}", claude, a.model)
     failures: list[str] = []
@@ -375,22 +379,22 @@ def main() -> int:
                 "--handoff-timeout 600 --wait 300",
                 check=True)
         sb.tmux("send-keys", "-t", "rs:ctl", "Enter", check=True)
-        # The draft must survive the ask: once rs_draft's handoff file is complete (the script
-        # waits 10 s more before counting it, and restarts nothing until every handoff is in),
-        # its prompt must still hold the draft. Watched here, while the roll runs.
+        # The draft must survive the ask: from the moment rs_draft's handoff file is complete until
+        # the script exits that session, its prompt must still hold the draft. Sampled here while
+        # the roll runs; the last sample before the exit is the one judged.
         draft_seen: bool | None = None
         draft_marker = f"HANDOFF-COMPLETE {before['rs_draft'].get('sessionId', '')}"
         draft_glob = f"nexus-continuation-restart-rs_draft-{before['rs_draft'].get('sessionId', '')[:8]}-*.md"
         while time.time() - t0 < a.timeout:
             text = sb.log.read_text(encoding="utf-8") if sb.log.exists() else ""
-            if draft_seen is None and "exit rs_draft" not in text:
+            if "exit rs_draft" not in text:
                 for f in Path("/tmp").glob(draft_glob):
                     body = f.read_text(encoding="utf-8", errors="replace").strip()
                     if body.endswith(draft_marker):
-                        draft_seen = DRAFT_TEXT in crs.typed_text(crs.prompt_line(sb.capture("rs_draft")) or "")
+                        draft_seen = DRAFT_TEXT in crs.draft_text(sb.capture("rs_draft"))
             if "=== done:" in text or "=== ABORT" in text or "=== CRASH" in text:
                 break
-            time.sleep(2)
+            time.sleep(1)
         log = sb.log.read_text(encoding="utf-8") if sb.log.exists() else ""
         print("[sandbox] restart log:\n" + "\n".join("    " + ln for ln in log.splitlines()), flush=True)
         expect = [
@@ -398,8 +402,12 @@ def main() -> int:
             "handoff asked of rs_nochan by typed (launched without the conexus channel)",
             "handoff written by rs_alpha", "handoff written by rs_draft", "handoff written by rs_nochan",
             "OK rs_alpha: fresh as pid", "OK rs_draft: fresh as pid", "OK rs_nochan: fresh as pid",
+            "rs_draft: unsent draft saved to",
             "=== done: 3 of 3 restarted (3 fresh, 0 resumed)",
         ]
+        for name in ("rs_alpha", "rs_nochan"):
+            if f"{name}: unsent draft saved to" in log:
+                failures.append(f"{name}: a draft was saved for a session with nothing typed")
         for line in expect:
             if line not in log:
                 failures.append(f"log lacks: {line}")
@@ -412,11 +420,13 @@ def main() -> int:
             failures.append("rs_draft: its draft was gone from the prompt once its handoff was written")
         else:
             notes.append("rs_draft: draft still in its prompt after the mail ask and its handoff")
-        old_draft = before["rs_draft"].get("sessionId", "")
-        typed_into_draft = [d for d in sb.events(old_draft) if d.get("type") == "user"
-                            and (DRAFT_TEXT in json.dumps(d.get("message")) or "Do what /tmp/rh-" in json.dumps(d.get("message")))]
-        if typed_into_draft:
-            failures.append("rs_draft: its old transcript has the draft or a typed ask as a user message")
+        # Nothing typed into a mailed session: its old transcript holds neither the draft nor the
+        # typed path's ask line as a prompt.
+        for name in sorted(CHANNEL):
+            typed = [d for d in sb.events(before[name].get("sessionId", "")) if d.get("type") == "user"
+                     and (DRAFT_TEXT in json.dumps(d.get("message")) or "Do what /tmp/rh-" in json.dumps(d.get("message")))]
+            if typed:
+                failures.append(f"{name}: its old transcript has the draft or a typed ask as a prompt")
 
         handoffs = dict(re.findall(r"handoff written by (\S+): (\S+) \(", log))
         for name, word in WORDS.items():
@@ -441,6 +451,21 @@ def main() -> int:
                 failures.append(f"{name}: kept session id {old[:8]}; expected a fresh start")
             if not fresh and d["sessionId"] != old:
                 failures.append(f"{name}: session id changed to {d['sessionId'][:8]}; expected a resume")
+            # The first prompt rode the command line: read the new process's own argv.
+            argv = subprocess.run(["ps", "-o", "args=", "-p", str(d.get("pid", 0))], capture_output=True,
+                                  text=True).stdout.strip()
+            want = f"-- cat {handoffs.get(name, '?')}"
+            if fresh and want not in argv:
+                failures.append(f"{name}: the fresh process's argv lacks {want!r}")
+            if name == "rs_draft":
+                saw = any(isinstance(c, dict) and c.get("type") == "tool_result" and DRAFT_TEXT in json.dumps(c)
+                          for e in sb.events(d["sessionId"])
+                          for c in ((e.get("message") or {}).get("content") or [] if isinstance(
+                              (e.get("message") or {}).get("content"), list) else []))
+                if not saw:
+                    failures.append("rs_draft: the fresh session never read its saved draft")
+                else:
+                    notes.append("rs_draft: the fresh session read its saved draft with its handoff")
             try:
                 sb.prompt(name, "What is the project code word for this task? Reply with only the word.")
             except TimeoutError as exc:
@@ -482,22 +507,27 @@ def main() -> int:
         failures.append(f"harness: {type(exc).__name__}: {exc}")
         return 1
     finally:
-        sb.delete_config()
+        sids = {str(d.get("sessionId", ""))[:8] for d in sb.entries()}
+        sids |= {str(d.get("sessionId", ""))[:8] for d in before.values() if d}
+        if not a.keep:
+            # First: ours alone (-L), it holds the token, and its claude processes end with it;
+            # then the config copy they were reading.
+            sb.tmux("kill-server")
+            sb.delete_config()
         for n in notes:
             print(f"[sandbox] {n}", flush=True)
         for f in failures:
             print(f"[sandbox] FAIL {f}", flush=True)
         verdict = "RESTART SANDBOX PASSED" if ok else "RESTART SANDBOX FAILED"
         print(f"{verdict} -- 3 sessions and a no-handoff control, {len(failures)} failure(s)", flush=True)
-        sids = {str(d.get("sessionId", ""))[:8] for d in sb.entries()}
-        sids |= {str(d.get("sessionId", ""))[:8] for d in before.values() if d}
-        if not a.keep:
-            sb.tmux("kill-server")  # always: ours alone (-L), and it holds the token; its claude processes end with it
+        if a.keep:
+            print(f"[sandbox] --keep: the sessions still run on a copy of your nexus config at "
+                  f"{sb.nexus_config}/config.yml; delete it when done", flush=True)
         if ok and not a.keep:
             for sid in filter(None, sids):  # the script's /tmp files for these sessions
                 for f in Path("/tmp").glob(f"rh-{sid}.*"):
                     f.unlink(missing_ok=True)
-                for f in Path("/tmp").glob(f"nexus-continuation-restart-rs_*-{sid}-*.md"):
+                for f in Path("/tmp").glob(f"nexus-continuation-restart-rs_*-{sid}-*"):
                     f.unlink(missing_ok=True)
             shutil.rmtree(home, ignore_errors=True)
         else:

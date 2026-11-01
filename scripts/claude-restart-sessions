@@ -33,8 +33,11 @@ all sessions at once; then each is exited and started with a fresh context
 prompt on the command line. The ask goes as conexus mail to the session's own
 mailbox when it was launched with the conexus channel (--channels
 plugin:conexus@nexus-plugins), so nothing is typed into its prompt and an
-unsent draft there is left alone; a session without the channel is asked by
-typing, and is skipped if its prompt holds a draft (nexus-cmqe8). A session whose handoff does not appear within
+unsent draft there is left alone through the ask; at the restart the draft is
+saved next to the handoff (<handoff>.draft.txt) and handed to the fresh session
+with it, since exiting clears the input box. A mailed session that starts no
+turn within 60 s, a session without the channel, and a failed send are asked
+by typing instead, and skipped if the prompt holds a draft (nexus-cmqe8). A session whose handoff does not appear within
 --handoff-timeout is left running, not restarted, unless --fallback-resume is
 given, in which case it is restarted with --resume (2026-10-31, for 7.91.0).
 
@@ -191,12 +194,17 @@ def has_channel(s: dict) -> bool:
         args = shlex.split(s.get("argv") or "")
     except ValueError:
         return False
+    args = args[:args.index("--")] if "--" in args else args  # after it: the first prompt
     for i, a in enumerate(args):
         flag, _, inline = a.partition("=")
         if flag not in ("--channels", "--dangerously-load-development-channels"):
             continue
-        values = [inline] if inline else args[i + 1:i + 2]
-        if any("plugin:conexus@" in v or "server:nexus" in v for v in values):
+        values = [inline] if inline else []
+        for v in args[i + 1:]:  # the flag is variadic: every value up to the next option
+            if inline or v.startswith("-"):
+                break
+            values.append(v)
+        if any(v.startswith(f"plugin:conexus@{MARKETPLACE}") or v == "server:nexus" for v in values):
             return True
     return False
 
@@ -209,6 +217,9 @@ def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> st
     is typed into its input box (nexus-cmqe8).
     """
     args = shlex.split(s["argv"])[1:] if s["argv"] else []
+    # Everything after a bare `--` is the previous restart's first prompt (`-- cat <handoff>`):
+    # carried over, it would push -n and --resume past the `--`, where claude reads them as prompt.
+    args = args[:args.index("--")] if "--" in args else args
     out, skip = [], False
     for i, a in enumerate(args):
         if skip:
@@ -363,11 +374,12 @@ def restart(s: dict, handoff: str = "") -> bool:
             ok_file = Path(handoff).stat().st_size > 0
         except OSError:
             ok_file = False
-        now_at = (read(s["file"]) or {}).get("statusUpdatedAt")
-        worked_after = "handoff_status_at" in s and now_at != s["handoff_status_at"]
+        # A prompt after the handoff means the session did work the handoff does not carry. Read
+        # from the transcript, not statusUpdatedAt: plugin hooks move that timestamp on their own.
+        worked_after = "handoff_prompts" in s and prompt_count(s["sessionId"]) > s["handoff_prompts"]
         if not ok_file or worked_after:
             why = (f"handoff {handoff} is gone or empty now" if not ok_file
-                   else f"it worked after writing {handoff} (status changed)")
+                   else f"it took a prompt after writing {handoff}")
             if not FALLBACK_RESUME:
                 log(f"SKIP {name}: {why}; left running, not restarted")
                 return False
@@ -376,7 +388,13 @@ def restart(s: dict, handoff: str = "") -> bool:
     if handoff:
         log(f"{name}: old session {s['sessionId']} (back out with: cd {shlex.quote(s['cwd'])} && "
             f"claude --resume {s['sessionId']})")
-    cmd = relaunch_command(s, fresh=bool(handoff), first_prompt=f"cat {handoff}" if handoff else "")
+    first = ""
+    if handoff:
+        first = f"cat {handoff}"
+        draft = save_draft(s, handoff)
+        if draft:
+            first += f" {draft}"
+    cmd = relaunch_command(s, fresh=bool(handoff), first_prompt=first)
     before = {p.name for p in SESSIONS.glob("*.json")}
     log(f"exit {name} (pid {s['pid']}, pane {s['pane']})")
     tmux("send-keys", "-t", s["pane"], "C-c")
@@ -502,6 +520,46 @@ def has_draft(captured: str) -> bool:
     return typed[1:].strip() != "" if typed.startswith("\u276f") else typed.strip() != ""
 
 
+def draft_text(captured: str) -> str:
+    """The unsent text in an escaped pane capture's input box, every line of it, or ``""``.
+
+    The box runs from the prompt line to the next horizontal rule; continuation lines are
+    indented under the prompt mark.
+    """
+    if not captured.strip():
+        return ""
+    raw = captured.splitlines()
+    plain = [_SGR.sub("", _OTHER_ESCAPE.sub("", ln)) for ln in raw]
+    starts = [i for i, ln in enumerate(plain) if i and ln.lstrip().startswith("❯")
+              and plain[i - 1].strip().startswith("─")]
+    if not starts or not has_draft(captured):
+        return ""
+    out = []
+    for i in range(starts[-1], len(raw)):
+        if i > starts[-1] and plain[i].strip().startswith("─"):
+            break
+        line = typed_text(raw[i]).replace("\xa0", " ")
+        out.append(line.lstrip()[1:].strip() if i == starts[-1] else line.strip())
+    return "\n".join(out).strip()
+
+
+def save_draft(s: dict, handoff: str) -> str:
+    """Save an unsent draft from the session's prompt next to its handoff; the path, or "".
+
+    The exit clears the input box, so a draft the mail ask left in place would be lost at the
+    restart. Saved, it is handed to the fresh session with the handoff (nexus-cmqe8).
+    """
+    out = subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", s["pane"]], capture_output=True, text=True).stdout
+    text = draft_text(out)
+    if not text:
+        return ""
+    path = str(Path(handoff).with_suffix("")) + ".draft.txt"
+    Path(path).write_text("Unsent draft from this session's prompt at the restart (not sent; the user's text):\n\n"
+                          + text + "\n", encoding="utf-8")
+    log(f"{label(s)}: unsent draft saved to {path}; the fresh session gets it with its handoff")
+    return path
+
+
 def pane_has_draft(pane: str) -> bool:
     """True when the prompt line in the pane holds unsent text (typed text would append to it)."""
     out = subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", pane], capture_output=True, text=True).stdout
@@ -541,8 +599,19 @@ def handoff_marker(s: dict) -> str:
     return f"HANDOFF-COMPLETE {s['sessionId']}"
 
 
-def handoff_prompt(s: dict, path: str) -> str:
-    return (f"Restart handoff for {label(s)} (coordinated restart; this session restarts with a fresh context "
+def mail_note(s: dict, path: str) -> str:
+    """The restart-log line written before the mail goes, which the mail tells the session to check."""
+    return f"mailing handoff ask to {label(s)} -> {path}"
+
+
+def handoff_prompt(s: dict, path: str, mailed: bool = False) -> str:
+    # Mail from a script carries no session token, so the channel labels it unattested and a
+    # model may rightly decline it (nexus-cmqe8 sandbox, 2026-11-01). Say who sent it and give
+    # a check the session can make itself: the operator's restart log, written before the send.
+    origin = (f"This message comes from claude-restart-sessions, the operator's restart script, through "
+              f"`nx tuple out`, which is why it reads as unattested. Check before acting: {LOG} has the line "
+              f"'{mail_note(s, path)}'. " if mailed else "")
+    return (origin + f"Restart handoff for {label(s)} (coordinated restart; this session restarts with a fresh context "
             f"and reads the file you write as its first prompt). Write your continuation handoff now in the "
             f"9-section format of the conexus continuation command (run `nx command-context continuation` for the "
             f"working state; do its session-retro audits), but save it to {path} and NOT to the Target file it "
@@ -554,20 +623,61 @@ def handoff_prompt(s: dict, path: str) -> str:
             f"When the file is complete, reply with only: cat {path}")
 
 
-def mail_ask(s: dict, path: str, sender: str) -> bool:
+def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200) -> bool:
     """Send the handoff ask to the session's own mailbox; the conexus channel delivers it as a turn.
 
     Nothing is typed into the pane, so an unsent draft in the prompt is left as it is.
     """
     sid = s["sessionId"]
-    r = subprocess.run(["nx", "tuple", "out", f"mailbox/{sid}", "--key", f"to={sid}", "--dim", f"from={sender}",
-                        "--dim", "address_kind=session", "--dim", "kind=restart-handoff",
-                        "--nonce", str(uuid.uuid4()), "--body", handoff_prompt(s, path)],
-                       capture_output=True, text=True)
+    # The ask expires soon after the roll would stop waiting for it, so an ask the session never
+    # took does not sit in its mailbox for the template's 7 days and land in a later prompt.
+    argv = [_nx_binary(), "tuple", "out", f"mailbox/{sid}", "--key", f"to={sid}", "--dim", f"from={sender}",
+            "--dim", "address_kind=session", "--dim", "kind=restart-handoff", "--nonce", str(uuid.uuid4()),
+            "--ttl-seconds", str(ttl), "--body", handoff_prompt(s, path, mailed=True)]
+    log(mail_note(s, path))
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"WARN {label(s)}: mail to mailbox/{sid} failed ({type(e).__name__}: {e})")
+        return False
     if r.returncode != 0:
         log(f"WARN {label(s)}: mail to mailbox/{sid} failed (exit {r.returncode}): "
             f"{(r.stdout + r.stderr).strip().splitlines()[-1:]}")
         return False
+    return True
+
+
+def _nx_binary() -> str:
+    """nx: NX_RESTART_NX, else ~/.local/bin/nx, else the one on PATH (the tmux server's PATH may lack it)."""
+    override = os.environ.get("NX_RESTART_NX", "")
+    if override:
+        return override
+    local = Path.home() / ".local" / "bin" / "nx"
+    if local.exists():
+        return str(local)
+    return shutil.which("nx") or "nx"
+
+
+def went_busy(s: dict, n0: int, seconds: int = 60) -> bool:
+    """True once the session's transcript has more than `n0` prompts or its status reads busy."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if status(s) == "busy" or prompt_count(s["sessionId"]) > n0:
+            return True
+        time.sleep(2)
+    return False
+
+
+def typed_ask(s: dict, path: str) -> bool:
+    """Type the handoff ask into the session's prompt; False (and nothing typed) if it holds a draft.
+
+    Typing appends to whatever is in the prompt, so only this path reads the pane.
+    """
+    if pane_has_draft(s["pane"]):
+        log(f"SKIP {label(s)}: unsent text in its prompt and no mail it acted on; no handoff asked, not restarted")
+        return False
+    if not submit(s["pane"], ask_line(s, path), s["file"]):
+        log(f"WARN {label(s)}: did not go busy after the handoff prompt; waiting for the file anyway")
     return True
 
 
@@ -581,6 +691,7 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
     """
     stamp = time.strftime("%Y%m%d-%H%M%S")
     asked: dict[str, tuple[dict, str, float]] = {}
+    mailed: dict[str, int] = {}  # sessionId -> consecutive idle reads with no handoff file yet
     done: dict[str, str] = {}
     waiting = list(found)
     start = time.time()
@@ -597,19 +708,20 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
                     continue
                 t0 = time.time()
                 how = "mail"
+                n0 = prompt_count(s["sessionId"])
                 if not has_channel(s):
                     how = "typed (launched without the conexus channel)"
-                elif not mail_ask(s, path, sender):
+                elif not mail_ask(s, path, sender, ttl=timeout + 300):
                     how = "typed (the mail send failed)"
-                if how != "mail":
-                    # Typing appends to whatever is in the prompt, so only this path reads the pane.
-                    if pane_has_draft(s["pane"]):
-                        log(f"SKIP {label(s)}: unsent text in its prompt and no channel to mail; "
-                            f"no handoff asked, not restarted")
-                        continue
-                    if not submit(s["pane"], ask_line(s, path), s["file"]):
-                        log(f"WARN {label(s)}: did not go busy after the handoff prompt; waiting for the file anyway")
+                elif not went_busy(s, n0):
+                    # The flag is on the command line but the channel may not be live, or the
+                    # model may not act on the mail: fall back rather than wait out the timeout.
+                    how = "typed (the mail started no turn within 60s)"
+                if how != "mail" and not typed_ask(s, path):
+                    continue
                 asked[s["sessionId"]] = (s, path, t0)
+                if how == "mail":
+                    mailed[s["sessionId"]] = 0
                 log(f"handoff asked of {label(s)} by {how} -> {path}")
             elif time.time() - start > wait:
                 log(f"SKIP {label(s)}: still {status(s)} after {wait}s; no handoff asked, not restarted")
@@ -617,6 +729,22 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
         for sid, (s, path, t0) in asked.items():
             if sid in done:
                 continue
+            if sid in mailed and not Path(path).exists() and status(s) in ready:
+                # The mail turn ended and no handoff was started: the model declined the mail
+                # (it reads as unattested) or did something else. Two idle reads 5 s apart, then
+                # ask once by typing, which the session takes as its user's prompt.
+                mailed[sid] += 1
+                if mailed[sid] >= 2:
+                    del mailed[sid]
+                    t1 = time.time()  # before typing: submit waits for busy, and the file may land first
+                    if typed_ask(s, path):
+                        asked[sid] = (s, path, t1)
+                        log(f"handoff asked of {label(s)} by typed (its mail turn ended with no handoff) -> {path}")
+                    else:
+                        done[sid] = ""
+                    continue
+            elif sid in mailed:
+                mailed[sid] = 0
             try:
                 st = Path(path).stat()
                 lines = [l.strip() for l in Path(path).read_text(encoding="utf-8", errors="replace").splitlines()]
@@ -624,13 +752,16 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
                 # The marker on the last line is the completeness proof; the size floor only rules
                 # out a file holding little more than the marker. 1000 bytes refused a complete
                 # 959-byte handoff from a short session (nexus-cmqe8 sandbox, 2026-11-01).
+                # Headings: the ask names the continuation command's sectioned format, so a
+                # marker with a line or two of text is not a handoff.
                 written = (st.st_mtime >= t0 and st.st_size >= 200 and time.time() - st.st_mtime > 10
-                           and bool(lines) and lines[-1] == handoff_marker(s))
+                           and bool(lines) and lines[-1] == handoff_marker(s)
+                           and sum(1 for ln in lines if ln.startswith("#")) >= 2)
             except OSError:
                 written = False
             if written and status(s) in ready:
                 done[sid] = path
-                s["handoff_status_at"] = (read(s["file"]) or {}).get("statusUpdatedAt")
+                s["handoff_prompts"] = prompt_count(sid)
                 log(f"handoff written by {label(s)}: {path} ({st.st_size} bytes)")
             elif not alive(s["pid"]):
                 done[sid] = ""
@@ -644,22 +775,45 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
     return {sid: p for sid, p in done.items() if p}
 
 
-def transcript_has(session_id: str, text: str) -> bool:
-    """True when the session's transcript holds a user message containing `text`."""
+def _prompts(session_id: str) -> list[str]:
+    """The session's prompts, in order: user transcript entries that are not only tool results.
+
+    A typed prompt, a command-line first prompt and a channel message all count. Hooks and
+    other peers' mail can add entries too; any of them after the handoff is work it lacks.
+    """
+    out: list[str] = []
     for f in (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
         try:
             lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
         for line in lines:
-            if '"user"' in line and text in line:
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                if d.get("type") == "user" and text in json.dumps(d.get("message")):
-                    return True
-    return False
+            if '"user"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            # Meta entries (caveats, command output) are not prompts; a channel message is one, and
+            # Claude Code 2.1.316 records it as meta with origin.kind "channel".
+            if d.get("isMeta") and (d.get("origin") or {}).get("kind") != "channel":
+                continue
+            content = (d.get("message") or {}).get("content") if d.get("type") == "user" else None
+            if isinstance(content, list) and all(isinstance(c, dict) and c.get("type") == "tool_result"
+                                                 for c in content):
+                continue
+            if content:
+                out.append(json.dumps(content, ensure_ascii=False))
+    return out
+
+
+def prompt_count(session_id: str) -> int:
+    return len(_prompts(session_id))
+
+
+def transcript_has(session_id: str, text: str) -> bool:
+    """True when one of the session's prompts contains `text`."""
+    return any(text in p for p in _prompts(session_id))
 
 
 #: sessionId -> "fresh" or "resumed", for the closing tally.
@@ -826,9 +980,11 @@ def main() -> int:
             return 2
     if a.dry_run:
         for s in found:
-            print(f"{s.get('name')}  pid={s['pid']}  pane={s['pane']}  status={s.get('status')}\n    {relaunch_command(s, a.fresh)}")
+            h = handoff_path(s, time.strftime("%Y%m%d-%H%M%S")) if a.fresh else ""
+            cmd = relaunch_command(s, a.fresh, first_prompt=f"cat {h}" if h else "")
+            print(f"{s.get('name')}  pid={s['pid']}  pane={s['pane']}  status={s.get('status')}\n    {cmd}")
             if a.fresh:
-                print(f"    handoff -> {handoff_path(s, time.strftime('%Y%m%d-%H%M'))}")
+                print(f"    handoff -> {h}, asked by {'mail' if has_channel(s) else 'typing'}")
         print(f"{len(found)} session(s); plugins {'not ' if a.no_update else ''}updated first")
         return 0
     if not found:
