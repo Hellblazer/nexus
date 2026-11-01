@@ -1082,6 +1082,8 @@ class TestWindowsDetach:
         kw = attempts[0]
         assert kw["creationflags"] == 0x08000000 | 0x00000200 | 0x01000000
         assert "start_new_session" not in kw
+        # nexus-75w5d's marker on the Windows branch too (TestBackgroundUpgrade pins the POSIX one).
+        assert kw["env"][mod.UNATTENDED_ENV] == "1"
 
     def test_a_job_that_forbids_breakaway_is_retried_without_it(self, mod, tmp_path, monkeypatch) -> None:
         attempts = self._run(mod, tmp_path, monkeypatch, [OSError("breakaway refused"), None])
