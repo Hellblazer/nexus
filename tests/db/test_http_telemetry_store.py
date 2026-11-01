@@ -19,7 +19,9 @@ Full cross-language end-to-end is in tests/db/test_http_telemetry_store_integrat
 """
 from __future__ import annotations
 
+import inspect
 import threading
+import time
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -1109,6 +1111,167 @@ class TestAgentDispatches:
         monkeypatch.setattr(type(client), "_post", spy)
         client.record_agent_dispatch(session_id="s1", agent_id="a1", t1_puts=1)
         assert sent == [{"session_id": "s1", "agent_id": "a1", "t1_puts": 1}]
+
+
+#: nexus-mtheb.4 fix r1: requests an engine-without-the-routes stub answered, and the
+#: per-request delay the slow stub sleeps. Module state like the fakes above; cleared per test.
+_STUB_HITS: list[str] = []
+_SLOW_DELAY_S = 2.0
+
+
+class _OldEngineHandler(_FakeTelemetryHandler):
+    """An engine that predates telemetry-018: the agent_dispatches routes answer 404."""
+
+    def _gone(self) -> bool:
+        pp = urlparse(self.path).path
+        if not pp.startswith("/v1/telemetry/agent_dispatches/"):
+            return False
+        _STUB_HITS.append(pp)
+        if self._check_auth():
+            self._send(404, {"error": "not found"})
+        return True
+
+    def do_POST(self):
+        if not self._gone():
+            super().do_POST()
+
+    def do_GET(self):
+        if not self._gone():
+            super().do_GET()
+
+
+class _SickGatewayHandler(_FakeTelemetryHandler):
+    """The gateway answers 503 to every agent_dispatches record, and counts the attempts."""
+
+    def do_POST(self):
+        pp = urlparse(self.path).path
+        if pp != "/v1/telemetry/agent_dispatches/record":
+            super().do_POST()
+            return
+        _STUB_HITS.append(pp)
+        if self._check_auth():
+            self._send(503, {"error": "unavailable"})
+
+
+class _SlowEngineHandler(_FakeTelemetryHandler):
+    """The record route accepts the request and then sits on it past any short timeout."""
+
+    def do_POST(self):
+        pp = urlparse(self.path).path
+        if pp != "/v1/telemetry/agent_dispatches/record":
+            super().do_POST()
+            return
+        _STUB_HITS.append(pp)
+        self._body()
+        threading.Event().wait(_SLOW_DELAY_S)
+        try:
+            self._send(200, {"ok": True})
+        except OSError:
+            pass  # the client already gave up; nothing is listening
+
+
+class TestAgentDispatchesAgainstAnOldEngine:
+    """nexus-mtheb.4 fix r1: an engine without telemetry-018 answers 404 on both routes. The
+    claim "a best-effort caller can catch it" holds only if the client raises it as
+    ``httpx.HTTPStatusError`` with status 404 rather than swallowing it or retrying it."""
+
+    def test_record_surfaces_a_404_as_http_status_error(self):
+        _STUB_HITS.clear()
+        with fake_http_server(_OldEngineHandler) as url:
+            c = HttpTelemetryStore(base_url=url, _token=TOKEN)
+            try:
+                with pytest.raises(httpx.HTTPStatusError) as exc:
+                    c.record_agent_dispatch(session_id="s1", agent_id="a1", t1_puts=1)
+            finally:
+                c.close()
+        assert exc.value.response.status_code == 404
+        assert _STUB_HITS == ["/v1/telemetry/agent_dispatches/record"]  # 404 is not retried
+
+    def test_list_surfaces_a_404_as_http_status_error(self):
+        _STUB_HITS.clear()
+        with fake_http_server(_OldEngineHandler) as url:
+            c = HttpTelemetryStore(base_url=url, _token=TOKEN)
+            try:
+                with pytest.raises(httpx.HTTPStatusError) as exc:
+                    c.list_agent_dispatches(session_id="s1")
+            finally:
+                c.close()
+        assert exc.value.response.status_code == 404
+        assert _STUB_HITS == ["/v1/telemetry/agent_dispatches/list"]
+
+    def test_record_once_surfaces_a_404_as_http_status_error(self):
+        _STUB_HITS.clear()
+        with fake_http_server(_OldEngineHandler) as url:
+            c = HttpTelemetryStore(base_url=url, _token=TOKEN)
+            try:
+                with pytest.raises(httpx.HTTPStatusError) as exc:
+                    c.record_agent_dispatch_once(session_id="s1", agent_id="a1", t1_puts=1)
+            finally:
+                c.close()
+        assert exc.value.response.status_code == 404
+
+
+class TestRecordAgentDispatchOnce:
+    """nexus-mtheb.4 fix r1: the SubagentStop hook's record is ONE bounded attempt. The mixin
+    ladder (gateway backoff, re-resolve lease-wait) is a 20-50 s worst case at subagent stop;
+    charter and rationale: ``query_tier_writes_once`` and tests/db/test_http_store_selfheal.py."""
+
+    def test_it_sends_the_same_payload_as_record_and_never_enters_the_retry_path(
+        self, client, monkeypatch,
+    ):
+        def _no_send(*_a, **_kw):
+            raise AssertionError("record_agent_dispatch_once must bypass _send")
+
+        monkeypatch.setattr(type(client), "_send", _no_send)
+        client.record_agent_dispatch_once(
+            session_id="s1", agent_id="a1", agent_type="developer", t1_puts=2,
+            ts="2026-11-01T12:00:00Z",
+        )
+        monkeypatch.undo()
+        assert client.list_agent_dispatches(session_id="s1")["rows"] == [{
+            "session_id": "s1", "agent_id": "a1", "agent_type": "developer",
+            "ts": "2026-11-01T12:00:00Z", "t1_puts": 2,
+        }]
+
+    def test_an_absent_agent_type_and_ts_are_omitted_from_the_payload(self, client):
+        client.record_agent_dispatch_once(session_id="s1", agent_id="a1", t1_puts=0)
+        row = client.list_agent_dispatches(session_id="s1")["rows"][0]
+        assert row["agent_type"] is None and row["t1_puts"] == 0
+
+    def test_a_503_is_one_request_not_the_gateway_retry_ladder(self):
+        _STUB_HITS.clear()
+        with fake_http_server(_SickGatewayHandler) as url:
+            c = HttpTelemetryStore(base_url=url, _token=TOKEN)
+            try:
+                started = time.monotonic()
+                with pytest.raises(httpx.HTTPStatusError) as exc:
+                    c.record_agent_dispatch_once(session_id="s1", agent_id="a1", t1_puts=1)
+                elapsed = time.monotonic() - started
+            finally:
+                c.close()
+        assert exc.value.response.status_code == 503
+        assert _STUB_HITS == ["/v1/telemetry/agent_dispatches/record"]
+        assert elapsed < 2.0, f"a single attempt, took {elapsed:.1f}s"
+
+    def test_a_slow_engine_is_cut_off_at_the_timeout(self):
+        _STUB_HITS.clear()
+        with fake_http_server(_SlowEngineHandler) as url:
+            c = HttpTelemetryStore(base_url=url, _token=TOKEN)
+            try:
+                started = time.monotonic()
+                with pytest.raises(httpx.TimeoutException):
+                    c.record_agent_dispatch_once(
+                        session_id="s1", agent_id="a1", t1_puts=1, timeout=0.3,
+                    )
+                elapsed = time.monotonic() - started
+            finally:
+                c.close()
+        assert elapsed < _SLOW_DELAY_S, f"cut off at the timeout, took {elapsed:.1f}s"
+        assert _STUB_HITS == ["/v1/telemetry/agent_dispatches/record"]
+
+    def test_the_default_timeout_is_short(self):
+        default = inspect.signature(HttpTelemetryStore.record_agent_dispatch_once).parameters["timeout"].default
+        assert 0 < default <= 5.0
 
 
 class TestListTierWrites:

@@ -62,6 +62,12 @@ Route mapping (matches TelemetryHandler Java):
                                            themselves, which POST via urllib directly —
                                            see that method's own docstring)
     GET  /v1/telemetry/routing_events/list      — list_routing_events
+    POST /v1/telemetry/agent_dispatches/record  — record_agent_dispatch, and
+                                           record_agent_dispatch_once (the
+                                           SubagentStop hook's single-attempt
+                                           variant; nexus-mtheb.4)
+    GET  /v1/telemetry/agent_dispatches/list    — list_agent_dispatches (rows plus
+                                           a no-T1-put summary; nexus-mtheb.4)
 """
 
 from __future__ import annotations
@@ -319,6 +325,49 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Requires an engine carrying telemetry-018; older engines 404, which the
         HTTP layer raises. A best-effort caller catches it.
         """
+        self._post(
+            "/v1/telemetry/agent_dispatches/record",
+            self._agent_dispatch_payload(session_id, agent_id, t1_puts, agent_type, ts),
+        )
+
+    def record_agent_dispatch_once(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        t1_puts: int,
+        agent_type: str | None = None,
+        ts: str | None = None,
+        timeout: float = 2.0,
+    ) -> None:
+        """Single-attempt ``agent_dispatches/record`` for the SubagentStop hook.
+
+        nexus-mtheb.4 review r1: ``record_agent_dispatch`` goes through ``_post``,
+        whose gateway backoff and re-resolve lease-wait have a 20-50 s worst case
+        that a per-request timeout does not bound (see ``query_tier_writes_once``).
+        A hook that runs at subagent stop must not wait that long. This variant
+        issues exactly ONE raw request with a hard *timeout*: no gateway retry, no
+        re-resolve, no lease wait. Any failure raises (an engine without the route
+        answers 404), and the caller's contract is best-effort. Not for general
+        use; the engine upsert is idempotent, so a caller that wants retries uses
+        ``record_agent_dispatch``.
+        """
+        import httpx  # noqa: PLC0415 — deferred import — only needed on this path
+
+        resp = self._client.request(
+            "POST",
+            self._base_url + "/v1/telemetry/agent_dispatches/record",
+            headers=self._auth_headers(),
+            json=self._agent_dispatch_payload(session_id, agent_id, t1_puts, agent_type, ts),
+            timeout=httpx.Timeout(timeout),
+        )
+        resp.raise_for_status()
+
+    @staticmethod
+    def _agent_dispatch_payload(
+        session_id: str, agent_id: str, t1_puts: int,
+        agent_type: str | None, ts: str | None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "session_id": session_id,
             "agent_id":   agent_id,
@@ -328,7 +377,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["agent_type"] = agent_type
         if ts is not None:
             payload["ts"] = ts
-        self._post("/v1/telemetry/agent_dispatches/record", payload)
+        return payload
 
     def list_agent_dispatches(
         self,
