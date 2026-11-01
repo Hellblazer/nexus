@@ -43,18 +43,9 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v7.91.1)
+## Awaiting the next release (pinned: v7.92.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-- `conexus/skills/mailbox/SKILL.md` (nexus-onjvw): the reply-in-ack paragraph names `lock/<resource>`, not the RDR-184 ledger, as its example of a keys-only target the engine refuses with `SchemaViolation`; the ledger template is retired.
-- `prose-edit/agents/line-editor.md` (nexus-qo7ie.1): `omitClaudeMd: true`, so the agent starts without the user and project CLAUDE.md files, since its brief carries everything it uses; one line carries the writing-register rule (no em dash in its own text) for a repo with no style sheet.
-- `conexus/agents/code-review-expert.md` (nexus-qo7ie.1): `memory: user` gives the reviewer its own memory directory under `~/.claude/agent-memory/`, and a gate record it writes carries `kind:gate`, `bead:` and `rdr:` tags; a paragraph bounds the agent memory (never replaces the T2 gate record; reusable heuristics only, each naming its repo; index under 40 lines; none under a read-only brief).
-- `conexus/agents/substantive-critic.md` (nexus-qo7ie.1): `memory: user`, the same gate-record tags and memory paragraph, and the completion protocol names the T2 gate record as mandatory.
-- `conexus/agents/developer.md` (nexus-qo7ie.1): a fix-round gate record it writes carries `kind:gate`, `bead:` and `rdr:` tags.
-- `conexus/skills/orchestration/reference.md` (nexus-qo7ie.1): the T2 ttl rule says a gate record is written with no `ttl` and with gate tags, and the phase-close rollup sets its TTL (RDR-209 Amendment A1), in place of passing a ttl for review rounds, which the agent definitions contradicted.
-- `conexus/skills/substantive-critique/SKILL.md` (nexus-qo7ie.1): the T2 critique record carries the gate tags and leaves its TTL to the phase-close rollup.
-- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-qo7ie.1): the T2 row says omitting `ttl` is permanent (nexus-473mx), in place of the stale 30-day default.
-- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-gy317): PreCompact runs the continuation in the worktree named after the session (the payload cwd is the launch checkout, usually the shared primary) and keeps the in-progress beads the `ref:` lines of the session's board entry name, since every session claims under one assignee; it leaves the list whole when nothing on the board matches or `bd` is unavailable.
 - `conexus/skills/nexus/reference.md` (nexus-z1d0l.1.2): the operator table gives `check` and `verify` the witness schema v1 result shape (host-bound evidence items with state, span, tumbler, chash and collection, plus rejected, uncovered and requires_review), in place of the bare `evidence` and `citations` shapes.
 - `conexus/skills/rdr-close/SKILL.md` (site prose pass): says `nx index repo` makes an RDR searchable from the first run, drafts included, and close only re-indexes a changed RDR, in place of saying accept or close indexes it.
 

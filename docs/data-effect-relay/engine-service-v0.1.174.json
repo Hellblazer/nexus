@@ -1,0 +1,8 @@
+{
+  "changeset_ids": [
+    "tuples-012-retire-ledger.xml:tuples-012-1"
+  ],
+  "engine_tag": "engine-service-v0.1.174",
+  "from_tag": "engine-service-v0.1.173",
+  "recorded_at": "2026-11-01T11:03:48Z"
+}
