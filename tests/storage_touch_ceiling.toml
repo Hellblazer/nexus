@@ -40,8 +40,13 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5013
+provisioned_tests = 5015
 tolerance_tests = 0
+# 5013 -> 5015 (nexus-z1d0l.1.6, 2026-11-01): tests/test_enrich_aspects.py 45 -> 47. TestValidationAllOutcomes keeps two
+# CLI tests that drive `nx enrich aspects` against the catalog fixture: test_the_cli_run_writes_both_named_files (the
+# --validation-out/--validation-all-out flags reach the run) and test_trace_flag_reaches_the_validation_sample (three
+# flag forms, one test). Its other 18 tests and the file-safety and rule pins call the helpers directly and take no tenant
+# (review of 716b0cc27 showed 19 of the first 21 tenant tests could go tenant-free; they did).
 # 5012 -> 5013 (nexus-8g2tl, nexus-qo7ie, 2026-11-01): +1, the passed_gate_findings_are_a_menu case added to
 # _FIX_STATE_CASES in tests/test_rdr_preamble.py (69f03f999), which runs under the t2_tenant-marked
 # test_rdr_fix_by_gate_state. CI on b55a04e94 counted 5013 with nothing else new (57b43bfb6 counted 5012);
