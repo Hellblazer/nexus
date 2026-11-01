@@ -76,7 +76,7 @@ from nexus.db.gateway_backoff import (
     _GATEWAY_RETRY_SLEEPS,
     _is_embed_server_side_write_path,
 )
-from nexus.rate_brake import parse_retry_after
+from nexus.rate_brake import DEADLINE_OUTCOME_HEADER, parse_retry_after
 from nexus.db.service_endpoint import (
     DEFAULT_LEASE_WAIT_BUDGET_S,
     discover_lease_with_wait,
@@ -548,6 +548,15 @@ class _EndpointRegistrar:
             # nor closes an injected client (nexus-m20mf contract).
             client=getattr(self._store, "_client", None),
         )
+
+
+def _numeric_timeout(value: Any) -> float | None:
+    """A per-call ``timeout=`` as seconds (an ``httpx.Timeout`` gives its read
+    bound), or ``None`` when the call passed none (nexus-v1929 hold clamp)."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    read = getattr(value, "read", None)
+    return float(read) if isinstance(read, (int, float)) else None
 
 
 class RefreshableHttpStoreMixin:
@@ -1336,22 +1345,27 @@ class RefreshableHttpStoreMixin:
         ``refreshable_http_store.gateway_retry`` event name).
         """
         embed_write_path = _is_embed_server_side_write_path(path, kwargs.get("json"))
-        # nexus-v1929: another process's 503 holds this one too, before its first send.
-        if (held_s := gateway_hold.wait_before_attempt()) > 0.0:
-            _log.info(
-                "refreshable_http_store.gateway_hold_wait",
-                store=type(self).__name__, path=path, sleep_s=held_s,
-            )
-            time.sleep(held_s)
+        slept_until: float | None = None
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
+            # nexus-v1929: another process's 503 holds this one too, before every send.
+            held_s = gateway_hold.wait_before_attempt(
+                after=slept_until, max_wait=_numeric_timeout(kwargs.get("timeout", getattr(self._client, "timeout", None))),
+            )
+            if held_s > 0.0:
+                _log.info(
+                    "refreshable_http_store.gateway_hold_wait",
+                    store=type(self).__name__, path=path, attempt=i + 1, sleep_s=held_s,
+                )
+                time.sleep(held_s)
             try:
-                return self._request_once(method, path, **kwargs)
+                result = self._request_once(method, path, **kwargs)
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code not in _GATEWAY_RETRY_CODES or delay is None:
                     raise
                 floored = exc.response.status_code == 504 and embed_write_path
                 sleep_s = max(delay, _EMBED_WRITE_504_BACKOFF_FLOOR_S) if floored else delay
-                if exc.response.status_code == 503:
+                # An engine deadline 503 is about this request, not an overloaded edge.
+                if exc.response.status_code == 503 and not exc.response.headers.get(DEADLINE_OUTCOME_HEADER):
                     # nexus-v1929: the hold is shared with every client on this config dir.
                     sleep_s = gateway_hold.record_503(
                         sleep_s,
@@ -1368,7 +1382,11 @@ class RefreshableHttpStoreMixin:
                     attempt=i + 1,
                     sleep_s=sleep_s,
                 )
+                slept_until = time.time() + sleep_s
                 time.sleep(sleep_s)
+            else:
+                gateway_hold.record_success()
+                return result
         raise AssertionError("unreachable")  # loop always returns or raises
 
     def _request_once(self, method: str, path: str, **kwargs: Any) -> Any:
