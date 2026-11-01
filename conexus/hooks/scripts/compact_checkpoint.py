@@ -327,11 +327,12 @@ def _board_entry(name: str, cwd: str | None, timeout: float) -> tuple[str, str |
 
 def _git_worktrees(cwd: str | None, timeout: float) -> list[str]:
     """Paths of the worktrees of the repository at *cwd* (``git worktree list``). Never raises."""
-    if not cwd or not os.path.isdir(cwd):
+    git = _cli_lookup.resolve("git")
+    if not cwd or not os.path.isdir(cwd) or not git:
         return []
     try:
         result = subprocess.run(
-            ["git", "-C", cwd, "worktree", "list", "--porcelain"], capture_output=True, text=True,
+            [git, "-C", cwd, "worktree", "list", "--porcelain"], capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout, check=False,
         )
     except (subprocess.SubprocessError, OSError) as exc:
