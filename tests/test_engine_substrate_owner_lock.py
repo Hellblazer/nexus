@@ -31,6 +31,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from tests import _engine_substrate as sub
+from tests._module_seam import setattr_in
 from tests._engine_substrate import (
     _SIDECAR_FILENAME,
     sweep_stale_substrate_clusters,
@@ -433,7 +434,7 @@ def _lock_held_at_each_lock_rename(monkeypatch) -> list[bool]:
                 os.close(fd)
         return real(src, dst, *args, **kwargs)
 
-    monkeypatch.setattr(os, "replace", spy)
+    setattr_in(monkeypatch, sub, "os.replace", spy)
     return seen
 
 

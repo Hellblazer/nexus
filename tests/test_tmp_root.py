@@ -539,7 +539,7 @@ class TestLockIsHeldBeforeItIsPublished:
                     os.close(fd)
             return real(src, dst, *args, **kwargs)
 
-        monkeypatch.setattr(os, "replace", spy)
+        setattr_in(monkeypatch, tr, "os.replace", spy)
         _run, fd = tr.make_owned_run_dir(tmp_path / "root", probe=False)
         tr.release_owner_lock(fd)
         assert seen == [True], f"owner.lock was renamed into place {len(seen)} time(s), held at each: {seen}"

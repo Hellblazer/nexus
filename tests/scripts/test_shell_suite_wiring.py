@@ -275,12 +275,19 @@ class TestLinuxHostsRunTheFlockTests:
     host that lost util-linux, a bash older than 4.1) fails here instead of running 30 and skipping
     them without a word."""
 
-    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="darwin has no flock(1): lower floor")
     def test_a_linux_host_has_flock_and_a_bash_that_can_use_it(self) -> None:
-        assert _lock_suite_has_flock_tests(), (
-            "lock_test.sh would skip its flock tests (10-16) on this Linux host: flock(1) is missing "
-            "or bash is older than 4.1. Install util-linux; do not lower the floor."
-        )
+        lock_floor = next(s.min_passed for s in SUITES if s.path == REPO_ROOT / "tests/e2e/lib/lock_test.sh")
+        if sys.platform.startswith("linux"):
+            assert _lock_suite_has_flock_tests(), (
+                "lock_test.sh would skip its flock tests (10-16) on this Linux host: flock(1) is missing "
+                "or bash is older than 4.1. Install util-linux; do not lower the floor."
+            )
+            assert lock_floor == _LOCK_SUITE_FLOOR_WITH_FLOCK
+        else:
+            # darwin: no flock(1) unless installed by hand; the floor must follow the probe, so a host
+            # without flock gets the lower floor and a host with it still runs tests 10-16.
+            expected = _LOCK_SUITE_FLOOR_WITH_FLOCK if _lock_suite_has_flock_tests() else _LOCK_SUITE_FLOOR_WITHOUT_FLOCK
+            assert lock_floor == expected
 
 
 class TestSuitesExist:
