@@ -20,6 +20,8 @@ WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/build_gate_jar_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 # Never the real per-user lease-events log (nexus-jqk5c).
 export NX_LEASE_EVENTS_LOG="$WORKDIR/lease-events.log"
+# Never sweep the host's real Testcontainers containers from a harness (nexus-qrldo).
+export NX_TC_SWEEP=0
 PASS=0; FAIL=0; SKIP=0
 ok() { echo "  [ok] $1"; PASS=$((PASS + 1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }

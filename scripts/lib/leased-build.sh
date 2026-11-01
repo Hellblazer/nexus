@@ -154,6 +154,13 @@ leased_build_init() {
 leased_build_run() {
     local lab_class="$1"
     shift
+    # nexus-qrldo: remove orphaned Testcontainers containers first (Ryuk is off
+    # on the dev boxes). Best effort, bounded, never fails; NX_TC_SWEEP=0 skips it.
+    local tc_sweep
+    tc_sweep="$(dirname "${BASH_SOURCE[0]}")/../testcontainers_sweep.py"
+    if [[ "${NX_TC_SWEEP:-1}" != 0 && -f "$tc_sweep" ]]; then
+        python3 "$tc_sweep" || true
+    fi
     set -m
     if [[ -n "$lab_class" ]]; then
         rm -f "$_leased_build_pidfile"
