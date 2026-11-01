@@ -291,6 +291,11 @@ Mitigations).
   `evidence` list, a `citations` key included (a model can write it and no
   production dispatch emits it), is malformed and comes back as
   `schema_version: 1` with `evidence: []` and `requires_review: true`.
+  A check or verify step whose evidence hydrates to nothing is not
+  dispatched: the runner returns that same empty payload with no verdict
+  (`ok` / `verified` null), verify's `reason` set to the zero-evidence
+  marker, and the marker also under `text`, where `nx_answer` and the
+  answer-runs classifier read it (nexus-z1d0l.1.10).
 - `answer_shape` classifies a payload when its keys are a subset of a
   listed set, so the v1 sets are added: check
   `{schema_version, ok, evidence, rejected, uncovered, requires_review}`

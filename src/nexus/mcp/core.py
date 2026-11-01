@@ -19,7 +19,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
@@ -11915,6 +11915,54 @@ def _nx_answer_planner_request_block(coverage: "RequestCoverage | None") -> str:
         return ""
 
 
+async def _claimed_verify_plan(
+    plan_json: str, prompt: str, plan_from: Callable[[str], Awaitable[str]], *, may_retry: bool,
+) -> str:
+    """*plan_json* with no verify step lacking a claim, as far as the planner can get there
+    (nexus-z1d0l.1.11).
+
+    ``plan_run`` refuses a verify step with no claim when it reaches it, after the steps before it
+    are paid for, and the host never invents a claim. So the planner is asked once more with the
+    step named, unless *may_retry* is false (the embedded-ref retry already asked: one retry per
+    answer). If the plan still has one and it is the last step, nothing reads its output: it is
+    dropped with a warning and the answer is the step before it. A claim-less verify step that a
+    later step may read, or the plan's only step, stays, and ``plan_run`` refuses it by name.
+    """
+    from nexus.plans.runner import find_claimless_verify  # noqa: PLC0415 — deferred; runner is heavy and this is the planner path
+
+    import structlog as _slog4  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+
+    log = _slog4.get_logger()
+    index = find_claimless_verify(plan_json)
+    if index is None:
+        return plan_json
+    if may_retry:
+        log.warning("nx_answer_planner_verify_claim_retry", step=index + 1)
+        try:
+            retried = await plan_from(
+                prompt
+                + f"\n\nYour previous plan was refused before it ran: step {index + 1} is a verify step "
+                + "with no claim. The host never invents a claim. Give every verify step a claim (text, "
+                + "or a reference such as $stepN.text), or leave verify out."
+            )
+        except Exception as exc:  # noqa: BLE001 — the retry is best-effort; the first plan stands
+            log.warning(
+                "nx_answer_planner_verify_claim_retry_failed",
+                error_type=type(exc).__name__, error=str(exc)[:200],
+            )
+        else:
+            plan_json = retried
+            index = find_claimless_verify(plan_json)
+            if index is None:
+                return plan_json
+    plan = json.loads(plan_json)
+    steps = plan["steps"]
+    if index == len(steps) - 1 and len(steps) > 1:
+        log.warning("nx_answer_planner_verify_step_dropped", step=index + 1)
+        return json.dumps({**plan, "steps": steps[:-1]})
+    return plan_json
+
+
 async def _nx_answer_plan_miss(
     question: str,
     *,
@@ -12167,6 +12215,7 @@ async def _nx_answer_plan_miss(
                 "nx_answer_planner_step_ref_retry_failed",
                 error_type=type(exc).__name__, error=str(exc)[:200],
             )
+    plan_json = await _claimed_verify_plan(plan_json, prompt, _plan_from, may_retry=embedded is None)
     return Match(
         plan_id=0,
         name="ad-hoc",

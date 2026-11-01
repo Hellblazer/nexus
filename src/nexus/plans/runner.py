@@ -1126,6 +1126,33 @@ def find_embedded_step_ref(plan: "str | dict[str, Any] | None") -> PlanRunStepRe
     return None
 
 
+def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
+    """The 0-based index of the first verify step with no non-blank ``claim``, else ``None``
+    (nexus-z1d0l.1.11).
+
+    ``plan_run`` refuses such a step when it reaches it (the host never invents a claim), after the
+    steps before it have run and been paid for; the inline planner asks this before the plan runs.
+    A claim that is not a string (a list, a mapping) is left for ``plan_run`` to judge. Anything that
+    is not a plan with a ``steps`` list returns ``None``, as :func:`find_embedded_step_ref` does.
+    """
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except (TypeError, ValueError):
+            return None
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return None
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or step.get("tool") not in ("verify", "operator_verify"):
+            continue
+        args = step.get("args")
+        claim = args.get("claim") if isinstance(args, dict) else None
+        if claim is None or (isinstance(claim, str) and not claim.strip()):
+            return index
+    return None
+
+
 def _resolve_args(
     args: dict[str, Any],
     *,
@@ -2037,6 +2064,23 @@ def _no_evidence_result_text(*, tool: str, filtered_count: int) -> str:
         f"{_NO_EVIDENCE_RESULT_PREFIX} tool={tool}, "
         f"{filtered_count} hydrated item(s) filtered to 0 before dispatch"
     )
+
+
+def _zero_evidence_witness(resolved_tool: str, text: str) -> dict[str, Any]:
+    """The Witness Schema v1 payload for a check or verify step whose evidence hydrated to nothing
+    (nexus-z1d0l.1.10).
+
+    No model ran, so there is no verdict (``ok`` / ``verified`` is ``None``), no evidence and
+    ``requires_review`` true, which is what :func:`~nexus.operators.witness.bind` gives a reply with
+    no evidence and no records. A verify step's ``reason`` is the marker. The payload also keeps
+    ``text``, the marker every other operator's short-circuit returns, so ``$stepN.text`` and the
+    answer-runs classifier read it as before.
+    """
+    verb = resolved_tool.removeprefix("operator_")
+    reply: dict[str, Any] = {"evidence": []}
+    if verb == "verify":
+        reply["reason"] = text
+    return {**_bind_witness(reply, None, verb), "text": text}
 
 
 def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
@@ -3089,6 +3133,8 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
             "nx_answer_zero_evidence_short_circuit",
             tool=tool, resolved_tool=resolved_tool,
         )
+        if resolved_tool in ("operator_check", "operator_verify"):
+            return _zero_evidence_witness(resolved_tool, _zero_evidence_text)
         return {"text": _zero_evidence_text}
 
     # RDR-196 .p2d (nexus-nyry9.17): DEFAULT-ON per-operator tiering, plus
