@@ -85,8 +85,8 @@ def test_the_t1_index_shows_ids_and_tags_never_contents(monkeypatch) -> None:
     assert "## T1 index (ids and tags; read only what your brief names)" in ctx
     assert "secret finding" not in ctx
     assert "[abcd0000] nexus-x,review-r1" in ctx
-    assert "[abcd0014]" in ctx and "[abcd0015]" not in ctx
-    assert "... (5 more)" in ctx
+    assert "[abcd0007]" in ctx and "[abcd0008]" not in ctx
+    assert "... (12 more)" in ctx
     assert "scratch list)" not in ctx  # the hint pointed at the command that dumps contents
 
 
@@ -116,7 +116,7 @@ def test_an_index_line_is_clamped_so_tags_cannot_outgrow_the_section(monkeypatch
     tags = ",".join(f"tag{i:03d}" for i in range(100))
     ctx = _ctx("conexus:developer", monkeypatch, scratch_list=f"[abcd0001] {tags}  flagged=False")
     [line] = [ln for ln in ctx.splitlines() if ln.startswith("[abcd0001]")]
-    assert len(line) == subagent_start._T1_INDEX_LINE_MAX
+    assert len(line.encode("utf-8")) == subagent_start._T1_INDEX_LINE_MAX
     assert line.endswith("…")
 
 
@@ -200,3 +200,12 @@ def test_the_session_start_context_leads_with_the_t1_contract(monkeypatch) -> No
     out = session_context.run(None).stdout or ""
     assert out.startswith("## T1: the working layer this session shares with its subagents")
     assert "name its id in each brief" in out
+
+
+def test_an_index_line_is_clamped_by_bytes_not_characters(monkeypatch) -> None:
+    """A non-ASCII tag is up to 4 bytes a character; the budget counts bytes."""
+    listing = "[abcd0001] " + "\u00e9" * 200 + "  flagged=False\n  content"
+    ctx = _ctx("conexus:developer", monkeypatch, scratch_list=listing)
+    [line] = [ln for ln in ctx.splitlines() if ln.startswith("[abcd0001]")]
+    assert len(line.encode("utf-8")) <= 100
+    assert line.endswith("\u2026")

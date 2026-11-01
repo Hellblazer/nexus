@@ -490,15 +490,21 @@ def _knowledge_map_section(repo_root: str) -> str:
 
 
 #: The most entry lines the T1 index shows; the rest are counted.
-_T1_INDEX_MAX: int = 15
+_T1_INDEX_MAX: int = 8
 
-#: Longest index line, id and tags included. Tags are free-length, so without a
-#: clamp the section has no byte bound (15 lines x 100 chars is its worst case).
+#: Longest index line in UTF-8 bytes, id and tags included. Tags are free-length,
+#: so without a clamp the section has no byte bound (8 lines x 100 B is its worst
+#: case). Bytes, not characters, because the budget tests count bytes and a
+#: non-ASCII tag is up to 4 B a character.
 _T1_INDEX_LINE_MAX: int = 100
 
 
 def _clamp_index_line(line: str) -> str:
-    return line if len(line) <= _T1_INDEX_LINE_MAX else line[: _T1_INDEX_LINE_MAX - 1] + "…"
+    raw = line.encode("utf-8")
+    if len(raw) <= _T1_INDEX_LINE_MAX:
+        return line
+    ellipsis = "…".encode("utf-8")
+    return (raw[: _T1_INDEX_LINE_MAX - len(ellipsis)] + ellipsis).decode("utf-8", errors="ignore")
 
 
 def _t1_scratch_section(env: dict[str, str]) -> str:

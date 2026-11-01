@@ -122,7 +122,7 @@ _KNOWLEDGE_MAP_SEED = "## Knowledge Map\n\n" + "".join(
 )
 
 #: T1: the hook prints ids and tags only, at most ``_T1_INDEX_MAX`` = 15
-#: lines of at most ``_T1_INDEX_LINE_MAX`` = 100 chars, plus a "(N more)"
+#: lines of at most ``_T1_INDEX_LINE_MAX`` = 100 chars (``_T1_INDEX_MAX`` = 8 lines), plus a "(N more)"
 #: line (nexus-mtheb), so the section has a worst case and it is seeded: 20
 #: entries whose tag lines run past the clamp, each followed by a content
 #: line the hook must drop. ``nx scratch list`` itself is stubbed in the
@@ -171,9 +171,12 @@ _T1_SEED = "".join(
 #: nexus-mtheb (2026-11-01): re-measured after the T1 contract grew, the
 #: machine-written health namespace left the T2 seed (the scan filters it, so
 #: the old seed carried ~500B no dispatch has) and the T1 index was seeded at
-#: its worst case (15 clamped lines plus the "(N more)" line). conexus 6599B
-#: + sn 3470B = 10069B, identical across two runs. 10069 * 1.08 ~= 10874.
-_SUBAGENT_START_BUDGET_BYTES = 10900
+#: its worst case (8 clamped lines plus the "(N more)" line; the confirmation
+#: review found the first fix round never passed this seed to the child, so
+#: 10069B was the unseeded measure, and a 15-line index cost ~1.6KB, which is
+#: why the cap is 8). Seeded: conexus 7499B + sn 3470B = 10969B.
+#: 10969 * 1.08 ~= 11847.
+_SUBAGENT_START_BUDGET_BYTES = 11850
 
 #: Budget for an isolation:worktree dispatch: sn's subagent_start.py adds
 #: worktree-section.md on top of its normal output, and conexus's ported
@@ -196,9 +199,9 @@ _SUBAGENT_START_BUDGET_BYTES = 10900
 #: worktrees. 11506 * 1.08 ~= 12426.
 #:
 #: nexus-mtheb (2026-11-01): same re-measure as above, worktree case:
-#: conexus 6599B + sn 5424B = 12023B, identical across two runs.
-#: 12023 * 1.08 ~= 12985.
-_SUBAGENT_START_WORKTREE_BUDGET_BYTES = 13000
+#: with the T1 index seeded at its 8-line cap, conexus 7499B + sn 5424B =
+#: 12923B. 12923 * 1.08 ~= 13957.
+_SUBAGENT_START_WORKTREE_BUDGET_BYTES = 13950
 
 
 def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
@@ -223,6 +226,9 @@ def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
     )
     t2_seed = home / "t2-seed.txt"
     t2_seed.write_text(_T2_SEED, encoding="utf-8")
+    # nexus-mtheb: the T1 index at its worst case, read by the driver's stub.
+    t1_seed = home / "t1-seed.txt"
+    t1_seed.write_text(_T1_SEED, encoding="utf-8")
     # USERPROFILE: Windows' home for expanduser; NEXUS_CONFIG_DIR: the
     # directory the hook reads the cache from (nexus-3fme8).
     return {
@@ -231,6 +237,7 @@ def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
         "USERPROFILE": str(home),
         "NEXUS_CONFIG_DIR": str(home / ".config" / "nexus"),
         "NX_BUDGET_T2_SEED_FILE": str(t2_seed),
+        "NX_BUDGET_T1_SEED_FILE": str(t1_seed),
     }
 
 
@@ -243,6 +250,11 @@ def _assert_seeds_reached(conexus_ctx: str) -> None:
     assert "Code topic label number 1" in conexus_ctx, (
         "the seeded Knowledge Map cache did not reach the hook's output"
     )
+    # nexus-mtheb: the T1 index at its cap, contents dropped.
+    assert "[t1seed07]" in conexus_ctx, "the seeded T1 index did not reach the hook's output"
+    assert "[t1seed08]" not in conexus_ctx, "the T1 index is not capped at 8 lines"
+    assert "(12 more)" in conexus_ctx, "the T1 index lost its overflow count"
+    assert "that the hook must not print" not in conexus_ctx, "the T1 index printed entry contents"
 
 
 def _run_conexus(
