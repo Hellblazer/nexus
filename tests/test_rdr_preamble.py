@@ -1125,6 +1125,22 @@ _REGATE_STATE_CASES = [
              "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding, sweep every "],
      "lacks": ["Recorded residuals", "no matching finding in the critique", "that is not a recorded residual"],
      "ordered": []},
+    # nexus-qo7ie: after a PASSED gate Layer 0 sweeps only the findings a fix
+    # commit closed; the rest the user chose not to fix are not survivors.
+    {"name": "passed_gate_prior_findings_are_swept_only_where_fixed",
+     "entries": {
+         "204-gate-latest": (
+             "outcome: \"PASSED\"\ndate: \"2026-09-07\"\n"
+             "critique: nexus_rdr/204-gate-critique-2026-09-07c\n"
+         ),
+         "204-gate-critique-2026-09-07c": (
+             "## Significant Issues\n\n### Issue: ghost sweep omits topic_assignments\n- **Location**: L1\n"
+         ),
+     },
+     "has": ["Prior findings of a PASSED gate (sweep only those a fix commit closed;",
+             "ghost sweep omits topic_assignments"],
+     "lacks": ["each must be closed EVERYWHERE"],
+     "ordered": []},
     # The Sites: line is what Layer 0 sweeps.
     {"name": "blocked_gate_carries_the_critics_sites_lines",
      "entries": {
@@ -1666,6 +1682,15 @@ _FIX_SPLIT_CASES = [
      "critique": (f"CRITICAL — {_SHIP_BLOCKER}\nShip-blocker: yes\n\n"
                   f"SIGNIFICANT — {_RESIDUAL}\nShip-blocker: no\n"),
      "ordered": [_FIX_SHIP, _SHIP_BLOCKER, _FIX_RESID, _RESIDUAL], "none_between": False},
+    # nexus-qo7ie: a PASSED round-3+ gate's findings are a menu, not a
+    # ship-blocker/residual split that says to fix none of them.
+    {"name": "passed_round_three_gate_is_a_menu_not_a_split",
+     "gate": _ROUND_FOUR_GATE.replace('"BLOCKED"', '"PASSED"') + f"residuals:\n  - {_RESIDUAL}\n",
+     "critique": ("## Significant Issues\n\n### Issue: " + _RESIDUAL + "\n"
+                  "- **Location**: L200\n- **Ship-blocker**: no\n"),
+     "ordered": ["#### Findings (fix only those the user names)",
+                 "A residual the user names is fixed here", _RESIDUAL],
+     "none_between": False, "passed": True},
     # nexus-u1jxt.9: rdr-fix matched residuals strict-key only while rdr-gate
     # matched strict-then-loose, so a residual whose title drifted by a digit
     # was a ship-blocker to fix here and a recorded residual there.
@@ -1688,6 +1713,9 @@ def test_rdr_fix_round_three_splits_ship_blockers_from_residuals(rdr_env, monkey
         "204-gate-critique-2026-09-09z": case["critique"],
     })
     out = _preamble("rdr-fix", "--", "204").output
+    if case.get("passed"):
+        _assert_output(name, out, has=["Gate round 4"], lacks=[_FIX_SHIP, _FIX_RESID], ordered=case["ordered"])
+        return
     _assert_output(name, out, has=["Gate round 4", _FIX_SHIP, _FIX_RESID], ordered=case["ordered"])
     if case["none_between"]:
         assert "(none" in out[out.index(_FIX_SHIP):out.index(_FIX_RESID)], (
@@ -2240,3 +2268,16 @@ def test_fix_loop_rules_are_carried_verbatim_by_both_rdr_skills():
         lines = text.splitlines()
         missing = [rule for rule in FIX_LOOP_RULES if f"- {rule}" not in lines]
         assert not missing, f"{skill} lacks: {missing}"
+
+
+def test_no_fix_rule_gives_a_gloss_commit_its_own_fix_check():
+    """Rule 3 (one fix check per fix round) holds only while no rule anywhere
+    gives a gloss or count commit its own check (nexus-qo7ie review)."""
+    from nexus.commands.rdr import _FIX_RULES
+
+    texts = {"_FIX_RULES": " ".join(_FIX_RULES)}
+    for skill in ("rdr-fix-checklist", "rdr-gate-checklist", "rdr-research"):
+        texts[skill] = (_PLUGIN_DIR / "skills" / skill / "SKILL.md").read_text()
+    stale = [name for name, text in texts.items()
+             if "own fix check" in text or "gated separately" in text]
+    assert not stale, f"per-commit fix-check wording survives in: {stale}"

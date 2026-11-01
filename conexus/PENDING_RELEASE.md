@@ -46,5 +46,7 @@ it is until moved back deliberately.
 ## Awaiting the next release (pinned: v7.93.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
+- `conexus/skills/rdr-fix-checklist/SKILL.md` (nexus-qo7ie): rules 1 and 2 say where unnamed and design-needing Significants go before and from round 3, the fix check runs after the round's last fix commit, and the round-3 ship-blocker-only rule is scoped to a BLOCKED gate.
+- `conexus/skills/rdr-gate-checklist/SKILL.md` (nexus-qo7ie): the same rule wording, the Layer 3 brief names the swept prior findings, and the round-3 ship-blocker-only rule is scoped to a BLOCKED gate.
 
 ## Deferred to the next client release

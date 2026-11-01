@@ -47,7 +47,7 @@ gated commit, and the Fix check section. Do this before anything else:
    are where survivors hide. Fix every site.
 2. If a finding changed a design decision, read Implementation Plan, Test Plan,
    Day 2 Operations, Trade-offs and Proportionality in full.
-3. Brief the Layer 3 critic with the prior findings and ask it to verify each is
+3. Brief the Layer 3 critic with the swept prior findings and ask it to verify each is
    closed everywhere, then run a full-document consistency pass. Re-read related
    RDRs only if the diff touched the Relationship section; otherwise the prior
    round's P7 check stands.
@@ -103,8 +103,8 @@ The fix check is a precondition and never counts toward the round cap.
 
 Fixes go through `/conexus:rdr-fix <id>` (the rdr-fix skill); its preamble prints the findings with their Sites, the diff range and the pre-edit research title. The rules, restated:
 
-- After a PASSED gate, fix only the findings the user names; the rest stay in the critique record, the next gate's Layer 0 does not re-sweep them, and the gate goes to accept.
-- A fix for a Significant adds no new design; a Significant that needs design is left for accept. A Critical in rounds 1 and 2, or a ship-blocker from round 3, is fixed even when its remedy is design.
+- After a PASSED gate, fix only the findings the user names; before round 3 the rest stay in the critique record and the next gate's Layer 0 does not re-sweep them, and from round 3 they are the gate record's residuals, dispositioned at accept.
+- A fix for a Significant adds no new design; a Significant that needs design is left unfixed, stays in the critique record, and becomes a residual if the gate reaches round 3. A Critical in rounds 1 and 2, or a ship-blocker from round 3, is fixed even when its remedy is design.
 - Run one fix check per fix round: batch the round's fix commits and check the whole range once, never once per commit; the re-check after a failed check is the next round's one check.
 - A fix changes the fact the critic named and nothing else. New glosses,
   rationales, parentheticals and counts are a separate commit, covered by the

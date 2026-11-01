@@ -2374,7 +2374,12 @@ def _preamble_regate_block(
         if unmatched:
             lines.append("")
 
-        lines.append("Prior findings (each must be closed EVERYWHERE in the file, not at the quoted line):")
+        lines.append(
+            "Prior findings of a PASSED gate (sweep only those a fix commit closed; the rest the "
+            "user chose not to fix stay in the critique record):"
+            if outcome == "PASSED" and not residual_titles
+            else "Prior findings (each must be closed EVERYWHERE in the file, not at the quoted line):"
+        )
         # Cap on FINDINGS, not lines: a canonical issue is four lines (Issue,
         # Location, Recommendation, Sites) and a line cap dropped the Sites
         # lists Layer 0 sweeps (deep critique [24873] S2).
@@ -3477,8 +3482,8 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
 #: of a 30-record sample failed). Printed by ``preamble rdr-fix`` and carried verbatim by the
 #: rdr-fix-checklist and rdr-gate-checklist skills; a test keeps the three equal.
 FIX_LOOP_RULES: tuple[str, ...] = (
-    "After a PASSED gate, fix only the findings the user names; the rest stay in the critique record, the next gate's Layer 0 does not re-sweep them, and the gate goes to accept.",
-    "A fix for a Significant adds no new design; a Significant that needs design is left for accept. A Critical in rounds 1 and 2, or a ship-blocker from round 3, is fixed even when its remedy is design.",
+    "After a PASSED gate, fix only the findings the user names; before round 3 the rest stay in the critique record and the next gate's Layer 0 does not re-sweep them, and from round 3 they are the gate record's residuals, dispositioned at accept.",
+    "A fix for a Significant adds no new design; a Significant that needs design is left unfixed, stays in the critique record, and becomes a residual if the gate reaches round 3. A Critical in rounds 1 and 2, or a ship-blocker from round 3, is fixed even when its remedy is design.",
     "Run one fix check per fix round: batch the round's fix commits and check the whole range once, never once per commit; the re-check after a failed check is the next round's one check.",
 )
 
@@ -3592,10 +3597,13 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
     own_round = _gate_round_number(content, critique_count) - 1
-    print("#### Findings (fix only those the user names)" if str(outcome).strip('"').upper() == "PASSED"
-          else "#### Findings to fix (each at every site named)")
+    passed = outcome == "PASSED"
+    print("#### Findings (fix only those the user names)" if passed else "#### Findings to fix (each at every site named)")
     print()
-    if findings and own_round > GATE_MAX_ANY_CRITICAL_ROUNDS:
+    if passed and findings and own_round > GATE_MAX_ANY_CRITICAL_ROUNDS:
+        print("A residual the user names is fixed here; accept then dispositions it by the fixing sha.")
+        print()
+    if findings and own_round > GATE_MAX_ANY_CRITICAL_ROUNDS and not passed:
         residual_titles = _residual_titles(content)
         residual_keys = {_finding_title_key(t) for t in residual_titles}
         # nexus-u1jxt.9: the SAME strict-then-loose rule the gate preamble
@@ -3674,8 +3682,9 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     )
     print("2. Edit the RDR at every site the finding names.")
     print(
-        f"3. Commit, then `nx rdr preamble rdr-gate -- {t2_key}` prints the Fix check section; "
-        "dispatch it and store the verdict under the title it names before any re-gate."
+        f"3. After the round's last fix commit, `nx rdr preamble rdr-gate -- {t2_key}` prints the "
+        "Fix check section; dispatch it once for the round and store the verdict under the title "
+        "it names before any re-gate."
     )
     print()
     print("#### Rules")
