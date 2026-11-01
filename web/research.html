@@ -177,7 +177,6 @@ figure.fig .you-edge{stroke:var(--brass)}
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table>
 <tr><th>Term</th><th>Meaning</th></tr>
 <tr><td>link</td><td>A typed connection between two catalog documents: cites, implements, supersedes, relates, comments, quotes.</td></tr>
-<tr><td>research agent</td><td>The agent that reads outward from a source: authors, venue, independent evaluations, the literature around it.</td></tr>
 <tr><td>critic agent</td><td>The agent that checks a plan or a result against the code, the schema, and the design records, and returns a verdict.</td></tr>
 <tr><td>mapping</td><td>A document that says, claim by claim, where a paper touches your own system.</td></tr>
 <tr><td>proposal</td><td>One change your system could make, with its cost and its falsifier.</td></tr>
@@ -224,10 +223,11 @@ figure.fig .you-edge{stroke:var(--brass)}
 <p>Claude runs <code>nx index pdf</code> with <code>--enrich</code>. Every PDF goes through MinerU, which reads layout, tables, and formulas, and if you installed with <code>--slim</code> the first PDF installs PDF support first. Enrichment looks the paper up by title and adds the DOI, the authors, the venue, and the citation count to the catalog entry. Then Claude shows the entry.</p>
 <details class="gloss out"><summary>What you see</summary><pre class="out">catalog show  <b>1.12.119</b>
   title:      RAG Deserves an Index: Why Ingest-Time Compilation Beats Query-Time Interpretation
-  author:     Kyle Wild, Yusuke Takahashi, Asako Uraki      year: 2026
-  collection: knowledge__dt-papers__voyage-context-3__v1    chunk_count: 52
+  author:     Kyle Wild, Yusuke Takahashi, Asako Uraki
+  collection: knowledge__dt-papers__voyage-context-3__v1
   bib_doi:    10.48550/arxiv.2608.20845    bib_openalex_id: W7204148305
-  bib_venue:  arXiv (Cornell University)   index_state: complete</pre></details>
+  bib_venue:  arXiv (Cornell University)   index_state: complete
+  …</pre></details>
 <p class="note">On macOS with DEVONthink, <code>nx dt capture</code> takes a URL or a DOI, stores the PDF in DEVONthink, and indexes it in one step. The catalog keeps the DEVONthink identity, so the same paper is never indexed twice. <code>nx dt capture</code> and <code>nx dt index</code> also add <code>relates</code> links, made by <code>dt_similar</code>, to the most similar documents already in the store. <code>nx index pdf</code> adds no such links.</p>
 <h3>Collections are subjects</h3>
 <p>A paper is stored in a collection named for its subject, such as <code>distributed-systems</code> or <code>semantic-operators</code>, and never for a project or a date. A later question can then be limited to one subject. "What do the semantic-operator papers say about batching" works because those papers are in one place.</p>
@@ -387,8 +387,7 @@ per-operator model and backend selection, plan-level cost/quality optimization, 
 
 - **outcome**: <b>not-justified</b>
 - **confidence**: high
-- **critical_count**: 3
-- **significant_count**: 5</pre></details>
+…</pre></details>
 <details class="gloss out"><summary>What you see, in the verdict document</summary><pre class="out">## The ideas, and which survived
 1. Replicate the agent-layer experiment before building anything.   <b>Survives.</b>
 2. The redo-log idea maps onto a known gap.                          <b>Survives</b>, and the synthesis had missed it.
@@ -419,19 +418,17 @@ Run item 1. Fold item 2 into the existing beads. Do not build item 5 on faith.</
 <h3>Recompute the result</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Methodology critique of <span class="ph">&lt;THE EXPERIMENT&gt;</span>. Give the critic the raw trial data, not the report. Recompute every number. Classify every outcome as correct, wrong, or no answer. Check that the generated data follows its own generation rules. Validate the grader on a sample labelled by a person.</pre><button class="copy" type="button">Copy</button></div>
-<details class="gloss out"><summary>What you see, from the recompute</summary><pre class="out">Verdict: <b>NOT-JUSTIFIED</b>, 3 ship-blockers, confidence high. Do not proceed to an engine change on this evidence.
+<details class="gloss out"><summary>What you see, from the recompute</summary><pre class="out">Verdict: <b>NOT-JUSTIFIED</b>, confidence high. Do not proceed to an engine change on this evidence.
 
 ARITHMETIC IS CLEAN. Every number in report.md reproduces exactly from retrievals.jsonl by independent
 recomputation … The instrument, not the arithmetic, is the problem.
 
-SHIP-BLOCKER 1 — THE HEADLINE IS FORCED BY CONSTRUCTION. On the current leg, 35 of 35 of arm A's stale
-top-1 documents ARE the question's own source document. … More than half the A-to-B gap on both metrics
-is reproduced by a control that knows nothing about validity.
+SHIP-BLOCKER 1 — THE HEADLINE IS FORCED BY CONSTRUCTION. … A control that knows nothing about the
+treatment reproduces more than half of the gap between the arms.
 
-SHIP-BLOCKER 2 — THE LEG THAT PASSED DOES NOT TEST THE TEMPORAL SIGNAL. …
-SHIP-BLOCKER 3 — 7 OF 14 VALIDITY WINDOWS ARE WRONG, AND THE GROUND TRUTH WAS IN THE FILE. …
+SHIP-BLOCKER 2 — THE LEG THAT PASSED DOES NOT TEST THE SIGNAL. …
 
-WHAT A FAIR RERUN NEEDS. (1) Read the dates from frontmatter and fall back to git only when absent …</pre></details>
+WHAT A FAIR RERUN NEEDS. …</pre></details>
 <p>A report may say "the treated arm mostly answered wrongly" while the raw log shows most failures were no answer at all. Those are two different findings, and only the recompute finds the second. Here it found a clean report over a broken instrument, which no reading of the report could have shown.</p>
 <div class="further"><p class="ttl">Investigate further</p><ul>
 <li>Ask Claude, before any run: <em>"Count the questions on which the treatment can act at all. If that is fewer than the discordance floor, stop."</em></li>
@@ -490,7 +487,7 @@ WHAT A FAIR RERUN NEEDS. (1) Read the dates from frontmatter and fall back to gi
 [to floating-point precision. And on a held-out sample of 500](chash:e97331ff10ab59c8c97537bc440fbd6c4e85cd167579af89fa133b550418bf5d)
 
 $ nx doc cite "compiled claims as the retrieval payload beat chunking" --against knowledge__dt-papers
-top candidate distance 0.388 above threshold 0.300 — no cite emitted. Try a narrower claim or broaden the collection.</pre></details>
+top candidate distance … above threshold … — no cite emitted. Try a narrower claim or broaden the collection.</pre></details>
 <p>The second call shows the refusal. A claim too vague to ground returns no link and says so.</p>
 </div></details>
 <details class="gloss"><summary>Grounding</summary><div class="pad">
@@ -513,7 +510,7 @@ top candidate distance 0.388 above threshold 0.300 — no cite emitted. Try a na
 <p>For a scientific paper, the store extracts a fixed set of structured fields at index time or later. The fields are the problem the paper addresses, the proposed method, the datasets, the baselines, and the main result, each with a confidence value. Questions such as "which papers used dataset X" or "group the papers by baseline" run against these fields directly. The filter, group-by, and aggregate operators use that fast path when the fields exist and read the text when they do not. The <code>search_aspect_scoped</code> tool applies a field condition inside the same query as the vector search. A strict filter then does not lose results the way "search first, filter after" does.</p>
 <details class="gloss out"><summary>What you see</summary><pre class="out">search_aspect_scoped  query: retrieval payload compiled claims versus chunks
                       field: experimental_datasets   pattern: %MediaSum%
-[knowledge__dt-papers__voyage-context-3__v1] <b>1.12.119</b> (dist=0.5450)
+[knowledge__dt-papers__voyage-context-3__v1] <b>1.12.119</b> …
   … What is new here is compiling the payload the reader consumes, and validating it against
   the span it came from. Proposition-level indexing [3] decomposes passages into standalone
   propositions and indexes those …</pre></details>
