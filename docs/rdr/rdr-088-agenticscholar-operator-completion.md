@@ -176,10 +176,12 @@ records:
   `e1, e2, ...` in record order. Binding happens once, by whoever holds the
   records: on the runner path the runner binds the operator's raw payload;
   the MCP tool binds only when it is called directly.
-- `nx enrich aspects --validate-sample`: one record, `e1`, whose `tumbler`
-  is the document's catalog tumbler (enrich already holds
-  `doc_id_lookup`), `chash` null (the evidence is the reassembled document,
-  not one chunk), `collection` the collection being enriched.
+- `nx enrich aspects --validate-sample`: one record per chunk of the
+  evidence window, `c1, c2, ...`, each carrying the document's catalog
+  tumbler, the chunk's `chash` from the catalog manifest and the collection
+  being enriched; a chunk the manifest does not list gets no source fields.
+  A read that yields no chunk identities is verified against the plain text
+  with no records.
 - The coverage ledger: its anchors already are such records.
 - A direct MCP call: records come from what the caller supplied. A check
   `items` JSON array of objects with `id` and `text` gives one record per

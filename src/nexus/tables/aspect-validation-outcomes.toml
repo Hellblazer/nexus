@@ -17,13 +17,11 @@
 #                             verify call was made
 #   verify_exception          the verify call raised
 #   malformed_verify_result   the verify call returned a payload whose
-#                             `verified` is missing or not a boolean. The
-#                             legacy path reads a missing one as non-verified
-#                             and appends a failures row; that stays, so
-#                             legacy_failures_row = yes. (A truthy non-boolean
-#                             would take the legacy verified branch, but the
-#                             dispatch schema requires a boolean, so the
-#                             missing case is the one that reaches here.)
+#                             `verified` is missing or not a boolean (a
+#                             truthy non-boolean such as "yes" counts too).
+#                             Before RDR-189 that reply counted as a failure
+#                             and appended a failures row; that stays for every
+#                             malformed verdict, so legacy_failures_row = yes.
 #
 # emit fields
 #   status               the aspect_validation.jsonl row status, from the

@@ -2528,7 +2528,12 @@ def _run_validation_sample(
     unverifiable = 0
     unwitnessed = 0
     verified = 0
-    errored = 0
+    errored_by: dict[str, int] = {}  # reason_code -> count; its sum is the errored total
+    unwritten: dict[Path, int] = {}  # file -> rows whose append failed
+
+    def append(path: Path, row: dict[str, Any]) -> None:
+        if not _append_validation_row_logged(path, row):
+            unwritten[path] = unwritten.get(path, 0) + 1
 
     for source_path, record, lookup_path in sample:
         claim_payload = {
@@ -2553,7 +2558,7 @@ def _run_validation_sample(
             _tumbler: str | None = tumbler,
             _timestamp: str = timestamp,
         ) -> None:
-            _append_validation_row_logged(all_path, _all_outcomes_row(
+            append(all_path, _all_outcomes_row(
                 reason_code=reason_code, collection=collection, source_path=_source_path,
                 tumbler=_tumbler, claim_payload=_claim, result=result, window=window,
                 identity_trusted=identity_trusted, trace=trace, timestamp=_timestamp,
@@ -2569,7 +2574,7 @@ def _run_validation_sample(
             chunks_out=chunks,
         )
         if not content:
-            errored += 1
+            errored_by["indexed_text_unavailable"] = errored_by.get("indexed_text_unavailable", 0) + 1
             _log.warning(
                 "validate_sample_indexed_text_unavailable",
                 source_path=source_path, collection=collection,
@@ -2602,7 +2607,7 @@ def _run_validation_sample(
             else:
                 result = asyncio.run(_verify(claim_json, evidence))
         except Exception as exc:  # noqa: BLE001 — per-sample isolation; verify failure counted as errored, validation loop continues
-            errored += 1
+            errored_by["verify_exception"] = errored_by.get("verify_exception", 0) + 1
             _log.warning(
                 "validate_sample_verify_failed",
                 source_path=source_path, error=str(exc),
@@ -2611,7 +2616,7 @@ def _run_validation_sample(
             continue
 
         if not isinstance(result, Mapping):
-            errored += 1
+            errored_by["malformed_verify_result"] = errored_by.get("malformed_verify_result", 0) + 1
             _log.warning(
                 "validate_sample_verify_malformed",
                 source_path=source_path, result_type=type(result).__name__,
@@ -2631,28 +2636,28 @@ def _run_validation_sample(
             reason_code = "evidence_truncated" if evidence_truncated else "verifier_rejected"
         write_row(reason_code, result, window, identity_trusted=trusted)
 
-        # The failures file is decided by the legacy expression, unchanged.
-        if result.get("verified", False):
+        # The failures file follows the outcome table's legacy_failures_row: every outcome that
+        # read as non-verified before RDR-189 writes a row, and a malformed verdict (missing, or
+        # truthy but not a boolean) counted as a failure then, so it still writes one. Only a
+        # true boolean verdict writes none.
+        if reason_code == "malformed_verify_result":
+            errored_by[reason_code] = errored_by.get(reason_code, 0) + 1
+        elif verdict:
             if reason_code == "verified":
                 verified += 1
-            elif reason_code == "malformed_verify_result":
-                errored += 1  # truthy but not a boolean: the row says errored, so does the summary
             else:
                 unwitnessed += 1  # a true verdict with no bound support is unverifiable
             continue
-
         # nexus-xwvwx: a non-verified result against a TRUNCATED evidence
         # window is not a real disagreement -- the verifier may simply not
         # have seen the section the claim references. Classify separately
         # so the summary never conflates "the extraction looks wrong" with
         # "the sample's evidence window was partial".
-        if reason_code == "malformed_verify_result":
-            errored += 1
         elif evidence_truncated:
             unverifiable += 1
         else:
             failures += 1
-        _append_validation_row_logged(failures_path, _failures_row(
+        append(failures_path, _failures_row(
             source_path=source_path, claim_payload=claim_payload, result=result,
             window=window, trace=trace, timestamp=timestamp,
         ))
@@ -2664,17 +2669,33 @@ def _run_validation_sample(
         except OSError as exc:
             _log.warning("validation_file_prune_failed", path=str(path), error=str(exc))
 
+    errored = sum(errored_by.values())
+
+    def written(label: str, path: Path, ok: str = "") -> str:
+        """"<label> written to <path>." (or *ok*) only for a file that took every row; a file that
+        lost any names how many, so the summary never claims a file it failed to write."""
+        if lost := unwritten.get(path):
+            return f"{label}: {lost} row(s) could not be written to {path}."
+        return ok or f"{label} written to {path}."
+
     # nexus-vwns1: an all-errored run (no sample's indexed text could be
     # re-fetched — T3 down, collection not indexed) must NOT read as a quiet
     # pass. Surface it loudly so a broad read_indexed_text regression can't
-    # make --validate-sample silently verify nothing.
+    # make --validate-sample silently verify nothing. The warning names what
+    # errored (a count per reason_code); the T3 hint stays only when every
+    # error was an unavailable text, since a verify exception or a malformed
+    # reply says nothing about T3.
     if sample_count and errored == sample_count:
+        reasons = ", ".join(f"{code}={n}" for code, n in sorted(errored_by.items()))
+        hint = (
+            " Is the collection indexed and T3 reachable?"
+            if set(errored_by) == {"indexed_text_unavailable"} else ""
+        )
         click.echo(
-            f"WARNING: validation verified 0 samples — indexed text was "
-            f"unavailable for ALL {sample_count} sampled document(s). "
-            f"Is the collection indexed and T3 reachable? "
+            f"WARNING: validation verified 0 samples — all {sample_count} sampled "
+            f"document(s) errored ({reasons}).{hint} "
             f"(no verification signal this run) "
-            f"All outcomes written to {all_path}.",
+            f"{written('All outcomes', all_path)}",
             err=True,
         )
     elif failures or unverifiable or unwitnessed:
@@ -2682,15 +2703,18 @@ def _run_validation_sample(
             f"Validation: {verified} verified, {failures} disagreement(s), "
             f"{unverifiable} unverifiable (evidence truncated), "
             f"{unwitnessed} unverifiable (no bound witness), "
-            f"{errored} errored. Failures written to {failures_path}. "
-            f"All outcomes written to {all_path}."
+            f"{errored} errored. {written('Failures', failures_path)} "
+            f"{written('All outcomes', all_path)}"
         )
     else:
         click.echo(
             f"Validation: all {verified} sample(s) verified "
-            f"({errored} errored). Output: {failures_path}. "
-            f"All outcomes written to {all_path}."
+            f"({errored} errored). {written('Output', failures_path, f'Output: {failures_path}.')} "
+            f"{written('All outcomes', all_path)}"
         )
+    if unwritten:
+        # The rows are gone: a run that could not record its result has not succeeded.
+        raise click.exceptions.Exit(1)
 
 
 # ── RDR-189 P1: the validation record ──────────────────────────────────────
@@ -2979,7 +3003,7 @@ def _append_validation_row(path: Path, row: dict[str, Any]) -> None:
     line = (json.dumps(row) + "\n").encode("utf-8")
     if target.exists() and not target.is_file():
         # O_NONBLOCK: a FIFO with no reader fails (ENXIO, logged by the caller) instead of hanging the run.
-        fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK)
+        fd = os.open(target, os.O_WRONLY | os.O_APPEND | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(fd, "ab") as f:
             f.write(line)
         return
@@ -3008,14 +3032,17 @@ def _append_validation_row(path: Path, row: dict[str, Any]) -> None:
             f.write(lead + line)
 
 
-def _append_validation_row_logged(path: Path, row: dict[str, Any]) -> None:
+def _append_validation_row_logged(path: Path, row: dict[str, Any]) -> bool:
     """:func:`_append_validation_row`, with an OS error logged instead of raised: one unwritable
     file (a read-only directory for its lock, a symlink loop) must not end a run whose
-    extraction is already spent, nor cost the other file its row."""
+    extraction is already spent, nor cost the other file its row. Returns whether the row was
+    written, so the caller can count what was lost and say so."""
     try:
         _append_validation_row(path, row)
     except OSError as exc:
         _log.warning("validation_file_append_failed", path=str(path), error=str(exc))
+        return False
+    return True
 
 
 def _prune_validation_file(path: Path, keep: int = _VALIDATION_MAX_ROWS) -> None:
@@ -3025,8 +3052,8 @@ def _prune_validation_file(path: Path, keep: int = _VALIDATION_MAX_ROWS) -> None
     anything that is not a regular file is skipped. "Newest" is the last *keep* complete
     lines in file order; a torn trailing line is dropped. The kept rows go to a temp file
     in the same directory, fsynced, given the original's mode, and renamed over it."""
+    import secrets  # noqa: PLC0415 — branch-local stdlib import; deferred to validation path
     import stat  # noqa: PLC0415 — branch-local stdlib import; deferred to validation path
-    import tempfile  # noqa: PLC0415 — branch-local stdlib import; deferred to validation path
 
     target = path.resolve()
     if not target.exists():
@@ -3049,7 +3076,12 @@ def _prune_validation_file(path: Path, keep: int = _VALIDATION_MAX_ROWS) -> None
         if torn:
             _log.warning("validation_file_torn_tail_dropped", path=str(target), bytes=len(torn))
         kept = b"".join(line + b"\n" for line in complete[-keep:]) if keep else b""
-        fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
+        # The replacement is made through open_private, not mkstemp: an owner-only file the run made
+        # must stay owner-only on Windows, where os.chmod does not carry the ACL.
+        from nexus._winsec import open_private  # noqa: PLC0415 — command-local import; deferred to validation path
+
+        tmp_name = str(target.parent / f"{target.name}.{secrets.token_hex(8)}.tmp")
+        fd = open_private(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(kept)

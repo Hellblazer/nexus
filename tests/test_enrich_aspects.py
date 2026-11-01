@@ -1583,24 +1583,126 @@ class TestValidationAllOutcomes:
         (legacy,) = _rows(fail)
         assert legacy["operator_verify_reason"] == "no verdict key"
 
-    @pytest.mark.parametrize("code", [
-        "verified", "verified_unwitnessed", "verifier_rejected", "malformed_verify_result",
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the directory's mode")
+    def test_an_unwritable_output_directory_is_not_reported_as_written_and_exits_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import click
+
+        ro = tmp_path / "ro"
+        ro.mkdir()
+        fail, allout = ro / "f.jsonl", ro / "a.jsonl"
+        ro.chmod(0o500)
+        try:
+            with pytest.raises(click.exceptions.Exit) as exc:
+                _sample(
+                    tmp_path, monkeypatch, _verdict(verified=False, reason="no", evidence=[]),
+                    fail_out=str(fail), all_out=str(allout),
+                )
+        finally:
+            ro.chmod(0o700)
+        assert exc.value.exit_code != 0
+        out = capsys.readouterr().out
+        assert not fail.exists() and not allout.exists()
+        assert f"written to {fail}" not in out.replace(f"could not be written to {fail}", "")
+        assert f"written to {allout}" not in out.replace(f"could not be written to {allout}", "")
+        # Each unwritten file is named, with how many rows it lost.
+        assert f"1 row(s) could not be written to {fail}" in out
+        assert f"1 row(s) could not be written to {allout}" in out
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the directory's mode")
+    def test_only_the_file_that_failed_is_named_unwritten(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import click
+
+        ro = tmp_path / "ro"
+        ro.mkdir()
+        fail, allout = ro / "f.jsonl", tmp_path / "a.jsonl"
+        ro.chmod(0o500)
+        try:
+            with pytest.raises(click.exceptions.Exit):
+                _sample(
+                    tmp_path, monkeypatch, _verdict(verified=False, reason="no", evidence=[]),
+                    fail_out=str(fail), all_out=str(allout),
+                )
+        finally:
+            ro.chmod(0o700)
+        out = capsys.readouterr().out
+        assert f"All outcomes written to {allout}" in out
+        assert f"1 row(s) could not be written to {fail}" in out
+        assert f"written to {fail}" not in out.replace(f"could not be written to {fail}", "")
+        assert len(_rows(allout)) == 1
+
+    @pytest.mark.parametrize("code", ["verify_exception", "malformed_verify_result"])
+    def test_the_all_errored_warning_names_the_reason_not_unavailable_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], code: str,
+    ) -> None:
+        async def boom(claim, evidence, timeout=60.0):
+            raise RuntimeError("dispatch died")
+
+        verify = boom if code == "verify_exception" else _verdict(reason="no verdict", evidence=[])
+        _sample(tmp_path, monkeypatch, verify)
+        err = capsys.readouterr().err
+        assert "verified 0 samples" in err and f"{code}=1" in err
+        assert "unavailable" not in err and "T3" not in err
+
+    def test_the_all_errored_warning_keeps_the_t3_hint_for_unavailable_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _sample(tmp_path, monkeypatch, _verdict(verified=True), read=lambda **_kw: None)
+        err = capsys.readouterr().err
+        assert "indexed_text_unavailable=1" in err and "T3 reachable" in err
+
+    @pytest.mark.parametrize("case", [
+        "verified", "verified_unwitnessed", "verifier_rejected", "evidence_truncated",
+        "indexed_text_unavailable", "verify_exception", "malformed_verify_result",
+        "malformed_truthy_non_boolean",
     ])
     def test_legacy_row_appears_exactly_when_the_outcome_table_says(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
     ) -> None:
+        """Every row of the table is driven, so every ``legacy_failures_row`` flag is pinned. A truthy
+        non-boolean verdict gets the same reason_code as a missing one, so it is the same row: the
+        legacy file is unchanged from before RDR-189, where it counted as a failure."""
         from nexus.tables.aspect_validation_outcomes import rows as outcome_rows
 
+        code = "malformed_verify_result" if case == "malformed_truthy_non_boolean" else case
         wanted = {r.reason_code: r.legacy_failures_row for r in outcome_rows()}[code]
-        payload = {
-            "verified": {"verified": True, "reason": "", "evidence": [_SUPPORTS_ALPHA]},
-            "verified_unwitnessed": {"verified": True, "reason": "", "evidence": []},
-            "verifier_rejected": {"verified": False, "reason": "no", "evidence": []},
-            "malformed_verify_result": {"reason": "no", "evidence": []},
-        }[code]
-        fail, allout = _sample(tmp_path, monkeypatch, _verdict(**payload))
+
+        async def boom(claim, evidence, timeout=60.0):
+            raise RuntimeError("dispatch died")
+
+        kw: dict = {}
+        verify = {
+            "verified": _verdict(verified=True, reason="", evidence=[_SUPPORTS_ALPHA]),
+            "verified_unwitnessed": _verdict(verified=True, reason="", evidence=[]),
+            "verifier_rejected": _verdict(verified=False, reason="no", evidence=[]),
+            "evidence_truncated": _verdict(verified=False, reason="no", evidence=[]),
+            "indexed_text_unavailable": _verdict(verified=True),
+            "verify_exception": boom,
+            "malformed_verify_result": _verdict(reason="no", evidence=[]),
+            "malformed_truthy_non_boolean": _verdict(verified="yes", reason="no", evidence=[]),
+        }[case]
+        if case == "evidence_truncated":
+            kw["window_cap"] = 40
+        if case == "indexed_text_unavailable":
+            kw["read"] = lambda **_kw: None
+        fail, allout = _sample(tmp_path, monkeypatch, verify, **kw)
         assert _rows(allout)[0]["reason_code"] == code
         assert (fail.exists() and bool(fail.read_text().strip())) is wanted
+        if wanted:
+            (legacy,) = _rows(fail)
+            assert set(legacy) == _LEGACY_KEYS
+
+    def test_every_outcome_table_row_is_driven_by_the_legacy_row_test(self) -> None:
+        """The parametrize above must name every table row, or a new row's flag would be unpinned."""
+        import inspect
+
+        from nexus.tables.aspect_validation_outcomes import rows as outcome_rows
+
+        src = inspect.getsource(type(self).test_legacy_row_appears_exactly_when_the_outcome_table_says)
+        assert all(f'"{r.reason_code}"' in src for r in outcome_rows())
 
     def test_equal_validation_paths_are_rejected_before_any_extraction(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -1948,7 +2050,9 @@ class TestValidationRulePins:
         assert sorted((r["status"], r["reason_code"]) for r in _rows(allout)) == [
             ("errored", "malformed_verify_result"), ("verified", "verified"),
         ]
-        assert not fail.exists()  # the legacy expression reads a truthy verdict as verified: no row
+        # A malformed verdict writes the legacy failures row (the outcome table), as it counted as a failure before RDR-189.
+        (legacy,) = _rows(fail)
+        assert legacy["source_path"] == _VPATH  # the truthy "yes" sample; the verified one wrote none
         # The all-verified line: the errored sample is counted as errored, not verified or unwitnessed.
         assert capsys.readouterr().out.splitlines()[-1] == (
             f"Validation: all 1 sample(s) verified (1 errored). Output: {fail}. "
@@ -1963,8 +2067,8 @@ class TestValidationRulePins:
         assert sorted(r["reason_code"] for r in _rows(allout)) == [
             "malformed_verify_result", "verifier_rejected",
         ]
-        (legacy,) = _rows(fail)  # only the disagreement wrote a failures row
-        assert legacy["source_path"] == "/p/other.txt"
+        # Both the disagreement and the malformed verdict write a failures row.
+        assert sorted(r["source_path"] for r in _rows(fail)) == ["/p/other.txt", _VPATH]
         assert capsys.readouterr().out.splitlines()[-1] == (
             "Validation: 0 verified, 1 disagreement(s), 0 unverifiable (evidence truncated), "
             "0 unverifiable (no bound witness), 1 errored. "
@@ -2710,6 +2814,39 @@ class TestValidationFileSafety:
         finally:
             ro.chmod(0o700)
         assert any(e["event"] == "validation_file_append_failed" for e in logs)
+
+    def test_a_device_target_needs_no_o_nonblock(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Windows has no ``os.O_NONBLOCK``: a non-regular target (NUL) must not raise AttributeError
+        past the OSError-only wrapper. Faked for ``enrich`` alone, never on the shared ``os``."""
+        from tests._module_seam import delattr_in
+
+        delattr_in(monkeypatch, enrich_mod, "os.O_NONBLOCK")
+        assert not hasattr(enrich_mod.os, "O_NONBLOCK") and hasattr(os, "O_NONBLOCK")
+        enrich_mod._append_validation_row_logged(Path(os.devnull), {"a": 1})
+
+    def test_the_prune_replacement_is_made_through_open_private(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """mkstemp's file carries the default ACL on Windows and os.chmod does not move a DACL, so the
+        replacement of an owner-only file is created through ``open_private`` and keeps the old mode."""
+        import nexus._winsec as winsec
+
+        p = tmp_path / "rows.jsonl"
+        p.write_text("".join(f'{{"schema_version": 1, "n": {i}}}\n' for i in range(12)))
+        p.chmod(0o640)
+        made: list[Path] = []
+        real = winsec.open_private
+
+        def spy(path, flags, **kw):
+            made.append(Path(path))
+            return real(path, flags, **kw)
+
+        monkeypatch.setattr(winsec, "open_private", spy)
+        enrich_mod._prune_validation_file(p, keep=5)
+        assert len(made) == 1 and made[0].parent == p.parent and made[0] != p
+        assert len(p.read_text().splitlines()) == 5
+        assert (p.stat().st_mode & 0o777) == 0o640  # an existing named file keeps its mode
+        assert sorted(x.name for x in tmp_path.iterdir()) == ["rows.jsonl", "rows.jsonl.lock"]
 
     def test_prune_leaves_a_file_of_non_rows_alone(self, tmp_path: Path) -> None:
         from nexus.commands.enrich import _prune_validation_file
