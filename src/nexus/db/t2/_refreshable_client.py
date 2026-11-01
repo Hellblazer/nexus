@@ -1349,7 +1349,7 @@ class RefreshableHttpStoreMixin:
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             # nexus-v1929: another process's 503 holds this one too, before every send.
             held_s = gateway_hold.wait_before_attempt(
-                after=slept_until, max_wait=_numeric_timeout(kwargs.get("timeout", getattr(self._client, "timeout", None))),
+                after=slept_until, max_wait=_numeric_timeout(kwargs.get("timeout", getattr(getattr(self, "_client", None), "timeout", None))),
             )
             if held_s > 0.0:
                 _log.info(

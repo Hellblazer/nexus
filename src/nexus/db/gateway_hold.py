@@ -60,9 +60,9 @@ ESCALATION_S: tuple[float, ...] = (2.0, 5.0, 10.0, 20.0, 30.0)
 
 
 def _hold_path() -> Path:
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred: keeps this leaf module free of config's import graph
+    from nexus import config as _config  # noqa: PLC0415 — deferred: keeps this leaf module free of config's import graph
 
-    return nexus_config_dir() / HOLD_FILENAME
+    return _config.nexus_config_dir() / HOLD_FILENAME
 
 
 def _read(path: Path) -> dict[str, float]:
@@ -159,7 +159,7 @@ def _locked(fn: Callable[[Path], _T]) -> _T:
 
     path = _hold_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path.with_name(HOLD_FILENAME + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fd = os.open(path.with_name(HOLD_FILENAME + ".lock"), os.O_RDWR | os.O_CREAT)  # a lock sentinel, no content
     try:
         deadline = time.monotonic() + LOCK_WAIT_S
         while True:
