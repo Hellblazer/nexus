@@ -185,7 +185,7 @@ figure.fig .arrow{fill:currentColor;stroke:none}
 <section class="lesson" id="glance">
 <div class="lhead"><h2>The space at a glance</h2></div>
 <figure class="fig">
-<svg viewBox="0 0 760 330" role="img" aria-label="Four kinds of participant around one tuple space in Postgres. Your session and its peers write, read, and take. Agents take work and post results. Hooks take what waits for a session and show it. A CI adapter posts build results. The space holds queue tasks, board posts, locks, and mailbox messages.">
+<svg viewBox="0 0 760 330" role="img" aria-label="Four kinds of participant around one tuple space in Postgres. A session and its peers write, read, and take. Agents take work and post results. Hooks take what waits for a session and show it. A CI adapter posts build results. The space holds queue tasks, board posts, locks, and mailbox messages.">
   <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
   <marker id="arb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--brass)"/></marker></defs>
   <text x="380" y="66" text-anchor="middle" class="sm">one tuple space, in postgres</text>
@@ -195,7 +195,7 @@ figure.fig .arrow{fill:currentColor;stroke:none}
   <rect class="tuple" x="270" y="176" width="100" height="24" rx="3"/><text x="320" y="192" text-anchor="middle" class="lbl">lock</text>
   <rect class="tuple" x="390" y="176" width="100" height="24" rx="3"/><text x="440" y="192" text-anchor="middle" class="lbl">mailbox message</text>
 
-  <rect class="you" x="20" y="24" width="200" height="66" rx="4"/><text x="120" y="44" text-anchor="middle" class="hd">Sessions</text><text x="120" y="60" text-anchor="middle" class="lbl">yours and its peers</text><text x="120" y="76" text-anchor="middle" class="lbl">write, read, take</text>
+  <rect class="you" x="20" y="24" width="200" height="66" rx="4"/><text x="120" y="44" text-anchor="middle" class="hd">Sessions</text><text x="120" y="60" text-anchor="middle" class="lbl">one session and its peers</text><text x="120" y="76" text-anchor="middle" class="lbl">write, read, take</text>
   <rect class="box" x="20" y="240" width="200" height="66" rx="4"/><text x="120" y="260" text-anchor="middle" class="hd">Agents</text><text x="120" y="276" text-anchor="middle" class="lbl">started by a session</text><text x="120" y="292" text-anchor="middle" class="lbl">take work, post results</text>
   <rect class="box" x="540" y="24" width="200" height="66" rx="4"/><text x="640" y="44" text-anchor="middle" class="hd">Hooks</text><text x="640" y="60" text-anchor="middle" class="lbl">run around harness events</text><text x="640" y="76" text-anchor="middle" class="lbl">take what waits, show it</text>
   <rect class="box" x="540" y="240" width="200" height="66" rx="4"/><text x="640" y="260" text-anchor="middle" class="hd">CI adapter</text><text x="640" y="276" text-anchor="middle" class="lbl">receives GitHub webhooks</text><text x="640" y="292" text-anchor="middle" class="lbl">posts build results</text>
@@ -204,7 +204,7 @@ figure.fig .arrow{fill:currentColor;stroke:none}
   <line x1="220" y1="270" x2="293" y2="231" marker-start="url(#ar)" marker-end="url(#ar)"/>
   <line x1="540" y1="60" x2="467" y2="100" marker-start="url(#ar)" marker-end="url(#ar)"/>
   <line x1="540" y1="270" x2="467" y2="231" marker-start="url(#ar)" marker-end="url(#ar)"/>
-  <text x="380" y="322" text-anchor="middle" class="sm">brass: your own session</text>
+  <text x="380" y="322" text-anchor="middle" class="sm">brass: the session that decides what to do</text>
 </svg>
 <figcaption>Participants meet only in the space.</figcaption>
 </figure>
@@ -236,7 +236,7 @@ figure.fig .arrow{fill:currentColor;stroke:none}
 <p>A producer calls <code>out</code> on a subspace such as <code>queue/site-demo</code>. The engine resolves the subspace name to a template and refuses an <code>out</code> that does not fit it. The queue template requires one key, <code>queue</code>, and one dimension, <code>from</code>. A task may carry a shorter lifetime than the template's, set with <code>--ttl-seconds</code>.</p>
 <p>The producer also supplies a nonce. The task's identity comes from its keys, <code>from</code>, and the nonce, never from the insert time. So a retry after a dropped connection lands on the same task. The same nonce with a different body is refused as <code>NonceReuseConflict</code>, because a nonce names one write.</p>
 <div class="cmd"><pre>nx tuple out queue/site-demo --key queue=site-demo --dim from=planner --body "rebuild the gate jar" --nonce job-17 --ttl-seconds 120</pre><button class="copy" type="button">Copy</button></div>
-<details class="gloss out"><summary>What you see: the task, the same task again, and a changed body</summary><pre class="out">$ nx tuple out queue/site-demo … --body "rebuild the gate jar" --nonce job-17
+<details class="gloss out"><summary>Example output: the task, the same task again, and a changed body</summary><pre class="out">$ nx tuple out queue/site-demo … --body "rebuild the gate jar" --nonce job-17
 <b>48ba5b597a1e…</b>
 $ nx tuple out queue/site-demo … --body "rebuild the gate jar" --nonce job-17
 <b>48ba5b597a1e…</b>
@@ -247,7 +247,7 @@ Error: <b>NonceReuseConflictError</b>: tuple id 48ba5b597a1e… already exists i
 <p>A worker calls <code>in</code> with every key the template pins. A take matches on keys alone, and the call must name them all, so a wide pattern cannot claim a task by accident. The engine picks the oldest available task, skips any task that another worker is claiming at that moment, and returns it with a claim id. The task is now claimed, and the worker holds a lease: a time limit after which the engine treats the claim as abandoned. On a queue the lease is at most 900 seconds.</p>
 <p>A worker that finds nothing can wait. With <code>--timeout-s 25</code>, the engine holds the call until a task arrives or the timeout ends. A signal that the engine sends after a write commits wakes the call, so nothing polls. The engine refuses a timeout above 25 seconds with <code>TimeoutTooLong</code>, so a wait of minutes is a loop of waits. When the engine stops for a deploy it wakes every waiter, so a deploy costs one retry.</p>
 <div class="cmd"><pre>nx tuple in queue/site-demo --pattern queue=site-demo --claimant worker-a --lease-s 60</pre><button class="copy" type="button">Copy</button></div>
-<details class="gloss out"><summary>What you see</summary><pre class="out"><b>claim_id=f99cc6e2-759a-4bc2-907f-1f0790fa298f</b>
+<details class="gloss out"><summary>Example output</summary><pre class="out"><b>claim_id=f99cc6e2-759a-4bc2-907f-1f0790fa298f</b>
   id: 48ba5b597a1e…
   subspace: queue/site-demo
   template: queue/&lt;name&gt;
@@ -259,14 +259,14 @@ Error: <b>NonceReuseConflictError</b>: tuple id 48ba5b597a1e… already exists i
 <h3>Finish, or give it back</h3>
 <p>A worker whose job runs long calls <code>renew</code> before the lease ends. The engine moves the lease forward but never past the task's own expiry, and it refuses a request above the template's lease cap. A renew never counts as an attempt.</p>
 <p>When the work is done, the worker calls <code>ack</code>, which consumes the task. An <code>ack</code> can carry a reply, which the engine writes in the same transaction. A crash therefore cannot deliver the reply and leave the task to run again. When the work fails, the worker calls <code>nack</code>, which returns the task to the queue and counts one failed attempt. A worker that hands the task back in good order calls <code>release</code>, which returns it without counting an attempt. A worker that crashes calls nothing: its lease ends, the task is claimable again, and the lapse counts as a failed attempt.</p>
-<details class="gloss out"><summary>What you see: a renew, then the ack</summary><pre class="out">$ nx tuple renew --claim-id f99cc6e2-… --claimant worker-a --lease-s 60
+<details class="gloss out"><summary>Example output: a renew, then the ack</summary><pre class="out">$ nx tuple renew --claim-id f99cc6e2-… --claimant worker-a --lease-s 60
 <b>…T05:22:55.375602+00:00</b>
 $ nx tuple ack f99cc6e2-… --claimant worker-a
 <b>Acked claim f99cc6e2-…</b></pre></details>
 
 <h3>Fail, and the dead letter</h3>
 <p>After three failed attempts, the engine marks the task as a dead letter. The aspect-extraction queue allows six, because its worker retries on a ladder. Nobody can take a dead letter, but any reader can see it. So a task that makes every worker fail stays visible and does not loop. A task that nobody claims expires after its lifetime, which is two days on a queue.</p>
-<details class="gloss out"><summary>What you see after three claims that each ended in a nack</summary><pre class="out">$ nx tuple stats queue/site-demo
+<details class="gloss out"><summary>Example output after three claims that each ended in a nack</summary><pre class="out">$ nx tuple stats queue/site-demo
 subspace: queue/site-demo
 total: 1
 available: 0
@@ -277,9 +277,10 @@ consumed: 1
 expired_unpurged: 0
 $ nx tuple in queue/site-demo --pattern queue=site-demo --claimant worker-a --lease-s 30
 No matching tuple.</pre></details>
+<p>The consumed row in the census is the task that was acked above. The dead row is a second task, one that failed every attempt.</p>
 
 <h3>The sweep</h3>
-<p>A sweep runs in the engine every six hours. It releases claims whose lease ended and nobody retook, and it dead-letters a task that has reached its attempt limit. It removes expired tuples, consumed tuples past their retention, and old claim-log rows. The claim log gets one row for every claim, ack, nack, lease end, and dead letter. Rows are appended and never edited, except that the purge of a tuple sets its log rows' tuple id to null. The sweep is why a worker that dies costs a delay and no task.</p>
+<p>A sweep runs in the engine every six hours. It releases claims whose lease ended and nobody retook, and it dead-letters a task that has reached its attempt limit. It removes expired tuples, consumed tuples past their retention, and old claim-log rows. The claim log gets one row for every claim, renew, ack, nack, release, lease end, and dead letter. Rows are appended and never edited, except that the purge of a tuple sets its log rows' tuple id to null. The sweep is why a worker that dies costs a delay and no task.</p>
 </section>
 
 <section class="lesson" id="kinds">
@@ -317,7 +318,7 @@ No matching tuple.</pre></details>
 
 <section class="lesson" id="limits">
 <div class="lhead"><h2>Limits and health</h2></div>
-<p>The engine enforces every limit below and refuses a call that breaks one with a named error.</p>
+<p>The engine enforces each limit below except the last, and refuses a call that breaks one with a named error. The last is the page size of the <code>tuple_list</code> MCP tool.</p>
 <div class="tbl"><table>
 <tr><th>Limit</th><th>Value</th><th>When it is broken</th></tr>
 <tr><td>Body</td><td>4,096 bytes, or less if the template sets it</td><td><code>TooLarge</code></td></tr>
@@ -326,10 +327,20 @@ No matching tuple.</pre></details>
 <tr><td>One wait</td><td>25 seconds by default</td><td><code>TimeoutTooLong</code></td></tr>
 <tr><td>One lease</td><td>900 seconds on a queue, a lock, or a mailbox</td><td><code>LeaseTooLong</code></td></tr>
 <tr><td>Wait slots</td><td>4 for each claimant, 16 for the engine, by default</td><td><code>ParkCapExceeded</code>: the caller gets the probe result and backs off</td></tr>
-<tr><td>Live rows in a subspace</td><td>the cap in the table above</td><td>the write is refused until rows expire</td></tr>
+<tr><td>Live rows in a subspace</td><td>the cap in the table above</td><td>the write is refused until rows are consumed or expire</td></tr>
 <tr><td>Subspaces in one <code>tuple_list</code> page over MCP</td><td>100</td><td>the page ends with the cursor for the next one</td></tr>
 </table></div>
-<p>Three reads show the state of the space. <code>tuple_list</code> and <code>nx tuple list</code> give one line for each subspace with its counts of available, claimed, dead, and consumed tuples. <code>tuple_stats</code> and <code>nx tuple stats</code> give the census of one subspace. <code>tuple_rd</code> and <code>nx tuple rd</code> with an empty pattern return every live tuple in a subspace, each with its state. That includes claimed tuples and dead letters.</p>
+<p>Three reads show the state of the space. <code>tuple_list</code> and <code>nx tuple list</code> give one line for each subspace with its counts of available, claimed, dead, and consumed tuples. <code>tuple_stats</code> and <code>nx tuple stats</code> give the census of one subspace. <code>tuple_rd</code> and <code>nx tuple rd</code> with an empty pattern match every live tuple in a subspace, each with its state, including claimed tuples and dead letters. A read returns one tuple unless the caller sets <code>n</code> (<code>-n</code> on the command line) or passes <code>--all</code> to <code>nx tuple rd</code>.</p>
+<details class="gloss out"><summary>Example output: list the mailboxes, then read one</summary><pre class="out">$ nx tuple list --prefix mailbox/
+mailbox/0f3c9023-…  total=0 available=0 claimed=0 lapsed=0 dead=0 consumed=31 expired_unpurged=0
+mailbox/9b5eeb37-…  total=1 available=<b>1</b> claimed=0 lapsed=0 dead=0 consumed=20 expired_unpurged=0
+$ nx tuple rd mailbox/5b354c36-… -n 300
+  id: adb98e40…
+  subspace: mailbox/5b354c36-…
+  keys: {'to': '5b354c36-…'}
+  dims: {'from': 'cdeb12b5-…', 'kind': 'reply', 'address_kind': 'session', 'correlation_id': 'r-41'}
+  body: Subscribed. I am on the channel now …
+  claim_state: claimed</pre></details>
 <p><code>nx doctor</code> has seven rows for the space. Each one watches one thing:</p>
 <ul class="plain">
 <li>the age of the oldest unclaimed tuple in each subspace</li>
@@ -379,7 +390,7 @@ No matching tuple.</pre></details>
 <tr><td>Knowledge (T3)</td><td>Documents, chunks, the catalog, and its links</td><td>Permanent</td><td>Many</td></tr>
 <tr><td>Tuple space</td><td>Coordination: a task, a lock, a message, a post</td><td>Days, set by the template</td><td>Many read, one takes</td></tr>
 </table></div>
-<p>All four stores share one database and one tenant. A tuple can therefore name an item in any of the other three, and the reader opens it with the credential it already has. A tuple is a signal about data, so a body carries a pointer to its content: a content hash for a chunk, a catalog address for a document, a project and title for a memory entry. The content is stored once in the right store. A copy inside a body goes stale when somebody corrects the original, and a pointer can be checked where a copied value cannot.</p>
+<p>All four stores share one database and one tenant. A tuple can therefore name an item in any of the other three, and the reader opens it with the credential it already has. A tuple is a signal about data, so a body carries a pointer to its content. The pointer is a content hash for a chunk, a catalog address for a document, or a project and title for a memory entry. The content is stored once in the right store. A copy inside a body goes stale when somebody corrects the original, and a pointer can be checked where a copied value cannot.</p>
 </div></details>
 
 <details class="gloss"><summary>Inside the engine</summary><div class="pad">

@@ -185,7 +185,7 @@ figure.fig .you-edge{stroke:var(--brass)}
 </table></details></div>
 
 <figure class="fig">
-<svg viewBox="0 0 760 330" role="img" aria-label="A paper in the middle of the store, with the documents that research produces around it: reading, mapping, proposals, verdict, experiment, report. Every one is linked to the paper and to the one before it. Your code and design records sit at the right, linked from the mapping.">
+<svg viewBox="0 0 760 330" role="img" aria-label="A paper in the middle of the store, with what research produces around it: a reading kept in memory, and the mapping, proposals, verdict, experiment and report as documents in the store, each linked to the paper. Your code and design records sit at the right, linked from the mapping.">
   <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
   <marker id="arb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--brass)"/></marker></defs>
   <text x="380" y="22" text-anchor="middle" class="sm">one store, one catalog, every document addressed and linked</text>
@@ -432,7 +432,7 @@ WHAT A FAIR RERUN NEEDS. …</pre></details>
 <p>A report may say "the treated arm mostly answered wrongly" while the raw log shows most failures were no answer at all. Those are two different findings, and only the recompute finds the second. Here it found a clean report over a broken instrument, which no reading of the report could have shown.</p>
 <div class="further"><p class="ttl">Investigate further</p><ul>
 <li>Ask Claude, before any run: <em>"Count the questions on which the treatment can act at all. If that is fewer than the discordance floor, stop."</em></li>
-<li><a href="research-in-nexus.html">Research in Nexus</a>: why the method pairs a critique before the run with a recompute after it. A synthesis alone gives a plausible plan with false premises, and an experiment alone gives a correct number with a wrong explanation.</li>
+<li><a href="research-in-nexus.html">Research in Nexus</a>: why the method pairs a critique before the run with a recompute after it.</li>
 </ul></div>
 </section>
 
@@ -451,7 +451,7 @@ WHAT A FAIR RERUN NEEDS. …</pre></details>
   1.11.532  verdict after critique                    cites   supersedes 1.11.529, 1.11.530
   1.11.533  the experiment and its result             cites   relates 1.11.532
   1.11.534  findings on the method                    cites   comments 1.11.533</pre></details>
-<p>The verdict supersedes the mapping and the synthesis it reduced. A reader who opens the paper a year from now finds the current state first and the earlier drafts behind it.</p>
+<p>The verdict supersedes the mapping and the synthesis it reduced. A reader who opens the paper a year from now can follow the supersedes link from the verdict to the earlier drafts behind it.</p>
 <h3>Check that the record was kept</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>What did you write to the stores today, and what does it link to?</pre><button class="copy" type="button">Copy</button></div>
@@ -497,8 +497,8 @@ top candidate distance … above threshold … — no cite emitted. Try a narrow
 <details class="gloss"><summary>Three kinds of record</summary><div class="pad">
 <div class="tbl"><table>
 <tr><th>What</th><th>Where</th><th>Written by</th></tr>
-<tr><td>A reading, a mapping, proposals, a verdict, a result, a report</td><td>The store, as a document registered in the catalog and linked to its source</td><td>The agent that produced it, when its work ends</td></tr>
-<tr><td>A decision, a finding, the state of the work</td><td>Memory, by project and title</td><td>Claude, as it works and at the end of a session</td></tr>
+<tr><td>A mapping, proposals, a verdict, a result, a report</td><td>The store, as a document registered in the catalog and linked to its source</td><td>The agent that produced it, when its work ends</td></tr>
+<tr><td>A reading, a decision, a finding, the state of the work</td><td>Memory, by project and title</td><td>The reading agents and Claude, as they work and at the end of a session</td></tr>
 <tr><td>A connection between two documents</td><td>The catalog, as a typed link</td><td>Indexing and enrichment automatically. Claude or you, by hand</td></tr>
 </table></div>
 <p>All three share one database and one credential. A memory entry can therefore name a catalog document, and a link can point at a chunk.</p>
