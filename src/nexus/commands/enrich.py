@@ -2595,6 +2595,10 @@ def _run_validation_sample(
                 with defer_binding(evidence_prerendered=True):
                     raw = asyncio.run(_verify(claim_json, shown_items(records)))
                 result = bind(raw, records, "verify")
+                if isinstance(raw, Mapping) and "reason" not in raw:
+                    # bind writes reason=None for an absent reason; the failures row reads an absent
+                    # one as "" (result.get("reason", "")), as it did before RDR-189.
+                    result.pop("reason", None)
             else:
                 result = asyncio.run(_verify(claim_json, evidence))
         except Exception as exc:  # noqa: BLE001 — per-sample isolation; verify failure counted as errored, validation loop continues
@@ -2631,6 +2635,8 @@ def _run_validation_sample(
         if result.get("verified", False):
             if reason_code == "verified":
                 verified += 1
+            elif reason_code == "malformed_verify_result":
+                errored += 1  # truthy but not a boolean: the row says errored, so does the summary
             else:
                 unwitnessed += 1  # a true verdict with no bound support is unverifiable
             continue
@@ -2846,7 +2852,8 @@ def _all_outcomes_row(
         items, counts = _witness_items(result, identity_trusted=identity_trusted, trace=trace)
         raw_reason = result.get("reason")
         reason = raw_reason if trace and isinstance(raw_reason, str) else None
-    claim_text = unicodedata.normalize("NFKC", json.dumps(claim_payload, sort_keys=True))
+    # ensure_ascii=False: escaping to \uXXXX first would hide a compatibility form from NFKC.
+    claim_text = unicodedata.normalize("NFKC", json.dumps(claim_payload, sort_keys=True, ensure_ascii=False))
     return {
         "schema_version": _VALIDATION_ROW_SCHEMA_VERSION,
         "claim_id": hashlib.sha256(

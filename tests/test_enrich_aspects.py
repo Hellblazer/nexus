@@ -20,12 +20,14 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
+from nexus.commands import enrich as enrich_mod
 from nexus.commands.enrich import _PER_PAPER_COST_USD, enrich
 from nexus.db.t2 import T2Database
 from tests._catalog_fixture_ops import ActiveCatalog, register_real_doc_id
@@ -1307,9 +1309,16 @@ class TestValidateSample:
 
 
 # ── RDR-189 P1 (nexus-z1d0l.1.6): the all-outcomes validation record ─────────
+#
+# Almost every test here drives ``_run_validation_sample`` (and the row/path/retention helpers)
+# directly, with the two catalog lookups and the indexed-text reader patched: no tenant, no engine
+# (tests/AGENTS.md § The tenant is opt-in; the storage-touch ceiling has tolerance 0). Exactly two
+# tests are CLI tests on a tenant: the one that proves ``--validation-out`` / ``--validation-all-out``
+# reach the run, and the one that proves the trace flag does.
 
 _VTUMBLER = "1.9.42"
 _VCOLL = "knowledge__delos"
+_VPATH = "/p/x.txt"
 _VCHUNKS = [
     ("a" * 64, "alpha chunk text about datasets"),
     ("b" * 64, "beta chunk text about baselines"),
@@ -1318,6 +1327,7 @@ _LEGACY_KEYS = {
     "source_path", "extracted_aspects", "operator_verify_reason", "citations",
     "timestamp", "evidence_truncated", "evidence_chars", "document_chars",
 }
+_SUPPORTS_ALPHA = {"item_id": "c1", "quote": "alpha chunk text", "role": "supports"}
 
 
 def _indexed_with_chunks(monkeypatch: pytest.MonkeyPatch, chunks=_VCHUNKS) -> str:
@@ -1369,15 +1379,55 @@ def _rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
+def _record(**kw) -> SimpleNamespace:
+    """The five fields ``_run_validation_sample`` reads off an extracted record."""
+    return SimpleNamespace(**{
+        "problem_formulation": "P", "proposed_method": "M", "experimental_datasets": ["d1"],
+        "experimental_baselines": ["b1"], "experimental_results": "R", **kw,
+    })
+
+
+def _sample(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verify, *, trace: bool = True,
+    chunks=_VCHUNKS, read=None, extracted=None, window_cap: int | None = None,
+    fail_out: str | None = None, all_out: str | None = None,
+) -> tuple[Path, Path]:
+    """Run ``_run_validation_sample`` at 100% with no tenant: the catalog lookups, the reader and
+    ``operator_verify`` are patched. The files are ``f.jsonl`` and ``a.jsonl`` under *tmp_path*
+    unless a path is given. Returns ``(failures_path, all_outcomes_path)``."""
+    monkeypatch.setattr(enrich_mod, "_build_catalog_doc_id_lookup", lambda: (lambda c, s: _VTUMBLER))
+    monkeypatch.setattr(enrich_mod, "_build_catalog_manifest_lookup", lambda: (lambda d: []))
+    if window_cap is not None:
+        monkeypatch.setattr(enrich_mod, "_VALIDATION_EVIDENCE_CHAR_CAP", window_cap)
+    if read is not None:
+        monkeypatch.setattr("nexus.aspect_extractor.read_indexed_text", read)
+    else:
+        _indexed_with_chunks(monkeypatch, chunks)
+    monkeypatch.setattr("nexus.mcp.core.operator_verify", verify)
+    fail = tmp_path / "f.jsonl" if fail_out is None else Path(fail_out)
+    allout = tmp_path / "a.jsonl" if all_out is None else Path(all_out)
+    enrich_mod._run_validation_sample(
+        extracted if extracted is not None else [(_VPATH, _record(), "")],
+        collection=_VCOLL, sample_pct=100,
+        validation_out=str(fail), validation_all_out=str(allout), trace=trace,
+    )
+    return fail, allout
+
+
+def _verdict(**payload):
+    """An ``operator_verify`` stand-in that returns *payload*."""
+    async def verify(claim, evidence, timeout=60.0):
+        return payload
+
+    return verify
+
+
 class TestValidationAllOutcomes:
     """RDR-189 P1: every sampled record writes one row to aspect_validation.jsonl."""
 
-    @pytest.mark.t2_tenant
     def test_verified_row_is_host_bound_and_model_identity_is_ignored(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _one_paper(env, tmp_path, monkeypatch)
-        _indexed_with_chunks(monkeypatch)
         shown: list[str] = []
 
         async def verify(claim, evidence, timeout=60.0):
@@ -1385,15 +1435,13 @@ class TestValidationAllOutcomes:
             return {
                 "verified": True, "reason": "supported by the alpha chunk",
                 "evidence": [{
-                    "item_id": "c1", "quote": "alpha chunk text", "role": "supports",
+                    **_SUPPORTS_ALPHA,
                     # identity the model must never be able to set
                     "chash": "f" * 64, "tumbler": "9.9.9", "collection": "evil__coll",
                 }],
             }
 
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", verify)
-        result, fail, allout = _validate(tmp_path)
-        assert result.exit_code == 0, result.output
+        fail, allout = _sample(tmp_path, monkeypatch, verify)
         # The verifier saw one item per chunk, ids minted by the host.
         assert [i["id"] for i in json.loads(shown[0])] == ["c1", "c2"]
         (row,) = _rows(allout)
@@ -1416,25 +1464,14 @@ class TestValidationAllOutcomes:
         assert "source_path" not in row
         assert not fail.exists()  # a verified sample never wrote a failures row
 
-    @pytest.mark.t2_tenant
     def test_disagreement_row_and_legacy_failures_row_keep_their_schema(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        src = _one_paper(env, tmp_path, monkeypatch)
-        _indexed_with_chunks(monkeypatch)
-
-        async def verify(claim, evidence, timeout=60.0):
-            return {
-                "verified": False, "reason": "datasets are not in the text",
-                "evidence": [
-                    {"item_id": "c2", "quote": "beta chunk text", "role": "contradicts"},
-                    {"item_id": "zz", "quote": "x", "role": "neutral"},  # not an item shown
-                ],
-            }
-
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", verify)
-        result, fail, allout = _validate(tmp_path)
-        assert result.exit_code == 0, result.output
+        verify = _verdict(verified=False, reason="datasets are not in the text", evidence=[
+            {"item_id": "c2", "quote": "beta chunk text", "role": "contradicts"},
+            {"item_id": "zz", "quote": "x", "role": "neutral"},  # not an item shown
+        ])
+        fail, allout = _sample(tmp_path, monkeypatch, verify)
         (row,) = _rows(allout)
         assert row["status"] == "disagreement" and row["reason_code"] == "verifier_rejected"
         assert [(w["item_id"], w["state"], w["chash"]) for w in row["witness"]] == [
@@ -1444,7 +1481,7 @@ class TestValidationAllOutcomes:
         # The legacy file: exactly its old key set and values, nothing from the new schema.
         (legacy,) = _rows(fail)
         assert set(legacy) == _LEGACY_KEYS
-        assert legacy["source_path"] == src
+        assert legacy["source_path"] == _VPATH
         assert legacy["extracted_aspects"] == {
             "problem_formulation": "P", "proposed_method": "M",
             "experimental_datasets": ["d1"], "experimental_baselines": ["b1"],
@@ -1455,57 +1492,40 @@ class TestValidationAllOutcomes:
         assert (legacy["evidence_truncated"], legacy["evidence_chars"], legacy["document_chars"]) == (False, 64, 64)
         assert "status" not in legacy and "schema_version" not in legacy
 
-    @pytest.mark.t2_tenant
     def test_truncated_window_is_unverifiable(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     ) -> None:
-        _one_paper(env, tmp_path, monkeypatch)
-        _indexed_with_chunks(monkeypatch)
-        monkeypatch.setattr("nexus.commands.enrich._VALIDATION_EVIDENCE_CHAR_CAP", 40)
         shown: list[str] = []
 
         async def reject(claim, evidence, timeout=60.0):
             shown.append(evidence)
             return {"verified": False, "reason": "outside the window", "evidence": []}
 
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", reject)
-        result, fail, allout = _validate(tmp_path)
-        assert result.exit_code == 0, result.output
+        fail, allout = _sample(tmp_path, monkeypatch, reject, window_cap=40)
         # 31 chars of chunk 1, the 2-char separator, then the window ends 7 chars into chunk 2.
         assert [i["text"] for i in json.loads(shown[0])] == [_VCHUNKS[0][1], "beta ch"]
         (row,) = _rows(allout)
         assert (row["status"], row["reason_code"]) == ("unverifiable", "evidence_truncated")
         assert (row["evidence_truncated"], row["evidence_chars"], row["document_chars"]) == (True, 40, 64)
         assert _rows(fail)[0]["evidence_truncated"] is True
-        assert "1 unverifiable (evidence truncated)" in result.output
+        assert "1 unverifiable (evidence truncated)" in capsys.readouterr().out
 
-    @pytest.mark.t2_tenant
     def test_true_verdict_without_a_bound_supporting_item_is_unverifiable(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     ) -> None:
-        _one_paper(env, tmp_path, monkeypatch)
-        _indexed_with_chunks(monkeypatch)
-
-        async def agree_without_support(claim, evidence, timeout=60.0):
-            return {"verified": True, "reason": "looks right", "evidence": [
-                {"item_id": "c1", "quote": "text the chunk does not hold", "role": "supports"},
-            ]}
-
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", agree_without_support)
-        result, fail, allout = _validate(tmp_path)
-        assert result.exit_code == 0, result.output
+        verify = _verdict(verified=True, reason="looks right", evidence=[
+            {"item_id": "c1", "quote": "text the chunk does not hold", "role": "supports"},
+        ])
+        fail, allout = _sample(tmp_path, monkeypatch, verify)
         (row,) = _rows(allout)
         assert (row["status"], row["reason_code"]) == ("unverifiable", "verified_unwitnessed")
         assert [w["state"] for w in row["witness"]] == ["unresolved"]
         assert not fail.exists()
-        assert "1 unverifiable (no bound witness)" in result.output
+        assert "1 unverifiable (no bound witness)" in capsys.readouterr().out
 
-    @pytest.mark.t2_tenant
     def test_a_read_without_chunk_identities_binds_nothing_and_copies_no_identity(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _one_paper(env, tmp_path, monkeypatch)
-        monkeypatch.setattr("nexus.aspect_extractor.read_indexed_text", lambda **_kw: "plain text only")
         seen: list[str] = []
 
         async def verify(claim, evidence, timeout=60.0):
@@ -1515,30 +1535,23 @@ class TestValidationAllOutcomes:
                 "chash": "f" * 64, "tumbler": "9.9.9", "collection": "evil__coll",
             }]}
 
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", verify)
-        result, fail, allout = _validate(tmp_path)
-        assert result.exit_code == 0, result.output
+        _, allout = _sample(tmp_path, monkeypatch, verify, read=lambda **_kw: "plain text only")
         assert seen == ["plain text only"]  # the plain-text call, as before RDR-189
         (row,) = _rows(allout)
         assert (row["status"], row["reason_code"]) == ("unverifiable", "verified_unwitnessed")
         (item,) = row["witness"]
         assert (item["tumbler"], item["chash"], item["collection"]) == (None, None, None)
 
-    @pytest.mark.t2_tenant
     def test_errored_when_the_indexed_text_is_unavailable(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _one_paper(env, tmp_path, monkeypatch)
         calls: list[str] = []
 
         async def never(claim, evidence, timeout=60.0):
             calls.append(claim)
             return {"verified": True}
 
-        monkeypatch.setattr("nexus.aspect_extractor.read_indexed_text", lambda **_kw: None)
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", never)
-        result, fail, allout = _validate(tmp_path)
-        assert result.exit_code == 0, result.output
+        fail, allout = _sample(tmp_path, monkeypatch, never, read=lambda **_kw: None)
         (row,) = _rows(allout)
         assert (row["status"], row["reason_code"]) == ("errored", "indexed_text_unavailable")
         assert row["witness"] is None and row["verify_reason"] is None
@@ -1547,83 +1560,61 @@ class TestValidationAllOutcomes:
         assert row["extracted_claims"]["proposed_method"] == "M"
         assert calls == [] and not fail.exists()
 
-    @pytest.mark.t2_tenant
     def test_errored_when_the_verify_call_raises(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _one_paper(env, tmp_path, monkeypatch)
-        _indexed_with_chunks(monkeypatch)
-
         async def boom(claim, evidence, timeout=60.0):
             raise RuntimeError("dispatch died")
 
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", boom)
-        result, fail, allout = _validate(tmp_path)
-        assert result.exit_code == 0, result.output
+        fail, allout = _sample(tmp_path, monkeypatch, boom)
         (row,) = _rows(allout)
         assert (row["status"], row["reason_code"]) == ("errored", "verify_exception")
         assert row["witness"] is None and row["verify_reason"] is None
         assert row["document_chars"] == 64 and row["evidence_truncated"] is False
         assert not fail.exists()
 
-    @pytest.mark.t2_tenant
     def test_errored_when_the_verdict_is_missing_and_the_legacy_row_stays(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _one_paper(env, tmp_path, monkeypatch)
-        _indexed_with_chunks(monkeypatch)
-
-        async def malformed(claim, evidence, timeout=60.0):
-            return {"reason": "no verdict key", "evidence": []}
-
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", malformed)
-        result, fail, allout = _validate(tmp_path)
-        assert result.exit_code == 0, result.output
+        fail, allout = _sample(tmp_path, monkeypatch, _verdict(reason="no verdict key", evidence=[]))
         (row,) = _rows(allout)
         assert (row["status"], row["reason_code"]) == ("errored", "malformed_verify_result")
         # The legacy path read a missing verdict as non-verified and appended a row; that stays.
         (legacy,) = _rows(fail)
         assert legacy["operator_verify_reason"] == "no verdict key"
 
-    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("code", [
         "verified", "verified_unwitnessed", "verifier_rejected", "malformed_verify_result",
     ])
     def test_legacy_row_appears_exactly_when_the_outcome_table_says(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str,
     ) -> None:
         from nexus.tables.aspect_validation_outcomes import rows as outcome_rows
 
         wanted = {r.reason_code: r.legacy_failures_row for r in outcome_rows()}[code]
-        good = {"item_id": "c1", "quote": "alpha chunk text", "role": "supports"}
         payload = {
-            "verified": {"verified": True, "reason": "", "evidence": [good]},
+            "verified": {"verified": True, "reason": "", "evidence": [_SUPPORTS_ALPHA]},
             "verified_unwitnessed": {"verified": True, "reason": "", "evidence": []},
             "verifier_rejected": {"verified": False, "reason": "no", "evidence": []},
             "malformed_verify_result": {"reason": "no", "evidence": []},
         }[code]
-        _one_paper(env, tmp_path, monkeypatch)
-        _indexed_with_chunks(monkeypatch)
-
-        async def verify(claim, evidence, timeout=60.0):
-            return payload
-
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", verify)
-        result, fail, allout = _validate(tmp_path)
-        assert result.exit_code == 0, result.output
+        fail, allout = _sample(tmp_path, monkeypatch, _verdict(**payload))
         assert _rows(allout)[0]["reason_code"] == code
         assert (fail.exists() and bool(fail.read_text().strip())) is wanted
 
-    @pytest.mark.t2_tenant
     def test_equal_validation_paths_are_rejected_before_any_extraction(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _one_paper(env, tmp_path, monkeypatch)
-        extracted: list[str] = []
-        monkeypatch.setattr(
-            "nexus.aspect_extractor.extract_aspects",
-            lambda content, source_path, collection, **_kw: extracted.append(source_path),
-        )
+        """A CLI test with no tenant: the refusal comes before ``select_config``, so a trap there
+        proves it ran first (a refusal that came late would reach the trap and exit 1, not 2)."""
+        reached: list[str] = []
+
+        def trap(*args, **kw):
+            reached.append("select_config")
+            raise AssertionError("select_config reached: the path check ran too late")
+
+        monkeypatch.setattr("nexus.aspect_extractor.select_config", trap)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
         same = tmp_path / "same.jsonl"
         (tmp_path / "sub").mkdir()
         spellings = [str(same), str(tmp_path / "sub" / ".." / "same.jsonl")]
@@ -1632,115 +1623,63 @@ class TestValidationAllOutcomes:
             "aspects", _VCOLL, "--validate-sample", "100",
             "--validation-out", spellings[0], "--validation-all-out", spellings[1],
         ])
-        assert result.exit_code != 0
-        assert "same" in result.output.lower()
-        assert extracted == [] and not same.exists()
+        assert result.exit_code == 2 and "same" in result.output.lower()
+        assert reached == [] and not same.exists()
         # The default all-outcomes path counts too: naming it as the failures file collides.
-        from nexus.config import nexus_config_dir
-        default_all = nexus_config_dir() / "aspect_validation.jsonl"
+        default_all = tmp_path / "cfg" / "aspect_validation.jsonl"
         result = runner.invoke(enrich, [
             "aspects", _VCOLL, "--validate-sample", "100",
             "--validation-out", str(default_all),
         ])
-        assert result.exit_code != 0
-        assert extracted == [] and not default_all.exists()
+        assert result.exit_code == 2
+        assert reached == [] and not default_all.exists()
 
-    @pytest.mark.t2_tenant
     def test_default_all_outcomes_path_is_under_the_config_dir_and_apart_from_failures(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from nexus.commands.enrich import _VALIDATION_ALL_OUTCOMES_FILENAME, _VALIDATION_FAILURES_FILENAME
-        from nexus.config import nexus_config_dir
-
-        assert _VALIDATION_ALL_OUTCOMES_FILENAME == "aspect_validation.jsonl"
-        assert _VALIDATION_ALL_OUTCOMES_FILENAME != _VALIDATION_FAILURES_FILENAME
-        _one_paper(env, tmp_path, monkeypatch)
+        assert enrich_mod._VALIDATION_ALL_OUTCOMES_FILENAME == "aspect_validation.jsonl"
+        assert enrich_mod._VALIDATION_ALL_OUTCOMES_FILENAME != enrich_mod._VALIDATION_FAILURES_FILENAME
+        # The options default to "" (the config-dir default), so the CLI adds no path of its own.
+        defaults = {p.name: p.default for p in enrich.get_command(None, "aspects").params}
+        assert defaults["validation_out"] == "" and defaults["validation_all_out"] == ""
+        cfg, cwd = tmp_path / "cfg", tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        monkeypatch.chdir(cwd)
+        verify = _verdict(verified=True, reason="", evidence=[_SUPPORTS_ALPHA])
+        monkeypatch.setattr(enrich_mod, "_build_catalog_doc_id_lookup", lambda: (lambda c, s: _VTUMBLER))
+        monkeypatch.setattr(enrich_mod, "_build_catalog_manifest_lookup", lambda: (lambda d: []))
         _indexed_with_chunks(monkeypatch)
-
-        async def agree(claim, evidence, timeout=60.0):
-            return {"verified": True, "reason": "", "evidence": [
-                {"item_id": "c1", "quote": "alpha chunk text", "role": "supports"},
-            ]}
-
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", agree)
-        runner = CliRunner()
-        with runner.isolated_filesystem():
-            result = runner.invoke(enrich, ["aspects", _VCOLL, "--validate-sample", "100"])
-            assert result.exit_code == 0, result.output
-            assert not Path("aspect_validation.jsonl").exists()
-        expected = nexus_config_dir() / "aspect_validation.jsonl"
-        assert expected.exists() and _rows(expected)[0]["status"] == "verified"
-        assert str(expected) in result.output
-        assert str(nexus_config_dir() / "aspect_validation_failures.jsonl") in result.output
-
-    @pytest.mark.t2_tenant
-    @pytest.mark.parametrize(
-        ("args", "expected"),
-        [([], True), (["--validation-trace"], True), (["--no-validation-trace"], False)],
-    )
-    def test_trace_flag_reaches_the_validation_sample(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args, expected,
-    ) -> None:
-        _one_paper(env, tmp_path, monkeypatch)
-        seen: list[dict] = []
-        monkeypatch.setattr(
-            "nexus.commands.enrich._run_validation_sample",
-            lambda extracted, **kw: seen.append(kw),
-        )
-        result = CliRunner().invoke(enrich, [
-            "aspects", _VCOLL, "--validate-sample", "100", *args,
-        ])
-        assert result.exit_code == 0, result.output
-        assert len(seen) == 1 and seen[0]["trace"] is expected
-
-    @staticmethod
-    def _marked(env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, dict[str, str]]:
-        marks = {
-            "claim": "MARK-CLAIM-7f3a", "quote": "MARK-QUOTE-91bc", "reason": "MARK-REASON-5d2e",
-        }
-        src = _one_paper(
-            env, tmp_path, monkeypatch,
-            problem_formulation=marks["claim"], proposed_method=marks["claim"],
-        )
-        _indexed_with_chunks(monkeypatch, [
-            ("c" * 64, f"intro {marks['quote']} outro"), ("d" * 64, "second chunk"),
-        ])
-
-        async def verify(claim, evidence, timeout=60.0):
-            return {
-                "verified": False, "reason": marks["reason"],
-                "evidence": [{"item_id": "c1", "quote": marks["quote"], "role": "contradicts"}],
-            }
-
         monkeypatch.setattr("nexus.mcp.core.operator_verify", verify)
-        return src, marks
+        enrich_mod._run_validation_sample(
+            [(_VPATH, _record(), "")], collection=_VCOLL, sample_pct=100,
+        )
+        expected = cfg / "aspect_validation.jsonl"
+        assert expected.exists() and _rows(expected)[0]["status"] == "verified"
+        assert list(cwd.iterdir()) == []  # nothing left in the working directory
+        out = capsys.readouterr().out
+        assert str(expected) in out and str(cfg / "aspect_validation_failures.jsonl") in out
 
-    @pytest.mark.t2_tenant
     def test_trace_on_puts_the_free_text_in_both_files(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Control for the next test: the markers do reach the files when the trace is on,
         so their absence under --no-validation-trace is redaction, not an unwired fixture."""
-        _, marks = self._marked(env, tmp_path, monkeypatch)
-        result, fail, allout = _validate(tmp_path, "--validation-trace")
-        assert result.exit_code == 0, result.output
+        fail, allout, marks = self._marked(tmp_path, monkeypatch, trace=True)
         assert all(m in fail.read_text() for m in marks.values() if m != marks["quote"])
         assert all(m in allout.read_text() for m in marks.values())
 
-    @pytest.mark.t2_tenant
     def test_no_trace_keeps_free_text_out_of_both_files(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        src, marks = self._marked(env, tmp_path, monkeypatch)
-        result, fail, allout = _validate(tmp_path, "--no-validation-trace")
-        assert result.exit_code == 0, result.output
+        fail, allout, marks = self._marked(tmp_path, monkeypatch, trace=False)
         text = fail.read_text() + allout.read_text()
         assert not any(m in text for m in marks.values())
         # Legacy file: same key set, free-text fields nulled, source_path kept (its consumers locate by it).
         (legacy,) = _rows(fail)
         assert set(legacy) == _LEGACY_KEYS
         assert legacy["extracted_aspects"] is None and legacy["operator_verify_reason"] is None
-        assert legacy["citations"] == [] and legacy["source_path"] == src
+        assert legacy["citations"] == [] and legacy["source_path"] == _VPATH
         assert legacy["evidence_chars"] == legacy["document_chars"]
         # All-outcomes file: fields nulled and named, state and ids kept.
         (row,) = _rows(allout)
@@ -1750,20 +1689,26 @@ class TestValidationAllOutcomes:
         assert [(w["item_id"], w["state"], w["quote"]) for w in row["witness"]] == [("c1", "bound", None)]
         assert row["witness"][0]["chash"] == "c" * 64 and row["status"] == "disagreement"
 
-    @pytest.mark.t2_tenant
+    @staticmethod
+    def _marked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, trace: bool):
+        marks = {
+            "claim": "MARK-CLAIM-7f3a", "quote": "MARK-QUOTE-91bc", "reason": "MARK-REASON-5d2e",
+        }
+        verify = _verdict(verified=False, reason=marks["reason"], evidence=[
+            {"item_id": "c1", "quote": marks["quote"], "role": "contradicts"},
+        ])
+        fail, allout = _sample(
+            tmp_path, monkeypatch, verify, trace=trace,
+            chunks=[("c" * 64, f"intro {marks['quote']} outro"), ("d" * 64, "second chunk")],
+            extracted=[(_VPATH, _record(
+                problem_formulation=marks["claim"], proposed_method=marks["claim"]), "")],
+        )
+        return fail, allout, marks
+
     def test_retention_prunes_each_file_to_its_newest_rows_without_mixing_schemas(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from nexus.commands.enrich import _VALIDATION_MAX_ROWS
-
-        assert _VALIDATION_MAX_ROWS == 10_000
-        _one_paper(env, tmp_path, monkeypatch)
-        _indexed_with_chunks(monkeypatch)
-
-        async def reject(claim, evidence, timeout=60.0):
-            return {"verified": False, "reason": "no", "evidence": []}
-
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", reject)
+        assert enrich_mod._VALIDATION_MAX_ROWS == 10_000
         fail = tmp_path / "f.jsonl"
         allout = tmp_path / "a.jsonl"
         # The failures file is the user's own, behind a symlink and with its own mode; its tail is torn.
@@ -1778,11 +1723,7 @@ class TestValidationAllOutcomes:
         allout.write_text("".join(
             json.dumps({"schema_version": 1, "status": "verified", "n": i}) + "\n" for i in range(10_004)
         ))
-        result = CliRunner().invoke(enrich, [
-            "aspects", _VCOLL, "--validate-sample", "100",
-            "--validation-out", str(fail), "--validation-all-out", str(allout),
-        ])
-        assert result.exit_code == 0, result.output
+        _sample(tmp_path, monkeypatch, _verdict(verified=False, reason="no", evidence=[]))
         legacy_rows, all_rows = _rows(real), _rows(allout)
         assert len(legacy_rows) == len(all_rows) == 10_000
         # Newest kept: the run's own row is last, the oldest rows are the ones gone.
@@ -1797,25 +1738,12 @@ class TestValidationAllOutcomes:
         assert (real.stat().st_mode & 0o777) == 0o640
         assert sorted(p.name for p in tmp_path.iterdir() if p.name.endswith((".tmp", ".new"))) == []
 
-    @pytest.mark.t2_tenant
     def test_a_torn_tail_is_dropped_on_append_and_on_prune_and_new_files_are_private(
-        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _one_paper(env, tmp_path, monkeypatch)
-        _indexed_with_chunks(monkeypatch)
-
-        async def reject(claim, evidence, timeout=60.0):
-            return {"verified": False, "reason": "no", "evidence": []}
-
-        monkeypatch.setattr("nexus.mcp.core.operator_verify", reject)
-        torn = tmp_path / "torn-failures.jsonl"
+        torn = tmp_path / "f.jsonl"
         torn.write_text('{"keep": 1}\n{"half": ')
-        allout = tmp_path / "torn-all.jsonl"
-        result = CliRunner().invoke(enrich, [
-            "aspects", _VCOLL, "--validate-sample", "100",
-            "--validation-out", str(torn), "--validation-all-out", str(allout),
-        ])
-        assert result.exit_code == 0, result.output
+        _, allout = _sample(tmp_path, monkeypatch, _verdict(verified=False, reason="no", evidence=[]))
         # Append: the fragment is cut off, the earlier row stays, the new row is whole on its own line.
         lines = torn.read_text().splitlines()
         assert json.loads(lines[0]) == {"keep": 1} and len(lines) == 2
@@ -1825,13 +1753,222 @@ class TestValidationAllOutcomes:
         # Prune: a run that appends nothing to the failures file still drops a torn tail from it.
         with torn.open("a") as f:
             f.write('{"half": ')
-        monkeypatch.setattr("nexus.aspect_extractor.read_indexed_text", lambda **_kw: None)
-        result = CliRunner().invoke(enrich, [
-            "aspects", _VCOLL, "--all", "--validate-sample", "100",
-            "--validation-out", str(torn), "--validation-all-out", str(allout),
-        ])
-        assert result.exit_code == 0, result.output
+        _sample(tmp_path, monkeypatch, _verdict(verified=True), read=lambda **_kw: None)
         assert len(torn.read_text().splitlines()) == 2 and torn.read_text().endswith("\n")
+
+    @pytest.mark.t2_tenant
+    def test_the_cli_run_writes_both_named_files(
+        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The one end-to-end run: ``--validation-out`` and ``--validation-all-out`` reach the run,
+        each file gets its own schema, and the summary names both."""
+        src = _one_paper(env, tmp_path, monkeypatch)
+        _indexed_with_chunks(monkeypatch)
+        monkeypatch.setattr("nexus.mcp.core.operator_verify", _verdict(
+            verified=False, reason="datasets are not in the text",
+            evidence=[{"item_id": "c2", "quote": "beta chunk text", "role": "contradicts"}],
+        ))
+        result, fail, allout = _validate(tmp_path)
+        assert result.exit_code == 0, result.output
+        (legacy,) = _rows(fail)
+        assert set(legacy) == _LEGACY_KEYS and legacy["source_path"] == src
+        (row,) = _rows(allout)
+        assert row["status"] == "disagreement" and row["tumbler"] == _VTUMBLER
+        assert f"Failures written to {fail}" in result.output
+        assert f"All outcomes written to {allout}" in result.output
+
+    @pytest.mark.t2_tenant
+    def test_trace_flag_reaches_the_validation_sample(
+        self, env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _one_paper(env, tmp_path, monkeypatch)
+        seen: list[dict] = []
+        monkeypatch.setattr(
+            "nexus.commands.enrich._run_validation_sample",
+            lambda extracted, **kw: seen.append(kw),
+        )
+        for args, expected in [([], True), (["--validation-trace"], True), (["--no-validation-trace"], False)]:
+            seen.clear()
+            result = CliRunner().invoke(enrich, [
+                "aspects", _VCOLL, "--all", "--validate-sample", "100", *args,
+            ])
+            assert result.exit_code == 0, result.output
+            assert len(seen) == 1 and seen[0]["trace"] is expected, args
+
+
+class TestValidationRulePins:
+    """Rules the mutation sweep of 716b0cc27 found unpinned (nexus-z1d0l.1.6 fix round 2),
+    and three behaviours the review round changed. All tenant-free."""
+
+    # ── what counts as a witness ───────────────────────────────────────────
+
+    def test_only_a_bound_supporting_item_is_a_witness(self) -> None:
+        def has(items, trusted=True):
+            return enrich_mod._has_bound_support({"evidence": items}, trusted)
+
+        assert has([{"state": "bound", "role": "supports"}]) is True
+        assert has([{"state": "bound", "role": "contradicts"}]) is False
+        assert has([{"state": "bound", "role": "neutral"}]) is False
+        assert has([{"state": "bound"}]) is False
+        assert has([{"state": "unresolved", "role": "supports"}]) is False
+        assert has([{"state": "bound", "role": "supports"}], trusted=False) is False
+
+    def test_a_true_verdict_whose_bound_item_does_not_support_is_unverifiable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        verify = _verdict(verified=True, reason="r", evidence=[
+            {"item_id": "c1", "quote": "alpha chunk text", "role": "contradicts"},
+        ])
+        _, allout = _sample(tmp_path, monkeypatch, verify)
+        (row,) = _rows(allout)
+        assert [(w["state"], w["role"]) for w in row["witness"]] == [("bound", "contradicts")]
+        assert (row["status"], row["reason_code"]) == ("unverifiable", "verified_unwitnessed")
+
+    # ── the quote cap ──────────────────────────────────────────────────────
+
+    def test_a_witness_quote_is_cut_to_300_characters(self) -> None:
+        def quote_len(n: int, *, trace: bool = True):
+            result = {"evidence": [{"item_id": "c1", "quote": "q" * n, "role": "supports", "state": "bound"}]}
+            (item,), _ = enrich_mod._witness_items(result, identity_trusted=True, trace=trace)
+            return None if item["quote"] is None else len(item["quote"])
+
+        assert quote_len(299) == 299
+        assert quote_len(300) == 300
+        assert quote_len(301) == 300
+        assert quote_len(5_000) == 300
+        assert quote_len(5_000, trace=False) is None
+
+    # ── the file lock ──────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("op", ["append", "prune"])
+    def test_a_held_file_lock_keeps_an_append_and_a_prune_off_the_file(
+        self, tmp_path: Path, op: str,
+    ) -> None:
+        import threading
+
+        p = tmp_path / "rows.jsonl"
+        before = '{"n": 1}\n{"n": 2}\n{"n": 3}\n'
+        p.write_text(before)
+        done = threading.Event()
+
+        def work() -> None:
+            if op == "append":
+                enrich_mod._append_validation_row(p, {"n": 4})
+            else:
+                enrich_mod._prune_validation_file(p, keep=1)
+            done.set()
+
+        with enrich_mod._validation_file_lock(p.resolve()):
+            worker = threading.Thread(target=work, daemon=True)
+            worker.start()
+            # Without the lock this finishes in milliseconds; with it, it waits for the release below.
+            assert not done.wait(0.5)
+            assert p.read_text() == before
+        assert done.wait(10)
+        worker.join(10)
+        assert p.read_text() == ('{"n": 1}\n{"n": 2}\n{"n": 3}\n{"n": 4}\n' if op == "append" else '{"n": 3}\n')
+
+    # ── the row's ids and digests ──────────────────────────────────────────
+
+    @staticmethod
+    def _row(*, payload=None, collection: str = _VCOLL, source_path: str = _VPATH) -> dict:
+        return enrich_mod._all_outcomes_row(
+            reason_code="verifier_rejected", collection=collection, source_path=source_path,
+            tumbler=None, claim_payload=payload if payload is not None else {"proposed_method": "M"},
+            result=None, window=(None, None, None), identity_trusted=False, trace=True, timestamp="t",
+        )
+
+    def test_claim_id_is_sha256_of_the_policy_string(self) -> None:
+        import hashlib
+
+        row = self._row()
+        # aspects/v1 NUL collection NUL source_path, as RDR-189 decision 3 says.
+        assert row["claim_id"] == hashlib.sha256(f"aspects/v1\0{_VCOLL}\0{_VPATH}".encode()).hexdigest()
+        assert row["claim_id"] == "b4b893a84a39354adca1bf420b3efe7ebfdad95e7bbb54ec68df6679c3ba8a7b"
+        assert self._row(collection="knowledge__other")["claim_id"] != row["claim_id"]
+        assert self._row(source_path="/p/y.txt")["claim_id"] != row["claim_id"]
+        assert _VPATH not in json.dumps(row)  # the id is a hash; the path never rides along
+
+    def test_claim_digest_is_stable_across_key_order_and_unicode_compatibility_forms(self) -> None:
+        import hashlib
+        import unicodedata
+
+        a = self._row(payload={"proposed_method": "M", "problem_formulation": "P"})["claim_digest"]
+        b = self._row(payload={"problem_formulation": "P", "proposed_method": "M"})["claim_digest"]
+        assert a == b  # sort_keys
+        text = json.dumps({"problem_formulation": "P", "proposed_method": "M"}, sort_keys=True)
+        assert a == hashlib.sha256(unicodedata.normalize("NFKC", text).encode()).hexdigest()
+        assert a != self._row(payload={"proposed_method": "N", "problem_formulation": "P"})["claim_digest"]
+        # NFKC: the fi ligature (U+FB01) and plain "fi" are one claim. json.dumps must not escape the
+        # ligature to ﬁ before the normalisation sees it.
+        ligature = self._row(payload={"proposed_method": "ﬁne-tune"})["claim_digest"]
+        plain = self._row(payload={"proposed_method": "fine-tune"})["claim_digest"]
+        assert ligature == plain
+
+    # ── the legacy row when the verifier says nothing ──────────────────────
+
+    @pytest.mark.parametrize("bound", [True, False], ids=["bound-path", "plain-text-path"])
+    def test_a_verifier_that_omits_its_reason_leaves_the_legacy_reason_empty_not_null(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: bool,
+    ) -> None:
+        """Before RDR-189 the failures row read ``result.get("reason", "")``: "" when the verifier gave
+        no reason. The host-side bind writes ``reason: None`` for an absent one; the row keeps ``""``."""
+        kwargs = {} if bound else {"read": lambda **_kw: "plain text only"}
+        fail, allout = _sample(
+            tmp_path, monkeypatch, _verdict(verified=False, evidence=[]), **kwargs,
+        )
+        (legacy,) = _rows(fail)
+        assert legacy["operator_verify_reason"] == ""
+        assert _rows(allout)[0]["verify_reason"] is None  # the new file never invents a reason
+
+    # ── a truthy verdict that is not a boolean ─────────────────────────────
+
+    @staticmethod
+    def _two_records(truthy_second_status: str) -> list:
+        return [
+            (_VPATH, _record(proposed_method="TRUTHY"), ""),
+            ("/p/other.txt", _record(proposed_method=truthy_second_status), ""),
+        ]
+
+    @staticmethod
+    def _by_claim(other: dict):
+        async def verify(claim, evidence, timeout=60.0):
+            if "TRUTHY" in claim:
+                return {"verified": "yes", "reason": "not a bool", "evidence": [_SUPPORTS_ALPHA]}
+            return other
+
+        return verify
+
+    def test_a_truthy_non_boolean_verdict_is_counted_errored_beside_a_verified_sample(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        verify = self._by_claim({"verified": True, "reason": "ok", "evidence": [_SUPPORTS_ALPHA]})
+        fail, allout = _sample(tmp_path, monkeypatch, verify, extracted=self._two_records("OTHER"))
+        assert sorted((r["status"], r["reason_code"]) for r in _rows(allout)) == [
+            ("errored", "malformed_verify_result"), ("verified", "verified"),
+        ]
+        assert not fail.exists()  # the legacy expression reads a truthy verdict as verified: no row
+        # The all-verified line: the errored sample is counted as errored, not verified or unwitnessed.
+        assert capsys.readouterr().out.splitlines()[-1] == (
+            f"Validation: all 1 sample(s) verified (1 errored). Output: {fail}. "
+            f"All outcomes written to {allout}."
+        )
+
+    def test_a_truthy_non_boolean_verdict_is_counted_errored_in_the_mixed_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        verify = self._by_claim({"verified": False, "reason": "wrong", "evidence": []})
+        fail, allout = _sample(tmp_path, monkeypatch, verify, extracted=self._two_records("OTHER"))
+        assert sorted(r["reason_code"] for r in _rows(allout)) == [
+            "malformed_verify_result", "verifier_rejected",
+        ]
+        (legacy,) = _rows(fail)  # only the disagreement wrote a failures row
+        assert legacy["source_path"] == "/p/other.txt"
+        assert capsys.readouterr().out.splitlines()[-1] == (
+            "Validation: 0 verified, 1 disagreement(s), 0 unverifiable (evidence truncated), "
+            "0 unverifiable (no bound witness), 1 errored. "
+            f"Failures written to {fail}. All outcomes written to {allout}."
+        )
 
 
 # ── operator_verify timeout scaling (code-review T2 [24110] xwvwx finding) ──
