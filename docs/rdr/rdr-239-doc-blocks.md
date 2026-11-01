@@ -1,5 +1,7 @@
 # RDR-239 Phase 1: the `doc` block for the eight shipped templates
 
+Revised for gate findings S1, S4 and S7 (nexus-mdbds.2), 2026-11-01.
+
 Review artifact for assumption A1 of RDR-239 (bead nexus-mdbds). Content only:
 no template file, parser or engine change. Written 2026-10-31 against
 worktree `halcyon` at the RDR-239 draft. Live counts are from the connected
@@ -75,7 +77,7 @@ doc:
     nonce: 1.1.42
     keys:
       queue: aspects
-    body: {"collection":"docs__1-1__voyage-context-3__v1","source_path":"/repo/docs/a.md","doc_id":"1.1.42","content_hash":"0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9"}
+    body: {"collection":"docs__0-0__example__v1","source_path":"/example/a.md","doc_id":"1.1.42","content_hash":"0000000000000000000000000000000000000000000000000000000000000000"}
   see_also:
     - RDR-235
 ```
@@ -107,25 +109,25 @@ A1 notes:
 doc:
   summary: An append-only announcement log per topic, many readers and no claiming; a post is a short message with a sender and an optional label.
   writers:
-    - any session of the tenant, by tuple_out or nx tuple out, following the board posting convention (one post per topic per minute) in conexus/skills/mailbox/SKILL.md
-    - no code in this repository posts to board/<topic>; the live tenant holds no such subspace
+    - Unverified: any session of the tenant, by tuple_out or nx tuple out, following the board posting convention (one post per topic per minute) in conexus/skills/mailbox/SKILL.md
+    - Unverified: no code in this repository posts to board/<topic>; the live tenant holds no such subspace
   readers:
-    - a session that called tuple_subscribe on the topic gets each post pushed through the channel (at most 32 topics per session)
-    - nx tuple wait and tuple_rd page the log with the (created_at, id) cursor
+    - Unverified: a session that called tuple_subscribe on the topic gets each post pushed through the channel (at most 32 topics per session)
+    - Unverified: nx tuple wait and tuple_rd page the log with the (created_at, id) cursor
   fields:
     topic: the topic name, the same as the subspace's last segment
     from: the poster's session or agent id; recorded, not checked
     kind: an optional free label for the post's shape; no value is in use today
   body: free text up to 1024 bytes
   example:
-    subspace: board/release
-    nonce: 6c0e5f1a-2b34-4d5e-8f60-71829a3b4c5d
+    subspace: board/example-topic
+    nonce: 00000000-0000-0000-0000-000000000002
     keys:
-      topic: release
+      topic: example-topic
     dims:
-      from: 1b327a6a-a047-4391-9c15-36bc499db1b3
-      kind: release
-    body: conexus 7.90.0 is tagged
+      from: 00000000-0000-0000-0000-000000000003
+      kind: example
+    body: An example post body.
   see_also:
     - RDR-211
     - conexus/skills/mailbox/SKILL.md
@@ -158,7 +160,7 @@ doc:
     - a session that called tuple_subscribe on board/ci/nexus-develop gets a ping per post (docs/agents/worktrees.md rule 7)
     - nx tuple rd and nx tuple wait page the log
   fields:
-    topic: repository name, a dash, and the branch, normalised to the address grammar (nexus-develop, nexus-main)
+    topic: repository name, a dash, and the branch, normalised to the address grammar (for example example-main)
     from:
       github: the adapter; the only value written
     kind:
@@ -174,14 +176,14 @@ doc:
     attempt: run attempt, an integer
     url: https://github.com/OWNER/REPO/actions/runs/N with an optional job and attempt suffix, or blank
   example:
-    subspace: board/ci/nexus-develop
-    nonce: 8d1c2f60-3a4b-4c5d-9e6f-7a8b9c0d1e2f
+    subspace: board/ci/example-branch
+    nonce: 00000000-0000-0000-0000-000000000004
     keys:
-      topic: nexus-develop
+      topic: example-branch
     dims:
       from: github
       kind: job
-    body: {"state":"completed","conclusion":"success","workflow":"CI","job":"lint","sha":"509df9541077c06bfb171a57cf6bdba19c97cf1e","run":1234567890,"attempt":1,"url":"https://github.com/Hellblazer/nexus/actions/runs/1234567890/job/9876543210"}
+    body: {"state":"completed","conclusion":"success","workflow":"CI","job":"lint","sha":"0000000000000000000000000000000000000000","run":1,"attempt":1,"url":"https://github.com/example/example/actions/runs/1"}
   see_also:
     - RDR-220
     - RDR-211
@@ -226,7 +228,7 @@ doc:
     keys:
       name: example-peer
     dims:
-      session_id: 1b327a6a-a047-4391-9c15-36bc499db1b3
+      session_id: 00000000-0000-0000-0000-000000000005
   see_also:
     - RDR-208
 ```
@@ -247,6 +249,8 @@ A1 notes:
 
 ## 5. `ledger/<session_id>`
 
+Retired by nexus-onjvw (engine-service-v0.1.174); not carried forward.
+
 ```yaml
 doc:
   summary: Per-session rows that recorded when a subagent started and reported. Its only writer was deleted; the template stays, the last row on the tenant is dated 2026-10-04, and nothing reads it.
@@ -263,7 +267,7 @@ doc:
     commit: a short or full sha the agent reported; declared but never written
     t2_ref: a project/title T2 pointer the agent reported; declared but never written
   example:
-    subspace: ledger/1b327a6a-a047-4391-9c15-36bc499db1b3
+    subspace: ledger/00000000-0000-0000-0000-000000000009
     keys:
       agent_id: a0123456789abcdef
       kind: report
@@ -309,11 +313,11 @@ doc:
     resource: the thing being locked, for example ci-develop-push
     from: optional; the holder's name for diagnostics, nothing depends on it
   example:
-    subspace: lock/ci-develop-push
+    subspace: lock/example-resource
     keys:
-      resource: ci-develop-push
+      resource: example-resource
     dims:
-      from: halcyon
+      from: example-peer
   see_also:
     - RDR-211
     - conexus/skills/peer-messaging/SKILL.md
@@ -357,16 +361,16 @@ doc:
       reply: a late answer sent as a new message after the request was acked as tracked
     correlation_id: pairs a reply with its request
     address_kind:
-      session: to is a session id
       agent: to is a subagent id
+      session: to is a session id
   body: free text up to 4096 bytes
   example:
-    subspace: mailbox/1b327a6a-a047-4391-9c15-36bc499db1b3
-    nonce: 0b6c1d2e-3f40-4a51-b627-38495a6b7c8d
+    subspace: mailbox/00000000-0000-0000-0000-000000000000
+    nonce: 00000000-0000-0000-0000-000000000006
     keys:
-      to: 1b327a6a-a047-4391-9c15-36bc499db1b3
+      to: 00000000-0000-0000-0000-000000000000
     dims:
-      from: 5576ca1a-71e6-49c9-b7a5-f960e85a87e7
+      from: 00000000-0000-0000-0000-000000000001
       kind: request
       correlation_id: req-0001
       address_kind: session
@@ -403,10 +407,10 @@ A1 notes:
 doc:
   summary: A named work queue; a producer posts one task per unit of work, any free worker claims the oldest, and the worker acks, nacks (counts a failure) or releases (hands it back).
   writers:
-    - any producer, by tuple_out or nx tuple out; no code in this repository posts to queue/<name>, and the live tenant holds no such subspace
+    - Unverified: any producer, by tuple_out or nx tuple out; no code in this repository posts to queue/<name>, and the live tenant holds no such subspace
   readers:
-    - a worker claims with tuple_in or tuple_inp, then tuple_ack, tuple_nack or tuple_release
-    - nx doctor (nexus.health) warns when the available backlog of a queue grows
+    - Unverified: a worker claims with tuple_in or tuple_inp, then tuple_ack, tuple_nack or tuple_release
+    - Unverified: nx doctor (nexus.health) warns when the available backlog of a queue grows
   fields:
     queue: the queue name, the same as the subspace's last segment
     from: the producer's session or agent id; recorded, not checked
@@ -415,11 +419,11 @@ doc:
   body: the task, free text up to 4096 bytes
   example:
     subspace: queue/example-work
-    nonce: 4e7f8091-a2b3-4c4d-8e5f-60718293a4b5
+    nonce: 00000000-0000-0000-0000-000000000008
     keys:
       queue: example-work
     dims:
-      from: 1b327a6a-a047-4391-9c15-36bc499db1b3
+      from: 00000000-0000-0000-0000-000000000007
       kind: review
       correlation_id: req-0002
     body: Review the diff on feature/example.
