@@ -2691,16 +2691,24 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
     _os._exit(0)
 
 
-def _install_exit_handlers() -> None:
+def _install_exit_handlers(
+    register: Callable[[Callable[[], None]], Any] | None = None,
+    set_signal: Callable[[int, Any], Any] | None = None,
+) -> None:
     """Register :func:`_exit_teardown` with :mod:`atexit` and
     :func:`_sigterm_handler` for SIGTERM and SIGINT. Called once by
-    :func:`main`; see the comment there for why all three are needed."""
+    :func:`main`; see the comment there for why all three are needed.
+    *register* and *set_signal* default to ``atexit.register`` and
+    ``signal.signal``; a test passes its own instead of patching the
+    stdlib modules for the whole process."""
     import atexit  # noqa: PLC0415 — stdlib, deferred to the one call site
     import signal  # noqa: PLC0415 — stdlib, deferred to the one call site
 
-    atexit.register(_exit_teardown)
-    signal.signal(signal.SIGTERM, _sigterm_handler)
-    signal.signal(signal.SIGINT, _sigterm_handler)
+    register = register or atexit.register
+    set_signal = set_signal or signal.signal
+    register(_exit_teardown)
+    set_signal(signal.SIGTERM, _sigterm_handler)
+    set_signal(signal.SIGINT, _sigterm_handler)
 
 
 # nexus-20iee: the upstream mcp SDK's FastMCP Settings model (a Generic[

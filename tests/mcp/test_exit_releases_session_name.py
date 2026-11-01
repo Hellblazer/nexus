@@ -27,6 +27,7 @@ import pytest
 from nexus import mcp_infra
 from nexus.mcp import core
 from nexus.mcp import subscriptions as subs
+from tests._module_seam import setattr_in
 
 
 class _FakeTuples:
@@ -101,7 +102,7 @@ def _sigterm_stubs(monkeypatch, order: list[str]) -> None:
         order.append(f"exit {code}")
         raise _Exit
 
-    monkeypatch.setattr(core._os, "_exit", _fake_exit)
+    setattr_in(monkeypatch, core, "_os._exit", _fake_exit)
 
 
 def test_the_release_lapses_the_row_this_process_wrote() -> None:
@@ -166,7 +167,7 @@ def test_a_release_that_cannot_start_does_not_stop_the_t1_teardown(monkeypatch) 
         def start(self) -> None:
             raise RuntimeError("can't start new thread")
 
-    monkeypatch.setattr(core.threading, "Thread", _NoThread)
+    setattr_in(monkeypatch, core, "threading.Thread", _NoThread)
     order: list[str] = []
     monkeypatch.setattr(core, "_t1_shutdown", lambda: order.append("t1_shutdown"))
     core._exit_teardown()
@@ -226,10 +227,9 @@ def test_sigterm_during_the_lifespan_release_waits_for_it(monkeypatch) -> None:
 def test_the_exit_handlers_register_the_release_with_atexit(monkeypatch) -> None:
     registered: list = []
     signals: dict = {}
-    monkeypatch.setattr("atexit.register", registered.append)
-    monkeypatch.setattr("signal.signal", lambda sig, fn: signals.__setitem__(sig, fn))
-
-    core._install_exit_handlers()
+    core._install_exit_handlers(
+        register=registered.append, set_signal=lambda sig, fn: signals.__setitem__(sig, fn),
+    )
 
     assert registered == [core._exit_teardown]
     # and main() installs them: the pre-fix main registered _t1_shutdown inline
