@@ -96,7 +96,7 @@ _KWARGS_READ: dict[str, str] = {
         "lone ``cwd`` key (nexus-x3m8e); stdout and stderr are the child log handle, "
         "binary, and the server is detached"
     ),
-    "src/nexus/hooks/agent_dispatch_record.py:93": (
+    "src/nexus/hooks/agent_dispatch_record.py:92": (
         "``common`` is the null device for all three streams, ``close_fds`` and "
         "``stable_cwd.detached_spawn_kwargs()``; ``extra`` is the session or creation "
         "flags; nothing reads the detached recorder child as text (nexus-mtheb.4)"

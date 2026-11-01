@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import warnings
 from typing import Any
 
 __all__ = ["OFF_ENV", "main", "run_child", "spawn"]
@@ -63,11 +65,8 @@ def spawn(session_id: str, agent_id: str, agent_type: str, t1_puts: int) -> bool
     if _disabled() or not session_id or not agent_id:
         return False
     try:
-        import subprocess  # noqa: PLC0415 — deferred: the nudge's import cost stays stdlib-light
-        import warnings  # noqa: PLC0415 — deferred with subprocess
-
-        from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 — stdlib-only helper, deferred with subprocess
-        from nexus.util.stable_cwd import detached_spawn_kwargs  # noqa: PLC0415 — stdlib-only helper, deferred with subprocess
+        from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 — stdlib-only helper, deferred to the spawn
+        from nexus.util.stable_cwd import detached_spawn_kwargs  # noqa: PLC0415 — stdlib-only helper, deferred to the spawn
 
         payload = json.dumps({
             "session_id": session_id,

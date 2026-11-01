@@ -26,6 +26,7 @@ from nexus.hooks import agent_dispatch_record as rec
 from nexus.hooks import subagent_stop_t1_nudge as nudge
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 from tests._hook_wiring import REPO_ROOT
+from tests._module_seam import setattr_in
 
 ROUTE = "/v1/telemetry/agent_dispatches/record"
 
@@ -152,7 +153,7 @@ def test_spawn_starts_a_detached_child_that_records_and_returns_at_once(engine_e
 def test_the_off_switch_spawns_nothing(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv(rec.OFF_ENV, value)
     started: list[object] = []
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
+    setattr_in(monkeypatch, rec, "subprocess.Popen", lambda *a, **k: started.append(a))
     assert rec.spawn("s1", "a1", "developer", 0) is False
     assert started == []
 
@@ -161,7 +162,7 @@ def test_the_off_switch_spawns_nothing(monkeypatch: pytest.MonkeyPatch, value: s
 def test_no_identity_spawns_nothing(monkeypatch: pytest.MonkeyPatch, sid: str, aid: str) -> None:
     monkeypatch.delenv(rec.OFF_ENV, raising=False)
     started: list[object] = []
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
+    setattr_in(monkeypatch, rec, "subprocess.Popen", lambda *a, **k: started.append(a))
     assert rec.spawn(sid, aid, "developer", 0) is False
     assert started == []
 
@@ -172,7 +173,7 @@ def test_a_failing_popen_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*_a: object, **_k: object) -> None:
         raise OSError("no fork")
 
-    monkeypatch.setattr(subprocess, "Popen", boom)
+    setattr_in(monkeypatch, rec, "subprocess.Popen", boom)
     assert rec.spawn("s1", "a1", "developer", 0) is False
 
 
@@ -186,7 +187,7 @@ def test_the_posix_spawn_leaves_the_hook_session_and_stdio(monkeypatch: pytest.M
         def __init__(self, argv: list[str], **kw: object) -> None:
             seen.append((argv, kw))
 
-    monkeypatch.setattr(subprocess, "Popen", _P)
+    setattr_in(monkeypatch, rec, "subprocess.Popen", _P)
     assert rec.spawn("s1", "a1", "developer", 4) is True
     [(argv, kw)] = seen
     assert argv[:3] == [sys.executable, "-m", "nexus.hooks.agent_dispatch_record"]
@@ -295,7 +296,7 @@ def test_the_windows_spawn_tries_breakaway_then_falls_back(monkeypatch: pytest.M
     refuses it, the same flags without breakaway (the _session_end_launcher
     pattern). Never DETACHED_PROCESS."""
     monkeypatch.delenv(rec.OFF_ENV, raising=False)
-    monkeypatch.setattr(rec.os, "name", "nt")
+    setattr_in(monkeypatch, rec, "os.name", "nt")
     flags: list[int] = []
 
     class _P:
@@ -305,7 +306,7 @@ def test_the_windows_spawn_tries_breakaway_then_falls_back(monkeypatch: pytest.M
             if len(flags) == 1:
                 raise PermissionError("job forbids breakaway")
 
-    monkeypatch.setattr(subprocess, "Popen", _P)
+    setattr_in(monkeypatch, rec, "subprocess.Popen", _P)
     assert rec.spawn("s1", "a1", "developer", 1) is True
     base = rec._CREATE_NO_WINDOW | rec._CREATE_NEW_PROCESS_GROUP
     assert flags == [base | rec._CREATE_BREAKAWAY_FROM_JOB, base]
