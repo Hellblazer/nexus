@@ -586,3 +586,4 @@ nobody runs.
 | 2026-10-31 | Cold-state section added at Sam's direction (heat and waste): Gap 4 names the day's five cases, and `nx memory curate --cold` reports every store with no write and no read in N days, report only. |
 | 2026-10-31 | Sam's review: supersession becomes deletion; Gaps 3 and 5 (procedures) move to nexus-qo7ie.2 as Lua scripts on the runtime of nexus-mdbds.1; gaps renumbered; title changed. |
 | 2026-10-31 | Pre-gate revision: Finalization Gate written; the Approach states what the SessionStart hook checks, matching Technical Design 3; A1 prerequisite ticked. |
+| 2026-11-01 | Gate round 2: PASSED (0 Critical, 17 Significant, 0 ship-blockers); commit `3cd49dd10`; critique `nexus_rdr/238-gate-critique-2026-11-01-r2`. |
