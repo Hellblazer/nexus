@@ -167,3 +167,70 @@ def test_the_local_claude_wins_over_path(crs, monkeypatch, tmp_path) -> None:
     other.chmod(0o755)
     monkeypatch.setenv("PATH", str(other.parent))
     assert crs._claude_binary() == str(local)
+
+
+@pytest.mark.parametrize(
+    ("argv", "want"),
+    [
+        ("claude --channels plugin:conexus@nexus-plugins -n x", True),
+        ("claude --channels=plugin:conexus@nexus-plugins", True),
+        ("claude --dangerously-load-development-channels server:nexus", True),
+        ("claude --channels plugin:other@elsewhere", False),
+        ("claude -n x --model sonnet", False),
+        ("claude -n 'unbalanced", False),
+        ("", False),
+    ],
+    ids=["channels", "channels-inline", "dev-channels", "other-plugin", "none", "unparseable", "empty"],
+)
+def test_has_channel(crs, argv: str, want: bool) -> None:
+    """Mail reaches a session as a turn only through the conexus channel (nexus-cmqe8)."""
+    assert crs.has_channel({"argv": argv}) is want
+
+
+def test_fresh_relaunch_carries_the_first_prompt_after_a_double_dash(crs) -> None:
+    """--channels takes values, so the positional prompt must follow `--` or it is read as a channel."""
+    cmd = crs.relaunch_command({"argv": "claude --channels plugin:conexus@nexus-plugins", "name": "tamsin",
+                                "sessionId": "sid-1", "cwd": "/w"}, fresh=True, first_prompt="cat /tmp/h f.md")
+    args = shlex.split(cmd.split(" && ", 1)[1])[1:]
+    assert args[-2:] == ["--", "cat /tmp/h f.md"]
+    assert "--resume" not in args
+
+
+def test_mail_ask_writes_the_session_mailbox_and_types_nothing(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_kw):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="tupleid\n", stderr="")
+
+    setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
+    s = {"sessionId": "sid-9", "name": "tamsin"}
+    assert crs.mail_ask(s, "/tmp/h.md", "sid-caller") is True
+    assert len(seen) == 1 and seen[0][:4] == ["nx", "tuple", "out", "mailbox/sid-9"]
+    argv = seen[0]
+    pairs = {(argv[i], argv[i + 1]) for i in range(len(argv) - 1)}
+    assert {("--key", "to=sid-9"), ("--dim", "from=sid-caller"), ("--dim", "address_kind=session")} <= pairs
+    body = argv[argv.index("--body") + 1]
+    assert "/tmp/h.md" in body and body.endswith("reply with only: cat /tmp/h.md")
+    assert len(body.encode()) <= 4096  # the mailbox template's body ceiling
+
+
+def test_mail_ask_reports_a_failed_send(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    setattr_in(monkeypatch, crs, "subprocess.run",
+               lambda argv, **_kw: subprocess.CompletedProcess(argv, 1, stdout="", stderr="refused\n"))
+    assert crs.mail_ask({"sessionId": "sid-9", "name": "t"}, "/tmp/h.md", "x") is False
+    assert "mail to mailbox/sid-9 failed (exit 1)" in (tmp_path / "restart.log").read_text()
+
+
+def test_transcript_has_matches_only_a_user_message(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    proj = tmp_path / ".claude" / "projects" / "p"
+    proj.mkdir(parents=True)
+    rows = [{"type": "assistant", "message": {"content": "cat /tmp/a.md"}},
+            {"type": "user", "message": {"role": "user", "content": "cat /tmp/b.md"}}]
+    (proj / "sid.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    assert crs.transcript_has("sid", "/tmp/b.md") is True
+    assert crs.transcript_has("sid", "/tmp/a.md") is False
+    assert crs.transcript_has("other", "/tmp/b.md") is False
