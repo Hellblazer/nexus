@@ -642,17 +642,13 @@ def session_end_flush() -> str:
         # only the T2 writes cross the daemon boundary below.
         entries = list(t1.flagged_entries()) if t1 is not None else []
 
+        from nexus.mcp_infra import flush_rows_to_t2, t2_index_write  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
         def _flush_and_expire(db):
-            n = 0
-            for entry in entries:
-                db.memory.put(
-                    project=entry["flush_project"],
-                    title=entry["flush_title"],
-                    content=entry["content"],
-                    tags=entry.get("tags", ""),
-                    ttl=None,
-                )
-                n += 1
+            # nexus-mtheb.9: create-if-absent, like the MCP's flush. This hook
+            # often runs after the handoff or exit flush wrote the same rows,
+            # and an entry the user edited since must not be put back.
+            n = flush_rows_to_t2(db, entries, op="session_end_flush", log=_logger())
             # Flushed entries are permanent (ttl=None); the expire sweep
             # below only reaps already-expired rows, so flush-then-expire
             # ordering is safe.
@@ -663,7 +659,6 @@ def session_end_flush() -> str:
         # memory.db directly and contend on its single WAL writer lock.
         # t2_index_write falls back to a direct T2Database when the daemon
         # is unreachable (the grandchild can outlive the MCP lifespan).
-        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         flushed, expired = t2_index_write(_flush_and_expire)
         # nexus-6a19f: `t1 is None` here covers every case where
         # `_open_t1()` raised -- including, since nexus-f7xyq, an explicit

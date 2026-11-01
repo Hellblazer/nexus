@@ -148,19 +148,19 @@ async def test_a_row_flushed_by_the_handoff_and_again_is_one_t2_entry(handoff) -
 
 @pytest.mark.asyncio
 async def test_a_failing_flush_never_blocks_the_handoff(handoff, monkeypatch) -> None:
-    _, new_id = handoff
+    old_id, new_id = handoff
 
     attempts: list[str] = []
 
-    def _broken():
-        attempts.append("get_t1")
+    def _broken(session_id, session_token=None):
+        attempts.append(session_id)
         raise RuntimeError("T1 unreachable")
 
-    monkeypatch.setattr(mcp_infra, "get_t1", _broken)
+    monkeypatch.setattr(core, "_open_t1_for_flush", _broken)
 
     await core._t1_handoff_tick(_MCP_PID, MagicMock())
 
-    assert attempts == ["get_t1"]  # the flush was tried, once
+    assert attempts == [old_id]  # the flush was tried, once, for the old session
     assert os.environ["NX_T1_SESSION_ID"] == new_id
 
 
@@ -172,7 +172,7 @@ async def test_a_flush_that_raises_outside_the_worker_still_completes_the_handof
     outside the worker's own try; the claimed marker must still be consumed."""
     _, new_id = handoff
 
-    def _raises(session_id, *, op="t1_teardown_flush"):
+    def _raises(session_id, *, session_token=None, op="t1_teardown_flush"):
         raise RuntimeError("can't start new thread")
 
     monkeypatch.setattr(core, "_flush_flagged_t1_entries", _raises)
@@ -196,10 +196,10 @@ def test_a_handoff_flush_failure_is_logged_with_its_op(handoff, monkeypatch, flu
     assert core._flush_flagged_t1_entries(old_id, op="t1_handoff_flush") == 1
     assert flush_log.ops("t1_teardown_flush_complete") == ["t1_handoff_flush"]
 
-    def _broken():
+    def _broken(session_id, session_token=None):
         raise RuntimeError("T1 unreachable")
 
-    monkeypatch.setattr(mcp_infra, "get_t1", _broken)
+    monkeypatch.setattr(core, "_open_t1_for_flush", _broken)
     assert core._flush_flagged_t1_entries(old_id, op="t1_handoff_flush") == 0
     assert flush_log.ops("t1_teardown_flush_failed") == ["t1_handoff_flush"]
 
@@ -213,11 +213,11 @@ def test_an_incomplete_handoff_flush_is_logged_with_its_op(handoff, monkeypatch,
     old_id, _ = handoff
     release = threading.Event()
 
-    def _hangs():
+    def _hangs(session_id, session_token=None):
         release.wait(5)
         raise RuntimeError("released")
 
-    monkeypatch.setattr(mcp_infra, "get_t1", _hangs)
+    monkeypatch.setattr(core, "_open_t1_for_flush", _hangs)
     monkeypatch.setattr(core, "_TEARDOWN_FLUSH_TIMEOUT_S", 0.05)
     try:
         assert core._flush_flagged_t1_entries(old_id, op="t1_handoff_flush") == 0
@@ -251,6 +251,251 @@ async def test_a_failed_mint_does_not_flush_and_the_retry_does(handoff, monkeypa
     await core._t1_handoff_tick(_MCP_PID, MagicMock())
     assert os.environ["NX_T1_SESSION_ID"] == new_id
     assert _t2_titles(project) == ["waits"]
+
+
+# ── nexus-mtheb.9: the flush reads the session it is given ───────────────────
+
+
+class _ForeignScope:
+    """A T1 singleton bound to some OTHER scope: a flush that trusted it would
+    write this scope's flagged row (project ``foreign``) instead of the given
+    session's."""
+
+    session_id = "a-foreign-scope"
+
+    def __init__(self, project: str) -> None:
+        self._project = project
+
+    def flagged_entries(self) -> list[dict]:
+        return [{
+            "id": "x", "content": "from the foreign scope", "flagged": True,
+            "flush_project": self._project, "flush_title": "foreign",
+        }]
+
+
+def test_the_flush_reads_the_session_it_is_given_not_the_singleton(handoff, monkeypatch) -> None:
+    old_id, new_id = handoff
+    old_token = os.environ["NX_T1_SESSION"]
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    t1, _ = mcp_infra.get_t1()
+    t1.put("the given session's row", persist=True, flush_project=project, flush_title="given")
+    # The state after a handoff swap: the env and the singleton name another scope.
+    monkeypatch.setenv("NX_T1_SESSION_ID", new_id)
+    monkeypatch.setenv("NX_T1_SESSION", f"tok-{new_id}")
+    mcp_infra.inject_t1(_ForeignScope(project))
+
+    flushed = core._flush_flagged_t1_entries(old_id, session_token=old_token, op="t1_handoff_flush")
+
+    assert flushed == 1
+    assert _t2_titles(project) == ["given"]  # not "foreign"
+    got = mcp_infra.t2_index_write(lambda db: db.memory.get(project=project, title="given"))
+    assert got is not None and got["content"] == "the given session's row"
+
+
+def test_a_flush_with_no_token_for_its_session_reads_no_other_scope(handoff, monkeypatch, flush_log) -> None:
+    """The env names another session, no token is given, no lease is published
+    for the given one: there is nothing to read it with, so nothing is flushed
+    (and the singleton's scope is not read in its place)."""
+    old_id, new_id = handoff
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    monkeypatch.setenv("NX_T1_SESSION_ID", new_id)
+    monkeypatch.setenv("NX_T1_SESSION", f"tok-{new_id}")
+    mcp_infra.inject_t1(_ForeignScope(project))
+
+    assert core._flush_flagged_t1_entries(old_id, op="t1_handoff_flush") == 0
+
+    assert _t2_titles(project) == []
+    assert flush_log.ops("t1_teardown_flush_failed") == ["t1_handoff_flush"]
+
+
+# ── nexus-mtheb.9: the handoff flush runs after the swap ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_handoff_flush_runs_after_the_swap_with_the_old_sessions_own_token(
+    handoff, monkeypatch,
+) -> None:
+    old_id, new_id = handoff
+    old_token = os.environ["NX_T1_SESSION"]
+    seen: list[tuple[str, str | None, str, bool]] = []
+    real = core._flush_flagged_t1_entries
+
+    def _spy(session_id, *, session_token=None, op="t1_teardown_flush"):
+        seen.append((session_id, session_token, os.environ["NX_T1_SESSION_ID"], mcp_infra._t1_instance is None))
+        return real(session_id, session_token=session_token, op=op)
+
+    monkeypatch.setattr(core, "_flush_flagged_t1_entries", _spy)
+
+    await core._t1_handoff_tick(_MCP_PID, MagicMock())
+
+    # Called once, for the OLD id with the OLD token, while the env already names
+    # the NEW id and the singleton has been dropped for the new scope.
+    assert seen == [(old_id, old_token, new_id, True)]
+
+
+@pytest.mark.asyncio
+async def test_the_handoff_flush_uses_the_token_the_old_session_holds_at_the_swap(
+    handoff, monkeypatch,
+) -> None:
+    """The refresh loop rewrites the env token on every rotation, and it keeps
+    running while the tick awaits the new session's mint. The old session's
+    flush must carry the token held at the swap, not the one read at the top of
+    the tick (a rotation behind, and dead on the server by then)."""
+    from nexus.db import t1 as t1_mod
+
+    old_id, _ = handoff
+    base_mint = t1_mod.mint_t1_session_token
+
+    def _mint_while_the_old_token_rotates(sid, *, context=""):
+        monkeypatch.setenv("NX_T1_SESSION", "rotated-old-token")
+        return base_mint(sid, context=context)
+
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _mint_while_the_old_token_rotates)
+    seen: list[tuple[str, str | None]] = []
+
+    def _spy(session_id, *, session_token=None, op="t1_teardown_flush"):
+        seen.append((session_id, session_token))
+        return 0
+
+    monkeypatch.setattr(core, "_flush_flagged_t1_entries", _spy)
+
+    await core._t1_handoff_tick(_MCP_PID, MagicMock())
+
+    assert seen == [(old_id, "rotated-old-token")]
+
+
+@pytest.mark.asyncio
+async def test_a_row_flagged_after_the_old_flush_point_is_in_t2_after_the_tick(
+    handoff, monkeypatch,
+) -> None:
+    """The old scope flags a row at the moment the singleton is dropped for the
+    new scope: the spot a flush before the swap had already passed (it had spent
+    its await on a worker thread by then). A flush after the swap catches it."""
+    old_id, _ = handoff
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    t1, _ = mcp_infra.get_t1()
+    t1.put("flagged before", persist=True, flush_project=project, flush_title="before")
+    real_reset = mcp_infra.reset_t1_for_release
+
+    def _late_row_then_reset() -> None:
+        t1.put("flagged late", persist=True, flush_project=project, flush_title="late")
+        real_reset()
+
+    monkeypatch.setattr(mcp_infra, "reset_t1_for_release", _late_row_then_reset)
+    log = MagicMock()
+
+    await core._t1_handoff_tick(_MCP_PID, log)
+
+    assert _t2_titles(project) == ["before", "late"]
+    assert _released_flush_count(log) == 2
+
+
+# ── nexus-mtheb.9: a flush never overwrites a user-edited T2 entry ───────────
+
+
+class _CountingDb:
+    """Passes the T2 writer through, counting the memory puts that reach it."""
+
+    def __init__(self, db, puts: list[str]) -> None:
+        self._db, self._puts = db, puts
+
+    @property
+    def memory(self):
+        outer = self
+
+        class _Memory:
+            def __getattr__(self, name):
+                attr = getattr(outer._db.memory, name)
+                if name != "put":
+                    return attr
+
+                def _put(*a, **kw):
+                    outer._puts.append(kw.get("title", ""))
+                    return attr(*a, **kw)
+
+                return _put
+
+        return _Memory()
+
+
+def test_a_flush_never_overwrites_a_user_edited_t2_entry(handoff, flush_log) -> None:
+    old_id, _ = handoff
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    t1, _ = mcp_infra.get_t1()
+    t1.put("what T1 held", persist=True, flush_project=project, flush_title="note")
+
+    assert core._flush_flagged_t1_entries(old_id) == 1  # the first flush creates the entry
+    mcp_infra.t2_index_write(
+        lambda db: db.memory.put(project=project, title="note", content="what the user made of it"),
+    )
+
+    assert core._flush_flagged_t1_entries(old_id, op="t1_handoff_flush") == 0  # kept, not flushed
+
+    got = mcp_infra.t2_index_write(lambda db: db.memory.get(project=project, title="note"))
+    assert got is not None and got["content"] == "what the user made of it"
+    assert flush_log.ops("t1_flush_kept_existing_t2_entry") == ["t1_handoff_flush"]
+
+
+@pytest.mark.asyncio
+async def test_a_handoff_after_a_user_edit_keeps_the_edit(handoff) -> None:
+    """The exit-flush-then-edit-then-handoff order, through the real tick."""
+    old_id, _ = handoff
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    t1, _ = mcp_infra.get_t1()
+    t1.put("what T1 held", persist=True, flush_project=project, flush_title="note")
+    assert core._flush_flagged_t1_entries(old_id) == 1
+    mcp_infra.t2_index_write(
+        lambda db: db.memory.put(project=project, title="note", content="edited by the user"),
+    )
+    log = MagicMock()
+
+    await core._t1_handoff_tick(_MCP_PID, log)
+
+    got = mcp_infra.t2_index_write(lambda db: db.memory.get(project=project, title="note"))
+    assert got is not None and got["content"] == "edited by the user"
+    assert _released_flush_count(log) == 0
+
+
+def test_an_identical_reflush_is_a_no_op_that_still_counts(handoff, monkeypatch) -> None:
+    old_id, _ = handoff
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    t1, _ = mcp_infra.get_t1()
+    t1.put("unchanged", persist=True, flush_project=project, flush_title="note")
+    assert core._flush_flagged_t1_entries(old_id) == 1
+
+    puts: list[str] = []
+    real_write = mcp_infra.t2_index_write
+    monkeypatch.setattr(
+        mcp_infra, "t2_index_write",
+        lambda fn, *, op="t2_write": real_write(lambda db: fn(_CountingDb(db, puts)), op=op),
+    )
+
+    assert core._flush_flagged_t1_entries(old_id) == 1  # still counts as in T2
+    assert puts == []  # and wrote nothing
+    assert _t2_titles(project) == ["note"]
+
+
+def test_the_session_end_hook_flush_never_overwrites_a_user_edited_t2_entry(handoff) -> None:
+    """The SessionEnd hook flushes the same rows after a handoff or exit flush
+    has: it keeps an edited entry too."""
+    from nexus.hooks import session_end_flush  # noqa: PLC0415
+
+    old_id, _ = handoff
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    t1, _ = mcp_infra.get_t1()
+    t1.put("what T1 held", persist=True, flush_project=project, flush_title="note")
+    assert core._flush_flagged_t1_entries(old_id) == 1
+    mcp_infra.t2_index_write(
+        lambda db: db.memory.put(project=project, title="note", content="edited by the user"),
+    )
+    t1.put("flushed only by the hook", persist=True, flush_project=project, flush_title="fresh")
+
+    out = session_end_flush()
+
+    got = mcp_infra.t2_index_write(lambda db: db.memory.get(project=project, title="note"))
+    assert got is not None and got["content"] == "edited by the user"
+    assert _t2_titles(project) == ["fresh", "note"]  # an absent entry is still created
+    assert "Flushed 1 " in out, out
 
 
 # ── MCP scratch: a row can be flagged when it is written ─────────────────────

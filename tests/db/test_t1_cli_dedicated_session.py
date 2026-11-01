@@ -92,6 +92,24 @@ class _FakeHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def do_GET(self):  # noqa: N802
+        # nexus-mtheb.9: the flush is create-if-absent, so it asks for the entry
+        # first (GET /v1/memory/get; 404 = absent, as the engine answers).
+        from urllib.parse import parse_qs, urlsplit  # noqa: PLC0415 — test-local import
+
+        parts = urlsplit(self.path)
+        if parts.path == "/v1/memory/get":
+            if not self._check_bearer():
+                return
+            q = {k: v[0] for k, v in parse_qs(parts.query).items()}
+            for row in _T2_MEMORY:
+                if row["project"] == q.get("project") and row["title"] == q.get("title"):
+                    self._send(200, dict(row))
+                    return
+            self._send(404, {"error": "not found"})
+            return
+        self._send(404, {"error": "not found"})
+
     def do_POST(self):  # noqa: N802
         path = self.path.split("?")[0]
         body = self._read_body()

@@ -1835,6 +1835,49 @@ def t2_index_write(write_fn, *, op: str = "t2_write"):
     return _service_t2_write_locked(write_fn, op=op)
 
 
+def flush_rows_to_t2(db, entries, *, op: str, log) -> int:
+    """Write flagged T1 rows to T2 as create-if-absent; return how many are
+    now in T2 (written plus already identical). nexus-mtheb.9.
+
+    A flush is the row's one hand-over to T2: once the entry exists it is the
+    user's, who may edit it (``memory_put``, a note tool, an editor). A later
+    flush of the same row (the SessionEnd hook after a handoff flush, the
+    owner's exit flush) must not put the T1 text back over those edits, so an
+    existing entry whose content differs is kept and the skip logged with *op*.
+    An identical entry is left alone without a write (a no-op re-flush) and
+    counts as flushed. The existence check and the put are two engine calls,
+    not one atomic create: the engine has no create-only memory put, and a
+    user edit landing between the two is the one window left, bounded to a
+    flush that races a person editing that very entry.
+
+    *db* is the T2 writer ``t2_index_write`` hands its callback; *log* is the
+    caller's logger, so a caller's event stream names the skip with its own *op*.
+    """
+    flushed = 0
+    for entry in entries:
+        project, title = entry["flush_project"], entry["flush_title"]
+        existing = db.memory.get(project=project, title=title)
+        if existing is not None:
+            if existing["content"] == entry["content"]:
+                flushed += 1
+            else:
+                log.info(
+                    "t1_flush_kept_existing_t2_entry", op=op, project=project, title=title,
+                    detail="the T2 entry's content differs from the T1 row: it is the "
+                    "user's now, and a flush never overwrites it",
+                )
+            continue
+        db.memory.put(
+            project=project,
+            title=title,
+            content=entry["content"],
+            tags=entry.get("tags", ""),
+            ttl=None,
+        )
+        flushed += 1
+    return flushed
+
+
 # ── Search telemetry sink (nexus-vpa9q) ──────────────────────────────────────
 # MCP search and query hand their per-call telemetry rows to this sink
 # instead of a per-call T2Database store. See nexus.search_telemetry_sink for

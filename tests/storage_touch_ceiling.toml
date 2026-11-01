@@ -40,8 +40,13 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5011
+provisioned_tests = 5020
 tolerance_tests = 0
+# 5011 -> 5020 (nexus-mtheb.9, 2026-11-01): +9, tests/mcp/test_t1_handoff_flush.py 11 -> 20 (module marked t2_tenant): the
+# flush reads the session it is given, the handoff flush runs after the swap, a flush keeps a user-edited T2 entry (MCP flush
+# and SessionEnd hook). Each reads real flagged T1 rows and real T2 entries, so each needs the engine. Measured on chas
+# (lab-m, the guard in fail mode): the handoff and teardown flush modules together 28 tests, provisioned 28 (19 at the
+# parent). The CI fan-in sets the number of record.
 # 5000 -> 5011 (nexus-mtheb.1, 2026-11-01): +11, the new tests/mcp/test_t1_handoff_flush.py (module marked
 # t2_tenant): the handoff tick flushes flagged T1 rows to T2 and reads the old scope back, which needs a real
 # engine T1 and T2. Measured by CI 41357939836's fan-in (5011 at e598e4b3d), the only change in the count since 5000.
