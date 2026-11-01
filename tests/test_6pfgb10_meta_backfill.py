@@ -559,9 +559,11 @@ def test_the_derived_keys_read_no_chunk_row_and_no_manifest():
 
 
 def test_a_note_is_never_given_derived_tags_or_category_by_its_content_type():
-    """A note carries a path-shaped file_path here on purpose: were the note taken for an indexed document its
-    path would derive ["markdown"]/prose. Its keys are counted under note.* only, no doc.* key exists, and the
-    note's own residue is what the note rules alone make of it."""
+    """A note carries a path-shaped file_path here on purpose: were the note taken for an indexed document,
+    source_format would derive ``markdown`` from it and a stamp would be sent. Its keys are counted under
+    note.* only, and the note's own residue is what the note rules alone make of it. With the doc guard
+    removed the plans still land under note.* (kind stays "note"), so the updates and note.* count asserts
+    are what fail; the doc.* asserts only state the expected shape."""
     w = _World()
     w.entries = [
         _entry({"put_at": PUT}, title="n", tumbler="1.4.9", file_path="n.md"),   # holds its note keys

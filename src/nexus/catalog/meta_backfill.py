@@ -252,7 +252,8 @@ def plan_tags_category(entry: Any) -> Plan:
 
     Derived the way :func:`plan_source_format` derives its key, from the entry's own ``content_type`` and
     ``file_path`` by :func:`~nexus.catalog.indexed_meta.backfill_tags_category` (which also decides, from the
-    catalog type, whether ``nx index pdf`` or the repo PDF path wrote a PDF), so it reads no chunk row and a
+    catalog type and the path's extension, whether ``nx index pdf`` or the repo PDF path wrote a PDF), so it
+    reads no chunk row and a
     document whose chunks are all shared gets them too. Fill-only by presence, per key: a key the entry's
     ``meta`` holds (``[]``, ``''`` and a legacy string included) is final and nothing is sent for it. A key
     the rule cannot settle is residue with its reason, never a guess."""
