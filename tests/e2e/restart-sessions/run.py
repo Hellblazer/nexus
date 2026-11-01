@@ -186,16 +186,28 @@ class Sandbox:
                     continue
         return out
 
-    def first_mention(self, session_id: str, word: str) -> str:
-        """Where *word* first appears in a session's transcript: ``tool_result``, ``user``,
-        ``assistant``, another event type, or ``""`` when it never does."""
+    def first_mention(self, session_id: str, word: str, handoff: str = "") -> str:
+        """Where *word* first appears in a session's transcript: ``handoff_read`` (the result of
+        a tool call whose input names *handoff* or the short copy the script feeds), another
+        ``tool_result``, ``user``, ``assistant``, or ``""`` when it never does."""
+        reads: set[str] = set()
+        # The script feeds `cat /tmp/rh-<old sid8>.md`, a short copy of the handoff named by the
+        # old session id that also sits in the handoff's own name (...-<name>-<sid8>-<stamp>.md).
+        m = re.search(r"-([0-9a-f]{8})-\d{8}-\d{6}\.md$", handoff)
+        short = f"/tmp/rh-{m.group(1)}.md" if m else ""
         for d in self.events(session_id):
+            content = (d.get("message") or {}).get("content")
+            items = content if isinstance(content, list) else []
+            for c in items:
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    blob = json.dumps(c.get("input"))
+                    if handoff and (handoff in blob or (short and short in blob)):
+                        reads.add(str(c.get("id")))
             if word not in json.dumps(d):
                 continue
-            content = (d.get("message") or {}).get("content")
-            if isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result"
-                                                 and word in json.dumps(c) for c in content):
-                return "tool_result"
+            for c in items:
+                if isinstance(c, dict) and c.get("type") == "tool_result" and word in json.dumps(c):
+                    return "handoff_read" if str(c.get("tool_use_id")) in reads else "tool_result"
             return str(d.get("type") or "unknown")
         return ""
 
@@ -355,12 +367,12 @@ def main() -> int:
                 failures.append(str(exc))
                 continue
             reply = sb.last_reply(d["sessionId"]).upper()
-            source = sb.first_mention(d["sessionId"], word) if fresh else "resumed context"
+            source = sb.first_mention(d["sessionId"], word, handoffs.get(name, "")) if fresh else "resumed context"
             if word not in reply:
                 failures.append(f"{name}: asked for its code word after the restart, replied {reply[:80]!r}")
             elif any(w in reply for w in others):
                 failures.append(f"{name}: replied with another session's word: {reply[:80]!r}")
-            elif fresh and source != "tool_result":
+            elif fresh and source != "handoff_read":
                 failures.append(f"{name}: {word} first appears in its fresh transcript as {source or 'nothing'}, "
                                 "not in the result of reading its handoff")
             else:
@@ -379,6 +391,8 @@ def main() -> int:
         blank_reply = sb.last_reply(str(blank.get("sessionId", ""))).upper()
         if any(w in blank_reply for w in WORDS.values()):
             failures.append(f"negative control: a fresh session with no handoff knew a word: {blank_reply[:80]!r}")
+        elif "UNKNOWN" not in blank_reply:
+            failures.append(f"negative control: no usable reply from the no-handoff session ({blank_reply[:80]!r})")
         else:
             notes.append(f"negative control: a fresh session with no handoff replied {blank_reply[:40]!r}")
         notes.append(f"restart took {time.time() - t0:.0f}s")
