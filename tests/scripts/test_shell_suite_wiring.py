@@ -122,11 +122,14 @@ class _Suite:
     """One unwired shell suite: where it lives, and the non-vacuity floor
     for its own reported ``passed`` count (see module docstring)."""
 
-    __slots__ = ("path", "min_passed")
+    __slots__ = ("path", "min_passed", "skips_only_in_child_pid_namespace")
 
-    def __init__(self, relpath: str, min_passed: int) -> None:
+    def __init__(
+        self, relpath: str, min_passed: int, *, skips_only_in_child_pid_namespace: bool = False
+    ) -> None:
         self.path = REPO_ROOT / relpath
         self.min_passed = min_passed
+        self.skips_only_in_child_pid_namespace = skips_only_in_child_pid_namespace
 
     @property
     def id(self) -> str:
@@ -222,7 +225,11 @@ SUITES = [
     # set -e check now run against both unwritable-log shapes), so deleting Test 13
     # turns it red too. nexus-3mdmp added Test 10b (two stubbed-kill parse checks, +2 for every
     # user); inside a child PID namespace Test 10's real probe is a counted skip, not an ok.
-    _Suite("scripts/lib/build-lease_test.sh", 72 if os.geteuid() == 0 else 73),
+    _Suite(
+        "scripts/lib/build-lease_test.sh",
+        72 if os.geteuid() == 0 else 73,
+        skips_only_in_child_pid_namespace=True,
+    ),
     _Suite("scripts/mvnw-leased_test.sh", 22),
     # nexus-20onx round 3: leg B3's compare logic, sourced from the real cloud
     # gate script and fed canned /v1/status bodies (11 cases + 3 wiring checks;
@@ -335,11 +342,14 @@ class TestSuitesAreGreen:
             f"--- stdout ---\n{result.stdout}\n"
             f"--- stderr ---\n{result.stderr}"
         )
-        # nexus-3mdmp: a suite that counts skips may skip only inside a child PID namespace (a
+        # nexus-3mdmp: build-lease may skip its real EPERM probe only inside a child PID namespace (a
         # lab-run per-job namespace hides every other user's process). In the initial namespace,
-        # or with no /proc at all (macOS), a skip is a probe that silently stopped running.
+        # or with no /proc at all (macOS), a skip is a probe that silently stopped running. Other
+        # suites' skips (mvnw-leased's SIGINT case under an ignored SIGINT, build-gate-jar's per-signal
+        # skips) depend on other conditions, so the bound applies only to suites that opt in.
         skipped = re.search(rf"{re.escape(suite.id)}: \d+ passed, \d+ failed, (\d+) skipped", result.stdout)
-        if skipped is not None:
+        if suite.skips_only_in_child_pid_namespace:
+            assert skipped is not None, f"{suite.id} printed no skipped count\n{result.stdout}"
             assert int(skipped.group(1)) <= _MAX_SKIPS_IN_A_CHILD_PID_NAMESPACE, result.stdout
             if not _in_child_pid_namespace():
                 assert int(skipped.group(1)) == 0, (
