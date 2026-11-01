@@ -103,7 +103,7 @@ revision.
 | RDR-057 Progressive Formalization Across Memory Tiers | Origin of the tier model | Its "graduation" idea is the T2 to T3 case. This RDR is the curation case beside it: replacement and admission to context. |
 | RDR-207 Summarization at the T2 Expiry Boundary | Beside, no shared path | It owns what expiry may destroy (quarantine, rollup, reap only rolled-up rows). Replacement is not expiry: a writer names a row and the engine deletes it in the same transaction. Phase 1 Step 1 confirms the delete takes the path an explicit `memory_delete` takes. |
 | RDR-209 Heat-Based Graduation Between Memory Tiers | Sibling, draft | It owns heat and graduation, and takes the gate-record rollup as an amendment (same date). Its Phase 0b, a read counter that means "a caller read this row", is the signal this RDR's index audit would use for T2; until it lands, the audit counts reads from transcripts. |
-| RDR-074 Permanence Mode | Deferred, compatible | Permanence guards a row against expiry. A writer who names a permanent row as the one it replaces is an explicit act, not expiry. |
+| RDR-074 Permanence Mode | Deferred, compatible | Permanence guards a row against expiry only. Naming a permanent row in `replaces` deletes it, because explicit deletion is always the project's prerogative (Sam, 2026-10-31: "expiry is the def; explicit del is always our collective prerogative"). |
 | RDR-192 Superseded Note Chunks Outlive Manifest-Less Is-Live | Different layer | It concerns T3 chunks a re-put replaced. This RDR concerns whole T2 rows and memory files a writer replaced. No shared code. |
 
 Searched the RDR corpus for: rollup, quarantine, expiry, consolidation,
