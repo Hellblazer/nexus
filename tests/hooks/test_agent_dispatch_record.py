@@ -34,12 +34,14 @@ class _Engine:
 
     def __init__(self, status: int = 200, delay: float = 0.0) -> None:
         self.bodies: list[tuple[str, dict]] = []
+        self.auth: list[str] = []
         self.arrived = threading.Event()
         engine = self
 
         class _H(BaseHTTPRequestHandler):
             def do_POST(self) -> None:  # noqa: N802 — http.server API
                 n = int(self.headers.get("Content-Length", "0"))
+                engine.auth.append(self.headers.get("Authorization", ""))
                 engine.bodies.append((self.path, json.loads(self.rfile.read(n) or b"{}")))
                 engine.arrived.set()
                 time.sleep(delay)
@@ -134,7 +136,9 @@ def test_a_bad_payload_is_silent_and_zero(engine_env, arg: str) -> None:
 
 
 def test_spawn_starts_a_detached_child_that_records_and_returns_at_once(engine_env) -> None:
-    eng = engine_env()
+    # The engine answers after 3 s, so a spawn that waited on its child
+    # could not come back inside the 1 s bound.
+    eng = engine_env(delay=3.0)
     start = time.monotonic()
     assert rec.spawn("s9", "a9", "developer", 3) is True
     assert time.monotonic() - start < 1.0, "the hook never waits on the child"
@@ -201,11 +205,15 @@ def test_the_nudge_counter_seam_spawns_the_recorder(monkeypatch: pytest.MonkeyPa
     assert calls == [("s1", "a1", "developer", 2)]
 
 
-def test_importing_the_recorder_pulls_nothing_heavy() -> None:
+def test_importing_the_recorder_pulls_in_only_stdlib_and_nexus_modules() -> None:
     probe = (
-        "import sys, nexus.hooks.agent_dispatch_record\n"
-        "print(','.join(m for m in ('structlog', 'httpx', 'nexus.db', 'nexus.config', 'subprocess') "
-        "if m in sys.modules and m != 'subprocess'))"
+        "import sys\n"
+        "before = set(sys.modules)\n"
+        "import nexus.hooks.agent_dispatch_record\n"
+        "new = set(sys.modules) - before\n"
+        "bad = sorted(m for m in new if m.split('.')[0] not in sys.stdlib_module_names"
+        " and not m.startswith('nexus') and not m.startswith('_'))\n"
+        "print(','.join(bad))"
     )
     proc = subprocess.run(
         [sys.executable, "-c", probe], capture_output=True, text=True,
@@ -214,3 +222,68 @@ def test_importing_the_recorder_pulls_nothing_heavy() -> None:
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == ""
 
+
+# --- review r1: the token, the pin, the watchdog, silence ---------------------
+
+
+def test_a_minted_data_token_is_the_bearer(engine_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = engine_env()
+    import nexus.db.data_token as dt  # noqa: PLC0415 — the manager is replaced where the child reads it
+
+    class _Mgr:
+        def bearer_for(self, _base_url: str, _tenant: str) -> str:
+            return "minted-data-token"
+
+    monkeypatch.setattr(dt, "get_data_token_manager", lambda: _Mgr())
+    assert rec.main([json.dumps({"session_id": "s1", "agent_id": "a1", "t1_puts": 1})]) == 0
+    assert eng.auth == ["Bearer minted-data-token"]
+
+
+def test_the_endpoint_is_pinned_so_the_stores_own_resolution_never_runs(
+    engine_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    eng = engine_env()
+    import nexus.db.service_endpoint as se  # noqa: PLC0415 — the gated resolver is replaced where the store reads it
+
+    def gated(*_a: object, **_k: object) -> tuple[str, str]:
+        raise AssertionError("the store resolved its own endpoint (12 s lease wait on a restart)")
+
+    monkeypatch.setattr(se, "resolve_service_endpoint_with_evidence_gate", gated)
+    assert rec.main([json.dumps({"session_id": "s1", "agent_id": "a1", "t1_puts": 1})]) == 0
+    assert len(eng.bodies) == 1
+
+
+def test_the_watchdog_ends_a_hung_child() -> None:
+    code = (
+        "import time, nexus.hooks.agent_dispatch_record as r\n"
+        "r._arm_watchdog(1.0)\n"
+        "time.sleep(60)\n"
+    )
+    start = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True,
+        encoding=PYTHON_CHILD_ENCODING, env=_child_env(), timeout=30, check=False,
+    )
+    assert proc.returncode == 0
+    assert time.monotonic() - start < 10.0
+
+
+def test_the_module_entry_arms_the_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
+    armed: list[float] = []
+    monkeypatch.setattr(rec, "_arm_watchdog", armed.append)
+    monkeypatch.setattr(rec, "main", lambda argv=None: 0)
+    assert rec.run_child([]) == 0
+    assert armed == [rec._CHILD_LIFETIME_S]
+
+
+def test_a_failing_child_writes_nothing(engine_env) -> None:
+    engine_env(status=503)
+    payload = json.dumps({"session_id": "s1", "agent_id": "a1", "t1_puts": 0})
+    proc = subprocess.run(
+        [sys.executable, "-m", "nexus.hooks.agent_dispatch_record", payload],
+        capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING,
+        env=_child_env(), timeout=60, check=False,
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert proc.stderr == ""

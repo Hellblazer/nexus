@@ -8,8 +8,11 @@ network: the record goes out from a detached child process
 (``python -m nexus.hooks.agent_dispatch_record <json>``) and the hook
 returns at once. The child pins the endpoint from one fast resolve and makes
 one bounded request through ``record_agent_dispatch_once``, the pattern
-``_session_end_launcher`` uses for its tier-write summary, so it lives a few
-seconds at most and never touches the gateway retry ladder.
+``_session_end_launcher`` uses for its tier-write summary, so it never
+touches the gateway retry ladder. Its data-token step can mint (up to a
+minute on a cold mint, longer waiting on the mint lock), so a watchdog ends
+the child after ``_CHILD_LIFETIME_S`` whatever it is doing: no row then, as
+with any other failure.
 
 Best effort end to end: a missing endpoint, an engine without the route
 (404), a slow engine or any other failure leaves no row and no output. The
@@ -29,13 +32,16 @@ import os
 import sys
 from typing import Any
 
-__all__ = ["OFF_ENV", "main", "spawn"]
+__all__ = ["OFF_ENV", "main", "run_child", "spawn"]
 
 #: Set to ``off`` or ``0`` to start no recorder child.
 OFF_ENV: str = "NX_DISPATCH_COUNTER"
 
 #: The one request's hard timeout, in seconds.
 _REQUEST_TIMEOUT_S: float = 2.0
+
+#: The child's whole life, imports and token step included, in seconds.
+_CHILD_LIFETIME_S: float = 8.0
 
 # Windows creation flags, as _session_end_launcher sets them for its detached
 # child (CREATE_NO_WINDOW, not DETACHED_PROCESS: see that module).
@@ -138,5 +144,20 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _arm_watchdog(seconds: float) -> None:
+    """End this process after *seconds*, exit 0, whatever it is doing."""
+    import threading  # noqa: PLC0415 — child process only
+
+    timer = threading.Timer(seconds, os._exit, args=(0,))
+    timer.daemon = True
+    timer.start()
+
+
+def run_child(argv: list[str] | None = None) -> int:
+    """The ``python -m`` entry: arm the watchdog, then :func:`main`."""
+    _arm_watchdog(_CHILD_LIFETIME_S)
+    return main(argv)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_child())

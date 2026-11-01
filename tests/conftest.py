@@ -3418,6 +3418,9 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "NX_LLM_MAX_CONCURRENCY",
     ):
         monkeypatch.delenv(var, raising=False)
+    # nexus-mtheb.4: a SubagentStop nudge run from any test starts no detached
+    # dispatch-recorder child; tests of the recorder delenv this themselves.
+    monkeypatch.setenv("NX_DISPATCH_COUNTER", "off")
 
 
 @pytest.fixture(autouse=True, scope="session")
