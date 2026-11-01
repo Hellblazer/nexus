@@ -12,4 +12,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-exec python3 "$repo/tests/e2e/lib/claude_credentials.py" run -- python3 -I "$here/run.py" "$@"
+# shellcheck source=../lib/python.sh
+. "$repo/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
+exec "$E2E_PYTHON" "$repo/tests/e2e/lib/claude_credentials.py" run -- "$E2E_PYTHON" -I "$here/run.py" "$@"
