@@ -170,7 +170,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · coordination</span><a href="tuple-space.html">← The tuple space</a></div>
 <h1>Coordination Between Sessions and Agents</h1>
-<p class="lede">This page shows how you coordinate Claude Code sessions and their agents. You can ask a session in another repository to do a job, and you can correct a background agent while it works. You ask Claude in your own words. Claude writes each request and each correction as a record in <a href="tuple-space.html">the Nexus tuple space</a>. So your session continues its own work, and the other session acts when it is ready.</p>
+<p class="lede">You can ask a session in another repository to do a job, and you can correct a background agent while it works. You ask Claude in your own words. Claude writes each request and each correction as a record in <a href="tuple-space.html">the Nexus tuple space</a>. So your session continues its own work, and the other session acts when it is ready.</p>
 <p class="note">Words like <span class="ph">&lt;PEER NAME&gt;</span> are placeholders, and the prompts are examples. If tuples are new to you, read <a href="tuple-space.html">The Nexus Tuple Space</a> first, because it explains the operations underneath.</p>
 
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
@@ -236,7 +236,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <figcaption>Your session writes a request and keeps working. The request waits in the engine until the peer is ready. The reply waits until your channel pings.</figcaption>
 </figure>
 
-<p>Claude uses SendMessage to inject something into a live agent or session. What the tuple space adds is a persistent record of an interaction. Nexus keeps long-form content in its memory, and a tuple points to that content by reference, not by carrying it as its own value. So a reader learns that something is there without having to consume the thing itself. The exchange has three steps: <em>send</em>, <em>continue</em>, and <em>react</em> to the answer.</p>
+<p>Claude uses SendMessage to inject something into a live agent or session. What the tuple space adds is a persistent record of an interaction. Nexus keeps long-form content in its memory, and a tuple points to that content by reference. So a reader learns that something is there without having to consume the thing itself. The exchange has three steps: <em>send</em>, <em>continue</em>, and <em>react</em> to the answer.</p>
 <div class="tbl"><table>
 <tr><th>What you can rely on</th><th>How it works</th></tr>
 <tr><td>You can see the coordination</td><td>Every live message and name is a row that every session on the engine can read. From any session you see what waits and what is in progress.</td></tr>
@@ -367,7 +367,7 @@ nx doctor  <span class="c"># includes six tuple rows</span></pre><button class="
 <!-- ============ 6 ============ -->
 <section class="lesson" id="l6">
 <div class="lhead"><span class="lnum">6</span><h2>Appendix: how it works</h2><span class="ltime">reference</span></div>
-<p class="why">You need none of this to use the tuple space. The appendix compares the tuple space with SendMessage point by point. It shows how a message arrives and how names and addresses work, and it gives the limits and who does each step.</p>
+<p class="why">You need none of this to use the tuple space.</p>
 
 <details class="gloss" id="cmp"><summary>SendMessage and the tuple space, point by point</summary><div style="padding:0 14px 12px">
 <div class="tbl"><table>
