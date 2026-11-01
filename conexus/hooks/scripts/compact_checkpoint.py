@@ -15,7 +15,8 @@ Measured on session linda (e6613e51), 2026-10-31: two automatic compactions at a
 that let the session resume lived in git, beads and T2, not in the summary. This
 script writes that state down before the compaction and puts it back after it.
 
-PRE writes ``<nexus config dir>/compact-checkpoints/<session_id>.md`` (mode 0600,
+PRE writes ``<nexus config dir>/compact-checkpoints/<session_id>.md`` (for a hook fired
+inside a subagent, whose payload carries ``agent_id``: ``<session_id>__agent-<agent_id>.md``) (mode 0600,
 atomic): a header (session id, trigger, UTC time), then, in cut-proof order, the
 session's ``threads`` board entry (looked up by the session's exact name; the judgment
 half of a session lives there and a hook cannot write it), the branch and HEAD, the
@@ -124,6 +125,7 @@ _OUTPUT_CAP_BYTES = 64 * 1024
 
 _BOARD_PROJECT = "threads"
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 #: A nexus bead id: ``nexus-`` and five lowercase alphanumerics, optional ``.N`` suffix.
 #: Ordinary hyphenated words (ready-beads, auto-memory) are not ids.
 _BEAD_ID_RE = re.compile(r"\bnexus-[0-9a-z]{5}(?![0-9a-z])(?:\.\d{1,3})?")
@@ -195,6 +197,36 @@ def _read_payload() -> dict:
 def _session_id(payload: dict) -> str | None:
     sid = str(payload.get("session_id") or "").strip()
     return sid if _SESSION_ID_RE.match(sid) else None
+
+
+def _agent_id(payload: dict) -> str | None:
+    """The payload's ``agent_id``: ``""`` when absent, ``None`` when present but unusable.
+
+    Claude Code sets it on a hook that fires inside a subagent or teammate, beside the
+    parent's ``session_id``. Whether compaction hooks fire there is undocumented; if they do,
+    keying by session alone would let a subagent's checkpoint replace its parent's.
+    """
+    raw = payload.get("agent_id")
+    if raw is None or raw == "":
+        return ""
+    agent = str(raw).strip()
+    return agent if _AGENT_ID_RE.match(agent) else None
+
+
+def _checkpoint_key(payload: dict, mode: str) -> tuple[str, str] | None:
+    """``(session_id, file key)``: the key is the session id, or ``<session>__agent-<id>`` for a
+    hook fired inside a subagent, so the two never share a checkpoint (nexus-mtl98)."""
+    session_id = _session_id(payload)
+    if session_id is None:
+        if mode != "inject":
+            _log("WARNING", f"{mode}: the payload carried no usable session id; nothing written")
+        return None
+    agent = _agent_id(payload)
+    if agent is None:
+        _log("WARNING", f"{mode}: the payload's agent_id is not usable; nothing done, so the parent's "
+                        "checkpoint is not touched")
+        return None
+    return session_id, (f"{session_id}__agent-{agent}" if agent else session_id)
 
 
 def _claude_dir() -> Path:
@@ -566,10 +598,10 @@ def _summarized(text: str) -> bool:
 
 
 def run_pre(payload: dict) -> None:
-    session_id = _session_id(payload)
-    if session_id is None:
-        _log("WARNING", "pre: the payload carried no usable session id; nothing written")
+    keyed = _checkpoint_key(payload, "pre")
+    if keyed is None:
         return
+    session_id, key = keyed
     started = time.monotonic()
     # A lone surrogate in the payload would make the UTF-8 write raise and write nothing.
     trigger = str(payload.get("trigger") or "unknown")[:32].encode("utf-8", "replace").decode("utf-8")
@@ -594,6 +626,7 @@ def run_pre(payload: dict) -> None:
     parts = [
         "# Compaction checkpoint\n",
         f"- session: {session_id}",
+        *([f"- agent: {key.split('__agent-', 1)[1]}"] if key != session_id else []),
         f"- trigger: {trigger}",
         f"- written: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
     ]
@@ -619,18 +652,18 @@ def run_pre(payload: dict) -> None:
         parts.append(f"[working state incomplete: {error}]\n")
     directory = _checkpoint_dir()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _archive_and_prune(directory, session_id, time.time())
-    _write_atomic(directory / f"{session_id}.md", "\n".join(parts) + "\n")
+    _archive_and_prune(directory, key, time.time())
+    _write_atomic(directory / f"{key}.md", "\n".join(parts) + "\n")
 
 
 def run_post(payload: dict) -> None:
-    session_id = _session_id(payload)
-    if session_id is None:
-        _log("WARNING", "post: the payload carried no usable session id; nothing written")
+    keyed = _checkpoint_key(payload, "post")
+    if keyed is None:
         return
+    session_id, key = keyed
     summary = str(payload.get("compact_summary") or "")
     directory = _checkpoint_dir()
-    path = directory / f"{session_id}.md"
+    path = directory / f"{key}.md"
     try:
         existing: str | None = path.read_text(encoding="utf-8")
     except OSError:
@@ -644,7 +677,7 @@ def run_post(payload: dict) -> None:
         # appended to or refreshed, or inject would pass it as current. Pairing is by use, not
         # age: a deferred summary's post may run hours after its pre (nexus-702gy).
         if existing is not None:
-            _archive_and_prune(directory, session_id, time.time())
+            _archive_and_prune(directory, key, time.time())
         _log("WARNING", f"post: no unused pre-compaction checkpoint for session {session_id} "
                         f"({'an older one was archived' if existing is not None else 'none exists'}); "
                         "writing a stub, which inject does not emit")
@@ -710,10 +743,11 @@ def _age_label(age: float) -> str:
 
 
 def run_inject(payload: dict) -> None:
-    session_id = _session_id(payload)
-    if session_id is None:
+    keyed = _checkpoint_key(payload, "inject")
+    if keyed is None:
         return
-    path = _checkpoint_dir() / f"{session_id}.md"
+    _session, key = keyed
+    path = _checkpoint_dir() / f"{key}.md"
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
@@ -727,7 +761,7 @@ def run_inject(payload: dict) -> None:
                      "missing, or a stub); nothing injected")
         return
     written = _written_stamp(text)
-    sidecar = path.with_name(f"{session_id}{_INJECTED_SUFFIX}")
+    sidecar = path.with_name(f"{key}{_INJECTED_SUFFIX}")
     try:
         last = sidecar.read_text(encoding="utf-8").strip()
     except OSError:

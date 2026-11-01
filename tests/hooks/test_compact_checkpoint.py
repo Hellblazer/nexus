@@ -607,6 +607,50 @@ class TestPost:
             assert code == 0 and out == ""
 
 
+class TestSubagentKeying:
+    """A hook fired inside a subagent carries the parent's session_id plus agent_id. Whether the
+    compaction hooks fire there is undocumented; if they do, they must not touch the parent's
+    checkpoint (nexus-mtl98)."""
+
+    AGENT = "a0123456789abcdef"
+
+    def test_a_subagents_cycle_leaves_the_parents_checkpoint_alone(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        parent = env.checkpoints / f"{SID}.md"
+        before = parent.read_text(encoding="utf-8")
+        agent = {"agent_id": self.AGENT, "agent_type": "general-purpose"}
+        run(mod, monkeypatch, "pre", {**pre_payload(), **agent})
+        out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact", **agent})[1]
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "the agent's summary", **agent})
+        assert parent.read_text(encoding="utf-8") == before, "the parent's checkpoint was touched"
+        mine = env.checkpoints / f"{SID}__agent-{self.AGENT}.md"
+        text = mine.read_text(encoding="utf-8")
+        assert f"- agent: {self.AGENT}" in text and text.rstrip().endswith("the agent's summary")
+        assert json.loads(out)["hookSpecificOutput"]["additionalContext"].count(str(mine)) == 1
+        assert not (env.checkpoints / f"{SID}.injected").exists(), "the parent's sidecar was written"
+        # the parent's own restore still works afterwards
+        ctx = json.loads(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1])
+        assert str(parent) in ctx["hookSpecificOutput"]["additionalContext"]
+
+    def test_the_parents_archive_rotation_leaves_a_subagents_file_alone(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", {**pre_payload(), "agent_id": self.AGENT})
+        for _ in range(5):
+            run(mod, monkeypatch, "pre", pre_payload())
+        assert (env.checkpoints / f"{SID}__agent-{self.AGENT}.md").exists()
+
+    @pytest.mark.parametrize("bad", ["../x", "a/b", "a b", "-lead", "x" * 65], ids=["dotdot", "slash", "space", "dash", "long"])
+    def test_an_unusable_agent_id_does_nothing(self, mod, env, monkeypatch, bad) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        parent = env.checkpoints / f"{SID}.md"
+        before = parent.read_text(encoding="utf-8")
+        names = sorted(p.name for p in env.checkpoints.iterdir())
+        for mode, extra in (("pre", pre_payload()), ("post", {"compact_summary": "s"}), ("inject", {})):
+            code, out = run(mod, monkeypatch, mode, {"session_id": SID, **extra, "agent_id": bad})
+            assert (code, out) == (0, ""), mode
+        assert parent.read_text(encoding="utf-8") == before
+        assert sorted(p.name for p in env.checkpoints.iterdir()) == names
+
+
 class TestInject:
     def _ctx(self, out: str) -> str:
         data = json.loads(out)
