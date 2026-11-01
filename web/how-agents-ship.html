@@ -166,7 +166,7 @@ figure.fig .arrow.you{fill:var(--brass)}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · Agent-run development</span><a href="coordination.html">← Coordination</a></div>
 <h1>How Agents Build and Ship Nexus</h1>
-<p class="lede">Several Claude Code sessions build, test, review, and release Nexus, and one more session, the conexus instance, runs the cloud side. They work on the same repository and the same engine at the same time without colliding, because every claim, test slot, push, and deploy is a record that the other sessions see as soon as it is written. They coordinate through records in the tuple space of the managed Nexus engine, and they keep longer notes in Nexus memory. The owner makes the decisions that agents do not make: every tag, every cloud deploy, and every change of direction.</p>
+<p class="lede">Several Claude Code sessions build, test, review, and release Nexus, and one more session, the conexus instance, runs the cloud side. They work on the same repository and the same engine at the same time without colliding, because every claim, push, and deploy is a record that the other sessions see as soon as it is written. They coordinate through records in the tuple space of the managed Nexus engine, and they keep longer notes in Nexus memory. The owner makes the decisions that agents do not make: every tag, every cloud deploy, and every change of direction.</p>
 
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
 <tr><th>Term</th><th>Meaning</th></tr>
@@ -181,7 +181,7 @@ figure.fig .arrow.you{fill:var(--brass)}
 <section class="lesson" id="glance">
 <div class="lhead"><h2>The system at a glance</h2></div>
 <figure class="fig">
-<svg viewBox="0 0 760 450" role="img" aria-label="The laptop holds the sessions and their worktrees. Sessions write records to the tuple space in the managed engine and receive pings back. They push to GitHub and move branches to a second machine for tests. GitHub sends webhooks to an adapter, which posts to the CI board in the tuple space. The conexus instance deploys and gates the engine and exchanges messages through its mailbox. The owner sends decisions to the sessions and approves deploys in the conexus instance.">
+<svg viewBox="0 0 760 450" role="img" aria-label="The laptop holds the sessions and their worktrees. Sessions write records to the tuple space in the managed engine and receive pings back. They push to GitHub and send heavy runs to the lab pool, which also runs some CI jobs. GitHub sends webhooks to an adapter, which posts to the CI board in the tuple space. The conexus instance deploys and gates the engine and exchanges messages through its mailbox. The owner sends decisions to the sessions and approves deploys in the conexus instance.">
   <!-- sessions to tuple space, and pings back -->
   <path d="M80 60 V18 H700 V52"/>
   <path class="arrow" d="M700 60 l-4 -9 h8 z"/>
@@ -236,19 +236,19 @@ figure.fig .arrow.you{fill:var(--brass)}
   <text x="566" y="246" class="lbl">push lock</text>
   <text x="566" y="289" class="lbl">mailboxes and names</text>
 
-  <!-- laptop to second machine -->
+  <!-- laptop to lab pool -->
   <line x1="115" y1="210" x2="115" y2="302"/>
   <path class="arrow" d="M115 310 l-4 -9 h8 z"/>
-  <text x="123" y="262" class="lbl">branches over ssh</text>
+  <text x="123" y="262" class="lbl">heavy runs</text>
 
-  <!-- second machine -->
+  <!-- lab pool -->
   <rect class="box" x="10" y="310" width="210" height="130" rx="4"/>
-  <text x="115" y="330" text-anchor="middle" class="hd">Second machine</text>
+  <text x="115" y="330" text-anchor="middle" class="hd">Lab pool</text>
   <text x="115" y="345" text-anchor="middle" class="sm">local network</text>
   <rect class="box" x="24" y="356" width="182" height="28" rx="3"/>
-  <text x="115" y="375" text-anchor="middle" class="lbl">full suites and gates</text>
+  <text x="115" y="375" text-anchor="middle" class="lbl">hand runs and CI jobs</text>
   <rect class="box" x="24" y="394" width="182" height="28" rx="3"/>
-  <text x="115" y="413" text-anchor="middle" class="lbl">runner for mac release builds</text>
+  <text x="115" y="413" text-anchor="middle" class="lbl">macOS and Windows builds</text>
 
   <!-- engine and conexus -->
   <line x1="600" y1="320" x2="600" y2="364"/>
@@ -280,8 +280,8 @@ figure.fig .arrow.you{fill:var(--brass)}
 <ul class="plain">
 <li><b>Sessions and subagents.</b> Each working session is one Claude Code session in its own worktree and branch on the laptop. It dispatches subagents: developers for implementation, and two standing reviewers (a code reviewer and a critic). Sessions choose their own beads. When the owner asks, one session coordinates: it assigns work, collects results, and prepares a release.</li>
 <li><b>The conexus instance.</b> A separate Claude Code session in the conexus repository runs the managed engine, and so it hosts the tuple space that every other session coordinates through. It also hosts the adapter that turns GitHub events into CI board posts, deploys each engine release, and runs the cloud gates. It is a peer of the other sessions: it receives requests in its mailbox and answers there.</li>
-<li><b>GitHub</b> runs CI on every push to <code>develop</code> and on every pull request, and it runs the release workflows on tags.</li>
-<li><b>A second machine</b> on the local network runs full test suites and gates for the sessions. It is also a self-hosted GitHub runner for the mac release builds.</li>
+<li><b>GitHub</b> runs CI on every push to <code>develop</code> and on every pull request, and it runs the release workflows on tags. It sends the Python test shards, the engine's Java tests, and one macOS test job to the lab pool, and runs its other jobs on its own runners.</li>
+<li><b>The lab pool</b> is three machines on the local network: a Linux server, a Windows PC that also runs Linux, and a Mac mini. A scheduler gives each heavy run and each pool CI job its own share of cores and memory, so the sessions and CI use the same machines without running out of memory. The Mac mini and the Windows PC also build the macOS and Windows release binaries. Another peer, the labrun session, runs the pool and its machines.</li>
 <li><b>The owner</b> pushes every release tag, approves every cloud deploy, and decides changes of scope or direction.</li>
 </ul>
 </section>
@@ -319,7 +319,7 @@ figure.fig .arrow.you{fill:var(--brass)}
 <h3>Build and review</h3>
 <p>The session creates a worktree on a feature branch and dispatches a developer subagent, which writes the failing test and then the fix. The two reviewers then read the change, the session fixes their findings, and it records a review marker that names both reviewers.</p>
 <h3>Test</h3>
-<p>Each machine runs one engine build or engine test suite at a time, and a lease enforces it. Every worktree on the machine sees the lease, and it ends by itself if its holder stops. Each machine also runs one full test suite at a time. The session posts on the team boards when it takes the full-suite slot and again when it releases the slot. For heavy runs, the session moves its branch to the second machine over ssh. That machine has its own clone and its own lease, so it runs a suite while the laptop builds.</p>
+<p>A single test or a small selection runs on the laptop. A full suite or an engine build runs on the lab pool. The session starts it from its worktree, and a copy command sends the worktree to a pool machine and runs it there. A run that a session starts itself is a hand run. Each hand run asks for a class, a fixed share of cores and memory, and waits until the scheduler grants it. The scheduler decides how many runs fit on each machine, and it gives the next free share to a waiting hand run before a CI job. On the Linux machines, a run that uses more memory than its share is stopped. Engine builds in the worktrees of one clone take a lease, so they run one at a time. The lease ends by itself if its holder stops. Before a full suite, the session tells the labrun session why it needs the run. A tree that already has a green full run is not run again, and after the push the CI run of the commit is the verdict.</p>
 <h3>Push</h3>
 <p>Before it pushes, the session reads the CI board for the latest <code>develop</code> commit, because a push cancels the CI run of that commit. Another session can be waiting for that run. The push script then sends only the commits and files that the session names, so a peer's work never goes out with the push. The script holds the push lock only while it pushes. The session posts the push on the team boards and fast-forwards the primary checkout, which stays on <code>develop</code> as the shared reference and which nobody edits.</p>
 <p>GitHub then runs CI. For each state change of each run and job, GitHub sends a webhook to the adapter, which verifies it and writes one post to the CI board. The session receives the pings and reads the verdict for its commit with the status reader. A red commit gets a fix as a new commit, and other sessions read the verdict before they build on a commit. The bead closes when the close gate finds the review marker.</p>
@@ -338,8 +338,8 @@ figure.fig .arrow.you{fill:var(--brass)}
 <ul class="plain">
 <li>A predicate job decides whether a change touches code. A documentation-only change skips the tests.</li>
 <li>One job builds the engine's service jar once for all test jobs, and caches it on the service source.</li>
-<li>The unit suite runs in parallel shards against a real engine. Separate jobs run the repository-structure tests and a check over the whole collected suite.</li>
-<li>A change under the engine source also builds the engine's native image, and a separate workflow runs the Java tests.</li>
+<li>The unit suite runs in parallel shards against a real engine on the lab pool. A pull request from a fork runs on GitHub's own runners instead. Separate jobs run the repository-structure tests and a check over the whole collected suite.</li>
+<li>A change under the engine source also builds the engine's native image, and a separate workflow runs the Java tests on the lab pool.</li>
 <li>A pull request to <code>main</code> also checks the wire-contract ledger.</li>
 <li>One required check collects every result, and it fails on any failed, cancelled, or missing part.</li>
 <li>A newer push to the same branch cancels the older CI run. A newer run never cancels a release workflow, and a release workflow publishes what CI already tested without testing it again.</li>
@@ -348,7 +348,7 @@ figure.fig .arrow.you{fill:var(--brass)}
 <h3>Release the client</h3>
 <p>The coordinating session creates a release worktree, which a push to <code>develop</code> cannot move. Then it bumps the version and runs the release battery. The battery builds the artifacts once, runs the end-to-end gates in parallel, and prints one verdict table. A gate that finishes without its verdict line counts as missing, never as passed. A red gate is fixed on the release branch, and the battery runs again. The session opens a pull request to <code>main</code>. The owner merges it and pushes the release tag. The release workflow checks the tag against the version and against the tagged commit's CI results, publishes the package to PyPI, and creates the GitHub release. Each client release pins exactly one engine version.</p>
 <h3>Release and deploy the engine</h3>
-<p>Before an engine tag, the coordinating session builds the candidate native binary and runs the shakeout, an end-to-end test of that binary. The owner pushes the engine tag. The engine workflow builds and smoke-tests native binaries for Linux and macOS, signs every asset, and publishes the GitHub release only when every asset is present. A failed build job leaves the release as a draft until a rerun completes it. A gate then installs the published binary on a bare machine and tests it.</p>
+<p>Before an engine tag, the coordinating session builds the candidate native binary and runs the shakeout, an end-to-end test of that binary. The owner pushes the engine tag. The engine workflow builds and smoke-tests native binaries for Linux, macOS, and Windows, signs every asset, and publishes the GitHub release only when every asset is present. A failed build job leaves the release as a draft until a rerun completes it. A gate then installs the published binary on a bare machine and tests it.</p>
 <p>The deploy request is a relay, not an approval. The coordinating session sends the tag and its gate evidence to the conexus instance's mailbox. The owner types the approval in the conexus instance itself, and the conexus instance refuses an approval that another session relays. The conexus instance then deploys the engine and runs its cloud gates. While those gates run, the coordinating session posts a freeze on the team boards. The freeze names the step that the session waits for, and the other sessions hold their pushes. Afterwards, a session on a cloud-mode machine checks that the engine's contracts reach real client code through the public edge.</p>
 <p>The wire-contract ledger decides the order. It lists each engine change whose client half has not shipped, and marks whether an old client still works against the new engine. When every entry is safe for old clients, the engine deploys before the client release. Otherwise, the conexus instance must record that the redeploy is armed before the client tag, and the release gate checks for that record.</p>
 </section>
@@ -364,6 +364,7 @@ figure.fig .arrow.you{fill:var(--brass)}
 <tr><td>Deploy relay with gate evidence</td><td>The coordinating session</td></tr>
 <tr><td>Approval of each cloud deploy, typed in the conexus instance</td><td>The owner</td></tr>
 <tr><td>Cloud deploy and cloud gates</td><td>The conexus instance</td></tr>
+<tr><td>Lab pool machines, classes, and capacity</td><td>The labrun session</td></tr>
 <tr><td>Decisions that change scope or direction</td><td>The owner</td></tr>
 </table></div>
 </section>
