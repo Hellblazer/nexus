@@ -54,7 +54,9 @@ Usage:
 import argparse
 import json
 import os
+import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -63,7 +65,24 @@ from pathlib import Path
 
 SESSIONS = Path.home() / ".claude" / "sessions"
 LOG = Path.home() / ".claude" / "restart-sessions.log"
-CLAUDE = str(Path.home() / ".local" / "bin" / "claude")
+
+
+def _claude_binary() -> str:
+    """The claude executable: NX_RESTART_CLAUDE, else ~/.local/bin/claude, else the one on PATH.
+
+    The PATH fallback is what lets the sandbox harness (tests/e2e/restart-sessions) run this
+    script under a scratch HOME that has no ~/.local/bin/claude of its own.
+    """
+    override = os.environ.get("NX_RESTART_CLAUDE", "")
+    if override:
+        return override
+    local = Path.home() / ".local" / "bin" / "claude"
+    if local.exists():
+        return str(local)
+    return shutil.which("claude") or str(local)
+
+
+CLAUDE = _claude_binary()
 REPO = Path.home() / "git" / "nexus"
 ENDPOINT = "https://api.conexus-nexus.com"
 PLUGINS = ("conexus@nexus-plugins", "sn@nexus-plugins")  # required: must be installed
@@ -377,15 +396,58 @@ def restart(s: dict, handoff: str = "") -> bool:
     return False
 
 
+_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+#: Escapes other than SGR: CSI sequences not ending in ``m``, OSC strings, charset selects.
+_OTHER_ESCAPE = re.compile(r"\x1b(?:\[[0-9;?]*[A-Za-ln-z]|\][^\x07]*\x07|[()][A-Za-z0-9])")
+
+
+def typed_text(line: str) -> str:
+    """The characters of a captured pane line (``capture-pane -e``) that are not drawn dim.
+
+    Claude Code draws its suggested next prompt in dim text (SGR 2) after the prompt mark:
+    ``ESC[39m❯ ESC[2mgo Step 0ESC[0m``. That is ghost text, not something the user typed,
+    and before nexus-nuyju it made six of nine sessions read as holding a draft on the
+    7.92.0 restart. SGR 2 turns dim on; 0 and 22 turn it off; other parameters (colours)
+    leave it as it is.
+    """
+    out: list[str] = []
+    dim = False
+    pos = 0
+    line = _OTHER_ESCAPE.sub("", line)
+    for m in _SGR.finditer(line):
+        if not dim:
+            out.append(line[pos:m.start()])
+        for param in (m.group(1) or "0").split(";"):
+            if param in ("", "0", "22"):
+                dim = False
+            elif param == "2":
+                dim = True
+        pos = m.end()
+    if not dim:
+        out.append(line[pos:])
+    return "".join(out)
+
+
+def has_draft(captured: str) -> bool:
+    """True when the prompt line in an escaped capture holds text the user typed.
+
+    The input line is the one opening with the prompt mark right under a horizontal rule
+    (the footer can carry other lines that start with the same mark, such as an agent list).
+    """
+    raw = captured.splitlines()
+    plain = [_SGR.sub("", _OTHER_ESCAPE.sub("", ln)) for ln in raw]
+    prompts = [i for i, ln in enumerate(plain) if i and ln.lstrip().startswith("\u276f")
+               and plain[i - 1].strip().startswith("\u2500")]
+    if not prompts:
+        return False
+    typed = typed_text(raw[prompts[-1]]).replace("\xa0", " ").lstrip()
+    return typed[1:].strip() != "" if typed.startswith("\u276f") else typed.strip() != ""
+
+
 def pane_has_draft(pane: str) -> bool:
     """True when the prompt line in the pane holds unsent text (typed text would append to it)."""
-    out = subprocess.run(["tmux", "capture-pane", "-p", "-t", pane], capture_output=True, text=True).stdout
-    lines = out.splitlines()
-    # The input line is the one opening with the prompt mark right under a horizontal rule
-    # (the footer can carry other lines that start with the same mark, such as an agent list).
-    prompts = [l for i, l in enumerate(lines) if i and l.lstrip().startswith("\u276f")
-               and lines[i - 1].strip().startswith("\u2500")]
-    return bool(prompts) and prompts[-1].lstrip()[1:].strip() != ""
+    out = subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", pane], capture_output=True, text=True).stdout
+    return has_draft(out)
 
 
 def submit(pane: str, text: str, sess_file: Path) -> bool:
