@@ -172,8 +172,8 @@ class TestPre:
         assert "- written: 20" in text and text.count("+00:00") >= 1  # a UTC stamp
         assert "### In-progress beads" in text and "P2 Auto-continuation" in text
         assert f"## Threads board entry (threads/{NAME})" in text and "state: building" in text
-        assert nx_calls(env) == [
-            "command-context continuation", "memory list --project threads", "memory get 101 --project threads"
+        assert nx_calls(env) == [  # the board first: its ref lines choose the worktree
+            "memory list --project threads", "memory get 101 --project threads", "command-context continuation"
         ]
 
     def test_the_board_entry_comes_first_and_the_kept_sections_follow_in_order(self, mod, env, monkeypatch) -> None:
@@ -263,11 +263,74 @@ class TestPre:
         header = text.split("\n## ", 1)[0]
         assert "- worktree: " in header and header.rstrip().endswith(f"wt/{NAME}")
 
+    @staticmethod
+    def _repo_with_worktrees(tmp_path: Path, worktrees: dict[str, str]) -> Path:
+        """A primary checkout plus one worktree per ``{dir name: branch}``."""
+        primary = tmp_path / "primary"
+        primary.mkdir()
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", "-C", str(primary)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "root"], check=True)
+        for wt, branch in worktrees.items():
+            subprocess.run([*git, "worktree", "add", "-q", "-b", branch, str(tmp_path / "wt" / wt)], check=True)
+        return primary
+
+    @staticmethod
+    def _age(tmp_path: Path, wt: str, seconds_ago: float) -> None:
+        """Set a worktree's git-dir activity stamps (logs/HEAD, HEAD, index) to *seconds_ago*."""
+        pointer = (tmp_path / "wt" / wt / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip()
+        stamp = time.time() - seconds_ago
+        for leaf in ("logs/HEAD", "HEAD", "index"):
+            target = Path(pointer) / leaf
+            if target.exists():
+                os.utime(target, (stamp, stamp))
+
+    def test_a_topic_named_worktree_is_the_sessions(self, mod, env, monkeypatch, tmp_path) -> None:
+        """Sessions name worktrees ``<name>-<topic>`` (``marlowe-owner-onestmt``); 7.92.0 matched only ``<name>``."""
+        primary = self._repo_with_worktrees(tmp_path, {"linda_2": "feature/x", f"{NAME}-3mdmp": "feature/nexus-3mdmp-lease"})
+        monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
+        run(mod, monkeypatch, "pre", pre_payload(cwd=str(primary)))
+        expected = os.path.realpath(tmp_path / "wt" / f"{NAME}-3mdmp")
+        assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == expected
+
+    def test_the_board_ref_chooses_among_several_worktrees(self, mod, env, monkeypatch, tmp_path) -> None:
+        """The board names nexus-3lqxv; its worktree wins over a more recently active one."""
+        primary = self._repo_with_worktrees(tmp_path, {
+            f"{NAME}-old": "feature/nexus-3lqxv-auto-continuation", f"{NAME}-new": "feature/nexus-aaaaa-other",
+        })
+        self._age(tmp_path, f"{NAME}-old", 3600)
+        monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
+        run(mod, monkeypatch, "pre", pre_payload(cwd=str(primary)))
+        assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == os.path.realpath(
+            tmp_path / "wt" / f"{NAME}-old"
+        )
+        header = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8").split("\n## ", 1)[0]
+        assert f"- other worktree: " in header and f"wt/{NAME}-new [feature/nexus-aaaaa-other]" in header
+
+    def test_a_child_bead_branch_is_not_its_parents(self, mod, monkeypatch) -> None:
+        """``ref: nexus-3lqxv`` does not name ``feature/nexus-3lqxv.2-x``'s bead."""
+        rows = [("/w/linda-a", "feature/nexus-3lqxv.2-x"), ("/w/linda-b", "feature/nexus-3lqxv-y")]
+        monkeypatch.setattr(mod, "_git_worktrees", lambda _cwd, _timeout: rows)
+        monkeypatch.setattr(mod, "_last_active", lambda path: 2.0 if path.endswith("-a") else 1.0)
+        monkeypatch.setattr(mod.os.path, "isdir", lambda _p: True)
+        chosen, others = mod._session_worktrees(NAME, "/", "ref: nexus-3lqxv")
+        assert chosen == "/w/linda-b" and others == [rows[0]]
+
+    def test_without_a_board_match_the_most_recent_worktree_wins(self, mod, env, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("FAKE_BOARD", "missing")
+        primary = self._repo_with_worktrees(tmp_path, {NAME: "feature/nexus-v1929-old", f"{NAME}-now": "feature/nexus-bbbbb-now"})
+        self._age(tmp_path, NAME, 7200)
+        monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
+        run(mod, monkeypatch, "pre", pre_payload(cwd=str(primary)))
+        assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == os.path.realpath(
+            tmp_path / "wt" / f"{NAME}-now"
+        )
+
     def test_no_session_worktree_keeps_the_payload_cwd(self, mod, env, monkeypatch, tmp_path) -> None:
         monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
         run(mod, monkeypatch, "pre", pre_payload(cwd=str(tmp_path)))  # not a repository
         assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == os.path.realpath(tmp_path)
-        assert f"- worktree: none named {NAME};" in (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert f"- worktree: none named {NAME} or {NAME}-*;" in (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
 
     @pytest.mark.parametrize(
         ("rows", "board", "kept", "dropped"),
