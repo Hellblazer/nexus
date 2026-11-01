@@ -220,8 +220,9 @@ SUITES = [
     # lifted to what the suite now reports (66 at the first commit, 71 after its fix
     # round: the suite lease name, the lost mv race, the 0664 file mode, and the
     # set -e check now run against both unwritable-log shapes), so deleting Test 13
-    # turns it red too.
-    _Suite("scripts/lib/build-lease_test.sh", 70 if os.geteuid() == 0 else 71),
+    # turns it red too. nexus-3mdmp added Test 10b (two stubbed-kill parse checks, +2 for every
+    # user); inside a child PID namespace Test 10's real probe is a counted skip, not an ok.
+    _Suite("scripts/lib/build-lease_test.sh", 72 if os.geteuid() == 0 else 73),
     _Suite("scripts/mvnw-leased_test.sh", 22),
     # nexus-20onx round 3: leg B3's compare logic, sourced from the real cloud
     # gate script and fed canned /v1/status bodies (11 cases + 3 wiring checks;
@@ -334,6 +335,28 @@ class TestSuitesAreGreen:
             f"--- stdout ---\n{result.stdout}\n"
             f"--- stderr ---\n{result.stderr}"
         )
+        # nexus-3mdmp: a suite that counts skips may skip only inside a child PID namespace (a
+        # lab-run per-job namespace hides every other user's process). In the initial namespace,
+        # or with no /proc at all (macOS), a skip is a probe that silently stopped running.
+        skipped = re.search(rf"{re.escape(suite.id)}: \d+ passed, \d+ failed, (\d+) skipped", result.stdout)
+        if skipped is not None:
+            assert int(skipped.group(1)) <= _MAX_SKIPS_IN_A_CHILD_PID_NAMESPACE, result.stdout
+            if not _in_child_pid_namespace():
+                assert int(skipped.group(1)) == 0, (
+                    f"{suite.id} skipped {skipped.group(1)} probe(s) outside a child PID namespace\n"
+                    f"--- stdout ---\n{result.stdout}"
+                )
+
+
+_INIT_PID_NAMESPACE: str = "pid:[4026531836]"  # PROC_PID_INIT_INO, 0xEFFFFFFC
+_MAX_SKIPS_IN_A_CHILD_PID_NAMESPACE: int = 1  # build-lease Test 10's real EPERM probe
+
+
+def _in_child_pid_namespace() -> bool:
+    try:
+        return os.readlink("/proc/self/ns/pid") != _INIT_PID_NAMESPACE
+    except OSError:
+        return False
 
 
 class TestSuitesIgnoreAnInheritedLeaseRoot:

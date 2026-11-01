@@ -25,8 +25,11 @@ export NX_LEASE_EVENTS_LOG="$WORKDIR/events.log"
 
 PASS=0
 FAIL=0
+SKIP=0
 ok() { echo "  [ok] $1"; PASS=$((PASS + 1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
+# A skip is counted apart from passes, so a run that skipped a probe never reads like one that ran it.
+skip() { echo "  [skip] $1"; SKIP=$((SKIP + 1)); }
 
 # Fake repo tree: build-lease.sh anchors its repo-root computation on its
 # OWN BASH_SOURCE location, so sourcing a COPY placed under
@@ -403,7 +406,9 @@ else
     if [[ -z "$foreign_pgid" && "$pid1_user" == "$me" ]]; then
         # A private PID namespace (lab-run #88): pid 1 is this user's, so no other user's
         # process is visible and no EPERM can be observed. Proven by pid 1's owner, not assumed.
-        ok "not applicable: a private PID namespace (pid 1 is $me's) shows no other user's group"
+        # The kernel's EPERM path is then unproven in that run; Test 10b below proves the parse of
+        # its message in every namespace.
+        skip "a private PID namespace (pid 1 is $me's) shows no other user's group: the real EPERM probe did not run"
     elif [[ -z "$foreign_pgid" ]]; then
         bad "found no other user's process group to probe with: the test has no evidence (it must not pass vacuously)"
     else
@@ -418,6 +423,22 @@ else
     else
         ok "a group that does not exist still reads as dead"
     fi
+fi
+
+# ── Test 10b (nexus-3mdmp): the EPERM-versus-ESRCH decision is made on kill's message, so prove the
+# parse with a stubbed kill. It runs as any user in any PID namespace, where Test 10's real probe may
+# have nothing to probe.
+echo "Test 10b: the group-alive check reads kill's EPERM message as alive and ESRCH as dead"
+lib10b="$repo10/scripts/lib/build-lease.sh"
+if bash -c "source '$lib10b'; kill() { echo 'bash: kill: (-5) - Operation not permitted' >&2; return 1; }; _build_lease_group_alive 5"; then
+    ok "kill's 'Operation not permitted' (EPERM) reads as a live group"
+else
+    bad "kill's 'Operation not permitted' (EPERM) read as DEAD: a second user would reclaim a live build lease"
+fi
+if bash -c "source '$lib10b'; kill() { echo 'bash: kill: (-5) - No such process' >&2; return 1; }; _build_lease_group_alive 5"; then
+    bad "kill's 'No such process' (ESRCH) read as a live group: a stale lease would never be reclaimed"
+else
+    ok "kill's 'No such process' (ESRCH) reads as a dead group"
 fi
 
 # ── Test 11 (nexus-t6t9f): losing the stale-reclaim race is retried, not refused, even at wait 0.
@@ -712,5 +733,5 @@ kill -9 "$live14" 2>/dev/null
 wait "$live14" 2>/dev/null
 
 echo
-echo "build-lease_test.sh: $PASS passed, $FAIL failed"
+echo "build-lease_test.sh: $PASS passed, $FAIL failed, $SKIP skipped"
 [[ $FAIL -eq 0 ]]
