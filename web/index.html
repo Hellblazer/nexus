@@ -150,7 +150,7 @@ td:first-child{font-weight:500;white-space:nowrap}
 <h3>Tools to have</h3>
 <ul class="tools">
 <li>
-  <p><strong>uv</strong> runs the <code>nx</code> command. The one command in the next section installs it if it is missing. Check with <code>uv --version</code>. To install it yourself:</p>
+  <p><strong>uv</strong> runs the <code>nx</code> command. The one command in the next section installs it if it is missing. Adding the plugin first needs uv already installed, because the plugin starts its tools and hooks through uv. Check with <code>uv --version</code>. To install it yourself:</p>
   <div class="cmd" data-os-block="mac"><pre>brew install uv</pre><button class="copy" type="button">Copy</button></div>
   <div class="cmd hidden" data-os-block="linux"><pre>curl -LsSf https://astral.sh/uv/install.sh | sh</pre><button class="copy" type="button">Copy</button></div>
   <div class="cmd hidden" data-os-block="windows"><pre>powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"</pre><button class="copy" type="button">Copy</button></div>
@@ -160,7 +160,7 @@ td:first-child{font-weight:500;white-space:nowrap}
 <li>
   <p><strong>git</strong> is what Nexus reads when it indexes a repository, and <code>nx doctor</code> checks for it. Check with <code>git --version</code>. To install it:</p>
   <div class="cmd" data-os-block="mac"><pre>brew install git</pre><button class="copy" type="button">Copy</button></div>
-  <div class="cmd hidden" data-os-block="linux"><pre>sudo apt install git   <span class="c"># Debian and Ubuntu; other distributions use their own package manager</span></pre><button class="copy" type="button">Copy</button></div>
+  <div class="cmd hidden" data-os-block="linux"><pre>sudo apt install git   <span class="c"># Debian and Ubuntu. Other distributions use their own package manager</span></pre><button class="copy" type="button">Copy</button></div>
   <div class="cmd hidden" data-os-block="windows"><pre>$ProgressPreference = 'SilentlyContinue'
 $rel = Invoke-RestMethod https://api.github.com/repos/git-for-windows/git/releases/latest
 $asset = $rel.assets | Where-Object name -Match '^PortableGit-.*-64-bit\.7z\.exe$'
@@ -210,7 +210,7 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <p>Claude Code needs the plugin for its tools, agents, and skills. The one command already added it if <code>claude</code> was on your PATH. If not, start <code>claude</code> and type these two commands inside it, not in the terminal:</p>
 <div class="cmd"><pre>/plugin marketplace add Hellblazer/nexus
 /plugin install conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
-<p>If you add the plugin before the <code>nx</code> command exists, Claude runs the install for you. Run <code>/reload-plugins</code> or start a new session, and Claude says that Nexus is not installed and asks the question above. If you choose Not now, each session shows one line that names <code>/conexus:setup</code>, so you can answer later.</p>
+<p>If you add the plugin before the <code>nx</code> command exists, and uv is installed, Claude runs the install for you. Run <code>/reload-plugins</code> or start a new session, and Claude says that Nexus is not installed and asks the question above. If you choose Not now, each session shows one line that names <code>/conexus:setup</code>, so you can answer later.</p>
 <p>Setup runs in the background, and you can ask Claude for progress. When Claude says it is done, reconnect the Nexus server: type <code>/mcp</code>, choose <code>nexus</code>, and choose Reconnect. A new session works too.</p>
 </div>
 <div class="hidden" data-for="desktop">
@@ -230,7 +230,7 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 </div></li>
 <li><div class="step">
   <h3>Index a repository and search it</h3>
-  <p>CLI only has no service yet, so run <code>nx init</code> first if you chose Local, or <code>nx config init</code> if you chose Cloud. In Claude Code, <code>/conexus:setup</code> does the same.</p>
+  <p>CLI only has no service yet. Run <code>nx init</code> first for a local service, or <code>nx config init</code> for a managed one. In Claude Code, <code>/conexus:setup</code> does the same.</p>
   <div class="cmd"><pre>cd your-project
 nx index repo .
 nx search "how does retry work"</pre><button class="copy" type="button">Copy</button></div>
@@ -244,7 +244,7 @@ nx search "how does retry work"</pre><button class="copy" type="button">Copy</bu
 <p>Run both of these commands every time:</p>
 <div class="cmd"><pre>nx self install   <span class="c"># install the new version next to the current one</span>
 nx upgrade        <span class="c"># update the service, the data, and the plugins</span></pre><button class="copy" type="button">Copy</button></div>
-<div class="callout"><p><strong>Do not</strong> update with <code>uv tool install conexus</code> or with <code>--force</code>. That command takes the <code>nx</code> shims away from Nexus, so your terminal quietly runs a different install. <code>nx self install</code> puts them back.</p></div>
+<div class="callout"><p><strong>Do not</strong> update with <code>uv tool install conexus</code>. A plain install builds a second copy that Nexus does not use. With <code>--force</code> it also takes the <code>nx</code> shims, so your terminal runs that copy without telling you. <code>nx self install</code> puts the shims back.</p></div>
 <p class="note">If you update the plugin with <code>/plugin update</code> in Claude Code, the next session runs both commands for you.</p>
 <p class="note hidden" data-for="desktop">In Claude Desktop, remove the <code>Hellblazer/nexus</code> marketplace in Customize → Plugins and add it again. A marketplace stays at the release it was added at.</p>
 <p class="note hidden" data-os-block="windows">On Windows, <code>nx self install</code> also points the <code>NexusStorageService</code> logon task at the new version. The running storage service keeps its old version until it next starts, at your next sign-in or after <code>nx daemon service stop</code> and <code>Start-ScheduledTask NexusStorageService</code>.</p>
@@ -293,6 +293,7 @@ ls ~/.cache/nexus               <span class="c"># must not exist</span></pre><bu
 systemctl --user list-unit-files | grep -i nexus  <span class="c"># must print nothing</span>
 ls ~/.config/nexus                                <span class="c"># must not exist</span>
 ls ~/.cache/nexus                                 <span class="c"># must not exist</span></pre><button class="copy" type="button">Copy</button></div>
+<p data-os-block="mac linux">If <code>~/.cache/nexus</code> still exists, an older release left it behind. Delete it with <code>rm -rf ~/.cache/nexus</code>.</p>
 <div class="cmd hidden" data-os-block="windows"><pre>Get-Command nx -ErrorAction SilentlyContinue                          <span class="c"># must print nothing</span>
 Get-ScheduledTask NexusStorageService -ErrorAction SilentlyContinue   <span class="c"># must print nothing</span>
 Test-Path "$HOME\.config\nexus"                                       <span class="c"># must print False</span>
@@ -307,7 +308,7 @@ Test-Path "$HOME\.local\share\nexus"                                  <span clas
 <details data-os-block="mac linux"><summary>nx: command not found</summary><p>Add <code>~/.local/bin</code> to your PATH and open a new terminal. If PATH is already correct, run <code>nx self install</code>. If <code>nx</code> was never installed, run <code>uv tool install conexus --python 3.12</code> (on Linux, add <code>--torch-backend cpu</code>).</p></details>
 <details class="hidden" data-os-block="windows"><summary>nx: command not found</summary><p>Open a new PowerShell window. If <code>nx</code> is still not found, check that <code>%USERPROFILE%\.local\share\nexus\tools\current\bin</code> is on your user PATH.</p></details>
 <details class="hidden" data-os-block="linux"><summary>Linux: uv says "unexpected argument '--torch-backend'"</summary><p>Your uv is older than 0.9.19. Run <code>uv self update</code>, or update uv with the package manager that installed it, and then run the install command again. Do not leave the option off, because uv then installs the GPU build of torch.</p></details>
-<details><summary>nx search returns nothing</summary><p>Run <code>nx doctor</code>. If you chose CLI only, no service runs yet, so run <code>nx init</code>. If the index was interrupted, run <code>nx index repo .</code> again and it continues where it stopped.</p></details>
+<details><summary>nx search returns nothing</summary><p>Run <code>nx doctor</code>. If you chose CLI only, no service runs yet, so run <code>nx init</code> for a local service or <code>nx config init</code> for a managed one. If the index was interrupted, run <code>nx index repo .</code> again and it continues where it stopped.</p></details>
 <details data-for="code cli"><summary>Plugin installed but its tools never appear</summary><p>Usually the <code>nx</code> command is not installed, setup has not finished, or you chose Not now. Type <code>/conexus:setup</code>, which shows what is missing and asks before it installs anything. After setup is done, reconnect the <code>nexus</code> server with <code>/mcp</code>. <code>/conexus:nx-preflight</code> also lists what is missing.</p></details>
 <details class="hidden" data-for="desktop"><summary>Plugin added but Claude shows no Nexus tools</summary><p>Usually the <code>nx</code> command is not installed or setup has not finished. Say <em>Set up Nexus</em> in a conversation, and Claude shows what is missing and asks before it installs anything. After setup is done, quit Claude Desktop fully and open it again, because a new conversation keeps the old server.</p></details>
 <details><summary>Nothing above helps</summary><p>Paste the <a href="https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611">recovery runbook</a> as the first message of a Claude Code session. Claude checks the install step by step and asks you before it changes any data.</p></details>
