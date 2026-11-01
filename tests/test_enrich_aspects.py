@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1573,6 +1573,14 @@ class TestValidationAllOutcomes:
         assert row["document_chars"] == 64 and row["evidence_truncated"] is False
         assert not fail.exists()
 
+    def test_both_rows_carry_the_same_utc_timestamp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fail, allout = _sample(tmp_path, monkeypatch, _verdict(verified=False, reason="no", evidence=[]))
+        (row,), (legacy,) = _rows(allout), _rows(fail)
+        stamp = datetime.fromisoformat(row["timestamp"])
+        assert stamp.utcoffset() == timedelta(0) and legacy["timestamp"] == row["timestamp"]
+
     def test_errored_when_the_verdict_is_missing_and_the_legacy_row_stays(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1583,24 +1591,19 @@ class TestValidationAllOutcomes:
         (legacy,) = _rows(fail)
         assert legacy["operator_verify_reason"] == "no verdict key"
 
-    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the directory's mode")
     def test_an_unwritable_output_directory_is_not_reported_as_written_and_exits_nonzero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     ) -> None:
         import click
 
         ro = tmp_path / "ro"
-        ro.mkdir()
+        ro.write_text("a file, not a directory: nothing can be created under it, root or not")
         fail, allout = ro / "f.jsonl", ro / "a.jsonl"
-        ro.chmod(0o500)
-        try:
-            with pytest.raises(click.exceptions.Exit) as exc:
-                _sample(
-                    tmp_path, monkeypatch, _verdict(verified=False, reason="no", evidence=[]),
-                    fail_out=str(fail), all_out=str(allout),
-                )
-        finally:
-            ro.chmod(0o700)
+        with pytest.raises(click.exceptions.Exit) as exc:
+            _sample(
+                tmp_path, monkeypatch, _verdict(verified=False, reason="no", evidence=[]),
+                fail_out=str(fail), all_out=str(allout),
+            )
         assert exc.value.exit_code != 0
         out = capsys.readouterr().out
         assert not fail.exists() and not allout.exists()
@@ -1610,24 +1613,19 @@ class TestValidationAllOutcomes:
         assert f"1 row(s) could not be written to {fail}" in out
         assert f"1 row(s) could not be written to {allout}" in out
 
-    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the directory's mode")
     def test_only_the_file_that_failed_is_named_unwritten(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     ) -> None:
         import click
 
         ro = tmp_path / "ro"
-        ro.mkdir()
+        ro.write_text("a file, not a directory: nothing can be created under it, root or not")
         fail, allout = ro / "f.jsonl", tmp_path / "a.jsonl"
-        ro.chmod(0o500)
-        try:
-            with pytest.raises(click.exceptions.Exit):
-                _sample(
-                    tmp_path, monkeypatch, _verdict(verified=False, reason="no", evidence=[]),
-                    fail_out=str(fail), all_out=str(allout),
-                )
-        finally:
-            ro.chmod(0o700)
+        with pytest.raises(click.exceptions.Exit):
+            _sample(
+                tmp_path, monkeypatch, _verdict(verified=False, reason="no", evidence=[]),
+                fail_out=str(fail), all_out=str(allout),
+            )
         out = capsys.readouterr().out
         assert f"All outcomes written to {allout}" in out
         assert f"1 row(s) could not be written to {fail}" in out
@@ -1749,6 +1747,7 @@ class TestValidationAllOutcomes:
         # The options default to "" (the config-dir default), so the CLI adds no path of its own.
         defaults = {p.name: p.default for p in enrich.get_command(None, "aspects").params}
         assert defaults["validation_out"] == "" and defaults["validation_all_out"] == ""
+        assert defaults["validation_trace"] is True  # free text is kept unless --no-validation-trace
         cfg, cwd = tmp_path / "cfg", tmp_path / "cwd"
         cwd.mkdir()
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
@@ -2804,20 +2803,15 @@ class TestValidationFileSafety:
         _append_validation_row(Path(os.devnull), {"a": 1})
         assert not Path(os.devnull + ".lock").exists()
 
-    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the directory's mode")
     def test_an_unwritable_directory_is_logged_not_raised(self, tmp_path: Path) -> None:
         from structlog.testing import capture_logs
 
         from nexus.commands.enrich import _append_validation_row_logged
 
         ro = tmp_path / "ro"
-        ro.mkdir()
-        ro.chmod(0o500)
-        try:
-            with capture_logs() as logs:
-                _append_validation_row_logged(ro / "rows.jsonl", {"a": 1})
-        finally:
-            ro.chmod(0o700)
+        ro.write_text("a file, not a directory: nothing can be created under it, root or not")
+        with capture_logs() as logs:
+            assert _append_validation_row_logged(ro / "rows.jsonl", {"a": 1}) is False
         assert any(e["event"] == "validation_file_append_failed" for e in logs)
 
     def test_a_device_target_needs_no_o_nonblock(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

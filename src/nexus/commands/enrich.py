@@ -2523,8 +2523,13 @@ def _run_validation_sample(
     )
 
     failures_path, all_path = _validation_paths(validation_out, validation_all_out)
-    failures_path.parent.mkdir(parents=True, exist_ok=True)
-    all_path.parent.mkdir(parents=True, exist_ok=True)
+    for out_path in (failures_path, all_path):
+        # A directory that cannot be made (a file in the way, no permission) must not end a run
+        # whose extraction is spent: its rows fail to append, are counted, and the summary names it.
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _log.warning("validation_dir_create_failed", path=str(out_path.parent), error=str(exc))
     failures = 0
     unverifiable = 0
     unwitnessed = 0
