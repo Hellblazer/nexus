@@ -94,8 +94,9 @@ Procedures stored as memory, and procedures recalled or improvised instead of
 run, moved to their own RDR on 2026-10-31 (nexus-qo7ie.2): they become
 sandboxed Lua scripts on a Lua runtime (nexus-mdbds.1), not new Python verbs
 or MCP tools. That RDR is now RDR-240, and it is a prerequisite of this
-one's Phase 2 Step 3 and Phase 3: its `transcripts` procedure is the one
-transcript scanner both use (Technical Design 5). The removed text stays in the history of branch
+one's Phase 2 and of `nx memory curate` in Phase 3: its `transcripts`
+procedure is the one transcript scanner both use (Technical Design 5).
+RDR-240 in turn waits on the Lua runtime RDR (nexus-mdbds.1), not yet filed. The removed text stays in the history of branch
 `feature/nexus-qo7ie-memory-curation-rdr`, in the draft as filed before this
 revision.
 
@@ -105,8 +106,8 @@ revision.
 | --- | --- | --- |
 | RDR-057 Progressive Formalization Across Memory Tiers | Origin of the tier model | Its "graduation" idea is the T2 to T3 case. This RDR is the curation case beside it: replacement and admission to context. |
 | RDR-207 Summarization at the T2 Expiry Boundary | Beside, no shared path | It owns what expiry may destroy (quarantine, rollup, reap only rolled-up rows). Replacement is not expiry: a writer names a row and the engine deletes it in the same transaction. Phase 1 Step 1 confirms the delete takes the path an explicit `memory_delete` takes. |
-| RDR-209 Heat-Based Graduation Between Memory Tiers | Sibling, draft | It owns heat and graduation, and takes the gate-record rollup as an amendment (same date). Its Phase 0b, a read counter that means "a caller read this row", is the signal this RDR's index audit would use for T2; until it lands, the audit counts reads with RDR-240's `memory` transcript query. |
-| RDR-240 Procedures as Sandboxed Lua Scripts | Prerequisite of Phase 2 Step 3 and Phase 3 | Split from this RDR. Its `transcripts` procedure owns transcript scanning; this RDR calls four of its queries and builds no scanner (Technical Design 5). Phase 1 does not depend on it. |
+| RDR-209 Heat-Based Graduation Between Memory Tiers | Sibling, draft | It owns heat and graduation, and takes the gate-record rollup as an amendment (same date). Its Phase 0b, a read counter that means "a caller read this row", is the signal this RDR's index audit would use for T2; until it lands, the audit counts T2 reads with RDR-240's `memory` transcript query (a requirement this RDR places on RDR-240, Technical Design 5). |
+| RDR-240 Procedures as Sandboxed Lua Scripts | Prerequisite of Phase 2 and of `nx memory curate` | Split from this RDR. Its `transcripts` procedure owns transcript scanning; this RDR calls four of its queries and builds no scanner (Technical Design 5). Phase 1 does not depend on it. |
 | RDR-074 Permanence Mode | Deferred, compatible | Permanence guards a row against expiry only. Naming a permanent row in `replaces` deletes it, because explicit deletion is always the project's prerogative (Sam, 2026-10-31: "expiry is the def; explicit del is always our collective prerogative"). |
 | RDR-192 Superseded Note Chunks Outlive Manifest-Less Is-Live | Different layer | It concerns T3 chunks a re-put replaced. This RDR concerns whole T2 rows and memory files a writer replaced. No shared code. |
 
@@ -285,16 +286,22 @@ later row appears to replace without naming them.
    and this RDR calls it through `run_procedure("transcripts", {query, since,
    project})` from Python, so `nx memory curate` adds no Lua. It uses four
    queries:
-   - `memory`: memory-file reads, for `--files` and T2 read counts;
+   - `memory`: memory-file reads, and T2 reads (`memory_get` and
+     `memory_search` calls by project and title), for `--files` and T2 read
+     counts;
    - `tools`: calls per MCP tool, and per `nx` CLI verb called through Bash,
      for `--cold`;
-   - `loads`: instruction files loaded per session and per dispatch, with
-     their sizes, for `--cold`;
-   - `violations`: the rule detectors, for Phase 2 Step 3.
-   Each row it needs carries a name, a count, a last-use time and a size
-   (inferred, not read: RDR-240 does not yet state its row fields; its gate
-   settles them). The `nx` CLI verb count in `tools` is a requirement this
-   RDR places on RDR-240.
+   - `loads`: instruction files loaded per main session and per dispatch,
+     with their sizes, for `--cold`;
+   - `violations`: the rule detectors, counted per 100 main sessions, for
+     Phase 2 Steps 1 and 3.
+   Requirements this RDR places on RDR-240, none of them in RDR-240's text
+   before this revision (inferred, not read: RDR-240's gate settles their
+   shape): the argument object `{query, since, project}`; the T2 reads in
+   `memory`; main sessions and sizes in `loads`; the `nx` CLI verb count in
+   `tools`; and `violations` reading message bodies inside the procedure,
+   since its detectors scan assistant text and Bash inputs. Each row this
+   RDR needs carries a name, a count, a last-use time and a size.
 
 ### Existing Infrastructure Audit
 
@@ -391,8 +398,8 @@ If the on-demand tier works, this is a refinement of it.
 - [ ] RDR-209 amendment for gate records filed (this RDR does not depend on
       it landing).
 - [ ] RDR-240 Phase 1 Step 1 landed (the runner and the `transcripts`
-      procedure). Phase 2 Step 3 and Phase 3 wait for it; Phase 1, Phase 2
-      Step 1 and Phase 2 Step 2 do not.
+      procedure). Phase 2, `nx memory curate` and the release-skill step
+      that runs it wait for it; Phase 1 and the SessionStart check do not.
 
 ### Minimum Viable Validation
 
@@ -420,7 +427,9 @@ engine.
 #### Step 1: Measure
 
 Before any move: count violations per 100 main sessions for rules whose
-violations show in transcripts. The baseline is already taken (research 4).
+violations show in transcripts, with RDR-240's `violations` query, over the
+windows just before the split. Research 4's ad hoc scan sized those windows
+and is not the baseline, so before and after come from one scanner.
 The em dash rule has the volume for a 14-day window. The rare rules (`git
 stash`, full-disk `find`, the Claude-Session trailer, backticks in quoted
 arguments) are pooled into one rate over 60 days, because at about one
@@ -433,16 +442,15 @@ the rest. Record what moved and why.
 
 #### Step 3: Re-measure
 
-Count the same rules over the same windows after the split, with RDR-240's
-`violations` query. Before it is used, the query is run over research 4's
-window and must reproduce research 4's baseline counts. A rule whose rate
-rises returns to the always tier.
+Count the same rules over the same windows after the split, with the same
+`violations` query. A rule whose rate rises returns to the always tier.
 
 ### Phase 3: Habits
 
 The SessionStart check, `nx memory curate`, and a curation step in the
-release skill's post-release section. `nx memory curate` waits for RDR-240
-Phase 1 Step 1; the SessionStart check does not.
+release skill's post-release section. `nx memory curate` and the
+release-skill step that runs it wait for RDR-240 Phase 1 Step 1; the
+SessionStart check does not.
 
 ### Day 2 Operations
 
@@ -524,7 +532,7 @@ whose rate rises goes back.
 Gap 1 maps to Phase 1 (engine and client) and the frontmatter field, Gap 2
 to Phase 2 (measure, split, re-measure), and Gap 3 to Phase 3 (the
 SessionStart check and `nx memory curate`, including `--cold`). Phase 2
-Step 3 and `nx memory curate` need RDR-240's `transcripts` procedure, a
+and `nx memory curate` need RDR-240's `transcripts` procedure, a
 prerequisite, so this RDR builds no transcript scanner. Procedures
 and promotion are out of scope (RDR-240), and so is the gate-record
 rollup (RDR-209 Amendment A1). Retiring a cold store is out of scope too:
@@ -542,8 +550,8 @@ the report lists it, and any deletion of data rides its own change.
   point-in-time recovery.
 - **Hook cost.** The SessionStart check is stdlib only, reads one small
   directory, prints at most one line and never blocks a session.
-- **Measurement.** Phase 2 counts compliance from transcripts with the same
-  scan as the baseline, so before and after are comparable.
+- **Measurement.** Phase 2 counts compliance before and after the split
+  with the same `violations` query, so the two are comparable.
 
 ### Proportionality
 

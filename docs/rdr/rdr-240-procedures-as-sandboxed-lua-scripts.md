@@ -104,7 +104,7 @@ scripts behind it.
 
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
-| RDR-238 Memory Curation | Parent; split from it | It owns supersession by deletion, the bounded index and the curation habits. Its curation report's cold-state section takes MCP tool, CLI verb and injected-context counts from this RDR's transcript queries (RDR-238 Technical Design 4); its round-1 gate (2026-11-01) blocked on that dependency, and its fix made this RDR a prerequisite of its Phase 2 Step 3 and Phase 3, calling the `memory`, `tools`, `loads` and `violations` queries (RDR-238 Technical Design 5). |
+| RDR-238 Memory Curation | Parent; split from it | It owns supersession by deletion, the bounded index and the curation habits. Its curation report's cold-state section takes MCP tool, CLI verb and injected-context counts from this RDR's transcript queries (RDR-238 Technical Design 4); its round-1 gate (2026-11-01) blocked on that dependency, and its fix made this RDR a prerequisite of its Phase 2 and of `nx memory curate`, calling the argument object `{query, since, project}` and the `memory`, `tools`, `loads` and `violations` queries (RDR-238 Technical Design 5). |
 | Lua runtime RDR (nexus-mdbds.1, not yet filed) | Depends on it | It owns the sandbox: the interpreter, what a script may call, the limits on time and memory, and how a host verb is exposed. This RDR states what its four procedures need from that runtime and decides nothing about the runtime itself. |
 | RDR-239 The Tuple-Space Dictionary | Sibling in the same epic (nexus-mdbds) | Stage 1 of the scriptable tuple space. The runtime exposes what the dictionary describes; these procedures read memory and transcripts, not tuples, so they use no dictionary entry in v1. |
 | RDR-209 Heat-Based Graduation | Consumer | Its gate-record rollup reads the tags the gate-record script derives. Until its Phase 0b read counter lands, the transcript queries here are its read-count source. |
@@ -267,9 +267,12 @@ schema.
    turns, errors, estimated cost), `tools` (calls per tool and MCP server,
    deferred against called, and per `nx` CLI verb called through Bash, which
    RDR-238's cold-state report needs), `skills` (the skill-routing census, ported),
-   `memory` (memory-file reads and writes, and what loaded into a subagent's
-   instructions), `violations` (named rule detectors, RDR-238's Phase 2
-   baseline), `loads` (instruction files and their types per dispatch), and
+   `memory` (memory-file reads and writes, T2 reads by project and title
+   from `memory_get` and `memory_search` calls, and what loaded into a subagent's
+   instructions), `violations` (named rule detectors, counted per 100 main
+   sessions and reading message bodies inside the procedure, RDR-238's Phase
+   2 before and after counts), `loads` (instruction files, their types and
+   sizes, per main session and per dispatch), and
    `procedures` (script runs against hand-written equivalents, A3). Cost
    uses one dated price table and says it is an estimate.
 6. **`gate_record`.** Arguments `kind` (review, critique, confirm,
