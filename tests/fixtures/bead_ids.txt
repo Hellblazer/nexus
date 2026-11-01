@@ -714,6 +714,7 @@ nexus-39zi
 nexus-39zi.1
 nexus-3ac
 nexus-3ajpd
+nexus-3ax49
 nexus-3bafq
 nexus-3bafq.1
 nexus-3c92m
@@ -3492,6 +3493,7 @@ nexus-euczk
 nexus-eum97
 nexus-eum97.1
 nexus-eusu6
+nexus-eva4x
 nexus-evnm8
 nexus-evqoc
 nexus-evrz
@@ -4145,6 +4147,7 @@ nexus-gxq5
 nexus-gxr
 nexus-gxzfq
 nexus-gy2eh
+nexus-gy317
 nexus-gynt2
 nexus-gynt2.1
 nexus-gzk
@@ -8247,6 +8250,7 @@ nexus-xqrq0
 nexus-xqrq0.1
 nexus-xr1yw
 nexus-xr1yw.1
+nexus-xrfev
 nexus-xrkk4
 nexus-xrkk4.1
 nexus-xs0s0

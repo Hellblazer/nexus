@@ -329,12 +329,15 @@ critiqued once before Sam's gate decision (T2
 - **RF-7 (Decided, Sam 2026-10-26).** `title=` means the document's catalog
   title everywhere, the filename for code and prose; the per-position label
   stays display text (nexus-6pfgb.2, option A). `content_type=` maps by
-  value: pdf and markdown answer from `source_format`, a GENERATED column
-  on `catalog_documents` derived from content_type and the file extension
-  (the ruling named a stamped meta key; RF-17 and the schema analysis
-  superseded that with the generated column); code, prose, paper, rdr,
-  knowledge from `catalog_documents.content_type` (nexus-6pfgb.3,
-  option A). Both
+  value: pdf and markdown answer from the source format, which the engine
+  derives from the document's content_type and file_path
+  (`nexus.catalog_source_format`, vectors-043) and which every indexer
+  also stamps as the meta key `source_format` (the ruling named a stamped
+  meta key; RF-17 and the schema analysis replaced it with a GENERATED
+  column; Sam's option A, 2026-10-31, put the stored key back, and the
+  2026-11-01 amendment rewrote this text to say so; nothing reads the key
+  yet); code, prose, paper, rdr, knowledge from
+  `catalog_documents.content_type` (nexus-6pfgb.3, option A). Both
   change what an existing request shape returns: `title=` on code and prose
   today matches the per-position label; `content_type=prose` from the
   catalog includes markdown files the row form excluded. The ledger entry
@@ -383,7 +386,9 @@ critiqued once before Sam's gate decision (T2
   collection), category=code (two), tags=js (one), category=prose (four),
   tags=pdf (one). None uses a user note value. Ten rewrite to catalog
   content_type or the collection scope; the two tag filters read the
-  GENERATED tags column of indexed files (.8, decided after RF-17). The
+  stored `tags` meta key of indexed files (.8: stamped at register and
+  filled by backfill-meta; RF-17 had decided a GENERATED column, replaced
+  by option A, amendment of 2026-11-01). The
   engine leg forwards the
   clause unchanged (`run_gate.py` ~2029, `warmup.py` ~70) and the oracle
   is recaptured; the recall leg (`_where_clause_parts` ~3848, pool count
@@ -442,11 +447,13 @@ critiqued once before Sam's gate decision (T2
   tenant and must carry tenant_id in its batches.
 - **RF-17 (Decided, Sam 2026-10-26).** tags is a set: a JSON array on the
   document filtered by containment, never a comma string matched by
-  equality; indexed files get a GENERATED one-element array. The design
+  equality; indexed files get a one-element array, a GENERATED column when
+  ruled, stored in the meta under Sam's option A (2026-10-31; amendment of
+  2026-11-01). The design
   changes the schema analysis forced (database CHECKs behind the Java
-  allow-list after a mandatory allow-list-shaped sweep; GENERATED columns
-  for source_format and indexed-file tags and category, moving .8 and .23
-  to Phase 3; frecency with computed_at; backfill authorship by the full
+  allow-list after a mandatory allow-list-shaped sweep; the derived keys
+  of indexed files, GENERATED columns as ruled and stored meta keys under
+  option A; frecency with computed_at; backfill authorship by the full
   row key with tombstoned owners and the last_written_at guard; one
   manifest row for nexus-1nrcu; the .26 re-scope) are accepted as written.
   No code stores the array today: every note since 6pfgb.5 holds tags as
@@ -590,8 +597,9 @@ critiqued once before Sam's gate decision (T2
   be rewritten against the catalog without changing what they measure —
   **Status**: Verified for the queries (RF-13): all twelve filter on
   indexer constants, ten rewrite to catalog content_type or the
-  collection scope, two (tags=js, tags=pdf) read the GENERATED tags
-  column Phase 3 adds (.8; `source_format` cannot express tags=js); the
+  collection scope, two (tags=js, tags=pdf) read the stored `tags`
+  meta key of indexed files (.8, stamped at register and filled by
+  backfill-meta; `source_format` cannot express tags=js); the
   engine leg
   forwards the where clause unchanged and needs nothing; the recall leg
   becomes a manifest join. Not fully true for the findings SQL: its
@@ -655,9 +663,10 @@ has exactly one other home, and the engine enforces the rule on write.
    extraction_method, quality_gate_overridden, extraction_source,
    frecency_score with its computed_at and the bib writer, or an existing
    column (markdown author), written at the seams that already update the
-   catalog. Indexed files: source_format, tags and category are GENERATED
-   columns on `catalog_documents` (Phase 3, engine changeset), stored
-   nowhere. A one-time, dry-run-first, fill-only verb stamps the meta keys
+   catalog. Indexed files: source_format, tags and category are stored
+   meta keys, stamped at register time by every indexer (.8 for tags and
+   category, .23 for source_format; Sam's option A, 2026-10-31, replacing
+   the GENERATED columns this RDR first chose). A one-time, dry-run-first, fill-only verb stamps the meta keys
    for existing documents under the per-kind rules of A7 and reports
    counts; its one exception to fill-only is the tags conversion
    (6pfgb.38). Position
@@ -730,8 +739,8 @@ has exactly one other home, and the engine enforces the rule on write.
    backfill could not fill), zero `legacy-unmanifested` chunks in the
    engine's manifest-less census (the rdr192 rung has converged on the
    install, RF-19), zero manifest rows whose span is NULL while their
-   chunk row's span is not (A4) and zero indexed documents whose GENERATED
-   columns come out NULL, or each residue is named and accepted by Sam at
+   chunk row's span is not (A4) and zero indexed documents missing a stored
+   source_format, tags or category key (the backfill's residue), or each residue is named and accepted by Sam at
    the dry run; an accepted `legacy-unmanifested` residue blocks the sweep
    for that collection (the reaper refuses a collection while the bucket is
    above zero, RF-23, and a swept stranded note's chunk would read
@@ -829,11 +838,16 @@ not bring the violation back, because the tumbler is the key. What meta
 costs instead: no declared type, NOT NULL or CHECK per key; no retraction
 (catalog update has no delete-keys, so an empty value overwrites,
 nexus-ke45f); and it invites storing values that are computable. That last
-point changes three homes in this RDR: source_format, and tags and
+point touches three homes in this RDR: source_format, and tags and
 category for indexed files, are determined by content_type and the file
-extension (RF-11), so storing them would add a 3NF transitive dependency;
-they become GENERATED columns on `catalog_documents` (engine changeset),
-not meta keys. frecency_score depends on the document and the time it was
+extension (RF-11), so storing them adds a 3NF transitive dependency. The
+schema analysis chose GENERATED columns on `catalog_documents` to avoid
+it; Sam's option A (2026-10-31, amended into this text 2026-11-01) chose
+stored meta keys and accepts the dependency: each key is stamped at
+register time and filled for older documents by `nx catalog backfill-meta`,
+fill-only, and a stamp is not recomputed when content_type or file_path
+later changes. A re-index fills tags and category only when the key is
+empty (nexus-3ax49). frecency_score depends on the document and the time it was
 computed (`frecency.py` uses now()), so its home carries a computed_at.
 tags is a set (Sam, 2026-10-26, RF-17): in 4NF a child relation
 (document, tag), in practice a JSON array on the document meta filtered
@@ -889,7 +903,7 @@ the enforcement this RDR adds:
 | chunk_index = position | CHECK (6pfgb.42) | negligible |
 | labels_written false means the labels are NULL | CHECK on `catalog_document_chunks`; not censused by RF-16, counted by the Step 3 dry run first, added in 6pfgb.42's own step (not the chunk routes) | negligible |
 | ttl_days > 0 means put_at present | CHECK on `catalog_documents` meta, counted at the .10 dry run, added NOT VALID only after the Step 2c paired cut (a pre-6pfgb.15 client writes ttl_days without put_at and would be refused by a NOT VALID CHECK; after 2c such a client is already refused, so the ledger entry is the same not-additive one) and VALIDATEd in its own step (6pfgb.44) | negligible |
-| derived document keys (source_format; indexed files' tags and category) | GENERATED columns | one regex a write |
+| derived document keys (source_format; indexed files' tags and category) | none in the database (option A): stored meta keys stamped at register by one rule per key (`src/nexus/catalog/indexed_meta.py`) and filled for older documents by backfill-meta; a later change to content_type or file_path does not restamp them | one regex per register for source_format |
 
 Why both the Java check and the CHECK: the Java check validates what a
 client sends on the write routes, can name the key and its home in a 422,
@@ -919,8 +933,8 @@ that reason).
 | presence fallback (catalog value, else the row's) | kept while bounded | the row is already in hand; it reintroduces the update anomaly for any document whose home is still empty, so it ends when the doctor counts reach zero, and has one SQL definition shared by the stage, the pre-filter and the conexus recall SQL |
 | frecency_score on the row | removed | `resolve_many` already runs once per window (RF-10); refresh writes drop from one per chunk to one per file; a computed_at is stored |
 | span on the search row | already text-determined | `spanFromMeta` emits the chash form; what moves is the flattened line fields and file:line, one `chash_positions` call per window |
-| pre-filter | added | one catalog query plus a manifest fetch capped at 5000; no index exists today on `catalog_documents.metadata`, so the GENERATED columns carry btree indexes (source_format, category) and a GIN index on the generated tags array, the meta gets a GIN index (`jsonb_path_ops`) for the note tags containment test (6pfgb.38), and the selective probes use one index list: `title=` uses the existing partial index on (tenant_id, md5(title)) for live rows (catalog-045; the probe states `md5(title) = md5(?)` beside `title = ?`, because a btree on free text can exceed the row-size limit, RF-24), `source_author=` gets the same form, a partial index on (tenant_id, md5(author)) WHERE deleted_at IS NULL, and `bib_doi=` a partial index on (tenant_id, bib_doi) WHERE bib_doi <> '' beside catalog-001's two bib-id indexes; never a plain btree on title or author (RF-24), measured before Phase 3 |
-| stored source_format, tags, category for indexed files | removed | GENERATED columns cost nothing to read |
+| pre-filter | added | one catalog query plus a manifest fetch capped at 5000; no index exists today on `catalog_documents.metadata`, so the meta gets a GIN index (`jsonb_path_ops`) for the tags containment test over notes and indexed files alike (6pfgb.38; the btree indexes on source_format and category that the GENERATED columns were to carry have no column to sit on, and whether the stored keys need an index of their own is a Phase 3 measurement, not decided here), and the selective probes use one index list: `title=` uses the existing partial index on (tenant_id, md5(title)) for live rows (catalog-045; the probe states `md5(title) = md5(?)` beside `title = ?`, because a btree on free text can exceed the row-size limit, RF-24), `source_author=` gets the same form, a partial index on (tenant_id, md5(author)) WHERE deleted_at IS NULL, and `bib_doi=` a partial index on (tenant_id, bib_doi) WHERE bib_doi <> '' beside catalog-001's two bib-id indexes; never a plain btree on title or author (RF-24), measured before Phase 3 |
+| stored source_format, tags, category for indexed files | kept (option A) | stored meta keys, stamped at register; reading one costs nothing beyond the meta the catalog row already holds; the transitive dependency named above is accepted |
 
 **Transforms.** The analysis writes the backfill, the sweep and the
 constraints as SQL (T3 record, section 8). Rules they share and this RDR
@@ -967,14 +981,14 @@ part of K, determines it.
 | --- | --- | --- | --- | --- |
 | chunk_text_hash | chash (equal to its hex) | always present on new rows | CHUNK, kept for the wire shape, CHECKed equal to the column | Phase 4 CHECK through the add-constraint and validate routes (6pfgb.43) |
 | embedding_model (metadata) | the column of the same name | always present | CHUNK, CHECKed equal to the column | Phase 4 CHECK through the routes (6pfgb.43) |
-| content_type (chunk vocabulary) | notes: the collection prefix; indexed files: the indexer path and extension | one of code, pdf, markdown, prose | DOCUMENT: `catalog_documents.content_type` for code/prose/paper/rdr/knowledge; the GENERATED `source_format` column for pdf/markdown (RF-7); row fallback while the column is absent | 6pfgb.23 (engine, generated column), .25 |
+| content_type (chunk vocabulary) | notes: the collection prefix; indexed files: the indexer path and extension | one of code, pdf, markdown, prose | DOCUMENT: `catalog_documents.content_type` for code/prose/paper/rdr/knowledge; for pdf/markdown the meta key `source_format` (pdf, markdown, code, prose), stamped at register by every indexer with the value `nexus.catalog_source_format` derives and filled for older documents by backfill-meta (6pfgb.23, Sam's option A, 2026-10-31); no consumer reads the key yet, the engine derives the same value from content_type and file_path in the search (RF-7); row fallback while the key is absent | 6pfgb.23 (client stamp and backfill), .25 |
 | title | two attributes: D for notes and `nx index pdf`; Pn (the per-position label "rel:ls-le") for code, prose and repo PDFs | always present | DOCUMENT `catalog_documents.title` (RF-7); the per-position label is display text derived from the manifest spans and file_path, stored nowhere; the engine's `/reapable` listing and reaper audit display read the row title until 6pfgb.39 (RF-19) | 6pfgb.25, .27, .39 |
 | source_author | D | absent = unknown | DOCUMENT `catalog_documents.author`; row fallback while empty (markdown: 6pfgb.7) | 6pfgb.7 |
 | bib_year, bib_authors, bib_venue, bib_citation_count, bib_semantic_scholar_id, bib_openalex_id, bib_doi | D | columns are NOT NULL with defaults; `bib_enriched_at` set means enriched | DOCUMENT, the bib columns, authoritative, no fallback | 6pfgb.28, .12 |
 | bib_enriched_by (proposed by .32) | D | absent = not enriched | DOCUMENT meta key beside `bib_enriched_at`; never a row key | 6pfgb.32 |
 | indexed_at | three attributes: the row's last client write; the catalog's last engine manifest write (heals included); the note's put_at | timestamp | DOCUMENT: display and `where=` read `catalog_documents.indexed_at` (row fallback while NULL); the note TTL clock is meta `put_at` (6pfgb.15); the row's own write time is the ROW column `last_written_at` | 6pfgb.13 |
-| tags | D; for indexed files computable from extension | a set (Sam, 2026-10-26, RF-17): a JSON array in the document meta, filtered by containment; a comma string is legacy, converted once by 6pfgb.38; absent or `[]` = no tags | DOCUMENT: notes in meta (6pfgb.5 stores the comma string today, RF-20; 6pfgb.38 stores the array and converts existing strings); indexed files as a GENERATED one-element array from file_path, not stored | 6pfgb.38 (notes), 6pfgb.8 (re-scoped, indexed files) |
-| category | D; for indexed files computable from content_type | one of code, prose, paper, or a note's own | DOCUMENT: notes in meta (done); indexed files GENERATED from content_type | 6pfgb.8 (re-scoped) |
+| tags | D; for indexed files computable from extension | a set (Sam, 2026-10-26, RF-17): a JSON array in the document meta, filtered by containment; a comma string is legacy, converted once by 6pfgb.38; absent or `[]` = no tags | DOCUMENT: notes in meta (6pfgb.5 stores the comma string today, RF-20; 6pfgb.38 stores the array and converts existing strings); indexed files: a one-element array stamped at register from the file extension, markdown or pdf where the indexer says so (6pfgb.8, Sam's option A, 2026-10-31), and filled for older documents by backfill-meta from content_type and file_path with no chunk read (nexus-9cstf); the chunk row is the fallback while a document lacks it | 6pfgb.38 (notes), 6pfgb.8 and 9cstf (indexed files) |
+| category | D; for indexed files computable from content_type | one of code, prose, paper, or a note's own | DOCUMENT: notes in meta (done); indexed files: stamped at register as code, prose or paper (6pfgb.8, option A; the repo PDF path says prose where `nx index pdf` says paper, recorded not fixed) and filled for older documents by backfill-meta from content_type and file_path (nexus-9cstf); the chunk row is the fallback while a document lacks it | 6pfgb.8 and 9cstf |
 | ttl_days, put_at | D | ttl_days 0 or absent = permanent in meta (one encoding, 0 as the retraction sentinel); put_at present whenever ttl_days > 0 (CHECK, 6pfgb.44) | DOCUMENT meta (6pfgb.5, .15 done) | done; CHECK 6pfgb.44 |
 | extraction_method, quality_gate_overridden, extraction_source | D | absent = unknown; explicit false for the override | DOCUMENT meta | 6pfgb.6, .16 |
 | frecency_score | D and computation time (`frecency.py` uses now()) | float with a computed_at | DOCUMENT meta with computed_at; the scorer reads the attributed owner | 6pfgb.9 (re-scoped) |
@@ -1080,7 +1094,8 @@ page means the
 iterative scan stopped at `hnsw.max_scan_tuples` or the `work_mem` budget
 (RF-23; nothing signals the stop, the page size is the trigger). This
 extends `exactOnUnderReturn` (nexus-bq06h) from an empty page to a short
-one on this branch only, its recorded residual; the exact branch is
+one on this branch and, as shipped (nexus-6pfgb.61), on every statement
+carrying a manifest predicate, its recorded residual; the exact branch is
 already exact and never re-runs; a dense-branch page is legitimately short
 only when `n_results` exceeds the qualifying live rows, which the probe's
 count rules out before the search (RF-22). The re-run orders the collection without the index (a
@@ -1094,12 +1109,34 @@ predicates per owning document over the admitted chunks (at the document's
 lowest passing position, as today) to name the qualifying owner and its
 labels, and the EXISTS carries the stage's full operator set (`$eq`,
 `$ne`, `$in`, `$nin`, `$gt`, `$gte`, `$lt`, `$lte` on page_number, RF-24),
-negative operators included, so no label predicate is left to the cut; a
-label-only filter has no catalog probe, so its page is never re-run (it
-can be legitimately short) and nexus-p89h4's pin is recall on a rare label
-in a large collection. `category=` is
-one predicate over its two homes like `tags=` (the GENERATED column for
-indexed files, the meta key for notes). Whether a correlated EXISTS under
+negative operators included, so no label predicate is left to the cut. A
+label-only filter has no catalog probe, and its short page is not left
+alone: the shipped engine re-runs it, which is A8's named guard
+(nexus-6pfgb.61). The HNSW walk that carries the manifest predicate stops
+at `hnsw.max_scan_tuples`, so a rare label ranked past the cap yields only
+the rows the walk reached, and a page that is short because the filter
+matches little cannot be told from one the walk cut short. The engine
+therefore re-runs a non-empty page exactly (index scans off) whenever it
+returns fewer than widen(n) rows, the cut the stage asks for
+(`ManifestLabelStage.widen`: 4n, capped at 1200 unless n is larger). The
+trigger is any statement carrying a manifest predicate (labels, title,
+content_type, catalog-meta keys), not label-only filters alone, so a
+positive filter that matches fewer than widen(n) chunks in a collection
+above the router threshold pays the re-run every time. Its cost is bounded
+three ways. A collection of at most 20,000 rows (the router threshold)
+already takes the exact plan, so the re-run is never reached there. Above
+it the re-run is one exact statement, O(collection), run under the
+statement_timeout rebound before it (the review of the shipped engine read
+that as 30 s). And it runs under a savepoint, so a timeout or any other
+failure returns the page in hand and logs `vector_short_page_rerun_failed`
+instead of failing the search. Each re-run is counted by a process-wide
+counter and logged with tenant, collection and its own milliseconds. The
+cost was measured only at 21k rows (17 us a row, so about 3.5 s at 200k
+and 10 s at 600k by extrapolation), not on A8's far-query shape.
+nexus-p89h4's pin is recall on a rare label in a large collection.
+`category=` is one predicate over its two homes like `tags=` (the meta key
+for notes and for indexed files, with the row fallback while a document
+lacks the key). Whether a correlated EXISTS under
 `hnsw.iterative_scan` fills a page for a far query is A8. The
 pre-filter reuses hybrid's dispatch with the catalog as the gate: resolve
 the qualifying documents from `catalog_documents` and its meta, collect
@@ -1111,12 +1148,14 @@ none (the catalog title always exists); `source_author=` admits a document
 whose catalog author is empty when any of its rows carries the row value
 (the stage's own rule, because markdown authors predate their catalog home
 until .7's backfill, RF-24); content_type=pdf or markdown
-admits a document whose `source_format` is absent when any of its rows
-carries the row value (the same presence fallback as the stage, paid once
-per candidate document); meta keys fall back to the row the same way while
+is `nexus.catalog_source_format(content_type, file_path)` of the candidate
+document (the stored `source_format` meta key carries the same value and is
+not read) and admits a document the function derives nothing for when any
+of its rows carries the row value (the same presence fallback as the
+stage, paid once per candidate document); meta keys fall back to the row the same way while
 the key is absent; `tags=` is one containment test over both tag homes
-(the meta array for notes, the GENERATED one-element array for indexed
-files; 6pfgb.38), so a note tagged arch and decision matches `tags=arch`;
+(the meta array: any number of tags for a note, one for an indexed file;
+6pfgb.38), so a note tagged arch and decision matches `tags=arch`;
 while a note's meta still holds a legacy comma string, or the row fallback
 applies, the string is split before the test. indexed_at and the non-id
 bib_* keys (year, venue, citation count: range or dense filters) stay with
@@ -1185,9 +1224,30 @@ document whose single-owner rows disagree on a value is residue, not
 filled. Position labels (nexus-1nrcu) copy only when the chash has exactly
 one manifest row in the tenant, not one live owner (RF-16: 4976 groups in
 1752 documents recur inside their own document). tags, category and
-source_format for indexed documents are not backfilled at all: they are
-GENERATED columns (expressions under Phase 1's "Moved to Phase 3" item).
-The tags the verb does fill for notes, from a row's comma string, are
+source_format for indexed documents are stamped at register time and filled
+for older documents by this same verb (`nx catalog backfill-meta`), fill-only
+and each key by its own presence. They are derived from the entry's
+content_type and file_path alone, so no chunk row is read and no ownership
+is judged. source_format (nexus-6pfgb.23) is
+`indexed_meta.catalog_source_format`, the Python copy of the engine's
+`nexus.catalog_source_format`; its residue reasons are `no_rule` and
+`no_file_path`. tags and category (nexus-9cstf) go through the register-time
+rules (`document_register_meta`, and `pdf_register_meta` for a catalog type
+`paper` at a `.pdf` path, which is what `nx index pdf` registers; `pdf` is
+what the repo PDF path registers). A key the rule cannot settle is residue
+with its reason and is never guessed, because a fill-only write is
+permanent: `ambiguous_indexer` (the tags of a prose or rdr file that is not
+`.md` or `.markdown`, where the repo pass tags the extension, `nx index md`
+tags `markdown` and the entry cannot say which ran; and both keys of a prose
+or rdr file at a `.pdf` path, where `nx index pdf` would have stamped
+`paper`), `not_pdf_path` (both keys of a `paper` whose path is not `.pdf`),
+`no_extension` (the tags of a file with no extension), `no_file_path` (an
+entry with no path, such as a `paper` that is an `nx catalog backfill`
+placeholder) and `no_rule` (any other content type, `markdown` included).
+The engine's chunk-row fallback for a `where` on these keys stays until the
+row keys retire. A re-index later fills tags and category only when the key
+is empty, and keeps a non-empty curated value (Sam, 2026-11-01,
+nexus-3ax49). The tags the verb does fill for notes, from a row's comma string, are
 written as the array (6pfgb.38's form), never as the string. The run asserts it examined at least one document; the
 first live run's counts go on the bead. The backfill, the expiry sweep and the export share the two
 helpers in `note_ttl.py` that implement option B (`row_written_by` for
@@ -1358,7 +1418,7 @@ diverged key table fails CI.
       are adjacent and keep their beads (all four closed 2026-10-27 UTC,
       RF-22).
 - [ ] Bead descriptions updated to this RDR's decisions at acceptance: .8
-      and .23 (GENERATED columns, not stamped meta keys), .25 and .29 (the
+      and .23 (stored meta keys stamped at register, not GENERATED columns; option A, amended 2026-11-01), .25 and .29 (the
       pre-filter, not the post-search stage), .26 (the flattened line
       fields from the manifest; it stays on the stage), .9 (computed_at),
       .27, .10 (fill-only with the tags conversion exempt; writes the tags
@@ -1381,7 +1441,7 @@ diverged key table fails CI.
 - [x] Sam's ruling on the tags domain (string matched by equality, or a
       set) before 6pfgb.8 and the pre-filter land: a set (2026-10-26,
       RF-17). The design changes the schema analysis forced (CHECKs behind
-      the Java allow-list, GENERATED derived columns, frecency computed_at,
+      the Java allow-list, GENERATED derived columns (replaced 2026-11-01 by stored meta keys, option A), frecency computed_at,
       authorship by full row key, one manifest row for 1nrcu, the .26
       re-scope) are accepted (Sam, 2026-10-26, RF-17).
 
@@ -1450,38 +1510,33 @@ this lands.
   the display following (.38); notes write label keys on their manifest
   rows (jz86a); labels backfilled for chashes with exactly one manifest row
   written before catalog-046 (1nrcu, re-scoped from one owner).
-- Moved to Phase 3 because they are engine changesets: indexed documents'
-  tags and category (.8) and source_format (.23) become GENERATED columns
-  on `catalog_documents` from content_type and file_path, never stored
-  meta keys (schema analysis, 3NF); the client reads them like any column.
-  Expressions, written from the indexers' constants (RF-11) and the
-  register values (RF-20), pinned by a test comparing the generated values
-  with what each indexer writes on a fixture that holds every case below,
-  the extension deciding before content_type (the register sites write
-  the catalog content_types code, prose, rdr, pdf, paper and knowledge,
-  RF-20; `orphan_backfill` derives one from the collection prefix for a
-  synthesized document, `docs` among them, RF-23; a value outside the
-  rules below yields NULL and is counted): `source_format`
-  is `pdf` for the pdf extension or content_type pdf or paper, `markdown`
-  for the md or markdown extension (`prose_indexer` routes both to the
-  markdown chunker, RF-22) whatever the content_type, so an rdr or
-  prose-registered `.md` file is markdown, `code` for content_type code,
-  `prose` for any other prose or rdr file, NULL for knowledge (notes have
-  no file); `category` is `code` for code, `paper` for paper, `prose` for
-  pdf (the repo PDF path's constant), prose and rdr, NULL for knowledge;
-  `tags` is `["markdown"]` for the md or markdown extension, `["pdf"]` for
-  the pdf extension or content_type pdf or paper, otherwise the one-element
-  array of the lower-cased, dot-stripped extension for code and prose (what
-  `code_indexer` and `prose_indexer` write, RF-23; rdr files are `.md`, so
-  the markdown rule covers them), NULL for knowledge and for a file with no
-  extension (the indexers write the empty string there, `ext.lstrip(".")`
-  of an empty suffix, so the fixture pin reads "" and NULL as equal,
-  RF-24). A document with no
-  extension to read (DEVONthink records keep their on-disk file_path,
-  RF-20, so they have one) comes out NULL and is counted by the Step 3
-  precondition before the row fallback goes.
+- Indexed documents' source_format (.23), tags and category (.8) are
+  stored meta keys, stamped at register time by every indexer: client-only,
+  so Phase 1, not the engine changesets this bullet first named (Sam's
+  option A, 2026-10-31, replacing the GENERATED columns of RF-17 and the
+  schema analysis). `src/nexus/catalog/indexed_meta.py` is the one place
+  that states them, mirroring the row writers (RF-11) and the register
+  values (RF-20). `source_format` is `catalog_source_format(content_type,
+  file_path)`, the copy of the engine's `nexus.catalog_source_format`
+  (vectors-043): `pdf` for the pdf extension or content_type pdf or paper,
+  `markdown` for the md or markdown extension whatever the content_type,
+  `code` for code, `prose` for prose or rdr, nothing otherwise. `category`
+  is `code` for code, `paper` for what `nx index pdf` registers, and
+  `prose` for prose, rdr, markdown and the repo PDF path. `tags` is a
+  one-element array: `markdown` for a markdown file indexed through the
+  markdown path, `pdf` for a PDF, otherwise the lower-cased dot-stripped
+  extension for code and prose (what `code_indexer` and `prose_indexer`
+  write, RF-23). A file with no extension, a knowledge note and a pair the
+  rules derive nothing for send no key, and an empty value is never sent,
+  because the catalog merges meta and an explicit empty overwrites. The
+  two extension rules differ for a name such as `a..md` (`tags` reads
+  `Path.suffix`, `source_format` the engine's regex); the module records
+  it. A test pins the Python copy against the hand-written answers of the
+  engine's parity matrix.
 - The backfill verb (.10), after the homes above, with the first live
-  run's counts on the bead.
+  run's counts on the bead; its fill of source_format (.23) and of tags and
+  category (nexus-9cstf) for indexed documents is described under
+  Proposed Solution.
 
 ### Phase 2: Readers to the catalog and the manifest (client-only)
 
@@ -1515,9 +1570,10 @@ this lands.
   and source_uri on a search row from one owner, deterministic and
   collection-scoped (.26, re-scoped: the citation span is already the
   chash form and text-determined; what moves is line_start, line_end and
-  file:line, read from the manifest once per window); the GENERATED
-  columns source_format, and tags and category for indexed files (.8,
-  .23); the meta keys by the pre-filter once Phase 1 writes them and the
+  file:line, read from the manifest once per window); no GENERATED
+  columns for source_format, tags and category of indexed files (.8 and
+  .23 stamp them as meta keys in Phase 1, option A; the engine derives
+  source_format from content_type and file_path, vectors-043); the meta keys by the pre-filter once Phase 1 writes them and the
   backfill has run (.29, re-scoped the same way); route (b) SQL functions
   get the dispatch as their own designed and sized bead after route (a)
   (.41); route (b) position labels and route (c) get (u9dc5); a cap on
@@ -1666,8 +1722,9 @@ the dry run reports rows per tenant and the live run reports the measured
 cost of its first batch before continuing. Pin: a legacy-keyed row is still upserted after
 the Step 2c cut and before the sweep. Dry run first, counts on the bead. Precondition, counted by the engine per tenant on each install and enforced by the sweep route for the rung and the operator verb alike: the
 doctor counts of legacy-label manifest rows, keyless notes (no `put_at`),
-home-less documents, NULL-span manifest rows and indexed documents whose
-GENERATED columns are NULL are zero or each residue is accepted; the
+home-less documents, NULL-span manifest rows and indexed documents missing a
+stored source_format, tags or category key (the residue backfill-meta
+reports) are zero or each residue is accepted; the
 engine's manifest-less census reads zero `legacy-unmanifested` (`nx t3
 census-manifest-less --all --require-zero legacy-unmanifested`), because
 the census's forward join, the rdr192 rung and `manifest_backfill.py`
@@ -1677,7 +1734,7 @@ bucket blocks the sweep for its collection, which the sweep route skips
 and the count excludes; the two uncensused equalities of the dependency
 table count zero violations; the engine reports the Phase 3 capabilities
 the sweep relies on (the pre-filter route, the route (b) dispatch of .41
-and u9dc5, the GENERATED columns), the countable form of "every Phase 3
+and u9dc5, the manifest search's meta-first answer for tags and category), the countable form of "every Phase 3
 bead is deployed", because route (b) evaluates `c.metadata @> p_where` on
 the row until then (RF-3). The preconditions are the sweep route's own
 checks, counted by the engine per tenant, so the rung and the operator
@@ -1691,25 +1748,27 @@ added NOT VALID and VALIDATEd through the two table-wide routes
 6pfgb.42's and 6pfgb.44's own steps. A doctor row counts rows still
 carrying retired keys, not-applicable on a virgin box.
 
-### Phase 5: External readers (conexus repository, after the engine cut carrying .8, .23, .25, .29 and .38's engine half is deployed, before Phase 4 Step 1)
+### Phase 5: External readers (conexus repository, after the engine cut carrying .25, .29 and .38's engine half is deployed and the .8 and .23 stamps and backfill-meta have run, before Phase 4 Step 1)
 
 conexus-wd1q (filed 2026-10-26, gated ahead of the engine redeploy that
 follows Step 1). Lower bound: the gate's twelve queries filter on indexer
 constants of indexed files (RF-13), whose tags and category are the
-GENERATED columns of .8 and .23, never backfilled and absent only where
-the Step 3 NULL count reads non-zero (a file with no extension, a value
-outside the rules), so that count runs on the gate tenants before Phase 5
+stored meta keys of .8 (stamped at register, filled by backfill-meta,
+nexus-9cstf) and absent only where the backfill's residue reads non-zero
+(`no_extension`, `no_file_path`, `no_rule`, `ambiguous_indexer`,
+`not_pdf_path`), so that residue count runs on the gate tenants before Phase 5
 and confirms the papers and rdr content_type values RF-13 left
 unconfirmed; `tags=` and `category=` are answered on route (a) by the
 containment predicate of .38's engine half and by .29, so Phase 5 lands
-after the engine cut carrying .8, .23, .25, .29 and .38's engine half is
-deployed on the gated tenant; its recall SQL reads the generated columns
-and applies the row fallback only to the NULL residue that count names.
+after the engine cut carrying .25, .29 and .38's engine half is deployed
+on the gated tenant and the stamps and backfill-meta have run there; its
+recall SQL reads the document meta keys and applies the row fallback only
+to the residue that count names.
 Parity gate: the engine leg keeps its where strings (route
 (a) answers them from the catalog after Phase 3); the recall leg's raw SQL
 joins `catalog_document_chunks` and `catalog_documents` for category and
 tags, counting chunks through the manifest since chashes recur across
-collections; the two tag filters read the generated tags column.
+collections; the two tag filters read the stored tags meta key.
 `livec_findings.sql` reads the catalog title or file_path
 in place of the regexp-stripped row title; its superseded-residue
 predicate on indexed_at is redesigned over the manifest join (which side
@@ -1724,7 +1783,7 @@ against a Phase 3 engine is A6's spike.
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | catalog meta keys (tags as an array, category, ttl_days, put_at, source_agent, extraction_*, frecency_score with computed_at) | In scope (`nx catalog show`) | In scope | N/A (document lifecycle) | In scope (doctor: documents missing a home key after backfill, keyless notes) | In scope (recovery bundle exports them, 6pfgb.14, the array by 6pfgb.38) |
-| GENERATED columns (source_format; indexed files' tags and category) | In scope (`nx catalog show`, like any column) | In scope | N/A (computed) | In scope (doctor: indexed documents whose generated values are NULL) | N/A (recomputed) |
+| stored derived keys (source_format; indexed files' tags and category) | In scope (`nx catalog show`, in the meta) | In scope | N/A (document lifecycle) | In scope (the backfill-meta dry run reports the residue by reason; doctor: indexed documents missing a key) | N/A (re-derivable by backfill-meta, fill-only) |
 | the key table and its generated Java set | In scope (the module) | In scope | N/A | In scope (CI pin) | git |
 | the would-refuse log | In scope (engine route or SQL view) | In scope | Ages out | In scope (empty before 2c) | N/A |
 | retired keys on existing rows | In scope (doctor count) | N/A | In scope (Step 3 sweep, dry run first) | In scope (doctor row) | N/A |
@@ -2030,3 +2089,22 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   6pfgb.24 facts are corrected; A7 restated per kind under Sam's .35
   ruling; note TTL lifecycle, chunker split, phase order, MVV fixtures and
   register terms fixed.
+- 2026-11-01: amended at Sam's ruling ("Amend it", nexus-xrfev), two
+  changes and no decision changed. (1) Every claim that source_format, and
+  indexed files' tags and category, are GENERATED columns on
+  `catalog_documents` now describes what shipped, Sam's option A
+  (2026-10-31): stored keys in the entry's `meta`, stamped at register time
+  (nexus-6pfgb.8 for tags and category, .23 for source_format) and filled
+  fill-only by `nx catalog backfill-meta` (source_format by .23; tags and
+  category by nexus-9cstf, with its residue reasons), a re-index filling
+  tags and category only when the key is empty (nexus-3ax49); the key table,
+  the denormalization table, the backfill paragraph, Phases 1, 3 and 5 and
+  Day 2 follow the key table `chunk-metadata-keys.toml`. This revision
+  history, the Contradiction Check round record and the Finalization Gate
+  record keep the GENERATED wording as the record of what each round saw.
+  (2) The Proposed Solution's statement that a label-only page is never
+  re-run now describes the shipped engine, which re-runs any page carrying
+  a manifest predicate that returns fewer than widen(n) rows (A8's named
+  guard, nexus-6pfgb.61), with its cost bound (router-exact route at or
+  below 20,000 rows never re-runs; rebound statement timeout; savepoint
+  fallback). Beads nexus-xrfev, nexus-9cstf, nexus-3ax49.
