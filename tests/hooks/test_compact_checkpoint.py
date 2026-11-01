@@ -37,6 +37,7 @@ from pathlib import Path
 import pytest
 
 from tests._module_seam import setattr_in
+from tests._platform import IS_WINDOWS, WINDOWS_SHEBANG, install_windows_exe_fake, scrubbed_env
 
 SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "compact_checkpoint.py"
 HOOKS_JSON = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "hooks.json"
@@ -719,25 +720,29 @@ class TestScript:
         text = SCRIPT.read_text(encoding="utf-8")
         assert "sys.exit(2" not in text and "exit(2" not in text and '"decision"' not in text and "'block'" not in text
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="the stand-in is a POSIX executable")
     def test_end_to_end_as_hooks_json_launches_it(self, tmp_path: Path) -> None:
-        """A real subprocess: nx found through PATH, config through the env, exit 0, three modes."""
+        """A real subprocess: nx found through PATH, config through the env, exit 0, three modes.
+        On Windows the stand-in is a real nx.exe (the plugin's PATH lookup refuses .cmd) and the
+        env keeps SYSTEMROOT, without which the child cannot import asyncio (nexus-qowvl)."""
         bindir = tmp_path / "bin"
         bindir.mkdir()
-        nx = bindir / "nx"
-        nx.write_text(f"#!{sys.executable}\n{_STANDIN}", encoding="utf-8")
-        nx.chmod(0o755)
+        if IS_WINDOWS:
+            install_windows_exe_fake(bindir, "nx", f"{WINDOWS_SHEBANG}\n{_STANDIN}")
+        else:
+            nx = bindir / "nx"
+            nx.write_text(f"#!{sys.executable}\n{_STANDIN}", encoding="utf-8")
+            nx.chmod(0o755)
         claude = tmp_path / "claude"
         (claude / "sessions").mkdir(parents=True)
         (claude / "sessions" / "1.json").write_text(json.dumps({"sessionId": SID, "name": NAME}), encoding="utf-8")
-        env = {
+        env = scrubbed_env(**{
             "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
             "HOME": str(tmp_path / "home"),
             "NEXUS_CONFIG_DIR": str(tmp_path / "config"),
             "CLAUDE_CONFIG_DIR": str(claude),
             "NX_TOOLS_DIR": str(tmp_path / "no-tools"),
             "FAKE_NX_LOG": str(tmp_path / "nx.log"),
-        }
+        })
 
         def launch(mode: str, payload: dict | str) -> subprocess.CompletedProcess:
             return subprocess.run(
@@ -748,6 +753,8 @@ class TestScript:
         pre = launch("pre", pre_payload())
         assert pre.returncode == 0 and pre.stdout == "", pre.stderr
         assert (tmp_path / "config" / "compact-checkpoints" / f"{SID}.md").is_file()
+        # The script exits 0 whatever happens, so prove the PATH lookup reached the stand-in.
+        assert (tmp_path / "nx.log").read_text(encoding="utf-8").strip(), "nx was never launched"
         post = launch("post", {"session_id": SID, "compact_summary": "nexus-3lqxv"})
         assert post.returncode == 0 and post.stdout == ""
         inject = launch("inject", {"session_id": SID, "source": "compact"})
