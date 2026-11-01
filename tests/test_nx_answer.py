@@ -1206,6 +1206,19 @@ class TestPlanLibraryMetrics:
         assert row["failure_count"] == 1
 
 
+# Reads a module constant and needs no tenant (nexus-8g2tl): kept out of the t2_tenant-marked class
+# below so the storage-touch ratchet counts only tests that reach storage.
+class TestPlannerToolReference:
+
+    def test_planner_tool_reference_offers_check_and_verify(self):
+        """The allowlist change is reachable only if the planner is told the steps exist: the
+        tool reference documents both, with the verify claim contract."""
+        from nexus.mcp.core import _PLANNER_TOOL_REFERENCE
+
+        assert "check(check_instruction" in _PLANNER_TOOL_REFERENCE
+        assert "verify(claim" in _PLANNER_TOOL_REFERENCE
+
+
 # ── Plan-miss planner (uses claude_dispatch, no pool) ─────────────────────────
 
 
@@ -1285,6 +1298,36 @@ class TestPlanMissPlanner:
 
         plan = json.loads(match.plan_json)
         assert all(s["tool"] == "search" for s in plan["steps"])
+
+    @pytest.mark.asyncio
+    async def test_plan_miss_keeps_check_and_verify_in_every_spelling(self):
+        """RDR-189 P1 (nexus-z1d0l.1.4): the witness steps are dispatchable, so the inline
+        planner keeps them whether it writes the bare name, ``operator_*`` or the full MCP
+        name, and none is dropped with a ``planner_step_dropped`` warning."""
+        from structlog.testing import capture_logs
+
+        from nexus.mcp.core import _nx_answer_plan_miss
+        import nexus.operators.dispatch as _dispatch_mod
+
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
+            return {"steps": [
+                {"tool": "search", "args": {"query": "$intent"}},
+                {"tool": "check", "args": {"ids": "$step1.ids", "check_instruction": "consistent?"}},
+                {"tool": "operator_check", "args": {"ids": "$step1.ids", "check_instruction": "again?"}},
+                {"tool": "verify", "args": {"ids": "$step1.ids", "claim": "c"}},
+                {"tool": "operator_verify", "args": {"ids": "$step1.ids", "claim": "d"}},
+                {"tool": "mcp__plugin_conexus_nexus__operator_check", "args": {"ids": "$step1.ids", "check_instruction": "e"}},
+                {"tool": "mcp__plugin_conexus_nexus__operator_verify", "args": {"ids": "$step1.ids", "claim": "f"}},
+            ]}
+
+        with capture_logs() as cap, patch.object(_dispatch_mod, "claude_dispatch", fake_dispatch):
+            match = await _nx_answer_plan_miss("is X consistent across the papers")
+
+        plan = json.loads(match.plan_json)
+        assert [s["tool"] for s in plan["steps"]] == [
+            "search", "check", "check", "verify", "verify", "check", "verify",
+        ]
+        assert not [e for e in cap if e.get("event") == "planner_step_dropped"]
 
     @pytest.mark.asyncio
     async def test_plan_miss_normalizes_mcp_prefix(self):

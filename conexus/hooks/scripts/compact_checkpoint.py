@@ -22,8 +22,10 @@ half of a session lives there and a hook cannot write it), the branch and HEAD, 
 in-progress beads, the uncommitted files, the open PRs and the recent commits from
 ``nx command-context continuation``. Ready beads and memory titles are not kept: the
 SessionStart group that runs on the same event already injects them. Continuation runs
-in the worktree named after the session when the launch directory's repository has one
-(the payload ``cwd`` is the launch directory, usually the shared primary checkout), and
+in the session's worktree when the launch directory's repository has one: a worktree
+named ``<session>`` or ``<session>-<topic>``, the one whose branch carries a board ``ref:``
+bead when several match, else the most recently active, with the others listed (the
+payload ``cwd`` is the launch directory, usually the shared primary checkout), and
 the in-progress list keeps only the beads the board entry names, because every session
 claims beads under one assignee (both measured on halcyon's first live compaction,
 2026-11-01).
@@ -107,6 +109,8 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _BEAD_ID_RE = re.compile(r"\bnexus-[0-9a-z]{5}(?![0-9a-z])(?:\.\d{1,3})?")
 #: A ``bd list`` row: optional tree glyphs, a status glyph, then the bead id (any prefix).
 _BD_ROW_RE = re.compile(r"^[\s│├└─]*[○◐●✓❄]\s+([a-z][a-z0-9_]*(?:-[a-z0-9_]+)*-[0-9a-z]{2,}(?:\.\d+)*)\s")
+#: A bead id of any repo's prefix in a board ``ref:`` line (``nexus-v1929``, ``labrun-56v.1``).
+_REF_ID_RE = re.compile(r"\b[a-z][a-z0-9_]*-[0-9a-z]{3,}(?:\.\d+)*")
 _WRITTEN_RE = re.compile(r"(?m)^- written: (\S+)\s*$")
 _TRIGGER_RE = re.compile(r"(?m)^- trigger: (.{1,32})$")
 #: Subsections of the continuation output that are not kept: the same-event SessionStart
@@ -327,8 +331,11 @@ def _board_entry(name: str, cwd: str | None, timeout: float) -> tuple[str, str |
     return _run_nx(["memory", "get", entry_id, "--project", _BOARD_PROJECT], cwd, left)
 
 
-def _git_worktrees(cwd: str | None, timeout: float) -> list[str]:
-    """Paths of the worktrees of the repository at *cwd* (``git worktree list``). Never raises."""
+def _git_worktrees(cwd: str | None, timeout: float) -> list[tuple[str, str]]:
+    """``(path, branch)`` for each worktree of the repository at *cwd* (``git worktree list``).
+
+    *branch* is the short branch name, or ``""`` for a detached or bare worktree. Never raises.
+    """
     git = _cli_lookup.resolve("git")
     if not cwd or not os.path.isdir(cwd) or not git:
         return []
@@ -344,25 +351,109 @@ def _git_worktrees(cwd: str | None, timeout: float) -> list[str]:
         tail = (result.stderr or "").strip().splitlines()[-1:] or [""]
         _log("WARNING", f"pre: `git worktree list` exited {result.returncode}: {tail[0][:200]}")
         return []
-    return [ln[len("worktree "):].strip() for ln in result.stdout.splitlines() if ln.startswith("worktree ")]
+    rows: list[tuple[str, str]] = []
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            rows.append((line[len("worktree "):].strip(), ""))
+        elif line.startswith("branch ") and rows:
+            rows[-1] = (rows[-1][0], line[len("branch "):].strip().removeprefix("refs/heads/"))
+    return rows
 
 
-def _session_worktree(name: str | None, cwd: str | None) -> str | None:
-    """The worktree named after the session (``../nexus-wt/<session>``), or ``None``.
+def _last_active(path: str) -> float:
+    """When the worktree last moved: the newest mtime of its git dir's ``logs/HEAD``, ``HEAD``
+    and ``index`` (a commit, a checkout, a stage). Reads the ``.git`` pointer file, so no git
+    process is spawned. ``0.0`` when none can be read."""
+    try:
+        pointer = (Path(path) / ".git").read_text(encoding="utf-8", errors="replace").strip()
+    except (OSError, ValueError):  # ValueError: a NUL in the path
+        return 0.0
+    if not pointer.startswith("gitdir:"):
+        return 0.0
+    gitdir = Path(pointer[len("gitdir:"):].strip())
+    if not gitdir.is_absolute():
+        gitdir = Path(path) / gitdir
+    newest = 0.0
+    for leaf in ("logs/HEAD", "HEAD", "index"):
+        try:
+            newest = max(newest, (gitdir / leaf).stat().st_mtime)
+        except (OSError, ValueError):  # ValueError: a NUL in the pointer
+            continue
+    return newest
+
+
+#: The most other-worktree lines a checkpoint header lists; the rest are counted.
+_OTHER_WORKTREES_SHOWN = 5
+
+
+def _session_worktrees(
+    name: str | None, cwd: str | None, board: str = "",
+) -> tuple[str | None, list[tuple[str, str, float]]]:
+    """The session's worktree and the other candidates, as ``(chosen, others)``.
 
     The payload's ``cwd`` is where the session was launched, which for a session that works
     in its own worktree is the shared primary checkout: its branch and HEAD are not the
-    session's. Only a worktree whose directory name is exactly the session name counts.
+    session's. A worktree is a candidate when its directory is named after the session,
+    ``<name>`` or ``<name>-<topic>`` (``nexus-wt/marlowe-owner-onestmt``); ``linda_2`` is
+    not a topic of ``linda``. Candidates rank by, in order:
+
+    1. the launch ``cwd`` is inside it (a session started in its own worktree);
+    2. the board entry names its path (``nexus-wt/marlowe-rdr189-p13``);
+    3. its branch carries a bead a board ``ref:`` line names, or a child of one (the
+       convention is ``feature/<bead-id>-<slug>``; ``ref: nexus-z1d0l.1`` names
+       ``feature/nexus-z1d0l.1.3-x``, and ``ref: nexus-z1d0l.1.3`` does not name
+       ``feature/nexus-z1d0l.1-x``);
+    4. its directory is exactly ``<name>`` (7.92.0's only rule);
+    5. it was active most recently (:func:`_last_active`).
+
+    The rest come back as ``(path, branch, last_active)`` so the checkpoint can list them.
+    Never raises: a failure keeps the launch directory.
     """
     if not name:
-        return None
+        return None, []
     try:
-        for path in _git_worktrees(cwd, _GIT_TIMEOUT_S):
-            if Path(path).name == name and os.path.isdir(path):
-                return path
+        candidates = [
+            (path, branch) for path, branch in _git_worktrees(cwd, _GIT_TIMEOUT_S)
+            if (Path(path).name == name or Path(path).name.startswith(name + "-")) and os.path.isdir(path)
+        ]
+        if not candidates:
+            return None, []
+        refs = "\n".join(ln for ln in board.splitlines() if re.match(r"^\s*ref:", ln))
+        ref_ids = {m.group(0) for m in _REF_ID_RE.finditer(refs)}
+        launch = os.path.realpath(cwd) if cwd else ""
+
+        def inside(path: str) -> bool:
+            real = os.path.realpath(path)
+            return bool(launch) and (launch == real or launch.startswith(real + os.sep))
+
+        def path_named(path: str) -> bool:
+            return re.search(rf"[/\\]{re.escape(Path(path).name)}(?![\w-])", board) is not None
+
+        def ref_named(branch: str) -> bool:
+            return any(re.search(rf"(?:^|/){re.escape(bead)}(?:$|[-/.])", branch) for bead in ref_ids)
+
+        ranked = sorted(
+            ((path, branch, _last_active(path)) for path, branch in candidates),
+            key=lambda row: (inside(row[0]), path_named(row[0]), ref_named(row[1]), Path(row[0]).name == name, row[2]),
+            reverse=True,
+        )
     except Exception as exc:  # noqa: BLE001 -- a lookup failure keeps the launch directory, never the checkpoint
         _log("WARNING", f"pre: worktree lookup failed: {type(exc).__name__}: {exc}")
-    return None
+        return None, []
+    return ranked[0][0], ranked[1:]
+
+
+def _other_worktree_lines(others: list[tuple[str, str, float]]) -> list[str]:
+    """Header lines for the candidates not chosen, newest first, capped."""
+    lines = []
+    for path, branch, active in sorted(others, key=lambda row: row[2], reverse=True)[:_OTHER_WORKTREES_SHOWN]:
+        when = datetime.fromtimestamp(active, timezone.utc).strftime("%Y-%m-%dT%H:%MZ") if active else "unknown"
+        lines.append(f"- other worktree: {path} [{branch or 'detached'}], last active {when}")
+    if len(others) > _OTHER_WORKTREES_SHOWN:
+        lines.append(f"- other worktrees: {len(others) - _OTHER_WORKTREES_SHOWN} more not listed")
+    if others:
+        lines.append("- worktree choice: if it is wrong, read the right worktree's git state before acting")
+    return lines
 
 
 def _named_exactly(token: str, text: str) -> bool:
@@ -435,23 +526,21 @@ def run_pre(payload: dict) -> None:
     trigger = str(payload.get("trigger") or "unknown")[:32]
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
     name = _session_name(session_id)
-    worktree = _session_worktree(name, cwd)
-    if worktree:
-        cwd = worktree
-
-    state, error = _run_nx(["command-context", "continuation"], cwd, _NX_TIMEOUT_S)
-    if error:
-        _log("WARNING", f"pre: {error}")
+    # The board is read first: its ref: lines choose between the session's worktrees.
     board = ""
     board_error: str | None = None
     if name:
-        left = _TOTAL_BUDGET_S - (time.monotonic() - started)
-        if left > 1.0:
-            board, board_error = _board_entry(name, cwd, min(_BOARD_TIMEOUT_S, left))
-        else:
-            board_error = "no time left for the board lookup"
+        board, board_error = _board_entry(name, cwd, _BOARD_TIMEOUT_S)
         if board_error:
             _log("WARNING", f"pre: board entry for {name!r}: {board_error}")
+    worktree, other_worktrees = _session_worktrees(name, cwd, board)
+    if worktree:
+        cwd = worktree
+
+    left = _TOTAL_BUDGET_S - (time.monotonic() - started)
+    state, error = _run_nx(["command-context", "continuation"], cwd, max(1.0, min(_NX_TIMEOUT_S, left)))
+    if error:
+        _log("WARNING", f"pre: {error}")
 
     parts = [
         "# Compaction checkpoint\n",
@@ -463,8 +552,9 @@ def run_pre(payload: dict) -> None:
         parts.append(f"{_NAME_LINE}{name}")
     if worktree:
         parts.append(f"- worktree: {worktree}")
+        parts.extend(_other_worktree_lines(other_worktrees))
     elif name:
-        parts.append(f"- worktree: none named {name}; the working state is the launch directory's")
+        parts.append(f"- worktree: none named {name} or {name}-*; the working state is the launch directory's")
     parts.append("")
     if name:
         parts.append(f"## Threads board entry ({_BOARD_PROJECT}/{name})\n")

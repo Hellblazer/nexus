@@ -12,7 +12,7 @@ The core insight: complex features are bigger than what fits in working memory, 
 2. `/conexus:rdr-research add <id>`: appends a finding with an evidence classification tag
 3. `/conexus:rdr-gate <id>`: runs 3-layer validation (structure check, assumption audit, AI critique). Acceptance requires a PASSED gate (`accept` row of `src/nexus/tables/rdr-lifecycle.toml`); a draft that shipped without one closes via `close-unaccepted` with a stated reason.
 4. `/conexus:rdr-accept <id>`: locks the decision, sets status to Accepted
-5. `/conexus:rdr-close <id> --reason implemented`: archives the RDR, creates a post-mortem template, indexes to T3
+5. `/conexus:rdr-close <id> --reason implemented`: archives the RDR, creates a post-mortem template, and stores the post-mortem in the knowledge store
 
 Steps 3–5 add rigor for high-stakes decisions. For a straightforward bug fix, steps 1–2 plus writing the solution may be all you need.
 
@@ -191,7 +191,7 @@ The gate either **BLOCKS** or **PASSES**. No conditional outcomes. Rounds 1 and 
 
 ## Fix (`/conexus:rdr-fix`)
 
-The step between a gate's findings and the next gate. Prints the findings with the sites where each fact lives, the diff and fix commits since the gated commit, and the title the pre-edit research entry will get. A fix changes the fact the critic named and nothing else; every added clause carries a quote read by a tool or is marked as inferred; a count or a universal needs a census, not a spot read. The research entry is recorded before the edit, and the fix check runs on the committed diff before any re-gate. Session start names any draft RDR whose file has moved past its gated commit.
+The step between a gate's findings and the next gate. Prints the findings with the sites where each fact lives, the diff and fix commits since the gated commit, and the title the pre-edit research entry will get. After a PASSED gate, only the findings the user names are fixed; a fix for a Significant adds no new design; and a fix round gets one fix check over its whole range. A fix changes the fact the critic named and nothing else; every added clause carries a quote read by a tool or is marked as inferred; a count or a universal needs a census, not a spot read. The research entry is recorded before the edit, and the fix check runs on the committed diff before any re-gate. Session start names any draft RDR whose file has moved past its gated commit.
 
 ## Accept (`/conexus:rdr-accept`)
 
@@ -207,7 +207,7 @@ Finalizes an Accepted RDR. Requires status Accepted; a draft that shipped withou
 
 Close reasons: `implemented` · `partial` · `reverted`. (`abandoned` and `superseded` are statuses of their own, not close reasons.)
 
-Closing creates a post-mortem template for drift analysis, indexes the RDR into the `rdr__` collection for permanent semantic retrieval, and updates T2 with the close date and reason. If beads were created during accept, their status is displayed as an advisory. If the [catalog](catalog.md) is initialized, closing also creates typed links: `supersedes` for superseded RDRs, `cites` for referenced research papers.
+Closing creates a post-mortem template for drift analysis, re-indexes the RDR into its `rdr__` collection when its text changed (it is already searchable from `nx index repo`, drafts included), and updates T2 with the close date and reason. If beads were created during accept, their status is displayed as an advisory. If the [catalog](catalog.md) is initialized, closing also creates typed links: `supersedes` for superseded RDRs, `cites` for referenced research papers.
 
 ## Querying RDRs
 

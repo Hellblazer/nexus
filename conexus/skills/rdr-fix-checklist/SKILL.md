@@ -35,7 +35,10 @@ Prose register: `$RDR_DIR/REGISTER.md`, falling back to `$CLAUDE_PLUGIN_ROOT/res
 
 ## Rules
 
-- A fix changes the fact the critic named and nothing else. A gloss, rationale, parenthetical or count is a separate commit with its own fix check.
+- After a PASSED gate, fix only the findings the user names; the rest stay in the critique record, the next gate's Layer 0 does not re-sweep them, and the gate goes to accept.
+- A fix for a Significant adds no new design; a Significant that needs design is left for accept. A Critical in rounds 1 and 2, or a ship-blocker from round 3, is fixed even when its remedy is design.
+- Run one fix check per fix round: batch the round's fix commits and check the whole range once, never once per commit; the re-check after a failed check is the next round's one check.
+- A fix changes the fact the critic named and nothing else. A gloss, rationale, parenthetical or count is a separate commit, covered by the round's fix check.
 - Every clause a fix adds carries a tool-produced quote from its source or the marker "inferred, not read".
 - A count or a universal (never / always / only / nothing / every / the one / all) needs a census of the whole surface, captured in the research entry as an enumeration; two sites that agree are not a source.
 - The research entry is written before the edit; its `commits:` field is filled after the commit exists.

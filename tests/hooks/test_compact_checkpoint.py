@@ -49,6 +49,8 @@ NAME = "linda"
 _STANDIN = textwrap.dedent(
     """
     import os, sys, time
+    # As src/nexus/cli.py does on Windows: a cp1252 pipe cannot encode the bead glyphs.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = sys.argv[1:]
     with open(os.environ["FAKE_NX_LOG"], "a", encoding="utf-8") as log:
         log.write(" ".join(args) + "\\n")
@@ -112,6 +114,8 @@ def env(tmp_path: Path, monkeypatch, mod):
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
     monkeypatch.setenv("FAKE_NX_LOG", str(nx_log))
+    # A Windows pipe's encoding, on every platform, so the stand-in's glyphs fail here as they do there.
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
     monkeypatch.delenv("FAKE_NX_HANG", raising=False)
     monkeypatch.delenv("FAKE_BOARD", raising=False)
     monkeypatch.delenv("FAKE_READY", raising=False)
@@ -168,8 +172,8 @@ class TestPre:
         assert "- written: 20" in text and text.count("+00:00") >= 1  # a UTC stamp
         assert "### In-progress beads" in text and "P2 Auto-continuation" in text
         assert f"## Threads board entry (threads/{NAME})" in text and "state: building" in text
-        assert nx_calls(env) == [
-            "command-context continuation", "memory list --project threads", "memory get 101 --project threads"
+        assert nx_calls(env) == [  # the board first: its ref lines choose the worktree
+            "memory list --project threads", "memory get 101 --project threads", "command-context continuation"
         ]
 
     def test_the_board_entry_comes_first_and_the_kept_sections_follow_in_order(self, mod, env, monkeypatch) -> None:
@@ -259,11 +263,127 @@ class TestPre:
         header = text.split("\n## ", 1)[0]
         assert "- worktree: " in header and header.rstrip().endswith(f"wt/{NAME}")
 
+    @staticmethod
+    def _repo_with_worktrees(tmp_path: Path, worktrees: dict[str, str]) -> Path:
+        """A primary checkout plus one worktree per ``{dir name: branch}``."""
+        primary = tmp_path / "primary"
+        primary.mkdir()
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", "-C", str(primary)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "root"], check=True)
+        for wt, branch in worktrees.items():
+            subprocess.run([*git, "worktree", "add", "-q", "-b", branch, str(tmp_path / "wt" / wt)], check=True)
+        return primary
+
+    @staticmethod
+    def _age(tmp_path: Path, wt: str, seconds_ago: float) -> None:
+        """Set a worktree's git-dir activity stamps (logs/HEAD, HEAD, index) to *seconds_ago*."""
+        pointer = (tmp_path / "wt" / wt / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip()
+        stamp = time.time() - seconds_ago
+        for leaf in ("logs/HEAD", "HEAD", "index"):
+            target = Path(pointer) / leaf
+            if target.exists():
+                os.utime(target, (stamp, stamp))
+
+    def test_a_topic_named_worktree_is_the_sessions(self, mod, env, monkeypatch, tmp_path) -> None:
+        """Sessions name worktrees ``<name>-<topic>`` (``marlowe-owner-onestmt``); 7.92.0 matched only ``<name>``."""
+        primary = self._repo_with_worktrees(tmp_path, {"linda_2": "feature/x", f"{NAME}-3mdmp": "feature/nexus-3mdmp-lease"})
+        monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
+        run(mod, monkeypatch, "pre", pre_payload(cwd=str(primary)))
+        expected = os.path.realpath(tmp_path / "wt" / f"{NAME}-3mdmp")
+        assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == expected
+
+    def test_the_board_ref_chooses_among_several_worktrees(self, mod, env, monkeypatch, tmp_path) -> None:
+        """The board names nexus-3lqxv; its worktree wins over a more recently active one."""
+        primary = self._repo_with_worktrees(tmp_path, {
+            f"{NAME}-old": "feature/nexus-3lqxv-auto-continuation", f"{NAME}-new": "feature/nexus-aaaaa-other",
+        })
+        self._age(tmp_path, f"{NAME}-old", 3600)
+        monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
+        run(mod, monkeypatch, "pre", pre_payload(cwd=str(primary)))
+        assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == os.path.realpath(
+            tmp_path / "wt" / f"{NAME}-old"
+        )
+        header = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8").split("\n## ", 1)[0]
+        assert f"- other worktree: " in header and f"wt/{NAME}-new [feature/nexus-aaaaa-other]" in header
+
+    @pytest.mark.parametrize(
+        ("rows", "active", "board", "cwd", "chosen"),
+        [
+            # a child ref does not name its parent's branch; recency then decides
+            ([("/w/linda-a", "feature/nexus-3lqxv-y"), ("/w/linda-b", "feature/nexus-aaaaa-z")],
+             {"/w/linda-a": 2.0, "/w/linda-b": 1.0}, "ref: nexus-3lqxv.2", "/p", "/w/linda-a"),
+            # a parent ref names its child's branch (marlowe's board: ref nexus-z1d0l.1, branch .1.3)
+            ([("/w/linda-a", "feature/nexus-zzzzz-y"), ("/w/linda-b", "feature/nexus-z1d0l.1.3-x")],
+             {"/w/linda-a": 2.0, "/w/linda-b": 1.0}, "ref: nexus-z1d0l.1", "/p", "/w/linda-b"),
+            # .1 is not .10
+            ([("/w/linda-a", "feature/nexus-z1d0l.10-y"), ("/w/linda-b", "feature/nexus-qqqqq-x")],
+             {"/w/linda-a": 1.0, "/w/linda-b": 2.0}, "ref: nexus-z1d0l.1", "/p", "/w/linda-b"),
+            # the board naming a worktree's path beats a ref match and recency
+            ([("/w/linda-a", "feature/nexus-3lqxv-y"), ("/w/linda-b", "release/v1")],
+             {"/w/linda-a": 2.0, "/w/linda-b": 1.0}, "ref: nexus-3lqxv\nstate: testing in nexus-wt/linda-b", "/p", "/w/linda-b"),
+            # a directory name in prose, not after a path separator, is not a path mention
+            ([("/w/linda-a", "feature/x"), ("/w/linda-b", "feature/y")],
+             {"/w/linda-a": 1.0, "/w/linda-b": 2.0}, "linda-a is waiting", "/p", "/w/linda-b"),
+            # with no board signal, the exact name beats a more recent topic worktree
+            ([("/w/linda", "feature/x"), ("/w/linda-b", "feature/y")],
+             {"/w/linda": 1.0, "/w/linda-b": 2.0}, "", "/p", "/w/linda"),
+            # a session launched inside a worktree keeps it, whatever the board says
+            ([("/w/linda", "feature/nexus-3lqxv-x"), ("/w/linda-b", "feature/y")],
+             {"/w/linda": 2.0, "/w/linda-b": 1.0}, "ref: nexus-3lqxv", "/w/linda-b/src", "/w/linda-b"),
+        ],
+        ids=["child-ref-not-parent", "parent-ref-names-child", "dot1-not-dot10", "path-mention-wins",
+             "bare-name-not-a-path", "exact-beats-recent-topic", "launch-cwd-wins"],
+    )
+    def test_the_worktree_ranking(self, mod, monkeypatch, rows, active, board, cwd, chosen) -> None:
+        monkeypatch.setattr(mod, "_git_worktrees", lambda _cwd, _timeout: rows)
+        monkeypatch.setattr(mod, "_last_active", lambda path: active[path])
+        setattr_in(monkeypatch, mod, "os.path.isdir", lambda _p: True)
+        setattr_in(monkeypatch, mod, "os.path.realpath", lambda p: p)
+        got, others = mod._session_worktrees(NAME, cwd, board)
+        assert got == chosen and [o[0] for o in others] == [r[0] for r in rows if r[0] != chosen]
+
+    def test_the_others_list_is_capped_and_dated(self, mod) -> None:
+        others = [(f"/w/linda-{i}", f"feature/b{i}", 1_000_000.0 + i) for i in range(8)]
+        lines = mod._other_worktree_lines(others)
+        assert len([ln for ln in lines if ln.startswith("- other worktree: ")]) == mod._OTHER_WORKTREES_SHOWN
+        assert lines[0].startswith("- other worktree: /w/linda-7 [feature/b7], last active 1970-01-")
+        assert "- other worktrees: 3 more not listed" in lines and lines[-1].startswith("- worktree choice:")
+        assert mod._other_worktree_lines([]) == []
+
+    def test_a_ranking_failure_keeps_the_launch_directory(self, mod, monkeypatch) -> None:
+        monkeypatch.setattr(mod, "_git_worktrees", lambda _cwd, _timeout: [("/w/linda-a", "x"), ("/w/linda-b", "y")])
+        setattr_in(monkeypatch, mod, "os.path.isdir", lambda _p: True)
+        monkeypatch.setattr(mod, "_last_active", lambda _p: 1 / 0)
+        assert mod._session_worktrees(NAME, "/p", "") == (None, [])
+
+    def test_activity_reads_a_relative_gitdir_pointer_and_survives_a_bad_one(self, mod, tmp_path) -> None:
+        gitdir = tmp_path / "gitdirs" / "wt"
+        (gitdir / "logs").mkdir(parents=True)
+        (gitdir / "logs" / "HEAD").write_text("x", encoding="utf-8")
+        os.utime(gitdir / "logs" / "HEAD", (1_000_000.0, 1_000_000.0))
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text("gitdir: ../gitdirs/wt\n", encoding="utf-8")
+        assert mod._last_active(str(wt)) == 1_000_000.0
+        (wt / ".git").write_text("gitdir: bad\x00path\n", encoding="utf-8")
+        assert mod._last_active(str(wt)) == 0.0
+
+    def test_without_a_board_match_the_most_recent_worktree_wins(self, mod, env, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("FAKE_BOARD", "missing")
+        primary = self._repo_with_worktrees(tmp_path, {f"{NAME}-old": "feature/nexus-v1929-old", f"{NAME}-now": "feature/nexus-bbbbb-now"})
+        self._age(tmp_path, f"{NAME}-old", 7200)
+        monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
+        run(mod, monkeypatch, "pre", pre_payload(cwd=str(primary)))
+        assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == os.path.realpath(
+            tmp_path / "wt" / f"{NAME}-now"
+        )
+
     def test_no_session_worktree_keeps_the_payload_cwd(self, mod, env, monkeypatch, tmp_path) -> None:
         monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
         run(mod, monkeypatch, "pre", pre_payload(cwd=str(tmp_path)))  # not a repository
         assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == os.path.realpath(tmp_path)
-        assert f"- worktree: none named {NAME};" in (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert f"- worktree: none named {NAME} or {NAME}-*;" in (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
 
     @pytest.mark.parametrize(
         ("rows", "board", "kept", "dropped"),

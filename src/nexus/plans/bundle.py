@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BUNDLEABLE_OPERATORS",
     "OPERATOR_BUNDLE_NAMES",  # legacy alias — see BUNDLEABLE_OPERATORS
+    "WITNESS_OPERATORS",
     "OperatorBundleStep",
     "OperatorBundle",
     "OperatorBundleSlice",
@@ -52,6 +53,7 @@ __all__ = [
     "MAX_BUNDLE_PROMPT_CHARS",
     "MAX_CONTINUATION_PROMPT_CHARS",
     "is_operator_tool",
+    "is_witness_tool",
     "segment_steps",
     "resolve_dispatch_segments",
     "compose_bundle_prompt",
@@ -115,10 +117,16 @@ MAX_CONTINUATION_PROMPT_CHARS: int = 60_000
 #:    Don't bundle an operator whose failure must be retried in
 #:    isolation.
 #:
+#: 4. (RDR-189 P1, nexus-z1d0l.1.4) Its output must not need to reach the
+#:    host. An operator whose typed output the host reads (``check`` and
+#:    ``verify``, :data:`WITNESS_OPERATORS`) is bundled only as a bundle's
+#:    TERMINAL step, never an intermediate: ``segment_steps`` ends the
+#:    buffer at it.
+#:
 #: Today all ten operators (extract / rank / compare / summarize /
 #: generate / filter / check / verify / groupby / aggregate) satisfy
-#: (1), (2), and (3). Bare and resolved forms are both accepted because
-#: plan YAMLs use either.
+#: (1), (2), and (3); check and verify carry the terminal-only form of (4).
+#: Bare and resolved forms are both accepted because plan YAMLs use either.
 BUNDLEABLE_OPERATORS: frozenset[str] = frozenset({
     "extract", "rank", "compare", "summarize", "generate",
     "filter", "check", "verify", "groupby", "aggregate",
@@ -131,6 +139,26 @@ BUNDLEABLE_OPERATORS: frozenset[str] = frozenset({
 #: Legacy alias — older call sites / docs may reference the prior name.
 #: Prefer ``BUNDLEABLE_OPERATORS`` for new code.
 OPERATOR_BUNDLE_NAMES: frozenset[str] = BUNDLEABLE_OPERATORS
+
+#: The witness operators (RDR-189 P1, nexus-z1d0l.1.4): their typed evidence must reach the host. They
+#: stay in ``BUNDLEABLE_OPERATORS`` (criteria 1-3 above hold), with one further criterion that
+#: ``segment_steps`` enforces: 4. an operator whose output the host must read is only ever a bundle's
+#: TERMINAL step, never an intermediate, because an intermediate's output is ``BUNDLED_INTERMEDIATE``.
+#:
+#: Cost of the terminal rule: a witness that is the terminal of a bundle with an operator before it
+#: (``extract -> check``, ``extract -> verify``) cannot produce a BOUND witness. Its evidence is the bundle's
+#: own model output, which has no host-held records, so every item comes back ``unresolved`` with
+#: ``requires_review`` true. A witness dispatched on its own (isolated) over a retrieval step's ids keeps
+#: its sources and can bind.
+WITNESS_OPERATORS: frozenset[str] = frozenset({
+    "check", "verify", "operator_check", "operator_verify",
+})
+
+
+def is_witness_tool(tool: str) -> bool:
+    """True for a ``check`` / ``verify`` step name (bare or ``operator_*``; an ``mcp__`` prefix is already
+    stripped by :func:`_extract_tool_name`). See :data:`WITNESS_OPERATORS`."""
+    return tool in WITNESS_OPERATORS
 
 # Sentinel stamped into step_outputs for intermediate bundled steps. Any
 # $stepN.<field> reference that tries to look into this dict falls through
@@ -244,6 +272,33 @@ def segment_steps(steps: list[dict[str, Any]]) -> list[Segment]:
     :class:`OperatorBundleSlice` naming the bundle's plan indices.
     Lone operators and non-operator steps each yield :class:`IsolatedStep`.
 
+    **Witness boundary (RDR-189 P1, nexus-z1d0l.1.4).** A ``check`` or ``verify``
+    step (:data:`WITNESS_OPERATORS`) ENDS the buffer it joins: it may be the last
+    step of a bundle, never an earlier one. Rule chosen: *terminal*, not
+    *always isolated*. A bundle's terminal output is stamped host-side, where the
+    runner binds it against the step's evidence records (a witness over a
+    retrieval step's ids keeps its source identity; a witness over an earlier
+    bundled step's model output comes back ``unresolved``, which is the host-bound
+    answer when no record exists). A bundle's intermediate output is the
+    ``BUNDLED_INTERMEDIATE`` sentinel, so a witness there would never reach the
+    host: ``check -> generate`` would hide the typed evidence the amendment exists
+    to expose. Terminal keeps the single dispatch for ``extract -> check`` and the
+    bound-terminal behaviour the runner already has, and costs one extra dispatch
+    only for the witness-then-operator adjacency, which cannot be one dispatch
+    without hiding the witness. ``check -> generate`` therefore yields two
+    :class:`IsolatedStep` entries, and ``extract -> check -> generate`` yields a
+    bundle of the first two and an isolated ``generate``. This function feeds
+    ``plan_run``, the continuation cut classifier and the cost estimate, so all
+    three read the same boundary.
+
+    **What the terminal rule costs.** An ``extract -> check`` (or ``extract -> verify``)
+    bundle cannot produce a BOUND witness: the terminal's evidence is the bundle's
+    own model output, so no host-held record exists and every item comes back
+    ``unresolved`` with ``requires_review`` true. Binding needs the witness
+    dispatched on its own over a retrieval step's ids, which *always isolated*
+    would have given at one extra dispatch for such a bundle. The terminal rule
+    trades that strength for the single dispatch.
+
     Pure structural analysis — no argument resolution, no dispatch.
     The runner handles both at execution time, where the relevant
     ``step_outputs`` list and ``deferred_step_indices`` are available.
@@ -262,8 +317,11 @@ def segment_steps(steps: list[dict[str, Any]]) -> list[Segment]:
         buffer.clear()
 
     for i, step in enumerate(steps):
-        if is_operator_tool(_extract_tool_name(step)):
+        name = _extract_tool_name(step)
+        if is_operator_tool(name):
             buffer.append(i)
+            if is_witness_tool(name):
+                _flush()  # the witness is this run's last step: the terminal, never an intermediate
         else:
             _flush()
             segments.append(IsolatedStep(plan_index=i, step=step))
@@ -365,6 +423,18 @@ def _fmt_value(
     return v if isinstance(v, str) else str(v)
 
 
+def _fmt_scalar(
+    v: Any,
+    *,
+    plan_to_local: dict[int, int] | None = None,
+) -> str:
+    """Render a scalar operator arg (a claim, instruction, criterion or template): a deferred ref to an
+    earlier bundled step as "the `field` output from STEP K", anything else quoted with ``repr`` as
+    before. Without this a ref reached the model as the raw sentinel dict (nexus-z1d0l.1.4)."""
+    prose = _deferred_ref_prose(v, plan_to_local=plan_to_local)
+    return prose if prose is not None else repr(v)
+
+
 def _render_input_line(
     *,
     label: str,
@@ -440,7 +510,7 @@ def _describe_step(
 
     elif verb == "rank":
         criterion = step.args.get("criterion", "")
-        lines.append(f"  criterion: {criterion!r}")
+        lines.append(f"  criterion: {_fmt_scalar(criterion, plan_to_local=plan_to_local)}")
         lines.extend(_render_input_line(
             label="items", value=step.args.get("items"),
             first=first, position=position,
@@ -491,7 +561,7 @@ def _describe_step(
 
     elif verb == "generate":
         template = step.args.get("template", "")
-        lines.append(f"  template: {template!r}")
+        lines.append(f"  template: {_fmt_scalar(template, plan_to_local=plan_to_local)}")
         lines.extend(_render_input_line(
             label="context", value=step.args.get("context"),
             first=first, position=position,
@@ -503,7 +573,7 @@ def _describe_step(
 
     elif verb == "filter":
         criterion = step.args.get("criterion", "")
-        lines.append(f"  criterion: {criterion!r}")
+        lines.append(f"  criterion: {_fmt_scalar(criterion, plan_to_local=plan_to_local)}")
         lines.extend(_render_input_line(
             label="items", value=step.args.get("items"),
             first=first, position=position,
@@ -520,7 +590,7 @@ def _describe_step(
 
     elif verb == "check":
         instruction = step.args.get("check_instruction", "")
-        lines.append(f"  check_instruction: {instruction!r}")
+        lines.append(f"  check_instruction: {_fmt_scalar(instruction, plan_to_local=plan_to_local)}")
         lines.extend(_render_input_line(
             label="items", value=step.args.get("items"),
             first=first, position=position,
@@ -531,13 +601,14 @@ def _describe_step(
             "  Emit a JSON object with keys `ok` (boolean: true when "
             "every item supports the claim, false when at least one "
             "contradicts) and `evidence` (array of `{item_id, quote, "
-            "role}` records where role is one of `supports`, "
-            "`contradicts`, `neutral`)."
+            "role}` records: `item_id` is the id of the item shown, "
+            "`quote` is copied verbatim from that item's text, and role "
+            "is one of `supports`, `contradicts`, `neutral`)."
         )
 
     elif verb == "verify":
         claim = step.args.get("claim", "")
-        lines.append(f"  claim: {claim!r}")
+        lines.append(f"  claim: {_fmt_scalar(claim, plan_to_local=plan_to_local)}")
         lines.extend(_render_input_line(
             label="evidence", value=step.args.get("evidence"),
             first=first, position=position,
@@ -547,8 +618,11 @@ def _describe_step(
         lines.append(
             "  Emit a JSON object with keys `verified` (boolean), "
             "`reason` (short string explaining the verdict), and "
-            "`citations` (array of locator strings pinpointing the "
-            "passages that ground the verdict)."
+            "`evidence` (array of `{item_id, quote, role}` records, one "
+            "per passage that supports or contradicts the claim: "
+            "`item_id` is the id of the evidence item shown, `quote` is "
+            "copied verbatim from that item's text, and role is one of "
+            "`supports`, `contradicts`, `neutral`)."
         )
 
     elif verb == "groupby":
@@ -696,15 +770,18 @@ def _terminal_schema(tool: str) -> dict[str, Any]:
             },
         }
     if verb == "verify":
+        # Witness Schema v1 (RDR-088 amendment 2026-11-01): verify returns the same model-facing
+        # evidence items as check, imported from the one definition.
+        from nexus.mcp.core import _CHECK_EVIDENCE_ITEM_SCHEMA  # noqa: PLC0415 — deferred to avoid circular import (mcp.core)
         return {
             "type": "object",
-            "required": ["verified", "reason", "citations"],
+            "required": ["verified", "reason", "evidence"],
             "properties": {
                 "verified": {"type": "boolean"},
                 "reason": {"type": "string"},
-                "citations": {
+                "evidence": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": _CHECK_EVIDENCE_ITEM_SCHEMA,
                 },
             },
         }

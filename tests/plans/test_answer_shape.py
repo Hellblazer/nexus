@@ -150,6 +150,25 @@ class TestVocabulary:
         {"ok": True, "evidence": []},
         {"verified": False, "reason": "no", "citations": []},
         {"groups": [{"key_value": "x", "items": []}]},
+        # Witness Schema v1 (RDR-088 amendment 2026-11-01): the full key sets, and the subset the
+        # classifier has always accepted.
+        {"schema_version": 1, "ok": True, "evidence": [], "rejected": [], "uncovered": [], "requires_review": True},
+        {"schema_version": 1, "verified": True, "reason": "r", "evidence": [], "rejected": [],
+         "requires_review": False, "citations": []},
+        {"schema_version": 1, "ok": False, "evidence": []},
     ])
     def test_other_operator_payloads_are_non_answers(self, payload) -> None:
         assert classify_answer_shape(json.dumps(payload)) is AnswerShape.OPERATOR_PAYLOAD
+
+    def test_v1_witness_key_sets_are_exact_supersets_of_the_binder_output(self) -> None:
+        """The classifier's v1 sets must cover every key ``witness.bind`` emits, or a bound payload
+        reads as ANSWERED."""
+        from nexus.operators.witness import bind
+
+        raw_check = {"ok": True, "evidence": [{"item_id": "e1", "quote": "a", "role": "supports"}]}
+        raw_verify = {"verified": True, "reason": "r", "evidence": raw_check["evidence"]}
+        from nexus.operators.witness import EvidenceRecord
+
+        recs = [EvidenceRecord("e1", "a b")]
+        assert classify_answer_shape(json.dumps(bind(raw_check, recs, "check"))) is AnswerShape.OPERATOR_PAYLOAD
+        assert classify_answer_shape(json.dumps(bind(raw_verify, recs, "verify"))) is AnswerShape.OPERATOR_PAYLOAD

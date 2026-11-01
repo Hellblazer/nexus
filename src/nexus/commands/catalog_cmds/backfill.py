@@ -331,9 +331,12 @@ def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
     take ``put_at``, ``ttl_days``, ``tags`` (as an array), ``category`` and ``source_agent`` from the row
     the note itself wrote, or ``tags``/``category``/``source_agent``/``put_at`` from a row of a chunk it
     solely owns. Indexed documents take ``source_format`` (``pdf`` / ``markdown`` / ``code`` / ``prose``,
-    nexus-6pfgb.23) as the engine derives it from their ``content_type`` and ``file_path``, with no chunk
-    row read (a pair the rule derives nothing for is residue, ``no_rule`` or ``no_file_path``), and
-    ``extraction_method``, ``quality_gate_overridden`` (only where True),
+    nexus-6pfgb.23) as the engine derives it from their ``content_type`` and ``file_path``, and ``tags`` and
+    ``category`` (nexus-9cstf) as the register-time rules give them for the same two columns (type ``paper``
+    at a ``.pdf`` path is ``nx index pdf``, ``pdf`` the repo PDF path), all with no chunk row read; a pair
+    the rule derives nothing for is residue (``no_rule``, ``no_file_path``, ``no_extension``,
+    ``not_pdf_path`` for a ``paper`` at another path, or ``ambiguous_indexer`` for the tags of a prose or rdr
+    file that is not markdown and for both keys of one at a ``.pdf`` path), and ``extraction_method``, ``quality_gate_overridden`` (only where True),
     ``extraction_source``, ``frecency_score`` (with its computed_at) and an empty ``author`` from chunks
     they solely own, when those rows agree and are no later than the document. A document whose chunks
     are all shared is skipped and counted. A legacy comma string under ``tags`` is left for the array rung.

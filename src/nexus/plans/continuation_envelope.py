@@ -77,9 +77,11 @@ from nexus.plans.bundle import (
     _extract_tool_name,
     compose_bundle_prompt,
 )
+from nexus.operators.witness import prerendered_evidence
 from nexus.plans.continuation import CutShape
 from nexus.plans.reserved_stream import active_reserved_stream, reserved_stream_is_evidence
 from nexus.plans.runner import (
+    _EVIDENCE_RECORDS_KEY,
     _apply_caller_scope_to_args,
     _apply_mode_to_args,
     _apply_scope_to_args,
@@ -122,6 +124,14 @@ CONTINUATION_SPEC_VERSION: int = 1
 #: needs to change, since every downstream branch is already keyed off
 #: this same value via ``_continuation_engaged``.
 _CONTINUATION_GO_LIVE: bool = True
+
+
+#: The bare verbs whose reply is a Witness Schema v1 payload when the host binds it (RDR-189 P1). A continuation
+#: that hands one of them to the caller cannot bind the reply: see ``assemble_continuation_envelope``.
+WITNESS_BARE_VERBS: frozenset[str] = frozenset({"check", "verify"})
+
+#: ``reduction_spec.witness_binding`` for such an envelope: the reply carries no host binding and no schema version.
+WITNESS_BINDING_UNVERSIONED: str = "unversioned"
 
 
 class ContinuationEnvelopeError(ValueError):
@@ -334,7 +344,11 @@ def _compose_shape_b(
             f"no continuation request builder registered for operator "
             f"{verb!r} (resolved_tool={resolved_tool!r})"
         )
-    prompt, schema = builder(prepared)
+    # RDR-189 P1 (nexus-z1d0l.1.4): a verify the runner hydrated from ``ids`` holds evidence records, and its
+    # ``evidence`` is their rendering; the runner's own dispatch shows it as such (``_default_dispatcher``), so
+    # the builder runs in the same scope or the two prompts would differ.
+    with prerendered_evidence(verb == "verify" and _EVIDENCE_RECORDS_KEY in prepared):
+        prompt, schema = builder(prepared)
     return prompt, schema, verb, prepared
 
 
@@ -713,18 +727,28 @@ def assemble_continuation_envelope(
     hydrated_bundles = _harvest_hydrated_bundles(step_outputs, cut.cut_at_step)
     continuation_id = str(uuid.uuid4())
 
+    reduction_spec: dict[str, Any] = {
+        "prompt": prompt,
+        "response_schema": schema,
+        "operators": list(cut.operators),
+        "prompt_chars": prompt_chars,
+    }
+    if any(op in WITNESS_BARE_VERBS for op in cut.operators):
+        # RDR-189 P1 (nexus-z1d0l.1.4), decision: the reply is NOT bound. The reduction runs in the caller's
+        # context and ``nx_answer_report`` is told only ok/not-ok (it stores no reply text), so the host never
+        # sees the model's check/verify evidence and cannot test its quotes against the records it holds.
+        # Binding on return would need the reply, the records and a store for the records between two calls,
+        # none of which exist; so the reply is marked unversioned. It is the model's own unverified claim, not a
+        # Witness Schema v1 payload, and the caller must not read its evidence items as witnesses.
+        reduction_spec["witness_binding"] = WITNESS_BINDING_UNVERSIONED
+
     envelope: dict[str, Any] = {
         "spec_version": CONTINUATION_SPEC_VERSION,
         "continuation_id": continuation_id,
         "run_id": run_id,
         "cut_at_step": cut.cut_at_step,
         "plan_id": plan_id,
-        "reduction_spec": {
-            "prompt": prompt,
-            "response_schema": schema,
-            "operators": list(cut.operators),
-            "prompt_chars": prompt_chars,
-        },
+        "reduction_spec": reduction_spec,
         "hydrated_bundles": hydrated_bundles,
         "coverage": coverage,
         "reduction_contract": {
@@ -851,6 +875,14 @@ def render_continuation_text(envelope: dict[str, Any]) -> str:
             "only, not part of the reduction task — each line names "
             "the originating step, collection, and vector distance):",
             *provenance_lines,
+            "",
+        ]
+    if spec.get("witness_binding") == WITNESS_BINDING_UNVERSIONED:
+        lines += [
+            "Witness note: this reply is not host-bound. The server will not test your evidence quotes against "
+            "the source passages, so the evidence items you return are your own unverified claims, not Witness "
+            "Schema v1 witnesses. Quote each passage verbatim from the item you cite, and do not present the "
+            "result to anyone as a bound or verified witness.",
             "",
         ]
     lines += [

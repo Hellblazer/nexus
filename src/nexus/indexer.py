@@ -29,7 +29,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
-from nexus.catalog.indexed_meta import document_register_meta
+from nexus.catalog.indexed_meta import document_register_meta, fill_only_meta
 from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import index_model_for_collection, is_conformant_collection_name
 from nexus.db.limits import QUOTAS
@@ -1556,7 +1556,8 @@ def _catalog_hook(
             # update_many payloads already carry, so a document costs no extra request, and a registration
             # made before they existed is written once and the next run finds it equal (the rdr id's rule,
             # nexus-jypmj.7). The repo PDF path's category is "prose" where ``nx index pdf`` says "paper"
-            # (recorded in ``nexus.catalog.indexed_meta``, not fixed here).
+            # (recorded in ``nexus.catalog.indexed_meta``, not fixed here). The tags and category are fill-only
+            # for an EXISTING document (nexus-3ax49), applied in the existing-row branch below.
             rdr_stamp = {**rdr_stamp, **document_register_meta(content_type, rel_path)}
 
             try:
@@ -1600,6 +1601,10 @@ def _catalog_hook(
                     # nexus-jypmj.7: a registration that lacks the RDR frontmatter stamp (made before the stamp
                     # existed) or carries a different one is written once, so a plain re-index fills it; the
                     # next run finds it equal and writes nothing.
+                    # nexus-3ax49 (Sam's ruling, 2026-11-01): the tags and category are filled only where the
+                    # document holds none, so a curated value is neither stale nor rewritten; the rest of the
+                    # stamp (source_format, the rdr id) keeps its compare-and-overwrite.
+                    rdr_stamp = fill_only_meta(rdr_stamp, existing.meta)
                     stamp_stale = any(
                         existing.meta.get(k, _STAMP_MISSING) != v for k, v in rdr_stamp.items()
                     )

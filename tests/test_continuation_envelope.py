@@ -936,6 +936,67 @@ class TestSpecVersionLoudRefusal:
         assert exc_info.value.spec_version == 2
 
 
+# ── Witness replies are explicitly unversioned (RDR-189 P1, nexus-z1d0l.1.4) ─
+
+
+class TestWitnessReplyIsMarkedUnversioned:
+    """A continuation hands the reduction to the CALLER, and ``nx_answer_report`` stores no reply, so the host
+    never sees the model's check/verify evidence and cannot bind it against its records. The envelope says so
+    in ``reduction_spec.witness_binding`` instead of letting the reply read as a Witness Schema v1 payload."""
+
+    @staticmethod
+    async def _envelope_for(steps, monkeypatch):
+        async def fake_claude_dispatch(prompt, schema, **kwargs):
+            return {"ok": True, "evidence": []}
+
+        import nexus.operators.dispatch as _dispatch_mod
+        monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_claude_dispatch)
+        match = _match({"steps": steps})
+        result = await plan_run(match)
+        cut = classify_continuation_cut(steps)
+        return assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings=merge_bindings(match.default_bindings, {}),
+            step_outputs=result.steps, plan_id=1, run_id=None,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb, args", [
+        ("check", {"items": "[{\"id\": \"1\", \"text\": \"t\"}]", "check_instruction": "c"}),
+        ("verify", {"claim": "X", "evidence": "some evidence text"}),
+    ])
+    async def test_a_shape_b_witness_cut_is_marked(self, verb, args, monkeypatch):
+        envelope = await self._envelope_for([{"tool": verb, "args": args}], monkeypatch)
+        assert envelope is not None
+        assert envelope["reduction_spec"]["witness_binding"] == "unversioned"
+
+    @pytest.mark.asyncio
+    async def test_a_shape_a_bundle_ending_in_a_witness_is_marked(self, monkeypatch):
+        steps = [
+            {"tool": "extract", "args": {"inputs": "[\"alpha text\"]", "fields": "claim"}},
+            {"tool": "verify", "args": {"claim": "X", "evidence": "$step1.extractions"}},
+        ]
+        envelope = await self._envelope_for(steps, monkeypatch)
+        assert envelope is not None and envelope["reduction_spec"]["operators"] == ["extract", "verify"]
+        assert envelope["reduction_spec"]["witness_binding"] == "unversioned"
+
+    @pytest.mark.asyncio
+    async def test_a_cut_without_a_witness_carries_no_marker(self, monkeypatch):
+        envelope = await self._envelope_for(
+            [{"tool": "summarize", "args": {"content": "hello world"}}], monkeypatch,
+        )
+        assert envelope is not None
+        assert "witness_binding" not in envelope["reduction_spec"]
+
+    def test_the_rendered_instruction_tells_the_caller_the_reply_is_not_host_bound(self):
+        env = TestRenderContinuationText._envelope()
+        assert "not host-bound" not in render_continuation_text(env).lower()
+        env["reduction_spec"]["witness_binding"] = "unversioned"
+        env["reduction_spec"]["operators"] = ["check"]
+        text = render_continuation_text(env)
+        assert "not host-bound" in text.lower()
+        assert "witness" in text.lower()
+
+
 # ── Text-mode renderer (R7 delimiting) ──────────────────────────────────────
 
 

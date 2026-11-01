@@ -1494,8 +1494,11 @@ class TestHydrateInputsTranslation:
             {"inputs": ["doc-a", "doc-b"], "check_instruction": "agree"},
         )
         assert tool == "operator_check"
+        # Witness Schema v1 (nexus-z1d0l.1.2): the model is shown [{"id","text"}] and the runner holds the records.
+        records = args.pop("_evidence_records")
+        assert [(r.item_id, r.text) for r in records] == [("e1", "doc-a"), ("e2", "doc-b")]
         assert args == {
-            "items": json.dumps(["doc-a", "doc-b"]),
+            "items": json.dumps([{"id": "e1", "text": "doc-a"}, {"id": "e2", "text": "doc-b"}]),
             "check_instruction": "agree",
         }
 
@@ -1521,7 +1524,12 @@ class TestHydrateInputsTranslation:
         renamed — verify's contract is two scalar args. Translating would
         mask an authoring bug. The step should either raise or drop the
         unknown arg downstream; _hydrate_operator_args must leave
-        ``inputs`` in place so the downstream TypeError is attributable."""
+        ``inputs`` in place so the downstream TypeError is attributable.
+
+        This holds for a step that supplies its own ``evidence``. A verify
+        step fed by ``ids`` is the other contract (RDR-189 P1,
+        nexus-z1d0l.1.4, ``test_verify_ids_hydrates_claim_and_evidence_not_inputs``):
+        the runner sets ``evidence`` and never produces ``inputs``."""
         from nexus.plans.runner import _hydrate_operator_args
 
         tool, args = _hydrate_operator_args(
@@ -1530,6 +1538,29 @@ class TestHydrateInputsTranslation:
         )
         assert tool == "operator_verify"
         assert args.get("inputs") == "stray"
+
+    @pytest.mark.t2_tenant
+    def test_verify_ids_hydrates_claim_and_evidence_not_inputs(self):
+        """RDR-189 P1 (nexus-z1d0l.1.4): ``verify`` with ``ids`` used to fall through to
+        ``inputs``, which ``operator_verify`` rejects, with ``evidence`` missing. It now
+        keeps the author's ``claim``, sets ``evidence`` from the hydrated passages, and
+        passes no ``inputs`` argument."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["doc-a body", "doc-b body"]},
+        ):
+            tool, args = _hydrate_operator_args(
+                "verify", {"ids": ["doc-a", "doc-b"], "claim": "c"},
+            )
+        assert tool == "operator_verify"
+        assert "inputs" not in args and "ids" not in args and "collections" not in args
+        assert args["claim"] == "c"
+        assert [s["text"] for s in json.loads(args["evidence"])] == ["doc-a body", "doc-b body"]
+        assert [r.item_id for r in args.pop("_evidence_records")] == ["e1", "e2"]
 
     # ── operator_groupby hydration (RDR-093 nexus-9bz6) ──────────────────
 
@@ -1629,7 +1660,12 @@ class TestHydrateInputsTranslation:
             )
         assert tool == f"operator_{op}"
         assert "ids" not in args and "collections" not in args
-        assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
+        if op == "check":  # Witness Schema v1: id/text rendering, records held by the runner
+            assert args["items"] == json.dumps(
+                [{"id": "e1", "text": "doc-a body"}, {"id": "e2", "text": "doc-b body"}])
+            assert [r.text for r in args.pop("_evidence_records")] == ["doc-a body", "doc-b body"]
+        else:
+            assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
         assert args[key] == value
 
     @pytest.mark.t2_tenant
@@ -5235,3 +5271,66 @@ class TestSourceNotesOnHydratedContent:
         ))
         prompt, _ = compose_bundle_prompt(plain)
         assert SOURCE_INSTRUCTION not in prompt
+
+
+class TestWitnessOutputIsNeverBundledAway:
+    """RDR-189 P1 (nexus-z1d0l.1.4): a check or verify step followed by another operator used to fuse
+    into a bundle that stamped the witness as ``BUNDLED_INTERMEDIATE``, so its typed evidence never
+    reached the host. The witness step now ends the buffer: it dispatches by itself (or as a bundle's
+    terminal step) and its output is a real v1 payload the next step can reference."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("witness, args, reply", [
+        ("check", {"items": json.dumps([{"id": "a", "text": "alpha text"}]), "check_instruction": "c"},
+         {"ok": True, "evidence": [{"item_id": "a", "quote": "alpha", "role": "supports"}]}),
+        ("verify", {"claim": "c", "evidence": "alpha text"},
+         {"verified": True, "reason": "r", "evidence": [{"item_id": "e1", "quote": "alpha", "role": "supports"}]}),
+    ])
+    async def test_witness_then_generate_keeps_the_witness_output_visible(self, monkeypatch, witness, args, reply) -> None:
+        import nexus.operators.dispatch as _dispatch_mod
+        from nexus.plans.bundle import BUNDLED_INTERMEDIATE
+        from nexus.plans.runner import plan_run
+
+        seen: list[str] = []
+
+        async def fake_dispatch(prompt, schema, timeout=300.0, **kwargs):
+            required = schema.get("required", [])
+            seen.append("witness" if "evidence" in required else "generate")
+            return json.loads(json.dumps(reply)) if "evidence" in required else {"output": "final"}
+
+        monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_dispatch)
+        plan = {"steps": [
+            {"tool": witness, "args": args},
+            {"tool": "generate", "args": {"template": "summary", "context": "$step1.evidence"}},
+        ]}
+        result = await plan_run(_match(plan), {}, dispatcher=None)
+
+        assert seen == ["witness", "generate"], "two dispatches, not one fused bundle"
+        assert result.steps[0] != BUNDLED_INTERMEDIATE
+        assert not result.steps[0].get("_bundled_intermediate")
+        assert result.steps[0]["schema_version"] == 1
+        assert result.steps[0]["evidence"][0]["state"] in ("bound", "unattributed", "unresolved", "ambiguous")
+        assert result.steps[1] == {"output": "final"}
+
+    @pytest.mark.asyncio
+    async def test_a_terminal_witness_still_bundles_with_the_operators_before_it(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _dispatch_mod
+        from nexus.plans.bundle import BUNDLED_INTERMEDIATE
+        from nexus.plans.runner import plan_run
+
+        dispatches: list[int] = []
+
+        async def fake_dispatch(prompt, schema, timeout=300.0, **kwargs):
+            dispatches.append(1)
+            return {"ok": True, "evidence": []}
+
+        monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_dispatch)
+        plan = {"steps": [
+            {"tool": "extract", "args": {"inputs": "[\"alpha text\"]", "fields": "claim"}},
+            {"tool": "check", "args": {"items": "$step1.extractions", "check_instruction": "c"}},
+        ]}
+        result = await plan_run(_match(plan), {}, dispatcher=None)
+
+        assert len(dispatches) == 1, "extract + terminal check is one bundle"
+        assert result.steps[0] == BUNDLED_INTERMEDIATE
+        assert result.steps[1]["schema_version"] == 1

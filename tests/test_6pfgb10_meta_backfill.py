@@ -276,11 +276,12 @@ def test_a_dry_run_counts_per_key_and_writes_nothing_then_apply_writes_and_a_sec
     by_tumbler = {u["tumbler"]: u for u in w.updates}
     assert by_tumbler["1.1.1"]["meta"] == {"put_at": PUT, "ttl_days": 3, "tags": ["t"]}
     assert by_tumbler["1.1.2"]["meta"]["extraction_method"] == "mineru" and by_tumbler["1.1.2"]["author"] == "Ann"
-    assert "tags" not in by_tumbler["1.1.2"]["meta"] and "category" not in by_tumbler["1.1.2"]["meta"], \
-        "tags and category of an indexed document are not backfilled: the register-time stamp and the next index run fill them"
+    assert by_tumbler["1.1.2"]["meta"]["tags"] == ["pdf"] and by_tumbler["1.1.2"]["meta"]["category"] == "paper", \
+        "nexus-9cstf: tags and category of an indexed document are derived from the entry, as source_format is"
     assert by_tumbler["1.1.2"]["meta"]["source_format"] == "pdf"
-    assert by_tumbler["1.1.3"]["meta"] == {"source_format": "pdf"} and by_tumbler["1.1.4"]["meta"] == {"source_format": "pdf"}, \
-        "a chunk two documents hold decides no row-sourced key, but source_format is derived from the entry, not the chunk"
+    derived = {"source_format": "pdf", "tags": ["pdf"], "category": "paper"}
+    assert by_tumbler["1.1.3"]["meta"] == derived and by_tumbler["1.1.4"]["meta"] == derived, \
+        "a chunk two documents hold decides no row-sourced key, but the derived keys come from the entry, not the chunk"
     assert first.documents_written == 4 and first.writes_failed == 0
 
     # the catalog now holds what was written; a second run finds nothing to stamp
@@ -306,8 +307,9 @@ def test_a_failed_owner_lookup_withholds_the_keys_counts_the_documents_and_never
     assert rep.lookups_failed == 3, "the note's own written row needs no ownership; the three documents do"
     ext_written = [u for u in w.updates if "extraction_method" in u["meta"]]
     assert ext_written == []
-    assert [u["meta"] for u in w.updates if u["tumbler"] == "1.1.2"] == [{"source_format": "pdf"}], \
-        "an indexed document's row-sourced keys are withheld; its derived source_format needs no lookup"
+    assert [u["meta"] for u in w.updates if u["tumbler"] == "1.1.2"] == [
+        {"source_format": "pdf", "tags": ["pdf"], "category": "paper"}], \
+        "an indexed document's row-sourced keys are withheld; its derived keys need no lookup"
 
 
 def test_a_failed_row_read_for_one_collection_isolates_its_documents():
@@ -436,4 +438,265 @@ def test_no_content_type_is_left_out_of_the_row_sourced_keys(ctype):
     w.rows[("docs__x__m__v1", "h1")] = _row(source_author="Ann Lee", extraction_source="dt_content")
     mb.backfill_meta(w, w, w, apply=True)
     fmt = "pdf" if ctype in ("pdf", "paper") else "markdown"   # nexus-6pfgb.23: the extension is read first
-    assert w.updates == [{"tumbler": "1.9.1", "meta": {"extraction_source": "dt_content", "source_format": fmt}, "author": "Ann Lee"}]
+    derived = {
+        "prose": {"tags": ["markdown"], "category": "prose"}, "rdr": {"tags": ["markdown"], "category": "prose"},
+        "pdf": {"tags": ["pdf"], "category": "prose"}, "paper": {},   # a paper at a .md path was not made by nx index pdf
+        "code": {"tags": ["md"], "category": "code"}, "markdown": {},   # index_markdown's fallback can register it: no rule
+    }[ctype]
+    assert w.updates == [{
+        "tumbler": "1.9.1", "meta": {"extraction_source": "dt_content", "source_format": fmt, **derived}, "author": "Ann Lee",
+    }]
+
+
+# ── nexus-9cstf: tags and category of an indexed document are derived from the entry ────────────
+
+def _indexed(meta, content_type, file_path, tumbler="1.4.1"):
+    """An indexed document whose row-sourced keys are all held, so only the derived keys are open."""
+    held = {"extraction_method": "m", "quality_gate_overridden": False, "extraction_source": "file", "frecency_score": 0.0}
+    return _entry({**held, **meta}, title="d", tumbler=tumbler, content_type=content_type, file_path=file_path,
+                  author="Ann", collection="docs__x__m__v1")
+
+
+@pytest.mark.parametrize("content_type,path,tags,category", [
+    ("code", "src/a.py", ["py"], "code"),                  # the repo code indexer: the extension, lower-cased
+    ("code", "src/A.PY", ["py"], "code"),
+    ("prose", "docs/a.md", ["markdown"], "prose"),         # the repo path and the md hook agree on a .md file
+    ("prose", "docs/a.markdown", ["markdown"], "prose"),
+    ("rdr", "docs/rdr/rdr-1.md", ["markdown"], "prose"),
+    ("pdf", "papers/p.pdf", ["pdf"], "prose"),             # registered by the repo PDF path: prose
+    ("paper", "/abs/p.pdf", ["pdf"], "paper"),             # registered by nx index pdf: paper
+    ("paper", "/abs/P.PDF", ["pdf"], "paper"),             # the extension is read lower-cased
+])
+def test_a_document_lacking_tags_and_category_gets_what_its_own_indexer_wrote(content_type, path, tags, category):
+    plan = mb.plan_tags_category(_indexed({}, content_type, path))
+    assert plan.meta == {"tags": tags, "category": category}
+    assert plan.outcome == {"tags": STAMPED, "category": STAMPED}
+
+
+@pytest.mark.parametrize("content_type,path,category,tags_reason", [
+    ("prose", "notes/a.txt", "prose", "ambiguous_indexer"),   # repo says ["txt"], nx index md says ["markdown"]
+    ("rdr", "r.rst", "prose", "ambiguous_indexer"),
+    ("prose", "Makefile", "prose", "ambiguous_indexer"),
+    ("prose", "", "prose", "no_file_path"),
+    ("code", "Makefile", "code", "no_extension"),            # the row writer wrote "" for a file with no extension
+    ("code", "", "code", "no_file_path"),
+])
+def test_a_pair_with_only_one_of_the_two_keys_derivable_stamps_it_and_names_why_the_other_is_residue(
+    content_type, path, category, tags_reason,
+):
+    plan = mb.plan_tags_category(_indexed({}, content_type, path))
+    assert plan.meta == {"category": category}, "no tags key is sent without a real value"
+    assert plan.outcome == {"tags": f"residue:{tags_reason}", "category": STAMPED}
+
+
+@pytest.mark.parametrize("content_type,path,reason", [
+    # a prose or rdr entry at a .pdf path: the repo pass registers it as type pdf, so this entry was
+    # registered by nx index md / rdr or a DEVONthink import, and nx index pdf of the same file stamps
+    # paper/["pdf"]; the entry cannot say which ran, so neither key is guessed
+    ("prose", "papers/p.pdf", "ambiguous_indexer"),
+    ("rdr", "docs/rdr/p.pdf", "ambiguous_indexer"),
+    ("prose", "papers/P.PDF", "ambiguous_indexer"),
+    # a paper entry with no path is an `nx catalog backfill` placeholder (one per docs__ collection)
+    ("paper", "", "no_file_path"),
+    # a paper entry whose path is not a .pdf (a placeholder is often markdown) was not made by nx index pdf
+    ("paper", "a.md", "not_pdf_path"),
+    ("paper", "notes/a.txt", "not_pdf_path"),
+    ("paper", "Makefile", "not_pdf_path"),
+])
+def test_a_pair_whose_indexer_the_entry_cannot_name_leaves_both_keys_as_residue(content_type, path, reason):
+    plan = mb.plan_tags_category(_indexed({}, content_type, path))
+    assert plan.meta == {}, "a fill-only write is permanent: nothing is sent for a pair that was guessed"
+    assert plan.outcome == {"tags": f"residue:{reason}", "category": f"residue:{reason}"}
+
+
+@pytest.mark.parametrize("content_type,path,reason", [
+    ("docs", "a.txt", "no_rule"), ("", "LICENSE", "no_rule"), ("markdown", "a.md", "no_rule"),
+    ("docs", "", "no_file_path"), ("", "", "no_file_path"),
+])
+def test_a_pair_the_rule_derives_nothing_for_is_residue_for_both_keys(content_type, path, reason):
+    plan = mb.plan_tags_category(_indexed({}, content_type, path))
+    assert plan.meta == {} and plan.outcome == {"tags": f"residue:{reason}", "category": f"residue:{reason}"}
+
+
+@pytest.mark.parametrize("held", [
+    {"tags": ["curated"]}, {"tags": "a, b"},                 # a non-empty tags value, a legacy string included
+    {"category": "curated"},
+])
+def test_a_key_the_entry_holds_non_empty_is_never_touched(held):
+    plan = mb.plan_tags_category(_indexed(held, "paper", "p.pdf"))
+    key = next(iter(held))
+    other = "category" if key == "tags" else "tags"
+    assert key not in plan.meta and plan.outcome[key] == PRESENT
+    assert plan.outcome[other] == STAMPED and other in plan.meta, "the other key is still open and still filled"
+
+
+@pytest.mark.parametrize("held", [
+    {"tags": []}, {"tags": None}, {"tags": ""},
+    {"category": ""}, {"category": None}, {"category": []},
+])
+def test_a_key_the_entry_holds_empty_is_filled_as_a_re_index_would_fill_it(held):
+    """nexus-3ax49 (Sam's ruling, 2026-11-01): the backfill and a re-index share one definition of empty for an
+    indexed document's tags and category: absent, None, '' and [] are open, anything else is held."""
+    plan = mb.plan_tags_category(_indexed(held, "paper", "p.pdf"))
+    assert plan.meta == {"tags": ["pdf"], "category": "paper"}
+    assert plan.outcome == {"tags": STAMPED, "category": STAMPED}
+
+
+def test_an_empty_key_the_rule_cannot_settle_is_residue_not_a_held_key():
+    plan = mb.plan_tags_category(_indexed({"tags": []}, "prose", "notes/a.txt"))
+    assert plan.meta == {"category": "prose"}
+    assert plan.outcome == {"tags": "residue:ambiguous_indexer", "category": STAMPED}
+
+
+def test_a_document_holding_both_keys_non_empty_sends_nothing():
+    plan = mb.plan_tags_category(_indexed({"tags": ["x"], "category": "y"}, "code", "a.py"))
+    assert plan.meta == {} and not plan.has_writes() and plan.outcome == {"tags": PRESENT, "category": PRESENT}
+
+
+def test_the_backfill_and_the_re_index_share_one_definition_of_empty():
+    """A value the re-index helper fills is a key the backfill fills, and the reverse, for every shape."""
+    from nexus.catalog.indexed_meta import fill_only_meta
+
+    stamp = {"tags": ["py"], "category": "code"}
+    for value in (None, "", [], (), {}, ["t"], "a, b", "curated", 0, False):
+        held = {"tags": value, "category": value}
+        plan = mb.plan_tags_category(_indexed(held, "code", "a.py"))
+        re_index_fills = fill_only_meta(stamp, held) == stamp
+        assert (plan.outcome["tags"] == STAMPED) is re_index_fills, repr(value)
+        assert (plan.outcome["category"] == STAMPED) is re_index_fills, repr(value)
+
+
+def test_the_derived_keys_read_no_chunk_row_and_no_manifest():
+    """A document whose row-sourced keys are all held and whose chunks are all shared still gets tags and
+    category, and the run neither reads a manifest, asks for owners, nor reads a chunk row for it."""
+    class _Trip(_World):
+        def get_manifests(self, ids):
+            raise AssertionError("no manifest read for a document with nothing row-sourced open")
+
+        def chash_positions(self, chashes):
+            raise AssertionError("no owner lookup")
+
+        def chunk_rows(self, collection, chashes):
+            raise AssertionError("no chunk row read")
+
+    w = _Trip()
+    w.entries = [_indexed({}, "paper", "p.pdf", "1.4.1"), _indexed({}, "code", "src/a.py", "1.4.2")]
+    rep = mb.backfill_meta(w, w, w, apply=True)
+    assert {u["tumbler"]: u["meta"] for u in w.updates} == {
+        "1.4.1": {"source_format": "pdf", "tags": ["pdf"], "category": "paper"},
+        "1.4.2": {"source_format": "code", "tags": ["py"], "category": "code"},
+    }
+    assert rep.lookups_failed == 0 and rep.documents_written == 2
+
+
+def test_a_note_is_never_given_derived_tags_or_category_by_its_content_type():
+    """A note carries a path-shaped file_path here on purpose: were the note taken for an indexed document,
+    source_format would derive ``markdown`` from it and a stamp would be sent. Its keys are counted under
+    note.* only, and the note's own residue is what the note rules alone make of it. With the doc guard
+    removed the plans still land under note.* (kind stays "note"), so the updates and note.* count asserts
+    are what fail; the doc.* asserts only state the expected shape."""
+    w = _World()
+    w.entries = [
+        _entry({"put_at": PUT}, title="n", tumbler="1.4.9", file_path="n.md"),   # holds its note keys
+        _entry({}, title="k", tumbler="1.4.8", file_path="k.md"),                # keyless, no row to recover from
+    ]
+    rep = mb.backfill_meta(w, w, w, apply=True)
+    assert w.updates == [], "neither a derived key nor anything else is sent for a note"
+    assert not any(k.startswith("doc.") for k in rep.keys), sorted(rep.keys)
+    for derived in ("doc.tags", "doc.category"):
+        assert rep.keys.get(derived) is None, f"{derived} examined 0: no indexed document is in this world"
+    for key in ("tags", "category", "put_at", "source_agent", "ttl_days"):
+        st = rep.keys[f"note.{key}"]
+        assert (st.examined, st.present, st.shared, st.stamped, dict(st.residue)) == (2, 1, 0, 0, {"no_row": 1}), key
+
+
+def _tags_world():
+    w = _World()
+    w.entries = [
+        _indexed({}, "code", "src/a.py", "1.5.1"),
+        _indexed({}, "prose", "docs/a.md", "1.5.2"),
+        _indexed({}, "pdf", "p.pdf", "1.5.3"),
+        _indexed({}, "paper", "q.pdf", "1.5.4"),
+        _indexed({}, "prose", "docs/a.txt", "1.5.5"),       # tags ambiguous, category stamped
+        _indexed({}, "docs", "x.txt", "1.5.6"),             # no rule for either
+        _indexed({"tags": ["curated-tag"], "category": "curated"}, "paper", "r.pdf", "1.5.7"),
+        _entry({}, title="note", tumbler="1.5.8", content_type="knowledge", indexed_at=PUT),
+    ]
+    return w
+
+
+def test_the_dry_run_report_counts_tags_and_category_per_key_with_reasons(monkeypatch):
+    w = _tags_world()
+    result, _ = _invoke(monkeypatch, w, "--json")
+    assert result.exit_code == 0, result.output
+    keys = json.loads(result.stdout)["keys"]
+    assert keys["doc.tags"] == {
+        "examined": 7, "present": 1, "skipped_shared": 0, "stamped": 4, "residue": 2,
+        "residue_reasons": {"ambiguous_indexer": 1, "no_rule": 1},
+    }
+    assert keys["doc.category"] == {
+        "examined": 7, "present": 1, "skipped_shared": 0, "stamped": 5, "residue": 1, "residue_reasons": {"no_rule": 1},
+    }
+    assert w.updates == []
+
+    text, _ = _invoke(monkeypatch, _tags_world())
+    assert "doc.tags: examined 7, held 1, skipped (shared) 0, would stamp 4, residue 2" in text.output
+    assert "doc.category: examined 7, held 1, skipped (shared) 0, would stamp 5, residue 1" in text.output
+
+
+def test_apply_writes_the_derived_keys_and_a_second_run_stamps_nothing():
+    w = _tags_world()
+    mb.backfill_meta(w, w, w, apply=True)
+    by = {u["tumbler"]: u["meta"] for u in w.updates}
+    assert by["1.5.1"]["tags"] == ["py"] and by["1.5.1"]["category"] == "code"
+    assert by["1.5.3"]["category"] == "prose" and by["1.5.4"]["category"] == "paper"
+    assert by["1.5.5"].get("category") == "prose" and "tags" not in by["1.5.5"]
+    assert "tags" not in by.get("1.5.6", {}) and "category" not in by.get("1.5.6", {})
+    assert "tags" not in by.get("1.5.7", {}) and "category" not in by.get("1.5.7", {}), "non-empty held keys are never resent"
+    for e in w.entries:
+        if str(e.tumbler) in by:
+            e.meta = {**(e.meta or {}), **by[str(e.tumbler)]}
+    w.updates.clear()
+    again = mb.backfill_meta(w, w, w, apply=True)
+    assert w.updates == []
+    assert again.keys["doc.tags"].stamped == 0 and again.keys["doc.category"].stamped == 0
+
+
+def test_apply_fills_a_document_whose_tags_and_category_are_empty_and_keeps_a_non_empty_one():
+    w = _World()
+    w.entries = [
+        _indexed({"tags": [], "category": ""}, "code", "src/a.py", "1.6.1"),
+        _indexed({"tags": None, "category": None}, "code", "src/b.py", "1.6.2"),
+        _indexed({"tags": ["mine"], "category": "mine", "source_format": "code"}, "code", "src/c.py", "1.6.3"),
+    ]
+    report = mb.backfill_meta(w, w, w, apply=True)
+    by = {u["tumbler"]: u["meta"] for u in w.updates}
+    for t in ("1.6.1", "1.6.2"):
+        assert (by[t]["tags"], by[t]["category"]) == (["py"], "code"), by[t]
+    assert "1.6.3" not in by, "a non-empty value is kept: nothing is sent"
+    assert report.keys["doc.tags"].stamped == 2 and report.keys["doc.tags"].present == 1
+
+
+@pytest.mark.parametrize("content_type,path", [
+    ("code", "src/a.py"), ("code", "src/A.PY"), ("prose", "docs/a.md"), ("rdr", "docs/rdr/r.md"), ("pdf", "p.pdf"),
+])
+def test_the_backfill_agrees_with_the_repo_pass_where_it_derives_a_value(content_type, path):
+    """The backfill is the register-time statement read back from the entry: wherever it derives a key, the
+    repo pass (document_register_meta) wrote the same value."""
+    from nexus.catalog.indexed_meta import backfill_tags_category, document_register_meta
+
+    values, residue = backfill_tags_category(content_type, path)
+    registered = document_register_meta(content_type, path)
+    assert values == {k: registered[k] for k in ("tags", "category")} and residue == {}
+
+
+def test_the_backfill_agrees_with_the_single_file_verbs_where_it_derives_a_value():
+    from nexus.catalog.indexed_meta import backfill_tags_category, markdown_register_meta, pdf_register_meta
+
+    for ct in ("prose", "rdr"):
+        values, _ = backfill_tags_category(ct, "a.md")
+        assert values == {k: markdown_register_meta(ct, "a.md")[k] for k in ("tags", "category")}
+    values, _ = backfill_tags_category("paper", "p.pdf")
+    assert values == {k: pdf_register_meta("p.pdf", "paper")[k] for k in ("tags", "category")}
+    values, _ = backfill_tags_category("pdf", "p.pdf")
+    assert values == {k: pdf_register_meta("p.pdf", "pdf")[k] for k in ("tags", "category")}

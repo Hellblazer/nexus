@@ -144,8 +144,8 @@ save a plan with `plan_save` whose steps name these verbs.
 | `compare` | `items` (or `items_a`/`items_b`), optional `focus` | `{"comparison": "<markdown>"}` |
 | `generate` | `template`, `context`, optional `cited=True` | `{"output": "<generated>"}` |
 | `filter` | `items` (JSON array), `criterion` | `{"items": [...], "rationale": [{"id", "reason"}]}` |
-| `check` | `items`, `check_instruction` | `{"ok": bool, "evidence": [{"item_id", "quote", "role"}]}` |
-| `verify` | `claim`, `evidence` | `{"verified": bool, "reason": str, "citations": [...]}` |
+| `check` | `items`, `check_instruction` | `{"schema_version": 1, "ok": bool, "evidence": [{"item_id", "quote", "role", "state", "span", "tumbler", "chash", "collection"}], "rejected": [...], "uncovered": [...], "requires_review": bool}`; the host binds `state`/`span`/source fields, only `state: "bound"` is a valid witness |
+| `verify` | `claim`, `evidence` | `{"schema_version": 1, "verified": bool, "reason": str, "evidence": [<same items as check>], "rejected": [...], "requires_review": bool, "citations": [...]}`; `citations` is deprecated (host-derived quotes) |
 | `groupby` | `items`, `key` | `[{"key_value", "items"}]` |
 | `aggregate` | `groups` (from `groupby`), `reducer` | one summary per group |
 

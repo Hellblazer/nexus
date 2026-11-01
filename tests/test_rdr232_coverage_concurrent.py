@@ -262,8 +262,10 @@ async def test_a_call_that_raises_cancellation_cancels_the_calls_still_running()
 
 @pytest.mark.asyncio
 async def test_a_check_that_ignores_its_timeout_is_cut_at_the_stage_share() -> None:
-    """The stage may use 0.4 of the deadline left (here 1.0 s, so 0.4 s). A check that sleeps 5 s whatever it is told
-    is cut from outside at the stage end, and the calls that never started are skipped, not queued past it."""
+    """The stage may use 0.4 of the deadline left (here 3.0 s, so 1.2 s). A check that sleeps 5 s whatever it is told
+    is cut from outside at the stage end, and the calls that never started are skipped, not queued past it. The
+    deadline is 3 s, not 1 s: on a loaded CI runner the setup before the stage ate most of a 0.4 s share, no call
+    started and the test read 0 calls (develop shard 3 on 292c21f0a)."""
     async def ignores_timeout(args: dict) -> dict:  # noqa: ARG001
         await asyncio.sleep(5.0)
         return {}
@@ -271,10 +273,10 @@ async def test_a_check_that_ignores_its_timeout_is_cut_at_the_stage_share() -> N
     d = Canary(ignores_timeout, vector=3, graph=3, other=0)
     boundary = CoverageBoundary(request=_request(1), call_timeout_s=10.0, min_call_s=0.01, max_concurrent_calls=2)
     started = time.monotonic()
-    result = await _run(d, boundary, reserved_stream=_reserved(n=2), deadline=started + 1.0)
+    result = await _run(d, boundary, reserved_stream=_reserved(n=2), deadline=started + 3.0)
     cov = _cov(result)
     report = cov.ledger.assessment
-    share = 0.4
+    share = 0.4 * 3.0
     assert report.latency_ms <= (share + 0.4) * 1000, f"the stage took {report.latency_ms} ms of a {share} s share"
     assert report.raised_calls == 2 and report.calls == 2
     steps = [r for r in result.step_records if r.operator == "operator_check"]

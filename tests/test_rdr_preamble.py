@@ -1588,12 +1588,25 @@ _FIX_STATE_CASES = [
              "204-fix-check-{fixed}",
              # nexus-yjf5l.5 (R2): the serial precondition (fix, check, then
              # Layer 1 and Layer 3, never a parallel dispatch) is printed here.
-             "dispatched against the same commit in parallel"],
+             "dispatched against the same commit in parallel",
+             # nexus-qo7ie: the fix-loop rules Sam adopted 2026-11-01.
+             "fix only the findings the user names", "adds no new design",
+             "Run one fix check per fix round", "#### Findings to fix (each at every site named)"],
      "has_ci": ["no fix-check record yet"], "lacks": ["- fine"]},
     {"name": "existing_fix_check_record_is_reported", "scenario": "gated_fixed", "boom": False,
      "entries": {"204-gate-latest": 'outcome: "BLOCKED"\ncommit: {gated}\n',
                  "204-fix-check-{fixed}": "verdict: CLEAN\n"},
      "has": ["Fix-check record `204-fix-check-{fixed}` exists"], "has_ci": [], "lacks": []},
+    # nexus-qo7ie: after a PASSED gate the findings are a menu, fixed only when the
+    # user names them (FIX_LOOP_RULES rule 1); a BLOCKED gate keeps "to fix".
+    {"name": "passed_gate_findings_are_a_menu", "scenario": "gated_fixed", "boom": False,
+     "entries": {
+         "204-gate-latest": ('outcome: "PASSED"\ndate: "2026-09-07"\ncommit: {gated}\n'
+                             "critique: nexus_rdr/204-gate-critique-2026-09-07h\n"),
+         "204-gate-critique-2026-09-07h": _FIX_CRITIQUE,
+     },
+     "has": ["#### Findings (fix only those the user names)", "model_version never parsed"],
+     "has_ci": [], "lacks": ["Findings to fix"]},
     {"name": "past_the_gate_is_named", "scenario": "gated_accepted", "boom": False,
      "entries": {"204-gate-latest": 'outcome: "PASSED"\ncommit: {gated}\n'},
      "has": ["past the gate", "accepted", "204-fix-check-<sha>", "bead id", "needs none"], "has_ci": [],
@@ -2211,3 +2224,19 @@ def test_loose_match_is_refused_when_ambiguous():
     assert not any("off by" in v for v in idx.values()), (
         "two titles sharing every non-digit word must not resolve to either"
     )
+
+
+def test_fix_loop_rules_are_carried_verbatim_by_both_rdr_skills():
+    """The three fix-loop rules (Sam, 2026-11-01; T2
+    nexus/rdr-gate-loop-census-2026-11-01) are printed by ``preamble rdr-fix``
+    through ``_FIX_RULES`` and stated in the rdr-fix-checklist and
+    rdr-gate-checklist skills as the same sentences, so one cannot drift."""
+    from nexus.commands.rdr import _FIX_RULES, FIX_LOOP_RULES
+
+    assert len(FIX_LOOP_RULES) == 3
+    assert _FIX_RULES[: len(FIX_LOOP_RULES)] == FIX_LOOP_RULES
+    for skill in ("rdr-fix-checklist", "rdr-gate-checklist"):
+        text = (_PLUGIN_DIR / "skills" / skill / "SKILL.md").read_text()
+        lines = text.splitlines()
+        missing = [rule for rule in FIX_LOOP_RULES if f"- {rule}" not in lines]
+        assert not missing, f"{skill} lacks: {missing}"

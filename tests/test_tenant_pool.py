@@ -388,6 +388,55 @@ def test_python_client_caches_are_reset_on_every_lease(
     assert resets == ["client"] * 2  # one reset when the lease starts and one when it ends
 
 
+def test_a_queued_search_telemetry_batch_is_written_before_the_lease_wipes(
+    state: dict[str, Any], make_pool: Callable[..., TenantPool], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP query queues its ``search_telemetry`` batch on a daemon worker and returns. The autouse per-test sink reset
+    tears down after the tenant fixture, so without a drain in the lease the write landed between the wipe and the
+    census: ``nexus.search_telemetry=1`` (develop CI run 41312781094). The fake write is slower than the lease's
+    teardown reaches the wipe, so with the drain removed ``write`` comes after ``wipe``."""
+    events: list[str] = []
+
+    def slow_write(_fn: Callable[..., Any], *, op: str) -> None:
+        time.sleep(0.3)
+        events.append(f"write:{op}")
+
+    real_wipe = _tenant_pool.wipe
+
+    def recording_wipe(st: Any, tenant: str) -> None:
+        events.append("wipe")
+        real_wipe(st, tenant)
+
+    monkeypatch.setattr(mcp_infra, "t2_index_write", slow_write)
+    monkeypatch.setattr(_tenant_pool, "wipe", recording_wipe)
+    pool = make_pool()
+    with pool.lease():
+        assert mcp_infra.search_telemetry_sink().log_search_batch([("ts", "q", "c", 1, 1, 0.1, 0.5)]) == 1
+    assert events[:2] == ["write:search_telemetry", "wipe"], events
+
+
+def test_a_search_telemetry_write_still_running_at_the_bound_fails_the_lease(
+    state: dict[str, Any], make_pool: Callable[..., TenantPool], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write that outlives the drain would commit after the census or into the next lease: the lease fails naming
+    it, and the tenant is retired."""
+    release = threading.Event()
+
+    def hung_write(_fn: Callable[..., Any], *, op: str) -> None:
+        release.wait(30)
+
+    monkeypatch.setattr(mcp_infra, "t2_index_write", hung_write)
+    monkeypatch.setattr(_tenant_pool, "TELEMETRY_DRAIN_SECONDS", 0.2)
+    pool = make_pool()
+    try:
+        with pytest.raises(TenantLeakError, match="search telemetry worker was still writing"):
+            with pool.lease():
+                mcp_infra.search_telemetry_sink().log_search_batch([("ts", "q", "c", 1, 1, 0.1, 0.5)])
+        assert pool.retired == 1 and pool.tenant is None
+    finally:
+        release.set()
+
+
 def test_the_slot_clients_are_rebuilt_for_each_lease(
     state: dict[str, Any], make_pool: Callable[..., TenantPool], monkeypatch: pytest.MonkeyPatch,
 ) -> None:

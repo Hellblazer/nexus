@@ -1021,12 +1021,16 @@ DRIVER_EOF
     printf '%s\n' "$twin_pid" >"$WORKDIR/reclaimid.live/pid"
     echo unknown >"$WORKDIR/reclaimid.live/start_token"
     : >"$WORKDIR/reclaimid.live/holder.flock"
-    bash -c 'exec 9>"$0"; flock -n 9 || exit 9; exec sleep 30' "$WORKDIR/reclaimid.live/holder.flock" &
+    # A blocking flock: the readiness probe below holds the lock for an instant, and a
+    # non-blocking holder that lands in that instant would exit and leave no live holder.
+    bash -c 'exec 9>"$0"; flock -w 10 9 || exit 9; exec sleep 30' "$WORKDIR/reclaimid.live/holder.flock" &
     twin_holder=$!
-    for _ in $(seq 1 50); do
-        [[ "$(_lock_flock_state "$WORKDIR/reclaimid.live")" == live ]] && break
+    twin_live=0
+    for _ in $(seq 1 100); do
+        [[ "$(_lock_flock_state "$WORKDIR/reclaimid.live")" == live ]] && { twin_live=1; break; }
         sleep 0.1
     done
+    [[ "$twin_live" -eq 1 ]] || bad "test setup: the live holder never held its flock, so the reclaim cannot be judged"
     cat >"$WORKDIR/reclaim_driver.sh" <<'DRIVER_EOF'
 source "$1/lock.sh"
 eval "$(declare -f _lock_is_stale | sed '1s/_lock_is_stale/_orig_lock_is_stale/')"

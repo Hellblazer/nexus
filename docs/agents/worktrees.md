@@ -112,8 +112,10 @@ things to avoid carefully; they are impossible.
    after the session started; check `ipcs -m` first.
 
 7. **Before pushing, ask whether a run someone is waiting on is in flight.**
-   Worktrees split the tree; CI remains one shared resource with one queue,
-   and a push cancels the run in progress. Read one commit's checks with a
+   Worktrees split the tree; CI remains one shared resource with one queue.
+   On develop a push never cancels a running run, but it replaces the pending
+   run in its slot and adds load to a shared pool (`.github/workflows/ci.yml`
+   concurrency); on a PR a push cancels the run in progress. Read one commit's checks with a
    single call: `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs`. Never
    `gh run watch` and never a polling loop: several concurrent watch loops on
    one token tripped GitHub's secondary rate limit on 2026-09-26 and every

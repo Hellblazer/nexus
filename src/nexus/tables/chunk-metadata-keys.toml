@@ -174,12 +174,12 @@ emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "
 [[row]]
 id = "tags"
 match = { key = "tags" }
-emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "a JSON array in the document meta, filtered by containment (a note's comma string is legacy); indexed files: a one-element array stamped at register from the file extension, markdown or pdf (nexus-6pfgb.8, Sam 2026-10-31 option A); the chunk row is the fallback while a document lacks it", remedy = "R3", moved_by = "6pfgb.38, 6pfgb.8" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "a JSON array in the document meta, filtered by containment (a note's comma string is legacy); indexed files: a one-element array stamped at register from the file extension, markdown or pdf (nexus-6pfgb.8, Sam 2026-10-31 option A) and filled for older documents by backfill-meta from content_type and file_path, with no chunk read (nexus-9cstf); a re-index and the backfill fill it only if empty (absent, null, empty string or empty array) and keep a non-empty value, so the first non-empty stamp is kept and the chunk row may differ (nexus-3ax49, Sam 2026-11-01); the chunk row is the fallback while a document lacks it", remedy = "R3", moved_by = "6pfgb.38, 6pfgb.8, 6pfgb.10, 9cstf, 3ax49" }
 
 [[row]]
 id = "category"
 match = { key = "category" }
-emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "document meta; indexed files: stamped at register as code, prose or paper (nexus-6pfgb.8, Sam 2026-10-31 option A; the repo PDF path says prose where nx index pdf says paper, recorded not fixed); the chunk row is the fallback while a document lacks it", remedy = "R3", moved_by = "6pfgb.8; R3 is plan 6pfgb, not the census (R2 there)" }
+emit = { class = "DOCUMENT", kind = "metadata-key", on_row = "allowed", home = "document meta; indexed files: stamped at register as code, prose or paper (nexus-6pfgb.8, Sam 2026-10-31 option A; the repo PDF path says prose where nx index pdf says paper, recorded not fixed) and filled for older documents by backfill-meta from content_type and file_path (nexus-9cstf); a re-index and the backfill fill it only if empty (absent, null, empty string or empty array) and keep a non-empty value, so the first non-empty stamp is kept and the chunk row may differ (nexus-3ax49, Sam 2026-11-01); the chunk row is the fallback while a document lacks it", remedy = "R3", moved_by = "6pfgb.8, 9cstf, 3ax49; R3 is plan 6pfgb, not the census (R2 there)" }
 
 [[row]]
 id = "ttl-days"

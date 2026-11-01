@@ -31,7 +31,13 @@ here.
 Do NOT unify these schemas with ``nexus.plans.bundle._terminal_schema``
 — they are deliberately NOT byte-identical (e.g. ``build_generate_
 request``'s schema carries ``citations``; ``_terminal_schema("generate")``
-does not, RDR-200 P0 audit round 2 residual). ``bundle.py``'s prompt
+does not, RDR-200 P0 audit round 2 residual). The ONE deliberate exception
+is check and verify (RDR-088 amendment 2026-11-01, Witness Schema v1,
+nexus-z1d0l.1.2): both share ``_CHECK_EVIDENCE_ITEM_SCHEMA`` here, and
+``_terminal_schema("check")`` / ``("verify")`` import it, so the item the
+model emits is defined once. Check and verify are no longer byte-for-byte
+transcriptions of the pre-amendment prompts; they show the model
+``[{"id","text"}]`` items (``nexus.operators.witness``). ``bundle.py``'s prompt
 shape (positional pipeline fragments via ``compose_bundle_prompt``) is
 also a structurally different, deliberately separate builder for the
 ``>=2``-contiguous-operator bundle path — this module is the fidelity
@@ -41,14 +47,18 @@ path only.
 from __future__ import annotations
 
 from nexus.context_annotations import source_clause
+from nexus.operators.witness import shown_check_items, shown_verify_evidence
 
 from typing import Any, Callable
 
-#: Shared evidence-item schema for ``operator_check`` and (via a deferred
-#: import) ``nexus.plans.bundle._terminal_schema("check")`` — one
+#: Shared model-facing evidence-item schema for ``operator_check``,
+#: ``operator_verify`` and (via a deferred import)
+#: ``nexus.plans.bundle._terminal_schema("check")`` / ``("verify")`` — one
 #: authoritative definition so a role-enum or required-key change lands
-#: once. ``nexus.mcp.core`` re-exports this name at module scope (a plain
-#: import, not a copy) so ``bundle.py``'s existing
+#: once. The model emits nothing else about an item: ``state``, ``span``,
+#: ``tumbler``, ``chash`` and ``collection`` are written by the host after
+#: dispatch (``nexus.operators.witness.bind``). ``nexus.mcp.core`` re-exports
+#: this name at module scope (a plain import, not a copy) so ``bundle.py``'s existing
 #: ``from nexus.mcp.core import _CHECK_EVIDENCE_ITEM_SCHEMA`` keeps
 #: working unchanged.
 _CHECK_EVIDENCE_ITEM_SCHEMA: dict = {
@@ -234,16 +244,19 @@ def build_filter_request(items: str, criterion: str) -> tuple[str, dict]:
 
 
 def build_check_request(items: str, check_instruction: str) -> tuple[str, dict]:
-    """Prompt/schema for ``operator_check``. Verbatim from core.py."""
+    """Prompt/schema for ``operator_check``. The items are shown as
+    ``[{"id","text"}]``: the caller's own id/text objects as they came, any
+    other input as the one item ``e1`` (``witness.shown_check_items``)."""
     prompt = (
         f"Check whether the following items are consistent with this "
         f"claim or question: {check_instruction}\n"
         f"Set ok=true when every item supports the claim, false when at "
         f"least one item contradicts it. Populate 'evidence' with a "
-        f"record per item containing a short grounding 'quote' and a "
-        f"'role' of 'supports', 'contradicts', or 'neutral'. Keep quotes "
-        f"short enough to be verifiable against the source item.\n\n"
-        f"Items:\n{items}{source_clause(items)}"
+        f"record per item containing the 'item_id' of the item shown, a "
+        f"short grounding 'quote' copied verbatim from that item's text, "
+        f"and a 'role' of 'supports', 'contradicts', or 'neutral'. Keep "
+        f"quotes short enough to be verifiable against the source item.\n\n"
+        f"Items:\n{shown_check_items(items)}{source_clause(items)}"
     )
     schema: dict = {
         "type": "object",
@@ -260,28 +273,35 @@ def build_check_request(items: str, check_instruction: str) -> tuple[str, dict]:
 
 
 def build_verify_request(claim: str, evidence: str) -> tuple[str, dict]:
-    """Prompt/schema for ``operator_verify``. Verbatim from core.py."""
+    """Prompt/schema for ``operator_verify``. The evidence is plain text (never
+    sniffed for JSON) and is shown as the one item ``e1``; the model returns
+    the same typed evidence items as ``operator_check``. The one exception is
+    a step the plan runner hydrated from ``ids``: its ``evidence`` is the
+    runner's own ``[{"id","text"}]`` rendering, shown as it is inside the
+    runner's prerendered scope (``witness.shown_verify_evidence``)."""
     prompt = (
         f"Verify whether the following claim is grounded in the evidence "
         f"provided.\n\n"
         f"Claim: {claim}\n\n"
-        f"Evidence:\n{evidence}\n\n"
+        f"Evidence:\n{shown_verify_evidence(evidence)}\n\n"
         f"Set verified=true only when the claim is directly supported by "
         f"the evidence. Provide a concise 'reason' explaining the "
-        f"verdict. Populate 'citations' with locators (section, page, "
-        f"table, or quoted span snippets) that pinpoint the supporting "
-        f"or contradicting passages."
+        f"verdict. Populate 'evidence' with a record per passage that "
+        f"supports or contradicts the claim: the 'item_id' of the "
+        f"evidence item shown, a short 'quote' copied verbatim from that "
+        f"item's text, and a 'role' of 'supports', 'contradicts', or "
+        f"'neutral'."
         f"{source_clause(evidence)}"
     )
     schema: dict = {
         "type": "object",
-        "required": ["verified", "reason", "citations"],
+        "required": ["verified", "reason", "evidence"],
         "properties": {
             "verified": {"type": "boolean"},
             "reason": {"type": "string"},
-            "citations": {
+            "evidence": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": _CHECK_EVIDENCE_ITEM_SCHEMA,
             },
         },
     }

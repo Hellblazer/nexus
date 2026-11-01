@@ -69,6 +69,35 @@ INLINE_PLANS: dict[str, dict[str, Any]] = {
         {"tool": "check", "args": {"items": "$step2.contents", "check_instruction": "do the chunks say anything"}},
         {"tool": "generate", "args": {"context": "$step2.contents", "question": "q"}},
     ]},
+    #: RDR-189 P1 (nexus-z1d0l.1.4): a witness ends a bundle, so this trailing run is a bundle (extract, check) and then an
+    #: isolated generate: one run, two segments.
+    "extract-check-generate": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "extract", "args": {"inputs": "$step2.contents", "fields": "decision"}},
+        {"tool": "check", "args": {"items": "$step3.extractions", "check_instruction": "do the extractions say anything"}},
+        {"tool": "generate", "args": {"context": "$step2.contents", "question": "q"}},
+    ]},
+    #: A witness-split trailing run whose isolated step AFTER the witness reads different evidence than the bundle:
+    #: the bundle (extract, check) reads branch A, the generate branch B.
+    "witness-split-later-reads-b": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "search", "args": {"query": "q2", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "store_get_many", "args": {"ids": "$step2.ids", "collections": "$step2.collections"}},
+        {"tool": "extract", "args": {"inputs": "$step3.contents", "fields": "decision"}},
+        {"tool": "check", "args": {"items": "$step5.extractions", "check_instruction": "do the extractions say anything"}},
+        {"tool": "generate", "args": {"context": "$step4.contents", "question": "q"}},
+    ]},
+    #: As above, but the generate hydrates branch B itself through its own ``ids``.
+    "witness-split-later-own-ids": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "search", "args": {"query": "q2", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "extract", "args": {"inputs": "$step3.contents", "fields": "decision"}},
+        {"tool": "check", "args": {"items": "$step4.extractions", "check_instruction": "do the extractions say anything"}},
+        {"tool": "generate", "args": {"ids": "$step2.ids", "collections": "$step2.collections", "question": "q"}},
+    ]},
     #: Two retrieval branches, each fetched, then an extract over branch A and a generate over branch B plus the extract:
     #: the evidence of the run is A plus B, the generate's second element is a deferred ref when the run bundles.
     "two-branch-probe": {"steps": [
@@ -225,7 +254,7 @@ class Calls:
 
 async def _run(
     name: str, bindings: dict[str, Any], *, bundled: bool, supports: bool = True, cut_at: int | None = None,
-    repair: bool = False, oversized: bool = False,
+    repair: bool = False, oversized: bool = False, dispatcher: Any = None, fetch: Any = None,
 ) -> tuple[PlanResult, Calls]:
     """``supports`` False: the assessment finds nothing supporting. ``repair``: only the repair's own hit supports,
     and the facet's own text retrieves it. ``oversized``: the bundle is too big, so it falls back to per-step dispatch."""
@@ -234,7 +263,7 @@ async def _run(
     mode = "repair" if repair else ("supports" if supports else "neutral")
     retrieve = _retrieve_for(repair=repair)
     with patch.object(mcp_core, "search", retrieve), patch.object(mcp_core, "query", retrieve), \
-         patch.object(mcp_core, "traverse", _traverse), patch.object(mcp_core, "store_get_many", _get_many), \
+         patch.object(mcp_core, "traverse", _traverse), patch.object(mcp_core, "store_get_many", fetch or _get_many), \
          patch.object(mcp_core, "operator_groupby", calls.count("groupby", _groupby)), \
          patch.object(mcp_core, "operator_aggregate", calls.count("aggregate", _aggregate)), \
          patch.object(mcp_core, "operator_summarize", calls.count("summarize", _text)), \
@@ -248,7 +277,7 @@ async def _run(
          patch("nexus.plans.bundle.MAX_BUNDLE_PROMPT_CHARS", 1 if oversized else _REAL_MAX_BUNDLE_PROMPT_CHARS):
         result = await plan_run(
             match, binds, bundle_operators=bundled, coverage_boundary=CoverageBoundary(request=_request()),
-            continuation_cut_at_step=cut_at,
+            continuation_cut_at_step=cut_at, dispatcher=dispatcher,
         )
     return result, calls
 
@@ -423,6 +452,11 @@ async def test_a_plans_own_check_before_the_terminal_operator_does_not_dispatch_
     assert unbundled.coverage.skip_generation and bundled.coverage.skip_generation
     assert unbundled.steps == bundled.steps
     assert ucalls.timeline and set(ucalls.timeline) == {"assess"}
+    # The isolated fill (the check is the first step of the run) marks the unrun witness skipped too.
+    assert bundled.steps[2] != BUNDLED_INTERMEDIATE and bundled.steps[2][SKIPPED_MARK] is True
+    assert unbundled.steps[2] == bundled.steps[2]
+    # a skipped witness never ran, so it is no discarded reduce branch (nexus-z1d0l.1.4 confirmation)
+    assert bundled.dropped_reduce_steps == [] and unbundled.dropped_reduce_steps == []
 
 
 @pytest.mark.asyncio
@@ -433,10 +467,108 @@ async def test_a_plans_own_check_before_the_terminal_operator_dispatches_after_t
     assert "assess" in ucalls.timeline
     last_assessment = max(i for i, t in enumerate(ucalls.timeline) if t == "assess")
     assert ucalls.timeline.index("check") > last_assessment, "the plan's check runs after the boundary, not before it"
-    assert bcalls.timeline.index("bundle") > max(i for i, t in enumerate(bcalls.timeline) if t == "assess")
+    # RDR-189 P1 (nexus-z1d0l.1.4): a witness ends a bundle, so the bundling dispatcher no longer fuses the plan's
+    # check with the generate: both run one by one, as in the unbundled run, and the boundary still precedes the check.
+    assert bcalls.ran == ["check", "generate"] and "bundle" not in bcalls.timeline
+    assert bcalls.timeline.index("check") > max(i for i, t in enumerate(bcalls.timeline) if t == "assess")
     assert _anchor_contents(unbundled) == _anchor_contents(bundled)
     assert unbundled.coverage is not None and bundled.coverage is not None
     assert unbundled.coverage.state == bundled.coverage.state
+
+
+EXTRACT_CHECK_GENERATE = ("extract-check-generate", {})
+
+
+@pytest.mark.asyncio
+async def test_a_trailing_run_a_witness_splits_into_a_bundle_and_an_isolated_step_is_skipped_whole() -> None:
+    """``search, fetch, extract, check, generate``: the bundling run is the bundle (extract, check) then the generate.
+    The boundary sits before the bundle and, on a skip, fills the whole run: nothing dispatches and the later
+    isolated step is not run on its own."""
+    bundled, bcalls = await _run(*EXTRACT_CHECK_GENERATE, bundled=True, supports=False)
+    unbundled, ucalls = await _run(*EXTRACT_CHECK_GENERATE, bundled=False, supports=False)
+    assert bundled.coverage is not None and bundled.coverage.skip_generation
+    assert bcalls.ran == [] and "bundle" not in bcalls.timeline and ucalls.ran == []
+    assert len(bundled.steps) == len(_plan("extract-check-generate")["steps"])
+    assert bundled.steps[2] == BUNDLED_INTERMEDIATE, "the extract is an operator that never ran: the bundle placeholder"
+    # A witness that never ran is not "consumed inline by a bundle": its slot says it was skipped (nexus-z1d0l.1.4).
+    assert bundled.steps[3] != BUNDLED_INTERMEDIATE and bundled.steps[3][SKIPPED_MARK] is True
+    # a skipped witness never ran, so it is no discarded reduce branch (nexus-z1d0l.1.4 confirmation)
+    assert bundled.dropped_reduce_steps == [] and unbundled.dropped_reduce_steps == []
+    assert bundled.steps[-1][SKIPPED_MARK] is True
+    assert bundled.steps == unbundled.steps
+
+
+@pytest.mark.asyncio
+async def test_a_trailing_run_a_witness_splits_reads_the_whole_runs_evidence_and_runs_in_order_when_covered() -> None:
+    bundled, bcalls = await _run(*EXTRACT_CHECK_GENERATE, bundled=True)
+    unbundled, ucalls = await _run(*EXTRACT_CHECK_GENERATE, bundled=False)
+    assert _anchor_contents(bundled) == _anchor_contents(unbundled) == set(TEXTS)
+    # the bundle (extract + check) is one dispatch after the boundary, then the generate on its own
+    assert bcalls.ran == ["generate"] and len(bcalls.bundles) == 1
+    last_assessment = max(i for i, t in enumerate(bcalls.timeline) if t == "assess")
+    assert bcalls.timeline.index("bundle") > last_assessment
+    assert bcalls.timeline.index("generate") > bcalls.timeline.index("bundle")
+    assert ucalls.ran == ["extract", "check", "generate"]
+    assert bundled.coverage is not None and unbundled.coverage is not None
+    assert bundled.coverage.state == unbundled.coverage.state
+
+
+WITNESS_SPLIT_B = ("witness-split-later-reads-b", {})
+WITNESS_SPLIT_OWN_IDS = ("witness-split-later-own-ids", {})
+
+
+@pytest.mark.asyncio
+async def test_the_isolated_step_after_a_witness_is_read_by_the_boundary_and_handed_the_repair_evidence() -> None:
+    """``extract, check`` is one bundle reading branch A; the generate after the witness reads branch B. The boundary
+    reads the whole run's evidence (A and B), and the repair evidence reaches the later step, as it does unbundled."""
+    bundled, bcalls = await _run(*WITNESS_SPLIT_B, bundled=True)
+    unbundled, _ = await _run(*WITNESS_SPLIT_B, bundled=False)
+    assert _anchor_contents(bundled) == set(TEXTS) | set(TEXTS_B) == _anchor_contents(unbundled)
+    assert bcalls.ran == ["generate"] and len(bcalls.bundles) == 1
+    repaired, rcalls = await _run(*WITNESS_SPLIT_B, bundled=True, repair=True)
+    assert repaired.coverage is not None and repaired.coverage.repair.outcome == "completed"
+    assert set(TEXTS_B) | {REPAIR_TEXT} <= _anchor_contents(repaired)
+    assert REPAIR_TEXT in _hand_text(rcalls.args["generate"][0]), "the step after the witness is handed the repair evidence"
+    (bundle,) = rcalls.bundles
+    assert REPAIR_TEXT in _hand_text(bundle.steps[0].args)
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_bundle_keeps_the_repair_naming_of_the_step_after_its_witness() -> None:
+    """The per-step fallback names its own steps for the repair supplement; the step after the witness (named before
+    the fallback) must stay named, not be overwritten by the fallback's naming."""
+    result, calls = await _run(*WITNESS_SPLIT_B, bundled=True, repair=True, oversized=True)
+    assert calls.bundles == [] and result.coverage is not None and result.coverage.repair.outcome == "completed"
+    assert calls.ran == ["extract", "check", "generate"]
+    assert REPAIR_TEXT in _hand_text(calls.args["extract"][0])
+    assert REPAIR_TEXT in _hand_text(calls.args["generate"][0])
+
+
+@pytest.mark.asyncio
+async def test_a_dispatcher_that_does_not_hydrate_is_not_asked_to_fetch_for_the_run_after_a_witness() -> None:
+    """The boundary reads the step after a witness the way that step's own dispatch will. A bundling dispatcher that
+    does not hydrate does not fetch the generate's ``ids`` at dispatch, so the boundary reading must not fetch them."""
+    async def bundling_only(tool: str, args: dict[str, Any], **kw: Any) -> Any:
+        return await runner._default_dispatcher(tool, args, **kw)
+    setattr(bundling_only, runner._SUPPORTS_BUNDLING_ATTR, True)  # supports bundling, does not hydrate
+
+    seen_default: list[Any] = []
+    seen_plain: list[Any] = []
+
+    def counting(into: list[Any]):
+        def fetch(**kw: Any) -> dict[str, Any]:
+            into.append(kw["ids"])
+            return _get_many(**kw)
+        return fetch
+
+    await _run(*WITNESS_SPLIT_OWN_IDS, bundled=True, fetch=counting(seen_default))
+    await _run(*WITNESS_SPLIT_OWN_IDS, bundled=True, fetch=counting(seen_plain), dispatcher=bundling_only)
+    branch_b = [_h(t) for t in TEXTS_B]
+    own_ids = lambda seen: [ids for ids in seen if list(ids) == branch_b]  # noqa: E731
+    # the hydrating dispatcher: the boundary reads the generate's ids once, the generate's dispatch fetches them again
+    assert len(own_ids(seen_default)) == 2
+    # the non-hydrating one: only the generate's own dispatch fetches them
+    assert len(own_ids(seen_plain)) == 1
 
 
 # ── the repair evidence reaches the answering step ─────────────────────────────────────────────────────────

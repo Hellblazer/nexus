@@ -174,17 +174,43 @@ class TestClassifyContinuationCut:
 
 
 class TestMultiUnitReachability:
-    """MULTI_UNIT is UNREACHABLE for a pure trailing operator suffix under
-    the production bundling gate (bundle_operators=True and a bundling-
-    capable dispatcher) — segment_steps fuses every contiguous run of
-    >=2 operators into exactly one OperatorBundleSlice, so the trailing
-    walk in classify_continuation_cut can never see more than one
-    operator-composed segment when that gate is open. It is reachable
-    through exactly one real path: the bundling gate closed, which
-    flattens a >=2-operator run into N separate per-step dispatches.
-    This is a real, non-vacuous construction (nexus-moht0 doctrine),
-    proved by actually driving classify_continuation_cut through
-    bundle_operators=False — not asserted."""
+    """MULTI_UNIT is UNREACHABLE for a pure trailing run of NON-WITNESS
+    operators under the production bundling gate (bundle_operators=True
+    and a bundling-capable dispatcher) — segment_steps fuses every
+    contiguous run of >=2 such operators into exactly one
+    OperatorBundleSlice, so the trailing walk in classify_continuation_cut
+    can never see more than one operator-composed segment when that gate
+    is open. It is reachable through two real paths: the bundling gate
+    closed, which flattens a >=2-operator run into N separate per-step
+    dispatches; and (RDR-189 P1, nexus-z1d0l.1.4) a ``check``/``verify``
+    followed by another operator, because a witness ends the bundle
+    buffer (its output must reach the host), so ``check -> generate`` is
+    two units. Both are real, non-vacuous constructions (nexus-moht0
+    doctrine), proved by actually driving classify_continuation_cut."""
+
+    def test_a_witness_followed_by_an_operator_is_multi_unit_under_the_production_gate(self):
+        steps = [
+            _step("search", query="a"),
+            _step("check", ids="$step1.ids", check_instruction="c"),
+            _step("generate", template="report", context="$step2.evidence"),
+        ]
+        cut = classify_continuation_cut(steps)
+        assert cut.shape == CutShape.MULTI_UNIT
+        assert cut.plan_indices == (1, 2)
+        assert cut.operators == ("check", "generate")
+
+    def test_a_terminal_witness_keeps_its_cut_shape(self):
+        bundled = classify_continuation_cut([
+            _step("search", query="a"),
+            _step("extract", inputs="$step1.ids", fields="title"),
+            _step("verify", claim="c", evidence="$step2.extractions"),
+        ])
+        assert bundled.shape == CutShape.SHAPE_A and bundled.operators == ("extract", "verify")
+        lone = classify_continuation_cut([
+            _step("search", query="a"),
+            _step("verify", ids="$step1.ids", claim="c"),
+        ])
+        assert lone.shape == CutShape.SHAPE_B and lone.operators == ("verify",)
 
     def test_bundling_disabled_makes_trailing_run_multi_unit(self):
         steps = [

@@ -135,6 +135,60 @@ class TestSegmentation:
         assert segment_steps([]) == []
 
 
+class TestWitnessStepsAreNeverBundleIntermediates:
+    """RDR-189 P1 (nexus-z1d0l.1.4): a ``check`` or ``verify`` step ends the bundle buffer, so it can be a
+    bundle's terminal step (whose output is stamped host-side and bound there) and is never an intermediate
+    (whose output the host never sees). Rule chosen: terminal, not always-isolated."""
+
+    @pytest.mark.parametrize("witness", ["check", "verify", "operator_check", "operator_verify",
+                                          "mcp__plugin_conexus_nexus__operator_check"])
+    def test_witness_then_generate_is_two_isolated_steps(self, witness):
+        segs = segment_steps([
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": witness, "args": {}},
+            {"tool": "generate", "args": {}},
+        ])
+        assert [type(s).__name__ for s in segs] == ["IsolatedStep"] * 3
+        assert [s.plan_index for s in segs] == [0, 1, 2]
+
+    @pytest.mark.parametrize("witness", ["check", "verify"])
+    def test_a_witness_after_operators_is_the_terminal_of_their_bundle(self, witness):
+        segs = segment_steps([
+            {"tool": "extract", "args": {}},
+            {"tool": "rank", "args": {}},
+            {"tool": witness, "args": {}},
+            {"tool": "generate", "args": {}},
+        ])
+        assert isinstance(segs[0], OperatorBundleSlice) and segs[0].plan_indices == (0, 1, 2)
+        assert isinstance(segs[1], IsolatedStep) and segs[1].plan_index == 3
+
+    def test_adjacent_witnesses_do_not_bundle_each_other(self):
+        segs = segment_steps([{"tool": "check", "args": {}}, {"tool": "verify", "args": {}}])
+        assert [type(s).__name__ for s in segs] == ["IsolatedStep", "IsolatedStep"]
+
+    def test_a_witness_between_operators_splits_the_run_after_it(self):
+        segs = segment_steps([
+            {"tool": "extract", "args": {}},
+            {"tool": "verify", "args": {}},
+            {"tool": "rank", "args": {}},
+            {"tool": "summarize", "args": {}},
+        ])
+        assert isinstance(segs[0], OperatorBundleSlice) and segs[0].plan_indices == (0, 1)
+        assert isinstance(segs[1], OperatorBundleSlice) and segs[1].plan_indices == (2, 3)
+
+    def test_no_segment_ever_holds_a_witness_before_its_last_step(self):
+        """The invariant, over every ordering of three steps drawn from witnesses and other operators."""
+        import itertools
+
+        names = ["check", "verify", "extract", "generate"]
+        for combo in itertools.product(names, repeat=3):
+            steps = [{"tool": t, "args": {}} for t in combo]
+            for seg in segment_steps(steps):
+                if isinstance(seg, OperatorBundleSlice):
+                    for pi in seg.plan_indices[:-1]:
+                        assert combo[pi] not in ("check", "verify"), (combo, seg)
+
+
 # ── Prompt composition ────────────────────────────────────────────────────────
 
 
@@ -277,7 +331,8 @@ class TestComposeBundlePrompt:
     def test_verify_step_renders_claim_and_verification_schema(self):
         """RDR-088 Phase 2: a bundled verify step must render its claim
         verbatim and the terminal schema must declare verified + reason +
-        citations as required keys."""
+        evidence as required keys; evidence items are the SAME model-facing
+        item as check's (Witness Schema v1, nexus-z1d0l.1.2)."""
         bundle = OperatorBundle(steps=(
             OperatorBundleStep(
                 1, "extract", {"fields": "passage",
@@ -293,10 +348,16 @@ class TestComposeBundlePrompt:
         assert "claim-sentinel-verify-abc" in prompt
         # The downstream input for verify is evidence, not items.
         assert "output text from STEP 1" in prompt
-        assert {"verified", "reason", "citations"}.issubset(
+        assert {"verified", "reason", "evidence"}.issubset(
             set(schema["required"]),
         )
         assert schema["properties"]["verified"]["type"] == "boolean"
+        assert "citations" not in schema["properties"]
+        from nexus.mcp.operator_requests import _CHECK_EVIDENCE_ITEM_SCHEMA
+
+        assert schema["properties"]["evidence"]["items"] == _CHECK_EVIDENCE_ITEM_SCHEMA
+        assert "`evidence`" in prompt and "item_id" in prompt
+        assert "citations" not in prompt
 
     def test_groupby_step_renders_key_and_inline_items_schema(self):
         """RDR-093 Phase 1: a bundled groupby step must render its
@@ -1067,3 +1128,38 @@ class TestBundleModelPin:
     async def test_kill_switch_leaves_bundle_bare(self, monkeypatch):
         monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
         assert "model" not in (await self._run())
+
+
+class TestDeferredScalarArgsRenderAsStepProse:
+    """A scalar arg (verify claim, check instruction, filter criterion, generate template) that is a
+    deferred ref to an earlier bundled step must reach the model as "the `field` output from STEP K",
+    numbered inside the bundle, never as the raw sentinel dict (nexus-z1d0l.1.4 confirmation)."""
+
+    @staticmethod
+    def _ref(plan_index: int, field: str) -> dict:
+        from nexus.plans.bundle import DEFERRED_REF_KEY
+        return {DEFERRED_REF_KEY: True, "step_index": plan_index, "field": field}
+
+    @pytest.mark.parametrize(("tool", "arg"), [
+        ("verify", "claim"),
+        ("check", "check_instruction"),
+        ("filter", "criterion"),
+        ("generate", "template"),
+    ])
+    def test_a_deferred_scalar_arg_names_the_bundle_step(self, tool: str, arg: str) -> None:
+        from nexus.plans.bundle import DEFERRED_REF_KEY
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(4, "summarize", {"inputs": "[{\"id\": \"a\", \"text\": \"x\"}]"}),
+            OperatorBundleStep(5, tool, {arg: self._ref(4, "text")}),
+        ))
+        prompt, _ = compose_bundle_prompt(bundle)
+        assert DEFERRED_REF_KEY not in prompt, prompt
+        assert f"{arg}: the `text` output from STEP 1" in prompt, prompt
+
+    def test_a_literal_scalar_arg_is_still_quoted(self) -> None:
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(1, "summarize", {"inputs": "[{\"id\": \"a\", \"text\": \"x\"}]"}),
+            OperatorBundleStep(2, "verify", {"claim": "the sky is green"}),
+        ))
+        prompt, _ = compose_bundle_prompt(bundle)
+        assert "claim: 'the sky is green'" in prompt

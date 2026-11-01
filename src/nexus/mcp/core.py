@@ -9174,18 +9174,33 @@ async def operator_check(
     """Check a claim's consistency across N peer items, via an LLM subprocess.
 
     Use `operator_verify` instead for a single claim against a single
-    evidence source (1-to-1, not 1-to-N). Returns a composable
-    `{ok: bool, evidence: list[{item_id, quote, role}]}` payload, where
-    role is one of "supports", "contradicts", "neutral", so plan steps can
-    branch deterministically on `ok`.
+    evidence source (1-to-1, not 1-to-N). Returns a versioned, host-bound
+    payload `{schema_version: 1, ok: bool, evidence: list[item], rejected:
+    list[str], uncovered: list[str], requires_review: bool}` so plan steps
+    can branch deterministically on `ok`. Each item is `{item_id, quote,
+    role, state, span, tumbler, chash, collection}`: role is one of
+    "supports", "contradicts", "neutral"; state is "bound", "unattributed",
+    "unresolved" or "ambiguous". The model supplies only item_id, quote and
+    role; the host tests the quote against the item's own text and writes
+    state, span and the source fields, and a value the model puts in them
+    is never read. An item_id outside the supplied items is dropped and
+    listed in `rejected`; `uncovered` lists items no supports or contradicts
+    item names. Only a "bound" item is a valid witness; a direct call has no
+    known source, so its quotes come back "unattributed" at best.
+    `requires_review` is true when any item is not bound or the verdict is
+    not backed by bound support.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
+    from nexus.operators.witness import bind, binding_deferred, records_from_check_items  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
     prompt, schema = build_check_request(items, check_instruction)
-    return await claude_dispatch(
+    raw = await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_check",
     )
+    if binding_deferred():
+        return raw  # the plan runner holds the records and binds once
+    return bind(raw, records_from_check_items(items), "check")
 
 
 async def operator_verify(
@@ -9204,17 +9219,29 @@ async def operator_verify(
     """Verify a single claim against a single evidence source, via an LLM subprocess.
 
     Use `operator_check` instead when the claim must hold across N peer
-    items rather than one evidence source. Returns
-    `{verified: bool, reason: str, citations: list[str]}`, where citations
-    are span anchors or locators from the evidence text.
+    items rather than one evidence source. Returns a versioned, host-bound
+    payload `{schema_version: 1, verified: bool, reason: str, evidence:
+    list[item], rejected: list[str], requires_review: bool, citations:
+    list[str]}`. Each item has the same shape and rules as `operator_check`'s
+    (`{item_id, quote, role, state, span, tumbler, chash, collection}`); the
+    evidence is one item, `e1`, so the model cites item_id "e1" and the host
+    tests each quote against the evidence text. A direct call has no known
+    source, so a quote comes back "unattributed" at best; only a "bound"
+    item is a valid witness. `citations` is deprecated: the host derives it
+    as the quotes of bound and unattributed items, and it goes at
+    schema_version 2.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
+    from nexus.operators.witness import bind, binding_deferred, records_from_verify_evidence  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
     prompt, schema = build_verify_request(claim, evidence)
-    return await claude_dispatch(
+    raw = await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_verify",
     )
+    if binding_deferred():
+        return raw  # the plan runner holds the records and binds once
+    return bind(raw, records_from_verify_evidence(evidence), "verify")
 
 
 # HISTORY (RDR-093 Phase 1, Paper §D.4 GroupBy operator). Group
@@ -9868,7 +9895,9 @@ THEY DO NOT RETURN CONTENT. To get text, chain into store_get_many.
       - Output: {contents: [str, ...], missing: [str, ...]}
 
 === Operators (LLM-backed) ===
-Each requires hydrated text as input — NOT ids/tumblers.
+Each takes hydrated text as input: pass $stepN.contents, never raw tumblers.
+`check` and `verify` (listed last) also take `ids` + `collections` straight
+from a retrieval step; the runner hydrates them and keeps each item's source.
 
   extract(inputs, fields)
       - `inputs` is a JSON array of content strings. Pass $stepN.contents
@@ -9898,6 +9927,23 @@ Each requires hydrated text as input — NOT ids/tumblers.
         To pass several sources write context=[$step3.contents,
         $step4.contents], never one string that quotes them.
       - Output: {text: str}
+
+  check(check_instruction, ids, collections, items)
+      - Tests a claim across the retrieved items. Feed it ids=$step1.ids and
+        collections=$step1.collections (the runner hydrates them and keeps
+        each item's source); `check_instruction` is the claim or question.
+        Instead of ids, `items` may be a JSON array of hydrated texts
+        (items=$stepN.contents); the items then carry no source of their own.
+      - Output: {ok, evidence: [{item_id, quote, role, state, span,
+        tumbler, chash, collection}], rejected, uncovered, requires_review}.
+        Only an evidence item whose state is "bound" is a valid witness.
+
+  verify(claim, ids, collections)
+      - Tests ONE claim against the retrieved passages. `claim` is the
+        assertion to test and is REQUIRED: a verify step with ids and no
+        claim fails the plan, it is never filled in for you.
+      - Output: {verified, reason, evidence: [same items as check],
+        rejected, requires_review, citations}.
 
 === Correct chain patterns ===
 
@@ -12016,9 +12062,14 @@ async def _nx_answer_plan_miss(
         if not steps:
             raise ValueError("planner returned empty plan")
 
+        # RDR-189 P1 (nexus-z1d0l.1.4): ``check`` and ``verify`` are dispatchable (the runner's
+        # ``_OPERATOR_TOOL_MAP`` carries both) and return the host-bound witness payload, so the
+        # planner may emit them; before this a witness step was dropped and no ad-hoc plan could
+        # reach one.
         _ALLOWED_TOOLS = {
             "search", "query", "traverse", "store_get_many",
             "extract", "rank", "compare", "summarize", "generate",
+            "check", "verify",
         }
         # The LLM planner emits either the bare operator name ("extract") or
         # the resolved MCP tool name ("operator_extract" / full prefix form).
@@ -12034,6 +12085,8 @@ async def _nx_answer_plan_miss(
             "operator_compare": "compare",
             "operator_summarize": "summarize",
             "operator_generate": "generate",
+            "operator_check": "check",
+            "operator_verify": "verify",
         }
         # Catalog tools the LLM might reach for — map to the closest allowed
         # tool (traverse covers link walks; search covers catalog_search use

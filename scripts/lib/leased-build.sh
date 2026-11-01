@@ -151,9 +151,31 @@ leased_build_init() {
     trap '_leased_build_forward_signal QUIT' QUIT
 }
 
+# nexus-qrldo: remove this repo's orphaned Testcontainers containers before a
+# build (see scripts/testcontainers_sweep.py), the backstop for a container
+# Ryuk could not reap. Best effort and bounded: it never fails the build.
+# NX_TC_SWEEP=0 skips it; a lib copied without the script (the shell harnesses'
+# temp repos) skips it too.
+leased_build_sweep_testcontainers() {
+    local tc_sweep
+    tc_sweep="$(dirname "${BASH_SOURCE[0]}")/../testcontainers_sweep.py"
+    if [[ "${NX_TC_SWEEP:-1}" != 0 && -f "$tc_sweep" ]]; then
+        python3 "$tc_sweep" || true
+    fi
+    return 0
+}
+
 leased_build_run() {
     local lab_class="$1"
     shift
+    leased_build_sweep_testcontainers
+    # nexus-qrldo: Ryuk on for this build. ~/.testcontainers.properties turns it
+    # off on the dev boxes, and then a killed JVM's containers ran until someone
+    # removed them (29 filled the laptop's colima disk on 2026-11-01). The
+    # environment variable beats the file; with Ryuk on, a kill -9'd test JVM's
+    # container was gone in 10 s on colima. A caller can still pass
+    # TESTCONTAINERS_RYUK_DISABLED=true.
+    export TESTCONTAINERS_RYUK_DISABLED="${TESTCONTAINERS_RYUK_DISABLED:-false}"
     set -m
     if [[ -n "$lab_class" ]]; then
         rm -f "$_leased_build_pidfile"

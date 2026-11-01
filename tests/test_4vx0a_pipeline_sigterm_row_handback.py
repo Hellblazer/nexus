@@ -350,6 +350,82 @@ def test_a_stopped_mineru_worker_and_one_started_after_the_stop_are_both_killed(
         pdf_extractor.bind_run_cancel(None)
 
 
+def test_the_release_waits_for_a_stage_threads_in_flight_page_flush() -> None:
+    """CI run 41298836805: the chunker's poll had popped the page buffer and its ``/pages`` POST was
+    in flight when SIGTERM landed. The release's own flush found the buffer empty, ``/fail`` went at
+    once, the re-delivered SIGTERM ended the process mid-POST (the stand-in logged a POST with an
+    empty body) and the resume found no pages. The release's ``/fail`` must follow the in-flight
+    pages; with the flush lock removed this sees ``/fail`` while the pages POST is still blocked."""
+    engine = InMemoryPipelineEngine()
+    in_pages, let_pages_go = threading.Event(), threading.Event()
+    order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/pipeline/pages":
+            in_pages.set()
+            let_pages_go.wait(10)
+        order.append(request.url.path)
+        return engine.handler(request)
+
+    db = HttpPipelineDB(base_url="http://in-memory-pipeline", _token="in-memory",
+                        client=httpx.Client(transport=httpx.MockTransport(handler)))
+    db.create_pipeline("h4vx0a-inflight", "/a.pdf", "docs__test")
+    for i in range(3):
+        db.write_page("h4vx0a-inflight", i, f"page {i}")
+    stage = threading.Thread(target=db.flush, args=("h4vx0a-inflight",))
+    release = threading.Thread(target=_release_interrupted_run,
+                               args=(db, "h4vx0a-inflight", TerminationRequested(signal.SIGTERM)))
+    try:
+        stage.start()
+        assert in_pages.wait(5), "the stage's flush never reached its pages POST"
+        release.start()
+        release.join(0.5)
+        assert "/v1/pipeline/fail" not in order, f"/fail went while the pages POST was in flight: {order}"
+    finally:
+        let_pages_go.set()
+        stage.join(10)
+        release.join(10)
+    assert order.index("/v1/pipeline/pages") < order.index("/v1/pipeline/fail"), order
+    resume = HttpPipelineDB(base_url="http://in-memory-pipeline", _token="in-memory",
+                            client=httpx.Client(transport=httpx.MockTransport(engine.handler)))
+    assert resume.create_pipeline("h4vx0a-inflight", "/a.pdf", "docs__test") == "resuming"
+    assert [p["page_index"] for p in resume.read_pages("h4vx0a-inflight")] == [0, 1, 2]
+
+
+def test_the_release_stops_waiting_for_an_in_flight_flush_at_its_timeout() -> None:
+    """The flush lock must not undo nexus-euczk: with a stage thread's ``/pages`` POST stuck, the
+    release's flush gives up at its timeout and ``mark_failed`` still sends ``/fail`` at once.
+    With the bound dropped (an unbounded acquire) this waits for the stuck POST and fails."""
+    engine = InMemoryPipelineEngine()
+    in_pages, let_pages_go = threading.Event(), threading.Event()
+    order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/pipeline/pages":
+            in_pages.set()
+            let_pages_go.wait(10)
+        order.append(request.url.path)
+        return engine.handler(request)
+
+    db = HttpPipelineDB(base_url="http://in-memory-pipeline", _token="in-memory",
+                        client=httpx.Client(transport=httpx.MockTransport(handler)))
+    db.create_pipeline("h4vx0a-stuck", "/a.pdf", "docs__test")
+    for i in range(3):
+        db.write_page("h4vx0a-stuck", i, f"page {i}")
+    stage = threading.Thread(target=db.flush, args=("h4vx0a-stuck",))
+    try:
+        stage.start()
+        assert in_pages.wait(5), "the stage's flush never reached its pages POST"
+        started = time.monotonic()
+        db.mark_failed("h4vx0a-stuck", error="interrupted", timeout=0.3)
+        waited = time.monotonic() - started
+    finally:
+        let_pages_go.set()
+        stage.join(10)
+    assert waited < 3, f"mark_failed waited {waited:.2f}s for a stuck flush past its 0.3s timeout"
+    assert order.index("/v1/pipeline/fail") < order.index("/v1/pipeline/pages"), order
+
+
 def test_a_fenced_run_does_not_mark_the_new_owners_row() -> None:
     """An interrupted run whose row a newer run already took over (``run_epoch``,
     nexus-8vu8p) must not move that row: the engine refuses the stale write and

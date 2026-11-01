@@ -35,6 +35,254 @@ no persistent storage. Grouping them in one RDR produces a coherent
 narrative — each closes a specific paper capability and together they
 unblock multi-hop query classes we currently cannot express.
 
+## Amendment Log
+
+**2026-11-01, one versioned witness schema for check and verify (approved
+by Sam 2026-11-01 with the proposed answers to all seven open decisions,
+bead nexus-mkeh6; drafted under nexus-z1d0l.1.1).** RDR-189 P1 (accepted
+2026-10-24) requires this amendment before `operator_requests.py`,
+`core.py`, `bundle.py`, plan hydration or any documented return contract
+changes. The original text is kept where it stands; each edit point carries
+an inline "Amended 2026-11-01" note pointing here. The contract itself is
+§ Witness Schema v1 below. This log is an index.
+
+  - **(i)** Gap 2 and Technical Design: `operator_verify` no longer returns
+    bare-string `citations` as its evidence. It returns the same structured
+    evidence items as `operator_check`; `citations` survives one deprecation
+    window as a host-derived field.
+  - **(ii)** Technical Design: both operators return `schema_version: 1`,
+    host-assigned `state` (bound, unattributed, unresolved, ambiguous) and
+    `span` per item, host-bound source identity, and `requires_review`.
+    Binding is a host step after dispatch, over evidence records the host
+    already holds.
+  - **(iii)** Phase 2 Step 1: the shared schema is split into the
+    model-facing item (unchanged `{item_id, quote, role}`) and the
+    host-returned item. Verify gains the model-facing item.
+  - **(iv)** Test Plan: the grounded-claim scenario asserts bound evidence
+    items, not "citation spans".
+
+### Witness Schema v1
+
+**Blast radius.** Two live consumers and three documented surfaces.
+(RDR-189's Blast radius line says one consumer; the RDR-232 coverage
+ledger landed after it was written.)
+
+- Live consumer 1: `nexus.commands.enrich._run_validation_sample`
+  (`nx enrich aspects --validate-sample N`). It branches on `verified` and
+  writes `operator_verify_reason` and `citations` into
+  `aspect_validation_failures.jsonl`. That file's schema does not change
+  (Compatibility, below).
+- Live consumer 2: the RDR-232 coverage ledger
+  (`nexus.plans.coverage_ledger`, `ASSESSMENT_OPERATOR = "operator_check"`).
+  It reads `evidence[].item_id`, `quote` and `role`, accepts an item only
+  when its `item_id` is one of the call's ids and its quote opens with a
+  facet tag (`[f2] ...`), and already presents evidence as host-minted
+  `e1, e2, ...` ids with a `{chash, collection, tumbler}` side record. It
+  is the precedent for the binding rule below, and the facet-tag rule
+  under Quote and span exists for it.
+- Surface 1: the `operator_check` and `operator_verify` docstrings in
+  `nexus.mcp.core`, which are the MCP tool descriptions. The committed wire
+  snapshot strips descriptions, so it moves only if a parameter changes;
+  `tests/test_mcp_tool_description_lint.py` is what constrains the
+  docstring text.
+- Surface 2: `docs/mcp-servers.md`, the `verify` row.
+- Surface 3: `docs/plan-centric-retrieval.md`, the `operator_verify` row
+  of the operator table.
+- Not documented surfaces, but bound by the compatibility rule: the key
+  sets in `nexus.plans.answer_shape._PAYLOAD_SHAPES`
+  (`{ok, evidence}`, `{verified, reason, citations}`), which classify a
+  payload when its keys are a subset of one set; the bundle prompt
+  text for `verify` and `_terminal_schema("verify")` in
+  `nexus.plans.bundle`, which duplicates the citations schema inline; and
+  `nexus.plans.runner`, where verify takes scalar `claim`/`evidence` and
+  ids-hydration falls through to `inputs`, which direct dispatch rejects.
+  The runner fix belongs to the code bead (nexus-z1d0l.1.4), not here.
+- Also pinned to the old shapes, updated by the code beads:
+  `conexus/skills/nexus/reference.md` (the check and verify return
+  shapes); `scripts/bench/operator_proxy.py` (copies of the item and
+  verify schemas, pinned by `tests/test_operator_proxy_builder_fidelity.py`);
+  `tests/test_operator_request_builders.py` and
+  `tests/test_operator_dispatch.py` (pin `citations`);
+  `docs/cli-reference.md`, the `nx enrich aspects` `--validate-sample` and
+  `--validation-out` rows (nexus-z1d0l.1.6 adds the all-outcomes file and
+  its flags there).
+
+**Model-facing item.** What the model emits, for both operators, direct
+and bundled:
+
+```
+{item_id: str, quote: str, role: "supports" | "contradicts" | "neutral"}
+```
+
+This is today's `_CHECK_EVIDENCE_ITEM_SCHEMA`, unchanged, and stays the
+one definition both paths import. `operator_verify`'s model schema becomes
+`{verified: bool, reason: str, evidence: [model-facing item]}`. The model
+never emits `span`, `state`, a tumbler, a chash or a collection, and the
+prompt never shows it one.
+
+**Evidence records.** Binding is a host step that runs after the operator
+returns, not a field the model or the MCP tool carries. The host holds one
+evidence record per item it showed the model:
+
+```
+{item_id, text, tumbler: str | null, chash: str | null, collection: str | null}
+```
+
+`text` is the item body the model was shown, without any `[source: ...]`
+note the prompt adds, so a quote of the source note never binds. The
+model is shown `[{"id": item_id, "text": text}, ...]` (the coverage
+ledger's `_pack` shape) and nothing else from the record. Who builds the
+records:
+
+- The plan runner, for a check or verify step fed by a retrieval step. It
+  builds the records from that step's output (`ids`, `tumblers`,
+  `chunk_text_hash`, per-chunk collections, the fields the coverage ledger's
+  `_hits` already reads), zipped with the hydrated contents by position
+  BEFORE the empty-content filter, the supplement and reserved-stream
+  merges, and the item cap, which today drop the alignment. The source
+  step's output reaches the hydration code through argument resolution
+  (`_hydrate_operator_args` sees only the resolved args today, where
+  `collections` is the deduplicated list; the per-chunk values are
+  `chunk_collections`). A tumbler from the retrieval output counts as
+  identity only when it was not inferred: a hit whose `doc_id` carries
+  `_doc_id_inferred` (search picked one of several owners of a shared
+  chash) contributes no tumbler, so its record is chash-only. Items merged
+  in later (supplement, reserved stream, coverage note) get records from
+  their own provenance (`SupplementItem`, `RepairSupplement.provenance`),
+  or identity-less records when they have none. Records ride beside `args`
+  as a private value that never reaches the dispatched prompt or the MCP
+  surface, the same way `_truncation_metadata` does. Ids are minted
+  `e1, e2, ...` in record order. Binding happens once, by whoever holds the
+  records: on the runner path the runner binds the operator's raw payload;
+  the MCP tool binds only when it is called directly.
+- `nx enrich aspects --validate-sample`: one record, `e1`, whose `tumbler`
+  is the document's catalog tumbler (enrich already holds
+  `doc_id_lookup`), `chash` null (the evidence is the reassembled document,
+  not one chunk), `collection` the collection being enriched.
+- The coverage ledger: its anchors already are such records.
+- A direct MCP call: records come from what the caller supplied. A check
+  `items` JSON array of objects with `id` and `text` gives one record per
+  object with the caller's id; anything else, and verify's plain-text
+  `evidence`, gives one record `e1`. Source fields are null on this path.
+  Verify does not sniff its `evidence` for JSON.
+
+This makes nexus-z1d0l.1.2 depend on the record channel that
+nexus-z1d0l.1.4 now lists under typed hydration; the channel moves into
+.1.2 (bead note, 2026-11-01).
+
+**Host-returned item.** What check and verify return after binding:
+
+```
+{item_id, quote, role,
+ state: "bound" | "unattributed" | "unresolved" | "ambiguous",
+ span: {start: int, end: int} | null,
+ tumbler: str | null, chash: str | null, collection: str | null}
+```
+
+Payloads:
+
+```
+check:  {schema_version: 1, ok, evidence: [item], rejected: [str],
+         uncovered: [str], requires_review: bool}
+verify: {schema_version: 1, verified, reason, evidence: [item], rejected: [str],
+         requires_review: bool, citations: [str]}
+```
+
+**Host binding.** For each model-facing item:
+
+1. An `item_id` with no record is rejected: the item is removed from
+   `evidence` and its id listed in `rejected`. It never reaches a consumer
+   as evidence.
+2. The quote is tested against the record's `text` (Quote and span,
+   below). Only a quote contained in its own record keeps source fields;
+   every other state nulls them. The host is the only writer of `tumbler`,
+   `chash` and `collection`.
+3. A contained quote binds (`bound`) only when the record has source
+   identity: a `tumbler` that names the one owning document (never an
+   inferred one), or a `chash` with a `collection` whose single parent
+   document is known. A contained quote on a record without identity is
+   `unattributed`: the text is real, the source is not known. Every
+   direct-MCP plain-text call lands here.
+4. A record with a `chash` and no `tumbler` is `ambiguous` unless the
+   owner set shows exactly one owning document, in which case that
+   document's tumbler fills the record and rule 3 applies. The owner rows
+   the runner already captures (`capturing_owner_lookups`) are one source;
+   nexus-z1d0l.1.3 makes the lookup complete (it needs nexus-tko2w). With
+   no owner set, a chash-only record is `ambiguous`, never `bound`. A
+   wrong-document quote is also `ambiguous`; the two are told apart by
+   `span` (null for a wrong-document quote) and by the record's `chash`.
+
+**Quote and span.** The quote and the record text are compared after
+normalization: each code point is NFKC-normalized on its own, every
+whitespace run collapses to one space, and leading and trailing whitespace
+is stripped. Case is not folded. Normalizing per code point keeps a map
+from each normalized position back to an original one, so `span` is exact;
+a quote that only matches after cross-character composition does not
+match and is `unresolved`. This is narrower than whole-string NFKC
+(decomposed versus precomposed accents do not match), which errs toward
+review, never toward a false witness. A match may not start or end inside a
+combining sequence: a quote `cafe` does not match the front of `cafe` followed
+by a combining acute accent. A character continues the cluster before it when
+its Unicode category is a mark (M, which covers Devanagari vowel signs), or it
+is the zero-width joiner or a variation selector. One leading facet tag, `[f<n>]` in any case
+followed by optional whitespace (the coverage ledger's convention), is
+removed from the quote before the test and kept in the returned `quote`.
+
+- Contained in its own record: `bound` or `unattributed` (rule 3), and
+  `span` is the half-open code-point range of the first occurrence in the
+  record's original text.
+- Not in its own record but in another record (a wrong-document quote):
+  `ambiguous`, `span` and source fields null. The host does not rebind it.
+- In no record, or empty (a fabricated quote): `unresolved`, `span` and
+  source fields null.
+
+`uncovered` (check) lists the input item ids that no `supports` or
+`contradicts` item names. `requires_review` is true when any item is not
+`bound`, when `rejected` or `uncovered` is non-empty, or when the verdict
+(`ok`, `verified`) is true and no `supports` item is `bound`; for check
+with `ok=true`, every input item needs a bound `supports` item. It is the
+boolean form of RDR-189's `requiresReview` outcome. The host never changes
+the model's verdict. A witness is valid only in state `bound`; a consumer
+that needs a witness counts bound items and nothing else, so missing
+support never upgrades a witness to valid (RDR-189 Risks and
+Mitigations).
+
+**Compatibility.**
+
+- `citations` (verify): removed from the model schema. During a
+  deprecation window the host derives it as the `quote` values of `bound`
+  and `unattributed` items in evidence order; it is removed at
+  `schema_version: 2`, which needs its own amendment. Its type stays
+  `list[str]` but its content changes from free-text locators to quotes
+  and can be empty on a failing verdict; `scripts/bench/operator_proxy_metrics.py`
+  (`citation_tokens`) and the tier study it feeds measure locators and
+  move with the code bead. The enrich failures file keeps writing
+  `citations` from this field, so `aspect_validation_failures.jsonl` keeps
+  its keys.
+- A payload without `schema_version` is legacy (version 0) and is read as
+  it was: check items carry no `state`, verify carries bare `citations`.
+  The host never fabricates `state`, `span` or source fields for it, and a
+  legacy item never counts as a bound witness. On the host side only a reply
+  that is not a mapping passes through unbound. Any mapping without an
+  `evidence` list, a `citations` key included (a model can write it and no
+  production dispatch emits it), is malformed and comes back as
+  `schema_version: 1` with `evidence: []` and `requires_review: true`.
+- `answer_shape` classifies a payload when its keys are a subset of a
+  listed set, so the v1 sets are added: check
+  `{schema_version, ok, evidence, rejected, uncovered, requires_review}`
+  and verify `{schema_version, verified, reason, evidence, rejected,
+  requires_review, citations}`, both `OPERATOR_PAYLOAD`. The legacy sets
+  stay. That change lands with nexus-z1d0l.1.2, together with the bundle's
+  `_terminal_schema("verify")`, which then imports the shared model-facing
+  item instead of duplicating a citations schema.
+- Bundled check/verify: a terminal witness step is bound after the bundle
+  returns only when its evidence is host-hydrated records; when its input
+  is an earlier step's model output inside the bundle, there are no
+  records and every item is `unresolved` with `requires_review = true`.
+  RDR-189 P1 forbids hiding a declared witness obligation inside a bundle;
+  nexus-z1d0l.1.4 picks the one boundary rule (direct dispatch or a
+  non-bundling boundary) and this amendment does not presuppose either.
+
 ## Problem Statement
 
 ### Enumerated gaps to close
@@ -59,6 +307,10 @@ Single-claim targeted variant of Check. No current Nexus analog.
 **Impact**: agents cannot ask "is this claim grounded in the cited source?"
 as a discrete operator step; verification must be folded into ad-hoc
 `operator_summarize` or `operator_compare` calls, losing composability.
+
+> **Amended 2026-11-01 (see Amendment Log (i)).** Verify's evidence
+> is structured evidence items shared with check, not bare-string
+> `citations`; § Witness Schema v1.
 
 #### Gap 3: `operator_filter` (composable predicate) missing
 
@@ -320,6 +572,11 @@ supporting). Schema enforced via `claude_dispatch`.
 Single-claim variant. `citations` returns span anchors from `evidence`
 that ground the verdict.
 
+> **Amended 2026-11-01 (see Amendment Log (i), (ii)).** Both operators
+> return `schema_version: 1` payloads with host-bound evidence items;
+> verify's `citations` is host-derived for one deprecation window;
+> § Witness Schema v1.
+
 **`operator_filter`** — signature:
 `filter(items: list[dict], criterion: str, timeout: float = 300.0) → {items: list[dict], rationale: list[{id, reason}]}`
 
@@ -492,6 +749,11 @@ Add operator to the DAG operator registry. Unit test: plan with
 
 Extract `{item_id, quote, role}` schema into a shared definition.
 
+> **Amended 2026-11-01 (see Amendment Log (iii)).** The shared
+> definition is the model-facing item and verify uses it too; the host
+> returns the bound item with `state`, `span` and source fields;
+> § Witness Schema v1.
+
 #### Step 2: Integration test
 
 `traverse → operator_check` plan against citation graph in
@@ -535,6 +797,7 @@ None. All additions use `claude_dispatch` (existing) and existing Python stdlib.
 - **Scenario**: `operator_check` called with 3 papers that agree on a claim — **Verify**: `ok=True`, evidence list has ≥1 supporting quote per paper, no contradicts.
 - **Scenario**: `operator_check` called with 3 papers where 1 contradicts — **Verify**: `ok=False`, evidence includes the contradicting quote with `role=contradicts`.
 - **Scenario**: `operator_verify` on a grounded claim — **Verify**: `verified=True` with citation spans.
+  *Amended 2026-11-01 (Amendment Log (iv)):* `verified=True`, at least one `supports` item in state `bound` with a non-null `span`, `requires_review=false`.
 - **Scenario**: `plan_match` with an ambiguous 0.55 top-1 confidence, caller `min_confidence=0.50`, and rerank on — **Verify**: either the rerank clears the 0.90 gate and the plan is selected, or the rerank fails and `NoMatch` is returned (fall through to dynamic generation); never returned as a weak match between these two outcomes.
 - **Scenario**: `plan_match` with caller `min_confidence=0.70` and rerank on — **Verify**: rerank is a documented no-op (top-1 must land ≥ 0.70 on its own merits); the ceiling guard in the pseudocode prevents an empty band from firing rerank.
 

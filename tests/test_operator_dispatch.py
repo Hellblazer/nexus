@@ -3467,9 +3467,16 @@ class TestOperatorFilter:
         assert "_dispatch_source" not in result
 
 
+def _items_json(*pairs: tuple[str, str]) -> str:
+    import json
+
+    return json.dumps([{"id": i, "text": t} for i, t in pairs])
+
+
 class TestOperatorCheck:
-    """RDR-088 Phase 2: operator_check returns a structured boolean plus
-    grounding evidence across multiple items (paper §D.2 Check)."""
+    """RDR-088 Phase 2 + Witness Schema v1 (RDR-088 amendment 2026-11-01,
+    nexus-z1d0l.1.2): operator_check returns a versioned, host-bound
+    payload; the model never supplies identity."""
 
     @pytest.mark.asyncio
     async def test_returns_ok_and_evidence_keys(self, monkeypatch) -> None:
@@ -3486,12 +3493,12 @@ class TestOperatorCheck:
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
         result = await operator_check(
-            items='[{"id": "p1"}]', check_instruction="claim X holds",
+            items=_items_json(("p1", "the A B paper")), check_instruction="claim X holds",
         )
-        assert "ok" in result
-        assert "evidence" in result
+        assert result["schema_version"] == 1
         assert isinstance(result["ok"], bool)
         assert isinstance(result["evidence"], list)
+        assert set(result) == {"schema_version", "ok", "evidence", "rejected", "uncovered", "requires_review"}
 
     @pytest.mark.asyncio
     async def test_prompt_contains_instruction_and_items(self, monkeypatch) -> None:
@@ -3506,7 +3513,7 @@ class TestOperatorCheck:
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
         await operator_check(
-            items='[{"id": "sentinel-paper-abc"}]',
+            items=_items_json(("sentinel-paper-abc", "text")),
             check_instruction="consistency-probe-xyz",
         )
         assert "sentinel-paper-abc" in captured[0]
@@ -3563,7 +3570,7 @@ class TestOperatorCheck:
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
         result = await operator_check(
-            items='[{"id": "p1"}, {"id": "p2"}, {"id": "p3"}]',
+            items=_items_json(("p1", "paper one agrees-1"), ("p2", "paper two agrees-2"), ("p3", "paper three agrees-3")),
             check_instruction="papers agree on baseline",
         )
         assert result["ok"] is True
@@ -3571,6 +3578,9 @@ class TestOperatorCheck:
         assert paper_ids == {"p1", "p2", "p3"}
         roles = {e["role"] for e in result["evidence"]}
         assert "contradicts" not in roles
+        # caller-supplied items have no known source: contained quotes are unattributed, never bound
+        assert {e["state"] for e in result["evidence"]} == {"unattributed"}
+        assert result["requires_review"] is True
 
     @pytest.mark.asyncio
     async def test_contradicting_paper_yields_ok_false(self, monkeypatch) -> None:
@@ -3595,7 +3605,7 @@ class TestOperatorCheck:
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
         result = await operator_check(
-            items='[{"id": "p1"}, {"id": "p2"}, {"id": "p3"}]',
+            items=_items_json(("p1", "a supports-1 b"), ("p2", "a supports-2 b"), ("p3", "a contradicts-sentinel b")),
             check_instruction="all papers report same numbers",
         )
         assert result["ok"] is False
@@ -3606,21 +3616,114 @@ class TestOperatorCheck:
         assert contradicts[0]["item_id"] == "p3"
         assert contradicts[0]["quote"] == "contradicts-sentinel"
 
+    @pytest.mark.asyncio
+    async def test_item_id_outside_the_supplied_evidence_is_rejected(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
 
-class TestOperatorVerify:
-    """RDR-088 Phase 2: operator_verify targets a single claim against
-    a single evidence blob (paper §D.2 Verify)."""
+        async def fake(*a, **kw):
+            return {"ok": True, "evidence": [
+                {"item_id": "p1", "quote": "alpha", "role": "supports"},
+                {"item_id": "ghost", "quote": "alpha", "role": "supports"},
+            ]}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_check(items=_items_json(("p1", "alpha text")), check_instruction="x")
+        assert [e["item_id"] for e in result["evidence"]] == ["p1"]
+        assert result["rejected"] == ["ghost"]
+        assert result["requires_review"] is True
 
     @pytest.mark.asyncio
-    async def test_returns_verified_reason_citations(self, monkeypatch) -> None:
+    async def test_model_supplied_identity_is_never_returned(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
+
+        async def fake(*a, **kw):
+            return {"ok": True, "evidence": [{
+                "item_id": "p1", "quote": "alpha", "role": "supports",
+                "tumbler": "9.9.9", "chash": "f" * 64, "collection": "docs__evil", "state": "bound",
+            }]}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_check(items=_items_json(("p1", "alpha text")), check_instruction="x")
+        it = result["evidence"][0]
+        assert (it["tumbler"], it["chash"], it["collection"]) == (None, None, None)
+        assert it["state"] == "unattributed"
+
+    @pytest.mark.asyncio
+    async def test_plain_text_items_are_one_record_e1(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
+
+        captured: list[str] = []
+
+        async def fake(prompt, schema, **kw):
+            captured.append(prompt)
+            return {"ok": True, "evidence": [{"item_id": "e1", "quote": "plain prose", "role": "supports"}]}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_check(items="some plain prose here", check_instruction="x")
+        assert '{"id": "e1", "text": "some plain prose here"}' in captured[0]
+        assert result["evidence"][0]["state"] == "unattributed"
+
+    @pytest.mark.asyncio
+    async def test_failure_path_ok_false_is_versioned_too(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
+
+        async def fake(*a, **kw):
+            return {"ok": False, "evidence": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_check(items=_items_json(("p1", "alpha")), check_instruction="x")
+        assert result["schema_version"] == 1 and result["ok"] is False
+        assert result["uncovered"] == ["p1"]
+
+    @pytest.mark.asyncio
+    async def test_a_reply_without_an_evidence_list_is_malformed_and_needs_review(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
+
+        async def fake(*a, **kw):
+            return {"ok": True}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_check(items="x", check_instruction="y")
+        assert result["schema_version"] == 1 and result["ok"] is True
+        assert result["evidence"] == [] and result["requires_review"] is True
+
+    @pytest.mark.asyncio
+    async def test_binding_is_skipped_when_the_caller_holds_the_records(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
+        from nexus.operators.witness import defer_binding
+
+        raw = {"ok": True, "evidence": [{"item_id": "p1", "quote": "alpha", "role": "supports"}]}
+
+        async def fake(*a, **kw):
+            return dict(raw)
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        with defer_binding():
+            result = await operator_check(items=_items_json(("p1", "alpha")), check_instruction="x")
+        assert result == raw
+
+
+class TestOperatorVerify:
+    """RDR-088 Phase 2 + Witness Schema v1: operator_verify targets a single
+    claim against a single evidence blob (paper §D.2 Verify) and returns the
+    same typed evidence items as operator_check."""
+
+    @pytest.mark.asyncio
+    async def test_returns_verified_reason_evidence_citations(self, monkeypatch) -> None:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_verify
 
         async def fake(*a, **kw):
             return {
                 "verified": True,
-                "reason": "grounded in §2.1",
-                "citations": ["§2.1, p.3"],
+                "reason": "grounded in 2.1",
+                "evidence": [{"item_id": "e1", "quote": "built on transformer layers", "role": "supports"}],
             }
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
@@ -3628,9 +3731,15 @@ class TestOperatorVerify:
             claim="X is a transformer variant",
             evidence="Section 2.1: X is built on transformer layers...",
         )
+        assert result["schema_version"] == 1
         assert result["verified"] is True
         assert isinstance(result["reason"], str)
-        assert isinstance(result["citations"], list)
+        assert list(result) == [
+            "schema_version", "verified", "reason", "evidence", "rejected", "requires_review", "citations",
+        ]
+        assert result["evidence"][0]["state"] == "unattributed"
+        # the deprecated citations field is host-derived: quotes of bound and unattributed items
+        assert result["citations"] == ["built on transformer layers"]
 
     @pytest.mark.asyncio
     async def test_prompt_contains_claim_and_evidence(self, monkeypatch) -> None:
@@ -3641,7 +3750,7 @@ class TestOperatorVerify:
 
         async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
-            return {"verified": False, "reason": "", "citations": []}
+            return {"verified": False, "reason": "", "evidence": []}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
         await operator_verify(
@@ -3652,7 +3761,7 @@ class TestOperatorVerify:
         assert "evidence-sentinel-xyz" in captured[0]
 
     @pytest.mark.asyncio
-    async def test_schema_declares_verified_reason_citations(
+    async def test_schema_declares_verified_reason_evidence(
         self, monkeypatch,
     ) -> None:
         import nexus.operators.dispatch as _mod
@@ -3662,24 +3771,27 @@ class TestOperatorVerify:
 
         async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured_schemas.append(schema)
-            return {"verified": False, "reason": "", "citations": []}
+            return {"verified": False, "reason": "", "evidence": []}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
         await operator_verify(claim="c", evidence="e")
 
         schema = captured_schemas[0]
         assert schema["properties"]["verified"]["type"] == "boolean"
-        assert {"verified", "reason", "citations"}.issubset(
+        assert {"verified", "reason", "evidence"}.issubset(
             set(schema["required"]),
         )
-        assert schema["properties"]["citations"]["type"] == "array"
+        assert "citations" not in schema["properties"]
+        assert schema["properties"]["evidence"]["type"] == "array"
+        assert set(schema["properties"]["evidence"]["items"]["properties"]) == {"item_id", "quote", "role"}
 
     @pytest.mark.asyncio
-    async def test_grounded_claim_verified_with_citations(
+    async def test_grounded_claim_verified_with_bound_evidence_items(
         self, monkeypatch,
     ) -> None:
-        """RDR-088 Test Plan scenario 4: a claim that IS grounded in the
-        evidence returns verified=True with at least one citation span."""
+        """RDR-088 Test Plan scenario 4 (amended): a grounded claim returns
+        verified=True with evidence items. A direct call has no source
+        identity, so the contained quote is unattributed, not bound."""
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_verify
 
@@ -3687,7 +3799,7 @@ class TestOperatorVerify:
             return {
                 "verified": True,
                 "reason": "quote-at-p3-matches-claim",
-                "citations": ["p.3, §2", "Table 1"],
+                "evidence": [{"item_id": "e1", "quote": "compares attention variants", "role": "supports"}],
             }
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
@@ -3696,7 +3808,52 @@ class TestOperatorVerify:
             evidence="Table 1 compares attention variants...",
         )
         assert result["verified"] is True
-        assert len(result["citations"]) >= 1
+        assert len(result["evidence"]) >= 1
+        assert result["evidence"][0]["span"] == {"start": 8, "end": 35}
+        assert result["requires_review"] is True  # nothing bound
+
+    @pytest.mark.asyncio
+    async def test_failure_path_verified_false_is_versioned_too(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_verify
+
+        async def fake(*a, **kw):
+            return {"verified": False, "reason": "no", "evidence": [
+                {"item_id": "e1", "quote": "invented words", "role": "contradicts"},
+            ]}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_verify(claim="c", evidence="real text")
+        assert result["schema_version"] == 1 and result["verified"] is False
+        assert result["evidence"][0]["state"] == "unresolved"
+        assert result["citations"] == []
+
+    @pytest.mark.asyncio
+    async def test_item_id_outside_the_evidence_is_rejected(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_verify
+
+        async def fake(*a, **kw):
+            return {"verified": True, "reason": "", "evidence": [{"item_id": "e7", "quote": "real", "role": "supports"}]}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_verify(claim="c", evidence="real text")
+        assert result["evidence"] == [] and result["rejected"] == ["e7"]
+
+    @pytest.mark.asyncio
+    async def test_citations_only_reply_is_malformed_and_needs_review(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_verify
+
+        legacy = {"verified": True, "reason": "r", "citations": ["p.3"]}
+
+        async def fake(*a, **kw):
+            return dict(legacy)
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_verify(claim="c", evidence="e")
+        assert result["schema_version"] == 1 and result["evidence"] == [] and result["requires_review"] is True
+        assert result["citations"] == []
 
 
 class TestOperatorGroupby:
@@ -5071,9 +5228,10 @@ class TestClaudeDispatchPerOperatorSchemaCheapTier:
             "claim or question: all items are fruit\n"
             "Set ok=true when every item supports the claim, false when "
             "at least one item contradicts it. Populate 'evidence' with "
-            "a record per item containing a short grounding 'quote' and "
-            "a 'role' of 'supports', 'contradicts', or 'neutral'.\n\n"
-            'Items:\n[{"id": "1", "name": "apple"}, {"id": "2", "name": "car"}]',
+            "a record per item containing the 'item_id' of the item shown, "
+            "a short grounding 'quote' copied verbatim from that item's "
+            "text, and a 'role' of 'supports', 'contradicts', or 'neutral'.\n\n"
+            'Items:\n[{"id": "1", "text": "apple"}, {"id": "2", "text": "car"}]',
             {
                 "type": "object",
                 "required": ["ok", "evidence"],
@@ -5091,18 +5249,18 @@ class TestClaudeDispatchPerOperatorSchemaCheapTier:
             "Verify whether the following claim is grounded in the "
             "evidence provided.\n\n"
             "Claim: the sky is blue\n\n"
-            "Evidence:\nOn a clear day, the sky appears blue due to "
-            "Rayleigh scattering.\n\n"
+            'Evidence:\n[{"id": "e1", "text": "On a clear day, the sky '
+            'appears blue due to Rayleigh scattering."}]\n\n'
             "Set verified=true only when the claim is directly "
             "supported by the evidence. Provide a concise 'reason'. "
-            "Populate 'citations' with locators.",
+            "Populate 'evidence' with item_id, quote and role records.",
             {
                 "type": "object",
-                "required": ["verified", "reason", "citations"],
+                "required": ["verified", "reason", "evidence"],
                 "properties": {
                     "verified": {"type": "boolean"},
                     "reason": {"type": "string"},
-                    "citations": {"type": "array", "items": {"type": "string"}},
+                    "evidence": {"type": "array", "items": _CHECK_EVIDENCE_ITEM_SCHEMA},
                 },
             },
         ),
