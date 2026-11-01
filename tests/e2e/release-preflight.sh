@@ -119,9 +119,9 @@ check () { # name, command...
   fi
 }
 
-# The lint leg (step 4 below). NO_COLOR is load-bearing: the floor parser anchors its summary regex at
-# end-of-line, and an ANSI reset after the duration makes it read 0
-# executed and trip on a perfectly good run.
+# The lint leg (step 4 below). It fails on pytest's exit status first, then on a passed
+# count under the floor. NO_COLOR keeps colour codes out of the captured summary (they are
+# also stripped below, so the passed-count match sees plain text either way).
 lint_leg_check () {
   local out plain rc
   # NX_TEST_T2_SUBSTRATE=none, as ci.yml's test-lint job runs it ("pure-Python AST/regex/

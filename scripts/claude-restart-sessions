@@ -371,7 +371,9 @@ def restart(s: dict, handoff: str = "") -> bool:
     time.sleep(1)
     tmux("send-keys", "-t", s["pane"], "-l", cmd)
     tmux("send-keys", "-t", s["pane"], "Enter")
-    for _ in range(60):
+    # A fresh start registers slower than a resume (a new transcript, hooks, MCP servers);
+    # on 2026-10-30 one took over 60 s and was left empty with no handoff fed.
+    for _ in range(180 if handoff else 60):
         for path in SESSIONS.glob("*.json"):
             d = read(path)
             # Same session id AND same pane: a stale live entry for this id in another pane
@@ -392,11 +394,15 @@ def restart(s: dict, handoff: str = "") -> bool:
                 short.write_bytes(Path(handoff).read_bytes())
                 return feed_handoff(name, s["pane"], path, str(short))
         time.sleep(1)
-    log(f"WARN {name}: relaunched in {s['pane']} but no session file appeared within 60s; check the pane")
+    if handoff:
+        log(f"WARN {name}: relaunched fresh in {s['pane']} but no session file appeared within 180s; "
+            f"check the pane and give it `cat {handoff}` yourself")
+    else:
+        log(f"WARN {name}: relaunched in {s['pane']} but no session file appeared within 60s; check the pane")
     return False
 
 
-_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+_SGR = re.compile(r"\x1b\[([0-9;:]*)m")
 #: Escapes other than SGR: CSI sequences not ending in ``m``, OSC strings, charset selects.
 _OTHER_ESCAPE = re.compile(r"\x1b(?:\[[0-9;?]*[A-Za-ln-z]|\][^\x07]*\x07|[()][A-Za-z0-9])")
 
@@ -418,7 +424,7 @@ def typed_text(line: str) -> str:
     for m in _SGR.finditer(line):
         if not dim:
             out.append(line[pos:m.start()])
-        params = (m.group(1) or "0").split(";")
+        params = re.split(r"[;:]", m.group(1) or "0")  # ITU colon form too: 38:5:2
         i = 0
         while i < len(params):
             param = params[i]
@@ -438,8 +444,8 @@ def typed_text(line: str) -> str:
     return "".join(out)
 
 
-def has_draft(captured: str) -> bool:
-    """True when the prompt line in an escaped capture holds text the user typed.
+def prompt_line(captured: str) -> str | None:
+    """The input line of an escaped pane capture (escapes kept), or ``None`` when there is none.
 
     The input line is the one opening with the prompt mark right under a horizontal rule
     (the footer can carry other lines that start with the same mark, such as an agent list).
@@ -448,9 +454,22 @@ def has_draft(captured: str) -> bool:
     plain = [_SGR.sub("", _OTHER_ESCAPE.sub("", ln)) for ln in raw]
     prompts = [i for i, ln in enumerate(plain) if i and ln.lstrip().startswith("\u276f")
                and plain[i - 1].strip().startswith("\u2500")]
-    if not prompts:
+    return raw[prompts[-1]] if prompts else None
+
+
+def has_draft(captured: str) -> bool:
+    """True when the prompt line in an escaped capture holds text the user typed.
+
+    An empty capture (tmux failed to read the pane) counts as a draft: typing a handoff ask
+    into a pane that could not be read is the unsafe direction, and the session is then left
+    for --fallback-resume.
+    """
+    if not captured.strip():
+        return True
+    line = prompt_line(captured)
+    if line is None:
         return False
-    typed = typed_text(raw[prompts[-1]]).replace("\xa0", " ").lstrip()
+    typed = typed_text(line).replace("\xa0", " ").lstrip()
     return typed[1:].strip() != "" if typed.startswith("\u276f") else typed.strip() != ""
 
 

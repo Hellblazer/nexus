@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
-import re
+import json
+import os
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+from tests._module_seam import setattr_in
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "claude-restart-sessions"
 
@@ -67,12 +72,6 @@ def test_no_prompt_line_is_no_draft(crs) -> None:
     assert crs.has_draft("just output\nmore output") is False
 
 
-def test_the_pre_fix_reading_called_a_ghost_a_draft(crs) -> None:
-    """Without -e the dim suggestion is indistinguishable from typed text: the old false positive."""
-    stripped = re.sub(r"\x1b\[[0-9;]*m", "", pane("\x1b[39m❯\xa0\x1b[2mgo Step 0\x1b[0m"))
-    assert crs.has_draft(stripped) is True  # what capture-pane without -e handed the old check
-
-
 @pytest.mark.parametrize(
     ("argv", "fresh", "want", "unwanted"),
     [
@@ -104,3 +103,67 @@ def test_claude_binary_honours_the_override_then_path(crs, monkeypatch, tmp_path
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", str(fake.parent))
     assert crs._claude_binary() == str(fake)  # no ~/.local/bin/claude under this HOME
+
+
+def test_an_empty_capture_counts_as_a_draft(crs) -> None:
+    """tmux failed to read the pane: typing a handoff ask into it is the unsafe direction."""
+    assert crs.has_draft("") is True and crs.has_draft("\n  \n") is True
+
+
+def test_colon_form_sgr_is_parsed(crs) -> None:
+    assert crs.has_draft(pane("\x1b[39m❯\xa0\x1b[38:5:2mtyped in colour 2")) is True
+    assert crs.has_draft(pane("\x1b[39m❯\xa0\x1b[2mghost\x1b[0m")) is False
+
+
+def _session_file(directory: Path, name: str, sid: str, pid: int, mtime: float) -> Path:
+    path = directory / f"{name}.json"
+    path.write_text(json.dumps({"kind": "interactive", "tmux": "rs:@1.%5", "pid": pid, "sessionId": sid,
+                                "name": name, "cwd": "/w", "status": "idle"}), encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_sessions_skips_a_gone_pid_and_keeps_the_newest_of_a_duplicated_id(crs, monkeypatch, tmp_path) -> None:
+    """The two non-draft SKIP kinds in the restart log: 'pid already gone' and 'also live as'."""
+    monkeypatch.setattr(crs, "SESSIONS", tmp_path)
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    gone = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True)
+    me = os.getpid()
+    _session_file(tmp_path, "old_pane", "sid-dup", me, 1000.0)
+    _session_file(tmp_path, "new_pane", "sid-dup", me, 2000.0)
+    _session_file(tmp_path, "ghost", "sid-gone", int(gone.stdout.strip()), 1500.0)
+    got = crs.sessions()
+    assert [s["name"] for s in got] == ["new_pane"]
+    assert "is also live as new_pane; resuming it twice would fork it" in (tmp_path / "restart.log").read_text()
+
+
+def test_pane_has_draft_reads_the_pane_with_its_escapes(crs, monkeypatch) -> None:
+    """The fix is the -e: without it the dim suggestion arrives as plain text (nexus-nuyju)."""
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_kw):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout=pane("\x1b[39m\u276f\xa0\x1b[2mgo Step 0\x1b[0m"), stderr="")
+
+    setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
+    assert crs.pane_has_draft("%5") is False
+    assert seen and seen[0][:2] == ["tmux", "capture-pane"] and "-e" in seen[0]
+
+
+def test_an_empty_prompt_under_a_reverse_video_cursor_is_no_draft(crs) -> None:
+    assert crs.has_draft(pane("\x1b[39m\u276f\xa0\x1b[7m \x1b[27m")) is False
+
+
+def test_the_local_claude_wins_over_path(crs, monkeypatch, tmp_path) -> None:
+    """The operator's box: ~/.local/bin/claude exists and is used even with another claude on PATH."""
+    monkeypatch.delenv("NX_RESTART_CLAUDE", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    local = tmp_path / ".local" / "bin" / "claude"
+    local.parent.mkdir(parents=True)
+    local.write_text("#!/bin/sh\n")
+    other = tmp_path / "other" / "claude"
+    other.parent.mkdir()
+    other.write_text("#!/bin/sh\n")
+    other.chmod(0o755)
+    monkeypatch.setenv("PATH", str(other.parent))
+    assert crs._claude_binary() == str(local)

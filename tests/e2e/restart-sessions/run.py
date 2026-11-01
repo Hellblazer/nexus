@@ -14,9 +14,21 @@ checks every outcome, with nothing read from or written to the operator's ~/.cla
   --no-update``, exactly as the operator runs it, minus the release install.
 
 Expected: alpha and beta write a handoff, restart with a new session id and are fed
-``cat <handoff>``; draft is skipped for its draft and resumed with its old id; all
-three then answer their code word, which a fresh session can know only from the
-handoff it was fed. A suggested prompt must not count as a draft.
+``cat <handoff>``; draft is skipped for its draft (no handoff asked) and resumed with
+its old id; all three then answer their own code word and no other.
+
+Continuity is proved from the handoff, not merely observed. Auto memory is off
+(``CLAUDE_CODE_DISABLE_AUTO_MEMORY``, ``autoMemoryEnabled: false``) and the word is given
+as task context, not "remember"; each fresh session's word must be in its handoff file,
+must first appear in its transcript inside a tool result (the read of the handoff), and
+no memory file in the scratch HOME may hold any word. A negative control, a fourth fresh
+session in the same folder with no handoff, must not know any word.
+
+Positive control: ``NX_RESTART_SANDBOX_SCRIPT=<copy>`` runs another copy of the script;
+the pane checks always use this checkout's reader. The pre-fix copy (776e83008) needs its
+``CLAUDE = str(Path.home() / ".local" / "bin" / "claude")`` line changed to
+``CLAUDE = os.environ.get("NX_RESTART_CLAUDE", "claude")`` to relaunch under a scratch
+HOME; it then fails in the 7.92.0 shape (alpha and beta skipped as drafts, resumed).
 
 Run through run.sh (it supplies the automation token, RDR-219). Prints one verdict
 line, ``RESTART SANDBOX PASSED`` or ``RESTART SANDBOX FAILED``, and exits 0 or 1;
@@ -30,7 +42,10 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -67,10 +82,12 @@ class Sandbox:
         self.sessions_dir = home / ".claude" / "sessions"
         self.log = home / ".claude" / "restart-sessions.log"
         self.env = {k: v for k, v in os.environ.items()
-                    if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "ANTHROPIC_API_KEY", "TMUX", "TMUX_PANE",
-                                 "CLAUDE_CONFIG_DIR", "NEXUS_CONFIG_DIR")}
+                    if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                                 "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                                 "CLAUDE_CODE_SSE_PORT", "TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR", "NEXUS_CONFIG_DIR")}
         self.env.update(HOME=str(home), NX_NO_TELEMETRY="1", NX_RESTART_CLAUDE=claude, TERM="xterm-256color",
-                        CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="1")  # the dim ghost prompt that broke 7.92.0
+                        CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="1", CLAUDE_CODE_DISABLE_AUTO_MEMORY="1",
+                        DISABLE_AUTOUPDATER="1")  # the dim ghost prompt that broke 7.92.0
 
     # tmux on the private server only
     def tmux(self, *args: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -91,7 +108,8 @@ class Sandbox:
         (self.home / ".claude.json").write_text(
             json.dumps({"hasCompletedOnboarding": True, "projects": projects}), encoding="utf-8")
         (self.home / ".claude" / "settings.json").write_text(
-            json.dumps({"skipDangerousModePermissionPrompt": True, "promptSuggestionEnabled": True}),
+            json.dumps({"skipDangerousModePermissionPrompt": True, "promptSuggestionEnabled": True,
+                        "autoMemoryEnabled": False}),
             encoding="utf-8")
         self.tmux("new-session", "-d", "-s", "rs", "-x", "220", "-y", "50", "-n", "ctl", "-c", str(self.work),
                   "bash --noprofile --norc", check=True)
@@ -158,6 +176,46 @@ class Sandbox:
     def capture(self, name: str) -> str:
         return self.tmux("capture-pane", "-e", "-p", "-t", self.pane_of(name)).stdout
 
+    def events(self, session_id: str) -> list[dict]:
+        out: list[dict] = []
+        for f in (self.home / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
+            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue
+        return out
+
+    def first_mention(self, session_id: str, word: str) -> str:
+        """Where *word* first appears in a session's transcript: ``tool_result``, ``user``,
+        ``assistant``, another event type, or ``""`` when it never does."""
+        for d in self.events(session_id):
+            if word not in json.dumps(d):
+                continue
+            content = (d.get("message") or {}).get("content")
+            if isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result"
+                                                 and word in json.dumps(c) for c in content):
+                return "tool_result"
+            return str(d.get("type") or "unknown")
+        return ""
+
+    def memory_files_with(self, words: list[str]) -> list[str]:
+        """Files a later session could read a word from: anything in the scratch HOME or the
+        work folder except the transcripts and session registry themselves."""
+        hits = []
+        for root in (self.home,):
+            for f in root.rglob("*"):
+                rel = f.relative_to(self.home).as_posix()
+                if not f.is_file() or rel.endswith(".jsonl") or rel.startswith(".claude/sessions/") \
+                        or rel.startswith(".claude/restart-sessions.log") or f.stat().st_size > 2_000_000:
+                    continue
+                try:
+                    text = f.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                hits += [f"{rel}: {w}" for w in words if w in text]
+        return hits
+
     def last_reply(self, session_id: str) -> str:
         for f in (self.home / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
             text = ""
@@ -190,6 +248,9 @@ def main() -> int:
         print("RESTART SANDBOX UNVERIFIED: claude or tmux not on PATH", flush=True)
         return 2
 
+    # A SIGTERM must still reach the finally below: the private tmux server holds the token in
+    # its environment and must not outlive the run.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     home = Path(tempfile.mkdtemp(prefix="nx-restart-sandbox-"))
     sb = Sandbox(home, f"nx-rs-{os.getpid()}", claude, a.model)
     failures: list[str] = []
@@ -204,7 +265,7 @@ def main() -> int:
         for name in WORDS:
             sb.wait_status(name, {"idle"}, 120)
         for name, word in WORDS.items():
-            sb.prompt(name, f"Remember this code word for later: {word}. Reply with only: OK")
+            sb.prompt(name, f"For this task, the project code word is {word}. Reply with only: OK")
             d = sb.session(name)
             if not d or not d.get("tmux"):
                 failures.append(f"{name}: its session file has no tmux pane; the script cannot see it")
@@ -218,13 +279,15 @@ def main() -> int:
         for name in ("rs_alpha", "rs_beta"):
             deadline = time.time() + 30
             while time.time() < deadline:
-                if any("❯" in ln and "\x1b[2m" in ln for ln in sb.capture(name).splitlines()):
-                    ghosts += 1
+                line = crs.prompt_line(sb.capture(name)) or ""
+                shown = re.sub(r"\x1b\[[0-9;:]*m", "", line).replace("\xa0", " ").split("\u276f", 1)[-1].strip()
+                if "\x1b[2m" in line and shown and not crs.typed_text(line).replace("\xa0", " ").split("\u276f", 1)[-1].strip():
+                    ghosts += 1  # dim text after the mark on the input line, and nothing typed
                     break
                 time.sleep(1)
             if crs.has_draft(sb.capture(name)):
                 failures.append(f"precondition: {name} reads as holding a draft with nothing typed")
-        notes.append(f"suggested prompt showing at restart time: {ghosts} of 2 clean sessions")
+        notes.append(f"suggested prompt showing just before the restart: {ghosts} of 2 clean sessions")
         if ghosts == 0:
             failures.append("non-vacuity: no clean session showed a suggested prompt, so the ghost case was not exercised")
         sb.tmux("send-keys", "-t", sb.pane_of("rs_draft"), "-l", DRAFT_TEXT, check=True)
@@ -236,7 +299,8 @@ def main() -> int:
 
         t0 = time.time()
         sb.tmux("send-keys", "-t", "rs:ctl", "-l",
-                f"{sys.executable} -I {SCRIPT} --fresh --fallback-resume --no-update --handoff-timeout 600 --wait 300",
+                f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} --fresh --fallback-resume --no-update "
+                "--handoff-timeout 600 --wait 300",
                 check=True)
         sb.tmux("send-keys", "-t", "rs:ctl", "Enter", check=True)
         while time.time() - t0 < a.timeout:
@@ -260,11 +324,22 @@ def main() -> int:
             if bad in log:
                 failures.append(f"log has: {bad}")
 
+        handoffs = dict(re.findall(r"handoff written by (\S+): (\S+) \(", log))
+        if "rs_draft" in handoffs or Path(f"/tmp/rh-{before['rs_draft'].get('sessionId', '')[:8]}.txt").exists():
+            failures.append("rs_draft: a handoff was asked of a session holding a draft")
         for name, word in WORDS.items():
+            others = [w for n, w in WORDS.items() if n != name]
             old = before[name]["sessionId"]
             fresh = name != "rs_draft"
             if fresh and f"OK {name}: fresh as pid" not in log:
                 continue  # already failed above; waiting for a fresh start the log says never came is time spent for nothing
+            if fresh:
+                body = Path(handoffs.get(name, "/nonexistent")).read_text(encoding="utf-8", errors="replace") \
+                    if Path(handoffs.get(name, "/nonexistent")).exists() else ""
+                if word not in body:
+                    failures.append(f"{name}: its handoff {handoffs.get(name)} does not carry {word}")
+                if any(w in body for w in others):
+                    failures.append(f"{name}: its handoff carries another session's word")
             try:
                 d = sb.wait_status(name, {"idle"}, 300, not_sid=old if fresh else "")
             except TimeoutError as exc:
@@ -275,15 +350,37 @@ def main() -> int:
             if not fresh and d["sessionId"] != old:
                 failures.append(f"{name}: session id changed to {d['sessionId'][:8]}; expected a resume")
             try:
-                sb.prompt(name, "What was the code word you were asked to remember? Reply with only the word.")
+                sb.prompt(name, "What is the project code word for this task? Reply with only the word.")
             except TimeoutError as exc:
                 failures.append(str(exc))
                 continue
-            reply = sb.last_reply(d["sessionId"])
-            if word not in reply.upper():
+            reply = sb.last_reply(d["sessionId"]).upper()
+            source = sb.first_mention(d["sessionId"], word) if fresh else "resumed context"
+            if word not in reply:
                 failures.append(f"{name}: asked for its code word after the restart, replied {reply[:80]!r}")
+            elif any(w in reply for w in others):
+                failures.append(f"{name}: replied with another session's word: {reply[:80]!r}")
+            elif fresh and source != "tool_result":
+                failures.append(f"{name}: {word} first appears in its fresh transcript as {source or 'nothing'}, "
+                                "not in the result of reading its handoff")
             else:
-                notes.append(f"{name}: {'fresh' if fresh else 'resumed'} as {d['sessionId'][:8]}, remembered {word}")
+                notes.append(f"{name}: {'fresh' if fresh else 'resumed'} as {d['sessionId'][:8]}, "
+                             f"answered {word} (first seen in: {source})")
+        leaks = sb.memory_files_with(list(WORDS.values()))
+        handoff_paths = set(handoffs.values())
+        leaks = [h for h in leaks if not any(h.startswith(p) for p in handoff_paths)]
+        if leaks:
+            failures.append(f"a code word is on disk where a fresh session could read it: {leaks[:3]}")
+        # Negative control: a fresh session in the same folder with no handoff must not know any word.
+        sb.start_session("rs_blank")
+        sb.wait_status("rs_blank", {"idle"}, 120)
+        sb.prompt("rs_blank", "What is the project code word for this task? If you do not know it, reply with only: UNKNOWN")
+        blank = sb.session("rs_blank") or {}
+        blank_reply = sb.last_reply(str(blank.get("sessionId", ""))).upper()
+        if any(w in blank_reply for w in WORDS.values()):
+            failures.append(f"negative control: a fresh session with no handoff knew a word: {blank_reply[:80]!r}")
+        else:
+            notes.append(f"negative control: a fresh session with no handoff replied {blank_reply[:40]!r}")
         notes.append(f"restart took {time.time() - t0:.0f}s")
         ok = not failures
         return 0 if ok else 1
@@ -296,11 +393,12 @@ def main() -> int:
         for f in failures:
             print(f"[sandbox] FAIL {f}", flush=True)
         verdict = "RESTART SANDBOX PASSED" if ok else "RESTART SANDBOX FAILED"
-        print(f"{verdict} -- 3 sessions, {len(failures)} failure(s)", flush=True)
+        print(f"{verdict} -- 3 sessions and a no-handoff control, {len(failures)} failure(s)", flush=True)
+        sids = {str(d.get("sessionId", ""))[:8] for d in sb.entries()}
+        sids |= {str(d.get("sessionId", ""))[:8] for d in before.values() if d}
+        if not a.keep:
+            sb.tmux("kill-server")  # always: ours alone (-L), and it holds the token; its claude processes end with it
         if ok and not a.keep:
-            sids = {str(d.get("sessionId", ""))[:8] for d in sb.entries()}
-            sids |= {str(d.get("sessionId", ""))[:8] for d in before.values() if d}
-            sb.tmux("kill-server")  # ours alone: the -L socket; its panes' claude processes end with it
             for sid in filter(None, sids):  # the script's /tmp files for these sessions
                 for f in Path("/tmp").glob(f"rh-{sid}.*"):
                     f.unlink(missing_ok=True)
@@ -308,8 +406,9 @@ def main() -> int:
                     f.unlink(missing_ok=True)
             shutil.rmtree(home, ignore_errors=True)
         else:
-            print(f"[sandbox] kept {home} and tmux server {sb.sock} (tmux -L {sb.sock} attach -t rs; "
-                  f"tmux -L {sb.sock} kill-server when done)", flush=True)
+            print(f"[sandbox] kept {home} (transcripts, restart log, handoffs under /tmp)"
+                  + (f"; tmux server {sb.sock} left running: tmux -L {sb.sock} kill-server when done" if a.keep else ""),
+                  flush=True)
 
 
 if __name__ == "__main__":
