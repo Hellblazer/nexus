@@ -222,6 +222,9 @@ class TuplesRetireLedgerLiquibaseTest {
 
         insertDelivery(ctx, TENANT_A, "ledger/session-1", l1);
         insertDelivery(ctx, TENANT_A, "mailbox/m1", sha("K1"));
+        // A ledger-subspace delivery whose tuple is a SURVIVING non-ledger row (k2): the FK cascade
+        // cannot remove it, so only the tuple_deliveries DELETE in tuples-012-1 does.
+        insertDelivery(ctx, TENANT_B, "ledger/dangling", k2);
         insertClaimLog(ctx, TENANT_A, "ledger/session-2", l3, "ledger-claim-with-tuple");
         insertClaimLog(ctx, TENANT_B, "ledger/gone", null, "ledger-claim-orphan");
         insertClaimLog(ctx, TENANT_B, "mailbox/m2", k2, "mailbox-claim");
@@ -241,7 +244,7 @@ class TuplesRetireLedgerLiquibaseTest {
         assertThat(ctx.fetchCount(TUPLES, TUPLES.TENANT_ID.in(TENANTS))).as("seeded tuples")
             .isEqualTo(seeded.ledgerIds().size() + seeded.keptIds().size());
         assertThat(ctx.fetchCount(TUPLE_DELIVERIES, TUPLE_DELIVERIES.TENANT_ID.in(TENANTS)))
-            .as("seeded deliveries").isEqualTo(2);
+            .as("seeded deliveries").isEqualTo(3);
         assertThat(ctx.fetchCount(TUPLE_CLAIM_LOG, TUPLE_CLAIM_LOG.TENANT_ID.in(TENANTS)))
             .as("seeded claim-log rows").isEqualTo(3);
     }
@@ -265,7 +268,8 @@ class TuplesRetireLedgerLiquibaseTest {
             .as("look-alike subspaces that merely contain 'ledger' are untouched").isEqualTo(5);
 
         assertThat(ctx.fetchCount(TUPLE_DELIVERIES, TUPLE_DELIVERIES.SUBSPACE.like("ledger/%")))
-            .as("no ledger delivery stamp remains").isEqualTo(0);
+            .as("no ledger delivery stamp remains, including the one pointing at a surviving non-ledger "
+                + "tuple (the FK cascade cannot remove that one; only the DELETE does)").isEqualTo(0);
         assertThat(ctx.fetchCount(TUPLE_DELIVERIES, TUPLE_DELIVERIES.TENANT_ID.in(TENANTS)))
             .as("the mailbox delivery stamp survives").isEqualTo(1);
 
