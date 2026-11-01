@@ -1,0 +1,731 @@
+#!/usr/bin/env python3
+"""Restart every interactive Claude Code session running in tmux and resume each one.
+
+Reads ~/.claude/sessions/<pid>.json (session id, name, cwd, tmux pane, idle/busy
+status), optionally updates the plugin marketplaces and plugins first, then, one
+session as soon as it is idle (a busy one holds up no other; the caller's own
+session goes last): exits it (Ctrl-C twice, then SIGTERM if
+needed), and types `claude <its original flags> --resume <current session id>`
+back into the same pane, in the same directory.
+
+It always runs detached inside the tmux server (tmux run-shell -b), so it can
+restart the session that started it. Progress goes to ~/.claude/restart-sessions.log.
+
+With --nx X.Y.Z it first brings the whole box to one release, in the
+foreground, and restarts nothing unless every step holds:
+  1. engine gate: the cloud engine (public /version) is at or above the
+     REQUIRED_ENGINE_VERSION of tag vX.Y.Z in the nexus repo; a release whose
+     engine is not live would have its managed service refused (GH #1402);
+     it re-reads every 30 s for up to --engine-wait seconds (default 1800),
+     since a paired release's redeploy fires at the client tag;
+  2. nx: uv's cached conexus entry is cleaned and conexus==X.Y.Z is installed
+     through the repo's scripts/reinstall-tool.sh; `nx --version` must say X.Y.Z;
+  3. plugins: marketplace and plugin update; installed_plugins.json must show
+     conexus, sn and every other installed @nexus-plugins plugin (the opt-in
+     conexus-tool-spill) at X.Y.Z.
+Then every session restarts, so all of them come back on the same version.
+
+With --fresh each session first writes a continuation handoff to a path this
+script names (one per session: name, session id and time, so sessions on the
+same repo and branch never share the continuation command's default file),
+all sessions at once; then each is exited and started with a fresh context
+(no --resume, same name, flags, pane and cwd) and given `cat <path>` as its
+first prompt. A session whose handoff does not appear within
+--handoff-timeout is left running, not restarted, unless --fallback-resume is
+given, in which case it is restarted with --resume (2026-10-31, for 7.91.0).
+
+With --revive (after a reboot, when the sessions are gone and so is their
+~/.claude/sessions/*.json) it resumes every session whose transcript
+(~/.claude/projects/*/<id>.jsonl) was written in the --since minutes before the
+last boot, each in a new window of tmux session --tmux-session, under its last
+name and in its last cwd, with --flags. A session id that is already live is skipped.
+
+Usage:
+  claude-restart-sessions --revive --dry-run   # after a reboot: list what would come back
+  claude-restart-sessions --revive             # resume them in tmux
+  claude-restart-sessions --nx 7.84.0     # upgrade nx + plugins to 7.84.0, then restart all
+  claude-restart-sessions --nx 7.84.0 --dry-run   # show the gate and versions, change nothing
+  claude-restart-sessions                 # update plugins, restart all
+  claude-restart-sessions --dry-run       # list what it would do
+  claude-restart-sessions --nx 7.88.0 --fresh   # upgrade, then handoff + fresh restart
+  claude-restart-sessions --only nexus_911 --only labrun_092
+  claude-restart-sessions --skip conexus-b8 --no-update --wait 900
+"""
+import argparse
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SESSIONS = Path.home() / ".claude" / "sessions"
+LOG = Path.home() / ".claude" / "restart-sessions.log"
+CLAUDE = str(Path.home() / ".local" / "bin" / "claude")
+REPO = Path.home() / "git" / "nexus"
+ENDPOINT = "https://api.conexus-nexus.com"
+PLUGINS = ("conexus@nexus-plugins", "sn@nexus-plugins")  # required: must be installed
+MARKETPLACE = "nexus-plugins"
+INSTALLED = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+
+
+def nexus_plugins() -> tuple[str, ...]:
+    """The required plugins plus every other plugin installed from the nexus marketplace.
+
+    conexus-tool-spill is opt-in (7.86.3): when it is installed it must move with the
+    release too, or it stays a version behind conexus and sn after the restart.
+    """
+    try:
+        data = json.loads(INSTALLED.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return PLUGINS
+    data = data.get("plugins", data)
+    extra = sorted(k for k in data if k.endswith(f"@{MARKETPLACE}") and k not in PLUGINS)
+    return (*PLUGINS, *extra)
+
+
+def log(msg: str) -> None:
+    line = f"{time.strftime('%H:%M:%S')} {msg}"
+    print(line, flush=True)
+    with LOG.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def read(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def sessions() -> list[dict]:
+    found = []
+    for path in sorted(SESSIONS.glob("*.json")):
+        d = read(path)
+        if not d or d.get("kind") != "interactive" or not d.get("tmux"):
+            continue
+        pid = int(d.get("pid", 0))
+        if not pid or not alive(pid):
+            continue
+        pane = d["tmux"].rsplit(".", 1)[-1]  # "vibes:@5.%5" -> "%5"
+        if not pane.startswith("%"):
+            continue
+        argv = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        found.append({**d, "pid": pid, "pane": pane, "argv": argv, "file": path})
+    # One restart per session id: a live stale entry (a session resumed in another pane
+    # leaves its old pid and file behind) would otherwise be resumed a second time.
+    newest: dict[str, dict] = {}
+    for s in found:
+        k = s.get("sessionId")
+        if k not in newest or s["file"].stat().st_mtime > newest[k]["file"].stat().st_mtime:
+            newest[k] = s
+    for s in found:
+        if newest.get(s.get("sessionId")) is not s:
+            log(f"SKIP {s.get('name') or '?'} (pid {s['pid']}, pane {s['pane']}): session {str(s.get('sessionId'))[:8]} "
+                f"is also live as {newest[s.get('sessionId')].get('name')}; resuming it twice would fork it")
+    return [s for s in found if newest.get(s.get("sessionId")) is s]
+
+
+def last_permission_mode(sid: str) -> str:
+    """The permission mode the session was last in (switched at runtime, e.g. shift+tab to auto), from its transcript."""
+    import re
+
+    for f in (Path.home() / ".claude" / "projects").glob(f"*/{sid}.jsonl"):
+        try:
+            with f.open("rb") as fh:
+                fh.seek(max(0, f.stat().st_size - 2_000_000))
+                tail = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        modes = re.findall(r'"permissionMode":"([A-Za-z]+)"', tail)
+        if modes:
+            return modes[-1]
+    return ""
+
+
+def relaunch_command(s: dict, fresh: bool = False) -> str:
+    """The session's own flags, with --resume set to its CURRENT id (it changes after /clear).
+
+    fresh: no --resume at all; the session starts with an empty context.
+    """
+    args = shlex.split(s["argv"])[1:] if s["argv"] else []
+    out, skip = [], False
+    for i, a in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        if a in ("--resume", "-r", "--continue", "-c"):
+            skip = a in ("--resume", "-r") and i + 1 < len(args) and not args[i + 1].startswith("-")
+            continue
+        if a.startswith("--resume="):
+            continue
+        # The launch name is stale once a session is renamed (/rename): drop it and pass the
+        # session's CURRENT registry name below, so a restart keeps the name peers address it by.
+        if a in ("-n", "--name"):
+            skip = i + 1 < len(args) and not args[i + 1].startswith("-")
+            continue
+        if a.startswith("--name="):
+            continue
+        out.append(a)
+    if s.get("name"):
+        out += ["-n", s["name"]]
+    if not fresh:
+        out += ["--resume", s["sessionId"]]
+    elif "--permission-mode" not in out and not any(x.startswith("--permission-mode=") for x in out):
+        # A resumed session keeps its runtime mode; a fresh one starts in the settings default and
+        # would stop at the first approval prompt, so carry the mode it was last in.
+        mode = last_permission_mode(s["sessionId"])
+        if mode and mode != "default":
+            out += ["--permission-mode", mode]
+    return f"cd {shlex.quote(s['cwd'])} && {shlex.quote(CLAUDE)} " + " ".join(shlex.quote(a) for a in out)
+
+
+def _vt(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in v.strip().lstrip("v").split(".")[:3])
+
+
+def release_engine_floor(version: str, repo: Path) -> tuple[int, ...]:
+    """REQUIRED_ENGINE_VERSION as the release tag itself declares it."""
+    import re
+
+    subprocess.run(["git", "-C", str(repo), "fetch", "-q", "--tags", "origin"], check=False)
+    src = subprocess.run(["git", "-C", str(repo), "show", f"v{version}:src/nexus/engine_version.py"],
+                         capture_output=True, text=True, check=True).stdout
+    m = re.search(r"^REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src, re.M)
+    if not m:
+        raise RuntimeError(f"no REQUIRED_ENGINE_VERSION in v{version}:src/nexus/engine_version.py")
+    return tuple(int(g) for g in m.groups())
+
+
+def cloud_engine(endpoint: str) -> tuple[int, ...]:
+    import urllib.request
+
+    with urllib.request.urlopen(f"{endpoint}/version", timeout=15) as r:
+        return _vt(json.loads(r.read())["release_version"])
+
+
+def nx_version() -> str:
+    r = subprocess.run(["nx", "--version"], capture_output=True, text=True)
+    return (r.stdout + r.stderr).strip()
+
+
+def plugin_versions() -> dict[str, str]:
+    data = json.loads(INSTALLED.read_text(encoding="utf-8"))
+    data = data.get("plugins", data)
+    out = {}
+    for name in nexus_plugins():
+        entries = data.get(name) or []
+        entries = entries if isinstance(entries, list) else [entries]
+        out[name] = ",".join(sorted({str(e.get("version")) for e in entries})) or "absent"
+    return out
+
+
+def update_plugins() -> None:
+    for cmd in ([CLAUDE, "plugin", "marketplace", "update"],
+                *([CLAUDE, "plugin", "update", p] for p in nexus_plugins())):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        log(f"{' '.join(cmd[1:])}: exit {r.returncode} {(r.stdout + r.stderr).strip().splitlines()[-1:]}")
+
+
+def converge(version: str, repo: Path, endpoint: str, gate: bool, dry: bool, engine_wait: int = 0,
+             install: bool = True) -> bool:
+    """Bring nx and the plugins to `version`; False (and nothing restarted) on any miss."""
+    floor = release_engine_floor(version, repo)
+    if gate:
+        # A paired release's redeploy fires at the client tag: wait for it to land rather than abort
+        # mid-rollout, when /version is most likely to fail outright (502, refused, partial body).
+        import http.client
+
+        deadline = time.time() + (0 if dry else engine_wait)
+        live: tuple[int, ...] = ()
+        while True:
+            try:
+                live = cloud_engine(endpoint)
+                log(f"engine gate: v{version} requires engine {'.'.join(map(str, floor))}; "
+                    f"{endpoint} serves {'.'.join(map(str, live))}")
+            except (OSError, ValueError, KeyError, http.client.HTTPException) as e:
+                log(f"engine gate: read of {endpoint}/version failed ({e!r})")
+            if (live and live >= floor) or time.time() >= deadline:
+                break
+            time.sleep(30)
+        if not live or live < floor:
+            log(f"ABORT: the cloud engine is behind v{version}'s floor; deploy it first. Nothing installed, nothing restarted.")
+            return False
+    else:
+        log(f"engine gate skipped (v{version} requires engine {'.'.join(map(str, floor))})")
+    if not install:
+        return True
+    if dry:
+        log(f"dry run: nx now '{nx_version()}', plugins now {plugin_versions()}; would install conexus=={version}")
+        return True
+    subprocess.run(["uv", "cache", "clean", "conexus"], capture_output=True, text=True, check=False)
+    r = subprocess.run([str(repo / "scripts" / "reinstall-tool.sh"), f"conexus=={version}", "--allow-registry-over-dev"],
+                       capture_output=True, text=True)
+    log(f"reinstall-tool conexus=={version}: exit {r.returncode}")
+    got = nx_version()
+    if r.returncode != 0 or version not in got:
+        log(f"ABORT: nx reports '{got}', not {version}. Nothing restarted.")
+        return False
+    log(f"nx: {got}")
+    update_plugins()
+    pv = plugin_versions()
+    if any(v != version for v in pv.values()):
+        log(f"ABORT: plugins are {pv}, not {version}. Nothing restarted.")
+        return False
+    log(f"plugins: {pv}")
+    return True
+
+
+def status(s: dict) -> str:
+    d = read(s["file"])
+    return (d or {}).get("status", "unknown")
+
+
+def tmux(*args: str) -> None:
+    subprocess.run(["tmux", *args], check=False)
+
+
+def label(s: dict) -> str:
+    return s.get("name") or s["sessionId"][:8]
+
+
+#: --fallback-resume, set once by main(): restart() runs where main's args are not in scope.
+FALLBACK_RESUME = False
+
+
+def restart(s: dict, handoff: str = "") -> bool:
+    """Exit an idle session and resume it in its pane (or, with a handoff path, start it fresh on that handoff)."""
+    name = label(s)
+    if handoff:
+        try:
+            ok_file = Path(handoff).stat().st_size > 0
+        except OSError:
+            ok_file = False
+        now_at = (read(s["file"]) or {}).get("statusUpdatedAt")
+        worked_after = "handoff_status_at" in s and now_at != s["handoff_status_at"]
+        if not ok_file or worked_after:
+            why = (f"handoff {handoff} is gone or empty now" if not ok_file
+                   else f"it worked after writing {handoff} (status changed)")
+            if not FALLBACK_RESUME:
+                log(f"SKIP {name}: {why}; left running, not restarted")
+                return False
+            log(f"{name}: {why}; falling back to --resume")
+            handoff = ""
+    if handoff:
+        log(f"{name}: old session {s['sessionId']} (back out with: cd {shlex.quote(s['cwd'])} && "
+            f"claude --resume {s['sessionId']})")
+    cmd = relaunch_command(s, fresh=bool(handoff))
+    before = {p.name for p in SESSIONS.glob("*.json")}
+    log(f"exit {name} (pid {s['pid']}, pane {s['pane']})")
+    tmux("send-keys", "-t", s["pane"], "C-c")
+    time.sleep(0.4)
+    tmux("send-keys", "-t", s["pane"], "C-c")
+    for _ in range(30):
+        if not alive(s["pid"]):
+            break
+        time.sleep(1)
+    if alive(s["pid"]):
+        log(f"{name}: still running after Ctrl-C, sending SIGTERM")
+        try:
+            os.kill(s["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        for _ in range(15):
+            if not alive(s["pid"]):
+                break
+            time.sleep(1)
+    if alive(s["pid"]):
+        log(f"FAIL {name}: pid {s['pid']} did not exit; not relaunched")
+        return False
+    time.sleep(1)
+    tmux("send-keys", "-t", s["pane"], "-l", cmd)
+    tmux("send-keys", "-t", s["pane"], "Enter")
+    for _ in range(60):
+        for path in SESSIONS.glob("*.json"):
+            d = read(path)
+            # Same session id AND same pane: a stale live entry for this id in another pane
+            # (see sessions()) must not read as the relaunch. A fresh start has a new id.
+            if handoff:
+                # A fresh start has a new id: accept only a new interactive session file in this pane.
+                match = bool(d and path.name not in before and d.get("kind") == "interactive"
+                             and d.get("sessionId") != s["sessionId"])
+            else:
+                match = bool(d and d.get("sessionId") == s["sessionId"])
+            if (match and int(d.get("pid", 0)) != s["pid"]
+                    and str(d.get("tmux", "")).rsplit(".", 1)[-1] == s["pane"] and alive(int(d["pid"]))):
+                if not handoff:
+                    log(f"OK {name}: resumed as pid {d['pid']}")
+                    return True
+                # Typed text arrives truncated past ~50 characters: hand a short copy of the handoff.
+                short = Path(f"/tmp/rh-{s['sessionId'][:8]}.md")
+                short.write_bytes(Path(handoff).read_bytes())
+                return feed_handoff(name, s["pane"], path, str(short))
+        time.sleep(1)
+    log(f"WARN {name}: relaunched in {s['pane']} but no session file appeared within 60s; check the pane")
+    return False
+
+
+def pane_has_draft(pane: str) -> bool:
+    """True when the prompt line in the pane holds unsent text (typed text would append to it)."""
+    out = subprocess.run(["tmux", "capture-pane", "-p", "-t", pane], capture_output=True, text=True).stdout
+    lines = out.splitlines()
+    # The input line is the one opening with the prompt mark right under a horizontal rule
+    # (the footer can carry other lines that start with the same mark, such as an agent list).
+    prompts = [l for i, l in enumerate(lines) if i and l.lstrip().startswith("\u276f")
+               and lines[i - 1].strip().startswith("\u2500")]
+    return bool(prompts) and prompts[-1].lstrip()[1:].strip() != ""
+
+
+def submit(pane: str, text: str, sess_file: Path) -> bool:
+    """Type `text` and Enter, then confirm the session went busy; retry Enter once."""
+    tmux("send-keys", "-t", pane, "-l", text)
+    time.sleep(1)
+    for attempt in range(2):
+        tmux("send-keys", "-t", pane, "Enter")
+        for _ in range(15):
+            time.sleep(1)
+            if (read(sess_file) or {}).get("status") == "busy":
+                return True
+    return False
+
+
+def handoff_path(s: dict, stamp: str) -> str:
+    safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in label(s))
+    return f"/tmp/nexus-continuation-restart-{safe}-{s['sessionId'][:8]}-{stamp}.md"
+
+
+def ask_line(s: dict, path: str) -> str:
+    """Write the handoff instructions to a file and return the short line typed into the pane.
+
+    Long text typed with send-keys arrives truncated (8 sessions on 2026-10-28 each got only
+    the last 50-65 characters), so only this ~31-character line is typed.
+    """
+    ask = Path(f"/tmp/rh-{s['sessionId'][:8]}.txt")
+    ask.write_text(handoff_prompt(s, path) + "\n", encoding="utf-8")
+    return f"Do what {ask} says"
+
+
+def handoff_marker(s: dict) -> str:
+    return f"HANDOFF-COMPLETE {s['sessionId']}"
+
+
+def handoff_prompt(s: dict, path: str) -> str:
+    return (f"Restart handoff for {label(s)} (coordinated restart; this session restarts with a fresh context "
+            f"and reads the file you write as its first prompt). Write your continuation handoff now in the "
+            f"9-section format of the conexus continuation command (run `nx command-context continuation` for the "
+            f"working state; do its session-retro audits), but save it to {path} and NOT to the Target file it "
+            f"names, and do not invoke the continuation skill's chat reply: every session is writing one at once. "
+            f"Do not ask questions; if the working state has no repository or beads, write the handoff from this "
+            f"conversation. Also list peers you are mid-conversation with (name and what each is waiting on), "
+            f"board topics you subscribe to, and your threads board entry title so the fresh session keeps it. "
+            f"Start no other work. The file's last line must be exactly: {handoff_marker(s)} . "
+            f"When the file is complete, reply with only: cat {path}")
+
+
+def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int) -> dict[str, str]:
+    """Prompt every session for a handoff as soon as it is idle; return sessionId -> path for those written.
+
+    A handoff counts once its file is non-empty, unchanged for 10 s, and the session is at its prompt again
+    ('idle', or 'shell' when a background shell is still open).
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    asked: dict[str, tuple[dict, str, float]] = {}
+    done: dict[str, str] = {}
+    waiting = list(found)
+    start = time.time()
+    while True:
+        for s in list(waiting):
+            if not alive(s["pid"]):
+                log(f"SKIP {label(s)}: pid {s['pid']} already gone")
+                waiting.remove(s)
+            elif status(s) in ready:
+                waiting.remove(s)
+                path = handoff_path(s, stamp)
+                if pane_has_draft(s["pane"]):
+                    log(f"SKIP {label(s)}: unsent text in its prompt; no handoff asked, not restarted")
+                    continue
+                if Path(path).exists():
+                    log(f"SKIP {label(s)}: {path} already exists; no handoff asked, not restarted")
+                    continue
+                if not submit(s["pane"], ask_line(s, path), s["file"]):
+                    log(f"WARN {label(s)}: did not go busy after the handoff prompt; waiting for the file anyway")
+                asked[s["sessionId"]] = (s, path, time.time())
+                log(f"handoff asked of {label(s)} -> {path}")
+            elif time.time() - start > wait:
+                log(f"SKIP {label(s)}: still {status(s)} after {wait}s; no handoff asked, not restarted")
+                waiting.remove(s)
+        for sid, (s, path, t0) in asked.items():
+            if sid in done:
+                continue
+            try:
+                st = Path(path).stat()
+                lines = [l.strip() for l in Path(path).read_text(encoding="utf-8", errors="replace").splitlines()]
+                lines = [l for l in lines if l]
+                written = (st.st_mtime >= t0 and st.st_size >= 1000 and time.time() - st.st_mtime > 10
+                           and bool(lines) and lines[-1] == handoff_marker(s))
+            except OSError:
+                written = False
+            if written and status(s) in ready:
+                done[sid] = path
+                s["handoff_status_at"] = (read(s["file"]) or {}).get("statusUpdatedAt")
+                log(f"handoff written by {label(s)}: {path} ({st.st_size} bytes)")
+            elif not alive(s["pid"]):
+                done[sid] = ""
+                log(f"SKIP {label(s)}: pid {s['pid']} exited before its handoff was written")
+            elif time.time() - t0 > timeout:
+                done[sid] = ""
+                log(f"SKIP {label(s)}: no handoff at {path} after {timeout}s; left running, not restarted")
+        if not waiting and all(sid in done for sid in asked):
+            break
+        time.sleep(5)
+    return {sid: p for sid, p in done.items() if p}
+
+
+def feed_handoff(name: str, pane: str, sess_file: Path, handoff: str) -> bool:
+    """Wait for the fresh session to go idle, then give it `cat <handoff>` as its first prompt."""
+    for _ in range(120):
+        d = read(sess_file) or {}
+        if d.get("status") == "idle":
+            time.sleep(3)
+            if submit(pane, f"cat {handoff}", sess_file):
+                log(f"OK {name}: fresh as pid {d.get('pid')} ({str(d.get('sessionId'))[:8]}), handed {handoff}")
+                return True
+            log(f"WARN {name}: fresh as pid {d.get('pid')} but did not go busy on `cat {handoff}`; check the pane")
+            return False
+        time.sleep(1)
+    log(f"WARN {name}: fresh session in {pane} never went idle; type `cat {handoff}` there yourself")
+    return False
+
+
+PROJECTS = Path.home() / ".claude" / "projects"
+REVIVE_FLAGS = "--channels plugin:conexus@nexus-plugins"
+
+
+def boot_time() -> float:
+    import re
+
+    out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True).stdout
+    m = re.search(r"sec\s*=\s*(\d+)", out)
+    if not m:
+        raise RuntimeError(f"cannot read kern.boottime: {out!r}")
+    return float(m.group(1))
+
+
+def revivable(before: float, since_min: int) -> list[dict]:
+    """Sessions whose transcript was written in the `since_min` minutes before `before`, newest per name."""
+    lo = before - since_min * 60
+    by_name: dict[str, dict] = {}
+    for f in PROJECTS.glob("*/*.jsonl"):
+        mtime = f.stat().st_mtime
+        if not lo <= mtime <= before:
+            continue
+        name = cwd = None
+        with f.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"agentName"' not in line and '"cwd"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                name = d.get("agentName") or name
+                cwd = d.get("cwd") or cwd
+        if not cwd:
+            continue
+        key = name or f.stem
+        if key not in by_name or mtime > by_name[key]["mtime"]:
+            by_name[key] = {"name": name, "sessionId": f.stem, "cwd": cwd, "mtime": mtime}
+    return sorted(by_name.values(), key=lambda s: s["mtime"])
+
+
+def revive(a: argparse.Namespace) -> int:
+    before = boot_time()
+    found = [s for s in revivable(before, a.since)
+             if (not a.only or s["name"] in a.only) and s["name"] not in a.skip]
+    live = {(read(p) or {}).get("sessionId") for p in SESSIONS.glob("*.json")
+            if alive(int((read(p) or {}).get("pid", 0) or 0))}
+    flags = shlex.split(a.flags)
+    if not a.dry_run:
+        log(f"=== revive: sessions written in the {a.since} min before boot "
+            f"({time.strftime('%m-%d %H:%M', time.localtime(before))})")
+        if subprocess.run(["tmux", "has-session", "-t", a.tmux_session], capture_output=True).returncode != 0:
+            tmux("new-session", "-d", "-s", a.tmux_session)
+    launched: dict[str, str] = {}
+    for s in found:
+        label_ = s["name"] or s["sessionId"][:8]
+        when = time.strftime("%H:%M", time.localtime(s["mtime"]))
+        if s["sessionId"] in live:
+            log(f"SKIP {label_}: session {s['sessionId'][:8]} is already live")
+            continue
+        if not Path(s["cwd"]).is_dir():
+            log(f"SKIP {label_}: cwd {s['cwd']} no longer exists")
+            continue
+        args = [CLAUDE, *flags, *(["-n", s["name"]] if s["name"] else []), "--resume", s["sessionId"]]
+        cmd = " ".join(shlex.quote(x) for x in args)
+        if a.dry_run:
+            print(f"{label_}  last written {when}\n    cd {shlex.quote(s['cwd'])} && {cmd}")
+            continue
+        tmux("new-window", "-d", "-t", a.tmux_session, "-n", label_, "-c", s["cwd"], f"{cmd}; exec $SHELL -l")
+        log(f"launched {label_}: --resume {s['sessionId'][:8]} in {s['cwd']}")
+        launched[s["sessionId"]] = label_
+    if a.dry_run:
+        print(f"{len(found)} session(s) written in the {a.since} min before boot")
+        return 0
+    # A launch counts only once a live process has registered that session id.
+    pending, deadline = dict(launched), time.time() + a.verify_timeout
+    while pending and time.time() < deadline:
+        for p in SESSIONS.glob("*.json"):
+            d = read(p) or {}
+            sid = d.get("sessionId")
+            if sid in pending and alive(int(d.get("pid", 0) or 0)):
+                log(f"OK {pending.pop(sid)}: resumed as pid {d['pid']} in {d.get('tmux')}")
+        if pending:
+            time.sleep(1)
+    for sid, label_ in pending.items():
+        log(f"FAIL {label_}: no live session {sid[:8]} after {a.verify_timeout}s; check its {a.tmux_session} window")
+    ok = len(launched) - len(pending)
+    log(f"=== revive done: {ok} of {len(launched)} resumed")
+    return 0 if not pending else 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--only", action="append", default=[], help="restart only this session name (repeatable)")
+    ap.add_argument("--skip", action="append", default=[], help="leave this session name alone (repeatable)")
+    ap.add_argument("--no-update", action="store_true", help="do not update marketplaces and plugins first")
+    ap.add_argument("--wait", type=int, default=600, help="seconds to wait for a busy session to go idle (default 600)")
+    ap.add_argument("--force", action="store_true",
+                    help="also restart a session whose status is 'shell' (a stale or running shell command); "
+                         "a 'busy' session, one mid-turn, is still waited for")
+    ap.add_argument("--nx", metavar="X.Y.Z", default="",
+                    help="first bring nx and the plugins to this release (engine gate, pinned install, version checks)")
+    ap.add_argument("--skip-engine-gate", action="store_true",
+                    help="with --nx: do not require the cloud engine to be at the release's floor (local-mode box)")
+    ap.add_argument("--engine-wait", type=int, default=1800,
+                    help="with --nx: seconds to wait for the cloud engine to reach the floor before aborting (default 1800)")
+    ap.add_argument("--repo", default=str(REPO), help="nexus checkout holding the release tags and reinstall-tool.sh")
+    ap.add_argument("--endpoint", default=ENDPOINT, help="cloud engine read for the engine gate")
+    ap.add_argument("--fresh", action="store_true",
+                    help="each session writes a continuation handoff, then restarts with a fresh context on it (see above)")
+    ap.add_argument("--fallback-resume", action="store_true",
+                    help="with --fresh: a session with no usable handoff is restarted with --resume instead of left running")
+    ap.add_argument("--handoff-timeout", type=int, default=900,
+                    help="with --fresh: seconds a session gets to write its handoff (default 900)")
+    ap.add_argument("--revive", action="store_true",
+                    help="after a reboot: resume the sessions that were running before it (see above)")
+    ap.add_argument("--since", type=int, default=30,
+                    help="with --revive: minutes before boot a transcript must have been written in (default 30)")
+    ap.add_argument("--tmux-session", default="vibes", help="with --revive: tmux session to open windows in")
+    ap.add_argument("--verify-timeout", type=int, default=60,
+                    help="with --revive: seconds to wait for every launched session to register (default 60)")
+    ap.add_argument("--flags", default=REVIVE_FLAGS, help=f"with --revive: claude flags (default {REVIVE_FLAGS!r})")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--caller-pane", default="", help=argparse.SUPPRESS)
+    a = ap.parse_args()
+    global FALLBACK_RESUME
+    FALLBACK_RESUME = a.fallback_resume
+    if a.revive:
+        return revive(a)
+
+    found = [s for s in sessions() if (not a.only or s.get("name") in a.only) and s.get("name") not in a.skip]
+    if a.nx and not a.detached:
+        # With --fresh the install waits until every handoff is written, so the handoff turns run on
+        # one consistent nx and plugin version; here only the engine gate runs.
+        if not converge(a.nx, Path(a.repo), a.endpoint, not a.skip_engine_gate, a.dry_run, a.engine_wait,
+                        install=not a.fresh or a.dry_run):
+            return 2
+    if a.dry_run:
+        for s in found:
+            print(f"{s.get('name')}  pid={s['pid']}  pane={s['pane']}  status={s.get('status')}\n    {relaunch_command(s, a.fresh)}")
+            if a.fresh:
+                print(f"    handoff -> {handoff_path(s, time.strftime('%Y%m%d-%H%M'))}")
+        print(f"{len(found)} session(s); plugins {'not ' if a.no_update else ''}updated first")
+        return 0
+    if not found:
+        print("no interactive tmux Claude sessions found")
+        return 1
+    if not a.detached:
+        rest = sys.argv[1:]
+        if a.nx and a.fresh:  # gated above; the child installs after the handoffs
+            rest = [x for x in rest if x != "--skip-engine-gate"] + ["--skip-engine-gate", "--no-update"]
+        elif a.nx:  # converged above; the detached child only restarts
+            rest = [x for i, x in enumerate(rest) if x != "--nx" and not x.startswith("--nx=") and not (i and rest[i - 1] == "--nx")]
+            rest = [x for x in rest if x != "--skip-engine-gate"] + ["--no-update"]
+        args = [sys.executable, os.path.abspath(__file__), "--detached", "--caller-pane", os.environ.get("TMUX_PANE", "")] + rest
+        subprocess.run(["tmux", "run-shell", "-b", " ".join(shlex.quote(x) for x in args) + f" > /dev/null 2>&1"], check=True)
+        print(f"started in the background for {len(found)} session(s); progress in {LOG}")
+        return 0
+
+    log(f"=== restart {len(found)} session(s): " + ", ".join(s.get("name") or "?" for s in found))
+    if not a.no_update:
+        update_plugins()
+    # Restart whichever session goes idle first, so one busy session holds up no
+    # other. The caller's own session goes last, once the others are done, so it
+    # is not cut off while they come back.
+    me = a.caller_pane
+    others = [s for s in found if s["pane"] != me]
+    callers = [s for s in found if s["pane"] == me]
+    ready = {"idle", "shell"} if a.force else {"idle"}
+    handoffs: dict[str, str] | None = None
+    if a.fresh:
+        handoffs = write_handoffs(found, ready, a.wait, a.handoff_timeout)
+        if a.nx and not converge(a.nx, Path(a.repo), a.endpoint, False, False, install=True):
+            log("=== ABORT: install failed after the handoffs; no session restarted (handoffs kept in /tmp)")
+            return 2
+        if not a.fallback_resume:
+            others = [s for s in others if s["sessionId"] in handoffs]
+            callers = [s for s in callers if s["sessionId"] in handoffs]
+        else:
+            for s in others + callers:
+                if s["sessionId"] not in handoffs:
+                    log(f"{label(s)}: no handoff; will restart with --resume (fallback)")
+    ok = run_when_idle(others, a.wait, ready, handoffs)
+    ok += run_when_idle(callers, a.wait, ready, handoffs)
+    log(f"=== done: {ok} of {len(found)} resumed")
+    return 0 if ok == len(found) else 1
+
+
+def run_when_idle(pending: list[dict], wait: int, ready: set[str], handoffs: dict[str, str] | None = None) -> int:
+    """Restart each session the moment its status is in `ready`; skip any still busy after `wait` seconds."""
+    deadline = time.time() + wait
+    ok = 0
+    while pending:
+        for s in list(pending):
+            if not alive(s["pid"]):
+                log(f"SKIP {label(s)}: pid {s['pid']} already gone")
+                pending.remove(s)
+            elif status(s) in ready:
+                pending.remove(s)
+                ok += restart(s, (handoffs or {}).get(s["sessionId"], ""))
+                deadline = max(deadline, time.time() + 60)  # a restart takes minutes; do not spend others' wait on it
+        if not pending:
+            break
+        if time.time() > deadline:
+            for s in pending:
+                log(f"SKIP {label(s)}: still {status(s)} after {wait}s; not restarted")
+            break
+        time.sleep(5)
+    return ok
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        import traceback
+
+        log("=== CRASH: " + traceback.format_exc().replace("\n", " | "))
+        raise
