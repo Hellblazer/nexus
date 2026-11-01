@@ -138,10 +138,22 @@ records:
   `chunk_text_hash`, per-chunk collections, the fields the coverage ledger's
   `_hits` already reads), zipped with the hydrated contents by position
   BEFORE the empty-content filter, the supplement and reserved-stream
-  merges, and the item cap, which today drop the alignment. Records ride
-  beside `args` as a private value that never reaches the dispatched
-  prompt or the MCP surface, the same way `_truncation_metadata` does. Ids
-  are minted `e1, e2, ...` in record order.
+  merges, and the item cap, which today drop the alignment. The source
+  step's output reaches the hydration code through argument resolution
+  (`_hydrate_operator_args` sees only the resolved args today, where
+  `collections` is the deduplicated list; the per-chunk values are
+  `chunk_collections`). A tumbler from the retrieval output counts as
+  identity only when it was not inferred: a hit whose `doc_id` carries
+  `_doc_id_inferred` (search picked one of several owners of a shared
+  chash) contributes no tumbler, so its record is chash-only. Items merged
+  in later (supplement, reserved stream, coverage note) get records from
+  their own provenance (`SupplementItem`, `RepairSupplement.provenance`),
+  or identity-less records when they have none. Records ride beside `args`
+  as a private value that never reaches the dispatched prompt or the MCP
+  surface, the same way `_truncation_metadata` does. Ids are minted
+  `e1, e2, ...` in record order. Binding happens once, by whoever holds the
+  records: on the runner path the runner binds the operator's raw payload;
+  the MCP tool binds only when it is called directly.
 - `nx enrich aspects --validate-sample`: one record, `e1`, whose `tumbler`
   is the document's catalog tumbler (enrich already holds
   `doc_id_lookup`), `chash` null (the evidence is the reassembled document,
@@ -185,15 +197,19 @@ verify: {schema_version: 1, verified, reason, evidence: [item], rejected: [str],
    every other state nulls them. The host is the only writer of `tumbler`,
    `chash` and `collection`.
 3. A contained quote binds (`bound`) only when the record has source
-   identity: a `tumbler`, or a `chash` with a `collection` whose parent
+   identity: a `tumbler` that names the one owning document (never an
+   inferred one), or a `chash` with a `collection` whose single parent
    document is known. A contained quote on a record without identity is
    `unattributed`: the text is real, the source is not known. Every
    direct-MCP plain-text call lands here.
-4. A record with a `chash` and no `tumbler` is `ambiguous` when the chash
-   has more than one owning document and nothing in the record names the
-   parent. Detecting that needs the catalog owner lookup, which
-   nexus-z1d0l.1.3 adds (it needs nexus-tko2w); until it lands, a
-   chash-only record is `ambiguous`, never `bound`.
+4. A record with a `chash` and no `tumbler` is `ambiguous` unless the
+   owner set shows exactly one owning document, in which case that
+   document's tumbler fills the record and rule 3 applies. The owner rows
+   the runner already captures (`capturing_owner_lookups`) are one source;
+   nexus-z1d0l.1.3 makes the lookup complete (it needs nexus-tko2w). With
+   no owner set, a chash-only record is `ambiguous`, never `bound`. A
+   wrong-document quote is also `ambiguous`; the two are told apart by
+   `span` (null for a wrong-document quote) and by the record's `chash`.
 
 **Quote and span.** The quote and the record text are compared after
 normalization: each code point is NFKC-normalized on its own, every
@@ -201,7 +217,9 @@ whitespace run collapses to one space, and leading and trailing whitespace
 is stripped. Case is not folded. Normalizing per code point keeps a map
 from each normalized position back to an original one, so `span` is exact;
 a quote that only matches after cross-character composition does not
-match and is `unresolved`. One leading facet tag, `[f<n>]` in any case
+match and is `unresolved`. This is narrower than whole-string NFKC
+(decomposed versus precomposed accents do not match), which errs toward
+review, never toward a false witness. One leading facet tag, `[f<n>]` in any case
 followed by optional whitespace (the coverage ledger's convention), is
 removed from the quote before the test and kept in the returned `quote`.
 
