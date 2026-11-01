@@ -4,12 +4,17 @@ package dev.nexus.service.tuples;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -389,5 +394,331 @@ class TemplateSchemaParserTest {
         var ex = assertThrows(TemplateRegistryException.class,
                 () -> TemplateSchemaParser.parse("broken.yaml", doc));
         assertTrue(ex.getMessage().contains("claim_log_ttl_seconds"), ex.getMessage());
+    }
+
+    // ── doc block (bead nexus-mdbds.2.10, RDR-239 Technical Design item 1) ──────────
+
+    /** A doc block that fits {@link #validDoc()}: keys {@code to}, dimension {@code from}. */
+    private static Map<String, Object> docBlock() {
+        Map<String, Object> d = new LinkedHashMap<>();
+        d.put("summary", "Messages addressed to one agent or session.");
+        d.put("writers", new ArrayList<>(List.of("Any session, by tuple_out")));
+        d.put("readers", new ArrayList<>(List.of("The addressee claims with in")));
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("to", "the addressee");
+        fields.put("from", "the sender");
+        d.put("fields", fields);
+        d.put("body", "free text");
+        Map<String, Object> ex = new LinkedHashMap<>();
+        ex.put("subspace", "mailbox/someone");
+        ex.put("nonce", "n1");
+        Map<String, Object> keys = new LinkedHashMap<>();
+        keys.put("to", "someone");
+        ex.put("keys", keys);
+        Map<String, Object> dims = new LinkedHashMap<>();
+        dims.put("from", "other");
+        ex.put("dims", dims);
+        ex.put("body", "hello");
+        d.put("example", ex);
+        d.put("see_also", new ArrayList<>(List.of("RDR-239")));
+        return d;
+    }
+
+    private static Map<String, Object> docDocument(Map<String, Object> block) {
+        Map<String, Object> doc = validDoc();
+        doc.put("doc", block);
+        return doc;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> sub(Map<String, Object> m, String key) {
+        return (Map<String, Object>) m.get(key);
+    }
+
+    private static TemplateRegistryException refused(Map<String, Object> document) {
+        return assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", document));
+    }
+
+    private static void assertNames(TemplateRegistryException ex, String field) {
+        assertEquals(field, ex.field(), ex.getMessage());
+        assertTrue(ex.getMessage().contains("broken.yaml"), ex.getMessage());
+    }
+
+    @Test
+    void docWithEveryFieldParses() {
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", docDocument(docBlock()));
+        TemplateDoc d = t.doc();
+        assertNotNull(d);
+        assertEquals("Messages addressed to one agent or session.", d.summary());
+        assertEquals(List.of("Any session, by tuple_out"), d.writers());
+        assertEquals(List.of("The addressee claims with in"), d.readers());
+        assertEquals("the addressee", d.fields().get("to"));
+        assertEquals("free text", d.body());
+        assertEquals(List.of("RDR-239"), d.seeAlso());
+        TemplateDoc.Example ex = d.example();
+        assertEquals("mailbox/someone", ex.subspace());
+        assertEquals("n1", ex.nonce());
+        assertEquals(Map.of("to", "someone"), ex.keys());
+        assertEquals(Map.of("from", "other"), ex.dims());
+        assertEquals("hello", ex.body());
+    }
+
+    @Test
+    void templateWithoutDocLoadsWithNullDoc() {
+        assertNull(TemplateSchemaParser.parse("mailbox.yaml", validDoc()).doc());
+    }
+
+    @Test
+    void unknownDocFieldIsRefusedNamingIt() {
+        Map<String, Object> block = docBlock();
+        block.put("dimension_values", "x");
+        assertNames(refused(docDocument(block)), "doc.dimension_values");
+    }
+
+    @Test
+    void docWithoutSummaryIsRefused() {
+        Map<String, Object> block = docBlock();
+        block.remove("summary");
+        assertNames(refused(docDocument(block)), "doc.summary");
+    }
+
+    @Test
+    void docThatIsNotAMappingIsRefused() {
+        assertNames(refused(docDocument(null)), "doc");
+        Map<String, Object> doc = validDoc();
+        doc.put("doc", "just a string");
+        assertNames(refused(doc), "doc");
+    }
+
+    @Test
+    void fieldsNameThatIsNotADeclaredKeyOrDimensionIsRefusedNamingIt() {
+        Map<String, Object> block = docBlock();
+        sub(block, "fields").put("sender", "typo for from");
+        assertNames(refused(docDocument(block)), "doc.fields.sender");
+    }
+
+    @Test
+    void valueMapWhoseKeysDifferFromTheDeclaredValuesIsRefusedNamingBothSets() {
+        Map<String, Object> document = validDoc();
+        Map<String, Object> kind = new LinkedHashMap<>();
+        kind.put("type", "string");
+        kind.put("values", List.of("agent", "session"));
+        sub(document, "dimensions").put("address_kind", kind);
+        Map<String, Object> block = docBlock();
+        Map<String, Object> valueMap = new LinkedHashMap<>();
+        valueMap.put("agent", "a named agent");
+        valueMap.put("pane", "not a declared value");
+        sub(block, "fields").put("address_kind", valueMap);
+        document.put("doc", block);
+        TemplateRegistryException ex = refused(document);
+        assertNames(ex, "doc.fields.address_kind");
+        assertTrue(ex.getMessage().contains("[agent, pane]"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("[agent, session]"), ex.getMessage());
+
+        // exactly the declared values, in any order: accepted
+        Map<String, Object> exact = new LinkedHashMap<>();
+        exact.put("session", "a session");
+        exact.put("agent", "a named agent");
+        sub(block, "fields").put("address_kind", exact);
+        assertDoesNotThrow(() -> TemplateSchemaParser.parse("t.yaml", document));
+    }
+
+    @Test
+    void valueMapOnAPinnedKeyIsHeldToThePinnedValues() {
+        Map<String, Object> document = validDoc();
+        Map<String, Object> spec = new LinkedHashMap<>();
+        spec.put("values", List.of("a", "b"));
+        Map<String, Object> keys = new LinkedHashMap<>();
+        keys.put("to", spec);
+        document.put("keys", keys);
+        Map<String, Object> block = docBlock();
+        Map<String, Object> valueMap = new LinkedHashMap<>();
+        valueMap.put("a", "first");
+        sub(block, "fields").put("to", valueMap);
+        document.put("doc", block);
+        assertNames(refused(document), "doc.fields.to");
+    }
+
+    @Test
+    void valueMapOnAFieldWithNoDeclaredValuesIsFree() {
+        Map<String, Object> block = docBlock();
+        Map<String, Object> valueMap = new LinkedHashMap<>();
+        valueMap.put("anything", "in use today");
+        sub(block, "fields").put("from", valueMap);
+        assertDoesNotThrow(() -> TemplateSchemaParser.parse("t.yaml", docDocument(block)));
+    }
+
+    @Test
+    void emptyWritersParsesAsAnEmptyListAndAbsentWritersAsNull() {
+        Map<String, Object> block = docBlock();
+        block.put("writers", new ArrayList<>());
+        assertEquals(List.of(), TemplateSchemaParser.parse("t.yaml", docDocument(block)).doc().writers());
+        block.remove("writers");
+        assertNull(TemplateSchemaParser.parse("t.yaml", docDocument(block)).doc().writers());
+    }
+
+    @Test
+    void docBodyOnATemplateWithMaxBodyBytesZeroIsRefused() {
+        Map<String, Object> document = docDocument(docBlock());
+        document.put("max_body_bytes", 0L);
+        assertNames(refused(document), "doc.body");
+        // omitting doc.body there is fine (the example then carries no body either)
+        Map<String, Object> block = docBlock();
+        block.remove("body");
+        sub(block, "example").remove("body");
+        Map<String, Object> ok = docDocument(block);
+        ok.put("max_body_bytes", 0L);
+        assertDoesNotThrow(() -> TemplateSchemaParser.parse("t.yaml", ok));
+    }
+
+    @Test
+    void exampleWithoutSubspaceIsRefused() {
+        Map<String, Object> block = docBlock();
+        sub(block, "example").remove("subspace");
+        assertNames(refused(docDocument(block)), "doc.example.subspace");
+    }
+
+    @Test
+    void exampleNonceOnATemplateWhoseIdIsNotKeysPlusNonceIsRefused() {
+        Map<String, Object> document = docDocument(docBlock());
+        document.put("id_from", "keys");
+        document.put("id_dims", List.of());
+        assertNames(refused(document), "doc.example.nonce");
+        // and without the nonce the same template is fine
+        sub(sub(document, "doc"), "example").remove("nonce");
+        assertDoesNotThrow(() -> TemplateSchemaParser.parse("t.yaml", document));
+    }
+
+    @Test
+    void exampleKeysAndDimsMiniYamlReturnsAsLongOrBooleanAreReadAsStrings() {
+        Map<String, Object> block = docBlock();
+        Map<String, Object> ex = sub(block, "example");
+        sub(ex, "keys").put("to", 3889972L);
+        sub(ex, "dims").put("from", Boolean.TRUE);
+        ex.put("nonce", 42L);
+        ex.put("body", 7L);
+        TemplateDoc.Example parsed = TemplateSchemaParser.parse("t.yaml", docDocument(block)).doc().example();
+        assertEquals("3889972", parsed.keys().get("to"));
+        assertEquals("true", parsed.dims().get("from"));
+        assertEquals("42", parsed.nonce());
+        assertEquals("7", parsed.body());
+    }
+
+    // ── byte caps: 300 per description, 4,096 per block (S4 Q3) ─────────────────────
+
+    private static String bytes(int n) {
+        return "x".repeat(n);
+    }
+
+    private void assertCap(java.util.function.Consumer<Map<String, Object>> setOver,
+                           java.util.function.Consumer<Map<String, Object>> setAt, String field) {
+        Map<String, Object> over = docBlock();
+        setOver.accept(over);
+        TemplateRegistryException ex = refused(docDocument(over));
+        assertNames(ex, field);
+        assertTrue(ex.getMessage().contains("300"), ex.getMessage());
+        Map<String, Object> at = docBlock();
+        setAt.accept(at);
+        assertDoesNotThrow(() -> TemplateSchemaParser.parse("t.yaml", docDocument(at)), field + " at the cap");
+    }
+
+    @Test
+    void summaryOverThreeHundredBytesIsRefused() {
+        assertCap(b -> b.put("summary", bytes(301)), b -> b.put("summary", bytes(300)), "doc.summary");
+    }
+
+    @Test
+    void multiByteSummaryIsCountedInBytesNotCharacters() {
+        // 151 two-byte characters = 302 bytes, 151 chars
+        Map<String, Object> block = docBlock();
+        block.put("summary", "\u00e9".repeat(151));
+        assertNames(refused(docDocument(block)), "doc.summary");
+    }
+
+    @Test
+    void writersReadersAndSeeAlsoStringsOverThreeHundredBytesAreRefused() {
+        for (String f : List.of("writers", "readers", "see_also")) {
+            assertCap(b -> b.put(f, new ArrayList<>(List.of("ok", bytes(301)))),
+                    b -> b.put(f, new ArrayList<>(List.of("ok", bytes(300)))), "doc." + f + "[1]");
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void fieldsDescriptionAndValueMapDescriptionOverThreeHundredBytesAreRefused() {
+        assertCap(b -> sub(b, "fields").put("to", bytes(301)), b -> sub(b, "fields").put("to", bytes(300)),
+                "doc.fields.to");
+        assertCap(b -> {
+                    Map<String, Object> vm = new LinkedHashMap<>();
+                    vm.put("v", bytes(301));
+                    sub(b, "fields").put("to", vm);
+                },
+                b -> {
+                    Map<String, Object> vm = new LinkedHashMap<>();
+                    vm.put("v", bytes(300));
+                    sub(b, "fields").put("to", vm);
+                }, "doc.fields.to.v");
+    }
+
+    @Test
+    void bodyDescriptionAndBodyMapDescriptionOverThreeHundredBytesAreRefused() {
+        assertCap(b -> b.put("body", bytes(301)), b -> b.put("body", bytes(300)), "doc.body");
+        assertCap(b -> {
+                    Map<String, Object> bm = new LinkedHashMap<>();
+                    bm.put("state", bytes(301));
+                    b.put("body", bm);
+                },
+                b -> {
+                    Map<String, Object> bm = new LinkedHashMap<>();
+                    bm.put("state", bytes(300));
+                    b.put("body", bm);
+                }, "doc.body.state");
+    }
+
+    /** The block's weight as the engine's reader sees it: UTF-8 bytes of every mapping key and
+     *  every scalar in the parsed mapping, nested. Written out here, not shared with the engine. */
+    private static int weight(Object o) {
+        if (o instanceof Map<?, ?> m) {
+            int w = 0;
+            for (var e : m.entrySet()) {
+                w += weight(e.getKey()) + weight(e.getValue());
+            }
+            return w;
+        }
+        if (o instanceof List<?> l) {
+            int w = 0;
+            for (Object x : l) {
+                w += weight(x);
+            }
+            return w;
+        }
+        return o == null ? 0 : String.valueOf(o).getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    @Test
+    void wholeBlockOverFourThousandNinetySixBytesIsRefusedAndAtTheCapIsNot() {
+        Map<String, Object> at = docBlock();
+        at.remove("see_also");
+        int remaining = 4096 - weight(at) - "see_also".length();
+        List<Object> filler = new ArrayList<>();
+        while (remaining > 200) {
+            filler.add(bytes(200));
+            remaining -= 200;
+        }
+        filler.add(bytes(remaining));
+        at.put("see_also", filler);
+        assertEquals(4096, weight(at));
+        assertDoesNotThrow(() -> TemplateSchemaParser.parse("t.yaml", docDocument(at)));
+
+        Map<String, Object> over = docBlock();
+        over.remove("see_also");
+        List<Object> filler2 = new ArrayList<>(filler);
+        filler2.set(filler2.size() - 1, bytes(remaining + 1));
+        over.put("see_also", filler2);
+        assertEquals(4097, weight(over));
+        TemplateRegistryException ex = refused(docDocument(over));
+        assertNames(ex, "doc");
+        assertTrue(ex.getMessage().contains("4096"), ex.getMessage());
     }
 }
