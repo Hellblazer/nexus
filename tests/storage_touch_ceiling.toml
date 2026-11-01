@@ -40,8 +40,16 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5010
+provisioned_tests = 5012
 tolerance_tests = 0
+# 5010 -> 5012 (nexus-8g2tl, 2026-11-01): +3 from nexus-z1d0l.1.4, -1 here. CI 41315821488 (aec82b2c6) and
+# 41322739370 (a6aeb9989) counted 5013 against 5010 at 41315395118 (8fda4d0f0); summing the shards' per-module counts,
+# only tests/test_nx_answer.py (84 -> 86) and tests/test_plan_run.py (17 -> 18) moved. Run unmarked under the guard in
+# fail mode on chas, TestPlanMissPlanner::test_plan_miss_keeps_check_and_verify_in_every_spelling and
+# TestHydrateInputsTranslation::test_verify_ids_hydrates_claim_and_evidence_not_inputs both reach storage
+# (ServiceEndpointUnresolvableError from the plan-miss path and from verify's chash resolution), so they keep their
+# tenant; test_planner_tool_reference_offers_check_and_verify reads a module constant and moved to the unmarked
+# TestPlannerToolReference in this commit. DDL-per-run ratchet untouched (no changeset).
 # 4961 -> 5009 (nexus-ger02.10, 2026-10-31): +48, the cut-only suite (prose-cut). CI 41217739838 (243cf230e) counted
 # 5009 with nothing else new. Every one of the 48 drives the T2-backed path: tests/prose_edit/test_cut_only.py's
 # filter, render, apply and decide tests read the document's stored rejections and write them (the `prose` fixture),

@@ -1206,6 +1206,19 @@ class TestPlanLibraryMetrics:
         assert row["failure_count"] == 1
 
 
+# Reads a module constant and needs no tenant (nexus-8g2tl): kept out of the t2_tenant-marked class
+# below so the storage-touch ratchet counts only tests that reach storage.
+class TestPlannerToolReference:
+
+    def test_planner_tool_reference_offers_check_and_verify(self):
+        """The allowlist change is reachable only if the planner is told the steps exist: the
+        tool reference documents both, with the verify claim contract."""
+        from nexus.mcp.core import _PLANNER_TOOL_REFERENCE
+
+        assert "check(check_instruction" in _PLANNER_TOOL_REFERENCE
+        assert "verify(claim" in _PLANNER_TOOL_REFERENCE
+
+
 # ── Plan-miss planner (uses claude_dispatch, no pool) ─────────────────────────
 
 
@@ -1315,14 +1328,6 @@ class TestPlanMissPlanner:
             "search", "check", "check", "verify", "verify", "check", "verify",
         ]
         assert not [e for e in cap if e.get("event") == "planner_step_dropped"]
-
-    def test_planner_tool_reference_offers_check_and_verify(self):
-        """The allowlist change is reachable only if the planner is told the steps exist: the
-        tool reference documents both, with the verify claim contract."""
-        from nexus.mcp.core import _PLANNER_TOOL_REFERENCE
-
-        assert "check(check_instruction" in _PLANNER_TOOL_REFERENCE
-        assert "verify(claim" in _PLANNER_TOOL_REFERENCE
 
     @pytest.mark.asyncio
     async def test_plan_miss_normalizes_mcp_prefix(self):
