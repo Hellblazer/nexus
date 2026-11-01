@@ -52,13 +52,15 @@ a hash in one instance would merge their page buffers, so
 sequential re-run of the same hash on one instance, after the first run
 completed or failed, is fine and replaces the mapping).
 
-Thread-safety: a single lock guards the buffers; HTTP calls happen outside
-it. Matches PipelineDB's cross-thread usage contract (three stage threads,
-one store). Known transient: two threads flushing the same hash race —
-the loser's read can miss rows the winner is still POSTing (its flush saw
-an empty buffer while the in-flight POST hadn't landed). Self-healing:
-the next poll observes them; the stages' poll loops tolerate exactly this
-kind of not-yet-visible tail by design (RDR-048 stable-prefix chunking).
+Thread-safety: ``_buffer_lock`` guards the buffers and is never held across
+HTTP. ``_flush_lock`` serialises flushes and IS held across a flush's POSTs, so
+a flush (and every read, which flushes first) waits for one already in flight
+and then sees its rows (nexus-rqw0m). Before that, a second flush found the
+popped buffer empty and returned, and an interrupt release sent ``/fail``
+while a stage thread's pages were still on the wire. The cost: one stage's
+slow POST delays the other stages' reads. Lock order is ``_flush_lock`` then
+``_buffer_lock``, never the reverse. Matches PipelineDB's cross-thread usage
+contract (three stage threads, one store).
 """
 from __future__ import annotations
 
@@ -584,9 +586,10 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         pages the release promises to keep were lost. A flush with *timeout* waits at most that
         long for the in-flight one and raises ``TimeoutError`` past it (``mark_failed`` logs that
         and still sends ``/fail``), so an unreachable engine still cannot hold an interrupted
-        process open (nexus-euczk).
+        process open (nexus-euczk). So a stage POST that outlasts that timeout can still be lost at
+        process death, as before; the resume then re-extracts those pages.
         """
-        if not self._flush_lock.acquire(timeout=-1 if timeout is None else timeout):
+        if not self._flush_lock.acquire(timeout=-1 if timeout is None else max(0.0, timeout)):
             raise TimeoutError(f"flush of {content_hash} waited {timeout}s for an in-flight flush")
         try:
             with self._buffer_lock:
