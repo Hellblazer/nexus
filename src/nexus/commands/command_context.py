@@ -651,10 +651,14 @@ def compute_continuation_path(
     now: datetime,
     out_dir: Path,
     exists: Callable[[Path], bool],
+    session: str = "",
 ) -> Path:
     """Return the target path for a continuation handoff file.
 
-    Constructs ``<out_dir>/nexus-continuation-<repo_safe>-<slug>-<YYYY-MM-DD>.md``.
+    Constructs ``<out_dir>/nexus-continuation-<repo_safe>-<slug>[-<session>]-<YYYY-MM-DD>.md``.
+    *session* (the first 8 characters of the session id, when one is known)
+    keeps two sessions on one repo and branch from writing one file in the
+    same minute, where the last writer won (nexus-73vf4).
     When *exists* returns ``True`` for the base path (i.e., a same-day file
     already exists), appends a ``-HHMM`` suffix so successive invocations on
     the same day do not silently overwrite prior handoffs.
@@ -676,10 +680,11 @@ def compute_continuation_path(
         Absolute ``Path`` to the target handoff file.
     """
     date_str = now.strftime("%Y-%m-%d")
-    base = out_dir / f"nexus-continuation-{repo_safe}-{slug}-{date_str}.md"
+    stem = f"nexus-continuation-{repo_safe}-{slug}" + (f"-{session}" if session else "")
+    base = out_dir / f"{stem}-{date_str}.md"
     if exists(base):
         hhmm = now.strftime("%H%M")
-        return out_dir / f"nexus-continuation-{repo_safe}-{slug}-{date_str}-{hhmm}.md"
+        return out_dir / f"{stem}-{date_str}-{hhmm}.md"
     return base
 
 
@@ -1546,12 +1551,15 @@ def continuation(args: tuple[str, ...]) -> None:
         title_topic = f"current branch {branch}"
 
     # ---- Compute output path ------------------------------------------------
+    from nexus.session import resolve_explicit_session_id  # noqa: PLC0415 — command-local import (session)
+
     out = compute_continuation_path(
         repo_safe=repo_safe,
         slug=slug,
         now=datetime.now(),
         out_dir=_continuation_dir(),
         exists=Path.exists,
+        session=_sanitize_slug((resolve_explicit_session_id() or "")[:8]),
     )
 
     # ---- Emit header lines --------------------------------------------------

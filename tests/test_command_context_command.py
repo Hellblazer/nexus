@@ -1663,6 +1663,56 @@ def test_continuation_has_target_file_line(
     assert "**Target file:**" in result.output
 
 
+def test_continuation_target_names_the_session(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """Two sessions on one branch in one minute get two files (nexus-73vf4):
+    the target carries the first 8 characters of the session id."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    from nexus.cli import main
+
+    targets = []
+    for sid in ("aaaaaaaa-1111-2222-3333-444444444444", "bbbbbbbb-1111-2222-3333-444444444444"):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
+        out = CliRunner().invoke(main, ["command-context", "continuation"]).output
+        [line] = [ln for ln in out.splitlines() if ln.startswith("**Target file:**")]
+        targets.append(line)
+    assert "-aaaaaaaa-" in targets[0]
+    assert "-bbbbbbbb-" in targets[1]
+    assert targets[0] != targets[1]
+
+
+def test_continuation_target_without_a_session_keeps_the_old_name(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    from nexus.cli import main
+
+    out = CliRunner().invoke(main, ["command-context", "continuation"]).output
+    [line] = [ln for ln in out.splitlines() if ln.startswith("**Target file:**")]
+    assert _re.search(r"nexus-continuation-[a-z0-9-]+-\d{4}-\d{2}-\d{2}(-\d{4})?\.md", line)
+
+
+def test_compute_continuation_path_with_session() -> None:
+    from datetime import datetime
+    from nexus.commands.command_context import compute_continuation_path
+
+    now = datetime(2026, 5, 26, 14, 30)
+    base = compute_continuation_path(
+        repo_safe="nexus", slug="main", now=now, out_dir=Path("/tmp"),
+        exists=lambda p: False, session="9f640074",
+    )
+    taken = compute_continuation_path(
+        repo_safe="nexus", slug="main", now=now, out_dir=Path("/tmp"),
+        exists=lambda p: True, session="9f640074",
+    )
+    assert base == Path("/tmp/nexus-continuation-nexus-main-9f640074-2026-05-26.md")
+    assert taken == Path("/tmp/nexus-continuation-nexus-main-9f640074-2026-05-26-1430.md")
+
+
 def test_continuation_has_topic_line(
     tmp_path: Path, monkeypatch, stub_continuation_subprocess
 ) -> None:
