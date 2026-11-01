@@ -48,6 +48,6 @@ it is until moved back deliberately.
 ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/nexus/reference.md` (nexus-z1d0l.1.2): the operator table gives `check` and `verify` the witness schema v1 result shape (host-bound evidence items with state, span, tumbler, chash and collection, plus rejected, uncovered and requires_review), in place of the bare `evidence` and `citations` shapes.
 - `conexus/skills/rdr-close/SKILL.md` (site prose pass): says `nx index repo` makes an RDR searchable from the first run, drafts included, and close only re-indexes a changed RDR, in place of saying accept or close indexes it.
-- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-gy317, round 2): the compaction checkpoint finds a session's worktree when it is named `<session>-<topic>` as well as `<session>`, picks among several by the board's `ref:` beads and then recency, and lists the others.
+- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-gy317, round 2): the compaction checkpoint finds a session's worktree when it is named `<session>-<topic>` as well as `<session>`, ranks several by launch directory, a board path mention, a board `ref:` bead (or its child) on the branch, the exact name, then recency, and lists up to five others.
 
 ## Deferred to the next client release
