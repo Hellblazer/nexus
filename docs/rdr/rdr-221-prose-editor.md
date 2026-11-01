@@ -716,17 +716,28 @@ a fail, stop and revise this RDR.
 
 #### Step 3.1: `site-page` voice pass
 
-Add a cut-only mode: `/prose-edit <path> --mode cut-only --voice-card <file>
---word-budget <n>`. It proposes only sentence edits that remove words and
-paragraph cuts, uses the given voice card instead of building one, applies the
-style sheet and the rejection filter, logs the session, and returns its
-proposals to the caller with no marked-up copy. `site-page` §5 item 3
-dispatches it with the page's §2 card and word budget; the gate session applies
-the cuts with the other passes' findings as it does today, where a fact fix
-wins over a cut (SKILL.md line 70). This is the one place the author does not
-accept each edit, because the `site-page` gate already owns that review. In
-this mode the parse row and the lengthening clause of section 6 do not apply
-(Amendment A1).
+Add a cut-only mode as a second skill in the plugin,
+`conexus-prose-edit:prose-cut <path>[:range] --mode cut-only --voice-card
+<file> --word-budget <n>`. It is a separate skill because `/prose-edit` is
+explicit-only (`disable-model-invocation`) and the gate that calls this mode is
+a model; `/prose-edit --mode cut-only` points to it. It proposes only sentence
+edits that remove words and paragraph cuts, uses the given voice card instead
+of building one, applies the style sheet and the rejection filter, logs the
+session, and returns its proposals to the caller with no marked-up copy and no
+question. The word budget is a target: the filter reports the count against it
+and drops nothing for exceeding it. `prose-cut count <page>` prints the page's
+prose words, the unit of the budget.
+
+`site-page` §5 item 3 dispatches it with the page's §2 card and word budget.
+The gate makes the fact and style passes' fixes first, then decides the cuts
+with `prose-cut decide <work> --accept S --reject S --hold S`, which applies the
+accepted ones through the same apply as an author run. A cut whose text a fix
+changed is skipped and stored nowhere, so a fact fix wins over a cut. A
+rejected cut is stored for the page; a held one (named in no set) is not.
+Paragraph cuts are advice only and never stored. This is the one place the
+author does not accept each edit, because the `site-page` gate already owns that
+review. In this mode the parse row and the lengthening clause of section 6 do
+not apply (Amendment A1).
 
 #### Step 3.2: Remaining genres
 
@@ -855,3 +866,4 @@ one, is a separate bead (nexus-b0b40).
 - 2026-10-23: round 2 Significants S1-S12 dispositioned by Sam's decisions of 2026-10-23 (S6, S7, S11, S12) and by the disposition edit (all twelve), fix check `nexus_rdr/221-fix-check-6159bc54e` (consensus PASS); its counted defects carried by nexus-zhdxx, nexus-b0b40, nexus-x7o5e and nexus-0hkkj.
 - 2026-10-25: Step 1a.2 text aligned with the fixture as built: no seeded sentence comes from the paper's Table 2, and `run-scenario.sh` has no kind registry (stacked review B4/B5). The section 6 heading stays unconditional; the brief drops the unpack clause for changelog and commit-message.
 - 2026-10-25: Phase 2 PASSED (Sam): 10 of 10 editor edits accepted across the four documents, the essay still in Sam's voice, yes to reaching for it again on all four, comparison accept rates tied at 100% (editor 6/6, brief 14/14). Record: T2 `nexus_rdr/221-phase2-results`. Phase 1a lands on `develop` after this.
+- 2026-11-01: Step 3.1 aligned with cut-only as shipped in conexus 7.91.0 (nexus-ger02.10, amended on Sam's go, nexus-scmcs.5): a second skill, `prose-cut`, in place of a `/prose-edit` mode; the word budget a target, not a cap; the gate fixes first and then applies the cuts with `prose-cut decide`, in place of applying them alongside the other findings. The stale `site-page` line cites are gone from the step. Discovery 12's line cites are left as they read when verified. The review-loop text (marked-up copy, viewer) still matches `develop`; the MarkupEditor review is amended with its branch (nexus-scmcs.4).
