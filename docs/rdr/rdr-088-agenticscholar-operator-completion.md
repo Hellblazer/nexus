@@ -60,6 +60,16 @@ an inline "Amended 2026-11-01" note pointing here. The contract itself is
     host-returned item. Verify gains the model-facing item.
   - **(iv)** Test Plan: the grounded-claim scenario asserts bound evidence
     items, not "citation spans".
+  - **(v)** 2026-11-01, approved by Sam (nexus-z1d0l.1.3 review): a
+    retrieval step's tumbler is never identity, including one search did
+    not infer. Its non-inferred `doc_id` is the shared T3 row's last
+    writer (the defect nexus-tko2w fixed for section labels), so trusting
+    it binds a shared chunk to a guess. Only the catalog owner set (rule 4)
+    or the parent document the step named can supply a tumbler. Edited in
+    place under § Witness Schema v1, Evidence records and Host binding
+    rule 3. A step confined to one document could bind a shared chunk to
+    that document when it is one of the chunk's owners; that recall gain
+    is nexus-z1d0l.1.12.
 
 ### Witness Schema v1
 
@@ -143,10 +153,15 @@ records:
   step's output reaches the hydration code through argument resolution
   (`_hydrate_operator_args` sees only the resolved args today, where
   `collections` is the deduplicated list; the per-chunk values are
-  `chunk_collections`). A tumbler from the retrieval output counts as
-  identity only when it was not inferred: a hit whose `doc_id` carries
-  `_doc_id_inferred` (search picked one of several owners of a shared
-  chash) contributes no tumbler, so its record is chash-only. Items merged
+  `chunk_collections`). A tumbler from the retrieval output never counts
+  as identity, inferred or not; the record's tumbler comes from rule 4's
+  owner set, or from the parent document the step itself named (a
+  tumbler-id hydration, where each id is its document). *Amended
+  2026-11-01 (v): this sentence said a tumbler counted when it was not
+  inferred. A non-inferred `doc_id` is the chunk row's own stored value,
+  and one chunk text is one T3 row, so for a chunk two documents share it
+  names whichever document wrote the row last, not the document the search
+  was about.* Items merged
   in later (supplement, reserved stream, coverage note) get records from
   their own provenance (`SupplementItem`, `RepairSupplement.provenance`),
   or identity-less records when they have none. Records ride beside `args`
@@ -198,9 +213,10 @@ verify: {schema_version: 1, verified, reason, evidence: [item], rejected: [str],
    every other state nulls them. The host is the only writer of `tumbler`,
    `chash` and `collection`.
 3. A contained quote binds (`bound`) only when the record has source
-   identity: a `tumbler` that names the one owning document (never an
-   inferred one), or a `chash` with a `collection` whose single parent
-   document is known. A contained quote on a record without identity is
+   identity: a `tumbler` that names the one owning document (the parent
+   the step named, or the owner set's single owner; never a retrieval
+   step's tumbler, *amended 2026-11-01 (v)*), or a `chash` with a
+   `collection` whose single parent document is known. A contained quote on a record without identity is
    `unattributed`: the text is real, the source is not known. Every
    direct-MCP plain-text call lands here.
 4. A record with a `chash` and no `tumbler` is `ambiguous` unless the
