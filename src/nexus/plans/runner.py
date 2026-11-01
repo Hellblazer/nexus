@@ -1128,6 +1128,10 @@ def find_embedded_step_ref(plan: "str | dict[str, Any] | None") -> PlanRunStepRe
     return None
 
 
+#: The names a verify step goes by in plan JSON, before an ``mcp__...__`` prefix.
+_VERIFY_TOOL_NAMES: tuple[str, ...] = ("verify", "operator_verify")
+
+
 def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
     """The 0-based index of the first verify step with no non-blank ``claim``, else ``None``
     (nexus-z1d0l.1.11).
@@ -1138,7 +1142,7 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
     ``plan_save``, the seed loader, the matcher and ``nx plan hygiene``. A claim that is not a
     non-blank string counts as none (a deferred-ref mapping exists only inside a running bundle,
     never in plan JSON). The tool name is read as ``plan_run`` reads it, an ``mcp__`` prefix
-    stripped. Anything that is not a plan with a ``steps`` list returns ``None``, as
+    stripped (matched by suffix, so this is no new name-parse site). Anything that is not a plan with a ``steps`` list returns ``None``, as
     :func:`find_embedded_step_ref` does.
     """
     if isinstance(plan, str):
@@ -1151,9 +1155,10 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
         return None
     for index, step in enumerate(steps):
         tool = step.get("tool") if isinstance(step, dict) else None
-        if isinstance(tool, str) and tool.startswith("mcp__"):
-            tool = tool.rsplit("__", 1)[-1]
-        if tool not in ("verify", "operator_verify"):
+        if not isinstance(tool, str) or not (
+            tool in _VERIFY_TOOL_NAMES
+            or (tool.startswith("mcp__") and tool.endswith(tuple(f"__{n}" for n in _VERIFY_TOOL_NAMES)))
+        ):
             continue
         args = step.get("args")
         claim = args.get("claim") if isinstance(args, dict) else None
