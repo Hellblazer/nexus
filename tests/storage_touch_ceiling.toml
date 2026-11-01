@@ -40,8 +40,13 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5012
+provisioned_tests = 5013
 tolerance_tests = 0
+# 5012 -> 5013 (nexus-8g2tl, nexus-qo7ie, 2026-11-01): +1, the passed_gate_findings_are_a_menu case added to
+# _FIX_STATE_CASES in tests/test_rdr_preamble.py (69f03f999), which runs under the t2_tenant-marked
+# test_rdr_fix_by_gate_state. CI on b55a04e94 counted 5013 with nothing else new (57b43bfb6 counted 5012);
+# the cause is confirmed by the test's author. Whether that function needs its tenant at all (it reads an
+# in-memory _use_t2 double) is the follow-up in nexus-zlzg0.
 # 5010 -> 5012 (nexus-8g2tl, 2026-11-01): +3 from nexus-z1d0l.1.4, -1 here. CI 41315821488 (aec82b2c6) and
 # 41322739370 (a6aeb9989) counted 5013 against 5010 at 41315395118 (8fda4d0f0); summing the shards' per-module counts,
 # only tests/test_nx_answer.py (84 -> 86) and tests/test_plan_run.py (17 -> 18) moved. Run unmarked under the guard in
