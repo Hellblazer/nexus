@@ -100,6 +100,7 @@ SHA_ALLOWLIST: dict[str, str] = {
     "ffe499f": "rdr-220: sha in the conexus repo (adapter follow-ups), not this one",
     "afe4c0e85": "rdr-220: sha in the conexus repo (PR #582 completed-post TTL merge), not this one",
     "15701c2": "rdr-225 cloud-deploy runbook: sha in the conexus repo (Crunchy disk gate), not this one",
+    "a2398338e": "rdr-222: sha in the conexus repo (EdgeProxyHandlerIT 409/503 pins, PR #656), not this one",
     "433b036": "rdr-066: release commit squashed away at merge (2026-04-11); PR #148 is the durable pointer",
     # Local-only commits: they open in a developer clone that still holds
     # the squashed feature branch, and nowhere else (CI run 33919575425).
