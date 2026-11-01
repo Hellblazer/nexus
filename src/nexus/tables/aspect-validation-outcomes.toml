@@ -1,0 +1,81 @@
+# RDR-189 P1 (nexus-z1d0l.1.5): the outcome vocabulary of a
+# `nx enrich aspects --validate-sample` run, one row per reason_code.
+# Load it through nexus.tables.aspect_validation_outcomes. reason_code is a
+# guard dimension, so the house checker proves every code has exactly one row
+# (coverage, no overlap).
+#
+# reason_code   why a sampled record ended where it did (one verify call per
+#               record; the five aspect fields are one claim):
+#   verified                  verdict true and at least one `supports`
+#                             witness item is host-bound
+#   verified_unwitnessed      verdict true but no `supports` item is bound
+#                             (RDR-088 Witness Schema v1: missing support
+#                             never upgrades a witness to valid)
+#   verifier_rejected         verdict false against the full document text
+#   evidence_truncated        verdict false against a capped evidence window
+#   indexed_text_unavailable  the indexed text could not be re-fetched; no
+#                             verify call was made
+#   verify_exception          the verify call raised
+#   malformed_verify_result   the verify call returned a payload without a
+#                             boolean `verified`. The legacy path reads it as
+#                             non-verified and appends a failures row today;
+#                             that stays, so legacy_failures_row = yes
+#
+# emit fields
+#   status               the aspect_validation.jsonl row status, from the
+#                        closed set the RDR names: verified, disagreement,
+#                        unverifiable, errored
+#   legacy_failures_row  yes when the outcome also appends a row to the legacy
+#                        aspect_validation_failures.jsonl, exactly as before
+#                        RDR-189 (a non-verified verdict); no otherwise
+
+[table]
+id = "aspect-validation-outcomes"
+kind = "decision-table"
+version = 1
+
+[dimensions.reason_code]
+domain = [
+  "verified",
+  "verified_unwitnessed",
+  "verifier_rejected",
+  "evidence_truncated",
+  "indexed_text_unavailable",
+  "verify_exception",
+  "malformed_verify_result",
+]
+
+[[row]]
+id = "verified"
+guard = { reason_code = "verified" }
+emit = { status = "verified", legacy_failures_row = "no" }
+
+[[row]]
+id = "verified_unwitnessed"
+guard = { reason_code = "verified_unwitnessed" }
+emit = { status = "unverifiable", legacy_failures_row = "no" }
+
+[[row]]
+id = "verifier_rejected"
+guard = { reason_code = "verifier_rejected" }
+emit = { status = "disagreement", legacy_failures_row = "yes" }
+
+[[row]]
+id = "evidence_truncated"
+guard = { reason_code = "evidence_truncated" }
+emit = { status = "unverifiable", legacy_failures_row = "yes" }
+
+[[row]]
+id = "indexed_text_unavailable"
+guard = { reason_code = "indexed_text_unavailable" }
+emit = { status = "errored", legacy_failures_row = "no" }
+
+[[row]]
+id = "verify_exception"
+guard = { reason_code = "verify_exception" }
+emit = { status = "errored", legacy_failures_row = "no" }
+
+[[row]]
+id = "malformed_verify_result"
+guard = { reason_code = "malformed_verify_result" }
+emit = { status = "errored", legacy_failures_row = "yes" }
