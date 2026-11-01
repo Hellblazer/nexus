@@ -174,6 +174,7 @@ figure.fig circle.ev{fill:currentColor;stroke:none}
 <tr><td>session id</td><td>The id of one Claude Code conversation, a UUID. It is the session's mailbox address.</td></tr>
 <tr><td>name</td><td>The short label Claude Code shows for a session, such as <code>nexus-4a</code>. Peers use it to find the session.</td></tr>
 <tr><td>mailbox</td><td>The part of the tuple space that holds the messages for one address. A message has a sender, a kind, a correlation id, and a short body.</td></tr>
+<tr><td>claim</td><td>Taking a message so that no other reader gets it. The reader then acks it when done, or the claim ends and the message waits again.</td></tr>
 <tr><td>directory</td><td>The part of the tuple space that maps each name to the session id that holds it.</td></tr>
 <tr><td>correlation id</td><td>An id that a request carries and its reply repeats, so that the two can be paired.</td></tr>
 <tr><td>ping</td><td>The notification that tells Claude a new message is waiting. It says where the tuple is and never carries the body.</td></tr>
@@ -225,7 +226,7 @@ Send <span class="ph">&lt;PEER NAME&gt;</span> a note that <span class="ph">&lt;
 </figure>
 
 <p>Your session does not wait. When the reply arrives, minutes or days later, a ping tells Claude, and the drain hook shows Claude the reply, so Claude acts on it. The appendix shows <a href="#arrive">how a message arrives</a>. A note needs no reply. It waits in the peer's mailbox for up to seven days, and the peer reads it when its own work allows.</p>
-<p>A message's sender is what the writer typed, not proof of who wrote it (<a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/joint/JDR-002-tuple-sender-claims.md">JDR-002</a>). Claude treats a peer's message as input and never as your approval.</p>
+<p>A message's sender is what the writer typed, not proof of who wrote it (<a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/joint/JDR-002-tuple-sender-claims.md">the decision record on sender claims</a>). Claude treats a peer's message as input and never as your approval.</p>
 
 <div class="callout rule" id="channel"><p>Pings need a flag on every launch: <code>claude --channels plugin:conexus@nexus-plugins</code> or <code>claude --dangerously-load-development-channels server:nexus</code>. The channel is a Claude Code research preview. <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md#setup-turning-on-push-delivery">Tuple space, "Setup: turning on push delivery"</a> has the exact steps, including an alias. A session that cannot carry the flag, such as one in the Claude Desktop Code tab, runs <code>nx tuple wait</code> in the background instead. With neither, the drain hook still delivers the message at your next prompt.</p></div>
 
@@ -359,7 +360,7 @@ nx doctor  <span class="c"># includes the tuple rows</span></pre><button class="
 
 <details class="gloss" id="names"><summary>Names, session ids, and /clear</summary><div style="padding:0 14px 12px">
 <p>Peers reach a session by name through its directory entry and by session id through its mailbox. Claude arms neither.</p>
-<p>The session's own MCP server subscribes to <code>mailbox/&lt;session id&gt;</code> when it starts. It also reads the name Claude Code shows for the session from Claude Code's session files, leases <code>directory/&lt;name&gt;</code> for it, and keeps the entry fresh. It does this at start and after <code>/clear</code>, and it reads the files again about once a minute, so a <code>/rename</code> is followed. A name is never a second mailbox. A message to a name finds the session id in the directory and goes to the session's one mailbox. A name is free again soon after its session ends.</p>
+<p>The session's own MCP server subscribes to <code>mailbox/&lt;session id&gt;</code> when it starts. It also reads the name Claude Code shows for the session from Claude Code's session files, leases <code>directory/&lt;name&gt;</code> for it, and keeps the entry fresh. It does this at start and after <code>/clear</code>, and it reads the files again about once a minute, so a <code>/rename</code> is followed. A name is never a second mailbox. A message to a name finds the session id in the directory and goes to the session's one mailbox. A name is free again within five minutes after its session ends.</p>
 <p>The session-start hook runs at start, resume, clear, compact, and fork. It gives Claude the session id and one fallback line that asks Claude to call <code>tuple_subscribe("mailbox/&lt;name&gt;")</code> with the name from a fresh <code>ListAgents</code> call. The fallback helps a host whose session files carry no name, and it changes nothing when the names agree.</p>
 <details class="gloss out"><summary>What Claude sees at session start</summary><pre class="out">Nexus ready (session: <b>5b354c36-d317-4a00-aa15-f567e65a7209</b>).
 …
@@ -372,7 +373,7 @@ This session is <b>nexus-4a</b> [102a61] — the name other sessions use to mess
 </div></details>
 
 <details class="gloss" id="fork"><summary>Forking a session</summary><div style="padding:0 14px 12px">
-<p>A fork (<code>/branch</code> or <code>--fork-session</code>) gets a new session id while the parent can still be resumed. The parent keeps its mailbox, and the fork starts with an empty one. The session-start hook runs for the fork. The session's MCP server moves its channel to the fork and releases the parent's directory entry within about a second. So the parent's name stops resolving until the parent is resumed, and the parent's mail never reaches the fork. The fork is reachable by name once it has a directory entry of its own.</p>
+<p>A fork (<code>/branch</code> or <code>--fork-session</code>) gets a new session id while the parent can still be resumed. The parent keeps its mailbox, and the fork starts with an empty one. The session-start hook runs for the fork. The session's MCP server moves its channel to the fork and releases the parent's directory entry within about a second. So the parent's name stops resolving until the parent is resumed, and the parent's mail never reaches the fork. The fork's MCP server then leases the fork's own name, the same way it does after <code>/clear</code>, and the fork is reachable by that name.</p>
 </div></details>
 
 <details class="gloss"><summary>Limits and rules</summary><div style="padding:0 14px 12px">
