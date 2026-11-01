@@ -338,8 +338,8 @@ class TestPre:
     def test_the_worktree_ranking(self, mod, monkeypatch, rows, active, board, cwd, chosen) -> None:
         monkeypatch.setattr(mod, "_git_worktrees", lambda _cwd, _timeout: rows)
         monkeypatch.setattr(mod, "_last_active", lambda path: active[path])
-        monkeypatch.setattr(mod.os.path, "isdir", lambda _p: True)
-        monkeypatch.setattr(mod.os.path, "realpath", lambda p: p)
+        setattr_in(monkeypatch, mod, "os.path.isdir", lambda _p: True)
+        setattr_in(monkeypatch, mod, "os.path.realpath", lambda p: p)
         got, others = mod._session_worktrees(NAME, cwd, board)
         assert got == chosen and [o[0] for o in others] == [r[0] for r in rows if r[0] != chosen]
 
@@ -353,7 +353,7 @@ class TestPre:
 
     def test_a_ranking_failure_keeps_the_launch_directory(self, mod, monkeypatch) -> None:
         monkeypatch.setattr(mod, "_git_worktrees", lambda _cwd, _timeout: [("/w/linda-a", "x"), ("/w/linda-b", "y")])
-        monkeypatch.setattr(mod.os.path, "isdir", lambda _p: True)
+        setattr_in(monkeypatch, mod, "os.path.isdir", lambda _p: True)
         monkeypatch.setattr(mod, "_last_active", lambda _p: 1 / 0)
         assert mod._session_worktrees(NAME, "/p", "") == (None, [])
 
