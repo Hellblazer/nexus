@@ -2555,6 +2555,33 @@ def _position_identities(
     return queues
 
 
+def _with_repaired_owner_rows(
+    rows: dict[str, list[dict]] | None, texts: list[str], supplement: RepairSupplement | None, *, asked: Any,
+) -> dict[str, list[dict]] | None:
+    """*rows* plus the owner rows of each repaired chash among *texts* that the hydration did not ask about
+    (*asked*: the chash ids its own lookup covered), fetched in one batch (nexus-z1d0l.1.3). A repaired item
+    binds only through :func:`_single_owner`, so without its rows a one-owner repair would stay ambiguous. A
+    failed lookup adds nothing: those items stay unbound, never guessed."""
+    if supplement is None:
+        return rows
+    seen = set(asked)
+    wanted: list[str] = []
+    for text in texts:
+        item = supplement.provenance(text)
+        chash = item.chash if item is not None else ""
+        if chash and _CHASH_RE.fullmatch(chash) and chash not in seen:
+            seen.add(chash)
+            wanted.append(chash)
+    if not wanted:
+        return rows
+    from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    fetched = mcp_core._owner_rows_by_chash(wanted, [True] * len(wanted))
+    if not fetched:
+        return rows
+    return {**(rows or {}), **fetched}
+
+
 def _check_records_for(
     texts: list[str], queues: dict[str, Any], reserved: ReservedStream | None, supplement: RepairSupplement | None,
     owner_rows: dict[str, list[dict]] | None = None,
@@ -2801,6 +2828,9 @@ def _hydrate_operator_args(
             # Records only when the runner builds the items: a step that supplies its own keeps its own. A
             # verify step's records are the same ones, rendered into ``evidence`` (its claim stays the author's).
             _rows = owner_lookups.owner_rows if not _tumbler_ids and owner_lookups.asked else None
+            _rows = _with_repaired_owner_rows(
+                _rows, non_empty, _supp, asked=() if _rows is None else [str(i) for i in id_list_raw],
+            )
             _records = _check_records_for(non_empty, _idents, _rs if _rs_merge else None, _supp, _rows)
             args[_witness_arg] = _render_check_items(non_empty, _records)
             args[_EVIDENCE_RECORDS_KEY] = _records
