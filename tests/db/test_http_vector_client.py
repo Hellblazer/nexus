@@ -2563,6 +2563,52 @@ class TestGatewayTransientRetry:
         assert hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=5, body=None) == {"ok": True}
         assert not (tmp_path / gateway_hold.HOLD_FILENAME).exists()
 
+    def test_v1929_a_success_clears_the_strikes_for_the_next_call(self, monkeypatch, tmp_path):
+        """nexus-v1929: a lone process whose 503 ends in a success starts its next call at 2s, not 5s."""
+        import nexus.db.http_vector_client as hv
+        from nexus.db import gateway_hold
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        clock = [1_000_000.0]
+        sleeps: list[float] = []
+
+        def fake_sleep(s):
+            sleeps.append(s)
+            clock[0] += s
+
+        proxy = module_time(monkeypatch, [hv, gateway_hold])
+        proxy.time = lambda: clock[0]
+        proxy.sleep = fake_sleep
+        outcomes = iter([503, 200, 503, 200])
+
+        def fake_once(*a, **k):
+            if next(outcomes) == 503:
+                raise self._http_error(503)
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        for _ in range(2):
+            hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=60, body=None)
+        assert sleeps == [2.0, 2.0]
+
+    def test_v1929_the_hold_wait_is_clamped_to_the_call_timeout(self, monkeypatch, tmp_path):
+        import json
+        import time
+
+        import nexus.db.http_vector_client as hv
+        from nexus.db import gateway_hold
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / gateway_hold.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": time.time() + 10.0, "strikes": 1, "last_503": time.time()}
+        ))
+        sleeps: list[float] = []
+        monkeypatch.setattr(hv, "_request_once", lambda *a, **k: {"ok": True})
+        module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
+
+        hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=3, body=None)
+        assert sleeps == [3.0]
+
     def test_a_deadline_abort_503_is_not_resent_by_the_gateway_loop(self, monkeypatch):
         """nexus-qajw7: an engine 503 marked aborted discarded embedded work;
         resending it 2/5/10 s later runs the whole request to its deadline
