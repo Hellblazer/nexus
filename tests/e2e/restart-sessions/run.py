@@ -391,7 +391,10 @@ def main() -> int:
                 for f in Path("/tmp").glob(draft_glob):
                     body = f.read_text(encoding="utf-8", errors="replace").strip()
                     if body.endswith(draft_marker):
-                        draft_seen = DRAFT_TEXT in crs.draft_text(sb.capture("rs_draft"))
+                        seen = DRAFT_TEXT in crs.draft_text(sb.capture("rs_draft"))
+                        # The exit may have started during the capture: such a sample proves nothing.
+                        if "exit rs_draft" not in (sb.log.read_text(encoding="utf-8") if sb.log.exists() else ""):
+                            draft_seen = seen
             if "=== done:" in text or "=== ABORT" in text or "=== CRASH" in text:
                 break
             time.sleep(1)
@@ -411,7 +414,8 @@ def main() -> int:
         for line in expect:
             if line not in log:
                 failures.append(f"log lacks: {line}")
-        for bad in ("SKIP", "WARN", "FAIL", "CRASH", "ABORT", "fallback"):
+        # The typed re-asks after a mail ask name no failure word of their own.
+        for bad in ("SKIP", "WARN", "FAIL", "CRASH", "ABORT", "fallback", "by typed (the mail", "by typed (its mail"):
             if bad in log:
                 failures.append(f"log has: {bad}")
         if draft_seen is None:
@@ -529,7 +533,12 @@ def main() -> int:
                     f.unlink(missing_ok=True)
                 for f in Path("/tmp").glob(f"nexus-continuation-restart-rs_*-{sid}-*"):
                     f.unlink(missing_ok=True)
-            shutil.rmtree(home, ignore_errors=True)
+            # The killed sessions' MCP servers and hooks can still write logs for a moment.
+            for _ in range(5):
+                shutil.rmtree(home, ignore_errors=True)
+                if not home.exists():
+                    break
+                time.sleep(2)
         else:
             print(f"[sandbox] kept {home} (transcripts, restart log, handoffs under /tmp)"
                   + (f"; tmux server {sb.sock} left running: tmux -L {sb.sock} kill-server when done" if a.keep else ""),

@@ -34,8 +34,10 @@ prompt on the command line. The ask goes as conexus mail to the session's own
 mailbox when it was launched with the conexus channel (--channels
 plugin:conexus@nexus-plugins), so nothing is typed into its prompt and an
 unsent draft there is left alone through the ask; at the restart the draft is
-saved next to the handoff (<handoff>.draft.txt) and handed to the fresh session
-with it, since exiting clears the input box. A mailed session that starts no
+saved next to the handoff (<handoff>.draft.txt, mode 0600) and handed to the
+fresh session with it, since exiting clears the input box (a resumed session's
+draft is saved and its path logged). A draft holding pasted text or an image
+cannot be saved from the pane, so that session is left running. A mailed session that starts no
 turn within 60 s, a session without the channel, and a failed send are asked
 by typing instead, and skipped if the prompt holds a draft (nexus-cmqe8). A session whose handoff does not appear within
 --handoff-timeout is left running, not restarted, unless --fallback-resume is
@@ -388,12 +390,15 @@ def restart(s: dict, handoff: str = "") -> bool:
     if handoff:
         log(f"{name}: old session {s['sessionId']} (back out with: cd {shlex.quote(s['cwd'])} && "
             f"claude --resume {s['sessionId']})")
+    # The exit clears the input box, on a resume as on a fresh start: save an unsent draft first.
+    base = str(Path(handoff).with_suffix("")) if handoff else resume_draft_base(s)
+    draft, refused = save_draft(s, base)
+    if refused:
+        log(f"SKIP {name}: {refused}; left running, not restarted")
+        return False
     first = ""
     if handoff:
-        first = f"cat {handoff}"
-        draft = save_draft(s, handoff)
-        if draft:
-            first += f" {draft}"
+        first = f"cat {handoff}" + (f" {draft}" if draft else "")
     cmd = relaunch_command(s, fresh=bool(handoff), first_prompt=first)
     before = {p.name for p in SESSIONS.glob("*.json")}
     log(f"exit {name} (pid {s['pid']}, pane {s['pane']})")
@@ -543,21 +548,38 @@ def draft_text(captured: str) -> str:
     return "\n".join(out).strip()
 
 
-def save_draft(s: dict, handoff: str) -> str:
-    """Save an unsent draft from the session's prompt next to its handoff; the path, or "".
+#: How Claude Code shows pasted text and images in the input box: the capture holds only this
+#: placeholder, never the content, so such a draft cannot be saved from the pane.
+_PLACEHOLDER = re.compile(r"\[(?:Pasted text|Image) #\d+")
 
-    The exit clears the input box, so a draft the mail ask left in place would be lost at the
-    restart. Saved, it is handed to the fresh session with the handoff (nexus-cmqe8).
+
+def save_draft(s: dict, base: str) -> tuple[str, str]:
+    """Save an unsent draft from the session's prompt to ``<base>.draft.txt`` (mode 0600).
+
+    Returns ``(path, "")`` when saved, ``("", "")`` when the prompt holds no draft, and
+    ``("", reason)`` when the draft cannot be kept (a pasted-text or image placeholder, whose
+    content the pane does not show, or a failed write); the caller then leaves the session
+    running. The exit clears the input box, so a draft the mail ask left in place would
+    otherwise be lost at the restart. A fresh session is handed the file with its handoff
+    (nexus-cmqe8).
     """
     out = subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", s["pane"]], capture_output=True, text=True).stdout
     text = draft_text(out)
     if not text:
-        return ""
-    path = str(Path(handoff).with_suffix("")) + ".draft.txt"
-    Path(path).write_text("Unsent draft from this session's prompt at the restart (not sent; the user's text):\n\n"
-                          + text + "\n", encoding="utf-8")
-    log(f"{label(s)}: unsent draft saved to {path}; the fresh session gets it with its handoff")
-    return path
+        return "", ""
+    if _PLACEHOLDER.search(text):
+        return "", "its unsent draft holds pasted text or an image, which the pane shows only as a placeholder"
+    path = base + ".draft.txt"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("Unsent draft from this session's prompt at the restart (not sent; the user's text):\n\n"
+                     + text + "\n")
+    except OSError as e:
+        return "", f"its unsent draft could not be saved to {path} ({e})"
+    log(f"{label(s)}: unsent draft saved to {path}" + ("; the fresh session gets it with its handoff"
+                                                       if base.startswith("/tmp/nexus-continuation-restart-") else ""))
+    return path, ""
 
 
 def pane_has_draft(pane: str) -> bool:
@@ -579,9 +601,17 @@ def submit(pane: str, text: str, sess_file: Path) -> bool:
     return False
 
 
+def _safe_label(s: dict) -> str:
+    return "".join(c if c.isalnum() or c in "-_." else "-" for c in label(s))
+
+
 def handoff_path(s: dict, stamp: str) -> str:
-    safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in label(s))
-    return f"/tmp/nexus-continuation-restart-{safe}-{s['sessionId'][:8]}-{stamp}.md"
+    return f"/tmp/nexus-continuation-restart-{_safe_label(s)}-{s['sessionId'][:8]}-{stamp}.md"
+
+
+def resume_draft_base(s: dict) -> str:
+    """Where a resumed session's unsent draft is saved (no handoff to sit beside)."""
+    return f"/tmp/claude-restart-{_safe_label(s)}-{s['sessionId'][:8]}-{time.strftime('%Y%m%d-%H%M%S')}"
 
 
 def ask_line(s: dict, path: str) -> str:
@@ -613,7 +643,7 @@ def handoff_prompt(s: dict, path: str, mailed: bool = False) -> str:
               f"'{mail_note(s, path)}'. " if mailed else "")
     return (origin + f"Restart handoff for {label(s)} (coordinated restart; this session restarts with a fresh context "
             f"and reads the file you write as its first prompt). Write your continuation handoff now in the "
-            f"9-section format of the conexus continuation command (run `nx command-context continuation` for the "
+            f"9-section format (Markdown headings) of the conexus continuation command (run `nx command-context continuation` for the "
             f"working state; do its session-retro audits), but save it to {path} and NOT to the Target file it "
             f"names, and do not invoke the continuation skill's chat reply: every session is writing one at once. "
             f"Do not ask questions; if the working state has no repository or beads, write the handoff from this "
@@ -794,9 +824,10 @@ def _prompts(session_id: str) -> list[str]:
                 d = json.loads(line)
             except ValueError:
                 continue
-            # Meta entries (caveats, command output) are not prompts; a channel message is one, and
-            # Claude Code 2.1.316 records it as meta with origin.kind "channel".
-            if d.get("isMeta") and (d.get("origin") or {}).get("kind") != "channel":
+            # Meta entries (caveats, command output) are not prompts; a message that starts a turn
+            # is, and Claude Code 2.1.316 records channel mail and peer messages as meta entries
+            # with origin.kind "channel" and "peer".
+            if d.get("isMeta") and not (d.get("origin") or {}).get("kind"):
                 continue
             content = (d.get("message") or {}).get("content") if d.get("type") == "user" else None
             if isinstance(content, list) and all(isinstance(c, dict) and c.get("type") == "tool_result"

@@ -276,17 +276,19 @@ def _write_transcript(home: Path, sid: str, rows: list[dict]) -> None:
                                        encoding="utf-8")
 
 
-def test_prompt_count_counts_prompts_and_channel_turns_only(crs, monkeypatch, tmp_path) -> None:
-    """Channel mail is recorded as a meta user entry (origin kind "channel", CC 2.1.316)."""
+def test_prompt_count_counts_prompts_channel_and_peer_turns(crs, monkeypatch, tmp_path) -> None:
+    """Channel mail and peer messages start turns and are recorded as meta user entries with an
+    origin kind ("channel", "peer"; CC 2.1.316); a meta entry with no origin is not a prompt."""
     monkeypatch.setenv("HOME", str(tmp_path))
     _write_transcript(tmp_path, "sid", [
         {"type": "user", "message": {"content": "typed prompt"}},
         {"type": "user", "isMeta": True, "origin": {"kind": "channel"}, "message": {"content": "<channel>mail"}},
+        {"type": "user", "isMeta": True, "origin": {"kind": "peer"}, "message": {"content": "<peer>hi"}},
         {"type": "user", "isMeta": True, "message": {"content": "Caveat: local command output"}},
         {"type": "user", "message": {"content": [{"type": "tool_result", "content": "x"}]}},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
     ])
-    assert crs.prompt_count("sid") == 2
+    assert crs.prompt_count("sid") == 3
 
 
 def test_transcript_has_matches_a_non_ascii_path(crs, monkeypatch, tmp_path) -> None:
@@ -304,16 +306,18 @@ def test_mail_ask_survives_a_missing_nx(crs, monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("channel", "mail_turn_writes", "draft", "want_typed", "want_done"),
+    ("channel", "busy", "mail_turn_writes", "draft", "want_typed", "want_done"),
     [
-        (True, True, False, False, True),    # mail taken: nothing typed
-        (True, False, False, True, True),    # mail declined: asked once by typing
-        (True, False, True, False, False),   # mail declined, draft in the prompt: skipped
-        (False, False, False, True, True),   # no channel: typed from the start
+        (True, True, True, False, False, True),     # mail taken: nothing typed
+        (True, True, False, False, True, True),     # mail declined: asked once by typing
+        (True, True, False, True, False, False),    # mail declined, draft in the prompt: skipped
+        (False, True, False, False, True, True),    # no channel: typed from the start
+        (True, False, False, False, True, True),    # mail started no turn: typed at once
     ],
-    ids=["mail-taken", "mail-declined-typed", "mail-declined-draft-skipped", "no-channel-typed"],
+    ids=["mail-taken", "mail-declined-typed", "mail-declined-draft-skipped", "no-channel-typed",
+         "mail-no-turn-typed"],
 )
-def test_write_handoffs_routes_mail_then_typing(crs, monkeypatch, tmp_path, channel, mail_turn_writes,
+def test_write_handoffs_routes_mail_then_typing(crs, monkeypatch, tmp_path, channel, busy, mail_turn_writes,
                                                draft, want_typed, want_done) -> None:
     monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
     s = {"sessionId": "sid-1", "name": "t", "pid": os.getpid(), "pane": "%9", "file": tmp_path / "s.json"}
@@ -331,10 +335,11 @@ def test_write_handoffs_routes_mail_then_typing(crs, monkeypatch, tmp_path, chan
 
     monkeypatch.setattr(crs, "has_channel", lambda _s: channel)
     monkeypatch.setattr(crs, "mail_ask", lambda *_a, **_k: (write_later() if mail_turn_writes else None) or True)
-    monkeypatch.setattr(crs, "went_busy", lambda *_a, **_k: True)
+    monkeypatch.setattr(crs, "went_busy", lambda *_a, **_k: busy)
     monkeypatch.setattr(crs, "prompt_count", lambda _sid: 1)
     monkeypatch.setattr(crs, "status", lambda _s: "idle")
     monkeypatch.setattr(crs, "pane_has_draft", lambda _p: draft)
+    monkeypatch.setattr(crs, "ask_line", lambda _s, _path: "Do what the ask file says")  # no /tmp write
     monkeypatch.setattr(crs, "submit", lambda _pane, text, _f: typed.append(text) or write_later() or True)
     setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
     def tick() -> float:
@@ -345,3 +350,86 @@ def test_write_handoffs_routes_mail_then_typing(crs, monkeypatch, tmp_path, chan
     got = crs.write_handoffs([s], {"idle"}, wait=60, timeout=10_000)
     assert bool(typed) is want_typed, typed
     assert (got == {"sid-1": str(handoff)}) is want_done, got
+    if want_typed and channel and not busy:
+        assert "by typed (the mail started no turn within 60s)" in (tmp_path / "restart.log").read_text()
+
+
+def _fake_capture(monkeypatch, crs, text: str) -> None:
+    setattr_in(monkeypatch, crs, "subprocess.run",
+               lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, stdout=text, stderr=""))
+
+
+def _box(line: str) -> str:
+    return f"out\n───\n\x1b[39m❯\xa0{line}\n───\n"
+
+
+def test_save_draft_writes_a_private_file(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    _fake_capture(monkeypatch, crs, _box("half a thought"))
+    path, refused = crs.save_draft({"pane": "%1", "sessionId": "sid", "name": "t"}, str(tmp_path / "h"))
+    assert refused == "" and path == str(tmp_path / "h.draft.txt")
+    assert "half a thought" in Path(path).read_text(encoding="utf-8")
+    assert Path(path).stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("line", ["[Pasted text #1 +12 lines]", "see [Image #2] here"], ids=["paste", "image"])
+def test_save_draft_refuses_a_placeholder(crs, monkeypatch, tmp_path, line: str) -> None:
+    """The pane shows only the placeholder, so saving it would claim a draft kept that is lost."""
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    _fake_capture(monkeypatch, crs, _box(line))
+    path, refused = crs.save_draft({"pane": "%1", "sessionId": "sid", "name": "t"}, str(tmp_path / "h"))
+    assert path == "" and "placeholder" in refused
+    assert not (tmp_path / "h.draft.txt").exists()
+
+
+def test_save_draft_with_nothing_typed(crs, monkeypatch, tmp_path) -> None:
+    _fake_capture(monkeypatch, crs, _box("\x1b[2mghost\x1b[0m"))
+    assert crs.save_draft({"pane": "%1", "sessionId": "sid", "name": "t"}, str(tmp_path / "h")) == ("", "")
+
+
+def test_mail_note_is_logged_before_the_send_and_named_in_the_body(crs, monkeypatch, tmp_path) -> None:
+    log = tmp_path / "restart.log"
+    monkeypatch.setattr(crs, "LOG", log)
+    s = {"sessionId": "sid-9", "name": "tamsin"}
+    seen: list[str] = []
+
+    def fake_run(argv, **_kw):
+        seen.append(log.read_text(encoding="utf-8") if log.exists() else "")
+        return subprocess.CompletedProcess(argv, 0, stdout="id\n", stderr="")
+
+    setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
+    assert crs.mail_ask(s, "/tmp/h.md", "x") is True
+    note = crs.mail_note(s, "/tmp/h.md")
+    assert note in seen[0]  # in the log when the send runs
+    assert note in crs.handoff_prompt(s, "/tmp/h.md", mailed=True)
+    assert note not in crs.handoff_prompt(s, "/tmp/h.md")  # the typed ask is the user's own prompt
+
+
+@pytest.mark.parametrize(("headings", "counted"), [(2, True), (1, False)], ids=["two-headings", "one-heading"])
+def test_a_handoff_needs_two_headings(crs, monkeypatch, tmp_path, headings: int, counted: bool) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    s = {"sessionId": "sid-1", "name": "t", "pid": os.getpid(), "pane": "%9", "file": tmp_path / "s.json"}
+    handoff = tmp_path / "h.md"
+    monkeypatch.setattr(crs, "handoff_path", lambda _s, _stamp: str(handoff))
+    now = [1_000_000.0]
+    body = "".join(f"# H{i}\n" for i in range(headings)) + "x" * 300 + f"\n{crs.handoff_marker(s)}\n"
+
+    def write() -> bool:
+        handoff.write_text(body, encoding="utf-8")
+        os.utime(handoff, (now[0], now[0]))
+        return True
+
+    monkeypatch.setattr(crs, "has_channel", lambda _s: True)
+    monkeypatch.setattr(crs, "mail_ask", lambda *_a, **_k: write())
+    monkeypatch.setattr(crs, "went_busy", lambda *_a, **_k: True)
+    monkeypatch.setattr(crs, "prompt_count", lambda _sid: 1)
+    monkeypatch.setattr(crs, "status", lambda _s: "idle")
+    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+
+    def tick() -> float:
+        now[0] += 7
+        return now[0]
+
+    setattr_in(monkeypatch, crs, "time.time", tick)
+    got = crs.write_handoffs([s], {"idle"}, wait=60, timeout=200)
+    assert (got == {"sid-1": str(handoff)}) is counted
