@@ -420,10 +420,16 @@ def _session_worktrees(
             return None, []
         refs = "\n".join(ln for ln in board.splitlines() if re.match(r"^\s*ref:", ln))
         ref_ids = {m.group(0) for m in _REF_ID_RE.finditer(refs)}
-        launch = os.path.realpath(cwd) if cwd else ""
+        # Both sides take the platform's one spelling before the os.sep prefix test, so the
+        # test does not rely on realpath alone to normalize git's forward slashes and a
+        # drive letter's case on Windows (defensive; realpath does both there today).
+        def canon(p: str) -> str:
+            return os.path.normcase(os.path.normpath(os.path.realpath(p)))
+
+        launch = canon(cwd) if cwd else ""
 
         def inside(path: str) -> bool:
-            real = os.path.realpath(path)
+            real = canon(path)
             return bool(launch) and (launch == real or launch.startswith(real + os.sep))
 
         def path_named(path: str) -> bool:

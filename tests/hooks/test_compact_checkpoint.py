@@ -22,6 +22,7 @@ import ast
 import importlib.util
 import io
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -29,6 +30,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -342,6 +344,22 @@ class TestPre:
         setattr_in(monkeypatch, mod, "os.path.realpath", lambda p: p)
         got, others = mod._session_worktrees(NAME, cwd, board)
         assert got == chosen and [o[0] for o in others] == [r[0] for r in rows if r[0] != chosen]
+
+    def test_the_launch_cwd_test_holds_on_windows_path_spellings(self, mod, monkeypatch) -> None:
+        # realpath is faked as the identity, as in test_the_worktree_ranking; with Windows
+        # path rules a bare os.sep prefix test over git's forward slashes missed the
+        # launch worktree there (Windows set red on b05101286, nexus-qowvl).
+        rows = [("C:/w/linda", "feature/nexus-3lqxv-x"), ("C:/w/linda-b", "feature/y")]
+        winpath = types.SimpleNamespace(
+            **{k: getattr(ntpath, k) for k in ("normcase", "normpath", "join", "basename")},
+            realpath=lambda p: p, isdir=lambda _p: True,
+        )
+        setattr_in(monkeypatch, mod, "os.path", winpath)
+        setattr_in(monkeypatch, mod, "os.sep", "\\")
+        monkeypatch.setattr(mod, "_git_worktrees", lambda _cwd, _timeout: rows)
+        monkeypatch.setattr(mod, "_last_active", lambda path: {"C:/w/linda": 2.0, "C:/w/linda-b": 1.0}[path])
+        got, _others = mod._session_worktrees(NAME, "c:\\w\\linda-b\\src", "ref: nexus-3lqxv")
+        assert got == "C:/w/linda-b"
 
     def test_the_others_list_is_capped_and_dated(self, mod) -> None:
         others = [(f"/w/linda-{i}", f"feature/b{i}", 1_000_000.0 + i) for i in range(8)]
