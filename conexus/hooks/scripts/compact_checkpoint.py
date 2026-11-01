@@ -110,7 +110,8 @@ _PRUNE_AFTER_S = 2 * 24 * 3600.0
 #: does not append to it. It is the prune window, not a freshness window: if a compaction's
 #: summary is used later than it was made (the changelog's deferred idle case, not seen in
 #: the CLI), its checkpoint is restored up to two days later; past that the prune has
-#: removed it, a design limit (nexus-702gy, nexus-ct9sv).
+#: removed it. Whether 48 h is the limit or the deferred case needs its own value is open
+#: (nexus-ct9sv, sub-issue 1).
 _MAX_AGE_S = _PRUNE_AFTER_S
 #: Past this age the inject intro says the state may have changed since it was written.
 _STALE_NOTE_S = 10 * 60.0
@@ -558,8 +559,8 @@ def _written_stamp(text: str) -> str | None:
 def _summarized(text: str) -> bool:
     """True when a post already appended a summary: an earlier compaction used this file.
 
-    Only post's own trace counts. Inject runs before post in the live harness, so a
-    trace inject left would make post discard this compaction's own checkpoint.
+    Only post's own trace counts. Inject may run before post (it did in the live runs
+    measured), so a trace inject left would make post discard this compaction's own checkpoint.
     """
     return _SUMMARY_RE.search(text) is not None
 
@@ -570,7 +571,8 @@ def run_pre(payload: dict) -> None:
         _log("WARNING", "pre: the payload carried no usable session id; nothing written")
         return
     started = time.monotonic()
-    trigger = str(payload.get("trigger") or "unknown")[:32]
+    # A lone surrogate in the payload would make the UTF-8 write raise and write nothing.
+    trigger = str(payload.get("trigger") or "unknown")[:32].encode("utf-8", "replace").decode("utf-8")
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
     name = _session_name(session_id)
     # The board is read first: its ref: lines choose between the session's worktrees.

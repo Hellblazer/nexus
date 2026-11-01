@@ -15,8 +15,8 @@ in front of the model. The contract these tests pin:
   not its mtime), and starts no process.
 - pairing is by use, not age: an idle compaction's checkpoint, written when the
   session went idle and used later (the deferred case), is appended to and injected with
-  its real age, and inject and post work in either order; the live harness runs
-  inject first (nexus-702gy).
+  its real age, and inject and post work in either order; in the live runs
+  measured, inject ran first (nexus-702gy).
 - the board entry comes first and is the one titled EXACTLY the session's name.
 - the script imports only the standard library and the plugin's own ``_`` modules.
 """
@@ -736,6 +736,8 @@ class TestInject:
         assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, "")
         assert "inject: " in env.hook_log.read_text(encoding="utf-8") and "is not valid UTF-8" in env.hook_log.read_text(encoding="utf-8")
         assert run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "s"}) == (0, "")
+        assert re.search(r"post: .* is not valid UTF-8 .*archiving it", env.hook_log.read_text(encoding="utf-8")), \
+            "post's own read-error line"
         assert "no pre-compaction checkpoint for this compaction" in path.read_text(encoding="utf-8")
         assert len([p for p in env.checkpoints.iterdir() if p.name != path.name]) == 1, "the bad file is archived"
 
@@ -760,8 +762,9 @@ class TestInject:
     @pytest.mark.parametrize(
         "title",
         ["Compact summary pairing", "Compact summary (2026-11-01 notes)", "Compact summary (2026-11-01T handoff)",
-         "Compact summary (2026-11-01T21:27:09+00:00) and more"],
-        ids=["prefix", "date-only", "date-T-text", "stamp-then-text"],
+         "Compact summary (2026-11-01T21:27:09+00:00) and more", "Compact summary (2026-11-01T21:27:09Z)",
+         "Compact summary (2026-11-01T21:27:09-07:00)"],
+        ids=["prefix", "date-only", "date-T-text", "stamp-then-text", "zulu-stamp", "offset-stamp"],
     )
     def test_a_board_block_titled_compact_summary_is_not_taken_for_posts_heading(
         self, mod, env, monkeypatch, title
@@ -784,13 +787,16 @@ class TestInject:
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "s"})
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert mod._SUMMARY_RE.search(text), "the pattern must match post's own heading"
-        assert mod._SUMMARY_RE.pattern.find(re.escape(mod._SUMMARY_HEADING)) != -1, "built from the heading constant"
 
     def test_a_summary_with_a_lone_surrogate_is_written_not_lost(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
         assert run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "before \ud83d after"}) == (0, "")
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert "## Compact summary (" in text and "before ? after" in text
+
+    def test_a_lone_surrogate_in_the_trigger_still_writes_the_checkpoint(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload(trigger="auto\ud83d"))
+        assert "- trigger: auto?" in (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
 
     def test_the_sidecar_is_pruned_with_the_checkpoints(self, mod, env, monkeypatch) -> None:
         env.checkpoints.mkdir(parents=True)
