@@ -90,6 +90,19 @@ it. Sam: "we need to somehow get that ensconced in our habits." The fix
 delivers checks that run without anyone remembering them, and a measurement
 that says whether the curation helped.
 
+The same drift reaches beyond memory, to anything that keeps running or
+keeping after its purpose ends with nobody assigned to notice. Found on
+2026-10-31 alone: the main `MEMORY.md` injected into every subagent (about
+15M tokens in 60 days, research 5); thirteen plugins unused for 30 days (about
+4K tokens per session start); 19 detached `nx upgrade --auto` walkers
+saturating the cloud edge (nexus-75w5d); about 2,500 permanent gate records;
+and the RDR-205 session ledger, whose writer and readers 7.70.0 deleted while
+its engine template and 40,785 rows stayed (nexus-onjvw). Sam: "we want to be
+sure we're paying attention to things and ensuring we're not generating a lot
+of heat and waste." The fix also delivers a last-use signal for every store of
+state this project owns, read on a schedule: the curation report's cold-state
+section (Technical Design 6).
+
 #### Gap 5: Procedures are recalled or improvised instead of run
 
 Gap 3 moves a procedure out of memory into a skill, but a skill is still text
@@ -364,6 +377,21 @@ files, unindexed files, oversized files and superseded rows still served.
    a true read counter), unindexed files, files over the promotion size, and
    live T2 rows that a later row names in its title or body as replaced
    (a heuristic list for a person to confirm, never an automatic mark).
+   `--cold [--days N]`: every store of state with no write and no read in N
+   days (default 30), wherever it lives. Each row gives the store, its last
+   write, its last read, its size and its owner if known:
+   - tuple subspaces, from the census's last post time and from the
+     dictionary's `writers` (the tuple-space dictionary draft, nexus-mdbds); a template whose `writers` is empty
+     and that has no live subspace is listed by name;
+   - T2 namespaces and memory files, from read and write counts;
+   - MCP tools and CLI verbs, from `nx transcripts tools` (the front-door
+     census, Phase 5 Step 4);
+   - context injected per session and per dispatch, from `nx transcripts
+     loads`, so a large always-loaded item with no use shows as tokens.
+   Report only: retiring a cold store is a person's decision, and one that
+   deletes data rides its own change (as nexus-onjvw does for the ledger).
+   The report runs at each release's post-release step (Phase 4), so waste
+   shows while it is small.
 7. **Promotion recipe.** A section in the `writing-nx-skills` skill: the
    criterion, the target choice, the citation of sources, and a loss check in
    which `substantive-critic` compares the skill with its source files and
@@ -681,3 +709,4 @@ reads one directory of about 150 small files, well under its hook budget.
 | 2026-10-31 | Filed as draft from the memory survey at Sam's direction (nexus-qo7ie). Gate-record rollup routed to RDR-209 as an amendment. |
 | 2026-10-31 | Gap 5 added at Sam's direction: procedures that run instead of being recalled. Promotion gains three targets (skill, command, hook), and Phase 5 builds `nx transcripts`, prose on stdin, `nx gate record` and `nx preflight`. Title widened to match. |
 | 2026-10-31 | Front-door rule added to Gap 5 at Sam's direction: one implementation, MCP and CLI as thin wrappers, chosen by caller and reach; `nx gate record` becomes the MCP tool `gate_record` first; Phase 5 Step 4 is a front-door census. |
+| 2026-10-31 | Cold-state section added at Sam's direction (heat and waste): Gap 4 names the day's five cases, and `nx memory curate --cold` reports every store with no write and no read in N days, report only. |
