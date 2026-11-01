@@ -188,7 +188,7 @@ Skip all catalog steps silently if catalog is not initialized. The T2 record and
 
 ### Step 6: T3 Archive (post-mortem only)
 
-The main RDR was already semantically indexed at accept time (and refreshed in Step 4 only if the body changed during close). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
+The main RDR is already in its `rdr__` collection from `nx index repo`, drafts included (and refreshed in Step 4 only if the body changed during close). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
 
 Per docs/collections.md Rule 1, a knowledge collection is a subject area, never an owner id. The post-mortem's target is the bare subject `{repo}-rdr-research` (per Rule 3, never the four-segment form — `store_put` renders and, on first write, mints it), with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
 

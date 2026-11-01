@@ -12,7 +12,7 @@ The core insight: complex features are bigger than what fits in working memory, 
 2. `/conexus:rdr-research add <id>`: appends a finding with an evidence classification tag
 3. `/conexus:rdr-gate <id>`: runs 3-layer validation (structure check, assumption audit, AI critique). Acceptance requires a PASSED gate (`accept` row of `src/nexus/tables/rdr-lifecycle.toml`); a draft that shipped without one closes via `close-unaccepted` with a stated reason.
 4. `/conexus:rdr-accept <id>`: locks the decision, sets status to Accepted
-5. `/conexus:rdr-close <id> --reason implemented`: archives the RDR, creates a post-mortem template, indexes to T3
+5. `/conexus:rdr-close <id> --reason implemented`: archives the RDR, creates a post-mortem template, and stores the post-mortem in the knowledge store
 
 Steps 3–5 add rigor for high-stakes decisions. For a straightforward bug fix, steps 1–2 plus writing the solution may be all you need.
 
@@ -207,7 +207,7 @@ Finalizes an Accepted RDR. Requires status Accepted; a draft that shipped withou
 
 Close reasons: `implemented` · `partial` · `reverted`. (`abandoned` and `superseded` are statuses of their own, not close reasons.)
 
-Closing creates a post-mortem template for drift analysis, indexes the RDR into the `rdr__` collection for permanent semantic retrieval, and updates T2 with the close date and reason. If beads were created during accept, their status is displayed as an advisory. If the [catalog](catalog.md) is initialized, closing also creates typed links: `supersedes` for superseded RDRs, `cites` for referenced research papers.
+Closing creates a post-mortem template for drift analysis, re-indexes the RDR into its `rdr__` collection when its text changed (it is already searchable from `nx index repo`, drafts included), and updates T2 with the close date and reason. If beads were created during accept, their status is displayed as an advisory. If the [catalog](catalog.md) is initialized, closing also creates typed links: `supersedes` for superseded RDRs, `cites` for referenced research papers.
 
 ## Querying RDRs
 
