@@ -40,8 +40,10 @@ warning. It has no decision control and prints nothing.
 
 A checkpoint is paired with its compaction by use, not by age (nexus-702gy). Idle
 compaction (Claude Code ``idleCompaction``) runs PreCompact once the session has sat
-idle for about an hour and applies the summary at the next message, which can come
-hours later, so an age window would discard the very checkpoint the compaction wrote.
+idle for about an hour. Measured in the CLI it then runs the whole cycle at once
+(4ec033b9, 2026-11-01: pre, compaction, inject and post inside 20 s); the changelog
+(2.1.314) also allows the summary to be used at the next message, possibly hours
+later, and an age window would discard the checkpoint that compaction wrote.
 Inject and post run in either order (live: inject about 6 s before post), so each
 judges use only by its own trace: post by a summary in the file, inject by the
 ``<session>.injected`` sidecar, which holds the ``written:`` stamp it last emitted.
@@ -144,6 +146,9 @@ _NAME_LINE = "- session name: "
 #: cap, in this order.
 _DROP_FIRST = ("### Recent commits", "### Open PRs", "### Uncommitted")
 _SUMMARY_HEADING = "## Compact summary"
+#: The heading post writes, matched whole: the embedded threads board can carry a block
+#: whose title starts "Compact summary", which a prefix match would take for post's trace.
+_SUMMARY_RE = re.compile(r"(?m)^## Compact summary \(\d{4}-\d\d-\d\dT[^)\n]*\)$")
 
 
 def _config_dir() -> Path:
@@ -552,7 +557,7 @@ def _summarized(text: str) -> bool:
     Only post's own trace counts. Inject runs before post in the live harness, so a
     trace inject left would make post discard this compaction's own checkpoint.
     """
-    return f"\n{_SUMMARY_HEADING}" in text
+    return _SUMMARY_RE.search(text) is not None
 
 
 def run_pre(payload: dict) -> None:
@@ -624,6 +629,8 @@ def run_post(payload: dict) -> None:
         existing: str | None = path.read_text(encoding="utf-8")
     except OSError:
         existing = None
+    except ValueError:  # undecodable: not this compaction's checkpoint; archived below
+        existing = ""
     if existing is None or _written_age(existing) is None or _summarized(existing):
         # Pre did not run for this compaction (killed at its timeout, a cold start, an error
         # before the write): whatever is here is an earlier compaction's state and must not be
@@ -700,7 +707,7 @@ def run_inject(payload: dict) -> None:
     path = _checkpoint_dir() / f"{session_id}.md"
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         return
     age = _written_age(text)
     if age is None:
@@ -711,7 +718,7 @@ def run_inject(payload: dict) -> None:
     sidecar = path.with_name(f"{session_id}{_INJECTED_SUFFIX}")
     try:
         last = sidecar.read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, ValueError):  # garbage reads as "not injected": fail toward restoring
         last = ""
     if written is not None and last == written:
         _log("INFO", f"inject: {path} (written {written}) was already injected by an earlier compaction; "
@@ -721,20 +728,18 @@ def run_inject(payload: dict) -> None:
     trigger = trigger_match.group(1) if trigger_match else "unknown"
     # The compact summary is already in the new context; the injection is the state that
     # was written down before it.
-    cut = text.find(f"\n{_SUMMARY_HEADING}")
-    body = text[:cut] if cut != -1 else text
+    summary_match = _SUMMARY_RE.search(text)
+    body = text[: summary_match.start()] if summary_match else text
     body = body.rstrip() + "\n\n"
     lead = f"The conexus PreCompact hook wrote this working-state checkpoint {_age_label(age)} ago (trigger {trigger})"
     if age < _STALE_NOTE_S:
         lead += ", just before this session was compacted."
     else:
-        # Only the age is known. An idle compaction writes its checkpoint when the session goes
-        # idle and is applied at the next message; a compaction whose PreCompact hook failed
-        # finds an earlier one (nexus-702gy).
-        lead += (". A compaction prepared while the session sat idle is applied at the next message, "
-                 "and one whose PreCompact hook failed finds an earlier checkpoint, so this state may "
-                 "predate this compaction and may have changed since: check git, beads and the board "
-                 "before acting on it.")
+        # Only the age is known: a compaction whose summary was used later than it was made, or
+        # one whose PreCompact hook failed and found an earlier checkpoint (nexus-702gy).
+        lead += (". That is longer than a compaction takes, so this state may predate this "
+                 "compaction and may have changed since: check git, beads and the board before "
+                 "acting on it.")
     intro = (f"{lead} The state lives in version control, beads and the threads board, "
              "not in the summary.\n\n")
     footer = f"Full checkpoint (with the compact summary): {path}\n"

@@ -719,6 +719,55 @@ class TestInject:
         assert ("may predate this compaction" in first) is stale
         assert ("just before this session was compacted" in first) is not stale
 
+    @pytest.mark.parametrize("garbage", [b"\xff\xfe\x80", b"not a stamp\n", b""], ids=["non-utf8", "text", "empty"])
+    def test_a_garbage_sidecar_reads_as_not_injected(self, mod, env, monkeypatch, garbage) -> None:
+        """A non-UTF-8 sidecar raised UnicodeDecodeError, and inject printed nothing for two days."""
+        run(mod, monkeypatch, "pre", pre_payload())
+        (env.checkpoints / f"{SID}.injected").write_bytes(garbage)
+        assert "state: building" in self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
+        assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, ""), "the rewritten sidecar suppresses"
+
+    def test_an_undecodable_checkpoint_is_not_injected_and_post_archives_it(self, mod, env, monkeypatch) -> None:
+        env.checkpoints.mkdir(parents=True)
+        path = env.checkpoints / f"{SID}.md"
+        path.write_bytes(b"# Compaction checkpoint\n\xff\xfe\n")
+        assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, "")
+        assert run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "s"}) == (0, "")
+        assert "no pre-compaction checkpoint for this compaction" in path.read_text(encoding="utf-8")
+        assert len([p for p in env.checkpoints.iterdir() if p.name != path.name]) == 1, "the bad file is archived"
+
+    @pytest.mark.parametrize("inject_first", [True, False], ids=["inject-then-post", "post-then-inject"])
+    def test_after_a_complete_compaction_a_compaction_whose_pre_failed_injects_nothing(
+        self, mod, env, monkeypatch, inject_first
+    ) -> None:
+        path = env.checkpoints / f"{SID}.md"
+        run(mod, monkeypatch, "pre", pre_payload())  # compaction 1, complete, in the live order
+        run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "summary one"})
+        # compaction 2: pre failed
+        if inject_first:
+            assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"}) == (0, "")
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "summary two"})
+        if not inject_first:
+            assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"}) == (0, "")
+        text = path.read_text(encoding="utf-8")
+        assert "no pre-compaction checkpoint for this compaction" in text and "summary two" in text
+        assert "summary one" not in text
+
+    def test_a_board_block_titled_compact_summary_is_not_taken_for_posts_heading(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        path = env.checkpoints / f"{SID}.md"
+        text = path.read_text(encoding="utf-8")
+        assert text.count("\n## Working state") == 1
+        path.write_text(text.replace("\n## Working state", "\n## Compact summary pairing\nref: nexus-mtl98\n\n## Working state"),
+                        encoding="utf-8")
+        ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1])
+        assert "## Compact summary pairing" in ctx and "P2 Auto-continuation" in ctx, "inject cut at the board block"
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "this compaction's summary"})
+        after = path.read_text(encoding="utf-8")
+        assert "P2 Auto-continuation" in after and after.rstrip().endswith("this compaction's summary"), \
+            "post took the board block for its own heading and archived the checkpoint"
+
     def test_the_sidecar_is_pruned_with_the_checkpoints(self, mod, env, monkeypatch) -> None:
         env.checkpoints.mkdir(parents=True)
         old = env.checkpoints / f"{OTHER_SID}.injected"
