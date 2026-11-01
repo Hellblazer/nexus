@@ -97,6 +97,13 @@ _TITLE_LIMIT = 5  # per-namespace: entries up to this rank get title-only
 #: sequential HTTP round-trips).
 _MAX_NAMESPACES = 5
 
+#: Namespaces that machines write, not people: never shown to a session or agent
+#: (nexus-mtheb). ``<project>_taxonomy_discover_health`` holds collection health
+#: stamps rewritten every few minutes, so it was always the most recently updated
+#: namespace and took the first of the five slots in every SessionStart and
+#: SubagentStart injection, ahead of the project's own notes.
+_MACHINE_NAMESPACE_SUFFIXES: tuple[str, ...] = ("_taxonomy_discover_health",)
+
 #: Overall wall-clock budget for the per-namespace fetch loop, distinct
 #: from the per-request timeout below. Override via NX_T2_SCAN_BUDGET_S.
 _DEFAULT_SCAN_BUDGET_S = 8.0
@@ -437,6 +444,10 @@ def scan(project: str) -> str:
             )
             return f"WARNING: T2 memory unreachable: {exc}"
 
+        namespaces = [
+            ns for ns in namespaces
+            if not str(ns.get("project", "")).endswith(_MACHINE_NAMESPACE_SUFFIXES)
+        ]
         if not namespaces:
             # Reachable, zero matching namespaces: a genuinely empty T2.
             return ""

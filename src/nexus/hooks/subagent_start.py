@@ -161,6 +161,25 @@ _WORKTREE_PREFLIGHT = (
     "on any PREFLIGHT_FAIL line (nexus-5kwkf) |\n"
 )
 
+#: nexus-mtheb: the T1 contract, first in every injection, review and code-nav
+#: agents included. Five rounds of T1 design faded because the guidance was
+#: buried or pointed elsewhere: this block used to be absent for reviewers, and the
+#: only write-back line sent findings to T2 or T3 (survey of 9 sessions,
+#: 2026-11-01: 0 T1 writes in ~45 dispatches).
+_NX_T1 = (
+    "## T1: this session's working layer\n"
+    "Your scratch IS your parent session's T1, shared with every sibling agent; the "
+    "parent can read it while you run.\n"
+    "- Read the T1 id your brief names first: mcp__plugin_conexus_nexus__scratch"
+    '(action="get", entry_id=...). If your brief says you are an independent '
+    "reviewer, read nothing else in T1.\n"
+    "- Interim findings and working notes go to T1: scratch put, with the tags your "
+    'brief names (for example tags="nexus-abc,review-r1").\n'
+    "- T2 memory_put only for a record your brief names; never overwrite a T2 record "
+    "it did not give you. T3 store_put only for validated, reusable knowledge.\n"
+    "T1 survives resume and compaction; a fresh restart or /clear drops it.\n\n"
+)
+
 _NX_TIERS = (
     "\n## nx storage (call as mcp__plugin_conexus_nexus__<tool>; paged: footer shows "
     "offset=N)\n\n"
@@ -182,8 +201,9 @@ _NX_T3 = (
     "    store_list, store_get, store_put, collection_list\n"
     "Plans (T2): plan_search, plan_save\n"
     'Hint: where="section_type!=references" filters noise.\n\n'
-    "WRITE-BACK: findings not stored = findings lost. store_put (T3) or memory_put "
-    "(T2) before returning.\n"
+    "WRITE-BACK before returning (findings not stored are lost): interim findings to "
+    "T1 (scratch put, your brief's tags); the record your brief names to T2; only "
+    "validated, reusable knowledge to T3.\n"
 )
 
 _NX_ANSWER = (
@@ -467,8 +487,19 @@ def _knowledge_map_section(repo_root: str) -> str:
     return "\n" + content
 
 
+#: The most entry lines the T1 index shows; the rest are counted.
+_T1_INDEX_MAX: int = 15
+
+
 def _t1_scratch_section(env: dict[str, str]) -> str:
-    """The "## T1 Scratch (shared session state)" section, or "" (subagent-start.sh:390-399)."""
+    """The "## T1 index" section, or "" (subagent-start.sh:390-399).
+
+    nexus-mtheb: ids and tags only, never contents. The section used to dump
+    every entry's first 120 characters into every subagent, which is noise
+    once T1 is in use and breaks independent review: a fix-check critic briefed
+    to read no sibling findings was handed them anyway. An agent reads the
+    entries its brief names, by id or tag.
+    """
     if shutil.which("nx") is None:
         return ""
     from nexus.util.nx_argv import nx_argv  # noqa: PLC0415 — stdlib-only; kept off the hook's import path
@@ -476,7 +507,16 @@ def _t1_scratch_section(env: dict[str, str]) -> str:
     t1_entries = _run_captured(nx_argv("scratch", "list"), env=env, timeout=30)
     if not t1_entries or t1_entries == "No scratch entries.":
         return ""
-    return f"\n## T1 Scratch (shared session state)\n{t1_entries}\n\n"
+    index = [ln for ln in t1_entries.splitlines() if ln.startswith("[")]
+    if not index:
+        return ""
+    shown = index[:_T1_INDEX_MAX]
+    more = len(index) - len(shown)
+    body = "\n".join(shown) + (f"\n... ({more} more: scratch list)" if more else "")
+    return (
+        "\n## T1 index (ids and tags; read only what your brief names)\n"
+        f"{body}\n\n"
+    )
 
 
 def run(payload: dict | None) -> HookResult:
@@ -495,6 +535,8 @@ def run(payload: dict | None) -> HookResult:
     if agent_id:
         parts.append(f"Claimant id: {agent_id} — mailbox: mailbox/{agent_id}\n")
 
+    # nexus-mtheb: first, and for every agent type (reviewers included).
+    parts.append(_NX_T1)
     parts.append(_t2_memory_section(repo_root))
     parts.append(_linked_rdrs_section(task_text, env))
 

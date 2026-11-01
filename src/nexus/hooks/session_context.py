@@ -177,6 +177,22 @@ def _render_ready_beads(
     return lines
 
 
+#: nexus-mtheb: the top-level T1 contract, first in the SessionStart context.
+#: T1 inter-agent use was designed five times and faded each time; the survey of
+#: 2026-11-01 found 0 T1 writes in ~45 dispatches across 9 sessions, with the
+#: only top-level mention one capability line deep in this block.
+_T1_TOP_LINES: list[str] = [
+    "## T1: the working layer this session shares with its subagents",
+    "Before a dispatch, `scratch put` the design-of-record and the shared brief context "
+    "(ship-when, inputs, prior findings) and name its id in each brief; have agents put "
+    "interim findings in T1 under the round tags you give them; read their entries "
+    "before acting on a hand-back.",
+    "T1 survives resume and compaction; a fresh restart or `/clear` drops it unless "
+    "flagged (`scratch_manage`).",
+    "",
+]
+
+
 def _build_capabilities_block() -> list[str]:
     """Static ``## nx Capabilities`` reference lines.
 
@@ -197,7 +213,7 @@ def _build_capabilities_block() -> list[str]:
         "`subtree`, `follow_links`, `depth`), taxonomy-boosted",
         "`nx_answer` MCP tool: reduce many documents (minutes); `search`/`query`: lookups (seconds)",
         "`plan_save`/`plan_search` MCP tools: T2, project-scoped plan library",
-        "`scratch` MCP tool: session-scoped, shared across agents",
+        "`scratch` MCP tool: T1, shared with this session's subagents (see the T1 block above)",
         "`search`/`links`/`link` MCP tools (nexus-catalog): metadata-first; "
         "`chash:` spans preferred for link creation",
         "`nx enrich bib COLLECTION` (Semantic Scholar) | `nx enrich aspects "
@@ -226,7 +242,8 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — the script neve
     project_dir = Path(os.environ.get('CLAUDE_PROJECT_DIR', os.getcwd())).resolve()
     cwd = str(project_dir)
 
-    output_lines: list[str] = []
+    # nexus-mtheb: the T1 contract leads the context.
+    output_lines: list[str] = list(_T1_TOP_LINES)
 
     # --- T2 memory context ---
     if which('nx'):
