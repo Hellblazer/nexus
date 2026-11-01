@@ -1607,7 +1607,8 @@ def _scaled_verify_timeout(evidence_chars: int) -> float:
         "to <nexus config dir>/aspect_validation_failures.jsonl (override "
         "with --validation-out); every sampled record, whatever its outcome, "
         "also writes one row to <nexus config dir>/aspect_validation.jsonl "
-        "(override with --validation-all-out). Pass 0 to skip validation."
+        "(override with --validation-all-out); a row that cannot be written is named "
+        "in the summary and the run exits 1. Pass 0 to skip validation."
     ),
 )
 @click.option(
@@ -2478,8 +2479,8 @@ def _run_validation_sample(
       ``disagreement`` — the summary counts the two separately.
 
     RDR-189 P1 (nexus-z1d0l.1.6) adds an all-outcomes record. Every sampled
-    record, whatever its outcome (including ``errored``, which writes nothing to
-    the failures file), appends one row to ``aspect_validation.jsonl``
+    record, whatever its outcome (including ``errored``; of the errored codes only
+    ``malformed_verify_result`` also writes a failures row), appends one row to ``aspect_validation.jsonl``
     (``validation_all_out``): ``status`` and ``reason_code`` from the checked
     table :mod:`nexus.tables.aspect_validation_outcomes`, the extracted claims,
     the verify reason and the witness items. The witness is host-bound: the
@@ -2622,6 +2623,12 @@ def _run_validation_sample(
                 source_path=source_path, result_type=type(result).__name__,
             )
             write_row("malformed_verify_result", window=window)
+            # The table's malformed_verify_result row says legacy_failures_row = yes, whatever the
+            # reply's shape; there is no reason or citations to carry, so those fields are empty.
+            append(failures_path, _failures_row(
+                source_path=source_path, claim_payload=claim_payload, result={},
+                window=window, trace=trace, timestamp=timestamp,
+            ))
             continue
 
         verdict = result.get("verified")
@@ -2637,9 +2644,10 @@ def _run_validation_sample(
         write_row(reason_code, result, window, identity_trusted=trusted)
 
         # The failures file follows the outcome table's legacy_failures_row: every outcome that
-        # read as non-verified before RDR-189 writes a row, and a malformed verdict (missing, or
-        # truthy but not a boolean) counted as a failure then, so it still writes one. Only a
-        # true boolean verdict writes none.
+        # read as non-verified before RDR-189 writes a row, as does every malformed verdict. A
+        # missing verdict read as non-verified then; a truthy non-boolean read as verified and
+        # wrote no row, and writes one now by decision (P1 review, nexus-z1d0l.1.7). Only a true
+        # boolean verdict writes none.
         if reason_code == "malformed_verify_result":
             errored_by[reason_code] = errored_by.get(reason_code, 0) + 1
         elif verdict:

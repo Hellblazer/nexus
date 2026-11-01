@@ -17,19 +17,22 @@
 #                             verify call was made
 #   verify_exception          the verify call raised
 #   malformed_verify_result   the verify call returned a payload whose
-#                             `verified` is missing or not a boolean (a
-#                             truthy non-boolean such as "yes" counts too).
-#                             Before RDR-189 that reply counted as a failure
-#                             and appended a failures row; that stays for every
-#                             malformed verdict, so legacy_failures_row = yes.
+#                             `verified` is missing or not a boolean, or that
+#                             is not a mapping at all. Every such reply appends
+#                             a failures row (legacy_failures_row = yes). A
+#                             missing verdict did before RDR-189; a truthy
+#                             non-boolean ("yes") then read as verified and
+#                             wrote none, and a non-mapping crashed: those two
+#                             rows are new, by decision (nexus-z1d0l.1.7).
 #
 # emit fields
 #   status               the aspect_validation.jsonl row status, from the
 #                        closed set the RDR names: verified, disagreement,
 #                        unverifiable, errored
 #   legacy_failures_row  yes when the outcome also appends a row to the legacy
-#                        aspect_validation_failures.jsonl, exactly as before
-#                        RDR-189 (a non-verified verdict); no otherwise
+#                        aspect_validation_failures.jsonl: a non-verified
+#                        verdict, as before RDR-189, and every malformed
+#                        reply (see malformed_verify_result); no otherwise
 
 [table]
 id = "aspect-validation-outcomes"

@@ -1657,21 +1657,25 @@ class TestValidationAllOutcomes:
     @pytest.mark.parametrize("case", [
         "verified", "verified_unwitnessed", "verifier_rejected", "evidence_truncated",
         "indexed_text_unavailable", "verify_exception", "malformed_verify_result",
-        "malformed_truthy_non_boolean",
+        "malformed_truthy_non_boolean", "malformed_non_mapping",
     ])
     def test_legacy_row_appears_exactly_when_the_outcome_table_says(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
     ) -> None:
         """Every row of the table is driven, so every ``legacy_failures_row`` flag is pinned. A truthy
-        non-boolean verdict gets the same reason_code as a missing one, so it is the same row: the
-        legacy file is unchanged from before RDR-189, where it counted as a failure."""
+        non-boolean verdict and a reply that is not a mapping get the same reason_code as a missing
+        verdict, so they are the same row and write a failures row too (new rows by decision: before
+        RDR-189 the truthy case read as verified and a non-mapping crashed)."""
         from nexus.tables.aspect_validation_outcomes import rows as outcome_rows
 
-        code = "malformed_verify_result" if case == "malformed_truthy_non_boolean" else case
+        code = "malformed_verify_result" if case.startswith("malformed_") else case
         wanted = {r.reason_code: r.legacy_failures_row for r in outcome_rows()}[code]
 
         async def boom(claim, evidence, timeout=60.0):
             raise RuntimeError("dispatch died")
+
+        async def not_a_mapping(claim, evidence, timeout=60.0):
+            return "verified"
 
         kw: dict = {}
         verify = {
@@ -1683,6 +1687,7 @@ class TestValidationAllOutcomes:
             "verify_exception": boom,
             "malformed_verify_result": _verdict(reason="no", evidence=[]),
             "malformed_truthy_non_boolean": _verdict(verified="yes", reason="no", evidence=[]),
+            "malformed_non_mapping": not_a_mapping,
         }[case]
         if case == "evidence_truncated":
             kw["window_cap"] = 40
@@ -2839,6 +2844,7 @@ class TestValidationFileSafety:
 
         def spy(path, flags, **kw):
             made.append(Path(path))
+            assert flags & os.O_EXCL and flags & os.O_CREAT, "the replacement must never open an existing file"
             return real(path, flags, **kw)
 
         monkeypatch.setattr(winsec, "open_private", spy)
@@ -2846,6 +2852,24 @@ class TestValidationFileSafety:
         assert len(made) == 1 and made[0].parent == p.parent and made[0] != p
         assert len(p.read_text().splitlines()) == 5
         assert (p.stat().st_mode & 0o777) == 0o640  # an existing named file keeps its mode
+        assert sorted(x.name for x in tmp_path.iterdir()) == ["rows.jsonl", "rows.jsonl.lock"]
+
+    def test_a_failed_prune_replace_leaves_no_temp_file_and_the_original_whole(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from tests._module_seam import setattr_in
+
+        p = tmp_path / "rows.jsonl"
+        body = "".join(f'{{"schema_version": 1, "n": {i}}}\n' for i in range(12))
+        p.write_text(body)
+
+        def refuse(_src, _dst):
+            raise OSError("replace refused")
+
+        setattr_in(monkeypatch, enrich_mod, "os.replace", refuse)
+        with pytest.raises(OSError, match="replace refused"):
+            enrich_mod._prune_validation_file(p, keep=5)
+        assert p.read_text() == body
         assert sorted(x.name for x in tmp_path.iterdir()) == ["rows.jsonl", "rows.jsonl.lock"]
 
     def test_prune_leaves_a_file_of_non_rows_alone(self, tmp_path: Path) -> None:
