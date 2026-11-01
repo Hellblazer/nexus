@@ -320,7 +320,10 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         the row, and the stored count and time never go down. ``t1_puts`` is a
         whole number >= 0; zero is a real answer ("wrote nothing"), so pass it.
         ``agent_type`` and ``ts`` are left out of the payload when ``None`` (the
-        engine stamps ``ts`` itself).
+        engine stamps ``ts`` itself). A ``ts`` must be ISO-8601 with an offset or
+        ``Z``: a malformed one is a 400 naming ``ts``, and one more than five
+        minutes ahead of the engine's clock is replaced by the engine's now
+        (nexus-mtheb.7), so pass the stop time or leave it out.
 
         Requires an engine carrying telemetry-018; older engines 404, which the
         HTTP layer raises. A best-effort caller catches it.
