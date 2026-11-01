@@ -152,6 +152,11 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # model once. Waiters re-check and take the holder's result; no lease, no
     # heartbeat, no daemon-scope election.
     "db/minilm_direct.py",
+    # Shared gateway-hold read-modify-write (nexus-v1929): a critical section
+    # on <config>/gateway-hold.json.lock around one JSON record, polled
+    # non-blocking for at most 0.5 s, then the caller falls back to its own
+    # retry schedule. No lease, no heartbeat, no daemon-scope election.
+    "db/gateway_hold.py",
     # PDF-stack install lock (nexus-2k66t.4.2): a blocking critical section on
     # <tools>/.pdf-stack.lock so two commands that both need the [pdf] extra
     # build one generation. The waiter re-checks the current generation and
