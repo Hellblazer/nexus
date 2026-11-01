@@ -80,10 +80,16 @@ NO_T1_AGENTS: frozenset[str] = frozenset({
 
 _ERROR_PREFIX = "Error:"
 #: ``nx scratch put`` as a command, at the start of the command line or after
-#: ``;``, ``&``, ``|``, ``(`` or a newline, optionally behind ``VAR=value``
-#: assignments; the same words inside a quoted argument (``echo "nx scratch
+#: ``;``, ``&``, ``|``, ``(``, a backtick, ``{``, ``then``, ``do`` or a newline, optionally
+#: behind ``VAR=value`` assignments, a wrapper (``sudo``, ``env``, ``time``,
+#: ``nohup``, ``timeout N``, ``uv run``) and a path to ``nx``; the same words inside a quoted argument (``echo "nx scratch
 #: put"``, ``grep -rn "nx scratch put" docs/``) are not a put.
-_BASH_PUT = re.compile(r"(?:^|[;&|(\n])\s*(?:\w+=\S*\s+)*nx\s+scratch\s+put\b")
+_BASH_PUT = re.compile(
+    r"(?:^|[;&|(`{\n]|\bthen\b|\bdo\b)\s*"  # a command position
+    r"(?:\w+=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)*"  # VAR=value assignments
+    r"(?:(?:sudo|env|time|nohup|timeout\s+\S+|uv\s+run)\s+)*"  # wrapper words
+    r"(?:\S*/)?nx\s+scratch\s+put\b"  # nx, bare or by path
+)
 
 
 def _is_t1_put(name: object, tool_input: object) -> bool:
@@ -167,7 +173,9 @@ def record_dispatch(session_id: str, agent_id: str, agent_type: str, t1_puts: in
     yet, so this is a deliberate no-op. It is called once per real stop,
     including the re-stop after a nudge (``stop_hook_active`` true), whose
     count is the final one, so the receiver should keep the last row per
-    (session_id, agent_id). Importing the engine client here would load
+    (session_id, agent_id). An agent type in ``NO_T1_AGENTS`` is never
+    recorded: it cannot put, so it would only dilute the puts-per-dispatch
+    measure. Importing the engine client here would load
     ``nexus.cli``-class modules into a hook that runs on every real subagent
     stop (0.8 s measured by RDR-215 research-5); do it behind a deferred
     import, bounded well inside the hook timeout, and never let it raise.
@@ -184,7 +192,7 @@ def _decide(payload: dict | None) -> HookResult:
     agent_type = _field(data, "agent_type")
     if not agent_type or agent_type.rsplit(":", 1)[-1] in NO_T1_AGENTS:
         return HookResult()
-    puts =t1_put_count(_field(data, "agent_transcript_path"))
+    puts = t1_put_count(_field(data, "agent_transcript_path"))
     if puts is None:
         return HookResult()
     try:

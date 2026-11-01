@@ -176,6 +176,14 @@ def test_an_agent_with_the_t1_tool_is_still_nudged(tmp_path: Path, agent_type: s
         "cd /tmp && nx scratch put findings",
         "true; nx scratch put findings",
         "out=$(nx scratch put findings)",
+        "uv run nx scratch put findings",
+        "timeout 30 nx scratch put findings",
+        "/usr/local/bin/nx scratch put findings",
+        "./.venv/bin/nx scratch put findings",
+        'VAR="a b" nx scratch put findings',
+        "if true; then nx scratch put findings; fi",
+        "{ nx scratch put findings; }",
+        "  nx scratch put findings",
     ],
 )
 def test_a_bash_nx_scratch_put_behind_env_or_a_chain_counts(tmp_path: Path, command: str) -> None:
@@ -353,7 +361,7 @@ def test_the_matcher_skips_harness_internal_stops_and_keeps_real_agents() -> Non
 
 
 def test_the_verb_is_registered() -> None:
-    from nexus._hook_runtime.entry import VERB_TABLE
+    from nexus._hook_runtime.entry import VERB_TABLE  # noqa: PLC0415 — the verb table is imported where it is checked, as the sibling hook tests do
 
     assert VERB_TABLE[VERB] == "nexus.hooks.subagent_stop_t1_nudge"
 
