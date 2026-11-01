@@ -96,6 +96,33 @@ class TemplateRegistryTest {
         assertEquals(0L, directory.maxBodyBytes());
     }
 
+    /**
+     * nexus-mdbds.2.11 (RDR-239 Phase 2): every shipped template carries a doc block, and its
+     * example went through the same checks out() applies (a classpath template whose doc or
+     * example fails refuses to boot, so loading at all is the proof of validation). The
+     * non-vacuity assert is the count: seven templates examined, none skipped.
+     */
+    @Test
+    void everyShippedTemplateCarriesAValidatedDocBlock() {
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        List<TemplateSchema> templates = registry.templates();
+        assertEquals(7, templates.size());
+        int examined = 0;
+        for (TemplateSchema t : templates) {
+            TemplateDoc doc = t.doc();
+            assertNotNull(doc, t.name() + " carries no doc block");
+            assertFalse(doc.summary().isBlank(), t.name() + " has a blank doc summary");
+            assertFalse(doc.writers() == null, t.name() + " has no writers key");
+            assertFalse(doc.readers().isEmpty(), t.name() + " has no readers");
+            TemplateDoc.Example ex = doc.example();
+            assertNotNull(ex, t.name() + " carries no doc example");
+            assertEquals(t.name(), registry.resolve(ex.subspace()).name(),
+                    t.name() + "'s example subspace resolves to another template");
+            examined++;
+        }
+        assertEquals(7, examined);
+    }
+
     // ── registry() digest ───────────────────────────────────────────────
 
     @Test

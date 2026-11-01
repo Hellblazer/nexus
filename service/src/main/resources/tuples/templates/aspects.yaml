@@ -15,9 +15,6 @@
 # "from" in its id because its nonce is minted; here the id comes from the
 # doc_id alone.
 #
-# take.enabled: true -- any free worker claims the oldest available task
-# with in(), as in queue.yaml.
-#
 # take.max_attempts: 6 -- the worker's retry-ladder cap (5) plus one. One
 # count serves both a nack (a ladder retry) and a lapsed lease (a crash or
 # a stalled worker), so a crash spends one of the ladder's retries.
@@ -64,3 +61,22 @@ retention_seconds: 7776000
 max_live_rows: 10000
 
 claim_log_ttl_seconds: 8640000
+
+doc:
+  summary: The per-tenant queue of documents waiting for aspect extraction; a producer posts one task per document and a worker claims, extracts and acks it.
+  writers:
+    - HttpAspectQueue.enqueue and enqueue_many (nexus.db.t2.http_aspect_queue), called by the indexer, the aspect worker's re-enqueue and nx aspects, as out mode=replace so a re-enqueue replaces the task
+  readers:
+    - AspectExtractionWorker (nexus.aspect_worker_tuples) claims with in or inp, then ack, nack or release
+    - nx doctor queue-depth row (nexus.health) counts waiting and dead tasks
+  fields:
+    queue: always the literal aspects
+  body: the task identity as compact JSON, never document text
+  example:
+    subspace: aspects
+    nonce: 1.1.42
+    keys:
+      queue: aspects
+    body: {"collection":"docs__0-0__example__v1","source_path":"/example/a.md","doc_id":"1.1.42","content_hash":"0000000000000000000000000000000000000000000000000000000000000000"}
+  see_also:
+    - RDR-235

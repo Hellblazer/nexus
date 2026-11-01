@@ -1,11 +1,10 @@
-# RDR-205 v1 template: agent/session mailbox messages.
+# RDR-205 v1 template.
 #
 # The nonce in id_from is a sender-minted message id; "from" also enters
 # the id (id_dims) and so must be declared required.
 #
-# address_kind (RDR-208 Phase 1 Step 2, bead nexus-galkv.2): agent (a
-# named subagent) or session (a session-id mailbox, RDR-208's own
-# addressing scheme). instance (a Claude Code instance name) was retired
+# address_kind (RDR-208 Phase 1 Step 2, bead nexus-galkv.2) allows agent
+# and session only. instance (a Claude Code instance name) was retired
 # at RDR-208 Phase 3 (bead nexus-galkv.24): the client release that stops
 # sending it (R3, conexus 7.60.0) shipped first, and only this engine
 # release refuses it -- a value the RDR-205 Phase 6 addressing scheme
@@ -37,3 +36,41 @@ take:
   max_lease_seconds: 900
 
 retention_seconds: 604800
+
+doc:
+  summary: A per-address inbox for session-to-session and agent-to-agent messages; a sender posts, the addressee claims, acts and acks, and an ack can carry the reply.
+  writers:
+    - the mailbox_send MCP tool, which resolves a name to a session id through the directory and mints a fresh nonce per call
+    - tuple_ack with a reply, which writes the answer into the requester's mailbox in the ack's own transaction
+    - tuple_out or nx tuple out directly, for a sender that already knows the address
+  readers:
+    - the mailbox-drain hook claims, acks and renders the session's mailbox on every UserPromptSubmit
+    - the session's nexus MCP server waits on mailbox/SESSION_ID and pushes arrivals through the Claude Code channel
+    - nx tuple wait, and tuple_in for a manual claim
+  fields:
+    to: the address, a session id or an agent id; the same as the subspace's last segment
+    from: the sender's session or agent id; a claim the engine does not check, and mailbox_send fills it in
+    kind:
+      request: ask the addressee to do something and reply
+      ack: the reply to a request, written by tuple_ack
+      reply: a late answer sent as a new message after the request was acked as tracked
+    correlation_id: pairs a reply with its request
+    address_kind:
+      agent: to is a subagent id
+      session: to is a session id
+  body: free text up to 4096 bytes
+  example:
+    subspace: mailbox/00000000-0000-0000-0000-000000000000
+    nonce: 00000000-0000-0000-0000-000000000006
+    keys:
+      to: 00000000-0000-0000-0000-000000000000
+    dims:
+      from: 00000000-0000-0000-0000-000000000001
+      kind: request
+      correlation_id: req-0001
+      address_kind: session
+    body: Please review the diff on feature/example and reply with the findings.
+  see_also:
+    - RDR-205
+    - RDR-208
+    - conexus/skills/mailbox/SKILL.md
