@@ -1923,13 +1923,17 @@ def search_taxonomy() -> SharedT2StoreReader:
     return _SEARCH_TAXONOMY
 
 
-def reset_search_telemetry_sink(timeout: float = 0.5) -> None:
-    """Close and forget the sink (tests; :func:`reset_singletons`)."""
+def reset_search_telemetry_sink(timeout: float = 0.5) -> bool:
+    """Close and forget the sink (tests; :func:`reset_singletons`).
+
+    Returns False when a write was still running at *timeout* (it may yet
+    land); True when there was no sink or it drained."""
     global _search_telemetry
     with _search_telemetry_lock:
         sink, _search_telemetry = _search_telemetry, None
-    if sink is not None:
-        sink.close(timeout)
+    if sink is None:
+        return True
+    return sink.close(timeout)
 
 
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────

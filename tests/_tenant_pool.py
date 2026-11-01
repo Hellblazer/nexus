@@ -59,6 +59,9 @@ ENV_FLAG = "NX_TEST_TENANT_POOL"
 #: Engine env that registers ``POST /v1/_test/tenant-reset`` (exactly ``"1"``; nexus-0bl77).
 ROUTE_ENV = "NX_TEST_TENANT_RESET_ROUTE"
 MARKER = "fresh_tenant"
+#: Bound on draining the MCP search telemetry worker before a reset. A healthy batch write takes 0.1-0.2 s; the
+#: autouse per-test reset uses 0.5 s, too short for a loaded CI shard.
+TELEMETRY_DRAIN_SECONDS: float = 5.0
 
 #: The census refuses to pass over fewer relations than this (the live substrate has about 50), and over a set that
 #: lacks any of these.
@@ -258,13 +261,21 @@ def census(state: Mapping[str, Any], tenant: str, *, allow_token: str = "") -> N
         raise TenantLeakError(f"tenant {tenant}: census failed: {_verdict_of(proc)}")
 
 
-def reset_client_caches() -> None:
-    """Drop the Python caches that outlive a test and are not keyed by the per-lease bearer.
+def reset_client_caches() -> bool:
+    """Drop the Python caches that outlive a test and are not keyed by the per-lease bearer, and drain the MCP search
+    telemetry worker first. Returns False when that worker was still writing at :data:`TELEMETRY_DRAIN_SECONDS`.
 
     Looked up in ``sys.modules`` so a worker that never loaded a module imports nothing: an unloaded module holds
     no cache. ``corpus._REGISTERED_COLLECTIONS`` is already cleared per test by ``tests/conftest.py``.
     """
     mods = sys.modules
+    # MCP search and query queue a ``search_telemetry`` batch on a process-wide daemon worker and return; the worker
+    # POSTs it later with this lease's bearer. The autouse ``_isolate_search_telemetry_sink`` closes the worker, but it
+    # sets up before ``_pin_t2_substrate`` (or a test parameter) pulls in the tenant, so it tears down AFTER the
+    # lease's wipe and census: a batch committed in that gap failed the census with ``nexus.search_telemetry=1``
+    # (develop CI run 41312781094, tests/test_query_taxonomy_requests.py). Drain it here, before the wipe.
+    infra = mods.get("nexus.mcp_infra")
+    drained = infra is None or infra.reset_search_telemetry_sink(TELEMETRY_DRAIN_SECONDS)
     hvc = mods.get("nexus.db.http_vector_client")
     if hvc is not None:
         hvc._invalidate_endpoint()
@@ -283,6 +294,7 @@ def reset_client_caches() -> None:
     pcr = mods.get("nexus.mcp.plan_cache_registry")
     if pcr is not None:
         pcr.reset_plan_cache_registry_for_tests()
+    return drained
 
 
 class TenantLeaseBusyError(RuntimeError):
@@ -423,7 +435,11 @@ class TenantPool:
             finally:
                 try:
                     with self._timed("caches"):
-                        reset_client_caches()
+                        # ``is False``: a test stub of reset_client_caches returns None.
+                        if reset_client_caches() is False:
+                            raise TenantLeakError(
+                                f"tenant {tenant}: the MCP search telemetry worker was still writing after "
+                                f"{TELEMETRY_DRAIN_SECONDS} s; its row would land after the reset's census")
                     self.token = self.reset(tenant)
                 except BaseException as exc:
                     self.retire(f"{type(exc).__name__}: {exc}")
