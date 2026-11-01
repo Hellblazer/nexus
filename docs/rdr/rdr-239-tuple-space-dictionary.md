@@ -397,4 +397,4 @@ served comments) fail the drift test this RDR exists for.
 | 2026-10-31 | Filed as draft at Sam's direction: stage 1 of the scriptable tuple space (nexus-mdbds), the ORB's successor, constrained by the RDR-110 arc's scrap reason. |
 | 2026-10-31 | Phase 1 content written (`docs/rdr/rdr-239-doc-blocks.md`); A1 refuted and resolved: `fields` replaces `dimension_values`, `body` added, `example` gains `subspace` and `nonce`; stale-comment and writerless-template findings recorded. |
 | 2026-10-31 | Pre-gate revision: Background and Investigation added; Finalization Gate written; seven templates after the ledger retirement (nexus-onjvw); `dimension_values` in Risks corrected to `fields`; plan uses Phase and Step headings. |
-- 2026-11-01: Gate round 1 — PASSED (0 Critical, 9 Significant, 0 ship-blocker(s)); commit `f6de278a1`; critique `nexus_rdr/239-gate-critique-2026-11-01-r1`.
+- 2026-11-01: Gate round 1 — PASSED (0 Critical, 9 Significant, 0 ship-blocker(s)); commit `2ae483be1` (content-identical to the pre-rebase commit the gate read); critique `nexus_rdr/239-gate-critique-2026-11-01-r1`.
