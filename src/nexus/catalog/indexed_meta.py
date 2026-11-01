@@ -155,21 +155,35 @@ def backfill_tags_category(
 
     * ``code``: ``category`` ``code``; ``tags`` is the extension (``no_extension`` when the file has none,
       ``no_file_path`` when the entry has no path).
-    * ``rdr`` and ``prose``: ``category`` ``prose`` from every writer. ``tags`` is ``["markdown"]`` for a
-      ``.md`` / ``.markdown`` file, where the repo pass and the markdown hook (``nx index md`` / ``rdr``,
-      ``collection reindex``, DEVONthink) agree. For any other extension they do NOT (the repo pass tags
-      the extension, ``nx index md`` of the same file tags ``markdown``) and nothing on the entry tells
-      them apart, so ``tags`` is residue ``ambiguous_indexer``.
-    * ``paper`` is what ``nx index pdf`` registers (``["pdf"]``, ``paper``); ``pdf`` is what the repo PDF
-      path registers (``["pdf"]``, ``prose``). The catalog ``content_type`` is the only discriminator, and it
-      is the one :func:`pdf_register_meta` already keys on at register time, so the two paths are not
-      guessed apart here; neither rule reads the path.
+    * ``rdr`` and ``prose``: ``category`` ``prose`` (the repo pass and the markdown hook both write it).
+      ``tags`` is ``["markdown"]`` for a ``.md`` / ``.markdown`` file, where the repo pass and the
+      markdown hook (``nx index md`` / ``rdr``, ``collection reindex``, DEVONthink) agree. For any other
+      extension they do NOT (the repo pass tags the extension, ``nx index md`` of the same file tags
+      ``markdown``) and nothing on the entry tells them apart, so ``tags`` is residue
+      ``ambiguous_indexer``. At a ``.pdf`` path both keys are: the repo pass registers a PDF as type
+      ``pdf``, so this entry came from a markdown-hook or import path, and ``nx index pdf`` of the same file
+      stamps ``["pdf"]`` / ``paper`` where category ``prose`` would be stamped here. A fill-only write is
+      permanent, so neither key is guessed (both residue ``ambiguous_indexer``).
+    * ``paper`` is what ``nx index pdf`` registers (``["pdf"]``, ``paper``) and only a ``.pdf`` path says
+      so: an entry with no path is an ``nx catalog backfill`` placeholder (one per ``docs__`` collection,
+      often markdown), residue ``no_file_path`` for both keys, and a path that is not ``.pdf`` is residue
+      ``not_pdf_path`` for both. ``pdf`` is what the repo PDF path registers (``["pdf"]``, ``prose``).
+      The catalog ``content_type`` is the discriminator :func:`pdf_register_meta` already keys on at
+      register time (it is not the only fact the entry carries: the path is read too, above).
     * Any other type has no rule: both keys are residue, ``no_rule`` or, with no path, ``no_file_path``
-      (the same reasons ``source_format`` gives).
+      (the same reasons ``source_format`` gives). That includes ``markdown``: the ``index_markdown`` fallback
+      (``doc_indexer``, which registers a document under its chunks' own ``content_type``) can register that
+      type, so it does occur.
     """
     path = str(file_path or "")
+    suffix = Path(path).suffix.lower()
     if content_type == "paper":
+        if not path or suffix != ".pdf":
+            why = "no_file_path" if not path else "not_pdf_path"
+            return {}, {"tags": why, "category": why}
         stamped = pdf_register_meta(path, "paper")
+    elif content_type in _PROSE_CONTENT_TYPES and suffix == ".pdf":
+        return {}, {"tags": "ambiguous_indexer", "category": "ambiguous_indexer"}
     elif content_type in ("code", "prose", "rdr", "pdf"):
         stamped = document_register_meta(content_type, path)
     else:
@@ -177,7 +191,7 @@ def backfill_tags_category(
         return {}, {"tags": why, "category": why}
     values = {k: stamped[k] for k in ("tags", "category") if k in stamped}
     residue: dict[str, str] = {}
-    if content_type in _PROSE_CONTENT_TYPES and Path(path).suffix.lower() not in _MARKDOWN_SUFFIXES:
+    if content_type in _PROSE_CONTENT_TYPES and suffix not in _MARKDOWN_SUFFIXES:
         values.pop("tags", None)  # the repo pass would say the extension, the markdown hook "markdown"
         residue["tags"] = "ambiguous_indexer" if path else "no_file_path"
     elif "tags" not in values:

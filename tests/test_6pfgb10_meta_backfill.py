@@ -440,8 +440,8 @@ def test_no_content_type_is_left_out_of_the_row_sourced_keys(ctype):
     fmt = "pdf" if ctype in ("pdf", "paper") else "markdown"   # nexus-6pfgb.23: the extension is read first
     derived = {
         "prose": {"tags": ["markdown"], "category": "prose"}, "rdr": {"tags": ["markdown"], "category": "prose"},
-        "pdf": {"tags": ["pdf"], "category": "prose"}, "paper": {"tags": ["pdf"], "category": "paper"},
-        "code": {"tags": ["md"], "category": "code"}, "markdown": {},   # "markdown" is no catalog type: no rule
+        "pdf": {"tags": ["pdf"], "category": "prose"}, "paper": {},   # a paper at a .md path was not made by nx index pdf
+        "code": {"tags": ["md"], "category": "code"}, "markdown": {},   # index_markdown's fallback can register it: no rule
     }[ctype]
     assert w.updates == [{
         "tumbler": "1.9.1", "meta": {"extraction_source": "dt_content", "source_format": fmt, **derived}, "author": "Ann Lee",
@@ -465,7 +465,7 @@ def _indexed(meta, content_type, file_path, tumbler="1.4.1"):
     ("rdr", "docs/rdr/rdr-1.md", ["markdown"], "prose"),
     ("pdf", "papers/p.pdf", ["pdf"], "prose"),             # registered by the repo PDF path: prose
     ("paper", "/abs/p.pdf", ["pdf"], "paper"),             # registered by nx index pdf: paper
-    ("paper", "", ["pdf"], "paper"),                       # the pdf rule is keyed by type, not by path
+    ("paper", "/abs/P.PDF", ["pdf"], "paper"),             # the extension is read lower-cased
 ])
 def test_a_document_lacking_tags_and_category_gets_what_its_own_indexer_wrote(content_type, path, tags, category):
     plan = mb.plan_tags_category(_indexed({}, content_type, path))
@@ -487,6 +487,26 @@ def test_a_pair_with_only_one_of_the_two_keys_derivable_stamps_it_and_names_why_
     plan = mb.plan_tags_category(_indexed({}, content_type, path))
     assert plan.meta == {"category": category}, "no tags key is sent without a real value"
     assert plan.outcome == {"tags": f"residue:{tags_reason}", "category": STAMPED}
+
+
+@pytest.mark.parametrize("content_type,path,reason", [
+    # a prose or rdr entry at a .pdf path: the repo pass registers it as type pdf, so this entry was
+    # registered by nx index md / rdr or a DEVONthink import, and nx index pdf of the same file stamps
+    # paper/["pdf"]; the entry cannot say which ran, so neither key is guessed
+    ("prose", "papers/p.pdf", "ambiguous_indexer"),
+    ("rdr", "docs/rdr/p.pdf", "ambiguous_indexer"),
+    ("prose", "papers/P.PDF", "ambiguous_indexer"),
+    # a paper entry with no path is an `nx catalog backfill` placeholder (one per docs__ collection)
+    ("paper", "", "no_file_path"),
+    # a paper entry whose path is not a .pdf (a placeholder is often markdown) was not made by nx index pdf
+    ("paper", "a.md", "not_pdf_path"),
+    ("paper", "notes/a.txt", "not_pdf_path"),
+    ("paper", "Makefile", "not_pdf_path"),
+])
+def test_a_pair_whose_indexer_the_entry_cannot_name_leaves_both_keys_as_residue(content_type, path, reason):
+    plan = mb.plan_tags_category(_indexed({}, content_type, path))
+    assert plan.meta == {}, "a fill-only write is permanent: nothing is sent for a pair that was guessed"
+    assert plan.outcome == {"tags": f"residue:{reason}", "category": f"residue:{reason}"}
 
 
 @pytest.mark.parametrize("content_type,path,reason", [
@@ -539,11 +559,22 @@ def test_the_derived_keys_read_no_chunk_row_and_no_manifest():
 
 
 def test_a_note_is_never_given_derived_tags_or_category_by_its_content_type():
+    """A note carries a path-shaped file_path here on purpose: were the note taken for an indexed document its
+    path would derive ["markdown"]/prose. Its keys are counted under note.* only, no doc.* key exists, and the
+    note's own residue is what the note rules alone make of it."""
     w = _World()
-    w.entries = [_entry({"put_at": PUT}, title="n", tumbler="1.4.9", file_path="n.md")]
+    w.entries = [
+        _entry({"put_at": PUT}, title="n", tumbler="1.4.9", file_path="n.md"),   # holds its note keys
+        _entry({}, title="k", tumbler="1.4.8", file_path="k.md"),                # keyless, no row to recover from
+    ]
     rep = mb.backfill_meta(w, w, w, apply=True)
-    assert w.updates == [] and not any(k.startswith("doc.") for k in rep.keys)
-    assert "note.tags" in rep.keys and rep.keys["note.tags"].present == 1
+    assert w.updates == [], "neither a derived key nor anything else is sent for a note"
+    assert not any(k.startswith("doc.") for k in rep.keys), sorted(rep.keys)
+    for derived in ("doc.tags", "doc.category"):
+        assert rep.keys.get(derived) is None, f"{derived} examined 0: no indexed document is in this world"
+    for key in ("tags", "category", "put_at", "source_agent", "ttl_days"):
+        st = rep.keys[f"note.{key}"]
+        assert (st.examined, st.present, st.shared, st.stamped, dict(st.residue)) == (2, 1, 0, 0, {"no_row": 1}), key
 
 
 def _tags_world():

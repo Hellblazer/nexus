@@ -24,11 +24,14 @@ decides, per document, which keys the catalog may take from those rows, and noth
   extension from). ``tags`` and ``category`` (nexus-9cstf) are derived the same way, by
   :func:`~nexus.catalog.indexed_meta.backfill_tags_category`, from the content type and path through the
   register-time rules (:func:`~nexus.catalog.indexed_meta.document_register_meta`, and the type-keyed
-  :func:`~nexus.catalog.indexed_meta.pdf_register_meta`: a catalog type ``paper`` is what ``nx index pdf``
-  registers, ``pdf`` what the repo PDF path registers), each key by its own presence, with no chunk row
-  read. A key the rule cannot settle is residue with its reason: ``ambiguous_indexer`` (``tags`` of a
-  prose or rdr file that is not ``.md`` / ``.markdown``: the repo pass tags the extension, ``nx index md``
-  tags ``markdown``, and the entry cannot say which ran), ``no_extension``, ``no_file_path``, ``no_rule``.
+  :func:`~nexus.catalog.indexed_meta.pdf_register_meta`: a catalog type ``paper`` at a ``.pdf`` path is what
+  ``nx index pdf`` registers, ``pdf`` what the repo PDF path registers), each key by its own presence, with
+  no chunk row read. A key the rule cannot settle is residue with its reason: ``ambiguous_indexer`` (``tags``
+  of a prose or rdr file that is not ``.md`` / ``.markdown``: the repo pass tags the extension, ``nx index md``
+  tags ``markdown``, and the entry cannot say which ran; both keys of a prose or rdr file at a ``.pdf`` path,
+  where ``nx index pdf`` would have stamped ``paper``), ``not_pdf_path`` (both keys of a ``paper`` whose path is
+  not ``.pdf``), ``no_extension``, ``no_file_path`` (a ``paper`` with no path is an ``nx catalog backfill``
+  placeholder), ``no_rule``.
   The engine's chunk-row fallback for a ``where`` on these keys stays until the row keys retire.
   ``extraction_method``, ``quality_gate_overridden`` (only where the rows say ``True``; a
   missing key is never read as ``False``), ``extraction_source`` (only where a row carries a value: an absent key means "file" and is never stamped
