@@ -142,3 +142,32 @@ def test_no_pytest_leg_of_the_preflight_can_queue_behind_another_run(tmp_path: P
     assert len(pytest_calls) == 5, calls
     for sub, wait, args in pytest_calls:
         assert sub == "none" or wait == "0", f"a preflight pytest leg can queue on the suite lease: {args}"
+
+
+# ── nexus-nuyju: the lint leg fails on pytest's verdict, not only on its passed count ──
+
+
+def _lint_leg(tmp_path: Path, summary: str, rc: int) -> subprocess.CompletedProcess:
+    """Run the preflight's lint_leg_check against a stub ``uv`` that prints *summary* and exits *rc*."""
+    stub = tmp_path / "bin" / "uv"
+    stub.parent.mkdir(exist_ok=True)
+    stub.write_text(f"#!/bin/sh\nprintf '%s\\n' '{summary}'\nexit {rc}\n", encoding="utf-8")
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub.parent}{os.pathsep}{os.environ['PATH']}", "RELEASE_PREFLIGHT_SOURCE_ONLY": "1"}
+    return subprocess.run(["bash", "-c", '. "$1"; lint_leg_check', "bash", str(SCRIPT)],
+                          capture_output=True, text=True, env=env, check=False)
+
+
+@pytest.mark.parametrize(
+    ("summary", "rc", "ok"),
+    [
+        ("2294 passed, 4 skipped in 801.63s", 0, True),
+        ("1 failed, 2294 passed, 4 skipped in 801.63s", 1, False),  # the 2026-11-01 7.93.0 preflight shape
+        ("2294 passed, 1 error in 801.63s", 1, False),
+        ("120 passed in 3.0s", 0, False),  # under the 400 floor: a mass-skip
+    ],
+    ids=["green", "one-failed", "one-error", "below-floor"],
+)
+def test_the_lint_leg_fails_on_a_red_pytest_whatever_it_passed(tmp_path: Path, summary: str, rc: int, ok: bool) -> None:
+    proc = _lint_leg(tmp_path, summary, rc)
+    assert (proc.returncode == 0) is ok, (proc.returncode, proc.stdout, proc.stderr)

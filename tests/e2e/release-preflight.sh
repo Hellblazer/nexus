@@ -119,6 +119,30 @@ check () { # name, command...
   fi
 }
 
+# The lint leg (step 4 below). NO_COLOR is load-bearing: the floor parser anchors its summary regex at
+# end-of-line, and an ANSI reset after the duration makes it read 0
+# executed and trip on a perfectly good run.
+lint_leg_check () {
+  local out plain rc
+  # NX_TEST_T2_SUBSTRATE=none, as ci.yml's test-lint job runs it ("pure-Python AST/regex/
+  # manifest scanners with no T2 dependency"): measured 2026-10-25 under none, 2208
+  # passed and 4 skipped (none for the substrate), so no engine and no suite lease.
+  out="$(NX_TEST_T2_SUBSTRATE=none NO_COLOR=1 uv run pytest -m lint -q 2>&1)"
+  rc=$?
+  plain="$(printf '%s' "$out" | sed -e 's/\x1b\[[0-9;]*m//g')"
+  # pytest's own verdict first (nexus-nuyju): "1 failed, 2294 passed" still matches the
+  # passed-count regex below, so before this the leg passed a red lint bucket. On
+  # 2026-11-01 the 7.93.0 preflight passed this leg over a failing module-seam lint.
+  [ "$rc" -eq 0 ] || { printf '%s\n' "$plain" | tail -25; return 1; }
+  # No `| grep -q` here: that is the very pattern this leg lints for. Match
+  # against the captured variable instead, exactly as the lint's own remedy
+  # text prescribes.
+  [[ "$plain" =~ ([0-9]+)\ passed ]] || { printf '%s\n' "$plain" | tail -3; return 1; }
+  # Non-vacuity floor (nexus-wixar): a mass-skip exits 0, so read the PASSED
+  # count off the summary and fail below 400 (ci.yml's test-lint step, same floor).
+  [ "${BASH_REMATCH[1]}" -ge 400 ] || { echo "lint leg passed only ${BASH_REMATCH[1]} tests (floor 400) -- a mass-skip"; return 1; }
+}
+
 # Sourced with RELEASE_PREFLIGHT_SOURCE_ONLY=1, the script defines its helpers and
 # stops (tests/test_release_preflight_lease_detail.py drives `check` that way).
 [ "${RELEASE_PREFLIGHT_SOURCE_ONLY:-}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ] && return 0
@@ -184,24 +208,7 @@ check "mandatory-pins"            mandatory_pins_run
 #    just from new violations. ~2 min: by far the most expensive item here,
 #    and admitted anyway because the alternative is discovering it as a failed
 #    required check on the release PR.
-#    NO_COLOR is load-bearing: the floor parser anchors its summary regex at
-#    end-of-line, and an ANSI reset after the duration makes it read 0
-#    executed and trip on a perfectly good run.
-lint_leg_check () {
-  local out plain
-  # NX_TEST_T2_SUBSTRATE=none, as ci.yml's test-lint job runs it ("pure-Python AST/regex/
-  # manifest scanners with no T2 dependency"): measured 2026-10-25 under none, 2208
-  # passed and 4 skipped (none for the substrate), so no engine and no suite lease.
-  out="$(NX_TEST_T2_SUBSTRATE=none NO_COLOR=1 uv run pytest -m lint -q 2>&1)"
-  plain="$(printf '%s' "$out" | sed -e 's/\x1b\[[0-9;]*m//g')"
-  # No `| grep -q` here: that is the very pattern this leg lints for. Match
-  # against the captured variable instead, exactly as the lint's own remedy
-  # text prescribes.
-  [[ "$plain" =~ ([0-9]+)\ passed ]] || { printf '%s\n' "$plain" | tail -3; return 1; }
-  # Non-vacuity floor (nexus-wixar): a mass-skip exits 0, so read the PASSED
-  # count off the summary and fail below 400 (ci.yml's test-lint step, same floor).
-  [ "${BASH_REMATCH[1]}" -ge 400 ] || { echo "lint leg passed only ${BASH_REMATCH[1]} tests (floor 400) -- a mass-skip"; return 1; }
-}
+#    lint_leg_check is defined with the helpers above, so the source-only tests reach it.
 check "lint-leg+floor"            lint_leg_check
 #    The pin tests that are NOT lint-marked (engine version, release ledgers,
 #    PG bundle parity, deadline ordering).
