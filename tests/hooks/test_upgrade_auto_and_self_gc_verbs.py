@@ -51,7 +51,7 @@ from nexus._hook_runtime.entry import VERB_TABLE
 from nexus.hooks import self_gc, upgrade_auto
 from nexus.util.nx_argv import nx_argv
 from tests._module_seam import setattr_in
-from tests._platform import IS_WINDOWS, posix_only
+from tests._platform import IS_WINDOWS, posix_only, scrubbed_env
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 
@@ -589,7 +589,7 @@ def test_the_verb_dispatches_through_nx_hook_without_nx_present(verb, tmp_path):
         [sys.executable, "-c", "from nexus._hook_runtime.entry import main; main()", verb],
         capture_output=True,
         text=True, encoding=PYTHON_CHILD_ENCODING,
-        env={"PATH": str(tmp_path), "HOME": str(tmp_path)},
+        env=scrubbed_env(PATH=str(tmp_path), HOME=str(tmp_path)),
         stdin=subprocess.DEVNULL,
         timeout=60,
     )
