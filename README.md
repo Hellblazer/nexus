@@ -101,7 +101,7 @@ By default, a message that arrives while you are away — an agent's report, a p
 3. Make it stick: add `alias claude='claude --channels plugin:conexus@nexus-plugins'` to your shell's startup file.
 4. Check it worked: the startup screen shows "Channels (experimental) messages from plugin:conexus@nexus-plugins inject directly in this session · restart without --channels to stop"; `nx doctor`'s `tuples.channel_delivery` row reports the waiter's own status once it has run here (alive, last wake, messages announced and pending), or an informational "no record" line for a session whose waiter has not run yet.
 
-Without the flag, mail still arrives at your next prompt through the drain hook — degraded, not broken. Channels are a Claude Code research preview, not available on Amazon Bedrock, Google Cloud Agent Platform, or Microsoft Foundry. See [Coordination](https://hellblazer.github.io/nexus/coordination.html#l5) and [Tuple space: turning on push delivery](https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md#setup-turning-on-push-delivery) for more.
+Without the flag, mail still arrives at your next prompt through the drain hook — degraded, not broken. Channels are a Claude Code research preview, not available on Amazon Bedrock, Google Cloud Agent Platform, or Microsoft Foundry. See [Coordination](https://hellblazer.github.io/nexus/coordination.html#channel) and [Tuple space: turning on push delivery](https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md#setup-turning-on-push-delivery) for more.
 
 ## License
 
