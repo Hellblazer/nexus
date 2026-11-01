@@ -71,13 +71,45 @@ def _t2_titles(project: str) -> list[str]:
     return sorted(r["title"] for r in rows)
 
 
+class _RecordingLog:
+    """Stands in for the flush's structlog logger: records (level, event, fields).
+
+    capture_logs cannot see an info line when the app's structlog config
+    filters below warning, so the flush's logger is replaced outright."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict]] = []
+
+    def __getattr__(self, level: str):
+        return lambda event, **kw: self.events.append((level, event, kw))
+
+    def ops(self, event: str) -> list[str]:
+        return [kw["op"] for _, e, kw in self.events if e == event]
+
+
+@pytest.fixture
+def flush_log(monkeypatch) -> _RecordingLog:
+    import structlog  # noqa: PLC0415
+
+    rec = _RecordingLog()
+    monkeypatch.setattr(structlog, "get_logger", lambda *a, **k: rec)
+    return rec
+
+
+def _released_flush_count(log: MagicMock) -> int:
+    """flushed_to_t2 from the tick's own t1_handoff_released line."""
+    lines = [c for c in log.info.call_args_list if c.args and c.args[0] == "t1_handoff_released"]
+    assert len(lines) == 1, log.info.call_args_list
+    return lines[0].kwargs["flushed_to_t2"]
+
+
 @pytest.mark.asyncio
 async def test_a_handoff_flushes_the_old_sessions_flagged_rows_to_t2(handoff) -> None:
     old_id, new_id = handoff
     project = f"nexus_test_mtheb1_{uuid.uuid4().hex[:6]}"
     t1, _ = mcp_infra.get_t1()
     t1.put("kept across the clear", persist=True, flush_project=project, flush_title="kept")
-    t1.put("an ordinary scratch note")  # unflagged: stays behind with the old id
+    stranded_id = t1.put("an ordinary scratch note")  # unflagged: stays behind with the old id
 
     log = MagicMock()
     await core._t1_handoff_tick(_MCP_PID, log)
@@ -87,6 +119,12 @@ async def test_a_handoff_flushes_the_old_sessions_flagged_rows_to_t2(handoff) ->
     got = mcp_infra.t2_index_write(lambda db: db.memory.get(project=project, title="kept"))
     assert got is not None and got["content"] == "kept across the clear"
     assert _t2_titles(project) == ["kept"]  # only the flagged row crossed
+    # JDR-001: the old scope keeps ALL its rows, the flagged one and the unflagged
+    # one. `t1` is the store bound to the old session id before the tick.
+    assert stranded_id in {e["id"] for e in t1.list_entries()}
+    assert {e["content"] for e in t1.list_entries()} == {
+        "kept across the clear", "an ordinary scratch note",
+    }
 
 
 @pytest.mark.asyncio
@@ -98,7 +136,11 @@ async def test_a_row_flushed_by_the_handoff_and_again_is_one_t2_entry(handoff) -
     t1.put("flagged with the default destination", persist=True)  # scratch_sessions / <sid>_<id>
 
     assert core._flush_flagged_t1_entries(old_id) == 1  # the exit-path flush, first
-    await core._t1_handoff_tick(_MCP_PID, MagicMock())  # the handoff flush, second
+    log = MagicMock()
+    await core._t1_handoff_tick(_MCP_PID, log)  # the handoff flush, second
+    # The tick's own flush ran (it is the second write of the row); without
+    # this the exit flush alone yields one entry and the test pins nothing.
+    assert _released_flush_count(log) == 1
 
     titles = [t for t in _t2_titles("scratch_sessions") if t.startswith(f"{old_id}_")]
     assert len(titles) == 1, titles
@@ -120,6 +162,68 @@ async def test_a_failing_flush_never_blocks_the_handoff(handoff, monkeypatch) ->
 
     assert attempts == ["get_t1"]  # the flush was tried, once
     assert os.environ["NX_T1_SESSION_ID"] == new_id
+
+
+@pytest.mark.asyncio
+async def test_a_flush_that_raises_outside_the_worker_still_completes_the_handoff(
+    handoff, monkeypatch,
+) -> None:
+    """A raise from the to_thread call itself (Thread.start() failing, say) is
+    outside the worker's own try; the claimed marker must still be consumed."""
+    _, new_id = handoff
+
+    def _raises(session_id, *, op="t1_teardown_flush"):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(core, "_flush_flagged_t1_entries", _raises)
+    log = MagicMock()
+
+    await core._t1_handoff_tick(_MCP_PID, log)
+
+    assert os.environ["NX_T1_SESSION_ID"] == new_id  # the handoff completed
+    assert _released_flush_count(log) == 0
+    assert [c.args[0] for c in log.warning.call_args_list if c.args] == ["t1_handoff_flush_raised"]
+    from nexus.daemon.t1_handoff import claim_handoff_marker  # noqa: PLC0415
+    assert claim_handoff_marker(_MCP_PID, config_dir=nexus_config_dir()) is None  # consumed, not stranded
+
+
+def test_a_handoff_flush_failure_is_logged_with_its_op(handoff, monkeypatch, flush_log) -> None:
+    """A handoff flush is told apart from an exit flush by `op` in every event."""
+    old_id, _ = handoff
+    t1, _ = mcp_infra.get_t1()
+    t1.put("flagged", persist=True)
+
+    assert core._flush_flagged_t1_entries(old_id, op="t1_handoff_flush") == 1
+    assert flush_log.ops("t1_teardown_flush_complete") == ["t1_handoff_flush"]
+
+    def _broken():
+        raise RuntimeError("T1 unreachable")
+
+    monkeypatch.setattr(mcp_infra, "get_t1", _broken)
+    assert core._flush_flagged_t1_entries(old_id, op="t1_handoff_flush") == 0
+    assert flush_log.ops("t1_teardown_flush_failed") == ["t1_handoff_flush"]
+
+    core._flush_flagged_t1_entries(old_id)  # the default op is the exit flush's
+    assert flush_log.ops("t1_teardown_flush_failed") == ["t1_handoff_flush", "t1_teardown_flush"]
+
+
+def test_an_incomplete_handoff_flush_is_logged_with_its_op(handoff, monkeypatch, flush_log) -> None:
+    import threading  # noqa: PLC0415
+
+    old_id, _ = handoff
+    release = threading.Event()
+
+    def _hangs():
+        release.wait(5)
+        raise RuntimeError("released")
+
+    monkeypatch.setattr(mcp_infra, "get_t1", _hangs)
+    monkeypatch.setattr(core, "_TEARDOWN_FLUSH_TIMEOUT_S", 0.05)
+    try:
+        assert core._flush_flagged_t1_entries(old_id, op="t1_handoff_flush") == 0
+        assert flush_log.ops("t1_teardown_flush_incomplete") == ["t1_handoff_flush"]
+    finally:
+        release.set()
 
 
 @pytest.mark.asyncio
@@ -171,3 +275,22 @@ def test_scratch_manage_flag_takes_the_prefix_that_scratch_list_prints() -> None
     assert out.startswith("Flagged:"), out
     t1, _ = mcp_infra.get_t1()
     assert doc_id in {e["id"] for e in t1.flagged_entries()}
+
+
+def test_scratch_manage_flag_refuses_an_ambiguous_prefix_and_flags_nothing() -> None:
+    # Ids are hex uuids: 17 rows put two on the same first character.
+    ids = [
+        core.scratch(action="put", content=f"row {i}").split("Stored:")[1].strip()
+        for i in range(17)
+    ]
+    by_first: dict[str, list[str]] = {}
+    for doc_id in ids:
+        by_first.setdefault(doc_id[0], []).append(doc_id)
+    shared = next(c for c, v in by_first.items() if len(v) > 1)
+
+    out = core.scratch_manage(action="flag", entry_id=shared)
+
+    assert out.startswith("Error: ambiguous prefix"), out
+    t1, _ = mcp_infra.get_t1()
+    assert not ({e["id"] for e in t1.flagged_entries()} & set(ids))
+

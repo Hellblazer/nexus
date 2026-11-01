@@ -1306,11 +1306,12 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     on a borrow, exactly like the original mint branch) — take ownership
     and start a fresh refresh loop for the new session id.
 
-    Deliberately does NOT touch the old session's T1 rows or explicitly
-    revoke its token: they strand under the old session id and age out
-    via the T1 TTL sweep (design decision, nexus-d76vc bead body) — migrating
-    would silently merge two conversations the user explicitly separated
-    with `/clear`.
+    Deliberately does NOT migrate or delete the old session's T1 rows or
+    explicitly revoke its token: they strand under the old session id and age
+    out via the T1 TTL sweep (design decision, nexus-d76vc bead body) —
+    migrating would silently merge two conversations the user explicitly
+    separated with `/clear`. The one thing it does with them is copy the rows
+    flagged for T2 into T2 (nexus-mtheb.1); the rows themselves stay.
 
     Consecutive-failure backoff (nexus-abyi9, conexus-7hx5): a mint
     failure is NOT retried on the very next 5s tick unconditionally
@@ -1560,9 +1561,17 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # flush, and run off the event loop because it joins a worker thread.
     flushed = 0
     if old_session_id is not None:
-        flushed = await asyncio.to_thread(
-            _flush_flagged_t1_entries, old_session_id, op="t1_handoff_flush",
-        )
+        # The function never raises from its worker, but Thread.start() and
+        # the structlog import sit outside the worker's own try, and the marker
+        # is claimed and not yet consumed here: a raise would lose the handoff.
+        try:
+            flushed = await asyncio.to_thread(
+                _flush_flagged_t1_entries, old_session_id, op="t1_handoff_flush",
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed flush must never strand the handoff; surfaced via log.warning
+            log.warning(
+                "t1_handoff_flush_raised", session_id=old_session_id, error=str(exc),
+            )
 
     # Stop refreshing the OLD lease BEFORE adopting the new identity, so
     # the cancelled task can never race a re-mint against the swap below
@@ -2556,7 +2565,7 @@ def _flush_flagged_t1_entries(session_id: str, *, op: str = "t1_teardown_flush")
                 return len(entries)
 
             outcome["flushed"] = t2_index_write(_put_all, op=op)
-            _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=outcome["flushed"])
+            _log.info("t1_teardown_flush_complete", session_id=session_id, op=op, flushed=outcome["flushed"])
         except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
             outcome["error"] = str(exc)
             # Logged here, not by the caller, so an outcome that arrives after
@@ -2565,7 +2574,7 @@ def _flush_flagged_t1_entries(session_id: str, *, op: str = "t1_teardown_flush")
             # SIGTERM path does not, since _sigterm_handler calls os._exit right
             # after the teardown and that kills this thread (review of
             # a956bb57f; critique of 822d9dcec).
-            _log.warning("t1_teardown_flush_failed", session_id=session_id, error=str(exc))
+            _log.warning("t1_teardown_flush_failed", session_id=session_id, op=op, error=str(exc))
 
     worker = threading.Thread(target=_work, name="t1-teardown-flush", daemon=True)
     worker.start()
@@ -2574,7 +2583,7 @@ def _flush_flagged_t1_entries(session_id: str, *, op: str = "t1_teardown_flush")
         return outcome["flushed"]
     if "error" not in outcome:
         _log.warning(
-            "t1_teardown_flush_incomplete", session_id=session_id,
+            "t1_teardown_flush_incomplete", session_id=session_id, op=op,
             pending=outcome.get("pending"), timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
         )
     return 0
