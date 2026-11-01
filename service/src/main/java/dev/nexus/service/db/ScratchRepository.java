@@ -4,6 +4,7 @@ import dev.nexus.service.jooq.t1.tables.Scratch;
 import dev.nexus.service.jooq.t1.tables.records.ScratchRecord;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -274,23 +275,29 @@ public final class ScratchRepository {
      * first implementation keyed on each row's own put time, so a live session lost every row
      * 24 h after that row was written. A session's last activity is the newest of its rows' put
      * time ({@code ts}) and last read ({@code last_accessed}, stamped by {@link #get} and
-     * {@link #search}; {@link #listEntries} does not stamp it). The condition selects a row when
-     * its own {@code ts} is before the cutoff AND no row of its (tenant, session) was put or read
-     * at or after the cutoff. The first conjunct is implied for every row of an idle session
-     * (each row's {@code ts} is at most the session's newest touch) and is what lets the planner
-     * start from {@code idx_scratch_ts}; the NOT EXISTS probes {@code idx_scratch_tenant_session}
-     * (a session holds a handful of rows). No new index is needed.
+     * {@link #search}; {@link #listEntries} does not stamp it). A row is selected when its
+     * (tenant, session) is in the set of sessions whose newest {@code ts} and newest
+     * {@code last_accessed} are both before the cutoff (a never-read session has a NULL newest
+     * {@code last_accessed}, which counts as idle).
      *
-     * <p>A row whose own {@code last_accessed} is past the cutoff finds itself in the NOT EXISTS
-     * and survives with its session, which is the intent: a read keeps the session alive.
+     * <p>Why GROUP BY / HAVING and not a per-row NOT EXISTS (nexus-mtheb.6). The first form of this
+     * condition was {@code ts < cutoff AND NOT EXISTS (a row of the same session with ts >= cutoff OR
+     * last_accessed >= cutoff)}. {@code last_accessed} has no index, and with statistics the planner
+     * made it a Hash Anti Join (a few ms on 100k rows), but a table autovacuum had not analyzed yet got
+     * a Nested Loop Anti Join: one index probe per old row, each reading the whole session, so a session
+     * of k rows cost k*k row visits (measured: 270k buffers for 10k rows, 100 ms, against 405 for the
+     * hash plan). The aggregate subquery is uncorrelated, so the planner cannot turn it into a
+     * per-row probe: the worst plan is one pass over the table plus one probe per idle session.
+     * No index is needed.
      */
-    private static Condition idleSessionRows(OffsetDateTime cutoff) {
-        Scratch newer = SCRATCH.as("newer");
-        return SCRATCH.TS.lt(cutoff).and(notExists(
-            selectOne().from(newer)
-                .where(newer.TENANT_ID.eq(SCRATCH.TENANT_ID))
-                .and(newer.SESSION_ID.eq(SCRATCH.SESSION_ID))
-                .and(newer.TS.ge(cutoff).or(newer.LAST_ACCESSED.ge(cutoff)))));
+    public static Condition idleSessionRows(OffsetDateTime cutoff) {
+        Scratch s = SCRATCH.as("s");
+        Field<OffsetDateTime> newestRead = max(s.LAST_ACCESSED);
+        return row(SCRATCH.TENANT_ID, SCRATCH.SESSION_ID).in(
+            select(s.TENANT_ID, s.SESSION_ID)
+                .from(s)
+                .groupBy(s.TENANT_ID, s.SESSION_ID)
+                .having(max(s.TS).lt(cutoff).and(newestRead.isNull().or(newestRead.lt(cutoff)))));
     }
 
     /**

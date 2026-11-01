@@ -3,6 +3,7 @@ package dev.nexus.service.db;
 import dev.nexus.service.jooq.nexus.tables.records.FrecencyRecord;
 import dev.nexus.service.jooq.nexus.tables.records.RelevanceLogRecord;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -855,6 +856,40 @@ public final class TelemetryRepository {
 
     // ── agent_dispatches (nexus-mtheb.4) ───────────────────────────────────────
 
+    /** How far ahead of the engine clock a dispatch ts may be before it is treated as clock skew. */
+    static final java.time.Duration AGENT_DISPATCH_MAX_FUTURE_SKEW = java.time.Duration.ofMinutes(5);
+
+    /**
+     * The ts to store for a dispatch record (nexus-mtheb.7). Two failure modes of the lenient
+     * {@link #parseTs} are closed here, both made worse by the upsert's {@code GREATEST(ts)}, which keeps
+     * the later of two stops:
+     * <ul>
+     *   <li>a malformed ts used to become {@code now()} and so moved the stored time forward on a
+     *       record that carried no usable time; it is now an {@link IllegalArgumentException} (a 400
+     *       naming {@code ts});</li>
+     *   <li>a ts more than {@link #AGENT_DISPATCH_MAX_FUTURE_SKEW} ahead of {@code now} (a skewed client
+     *       clock, a wrong unit) would win every later {@code GREATEST} and pin the row for ever; it is
+     *       replaced by {@code now}. Ordinary skew inside the window is kept as given.</li>
+     * </ul>
+     * Null or blank means absent and is {@code now}. Package-private so the boundary is testable with a
+     * fixed clock.
+     */
+    static OffsetDateTime agentDispatchTs(String raw, OffsetDateTime now) {
+        if (raw == null || raw.isBlank()) return now;
+        OffsetDateTime ts;
+        try {
+            ts = OffsetDateTime.parse(raw.endsWith("Z") ? raw.replace("Z", "+00:00") : raw);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(
+                "Field 'ts' is not a valid ISO-8601 timestamp: \"" + raw + "\"", e);
+        }
+        if (ts.isAfter(now.plus(AGENT_DISPATCH_MAX_FUTURE_SKEW))) {
+            log.warn("event=agent_dispatch_ts_clamped raw=\"{}\" now={}", raw, now);
+            return now;
+        }
+        return ts;
+    }
+
     /**
      * Record one agent dispatch with its T1 put count: one row per
      * {@code (tenant, session_id, agent_id)}, upserted.
@@ -865,7 +900,11 @@ public final class TelemetryRepository {
      * out-of-order record cannot lower what was already counted. A null {@code agentType} keeps the type
      * already stored.
      *
-     * @param tsIso ISO-8601 time of the stop; null/blank means now (lenient {@link #parseTs}, the live-write rule)
+     * @param tsIso ISO-8601 time of the stop (an offset or {@code Z}); null/blank means now. A non-blank
+     *              value that does not parse throws {@link IllegalArgumentException} (the handler answers
+     *              400 naming the field), and one more than {@link #AGENT_DISPATCH_MAX_FUTURE_SKEW} ahead
+     *              of the engine clock is stamped with the engine's now instead (nexus-mtheb.7; see
+     *              {@link #agentDispatchTs})
      */
     public void recordAgentDispatch(String tenant,
                                     String sessionId,
@@ -873,7 +912,7 @@ public final class TelemetryRepository {
                                     String agentType,
                                     String tsIso,
                                     int t1Puts) {
-        OffsetDateTime ts = parseTs(tsIso);
+        OffsetDateTime ts = agentDispatchTs(tsIso, OffsetDateTime.now(ZoneOffset.UTC));
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(AGENT_DISPATCHES)
                 .set(AGENT_DISPATCHES.TENANT_ID, tenant)
@@ -900,7 +939,9 @@ public final class TelemetryRepository {
      * {@code limit}): {@code {rows: [{session_id, agent_id, agent_type, ts, t1_puts}], total,
      * summary: {dispatches, no_t1_put, t1_puts}}}. {@code no_t1_put} counts the dispatches whose
      * count is zero, the figure the T1 write-back metric is about. NULL {@code agent_type} crosses the
-     * wire as JSON null.
+     * wire as JSON null. Rows and summary come from ONE statement, so they describe the same snapshot:
+     * with a limit at least {@code total} the rows are exactly the {@code total} dispatches the summary
+     * counts, whatever is recorded while the call runs (nexus-mtheb.8).
      *
      * @param sessionId filter, or empty for none
      * @param sinceIso  {@code ts >= since} (strict {@link #parseSinceFilter}), or empty for none
@@ -923,40 +964,46 @@ public final class TelemetryRepository {
                 cond = cond.and(AGENT_DISPATCHES.TS.ge(parseSinceFilter(sinceIso)));
             }
 
-            var agg = ctx.select(
-                    count(),
-                    count().filterWhere(AGENT_DISPATCHES.T1_PUTS.eq(0)),
-                    coalesce(sum(AGENT_DISPATCHES.T1_PUTS), java.math.BigDecimal.ZERO))
-                .from(AGENT_DISPATCHES)
-                .where(cond)
-                .fetchOne();
+            // ONE statement: the summary rides on every row as window aggregates (computed over the whole
+            // filtered set before LIMIT cuts it), so the rows and the summary come from one snapshot. Two
+            // statements in a READ COMMITTED transaction see two snapshots, and a record landing between
+            // them made the rows and the total disagree (nexus-mtheb.8).
+            Field<Integer> dispatchesF = count().over();
+            Field<Integer> noPutF = count().filterWhere(AGENT_DISPATCHES.T1_PUTS.eq(0)).over();
+            Field<java.math.BigDecimal> putsF = coalesce(sum(AGENT_DISPATCHES.T1_PUTS).over(), java.math.BigDecimal.ZERO);
 
-            List<Map<String, Object>> rows = ctx.select(
+            var fetched = ctx.select(
                     AGENT_DISPATCHES.SESSION_ID,
                     AGENT_DISPATCHES.AGENT_ID,
                     AGENT_DISPATCHES.AGENT_TYPE,
                     AGENT_DISPATCHES.TS,
-                    AGENT_DISPATCHES.T1_PUTS)
+                    AGENT_DISPATCHES.T1_PUTS,
+                    dispatchesF, noPutF, putsF)
                 .from(AGENT_DISPATCHES)
                 .where(cond)
                 .orderBy(AGENT_DISPATCHES.TS.desc(), AGENT_DISPATCHES.ID.desc())
                 .limit(limit)
-                .fetch()
-                .map(r -> {
-                    Map<String, Object> m = new java.util.LinkedHashMap<>();
-                    m.put("session_id", r.value1());
-                    m.put("agent_id",   r.value2());
-                    m.put("agent_type", r.value3());
-                    m.put("ts",         utcIso(r.value4()));
-                    m.put("t1_puts",    r.value5());
-                    return m;
-                });
+                .fetch();
 
-            int dispatches = agg.value1();
+            // the same three values ride on every row; an empty result has no row and keeps the zeros
+            int dispatches = fetched.isEmpty() ? 0 : fetched.get(0).value6();
+            int noPut      = fetched.isEmpty() ? 0 : fetched.get(0).value7();
+            long puts      = fetched.isEmpty() ? 0L : fetched.get(0).value8().longValue();
+
+            List<Map<String, Object>> rows = fetched.map(r -> {
+                Map<String, Object> m = new java.util.LinkedHashMap<>();
+                m.put("session_id", r.value1());
+                m.put("agent_id",   r.value2());
+                m.put("agent_type", r.value3());
+                m.put("ts",         utcIso(r.value4()));
+                m.put("t1_puts",    r.value5());
+                return m;
+            });
+
             Map<String, Object> summary = new java.util.LinkedHashMap<>();
             summary.put("dispatches", dispatches);
-            summary.put("no_t1_put",  agg.value2());
-            summary.put("t1_puts",    agg.value3().longValue());
+            summary.put("no_t1_put",  noPut);
+            summary.put("t1_puts",    puts);
 
             Map<String, Object> out = new java.util.LinkedHashMap<>();
             out.put("rows", rows);

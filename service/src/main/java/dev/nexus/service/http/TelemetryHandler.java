@@ -391,7 +391,9 @@ public final class TelemetryHandler implements HttpHandler {
     /**
      * POST /v1/telemetry/agent_dispatches/record: one agent dispatch and the number of T1 puts it made.
      * Body: {@code session_id}, {@code agent_id}, {@code t1_puts} (required, a whole number >= 0);
-     * {@code agent_type}, {@code ts} (optional; a blank {@code agent_type} counts as absent). The SubagentStop
+     * {@code agent_type}, {@code ts} (optional; a blank {@code agent_type} or {@code ts} counts as absent). A
+     * {@code ts} that is not ISO-8601 with an offset is a 400 naming the field, and one more than five
+     * minutes ahead of the engine clock is stamped with the engine's now (nexus-mtheb.7). The SubagentStop
      * hook is the caller. Idempotent per (session, agent): a repeat updates the row and never lowers the count.
      */
     private void handleAgentDispatchRecord(HttpExchange ex, String tenant, String method) throws IOException {

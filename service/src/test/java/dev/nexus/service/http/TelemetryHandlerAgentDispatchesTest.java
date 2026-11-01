@@ -169,6 +169,81 @@ class TelemetryHandlerAgentDispatchesTest {
         assertThat(ids(list(TENANT, "session_id=" + sid + "&agent_type=developer"))).containsExactly("b-1");
     }
 
+    // ── ts: malformed is a 400, far-future is clamped (nexus-mtheb.7) ────────
+
+    @Test
+    void aMalformedTsIsA400NamingTheFieldAndWritesNothing() throws Exception {
+        String sid = sid("badts");
+        // not ISO, a bad calendar value, a bare date, a naive datetime (no offset), a JSON number
+        for (String bad : List.of("\"yesterday\"", "\"2026-13-45T00:00:00Z\"", "\"2026-11-01\"",
+                "\"2026-11-01T12:00:00\"", "1730000000")) {
+            Reply r = post("/agent_dispatches/record",
+                "{\"session_id\":\"" + sid + "\",\"agent_id\":\"a\",\"t1_puts\":1,\"ts\":" + bad + "}", TENANT);
+            assertThat(r.status).as("ts=%s: %s", bad, r.body).isEqualTo(400);
+            assertThat(r.body).as("the 400 names the field").contains("Field 'ts'");
+        }
+        assertThat(list(TENANT, "session_id=" + sid).rows).as("a rejected ts writes nothing").isEmpty();
+    }
+
+    @Test
+    void aMalformedTsOnARepeatNeverMovesTheStoredTimeOrCount() throws Exception {
+        // The old behaviour stamped now() for an unparseable ts, and GREATEST(ts) then moved the stored
+        // time forward on a record that carried no usable time at all.
+        String sid = sid("badts-repeat");
+        assertThat(record(TENANT, sid, "r-1", "developer", 1, "2026-01-01T00:00:00Z").status).isEqualTo(200);
+        Reply bad = record(TENANT, sid, "r-1", "developer", 9, "not-a-time");
+        assertThat(bad.status).isEqualTo(400);
+        Map<String, Object> row = list(TENANT, "session_id=" + sid).rows.get(0);
+        assertThat((String) row.get("ts")).startsWith("2026-01-01T00:00:00");
+        assertThat(((Number) row.get("t1_puts")).intValue()).isEqualTo(1);
+    }
+
+    @Test
+    void aBlankTsIsAbsentNotMalformed() throws Exception {
+        String sid = sid("blankts");
+        Reply r = post("/agent_dispatches/record",
+            "{\"session_id\":\"" + sid + "\",\"agent_id\":\"a\",\"t1_puts\":1,\"ts\":\"  \"}", TENANT);
+        assertThat(r.status).as(r.body).isEqualTo(200);
+        assertThat(list(TENANT, "session_id=" + sid).rows.get(0).get("ts")).isNotNull();
+    }
+
+    @Test
+    void aTsMoreThanFiveMinutesAheadIsClampedToNowSoItCannotPinTheRow() throws Exception {
+        String sid = sid("future");
+        java.time.OffsetDateTime before = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC);
+        // a day ahead, and an offset form of ten years ahead: both are skew, not time
+        assertThat(record(TENANT, sid, "fut-1", "developer", 1, before.plusDays(1).toString()).status).isEqualTo(200);
+        assertThat(record(TENANT, sid, "fut-2", "developer", 1,
+            before.plusYears(10).withOffsetSameInstant(java.time.ZoneOffset.ofHours(5)).toString()).status).isEqualTo(200);
+        java.time.OffsetDateTime after = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC);
+
+        for (Map<String, Object> row : list(TENANT, "session_id=" + sid).rows) {
+            java.time.OffsetDateTime stored = java.time.OffsetDateTime.parse((String) row.get("ts"));
+            assertThat(stored).as("%s is stamped when it arrived, not with the skewed clock", row.get("agent_id"))
+                .isAfterOrEqualTo(before.minusSeconds(1)).isBeforeOrEqualTo(after.plusSeconds(1));
+        }
+
+        // GREATEST(ts) keeps the later of two stops. Unclamped, the far-future time would win for ever.
+        assertThat(record(TENANT, sid, "fut-1", "developer", 2, null).status).isEqualTo(200);
+        Map<String, Object> row = list(TENANT, "session_id=" + sid + "&agent_type=developer").rows.stream()
+            .filter(m -> "fut-1".equals(m.get("agent_id"))).findFirst().orElseThrow();
+        assertThat(java.time.OffsetDateTime.parse((String) row.get("ts")))
+            .as("a later honest stop moves the time forward from now, not from a day ahead")
+            .isBeforeOrEqualTo(java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).plusSeconds(1));
+        assertThat(((Number) row.get("t1_puts")).intValue()).isEqualTo(2);
+    }
+
+    @Test
+    void aTsWithinFiveMinutesAheadIsKeptAsGiven() throws Exception {
+        String sid = sid("skew-ok");
+        java.time.OffsetDateTime ahead = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC)
+            .plusMinutes(2).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        assertThat(record(TENANT, sid, "ok-1", "developer", 1, ahead.toString()).status).isEqualTo(200);
+        java.time.OffsetDateTime stored = java.time.OffsetDateTime.parse(
+            (String) list(TENANT, "session_id=" + sid).rows.get(0).get("ts"));
+        assertThat(stored.toInstant()).as("ordinary clock skew is not touched").isEqualTo(ahead.toInstant());
+    }
+
     // ── filters, caps, tenants ───────────────────────────────────────────────
 
     @Test
@@ -210,6 +285,55 @@ class TelemetryHandlerAgentDispatchesTest {
         assertThat(ids(list(OTHER, "session_id=" + sid))).containsExactly("t-theirs");
     }
 
+    // ── one snapshot for rows and summary (nexus-mtheb.8) ────────────────────
+
+    @Test
+    void aRecordLandingDuringTheListCannotMakeTheSummaryDisagreeWithTheRows() throws Exception {
+        String sid = sid("snapshot");
+        for (int i = 0; i < 5; i++) {
+            record(TENANT, sid, "snap-" + i, "developer", i, "2026-11-01T00:0" + i + ":00Z");
+        }
+        // A dispatch is recorded on another connection the moment the list's FIRST statement against
+        // agent_dispatches has run. With rows and summary in two statements the second one sees it
+        // (rows 6, total 5); in one statement there is nothing after the first to see it.
+        TelemetryRepository direct = new TelemetryRepository(new TenantScope(svcDs));
+        java.util.concurrent.atomic.AtomicInteger fired = new java.util.concurrent.atomic.AtomicInteger();
+        javax.sql.DataSource racing = afterFirstDispatchSelect(svcDs, () -> {
+            fired.incrementAndGet();
+            direct.recordAgentDispatch(TENANT, sid, "snap-late", "developer", null, 7);
+        });
+
+        Map<String, Object> out = new TelemetryRepository(new TenantScope(racing))
+            .listAgentDispatches(TENANT, sid, "", "", 1000);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("rows");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> summary = (Map<String, Object>) out.get("summary");
+        assertThat(fired.get()).as("the concurrent record really ran during the call").isEqualTo(1);
+        assertThat(rows).as("an unlimited listing and its total are one snapshot").hasSize(((Number) out.get("total")).intValue());
+        assertThat(summary.get("dispatches")).isEqualTo(rows.size());
+        assertThat(summary.get("no_t1_put")).isEqualTo((int) rows.stream()
+            .filter(m -> ((Number) m.get("t1_puts")).intValue() == 0).count());
+        assertThat(((Number) summary.get("t1_puts")).longValue()).isEqualTo(rows.stream()
+            .mapToLong(m -> ((Number) m.get("t1_puts")).longValue()).sum());
+
+        // the next call sees the late record: it was written, just not part of that snapshot
+        Listing next = list(TENANT, "session_id=" + sid);
+        assertThat(next.rows).hasSize(rows.size() + 1);
+        assertThat(next.total).isEqualTo(rows.size() + 1);
+    }
+
+    @Test
+    void anEmptyFilterGivesNoRowsAndAZeroSummary() throws Exception {
+        Listing l = list(TENANT, "session_id=" + sid("nothing-here"));
+        assertThat(l.rows).isEmpty();
+        assertThat(l.total).isZero();
+        assertThat(l.summary.get("dispatches")).isEqualTo(0);
+        assertThat(l.summary.get("no_t1_put")).isEqualTo(0);
+        assertThat(((Number) l.summary.get("t1_puts")).intValue()).isZero();
+    }
+
     // ── validation ───────────────────────────────────────────────────────────
 
     @Test
@@ -239,6 +363,44 @@ class TelemetryHandlerAgentDispatchesTest {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * A DataSource whose connections run {@code hook} once, right after the first SELECT against
+     * agent_dispatches has executed on them (any PreparedStatement execute*). Lets a test land a write
+     * between the statements of one repository call without sleeping or racing threads.
+     */
+    private static javax.sql.DataSource afterFirstDispatchSelect(javax.sql.DataSource real, Runnable hook) {
+        java.util.concurrent.atomic.AtomicBoolean done = new java.util.concurrent.atomic.AtomicBoolean();
+        ClassLoader cl = TelemetryHandlerAgentDispatchesTest.class.getClassLoader();
+        return (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(cl,
+            new Class<?>[] {javax.sql.DataSource.class}, (p, m, a) -> {
+                Object r = invokeUnwrapped(real, m, a);
+                if (!m.getName().equals("getConnection")) return r;
+                Connection conn = (Connection) r;
+                return java.lang.reflect.Proxy.newProxyInstance(cl, new Class<?>[] {Connection.class}, (cp, cm, ca) -> {
+                    Object cr = invokeUnwrapped(conn, cm, ca);
+                    if (!cm.getName().equals("prepareStatement")) return cr;
+                    String sql = String.valueOf(ca[0]).toLowerCase(java.util.Locale.ROOT);
+                    boolean dispatchSelect = sql.startsWith("select") && sql.contains("agent_dispatches");
+                    return java.lang.reflect.Proxy.newProxyInstance(cl,
+                        new Class<?>[] {java.sql.PreparedStatement.class}, (sp, sm, sa) -> {
+                            Object sr = invokeUnwrapped(cr, sm, sa);
+                            if (dispatchSelect && sm.getName().startsWith("execute") && done.compareAndSet(false, true)) {
+                                hook.run();
+                            }
+                            return sr;
+                        });
+                });
+            });
+    }
+
+    private static Object invokeUnwrapped(Object target, java.lang.reflect.Method m, Object[] args) throws Throwable {
+        try {
+            return m.invoke(target, args);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw e.getCause();
+        }
+    }
 
     private static String sid(String tag) {
         return "disp-" + tag + "-" + System.nanoTime();
