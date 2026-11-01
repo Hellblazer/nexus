@@ -72,6 +72,10 @@ def _isolate_handoff_globals(monkeypatch):
     # itself dropped. Inert here by default; the re-key test below replaces
     # it with a recorder of its own.
     monkeypatch.setattr(core, "_start_channel_waiter", lambda: None)
+    # nexus-mtheb.1: the tick flushes the old session's flagged rows to T2 over
+    # the network; these tests are about the id swap, and
+    # tests/mcp/test_t1_handoff_flush.py drives the flush against the engine.
+    monkeypatch.setattr(core, "_flush_flagged_t1_entries", lambda sid, **kw: 0)
     yield
     task = core._T1_SESSION_REFRESH_TASK
     if task is not None:

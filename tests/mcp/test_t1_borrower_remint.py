@@ -554,6 +554,10 @@ def handoff(monkeypatch):
     monkeypatch.setattr(core, "_T1_SERVER_START_TIME", 0.0)
     monkeypatch.setattr(core, "_DEFERRED_T1_MINT", {})
     monkeypatch.setattr(core, "_start_channel_waiter", lambda: None)
+    # nexus-mtheb.1: the tick flushes the old session's flagged rows to T2; these
+    # tests are about leases and ownership, and tests/mcp/test_t1_handoff_flush.py
+    # drives the flush against the engine.
+    monkeypatch.setattr(core, "_flush_flagged_t1_entries", lambda sid, **kw: 0)
     monkeypatch.setattr(core, "_T1_HANDOFF_CONSECUTIVE_FAILURES", 0)
     monkeypatch.setattr(core, "_T1_HANDOFF_BACKOFF_SESSION_ID", None)
     monkeypatch.setattr(core, "_T1_HANDOFF_NEXT_ATTEMPT_AT", 0.0)

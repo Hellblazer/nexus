@@ -131,7 +131,7 @@ lease discovery) retired with the chroma substrate. The in-process
 with `T1IsolatedLegRetiredError`. A process outside service-mode routing
 raises `T1ServerNotFoundError` rather than inventing a private store.
 
-Everything is wiped at session end: the `SessionEnd` hook flushes flagged entries to T2 and the session's scratch rows expire against the service (backstopped by the 24h TTL sweep). Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
+Everything is wiped at session end: the `SessionEnd` hook flushes flagged entries to T2 and the session's scratch rows expire against the service (backstopped by the 24h TTL sweep). Use `nx scratch flag` (or `nx scratch put --persist`, or `scratch` with `persist=true` over MCP) to mark items for auto-promotion to T2. Flagged entries are copied to T2 when the session closes and also when the MCP server moves to a new session id (`/clear`, `/resume` into another id, `/branch`); the old id's rows themselves still strand (JDR-001), so a flagged row is the one thing that crosses.
 
 **Access tracking (RDR-057)**: Every `T1.get()` and `T1.search()` hit increments `access_count` and updates `last_accessed` on the returned entries (stored as row metadata in the service's Postgres backing store, schemaless-shaped, no client migration). The counts feed the progressive formalization tier model but do not drive expiry at T1 (T1 is wiped at session end).
 

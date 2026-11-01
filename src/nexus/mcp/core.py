@@ -1545,6 +1545,25 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     _T1_HANDOFF_NEXT_ATTEMPT_AT = 0.0
     _T1_HANDOFF_GIVE_UP_LOGGED = False
 
+    # nexus-mtheb.1: the old session's flagged rows go to T2 NOW. The rows
+    # themselves strand under the old id on purpose (JDR-001), but a row the
+    # user flagged for T2 was promised to survive the session, and this tick
+    # is the only code that sees the old scope move: the SessionEnd hook for
+    # a /clear races the lease clear below and skips on lease divergence, and
+    # the owner-exit flush runs under the NEW id by then. Placed after the
+    # successful re-lease so a mint that is retried on a backoff does not
+    # repeat it, and before the role swap and the env swap so the T1
+    # singleton is still bound to the old scope and its lease and token are
+    # still published. Idempotent (T2 puts upsert on (project, title)), so the
+    # exit flush of a later session over the same row is a no-op rewrite.
+    # Never raises and never blocks the handoff: bounded like the teardown
+    # flush, and run off the event loop because it joins a worker thread.
+    flushed = 0
+    if old_session_id is not None:
+        flushed = await asyncio.to_thread(
+            _flush_flagged_t1_entries, old_session_id, op="t1_handoff_flush",
+        )
+
     # Stop refreshing the OLD lease BEFORE adopting the new identity, so
     # the cancelled task can never race a re-mint against the swap below
     # (mirrors the ordering `_t1_lifespan`'s own teardown already uses:
@@ -1775,6 +1794,7 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         old_session_id=old_session_id,
         new_session_id=new_session_id,
         minted_fresh=minted_fresh,
+        flushed_to_t2=flushed,
     )
 
 
@@ -2495,10 +2515,12 @@ def _t1_session_shutdown() -> None:
 _TEARDOWN_FLUSH_TIMEOUT_S: float = 5.0
 
 
-def _flush_flagged_t1_entries(session_id: str) -> int:
+def _flush_flagged_t1_entries(session_id: str, *, op: str = "t1_teardown_flush") -> int:
     """Write this session's flagged T1 scratch entries to T2; return how
     many. Never raises: a teardown step must not stop the lease clear and
-    token revoke that follow it (nexus-mgu1k).
+    token revoke that follow it (nexus-mgu1k). *op* names the caller's write
+    in the T2 write log: the teardown by default, ``t1_handoff_flush`` for the
+    session handoff (nexus-mtheb.1).
 
     Bounded as a whole: this runs inside _sigterm_handler's synchronous
     chain, and a slow or unreachable engine must not delay the lease clear
@@ -2533,7 +2555,7 @@ def _flush_flagged_t1_entries(session_id: str) -> int:
                     )
                 return len(entries)
 
-            outcome["flushed"] = t2_index_write(_put_all, op="t1_teardown_flush")
+            outcome["flushed"] = t2_index_write(_put_all, op=op)
             _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=outcome["flushed"])
         except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
             outcome["error"] = str(exc)
@@ -7565,12 +7587,18 @@ def scratch(
     agent: Annotated[str, Field(
         description="Optional subagent/role attribution for \"put\" (e.g. \"developer\"). Falls back to NX_AGENT env.",
     )] = "",
+    persist: Annotated[bool, Field(
+        description="For \"put\": flag the entry so it is copied to T2 at session end or session handoff.",
+    )] = False,
 ) -> str:
     """T1 session scratch pad: ephemeral, within-session-only notes.
 
     Use `memory_put`/`memory_search` instead for anything that must survive
     past this session; use `store_put` for permanent T3 knowledge. Use
     `scratch_manage` to flag an entry for persistence or promote it to T2.
+    Put with `persist=true` to flag the entry as it is written: a flagged
+    entry is copied to T2 (project `scratch_sessions`) when the session ends
+    or moves to a new session id (`/clear`, `/resume`, `/branch`).
 
     For "search"/"list", returns a human-readable list capped at `limit`
     with a footer when more entries exist; other actions return a single
@@ -7584,7 +7612,7 @@ def scratch(
             if not content:
                 return _fail("Error: content is required for put")
             agent_arg = agent if agent else ""  # T1.put falls back to NX_AGENT env
-            doc_id = t1.put(content=content, tags=tags, agent=agent_arg)
+            doc_id = t1.put(content=content, tags=tags, agent=agent_arg, persist=persist)
             _record_tier_write(
                 tool="scratch_put", tier="T1",
                 agent=agent_arg or None,
@@ -7687,8 +7715,21 @@ def scratch_manage(
         prefix = "[T1 isolated] " if isolated else ""
 
         if action == "flag":
-            t1.flag(entry_id, project=project, title=title)
-            return f"{prefix}Flagged: {entry_id}"
+            # `scratch list` prints an 8-character prefix and the engine matches
+            # the id exactly, so a prefix is resolved here, as `get` and
+            # `delete` resolve theirs (nexus-mtheb.1).
+            full_id = entry_id
+            candidates = t1.resolve_prefix_candidates(entry_id)
+            if len(candidates) == 1:
+                full_id = candidates[0]
+            elif len(candidates) > 1:
+                listed = ", ".join(c[:8] for c in candidates[:5])
+                return _fail(
+                    f"Error: ambiguous prefix {entry_id!r}; matches: {listed}. "
+                    "Pass a longer prefix or full UUID."
+                )
+            t1.flag(full_id, project=project, title=title)
+            return f"{prefix}Flagged: {full_id}"
 
         elif action == "promote":
             if not project or not title:
