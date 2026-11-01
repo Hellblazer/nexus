@@ -2,12 +2,12 @@
 title: "The Tuple-Space Dictionary: Every Template Publishes What It Means, Who Writes It, Who Reads It, and a Post That Validates"
 id: RDR-239
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-10-31
-accepted_date:
+accepted_date: 2026-11-01
 related_issues: [nexus-mdbds]
 related_rdrs: [RDR-111, RDR-118, RDR-205, RDR-211, RDR-235, RDR-110]
 ---
