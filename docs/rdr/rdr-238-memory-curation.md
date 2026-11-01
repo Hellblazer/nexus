@@ -225,10 +225,10 @@ it binds on most turns of most sessions and is not already stated in a
 line so a session knows where to look.
 
 **Habits that run themselves (Gap 3).** Three checks: the index budget is
-checked at SessionStart and over budget prints one line; a `replaces` field is
-required when a memory file reverses another, and the old file must be gone
-(checked by the same hook, which compares a new file's text against what it
-says it replaces); and a curation report runs at each release's post-release
+checked at SessionStart and over budget prints one line; a memory file that
+replaces another names it in `replaces`, and the same hook reports any file
+that another file names in `replaces` and that still exists; and a curation
+report runs at each release's post-release
 step, listing unread files, unindexed files, oversized files and live rows a
 later row appears to replace without naming them.
 
@@ -369,7 +369,7 @@ If the on-demand tier works, this is a refinement of it.
 
 ### Prerequisites
 
-- [ ] A1 verified (Claude Code's loading of `MEMORY.md`).
+- [x] A1 verified (Claude Code's loading of `MEMORY.md`; research 1 and 2).
 - [ ] RDR-209 amendment for gate records filed (this RDR does not depend on
       it landing).
 
@@ -460,15 +460,72 @@ its hook budget.
 
 ### Contradiction Check
 
+The three gaps, the design and the plan agree: a replacing write deletes
+in one transaction, a budget bounds the index, and a hook plus a report run
+the checks. This revision fixes one contradiction. The Approach said the
+SessionStart hook compares a new file's text to detect a reversal, but
+Technical Design 3 only checks that a replaced file is gone. A hook cannot
+tell that one rule reverses another, so the Approach now states what the
+hook checks. Two Key Discoveries (the loss check on promotion, skills
+beside their sources) concern promotion, which Sam's review moved to
+nexus-qo7ie.2. They stay as findings and drive no design item here.
+Decision Rationale and the RDR-074 row agree that deletion overrides
+permanence, as Sam ruled.
+
 ### Assumption Verification
+
+A1 is verified (research 1 and 2): the index loads up to 200 lines or 25 KB
+and topic files load on demand; subagents also get it at Claude Code
+2.1.316, against the docs, so the budget rests on main sessions alone. A2 is
+verified by the census in research 3 (about 6% of non-gate rows are
+replaced members of a title chain, and one link per row is enough). A3 is
+open on purpose: no paper measures it, so Phase 2 measures compliance
+before and after the split against the research 4 baseline, and a rule
+whose rate rises goes back.
 
 #### API Verification
 
+- `memory_put` (MCP, `src/nexus/mcp/core.py`) and the engine's
+  `/v1/memory` put take no `replaces` today; the field is new and additive.
+- An explicit delete exists: MCP `memory_delete(project, title)`, engine
+  `DELETE /v1/memory/delete` (`MemoryHandler`), `MemoryRepository.delete`
+  and `deleteById`. Phase 1 Step 1 reuses that path.
+- A delete-and-write in one transaction already exists as a pattern:
+  `MemoryRepository.mergeMemories(tenant, keepId, deleteIds, content)`.
+- The latest memory changeset is `memory-005-live-project-timestamp-index.xml`,
+  and the design needs no new one.
+
 ### Scope Verification
+
+Gap 1 maps to Phase 1 (engine and client) and the frontmatter field, Gap 2
+to Phase 2 (measure, split, re-measure), and Gap 3 to Phase 3 (the
+SessionStart check and `nx memory curate`, including `--cold`). Procedures
+and promotion are out of scope (nexus-qo7ie.2), and so is the gate-record
+rollup (RDR-209 Amendment A1). Retiring a cold store is out of scope too:
+the report lists it, and any deletion of data rides its own change.
 
 ### Cross-Cutting Concerns
 
+- **Wire contract.** `replaces` is an additive field on the memory put, with
+  a wire-contract ledger entry; an old client never sends it.
+- **Tenancy.** The target must be in the writer's tenant and project, so a
+  replace cannot cross a tenant; the delete runs under the same RLS as the
+  put.
+- **Irreversibility.** A replaced row is gone. The guards are the
+  exact-target rule, the lineage line on the new row, and engine
+  point-in-time recovery.
+- **Hook cost.** The SessionStart check is stdlib only, reads one small
+  directory, prints at most one line and never blocks a session.
+- **Measurement.** Phase 2 counts compliance from transcripts with the same
+  scan as the baseline, so before and after are comparable.
+
 ### Proportionality
+
+One optional field on an existing write, one frontmatter field, one hook
+verb, one report verb, and a one-time split of one index file. No schema
+change. That matches problems measured in production: stale rows that
+retrieval serves, an index that grows one line per memory, and checks
+nobody runs.
 
 ## References
 
@@ -494,3 +551,4 @@ its hook budget.
 | 2026-10-31 | Front-door rule added to Gap 5 at Sam's direction: one implementation, MCP and CLI as thin wrappers, chosen by caller and reach; `nx gate record` becomes the MCP tool `gate_record` first; Phase 5 Step 4 is a front-door census. |
 | 2026-10-31 | Cold-state section added at Sam's direction (heat and waste): Gap 4 names the day's five cases, and `nx memory curate --cold` reports every store with no write and no read in N days, report only. |
 | 2026-10-31 | Sam's review: supersession becomes deletion; Gaps 3 and 5 (procedures) move to nexus-qo7ie.2 as Lua scripts on the runtime of nexus-mdbds.1; gaps renumbered; title changed. |
+| 2026-10-31 | Pre-gate revision: Finalization Gate written; the Approach states what the SessionStart hook checks, matching Technical Design 3; A1 prerequisite ticked. |
