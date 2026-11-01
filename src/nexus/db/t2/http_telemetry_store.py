@@ -297,6 +297,70 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         ]
         return {"rows": rows, "total": int(resp.get("total") or 0)}
 
+    def record_agent_dispatch(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        t1_puts: int,
+        agent_type: str | None = None,
+        ts: str | None = None,
+    ) -> None:
+        """Record one agent dispatch and its T1 put count (nexus-mtheb.4).
+
+        Calls ``POST /v1/telemetry/agent_dispatches/record``. The SubagentStop
+        hook is the caller. The engine keeps one row per ``(session_id,
+        agent_id)``: a second stop for the same dispatch (the nudge turn) updates
+        the row, and the stored count and time never go down. ``t1_puts`` is a
+        whole number >= 0; zero is a real answer ("wrote nothing"), so pass it.
+        ``agent_type`` and ``ts`` are left out of the payload when ``None`` (the
+        engine stamps ``ts`` itself).
+
+        Requires an engine carrying telemetry-018; older engines 404, which the
+        HTTP layer raises. A best-effort caller catches it.
+        """
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "agent_id":   agent_id,
+            "t1_puts":    t1_puts,
+        }
+        if agent_type is not None:
+            payload["agent_type"] = agent_type
+        if ts is not None:
+            payload["ts"] = ts
+        self._post("/v1/telemetry/agent_dispatches/record", payload)
+
+    def list_agent_dispatches(
+        self,
+        *,
+        session_id: str | None = None,
+        since: str | None = None,
+        agent_type: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Per-dispatch rows and a summary (nexus-mtheb.4).
+
+        ``GET /v1/telemetry/agent_dispatches/list``. Returns ``{"rows":
+        [{session_id, agent_id, agent_type, ts, t1_puts}, ...], "total": int,
+        "summary": {"dispatches", "no_t1_put", "t1_puts"}}``, newest first.
+        ``rows`` is capped at ``limit`` (the engine clamps it to 1..1000);
+        ``total`` and ``summary`` cover the whole filtered set, so
+        ``summary["no_t1_put"] / summary["dispatches"]`` is the share of
+        dispatches that wrote nothing to T1.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if session_id:
+            params["session_id"] = session_id
+        if agent_type:
+            params["agent_type"] = agent_type
+        if since:
+            params["since"] = normalize_since_filter(since)
+        resp = self._get("/v1/telemetry/agent_dispatches/list", params=params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return {"rows": [], "total": 0,
+                    "summary": {"dispatches": 0, "no_t1_put": 0, "t1_puts": 0}}
+        return resp
+
     def query_tier_writes_once(
         self,
         *,

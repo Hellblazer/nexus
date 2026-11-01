@@ -57,6 +57,8 @@ _hook_failures: list[dict[str, Any]] = []
 _frecency: dict[str, dict[str, Any]] = {}  # keyed by chunk_id
 _capability_census: dict[str, dict[str, Any]] = {}  # keyed by session_id (upsert)
 _routing_events: list[dict[str, Any]] = []
+#: nexus-mtheb.4: agent_dispatches, keyed (session_id, agent_id) like the engine's unique constraint.
+_agent_dispatches: dict[tuple[str, str], dict[str, Any]] = {}
 _STORE_LOCK = threading.Lock()
 _ID_SEQ: dict[str, int] = defaultdict(int)
 #: Counts every request that reaches this fake server, regardless of path —
@@ -88,6 +90,7 @@ def _clear_all() -> None:
         _frecency.clear()
         _capability_census.clear()
         _routing_events.clear()
+        _agent_dispatches.clear()
         _ID_SEQ.clear()
         IMPORT_LOG.clear()
         _VERSION_RESPONSE.clear()
@@ -247,6 +250,29 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 "search_telemetry": st_count,
                 "hook_failures":    hf_count,
             })
+
+        elif pp == "/v1/telemetry/agent_dispatches/record":
+            # Mirrors TelemetryRepository.recordAgentDispatch: upsert per (session, agent); the count
+            # and ts each keep the larger value. t1_puts is a required whole number >= 0.
+            puts = body.get("t1_puts")
+            if (not body.get("session_id") or not body.get("agent_id")
+                    or isinstance(puts, bool) or not isinstance(puts, int) or puts < 0):
+                self._send(400, {"error": "bad agent_dispatches body"})
+                return
+            key = (body["session_id"], body["agent_id"])
+            ts = body.get("ts") or datetime.now(UTC).isoformat()
+            with _STORE_LOCK:
+                prev = _agent_dispatches.get(key)
+                if prev is None:
+                    _agent_dispatches[key] = {
+                        "session_id": key[0], "agent_id": key[1],
+                        "agent_type": body.get("agent_type"), "ts": ts, "t1_puts": puts,
+                    }
+                else:
+                    prev["t1_puts"] = max(prev["t1_puts"], puts)
+                    prev["ts"] = max(prev["ts"], ts)
+                    prev["agent_type"] = body.get("agent_type") or prev["agent_type"]
+            self._send(200, {"ok": True})
 
         elif pp == "/v1/telemetry/tier_writes/record":
             with _STORE_LOCK:
@@ -529,6 +555,31 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 )
             ]
             self._send(200, out)
+            return
+
+        elif pp == "/v1/telemetry/agent_dispatches/list":
+            session_id = qs.get("session_id", "")
+            since      = qs.get("since", "")
+            agent_type = qs.get("agent_type", "")
+            limit      = int(qs.get("limit", "100"))
+            with _STORE_LOCK:
+                rows = [dict(r) for r in _agent_dispatches.values()]
+            if session_id:
+                rows = [r for r in rows if r["session_id"] == session_id]
+            if agent_type:
+                rows = [r for r in rows if r["agent_type"] == agent_type]
+            if since:
+                rows = [r for r in rows if r["ts"] >= since]
+            rows.sort(key=lambda r: r["ts"], reverse=True)
+            self._send(200, {
+                "rows": rows[:limit],
+                "total": len(rows),
+                "summary": {
+                    "dispatches": len(rows),
+                    "no_t1_put": sum(1 for r in rows if r["t1_puts"] == 0),
+                    "t1_puts": sum(r["t1_puts"] for r in rows),
+                },
+            })
             return
 
         elif pp == "/v1/telemetry/tier_writes/list":
@@ -994,6 +1045,70 @@ class TestQueryTierWrites:
         )
         with _pytest.raises(httpx.HTTPStatusError):
             client.query_tier_writes_once(session_id="once-1", timeout=2.0)
+
+
+class TestAgentDispatches:
+    """nexus-mtheb.4: the per-dispatch T1 put counter, ``/v1/telemetry/agent_dispatches/*``.
+
+    The SubagentStop hook records one row per dispatch (payload: session_id, agent_id, agent_type,
+    t1_puts, ts); ``list_agent_dispatches`` reads the rows and a summary of the dispatches that
+    wrote nothing. The engine half is pinned by TelemetryHandlerAgentDispatchesTest.java.
+    """
+
+    def test_record_sends_the_agreed_payload_and_list_reads_it_back(self, client):
+        client.record_agent_dispatch(
+            session_id="s1", agent_id="a1", agent_type="developer",
+            t1_puts=3, ts="2026-11-01T12:00:00Z",
+        )
+        result = client.list_agent_dispatches(session_id="s1")
+        assert result["rows"] == [{
+            "session_id": "s1", "agent_id": "a1", "agent_type": "developer",
+            "ts": "2026-11-01T12:00:00Z", "t1_puts": 3,
+        }]
+        assert result["total"] == 1
+
+    def test_a_zero_put_dispatch_is_recorded_and_counted_in_the_summary(self, client):
+        client.record_agent_dispatch(session_id="s1", agent_id="quiet", agent_type="code-review-expert", t1_puts=0)
+        client.record_agent_dispatch(session_id="s1", agent_id="loud", agent_type="developer", t1_puts=2)
+        summary = client.list_agent_dispatches(session_id="s1")["summary"]
+        assert summary == {"dispatches": 2, "no_t1_put": 1, "t1_puts": 2}
+
+    def test_a_second_stop_for_one_dispatch_updates_its_row(self, client):
+        client.record_agent_dispatch(session_id="s1", agent_id="a1", agent_type="developer", t1_puts=0)
+        client.record_agent_dispatch(session_id="s1", agent_id="a1", agent_type="developer", t1_puts=2)
+        result = client.list_agent_dispatches(session_id="s1")
+        assert result["total"] == 1
+        assert result["rows"][0]["t1_puts"] == 2
+
+    def test_filters_and_limit_reach_the_wire(self, client):
+        client.record_agent_dispatch(session_id="s1", agent_id="a", agent_type="developer", t1_puts=1,
+                                     ts="2026-01-01T00:00:00Z")
+        client.record_agent_dispatch(session_id="s1", agent_id="b", agent_type="substantive-critic", t1_puts=1,
+                                     ts="2026-11-01T00:00:00Z")
+        client.record_agent_dispatch(session_id="s1", agent_id="c", agent_type="developer", t1_puts=1,
+                                     ts="2026-11-02T00:00:00Z")
+        by_type = client.list_agent_dispatches(session_id="s1", agent_type="substantive-critic")
+        assert [r["agent_id"] for r in by_type["rows"]] == ["b"]
+        recent = client.list_agent_dispatches(since="2026-06-01")
+        assert [r["agent_id"] for r in recent["rows"]] == ["c", "b"]
+        page = client.list_agent_dispatches(session_id="s1", limit=1)
+        assert len(page["rows"]) == 1 and page["total"] == 3
+
+    def test_a_negative_count_is_refused_by_the_engine_not_swallowed(self, client):
+        with pytest.raises(httpx.HTTPStatusError):
+            client.record_agent_dispatch(session_id="s1", agent_id="a1", t1_puts=-1)
+
+    def test_an_absent_agent_type_and_ts_are_omitted_from_the_payload(self, client, monkeypatch):
+        sent: list[dict[str, Any]] = []
+        real_post = type(client)._post
+
+        def spy(self, path, payload, *a, **kw):
+            sent.append(payload)
+            return real_post(self, path, payload, *a, **kw)
+
+        monkeypatch.setattr(type(client), "_post", spy)
+        client.record_agent_dispatch(session_id="s1", agent_id="a1", t1_puts=1)
+        assert sent == [{"session_id": "s1", "agent_id": "a1", "t1_puts": 1}]
 
 
 class TestListTierWrites:
