@@ -15,7 +15,8 @@ in front of the model. The contract these tests pin:
   not its mtime), and starts no process.
 - pairing is by use, not age: an idle compaction's checkpoint, written when the
   session went idle and used at the next message, is appended to and injected with
-  its real age (nexus-702gy).
+  its real age, and inject and post work in either order; the live harness runs
+  inject first (nexus-702gy).
 - the board entry comes first and is the one titled EXACTLY the session's name.
 - the script imports only the standard library and the plugin's own ``_`` modules.
 """
@@ -569,12 +570,20 @@ class TestPost:
         assert len(archives) == 1 and "state: building" in archives[0].read_text(encoding="utf-8")
         assert "no unused pre-compaction checkpoint" in env.hook_log.read_text(encoding="utf-8")
 
-    def test_an_injected_checkpoint_counts_as_used(self, mod, env, monkeypatch) -> None:
+    def test_the_live_order_inject_then_post_appends_to_this_compactions_checkpoint(
+        self, mod, env, monkeypatch
+    ) -> None:
+        """Live (dcb9aae4, 2026-11-01): pre, then SessionStart inject, then post about 6 s later.
+        An inject trace that post read as "used" archived every real checkpoint (round-1 blocker)."""
         path = self._pre(mod, env, monkeypatch)
-        run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
-        assert "- injected: " in path.read_text(encoding="utf-8")
-        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "a later compaction's summary"})
-        assert "no pre-compaction checkpoint for this compaction" in path.read_text(encoding="utf-8")
+        before = path.read_text(encoding="utf-8")
+        assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1] != ""
+        assert path.read_text(encoding="utf-8") == before, "inject never rewrites the checkpoint"
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "this compaction's summary"})
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith(before.rstrip()) and text.rstrip().endswith("this compaction's summary")
+        assert sorted(p.name for p in env.checkpoints.iterdir()) == sorted([path.name, f"{SID}.injected"])
+        assert not env.hook_log.exists() or "no unused pre-compaction" not in env.hook_log.read_text(encoding="utf-8")
 
     def test_an_idle_compactions_hours_old_unused_checkpoint_is_appended_to(self, mod, env, monkeypatch) -> None:
         """Idle compaction: pre ran when the session went idle, post runs at the next message."""
@@ -639,35 +648,43 @@ class TestInject:
         code, out = run(mod, monkeypatch, "inject", {"session_id": SID})
         assert code == 0 and out == ""
 
-    @pytest.mark.parametrize("post_first", [True, False], ids=["post-at-idle", "post-at-next-message"])
+    @pytest.mark.parametrize(
+        "order",
+        [("post", "age", "inject"), ("age", "inject", "post"), ("age", "post", "inject")],
+        ids=["post-at-idle", "inject-then-post-at-next-message", "post-then-inject-at-next-message"],
+    )
     def test_an_idle_compactions_checkpoint_is_injected_hours_later_with_its_real_age(
-        self, mod, env, monkeypatch, post_first
+        self, mod, env, monkeypatch, order
     ) -> None:
         """Idle compaction: pre at idle, the summary applied at the next message (nexus-702gy).
-        The docs do not say when post runs, so both orders are pinned."""
+        The docs do not say when post and inject run, so every order is pinned."""
         run(mod, monkeypatch, "pre", pre_payload(trigger="auto"))
         path = env.checkpoints / f"{SID}.md"
-        if post_first:
-            run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "idle summary"})
-        restamp(path, 3 * 3600 + 5 * 60)
-        if not post_first:
-            run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "idle summary"})
-        self._no_process(mod, monkeypatch)
-        ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1])
+        ctx = None
+        for step in order:
+            if step == "post":
+                run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "idle summary"})
+            elif step == "age":
+                restamp(path, 3 * 3600 + 5 * 60)
+            else:
+                self._no_process(mod, monkeypatch)
+                ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1])
         first = ctx.splitlines()[0]
         assert "3 h 5 min ago (trigger auto)" in first
-        assert "may have changed since" in first and "just before" not in first
+        assert "may predate this compaction and may have changed since" in first and "just before" not in first
         assert "state: building" in ctx
+        text = path.read_text(encoding="utf-8")
+        assert "state: building" in text and text.rstrip().endswith("idle summary"), "post kept the real checkpoint"
 
-    def test_a_checkpoint_is_injected_once(self, mod, env, monkeypatch) -> None:
+    def test_a_checkpoint_is_injected_once_and_a_new_pre_is_injected_again(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
         path = env.checkpoints / f"{SID}.md"
+        written = re.search(r"(?m)^- written: (\S+)$", path.read_text(encoding="utf-8")).group(1)
         assert run(mod, monkeypatch, "inject", {"session_id": SID})[1] != ""
-        text = path.read_text(encoding="utf-8")
-        header = text.split("\n## ", 1)[0]
-        assert re.search(r"(?m)^- written: .*\n- injected: \S+$", header), header
-        assert "state: building" in text, "marking keeps the body"
+        assert (env.checkpoints / f"{SID}.injected").read_text(encoding="utf-8").strip() == written
         assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, "")
+        restamp(path, -60)  # the next compaction's pre: a new written: stamp
+        assert "state: building" in self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
 
     def test_a_missing_or_unparseable_stamp_gets_nothing(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
@@ -693,6 +710,23 @@ class TestInject:
         restamp(env.checkpoints / f"{SID}.md", 3 * 60)
         ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
         assert "3 min ago (trigger auto), just before this session was compacted." in ctx.splitlines()[0]
+
+    @pytest.mark.parametrize(("minutes", "stale"), [(9, False), (11, True)])
+    def test_the_stale_note_starts_at_ten_minutes(self, mod, env, monkeypatch, minutes, stale) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        restamp(env.checkpoints / f"{SID}.md", minutes * 60)
+        first = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1]).splitlines()[0]
+        assert ("may predate this compaction" in first) is stale
+        assert ("just before this session was compacted" in first) is not stale
+
+    def test_the_sidecar_is_pruned_with_the_checkpoints(self, mod, env, monkeypatch) -> None:
+        env.checkpoints.mkdir(parents=True)
+        old = env.checkpoints / f"{OTHER_SID}.injected"
+        old.write_text("2026-01-01T00:00:00+00:00\n", encoding="utf-8")
+        three_days = time.time() - 3 * 24 * 3600
+        os.utime(old, (three_days, three_days))
+        run(mod, monkeypatch, "pre", pre_payload())
+        assert not old.exists()
 
     @pytest.mark.parametrize(
         ("seconds", "label"),

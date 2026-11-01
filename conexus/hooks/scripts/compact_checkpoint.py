@@ -33,26 +33,30 @@ claims beads under one assignee (both measured on halcyon's first live compactio
 POST appends the ``compact_summary`` to the same file and logs one warning line to
 ``<config>/logs/hook.log`` when the summary names none of the session's board title,
 the checkpoint path, or a bead id from the checkpoint. It never appends to a
-checkpoint an earlier compaction already used (it carries a summary or an
-``injected:`` line), or one whose ``written:`` stamp is missing or past the prune
-window: pre did not run for this compaction. It archives that file, writes a stub
-that says so, and logs a warning. It has no decision control and prints nothing.
+checkpoint that already carries a summary (an earlier compaction's post ran on it), or
+one whose ``written:`` stamp is missing or past the prune window: pre did not run for
+this compaction. It archives that file, writes a stub that says so, and logs a
+warning. It has no decision control and prints nothing.
 
 A checkpoint is paired with its compaction by use, not by age (nexus-702gy). Idle
 compaction (Claude Code ``idleCompaction``) runs PreCompact once the session has sat
 idle for about an hour and applies the summary at the next message, which can come
-hours later; post and inject may run at either time, so an age window would discard
-the very checkpoint the compaction wrote.
+hours later, so an age window would discard the very checkpoint the compaction wrote.
+Inject and post run in either order (live: inject about 6 s before post), so each
+judges use only by its own trace: post by a summary in the file, inject by the
+``<session>.injected`` sidecar, which holds the ``written:`` stamp it last emitted.
+The limit is the prune window: a checkpoint older than two days is gone.
 
 INJECT prints ``hookSpecificOutput.additionalContext`` with this session's checkpoint
-(capped near 8 KB) and one line naming the full file, then writes an ``injected:``
-line into the file's header so no later compaction injects it again. Age is judged by
-the file's own ``written:`` stamp, never its mtime (post rewrites the file); the intro
-states the real age and trigger, and past ten minutes it says the state may have
-changed since. It reads and rewrites one file: no network, no ``nx`` call, because the
-same event runs seven other verbs and must stay light (nexus-75w5d). It prints nothing
-when no checkpoint exists for this session id, the stamp is missing or past the prune
-window, the file is a stub, or it was already injected.
+(capped near 8 KB) and one line naming the full file, then records the checkpoint's
+``written:`` stamp in the sidecar so no later compaction injects it again. It never
+rewrites the checkpoint. Age is judged by the file's own ``written:`` stamp, never its
+mtime (post rewrites the file); the intro states the real age and trigger, and past
+ten minutes it says the checkpoint may predate this compaction and the state may have
+changed. It reads one file and writes the sidecar: no network, no ``nx`` call, because
+the same event runs seven other verbs and must stay light (nexus-75w5d). It prints
+nothing when no checkpoint exists for this session id, the stamp is missing or past
+the prune window, the file is a stub, or the sidecar holds its stamp.
 
 NEVER VETOES. Every mode exits 0 whatever happens; errors go to ``hook.log`` and
 stderr only. A PreCompact veto on the context-limit recovery path fails the request,
@@ -102,7 +106,8 @@ _SKEW_S = 300.0
 _PRUNE_AFTER_S = 2 * 24 * 3600.0
 #: A checkpoint whose own ``written:`` stamp is older than this is not injected, and post
 #: does not append to it. It is the prune window, not a freshness window: an idle
-#: compaction's checkpoint is used at the next message, however late (nexus-702gy).
+#: compaction's checkpoint is used at the next message, up to two days later; past that
+#: the prune has removed it (nexus-702gy).
 _MAX_AGE_S = _PRUNE_AFTER_S
 #: Past this age the inject intro says the state may have changed since it was written.
 _STALE_NOTE_S = 10 * 60.0
@@ -123,7 +128,6 @@ _BD_ROW_RE = re.compile(r"^[\s│├└─]*[○◐●✓❄]\s+([a-z][a-z0-9_]*
 #: A bead id of any repo's prefix in a board ``ref:`` line (``nexus-v1929``, ``labrun-56v.1``).
 _REF_ID_RE = re.compile(r"\b[a-z][a-z0-9_]*-[0-9a-z]{3,}(?:\.\d+)*")
 _WRITTEN_RE = re.compile(r"(?m)^- written: (\S+)\s*$")
-_INJECTED_RE = re.compile(r"(?m)^- injected: \S+\s*$")
 _TRIGGER_RE = re.compile(r"(?m)^- trigger: (.{1,32})$")
 #: Subsections of the continuation output that are not kept: the same-event SessionStart
 #: group (session_context.py) already injects ready beads and memory titles, and
@@ -133,6 +137,8 @@ _OMIT_SECTIONS = ("### Ready beads", "### nx memory", "### Feedback memories")
 _KEEP_ORDER = ("### In-progress beads", "### Uncommitted", "### Open PRs", "### Recent commits")
 _STUB_BODY = "[no pre-compaction checkpoint for this compaction]"
 _ARCHIVE_STAMP = "%Y%m%dT%H%M%SZ"
+#: Suffix of the per-session sidecar inject writes: the ``written:`` stamp it last emitted.
+_INJECTED_SUFFIX = ".injected"
 _NAME_LINE = "- session name: "
 #: Subsections of the working-state block that go first when the injection is over its
 #: cap, in this order.
@@ -294,7 +300,7 @@ def _archive_and_prune(directory: Path, session_id: str, now: float) -> None:
             pass
     for path in directory.iterdir():
         try:
-            if path.is_file() and (path.suffix == ".md" or path.name.startswith(".tmp-")):
+            if path.is_file() and (path.suffix in (".md", _INJECTED_SUFFIX) or path.name.startswith(".tmp-")):
                 if now - path.stat().st_mtime > _PRUNE_AFTER_S:
                     path.unlink()
         except OSError:
@@ -535,14 +541,18 @@ def _written_age(text: str, now: datetime | None = None) -> float | None:
     return age if -_SKEW_S <= age <= _MAX_AGE_S else None
 
 
-def _injected(text: str) -> bool:
-    return _INJECTED_RE.search(text.split("\n## ", 1)[0]) is not None
+def _written_stamp(text: str) -> str | None:
+    match = _WRITTEN_RE.search(text.split("\n## ", 1)[0])
+    return match.group(1) if match else None
 
 
-def _used(text: str) -> bool:
-    """True when an earlier compaction already took this checkpoint: post appended its
-    summary, or inject emitted it."""
-    return _injected(text) or f"\n{_SUMMARY_HEADING}" in text
+def _summarized(text: str) -> bool:
+    """True when a post already appended a summary: an earlier compaction used this file.
+
+    Only post's own trace counts. Inject runs before post in the live harness, so a
+    trace inject left would make post discard this compaction's own checkpoint.
+    """
+    return f"\n{_SUMMARY_HEADING}" in text
 
 
 def run_pre(payload: dict) -> None:
@@ -614,7 +624,7 @@ def run_post(payload: dict) -> None:
         existing: str | None = path.read_text(encoding="utf-8")
     except OSError:
         existing = None
-    if existing is None or _written_age(existing) is None or _used(existing):
+    if existing is None or _written_age(existing) is None or _summarized(existing):
         # Pre did not run for this compaction (killed at its timeout, a cold start, an error
         # before the write): whatever is here is an earlier compaction's state and must not be
         # appended to or refreshed, or inject would pass it as current. Pairing is by use, not
@@ -697,41 +707,49 @@ def run_inject(payload: dict) -> None:
         _log("INFO", f"inject: {path} has no usable written: stamp (older than {_MAX_AGE_S / 3600:.0f} h, "
                      "missing, or a stub); nothing injected")
         return
-    if _injected(text):
-        _log("INFO", f"inject: {path} was already injected by an earlier compaction; nothing injected")
+    written = _written_stamp(text)
+    sidecar = path.with_name(f"{session_id}{_INJECTED_SUFFIX}")
+    try:
+        last = sidecar.read_text(encoding="utf-8").strip()
+    except OSError:
+        last = ""
+    if written is not None and last == written:
+        _log("INFO", f"inject: {path} (written {written}) was already injected by an earlier compaction; "
+                     "nothing injected")
         return
-    header = text.split("\n## ", 1)[0]
-    trigger_match = _TRIGGER_RE.search(header)
+    trigger_match = _TRIGGER_RE.search(text.split("\n## ", 1)[0])
     trigger = trigger_match.group(1) if trigger_match else "unknown"
     # The compact summary is already in the new context; the injection is the state that
     # was written down before it.
     cut = text.find(f"\n{_SUMMARY_HEADING}")
     body = text[:cut] if cut != -1 else text
     body = body.rstrip() + "\n\n"
+    lead = f"The conexus PreCompact hook wrote this working-state checkpoint {_age_label(age)} ago (trigger {trigger})"
     if age < _STALE_NOTE_S:
-        when = "just before this session was compacted."
+        lead += ", just before this session was compacted."
     else:
-        # An idle compaction writes its checkpoint when the session goes idle and is applied
-        # at the next message (nexus-702gy).
-        when = ("when this compaction began. A compaction prepared while the session sat idle "
-                "is applied at the next message, so the state may have changed since it was "
-                "written: check git, beads and the board before acting on it.")
-    intro = (f"The conexus PreCompact hook wrote this working-state checkpoint {_age_label(age)} ago "
-             f"(trigger {trigger}), {when} The state lives in "
-             "version control, beads and the threads board, not in the summary.\n\n")
+        # Only the age is known. An idle compaction writes its checkpoint when the session goes
+        # idle and is applied at the next message; a compaction whose PreCompact hook failed
+        # finds an earlier one (nexus-702gy).
+        lead += (". A compaction prepared while the session sat idle is applied at the next message, "
+                 "and one whose PreCompact hook failed finds an earlier checkpoint, so this state may "
+                 "predate this compaction and may have changed since: check git, beads and the board "
+                 "before acting on it.")
+    intro = (f"{lead} The state lives in version control, beads and the threads board, "
+             "not in the summary.\n\n")
     footer = f"Full checkpoint (with the compact summary): {path}\n"
     context = _fit(intro + body, footer)
     sys.stdout.write(json.dumps(
         {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
     ) + "\n")
     sys.stdout.flush()
-    # Mark it used, so a later compaction whose pre did not run cannot inject it again.
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    marked = re.sub(r"(?m)^(- written: \S+)\s*$", rf"\1\n- injected: {stamp}", header, count=1)
-    try:
-        _write_atomic(path, marked + text[len(header):])
-    except OSError as exc:
-        _log("WARNING", f"inject: could not mark {path} injected: {exc}")
+    # Record it in the sidecar, never the checkpoint (post may be rewriting that one), so a
+    # later compaction whose pre did not run cannot inject it again.
+    if written is not None:
+        try:
+            _write_atomic(sidecar, written + "\n")
+        except OSError as exc:
+            _log("WARNING", f"inject: could not record {path} as injected in {sidecar}: {exc}")
 
 
 _MODES = {"pre": run_pre, "post": run_post, "inject": run_inject}

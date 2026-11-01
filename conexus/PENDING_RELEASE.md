@@ -51,5 +51,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/orchestration/reference.md` (nexus-qo7ie): the RDR lifecycle line runs `/conexus:rdr-fix` for a BLOCKED gate's findings with one fix check per fix round, then a re-gate, in place of a fix per finding.
 - `conexus/hooks/scripts/compact_checkpoint.py` (nexus-qowvl): the launch-directory test that picks a session's own worktree compares normcase/normpath spellings of both sides, so it no longer relies on realpath alone to normalize slashes and drive-letter case on Windows (defensive; no production miss is known).
 - `conexus/skills/orchestration/SKILL.md` (nexus-mtheb): states where MCP-tool scratch lives across `/clear` and `/resume` as JDR-001 has it (the scope moves only on a consumed handoff marker and the old rows strand), in place of saying it survives both, and notes the 24 h sweep.
+- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-702gy): an idle compaction's checkpoint is restored at the next message: post and inject pair a checkpoint with its compaction by use (a summary in the file, a stamp in the `<session>.injected` sidecar) in place of a 30-minute window, work in either order (the harness runs inject first), and the intro gives the real age in hours and minutes and, past ten minutes, says the state may predate the compaction.
 
 ## Deferred to the next client release
