@@ -2,7 +2,8 @@
 title: "Request Identity for Mutating Engine Routes"
 id: RDR-222
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-01
 accepted_date: 2026-10-18
 priority: medium
 author: Sam
