@@ -8,9 +8,12 @@ in front of the model. The contract these tests pin:
 
 - ``pre`` never vetoes (exit 0 on every path, nothing on stdout), survives a missing
   ``nx`` and a timeout, and writes the file atomically with mode 0600.
-- ``post`` appends and logs a warning when the summary names none of the pointers.
+- ``post`` appends and logs a warning when the summary names none of the pointers; it
+  never appends to, or refreshes, a checkpoint whose ``written:`` stamp is old.
 - ``inject`` emits the capped ``additionalContext`` for THIS session only and nothing
-  for a stale or foreign one, and starts no process.
+  for a stale (by its ``written:`` stamp, not its mtime) or foreign one, and starts no
+  process.
+- the board entry comes first and is the one titled EXACTLY the session's name.
 - the script imports only the standard library and the plugin's own ``_`` modules.
 """
 from __future__ import annotations
@@ -20,10 +23,13 @@ import importlib.util
 import io
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import textwrap
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -49,16 +55,32 @@ _STANDIN = textwrap.dedent(
     if os.environ.get("FAKE_NX_HANG"):
         print("## Working state\\npartial before the hang", flush=True)
         time.sleep(30)
+    TITLES = {"exact": ["linda"], "prefix": ["linda_2"], "missing": []}[os.environ.get("FAKE_BOARD", "exact")]
     if args[:2] == ["command-context", "continuation"]:
         ready = "\\n".join(f"o nexus-r{i:04d} ready bead number {i} " + "x" * 80 for i in range(int(os.environ.get("FAKE_READY", "3"))))
-        print("**Topic:** current branch feature/x\\n\\n## Working state\\n\\n### Uncommitted\\n M a.py\\n\\n"
+        commits = "\\n".join(f"abc{i:04d} commit number {i} " + "x" * 80 for i in range(int(os.environ.get("FAKE_COMMITS", "3"))))
+        print("**Target file:** `/tmp/handoff-target.md`\\n\\n**Topic:** current branch feature/x\\n\\n"
+              "## Working state\\n\\n- **cwd:** `/w`\\n- **branch:** `feature/x`\\n- **HEAD:** `abc1 head`\\n\\n"
+              "### Uncommitted\\n M a.py\\n\\n"
+              "### Recent commits (last 10 on this branch)\\n" + commits + "\\n\\n"
+              "### Open PRs from this branch\\n(none)\\n\\n"
               "### In-progress beads\\no nexus-3lqxv Auto-continuation\\n\\n"
-              "### Ready beads (top 10)\\n" + ready + "\\n\\n### nx memory (x) titles\\nmemo-one\\nmemo-two\\n")
+              "### Ready beads (top 10)\\n" + ready + "\\n\\n### nx memory (x) titles\\nmemo-one\\nmemo-two\\n\\n"
+              "### Feedback memories\\nfeedback-one\\n")
+    elif args[:2] == ["memory", "list"]:
+        for i, t in enumerate(TITLES):
+            print(f"[{101 + i}] threads/{t}  (-, 2026-10-31T21:46:51Z)")
     elif args[:2] == ["memory", "get"]:
-        if os.environ.get("FAKE_BOARD") == "missing":
-            print("not found", file=sys.stderr)
-            sys.exit(1)
-        print("## the board work\\nref: nexus-3lqxv\\nstate: building")
+        if "--title" in args:  # the real CLI: exact, then a unique prefix
+            want = args[args.index("--title") + 1]
+            hits = [t for t in TITLES if t == want] or [t for t in TITLES if t.startswith(want)]
+            if len(hits) != 1:
+                print("not found", file=sys.stderr)
+                sys.exit(1)
+            title = hits[0]
+        else:
+            title = TITLES[int(args[2]) - 101]
+        print(f"## board of {title}\\nref: nexus-3lqxv\\nstate: building")
     """
 )
 
@@ -89,6 +111,7 @@ def env(tmp_path: Path, monkeypatch, mod):
     monkeypatch.delenv("FAKE_NX_HANG", raising=False)
     monkeypatch.delenv("FAKE_BOARD", raising=False)
     monkeypatch.delenv("FAKE_READY", raising=False)
+    monkeypatch.delenv("FAKE_COMMITS", raising=False)
     monkeypatch.setattr(mod, "_nx_command", lambda: [sys.executable, str(standin)])
 
     class Env:
@@ -114,6 +137,15 @@ def pre_payload(**kw) -> dict:
     return {"session_id": SID, "hook_event_name": "PreCompact", "trigger": "auto", "cwd": os.getcwd(), **kw}
 
 
+def restamp(path: Path, seconds_ago: float) -> None:
+    """Rewrite the checkpoint's own ``written:`` stamp, leaving its mtime alone (now)."""
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat(timespec="seconds")
+    text = path.read_text(encoding="utf-8")
+    text, n = re.subn(r"(?m)^- written: .*$", f"- written: {stamp}", text, count=1)
+    assert n == 1
+    path.write_text(text, encoding="utf-8")
+
+
 def nx_calls(env) -> list[str]:
     return env.nx_log.read_text(encoding="utf-8").splitlines() if env.nx_log.exists() else []
 
@@ -126,9 +158,48 @@ class TestPre:
         assert f"- session: {SID}" in text
         assert "- trigger: auto" in text
         assert "- written: 20" in text and text.count("+00:00") >= 1  # a UTC stamp
-        assert "### Ready beads (top 10)" in text and "nexus-3lqxv Auto-continuation" in text
+        assert "### In-progress beads" in text and "nexus-3lqxv Auto-continuation" in text
         assert f"## Threads board entry (threads/{NAME})" in text and "state: building" in text
-        assert nx_calls(env) == ["command-context continuation", f"memory get --project threads --title {NAME}"]
+        assert nx_calls(env) == [
+            "command-context continuation", "memory list --project threads", "memory get 101 --project threads"
+        ]
+
+    def test_the_board_entry_comes_first_and_the_kept_sections_follow_in_order(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        order = ["## Threads board entry", "## Working state", "- **branch:**", "### In-progress beads", "### Uncommitted",
+                 "### Open PRs", "### Recent commits"]
+        positions = [text.index(h) for h in order]
+        assert positions == sorted(positions), dict(zip(order, positions))
+        assert text.count("## Working state") == 1
+
+    def test_ready_beads_memory_titles_and_the_handoff_cues_are_not_kept(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        for gone in ("Ready beads", "nexus-r0000", "nx memory", "memo-one", "Feedback memories", "feedback-one",
+                     "Target file", "handoff-target", "Topic:"):
+            assert gone not in text, gone
+
+    def test_a_prefix_match_is_not_this_sessions_board(self, mod, env, monkeypatch) -> None:
+        """``memory get --title linda`` resolves to a unique-prefix ``linda_2``; its board is not ours."""
+        monkeypatch.setenv("FAKE_BOARD", "prefix")
+        run(mod, monkeypatch, "pre", pre_payload())
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert "board of linda_2" not in text and "[no board entry:" in text and "titled exactly" in text
+        assert not any(c.startswith("memory get") for c in nx_calls(env))
+
+    def test_a_key_file_is_not_a_session_source(self, mod, env, monkeypatch) -> None:
+        third = "33333333-3333-3333-3333-333333333333"
+        (env.claude / "sessions" / "9.key").write_text(json.dumps({"sessionId": third, "name": "from_the_key"}), encoding="utf-8")
+        run(mod, monkeypatch, "pre", pre_payload(session_id=third))
+        text = (env.checkpoints / f"{third}.md").read_text(encoding="utf-8")
+        assert "from_the_key" not in text and "- session name:" not in text
+        assert nx_calls(env) == ["command-context continuation"]
+
+    def test_no_matching_sessions_file_is_logged(self, mod, env, monkeypatch) -> None:
+        (env.claude / "sessions" / "4242.json").unlink()
+        run(mod, monkeypatch, "pre", pre_payload())
+        assert f"carries session id {SID}" in env.hook_log.read_text(encoding="utf-8")
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
     def test_the_file_is_mode_0600_and_no_temp_file_is_left(self, mod, env, monkeypatch) -> None:
@@ -147,7 +218,7 @@ class TestPre:
         monkeypatch.setenv("FAKE_BOARD", "missing")
         code, _ = run(mod, monkeypatch, "pre", pre_payload())
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
-        assert code == 0 and "[no board entry:" in text and "### Ready beads" in text
+        assert code == 0 and "[no board entry:" in text and "### In-progress beads" in text
 
     def test_survives_a_missing_nx(self, mod, env, monkeypatch) -> None:
         monkeypatch.setattr(mod, "_nx_command", lambda: None)
@@ -158,7 +229,7 @@ class TestPre:
         assert f"- session: {SID}" in text
         assert "the nx CLI was not found" in env.hook_log.read_text(encoding="utf-8")
 
-    def test_survives_a_timeout_and_keeps_the_partial_output(self, mod, env, monkeypatch) -> None:
+    def test_survives_a_timeout_and_writes_an_error_line(self, mod, env, monkeypatch) -> None:
         monkeypatch.setenv("FAKE_NX_HANG", "1")
         monkeypatch.setattr(mod, "_NX_TIMEOUT_S", 1.0)
         monkeypatch.setattr(mod, "_BOARD_TIMEOUT_S", 1.0)
@@ -167,7 +238,7 @@ class TestPre:
         assert time.monotonic() - started < 15
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert code == 0 and out == ""
-        assert "partial before the hang" in text and "timed out after 1s" in text
+        assert "timed out after 1s" in text and "[working state incomplete:" in text
 
     @pytest.mark.parametrize(
         "payload", ["", "not json", "[1, 2]", {}, {"session_id": "../../etc/passwd"}, {"session_id": ""}]
@@ -183,6 +254,19 @@ class TestPre:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(blocker))
         code, out = run(mod, monkeypatch, "pre", pre_payload())
         assert code == 0 and out == ""
+
+    def test_a_path_shaped_session_id_creates_nothing_outside_the_checkpoint_directory(
+        self, mod, env, monkeypatch
+    ) -> None:
+        for bad in ("../escape", "..", "a/../../escape", "/abs"):
+            run(mod, monkeypatch, "pre", pre_payload(session_id=bad))
+            run(mod, monkeypatch, "post", {"session_id": bad, "compact_summary": "x"})
+        outside = [
+            p for p in env.config.rglob("*")
+            if p.is_file() and env.checkpoints not in p.parents and "logs" not in p.relative_to(env.config).parts
+        ]
+        assert outside == [], outside
+        assert not env.checkpoints.exists() or not any(env.checkpoints.iterdir())
 
     def test_an_unexpected_error_in_the_handler_exits_zero(self, mod, env, monkeypatch) -> None:
         def boom(*_a, **_k):
@@ -251,7 +335,18 @@ class TestPost:
     def test_without_a_precompact_checkpoint_it_still_records_the_summary(self, mod, env, monkeypatch) -> None:
         code, _ = run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "orphan summary"})
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
-        assert code == 0 and "no pre-compaction checkpoint was written" in text and "orphan summary" in text
+        assert code == 0 and "no pre-compaction checkpoint for this compaction" in text and "orphan summary" in text
+
+    def test_an_old_checkpoint_is_archived_and_replaced_by_a_stub_not_appended_to(self, mod, env, monkeypatch) -> None:
+        path = self._pre(mod, env, monkeypatch)
+        restamp(path, 3 * 3600)
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "this compaction's summary"})
+        text = path.read_text(encoding="utf-8")
+        assert "state: building" not in text and "- written:" not in text
+        assert "no pre-compaction checkpoint for this compaction" in text and "this compaction's summary" in text
+        archives = [p for p in env.checkpoints.iterdir() if p.name != path.name]
+        assert len(archives) == 1 and "state: building" in archives[0].read_text(encoding="utf-8")
+        assert "no fresh pre-compaction checkpoint" in env.hook_log.read_text(encoding="utf-8")
 
     def test_has_no_decision_output_and_exits_zero_on_garbage(self, mod, env, monkeypatch) -> None:
         for payload in ("", "nope", {"session_id": "bad id"}):
@@ -293,33 +388,72 @@ class TestInject:
         for bad in ("../" + SID, SID + "/../x", "", None):
             assert run(mod, monkeypatch, "inject", {"session_id": bad})[1] == ""
 
-    def test_a_stale_checkpoint_gets_nothing(self, mod, env, monkeypatch) -> None:
+    def test_a_stale_stamp_gets_nothing_whatever_the_mtime_says(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
         path = env.checkpoints / f"{SID}.md"
-        long_ago = time.time() - 5 * 3600
-        os.utime(path, (long_ago, long_ago))
+        restamp(path, 2 * 3600)  # the mtime stays fresh, as after a rewrite
         code, out = run(mod, monkeypatch, "inject", {"session_id": SID})
         assert code == 0 and out == ""
+
+    def test_a_missing_or_unparseable_stamp_gets_nothing(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        path = env.checkpoints / f"{SID}.md"
+        good = path.read_text(encoding="utf-8")
+        for broken in (re.sub(r"(?m)^- written: .*\n", "", good), re.sub(r"(?m)^- written: .*$", "- written: yesterday", good)):
+            path.write_text(broken, encoding="utf-8")
+            assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, "")
+
+    def test_a_checkpoint_from_before_this_compaction_is_never_injected_after_a_post_without_a_pre(
+        self, mod, env, monkeypatch
+    ) -> None:
+        """The ship-blocker: pre did not run for this compaction, post must not refresh the old file."""
+        run(mod, monkeypatch, "pre", pre_payload())
+        restamp(env.checkpoints / f"{SID}.md", 3 * 3600)  # the previous compaction's checkpoint
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "the summary of this compaction"})
+        code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        assert code == 0 and out == ""
+
+    def test_the_intro_states_the_checkpoints_age_and_trigger(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload(trigger="auto"))
+        restamp(env.checkpoints / f"{SID}.md", 3 * 60)
+        ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
+        assert "3 min ago (trigger auto)" in ctx.splitlines()[0]
+
+    def test_a_path_shaped_session_id_cannot_reach_a_file_outside_the_checkpoint_directory(
+        self, mod, env, monkeypatch
+    ) -> None:
+        planted = env.config / f"{SID}.md"  # what ``"../" + SID`` resolves to
+        env.config.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        planted.write_text(f"# Compaction checkpoint\n\n- session: x\n- trigger: auto\n- written: {stamp}\n\n"
+                           "## Working state\n\nPLANTED-SENTINEL\n", encoding="utf-8")
+        (env.config / "compact-checkpoints").mkdir(parents=True, exist_ok=True)
+        for bad in ("../" + SID, "..", SID + "/../" + SID):
+            code, out = run(mod, monkeypatch, "inject", {"session_id": bad})
+            assert (code, out) == (0, ""), bad
 
     def test_no_checkpoint_gets_nothing(self, mod, env, monkeypatch) -> None:
         assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, "")
 
-    def test_over_the_cap_the_ready_beads_and_memory_titles_go_first(self, mod, env, monkeypatch) -> None:
-        monkeypatch.setenv("FAKE_READY", "200")
+    def test_over_the_cap_the_recent_commits_go_first_and_the_board_entry_stays(self, mod, env, monkeypatch) -> None:
+        monkeypatch.setenv("FAKE_COMMITS", "200")
         run(mod, monkeypatch, "pre", pre_payload())
         full = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert len(full.encode()) > mod._INJECT_CAP_BYTES * 2
         ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
         assert len(ctx.encode()) <= 8192
         assert "nexus-3lqxv Auto-continuation" in ctx and "state: building" in ctx
-        assert "nexus-r0000" not in ctx and "[omitted for size" in ctx
+        assert "commit number 100" not in ctx and "[omitted for size" in ctx
         assert ctx.splitlines()[-1].startswith("Full checkpoint")
 
     def test_a_working_state_that_alone_exceeds_the_cap_is_truncated_with_the_path_kept(
         self, mod, env, monkeypatch
     ) -> None:
         env.checkpoints.mkdir(parents=True)
-        (env.checkpoints / f"{SID}.md").write_text("# Compaction checkpoint\n\n## Working state\n\n" + "é" * 20000 + "\n", encoding="utf-8")
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        (env.checkpoints / f"{SID}.md").write_text(
+            f"# Compaction checkpoint\n\n- written: {stamp}\n\n## Working state\n\n" + "é" * 20000 + "\n", encoding="utf-8"
+        )
         ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
         assert len(ctx.encode()) <= 8192
         assert "[truncated for size" in ctx and ctx.splitlines()[-1].startswith("Full checkpoint")
@@ -327,7 +461,7 @@ class TestInject:
     def test_a_small_checkpoint_is_not_cut(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
         ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
-        assert "omitted for size" not in ctx and "truncated" not in ctx and "memo-one" in ctx
+        assert "omitted for size" not in ctx and "truncated" not in ctx and "commit number 0" in ctx
 
 
 class TestScript:
@@ -344,6 +478,27 @@ class TestScript:
         assert not outside, outside
         assert {r for r in roots if r.startswith("_")} <= {"__future__", "_cli_lookup", "_endpoint_resolve"}
         assert (SCRIPT.parent / "_cli_lookup.py").is_file() and (SCRIPT.parent / "_endpoint_resolve.py").is_file()
+
+    def test_the_sibling_imports_sit_inside_main_so_an_import_error_exits_zero(self, tmp_path: Path) -> None:
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        top = {a.name for n in tree.body if isinstance(n, ast.Import) for a in n.names}
+        assert not top & {"_cli_lookup", "_endpoint_resolve"}, "a module-level import of a sibling bypasses main's guard"
+        lone = tmp_path / "lone"
+        lone.mkdir()
+        shutil.copy(SCRIPT, lone / SCRIPT.name)  # no _cli_lookup / _endpoint_resolve beside it
+        for mode in ("pre", "post", "inject"):
+            done = subprocess.run([sys.executable, str(lone / SCRIPT.name), mode], input=json.dumps({"session_id": SID}),
+                                  capture_output=True, text=True, encoding="utf-8", timeout=60, check=False)
+            assert done.returncode == 0 and done.stdout == "", (mode, done.stderr)
+            assert "ModuleNotFoundError" in done.stderr or "ImportError" in done.stderr, done.stderr
+
+    @pytest.mark.parametrize("text", ["nexus-3lqxv", "nexus-6pfgb.27", "see nexus-0abcd, then", "(nexus-zz9yx)"])
+    def test_a_bead_id_matches(self, mod, text) -> None:
+        assert mod._BEAD_ID_RE.findall(text), text
+
+    @pytest.mark.parametrize("text", ["ready-beads", "auto-memory", "nexus-abcdef", "nexus-abcd", "pre-compact", "nx-memory"])
+    def test_an_ordinary_hyphenated_word_is_not_a_bead_id(self, mod, text) -> None:
+        assert mod._BEAD_ID_RE.findall(text) == [], text
 
     def test_never_exits_with_a_veto_code_or_prints_a_decision(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
