@@ -76,8 +76,9 @@ template that the engine validates when it loads its templates, with the
 same checks a real post meets, so an example that no longer fits its
 template fails the engine's boot test before release. The examples use
 reserved placeholder names (a subspace segment that starts with `example`,
-all-zero identifiers), so posting one as written cannot reach a live
-subspace or a real session.
+identifiers that are zeros except their last digit), so posting one as
+written reaches no real session and no named subspace. The one exception is
+`aspects`, whose subspace is the literal `aspects`, the live aspect queue.
 
 #### Gap 4: Shape and live use are in two places
 
@@ -460,10 +461,13 @@ placeholder rule for examples.
 
 #### Step 3: Repoint duplicated meanings
 
-The meanings of the mailbox `kind` values are written a second time in
-`conexus/skills/mailbox/SKILL.md`, `conexus/skills/peer-messaging/SKILL.md`
-and `docs/operations/tuple-space.md`. Replace each copy with a pointer to
-the dictionary, so the meaning lives in one place.
+Two skills use the mailbox `kind` values inline in their call procedures:
+the cross-instance request and ack line of `conexus/skills/mailbox/SKILL.md`
+and the mailbox request line of `conexus/skills/peer-messaging/SKILL.md`.
+Those procedures keep the values they pass; each gains a pointer to the
+dictionary for what the values mean, so the meaning lives in one place.
+`docs/operations/tuple-space.md` has no `kind` text today and gets at most
+one pointer sentence.
 
 ## Test Plan
 

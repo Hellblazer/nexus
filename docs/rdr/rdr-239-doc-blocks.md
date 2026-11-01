@@ -440,7 +440,7 @@ Live: `nx tuple list` shows no `queue/` subspace. No value counts exist.
 
 A1 notes:
 - Same as `board/<topic>`: `kind` has no values in use, so the scalar form is needed.
-- Two of the eight templates (board, queue) are documented from convention alone, with no live writer. The block can describe the shape and the intended use, but `writers` and `readers` there say "any" and cannot be verified. The RDR should expect this: for a template with no in-repo user, the dictionary entry is an intent record.
+- Two of the eight templates (board, queue) are documented from convention alone, with no live writer. The block can describe the shape and the intended use, but `writers` and `readers` there say "any" and cannot be verified. The RDR now says so: for a template with no in-repo user, the dictionary entry is an intent record, and its `writers` and `readers` strings start with `Unverified: `.
 - The body size note: the template sets no `max_body_bytes`, so the global 4096 cap applies (`TupleLimits.MAX_BODY_BYTES`).
 
 ---
@@ -464,7 +464,7 @@ Smaller points that need no field:
 - Lists are sentences, not records, because `MiniYaml` has no list of mappings. A structured `writers` (workflow, job, verb) would need a parser change beyond `doc`. Stage 2 can live with strings; if it cannot, that is a stage-2 cost to name now.
 - Example dims and keys must be coerced to strings after `MiniYaml` (digits become `Long`, `true`/`false` become `Boolean`).
 - A `status` field (active, dormant) was considered for the ledger and left out: `summary` plus `writers: []` carries it, and a status enum is one more thing to keep true.
-- Two templates (board, queue) have no in-repo writer, so their `writers` and `readers` are intent, not evidence. The lint cannot tell. The RDR should say so.
+- Two templates (board, queue) have no in-repo writer, so their `writers` and `readers` are intent, not evidence. The lint cannot tell. The RDR says so (Approach item 4, the `Unverified: ` mark, and Drift).
 - The census join (Gap 4) shows zero rows for any take-enabled template whose rows are consumed (all 49 mailboxes), so the dictionary text is the only record of `kind` there.
 - Template header comments are not a reliable source for "who writes": ledger.yaml:11 names a deleted module.
 
