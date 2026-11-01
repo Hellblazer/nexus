@@ -24,6 +24,9 @@ Pairs with engine-service-v0.1.174 (REQUIRED_ENGINE_VERSION moves from v0.1.173)
 
 - Test tmp dirs, engine-substrate clusters, integration owner records and e2e lockdirs judge their owner live by a held lock, not a pid, so jobs in separate PID namespaces (lab-run #88) no longer reap each other's live trees (nexus-fuz9t).
 
+### Fixed
+- **A compaction checkpoint describes the session's own worktree and beads** (nexus-gy317). On the first live compaction the PreCompact hook ran `nx command-context continuation` in the payload `cwd`, the launch directory, so a session working in `../nexus-wt/<session>` got the shared primary's branch, HEAD and commits; and its in-progress list held all 9 in-progress beads, most of them other sessions', because every session claims under one assignee. The hook now runs the continuation in the worktree whose directory name is exactly the session name (from `git worktree list`, 3 s bound; the launch directory otherwise, and the header gains a `- worktree:` line) and keeps only the in-progress beads the session's `threads` board entry names, with a line counting the rest; with no bead id on the board the list stays whole. `conexus/hooks/scripts/compact_checkpoint.py`, `conexus/README.md`.
+
 ## [7.91.1] - 2026-10-31
 
 Pairs with engine-service-v0.1.173 (`REQUIRED_ENGINE_VERSION` unchanged from 7.91.0). A patch release: the conexus plugin's hooks change, and the `nx` code is 7.91.0's. It was meant for the plugin-only fast lane, but the test fix that came with it touches the hook-skew harness, which the lane does not ship, so it was cut as a normal release.

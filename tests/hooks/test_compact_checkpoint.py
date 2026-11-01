@@ -57,6 +57,8 @@ _STANDIN = textwrap.dedent(
         time.sleep(30)
     TITLES = {"exact": ["linda"], "prefix": ["linda_2"], "missing": []}[os.environ.get("FAKE_BOARD", "exact")]
     if args[:2] == ["command-context", "continuation"]:
+        with open(os.environ["FAKE_NX_LOG"] + ".cwd", "w", encoding="utf-8") as log:
+            log.write(os.getcwd())
         ready = "\\n".join(f"o nexus-r{i:04d} ready bead number {i} " + "x" * 80 for i in range(int(os.environ.get("FAKE_READY", "3"))))
         commits = "\\n".join(f"abc{i:04d} commit number {i} " + "x" * 80 for i in range(int(os.environ.get("FAKE_COMMITS", "3"))))
         print("**Target file:** `/tmp/handoff-target.md`\\n\\n**Topic:** current branch feature/x\\n\\n"
@@ -64,7 +66,9 @@ _STANDIN = textwrap.dedent(
               "### Uncommitted\\n M a.py\\n\\n"
               "### Recent commits (last 10 on this branch)\\n" + commits + "\\n\\n"
               "### Open PRs from this branch\\n(none)\\n\\n"
-              "### In-progress beads\\no nexus-3lqxv Auto-continuation\\n\\n"
+              "### In-progress beads\\no nexus-3lqxv Auto-continuation\\n"
+              "├── o nexus-3lqxv.2 its child\\no nexus-zz9yx another session's bead\\n\\n"
+              "----\\nTotal: 3 issues\\n\\n"
               "### Ready beads (top 10)\\n" + ready + "\\n\\n### nx memory (x) titles\\nmemo-one\\nmemo-two\\n\\n"
               "### Feedback memories\\nfeedback-one\\n")
     elif args[:2] == ["memory", "list"]:
@@ -113,11 +117,15 @@ def env(tmp_path: Path, monkeypatch, mod):
     monkeypatch.delenv("FAKE_READY", raising=False)
     monkeypatch.delenv("FAKE_COMMITS", raising=False)
     monkeypatch.setattr(mod, "_nx_command", lambda: [sys.executable, str(standin)])
+    # The test checkout's own worktrees must not decide where continuation runs.
+    real_git_worktrees = mod._git_worktrees
+    monkeypatch.setattr(mod, "_git_worktrees", lambda _cwd, _timeout: [])
 
     class Env:
         pass
 
     e = Env()
+    e.real_git_worktrees = real_git_worktrees
     e.config, e.claude, e.nx_log = config, claude, nx_log
     e.checkpoints = config / "compact-checkpoints"
     e.hook_log = config / "logs" / "hook.log"
@@ -219,6 +227,43 @@ class TestPre:
         code, _ = run(mod, monkeypatch, "pre", pre_payload())
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert code == 0 and "[no board entry:" in text and "### In-progress beads" in text
+
+    def test_in_progress_keeps_only_the_beads_the_board_names(self, mod, env, monkeypatch) -> None:
+        """Every session claims under one assignee; the board's ref is this session's own list."""
+        run(mod, monkeypatch, "pre", pre_payload())
+        section = mod._in_progress_section((env.checkpoints / f"{SID}.md").read_text(encoding="utf-8"))
+        assert "nexus-3lqxv Auto-continuation" in section and "nexus-3lqxv.2 its child" in section
+        assert "nexus-zz9yx" not in section and "Total:" not in section
+        assert "(2 of 3 in-progress beads" in section
+
+    def test_without_a_board_the_in_progress_list_is_whole(self, mod, env, monkeypatch) -> None:
+        monkeypatch.setenv("FAKE_BOARD", "missing")
+        run(mod, monkeypatch, "pre", pre_payload())
+        section = mod._in_progress_section((env.checkpoints / f"{SID}.md").read_text(encoding="utf-8"))
+        assert "nexus-zz9yx" in section and "in-progress beads: the ones" not in section
+
+    def test_continuation_runs_in_the_worktree_named_after_the_session(self, mod, env, monkeypatch, tmp_path) -> None:
+        """The payload cwd is the launch directory (the shared primary); the session works in its worktree."""
+        primary = tmp_path / "primary"
+        primary.mkdir()
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(primary)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "root"], check=True)
+        for wt in ("linda_2", NAME):  # a prefix-named worktree is not the session's
+            subprocess.run([*git, "worktree", "add", "-q", "-b", f"feature/{wt}", str(tmp_path / "wt" / wt)], check=True)
+        monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
+        run(mod, monkeypatch, "pre", pre_payload(cwd=str(primary)))
+        expected = os.path.realpath(tmp_path / "wt" / NAME)
+        assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == expected
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        header = text.split("\n## ", 1)[0]
+        assert "- worktree: " in header and header.rstrip().endswith(f"wt/{NAME}")
+
+    def test_no_session_worktree_keeps_the_payload_cwd(self, mod, env, monkeypatch, tmp_path) -> None:
+        monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
+        run(mod, monkeypatch, "pre", pre_payload(cwd=str(tmp_path)))  # not a repository
+        assert os.path.realpath(Path(str(env.nx_log) + ".cwd").read_text(encoding="utf-8")) == os.path.realpath(tmp_path)
+        assert "- worktree:" not in (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
 
     def test_survives_a_missing_nx(self, mod, env, monkeypatch) -> None:
         monkeypatch.setattr(mod, "_nx_command", lambda: None)
