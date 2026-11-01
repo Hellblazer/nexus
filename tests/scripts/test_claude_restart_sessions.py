@@ -47,9 +47,11 @@ def pane(prompt_line: str) -> str:
         ("\x1b[39m❯\xa0half a thought\x1b[7m \x1b[27m", True),  # typed text and the cursor cell
         ("\x1b[39m❯\xa0typed \x1b[2mand a ghost tail\x1b[0m", True),  # typed text with a dim completion
         ("\x1b[39m❯\xa0\x1b[2;38;5;245mdim with a colour\x1b[22m", False),  # dim set with a colour in one SGR
+        ("\x1b[39m❯\xa0\x1b[38;5;2mtyped in colour 2", True),  # 256-colour index 2 is not dim
+        ("\x1b[39m❯\xa0\x1b[38;2;2;2;2mtyped in rgb 2,2,2", True),  # truecolour 2s are not dim
     ],
     ids=["ghost-elsinore", "ghost-no-suggestion", "ghost-command", "empty", "empty-grey",
-         "typed", "typed-cursor", "typed-plus-ghost", "dim-combined-sgr"],
+         "typed", "typed-cursor", "typed-plus-ghost", "dim-combined-sgr", "colour-index-2", "truecolour-2s"],
 )
 def test_has_draft_counts_only_text_that_is_not_dim(crs, prompt_line: str, draft: bool) -> None:
     assert crs.has_draft(pane(prompt_line)) is draft

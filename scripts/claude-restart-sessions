@@ -408,7 +408,8 @@ def typed_text(line: str) -> str:
     ``ESC[39m❯ ESC[2mgo Step 0ESC[0m``. That is ghost text, not something the user typed,
     and before nexus-nuyju it made six of nine sessions read as holding a draft on the
     7.92.0 restart. SGR 2 turns dim on; 0 and 22 turn it off; other parameters (colours)
-    leave it as it is.
+    leave it as it is, and the
+    sub-parameters of an extended colour (``38;5;2`` is colour 2, not dim) are skipped.
     """
     out: list[str] = []
     dim = False
@@ -417,11 +418,20 @@ def typed_text(line: str) -> str:
     for m in _SGR.finditer(line):
         if not dim:
             out.append(line[pos:m.start()])
-        for param in (m.group(1) or "0").split(";"):
+        params = (m.group(1) or "0").split(";")
+        i = 0
+        while i < len(params):
+            param = params[i]
+            if param in ("38", "48", "58") and i + 1 < len(params):
+                # Extended colour: 38;5;N or 38;2;R;G;B. Its sub-parameters are colour
+                # values, so a 2 among them (colour index 2) is not dim.
+                i += 3 if params[i + 1] == "5" else 5 if params[i + 1] == "2" else 1
+                continue
             if param in ("", "0", "22"):
                 dim = False
             elif param == "2":
                 dim = True
+            i += 1
         pos = m.end()
     if not dim:
         out.append(line[pos:])
