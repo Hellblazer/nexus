@@ -74,19 +74,17 @@ an inline "Amended 2026-11-01" note pointing here. The contract itself is
     rule 3. A step confined to one document could bind a shared chunk to
     that document when it is one of the chunk's owners; that recall gain
     is nexus-z1d0l.1.12.
-
-**Conformance notes (not amendments; no decision of Sam's).** These record
-how shipped code meets the approved contract, where the text above was
-silent. Each edit point is marked "Conformance note" and points here.
-
-  - **(c1)** 2026-11-01 (nexus-z1d0l.1.10): `requires_review` is true when
+  - **(vi)** 2026-11-01, approved by Sam (nexus-z1d0l.1.10): two rules
+    the text above left unstated. First, `requires_review` is true when
     the host holds no records for the step; `bind` has done so since
-    nexus-z1d0l.1.2 (a bundled step fed by model output). A check or verify
-    step whose evidence hydrates to nothing, dispatched on its own, returns
-    the empty v1 payload with a null verdict instead of a bare `text` dict.
-    It also carries `text`, a key outside the v1 sets that `bind` passes
-    through like any key the host does not own; `nx_answer` reads it, so its
-    answer text and the answer-runs class of such a run are unchanged.
+    nexus-z1d0l.1.2 (a bundled step fed by model output). Second, a check
+    or verify step whose evidence hydrates to nothing, dispatched on its
+    own, returns the empty v1 payload with a null verdict instead of a
+    bare `text` dict. It also carries `text`, a key outside the v1 sets
+    that `bind` passes through like any key the host does not own;
+    `nx_answer` reads it, so its answer text and the answer-runs class of
+    such a run are unchanged. Edited in place under § Witness Schema v1,
+    the `requires_review` rule and Compatibility.
 
 ### Witness Schema v1
 
@@ -276,7 +274,7 @@ removed from the quote before the test and kept in the returned `quote`.
 `uncovered` (check) lists the input item ids that no `supports` or
 `contradicts` item names. `requires_review` is true when the host holds no
 records for the step (a bundled step fed by model output, or no evidence
-at all; Conformance note (c1)), when any item is not
+at all; Amendment Log (vi)), when any item is not
 `bound`, when `rejected` or `uncovered` is non-empty, or when the verdict
 (`ok`, `verified`) is true and no `supports` item is `bound`; for check
 with `ok=true`, every input item needs a bound `supports` item. It is the
@@ -306,7 +304,7 @@ Mitigations).
   `evidence` list, a `citations` key included (a model can write it and no
   production dispatch emits it), is malformed and comes back as
   `schema_version: 1` with `evidence: []` and `requires_review: true`.
-  Conformance note (c1): on the isolated dispatch path, a check or verify
+  Amended 2026-11-01 (Amendment Log (vi)): on the isolated dispatch path, a check or verify
   step whose evidence hydrates to nothing is never sent to the model: the
   runner returns that same empty payload, with no records, so
   `requires_review: true`, and with no verdict
