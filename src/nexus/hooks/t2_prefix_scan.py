@@ -444,6 +444,12 @@ def scan(project: str) -> str:
             )
             return f"WARNING: T2 memory unreachable: {exc}"
 
+        # Freshness comes from the UNFILTERED list. The warning asks whether the
+        # T2 substrate is live, and a machine-written stamp newer than the stale
+        # window answers yes; reading the first HUMAN namespace after the filter
+        # would warn on every injection for a quiet project. The filter is for
+        # display only.
+        freshest = namespaces[0].get("last_updated", "") if namespaces else ""
         namespaces = [
             ns for ns in namespaces
             if not str(ns.get("project", "")).endswith(_MACHINE_NAMESPACE_SUFFIXES)
@@ -456,9 +462,7 @@ def scan(project: str) -> str:
             store, project, namespaces, scan_budget_s, request_timeout_s=timeout
         )
 
-        freshness_warning = _check_freshness(
-            namespaces[0].get("last_updated", ""), stale_days
-        )
+        freshness_warning = _check_freshness(freshest, stale_days)
         if freshness_warning:
             lines.append(freshness_warning)
             lines.append("")

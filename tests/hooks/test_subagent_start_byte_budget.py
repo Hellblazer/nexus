@@ -41,6 +41,23 @@ if _seed:
     _seeded = open(_seed, encoding="utf-8").read()
     t2_prefix_scan.scan = lambda project: _seeded
 
+# nexus-mtheb: the T1 index, seeded the way the T2 scan is. This is a child
+# process, so patching the shared shutil/_run_captured here touches nothing else.
+_t1_seed = os.environ.get("NX_BUDGET_T1_SEED_FILE")
+if _t1_seed:
+    import shutil
+    _t1_listing = open(_t1_seed, encoding="utf-8").read()
+    _real_run_captured = subagent_start._run_captured
+    _real_which = shutil.which
+
+    def _run_captured(argv, **kw):
+        if "scratch" in argv and "list" in argv:
+            return _t1_listing
+        return _real_run_captured(argv, **kw)
+
+    subagent_start._run_captured = _run_captured
+    shutil.which = lambda cmd, *a, **k: "/usr/bin/nx" if cmd == "nx" else _real_which(cmd, *a, **k)
+
 raw = sys.stdin.read()
 try:
     payload = json.loads(raw) if raw.strip() else None
@@ -76,20 +93,14 @@ _REAL_SHAPE_PAYLOAD = json.dumps({
 #:
 #: T2: ``t2_prefix_scan`` renders at most ``_HARD_CAP`` = 8 entries, the
 #: first ``_SNIPPET_LIMIT`` = 3 per namespace with a 70-char snippet. The
-#: seed is that cap in the real session's layout (two namespaces, 5 + 3,
-#: truncation lines included): 898B real on 2026-10-09, this seed a little
-#: over. Titles are free-length, so this is a measured shape, not a bound.
+#: seed is one human namespace in the real session's layout, truncation
+#: lines included. The machine-written ``_taxonomy_discover_health`` block
+#: the 2026-10-09 session carried is NOT seeded: the scan filters that
+#: namespace out now (nexus-mtheb), so seeding it measured ~500B of output
+#: no dispatch produces. Titles are free-length, so this is a measured
+#: shape, not a bound.
 _T2_SEED = (
-    "### T2 Memory (taxonomy_discover_health)\n"
-    + "".join(
-        f"  docs__1-{i}__voyage-context-3__v1 — "
-        + '{"last_attempt_at": "2026-10-09T03:25:16Z", "last_outcome": "success",…\n'
-        for i in range(1, 4)
-    )
-    + "  docs__1-85__voyage-context-3__v1\n"
-    + "  code__1-85__voyage-code-3__v1\n"
-    + "  … (4 more)\n\n"
-    + "### T2 Memory\n"
+    "### T2 Memory\n"
     + "".join(
         f"  search-telemetry-measurements-2026-10-0{i} — "
         + "nexus-vpa9q measurements, live managed cloud, engine v0.1.154, 2026-10…\n"
@@ -110,10 +121,18 @@ _KNOWLEDGE_MAP_SEED = "## Knowledge Map\n\n" + "".join(
     for prefix in ("code", "docs", "knowledge", "rdr")
 )
 
-#: Not seeded: the T1 scratch section. ``nx scratch list`` prints every
-#: entry in the session with no cap, so it has no worst case to seed and
-#: sits outside what this budget can bound. A session with a long
-#: scratch pad goes over it by construction.
+#: T1: the hook prints ids and tags only, at most ``_T1_INDEX_MAX`` = 15
+#: lines of at most ``_T1_INDEX_LINE_MAX`` = 100 chars, plus a "(N more)"
+#: line (nexus-mtheb), so the section has a worst case and it is seeded: 20
+#: entries whose tag lines run past the clamp, each followed by a content
+#: line the hook must drop. ``nx scratch list`` itself is stubbed in the
+#: driver, the way ``t2_prefix_scan.scan`` is, so the measure is the same on
+#: a box with no service.
+_T1_SEED = "".join(
+    f"[t1seed{i:02d}] " + ",".join(f"round-tag-{n}" for n in range(1, 12)) + "  flagged=False\n"
+    f"  working note {i} that the hook must not print, whatever its length\n"
+    for i in range(20)
+)
 
 #: Budget for the common (non-worktree) case. UNCHANGED across the RDR-215
 #: port, and that is a measurement rather than an assumption.
@@ -148,7 +167,13 @@ _KNOWLEDGE_MAP_SEED = "## Knowledge Map\n\n" + "".join(
 #: from a real laptop session on the same tree. 9552 * 1.08 ~= 10316.
 #: The brief check stays as written (nexus_ffa, 2026-10-08): the remedy
 #: for a gate that measured the wrong state is the gate.
-_SUBAGENT_START_BUDGET_BYTES = 10350
+#:
+#: nexus-mtheb (2026-11-01): re-measured after the T1 contract grew, the
+#: machine-written health namespace left the T2 seed (the scan filters it, so
+#: the old seed carried ~500B no dispatch has) and the T1 index was seeded at
+#: its worst case (15 clamped lines plus the "(N more)" line). conexus 6599B
+#: + sn 3470B = 10069B, identical across two runs. 10069 * 1.08 ~= 10874.
+_SUBAGENT_START_BUDGET_BYTES = 10900
 
 #: Budget for an isolation:worktree dispatch: sn's subagent_start.py adds
 #: worktree-section.md on top of its normal output, and conexus's ported
@@ -169,7 +194,11 @@ _SUBAGENT_START_BUDGET_BYTES = 10350
 #: conexus 6082B + sn 5424B = 11506B. The seeds reach the worktree case
 #: too, so the 3502B above was the fenced state again, not a property of
 #: worktrees. 11506 * 1.08 ~= 12426.
-_SUBAGENT_START_WORKTREE_BUDGET_BYTES = 12450
+#:
+#: nexus-mtheb (2026-11-01): same re-measure as above, worktree case:
+#: conexus 6599B + sn 5424B = 12023B, identical across two runs.
+#: 12023 * 1.08 ~= 12985.
+_SUBAGENT_START_WORKTREE_BUDGET_BYTES = 13000
 
 
 def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:

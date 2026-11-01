@@ -187,8 +187,9 @@ _T1_TOP_LINES: list[str] = [
     "(ship-when, inputs, prior findings) and name its id in each brief; have agents put "
     "interim findings in T1 under the round tags you give them; read their entries "
     "before acting on a hand-back.",
-    "T1 survives resume and compaction; a fresh restart or `/clear` drops it unless "
-    "flagged (`scratch_manage`).",
+    "T1 survives compaction; a `/clear`, `/resume` or fresh restart starts a new scope, "
+    "rows are swept 24 h after they were written, and flagged entries land in T2 at "
+    "session end. A `claude -p` child has its own T1 unless started with `share_t1=True`.",
     "",
 ]
 

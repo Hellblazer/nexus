@@ -174,10 +174,13 @@ _NX_T1 = (
     '(action="get", entry_id=...). If your brief says you are an independent '
     "reviewer, read nothing else in T1.\n"
     "- Interim findings and working notes go to T1: scratch put, with the tags your "
-    'brief names (for example tags="nexus-abc,review-r1").\n'
-    "- T2 memory_put only for a record your brief names; never overwrite a T2 record "
-    "it did not give you. T3 store_put only for validated, reusable knowledge.\n"
-    "T1 survives resume and compaction; a fresh restart or /clear drops it.\n\n"
+    'brief names (for example tags="nexus-abc,review-r1") and agent="<your role>".\n'
+    "- T2 memory_put only for a record your brief or your agent definition requires "
+    "(gate records stay mandatory); never overwrite a T2 record it did not give you. "
+    "T3 store_put only for validated, reusable knowledge.\n"
+    "T1 survives compaction; a /clear, /resume or fresh restart starts a new scope, "
+    "rows are swept 24 h after they were written, and flagged entries land in T2 at "
+    "session end.\n\n"
 )
 
 _NX_TIERS = (
@@ -186,8 +189,7 @@ _NX_TIERS = (
     "Read widest -> narrowest BEFORE any work; check before duplicating effort:\n"
     "  T3 search            all sessions/projects   <- check before researching\n"
     "  T2 memory            project-scoped          <- check before project work\n"
-    "  T1 scratch           shared with siblings    <- check before duplicating "
-    "sibling work\n"
+    "  T1 scratch           shared with siblings    <- read what your brief names\n"
 )
 
 _NX_TOOLS = (
@@ -202,7 +204,7 @@ _NX_T3 = (
     "Plans (T2): plan_search, plan_save\n"
     'Hint: where="section_type!=references" filters noise.\n\n'
     "WRITE-BACK before returning (findings not stored are lost): interim findings to "
-    "T1 (scratch put, your brief's tags); the record your brief names to T2; only "
+    "T1 (scratch put, your brief's tags); the record your brief or agent definition requires to T2; only "
     "validated, reusable knowledge to T3.\n"
 )
 
@@ -490,6 +492,14 @@ def _knowledge_map_section(repo_root: str) -> str:
 #: The most entry lines the T1 index shows; the rest are counted.
 _T1_INDEX_MAX: int = 15
 
+#: Longest index line, id and tags included. Tags are free-length, so without a
+#: clamp the section has no byte bound (15 lines x 100 chars is its worst case).
+_T1_INDEX_LINE_MAX: int = 100
+
+
+def _clamp_index_line(line: str) -> str:
+    return line if len(line) <= _T1_INDEX_LINE_MAX else line[: _T1_INDEX_LINE_MAX - 1] + "…"
+
 
 def _t1_scratch_section(env: dict[str, str]) -> str:
     """The "## T1 index" section, or "" (subagent-start.sh:390-399).
@@ -507,12 +517,20 @@ def _t1_scratch_section(env: dict[str, str]) -> str:
     t1_entries = _run_captured(nx_argv("scratch", "list"), env=env, timeout=30)
     if not t1_entries or t1_entries == "No scratch entries.":
         return ""
-    index = [ln for ln in t1_entries.splitlines() if ln.startswith("[")]
+    # split("\n"), not splitlines(): splitlines() also breaks on \r, \x0b, \x0c,
+    # \x1c-\x1e, \x85 and U+2028/9, so a content line holding one of them followed
+    # by "[" would surface as an index line and leak the contents this section
+    # exists to keep out.
+    index = [
+        _clamp_index_line(ln.rstrip("\r"))
+        for ln in t1_entries.split("\n")
+        if ln.startswith("[")
+    ]
     if not index:
         return ""
     shown = index[:_T1_INDEX_MAX]
     more = len(index) - len(shown)
-    body = "\n".join(shown) + (f"\n... ({more} more: scratch list)" if more else "")
+    body = "\n".join(shown) + (f"\n... ({more} more)" if more else "")
     return (
         "\n## T1 index (ids and tags; read only what your brief names)\n"
         f"{body}\n\n"
@@ -532,11 +550,14 @@ def run(payload: dict | None) -> HookResult:
 
     parts: list[str] = []
 
+    # nexus-mtheb: first, and for every agent type (reviewers included). A real
+    # payload always carries agent_id, so the claimant line goes AFTER the
+    # contract or it would open the injection instead.
+    parts.append(_NX_T1)
+
     if agent_id:
         parts.append(f"Claimant id: {agent_id} — mailbox: mailbox/{agent_id}\n")
 
-    # nexus-mtheb: first, and for every agent type (reviewers included).
-    parts.append(_NX_T1)
     parts.append(_t2_memory_section(repo_root))
     parts.append(_linked_rdrs_section(task_text, env))
 
