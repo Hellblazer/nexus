@@ -66,8 +66,9 @@ RESERVED_SHARE_MAX: int = 50
 #: ``PrimaryEvidenceCaps.max_narrowed_source_items``. A test pins the sum 88 + 12 = 100.
 RESERVED_SHARE_NARROWED: int = 88
 
-#: Operator args that carry the evidence a later operator reduces.
-EVIDENCE_KEYS: tuple[str, ...] = ("items", "inputs", "content", "context", "groups")
+#: Operator args that carry the evidence a later operator reduces. ``evidence`` is the explicit evidence of a
+#: ``verify`` step (RDR-189 P1, nexus-z1d0l.1.4).
+EVIDENCE_KEYS: tuple[str, ...] = ("items", "inputs", "content", "context", "groups", "evidence")
 
 #: Operators that only keep or reorder the items they are given. A reserved item missing from the
 #: input of the step after one of these was dropped by it; after any other operator (summarize,

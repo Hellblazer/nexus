@@ -167,15 +167,24 @@ class PlanRunOperatorArgMissingError(ValueError):
     missing 1 required positional argument: 'content'").
     """
 
-    def __init__(self, *, step_index: int, tool: str, missing_arg: str) -> None:
+    def __init__(self, *, step_index: int, tool: str, missing_arg: str, detail: str | None = None) -> None:
+        """*detail* replaces the generic explanation after "has no <arg>" for a caller whose case is not the one
+        the generic text describes (a verify step that has ``ids`` but no ``claim``). A re-raise that patches in the
+        step index passes ``exc.detail`` along."""
         self.step_index = step_index
         self.tool = tool
         self.missing_arg = missing_arg
+        self.detail = detail
         super().__init__(
-            f"plan_run: steps[{step_index}] ({tool!r}) has no "
-            f"{missing_arg!r} — not present in args, not hydratable via "
-            "'ids', no 'inputs' alias present. Malformed plan, rejected "
-            "before any step dispatched."
+            f"plan_run: steps[{step_index}] ({tool!r}) has no {missing_arg!r}"
+            + (
+                f": {detail}"
+                if detail is not None
+                else (
+                    " — not present in args, not hydratable via 'ids', no 'inputs' alias present. "
+                    "Malformed plan, rejected before any step dispatched."
+                )
+            )
         )
 
 
@@ -700,7 +709,13 @@ _STEPREF_RE = re.compile(r"^\$step(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$")
 #: carries the chain internally. The KEY string lives in
 #: :mod:`nexus.plans.bundle` (``DEFERRED_REF_KEY``) so a rename or typo
 #: on either side can't silently drop the sentinel (substantive-critic C2).
-from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY, _extract_tool_name, is_operator_tool as _is_operator_tool  # noqa: E402
+from nexus.plans.bundle import (  # noqa: E402
+    BUNDLED_INTERMEDIATE as _BUNDLED_INTERMEDIATE,
+    DEFERRED_REF_KEY as _DEFERRED_REF_KEY,
+    _extract_tool_name,
+    is_operator_tool as _is_operator_tool,
+    is_witness_tool as _is_witness_tool,
+)
 import nexus.operators.dispatch as _dispatch_mod  # noqa: E402
 from nexus.plans.evidence_diagnostics import (  # noqa: E402
     _per_chunk_collections,
@@ -1918,6 +1933,20 @@ def _coverage_skipped_output() -> dict[str, Any]:
     return {"text": _COVERAGE_SKIPPED_TEXT, "coverage_skipped": True}
 
 
+def _skipped_run_outputs(tools: Sequence[str]) -> list[dict[str, Any]]:
+    """One output per step of a trailing operator run the coverage boundary skipped, in plan order.
+
+    The last step carries the skipped output. An earlier operator step gets the bundle placeholder, as the bundle path
+    leaves it. An earlier WITNESS step (``check`` / ``verify``, RDR-189 P1, nexus-z1d0l.1.4) never ran and was never
+    consumed inline by a bundle, so it carries the skipped output too: the placeholder would say the opposite, and a
+    ``$stepN.evidence`` reference to it would be told the step sits inside an operator bundle."""
+    outputs = [
+        _coverage_skipped_output() if _is_witness_tool(tool) else dict(_BUNDLED_INTERMEDIATE) for tool in tools[:-1]
+    ]
+    outputs.append(_coverage_skipped_output())
+    return outputs
+
+
 def _hydrate_capturing(
     tool: str, args: dict[str, Any], *, capture: bool, step_index: int | None = None,
 ) -> tuple[str, dict[str, Any], list[list[str]]]:
@@ -1937,7 +1966,7 @@ def _hydrate_capturing(
         if step_index is None or exc.step_index >= 0:
             raise
         raise PlanRunOperatorArgMissingError(
-            step_index=step_index, tool=exc.tool, missing_arg=exc.missing_arg,
+            step_index=step_index, tool=exc.tool, missing_arg=exc.missing_arg, detail=exc.detail,
         ) from exc
 
 
@@ -2631,8 +2660,18 @@ def _hydrate_operator_args(
         # or a blank one, is a plan-authoring bug and fails here, before ``store_get_many`` pays for a fetch;
         # ``plan_run`` patches in the step index (the ``step_index=-1`` placeholder, as the dispatcher's own
         # missing-argument check does).
-        if resolved_tool == "operator_verify" and not (isinstance(args.get("claim"), str) and args["claim"].strip()):
-            raise PlanRunOperatorArgMissingError(step_index=-1, tool=resolved_tool, missing_arg="claim")
+        # A claim taken from an earlier bundled step is a deferred ref (a dict carrying the marker) until the bundle
+        # runs: the author did supply one, so it counts as present.
+        _claim = args.get("claim")
+        if resolved_tool == "operator_verify" and not (
+            (isinstance(_claim, str) and _claim.strip())
+            or (isinstance(_claim, dict) and _DEFERRED_REF_KEY in _claim)
+        ):
+            raise PlanRunOperatorArgMissingError(
+                step_index=-1, tool=resolved_tool, missing_arg="claim",
+                detail="the step supplies 'ids' (its evidence) but no non-blank 'claim' to check that evidence against; "
+                "the host never invents a claim, so the plan author states one (text, or a reference such as $stepN.text).",
+            )
         ids = args["ids"]
         collections = args.get("collections", "knowledge")
         id_list_raw = ids if isinstance(ids, list) else [ids]
@@ -4051,15 +4090,18 @@ async def _plan_run_impl(
                 # RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary, on the bundle's hydrated input,
                 # before the one fused dispatch. A skip leaves one output per plan step. The repair
                 # (nexus-jypmj.3.2) re-reads the input through the same builder and replaces the bundle.
+                _later_run: list[int] = []
                 if _bundle_at_boundary:
                     # RDR-189 P1 (nexus-z1d0l.1.4): a witness ends a bundle, so the trailing run can continue past
                     # this bundle in isolated steps (``extract, check, generate``: a bundle, then the generate).
                     # Those steps are read, handed the repair supplement and skipped with the bundle, as an
-                    # unbundled run's steps are; with no witness the list is empty and nothing changes.
+                    # unbundled run's steps are; with no witness the list is empty and nothing changes. They are
+                    # dispatched by ``dispatch``, so they are read as that dispatcher will hydrate them.
                     _later_run = [i for i in _boundary_run if i > seg.end_index]
+                    _later_hydrates = bool(getattr(dispatch, _HYDRATES_ATTR, False))
                     if _later_run:
                         _name_merge_steps(_later_run)
-                        _later_texts, _later_observed = _read_rest_of_run(_later_run, hydrate=True)
+                        _later_texts, _later_observed = _read_rest_of_run(_later_run, hydrate=_later_hydrates)
                         _boundary_texts = _boundary_texts + _later_texts
                         _boundary_observed = _boundary_observed or _later_observed
 
@@ -4068,7 +4110,7 @@ async def _plan_run_impl(
                         rebuilt, rebuilt_texts, rebuilt_observed = _build_bundle_steps(True)
                         bundle = OperatorBundle(steps=tuple(rebuilt))
                         if _later_run:
-                            more_texts, more_observed = _read_rest_of_run(_later_run, hydrate=True)
+                            more_texts, more_observed = _read_rest_of_run(_later_run, hydrate=_later_hydrates)
                             return rebuilt_texts + more_texts, rebuilt_observed or more_observed
                         return rebuilt_texts, rebuilt_observed
 
@@ -4077,10 +4119,8 @@ async def _plan_run_impl(
                     )
                     _seg_started_at += _boundary_s
                     if _cov is not None and _cov.skip_generation:
-                        # One output per plan step of the run: placeholders, then the skipped output last.
-                        for _ in range(_boundary_run[-1] - seg.plan_indices[0]):
-                            step_outputs.append(dict(BUNDLED_INTERMEDIATE))
-                        step_outputs.append(_coverage_skipped_output())
+                        # One output per plan step of the run (it starts at this bundle): the skipped output last.
+                        step_outputs.extend(_skipped_run_outputs([_extract_tool(steps[i]) for i in _boundary_run]))
                         _skip_through = _boundary_run[-1]
                         _log.info(
                             "nx_answer_coverage_generation_skipped", kind="bundle",
@@ -4108,7 +4148,8 @@ async def _plan_run_impl(
                     )
                     if _bundle_at_boundary:
                         # Dispatched one by one, each step that reads retrieved evidence directly is its own reduction.
-                        _name_merge_steps(seg.plan_indices)
+                        # The steps after a witness (named above) are dispatched one by one too: name the union.
+                        _name_merge_steps([*seg.plan_indices, *_later_run])
                     for bi in seg.plan_indices:
                         _mark_reserved_step(bi, steps)
                         bstep = steps[bi]
@@ -4157,6 +4198,7 @@ async def _plan_run_impl(
                                     step_index=bi,
                                     tool=exc.tool,
                                     missing_arg=exc.missing_arg,
+                                    detail=exc.detail,
                                 ) from exc
                             if not _is_operator_error(exc):
                                 raise
@@ -4547,10 +4589,8 @@ async def _plan_run_impl(
                 _seg_started_at += _boundary_s
                 if _cov is not None and _cov.skip_generation:
                     # Unbundled, the boundary sits before the first step of the trailing run: the run's other steps
-                    # get the placeholder the bundle path leaves, and the last gets the skipped output.
-                    for _ in _boundary_run[1:]:
-                        step_outputs.append(dict(BUNDLED_INTERMEDIATE))
-                    step_outputs.append(_coverage_skipped_output())
+                    # get the placeholder the bundle path leaves (a witness, the skipped output), the last the skipped output.
+                    step_outputs.extend(_skipped_run_outputs([_extract_tool(steps[i]) for i in _boundary_run]))
                     _skip_through = _boundary_run[-1]
                     _log.info(
                         "nx_answer_coverage_generation_skipped", kind="isolated",
@@ -4636,6 +4676,7 @@ async def _plan_run_impl(
                         step_index=index,
                         tool=exc.tool,
                         missing_arg=exc.missing_arg,
+                        detail=exc.detail,
                     ) from exc
                 if deadline is not None and isinstance(exc, _dispatch_mod.OperatorTimeoutError):
                     # a4: capture partial content and STOP — unlike the

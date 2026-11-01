@@ -144,6 +144,12 @@ OPERATOR_BUNDLE_NAMES: frozenset[str] = BUNDLEABLE_OPERATORS
 #: stay in ``BUNDLEABLE_OPERATORS`` (criteria 1-3 above hold), with one further criterion that
 #: ``segment_steps`` enforces: 4. an operator whose output the host must read is only ever a bundle's
 #: TERMINAL step, never an intermediate, because an intermediate's output is ``BUNDLED_INTERMEDIATE``.
+#:
+#: Cost of the terminal rule: a witness that is the terminal of a bundle with an operator before it
+#: (``extract -> check``, ``extract -> verify``) cannot produce a BOUND witness. Its evidence is the bundle's
+#: own model output, which has no host-held records, so every item comes back ``unresolved`` with
+#: ``requires_review`` true. A witness dispatched on its own (isolated) over a retrieval step's ids keeps
+#: its sources and can bind.
 WITNESS_OPERATORS: frozenset[str] = frozenset({
     "check", "verify", "operator_check", "operator_verify",
 })
@@ -284,6 +290,14 @@ def segment_steps(steps: list[dict[str, Any]]) -> list[Segment]:
     bundle of the first two and an isolated ``generate``. This function feeds
     ``plan_run``, the continuation cut classifier and the cost estimate, so all
     three read the same boundary.
+
+    **What the terminal rule costs.** An ``extract -> check`` (or ``extract -> verify``)
+    bundle cannot produce a BOUND witness: the terminal's evidence is the bundle's
+    own model output, so no host-held record exists and every item comes back
+    ``unresolved`` with ``requires_review`` true. Binding needs the witness
+    dispatched on its own over a retrieval step's ids, which *always isolated*
+    would have given at one extra dispatch for such a bundle. The terminal rule
+    trades that strength for the single dispatch.
 
     Pure structural analysis — no argument resolution, no dispatch.
     The runner handles both at execution time, where the relevant

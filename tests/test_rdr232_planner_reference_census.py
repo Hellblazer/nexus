@@ -114,6 +114,16 @@ def test_the_census_reads_the_reference_and_is_not_vacuous() -> None:
     assert {r[0] for r in IDS_ROWS} == {"check", "verify"}, IDS_ROWS
 
 
+def test_check_documents_both_ways_to_feed_it_and_the_header_does_not_forbid_ids() -> None:
+    """RDR-189 P1 (nexus-z1d0l.1.4): ``check`` takes ``ids`` (hydrated by the runner, each item's source kept) or
+    explicit ``items``; the section header above it used to say every operator needs hydrated text, "NOT ids"."""
+    assert {"ids", "collections", "items"} <= set(SIGNATURES["check"]), SIGNATURES["check"]
+    assert ("check", "items") in EVIDENCE_ROWS, "the explicit items arg is driven through a merge site like any other"
+    header = _PLANNER_TOOL_REFERENCE.split("=== Operators (LLM-backed) ===", 1)[1].split("  extract(", 1)[0]
+    assert "NOT ids" not in header
+    assert "check" in header and "verify" in header and "ids" in header
+
+
 @pytest.mark.parametrize("op", sorted(SIGNATURES))
 def test_every_documented_arg_is_classified(op: str) -> None:
     unclassified = [

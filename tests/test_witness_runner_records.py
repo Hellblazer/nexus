@@ -722,6 +722,71 @@ async def test_a_bundled_terminal_verify_with_ids_is_bound_by_the_host_records()
     assert "_evidence_records" not in prompts[0] and '"id": "e2"' in prompts[0]
 
 
+SUMMARIZE_THEN_VERIFY_PLAN = [
+    CHECK_PLAN[0],
+    {"tool": "summarize", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+    {"tool": "verify", "args": {"ids": "$step1.ids", "collections": "$step1.collections", "claim": "$step2.text"}},
+]
+
+
+@pytest.mark.asyncio
+async def test_a_bundled_verify_may_take_its_claim_from_an_earlier_bundled_step() -> None:
+    """Verifying a generated summary against its sources is the canonical verify use. Under bundling the claim is a
+    reference to the summarize step that has not run yet (a deferred ref, not a string); it is a present claim."""
+    prompts: list[str] = []
+
+    async def fake_bundle(bundle, **kw):
+        prompts.append(bundle_mod.compose_bundle_prompt(bundle)[0])
+        return {"verified": True, "reason": "r", "evidence": [{"item_id": "e2", "quote": "12 ms per request", "role": "supports"}]}
+
+    with _env(_owners(), {X: {"content": BODY_X}, Y: {"content": BODY_Y}}), patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+        result = await runner.plan_run(_plan_match(SUMMARIZE_THEN_VERIFY_PLAN), {}, bundle_operators=True)
+    assert len(prompts) == 1, "summarize and verify are one bundle dispatch"
+    (item,) = result.steps[-1]["evidence"]
+    assert (item["state"], item["tumbler"], item["chash"]) == ("bound", "1.1.2", Y)
+
+
+@pytest.mark.asyncio
+async def test_an_unbundled_verify_takes_its_claim_from_an_earlier_step_too() -> None:
+    async def fake_dispatch(prompt, schema, **kw):
+        if "verified" in json.dumps(schema):
+            return {"verified": True, "reason": "r", "evidence": []}
+        return {"text": "latency drops under batching"}
+
+    with _env(_owners(), {X: {"content": BODY_X}, Y: {"content": BODY_Y}}), patch.object(dmod, "claude_dispatch", fake_dispatch):
+        result = await runner.plan_run(_plan_match(SUMMARIZE_THEN_VERIFY_PLAN), {}, bundle_operators=False)
+    assert result.steps[-1]["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_bundled_verify_with_ids_and_no_claim_names_the_real_step_and_says_what_is_missing() -> None:
+    """The bundle builder hydrates the step itself, so the missing-claim error carries the plan index of the verify
+    (here 2), not the ``-1`` placeholder hydration raises with; and its message is about the claim, not about a
+    plan that was rejected before any step ran (the search step had run)."""
+    plan = [
+        VERIFY_PLAN[0],
+        {"tool": "summarize", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "verify", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+    ]
+    with _env(_owners(), {X: {"content": BODY_X}, Y: {"content": BODY_Y}}), pytest.raises(runner.PlanRunOperatorArgMissingError) as err:
+        await runner.plan_run(_plan_match(plan), {}, bundle_operators=True)
+    assert (err.value.step_index, err.value.missing_arg) == (2, "claim")
+    text = str(err.value)
+    assert "steps[2]" in text and "'claim'" in text and "verify" in text
+    assert "not hydratable via 'ids'" not in text and "rejected before any step dispatched" not in text
+
+
+def test_the_missing_claim_message_is_its_own_and_survives_a_reraise_with_the_real_index() -> None:
+    with pytest.raises(runner.PlanRunOperatorArgMissingError) as err:
+        runner._hydrate_operator_args("verify", {"ids": [X], "collections": COLL})
+    first = str(err.value)
+    assert "not hydratable via 'ids'" not in first and "rejected before any step dispatched" not in first
+    with pytest.raises(runner.PlanRunOperatorArgMissingError) as again:
+        runner._hydrate_capturing("verify", {"ids": [X], "collections": COLL}, capture=False, step_index=4)
+    assert again.value.step_index == 4 and "steps[4]" in str(again.value)
+    assert "not hydratable via 'ids'" not in str(again.value)
+
+
 @pytest.mark.asyncio
 async def test_a_verify_with_ids_composes_the_continuation_prompt_the_runner_sent() -> None:
     """RDR-189 P1 (nexus-z1d0l.1.4): the continuation's Shape B prompt for a hydrated verify is byte-identical

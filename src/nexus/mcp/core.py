@@ -9895,7 +9895,9 @@ THEY DO NOT RETURN CONTENT. To get text, chain into store_get_many.
       - Output: {contents: [str, ...], missing: [str, ...]}
 
 === Operators (LLM-backed) ===
-Each requires hydrated text as input — NOT ids/tumblers.
+Each takes hydrated text as input: pass $stepN.contents, never raw tumblers.
+`check` and `verify` (listed last) also take `ids` + `collections` straight
+from a retrieval step; the runner hydrates them and keeps each item's source.
 
   extract(inputs, fields)
       - `inputs` is a JSON array of content strings. Pass $stepN.contents
@@ -9926,10 +9928,12 @@ Each requires hydrated text as input — NOT ids/tumblers.
         $step4.contents], never one string that quotes them.
       - Output: {text: str}
 
-  check(check_instruction, ids, collections)
+  check(check_instruction, ids, collections, items)
       - Tests a claim across the retrieved items. Feed it ids=$step1.ids and
         collections=$step1.collections (the runner hydrates them and keeps
         each item's source); `check_instruction` is the claim or question.
+        Instead of ids, `items` may be a JSON array of hydrated texts
+        (items=$stepN.contents); the items then carry no source of their own.
       - Output: {ok, evidence: [{item_id, quote, role, state, span,
         tumbler, chash, collection}], rejected, uncovered, requires_review}.
         Only an evidence item whose state is "bound" is a valid witness.
