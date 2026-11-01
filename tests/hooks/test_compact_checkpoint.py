@@ -612,7 +612,10 @@ class TestSubagentPayload:
     compaction hooks fire there is undocumented; if they do, all three modes do nothing
     (nexus-mtl98, Sam 2026-11-01)."""
 
-    @pytest.mark.parametrize("agent", ["a0123456789abcdef", "name@team", "../x", 7], ids=["hex", "teammate", "odd", "int"])
+    @pytest.mark.parametrize(
+        "agent", ["a0123456789abcdef", "name@team", "../x", 7, True, ["a"], {"a": 1}],
+        ids=["hex", "teammate", "odd", "int", "bool", "list", "object"],
+    )
     def test_a_subagent_payload_touches_nothing(self, mod, env, monkeypatch, agent) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
         parent = env.checkpoints / f"{SID}.md"
@@ -630,10 +633,21 @@ class TestSubagentPayload:
         ctx = json.loads(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1])
         assert str(parent) in ctx["hookSpecificOutput"]["additionalContext"]
 
-    @pytest.mark.parametrize("agent", [None, "", "   "], ids=["none", "empty", "blank"])
-    def test_an_absent_or_empty_agent_id_is_the_main_session(self, mod, env, monkeypatch, agent) -> None:
-        run(mod, monkeypatch, "pre", {**pre_payload(), "agent_id": agent})
-        assert (env.checkpoints / f"{SID}.md").exists()
+    @pytest.mark.parametrize(
+        "extra",
+        [{"agent_id": None}, {"agent_id": ""}, {"agent_id": "   "}, {"agent_type": "Explore"}],
+        ids=["none", "empty", "blank", "main-session-with---agent"],
+    )
+    def test_a_main_session_still_checkpoints_and_restores(self, mod, env, monkeypatch, extra) -> None:
+        """A main session started with --agent carries agent_type and no agent_id (measured on
+        Claude Code 2.1.316); a guard keyed on agent_type would silently disable its restore."""
+        run(mod, monkeypatch, "pre", {**pre_payload(), **extra})
+        path = env.checkpoints / f"{SID}.md"
+        assert path.exists()
+        ctx = json.loads(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact", **extra})[1])
+        assert str(path) in ctx["hookSpecificOutput"]["additionalContext"]
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "main summary", **extra})
+        assert path.read_text(encoding="utf-8").rstrip().endswith("main summary")
 
 
 class TestInject:

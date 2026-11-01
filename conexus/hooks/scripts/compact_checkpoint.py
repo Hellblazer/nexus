@@ -201,6 +201,10 @@ def _from_subagent(payload: dict) -> bool:
     do, keyed by session alone they would replace the parent's checkpoint, and a checkpoint of
     their own would carry the parent's board and beads into the subagent. So all three modes
     do nothing (Sam, 2026-11-01, nexus-mtl98); the parent's checkpoint already holds the state.
+
+    Do not key on ``agent_type``: a main session started with ``--agent`` carries it, and no
+    ``agent_id``, on every compaction hook (measured on Claude Code 2.1.316). Any non-empty
+    value counts, falsy non-strings (``0``, ``false``, ``[]``) included: it fails closed.
     """
     raw = payload.get("agent_id")
     return raw is not None and str(raw).strip() != ""
