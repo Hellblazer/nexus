@@ -274,8 +274,10 @@ class TestPre:
             ("◐ nexus-9clx ● P2 x\n◐ nexus-zz9yx ● P2 y", "ref: nexus-9clx", ["nexus-9clx"], ["nexus-zz9yx"]),
             # naming a child does not name its siblings
             ("◐ nexus-z1d0l.1.1 ● P2 x\n└── ◐ nexus-z1d0l.1.5 ● P2 y", "ref: nexus-z1d0l.1.5", ["nexus-z1d0l.1.5"], ["nexus-z1d0l.1.1"]),
+            # a peer's bead in waiting_on: is not the session's
+            ("◐ nexus-aaaaa ● P2 x\n◐ nexus-peerx ● P2 y", "ref: nexus-aaaaa\nwaiting_on: nexus-peerx", ["nexus-aaaaa"], ["nexus-peerx"]),
         ],
-        ids=["other-prefix", "legacy-id", "child-exact"],
+        ids=["other-prefix", "legacy-id", "child-exact", "waiting-on-excluded"],
     )
     def test_the_filter_reads_any_bd_row(self, mod, rows, board, kept, dropped) -> None:
         out = mod._in_progress_section(mod._filter_in_progress(f"### In-progress beads\n{rows}\n", board))
