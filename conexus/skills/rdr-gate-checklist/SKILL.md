@@ -37,7 +37,8 @@ gated commit, and the Fix check section. Do this before anything else:
 1. For every prior finding printed under "Prior findings" (the last two rounds'
    critiques; a finding absent from both, printed under "Retired from the
    sweep" instead, needs no re-check) that is not a recorded residual
-   (dispositioned at accept, never a survivor to re-sweep), sweep every site
+   (dispositioned at accept, never a survivor to re-sweep) and not a finding of
+   a PASSED gate the user chose not to fix (it stays in the critique record), sweep every site
    in its `Sites:` list (the critic emits one per finding; see the Layer 3
    brief). Where a prior critique has no `Sites:` list, grep the RDR file for
    the refuted phrasing AND the corrected one. Every occurrence must agree. A
@@ -102,11 +103,12 @@ The fix check is a precondition and never counts toward the round cap.
 
 Fixes go through `/conexus:rdr-fix <id>` (the rdr-fix skill); its preamble prints the findings with their Sites, the diff range and the pre-edit research title. The rules, restated:
 
-- After a PASSED gate, fix only the findings Sam names; every other finding goes to accept as a residual.
-- A fix adds no new design: a finding that needs one becomes a residual or its own revision.
-- Run one fix check per change: batch the fix commits, then check the whole range once, never once per commit.
+- After a PASSED gate, fix only the findings the user names; the rest stay in the critique record, the next gate's Layer 0 does not re-sweep them, and the gate goes to accept.
+- A fix for a Significant adds no new design; a Significant that needs design is left for accept. A Critical in rounds 1 and 2, or a ship-blocker from round 3, is fixed even when its remedy is design.
+- Run one fix check per fix round: batch the round's fix commits and check the whole range once, never once per commit; the re-check after a failed check is the next round's one check.
 - A fix changes the fact the critic named and nothing else. New glosses,
-  rationales, parentheticals and counts are a separate commit, gated separately.
+  rationales, parentheticals and counts are a separate commit, covered by the
+  round's fix check.
 - Every clause a fix adds carries either a tool-produced quote from its source
   or an explicit "inferred, not read" marker.
 - Write the research entry BEFORE the edit (rdr-research skill § Pre-edit

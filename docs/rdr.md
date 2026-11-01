@@ -191,7 +191,7 @@ The gate either **BLOCKS** or **PASSES**. No conditional outcomes. Rounds 1 and 
 
 ## Fix (`/conexus:rdr-fix`)
 
-The step between a gate's findings and the next gate. Prints the findings with the sites where each fact lives, the diff and fix commits since the gated commit, and the title the pre-edit research entry will get. A fix changes the fact the critic named and nothing else; every added clause carries a quote read by a tool or is marked as inferred; a count or a universal needs a census, not a spot read. The research entry is recorded before the edit, and the fix check runs on the committed diff before any re-gate. Session start names any draft RDR whose file has moved past its gated commit.
+The step between a gate's findings and the next gate. Prints the findings with the sites where each fact lives, the diff and fix commits since the gated commit, and the title the pre-edit research entry will get. After a PASSED gate, only the findings the user names are fixed; a fix for a Significant adds no new design; and a fix round gets one fix check over its whole range. A fix changes the fact the critic named and nothing else; every added clause carries a quote read by a tool or is marked as inferred; a count or a universal needs a census, not a spot read. The research entry is recorded before the edit, and the fix check runs on the committed diff before any re-gate. Session start names any draft RDR whose file has moved past its gated commit.
 
 ## Accept (`/conexus:rdr-accept`)
 

@@ -3473,19 +3473,19 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
 # ---------------------------------------------------------------------------
 
 #: The fix-loop rules Sam adopted on 2026-11-01 after the gate-loop census (T2
-#: nexus/rdr-gate-loop-census-2026-11-01: 115 fix checks over 30 RDRs, about 43
-#: percent failing). Printed by ``preamble rdr-fix`` and carried verbatim by the
+#: nexus/rdr-gate-loop-census-2026-11-01: 115 fix-check records over 30 RDRs; 13
+#: of a 30-record sample failed). Printed by ``preamble rdr-fix`` and carried verbatim by the
 #: rdr-fix-checklist and rdr-gate-checklist skills; a test keeps the three equal.
 FIX_LOOP_RULES: tuple[str, ...] = (
-    "After a PASSED gate, fix only the findings Sam names; every other finding goes to accept as a residual.",
-    "A fix adds no new design: a finding that needs one becomes a residual or its own revision.",
-    "Run one fix check per change: batch the fix commits, then check the whole range once, never once per commit.",
+    "After a PASSED gate, fix only the findings the user names; the rest stay in the critique record, the next gate's Layer 0 does not re-sweep them, and the gate goes to accept.",
+    "A fix for a Significant adds no new design; a Significant that needs design is left for accept. A Critical in rounds 1 and 2, or a ship-blocker from round 3, is fixed even when its remedy is design.",
+    "Run one fix check per fix round: batch the round's fix commits and check the whole range once, never once per commit; the re-check after a failed check is the next round's one check.",
 )
 
 _FIX_RULES: tuple[str, ...] = (
     *FIX_LOOP_RULES,
     "A fix changes the fact the critic named and nothing else; a gloss, rationale, "
-    "parenthetical or count is a separate commit with its own fix check.",
+    "parenthetical or count is a separate commit, covered by the round's fix check.",
     "Every clause the fix adds carries a tool-produced quote from its source, or the "
     "marker \"inferred, not read\".",
     "A count or a universal (never / always / only / nothing / every / the one / all) "
@@ -3592,7 +3592,8 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
     own_round = _gate_round_number(content, critique_count) - 1
-    print("#### Findings to fix (each at every site named)")
+    print("#### Findings (fix only those the user names)" if str(outcome).strip('"').upper() == "PASSED"
+          else "#### Findings to fix (each at every site named)")
     print()
     if findings and own_round > GATE_MAX_ANY_CRITICAL_ROUNDS:
         residual_titles = _residual_titles(content)

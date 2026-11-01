@@ -49,5 +49,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/nexus/reference.md` (nexus-z1d0l.1.2): the operator table gives `check` and `verify` the witness schema v1 result shape (host-bound evidence items with state, span, tumbler, chash and collection, plus rejected, uncovered and requires_review), in place of the bare `evidence` and `citations` shapes.
 - `conexus/skills/rdr-close/SKILL.md` (site prose pass): says `nx index repo` makes an RDR searchable from the first run, drafts included, and close only re-indexes a changed RDR, in place of saying accept or close indexes it.
 - `conexus/hooks/scripts/compact_checkpoint.py` (nexus-gy317, round 2): the compaction checkpoint finds a session's worktree when it is named `<session>-<topic>` as well as `<session>`, ranks several by launch directory, a board path mention, a board `ref:` bead (or its child) on the branch, the exact name, then recency, and lists up to five others.
+- `conexus/skills/rdr-fix-checklist/SKILL.md` (nexus-qo7ie): carries the three fix-loop rules Sam adopted 2026-11-01 (after a PASSED gate fix only the findings the user names; a fix for a Significant adds no new design; one fix check per fix round), and a gloss commit is covered by the round's fix check.
+- `conexus/skills/rdr-gate-checklist/SKILL.md` (nexus-qo7ie): carries the same three rules in Fixing findings, Layer 0 does not re-sweep a PASSED gate's findings the user chose not to fix, and a gloss commit is covered by the round's fix check.
+- `conexus/skills/rdr-research/SKILL.md` (nexus-qo7ie): a gloss commit is covered by the fix round's one fix check, not its own.
 
 ## Deferred to the next client release

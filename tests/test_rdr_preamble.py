@@ -1590,8 +1590,8 @@ _FIX_STATE_CASES = [
              # Layer 1 and Layer 3, never a parallel dispatch) is printed here.
              "dispatched against the same commit in parallel",
              # nexus-qo7ie: the fix-loop rules Sam adopted 2026-11-01.
-             "fix only the findings Sam names", "adds no new design",
-             "Run one fix check per change"],
+             "fix only the findings the user names", "adds no new design",
+             "Run one fix check per fix round"],
      "has_ci": ["no fix-check record yet"], "lacks": ["- fine"]},
     {"name": "existing_fix_check_record_is_reported", "scenario": "gated_fixed", "boom": False,
      "entries": {"204-gate-latest": 'outcome: "BLOCKED"\ncommit: {gated}\n',
@@ -2224,8 +2224,9 @@ def test_fix_loop_rules_are_carried_verbatim_by_both_rdr_skills():
     from nexus.commands.rdr import _FIX_RULES, FIX_LOOP_RULES
 
     assert len(FIX_LOOP_RULES) == 3
-    assert set(FIX_LOOP_RULES) <= set(_FIX_RULES)
+    assert _FIX_RULES[: len(FIX_LOOP_RULES)] == FIX_LOOP_RULES
     for skill in ("rdr-fix-checklist", "rdr-gate-checklist"):
         text = (_PLUGIN_DIR / "skills" / skill / "SKILL.md").read_text()
-        missing = [rule for rule in FIX_LOOP_RULES if f"- {rule}" not in text]
+        lines = text.splitlines()
+        missing = [rule for rule in FIX_LOOP_RULES if f"- {rule}" not in lines]
         assert not missing, f"{skill} lacks: {missing}"

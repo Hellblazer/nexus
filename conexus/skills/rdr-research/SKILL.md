@@ -104,7 +104,7 @@ transcribed from it:
    enumeration; two sites that happen to agree are not a source.
 4. The fix commit changes the fact the critic named and nothing else. A gloss,
    rationale, attribution or count is derived from this entry and lands in a
-   separate commit, gated by its own fix check.
+   separate commit, covered by the fix round's one fix check.
 
 ## Agent Dispatch
 
