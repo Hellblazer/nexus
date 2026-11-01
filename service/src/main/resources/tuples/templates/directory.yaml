@@ -14,7 +14,7 @@
 # id_dims: [from].
 #
 # max_body_bytes: 0 -- a directory entry carries no body, same call as
-# ledger.yaml's (bead nexus-r7xao): the only writers are the RDR-208
+# the retired ledger template's (bead nexus-r7xao): the only writers are the RDR-208
 # session-directory heartbeat, and it never sends a body field.
 #
 # A re-send cannot move expiry past the entry's created_at plus the 7-day

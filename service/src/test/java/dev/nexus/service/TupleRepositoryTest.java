@@ -83,7 +83,8 @@ class TupleRepositoryTest {
      * A second, take-enabled template with TWO pinned keys ({@code owner},
      * {@code kind}) — RDR-205 P1 follow-on (bead nexus-em75s.39): neither
      * bundled resource template can exercise a "less specific pattern"
-     * claim/read scenario. {@code ledger/<session_id>} has two keys but
+     * claim/read scenario. {@code probe-ro/<session_id>} (this class's stand-in for the
+     * retired ledger template, see {@link ReadOnlyProbeTemplate}) has two keys but
      * {@code take.enabled=false} (throws {@link
      * dev.nexus.service.db.TakeDisabledException} before the pinned-key
      * check); {@code mailbox/<address>} is take-enabled but has only ONE
@@ -115,6 +116,9 @@ class TupleRepositoryTest {
         svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
 
         tenantScope = new TenantScope(svcDs);
+        // The retired ledger/<session_id>'s shape (bead nexus-onjvw): id_from keys, a pinned key
+        // value set, optional dims, take disabled, max_body_bytes 0.
+        ReadOnlyProbeTemplate.writeTo(extraTemplateDir);
         java.nio.file.Files.writeString(extraTemplateDir.resolve("probe.yaml"), """
                 name: probe/<id>
                 keys:
@@ -129,8 +133,8 @@ class TupleRepositoryTest {
                 """, java.nio.charset.StandardCharsets.UTF_8);
         // nexus-xapt8 (a scalability research pass over this design, addition 6): a take-enabled
         // template WITH take.default_lease_seconds configured -- none of the
-        // three bundled v1 templates (mailbox/ledger/directory) set this field
-        // (mailbox has only max_lease_seconds; ledger/directory have
+        // bundled v1 templates (mailbox/directory/board) set this field
+        // (mailbox has only max_lease_seconds; directory/board have
         // take.enabled=false), so an optional-lease_s happy-path test needs its
         // own template, same idiom as probe.yaml above.
         java.nio.file.Files.writeString(extraTemplateDir.resolve("probe-lease.yaml"), """
@@ -168,21 +172,21 @@ class TupleRepositoryTest {
     @Test
     void out_sameKeys_isIdempotent_oneRow() {
         Map<String, String> keys = Map.of("agent_id", "agent-idem-1", "kind", "start");
-        byte[] id1 = repo.out(TENANT_A, "ledger/session-idem", keys, Map.of(), null, null, null);
-        byte[] id2 = repo.out(TENANT_A, "ledger/session-idem", keys, Map.of(), null, null, null);
+        byte[] id1 = repo.out(TENANT_A, "probe-ro/session-idem", keys, Map.of(), null, null, null);
+        byte[] id2 = repo.out(TENANT_A, "probe-ro/session-idem", keys, Map.of(), null, null, null);
         assertThat(id2).isEqualTo(id1);
 
-        var rows = repo.rdp(TENANT_A, "ledger/session-idem", keys, 10, null);
+        var rows = repo.rdp(TENANT_A, "probe-ro/session-idem", keys, 10, null);
         assertThat(rows).hasSize(1);
     }
 
     @Test
     void out_missingPinnedKey_schemaViolation_noRowWritten() {
-        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-breach",
+        assertThatThrownBy(() -> repo.out(TENANT_A, "probe-ro/session-breach",
                 Map.of("agent_id", "agent-x"), Map.of(), null, null, null))
                 .isInstanceOf(SchemaViolationException.class);
 
-        var rows = repo.rdp(TENANT_A, "ledger/session-breach", null, 10, null);
+        var rows = repo.rdp(TENANT_A, "probe-ro/session-breach", null, 10, null);
         assertThat(rows).isEmpty();
     }
 
@@ -216,11 +220,11 @@ class TupleRepositoryTest {
     @Test
     void out_ttlAboveRetention_refused_noRow() {
         Map<String, String> keys = Map.of("agent_id", "agent-ttl", "kind", "start");
-        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-ttl", keys, Map.of(),
+        assertThatThrownBy(() -> repo.out(TENANT_A, "probe-ro/session-ttl", keys, Map.of(),
                 null, null, 999_999_999L))
                 .isInstanceOf(TtlTooLongException.class);
 
-        var rows = repo.rdp(TENANT_A, "ledger/session-ttl", keys, 10, null);
+        var rows = repo.rdp(TENANT_A, "probe-ro/session-ttl", keys, 10, null);
         assertThat(rows).isEmpty();
     }
 
@@ -406,42 +410,42 @@ class TupleRepositoryTest {
     /** A keys-only template keeps its refire semantics: a changed dim on the same keys is not refused. */
     @Test
     void out_keysOnlyTemplateRefire_isNotRefused() {
-        Map<String, String> keys = Map.of("agent_id", "agent-fzteh-ledger", "kind", "start");
-        byte[] id1 = repo.out(TENANT_A, "ledger/session-fzteh", keys, Map.of("agent_type", "developer"),
+        Map<String, String> keys = Map.of("agent_id", "agent-fzteh-probe-ro", "kind", "start");
+        byte[] id1 = repo.out(TENANT_A, "probe-ro/session-fzteh", keys, Map.of("agent_type", "developer"),
                 null, null, null);
-        byte[] id2 = repo.out(TENANT_A, "ledger/session-fzteh", keys, Map.of("agent_type", "debugger"),
+        byte[] id2 = repo.out(TENANT_A, "probe-ro/session-fzteh", keys, Map.of("agent_type", "debugger"),
                 null, null, null);
         assertThat(id2).isEqualTo(id1);
     }
 
     /**
-     * nexus-em75s.36: {@code ledger/<session_id>}'s {@code kind} key is pinned to
+     * nexus-em75s.36: {@code probe-ro/<session_id>}'s {@code kind} key is pinned to
      * {@code {start, report}} (RDR-205 §Technical Design "Registry" ~844). A value
      * outside that set is refused as a {@code SchemaViolation} naming {@code kind},
      * and no row is written.
      */
     @Test
-    void out_ledgerKindOutsidePinnedSet_schemaViolation_namesKind_noRowWritten() {
-        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-kind-breach",
+    void out_probeRoKindOutsidePinnedSet_schemaViolation_namesKind_noRowWritten() {
+        assertThatThrownBy(() -> repo.out(TENANT_A, "probe-ro/session-kind-breach",
                 Map.of("agent_id", "agent-x", "kind", "other"), Map.of(), null, null, null))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("kind");
 
-        var rows = repo.rdp(TENANT_A, "ledger/session-kind-breach", null, 10, null);
+        var rows = repo.rdp(TENANT_A, "probe-ro/session-kind-breach", null, 10, null);
         assertThat(rows).isEmpty();
     }
 
-    // ── ledger dims: commit / t2_ref / verify (bead nexus-d9k5h) ─────────────
+    // ── probe-ro dims (the retired ledger's): commit / t2_ref / verify (bead nexus-d9k5h) ─────────────
 
     @Test
-    void out_ledgerWithCommitT2RefVerifyDims_succeeds_readBack() {
+    void out_probeRoWithCommitT2RefVerifyDims_succeeds_readBack() {
         Map<String, String> keys = Map.of("agent_id", "agent-dims-1", "kind", "report");
-        repo.out(TENANT_A, "ledger/session-dims-1", keys,
+        repo.out(TENANT_A, "probe-ro/session-dims-1", keys,
                 Map.of("agent_type", "developer", "commit", "abc1234",
                         "t2_ref", "nexus/8zoyp-d9k5h-engine-riders-2026-09-13", "verify", "present"),
                 null, null, null);
 
-        var rows = repo.rdp(TENANT_A, "ledger/session-dims-1", keys, 10, null);
+        var rows = repo.rdp(TENANT_A, "probe-ro/session-dims-1", keys, 10, null);
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).dims())
                 .containsEntry("commit", "abc1234")
@@ -451,59 +455,59 @@ class TupleRepositoryTest {
 
     /**
      * Bead nexus-d9k5h: none of {@code commit}/{@code t2_ref}/{@code verify} is
-     * {@code required: true}, so a ledger row written the OLD way -- carrying only
+     * {@code required: true}, so a row written the OLD way -- carrying only
      * {@code agent_type}, as every pre-existing row does -- must still write and
      * read unchanged.
      */
     @Test
-    void out_ledgerWithoutNewDims_stillSucceeds_readBack() {
+    void out_probeRoWithoutNewDims_stillSucceeds_readBack() {
         Map<String, String> keys = Map.of("agent_id", "agent-dims-2", "kind", "start");
-        repo.out(TENANT_A, "ledger/session-dims-2", keys, Map.of("agent_type", "developer"),
+        repo.out(TENANT_A, "probe-ro/session-dims-2", keys, Map.of("agent_type", "developer"),
                 null, null, null);
 
-        var rows = repo.rdp(TENANT_A, "ledger/session-dims-2", keys, 10, null);
+        var rows = repo.rdp(TENANT_A, "probe-ro/session-dims-2", keys, 10, null);
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).dims()).containsEntry("agent_type", "developer");
         assertThat(rows.get(0).dims()).doesNotContainKeys("commit", "t2_ref", "verify");
     }
 
     @Test
-    void out_ledgerVerifyOutsideAllowedSet_schemaViolation_namesVerify_noRowWritten() {
+    void out_probeRoVerifyOutsideAllowedSet_schemaViolation_namesVerify_noRowWritten() {
         Map<String, String> keys = Map.of("agent_id", "agent-dims-3", "kind", "report");
         // nexus-y4dmz: assert the ALLOWED-SET refusal, which only a declared
         // verify with values [present, absent] produces. An undeclared verify is
         // refused too, but as "not a declared dimension", so the old
         // hasMessageContaining("verify") passed with the dim reverted.
-        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-dims-3", keys,
+        assertThatThrownBy(() -> repo.out(TENANT_A, "probe-ro/session-dims-3", keys,
                 Map.of("agent_type", "developer", "verify", "maybe"), null, null, null))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("field 'verify'")
                 .hasMessageContaining("not in [present, absent]");
 
-        var rows = repo.rdp(TENANT_A, "ledger/session-dims-3", keys, 10, null);
+        var rows = repo.rdp(TENANT_A, "probe-ro/session-dims-3", keys, 10, null);
         assertThat(rows).isEmpty();
     }
 
     @Test
-    void out_ledgerCommitDimOver256Bytes_tooLarge_namesDimsCommit_noRowWritten() {
+    void out_probeRoCommitDimOver256Bytes_tooLarge_namesDimsCommit_noRowWritten() {
         // nexus-y4dmz: prepareOut's size check runs before the unknown-dimension
         // check and ignores the dim's name, so 257 bytes alone is TooLarge
         // whether or not commit is declared. The 256-byte write at the limit is
         // what only a declared commit accepts: undeclared, it is refused.
         Map<String, String> atLimit = Map.of("agent_id", "agent-dims-4a", "kind", "report");
-        repo.out(TENANT_A, "ledger/session-dims-4", atLimit,
+        repo.out(TENANT_A, "probe-ro/session-dims-4", atLimit,
                 Map.of("agent_type", "developer", "commit", "x".repeat(256)), null, null, null);
-        assertThat(repo.rdp(TENANT_A, "ledger/session-dims-4", atLimit, 10, null)).hasSize(1);
+        assertThat(repo.rdp(TENANT_A, "probe-ro/session-dims-4", atLimit, 10, null)).hasSize(1);
 
         Map<String, String> keys = Map.of("agent_id", "agent-dims-4", "kind", "report");
         String over = "x".repeat(257);
-        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-dims-4", keys,
+        assertThatThrownBy(() -> repo.out(TENANT_A, "probe-ro/session-dims-4", keys,
                 Map.of("agent_type", "developer", "commit", over), null, null, null))
                 .isInstanceOf(dev.nexus.service.db.TooLargeException.class)
                 .satisfies(e -> assertThat(((dev.nexus.service.db.TooLargeException) e).field())
                         .isEqualTo("dims.commit"));
 
-        var rows = repo.rdp(TENANT_A, "ledger/session-dims-4", keys, 10, null);
+        var rows = repo.rdp(TENANT_A, "probe-ro/session-dims-4", keys, 10, null);
         assertThat(rows).isEmpty();
     }
 
@@ -982,14 +986,14 @@ class TupleRepositoryTest {
     @Test
     void rd_cursorResumption_sharedCreatedAt_eachReturnedExactlyOnce() {
         String session = "session-cursor-" + UUID.randomUUID();
-        repo.out(TENANT_A, "ledger/" + session, Map.of("agent_id", "a1", "kind", "start"), Map.of(), null, null, null);
-        repo.out(TENANT_A, "ledger/" + session, Map.of("agent_id", "a2", "kind", "start"), Map.of(), null, null, null);
+        repo.out(TENANT_A, "probe-ro/" + session, Map.of("agent_id", "a1", "kind", "start"), Map.of(), null, null, null);
+        repo.out(TENANT_A, "probe-ro/" + session, Map.of("agent_id", "a2", "kind", "start"), Map.of(), null, null, null);
 
-        var firstPage = repo.rdp(TENANT_A, "ledger/" + session, null, 1, null);
+        var firstPage = repo.rdp(TENANT_A, "probe-ro/" + session, null, 1, null);
         assertThat(firstPage).hasSize(1);
         var cursor = new TupleRepository.ReadCursor(firstPage.get(0).createdAt(), firstPage.get(0).id());
 
-        var secondPage = repo.rdp(TENANT_A, "ledger/" + session, null, 10, cursor);
+        var secondPage = repo.rdp(TENANT_A, "probe-ro/" + session, null, 10, cursor);
         assertThat(secondPage).hasSize(1);
         assertThat(secondPage.get(0).id()).isNotEqualTo(firstPage.get(0).id());
     }
@@ -1000,23 +1004,23 @@ class TupleRepositoryTest {
                 /* readMax */ 3, TupleRepository.DEFAULT_CLAIM_PASSES, 10, 4, 16);
         String session = "session-readmax-" + UUID.randomUUID();
         for (int i = 0; i < 5; i++) {
-            smallCapRepo.out(TENANT_A, "ledger/" + session,
+            smallCapRepo.out(TENANT_A, "probe-ro/" + session,
                     Map.of("agent_id", "a" + i, "kind", "start"), Map.of(), null, null, null);
         }
-        var rows = smallCapRepo.rdp(TENANT_A, "ledger/" + session, null, 100, null);
+        var rows = smallCapRepo.rdp(TENANT_A, "probe-ro/" + session, null, 100, null);
         assertThat(rows).hasSize(3);
     }
 
     // ── rd / rdp: descending order (nexus-kp5q3) ─────────────────────────────
 
-    /** Writes {@code count} ledger rows, one transaction each, and returns the subspace. */
-    private String seedLedger(TupleRepository target, String prefix, int count) {
+    /** Writes {@code count} probe-ro rows, one transaction each, and returns the subspace. */
+    private String seedProbeRo(TupleRepository target, String prefix, int count) {
         String session = prefix + UUID.randomUUID();
         for (int i = 0; i < count; i++) {
-            target.out(TENANT_A, "ledger/" + session,
+            target.out(TENANT_A, "probe-ro/" + session,
                     Map.of("agent_id", "a" + i, "kind", "start"), Map.of(), null, null, null);
         }
-        return "ledger/" + session;
+        return "probe-ro/" + session;
     }
 
     private static List<String> ids(List<TupleRepository.TupleRow> rows) {
@@ -1025,7 +1029,7 @@ class TupleRepositoryTest {
 
     @Test
     void rdp_descending_returnsTheNewestRowsNewestFirst() {
-        String subspace = seedLedger(repo, "session-desc-", 5);
+        String subspace = seedProbeRo(repo, "session-desc-", 5);
         var asc = ids(repo.rdp(TENANT_A, subspace, null, 10, null));
         assertThat(asc).hasSize(5);
 
@@ -1038,7 +1042,7 @@ class TupleRepositoryTest {
 
     @Test
     void rd_descending_matchesRdpDescending() {
-        String subspace = seedLedger(repo, "session-desc-rd-", 4);
+        String subspace = seedProbeRo(repo, "session-desc-rd-", 4);
         var viaRdp = ids(repo.rdp(TENANT_A, subspace, null, 3, null, TupleRepository.ReadOrder.DESC));
         var viaRd = ids(repo.rd(TENANT_A, subspace, null, 3, null, 0L, TupleRepository.ReadOrder.DESC));
         assertThat(viaRd).isEqualTo(viaRdp).hasSize(3);
@@ -1048,7 +1052,7 @@ class TupleRepositoryTest {
     void rdp_descending_pastTheReadCap_returnsTheRealNewestNotTheOldest() {
         TupleRepository smallCapRepo = new TupleRepository(tenantScope, registry,
                 /* readMax */ 3, TupleRepository.DEFAULT_CLAIM_PASSES, 10, 4, 16);
-        String subspace = seedLedger(smallCapRepo, "session-desc-cap-", 5);
+        String subspace = seedProbeRo(smallCapRepo, "session-desc-cap-", 5);
         var asc = ids(repo.rdp(TENANT_A, subspace, null, 10, null));
 
         var desc = ids(smallCapRepo.rdp(TENANT_A, subspace, null, 100, null, TupleRepository.ReadOrder.DESC));
@@ -1060,7 +1064,7 @@ class TupleRepositoryTest {
 
     @Test
     void rdp_descending_sinceStillMeansStrictlyNewerThanTheCursor() {
-        String subspace = seedLedger(repo, "session-desc-since-", 5);
+        String subspace = seedProbeRo(repo, "session-desc-since-", 5);
         var all = repo.rdp(TENANT_A, subspace, null, 10, null);
         var cursor = new TupleRepository.ReadCursor(all.get(1).createdAt(), all.get(1).id());
 
@@ -1083,7 +1087,7 @@ class TupleRepositoryTest {
 
     @Test
     void rdp_ascendingOverloadIsTheOldBehaviour() {
-        String subspace = seedLedger(repo, "session-asc-explicit-", 3);
+        String subspace = seedProbeRo(repo, "session-asc-explicit-", 3);
         assertThat(ids(repo.rdp(TENANT_A, subspace, null, 10, null, TupleRepository.ReadOrder.ASC)))
                 .isEqualTo(ids(repo.rdp(TENANT_A, subspace, null, 10, null)));
     }
@@ -1176,11 +1180,11 @@ class TupleRepositoryTest {
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             Future<List<TupleRepository.TupleRow>> parked = pool.submit(() ->
-                    repo.rd(TENANT_A, "ledger/" + session, null, 10, null, 8));
+                    repo.rd(TENANT_A, "probe-ro/" + session, null, 10, null, 8));
 
             Thread.sleep(600); // let the reader register + park
             long beforeOut = System.nanoTime();
-            repo.out(TENANT_A, "ledger/" + session,
+            repo.out(TENANT_A, "probe-ro/" + session,
                     Map.of("agent_id", "waker", "kind", "start"), Map.of(), null, null, null);
 
             List<TupleRepository.TupleRow> result = parked.get(5, TimeUnit.SECONDS);
@@ -1222,7 +1226,7 @@ class TupleRepositoryTest {
     void rd_parkedCallersOnSubspaceB_doNotWakeOnWriteToSubspaceA() throws Exception {
         String sessionA = "session-wakeA-" + UUID.randomUUID();
         String sessionB = "session-wakeB-" + UUID.randomUUID();
-        String subspaceB = "ledger/" + sessionB;
+        String subspaceB = "probe-ro/" + sessionB;
         java.util.concurrent.atomic.AtomicInteger subspaceBSignals = new java.util.concurrent.atomic.AtomicInteger();
         TupleRepository.setTestOnlySignalHook((tenant, subspace) -> {
             if (subspaceB.equals(subspace)) {
@@ -1235,7 +1239,7 @@ class TupleRepositoryTest {
                     repo.rd(TENANT_A, subspaceB, null, 10, null, 3));
 
             Thread.sleep(300);
-            repo.out(TENANT_A, "ledger/" + sessionA,
+            repo.out(TENANT_A, "probe-ro/" + sessionA,
                     Map.of("agent_id", "writer-a", "kind", "start"), Map.of(), null, null, null);
 
             // B's reader must NOT wake early on A's write -- it rides out its own
@@ -1263,7 +1267,7 @@ class TupleRepositoryTest {
         try {
             long start = System.nanoTime();
             Future<List<TupleRepository.TupleRow>> parked = pool.submit(() ->
-                    shutdownRepo.rd(TENANT_A, "ledger/" + session, null, 10, null, 20));
+                    shutdownRepo.rd(TENANT_A, "probe-ro/" + session, null, 10, null, 20));
 
             Thread.sleep(300); // let it register + park
             shutdownRepo.shutdown();
@@ -1296,14 +1300,14 @@ class TupleRepositoryTest {
 
             Future<List<TupleRepository.TupleRow>> holder = pool.submit(() ->
                     // occupies the single global slot for the duration of its timeout
-                    capped.rd(TENANT_A, "ledger/" + session, null, 10, null, 3));
+                    capped.rd(TENANT_A, "probe-ro/" + session, null, 10, null, 3));
             Thread.sleep(500); // let it register, query, and enter the park loop
 
             assertThat(capped.parkStats().globalInUse())
                     .as("RDR-211 Phase 1 Step 1: the park report must show the holder's slot in use")
                     .isEqualTo(1);
 
-            assertThatThrownBy(() -> capped.rd(TENANT_A, "ledger/" + session, null, 10, null, 3))
+            assertThatThrownBy(() -> capped.rd(TENANT_A, "probe-ro/" + session, null, 10, null, 3))
                     .isInstanceOf(ParkCapExceededException.class);
 
             assertThat(capped.parkStats().refusedGlobal())
@@ -1362,12 +1366,13 @@ class TupleRepositoryTest {
     @Test
     void registry_returnsDigestAndTemplates() {
         var snap = repo.registry();
-        // board, directory, ledger, lock, mailbox, queue (bundled resources, six
+        // board, directory, lock, mailbox, queue (bundled resources, six
         // since RDR-211 Phase 1 Step 2, bead nexus-rplay.8) + probe (this class's
         // extra template directory, bead nexus-em75s.39's multi-pinned-key fixture) +
-        // probe-lease (nexus-xapt8's default_lease_seconds fixture) -- see startAll.
-        // 9 since RDR-220 added board/ci/<topic> to the bundled resources; 10 since RDR-235 E3
-        // added the literal aspects template (nexus-5r2sc.2.4).
+        // probe-lease (nexus-xapt8's default_lease_seconds fixture) + probe-ro (the retired
+        // ledger's shape, nexus-onjvw) -- see startAll.
+        // The bundled set is 7: RDR-220 added board/ci/<topic>, RDR-235 E3 the literal aspects
+        // (nexus-5r2sc.2.4), and nexus-onjvw retired ledger/<session_id>.
         assertThat(snap.templates()).hasSize(10);
         assertThat(snap.digest()).isNotBlank();
     }
@@ -1377,15 +1382,15 @@ class TupleRepositoryTest {
     @Test
     void out_ttlSecondsZeroOrNegative_schemaViolation_noRowWritten() {
         String session = "session-ttl-nonpositive-" + UUID.randomUUID();
-        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/" + session,
+        assertThatThrownBy(() -> repo.out(TENANT_A, "probe-ro/" + session,
                 Map.of("agent_id", "a", "kind", "start"), Map.of(), null, null, 0L))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("ttl_seconds");
-        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/" + session,
+        assertThatThrownBy(() -> repo.out(TENANT_A, "probe-ro/" + session,
                 Map.of("agent_id", "a", "kind", "start"), Map.of(), null, null, -1L))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("ttl_seconds");
-        assertThat(repo.rdp(TENANT_A, "ledger/" + session, null, 10, null)).isEmpty();
+        assertThat(repo.rdp(TENANT_A, "probe-ro/" + session, null, 10, null)).isEmpty();
     }
 
     @Test
@@ -1528,14 +1533,14 @@ class TupleRepositoryTest {
     void rd_timeoutSAboveCap_timeoutTooLong_noRowRead() {
         String session = "session-timeout-toolong-" + UUID.randomUUID();
         // repo's timeoutCapSeconds is 10 (see startAll's fully-parameterized constructor)
-        assertThatThrownBy(() -> repo.rd(TENANT_A, "ledger/" + session, null, 10, null, 11))
+        assertThatThrownBy(() -> repo.rd(TENANT_A, "probe-ro/" + session, null, 10, null, 11))
                 .isInstanceOf(TimeoutTooLongException.class);
     }
 
     @Test
     void rd_negativeTimeoutS_schemaViolation() {
         String session = "session-timeout-negative-" + UUID.randomUUID();
-        assertThatThrownBy(() -> repo.rd(TENANT_A, "ledger/" + session, null, 10, null, -1))
+        assertThatThrownBy(() -> repo.rd(TENANT_A, "probe-ro/" + session, null, 10, null, -1))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("timeout_s");
         assertThatThrownBy(() -> repo.in(TENANT_A, "mailbox/negtimeout", Map.of("to", "x"), "c", 10, -1))
@@ -1944,16 +1949,16 @@ class TupleRepositoryTest {
     void rd_emptyPatternReturnsAllRows_kindReportPatternOnlyReturnsReports() {
         String session = "session-ten-agents-" + UUID.randomUUID();
         for (int i = 0; i < 10; i++) {
-            repo.out(TENANT_A, "ledger/" + session, Map.of("agent_id", "agent-" + i, "kind", "start"),
+            repo.out(TENANT_A, "probe-ro/" + session, Map.of("agent_id", "agent-" + i, "kind", "start"),
                     Map.of(), null, null, null);
-            repo.out(TENANT_A, "ledger/" + session, Map.of("agent_id", "agent-" + i, "kind", "report"),
+            repo.out(TENANT_A, "probe-ro/" + session, Map.of("agent_id", "agent-" + i, "kind", "report"),
                     Map.of(), null, null, null);
         }
 
-        var all = repo.rd(TENANT_A, "ledger/" + session, Map.of(), 30, null, 0);
+        var all = repo.rd(TENANT_A, "probe-ro/" + session, Map.of(), 30, null, 0);
         assertThat(all).hasSize(20);
 
-        var reportsOnly = repo.rd(TENANT_A, "ledger/" + session, Map.of("kind", "report"), 30, null, 0);
+        var reportsOnly = repo.rd(TENANT_A, "probe-ro/" + session, Map.of("kind", "report"), 30, null, 0);
         assertThat(reportsOnly).hasSize(10);
         assertThat(reportsOnly).allMatch(r -> "report".equals(r.keys().get("kind")));
     }
@@ -1974,7 +1979,7 @@ class TupleRepositoryTest {
     @Test
     void rd_suppressedSignal_stillFindsRowViaOneSecondTimer() throws Exception {
         String session = "session-suppressed-signal-" + UUID.randomUUID();
-        String subspace = "ledger/" + session;
+        String subspace = "probe-ro/" + session;
         ExecutorService pool = Executors.newFixedThreadPool(1);
         try {
             Future<List<TupleRepository.TupleRow>> parked = pool.submit(() ->
@@ -1994,7 +1999,7 @@ class TupleRepositoryTest {
                                 dev.nexus.service.jooq.nexus.Tables.TUPLES.ATTEMPTS,
                                 dev.nexus.service.jooq.nexus.Tables.TUPLES.EXPIRES_AT,
                                 dev.nexus.service.jooq.nexus.Tables.TUPLES.CREATED_AT)
-                        .values(id, TENANT_A, subspace, "ledger",
+                        .values(id, TENANT_A, subspace, ReadOnlyProbeTemplate.NAME,
                                 org.jooq.JSONB.valueOf("{\"agent_id\": \"raw-writer\", \"kind\": \"start\"}"),
                                 0, OffsetDateTime.now(java.time.ZoneOffset.UTC).plusHours(1),
                                 OffsetDateTime.now(java.time.ZoneOffset.UTC))

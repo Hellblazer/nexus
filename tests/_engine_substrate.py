@@ -82,6 +82,7 @@ import os
 import platform
 import random
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -116,6 +117,11 @@ from tests.db._service_fixture import (
     jar_checkout,
     wait_for_build_lease,
 )
+
+try:
+    import fcntl
+except ImportError:  # Windows: no flock; the pid rule stays the only one
+    fcntl = None  # type: ignore[assignment]
 
 # The real ``subprocess.run``, bound at import. Fixture teardown runs while a test's own
 # ``monkeypatch.setattr(subprocess, "run", ...)`` is still live (function-scoped monkeypatch
@@ -1057,13 +1063,127 @@ def reloadable_cluster_conf(pgdata: str, **kw) -> str:
     )
 
 
+# ── Owner locks: who owns a cluster is who holds its flock (nexus-fuz9t) ────
+#
+# lab-run #88 puts each CI job in its own PID namespace. A sweeper in one job then sees
+# every sibling job's owner pid, and the pids of the sibling's postmaster and engine, as
+# dead, and removes a live cluster's pgdata. A pid cannot carry liveness across a
+# namespace; a flock can, because the lock lives in the kernel's file table, not in a
+# pid table. The same fix as ``tests/_tmp_root.py`` (e5afc436c).
+#
+# The OWNER of a cluster is the process that boots it (``owner_pytest_pid`` in the sidecar
+# and in the integration owner record): the serial pytest process, or one xdist worker, which
+# boots its own substrate. It takes ``flock(LOCK_EX)`` on a lock file and holds the descriptor
+# for as long as it owns the cluster; a crash or SIGKILL releases the lock. A sweeper tries
+# ``LOCK_EX | LOCK_NB`` BEFORE any pid or leg check: refused means the owner is live, success
+# means it is dead and the sweeper reaps while holding the lock. A cluster or record with no
+# lock file was made by an owner of an older tree (still possible on a shared host on an
+# older branch) and keeps the pid and cmdline rule. Where ``fcntl`` is missing (Windows)
+# there is no lock and the pid rule is the only one.
+#
+# The descriptor comes from ``os.open``, so it is non-inheritable: the engine and postmaster
+# (children of the owner, in their own process groups) do NOT hold it, and a SIGKILLed owner
+# frees the lock at once even though its legs live on. That is the point: the legs outliving
+# the owner is why the sweep exists, and the sweep then identifies each leg by pid and
+# cmdline and signals it before it removes the dir, as before.
+#
+# Two producers: the substrate cluster (``<pgdata>/nexus_substrate_owner.lock``, taken by
+# :func:`_write_sidecar` before the sidecar exists) and the integration owner record
+# (``nexus_integration_owner_<pid>-<token>.lock`` beside the ``.json``; the name carries a per-process
+# random token because a pid names nothing across PID namespaces, nexus-fuz9t).
+_OWNER_LOCK_FILENAME = "nexus_substrate_owner.lock"
+_OWNER_LOCK_SUFFIX = ".lock"
+#: pgdata -> the descriptor holding its ``_OWNER_LOCK_FILENAME`` (this process is its owner).
+_cluster_lock_fds: dict[str, int] = {}
+
+
+def _acquire_owner_lock(lock: Path) -> int | None:
+    """Create *lock* already locked and return its descriptor (None where there is no ``fcntl``).
+    The file is made under another name, locked, then renamed into place, so a sweeper never
+    sees a lock file that nobody holds yet. A leftover ``.tmp`` of a killed owner is replaced (the
+    names the owners use carry a per-process token, so a ``.tmp`` here is never a live owner's).
+    Raises OSError; the caller decides whether that is fatal."""
+    if fcntl is None:
+        return None
+    tmp = lock.with_name(lock.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.replace(tmp, lock)
+    except BaseException:
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    return fd
+
+
+def release_owner_lock(fd: int | None) -> None:
+    """Close a descriptor :func:`_acquire_owner_lock` returned (closing drops the flock)."""
+    if fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def _lock_probe(lock: Path) -> tuple[str, int | None]:
+    """What *lock* says about its owner: ``("none", None)`` when there is no lock file (or no
+    ``fcntl``), ``("live", None)`` when the lock is held, ``("dead", fd)`` when it was free and is
+    now held by us (close the fd after the removal), ``("unknown", None)`` when the file is there
+    but cannot be tried (the caller keeps the cluster then)."""
+    if fcntl is None:
+        return "none", None
+    try:
+        fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return "none", None
+    except OSError:
+        return "unknown", None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return "live", None
+    except OSError:
+        os.close(fd)
+        return "unknown", None
+    return "dead", fd
+
+
+def _hold_cluster_lock(pgdata: str) -> None:
+    """Take (once per *pgdata*) the owner lock of a substrate cluster this process is booting.
+    Best effort: a lock that cannot be made leaves the cluster on the pid rule, loudly."""
+    if fcntl is None or pgdata in _cluster_lock_fds:
+        return
+    lock = Path(pgdata) / _OWNER_LOCK_FILENAME
+    try:
+        fd = _acquire_owner_lock(lock)
+    except OSError as exc:
+        # A stale lock file would read as a dead owner once we hold nothing: remove it.
+        with contextlib.suppress(OSError):
+            lock.unlink()
+        warnings.warn(
+            f"nexus test substrate: cannot take the owner lock {lock} ({exc}); a sweeper "
+            f"in another PID namespace could mistake this cluster for a dead owner's",
+            stacklevel=3,
+        )
+        return
+    if fd is not None:
+        _cluster_lock_fds[pgdata] = fd
+
+
+def _release_cluster_lock(pgdata: str) -> None:
+    """Drop this process's owner lock on *pgdata* (its dir is going or gone)."""
+    release_owner_lock(_cluster_lock_fds.pop(pgdata, None))
+
+
 # ── Integration clusters: owner records (nexus-942h9) ────────────────────────
 #
 # An integration fixture (``tests._child_process.pg_data_tempdir``) makes its
 # cluster dir BEFORE initdb and starts the engine JVM in a different fixture, so
 # the substrate's in-dir sidecar does not fit: initdb refuses a non-empty dir, and
 # the JVM is not known when the dir is made. Instead the process keeps ONE record
-# per chosen root, ``<root>/nexus_integration_owner_<pid>.json``: its identity,
+# per chosen root, ``<root>/nexus_integration_owner_<pid>-<token>.json``: its identity,
 # every cluster dir it made there, and every engine child it spawned
 # (:func:`record_integration_child`). The sweep reaps a record whose owner is
 # dead, with the same identity checks as the sidecar clusters. Only a cluster in
@@ -1074,12 +1194,59 @@ _OWNER_RECORD_GLOB = f"{_OWNER_RECORD_PREFIX}*.json"
 _owner_lock = threading.Lock()
 #: root -> this process's record contents (the file is a mirror of this).
 _owner_records: dict[Path, dict] = {}
+#: root -> the descriptor holding that record's ``.lock`` (nexus-fuz9t); this process is the owner.
+_owner_record_lock_fds: dict[Path, int] = {}
 _integration_swept = False
 _owner_exit_registered = False
 
 
+#: (pid, id) of this process's record name, see :func:`_owner_record_id`.
+_owner_record_id_cache: tuple[int, str] | None = None
+
+
+def _owner_record_id() -> str:
+    """``<pid>-<8 hex>``: the name stem of this process's owner record and its lock, chosen once per
+    process (nexus-fuz9t). A pid names nothing across PID namespaces: under lab-run #88 two jobs'
+    pytest and xdist workers carry the same pid numbers, and a record named by pid alone would be ONE
+    file for both, with the second owner replacing the first's live lock. The random part makes the
+    name this process's own; the pid stays in it for a human reading ``ls``. A forked child asks again
+    (the cache is keyed by pid), so it never shares its parent's name."""
+    global _owner_record_id_cache
+    pid = os.getpid()
+    if _owner_record_id_cache is None or _owner_record_id_cache[0] != pid:
+        _owner_record_id_cache = (pid, f"{pid}-{secrets.token_hex(4)}")
+    return _owner_record_id_cache[1]
+
+
 def _owner_record_path(root: Path) -> Path:
-    return root / f"{_OWNER_RECORD_PREFIX}{os.getpid()}.json"
+    return root / f"{_OWNER_RECORD_PREFIX}{_owner_record_id()}.json"
+
+
+def _owner_record_lock_path(rec: Path) -> Path:
+    """The lock file beside an owner record: ``nexus_integration_owner_<pid>-<token>.lock``."""
+    return rec.with_suffix(_OWNER_LOCK_SUFFIX)
+
+
+def _hold_owner_record_lock(root: Path) -> None:
+    """Take (once per *root*) the lock beside this process's record for *root*. Call it BEFORE the record
+    is first flushed, so a sweeper that sees the record sees a held lock. Best effort, as
+    :func:`_hold_cluster_lock`. Caller holds ``_owner_lock``."""
+    if fcntl is None or root in _owner_record_lock_fds:
+        return
+    lock = _owner_record_lock_path(_owner_record_path(root))
+    try:
+        fd = _acquire_owner_lock(lock)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            lock.unlink()  # a free leftover would read as a dead owner
+        warnings.warn(
+            f"nexus integration clusters: cannot take the owner lock {lock} ({exc}); a sweeper "
+            f"in another PID namespace could mistake this record for a dead owner's",
+            stacklevel=3,
+        )
+        return
+    if fd is not None:
+        _owner_record_lock_fds[root] = fd
 
 
 def _flush_owner_record(root: Path, info: dict) -> None:
@@ -1089,24 +1256,19 @@ def _flush_owner_record(root: Path, info: dict) -> None:
     tmp.replace(path)  # atomic: the sweep never reads a torn record
 
 
-def _load_owner_record(root: Path) -> dict:
-    """This process's record for *root*: fresh, plus whatever an earlier process
-    with the same pid left in the file (its orphans become ours to be reaped)."""
+def _new_owner_record() -> dict:
+    """This process's record: always fresh. The record's name is this process's own
+    (:func:`_owner_record_id`), so a file already there is never an earlier owner's to adopt; an
+    earlier process of the same pid number left a file under ITS name, and the sweep reaps that
+    once its lock is free (nexus-fuz9t)."""
     from nexus.daemon.service_registry import process_command
 
-    info: dict = {
+    return {
         "owner_pytest_pid": os.getpid(),
         "owner_cmdline": process_command(os.getpid()),
         "pgdatas": [],
         "children": [],
     }
-    try:
-        old = json.loads(_owner_record_path(root).read_text())
-        info["pgdatas"] = [p for p in old.get("pgdatas", []) if isinstance(p, str)]
-        info["children"] = [c for c in old.get("children", []) if isinstance(c, dict)]
-    except (OSError, ValueError, AttributeError):
-        pass
-    return info
 
 
 def register_owned_cluster(root: Path, pgdata: str) -> None:
@@ -1116,9 +1278,10 @@ def register_owned_cluster(root: Path, pgdata: str) -> None:
     global _owner_exit_registered
     try:
         with _owner_lock:
-            info = _owner_records.get(root) or _load_owner_record(root)
+            info = _owner_records.get(root) or _new_owner_record()
             info["pgdatas"] = [p for p in info["pgdatas"] if Path(p).exists()] + [pgdata]
             _owner_records[root] = info
+            _hold_owner_record_lock(root)
             _flush_owner_record(root, info)
             if not _owner_exit_registered:
                 _owner_exit_registered = True
@@ -1150,7 +1313,7 @@ def record_integration_child(proc: subprocess.Popen) -> None:
     with _owner_lock:
         if not _owner_records:
             root = _original_tempdir()
-            _owner_records[root] = _load_owner_record(root)
+            _owner_records[root] = _new_owner_record()
             if not _owner_exit_registered:
                 _owner_exit_registered = True
                 atexit.register(_drop_finished_owner_records)
@@ -1161,6 +1324,7 @@ def record_integration_child(proc: subprocess.Popen) -> None:
                 c for c in info["children"] if pid_alive(c.get("pid", 0)) and c.get("pid") != proc.pid
             ] + [{"pid": proc.pid, "cmdline": cmdline}]
             try:
+                _hold_owner_record_lock(root)
                 _flush_owner_record(root, info)
             except OSError as exc:
                 warnings.warn(
@@ -1185,6 +1349,10 @@ def _drop_finished_owner_records() -> None:
                 _owner_record_path(root).unlink(missing_ok=True)
             except OSError:
                 continue
+            # The lock file goes while we still hold it, then the descriptor.
+            with contextlib.suppress(OSError):
+                _owner_record_lock_path(_owner_record_path(root)).unlink(missing_ok=True)
+            release_owner_lock(_owner_record_lock_fds.pop(root, None))
             del _owner_records[root]
 
 
@@ -2240,6 +2408,7 @@ def _boot() -> dict:
                     f"for {pgdata}:\n{_start.stderr}\n--- pg.log tail ---\n{_log_tail}"
                 )
             shutil.rmtree(pgdata, ignore_errors=True)
+            _release_cluster_lock(pgdata)
             raise RuntimeError(_failure)
     postmaster_pid = _read_postmaster_pid(pgdata)
     # Checkpoint 2 of 3 (nexus-ui654 follow-up, critic Q3): UPDATE the
@@ -2268,6 +2437,7 @@ def _boot() -> dict:
             capture_output=True,
         )
         shutil.rmtree(pgdata, ignore_errors=True)
+        _release_cluster_lock(pgdata)
 
     try:
         subprocess.run(
@@ -2511,6 +2681,7 @@ def _teardown() -> None:
     except Exception as exc:  # noqa: BLE001 — keeping evidence must never leak the cluster
         _log.warning("substrate_log_keep_failed", error=repr(exc), bead="nexus-ww33u")
     shutil.rmtree(_state["pgdata"], ignore_errors=True)
+    _release_cluster_lock(_state["pgdata"])
     _state = None
 
 
@@ -2577,6 +2748,9 @@ def _write_sidecar(
     """
     from nexus.daemon.service_registry import process_command
 
+    # The owner lock exists, held, before the sidecar does (nexus-fuz9t): a sweeper that finds the
+    # sidecar finds a held lock beside it. Idempotent: the two later checkpoints keep the first.
+    _hold_cluster_lock(pgdata)
     resolved_started_at = started_at if started_at is not None else time.time()
     payload = {
         "owner_pytest_pid": os.getpid(),
@@ -2663,44 +2837,72 @@ def sweep_integration_owner_records() -> SweepResult:
 #: two), not one in flight.
 _OWNER_TMP_MIN_AGE_S: float = 600.0
 
+#: The name stem of an owner record: the pid, then (nexus-fuz9t) a per-process token. A pid-only stem is
+#: what an owner of an older tree made, and is still matched so the old files are swept.
+_OWNER_STEM = rf"{re.escape(_OWNER_RECORD_PREFIX)}\d+(?:-[0-9a-f]{{8}})?"
+
 #: The one name :func:`_flush_owner_record` gives its tmp: the record's own name plus ``.tmp``.
-_OWNER_TMP_NAME = re.compile(rf"{re.escape(_OWNER_RECORD_PREFIX)}\d+\.json\.tmp")
+_OWNER_TMP_NAME = re.compile(rf"{_OWNER_STEM}\.json\.tmp")
+#: What :func:`_acquire_owner_lock` makes before it renames the lock into place, and a lock file.
+_OWNER_LOCK_TMP_NAME = re.compile(rf"{_OWNER_STEM}\.lock\.tmp")
+_OWNER_LOCK_NAME = re.compile(rf"{_OWNER_STEM}\.lock")
+
+
+def _regular_file_of_ours_older_than(p: Path, now: float, min_age_s: float) -> bool:
+    """*p* is a regular file of the service identity and older than *min_age_s*."""
+    try:
+        st = p.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    if os.name != "nt" and st.st_uid != int(_current_uid()):
+        return False
+    return now - st.st_mtime > min_age_s
 
 
 def _sweep_stale_owner_tmps(root: Path, result: SweepResult, *, now: float | None = None) -> None:
-    """Remove ``<root>/nexus_integration_owner_<pid>.json.tmp`` files older than :data:`_OWNER_TMP_MIN_AGE_S`
-    (nexus-qsqc6). The glob ``*.json`` of the record sweep never matches them. Only a regular file of the
-    service identity, matched by :data:`_OWNER_TMP_NAME` directly under *root*: a symlink, a look-alike name,
-    another uid's file or anything below *root* is left alone."""
+    """Remove the debris an owner killed mid-write leaves directly under *root*, older than
+    :data:`_OWNER_TMP_MIN_AGE_S` (nexus-qsqc6, nexus-fuz9t): ``<record>.json.tmp``, ``<record>.lock.tmp``
+    (killed between creating its lock and renaming it in) and a ``<record>.lock`` with no ``.json`` beside
+    it (killed between taking the lock and the first flush). The glob ``*.json`` of the record sweep
+    matches none of them. A lock file goes only when it can be locked: a held one is an owner. Only a
+    regular file of the service identity, matched by name directly under *root*: a symlink, a look-alike
+    name, another uid's file or anything below *root* is left alone."""
     now = time.time() if now is None else now
     try:
         entries = sorted(root.iterdir())
     except OSError:
         return
     for p in entries:
-        if not _OWNER_TMP_NAME.fullmatch(p.name):
+        is_json_tmp = _OWNER_TMP_NAME.fullmatch(p.name) is not None
+        is_lock_tmp = _OWNER_LOCK_TMP_NAME.fullmatch(p.name) is not None
+        is_orphan_lock = (
+            _OWNER_LOCK_NAME.fullmatch(p.name) is not None and not p.with_suffix(".json").exists()
+        )
+        if not (is_json_tmp or is_lock_tmp or is_orphan_lock):
             continue
+        if not _regular_file_of_ours_older_than(p, now, _OWNER_TMP_MIN_AGE_S):
+            continue
+        lock_fd: int | None = None
         try:
-            st = p.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(st.st_mode):
-            continue
-        if os.name != "nt" and st.st_uid != int(_current_uid()):
-            continue
-        if now - st.st_mtime <= _OWNER_TMP_MIN_AGE_S:
-            continue
-        try:
-            p.unlink()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            warnings.warn(
-                f"nexus test substrate sweep: cannot remove stale owner-record tmp {p}: {exc}",
-                stacklevel=2,
-            )
-            continue
-        result.stale_tmp_removed.append(str(p))
+            if is_lock_tmp or is_orphan_lock:
+                state, lock_fd = _lock_probe(p)
+                if state != "dead":
+                    continue  # held (an owner), unreadable, or gone: not debris
+            try:
+                p.unlink()  # while we hold the lock, if there is one
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                warnings.warn(
+                    f"nexus test substrate sweep: cannot remove stale owner-record debris {p}: {exc}",
+                    stacklevel=2,
+                )
+                continue
+            result.stale_tmp_removed.append(str(p))
+        finally:
+            release_owner_lock(lock_fd)
 
 
 def _sweep_owner_records(root: Path, result: SweepResult, *, now: float | None = None) -> None:
@@ -2789,9 +2991,30 @@ def _owner_pgdata_candidates(d: Path) -> list[Path]:
     return [d, nested] if nested.is_dir() else [d]
 
 
-def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
-    from nexus.daemon.service_registry import wait_for_exit  # noqa: PLC0415 — deferred: keep this module's import light
+#: A cluster or record kept as live or unknown for longer than this is reported, never reaped on age
+#: (nexus-fuz9t): a lock held by a process the sweeper cannot see (an inherited descriptor in an orphaned
+#: daemon, a PID namespace that outlived its job) keeps its tmpfs dir with no other voice.
+_LONG_KEPT_AGE_S: float = 6 * 3600.0
 
+
+def _report_long_kept(path: Path, state: str, *, now: float | None = None) -> None:
+    """Log one structured line when *path*, which the sweep is keeping because its owner reads live
+    (*state*: ``live`` or ``unknown`` lock, or ``pid-live``), was last touched over
+    :data:`_LONG_KEPT_AGE_S` ago. Report only."""
+    try:
+        age = (time.time() if now is None else now) - path.stat().st_mtime
+    except OSError:
+        return
+    if age > _LONG_KEPT_AGE_S:
+        _log.warning(
+            "test_substrate_kept_long",
+            path=str(path), state=state, age_s=int(age), bead="nexus-fuz9t",
+            hint="its owner lock is still held or cannot be tried; look for a process holding it "
+                 "(an orphaned child that inherited the descriptor) before removing it by hand",
+        )
+
+
+def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
     untrusted = _owner_record_untrusted(rec, result)
     if untrusted is None or untrusted:
         return
@@ -2816,9 +3039,27 @@ def _sweep_owner_record(rec: Path, root: Path, result: SweepResult) -> None:
             stacklevel=2,
         )
         return
-    if _owner_is_live(owner_pid, info.get("owner_cmdline", "") or ""):
-        result.live_untouched.append(str(rec))
-        return
+    # The owner lock decides first, as for a substrate cluster (nexus-fuz9t); the pid and cmdline rule
+    # is only for a record with no lock file.
+    lock = _owner_record_lock_path(rec)
+    lock_state, lock_fd = _lock_probe(lock)
+    try:
+        if lock_state in ("live", "unknown") or (
+            lock_state == "none" and _owner_is_live(owner_pid, info.get("owner_cmdline", "") or "")
+        ):
+            result.live_untouched.append(str(rec))
+            _report_long_kept(rec, lock_state if lock_state != "none" else "pid-live")
+            return
+        _reap_owner_record(rec, root, info, result)
+        if not rec.exists():
+            lock.unlink(missing_ok=True)  # while we hold it; a record left in place keeps its lock file
+    finally:
+        release_owner_lock(lock_fd)
+
+
+def _reap_owner_record(rec: Path, root: Path, info: dict, result: SweepResult) -> None:
+    """Reap the clusters and engine children recorded in *rec*, whose owner is dead."""
+    from nexus.daemon.service_registry import wait_for_exit  # noqa: PLC0415 — deferred: keep this module's import light
 
     dirs: list[Path] = []
     for raw in info.get("pgdatas") or []:
@@ -2986,18 +3227,28 @@ def _sweep_sidecar_cluster(
         )
         return
 
-    if _owner_is_live(owner_pid, info.get("owner_cmdline", "") or ""):
-        # Concurrent-session safety: a live owner's cluster (including this
-        # very boot's own, pre-sidecar) is never touched.
-        result.live_untouched.append(str(cluster_dir))
-        return
+    # The owner lock decides first (nexus-fuz9t): held means live whatever the pid says, free means
+    # dead whatever the pid says, and the pid and cmdline rule is only for a cluster with no lock
+    # (an owner of an older tree).
+    lock_state, lock_fd = _lock_probe(cluster_dir / _OWNER_LOCK_FILENAME)
+    try:
+        if lock_state in ("live", "unknown") or (
+            lock_state == "none" and _owner_is_live(owner_pid, info.get("owner_cmdline", "") or "")
+        ):
+            # Concurrent-session safety: a live owner's cluster (including this
+            # very boot's own, pre-sidecar) is never touched.
+            result.live_untouched.append(str(cluster_dir))
+            _report_long_kept(cluster_dir, lock_state if lock_state != "none" else "pid-live")
+            return
 
-    with contextlib.suppress(Exception):
-        _keep_swept_cluster_logs(cluster_dir)
-    if _reap_cluster(cluster_dir, info, result):
-        result.mismatch_refused.append(str(cluster_dir))
-    else:
-        result.reaped.append(str(cluster_dir))
+        with contextlib.suppress(Exception):
+            _keep_swept_cluster_logs(cluster_dir)
+        if _reap_cluster(cluster_dir, info, result):  # removes the dir while we hold the lock
+            result.mismatch_refused.append(str(cluster_dir))
+        else:
+            result.reaped.append(str(cluster_dir))
+    finally:
+        release_owner_lock(lock_fd)
 
 
 #: (label, sidecar pid key, sidecar cmdline key) per leg, in REAP ORDER

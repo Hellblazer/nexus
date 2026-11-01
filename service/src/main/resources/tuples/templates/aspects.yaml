@@ -3,7 +3,7 @@
 # the row-level security of RDR-235 F12b) and the collection is a field of
 # the task body, not part of the queue name, so a worker parks one in() and
 # a collection rename is a body rewrite. It is not a retune of queue/<name>:
-# the board, ledger and ad-hoc queues keep RDR-211's sizing.
+# the board and ad-hoc queues keep RDR-211's sizing.
 #
 # keys: queue, in the mapping form with one allowed value. out refuses any
 # queue value other than "aspects", and in/inp refuse a call that does not

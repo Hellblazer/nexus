@@ -443,6 +443,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   catalog-044-3 nexus-6pbwx
                 //   note-uri-001-1 nexus-bivz3.5
                 //   vectors-046-4 nexus-yye8l.21
+                //   tuples-012-1 nexus-onjvw
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -1136,6 +1137,25 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
                 }
 
+                // ── tuples-012-1 (nexus-onjvw): deletes every ledger/* tuple and its delivery and claim-log
+                // rows across tenants, on three FORCE-RLS tables. The rows are seeded just before the
+                // changeset (the tuples-003-2 idiom), as superuser, and the NOBYPASSRLS owner must not see
+                // them, so the toggles are what the hop depends on. The same population and assertions as
+                // TuplesRetireLedgerLiquibaseTest. ─────────────────────────────────────────────────────────
+                migrateUpTo(adminDs, "tuples-012-1");
+                TuplesRetireLedgerLiquibaseTest.Seeded retiredLedgerSeed;
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    retiredLedgerSeed = TuplesRetireLedgerLiquibaseTest.seed(su);
+                    TuplesRetireLedgerLiquibaseTest.assertSeededPopulation(su, retiredLedgerSeed);
+                }
+                try (Connection admin = adminDs.getConnection()) {
+                    assertThat(dsl(admin).fetchCount(TUPLES))
+                        .as("FORCE RLS must hide every seeded nexus.tuples row from the non-BYPASSRLS "
+                            + "owner — tuples-012-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                }
+
                 // ── HEAD LEG over a populated database. This is the leg the
                 // v0.1.33 outage proved was untested: catalog-013-0's naked DML
                 // no-ops under RLS here exactly as it did in production; only
@@ -1194,6 +1214,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             .and(CATALOG_COLLECTIONS.OWNER_ID.eq("h044subject"))))
                         .as("a knowledge collection keeps its subject")
                         .isEqualTo(1);
+                }
+
+                // ── tuples-012-1's own effect (nexus-onjvw): the ledger rows and their side rows are gone in
+                // every tenant, everything else is as seeded, and FORCE RLS is back on all three tables. ──
+                try (Connection su = pg.createConnection("")) {
+                    TuplesRetireLedgerLiquibaseTest.assertRetired(su, retiredLedgerSeed);
+                    TuplesRetireLedgerLiquibaseTest.assertForceRlsRestored(su);
                 }
 
                 // ── vectors-046-4's own effect (nexus-yye8l.21): both seeded tenants are registered, exactly

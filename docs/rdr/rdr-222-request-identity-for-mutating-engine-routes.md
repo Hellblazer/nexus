@@ -2,7 +2,8 @@
 title: "Request Identity for Mutating Engine Routes"
 id: RDR-222
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-01
 accepted_date: 2026-10-18
 priority: medium
 author: Sam
@@ -19,7 +20,10 @@ related_rdrs: [RDR-181, RDR-191, RDR-192, RDR-193, RDR-108, RDR-103, RDR-225, RD
 > Prose: see REGISTER.md beside this template.
 
 Draft written read-only against develop b1d900fd6, 2026-09-27. Phase 0 has
-since shipped (`engine-service-v0.1.137`); no other phase has code.
+since shipped (`engine-service-v0.1.137`), and so have Phase 1 and 1a
+(`engine-service-v0.1.162`, ledger retention for a token-less tenant in
+`v0.1.173`, conexus 7.83.1 and 7.91.0). Phase 2 is deferred and Phase 3 is
+design of record only; neither has code. See Status at close.
 
 ## Problem Statement
 
@@ -385,6 +389,34 @@ Pieces 1-3 answer ll31n (Phase 1) and wvek6 (Phase 2, deferred). Piece 4
 answers mfw6c (Phase 3, closed) and does not use the ledger at all.
 
 ### Technical Design
+
+#### As built (overrides the text below; added at close, 2026-10-31)
+
+The accept dispositions were carried by beads, which the epic says win over
+this text; they were not written back here. Where the sections below
+differ, this list is what shipped. Sources: nexus-zxgld, nexus-icdmw,
+nexus-yye8l.19, .20, .22 and the `docs/wire-contract-pending.md` entries.
+
+- Keys are uuid4, not UUIDv7 (Technical Design 1).
+- The ledger has no `doc_id` column; it adds a `(tenant_id, finished_at)`
+  index, and `finished_at` is `clock_timestamp()`.
+- The sweep lease is 95 s: the bound plus twice the connection timeout plus
+  10 s (the 65 s figure in Technical Design 3 is superseded).
+- `sweep_gate_busy` applies to the quarantine and expire forms only;
+  restore takes no sweep gate.
+- The client never gates polling on the key echo. The echo is telemetry;
+  the first keyed call is protected without it (accept residual 1).
+- Claim exhaustion answers 503 `request_claim_contended` with
+  `Retry-After: 1`, not 422.
+- `rolled_back` means that attempt can no longer commit, not that the key is
+  finished: a same-key resend can take the row over and commit. A status
+  read can also report `rolled_back`, in a window narrower than one
+  statement, for a marker whose UPDATE had already scanned the row. The
+  takeover re-checks holder and state, so neither case executes twice. The
+  operative guarantee is that resending with the same key is safe, not that
+  each reported state is final.
+- ll31n is closed for the bounded sweeps only (Status at close lists what
+  stays unkeyed).
 
 #### 1. Request id
 
@@ -1336,7 +1368,7 @@ is never refused.
   in `--shakeout`'s index-throughput gate; no local harness runs it earlier
   (T2 `nexus/ulrjq-throughput-ab`).
 
-### Phase 1: ledger + sweeps + status route (closes ll31n)
+### Phase 1 (SHIPPED, engine-service-v0.1.162, conexus 7.83.1): ledger + sweeps + status route (closes ll31n for the bounded sweeps)
 
 - Changeset: table, RLS, grants. Update the three hand-kept lists for a new
   tenant table: the Liquibase schema test for the family,
@@ -1365,7 +1397,7 @@ is never refused.
   `Idempotency-Replayed` response headers (222-research-13).
 - Engine cut, deploy, then the client release (choreography (a)).
 
-### Phase 1a: bounded, keyed expire (Amendment A1, nexus-1579m)
+### Phase 1a (SHIPPED with Phase 1): bounded, keyed expire (Amendment A1, nexus-1579m)
 
 - Measure first, on a PITR fork, never production: read-only
   `EXPLAIN (ANALYZE)` of one page's victim walk at `row_limit` 2,000 and of
@@ -1689,6 +1721,44 @@ and the confirmation round's follow-ups are folded in.
    a new advisory key carrying the RDR-191 marker text.
 3. **Recorded as an amendment under the existing acceptance**, not re-gated.
 
+## Status at close (2026-10-31)
+
+Sam's 2026-10-31 decision pass assigned the RDR-222 Phase 1 finish (T2
+`nexus/sam-decision-pass-2026-10-31`); the phase dispositions below were relayed by wren
+the same day.
+
+- **Phase 0 shipped** in `engine-service-v0.1.137`.
+- **Phase 1 and 1a shipped.** Engine in `engine-service-v0.1.162`; client in
+  conexus 7.83.1, which pinned it. A keyed bounded expire-quarantine sweep
+  through the edge read back `committed` from `GET /v1/requests/<id>` on
+  2026-10-21 (request `3e74554c-c197-4525-8bec-bbfa4083db88`, nexus-yye8l.17).
+  Ledger retention for a tenant that never sends a key (a tenant registry, a
+  BEFORE INSERT trigger and a backfill, changesets vectors-046-1..4, nexus-yye8l.21)
+  shipped in `engine-service-v0.1.173`, deployed 2026-10-31 20:53Z; conexus
+  7.91.0 pins it. The edge passthrough (nexus-yye8l.10) was confirmed by live
+  probes on 2026-10-21 for the 200 and replay paths; the key echo and
+  `Retry-After` on 409 and 503 are pinned by conexus `EdgeProxyHandlerIT`
+  (conexus `a2398338e`, PR #656) rather than probed live, because a live 409
+  or 503 needs an in-flight conflict or a held sweep gate.
+- **Phase 2 stays deferred** (Sam, 2026-09-28). Its case, nexus-wvek6, closed
+  as measured and not material: `raced_embeds_total` read 11 against 14,693
+  chunks embedded (0.075%) on cloud v0.1.160, 2026-10-18, over 5.6 days of
+  uptime rather than the two weeks Sam's rule named (the counter is
+  per-process). It is an upper bound, since it counts shared-text races too.
+  Reopening Phase 2 needs that counter to read material; the threshold is
+  Sam's call.
+- **Phase 3 is closed as design of record only** (Sam, 2026-09-28, no
+  evidence of harm). The text stays so a future run-fence change starts from it.
+- **The edge must keep passing the key.** An `unknown` status makes the
+  client resend, which is safe only if the engine saw the key. A hop that
+  drops `Idempotency-Key` makes the sweep run unkeyed and the resend a second
+  execution. RDR-007 A5's CloudFront origin request policy dropped it
+  (conexus-c4i2); nexus-yye8l.10 verified the edge in front of the engine
+  today. Nothing re-probes it on a schedule (nexus-t0ms7).
+- **Still unkeyed** (Technical Design, Sweeps, "Not keyed in Phase 1"):
+  `/gc/quarantine-restore` (nexus-k9kr9), the unbounded and floor-only sweep
+  forms, and the catalog-client mutating routes.
+
 ## Open Questions (for Sam)
 
 All seven are answered: 3 and 4 on 2026-09-27, 1, 2, 5 and 7 on 2026-10-17,
@@ -1743,8 +1813,8 @@ plumbing) and -14 (fix-check facts), verified by source search except
 -14's pool timeout (read from a comment, not a setter) and its Postgres
 statement-timeout semantics (not tested here). Two Phase 1 items are not
 verified: `Idempotency-Key` and the response headers passing the managed
-edge (222-research-13, assumed; checked with conexus before the client half
-ships, Phase 1) and
+edge (222-research-13, assumed at the gate; verified at close, see Status
+at close and nexus-yye8l.10) and
 the IETF draft's 409/422 semantics (recalled, not re-read; the design states
 its own 409/422 rules, so it does not depend on the draft). The other two
 assumed findings, 222-research-5 and -6, concern only Phase 3, which is
@@ -1758,7 +1828,7 @@ closed.
 | bounded sweep statement and lock bounds | engine `PgSession`, changelogs | Source Search (222-research-9) |
 | sweep body built after the transaction; restore per sibling | engine `VectorHandler` | Source Search (222-research-10) |
 | AuthFilter scope gates; client thread-local plumbing | engine `AuthFilter`, client | Source Search (222-research-11) |
-| `Idempotency-Key` across the managed edge | conexus edge | Assumed (222-research-13) |
+| `Idempotency-Key` across the managed edge | conexus edge | Verified live 2026-10-21 (200 and replay paths); 409 and 503 pinned by conexus `EdgeProxyHandlerIT` at `a2398338e` (nexus-yye8l.10) |
 | sweep SQL functions write `gc_audit` under the sweep gate | engine changelogs | Source Search (222-research-7) |
 | `X-Nexus-Request-Deadline-Ms` / `NX_EMBED_DEADLINE_MS` | engine `RequestDeadline`, `AuthFilter` | Source Search (222-research-7) |
 | `Idempotency-Key` 409/422 semantics | IETF httpapi draft | Docs Only, recalled, not re-read |
@@ -1796,6 +1866,10 @@ of record; nothing is trimmed. The record is larger than Phase 1 needs
 because it keeps that design.
 
 ## Revision History
+
+- 2026-10-31: Status at close added; Phase 1 and 1a headings marked shipped; the opening status line brought up to date. Phase 2 deferred and Phase 3 design-only, unchanged since 2026-09-28.
+
+- 2026-10-31: close critique (T2 `nexus_rdr/222-close-critique-2026-10-31`, partial, 0 Critical, 4 Significant) fixed: Technical Design gains an As built list carrying the bead-held accept dispositions and the `rolled_back` exception; edge assumption marked verified; the edge dependency (conexus-c4i2) and the re-probe bead nexus-t0ms7 named in Status at close; Phase 2's measurement window stated.
 
 - 2026-10-21: Amendment A1 (nexus-1579m): bounded, keyed expire-quarantine (Technical Design 7, Phase 1a, Test Plan 1a, wire bullets); nexus-k9kr9 kept separate with a recommended direction. Recorded under the existing acceptance by Sam's decision (no re-gate); the RDR stays `accepted`. Sources in 222-research-15.
 

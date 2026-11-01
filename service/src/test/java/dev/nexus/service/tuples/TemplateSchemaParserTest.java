@@ -59,7 +59,7 @@ class TemplateSchemaParserTest {
     @Test
     void literalNameHasNoParamSegment() {
         Map<String, Object> doc = validDoc();
-        doc.put("name", "ledger/fixed");
+        doc.put("name", "session-log/fixed");
         doc.put("id_dims", List.of());
         TemplateSchema t = TemplateSchemaParser.parse("t.yaml", doc);
         assertTrue(t.isLiteral());
@@ -122,7 +122,7 @@ class TemplateSchemaParserTest {
     @Test
     void emptyParameterSegmentInNameIsABreach() {
         Map<String, Object> doc = validDoc();
-        doc.put("name", "ledger/<>");
+        doc.put("name", "session-log/<>");
         var ex = assertThrows(TemplateRegistryException.class,
                 () -> TemplateSchemaParser.parse("broken.yaml", doc));
         assertTrue(ex.getMessage().contains("name"), ex.getMessage());
@@ -228,7 +228,7 @@ class TemplateSchemaParserTest {
     void maxBodyBytesZero_parsesAsZero_notNull() {
         Map<String, Object> doc = validDoc();
         doc.put("max_body_bytes", 0L);
-        TemplateSchema t = TemplateSchemaParser.parse("ledger.yaml", doc);
+        TemplateSchema t = TemplateSchemaParser.parse("session-log.yaml", doc);
         assertEquals(0L, t.maxBodyBytes());
     }
 

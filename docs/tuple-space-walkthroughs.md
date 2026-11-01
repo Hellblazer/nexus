@@ -6,7 +6,7 @@ Scenario walkthroughs for the [Tuple Space reference](tuple-space.md). Each sect
 
 ## Ledger: dispatch start and report
 
-Consumer one. The `ledger/<session_id>` template (start and report rows keyed on the harness's per-instance agent id) exists engine-side. No client writes it: the RDR-184 and RDR-205 hooks that recorded dispatches and projected them into it were deleted at cleanup step A1, so there is no walkthrough to draw. See [Templates and subspaces](tuple-space.md#templates-and-subspaces).
+Consumer one. The `ledger/<session_id>` template (start and report rows keyed on the harness's per-instance agent id) is retired. The RDR-184 and RDR-205 hooks that recorded dispatches and projected them into it were deleted at cleanup step A1, and the template and its rows went with the engine change of nexus-onjvw, so there is no walkthrough to draw. See [Templates and subspaces](tuple-space.md#templates-and-subspaces).
 
 ## Mailbox: send, contend, drain
 

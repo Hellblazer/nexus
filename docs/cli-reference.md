@@ -5092,7 +5092,7 @@ Create tenant `NAME` and mint its first bound service token. The token is printe
 
 ## nx tuple
 
-The RDR-205 Linda tuple space: a coordination primitive over Postgres for cross-agent/cross-instance state (mailboxes, ledgers, work queues). Every subcommand calls through `HttpTupleStore` over `/v1/tuples`; requires `NX_SERVICE_PORT` / `NX_SERVICE_TOKEN`. A *subspace* (e.g. `mailbox/agent-7`) resolves to a registered template (`nx tuple templates`), which pins which `--key`/`--dim` fields it accepts.
+The RDR-205 Linda tuple space: a coordination primitive over Postgres for cross-agent/cross-instance state (mailboxes, boards, work queues). Every subcommand calls through `HttpTupleStore` over `/v1/tuples`; requires `NX_SERVICE_PORT` / `NX_SERVICE_TOKEN`. A *subspace* (e.g. `mailbox/agent-7`) resolves to a registered template (`nx tuple templates`), which pins which `--key`/`--dim` fields it accepts.
 
 ### nx tuple out
 
@@ -5102,7 +5102,7 @@ nx tuple out SUBSPACE [--key KEY=VALUE ...] [--dim KEY=VALUE ...] [--body TEXT] 
 
 Write a tuple into `SUBSPACE`. Idempotent by construction: the tuple id is derived from the template's `id_from` fields only (never the insert time), so a retry lands on the same tuple. Prints the tuple id (lowercase hex).
 
-The tuple space is a coordination and metadata store, not a value store: `--body` is at most 4096 bytes UTF-8 (a template may set a lower cap; the ledger's is 0), a `--key`/`--dim` value at most 256 bytes, `SUBSPACE` at most 256 bytes, `--nonce` at most 128 bytes — refused as `TooLarge` over the limit, never echoing the oversized value. Longer content goes in T2 (`nx memory put`) or T3 (`nx store put`), with the tuple carrying a reference.
+The tuple space is a coordination and metadata store, not a value store: `--body` is at most 4096 bytes UTF-8 (a template may set a lower cap; `directory/<name>`'s is 0), a `--key`/`--dim` value at most 256 bytes, `SUBSPACE` at most 256 bytes, `--nonce` at most 128 bytes — refused as `TooLarge` over the limit, never echoing the oversized value. Longer content goes in T2 (`nx memory put`) or T3 (`nx store put`), with the tuple carrying a reference.
 
 | Flag | Description |
 |------|-------------|
@@ -5157,7 +5157,7 @@ nx tuple ack CLAIM_ID --claimant ID [--reply-subspace SUBSPACE] [--reply-key KEY
 
 Consume a claimed tuple. The row is invisible to `rd`/`in` after this.
 
-With `--reply-subspace`, the engine writes a reply into that subspace in the same transaction that consumes the claim (RDR-206), and the confirmation gains a `reply_id=` line carrying the reply's tuple id. Without any `--reply-*` flag the confirmation is unchanged. `--reply-subspace` must resolve to a `keys+nonce` template — a keys-only target (e.g. the ledger) is refused as `SchemaViolation` before the transaction opens, so the request is left still claimed and still ackable. There is no `--reply-nonce` flag: the engine sets the reply's nonce itself, to the request's tuple id. Every other `--reply-*` flag requires `--reply-subspace`; using one without it is a usage error, not a silently dropped flag. Same size limits as `out` apply to the reply and are refused as `TooLarge` before the transaction opens, leaving the request still claimed: `--reply-body` at most 4096 bytes UTF-8, `--reply-subspace` at most 256, a `--reply-key`/`--reply-dim` value at most 256.
+With `--reply-subspace`, the engine writes a reply into that subspace in the same transaction that consumes the claim (RDR-206), and the confirmation gains a `reply_id=` line carrying the reply's tuple id. Without any `--reply-*` flag the confirmation is unchanged. `--reply-subspace` must resolve to a `keys+nonce` template — a keys-only target (e.g. `lock/<resource>`) is refused as `SchemaViolation` before the transaction opens, so the request is left still claimed and still ackable. There is no `--reply-nonce` flag: the engine sets the reply's nonce itself, to the request's tuple id. Every other `--reply-*` flag requires `--reply-subspace`; using one without it is a usage error, not a silently dropped flag. Same size limits as `out` apply to the reply and are refused as `TooLarge` before the transaction opens, leaving the request still claimed: `--reply-body` at most 4096 bytes UTF-8, `--reply-subspace` at most 256, a `--reply-key`/`--reply-dim` value at most 256.
 
 | Flag | Description |
 |------|-------------|

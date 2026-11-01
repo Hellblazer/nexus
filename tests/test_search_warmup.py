@@ -125,4 +125,4 @@ def test_on_by_default_runs_on_a_daemon_thread(monkeypatch) -> None:
 def test_the_mcp_lifespan_starts_the_warmup() -> None:
     from nexus.mcp import core
 
-    assert "_warm_search_path_in_background()" in inspect.getsource(core._t1_lifespan)
+    assert "_warm_search_path_in_background()" in inspect.getsource(core._t1_lifespan_body)

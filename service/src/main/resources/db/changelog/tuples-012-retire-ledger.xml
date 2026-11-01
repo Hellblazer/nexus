@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-onjvw (Sam's decision 2026-10-31): put the RDR-205 v1 session ledger to rest.
+
+    The ledger/<session_id> template was read-only (take.enabled: false) and had exactly one writer,
+    nexus.hooks.tuple_ledger_project, driven by the SubagentStart/SubagentStop hooks. The 7.70.0
+    cleanup (nexus-0r1uz step A1, 2026-10-04) deleted that writer and every reader and left the
+    template and its rows behind. This change deletes the template (ledger.yaml leaves the registry,
+    so ledger/... is now an unknown subspace) and this changeset deletes the rows the template left:
+    446 ledger/<session_id> subspaces and 40,785 rows on the managed service's one tenant when
+    measured 2026-10-31, all unconsumed and unclaimed, the newest from 2026-10-04. Nothing reads them
+    and nothing can any more, since the engine now refuses the subspace.
+
+    WHAT IS DELETED. Every nexus.tuples row whose subspace starts with ledger/, across ALL tenants,
+    and the two side tables' rows for the same subspaces:
+      - nexus.tuple_deliveries (tuples-007): per-(subspace, subscriber, tuple) announce stamps. Its
+        tuple_id foreign key is ON DELETE CASCADE, and the table carries its own subspace column, so
+        it is deleted by subspace explicitly rather than left to the cascade. Ledger rows were never
+        announce-read, so none is expected; the statement is what makes that a fact instead of an
+        assumption.
+      - nexus.tuple_claim_log (tuples-001-2): the append-only audit trail, which denormalises
+        subspace so a row reads standalone after its tuple is purged, and whose tuple_id foreign key
+        is ON DELETE SET NULL. Left alone, a ledger claim-log row would outlive its tuple with a null
+        tuple_id and a subspace nothing can resolve. The template was take-disabled, so none is
+        expected; deleting by subspace covers a row written under an earlier definition of it.
+      - nexus.tuple_tenants (tuples-001-3) is untouched: it names tenants, holds no per-subspace
+        data, and a tenant that held only ledger rows is still a tenant.
+
+    SAFE TO RUN ANYWHERE. A tenant, or a whole install, with no ledger rows matches nothing and
+    changes nothing. A second run (the changeset is run-once, but the statements do not depend on
+    that) matches nothing and changes nothing. A subspace such as mailbox/ledger/x or ledger-x/y does
+    not start with the literal ledger/ and is never touched.
+
+    RLS. nexus.tuples, nexus.tuple_claim_log and nexus.tuple_deliveries all carry FORCE ROW LEVEL
+    SECURITY with the tenant_isolation policy, and the migration role (nexus_admin) is the table
+    owner with no BYPASSRLS: the nexus-1wjmq incident class (catalog-013-1b's header). Under FORCE the
+    owner's DELETE sees zero rows, so with no tenant GUC set the statement would delete nothing, on
+    every tenant, and still be recorded as run. This changeset therefore toggles NO FORCE / FORCE on
+    all three tables for its own duration, the tuples-003-2 / catalog-013-1b shape: flat,
+    splitStatements="true" statements, not a DO block, because tests/test_changelog_rls_lint.py's
+    FORCE-RLS DML tripwire does not recognise a toggle nested in a procedural block as guarding the
+    DML inside it. A failure partway through rolls the whole transaction back, toggles included.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: delete every ledger/* tuple and its side rows, all tenants ── -->
+    <changeSet id="tuples-012-1" author="nexus-onjvw">
+        <comment>Retire the RDR-205 v1 session ledger (ledger.yaml leaves the template registry in the same engine change): delete every nexus.tuples row whose subspace starts with ledger/, across all tenants, together with the nexus.tuple_deliveries and nexus.tuple_claim_log rows for those subspaces. Toggles FORCE RLS off on all three tables for the duration (nexus_admin is the owner with no BYPASSRLS, so an un-toggled DELETE would match no row on any tenant) and restores it before the changeset ends. Flat, splitStatements="true" statements (tuples-003-2's shape), not a DO block: tests/test_changelog_rls_lint.py's FORCE-RLS DML tripwire does not recognise a toggle nested inside a procedural block as guarding the DML inside it. Idempotent, and a no-op where no ledger row exists. DATA EFFECT: DELETEs every nexus.tuples row whose subspace starts with ledger/ (measured on the managed service's tenant 2026-10-31: 40,785 rows in 446 subspaces, all available, the newest from 2026-10-04), plus the nexus.tuple_deliveries and nexus.tuple_claim_log rows for those subspaces (none expected: the template was read-only and never claimed); irreversible — the pre-image is not recoverable and nothing should recover it, since the writer was deleted in 7.70.0 and no reader exists (documented no-op rollback below).</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tuples NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.tuple_claim_log NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.tuple_deliveries NO FORCE ROW LEVEL SECURITY;
+DELETE FROM nexus.tuple_deliveries WHERE subspace LIKE 'ledger/%';
+DELETE FROM nexus.tuple_claim_log WHERE subspace LIKE 'ledger/%';
+DELETE FROM nexus.tuples WHERE subspace LIKE 'ledger/%';
+ALTER TABLE nexus.tuple_deliveries FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.tuple_claim_log FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.tuples FORCE ROW LEVEL SECURITY;
+        </sql>
+        <!-- Data deletion: the pre-image is not recoverable and nothing should
+             recover it. The only writer was deleted in 7.70.0 (nexus-0r1uz step
+             A1) and the template no longer exists, so the rows could not be read
+             back through the API even if they were restored. Same no-op rollback
+             posture as tuples-003-2 and tuples-004-1. -->
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

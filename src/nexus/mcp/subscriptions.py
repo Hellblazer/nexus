@@ -272,8 +272,9 @@ def _release_directory_entry(
     the idempotent tuple id updates the live row's expiry and it lapses
     within about a second instead of at :data:`DIRECTORY_TTL_S` (RDR-208
     test plan; bead nexus-kdxyv restored it from the deleted CLI watcher's
-    own ``_release_directory_entry``). A plain process exit never runs
-    this and leaves the row for one TTL, as the RDR says. A no-op when
+    own ``_release_directory_entry``). A clean process exit runs it too,
+    through ``reset_cache`` from ``nexus.mcp.core``'s exit paths
+    (nexus-tu84w); a crash leaves the row for one TTL. A no-op when
     the lease was never armed. Best-effort: a failure is logged and the
     row lapses by TTL, never raised into a handoff or a tool call."""
     if not lease.armed:
@@ -861,8 +862,8 @@ def load(t1: Any, session_id: str, *, store_factory: Callable[[], Any] | None = 
     name's mail strands, as RDR-208 accepted. Restoring the old name
     re-armed its directory lease for the life of the new process and made
     the new name's subscribe refuse as a second leased name. The old
-    name's row lapses at its TTL from the old process's exit, as a plain
-    exit leaves it. (nexus-u839f: the server re-arms the CURRENT name itself,
+    name's row was released by the old process's clean exit (nexus-tu84w),
+    or lapses at its TTL after a crash. (nexus-u839f: the server re-arms the CURRENT name itself,
     from Claude Code's sessions registry, in ``_start_channel_waiter`` right
     after this load; see :meth:`SubscriptionSet.arm_session_name`.)
     *store_factory* is accepted for the call shape

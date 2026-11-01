@@ -1821,6 +1821,35 @@ def _warn_if_harness_oauth_grant_present() -> None:
 
 @asynccontextmanager
 async def _t1_lifespan(_app: Any):
+    """The MCP server lifespan: :func:`_t1_lifespan_body`, then release
+    this process's peer-directory names (nexus-tu84w).
+
+    The body has four branches, each with its own yield and teardown; the
+    release wraps them all so no branch can leave a name live for one
+    ``DIRECTORY_TTL_S`` after a clean exit. It starts on its own thread
+    when the body's yield returns, so it runs alongside the body's T1
+    teardown (and before the token revoke, which would cost the release a
+    401 retry), and is awaited after it, up to its deadline.
+    """
+    import asyncio  # noqa: PLC0415 — stdlib, deferred like this module's other lifespan imports
+
+    started = False
+    release: threading.Thread | None = None
+    try:
+        async with _t1_lifespan_body(_app):
+            try:
+                yield
+            finally:
+                started = True
+                release = _start_session_name_release()
+    finally:
+        if not started:  # the body failed before or without yielding
+            release = _start_session_name_release()
+        await asyncio.to_thread(_await_session_name_release, release)
+
+
+@asynccontextmanager
+async def _t1_lifespan_body(_app: Any):
     """T1 session lifespan (RDR-105 P4, reshaped at RDR-155 P4b / RDR-158 P3).
 
     Branch 0 (service) is the only branch: route T1 through
@@ -2553,8 +2582,88 @@ def _t1_shutdown() -> None:
     _t1_session_shutdown()
 
 
+#: How long an exit path waits for the peer-directory name release
+#: (nexus-tu84w). The release runs in its own thread, alongside the T1
+#: teardown, so this bounds the exit's added delay; a release still in
+#: flight at the deadline is abandoned and its row lapses by TTL.
+_NAME_RELEASE_TIMEOUT_S: float = 3.0
+
+#: The release thread in flight, if any, so a second exit path (SIGTERM
+#: landing during the lifespan's release) waits for it instead of finding
+#: the cache already drained and exiting under it. Plain assignment, no
+#: lock: a signal handler on the main thread must never block on one.
+_NAME_RELEASE_THREAD: threading.Thread | None = None
+
+#: The monotonic deadline of that release, set once when it starts, so
+#: every exit path that waits on it (the lifespan, then atexit) shares one
+#: bound instead of each waiting a fresh :data:`_NAME_RELEASE_TIMEOUT_S`.
+_NAME_RELEASE_DEADLINE: float = 0.0
+
+
+def _release_session_names_now() -> None:
+    """Release every ``directory/<name>`` row this process leases
+    (nexus-tu84w): each lease's own nonce re-sent with a one-second TTL,
+    so only the row this process wrote lapses. Without it an exit left
+    the row live for one ``DIRECTORY_TTL_S`` (300 s), and a session
+    restarted inside that window shared its name with its own dead
+    predecessor, so ``mailbox_send`` by name was refused as ambiguous.
+    Never raises: a failure is logged and the row lapses by TTL, as a
+    crash's row does. Runs on the release thread only, so the cache and
+    lease locks it takes are never waited on by the main thread, where a
+    signal handler runs.
+    """
+    try:
+        _subscriptions.reset_cache()
+    except Exception as e:  # noqa: BLE001 — best-effort on exit; the row lapses by TTL
+        _log.warning("session_name_release_on_exit_failed", error=str(e))
+
+
+def _start_session_name_release() -> threading.Thread | None:
+    """Start the release on a daemon thread and set its deadline, or
+    return the one in flight. ``None`` when no thread could be started
+    (resource exhaustion): the caller's exit goes on and the rows lapse
+    by TTL."""
+    global _NAME_RELEASE_THREAD, _NAME_RELEASE_DEADLINE
+    running = _NAME_RELEASE_THREAD
+    if running is not None and running.is_alive():
+        return running
+    thread = threading.Thread(
+        target=_release_session_names_now, name="nx-mcp-name-release", daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception as e:  # noqa: BLE001 — RuntimeError "can't start new thread"; never block the exit
+        _log.warning("session_name_release_on_exit_not_started", error=str(e))
+        return None
+    _NAME_RELEASE_DEADLINE = time.monotonic() + _NAME_RELEASE_TIMEOUT_S
+    _NAME_RELEASE_THREAD = thread
+    return thread
+
+
+def _await_session_name_release(thread: threading.Thread | None) -> None:
+    """Wait for *thread* until the release's shared deadline, then give up."""
+    if thread is None:
+        return
+    thread.join(max(0.0, _NAME_RELEASE_DEADLINE - time.monotonic()))
+    if thread.is_alive():
+        _log.warning("session_name_release_on_exit_incomplete", timeout_s=_NAME_RELEASE_TIMEOUT_S)
+
+
+def _exit_teardown() -> None:
+    """The process-exit teardown shared by :func:`_sigterm_handler` and
+    :mod:`atexit`: the name release (nexus-tu84w) runs alongside
+    :func:`_t1_shutdown` (the flagged-row drain and token revoke, each
+    bounded on its own) and is awaited after it, up to its deadline.
+    Starting it first and awaiting it last keeps it from delaying the
+    data-bearing T1 steps, and a failure to start it skips nothing."""
+    release = _start_session_name_release()
+    _t1_shutdown()
+    _await_session_name_release(release)
+
+
 def _sigterm_handler(_signo: int, _frame: Any) -> None:
-    """Run the shutdown path then exit.
+    """Run the shutdown path (:func:`_exit_teardown`: the peer-directory
+    name release alongside :func:`_t1_shutdown`) then exit.
 
     When invoked while the lifespan finally is already running cleanup
     (stdin-EOF + SIGTERM race observed in production after 4.12.0
@@ -2578,8 +2687,28 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
     # nexus-vpa9q: os._exit skips atexit, so drain queued search
     # telemetry here (bounded) before the process goes.
     _flush_search_telemetry_at_exit()
-    _t1_shutdown()
+    _exit_teardown()
     _os._exit(0)
+
+
+def _install_exit_handlers(
+    register: Callable[[Callable[[], None]], Any] | None = None,
+    set_signal: Callable[[int, Any], Any] | None = None,
+) -> None:
+    """Register :func:`_exit_teardown` with :mod:`atexit` and
+    :func:`_sigterm_handler` for SIGTERM and SIGINT. Called once by
+    :func:`main`; see the comment there for why all three are needed.
+    *register* and *set_signal* default to ``atexit.register`` and
+    ``signal.signal``; a test passes its own instead of patching the
+    stdlib modules for the whole process."""
+    import atexit  # noqa: PLC0415 — stdlib, deferred to the one call site
+    import signal  # noqa: PLC0415 — stdlib, deferred to the one call site
+
+    register = register or atexit.register
+    set_signal = set_signal or signal.signal
+    register(_exit_teardown)
+    set_signal(signal.SIGTERM, _sigterm_handler)
+    set_signal(signal.SIGINT, _sigterm_handler)
 
 
 # nexus-20iee: the upstream mcp SDK's FastMCP Settings model (a Generic[
@@ -7939,7 +8068,7 @@ def tuple_out(
             "when the template's id_from is keys+nonce (mailbox/<address>, "
             "board/<topic>, board/ci/<topic>, queue/<name>, directory/<name>, "
             "aspects); omit "
-            "for a keys-only one (ledger, lock). An id ingredient only, never echoed "
+            "for a keys-only one (lock/<resource>). An id ingredient only, never echoed "
             "back on a read."
         ),
     )] = None,
@@ -7971,7 +8100,7 @@ def tuple_out(
 
     Size limits (refused with the `TooLarge` typed error before any write):
     - `body`: at most 4096 bytes UTF-8 (a template may set a lower cap; the
-      ledger's is 0, null or empty only).
+      `directory/<name>`'s is 0, null or empty only).
     - Each `keys`/`dims` value: at most 256 bytes UTF-8.
     - `subspace`: at most 256 bytes UTF-8.
     - `nonce`: at most 128 bytes UTF-8.
@@ -8179,7 +8308,7 @@ def tuple_ack(
     Pass `reply` to write a reply as the request is consumed; both commit
     together or not at all. The reply's target must resolve to a
     keys+nonce template (e.g. a mailbox address); a keys-only target (e.g.
-    the RDR-184 ledger) is refused. A reply that fails validation leaves
+    `lock/<resource>`) is refused. A reply that fails validation leaves
     the request still claimed and still ackable — nothing is written on
     either side.
 
@@ -15695,14 +15824,13 @@ def main():
     # atexit does NOT run (Python only fires atexit on clean exit),
     # and chroma orphans. The watchdog covers it eventually but
     # the MCP-owned cleanup path simply doesn't run. So we install
-    # the signal handlers for SIGTERM and SIGINT to call
-    # _t1_shutdown directly. atexit stays as the third
+    # the signal handlers for SIGTERM and SIGINT to run
+    # _exit_teardown (the name release alongside _t1_shutdown,
+    # nexus-tu84w) directly. atexit stays as the third
     # belt-and-braces for clean exits via stdin EOF / SystemExit.
-    # _t1_shutdown is idempotent so all three paths can fire
+    # Both steps are idempotent so all three paths can fire
     # without double-cleaning.
-    atexit.register(_t1_shutdown)
-    signal.signal(signal.SIGTERM, _sigterm_handler)
-    signal.signal(signal.SIGINT, _sigterm_handler)
+    _install_exit_handlers()
     try:
         check_version_compatibility()
         # RDR-211 Phase 1 Step 3 (bead nexus-rplay.10): mcp.run(transport=

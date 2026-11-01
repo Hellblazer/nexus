@@ -997,6 +997,107 @@ class TestGatewayTransientRetry:
 
         assert _REQUEST_COUNT["POST /v1/echo"] == 4
 
+    def test_v1929_another_process_hold_waits_before_the_first_send(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-v1929: a 503 another process recorded holds this store before it sends."""
+        from nexus.db import gateway_hold
+        from nexus.db.t2 import _refreshable_client as mod
+
+        (_config_dir() / gateway_hold.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": time.time() + 8.0, "strikes": 2, "last_503": time.time()}
+        ))
+        sleeps: list[float] = []
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
+        store = _make_echo_store()
+
+        assert store.echo_post("held") == {"echo": {"value": "held"}}
+        assert len(sleeps) == 1 and 7.0 <= sleeps[0] <= 8.0 + gateway_hold.MAX_JITTER_S
+        assert _REQUEST_COUNT["POST /v1/echo"] == 1
+
+    def test_v1929_a_503_records_the_shared_hold_and_honours_its_strikes(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-v1929: three strikes already on the box make this store's first 503 wait 20s, not 2s."""
+        from nexus.db import gateway_hold
+        from nexus.db.t2 import _refreshable_client as mod
+
+        hold = _config_dir() / gateway_hold.HOLD_FILENAME
+        hold.write_text(json.dumps({"not_before": 0.0, "strikes": 3, "last_503": time.time()}))
+        sleeps: list[float] = []
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
+        _GATEWAY_FAIL_QUEUE.extend([503])
+        store = _make_echo_store()
+
+        assert store.echo_post("struck") == {"echo": {"value": "struck"}}
+        assert len(sleeps) == 1 and 20.0 <= sleeps[0] <= 20.0 + gateway_hold.MAX_JITTER_S
+        state = json.loads(hold.read_text())
+        assert state["strikes"] == 4
+        assert state["url"].startswith("http://127.0.0.1:")
+
+    def test_v1929_a_success_clears_the_strikes_for_the_next_call(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-v1929: a lone store whose 503 ends in a success starts its next call at 2s, not 5s."""
+        from nexus.db import gateway_hold
+        from nexus.db.t2 import _refreshable_client as mod
+
+        clock = [1_000_000.0]
+        sleeps: list[float] = []
+
+        def fake_sleep(s: float) -> None:
+            sleeps.append(s)
+            clock[0] += s
+
+        proxy = module_time(monkeypatch, [mod, gateway_hold])
+        proxy.time = lambda: clock[0]
+        proxy.sleep = fake_sleep
+        store = _make_echo_store()
+        for value in ("one", "two"):
+            _GATEWAY_FAIL_QUEUE.extend([503])
+            assert store.echo_post(value) == {"echo": {"value": value}}
+        assert sleeps == [2.0, 2.0]
+
+    def test_v1929_the_hold_wait_is_clamped_to_the_call_timeout(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nexus.db import gateway_hold
+        from nexus.db.t2 import _refreshable_client as mod
+
+        (_config_dir() / gateway_hold.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": time.time() + 10.0, "strikes": 1, "last_503": time.time()}
+        ))
+        sleeps: list[float] = []
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
+        store = _make_echo_store()
+
+        assert store._once_with_gateway_retry("POST", "/v1/echo", json={"value": "x"}, timeout=3.0) == {"echo": {"value": "x"}}
+        assert sleeps == [3.0]
+
+    def test_v1929_an_engine_deadline_503_holds_no_one_else(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-v1929: a 503 carrying the engine deadline header is about one request."""
+        from nexus.db import gateway_hold
+        from nexus.db.t2 import _refreshable_client as mod
+        from nexus.rate_brake import DEADLINE_OUTCOME_HEADER
+
+        module_time(monkeypatch, mod).sleep = lambda s: None
+        store = _make_echo_store()
+        calls: list[int] = []
+        request = httpx.Request("POST", "http://svc/v1/echo")
+
+        def fake_once(method: str, path: str, **kwargs: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 1:
+                response = httpx.Response(503, headers={DEADLINE_OUTCOME_HEADER: "refused"}, request=request)
+                raise httpx.HTTPStatusError("503", request=request, response=response)
+            return {"ok": True}
+
+        monkeypatch.setattr(store, "_request_once", fake_once)
+        assert store._once_with_gateway_retry("POST", "/v1/echo", json={}) == {"ok": True}
+        assert not (_config_dir() / gateway_hold.HOLD_FILENAME).exists()
+
     def test_500_is_not_gateway_retried(
         self, fake_service, monkeypatch: pytest.MonkeyPatch
     ) -> None:

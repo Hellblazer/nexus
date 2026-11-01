@@ -25,7 +25,9 @@ Layout, all owned by the running user::
 
     /dev/shm/nexus-tmp-<uid>/            0700, per-uid, a sibling of nexus-test-pg-<uid>
         r<8 random>/                     one per run; the whole run is deleted at its end
-            owner.json                   {"pid", "starttime"} of the controller
+            owner.lock                   flock held by the controller for the whole run
+            owner.json                   {"pid": 1, "starttime": null, "controller_pid",
+                                         "controller_starttime"}, see below
             t/                           TMPDIR
             p/                           PYTEST_DEBUG_TEMPROOT
 
@@ -62,12 +64,35 @@ asked). A load-dependent failure cannot be reproduced under ``NX_TEST_TMP_ROOT=<
 so this is the only record of it. A passing run keeps only the reports.
 
 A run that is killed leaves its ``r*`` directory behind. The next run in a grant
-removes every directory under the same per-uid root whose controller is gone (pid
-dead, or the pid's start time differs), first handing its ``p`` tree to the daemon
-reaper so test daemons stranded under it are signalled (the same scoped reaper the
-start-of-run drain uses); a directory with no owner record is removed once it is
-10 minutes old. Nothing here signals by pattern and nothing touches a directory the
-running user does not own.
+removes every directory under the same per-uid root whose controller is gone, first
+handing its ``p`` tree to the daemon reaper so test daemons stranded under it are
+signalled (the same scoped reaper the start-of-run drain uses); a directory with no
+owner record is removed once it is 10 minutes old. Nothing here signals by pattern and
+nothing touches a directory the running user does not own.
+
+Whether the controller is gone is decided by ``owner.lock`` (nexus-fuz9t): the
+controller opens it and holds ``flock(LOCK_EX)`` until its run dir is removed; the
+sweep tries ``LOCK_EX | LOCK_NB`` and treats a refusal as a live owner, success as a
+dead one (a crash or SIGKILL releases the lock), and removes the tree while holding
+it. A pid cannot carry this: two jobs on one pool host can sit in different PID
+namespaces (lab-run #88), where every sibling's controller pid reads as dead and a
+live run's tree was deleted under it (CI run 41212350434). The descriptor is
+non-inheritable, so exec'd xdist workers do not hold it; a forked child of the
+controller would, which errs towards keeping the dir. A run dir with no
+``owner.lock`` was made by a controller of an older tree (still possible on a shared
+host on an older branch), and keeps the pid and start-time rule. Where ``fcntl`` is
+missing (Windows; tmpfs is gated on Linux, so only the test seam gets here) there is
+no lock and the pid rule is the only one.
+
+A tree from before this fix, sweeping the same per-uid root on the same host, still judges a
+run dir by the pid in ``owner.json`` and reads every sibling job's controller as dead across a
+PID namespace. So a lock-carrying run dir writes ``"pid": 1, "starttime": null`` there: pid 1
+exists in every namespace and has no start time to mismatch, which the old rule reads as live
+and leaves alone. The controller's real pid and start time are in ``controller_pid`` and
+``controller_starttime``, which only :func:`_is_run_controller` and the no-lock rule of
+:func:`sweep_stale_runs` read (a dir with no lock but those keys is one this tree made where
+there is no ``fcntl``); the sweep never reads either for a dir that carries a lock. A reader of
+``owner.json`` that wants the controller wants ``controller_pid``.
 """
 
 from __future__ import annotations
@@ -91,6 +116,11 @@ import structlog
 
 from tests import _engine_substrate as sub
 
+try:
+    import fcntl
+except ImportError:  # Windows: no flock; the pid rule stays the only one
+    fcntl = None  # type: ignore[assignment]
+
 _log = structlog.get_logger(__name__)
 
 #: ``default`` keeps the old tempdir; any other value is a root directory.
@@ -107,6 +137,7 @@ _GRANT_ENV = "LAB_CPUS"
 _ROOT_PREFIX = "nexus-tmp"
 _RUN_PREFIX = "r"
 _OWNER_FILE = "owner.json"
+_LOCK_FILE = "owner.lock"
 #: A run dir with no owner record (killed between mkdtemp and the record write)
 #: is reaped once this old.
 BARE_MIN_AGE_S = 600.0
@@ -273,14 +304,31 @@ def _process_start(pid: int) -> str | None:
         return None
 
 
-def _write_owner_record(run: Path, pid: int) -> None:
-    rec = {"pid": pid, "starttime": _process_start(pid)}
+#: The pid a lock-carrying run dir shows an older tree's sweeper (module docstring): alive in every
+#: PID namespace, and with no recorded start time the old rule has nothing to compare it to.
+_OLD_READER_PID = 1
+
+
+def _write_owner_record(run: Path, pid: int, *, legacy: bool = False) -> None:
+    """``owner.json`` for *run*, whose controller is *pid*. *legacy* writes the shape a controller of
+    an older tree wrote (the real pid under ``pid``): for the tests that build a lock-less run dir."""
+    start = _process_start(pid)
+    rec: dict = {"pid": pid, "starttime": start}
+    if not legacy:
+        rec = {
+            "pid": _OLD_READER_PID, "starttime": None,
+            "controller_pid": pid, "controller_starttime": start,
+        }
     tmp = run / (_OWNER_FILE + ".tmp")
     tmp.write_text(json.dumps(rec))
     os.replace(tmp, run / _OWNER_FILE)
 
 
 def _owner_is_live(rec: dict) -> bool:
+    """Is the controller *rec* names alive? For a dir with no ``owner.lock`` only. A record in the shape
+    this tree writes carries the controller under ``controller_*``; an older tree's, under ``pid``."""
+    if "controller_pid" in rec:
+        rec = {"pid": rec.get("controller_pid"), "starttime": rec.get("controller_starttime")}
     pid = rec.get("pid")
     if not isinstance(pid, int) or pid <= 0:
         return False
@@ -325,20 +373,102 @@ def _exec_probe(directory: Path) -> None:
         raise PermissionError(f"a script cannot run from {directory} (exit {r.returncode})")
 
 
-def make_run_dir(root: Path, *, pid: int | None = None, probe: bool = True) -> Path:
-    """A fresh run dir under *root* (``r<random>/{t,p}`` plus the owner record)."""
+def _acquire_owner_lock(run: Path) -> int | None:
+    """Create ``owner.lock`` in *run* already locked, and return its descriptor (None
+    where there is no ``fcntl``). The file is made under another name, locked, then
+    renamed into place, so a sweep never sees an ``owner.lock`` that nobody holds yet.
+    ``os.open`` descriptors are non-inheritable, so exec'd children do not hold it."""
+    if fcntl is None:
+        return None
+    tmp = run / (_LOCK_FILE + ".tmp")
+    fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.replace(tmp, run / _LOCK_FILE)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _make_run_dir(root: Path, pid: int | None, probe: bool, hold_lock: bool) -> tuple[Path, int | None]:
     _prepare_root(root)
     run = Path(tempfile.mkdtemp(prefix=_RUN_PREFIX, dir=root))
+    fd: int | None = None
     try:
-        _write_owner_record(run, os.getpid() if pid is None else pid)
+        if hold_lock:
+            fd = _acquire_owner_lock(run)
+        _write_owner_record(run, os.getpid() if pid is None else pid, legacy=not hold_lock)
         (run / "t").mkdir(mode=0o700)
         (run / "p").mkdir(mode=0o700)
         if probe:
             _exec_probe(run / "t")
     except BaseException:
         _rm_tree(run)
+        release_owner_lock(fd)
         raise
-    return run
+    return run, fd
+
+
+def make_run_dir(root: Path, *, pid: int | None = None, probe: bool = True) -> Path:
+    """A fresh run dir under *root* (``r<random>/{t,p}`` plus the owner record) in the
+    shape a pre-nexus-fuz9t controller made it: no ``owner.lock``, so the sweep judges
+    it by pid. The controller itself uses :func:`make_owned_run_dir`."""
+    return _make_run_dir(root, pid, probe, hold_lock=False)[0]
+
+
+def make_owned_run_dir(root: Path, *, probe: bool = True) -> tuple[Path, int | None]:
+    """A fresh run dir whose ``owner.lock`` the caller holds: the run dir and the lock's
+    descriptor. Keep the descriptor open until the run dir is removed, then
+    :func:`release_owner_lock` it. The descriptor is None where there is no ``fcntl``."""
+    return _make_run_dir(root, None, probe, hold_lock=True)
+
+
+def release_owner_lock(fd: int | None) -> None:
+    """Close the descriptor :func:`make_owned_run_dir` returned (closing drops the flock)."""
+    if fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def _lock_probe(d: Path) -> tuple[str, int | None]:
+    """What ``d/owner.lock`` says about the owner: ``("none", None)`` when there is no
+    lock file (or no ``fcntl``), ``("live", None)`` when the lock is held,
+    ``("dead", fd)`` when it was free and is now held by us (close the fd after the
+    removal), ``("unknown", None)`` when the file is there but cannot be tried; the
+    caller keeps the dir then."""
+    if fcntl is None:
+        return "none", None
+    try:
+        fd = os.open(d / _LOCK_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return "none", None
+    except OSError:
+        return "unknown", None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return "live", None
+    except OSError:
+        os.close(fd)
+        return "unknown", None
+    return "dead", fd
+
+
+#: A run dir kept as live or unknown for longer than this is reported, never reaped on age
+#: (nexus-fuz9t): a lock held by a process the sweeper cannot see keeps its tmpfs tree with no other voice.
+LONG_KEPT_AGE_S = 6 * 3600.0
+
+
+def _report_long_kept(d: Path, state: str, now: float, mtime: float) -> None:
+    if now - mtime > LONG_KEPT_AGE_S:
+        _log.warning(
+            "nexus_test_tmp.kept_long",
+            path=str(d), state=state, age_s=int(now - mtime), bead="nexus-fuz9t",
+            hint="its owner.lock is still held or cannot be tried; look for a process holding it "
+                 "(an orphaned child that inherited the descriptor) before removing it by hand",
+        )
 
 
 def sweep_stale_runs(
@@ -364,21 +494,33 @@ def sweep_stale_runs(
             st = d.lstat()
             if not stat.S_ISDIR(st.st_mode) or st.st_uid != me:
                 continue
+            lock_state, lock_fd = _lock_probe(d)
             try:
-                rec = json.loads((d / _OWNER_FILE).read_text())
-            except (OSError, ValueError):
-                rec = None
-            if rec is None:
-                if clock - st.st_mtime < BARE_MIN_AGE_S:
+                if lock_state in ("live", "unknown"):
+                    _report_long_kept(d, lock_state, clock, st.st_mtime)
                     continue
-            elif _owner_is_live(rec):
-                continue
-            if drain is not None and (d / "p").is_dir():
-                with contextlib.suppress(Exception):  # a drain is never a verdict
-                    drain(d / "p")
-            _rm_tree(d)
-            removed.append(d)
-            _log.info("nexus_test_tmp.stale_run_removed", path=str(d), bead="nexus-kyujr")
+                if lock_state == "none":
+                    # No owner.lock: a controller of an older tree. The pid rule.
+                    try:
+                        rec = json.loads((d / _OWNER_FILE).read_text())
+                    except (OSError, ValueError):
+                        rec = None
+                    if rec is None:
+                        if clock - st.st_mtime < BARE_MIN_AGE_S:
+                            continue
+                    elif _owner_is_live(rec):
+                        _report_long_kept(d, "pid-live", clock, st.st_mtime)
+                        continue
+                elif not d.is_dir():
+                    continue  # the owner finished and removed it between our look and our lock
+                if drain is not None and (d / "p").is_dir():
+                    with contextlib.suppress(Exception):  # a drain is never a verdict
+                        drain(d / "p")
+                _rm_tree(d)  # while holding the lock, if there is one
+                removed.append(d)
+                _log.info("nexus_test_tmp.stale_run_removed", path=str(d), bead="nexus-kyujr")
+            finally:
+                release_owner_lock(lock_fd)
         except Exception as exc:  # noqa: BLE001 — loud, never fatal
             warnings.warn(f"nexus test tmp: error sweeping {d}: {exc}", stacklevel=2)
     return removed
@@ -405,7 +547,7 @@ def _is_run_controller(run: Path, pid: int) -> bool:
         rec = json.loads((run / _OWNER_FILE).read_text())
     except (OSError, ValueError):
         return False
-    return isinstance(rec, dict) and rec.get("pid") == pid
+    return isinstance(rec, dict) and rec.get("controller_pid", rec.get("pid")) == pid
 
 
 def kept_report_path(
@@ -637,6 +779,8 @@ class TmpRootPlugin:
         #: only its top-level ``nx-*`` reports are harvested.
         self._basetemp: Path | None = None
         self._saved: dict[str, str | None] = {}
+        #: The descriptor holding the run dir's ``owner.lock`` (nexus-fuz9t); closed at unconfigure.
+        self._owner_fd: int | None = None
 
     # -- decision --
 
@@ -668,7 +812,7 @@ class TmpRootPlugin:
                     with contextlib.suppress(OSError):
                         if stat.S_ISDIR(decision.root.lstat().st_mode):
                             sweep_stale_runs(decision.root, drain=self._drain)
-                    run = make_run_dir(decision.root)
+                    run, self._owner_fd = make_owned_run_dir(decision.root)
             except OSError as exc:
                 if decision.forced:
                     raise
@@ -798,6 +942,8 @@ class TmpRootPlugin:
             self.exitstatus = int(final)
         self._harvest()
         _rm_tree(self.run)
+        release_owner_lock(self._owner_fd)
+        self._owner_fd = None
         env = self._env
         for k, v in self._saved.items():
             if v is None:

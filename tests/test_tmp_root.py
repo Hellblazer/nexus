@@ -9,6 +9,7 @@ pytest (serial, xdist and a SIGKILLed one) against a directory standing in for
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from structlog.testing import capture_logs
 
 from tests import _engine_substrate as sub
 from tests import _tmp_root as tr
@@ -337,6 +339,309 @@ class TestSweep:
         monkeypatch.setattr(cf, "_ps_all", lambda: procs)
         cf._drain_stale_tmp_run(stale_p, _kill=lambda pid, sig: killed.append((pid, sig)))
         assert killed == [(31, "QUIT")]
+
+
+_HOLDER = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("READY", os.readlink("/proc/self/ns/pid") if os.path.exists("/proc/self/ns/pid") else "", flush=True)
+sys.stdin.read()
+"""
+
+_TRY_LOCK = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)
+"""
+
+#: Set to 1 where a skip of the cross-namespace test must be a failure (qwent's WSL
+#: allows unprivileged user namespaces; chas's AppArmor does not, so there it skips).
+REQUIRE_PIDNS_ENV = "NX_REQUIRE_PIDNS"
+
+needs_flock = pytest.mark.skipif(tr.fcntl is None, reason="no fcntl (Windows): the pid rule is the only rule")
+
+
+@contextlib.contextmanager
+def _holding(lock: Path, *, wrap: tuple[str, ...] = ()):
+    """A real child process that holds ``flock(LOCK_EX)`` on *lock* until the block ends
+    (and on exit of the block, the child is gone and the lock with it). Yields the
+    child's PID-namespace id, or None where there is no procfs. If the child never says
+    READY (an *wrap* such as ``unshare`` was refused) the block is not entered: the
+    ``RuntimeError`` carries what the child printed on stderr."""
+    child = subprocess.Popen(
+        [*wrap, sys.executable, "-c", _HOLDER, str(lock)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        line = child.stdout.readline()
+        if not line.startswith("READY"):
+            child.wait(timeout=30)
+            raise RuntimeError(child.stderr.read().strip() or f"exit {child.returncode}")
+        parts = line.split()
+        yield parts[1] if len(parts) > 1 else None
+    finally:
+        with contextlib.suppress(OSError):
+            child.stdin.close()
+        child.wait(timeout=30)
+        child.stdout.close()
+        child.stderr.close()
+
+
+def _lock_dir(root: Path, *, pid: int) -> Path:
+    """A run dir in the shape of today's controller as far as the sweep can tell: an
+    owner record naming *pid* and an ``owner.lock`` file for a holder to lock."""
+    run = tr.make_run_dir(root, pid=pid, probe=False)
+    (run / "owner.lock").touch()
+    return run
+
+
+@needs_flock
+class TestOwnerLock:
+    """nexus-fuz9t: liveness of a run dir that carries ``owner.lock`` is the flock, not the pid
+    (a reaper in another PID namespace sees every sibling's controller pid as dead)."""
+
+    def test_a_held_lock_keeps_the_run_though_its_pid_is_dead(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = _lock_dir(root, pid=_dead_pid())
+        (run / "p" / "live").write_text("x")
+        with _holding(run / "owner.lock"):
+            drained: list[Path] = []
+            assert tr.sweep_stale_runs(root, drain=drained.append) == []
+            assert run.is_dir() and (run / "p" / "live").exists() and drained == []
+
+    def test_the_same_run_goes_when_the_holder_exits_though_its_pid_is_live(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = _lock_dir(root, pid=os.getpid())  # a live pid: only the lock can condemn it
+        with _holding(run / "owner.lock"):
+            assert tr.sweep_stale_runs(root) == []
+        drained: list[tuple[Path, bool]] = []
+        removed = tr.sweep_stale_runs(root, drain=lambda p: drained.append((p, p.is_dir())))
+        assert removed == [run] and not run.exists()
+        assert drained == [(run / "p", True)], "drained before it is deleted, as for a pid-dead dir"
+
+    def test_a_free_lock_is_a_dead_owner_even_with_no_owner_record(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = tr.make_run_dir(root, probe=False)
+        (run / "owner.json").unlink()
+        (run / "owner.lock").touch()  # fresh mtime: the bare-dir age rule would keep it
+        assert tr.sweep_stale_runs(root) == [run]
+
+    def test_a_lock_that_cannot_be_tried_keeps_the_run(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = tr.make_run_dir(root, pid=_dead_pid(), probe=False)
+        (run / "owner.lock").symlink_to(tmp_path)  # O_NOFOLLOW refuses: not ours to judge
+        assert tr.sweep_stale_runs(root) == [] and run.is_dir()
+
+    def test_a_run_with_no_lock_follows_the_pid_rule_both_ways(self, tmp_path) -> None:
+        """What a controller of an older tree left: no owner.lock, so a live pid keeps it and
+        a dead one does not."""
+        root = tmp_path / "root"
+        live = tr.make_run_dir(root, probe=False)
+        dead = tr.make_run_dir(root, pid=_dead_pid(), probe=False)
+        assert not (live / "owner.lock").exists() and not (dead / "owner.lock").exists()
+        assert tr.sweep_stale_runs(root) == [dead]
+        assert live.is_dir() and not dead.exists()
+
+    def test_the_controllers_run_dir_holds_a_lock_a_second_process_cannot_take(self, tmp_path) -> None:
+        run, fd = tr.make_owned_run_dir(tmp_path / "root", probe=False)
+        try:
+            assert fd is not None and (run / "owner.lock").is_file()
+            assert json.loads((run / "owner.json").read_text())["controller_pid"] == os.getpid()
+            blocked = subprocess.run([sys.executable, "-c", _TRY_LOCK, str(run / "owner.lock")], check=False)
+            assert blocked.returncode == 1, "the lock must be held while the controller lives"
+            assert tr.sweep_stale_runs(tmp_path / "root") == [] and run.is_dir()
+            assert not list(run.glob("owner.lock.tmp")), "the temporary name is gone once the lock is in place"
+        finally:
+            tr.release_owner_lock(fd)
+        free = subprocess.run([sys.executable, "-c", _TRY_LOCK, str(run / "owner.lock")], check=False)
+        assert free.returncode == 0, "closing the descriptor drops the lock"
+
+    def test_the_lock_is_not_inherited_by_a_child_the_controller_execs(self, tmp_path) -> None:
+        """An xdist worker is exec'd from the controller; if it held the lock, a controller that
+        died would still look alive for as long as any worker did."""
+        run, fd = tr.make_owned_run_dir(tmp_path / "root", probe=False)
+        try:
+            assert os.get_inheritable(fd) is False
+            survivor = subprocess.Popen(
+                [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+        finally:
+            tr.release_owner_lock(fd)  # the controller "dies" while its child lives on
+        try:
+            assert tr.sweep_stale_runs(tmp_path / "root") == [run]
+        finally:
+            survivor.stdin.close()
+            survivor.wait(timeout=30)
+
+    def test_the_plugin_holds_the_lock_until_it_has_removed_the_run_dir(self, tmp_path) -> None:
+        plug, _env = _plugin(tmp_path)
+        plug.pytest_configure(_config())
+        run = plug.run
+        assert run is not None and plug._owner_fd is not None
+        blocked = subprocess.run([sys.executable, "-c", _TRY_LOCK, str(run / "owner.lock")], check=False)
+        assert blocked.returncode == 1
+        plug.pytest_unconfigure(_config())
+        assert not run.exists() and plug._owner_fd is None
+
+    def test_a_run_in_another_pid_namespace_is_not_swept(self, tmp_path) -> None:
+        """The incident, for real: lab-run #88 put each job in its own PID namespace, and a
+        reaper outside it saw every sibling's controller pid as dead. The holder here runs
+        under ``unshare --pid`` (its pid, as the sweeper would have recorded it, means nothing
+        out here), and the sweep must still leave the run alone. ``unshare`` is refused where
+        unprivileged user namespaces are (chas: AppArmor); that skips, unless
+        ``NX_REQUIRE_PIDNS=1``, which makes the refusal a failure so a lab-run on a host that
+        allows it (qwent's WSL) can prove the test ran."""
+        if shutil.which("unshare") is None:
+            if os.environ.get(REQUIRE_PIDNS_ENV) == "1":
+                pytest.fail("NX_REQUIRE_PIDNS=1 but unshare is not installed")
+            pytest.skip("unshare is not installed")
+        root = tmp_path / "root"
+        run = _lock_dir(root, pid=_dead_pid())
+        wrap = ("unshare", "--user", "--map-root-user", "--pid", "--fork", "--mount-proc")
+        try:
+            holder = _holding(run / "owner.lock", wrap=wrap)
+            ns = holder.__enter__()
+        except RuntimeError as exc:
+            if os.environ.get(REQUIRE_PIDNS_ENV) == "1":
+                pytest.fail(f"NX_REQUIRE_PIDNS=1 but unshare refused: {exc}")
+            pytest.skip(f"unshare refused: {exc}")
+        try:
+            if ns is not None:
+                ours = os.readlink("/proc/self/ns/pid")
+                assert ns != ours, "the holder must be in a PID namespace of its own"
+            assert tr.sweep_stale_runs(root) == [] and run.is_dir()
+        finally:
+            holder.__exit__(None, None, None)
+        assert tr.sweep_stale_runs(root) == [run], "gone with its holder"
+
+
+@needs_flock
+class TestLockIsHeldBeforeItIsPublished:
+    def test_owner_lock_is_flocked_when_it_is_renamed_into_place(self, tmp_path, monkeypatch) -> None:
+        """A sweeper that sees ``owner.lock`` must see it held. Renaming first and locking after
+        leaves a window where it reads a free lock and removes a live controller's tree."""
+        seen: list[bool] = []
+        real = os.replace
+
+        def spy(src, dst, *args, **kwargs):
+            if str(dst).endswith("owner.lock"):
+                fd = os.open(src, os.O_RDONLY)
+                try:
+                    tr.fcntl.flock(fd, tr.fcntl.LOCK_EX | tr.fcntl.LOCK_NB)
+                except BlockingIOError:
+                    seen.append(True)
+                else:
+                    seen.append(False)
+                finally:
+                    os.close(fd)
+            return real(src, dst, *args, **kwargs)
+
+        setattr_in(monkeypatch, tr, "os.replace", spy)
+        _run, fd = tr.make_owned_run_dir(tmp_path / "root", probe=False)
+        tr.release_owner_lock(fd)
+        assert seen == [True], f"owner.lock was renamed into place {len(seen)} time(s), held at each: {seen}"
+
+
+#: ``_owner_is_live`` as it was before nexus-fuz9t (509df9541), copied verbatim: what a sweeper of
+#: an older tree, run on the same host over the same per-uid root, decides about a run dir.
+def _pre_fuz9t_owner_is_live(rec: dict) -> bool:
+    pid = rec.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # alive, someone else's: treat as live (the safe direction)
+    except (OSError, OverflowError):
+        return False
+    recorded = rec.get("starttime")
+    now = tr._process_start(pid)
+    return recorded is None or now is None or recorded == now
+
+
+class TestOlderTreesLeaveANewRunDirAlone:
+    """nexus-fuz9t: a tree from before the flock fix still judges a run dir by the pid in ``owner.json``, and
+    across a PID namespace that pid reads as dead. The record therefore shows such a reader a pid that is
+    alive in every namespace, and keeps the real controller under its own keys."""
+
+    def _record(self, tmp_path, controller_pid: int, *, legacy: bool) -> dict:
+        run = tmp_path / "run"
+        run.mkdir()
+        tr._write_owner_record(run, controller_pid, legacy=legacy)
+        return json.loads((run / "owner.json").read_text())
+
+    def test_the_older_rule_condemns_a_dead_controllers_old_shaped_record(self, tmp_path) -> None:
+        """Positive control: the frozen copy above does call a dead pid dead."""
+        rec = self._record(tmp_path, _dead_pid(), legacy=True)
+        assert _pre_fuz9t_owner_is_live(rec) is False
+
+    def test_the_older_rule_reads_a_new_record_live_whoever_the_controller_is(self, tmp_path) -> None:
+        rec = self._record(tmp_path, _dead_pid(), legacy=False)
+        assert _pre_fuz9t_owner_is_live(rec) is True, "an older sweeper keeps the dir, wherever it runs"
+        assert tr._owner_is_live(rec) is False, "and this tree's no-lock rule still reads the real controller"
+
+    def test_the_real_controller_is_what_this_trees_pid_rule_reads(self, tmp_path) -> None:
+        assert tr._owner_is_live(self._record(tmp_path, os.getpid(), legacy=False)) is True
+        assert tr._owner_is_live({"pid": os.getpid(), "starttime": None}) is True, "an older tree's shape still reads"
+
+    def test_a_free_lock_dir_goes_although_its_record_shows_a_live_pid(self, tmp_path) -> None:
+        """The sweep never asks the record for a dir that carries a lock: the lock decides."""
+        root = tmp_path / "root"
+        run, fd = tr.make_owned_run_dir(root, probe=False)
+        assert json.loads((run / "owner.json").read_text())["pid"] == 1
+        tr.release_owner_lock(fd)  # the controller exits
+        assert tr.sweep_stale_runs(root) == [run]
+
+    @needs_flock
+    def test_a_held_lock_keeps_the_dir_although_the_controller_pid_is_dead(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run, fd = tr.make_owned_run_dir(root, probe=False)
+        try:
+            tr._write_owner_record(run, _dead_pid())  # the record names a dead controller; the lock says live
+            assert tr.sweep_stale_runs(root) == [] and run.is_dir()
+        finally:
+            tr.release_owner_lock(fd)
+
+    def test_an_owner_lock_tmp_left_by_a_killed_controller_goes_with_its_bare_dir(self, tmp_path) -> None:
+        """Killed between creating the lock and renaming it in: no ``owner.lock``, no ``owner.json``,
+        so the run dir is a bare one and the age rule removes it, the leftover with it."""
+        root = tmp_path / "root"
+        run = root / "rbare1111"
+        run.mkdir(parents=True)
+        (run / "owner.lock.tmp").touch()
+        assert tr.sweep_stale_runs(root) == [] and run.is_dir(), "young: left alone"
+        past = time.time() - tr.BARE_MIN_AGE_S - 5
+        os.utime(run, (past, past))
+        assert tr.sweep_stale_runs(root) == [run] and not run.exists()
+
+
+@needs_flock
+class TestLongKeptIsReported:
+    def _events(self, logs) -> list[dict]:
+        return [e for e in logs if e.get("event") == "nexus_test_tmp.kept_long"]
+
+    def test_a_run_whose_lock_is_held_for_hours_is_logged_and_kept(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = _lock_dir(root, pid=_dead_pid())
+        old = time.time() - tr.LONG_KEPT_AGE_S - 60
+        os.utime(run, (old, old))
+        with _holding(run / "owner.lock"), capture_logs() as logs:
+            assert tr.sweep_stale_runs(root) == []
+        (event,) = self._events(logs)
+        assert event["path"] == str(run) and event["state"] == "live" and event["bead"] == "nexus-fuz9t"
+        assert run.is_dir(), "report only: a run is never reaped on age"
+
+    def test_a_run_held_for_minutes_is_not_logged(self, tmp_path) -> None:
+        root = tmp_path / "root"
+        run = _lock_dir(root, pid=_dead_pid())
+        with _holding(run / "owner.lock"), capture_logs() as logs:
+            tr.sweep_stale_runs(root)
+        assert self._events(logs) == []
 
 
 def _plugin(tmp_path, env=None, **decide_kw) -> tuple[tr.TmpRootPlugin, dict]:
@@ -997,6 +1302,17 @@ class TestKeptReportPath:
         run.mkdir(parents=True, exist_ok=True)
         (run / "owner.json").write_text(json.dumps({"pid": os.getpid() if pid is None else pid, "starttime": None}))
         return run
+
+    def test_a_run_dir_in_the_current_owner_shape_names_its_controller(self, tmp_path) -> None:
+        """``owner.json`` shows an older tree's sweeper pid 1 and keeps the controller under its own key
+        (nexus-fuz9t); the report path still follows the real controller, not whoever asks as pid 1."""
+        run = tmp_path / "shm" / _ROOT / "rabc12345"
+        run.mkdir(parents=True)
+        tr._write_owner_record(run, os.getpid())
+        report = run / "p" / "pytest-of-u" / "pytest-0" / "nx-ddl-report.json"
+        kept = tr.kept_report_path(report, self._env(run))
+        assert kept.name == "nx-ddl-report.json" and kept != report, "the controller's report is harvested"
+        assert tr.kept_report_path(report, self._env(run), pid=1) == report, "pid 1 is not the controller"
 
     def test_a_basetemp_report_is_named_by_its_disk_copy(self, tmp_path) -> None:
         run = self._owned(tmp_path / "shm" / _ROOT / "rabc12345")

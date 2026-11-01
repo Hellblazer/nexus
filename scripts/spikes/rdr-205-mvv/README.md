@@ -1,5 +1,7 @@
 # RDR-205 Phase 3 Step 3 — MVV run 2, engine-direct legs
 
+> Historical (nexus-onjvw): this spike cannot run any more. It writes to the `ledger/<session_id>` template, which the engine retired along with its rows; every `ledger/...` subspace now answers `UnknownSubspace`.
+
 Bead: `nexus-em75s.16`. The RDR-110 ten-worker work-stealing harness,
 written as code for the first time (RDR-110 itself is `abandoned`,
 carries a "do not implement against this design" tombstone, and

@@ -176,7 +176,7 @@ class TestSweepsTheTmpfsRoot:
 class TestSweepsAnIntegrationOwnerRecord:
     def test_dead_owner_integration_cluster_under_the_pg_root_is_reaped(self, tmp_path) -> None:
         """nexus-942h9: an integration fixture's cluster is named by its own prefix
-        and recorded in nexus_integration_owner_<pid>.json, not matched by the
+        and recorded in nexus_integration_owner_<pid>-<token>.json, not matched by the
         substrate glob; the script must reap it from the root all the same."""
         fake_tmpdir = tmp_path / "empty_tmp"
         fake_tmpdir.mkdir()

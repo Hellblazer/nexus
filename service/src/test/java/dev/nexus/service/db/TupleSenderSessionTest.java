@@ -4,13 +4,16 @@ package dev.nexus.service.db;
 
 import dev.nexus.service.NexusService;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.ReadOnlyProbeTemplate;
 import dev.nexus.service.tuples.TemplateRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.io.TempDir;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.util.Map;
 import java.util.Optional;
@@ -38,7 +41,7 @@ class TupleSenderSessionTest {
     TupleRepository repo;
 
     @BeforeAll
-    void startAll() throws Exception {
+    void startAll(@TempDir Path extraTemplateDir) throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
@@ -54,7 +57,8 @@ class TupleSenderSessionTest {
         cfg.setAutoCommit(true);
         svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
         repo = new TupleRepository(new TenantScope(svcDs),
-                TemplateRegistry.loadAtBoot(null, null, NexusService.SWEEP_INTERVAL_HOURS * 3600L));
+                TemplateRegistry.loadAtBoot(ReadOnlyProbeTemplate.writeTo(extraTemplateDir).toString(), null,
+                        NexusService.SWEEP_INTERVAL_HOURS * 3600L));
     }
 
     @AfterAll
@@ -102,7 +106,7 @@ class TupleSenderSessionTest {
     void aKeysTemplateRefireFromASecondSession_keepsTheFirstStamp() {
         String agent = addr("agent");
         Map<String, String> keys = Map.of("agent_id", agent, "kind", "start");
-        String subspace = "ledger/" + addr("sess");
+        String subspace = ReadOnlyProbeTemplate.PREFIX + addr("sess");
         repo.out(TENANT, subspace, keys, Map.of(), null, null, null, "session-A");
         repo.out(TENANT, subspace, keys, Map.of(), null, null, null, "session-B");
         assertThat(onlyRow(subspace, keys).senderSession()).isEqualTo("session-A");
@@ -112,7 +116,7 @@ class TupleSenderSessionTest {
     void aKeysTemplateRefireFromANullSession_doesNotClearTheStamp() {
         String agent = addr("agent");
         Map<String, String> keys = Map.of("agent_id", agent, "kind", "start");
-        String subspace = "ledger/" + addr("sess");
+        String subspace = ReadOnlyProbeTemplate.PREFIX + addr("sess");
         repo.out(TENANT, subspace, keys, Map.of(), null, null, null, "session-A");
         repo.out(TENANT, subspace, keys, Map.of(), null, null, null, null);
         assertThat(onlyRow(subspace, keys).senderSession()).isEqualTo("session-A");
@@ -124,7 +128,7 @@ class TupleSenderSessionTest {
         // never sets the column, so a later minted session cannot claim the row.
         String agent = addr("agent");
         Map<String, String> keys = Map.of("agent_id", agent, "kind", "start");
-        String subspace = "ledger/" + addr("sess");
+        String subspace = ReadOnlyProbeTemplate.PREFIX + addr("sess");
         repo.out(TENANT, subspace, keys, Map.of(), null, null, null, null);
         repo.out(TENANT, subspace, keys, Map.of(), null, null, null, "session-B");
         assertThat(onlyRow(subspace, keys).senderSession()).isNull();

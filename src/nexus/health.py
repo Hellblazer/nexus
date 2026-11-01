@@ -8175,7 +8175,7 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
     keeps the skip (``_check_tuple_queue_depth`` still covers aspects).
 
     Two review fixes (nexus-em75s.12): a subspace whose resolved template
-    has ``take.enabled: false`` (e.g. ``ledger/<session_id>`` — read-only
+    has ``take.enabled: false`` (e.g. ``board/<topic>`` — read-only
     by design, rows are never claimed) is skipped outright, since
     "oldest unclaimed" carries no signal there; and a subspace whose
     census ``oldest_created_at`` (spans ALL rows, not just unclaimed) is
@@ -8267,7 +8267,7 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
         # Falling through with templates=[] used to default EVERY
         # subspace to "checked" (_template_take_enabled's own
         # unmatched-defaults-True rule) -- including a take.enabled:false
-        # read-only subspace like ledger/<session_id>, whose rows are
+        # read-only subspace like board/<topic>, whose rows are
         # never claimed by design and would misreport as a stale-
         # unclaimed HARD finding purely because the registry blipped.
         # Report a soft warning for this run instead of guessing.
@@ -8287,7 +8287,7 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
         if census.available <= 0:
             continue
         if not _template_take_enabled(templates, census.subspace):
-            # Read-only template (take.enabled: false, e.g. ledger/<session_id>):
+            # Read-only template (take.enabled: false, e.g. board/<topic>):
             # rows are never claimed by design, so "oldest unclaimed" carries
             # no signal here (nexus-em75s.12 review fix).
             continue
@@ -9092,7 +9092,7 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
     ``HttpTupleStore.subspace_list``/``registry``) for subspaces that
     resolve to the take-enabled ``queue/<name>`` template or, since RDR-235
     F18, the take-enabled ``aspects`` template ONLY -- board (take disabled),
-    mailbox, lock, ledger, and directory subspaces never count here
+    mailbox, lock, and directory subspaces never count here
     regardless of row counts (RDR-211 Scale and Limits item 3: "a doctor row
     over the census available and dead counts for QUEUE subspaces"). The
     aspects queue is a queue by the same definition. On an engine without the

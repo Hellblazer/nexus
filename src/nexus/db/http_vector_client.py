@@ -47,6 +47,7 @@ from typing import Any, NoReturn
 import structlog
 
 from nexus._log_safe_url import log_endpoint
+from nexus.db import gateway_hold
 from nexus.db.gateway_backoff import (
     _EMBED_SERVER_SIDE_WRITE_PATH_SUFFIXES,
     _EMBED_WRITE_504_BACKOFF_FLOOR_S,
@@ -59,7 +60,7 @@ from nexus.db.client_identity import client_identity_headers
 from nexus.collection_errors import superseded_write_error_from_body
 from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON, error_reason
 from nexus.logging_setup import emit_import_time_warning
-from nexus.rate_brake import is_deadline_abort
+from nexus.rate_brake import DEADLINE_OUTCOME_HEADER, is_deadline_abort, parse_retry_after
 from nexus.redact import redact_credentials
 
 _log = structlog.get_logger(__name__)
@@ -1537,9 +1538,14 @@ def _request(
     no_auto_retry = is_non_idempotent_sweep_path(path)
 
     def _once_with_gateway_retry() -> Any:
+        slept_until: float | None = None
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
+            # nexus-v1929: another process's 503 holds this one too, before every send.
+            if (held_s := gateway_hold.wait_before_attempt(after=slept_until, max_wait=timeout)) > 0.0:
+                _log.info("vector_gateway_hold_wait", path=path, attempt=i + 1, sleep_s=held_s)
+                time.sleep(held_s)
             try:
-                return _request_once(
+                result = _request_once(
                     method, path, tenant=tenant, timeout=timeout, body=body
                 )
             except urllib.error.HTTPError as exc:
@@ -1553,6 +1559,12 @@ def _request(
                     raise
                 floored = exc.code == 504 and embed_write_path
                 sleep_s = max(delay, _EMBED_WRITE_504_BACKOFF_FLOOR_S) if floored else delay
+                # An engine deadline 503 is about this request, not an overloaded edge.
+                if exc.code == 503 and not (exc.headers or {}).get(DEADLINE_OUTCOME_HEADER):
+                    # nexus-v1929: the hold is shared with every client on this config dir.
+                    sleep_s = gateway_hold.record_503(
+                        sleep_s, retry_after=parse_retry_after(exc.headers),
+                    )
                 _log.warning(
                     "vector_gateway_retry_embed_write_504" if floored else "vector_gateway_retry",
                     path=path,
@@ -1560,7 +1572,11 @@ def _request(
                     attempt=i + 1,
                     sleep_s=sleep_s,
                 )
+                slept_until = time.time() + sleep_s
                 time.sleep(sleep_s)
+            else:
+                gateway_hold.record_success()
+                return result
         raise AssertionError("unreachable")  # loop always returns or raises
 
     try:

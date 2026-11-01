@@ -232,8 +232,8 @@ pid, with a short `ttl_seconds`, and re-sends the same entry on a heartbeat. A r
 instead of adding a row. Values, decided 2026-09-14: a 300-second TTL, re-sent
 every 60 seconds. An entry stops resolving within one TTL after
 its watcher stops. On a `/clear` self-stop the watcher releases its entry by
-re-sending it with `ttl_seconds=1`, so it lapses within about a second; on any other exit it leaves the
-entry to lapse, so a `/resume` inside the TTL still finds the name resolving. A re-send cannot move expiry past the entry's `created_at`
+re-sending it with `ttl_seconds=1`, so it lapses within about a second. Amended 2026-10-31 (nexus-tu84w, Sam's ruling): a clean exit of the MCP server (stdin EOF, SIGTERM, SIGINT) releases it the same way, and only a crash or SIGKILL leaves the
+entry to lapse by TTL. A `/resume` re-arms the name as its new server starts. A re-send cannot move expiry past the entry's `created_at`
 plus the 7-day retention, so a watcher that runs that long writes a fresh entry
 with a new nonce before then.
 
@@ -483,8 +483,8 @@ to the model arming the name; see `docs/tuple-space.md` § The directory lease.)
   conditions above; the budget running out, a refused ack or a row under lease
   keeps it; two `/clear`s before a prompt drain both old mailboxes.
 - Two sessions arming one name with the same nonce write two entries.
-- A `/clear` self-stop releases the watcher's entry within about a second; an
-  ordinary exit leaves it for one TTL.
+- A `/clear` self-stop releases the watcher's entry within about a second; so
+  does a clean exit (amended 2026-10-31, nexus-tu84w); a crash leaves it for one TTL.
 - `mailbox_send`: an agent-id `to` skips the directory; a subagent's
   `from_address` sends as its agent id; with no session marker and no
   `NX_T1_SESSION_ID` the call is refused.
@@ -612,3 +612,4 @@ behavior, the fork rule, and the TTL and heartbeat values.
 - 2026-09-24: Phase 3 (transition) landed after the 7-day retention window. Client half (nexus-galkv.20): the drain hook and `tuple_subscribe` stop treating an instance-name mailbox as delivered; a subscribed name only arms its directory lease. Shipped in conexus 7.60.0 (R3). Engine half (nexus-galkv.24): the mailbox template refuses `address_kind: instance`, and rows already stored with it stay readable, claimable and ackable. Shipped in engine-service-v0.1.131, paired with conexus 7.61.0 (R4) and deployed armed at the client tag. Close record T2 `nexus/rdr-208-phase3-close-2026-09-24`.
 - 2026-10-22: `from_address` no longer takes any session-id shape: `mailbox_send` refuses a session id that is not the sender's own (nexus-2mv7y). The trust rule, that `from` is a claim and the tenant is the boundary, is JDR-002.
 - 2026-10-22: The name is now armed from Claude Code's session registry, not only by the model (nexus-u839f). The MCP server reads the live interactive entry of `~/.claude/sessions/*.json` whose `sessionId` is its own, leases `directory/<name>` when its channel waiter starts (server start, a deferred T1 mint, a `/clear` handoff for the new id), and re-reads it about once a minute on the lease thread, so a `/rename` is followed. An explicit `tuple_subscribe` replaces an auto-armed name and an explicit name is never replaced. The Technical Environment fact that only the model can supply the name and the "New Dependencies: None" claim are corrected in place; the design, the status and the rest of this document stand.
+- 2026-10-31: Post-accept amendment (nexus-tu84w, Sam's ruling): a clean MCP server exit releases its `directory/<name>` entries (own nonce, `ttl_seconds=1`, on its own thread with a 3 s bound alongside the T1 teardown) instead of leaving them for one TTL. In the 2026-10-31 coordinated restart, fresh sessions messaged each other inside the old entries' TTL and `mailbox_send` by name was refused as held by two sessions. The cost: a `/resume`'s name stops resolving for the seconds before its new server re-arms it, where it used to keep resolving to the dead process's row. A crash or SIGKILL still leaves the entry for one TTL.

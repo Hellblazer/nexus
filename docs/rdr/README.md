@@ -239,7 +239,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-219](rdr-219-harness-credentials-never-leave-the-keychain.md) | Harness Credentials Never Leave the Keychain: an Automation Token, Passed by Environment | Architecture | Closed | 2026-09-25 |
 | [RDR-220](rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md) | CI Status From GitHub Webhooks to the Tuple Space | Architecture | Closed | 2026-09-26 |
 | [RDR-221](rdr-221-prose-editor.md) | Prose Editor: an Example-Anchored Line Editor with Memory in T2 | Feature | Accepted | 2026-09-27 |
-| [RDR-222](rdr-222-request-identity-for-mutating-engine-routes.md) | Request Identity for Mutating Engine Routes | Architecture | Accepted | 2026-09-27 |
+| [RDR-222](rdr-222-request-identity-for-mutating-engine-routes.md) | Request Identity for Mutating Engine Routes | Architecture | Closed | 2026-09-27 |
 | [RDR-223](rdr-223-atomic-chunk-plus-owner-write.md) | Atomic Chunk-Plus-Owner Write on Every Client Path | Architecture | Accepted | 2026-09-28 |
 | [RDR-224](rdr-224-native-windows-support.md) | Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client | Architecture | Closed | 2026-09-30 |
 | [RDR-225](rdr-225-vector-tables-per-embedding-model.md) | One Vector Table per Embedding Model, with Tenant Isolation | Architecture | Closed | 2026-10-05 |
@@ -254,6 +254,8 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-235](rdr-235-aspect-queue-onto-tuple-queue-template.md) | Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays | Architecture | Accepted | 2026-10-26 |
 | [RDR-236](rdr-236-chunk-row-metadata-normalization.md) | Chunk-row metadata normalization: document fields on the catalog document, position fields on the manifest, the chunk row keeps only what its text determines | Architecture | Accepted | 2026-10-26 |
 | [RDR-237](rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md) | MinerU-Only PDF Extraction with a Per-Page Fallback Ladder | Architecture | Closed | 2026-10-27 |
+| [RDR-238](rdr-238-memory-curation.md) | Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves | Feature | Draft | 2026-10-31 |
+| [RDR-239](rdr-239-tuple-space-dictionary.md) | The Tuple-Space Dictionary: Every Template Publishes What It Means, Who Writes It, Who Reads It, and a Post That Validates | Feature | Draft | 2026-10-31 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 

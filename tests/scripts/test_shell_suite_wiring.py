@@ -103,7 +103,9 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -147,6 +149,31 @@ def _bin_bash_is_pre_4() -> bool:
     )
     return probe.returncode != 0
 
+
+#: ``lock_test.sh`` passes this many assertions where its flock tests (10-16, nexus-fuz9t) run,
+#: and this many where they print one skip line instead (darwin, no flock(1)).
+_LOCK_SUITE_FLOOR_WITH_FLOCK = 44
+_LOCK_SUITE_FLOOR_WITHOUT_FLOCK = 30
+
+
+def _lock_suite_has_flock_tests() -> bool:
+    """True when ``lock_test.sh``'s flock tests (10-16, nexus-fuz9t) run on this host: flock(1)
+    installed and a bash of 4.1 or newer (the ``{fd}`` redirection). On darwin, which has no
+    flock(1), the suite prints one skip line and reports 30, so the floor follows the host as the
+    /bin/bash one above does; on a host that runs them, 44 means they were not skipped. A Linux
+    host always has util-linux's flock, so on Linux the full floor applies whatever this probe
+    says, and :class:`TestLinuxHostsRunTheFlockTests` fails: a pool host that lost flock(1) must
+    not slide to the lower floor and stop running tests 10-16 unseen."""
+    if shutil.which("flock") is None:
+        return False
+    probe = subprocess.run(
+        ["bash", "-c", "(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 401 ))"],
+        capture_output=True,
+        check=False,
+    )
+    return probe.returncode == 0
+
+
 # Floors are the exact passed count measured 2026-09-14 (nexus-fcjt7) --
 # tight enough to catch a suite quietly running fewer assertions than it
 # used to, loose enough that adding a new assertion to one of these suites
@@ -163,7 +190,12 @@ SUITES = [
     # Round 2 (nexus-fcjt7): found by the substantive-critic pass on round 1
     # plus a re-check of round 1's own "already wired" claim about the two
     # build-lease suites (see module docstring).
-    _Suite("tests/e2e/lib/lock_test.sh", 30),
+    _Suite(
+        "tests/e2e/lib/lock_test.sh",
+        _LOCK_SUITE_FLOOR_WITH_FLOCK
+        if _lock_suite_has_flock_tests() or sys.platform.startswith("linux")
+        else _LOCK_SUITE_FLOOR_WITHOUT_FLOCK,
+    ),
     # 32: 35 until nexus-boz84 dropped the per-harness wall-clock assertion (3 harnesses,
     # one assertion each); the output checks still prove no harness body ran.
     _Suite("tests/e2e/lib/harness_lock_test.sh", 32),
@@ -235,6 +267,27 @@ _LEASE_SENSITIVE = tuple(str(s.path.relative_to(REPO_ROOT)) for s in SUITES)
 
 def _env_without_lease_vars() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith(_LEASE_ENV_PREFIXES)}
+
+
+class TestLinuxHostsRunTheFlockTests:
+    """nexus-fuz9t: the flock tests of ``lock_test.sh`` are the ones that prove liveness survives a
+    PID namespace. Darwin has no flock(1) and keeps the lower floor; a Linux host without it (a pool
+    host that lost util-linux, a bash older than 4.1) fails here instead of running 30 and skipping
+    them without a word."""
+
+    def test_a_linux_host_has_flock_and_a_bash_that_can_use_it(self) -> None:
+        lock_floor = next(s.min_passed for s in SUITES if s.path == REPO_ROOT / "tests/e2e/lib/lock_test.sh")
+        if sys.platform.startswith("linux"):
+            assert _lock_suite_has_flock_tests(), (
+                "lock_test.sh would skip its flock tests (10-16) on this Linux host: flock(1) is missing "
+                "or bash is older than 4.1. Install util-linux; do not lower the floor."
+            )
+            assert lock_floor == _LOCK_SUITE_FLOOR_WITH_FLOCK
+        else:
+            # darwin: no flock(1) unless installed by hand; the floor must follow the probe, so a host
+            # without flock gets the lower floor and a host with it still runs tests 10-16.
+            expected = _LOCK_SUITE_FLOOR_WITH_FLOCK if _lock_suite_has_flock_tests() else _LOCK_SUITE_FLOOR_WITHOUT_FLOCK
+            assert lock_floor == expected
 
 
 class TestSuitesExist:

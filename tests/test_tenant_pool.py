@@ -251,7 +251,7 @@ def test_a_parked_tuple_waiter_is_aborted_by_the_reset(
         pool = make_pool(evict=evict)
         done: dict[str, Any] = {}
 
-        def park(token: str, sub: str = f"ledger/park-{evict}") -> None:
+        def park(token: str, sub: str = f"directory/park-{evict}") -> None:
             r = _post(state, "/v1/tuples/rd", token, {"subspace": sub, "timeout_s": timeout_s}, timeout=60)
             done["r"] = (r.status_code, r.text, time.monotonic())
 

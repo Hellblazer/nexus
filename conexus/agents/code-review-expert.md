@@ -6,6 +6,7 @@ model: sonnet
 color: purple
 effort: high
 disallowedTools: [mcp__plugin_sn_serena]
+memory: user
 ---
 
 ## Usage Examples
@@ -71,7 +72,7 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
 - **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="code-review-expert")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context`, seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
-- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="code-review-expert")`. Omit `ttl` — a decision or finding is permanent unless there is a reason it should expire. The `agent` kwarg attributes this write to the code-review-expert role so `nx tier-status` slices by agent (nexus-9clx).
+- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="code-review-expert")`. Omit `ttl` — a decision or finding is permanent unless there is a reason it should expire. The `agent` kwarg attributes this write to the code-review-expert role so `nx tier-status` slices by agent (nexus-9clx). A gate record (a review, critique, confirmation or fix round) also passes `tags="kind:gate,bead:<id>,rdr:<NNN>"` (drop `rdr:` when the bead serves no RDR), so the phase-close rollup finds it by query rather than by title (RDR-209 Amendment A1). **Your own memory** (`memory: user`, under `~/.claude/agent-memory/`) is a separate store and never replaces the T2 gate record, which is mandatory: the orchestrator and the phase-close rollup read the T2 record, not your memory. Keep in your memory only reusable review heuristics, each entry naming the repo it was learned in, and read an entry as a hint to verify in the repo under review, never as a rule. No code excerpts and no findings about one change. Keep its index under 40 lines: merge or drop an entry before adding one. Under a read-only brief, write no memory.
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting, for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
 
@@ -362,7 +363,7 @@ This agent follows the [Shared Context Protocol](../resources/agent-shared/CONTE
 
 Store using these naming conventions:
 - **Nexus knowledge title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **Nexus memory**: mcp__plugin_conexus_nexus__memory_put(content="content", project="{project}", title="{topic}.md" (e.g., project=ART, title=auth-implementation.md)
+- **T2 (memory_put)**: mcp__plugin_conexus_nexus__memory_put(content="content", project="{project}", title="{topic}.md" (e.g., project=ART, title=auth-implementation.md)
 - **Bead Description**: Include `Context: nx` line
 
 

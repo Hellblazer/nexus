@@ -868,6 +868,236 @@ kill -9 "$live_pid3" 2>/dev/null || true
 wait "$live_pid3" 2>/dev/null
 rm -rf "$LOCKDIR"
 
+# ── Tests 10-16: the holder's flock decides liveness (nexus-fuz9t) ───────
+# lab-run #88 puts each CI job in its own PID namespace: a holder in another
+# job's namespace has a pid that does not exist here. These run real holder
+# processes; where there is no flock (darwin) the lockdir is a pid-rule lockdir
+# and the suite floor in tests/scripts/test_shell_suite_wiring.py does not count
+# them.
+if _lock_flock_ok; then
+    echo "Test 10: a live holder whose recorded pid is invisible is not reclaimed"
+    LOCKDIR="$WORKDIR/nsvisible.lock"
+    bash -c "source '$HERE/lock.sh'; lock_acquire '$LOCKDIR' 0 || exit 9; exec sleep 30" &
+    ns_holder=$!
+    for _ in $(seq 1 50); do
+        [[ -f "$LOCKDIR/holder.flock" && -s "$LOCKDIR/pid" ]] && break
+        sleep 0.1
+    done
+    if [[ -f "$LOCKDIR/holder.flock" ]]; then
+        ok "a holder on this host keeps holder.flock in its lockdir"
+    else
+        bad "no holder.flock after a successful acquire -- the lockdir is a pid-rule lockdir"
+    fi
+    # What a sibling job sees: a pid that names nothing in its own namespace.
+    bash -c 'exit 0' &
+    gone_pid=$!
+    wait "$gone_pid" 2>/dev/null
+    printf '%s\n' "$gone_pid" >"$LOCKDIR/pid"
+    echo unknown >"$LOCKDIR/start_token"
+    if _lock_is_stale "$LOCKDIR" >/dev/null; then
+        bad "_lock_is_stale called a lock held by a live flock holder stale because its pid does not exist here"
+    else
+        ok "_lock_is_stale reads the held flock as live although the recorded pid does not exist here"
+    fi
+    if lock_acquire "$LOCKDIR" 0 2>/dev/null; then
+        bad "lock_acquire took a lock whose holder is alive and holds its flock (false-dead reclaim)"
+        rm -rf "$LOCKDIR"
+    else
+        ok "lock_acquire refused the live holder's lock"
+    fi
+    if [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$gone_pid" && -f "$LOCKDIR/holder.flock" ]]; then
+        ok "the live holder's lockdir was left untouched"
+    else
+        bad "the live holder's lockdir was moved or rewritten"
+    fi
+    kill -9 "$ns_holder" 2>/dev/null || true
+    wait "$ns_holder" 2>/dev/null
+    rm -rf "$LOCKDIR"
+
+    echo "Test 11: a dead holder's lock is reclaimed although its recorded pid names a live process"
+    LOCKDIR="$WORKDIR/nsdead.lock"
+    bash -c "source '$HERE/lock.sh'; lock_acquire '$LOCKDIR' 0 || exit 9; exec sleep 30" &
+    dead_holder=$!
+    for _ in $(seq 1 50); do
+        [[ -f "$LOCKDIR/holder.flock" && -s "$LOCKDIR/pid" ]] && break
+        sleep 0.1
+    done
+    kill -9 "$dead_holder" 2>/dev/null || true
+    wait "$dead_holder" 2>/dev/null
+    # The pid rule alone would call this live: a running process with its own start token.
+    printf '%s\n' "$$" >"$LOCKDIR/pid"
+    _lock_start_token "$$" >"$LOCKDIR/start_token"
+    if _lock_is_stale "$LOCKDIR" >/dev/null; then
+        ok "_lock_is_stale reads the released flock as dead whatever the pid says"
+    else
+        bad "_lock_is_stale kept a lock whose flock holder is dead"
+    fi
+    if lock_acquire "$LOCKDIR" 0 2>/dev/null && [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$$" ]]; then
+        ok "lock_acquire reclaimed the dead holder's lock and records this process"
+        lock_release "$LOCKDIR"
+    else
+        bad "lock_acquire did not reclaim a lock whose flock holder is dead"
+        rm -rf "$LOCKDIR"
+    fi
+    if [[ -d "$LOCKDIR" ]]; then
+        bad "lockdir still present after lock_release"
+    else
+        ok "lock_release removed the lockdir and dropped the flock"
+    fi
+
+    # Tests 12-16 (nexus-fuz9t review round): ordering, release status, reclaim identity, diagnostics.
+    # Each spies on lock.sh from a driver script of its own, so the assertion sees the moment the
+    # property must hold rather than whatever is left afterwards.
+    echo "Test 12: holder.flock is held on the staging dir BEFORE it is moved into place"
+    LOCKDIR="$WORKDIR/order.lock"
+    cat >"$WORKDIR/order_driver.sh" <<'DRIVER_EOF'
+source "$1/lock.sh"
+mv() { case "$1" in *.fresh.*) _lock_flock_state "$1" >"$ORDER_OUT" ;; esac; command mv "$@"; }
+lock_acquire "$2" 0
+DRIVER_EOF
+    rm -f "$WORKDIR/order_state"
+    ORDER_OUT="$WORKDIR/order_state" bash "$WORKDIR/order_driver.sh" "$HERE" "$LOCKDIR" >/dev/null 2>&1
+    order_state="$(cat "$WORKDIR/order_state" 2>/dev/null || echo 'mv never ran')"
+    if [[ "$order_state" == live ]]; then
+        ok "at the moment of the claiming mv the staging dir's flock was already held"
+    else
+        bad "at the claiming mv the staging dir's flock read '$order_state', not live: the lockdir becomes visible before its lock is held (reclaimers would see it as dead)"
+    fi
+    rm -rf "$LOCKDIR" "$WORKDIR"/order.lock.* 2>/dev/null
+
+    echo "Test 13: lock_release removes the lockdir BEFORE it closes the flock"
+    LOCKDIR="$WORKDIR/closeorder.lock"
+    cat >"$WORKDIR/close_driver.sh" <<'DRIVER_EOF'
+source "$1/lock.sh"
+lock_acquire "$2" 0 || exit 9
+rm() { [[ "$*" == "-rf $CLOSE_DIR" ]] && _lock_flock_state "$CLOSE_DIR" >"$CLOSE_OUT"; command rm "$@"; }
+lock_release "$2"
+DRIVER_EOF
+    rm -f "$WORKDIR/close_state"
+    CLOSE_DIR="$LOCKDIR" CLOSE_OUT="$WORKDIR/close_state" bash "$WORKDIR/close_driver.sh" "$HERE" "$LOCKDIR" >/dev/null 2>&1
+    close_state="$(cat "$WORKDIR/close_state" 2>/dev/null || echo 'rm never ran')"
+    if [[ "$close_state" == live ]]; then
+        ok "the flock was still held when lock_release removed the lockdir"
+    else
+        bad "the flock read '$close_state' at lock_release's rm: it closes the descriptor first, opening a window where a reclaimer sees a dead holder and a live lockdir"
+    fi
+    rm -rf "$LOCKDIR" 2>/dev/null
+
+    echo "Test 14: lock_release reports a lockdir it could not remove"
+    mkdir "$WORKDIR/rofail"
+    LOCKDIR="$WORKDIR/rofail/ro.lock"
+    cat >"$WORKDIR/rmfail_driver.sh" <<'DRIVER_EOF'
+source "$1/lock.sh"
+lock_acquire "$2" 0 || exit 9
+# A read-only parent stops the removal; root ignores permissions, so there the rm itself fails.
+if [[ $EUID -eq 0 ]]; then rm() { return 1; }; else chmod 555 "$(dirname "$2")"; fi
+lock_release "$2" 2>/dev/null
+rc=$?
+chmod 755 "$(dirname "$2")"
+exit "$rc"
+DRIVER_EOF
+    bash "$WORKDIR/rmfail_driver.sh" "$HERE" "$LOCKDIR" >/dev/null 2>&1
+    rc14=$?
+    if [[ "$rc14" -eq 1 ]]; then
+        ok "lock_release returned 1 when the lockdir could not be removed"
+    else
+        bad "lock_release returned $rc14 for a lockdir it could not remove (the status of the descriptor close hid the failed rm)"
+    fi
+    rm -rf "$WORKDIR/rofail" 2>/dev/null
+
+    echo "Test 15: reclaim does not remove a live lock that carries the stale holder's pid number"
+    LOCKDIR="$WORKDIR/reclaimid.lock"
+    bash -c 'exit 0' &
+    twin_pid=$!
+    wait "$twin_pid" 2>/dev/null
+    # The lock the reclaimer judged: dead holder, free flock.
+    mkdir "$LOCKDIR"
+    printf '%s\n' "$twin_pid" >"$LOCKDIR/pid"
+    echo unknown >"$LOCKDIR/start_token"
+    : >"$LOCKDIR/holder.flock"
+    # What lands at the path after the verdict: a live holder whose pid, in another namespace,
+    # has the same number.
+    mkdir "$WORKDIR/reclaimid.live"
+    printf '%s\n' "$twin_pid" >"$WORKDIR/reclaimid.live/pid"
+    echo unknown >"$WORKDIR/reclaimid.live/start_token"
+    : >"$WORKDIR/reclaimid.live/holder.flock"
+    bash -c 'exec 9>"$0"; flock -n 9 || exit 9; exec sleep 30' "$WORKDIR/reclaimid.live/holder.flock" &
+    twin_holder=$!
+    for _ in $(seq 1 50); do
+        [[ "$(_lock_flock_state "$WORKDIR/reclaimid.live")" == live ]] && break
+        sleep 0.1
+    done
+    cat >"$WORKDIR/reclaim_driver.sh" <<'DRIVER_EOF'
+source "$1/lock.sh"
+eval "$(declare -f _lock_is_stale | sed '1s/_lock_is_stale/_orig_lock_is_stale/')"
+# Judge the stale lock, then swap the live one in before the reclaim's rename.
+_lock_is_stale() {
+    local out rc=0
+    out="$(_orig_lock_is_stale "$1")" || rc=$?
+    echo "$out"
+    if [[ ! -e "$SWAP_FLAG" ]]; then
+        : >"$SWAP_FLAG"
+        command mv "$1" "$SWAP_STALE_AWAY"
+        command mv "$SWAP_LIVE" "$1"
+    fi
+    return "$rc"
+}
+lock_acquire "$2" 0
+DRIVER_EOF
+    SWAP_FLAG="$WORKDIR/reclaimid.swapped" SWAP_STALE_AWAY="$WORKDIR/reclaimid.stale" SWAP_LIVE="$WORKDIR/reclaimid.live" \
+        bash "$WORKDIR/reclaim_driver.sh" "$HERE" "$LOCKDIR" >/dev/null 2>&1
+    rc15=$?
+    if [[ ! -e "$WORKDIR/reclaimid.swapped" ]]; then
+        bad "test setup: the swap never ran (no stale verdict was reached), so the reclaim path was not exercised"
+    elif [[ "$rc15" -ne 0 ]]; then
+        ok "lock_acquire did not take over a lock whose holder is alive"
+    else
+        bad "lock_acquire took over a live holder's lock because its pid number matched the stale one it had judged"
+    fi
+    if [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$twin_pid" && "$(_lock_flock_state "$LOCKDIR")" == live ]]; then
+        ok "the live holder's lockdir is back in place, flock still held"
+    else
+        bad "the live holder's lockdir was removed or replaced by the reclaim"
+    fi
+    kill -9 "$twin_holder" 2>/dev/null || true
+    wait "$twin_holder" 2>/dev/null
+    rm -rf "$LOCKDIR" "$WORKDIR"/reclaimid.* 2>/dev/null
+
+    echo "Test 16: a timeout on a lock held by a process this shell cannot see names who holds it"
+    LOCKDIR="$WORKDIR/explain.lock"
+    bash -c "source '$HERE/lock.sh'; lock_acquire '$LOCKDIR' 0 || exit 9; exec sleep 30" &
+    explain_holder=$!
+    for _ in $(seq 1 50); do
+        [[ -f "$LOCKDIR/holder.flock" && -s "$LOCKDIR/pid" ]] && break
+        sleep 0.1
+    done
+    bash -c 'exit 0' &
+    explain_gone=$!
+    wait "$explain_gone" 2>/dev/null
+    printf '%s\n' "$explain_gone" >"$LOCKDIR/pid"
+    echo unknown >"$LOCKDIR/start_token"
+    lock_acquire "$LOCKDIR" 0 2>"$WORKDIR/explain_err" || true
+    if grep -q "holder.flock' is held" "$WORKDIR/explain_err"; then
+        ok "the timeout says the recorded pid is not a process here but holder.flock is held"
+    else
+        bad "the timeout message does not explain a held lock with an invisible recorded pid: $(cat "$WORKDIR/explain_err")"
+    fi
+    if [[ -d /proc/self/fd ]]; then
+        if grep -q "held via pid ${explain_holder}:" "$WORKDIR/explain_err"; then
+            ok "the timeout names the pid that really holds holder.flock"
+        else
+            bad "the timeout does not name pid ${explain_holder}, the process holding holder.flock: $(cat "$WORKDIR/explain_err")"
+        fi
+    else
+        ok "no /proc here: the holder scan is Linux-only (the held-lock line above is the diagnostic)"
+    fi
+    kill -9 "$explain_holder" 2>/dev/null || true
+    wait "$explain_holder" 2>/dev/null
+    rm -rf "$LOCKDIR"
+else
+    echo "Tests 10-16: skipped (no flock(1) or bash older than 4.1 on this host; pid-rule lockdirs only)"
+fi
+
 echo
 echo "lock_test.sh: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

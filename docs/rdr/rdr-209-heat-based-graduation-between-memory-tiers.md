@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-09-14
 accepted_date:
 related_issues: []
-related_rdrs: [RDR-057, RDR-207, RDR-131, RDR-132, RDR-194]
+related_rdrs: [RDR-057, RDR-207, RDR-131, RDR-132, RDR-194, RDR-238]
 ---
 
 # RDR-209: Heat-Based Graduation Between Memory Tiers
@@ -81,6 +81,20 @@ RDR-057 §Instrumentation gated its deferred items on three measurements and
 named no owner, so none were taken. The first question here, what the heat
 distribution of the live T2 actually looks like, has never been answered.
 The fix delivers the measurement before any threshold is chosen.
+
+#### Gap 6: Gate records never enter expiry (Amendment A1, 2026-10-31)
+
+Reviewers write their own gate records to T2 (`nexus/review-*`,
+`nexus/critique-*`, `nexus/confirm-*`, `nexus/fixround-*`), about 900 to 1,150
+a month and about 2,500 in all, with no TTL. RDR-207's quarantine and rollup
+act only on rows that carry one, so none of them ever reaches it. The 30-day
+read pattern says they are working state: 1,718 gets against 1,066 puts, and
+of the reads whose title carries a date, 91% came within two days and 27 came
+after a week (memory survey, 2026-10-31). The papers warn against rolling them
+up without a check: memory construction loses information (Memory Tax), and
+a compaction nobody checks can fall below the no-context baseline (Agentic
+Context Management). The fix delivers a phase-close rollup that keeps its
+sources, and a TTL on the records it covers.
 
 ## Relationship to Prior RDRs
 
@@ -354,6 +368,56 @@ T3 write, tests.
 
 The division rule for positive-TTL rows; tests for both kinds of row.
 
+### Phase 3: Gate-record rollup at phase close (Amendment A1)
+
+Does not depend on Phases 0b to 2 and can land first.
+
+Research 2 (2026-10-31) shapes it: only about 72% of the 2,320 gate-record
+titles name a bead, so a title-only rollup misses about 23%. And the
+`phase-review-gate` skill says nothing enforces its close step. So step 0
+comes first, and the trigger is `rdr-close` and the close of the phase's
+review bead, not the skill alone.
+
+0. Reviewer and developer write-backs carry `kind:gate`, `bead:<id>` and
+   `rdr:<NNN>` tags, `rdr:` dropped when the bead serves no RDR (the agent
+   definitions' T2 write-back lines, the orchestration reference and the
+   substantive-critique skill; shipped by nexus-qo7ie.1 and pinned by
+   `tests/test_gate_record_tags_lint.py`), so new gate records map to a
+   phase without parsing the title. Older records are mapped by title, and
+   the ones that do not map are listed under "unmapped" in the pointer record
+   and keep no TTL.
+   - **The lookup is an exact tag match, not a search.** `memory_search`
+     tokenizes: a search for `kind:gate` on 2026-10-31 returned 273 hits, the
+     first five untagged critiques matched on words in their bodies (the nexus-qo7ie.1 critique). Phase 3 therefore needs a list filter on the tags column
+     that matches one whole tag, and its tests include an untagged record that
+     mentions `kind:gate` in its body and must not be returned.
+   - **RDR gate records are in scope.** The `rdr-gate-checklist` skill writes
+     its fix-checks, critiques and results to project `{repo}_rdr` tagged
+     `rdr,gate,...` and titled by RDR number. The rollup reads those by that
+     project and the `gate` tag, mapped to the RDR by title, and the skill is
+     not retagged: its records are per RDR, not per bead, so its own
+     vocabulary already names the phase owner.
+
+1. At an RDR phase close (the `phase-review-gate` skill's close step, and
+   `rdr-close`), write one T3 record per phase. It lists every gate-record
+   title for that phase's beads, each one's verdict line, and the shas it
+   reviewed. It is a pointer record that keeps its sources by title, not a
+   summary that replaces them.
+2. Loss check before any TTL is set: each listed title resolves, and each
+   ship-blocker named in a gate record is either fixed by a listed sha or
+   names its bead.
+3. Then give the listed gate records a 30-day TTL, so RDR-207's quarantine,
+   rollup and reap retire them on the existing path. A gate record for an
+   open phase is never touched.
+4. A census flag in `nx memory curate --t2` (RDR-238) lists gate records
+   older than 30 days whose phase is closed and that have no TTL, so a missed
+   close step is visible.
+
+Test: a seeded closed phase with three gate records gets one T3 pointer
+record, all three titles resolve from it, and all three carry a 30-day TTL; a
+seeded open phase is untouched; a planted unresolvable title stops the TTL
+step and names the title.
+
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
@@ -411,3 +475,4 @@ Not run. Filed as draft; Phase 0 precedes the gate.
 | --- | --- |
 | 2026-09-14 | Filed as draft, split out of RDR-207 candidate (c) at Sam's direction. Phase 0 census is the first work; no threshold is chosen in this text. |
 | 2026-09-14 | Phase 0 census run by conexus-e9 on the live tenant (T2 `209-research-1`). A1 refuted as the counter stands: search tracking stamps every match, so `access_count` measures search matches, not reads. Gap 5 and Phase 0b added; A5 added. |
+| 2026-10-31 | Amendment A1 at Sam's direction (memory survey, nexus-qo7ie): Gap 6 and Phase 3, a phase-close rollup of gate records that keeps its sources, then a 30-day TTL so RDR-207 retires them. Sibling RDR-238 (memory curation) takes supersession, the index budget and promotion to skills, and uses Phase 0b's read counter when it lands. |

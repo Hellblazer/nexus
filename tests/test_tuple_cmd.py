@@ -331,7 +331,7 @@ class TestTupleTemplatesListStats:
         reg = _last_json_line(out.output)
         names = {t.get("name") for t in reg["templates"]}
         assert "mailbox/<address>" in names
-        assert "ledger/<session_id>" in names
+        assert "ledger/<session_id>" not in names, "retired by nexus-onjvw"
         assert "directory/<name>" in names
 
     def test_list_and_stats_reflect_a_written_tuple(self, t2_service_env) -> None:
@@ -765,14 +765,13 @@ class TestTupleAckReplyAgainstTheRealEngine:
     ) -> None:
         session = _uniq("sess")
         store = HttpTupleStore()
-        store.out(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, None, None)
+        store.out(f"lock/{session}", {"resource": session}, None, None)
         _addr, claim_id = _claimed_mailbox()
 
         res = _invoke([
             "ack", claim_id, "--claimant", "c1",
-            "--reply-subspace", f"ledger/{session}",
-            "--reply-key", "agent_id=a1",
-            "--reply-key", "kind=done",
+            "--reply-subspace", f"lock/{session}",
+            "--reply-key", f"resource={session}",
         ])
         assert res.exit_code == 1
         assert "SchemaViolationError" in res.output

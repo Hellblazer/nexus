@@ -7,12 +7,12 @@ timeout-ordering arithmetic, the parked-502 gateway retry) that do not need
 a live tuple row and are cheaper and more deterministic as mock-transport /
 monkeypatch tests than as engine round trips.
 
-Six templates are loaded at engine boot (``service/src/main/resources/
-tuples/templates/{board,directory,ledger,lock,mailbox,queue}.yaml``; the
-tests below exercise the original three):
+Seven templates are loaded at engine boot (``service/src/main/resources/
+tuples/templates/{aspects,board,board-ci,directory,lock,mailbox,queue}.yaml``;
+the ``ledger/<session_id>`` template was retired by nexus-onjvw). The tests
+below exercise mailbox and directory, plus ``lock/<resource>`` as the
+``id_from=keys`` reply target:
 
-  - ``ledger/<session_id>``: keys ``[agent_id, kind]``, ``id_from=keys``,
-    ``take.enabled=false`` (never claimable).
   - ``mailbox/<address>``: keys ``[to]``, dims ``{from (required), kind,
     correlation_id, address_kind}``, ``id_from=keys+nonce``,
     ``id_dims=[from]``, ``take.enabled=true``, ``max_attempts=3``,
@@ -79,6 +79,14 @@ def _clean_rejected_session_memo(monkeypatch: pytest.MonkeyPatch) -> None:
     # The rejected-session-token memo is process-wide (nexus-z1xox); keep one
     # test's rejection out of the next test in the same worker.
     monkeypatch.setattr(HttpTupleStore, "_rejected_sessions", {})
+
+
+def _out_directory(store: "HttpTupleStore", subspace: str, name: str = "a1") -> str:
+    """Write one ``directory/<name>`` row: the take-disabled bundled template
+    (the stand-in for the retired ledger in the read-only and census tests)."""
+    return store.out(
+        subspace, {"name": name}, {"session_id": "sess-a"}, None, nonce=_uniq("nonce"),
+    )
 
 
 def _uniq(label: str) -> str:
@@ -191,12 +199,12 @@ class TestRd:
     def test_rd_finds_nothing_before_out_and_the_row_after(self, t2_service_env) -> None:
         store = HttpTupleStore()
         session = _uniq("sess")
-        assert store.rd(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}) == []
+        assert store.rd(f"directory/{session}", {"name": "a1"}) == []
 
-        store.out(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, None, None)
-        rows = store.rd(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, n=2)
+        _out_directory(store, f"directory/{session}")
+        rows = store.rd(f"directory/{session}", {"name": "a1"}, n=2)
         assert len(rows) == 1, f"expected one row, got {len(rows)}"
-        assert rows[0].keys == {"agent_id": "a1", "kind": "start"}
+        assert rows[0].keys == {"name": "a1"}
 
     def test_unknown_subspace_is_unknown_subspace_error(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -208,7 +216,7 @@ class TestRd:
         store = HttpTupleStore()
         session = _uniq("sess")
         with pytest.raises(TimeoutTooLongError) as exc_info:
-            store.rd(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, timeout_s=26)
+            store.rd(f"directory/{session}", {"name": "a1"}, timeout_s=26)
         assert exc_info.value.code == "TimeoutTooLong"
 
 
@@ -258,9 +266,9 @@ class TestIn:
     def test_in_against_take_disabled_template_is_take_disabled(self, t2_service_env) -> None:
         store = HttpTupleStore()
         session = _uniq("sess")
-        store.out(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, None, None)
+        _out_directory(store, f"directory/{session}")
         with pytest.raises(TakeDisabledError) as exc_info:
-            store.in_(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, claimant="c1", lease_s=30)
+            store.in_(f"directory/{session}", {"name": "a1"}, claimant="c1", lease_s=30)
         assert exc_info.value.code == "TakeDisabled"
 
 
@@ -534,7 +542,8 @@ class TestRegistry:
         reg = store.registry()
         assert reg["digest"]
         names = {t["name"] for t in reg["templates"]}
-        assert {"ledger/<session_id>", "mailbox/<address>", "directory/<name>"} <= names
+        assert {"mailbox/<address>", "directory/<name>"} <= names
+        assert "ledger/<session_id>" not in names, "retired by nexus-onjvw"
 
 
 @pytest.mark.t2_tenant
@@ -542,8 +551,8 @@ class TestSubspaceList:
     def test_subspace_list_filters_by_prefix(self, t2_service_env) -> None:
         store = HttpTupleStore()
         session = _uniq("sess")
-        subspace = f"ledger/{session}"
-        store.out(subspace, {"agent_id": "a1", "kind": "start"}, None, None)
+        subspace = f"directory/{session}"
+        _out_directory(store, subspace)
 
         censuses = store.subspace_list(prefix=subspace)
         assert len(censuses) == 1
@@ -557,8 +566,8 @@ class TestSubspaceList:
         tuples.oldest_unclaimed doctor row) that never opts into paging."""
         store = HttpTupleStore()
         session = _uniq("sess")
-        subspace = f"ledger/{session}"
-        store.out(subspace, {"agent_id": "a1", "kind": "start"}, None, None)
+        subspace = f"directory/{session}"
+        _out_directory(store, subspace)
 
         result = store.subspace_list(prefix=subspace)
         assert isinstance(result, list)
@@ -566,10 +575,10 @@ class TestSubspaceList:
 
     def test_subspace_list_with_limit_pages_to_completion(self, t2_service_env) -> None:
         store = HttpTupleStore()
-        prefix = f"ledger/{_uniq('page')}-"
+        prefix = f"directory/{_uniq('page')}-"
         sessions = [f"{prefix}{i}" for i in range(5)]
         for session in sessions:
-            store.out(session, {"agent_id": "a1", "kind": "start"}, None, None)
+            _out_directory(store, session)
 
         collected: list = []
         after = None
@@ -590,8 +599,8 @@ class TestSubspaceList:
     def test_subspace_list_with_limit_and_nothing_truncated_has_no_cursor(self, t2_service_env) -> None:
         store = HttpTupleStore()
         session = _uniq("sess")
-        subspace = f"ledger/{session}"
-        store.out(subspace, {"agent_id": "a1", "kind": "start"}, None, None)
+        subspace = f"directory/{session}"
+        _out_directory(store, subspace)
 
         rows, next_cursor = store.subspace_list(prefix=subspace, limit=100)
         assert len(rows) == 1
@@ -603,8 +612,8 @@ class TestSubspaceStats:
     def test_subspace_stats_matches_a_written_row(self, t2_service_env) -> None:
         store = HttpTupleStore()
         session = _uniq("sess")
-        subspace = f"ledger/{session}"
-        store.out(subspace, {"agent_id": "a1", "kind": "start"}, None, None)
+        subspace = f"directory/{session}"
+        _out_directory(store, subspace)
 
         census = store.subspace_stats(subspace)
         assert census.subspace == subspace
@@ -1589,19 +1598,19 @@ class TestAckWithReply:
     def test_a_reply_to_a_keys_only_template_is_a_schema_violation(
         self, t2_service_env,
     ) -> None:
-        """A reply target must resolve to a keys+nonce template; the ledger
-        is keys-only, so it is refused rather than silently given a nonce."""
+        """A reply target must resolve to a keys+nonce template; a lock is
+        keys-only, so it is refused rather than silently given a nonce."""
         store = HttpTupleStore()
         session = _uniq("sess")
-        store.out(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, None, None)
+        store.out(f"lock/{session}", {"resource": session}, None, None)
         _addr, claim_id = self._request_claimed_by(store, _uniq("replyto"))
 
         with pytest.raises(SchemaViolationError):
             store.ack(
                 claim_id, "worker",
                 reply=ReplySpec(
-                    subspace=f"ledger/{session}",
-                    keys={"agent_id": "a1", "kind": "done"},
+                    subspace=f"lock/{session}",
+                    keys={"resource": session},
                 ),
             )
 

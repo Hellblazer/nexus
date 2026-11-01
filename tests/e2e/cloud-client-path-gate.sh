@@ -73,7 +73,7 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      claim a request, renew it and assert lease_until moved forward on
 #      the engine's clock; ack with a reply and assert a 64-hex reply id,
 #      exactly that row at the reply address (read at n=2), and the request
-#      consumed; a reply into a keys-only ledger/ target is refused as
+#      consumed; a reply into a keys-only lock/ target is refused as
 #      SchemaViolation and the same claimant can still ack plainly. WRITES
 #      two requests and one reply into fresh mailbox/ccpg-* addresses.
 #
@@ -1252,7 +1252,7 @@ try:
         else:
             store.ack(drained[1], asker)
 
-    # [H3] a reply into a keys-only template (the ledger) is refused before
+    # [H3] a reply into a keys-only template (a lock) is refused before
     # anything is consumed, so the same claimant can still ack plainly.
     second = _claim("refused")
     if second is None:
@@ -1261,8 +1261,8 @@ try:
         _, claim_id = second
         try:
             store.ack(claim_id, answerer, reply=ReplySpec(
-                subspace=f"ledger/ccpg-{stamp}", keys={"agent_id": "ccpg", "kind": "report"}))
-            print("  VIOLATION [H3]: a reply into ledger/ was accepted", file=sys.stderr)
+                subspace=f"lock/ccpg-{stamp}", keys={"resource": f"ccpg-{stamp}"}))
+            print("  VIOLATION [H3]: a reply into lock/ was accepted", file=sys.stderr)
             bad = True
         except SchemaViolationError as exc:
             if store.ack(claim_id, answerer) is not None:

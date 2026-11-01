@@ -124,7 +124,10 @@ migration_wal_bytes_per_worker = 11038000
 # 1 CREATE OR REPLACE FUNCTION (the register-tenant trigger function), 1 CREATE TRIGGER (BEFORE INSERT on request_ledger),
 # and the backfill's ALTER TABLE ... NO FORCE ROW LEVEL SECURITY and its FORCE restore (the INSERT ... SELECT is not DDL).
 # Measured on the laptop (macOS), 2026-10-31: tests/test_scenario_journeys.py, one worker, ddl: migration=2187, merged tree (043 +5, 044 +5, 045 +5, 046 +6).
-migration_ddl_per_worker = 2187
+# 2187 -> 2193 (2026-10-31): tuples-012-1 (nexus-onjvw, the retired session ledger's purge) adds six DDL statements to a fresh migration:
+# ALTER TABLE ... NO FORCE ROW LEVEL SECURITY and its FORCE restore on each of nexus.tuples, nexus.tuple_claim_log and nexus.tuple_deliveries (the three
+# DELETEs are not DDL), the tuples-003-2 / vectors-046-4 accounting. Counted from the changeset's statements.
+migration_ddl_per_worker = 2193
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

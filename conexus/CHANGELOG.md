@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.92.0] - 2026-11-01
+
+Plugin version aligned with conexus 7.92.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `conexus/agents/code-review-expert.md` (nexus-qo7ie.1): `memory: user` gives the reviewer its own memory directory under `~/.claude/agent-memory/`, and a gate record it writes carries `kind:gate`, `bead:` and `rdr:` tags; a paragraph bounds the agent memory (never replaces the T2 gate record; reusable heuristics only, each naming its repo; index under 40 lines; none under a read-only brief).
+- `conexus/agents/substantive-critic.md` (nexus-qo7ie.1): `memory: user`, the same gate-record tags and memory paragraph, and the completion protocol names the T2 gate record as mandatory.
+- `conexus/agents/developer.md` (nexus-qo7ie.1): a fix-round gate record it writes carries `kind:gate`, `bead:` and `rdr:` tags.
+- `conexus/skills/orchestration/reference.md` (nexus-qo7ie.1): a gate record is written with no `ttl` and with gate tags, and the phase-close rollup sets its TTL (RDR-209 Amendment A1).
+- `conexus/skills/substantive-critique/SKILL.md` (nexus-qo7ie.1): the T2 critique record carries the gate tags and leaves its TTL to the phase-close rollup.
+- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-qo7ie.1): omitting `ttl` on a T2 write is permanent (nexus-473mx), not the stale 30-day default.
+- `prose-edit/agents/line-editor.md` (nexus-qo7ie.1): `omitClaudeMd: true`, since its brief carries everything it uses; one line carries the writing-register rule for a repo with no style sheet.
+- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-gy317): PreCompact runs the continuation in the worktree named after the session (the payload cwd is the launch checkout, usually the shared primary) and keeps the in-progress beads the `ref:` lines of the session's board entry name, since every session claims under one assignee; it leaves the list whole when nothing on the board matches or `bd` is unavailable.
+- `conexus/skills/mailbox/SKILL.md` (nexus-onjvw): the reply-in-ack paragraph's example of a keys-only target the engine refuses is `lock/<resource>`; the ledger template is retired.
+
 ## [7.91.1] - 2026-10-31
 
 Plugin version aligned with conexus 7.91.1. These plugin changes become live at this pin.

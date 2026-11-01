@@ -86,12 +86,12 @@ drives the decision itself starts from a cleared `NX_TEST_PG_ROOT_SESSION`
 
 The `-m integration` fixtures that boot their own cluster (nexus-942h9) use the
 same root and conf: `pg_data_tempdir(prefix)` creates the dir through the root
-chooser and records it in `<root>/nexus_integration_owner_<pid>.json` (with the
+chooser and records it in `<root>/nexus_integration_owner_<pid>-<token>.json` (with the
 engine JVM, via `spawn_service`), and the fixture appends
 `integration_pg_conf(pgdata)` to `postgresql.conf` (fsync, synchronous_commit and
 full_page_writes off; on tmpfs also the 64 MB WAL cap and mmap DSM). The sweep
-reaps a record whose owner is dead, and runs once before a process's first
-integration cluster. A new fixture must append the conf
+reaps a record whose owner is dead (its lock, beside the record, is free), and
+runs once before a process's first integration cluster. A new fixture must append the conf
 (`tests/test_integration_pg_cluster.py` has a census). A fixture that needs
 durability semantics passes `parent_dir=` to stay on disk; none does today.
 
@@ -102,6 +102,28 @@ and the two `docker run postgres` tests `tests/db/test_write_seam_gate_integrati
 `tests/db/test_http_combined_query_integration.py`. The cluster prefix may reach 26 chars
 (`nexus_recovery_inttest_pg_`); `integration_cluster_dir` refuses a path whose
 socket would pass `sun_path`.
+
+### Liveness of a dir, a cluster, a lock: flock, not pid (nexus-fuz9t)
+
+A sweeper decides whether a run dir (`tests/_tmp_root.py`), a substrate cluster or an
+integration owner record (`tests/_engine_substrate.py`) and an e2e lockdir
+(`tests/e2e/lib/lock.sh`) still has an owner by trying the owner's `flock`, not by looking up a
+pid: a pid means nothing across PID namespaces, and lab-run #88 gives each CI job its own. The
+lock is taken before the dir, record or lockdir is visible, and a name that is shared across
+jobs carries a per-process token (`nexus_integration_owner_<pid>-<8 hex>`), not the pid alone.
+
+**Re-enabling PID-namespaced CI (lab-run #88) needs every tree that runs the suite on the pool
+host to carry this fix, hand runs and old branches included.** A tree from before it still judges
+the integration owner records and substrate clusters by pid and cmdline, so its sweep reads a
+sibling job's new-format record as dead across a namespace and removes a live cluster. Only the
+`_tmp_root` run dirs are shielded from such a tree (their `owner.json` shows it pid 1, which is
+alive in every namespace); `owner.json`'s `controller_pid` holds the real controller. Before the
+re-enable: announce on the bus that sessions merge `develop` first, and run the canary day with
+no old-tree run on the host.
+
+A dir kept because its lock is held (or cannot be tried) for more than six hours is logged
+(`nexus_test_tmp.kept_long`, `test_substrate_kept_long`), never reaped on age. On a lockdir that
+times out, `lock.sh` names the pids that hold `holder.flock` (`/proc`, Linux).
 
 ### Storage-touch sweep
 

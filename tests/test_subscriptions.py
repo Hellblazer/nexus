@@ -72,7 +72,7 @@ _FIXTURE_TEMPLATES = [
     {"name": "lock/<resource>", "take": {"enabled": True}},
     {"name": "mailbox/<address>", "take": {"enabled": True}},
     {"name": "directory/<name>", "take": {"enabled": False}},
-    {"name": "ledger/<session_id>", "take": {"enabled": False}},
+    {"name": "board/ci/<topic>", "take": {"enabled": False}},
 ]
 
 
@@ -350,13 +350,13 @@ class TestNameLease:
 class TestDirectoryRelease:
     """nexus-kdxyv (RDR-208 test plan: "a /clear self-stop releases the
     watcher's entry within about a second; an ordinary exit leaves it for
-    one TTL"). Stopping a lease on purpose -- ``unsubscribe`` of the
+    one TTL", amended by nexus-tu84w: a clean exit now releases too). Stopping a lease on purpose -- ``unsubscribe`` of the
     leased name, or ``shutdown`` on a handoff -- re-sends the SAME
     nonce with ``ttl_seconds=1`` so the ``directory/<name>`` row lapses
     within about a second instead of at the 300 s TTL. The idempotent
     tuple id (keys + nonce) makes that an update of the live row, never a
-    second row. A plain process exit still leaves the row for one TTL:
-    nothing here runs on exit."""
+    second row. The clean-exit release is tested in
+    tests/mcp/test_exit_releases_session_name.py (nexus-tu84w)."""
 
     def _armed(self, tmp_path):
         fake = _FakeTuples()

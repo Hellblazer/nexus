@@ -21,7 +21,12 @@ session's ``threads`` board entry (looked up by the session's exact name; the ju
 half of a session lives there and a hook cannot write it), the branch and HEAD, the
 in-progress beads, the uncommitted files, the open PRs and the recent commits from
 ``nx command-context continuation``. Ready beads and memory titles are not kept: the
-SessionStart group that runs on the same event already injects them.
+SessionStart group that runs on the same event already injects them. Continuation runs
+in the worktree named after the session when the launch directory's repository has one
+(the payload ``cwd`` is the launch directory, usually the shared primary checkout), and
+the in-progress list keeps only the beads the board entry names, because every session
+claims beads under one assignee (both measured on halcyon's first live compaction,
+2026-11-01).
 
 POST appends the ``compact_summary`` to the same file and logs one warning line to
 ``<config>/logs/hook.log`` when the summary names none of the session's board title,
@@ -78,6 +83,8 @@ def _load_siblings() -> None:
 _NX_TIMEOUT_S = 25.0
 #: Bound on the board lookup, and the budget the whole pre run spends on ``nx`` calls.
 _BOARD_TIMEOUT_S = 6.0
+#: Bound on ``git worktree list``, run before the continuation call.
+_GIT_TIMEOUT_S = 3.0
 _TOTAL_BUDGET_S = 32.0
 #: A checkpoint whose own ``written:`` stamp is older than this is not injected, and post
 #: does not append to it: it belongs to an earlier compaction.
@@ -98,6 +105,8 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 #: A nexus bead id: ``nexus-`` and five lowercase alphanumerics, optional ``.N`` suffix.
 #: Ordinary hyphenated words (ready-beads, auto-memory) are not ids.
 _BEAD_ID_RE = re.compile(r"\bnexus-[0-9a-z]{5}(?![0-9a-z])(?:\.\d{1,3})?")
+#: A ``bd list`` row: optional tree glyphs, a status glyph, then the bead id (any prefix).
+_BD_ROW_RE = re.compile(r"^[\s│├└─]*[○◐●✓❄]\s+([a-z][a-z0-9_]*(?:-[a-z0-9_]+)*-[0-9a-z]{2,}(?:\.\d+)*)\s")
 _WRITTEN_RE = re.compile(r"(?m)^- written: (\S+)\s*$")
 _TRIGGER_RE = re.compile(r"(?m)^- trigger: (.{1,32})$")
 #: Subsections of the continuation output that are not kept: the same-event SessionStart
@@ -318,6 +327,84 @@ def _board_entry(name: str, cwd: str | None, timeout: float) -> tuple[str, str |
     return _run_nx(["memory", "get", entry_id, "--project", _BOARD_PROJECT], cwd, left)
 
 
+def _git_worktrees(cwd: str | None, timeout: float) -> list[str]:
+    """Paths of the worktrees of the repository at *cwd* (``git worktree list``). Never raises."""
+    git = _cli_lookup.resolve("git")
+    if not cwd or not os.path.isdir(cwd) or not git:
+        return []
+    try:
+        result = subprocess.run(
+            [git, "-C", cwd, "worktree", "list", "--porcelain"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        _log("WARNING", f"pre: `git worktree list` failed: {type(exc).__name__}: {exc}")
+        return []
+    if result.returncode != 0:
+        tail = (result.stderr or "").strip().splitlines()[-1:] or [""]
+        _log("WARNING", f"pre: `git worktree list` exited {result.returncode}: {tail[0][:200]}")
+        return []
+    return [ln[len("worktree "):].strip() for ln in result.stdout.splitlines() if ln.startswith("worktree ")]
+
+
+def _session_worktree(name: str | None, cwd: str | None) -> str | None:
+    """The worktree named after the session (``../nexus-wt/<session>``), or ``None``.
+
+    The payload's ``cwd`` is where the session was launched, which for a session that works
+    in its own worktree is the shared primary checkout: its branch and HEAD are not the
+    session's. Only a worktree whose directory name is exactly the session name counts.
+    """
+    if not name:
+        return None
+    try:
+        for path in _git_worktrees(cwd, _GIT_TIMEOUT_S):
+            if Path(path).name == name and os.path.isdir(path):
+                return path
+    except Exception as exc:  # noqa: BLE001 -- a lookup failure keeps the launch directory, never the checkpoint
+        _log("WARNING", f"pre: worktree lookup failed: {type(exc).__name__}: {exc}")
+    return None
+
+
+def _named_exactly(token: str, text: str) -> bool:
+    """*token* occurs in *text* as a whole id: ``nexus-z1d0l.1`` is not named by ``nexus-z1d0l.1.5``."""
+    return re.search(rf"(?<![\w.-]){re.escape(token)}(?![\w-]|\.\w)", text) is not None
+
+
+def _filter_in_progress(shaped: str, board: str) -> str:
+    """Keep the in-progress beads the board entry names, and their children; fail open.
+
+    Every session claims beads under one assignee, so the in-progress list is everyone's,
+    and the board entry's ``ref:`` lines are this session's own record of its beads (a
+    ``waiting_on:`` line names peers' beads, so it is not read). Rows are read by
+    ``bd list``'s row shape (a status glyph, then the id), so any repo's id prefix works.
+    The list is left whole when it has no bead rows (``bd`` unavailable) or when the board
+    names none of them (another repo, a board written before the session's newest claim,
+    a board naming only closed beads): dropping the session's own bead is worse than
+    keeping other sessions'. ``bd`` caps the list (``--limit``), so the count says "listed".
+    """
+    match = re.search(r"(?ms)^(### In-progress beads[^\n]*\n)(.*?)(?=^### |\Z)", shaped)
+    refs = "\n".join(ln for ln in board.splitlines() if re.match(r"^\s*ref:", ln))
+    if match is None or not refs:
+        return shaped
+    rows: list[tuple[str, str]] = []
+    for line in match.group(2).splitlines():
+        row = _BD_ROW_RE.match(line)
+        if row:
+            rows.append((row.group(1), line))
+
+    def mine(bead_id: str) -> bool:
+        parts = bead_id.split(".")
+        return any(_named_exactly(".".join(parts[:n]), refs) for n in range(len(parts), 0, -1))
+
+    kept = [line for bead_id, line in rows if mine(bead_id)]
+    if not kept:
+        return shaped
+    note = (f"({len(kept)} of the {len(rows)} in-progress beads listed: the ones this session's board entry "
+            "names; the others are not named on the board, which may include a bead claimed since it was written)")
+    body = "\n".join([*kept, note]) + "\n\n"
+    return shaped[: match.start(2)] + body + shaped[match.end(2):].lstrip("\n")
+
+
 def _written_age(text: str, now: datetime | None = None) -> float | None:
     """Seconds since the checkpoint's own ``written:`` stamp, or ``None`` when it is missing,
     unparseable, in the future beyond clock skew, or older than the freshness window.
@@ -347,11 +434,14 @@ def run_pre(payload: dict) -> None:
     started = time.monotonic()
     trigger = str(payload.get("trigger") or "unknown")[:32]
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    name = _session_name(session_id)
+    worktree = _session_worktree(name, cwd)
+    if worktree:
+        cwd = worktree
 
     state, error = _run_nx(["command-context", "continuation"], cwd, _NX_TIMEOUT_S)
     if error:
         _log("WARNING", f"pre: {error}")
-    name = _session_name(session_id)
     board = ""
     board_error: str | None = None
     if name:
@@ -371,6 +461,10 @@ def run_pre(payload: dict) -> None:
     ]
     if name:
         parts.append(f"{_NAME_LINE}{name}")
+    if worktree:
+        parts.append(f"- worktree: {worktree}")
+    elif name:
+        parts.append(f"- worktree: none named {name}; the working state is the launch directory's")
     parts.append("")
     if name:
         parts.append(f"## Threads board entry ({_BOARD_PROJECT}/{name})\n")
@@ -379,7 +473,7 @@ def run_pre(payload: dict) -> None:
         else:
             parts.append(f"[no board entry: {board_error or 'empty'}]\n")
     parts.append("## Working state\n")
-    shaped = _shape_state(state)
+    shaped = _filter_in_progress(_shape_state(state), board)
     if shaped:
         parts.append(_cap(shaped).rstrip() + "\n")
     if error:

@@ -4,13 +4,16 @@ package dev.nexus.service.db;
 
 import dev.nexus.service.NexusService;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.ReadOnlyProbeTemplate;
 import dev.nexus.service.tuples.TemplateRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.io.TempDir;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.util.HexFormat;
 import java.util.Map;
@@ -32,11 +35,12 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
  * "never started" from "started and undone", and only the former keeps the guarantee
  * when someone later moves the signal or splits the transaction.
  *
- * <p>Templates used, both loaded at boot from {@code service/src/main/resources/tuples/
- * templates/}: {@code mailbox/<address>} is {@code id_from: keys+nonce} with
- * {@code take.enabled}, so it can be both request and reply target;
- * {@code ledger/<session_id>} is {@code id_from: keys} with take disabled, which makes
- * it the natural probe for the keys-only reply-target refusal.
+ * <p>Templates used: {@code mailbox/<address>}, loaded at boot from {@code service/src/main/
+ * resources/tuples/templates/}, is {@code id_from: keys+nonce} with {@code take.enabled}, so
+ * it can be both request and reply target; {@code probe-ro/<session_id>} (a test-only
+ * template, {@link ReadOnlyProbeTemplate}, with the shape the retired ledger had) is
+ * {@code id_from: keys} with take disabled, which makes it the natural probe for the
+ * keys-only reply-target refusal.
  *
  * <p>No call-order test. RDR-206 was amended (1c8f109da) to drop the claim that
  * {@code consumeClaim} must run before {@code writeOut}: they share one transaction, so
@@ -57,7 +61,7 @@ class TupleAckWithReplyTest {
     TupleRepository repo;
 
     @BeforeAll
-    void startAll() throws Exception {
+    void startAll(@TempDir Path extraTemplateDir) throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
@@ -74,7 +78,8 @@ class TupleAckWithReplyTest {
         svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
 
         tenantScope = new TenantScope(svcDs);
-        registry = TemplateRegistry.loadAtBoot(null, null, NexusService.SWEEP_INTERVAL_HOURS * 3600L);
+        registry = TemplateRegistry.loadAtBoot(ReadOnlyProbeTemplate.writeTo(extraTemplateDir).toString(), null,
+                NexusService.SWEEP_INTERVAL_HOURS * 3600L);
         repo = new TupleRepository(tenantScope, registry);
     }
 
@@ -369,25 +374,25 @@ class TupleAckWithReplyTest {
         String claimId = requestAndClaim(answerer, "worker-1");
         String session = addr("session");
 
-        // ledger/<session_id> is id_from: keys. computeId would IGNORE the nonce, so two
-        // replies to the same ledger keys would collide on one id and out's refire clamp
+        // probe-ro/<session_id> is id_from: keys. computeId would IGNORE the nonce, so two
+        // replies to the same probe-ro keys would collide on one id and out's refire clamp
         // would silently discard the second one's body -- the exact failure class RDR-206
         // exists to close, which is why this is refused rather than merely documented.
         //
-        // body is null, not a literal string (bead nexus-r7xao): ledger/<session_id>'s
+        // body is null, not a literal string (bead nexus-r7xao): probe-ro/<session_id>'s
         // own max_body_bytes is 0, so a non-empty body would trip TooLarge (a SIZE check,
         // run before the existing schema validation this test targets) before ever
         // reaching the id_from=keys+nonce check below -- null keeps this test isolated to
         // the ONE thing it is about.
         var keysOnly = new TupleRepository.ReplySpec(
-                "ledger/" + session, Map.of("agent_id", "a1", "kind", "report"),
+                ReadOnlyProbeTemplate.PREFIX + session, Map.of("agent_id", "a1", "kind", "report"),
                 Map.of("agent_type", "developer"), null, null);
 
         assertThatExceptionOfType(SchemaViolationException.class)
                 .isThrownBy(() -> repo.ackWithReply(TENANT, claimId, "worker-1", keysOnly));
 
         assertThat(repo.subspaceStats(TENANT, "mailbox/" + answerer).claimed()).isEqualTo(1);
-        assertThat(rowCount("ledger/" + session)).as("no reply row").isEqualTo(0);
+        assertThat(rowCount(ReadOnlyProbeTemplate.PREFIX + session)).as("no reply row").isEqualTo(0);
     }
 
     // ── retry after a lost response ─────────────────────────────────────────
@@ -510,7 +515,7 @@ class TupleAckWithReplyTest {
      * a call violates both at once.
      *
      * <p>The 50-case `TupleRepositoryTest` pin did not catch it because no case combines
-     * the two violations: its ttl case uses the nonce-free ledger template and its
+     * the two violations: its ttl case uses the nonce-free probe-ro template and its
      * missing-nonce case passes ttl=null. This is that missing case. Swapping the two
      * checks back in `prepareOut` fails it.
      */

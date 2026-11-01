@@ -40,7 +40,7 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5009
+provisioned_tests = 5010
 tolerance_tests = 0
 # 4961 -> 5009 (nexus-ger02.10, 2026-10-31): +48, the cut-only suite (prose-cut). CI 41217739838 (243cf230e) counted
 # 5009 with nothing else new. Every one of the 48 drives the T2-backed path: tests/prose_edit/test_cut_only.py's
