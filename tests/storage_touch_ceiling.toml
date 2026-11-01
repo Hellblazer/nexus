@@ -40,8 +40,11 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5000
+provisioned_tests = 5011
 tolerance_tests = 0
+# 5000 -> 5011 (nexus-mtheb.1, 2026-11-01): +11, the new tests/mcp/test_t1_handoff_flush.py (module marked
+# t2_tenant): the handoff tick flushes flagged T1 rows to T2 and reads the old scope back, which needs a real
+# engine T1 and T2. Measured by CI 41357939836's fan-in (5011 at e598e4b3d), the only change in the count since 5000.
 # 4998 -> 5000 (nexus-qo7ie, 2026-11-01): +2 in tests/test_rdr_preamble.py (109 -> 111 by scripts/tenant_delta.py),
 # the PASSED-gate cases passed_gate_prior_findings_are_swept_only_where_fixed (test_regate_block_by_prior_gate_state)
 # and passed_round_three_gate_is_a_menu_not_a_split (test_rdr_fix_round_three_splits_ship_blockers_from_residuals);
