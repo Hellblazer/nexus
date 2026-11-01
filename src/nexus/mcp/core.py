@@ -6219,6 +6219,14 @@ def capturing_owner_lookups() -> Iterator[OwnerLookups]:
         _OWNER_LOOKUPS.reset(token)
 
 
+def owner_rows_for_chashes(chashes: list[str]) -> dict[str, list[dict]] | None:
+    """The live manifest rows owning each chash-shaped id in *chashes*, by chash, in one
+    ``chash_positions`` batch: ``{}`` when none is chash-shaped, ``None`` when the catalog
+    cannot answer. For a caller that holds chashes no ``store_get_many`` hydrated (the plan
+    runner's repaired evidence, nexus-z1d0l.1.3)."""
+    return _owner_rows_by_chash(list(chashes), [True] * len(chashes))
+
+
 #: Whether ``store_get_many(structured=True)`` reads each chunk's section type from its owners'
 #: manifest rows. On by default; a caller that holds every label already turns it off with
 #: :func:`without_owner_section_types` (nexus-sx1t0). With the source notes off as well, the call makes

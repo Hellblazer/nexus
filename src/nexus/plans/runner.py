@@ -2495,13 +2495,16 @@ def _with_evidence_source(
 
 
 def _single_owner(owner_rows: dict[str, list[dict]] | None, chash: str, collection: str | None) -> str | None:
-    """The one document owning *chash* (in *collection*, when a row names its collection), else ``None``:
-    no owner set, no owner, or several (a shared chash is ambiguous, never a guess)."""
+    """The one document owning *chash* (in *collection*, when the chunk's collection is known), else ``None``:
+    no owner set, no owner, or several (a shared chash is ambiguous, never a guess). With the chunk's
+    collection known, a row that names no collection (a pre-catalog-025 engine) is not counted: it could be
+    an owner in another collection. Owners are live documents (``chash_positions``); a tombstoned co-owner
+    does not make the chash ambiguous."""
     if not owner_rows:
         return None
     docs = list(dict.fromkeys(
         row["doc_id"] for row in owner_rows.get(chash, ())
-        if row.get("doc_id") and (not collection or not row.get("collection") or row["collection"] == collection)
+        if row.get("doc_id") and (not collection or row.get("collection") == collection)
     ))
     return docs[0] if len(docs) == 1 else None
 
@@ -2576,7 +2579,7 @@ def _with_repaired_owner_rows(
         return rows
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    fetched = mcp_core._owner_rows_by_chash(wanted, [True] * len(wanted))
+    fetched = mcp_core.owner_rows_for_chashes(wanted)
     if not fetched:
         return rows
     return {**(rows or {}), **fetched}
@@ -2828,8 +2831,11 @@ def _hydrate_operator_args(
             # Records only when the runner builds the items: a step that supplies its own keeps its own. A
             # verify step's records are the same ones, rendered into ``evidence`` (its claim stays the author's).
             _rows = owner_lookups.owner_rows if not _tumbler_ids and owner_lookups.asked else None
+            # the ids the hydration's own owner lookup covered: found ones only (a missing id was never asked)
+            _missing = {str(m) for m in (hydrated.get("missing") or [])} if isinstance(hydrated, dict) else set()
             _rows = _with_repaired_owner_rows(
-                _rows, non_empty, _supp, asked=() if _rows is None else [str(i) for i in id_list_raw],
+                _rows, non_empty, _supp,
+                asked=() if _rows is None else [str(i) for i in id_list_raw if str(i) not in _missing],
             )
             _records = _check_records_for(non_empty, _idents, _rs if _rs_merge else None, _supp, _rows)
             args[_witness_arg] = _render_check_items(non_empty, _records)
@@ -2919,7 +2925,10 @@ def _hydrate_operator_args(
             note_reducer_input(value)  # nexus-jypmj.1.8: the explicit-inputs reducer input, after merge and cap
             if target_key == "items":
                 if resolved_tool == "operator_check" and value and all(isinstance(v, str) for v in value):
-                    _records = _check_records_for(value, {}, active_reserved_stream(), active_supplement())
+                    _records = _check_records_for(
+                        value, {}, active_reserved_stream(), active_supplement(),
+                        _with_repaired_owner_rows(None, value, active_supplement(), asked=()),
+                    )
                     args[_EVIDENCE_RECORDS_KEY] = _records
                     value = _render_check_items(value, _records)
                 else:
@@ -2980,7 +2989,10 @@ def _hydrate_operator_args(
     ) and isinstance(args.get("items"), list):
         _listed_items = args["items"]
         if resolved_tool == "operator_check" and _listed_items and all(isinstance(v, str) for v in _listed_items):
-            _records = _check_records_for(_listed_items, {}, active_reserved_stream(), active_supplement())
+            _records = _check_records_for(
+                _listed_items, {}, active_reserved_stream(), active_supplement(),
+                _with_repaired_owner_rows(None, _listed_items, active_supplement(), asked=()),
+            )
             args[_EVIDENCE_RECORDS_KEY] = _records
             args["items"] = _render_check_items(_listed_items, _records)
         else:

@@ -841,6 +841,7 @@ class TestSharedChashScenario:
         item = _bound_item(args)
         assert (item["state"], item["tumbler"], item["chash"], item["collection"]) == ("ambiguous", None, X, COLL)
         assert item["span"] is not None  # the quote is in the text; only the owning document is unknown
+        assert not {"section_title", "section_type"} & set(item)
 
     def test_the_collection_disambiguates_owners_in_different_collections(self) -> None:
         catalog = _CountingCatalog(
@@ -913,3 +914,50 @@ class TestRepairedItemOwnerRows:
             _, args = runner._hydrate_operator_args("check", {"ids": ["1.1.1"], "check_instruction": "c"})
         rec = next(r for r in args["_evidence_records"] if r.text == "repair body")
         assert rec.tumbler == "1.1.5"
+
+    def test_a_repaired_chash_that_is_a_missing_hydrated_id_is_still_asked(self) -> None:
+        # Z is in the step's ids but not in T3 (missing), so the hydration's owner lookup never asked about it
+        catalog = _CountingCatalog([_plain("1.1.1"), _plain("1.1.5")], [_position(X, "1.1.1"), _position(Z, "1.1.5")])
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.9"),))
+        _, args = _supplement_hydrate(catalog, {X: {"content": "plan body"}}, [X, Z], supp)
+        rec = next(r for r in args["_evidence_records"] if r.text == "repair body")
+        assert rec.tumbler == "1.1.5"
+
+    def test_a_repair_lookup_that_fails_after_a_good_hydration_leaves_it_unbound(self) -> None:
+        class _FailsSecond(_CountingCatalog):
+            def chash_positions(self, chashes):
+                if self.count("chash_positions") >= 1:
+                    self.calls.append(("chash_positions", tuple(chashes)))
+                    raise RuntimeError("second lookup down")
+                return super().chash_positions(chashes)
+
+        catalog = _FailsSecond([_plain("1.1.1"), _plain("1.1.5")], [_position(X, "1.1.1"), _position(Z, "1.1.5")])
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.5"),))
+        _, args = _supplement_hydrate(catalog, {X: {"content": "plan body"}}, [X], supp)
+        recs = {r.text: r for r in args["_evidence_records"]}
+        assert recs["plan body"].tumbler == "1.1.1"  # the hydration's own lookup worked
+        assert (recs["repair body"].tumbler, recs["repair body"].chash) == (None, Z)
+        assert catalog.count("chash_positions") == 2
+
+
+class TestRepairedOwnerRowsOnThePassthroughPaths:
+    """The explicit ``inputs`` and listed ``items`` check paths merge the supplement too (critique of 3b239c093)."""
+
+    def _run(self, args):
+        catalog = _CountingCatalog([_plain("1.1.5")], [_position(Z, "1.1.5")])
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.9"),))
+        with supplement_scope(supp), patch("nexus.mcp.core._get_catalog", return_value=catalog):
+            _, out = runner._hydrate_operator_args("check", {"check_instruction": "c", **args})
+        return next(r for r in out["_evidence_records"] if r.text == "repair body")
+
+    def test_the_explicit_inputs_path_binds_a_one_owner_repair(self) -> None:
+        assert self._run({"inputs": ["plan text"]}).tumbler == "1.1.5"
+
+    def test_the_listed_items_path_binds_a_one_owner_repair(self) -> None:
+        assert self._run({"items": ["repair body", "plan text"]}).tumbler == "1.1.5"
+
+
+def test_an_owner_row_naming_no_collection_does_not_bind_a_chunk_whose_collection_is_known() -> None:
+    rows = {Z: [{"chash": Z, "doc_id": "1.1.5"}]}  # a pre-catalog-025 row: no collection
+    assert runner._single_owner(rows, Z, COLL) is None
+    assert runner._single_owner(rows, Z, None) == "1.1.5"
