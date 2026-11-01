@@ -807,8 +807,16 @@ documents require the parent document/collection or an `ambiguous` state.
   `trace` into `_run_validation_sample`; this is distinct from `nx_answer`'s
   `trace` argument and needs no new configuration file. `trace=False` redacts
   free text and retains only permitted ids/states/counts.
-  Retention and deletion follow the existing validation-output lifecycle;
-  there is no new service or database table.
+  No validation-output lifecycle existed before this RDR. Both files,
+  `aspect_validation_failures.jsonl` and `aspect_validation.jsonl`, are
+  owned by the local user and written only by `nx enrich aspects`; each
+  keeps its newest 10,000 complete rows, pruned at the end of every
+  validation run under a sibling lock file by an atomic temp-file replace
+  of the resolved regular file. `--no-validation-trace` redacts free text
+  in both files. Deleting a file is the user's act; there is no new verb,
+  service or database table. Row status and reason codes are the checked
+  table `src/nexus/tables/aspect-validation-outcomes.toml`. Full policy and
+  row schema: T2 `nexus_rdr/189-validation-retention-policy`.
 - **Requires an RDR-088 amendment** and synchronized updates to
   `operator_requests.py`, `core.py`, `bundle.py`, hydration, and the documented
   return contracts. Compatibility tests cover direct/bundled operation,
@@ -1066,8 +1074,9 @@ under the fallback matrix.
   P2 must land the explicit family-review workflow above rather than calling
   a retired skill. The residual cost is the promotion signal: a family's
   defects are silent, so a human stays in the loop.
-- **Blast radius**: P1 touches a shipped RDR-088 contract with a live
-  consumer and three documented surfaces.
+- **Blast radius**: P1 touches a shipped RDR-088 contract with two live
+  consumers (enrich validation and the RDR-232 coverage ledger) and three
+  documented surfaces.
 
 ## Test Plan
 
@@ -1182,8 +1191,8 @@ through the P2 review workflow. The scope ladder supplies its governance
 concept; no current executable plan-promotion command is assumed. Versioned
 run summaries use RDR-232's
 migration, import/export, readback, and deletion lifecycle. `aspect_validation.jsonl`
-uses its separate `--validation-all-out` path and the existing local
-validation-output retention lifecycle, with
+uses its separate `--validation-all-out` path and the prune-on-write
+retention bound P1 defines (shared with the legacy failures file), with
 redaction and deletion covered by tests. No new database table, collection,
 service, credential, or independent telemetry write is proposed.
 
@@ -1418,3 +1427,10 @@ RDR-232 safeguards remain.
   the disclosed-gaps notice, counts as success, blocks growth with its own
   flag and stays outside `NON_ANSWER_SHAPES`; only `unavailable` is a failure.
   Status unchanged.
+- 2026-11-01: P1 gate findings resolved (nexus-z1d0l.1.1, nexus-z1d0l.1.5;
+  Sam's decisions, nexus-mkeh6). P1 no longer claims a validation-output
+  lifecycle that did not exist: both validation files keep their newest
+  10,000 rows under a prune-on-write policy, and `--no-validation-trace`
+  redacts both. The Blast radius names the RDR-232 coverage ledger as a
+  second consumer. The witness schema is RDR-088's Witness Schema v1
+  amendment. Status unchanged.

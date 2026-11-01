@@ -37,8 +37,9 @@ unblock multi-hop query classes we currently cannot express.
 
 ## Amendment Log
 
-**2026-11-01, one versioned witness schema for check and verify (PROPOSED,
-awaiting Sam's approval; bead nexus-z1d0l.1.1).** RDR-189 P1 (accepted
+**2026-11-01, one versioned witness schema for check and verify (approved
+by Sam 2026-11-01 with the proposed answers to all seven open decisions,
+bead nexus-mkeh6; drafted under nexus-z1d0l.1.1).** RDR-189 P1 (accepted
 2026-10-24) requires this amendment before `operator_requests.py`,
 `core.py`, `bundle.py`, plan hydration or any documented return contract
 changes. The original text is kept where it stands; each edit point carries
@@ -299,7 +300,7 @@ Single-claim targeted variant of Check. No current Nexus analog.
 as a discrete operator step; verification must be folded into ad-hoc
 `operator_summarize` or `operator_compare` calls, losing composability.
 
-> **Amended 2026-11-01 (proposed, see Amendment Log (i)).** Verify's evidence
+> **Amended 2026-11-01 (see Amendment Log (i)).** Verify's evidence
 > is structured evidence items shared with check, not bare-string
 > `citations`; § Witness Schema v1.
 
@@ -563,7 +564,7 @@ supporting). Schema enforced via `claude_dispatch`.
 Single-claim variant. `citations` returns span anchors from `evidence`
 that ground the verdict.
 
-> **Amended 2026-11-01 (proposed, see Amendment Log (i), (ii)).** Both operators
+> **Amended 2026-11-01 (see Amendment Log (i), (ii)).** Both operators
 > return `schema_version: 1` payloads with host-bound evidence items;
 > verify's `citations` is host-derived for one deprecation window;
 > § Witness Schema v1.
@@ -740,7 +741,7 @@ Add operator to the DAG operator registry. Unit test: plan with
 
 Extract `{item_id, quote, role}` schema into a shared definition.
 
-> **Amended 2026-11-01 (proposed, see Amendment Log (iii)).** The shared
+> **Amended 2026-11-01 (see Amendment Log (iii)).** The shared
 > definition is the model-facing item and verify uses it too; the host
 > returns the bound item with `state`, `span` and source fields;
 > § Witness Schema v1.
@@ -788,7 +789,7 @@ None. All additions use `claude_dispatch` (existing) and existing Python stdlib.
 - **Scenario**: `operator_check` called with 3 papers that agree on a claim — **Verify**: `ok=True`, evidence list has ≥1 supporting quote per paper, no contradicts.
 - **Scenario**: `operator_check` called with 3 papers where 1 contradicts — **Verify**: `ok=False`, evidence includes the contradicting quote with `role=contradicts`.
 - **Scenario**: `operator_verify` on a grounded claim — **Verify**: `verified=True` with citation spans.
-  *Amended 2026-11-01 (proposed, Amendment Log (iv)):* `verified=True`, at least one `supports` item in state `bound` with a non-null `span`, `requires_review=false`.
+  *Amended 2026-11-01 (Amendment Log (iv)):* `verified=True`, at least one `supports` item in state `bound` with a non-null `span`, `requires_review=false`.
 - **Scenario**: `plan_match` with an ambiguous 0.55 top-1 confidence, caller `min_confidence=0.50`, and rerank on — **Verify**: either the rerank clears the 0.90 gate and the plan is selected, or the rerank fails and `NoMatch` is returned (fall through to dynamic generation); never returned as a weak match between these two outcomes.
 - **Scenario**: `plan_match` with caller `min_confidence=0.70` and rerank on — **Verify**: rerank is a documented no-op (top-1 must land ≥ 0.70 on its own merits); the ceiling guard in the pseudocode prevents an empty band from firing rerank.
 
