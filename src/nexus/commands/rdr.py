@@ -2467,8 +2467,13 @@ def _preamble_regate_block(
     # regression pin (nexus-yjf5l.3) is byte-for-byte on that path.
     exempt_clause = (
         " that is not a recorded residual (dispositioned at accept, not swept as a survivor here)"
-        if residual_keys else ""
+        if residual_keys
+        else " that a fix commit closed (a finding of this PASSED gate the user chose not to fix "
+        "stays in the critique record and is not swept)"
+        if outcome == "PASSED"
+        else ""
     )
+    brief_scope = "each swept prior finding" if outcome == "PASSED" and not residual_keys else "each prior finding"
     lines.extend([
         "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding"
         f"{exempt_clause}, sweep every "
@@ -2476,7 +2481,7 @@ def _preamble_regate_block(
         "phrasing AND the corrected one; every occurrence must agree. A "
         "fact lives in Problem Statement, Research Findings, Technical Design and the "
         "Implementation Plan at once, and the last two are where survivors hide. Brief "
-        "the critic to verify each prior finding closed everywhere, then run a full-document "
+        f"the critic to verify {brief_scope} closed everywhere, then run a full-document "
         "consistency pass; re-read related RDRs only if the Relationship section changed.",
         "",
     ])
@@ -3497,7 +3502,7 @@ _FIX_RULES: tuple[str, ...] = (
     "needs a census of the whole surface, captured in the research entry as an enumeration.",
     "Sweep every site in the finding's Sites: list; a fact lives in Problem Statement, "
     "Research Findings, Technical Design and the Implementation Plan at once.",
-    "From round 3, the fix closes only findings marked `Ship-blocker: yes`; every other "
+    "At a BLOCKED gate from round 3, the fix closes only findings marked `Ship-blocker: yes`; every other "
     "Critical and Significant is a residual, recorded and dispositioned at accept — never "
     "re-gated for this change.",
     "A Criterion 6 readability WARN is never closed inside a fix commit.",

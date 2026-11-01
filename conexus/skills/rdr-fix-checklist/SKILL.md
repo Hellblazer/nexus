@@ -42,7 +42,7 @@ Prose register: `$RDR_DIR/REGISTER.md`, falling back to `$CLAUDE_PLUGIN_ROOT/res
 - Every clause a fix adds carries a tool-produced quote from its source or the marker "inferred, not read".
 - A count or a universal (never / always / only / nothing / every / the one / all) needs a census of the whole surface, captured in the research entry as an enumeration; two sites that agree are not a source.
 - The research entry is written before the edit; its `commits:` field is filled after the commit exists.
-- From round 3, the fix closes only findings marked `Ship-blocker: yes`; every other Critical and Significant is a residual, recorded and dispositioned at accept — never re-gated for this change.
+- At a BLOCKED gate from round 3, the fix closes only findings marked `Ship-blocker: yes`; every other Critical and Significant is a residual, recorded and dispositioned at accept — never re-gated for this change.
 - A Criterion 6 readability WARN is never closed inside a fix commit.
 - For every identifier whose meaning, bound, or owning phase this change alters (a column, a caller-supplied parameter, a typed error, a setting, a phase or step number), list every other occurrence in the file, and every check, bound or rule stated over the value it names under any other name, and say whether each still holds.
 - For every check, bound or rule this change adds, name the parameter, column or setting it constrains, and for every parameter, column or setting this change adds or alters, name every check, bound or rule that constrains it, whether or not they share a name, and a pair the previous check already named is not named again.

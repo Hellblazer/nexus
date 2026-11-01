@@ -1138,7 +1138,9 @@ _REGATE_STATE_CASES = [
          ),
      },
      "has": ["Prior findings of a PASSED gate (sweep only those a fix commit closed;",
-             "ghost sweep omits topic_assignments"],
+             "ghost sweep omits topic_assignments",
+             "for every prior finding that a fix commit closed (a finding of this PASSED gate",
+             "verify each swept prior finding closed everywhere"],
      "lacks": ["each must be closed EVERYWHERE"],
      "ordered": []},
     # The Sites: line is what Layer 0 sweeps.
@@ -1714,7 +1716,9 @@ def test_rdr_fix_round_three_splits_ship_blockers_from_residuals(rdr_env, monkey
     })
     out = _preamble("rdr-fix", "--", "204").output
     if case.get("passed"):
-        _assert_output(name, out, has=["Gate round 4"], lacks=[_FIX_SHIP, _FIX_RESID], ordered=case["ordered"])
+        _assert_output(name, out, has=["Gate round 4", "At a BLOCKED gate from round 3"],
+                       lacks=[_FIX_SHIP, _FIX_RESID, "\n- From round 3, the fix closes only"],
+                       ordered=case["ordered"])
         return
     _assert_output(name, out, has=["Gate round 4", _FIX_SHIP, _FIX_RESID], ordered=case["ordered"])
     if case["none_between"]:
