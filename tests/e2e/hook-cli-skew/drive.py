@@ -43,14 +43,14 @@ import json
 import os
 import shutil
 
-#: Entries every driven hooks.json must start at minimum: the 18 command-tier
+#: Entries every driven hooks.json must start at minimum: the 19 command-tier
 #: entries of conexus/hooks/hooks.json (RDR-228 Phase 1's 15, plus the three
 #: compact_checkpoint entries on PreCompact, PostCompact and compact-only
-#: SessionStart, nexus-3lqxv; it was also 18 while the nexus-i93tz integrity
-#: check was registered on Pre/Post/PostToolUseFailure Bash, removed again
-#: 2026-10-25). A stated floor, not a derived one, on purpose: a derived count
-#: falls with the manifest.
-DEFAULT_MIN_EXECUTED = 18
+#: SessionStart, nexus-3lqxv, plus the SubagentStop T1 nudge, nexus-mtheb.3; it
+#: was 18 while the nexus-i93tz integrity check was registered on
+#: Pre/Post/PostToolUseFailure Bash, removed again 2026-10-25). A stated floor,
+#: not a derived one, on purpose: a derived count falls with the manifest.
+DEFAULT_MIN_EXECUTED = 19
 
 #: What the launcher writes when it finds no CLI (_cli_lookup.missing_note).
 _MISSING_MARK = "is not installed"
