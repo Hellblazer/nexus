@@ -453,8 +453,8 @@ jobs:
       # tests/hooks/test_compact_checkpoint.py (the 0600 mode test and the end-to-end hooks.json
       # test, whose stand-in is a POSIX executable), and 3 nexus-75w5d unattended-marker tests
       # placed in test_version_lockstep_action.py's POSIX-skipped TestBackgroundUpgrade class
-      # although nothing in them is POSIX-specific (nexus-qowvl follow-ups move them and port
-      # the end-to-end test). Ceiling the measured skips plus the margin of 13 (197). The
+      # although nothing in them is POSIX-specific; the next commit moves the two that use no
+      # shebang helper out of that class (nexus-qowvl). Ceiling the measured skips plus the margin of 13 (197). The
       # recorded 90% floor (3229) no longer meets the 6% cap (193 < 197), so the floor rises to
       # 3290, about 92% of the passes (3290 * 6 // 100 = 197; 3284 is the lowest such floor).
       - name: Non-vacuity floor
