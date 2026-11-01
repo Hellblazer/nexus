@@ -38,14 +38,15 @@ def test_the_web_page_shows_the_default_sizes_the_slim_flag_and_the_macos_floor(
     assert text.count(f"<td>{CLI}</td>") == 2
     for stale in STALE_TABLE + ("~1.3 GB", "~700 MB", "~580 MB", "about 0.7 GB down"):
         assert stale not in text, f"web/index.html still quotes {stale!r}"
-    assert "~0.8 GB" in text
     assert "include PDF support" in text
-    assert "measured on 7.89.0 on macOS and Linux (2026-10-29); Windows was not measured" in text
+    # The page carries one approximate size row. Version, date and measurement narrative and the
+    # other volume figures (memory, cache, GPU libraries, the .djl.ai cleanup) stay off it.
+    for gone in ("7.89.0", "2026-10-29", "0.83 GB", "0.27 GB less", "4.5 GB", "4.3 GB", "4.8 GB", "2.3 GB", "~0.8 GB", "~0.34 GB"):
+        assert gone not in text, f"web/index.html still says {gone!r}"
+    assert "Windows sizes have not been measured" in text
     for stale in STALE_PROVENANCE:
         assert stale not in text, f"web/index.html still says {stale!r}"
-    assert "about 2.1 GB on Linux and 1.9 GB on macOS" in text and "0.83 GB" in text
-    assert "0.27 GB less" in text and "1.0 GB less on disk on macOS and 1.3 GB on Linux" in text
-    assert text.count("<code>--slim</code>") >= 3, "the flag lists (macOS/Linux and the Windows script block) must name --slim"
+    assert text.count("<code>--slim</code>") >= 3, "the size note and both flag lists (macOS/Linux, Windows script block) must name --slim"
     assert "macOS 14 or later" in text
 
 
