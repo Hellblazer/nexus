@@ -21,7 +21,12 @@ session's ``threads`` board entry (looked up by the session's exact name; the ju
 half of a session lives there and a hook cannot write it), the branch and HEAD, the
 in-progress beads, the uncommitted files, the open PRs and the recent commits from
 ``nx command-context continuation``. Ready beads and memory titles are not kept: the
-SessionStart group that runs on the same event already injects them.
+SessionStart group that runs on the same event already injects them. Continuation runs
+in the worktree named after the session when the launch directory's repository has one
+(the payload ``cwd`` is the launch directory, usually the shared primary checkout), and
+the in-progress list keeps only the beads the board entry names, because every session
+claims beads under one assignee (both measured on halcyon's first live compaction,
+2026-11-01).
 
 POST appends the ``compact_summary`` to the same file and logs one warning line to
 ``<config>/logs/hook.log`` when the summary names none of the session's board title,
@@ -78,6 +83,8 @@ def _load_siblings() -> None:
 _NX_TIMEOUT_S = 25.0
 #: Bound on the board lookup, and the budget the whole pre run spends on ``nx`` calls.
 _BOARD_TIMEOUT_S = 6.0
+#: Bound on ``git worktree list``, run before the continuation call.
+_GIT_TIMEOUT_S = 3.0
 _TOTAL_BUDGET_S = 32.0
 #: A checkpoint whose own ``written:`` stamp is older than this is not injected, and post
 #: does not append to it: it belongs to an earlier compaction.
@@ -318,6 +325,63 @@ def _board_entry(name: str, cwd: str | None, timeout: float) -> tuple[str, str |
     return _run_nx(["memory", "get", entry_id, "--project", _BOARD_PROJECT], cwd, left)
 
 
+def _git_worktrees(cwd: str | None, timeout: float) -> list[str]:
+    """Paths of the worktrees of the repository at *cwd* (``git worktree list``). Never raises."""
+    if not cwd or not os.path.isdir(cwd):
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "worktree", "list", "--porcelain"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        _log("WARNING", f"pre: `git worktree list` failed: {type(exc).__name__}: {exc}")
+        return []
+    if result.returncode != 0:
+        return []
+    return [ln[len("worktree "):].strip() for ln in result.stdout.splitlines() if ln.startswith("worktree ")]
+
+
+def _session_worktree(name: str | None, cwd: str | None) -> str | None:
+    """The worktree named after the session (``../nexus-wt/<session>``), or ``None``.
+
+    The payload's ``cwd`` is where the session was launched, which for a session that works
+    in its own worktree is the shared primary checkout: its branch and HEAD are not the
+    session's. Only a worktree whose directory name is exactly the session name counts.
+    """
+    if not name:
+        return None
+    for path in _git_worktrees(cwd, _GIT_TIMEOUT_S):
+        if Path(path).name == name and os.path.isdir(path):
+            return path
+    return None
+
+
+def _filter_in_progress(shaped: str, board: str) -> str:
+    """Keep only the in-progress beads the board entry names (or their children).
+
+    Every session claims beads under one assignee, so the in-progress list is everyone's.
+    The board entry's ``ref:`` lines are this session's own record of its beads. With no
+    bead id on the board the list is left whole.
+    """
+    own = set(_BEAD_ID_RE.findall(board))
+    if not own:
+        return shaped
+    match = re.search(r"(?ms)^(### In-progress beads[^\n]*\n)(.*?)(?=^### |\Z)", shaped)
+    if match is None:
+        return shaped
+    rows = [ln for ln in match.group(2).splitlines() if _BEAD_ID_RE.search(ln)]
+
+    def mine(line: str) -> bool:
+        return any(i == b or i.startswith(b + ".") for i in _BEAD_ID_RE.findall(line)[:1] for b in own)
+
+    kept = [ln for ln in rows if mine(ln)]
+    note = (f"({len(kept)} of {len(rows)} in-progress beads: the ones this session's board entry names; "
+            "the rest are other sessions')")
+    body = "\n".join([*kept, note]) + "\n\n"
+    return shaped[: match.start(2)] + body + shaped[match.end(2):].lstrip("\n")
+
+
 def _written_age(text: str, now: datetime | None = None) -> float | None:
     """Seconds since the checkpoint's own ``written:`` stamp, or ``None`` when it is missing,
     unparseable, in the future beyond clock skew, or older than the freshness window.
@@ -347,11 +411,14 @@ def run_pre(payload: dict) -> None:
     started = time.monotonic()
     trigger = str(payload.get("trigger") or "unknown")[:32]
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    name = _session_name(session_id)
+    worktree = _session_worktree(name, cwd)
+    if worktree:
+        cwd = worktree
 
     state, error = _run_nx(["command-context", "continuation"], cwd, _NX_TIMEOUT_S)
     if error:
         _log("WARNING", f"pre: {error}")
-    name = _session_name(session_id)
     board = ""
     board_error: str | None = None
     if name:
@@ -371,6 +438,8 @@ def run_pre(payload: dict) -> None:
     ]
     if name:
         parts.append(f"{_NAME_LINE}{name}")
+    if worktree:
+        parts.append(f"- worktree: {worktree}")
     parts.append("")
     if name:
         parts.append(f"## Threads board entry ({_BOARD_PROJECT}/{name})\n")
@@ -379,7 +448,7 @@ def run_pre(payload: dict) -> None:
         else:
             parts.append(f"[no board entry: {board_error or 'empty'}]\n")
     parts.append("## Working state\n")
-    shaped = _shape_state(state)
+    shaped = _filter_in_progress(_shape_state(state), board)
     if shaped:
         parts.append(_cap(shaped).rstrip() + "\n")
     if error:

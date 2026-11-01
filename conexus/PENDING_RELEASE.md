@@ -54,5 +54,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/orchestration/reference.md` (nexus-qo7ie.1): the T2 ttl rule says a gate record is written with no `ttl` and with gate tags, and the phase-close rollup sets its TTL (RDR-209 Amendment A1), in place of passing a ttl for review rounds, which the agent definitions contradicted.
 - `conexus/skills/substantive-critique/SKILL.md` (nexus-qo7ie.1): the T2 critique record carries the gate tags and leaves its TTL to the phase-close rollup.
 - `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-qo7ie.1): the T2 row says omitting `ttl` is permanent (nexus-473mx), in place of the stale 30-day default.
+- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-gy317): PreCompact runs the continuation in the worktree named after the session (the payload cwd is the launch checkout, usually the shared primary) and keeps only the in-progress beads the session's board entry names, since every session claims under one assignee.
 
 ## Deferred to the next client release
