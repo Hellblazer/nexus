@@ -1591,12 +1591,22 @@ _FIX_STATE_CASES = [
              "dispatched against the same commit in parallel",
              # nexus-qo7ie: the fix-loop rules Sam adopted 2026-11-01.
              "fix only the findings the user names", "adds no new design",
-             "Run one fix check per fix round"],
+             "Run one fix check per fix round", "#### Findings to fix (each at every site named)"],
      "has_ci": ["no fix-check record yet"], "lacks": ["- fine"]},
     {"name": "existing_fix_check_record_is_reported", "scenario": "gated_fixed", "boom": False,
      "entries": {"204-gate-latest": 'outcome: "BLOCKED"\ncommit: {gated}\n',
                  "204-fix-check-{fixed}": "verdict: CLEAN\n"},
      "has": ["Fix-check record `204-fix-check-{fixed}` exists"], "has_ci": [], "lacks": []},
+    # nexus-qo7ie: after a PASSED gate the findings are a menu, fixed only when the
+    # user names them (FIX_LOOP_RULES rule 1); a BLOCKED gate keeps "to fix".
+    {"name": "passed_gate_findings_are_a_menu", "scenario": "gated_fixed", "boom": False,
+     "entries": {
+         "204-gate-latest": ('outcome: "PASSED"\ndate: "2026-09-07"\ncommit: {gated}\n'
+                             "critique: nexus_rdr/204-gate-critique-2026-09-07h\n"),
+         "204-gate-critique-2026-09-07h": _FIX_CRITIQUE,
+     },
+     "has": ["#### Findings (fix only those the user names)", "model_version never parsed"],
+     "has_ci": [], "lacks": ["Findings to fix"]},
     {"name": "past_the_gate_is_named", "scenario": "gated_accepted", "boom": False,
      "entries": {"204-gate-latest": 'outcome: "PASSED"\ncommit: {gated}\n'},
      "has": ["past the gate", "accepted", "204-fix-check-<sha>", "bead id", "needs none"], "has_ci": [],
