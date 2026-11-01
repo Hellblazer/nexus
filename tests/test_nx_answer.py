@@ -1222,8 +1222,15 @@ class TestPlannerToolReference:
 # ── Plan-miss planner (uses claude_dispatch, no pool) ─────────────────────────
 
 
-@pytest.mark.t2_tenant
 class TestPlanMissPlanner:
+    """No tenant (nexus-zlzg0): the plan-miss path reaches storage only through ``_get_collection_names``,
+    the routing seam ``nexus.mcp.core`` documents for tests; the planner prompt's collection hint is not
+    under test here."""
+
+    @pytest.fixture(autouse=True)
+    def _no_collection_names(self):
+        with patch("nexus.mcp.core._get_collection_names", return_value=[]):
+            yield
 
     @pytest.mark.asyncio
     async def test_plan_miss_dispatches_via_claude_dispatch(self):

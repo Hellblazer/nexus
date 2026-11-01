@@ -40,8 +40,14 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5015
+provisioned_tests = 4998
 tolerance_tests = 0
+# 5015 -> 4998 (nexus-zlzg0, 2026-11-01): -17. TestPlanMissPlanner (tests/test_nx_answer.py) drops its class
+# t2_tenant (8 tests) for an autouse patch of nexus.mcp.core._get_collection_names, its only storage reach; the seven
+# ids-hydration functions of TestHydrateInputsTranslation (tests/test_plan_run.py, 9 test items) drop theirs for a
+# None catalog, the empty set the runner already falls back to. Both modules on qwent under the guard in fail mode:
+# 402 passed, provisioned 103 -> 86. Assertions unchanged. test_rdr_fix_by_gate_state keeps its tenant (rdr_env
+# opens a live T2Database).
 # 5013 -> 5015 (nexus-z1d0l.1.6, 2026-11-01): tests/test_enrich_aspects.py 45 -> 47. TestValidationAllOutcomes keeps two
 # CLI tests that drive `nx enrich aspects` against the catalog fixture: test_the_cli_run_writes_both_named_files (the
 # --validation-out/--validation-all-out flags reach the run) and test_trace_flag_reaches_the_validation_sample (three

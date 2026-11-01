@@ -30,6 +30,17 @@ from tests._module_seam import patch_in
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def _catalog_unreachable():
+    """The ids-hydration tests patch ``store_get_many``; the only other storage reach on that path is
+    ``_resolve_non_evidentiary_chashes`` -> ``get_catalog()``. It returns ``None`` here, which the runner
+    maps to an empty exclusion set, the same set an empty real catalog gives, without a tenant (nexus-zlzg0)."""
+    from unittest.mock import patch
+
+    with patch("nexus.mcp_infra.get_catalog", return_value=None):
+        yield
+
+
 def _match(plan: dict, *, default_bindings: dict | None = None) -> "Match":  # noqa: F821
     """Build a ``Match`` from an inline plan dict."""
     from nexus.plans.match import Match
@@ -1539,7 +1550,7 @@ class TestHydrateInputsTranslation:
         assert tool == "operator_verify"
         assert args.get("inputs") == "stray"
 
-    @pytest.mark.t2_tenant
+    @pytest.mark.usefixtures("_catalog_unreachable")
     def test_verify_ids_hydrates_claim_and_evidence_not_inputs(self):
         """RDR-189 P1 (nexus-z1d0l.1.4): ``verify`` with ``ids`` used to fall through to
         ``inputs``, which ``operator_verify`` rejects, with ``evidence`` missing. It now
@@ -1631,7 +1642,7 @@ class TestHydrateInputsTranslation:
         assert tool == f"operator_{op}"
         assert args["items"] == already_json
 
-    @pytest.mark.t2_tenant
+    @pytest.mark.usefixtures("_catalog_unreachable")
     @pytest.mark.parametrize(
         "op, extra_kwarg",
         [
@@ -1668,7 +1679,7 @@ class TestHydrateInputsTranslation:
             assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
         assert args[key] == value
 
-    @pytest.mark.t2_tenant
+    @pytest.mark.usefixtures("_catalog_unreachable")
     def test_groupby_truncation_metadata_attached_when_cap_fires(self):
         """RDR-093 S-1 fix: when ``_OPERATOR_MAX_INPUTS=100`` cap fires
         for a groupby step, the runner stashes truncation metadata
@@ -1703,7 +1714,7 @@ class TestHydrateInputsTranslation:
         loaded = json.loads(args["items"])
         assert len(loaded) == _OPERATOR_MAX_INPUTS
 
-    @pytest.mark.t2_tenant
+    @pytest.mark.usefixtures("_catalog_unreachable")
     def test_groupby_no_truncation_metadata_when_below_cap(self):
         """When input is below the cap, no truncation metadata is
         attached. Runner-side wrapping is opt-in via the metadata
@@ -1724,7 +1735,7 @@ class TestHydrateInputsTranslation:
         assert tool == "operator_groupby"
         assert "_truncation_metadata" not in args
 
-    @pytest.mark.t2_tenant
+    @pytest.mark.usefixtures("_catalog_unreachable")
     def test_truncation_metadata_attaches_to_all_operators(self):
         """nexus-3j6b: the truncation-metadata mechanism originally
         scoped to operator_groupby (RDR-093 S-1) is generalised to
@@ -1768,7 +1779,7 @@ class TestHydrateInputsTranslation:
                 f"contract"
             )
 
-    @pytest.mark.t2_tenant
+    @pytest.mark.usefixtures("_catalog_unreachable")
     def test_filter_truncation_metadata_attached_when_cap_fires(self):
         """nexus-3j6b acceptance criterion: filter must surface
         truncation metadata. Tracks the same shape as groupby's
@@ -1794,7 +1805,7 @@ class TestHydrateInputsTranslation:
             "kept_count": _OPERATOR_MAX_INPUTS,
         }
 
-    @pytest.mark.t2_tenant
+    @pytest.mark.usefixtures("_catalog_unreachable")
     def test_extract_truncation_metadata_attached_when_cap_fires(self):
         """nexus-3j6b acceptance criterion: extract must surface
         truncation metadata. Extract uses the catch-all `inputs`
