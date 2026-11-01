@@ -11,6 +11,7 @@ Plugin version aligned with conexus 7.92.0. These plugin changes become live at 
 - `conexus/skills/substantive-critique/SKILL.md` (nexus-qo7ie.1): the T2 critique record carries the gate tags and leaves its TTL to the phase-close rollup.
 - `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-qo7ie.1): omitting `ttl` on a T2 write is permanent (nexus-473mx), not the stale 30-day default.
 - `prose-edit/agents/line-editor.md` (nexus-qo7ie.1): `omitClaudeMd: true`, since its brief carries everything it uses; one line carries the writing-register rule for a repo with no style sheet.
+- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-gy317): PreCompact runs the continuation in the worktree named after the session (the payload cwd is the launch checkout, usually the shared primary) and keeps the in-progress beads the `ref:` lines of the session's board entry name, since every session claims under one assignee; it leaves the list whole when nothing on the board matches or `bd` is unavailable.
 - `conexus/skills/mailbox/SKILL.md` (nexus-onjvw): the reply-in-ack paragraph's example of a keys-only target the engine refuses is `lock/<resource>`; the ledger template is retired.
 
 ## [7.91.1] - 2026-10-31
