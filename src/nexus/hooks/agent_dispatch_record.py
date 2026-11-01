@@ -66,6 +66,7 @@ def spawn(session_id: str, agent_id: str, agent_type: str, t1_puts: int) -> bool
         import subprocess  # noqa: PLC0415 — deferred: the nudge's import cost stays stdlib-light
         import warnings  # noqa: PLC0415 — deferred with subprocess
 
+        from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 — stdlib-only helper, deferred with subprocess
         from nexus.util.stable_cwd import detached_spawn_kwargs  # noqa: PLC0415 — stdlib-only helper, deferred with subprocess
 
         payload = json.dumps({
@@ -89,7 +90,7 @@ def spawn(session_id: str, agent_id: str, agent_type: str, t1_puts: int) -> bool
             attempts = [{"start_new_session": True}]
         for extra in attempts:
             try:
-                child = subprocess.Popen(argv, **common, **extra)
+                child = subprocess.Popen(argv_off_cwd(argv), **common, **extra)
             except (OSError, ValueError):
                 continue
             # Never waited on; drop the handle without Popen.__del__'s

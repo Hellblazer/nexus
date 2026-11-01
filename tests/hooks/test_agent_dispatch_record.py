@@ -287,3 +287,25 @@ def test_a_failing_child_writes_nothing(engine_env) -> None:
     assert proc.returncode == 0
     assert proc.stdout == ""
     assert proc.stderr == ""
+
+
+def test_the_windows_spawn_tries_breakaway_then_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Windows branch, with a fake Popen: breakaway first; when the job
+    refuses it, the same flags without breakaway (the _session_end_launcher
+    pattern). Never DETACHED_PROCESS."""
+    monkeypatch.delenv(rec.OFF_ENV, raising=False)
+    monkeypatch.setattr(rec.os, "name", "nt")
+    flags: list[int] = []
+
+    class _P:
+        def __init__(self, _argv: list[str], **kw: object) -> None:
+            flags.append(int(kw["creationflags"]))  # type: ignore[call-overload]
+            assert "start_new_session" not in kw
+            if len(flags) == 1:
+                raise PermissionError("job forbids breakaway")
+
+    monkeypatch.setattr(subprocess, "Popen", _P)
+    assert rec.spawn("s1", "a1", "developer", 1) is True
+    base = rec._CREATE_NO_WINDOW | rec._CREATE_NEW_PROCESS_GROUP
+    assert flags == [base | rec._CREATE_BREAKAWAY_FROM_JOB, base]
+    assert not any(f & 0x00000008 for f in flags), "DETACHED_PROCESS"
