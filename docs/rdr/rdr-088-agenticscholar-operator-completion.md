@@ -222,7 +222,9 @@ match and is `unresolved`. This is narrower than whole-string NFKC
 (decomposed versus precomposed accents do not match), which errs toward
 review, never toward a false witness. A match may not start or end inside a
 combining sequence: a quote `cafe` does not match the front of `cafe` followed
-by a combining acute accent. One leading facet tag, `[f<n>]` in any case
+by a combining acute accent. A character continues the cluster before it when
+its Unicode category is a mark (M, which covers Devanagari vowel signs), or it
+is the zero-width joiner or a variation selector. One leading facet tag, `[f<n>]` in any case
 followed by optional whitespace (the coverage ledger's convention), is
 removed from the quote before the test and kept in the returned `quote`.
 
@@ -260,10 +262,10 @@ Mitigations).
 - A payload without `schema_version` is legacy (version 0) and is read as
   it was: check items carry no `state`, verify carries bare `citations`.
   The host never fabricates `state`, `span` or source fields for it, and a
-  legacy item never counts as a bound witness. On the host side a reply is
-  read as legacy only when it is a verify reply that carries a `citations`
-  list and no `evidence` key (the pre-v1 model schema), or is not a mapping.
-  Any other reply without an `evidence` list is malformed and comes back as
+  legacy item never counts as a bound witness. On the host side only a reply
+  that is not a mapping passes through unbound. Any mapping without an
+  `evidence` list, a `citations` key included (a model can write it and no
+  production dispatch emits it), is malformed and comes back as
   `schema_version: 1` with `evidence: []` and `requires_review: true`.
 - `answer_shape` classifies a payload when its keys are a subset of a
   listed set, so the v1 sets are added: check

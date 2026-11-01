@@ -192,7 +192,6 @@ def _compose_shape_a(
         _mark_reserved_step(bi, steps)
         _, prepared = _hydrate_operator_args(tool, resolved)
         prepared.pop("_truncation_metadata", None)
-        prepared.pop("_evidence_records", None)  # Witness Schema v1: host-side only, never in a prompt
         bundle_steps.append(OperatorBundleStep(
             plan_index=bi, tool=tool, args=prepared,
             source_collections=source_collections,
@@ -317,7 +316,6 @@ def _compose_shape_b(
     _mark_reserved_step(bi, steps)  # RDR-232 (nexus-jypmj.1.6): see _compose_shape_a
     resolved_tool, prepared = _hydrate_operator_args(tool, resolved)
     prepared.pop("_truncation_metadata", None)
-    prepared.pop("_evidence_records", None)  # Witness Schema v1: host-side only, never in a prompt
     verb = _bare(resolved_tool)
 
     if verb in _SQL_FAST_PATH_VERBS and _sql_fast_path_would_hit(verb, prepared):

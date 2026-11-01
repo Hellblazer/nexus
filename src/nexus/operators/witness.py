@@ -80,11 +80,21 @@ def normalize_with_map(text: str) -> tuple[str, list[int]]:
     return "".join(out), mapping
 
 
+def _extends_cluster(ch: str) -> bool:
+    """True for a character that continues the cluster before it: any mark (category M: combining marks and
+    the Devanagari-style vowel signs, whose combining class is 0), the zero-width joiner and the variation
+    selectors."""
+    return (
+        unicodedata.category(ch).startswith("M") or ch == "\u200d"
+        or "\ufe00" <= ch <= "\ufe0f" or "\U000e0100" <= ch <= "\U000e01ef"
+    )
+
+
 def _locate(quote: Any, normalized_text: tuple[str, list[int]]) -> dict[str, int] | None:
     """The half-open code-point range of the first occurrence of *quote* in a record's normalized text
     (``normalize_with_map`` of it), or ``None``. An empty or non-string quote never matches, and a match may
     not start or end inside a combining sequence (the next or first matched character is a combining mark),
-    so ``cafe`` does not match the front of ``cafe`` + COMBINING ACUTE."""
+    so ``cafe`` does not match the front of ``cafe`` + COMBINING ACUTE (see :func:`_extends_cluster`)."""
     if not isinstance(quote, str):
         return None
     needle, _ = normalize_with_map(_FACET_TAG.sub("", quote, count=1))
@@ -94,7 +104,7 @@ def _locate(quote: Any, normalized_text: tuple[str, list[int]]) -> dict[str, int
     at = hay.find(needle)
     while at >= 0:
         end = at + len(needle)
-        if not unicodedata.combining(hay[at]) and not (end < len(hay) and unicodedata.combining(hay[end])):
+        if not _extends_cluster(hay[at]) and not (end < len(hay) and _extends_cluster(hay[end])):
             return {"start": mapping[at], "end": mapping[end - 1] + 1}
         at = hay.find(needle, at + 1)
     return None
@@ -175,17 +185,14 @@ def bind(raw: Any, records: Sequence[EvidenceRecord] | None, operator: str) -> A
     ``unresolved`` and nothing is rejected. The host never changes the model's verdict
     (``ok`` / ``verified``); a truthy non-boolean verdict counts as true for ``requires_review``.
 
-    A reply that is not a mapping is returned as it came. A mapping without an ``evidence`` list
-    is malformed and comes back as a v1 payload with no evidence and ``requires_review`` true,
-    except one legacy shape: a verify reply carrying ``citations`` and no ``evidence`` key is what
-    the pre-v1 model schema produced, and is returned unbound. (``bind`` runs only after a v1
-    dispatch, so the ``citations`` key is the one thing that tells a pre-v1 reply apart.)
+    A reply that is not a mapping is returned as it came. A mapping without an ``evidence`` list is
+    malformed, whatever else it carries (a ``citations`` key included: a model can write it, and no
+    production dispatch emits it), and comes back as a v1 payload with no evidence and
+    ``requires_review`` true.
     """
     if not isinstance(raw, Mapping):
         return raw
     verb = operator.removeprefix("operator_")
-    if "evidence" not in raw and verb == "verify" and isinstance(raw.get("citations"), list):
-        return raw
     entries = raw["evidence"] if isinstance(raw.get("evidence"), list) else []
     by_id = {r.item_id: r for r in records} if records is not None else {}
     normalized: dict[str, tuple[str, list[int]]] = {}  # each record's text, normalized once per bind
@@ -225,7 +232,8 @@ def bind(raw: Any, records: Sequence[EvidenceRecord] | None, operator: str) -> A
     verdict = bool(raw.get("ok") if verb == "check" else raw.get("verified"))
     bound_supports = {i["item_id"] for i in items if i["state"] == "bound" and i["role"] == "supports"}
     if verb == "check" and verdict and records is not None:
-        unsupported = any(r.item_id not in bound_supports for r in inputs)  # ok=true needs every input item supported
+        # ok=true needs every input item supported, and a true verdict with no input at all has nothing behind it
+        unsupported = not inputs or any(r.item_id not in bound_supports for r in inputs)
     else:
         unsupported = verdict and not bound_supports
     review = records is None or any(i["state"] != "bound" for i in items) or bool(rejected) or bool(uncovered) or unsupported

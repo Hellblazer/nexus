@@ -3841,7 +3841,7 @@ class TestOperatorVerify:
         assert result["evidence"] == [] and result["rejected"] == ["e7"]
 
     @pytest.mark.asyncio
-    async def test_legacy_citations_only_reply_is_returned_as_it_came(self, monkeypatch) -> None:
+    async def test_citations_only_reply_is_malformed_and_needs_review(self, monkeypatch) -> None:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_verify
 
@@ -3851,7 +3851,9 @@ class TestOperatorVerify:
             return dict(legacy)
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        assert await operator_verify(claim="c", evidence="e") == legacy
+        result = await operator_verify(claim="c", evidence="e")
+        assert result["schema_version"] == 1 and result["evidence"] == [] and result["requires_review"] is True
+        assert result["citations"] == []
 
 
 class TestOperatorGroupby:

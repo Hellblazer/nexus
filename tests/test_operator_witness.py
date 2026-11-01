@@ -64,13 +64,14 @@ class TestPayloadShape:
         bind(raw, [_rec(**IDENT)], "check")
         assert raw == before
 
-    def test_a_pre_v1_citations_only_verify_reply_is_returned_unbound(self):
-        """The one legacy shape: a verify reply that carries ``citations`` and no ``evidence`` key is what the
-        pre-v1 model schema produced. It is read as it was; the host fabricates nothing for it."""
-        raw = {"verified": True, "reason": "r", "citations": ["p.3"]}
-        assert bind(raw, [_rec()], "verify") == raw
+    def test_a_citations_only_verify_reply_is_malformed_like_any_reply_without_evidence(self):
+        """No production dispatch emits ``citations`` any more, and a model can write the key: it must not skip
+        review. Only a non-mapping reply passes through."""
+        out = bind({"verified": True, "reason": "r", "citations": ["p.3"]}, [_rec()], "verify")
+        assert out["schema_version"] == 1 and out["verified"] is True
+        assert out["evidence"] == [] and out["citations"] == [] and out["requires_review"] is True
 
-    def test_a_v1_reply_with_no_evidence_list_is_malformed_not_legacy(self):
+    def test_a_reply_with_no_evidence_list_is_malformed(self):
         """Anything else without an evidence list went through a v1 dispatch and is malformed: schema_version 1,
         no evidence, review required, and the verdict untouched."""
         out = bind({"ok": True}, [_rec("e1"), _rec("e2")], "check")
@@ -417,3 +418,36 @@ class TestAdversarialInputs:
             mp.setattr(witness, "normalize_with_map", counting)
             bind(_check(*quotes), recs, "check")
         assert sorted(seen) == sorted(texts)  # once each, not per item and per elsewhere-scan
+
+
+class TestCombiningBoundaries:
+    @pytest.mark.parametrize("text, quote", [
+        ("\u0928\u093f first", "\u0928"),            # Devanagari NA + vowel sign I (category Mc, combining class 0)
+        ("a\u200d\u0915 text", "a"),                  # base + ZWJ
+        ("a\ufe0f text", "a"),                         # base + VARIATION SELECTOR-16
+        ("\u2764\ufe0e heart", "\u2764"),            # heart + VS-15
+        ("a\U000e0100 text", "a"),                     # base + ideographic variation selector
+    ])
+    def test_a_quote_may_not_end_before_a_mark_a_joiner_or_a_variation_selector(self, text, quote):
+        rec = _rec(text=text, **IDENT)
+        assert bind(_check(_item(quote=quote)), [rec], "check")["evidence"][0]["state"] == "unresolved"
+
+    def test_the_whole_cluster_still_matches(self):
+        rec = _rec(text="\u0928\u093f first", **IDENT)
+        assert bind(_check(_item(quote="\u0928\u093f")), [rec], "check")["evidence"][0]["state"] == "bound"
+
+    def test_a_quote_may_not_start_on_a_vowel_sign(self):
+        rec = _rec(text="\u0928\u093f first", **IDENT)
+        assert bind(_check(_item(quote="\u093f first")), [rec], "check")["evidence"][0]["state"] == "unresolved"
+
+
+class TestTrueVerdictWithNothingToSupportIt:
+    def test_ok_true_with_no_records_is_reviewed(self):
+        assert bind(_check(ok=True), [], "check")["requires_review"] is True
+
+    def test_ok_true_when_every_record_is_a_note_is_reviewed(self):
+        note = EvidenceRecord("e1", "NOTE", is_evidence=False)
+        assert bind(_check(ok=True), [note], "check")["requires_review"] is True
+
+    def test_ok_false_with_no_inputs_is_not_reviewed_for_the_verdict(self):
+        assert bind(_check(ok=False), [], "check")["requires_review"] is False
