@@ -396,14 +396,21 @@ if [[ "$(id -u)" -eq 0 ]]; then
     ok "skipped: root can signal every group (no EPERM to observe)"
 else
     # Not group 1: `kill -0 -- -1` is "every process" (pid -1), which always succeeds.
-    foreign_pgid="$(ps -axo pgid=,user= 2>/dev/null | awk '$2 == "root" && $1 > 1 { print $1; exit }')"
-    if [[ -z "$foreign_pgid" ]]; then
-        bad "found no root-owned process group to probe with: the test has no evidence (it must not pass vacuously)"
+    # Any other user's group serves; root's is the usual one.
+    me="$(id -un)"
+    foreign_pgid="$(ps -axo pgid=,user= 2>/dev/null | awk -v me="$me" '$2 != me && $1 > 1 { print $1; exit }')"
+    pid1_user="$(ps -o user= -p 1 2>/dev/null | tr -d ' ')"
+    if [[ -z "$foreign_pgid" && "$pid1_user" == "$me" ]]; then
+        # A private PID namespace (lab-run #88): pid 1 is this user's, so no other user's
+        # process is visible and no EPERM can be observed. Proven by pid 1's owner, not assumed.
+        ok "not applicable: a private PID namespace (pid 1 is $me's) shows no other user's group"
+    elif [[ -z "$foreign_pgid" ]]; then
+        bad "found no other user's process group to probe with: the test has no evidence (it must not pass vacuously)"
     else
         if bash -c "source '$repo10/scripts/lib/build-lease.sh'; _build_lease_group_alive $foreign_pgid"; then
-            ok "root's group $foreign_pgid reads as alive from an unprivileged user (EPERM is not ESRCH)"
+            ok "another user's group $foreign_pgid reads as alive from an unprivileged user (EPERM is not ESRCH)"
         else
-            bad "root's group $foreign_pgid read as DEAD: a second user would reclaim a live build lease"
+            bad "another user's group $foreign_pgid read as DEAD: a second user would reclaim a live build lease"
         fi
     fi
     if bash -c "source '$repo10/scripts/lib/build-lease.sh'; _build_lease_group_alive $NEVER_ALIVE_PID"; then
