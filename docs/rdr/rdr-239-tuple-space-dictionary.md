@@ -463,7 +463,7 @@ placeholder rule for examples.
 
 Two skills use the mailbox `kind` values inline in their call procedures:
 the cross-instance request and ack line of `conexus/skills/mailbox/SKILL.md`
-and the mailbox request line of `conexus/skills/peer-messaging/SKILL.md`.
+and the send example and mailbox request line of `conexus/skills/peer-messaging/SKILL.md`.
 Those procedures keep the values they pass; each gains a pointer to the
 dictionary for what the values mean, so the meaning lives in one place.
 `docs/operations/tuple-space.md` has no `kind` text today and gets at most

@@ -464,7 +464,7 @@ Smaller points that need no field:
 - Lists are sentences, not records, because `MiniYaml` has no list of mappings. A structured `writers` (workflow, job, verb) would need a parser change beyond `doc`. Stage 2 can live with strings; if it cannot, that is a stage-2 cost to name now.
 - Example dims and keys must be coerced to strings after `MiniYaml` (digits become `Long`, `true`/`false` become `Boolean`).
 - A `status` field (active, dormant) was considered for the ledger and left out: `summary` plus `writers: []` carries it, and a status enum is one more thing to keep true.
-- Two templates (board, queue) have no in-repo writer, so their `writers` and `readers` are intent, not evidence. The lint cannot tell. The RDR says so (Approach item 4, the `Unverified: ` mark, and Drift).
+- Two templates (board, queue) have no in-repo writer, so their `writers` and `readers` are intent, not evidence. The lint cannot tell. The RDR says so (Technical Design item 4, the `Unverified: ` mark, and Drift).
 - The census join (Gap 4) shows zero rows for any take-enabled template whose rows are consumed (all 49 mailboxes), so the dictionary text is the only record of `kind` there.
 - Template header comments are not a reliable source for "who writes": ledger.yaml:11 names a deleted module.
 
