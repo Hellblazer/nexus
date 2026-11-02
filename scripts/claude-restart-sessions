@@ -344,8 +344,9 @@ def converge(version: str, repo: Path, endpoint: str, gate: bool, dry: bool, eng
     if r.returncode != 0:
         log(f"ABORT: reinstall-tool exited {r.returncode} (nx reports '{got}'). Nothing restarted.")
         return False
-    # Bounded, not a substring: 7.93.1 is in "nx, version 7.93.10" and in "17.93.1".
-    if not re.search(rf"(?<![\d.]){re.escape(version)}(?!\d|\.\d)", got):
+    # The version as a whole token, not a substring: 7.93.1 is in "nx, version 7.93.10", "17.93.1",
+    # "7.93.1.dev3", "7.93.1-rc1" and "7.93.1+local". A trailing sentence period is allowed.
+    if not re.search(rf"(?<![\w.+-]){re.escape(version)}(?![\w+-]|\.\w)", got):
         log(f"ABORT: nx reports '{got}', not {version}. Nothing restarted.")
         return False
     log(f"nx: {got}")

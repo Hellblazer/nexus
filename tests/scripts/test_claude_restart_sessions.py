@@ -440,7 +440,10 @@ def test_a_handoff_needs_two_headings(crs, monkeypatch, tmp_path, headings: int,
     ("nx, version 7.93.10", False),  # the old substring test read 7.93.1 in 7.93.10 as installed
     ("nx, version 17.93.1", False),
     ("nx, version 7.93.1.", True),  # sentence punctuation after the version
-], ids=["exact", "longer-patch", "longer-major", "trailing-period"])
+    ("nx, version 7.93.1.dev3", False),  # a dev, pre-release or local build is not the release
+    ("nx, version 7.93.1-rc1", False),
+    ("nx, version 7.93.1+local", False),
+], ids=["exact", "longer-patch", "longer-major", "trailing-period", "dev", "rc", "local"])
 def test_converge_needs_nx_at_exactly_the_release(crs, monkeypatch, tmp_path, reported: str, accepted: bool) -> None:
     monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
     monkeypatch.setattr(crs, "release_engine_floor", lambda _v, _r: (0, 1, 0))

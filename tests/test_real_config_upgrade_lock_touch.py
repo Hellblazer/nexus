@@ -19,9 +19,11 @@ a live take after a test's take hides the test's, as a later live mint would.
 from __future__ import annotations
 
 import os
+import types
 
 import pytest
 
+import tests.conftest as conftest_module
 from nexus.util import upgrade_auto_lock as lock_mod
 from tests.conftest import _UPGRADE_LOCK_NAME, _split_appends_from_state  # type: ignore[attr-defined]
 
@@ -92,3 +94,46 @@ def test_holder_pid_reads_either_form(tmp_path, text: str) -> None:
 
 def test_the_guard_names_the_same_lock() -> None:
     assert _UPGRADE_LOCK_NAME == lock_mod.LOCK_NAME
+
+
+# ── the guard's own wiring: the lock reader and the call site that hands its bytes over ──
+
+
+def test_the_reader_returns_a_small_lock_s_bytes(tmp_path) -> None:
+    (tmp_path / REL).write_bytes(b"48213")
+    assert conftest_module._read_upgrade_lock(tmp_path) == b"48213"
+
+
+def test_the_reader_refuses_an_absent_a_large_or_a_linked_lock(tmp_path) -> None:
+    assert conftest_module._read_upgrade_lock(tmp_path) is None
+    (tmp_path / REL).write_bytes(b"1" * 65)
+    assert conftest_module._read_upgrade_lock(tmp_path) is None
+    (tmp_path / REL).unlink()
+    (tmp_path / "elsewhere").write_bytes(b"48213")
+    (tmp_path / REL).symlink_to(tmp_path / "elsewhere")
+    assert conftest_module._read_upgrade_lock(tmp_path) is None
+
+
+def _run_guard(monkeypatch, config_dir, rewrite: bytes) -> int:
+    """Drive _check_real_config_dir_mutations end to end against *config_dir*: snapshot a lock
+    holding a bare pid, rewrite it, and return the exit status the guard leaves on the session."""
+    (config_dir / REL).write_bytes(b"1")
+    monkeypatch.setattr(conftest_module, "_real_config_dir_for_guard", lambda: config_dir)
+    monkeypatch.setattr(conftest_module, "_is_controller_or_serial", True)
+    monkeypatch.setattr(conftest_module, "_real_config_dir_baseline_dir", config_dir)
+    monkeypatch.setattr(conftest_module, "_mint_lock_baseline_content", {})
+    monkeypatch.setattr(conftest_module, "_real_config_dir_baseline", conftest_module._snapshot_real_config_dir())
+    os.utime(config_dir / REL, ns=(1, 1))
+    (config_dir / REL).write_bytes(rewrite)
+    session = types.SimpleNamespace(exitstatus=0)
+    conftest_module._check_real_config_dir_mutations(session)
+    return session.exitstatus
+
+
+def test_the_guard_passes_a_live_host_s_take(tmp_path, monkeypatch) -> None:
+    assert _run_guard(monkeypatch, tmp_path, b"48213") == 0
+
+
+def test_the_guard_fails_a_test_s_take(tmp_path, monkeypatch, capsys) -> None:
+    assert _run_guard(monkeypatch, tmp_path, b"48213 pytest") == 1
+    assert "upgrade-auto.lock" in capsys.readouterr().out
