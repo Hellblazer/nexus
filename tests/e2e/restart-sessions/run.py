@@ -82,7 +82,7 @@ session in the same folder with no handoff, must not know any word.
 
 Not exercised: a real cloud engine (the gate reads the stand-in), a real PyPI install, the
 operator's own marketplace remote, a restart with ``--resume`` (no scenario resumes a
-session), the ``ABORT: plugins are`` branch (a plugin update that leaves an old version), and
+session), the ready-round check (the roll passes ``--no-ready-check``; unit tests cover it), the ``ABORT: plugins are`` branch (a plugin update that leaves an old version), and
 restart()'s fallback for a handoff that went stale.
 
 Positive controls: ``NX_RESTART_SANDBOX_SCRIPT=<copy>`` runs another copy of the script; the
@@ -722,7 +722,7 @@ def roll_command(sb: Sandbox, *, rc_file: Path | None = None) -> str:
            f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} --nx {sb.to_version} --fresh "
            f"--repo {shlex.quote(str(sb.relrepo))} --endpoint {sb.engine.url} --engine-wait {spec.engine_wait} "
            + ("--fallback-resume " if spec.fallback else "")
-           + f"--no-update --handoff-timeout 600 --wait {spec.wait}")
+           + f"--no-update --no-ready-check --handoff-timeout 600 --wait {spec.wait}")
     if rc_file is not None:
         cmd += f"; echo $? > {shlex.quote(str(rc_file))}"
     return cmd

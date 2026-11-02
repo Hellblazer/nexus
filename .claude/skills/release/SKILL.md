@@ -833,7 +833,14 @@ also adds the real GitHub marketplace and checks every plugin's version and
 `source.ref`. What it does not cover is a running session's in-session
 auto-update. Then Step 12 (the `nx --version` check), and restart sessions
 together, as after any release: a plugin update says "Restart to apply" and only a
-restarted session loads it. No Windows guest leg.
+restarted session loads it. Restart with `scripts/claude-restart-sessions`: ask
+first with `--ask-ready` and read the table with `--status`. The restart itself
+needs that round: it refuses (exit 3) with no round, a malformed or old one, or
+any target without a fresh ready reply that is idle now (the session running the
+script is exempt from idle only), and checks again after the install and before
+each session's exit. Name the mode: after a `--fresh` run a bare restart is
+refused until you pass `--fresh` or `--resume`. `--force` overrides the round.
+No Windows guest leg.
 
 For the first real use of this lane, paste the eligibility output, the battery
 table and the delivery-proof verdict into bead nexus-rbmja.13.

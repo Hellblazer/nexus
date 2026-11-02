@@ -7,13 +7,16 @@ whose dim suggested prompt made the 7.92.0 restart skip six of nine handoffs.
 """
 from __future__ import annotations
 
+import argparse
 import importlib.machinery
 import importlib.util
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -482,3 +485,709 @@ def test_the_engine_gate_names_why_it_refused(crs, monkeypatch, tmp_path, read, 
     monkeypatch.setattr(crs, "cloud_engine", cloud)
     assert crs.converge("7.93.1", tmp_path, "http://127.0.0.1:1", gate=True, dry=False, engine_wait=0) is False
     assert line in (tmp_path / "restart.log").read_text(encoding="utf-8")
+
+
+# ---- the ready round (nexus-1b5rs): --ask-ready, --status, and the check at go ----
+
+NOW = 1_800_000_000.0  # a fixed clock; reply files carry mtimes relative to it
+ROUND_AT = NOW - 3000  # when the fixture rounds began: every reply written after it, and the round is not old
+
+
+@pytest.fixture
+def rd(crs, monkeypatch, tmp_path):
+    """A scratch ~/.claude: sessions dir, log, round manifest, last-run file, ask dir; no caller pane."""
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    ask_dir = tmp_path / "ask"
+    ask_dir.mkdir()
+    monkeypatch.setattr(crs, "SESSIONS", sessions_dir)
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "READY_MANIFEST", tmp_path / "restart-ready.json")
+    monkeypatch.setattr(crs, "LAST_RUN", tmp_path / "restart-last.json")
+    monkeypatch.setattr(crs, "ASK_DIR", ask_dir)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    return tmp_path
+
+
+def _live(rd: Path, name: str, status: str = "idle", pane: str = "%5", **extra) -> Path:
+    path = rd / "sessions" / f"{name}.json"
+    path.write_text(json.dumps({"kind": "interactive", "tmux": f"rs:@1.{pane}", "pid": os.getpid(),
+                                "sessionId": f"sid-{name}", "name": name, "cwd": "/w", "status": status, **extra}),
+                    encoding="utf-8")
+    return path
+
+
+def _reply(rd: Path, name: str, age: float | None, body: dict | str | None = None) -> str:
+    """The reply file for `name`, `age` seconds old at NOW (None: never written); returns its path."""
+    path = rd / f"ready-{name}.json"
+    if age is not None:
+        path.write_text(body if isinstance(body, str) else json.dumps(
+            body if body is not None else {"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
+        os.utime(path, (NOW - age, NOW - age))
+    return str(path)
+
+
+def _round(crs, rd: Path, names: list[str], excluded: list[dict] | None = None, at: float = ROUND_AT, **ages) -> None:
+    """Record a round that asked `names`; ages[name] = reply age in seconds (absent: no reply)."""
+    targets = [{"name": n, "sessionId": f"sid-{n}", "path": _reply(rd, n, ages.get(n)), "how": "mail"} for n in names]
+    crs.write_manifest("20261102-100000", targets, excluded or [], at=at)
+
+
+def _found(crs, names: list[str] | None = None) -> list[dict]:
+    return [s for s in crs.sessions() if names is None or s["name"] in names]
+
+
+def _log(rd: Path) -> str:
+    return (rd / "restart.log").read_text(encoding="utf-8") if (rd / "restart.log").exists() else ""
+
+
+def _gate(crs, rd: Path, names: list[str] | None = None, **kw) -> int:
+    return crs.go_gate(_found(crs, names), **{"force": False, "max_age": 900, "now": NOW, **kw})
+
+
+def test_go_goes_when_every_target_is_ready_and_idle(crs, rd) -> None:
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    _round(crs, rd, ["alpha", "beta"], alpha=60, beta=800)
+    assert _gate(crs, rd) == 0
+    assert "all 2 session(s) ready and idle" in _log(rd)
+
+
+def test_go_refuses_a_ready_reply_older_than_the_max_age(crs, rd) -> None:
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    _round(crs, rd, ["alpha", "beta"], alpha=60, beta=901)
+    assert _gate(crs, rd) == 3
+    log = _log(rd)
+    assert "beta: reply stale: ready reply is 15m old" in log and "alpha:" not in log.replace("alpha, ", "")
+    assert _gate(crs, rd, max_age=1000) == 0  # the same reply, a longer window
+
+
+def test_go_names_a_session_that_went_busy_after_saying_ready(crs, rd) -> None:
+    _live(rd, "alpha", status="busy")
+    _round(crs, rd, ["alpha"], alpha=120)
+    assert _gate(crs, rd) == 3
+    at = time.strftime("%H:%M", time.localtime(NOW - 120))
+    assert f"alpha: ready at {at}, busy now" in _log(rd)
+
+
+def test_go_refuses_a_target_with_no_reply_and_one_that_said_not_ready(crs, rd) -> None:
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    _live(rd, "gamma")
+    _round(crs, rd, ["alpha", "beta", "gamma"], alpha=30, beta=30)
+    Path(_reply(rd, "beta", 30, {"ready": False, "reason": "mid-review of the engine diff", "eta_min": 12}))
+    assert _gate(crs, rd) == 3
+    log = _log(rd)
+    assert "gamma: no reply" in log
+    assert "beta: not ready: mid-review of the engine diff (eta 12 min)" in log
+
+
+def test_go_refuses_a_target_the_round_never_asked_and_an_unreadable_reply(crs, rd) -> None:
+    _live(rd, "alpha")
+    _live(rd, "late")
+    _round(crs, rd, ["alpha"], alpha=30)
+    Path(_reply(rd, "alpha", 30, "{not json"))
+    assert _gate(crs, rd) == 3
+    log = _log(rd)
+    assert "late: not asked in this round" in log and "alpha: its reply file" in log
+
+
+def test_an_excluded_session_is_listed_never_asked_and_never_a_blocker(crs, rd, monkeypatch, capsys) -> None:
+    _live(rd, "alpha")
+    _live(rd, "skipped")
+    (rd / "sessions" / "desk.json").write_text(json.dumps(
+        {"kind": "interactive", "pid": os.getpid(), "sessionId": "sid-desk", "name": "desk", "cwd": "/w",
+         "status": "idle", "entrypoint": "claude-desktop"}), encoding="utf-8")
+    mailed: list[str] = []
+    monkeypatch.setattr(crs, "has_channel", lambda _s: True)
+    monkeypatch.setattr(crs, "mail_ask", lambda s, *_a, **_k: mailed.append(s["name"]) or True)
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--ask-ready", "--skip", "skipped"])
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW - 100)
+    assert crs.main() == 0
+    assert mailed == ["alpha"]
+    manifest = json.loads((rd / "restart-ready.json").read_text(encoding="utf-8"))
+    assert [t["name"] for t in manifest["targets"]] == ["alpha"]
+    assert {e["name"]: e["why"] for e in manifest["excluded"]} == {
+        "skipped": "--skip", "desk": "Desktop session, cannot be restarted from here"}
+    # alpha answers; the excluded two never do, and the restart is not held up by them.
+    Path(_reply(rd, "alpha", 10))
+    manifest["targets"][0]["path"] = str(rd / "ready-alpha.json")
+    (rd / "restart-ready.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert _gate(crs, rd, ["alpha"]) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--status", "--skip", "skipped"])
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
+    assert crs.main() == 0
+    out = capsys.readouterr().out
+    assert "skipped" in out and "--skip" in out and "desk" in out and "Desktop session" in out
+    assert out.count("excluded") == 2
+
+
+def test_status_prints_the_table_and_exits_nonzero_while_a_target_blocks(crs, rd, monkeypatch, capsys) -> None:
+    _live(rd, "alpha")
+    _live(rd, "beta", status="busy")
+    _round(crs, rd, ["alpha", "beta"], alpha=60, beta=100)
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--status"])
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
+    assert crs.main() == 1
+    out = capsys.readouterr().out
+    rows = {ln.split()[0]: ln for ln in out.splitlines() if ln.split() and ln.split()[0] in ("alpha", "beta")}
+    assert "ready" in rows["alpha"] and "idle" in rows["alpha"] and "60s" in rows["alpha"]
+    assert "busy" in rows["beta"] and "busy now" in rows["beta"]
+
+
+def test_status_without_a_round_says_so(crs, rd, monkeypatch, capsys) -> None:
+    _live(rd, "alpha")
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--status"])
+    assert crs.main() == 2
+    assert "no ready round yet" in capsys.readouterr().out
+
+
+def test_force_goes_ahead_and_still_names_the_blockers(crs, rd) -> None:
+    _live(rd, "alpha", status="busy")
+    _round(crs, rd, ["alpha"], alpha=30)
+    assert _gate(crs, rd, force=True) == 0
+    log = _log(rd)
+    assert "--force: restarting although 1 of 1" in log and "alpha: ready at" in log
+
+
+def _run_main(crs, monkeypatch, argv: list[str]) -> tuple[int, list[list[str]]]:
+    """main() with tmux faked and the clock at NOW: returns its exit code and the tmux commands it issued."""
+    real = subprocess.run
+    tmux_calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        if cmd[0] == "tmux":
+            tmux_calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real(cmd, **kw)
+
+    setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", *argv])
+    return crs.main(), tmux_calls
+
+
+def test_the_restart_is_refused_before_anything_starts_when_the_round_blocks(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    _round(crs, rd, ["alpha", "beta"], alpha=30, beta=2000)
+    code, tmux_calls = _run_main(crs, monkeypatch, ["--resume", "--no-update"])
+    assert code == 3 and tmux_calls == []
+    assert "beta: reply stale" in _log(rd)
+    # --force: the same round, the restart is launched detached.
+    code, tmux_calls = _run_main(crs, monkeypatch, ["--resume", "--no-update", "--force"])
+    assert code == 0 and [c[1] for c in tmux_calls] == ["run-shell"]
+
+
+def test_the_restart_launches_when_the_round_is_all_ready(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    _round(crs, rd, ["alpha", "beta"], alpha=30, beta=40)
+    code, tmux_calls = _run_main(crs, monkeypatch, ["--resume", "--no-update"])
+    assert code == 0 and [c[1] for c in tmux_calls] == ["run-shell"]
+
+
+def test_the_ready_ask_is_mail_of_its_own_kind_naming_the_reply_file(crs, rd, monkeypatch) -> None:
+    seen: list[list[str]] = []
+    setattr_in(monkeypatch, crs, "subprocess.run",
+               lambda argv, **_kw: seen.append(list(argv)) or subprocess.CompletedProcess(argv, 0, stdout="id\n", stderr=""))
+    monkeypatch.setattr(crs, "has_channel", lambda _s: True)
+    s = {"sessionId": "sid-9", "name": "tamsin", "pane": "%1", "file": rd / "s.json"}
+    out = crs.ask_ready([s], "20261102-100000", "sid-caller")
+    argv = seen[0]
+    assert argv[1:4] == ["tuple", "out", "mailbox/sid-9"] and "kind=restart-ready" in argv
+    body = argv[argv.index("--body") + 1]
+    path = crs.ready_path(s, "20261102-100000")
+    assert path in body and crs.ready_note(s, path) in _log(rd) and crs.ready_note(s, path) in body
+    assert len(body.encode()) <= 4096  # the mailbox template's body ceiling
+    assert out == [{"name": "tamsin", "sessionId": "sid-9", "path": path, "how": "mail"}]
+
+
+def test_a_reply_written_while_later_sessions_are_still_being_asked_reads_ready(crs, rd, monkeypatch) -> None:
+    # Review r2: the round's `at` was stamped after the ask loop, so a session that answered while
+    # the loop was still asking others read as unreadable. The ask stub answers at once, then the
+    # loop goes on asking for a while before the manifest is written.
+    _live(rd, "tamsin")
+
+    def ask(found, stamp, _sender):
+        out = []
+        for s in found:
+            path = crs.ready_path(s, stamp)
+            Path(path).write_text(json.dumps({"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
+            out.append({"name": s["name"], "sessionId": s["sessionId"], "path": path, "how": "mail"})
+        time.sleep(0.05)  # the rest of the loop: other sessions still being asked
+        return out
+
+    monkeypatch.setattr(crs, "ask_ready", ask)
+    monkeypatch.setattr(crs, "ready_path", lambda s, stamp: str(rd / f"ready-{s['name']}-{stamp}.json"))
+    a = argparse.Namespace(status=False, dry_run=False, ready_max_age=900)
+    try:
+        assert crs.ready_round(a, _found(crs), _found(crs)) == 0
+        manifest, _why = crs.load_manifest()
+        (row,) = crs.readiness(_found(crs), manifest, time.time(), 900)
+        assert row["state"] == "ready", row
+    finally:
+        for p in rd.glob("ready-tamsin-*.json"):
+            p.unlink()
+
+
+# ---- fix round 1 ----
+
+
+def test_the_ready_ask_is_not_typed_over_a_draft(crs, rd, monkeypatch) -> None:
+    _live(rd, "tamsin")
+    monkeypatch.setattr(crs, "has_channel", lambda _s: False)
+    monkeypatch.setattr(crs, "pane_capture", lambda _p: pane("\x1b[39m❯\xa0half a thought"))
+    monkeypatch.setattr(crs, "submit", lambda *_a: pytest.fail("typed into a prompt holding a draft"))
+    (entry,) = crs.ask_ready(_found(crs), "20261102-100000", "x")
+    assert entry["how"] == "not asked: unsent text in its prompt"
+
+
+@pytest.mark.parametrize(("status", "screen"), [
+    ("idle", "a permission dialog\nDo you want to proceed?\n 1. Yes\n 2. No"),  # no prompt line: not at its prompt
+    ("busy", pane("\x1b[39m❯\xa0")),  # an empty prompt, but the session is mid-turn
+    ("idle", ""),  # tmux could not read the pane
+], ids=["permission-dialog", "busy-with-a-prompt-drawn", "unreadable-pane"])
+def test_the_ready_ask_is_never_typed_where_the_session_is_not_at_its_prompt(crs, rd, monkeypatch, status, screen) -> None:
+    _live(rd, "tamsin", status=status)
+    monkeypatch.setattr(crs, "has_channel", lambda _s: False)
+    monkeypatch.setattr(crs, "pane_capture", lambda _p: screen)
+    monkeypatch.setattr(crs, "submit", lambda *_a: pytest.fail("typed Enter where the session is not at its prompt"))
+    (entry,) = crs.ask_ready(_found(crs), "20261102-100000", "x")
+    assert entry["how"] == "not asked: not at its prompt"
+
+
+def test_the_ready_ask_is_typed_at_an_idle_empty_prompt_through_a_private_file(crs, rd, monkeypatch) -> None:
+    _live(rd, "tamsin")
+    monkeypatch.setattr(crs, "has_channel", lambda _s: False)
+    monkeypatch.setattr(crs, "pane_capture", lambda _p: pane("\x1b[39m❯\xa0"))
+    typed: list[str] = []
+    monkeypatch.setattr(crs, "submit", lambda _pane, text, _f: typed.append(text) or True)
+    (entry,) = crs.ask_ready(_found(crs), "20261102-100000", "x")
+    assert entry["how"].startswith("typed")
+    ask = rd / "ask" / "rr-sid-tami-20261102-100000.txt"
+    ask = next((rd / "ask").iterdir())
+    assert typed == [f"Do what {ask} says"] and ask.stat().st_mode & 0o777 == 0o600
+    # The file is per round and created exclusively: the same round again does not overwrite it.
+    (again,) = crs.ask_ready(_found(crs), "20261102-100000", "x")
+    assert again["how"].startswith("not asked: ") and "exist" in again["how"].lower()
+    (third,) = crs.ask_ready(_found(crs), "20261102-100500", "x")
+    assert third["how"].startswith("typed") and len(list((rd / "ask").iterdir())) == 2
+
+
+def test_an_oserror_mid_ask_loop_still_writes_the_manifest(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    monkeypatch.setattr(crs, "has_channel", lambda s: s["name"] == "alpha")
+    monkeypatch.setattr(crs, "mail_ask", lambda *_a, **_k: True)
+    monkeypatch.setattr(crs, "pane_capture", lambda _p: pane("\x1b[39m❯\xa0"))
+    monkeypatch.setattr(crs, "ASK_DIR", rd / "no-such-dir")  # beta's typed ask cannot create its file
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--ask-ready"])
+    assert crs.main() == 0
+    manifest = json.loads((rd / "restart-ready.json").read_text(encoding="utf-8"))
+    how = {t["name"]: t["how"] for t in manifest["targets"]}
+    assert how["alpha"] == "mail" and how["beta"].startswith("not asked: ")
+    assert "No such file" in how["beta"]
+
+
+# --- the caller's own session (finding 1)
+
+
+def test_the_callers_session_is_exempt_from_idle_only(crs, rd, monkeypatch, capsys) -> None:
+    _live(rd, "me", status="busy", pane="%7")
+    _live(rd, "other", status="busy", pane="%8")
+    _round(crs, rd, ["me", "other"], me=30, other=30)
+    assert _gate(crs, rd, caller_pane="%7") == 3
+    log = _log(rd)
+    assert "other: ready at" in log and "me: ready at" not in log  # the caller passes, the other busy one blocks
+    _live(rd, "other", pane="%8")  # idle now
+    (rd / "restart.log").unlink()
+    assert _gate(crs, rd, caller_pane="%7") == 0
+    assert _gate(crs, rd) == 3  # without the caller pane the busy caller blocks
+    # its ready reply is still required
+    (rd / "ready-me.json").unlink()
+    _round(crs, rd, ["me", "other"], other=30)
+    assert _gate(crs, rd, caller_pane="%7") == 3 and "me: no reply" in _log(rd)
+    # --status reads the pane from TMUX_PANE
+    _round(crs, rd, ["me", "other"], me=30, other=30)
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--status"])
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
+    assert crs.main() == 0
+    monkeypatch.delenv("TMUX_PANE")
+    capsys.readouterr()
+    assert crs.main() == 1
+
+
+def test_a_restart_from_inside_a_busy_managed_session_goes(crs, rd, monkeypatch) -> None:
+    _live(rd, "me", status="busy", pane="%7")
+    _live(rd, "other", pane="%8")
+    _round(crs, rd, ["me", "other"], me=30, other=30)
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    code, tmux_calls = _run_main(crs, monkeypatch, ["--resume", "--no-update"])
+    assert code == 0 and [c[1] for c in tmux_calls] == ["run-shell"]
+
+
+# --- the reply file is untrusted input (finding 2)
+
+
+def _read(crs, path, since=NOW - 3000, now=NOW):
+    return crs.read_reply(str(path), since, now)
+
+
+def _fresh_file(rd: Path, body: str | bytes = '{"ready": true, "reason": "ok", "eta_min": null}', age: float = 60) -> Path:
+    path = rd / "reply.json"
+    path.write_bytes(body if isinstance(body, bytes) else body.encode())
+    os.utime(path, (NOW - age, NOW - age))
+    return path
+
+
+def test_a_wellformed_reply_reads(crs, rd) -> None:
+    kind, r = _read(crs, _fresh_file(rd, '{"ready": false, "reason": "mid-turn", "eta_min": 7}'))
+    assert (kind, r["ready"], r["reason"], r["eta"]) == ("ok", False, "mid-turn", 7)
+    assert _read(crs, rd / "absent.json") == ("none", {})
+
+
+def test_a_reply_symlink_is_not_followed(crs, rd) -> None:
+    target = _fresh_file(rd)
+    link = rd / "link.json"
+    link.symlink_to(target)
+    assert _read(crs, link)[0] == "invalid"
+    assert _read(crs, rd / "dangling.json")[0] == "none"
+    (rd / "dangling.json").symlink_to(rd / "nowhere")
+    assert _read(crs, rd / "dangling.json")[0] == "invalid"
+
+
+class _Hung(BaseException):  # not an OSError: read_reply's own handlers must not swallow the alarm
+    pass
+
+
+def _alarm_after(seconds: int):
+    def alarm(*_a):
+        raise _Hung("read_reply blocked")
+
+    old = signal.signal(signal.SIGALRM, alarm)
+    signal.alarm(seconds)
+    return old
+
+
+def test_a_reply_fifo_with_no_writer_does_not_hang_the_reader(crs, rd) -> None:
+    fifo = rd / "fifo.json"
+    os.mkfifo(fifo)
+    old = _alarm_after(10)  # a plain open() of a FIFO with no writer waits for one, forever
+    try:
+        assert _read(crs, fifo)[0] == "invalid"
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def test_a_reply_fifo_holding_valid_json_is_still_not_a_regular_file(crs, rd) -> None:
+    fifo = rd / "fifo.json"
+    os.mkfifo(fifo)
+    keep = os.open(fifo, os.O_RDWR)  # a writer with data waiting: only the file-type check refuses it
+    os.write(keep, b'{"ready": true}')
+    os.utime(fifo, (NOW - 60, NOW - 60))
+    old = _alarm_after(10)
+    try:
+        assert _read(crs, fifo)[0] == "invalid"
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+        os.close(keep)
+
+
+def test_an_oversize_reply_is_unreadable(crs, rd) -> None:
+    body = '{"ready": true}' + " " * 5000  # valid JSON as a whole, and its first 4 KiB are valid JSON too
+    assert _read(crs, _fresh_file(rd, body))[0] == "invalid"
+    ok = '{"ready": true, "reason": "' + "x" * 3900 + '"}'
+    assert _read(crs, _fresh_file(rd, ok))[0] == "ok"
+
+
+def test_deeply_nested_json_is_unreadable_not_a_crash(crs, rd, monkeypatch) -> None:
+    assert _read(crs, _fresh_file(rd, "[" * 3000))[0] == "invalid"
+    assert _read(crs, _fresh_file(rd, '{"ready": ' + "[" * 2000 + "]" * 2000 + "}"))[0] == "invalid"
+
+    def too_deep(*_a, **_k):  # 4 KiB of brackets does not exhaust every Python's stack: force the error
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+
+    setattr_in(monkeypatch, crs, "json.loads", too_deep)
+    assert _read(crs, _fresh_file(rd))[0] == "invalid"
+
+
+def test_a_reply_owned_by_another_user_is_unreadable(crs, rd, monkeypatch) -> None:
+    path = _fresh_file(rd)
+    assert _read(crs, path)[0] == "ok"
+    setattr_in(monkeypatch, crs, "os.getuid", lambda: os.getuid() + 1)
+    assert _read(crs, path)[0] == "invalid"
+
+
+def test_a_reply_from_the_future_or_from_before_the_round_is_unreadable(crs, rd) -> None:
+    assert _read(crs, _fresh_file(rd, age=-3600))[0] == "invalid"  # mtime an hour ahead of the clock
+    assert _read(crs, _fresh_file(rd, age=4000))[0] == "invalid"  # written before the round began
+    assert _read(crs, _fresh_file(rd, age=-2))[0] == "ok"  # a little clock skew is allowed
+
+
+@pytest.mark.parametrize("ready", ['"true"', "1", "null", '"yes"'])
+def test_ready_must_be_a_real_boolean(crs, rd, ready) -> None:
+    assert _read(crs, _fresh_file(rd, f'{{"ready": {ready}}}'))[0] == "invalid"
+
+
+def test_the_reason_is_made_printable_and_short_and_eta_may_be_a_float(crs, rd) -> None:
+    body = json.dumps({"ready": False, "reason": "bad\x1b[31m\nred\x07\x9b" + "y" * 400, "eta_min": 7.6})
+    _, r = _read(crs, _fresh_file(rd, body))
+    assert not any(ord(c) < 32 or 127 <= ord(c) < 160 for c in r["reason"]) and len(r["reason"]) <= 200
+    assert r["reason"].startswith("bad [31m red") and r["eta"] == 8
+    _, r = _read(crs, _fresh_file(rd, '{"ready": false, "eta_min": true}'))
+    assert r["eta"] is None
+
+
+def test_a_hostile_reply_blocks_the_go_and_does_not_crash_the_gate(crs, rd) -> None:
+    _live(rd, "alpha")
+    _round(crs, rd, ["alpha"], alpha=30)
+    Path(_reply(rd, "alpha", 30)).unlink()
+    Path(_reply(rd, "alpha", 30)).write_text("[" * 3000, encoding="utf-8")
+    os.utime(rd / "ready-alpha.json", (NOW - 30, NOW - 30))
+    assert _gate(crs, rd) == 3 and "alpha: its reply file" in _log(rd)
+
+
+# --- a round is required (findings 4 and 7)
+
+
+def test_go_with_no_round_refuses_and_says_what_to_run(crs, rd, capsys) -> None:
+    _live(rd, "alpha")
+    assert _gate(crs, rd) == 3
+    log = _log(rd)
+    assert "ABORT: readiness: no ready round yet. Run claude-restart-sessions --ask-ready first" in log
+    assert _gate(crs, rd, force=True) == 0
+    assert "--force: restarting although no ready round yet" in _log(rd)
+
+
+MALFORMED = {
+    "not-json": "{nope",
+    "a-list": "[]",
+    "no-targets": {"stamp": "s", "at": NOW - 100},
+    "targets-not-a-list": {"stamp": "s", "at": NOW - 100, "targets": "x"},
+    "target-not-a-dict": {"stamp": "s", "at": NOW - 100, "targets": ["sid-alpha"]},
+    "target-without-path": {"stamp": "s", "at": NOW - 100, "targets": [{"sessionId": "sid-alpha"}]},
+    "target-path-not-a-string": {"stamp": "s", "at": NOW - 100, "targets": [{"sessionId": "sid-alpha", "path": 3}]},
+    "no-at": {"stamp": "s", "targets": [{"sessionId": "sid-alpha", "path": "/x"}]},
+    "at-a-string": {"stamp": "s", "at": "now", "targets": [{"sessionId": "sid-alpha", "path": "/x"}]},
+    "stamp-a-number": {"stamp": 5, "at": NOW - 100, "targets": [{"sessionId": "sid-alpha", "path": "/x"}]},
+    "excluded-bad": {"stamp": "s", "at": NOW - 100, "targets": [{"sessionId": "sid-alpha", "path": "/x"}],
+                     "excluded": [{"name": "d"}]},
+}
+
+
+@pytest.mark.parametrize("body", list(MALFORMED.values()), ids=list(MALFORMED))
+def test_a_malformed_round_refuses_the_go_and_the_status_without_a_crash(crs, rd, monkeypatch, capsys, body) -> None:
+    _live(rd, "alpha")
+    (rd / "restart-ready.json").write_text(body if isinstance(body, str) else json.dumps(body), encoding="utf-8")
+    assert _gate(crs, rd) == 3
+    assert "ABORT: readiness: the ready round file is malformed" in _log(rd)
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--status"])
+    assert crs.main() == 2
+    assert "malformed" in capsys.readouterr().out
+    assert _gate(crs, rd, force=True) == 0
+
+
+def test_a_round_older_than_the_max_age_plus_an_hour_refuses(crs, rd) -> None:
+    _live(rd, "alpha")
+    _round(crs, rd, ["alpha"], at=NOW - 900 - 3600 - 1, alpha=30)
+    assert _gate(crs, rd) == 3 and "the ready round 20261102-100000 is " in _log(rd)
+    _round(crs, rd, ["alpha"], at=NOW - 900 - 3600 + 1, alpha=30)
+    assert _gate(crs, rd) == 0
+
+
+def test_a_round_that_asked_none_of_the_targets_refuses_and_a_missing_target_blocks(crs, rd) -> None:
+    _live(rd, "alpha")
+    _live(rd, "newcomer")
+    _round(crs, rd, ["alpha"], alpha=30)
+    assert _gate(crs, rd, ["newcomer"]) == 3 and "asked none of these sessions" in _log(rd)
+    (rd / "restart.log").unlink()
+    assert _gate(crs, rd) == 3 and "newcomer: not asked in this round" in _log(rd)
+
+
+def test_the_refusal_shape_is_an_abort_log_line_then_a_final_printed_line(crs, rd, monkeypatch, capsys) -> None:
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    _round(crs, rd, ["alpha", "beta"], alpha=30, beta=2000)
+    code, tmux_calls = _run_main(crs, monkeypatch, ["--resume", "--no-update"])
+    assert code == 3 and tmux_calls == []
+    problem = "1 of 2 session(s) are not ready (round 20261102-100000)"
+    abort = (f"ABORT: readiness: {problem}. Run claude-restart-sessions --ask-ready first, read the table with "
+             f"--status, or pass --force. Nothing installed, nothing restarted.")
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-1] == f"readiness: refused, {problem}; see {crs.LOG}"
+    aborts = [i for i, ln in enumerate(lines) if abort in ln]
+    assert aborts == [len(lines) - 2]  # the ABORT line (log() echoes it) comes just before the final line
+    assert abort in _log(rd) and "readiness: refused" not in _log(rd)
+
+
+# --- the check runs again (finding 5)
+
+
+def test_the_check_runs_again_after_the_install_and_before_the_launch(crs, rd, monkeypatch, capsys) -> None:
+    _live(rd, "alpha")
+    _round(crs, rd, ["alpha"], alpha=30)
+    calls: list[str] = []
+
+    def converge(*_a, **_k):
+        calls.append("converge")
+        os.utime(rd / "ready-alpha.json", (NOW - 2000, NOW - 2000))  # the engine wait outlasted the reply
+        return True
+
+    monkeypatch.setattr(crs, "converge", converge)
+    code, tmux_calls = _run_main(crs, monkeypatch, ["--nx", "7.99.0", "--resume", "--no-update"])
+    assert calls == ["converge"] and code == 3 and tmux_calls == []
+    out = capsys.readouterr().out
+    assert "reply stale" in out and "Nothing restarted (nx and the plugins are already installed)." in out
+    # and not before the install: a round that blocks at the start never reaches converge
+    calls.clear()
+    _round(crs, rd, ["alpha"], alpha=2000)
+    assert _run_main(crs, monkeypatch, ["--nx", "7.99.0", "--resume", "--no-update"])[0] == 3 and calls == []
+
+
+def _child(crs, rd, monkeypatch, *argv: str) -> tuple[int, list[str]]:
+    restarted: list[str] = []
+    monkeypatch.setattr(crs, "restart", lambda s, handoff="": restarted.append(s["name"]) or True)
+    monkeypatch.setattr(crs, "update_plugins", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--detached", "--no-update", "--wait", "1", *argv])
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
+    return crs.main(), restarted
+
+
+def test_the_background_run_skips_a_session_whose_reply_went_stale_before_its_exit(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    _round(crs, rd, ["alpha", "beta"], alpha=30, beta=2000)  # beta's reply is stale by the time its turn comes
+    code, restarted = _child(crs, rd, monkeypatch, "--resume")
+    assert restarted == ["alpha"] and code == 1
+    assert "SKIP beta: reply stale: ready reply is 33m old" in _log(rd)
+
+
+def test_the_background_run_skips_a_session_that_turned_not_ready_or_a_late_arrival(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha")
+    _live(rd, "late")
+    _round(crs, rd, ["alpha"], alpha=30)
+    Path(_reply(rd, "alpha", 30, {"ready": False, "reason": "started a build", "eta_min": 5}))
+    code, restarted = _child(crs, rd, monkeypatch, "--resume")
+    assert restarted == []
+    log = _log(rd)
+    assert "SKIP alpha: not ready: started a build" in log and "SKIP late: not asked in this round" in log
+
+
+@pytest.mark.parametrize("flag", ["--force", "--no-ready-check"])
+def test_force_and_no_ready_check_leave_the_background_run_unchecked(crs, rd, monkeypatch, flag) -> None:
+    _live(rd, "alpha")
+    _round(crs, rd, ["alpha"], alpha=2000)
+    assert _child(crs, rd, monkeypatch, "--resume", flag)[1] == ["alpha"]
+
+
+def test_the_exit_check_with_fresh_judges_the_reply_not_idle(crs, rd) -> None:
+    """A session writing its handoff is busy by design; the reply is judged as of the run's start, which
+    the handoff wait that follows may outlast."""
+    _live(rd, "alpha", status="busy")
+    _live(rd, "stale", status="busy")
+    _live(rd, "notready", status="busy")
+    _round(crs, rd, ["alpha", "stale", "notready"], alpha=100, stale=950, notready=100)
+    Path(_reply(rd, "notready", 100, {"ready": False, "reason": "changed its mind"}))
+    fresh = crs.child_guard(900, "", True, NOW)
+    assert fresh(_found(crs, ["alpha"])[0]) == ""  # busy, but its reply was fresh at the start
+    assert fresh(_found(crs, ["stale"])[0]).startswith("reply stale")  # already 950 s old at the start
+    assert fresh(_found(crs, ["notready"])[0]).startswith("not ready: changed its mind")
+
+
+def test_the_exit_check_without_fresh_asks_idle_and_age_at_the_moment_of_the_exit(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha", status="busy")
+    _live(rd, "beta")
+    _round(crs, rd, ["alpha", "beta"], alpha=100, beta=100)
+    resume = crs.child_guard(900, "", False, NOW)
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
+    at = time.strftime("%H:%M", time.localtime(NOW - 100))
+    assert resume(_found(crs, ["alpha"])[0]) == f"ready at {at}, busy now"
+    assert resume(_found(crs, ["beta"])[0]) == ""
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW + 1800)  # the same replies, half an hour on
+    assert resume(_found(crs, ["beta"])[0]).startswith("reply stale")
+    assert crs.child_guard(900, "", True, NOW)(_found(crs, ["beta"])[0]) == ""  # fresh: as of the start
+
+
+# --- dry run (finding 6)
+
+
+def test_a_dry_run_writes_nothing_to_the_log_and_keeps_its_exit_code(crs, rd, monkeypatch, capsys) -> None:
+    _live(rd, "alpha", status="busy")
+    _round(crs, rd, ["alpha"], alpha=30)
+    code, tmux_calls = _run_main(crs, monkeypatch, ["--resume", "--dry-run"])
+    assert code == 0 and tmux_calls == []
+    assert not (rd / "restart.log").exists()
+    out = capsys.readouterr().out
+    assert "would be REFUSED" in out and "alpha: ready at" in out
+    (rd / "restart-ready.json").unlink()
+    assert _run_main(crs, monkeypatch, ["--resume", "--dry-run"])[0] == 0 and not (rd / "restart.log").exists()
+    assert not (rd / "restart-last.json").exists()  # a dry run records nothing
+
+
+# --- the last run's mode (finding 9)
+
+
+def _good_round(crs, rd) -> None:
+    _live(rd, "alpha")
+    _round(crs, rd, ["alpha"], alpha=30)
+
+
+def test_each_run_records_its_mode_and_options(crs, rd, monkeypatch) -> None:
+    _good_round(crs, rd)
+    assert _run_main(crs, monkeypatch, ["--fresh", "--no-update"])[0] == 0
+    last = json.loads((rd / "restart-last.json").read_text(encoding="utf-8"))
+    assert (last["mode"], last["nx"], last["no_update"]) == ("fresh", "", True)
+    assert _run_main(crs, monkeypatch, ["--resume"])[0] == 0
+    last = json.loads((rd / "restart-last.json").read_text(encoding="utf-8"))
+    assert (last["mode"], last["no_update"]) == ("resume", False)
+
+
+def test_a_bare_run_after_a_fresh_one_is_refused_until_the_mode_is_named(crs, rd, monkeypatch, capsys) -> None:
+    _good_round(crs, rd)
+    assert _run_main(crs, monkeypatch, ["--fresh", "--no-update"])[0] == 0
+    capsys.readouterr()
+    code, tmux_calls = _run_main(crs, monkeypatch, ["--no-update"])
+    assert code == 4 and tmux_calls == []
+    assert capsys.readouterr().out.splitlines() == ["the last restart was --fresh; pass --fresh or --resume"]
+    assert _run_main(crs, monkeypatch, ["--no-update", "--resume"])[0] == 0
+    assert _run_main(crs, monkeypatch, ["--no-update", "--fresh"])[0] == 0
+    # a bare run after a resume run is fine, and with no last run at all
+    assert _run_main(crs, monkeypatch, ["--no-update", "--resume"])[0] == 0
+    assert _run_main(crs, monkeypatch, ["--no-update"])[0] == 0
+    (rd / "restart-last.json").unlink()
+    assert _run_main(crs, monkeypatch, ["--no-update"])[0] == 0
+    (rd / "restart-last.json").write_text("garbage", encoding="utf-8")
+    assert _run_main(crs, monkeypatch, ["--no-update"])[0] == 0
+
+
+def test_a_dry_run_after_a_fresh_one_prints_the_refusal_and_keeps_its_exit_code(crs, rd, monkeypatch, capsys) -> None:
+    _good_round(crs, rd)
+    (rd / "restart-last.json").write_text(json.dumps({"mode": "fresh"}), encoding="utf-8")
+    assert _run_main(crs, monkeypatch, ["--dry-run"])[0] == 0
+    assert "the last restart was --fresh; pass --fresh or --resume" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("argv", "line"), [
+    (["--fresh", "--no-update"], "fresh: each session writes a handoff, then starts fresh"),
+    (["--resume", "--no-update"], "resume: each session resumes its context"),
+])
+def test_the_go_output_opens_with_the_mode(crs, rd, monkeypatch, capsys, argv, line) -> None:
+    _good_round(crs, rd)
+    assert _run_main(crs, monkeypatch, argv)[0] == 0
+    assert capsys.readouterr().out.splitlines()[0] == line
+    # a refused go opens with it too
+    _round(crs, rd, ["alpha"], alpha=2000)
+    assert _run_main(crs, monkeypatch, argv)[0] == 3
+    assert capsys.readouterr().out.splitlines()[0] == line
+
+
+def test_fresh_and_resume_are_opposites(crs, rd, monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--fresh", "--resume"])
+    with pytest.raises(SystemExit):
+        crs.main()

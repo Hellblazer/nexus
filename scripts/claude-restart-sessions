@@ -49,12 +49,50 @@ With --revive (after a reboot, when the sessions are gone and so is their
 last boot, each in a new window of tmux session --tmux-session, under its last
 name and in its last cwd, with --flags. A session id that is already live is skipped.
 
+With --ask-ready the script asks every target session, now, whether it can be restarted.
+The ask goes by conexus mail when the session has the channel; else it is typed, but only when
+the session is idle, at its prompt and the prompt holds no draft (else the round records "not
+asked"). Each session writes one JSON object to a file this script names,
+/tmp/nexus-restart-ready-<name>-<id>-<round>.json:
+{"ready": true|false, "reason": "...", "eta_min": minutes|null}. The file must be a regular file
+owned by you, under 4 KiB, written after the round began; anything else reads as unreadable.
+The round (targets, the sessions left out and why, the file paths) is recorded in
+~/.claude/restart-ready.json. Excluded, never asked: Desktop sessions and any session with no
+tmux pane, --skip names, and sessions outside --only.
+--status prints the round as a table: per target the reply (ready, not ready with its reason and
+eta, stale, no reply, unreadable, not in round), the reply's age, and the session's live idle|busy
+from ~/.claude/sessions/*.json, then the excluded sessions. Neither restarts anything.
+The session that runs the script (the pane in TMUX_PANE) is busy while it runs, so it is exempt
+from the idle requirement only; its ready reply is still required.
+
+The restart itself (no --ask-ready, no --status, no --revive) requires a round. Before any install
+it refuses (exit 3, every blocker named, nothing installed or restarted) when there is no round,
+the round file is malformed, the round is older than --ready-max-age + 1 h, it shares no session
+with the targets, or any target lacks a ready reply no older than --ready-max-age (default 900 s)
+or is not idle now. A session that said ready and has gone busy since is named "ready at HH:MM,
+busy now"; a target the round never asked is a blocker. The check runs again after --nx has
+installed, just before the background launch, and in the background run immediately before each
+session's exit: a session whose reply has gone stale or turned not ready, or that is busy now, is
+skipped and logged. With --fresh that last check is against the ready reply as of the start of the
+background run, not idle: a session writing its handoff is busy by design. --force restarts anyway
+after printing the same list (and also restarts a session in status 'shell'); --no-ready-check
+skips the check alone, for sandbox gates. --dry-run prints the verdict (nothing goes to the log)
+and does not refuse.
+
+Each restart run records its mode and options in ~/.claude/restart-last.json and prints the mode
+first: "fresh: each session writes a handoff, then starts fresh" or "resume: each session resumes
+its context". A bare run (neither --fresh nor --resume) after a --fresh run refuses (exit 4): "the
+last restart was --fresh; pass --fresh or --resume".
+
 Usage:
+  claude-restart-sessions --ask-ready      # ask every session whether it can be restarted now
+  claude-restart-sessions --status         # the round as a table; restarts nothing
   claude-restart-sessions --revive --dry-run   # after a reboot: list what would come back
   claude-restart-sessions --revive             # resume them in tmux
   claude-restart-sessions --nx 7.84.0     # upgrade nx + plugins to 7.84.0, then restart all
   claude-restart-sessions --nx 7.84.0 --dry-run   # show the gate and versions, change nothing
-  claude-restart-sessions                 # update plugins, restart all
+  claude-restart-sessions --resume        # update plugins, restart all; each session resumes (refused unless a fresh ready round says go)
+  claude-restart-sessions --force         # restart all although the ready round says not yet
   claude-restart-sessions --dry-run       # list what it would do
   claude-restart-sessions --nx 7.88.0 --fresh   # upgrade, then handoff + fresh restart
   claude-restart-sessions --only nexus_911 --only labrun_092
@@ -62,19 +100,28 @@ Usage:
 """
 import argparse
 import json
+import math
 import os
 import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 SESSIONS = Path.home() / ".claude" / "sessions"
 LOG = Path.home() / ".claude" / "restart-sessions.log"
+#: The ready round (--ask-ready): who was asked, who was left out and why, and where each reply goes.
+READY_MANIFEST = Path.home() / ".claude" / "restart-ready.json"
+#: The last restart run's mode and options, so a bare run after a --fresh one is refused.
+LAST_RUN = Path.home() / ".claude" / "restart-last.json"
+#: Where the typed ready ask's instruction file goes (created per round, O_EXCL, mode 0600).
+ASK_DIR = Path("/tmp")
 
 
 def _claude_binary() -> str:
@@ -661,18 +708,20 @@ def handoff_prompt(s: dict, path: str, mailed: bool = False) -> str:
             f"When the file is complete, reply with only: cat {path}")
 
 
-def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200) -> bool:
+def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200, *, kind: str = "restart-handoff",
+             body: str | None = None, note: str | None = None) -> bool:
     """Send the handoff ask to the session's own mailbox; the conexus channel delivers it as a turn.
 
     Nothing is typed into the pane, so an unsent draft in the prompt is left as it is.
+    The ready round reuses this with its own kind, body and log note.
     """
     sid = s["sessionId"]
     # The ask expires soon after the roll would stop waiting for it, so an ask the session never
     # took does not sit in its mailbox for the template's 7 days and land in a later prompt.
     argv = [_nx_binary(), "tuple", "out", f"mailbox/{sid}", "--key", f"to={sid}", "--dim", f"from={sender}",
-            "--dim", "address_kind=session", "--dim", "kind=restart-handoff", "--nonce", str(uuid.uuid4()),
-            "--ttl-seconds", str(ttl), "--body", handoff_prompt(s, path, mailed=True)]
-    log(mail_note(s, path))
+            "--dim", "address_kind=session", "--dim", f"kind={kind}", "--nonce", str(uuid.uuid4()),
+            "--ttl-seconds", str(ttl), "--body", body if body is not None else handoff_prompt(s, path, mailed=True)]
+    log(note if note is not None else mail_note(s, path))
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -970,6 +1019,348 @@ def revive(a: argparse.Namespace) -> int:
     return 0 if not pending else 1
 
 
+def ready_path(s: dict, stamp: str) -> str:
+    """The file a session writes its readiness answer to: one per session and round, named like a handoff."""
+    return f"/tmp/nexus-restart-ready-{_safe_label(s)}-{s['sessionId'][:8]}-{stamp}.json"
+
+
+def ready_note(s: dict, path: str) -> str:
+    """The restart-log line written before the ready mail goes, which the mail tells the session to check."""
+    return f"mailing ready ask to {label(s)} -> {path}"
+
+
+def ready_prompt(s: dict, path: str, mailed: bool = False) -> str:
+    origin = (f"This message comes from claude-restart-sessions, the operator's restart script, through "
+              f"`nx tuple out`, which is why it reads as unattested. Check before acting: {LOG} has the line "
+              f"'{ready_note(s, path)}'. " if mailed else "")
+    return (origin + f"Restart readiness check for {label(s)}: the operator is about to restart every Claude session. "
+            f"Answer by writing the file {path} (create it; do not edit any other file) holding one JSON object: "
+            f'{{"ready": true or false, "reason": "one short sentence", "eta_min": minutes until you could be ready, '
+            f"or null}}. ready is true only when a restart now loses nothing: no turn or background job in flight "
+            f"that a restart would cut off, no peer waiting on you for a reply you owe, no unsent work you cannot "
+            f"hand over. Otherwise ready is false, with the reason and your best estimate of the minutes. "
+            f"Start no other work. When the file is written, reply with only: ready file written")
+
+
+def pane_capture(pane: str) -> str:
+    return subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", pane], capture_output=True, text=True).stdout
+
+
+def typed_block(s: dict) -> str:
+    """"" when a typed ready ask is safe, else why not: typing Enter into a busy pane can answer a dialog."""
+    out = pane_capture(s["pane"])
+    if status(s) != "idle" or prompt_line(out) is None:
+        return "not asked: not at its prompt"
+    if has_draft(out):
+        return "not asked: unsent text in its prompt"
+    return ""
+
+
+def write_ask_file(s: dict, stamp: str, text: str) -> Path:
+    """The typed ask's instruction file: one per session and round, created exclusively, mode 0600."""
+    ask = ASK_DIR / f"rr-{s['sessionId'][:8]}-{stamp}.txt"
+    fd = os.open(ask, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return ask
+
+
+def ask_ready(found: list[dict], stamp: str, sender: str) -> list[dict]:
+    """Ask every session, now and whatever it is doing, whether it can be restarted; one entry per session.
+
+    Conexus mail when the session has the channel. Else typed, but only when the session is idle and
+    at its prompt with no draft; otherwise recorded as not asked. An OSError on one target (the ask
+    file, tmux) is recorded as that target's "not asked: <error>" and the loop goes on, so the
+    manifest is always written. Nothing waits for an answer: --status reads the files later.
+    """
+    out = []
+    for s in found:
+        path = ready_path(s, stamp)
+        try:
+            if has_channel(s) and mail_ask(s, path, sender, kind="restart-ready", body=ready_prompt(s, path, mailed=True),
+                                           note=ready_note(s, path)):
+                how = "mail"
+            else:
+                why = "launched without the conexus channel" if not has_channel(s) else "the mail send failed"
+                how = typed_block(s)
+                if how:
+                    log(f"SKIP {label(s)}: {how}")
+                else:
+                    ask = write_ask_file(s, stamp, ready_prompt(s, path) + "\n")
+                    submit(s["pane"], f"Do what {ask} says", s["file"])
+                    how = f"typed ({why})"
+        except OSError as e:
+            how = f"not asked: {e}"
+            log(f"SKIP {label(s)}: {how}")
+        log(f"ready asked of {label(s)} by {how} -> {path}")
+        out.append({"name": label(s), "sessionId": s["sessionId"], "path": path, "how": how})
+    return out
+
+
+def excluded_sessions(listed: list[dict], found: list[dict], a: argparse.Namespace) -> list[dict]:
+    """Live sessions the round leaves alone, each with why: --skip, outside --only, or no tmux pane (Desktop)."""
+    chosen = {s["sessionId"] for s in found}
+    out = []
+    for s in listed:
+        if s["sessionId"] not in chosen:
+            out.append({"name": label(s), "sessionId": s["sessionId"],
+                        "why": "--skip" if s.get("name") in a.skip else "not in --only"})
+    seen = {s["sessionId"] for s in listed}
+    for path in sorted(SESSIONS.glob("*.json")):
+        d = read(path) or {}
+        pane = str(d.get("tmux") or "").rsplit(".", 1)[-1]
+        sid = str(d.get("sessionId") or "")
+        pid = int(d.get("pid", 0) or 0)
+        if d.get("kind") != "interactive" or pane.startswith("%") or not sid or sid in seen or not pid or not alive(pid):
+            continue
+        seen.add(sid)
+        name = d.get("name") or sid[:8]
+        if (a.only and name not in a.only) or name in a.skip:
+            continue
+        out.append({"name": name, "sessionId": sid, "why": ("Desktop session" if d.get("entrypoint") == "claude-desktop"
+                                                            else "no tmux pane") + ", cannot be restarted from here"})
+    return out
+
+
+def write_manifest(stamp: str, targets: list[dict], excluded: list[dict], at: float | None = None) -> None:
+    READY_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    tmp = READY_MANIFEST.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"stamp": stamp, "at": time.time() if at is None else at, "targets": targets,
+                               "excluded": excluded}, indent=1), encoding="utf-8")
+    tmp.replace(READY_MANIFEST)
+
+
+#: A reply is a few dozen bytes; the ceiling keeps a hostile file from being read whole.
+REPLY_MAX = 4096
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _number(v: object) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def read_reply(path: str, since: float, now: float) -> tuple[str, dict]:
+    """The one place a reply file is read. ("none", {}) when absent, ("invalid", {}) when it is anything
+    but a regular file of ours, under REPLY_MAX bytes, written between ``since`` and ``now`` (+5 s
+    skew), holding a JSON object with a real boolean ``ready``; else ("ok", reply).
+
+    The path is opened without following a symlink and without blocking (a FIFO would hang a plain
+    open), then judged by fstat on the descriptor, so the file cannot change type between the check
+    and the read. Any parse failure, a RecursionError from deeply nested JSON included, is invalid.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return "none", {}
+    except OSError:
+        return "invalid", {}
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > REPLY_MAX
+                or st.st_mtime < since or st.st_mtime > now + 5):
+            return "invalid", {}
+        raw = os.read(fd, REPLY_MAX + 1)
+    except OSError:
+        return "invalid", {}
+    finally:
+        os.close(fd)
+    try:
+        d = json.loads(raw.decode("utf-8")) if len(raw) <= REPLY_MAX else None
+    except (ValueError, RecursionError):
+        d = None
+    if not isinstance(d, dict) or not isinstance(d.get("ready"), bool):
+        return "invalid", {}
+    eta = d.get("eta_min")
+    reason = _CONTROL.sub(" ", str(d.get("reason") or "")).strip()[:200]
+    return "ok", {"ready": d["ready"], "reason": reason, "mtime": st.st_mtime,
+                  "eta": round(eta) if _number(eta) else None}
+
+
+def readiness(found: list[dict], manifest: dict, now: float, max_age: int, caller_pane: str = "") -> list[dict]:
+    """One row per current target: its reply, the reply's age, its live status, and what blocks a restart.
+
+    A row's ``blocker`` is empty only when the session answered ready no longer than ``max_age`` ago
+    AND its status is idle now; a session that went busy after saying ready is named as such. The
+    session in ``caller_pane`` is busy because it runs this script: it is exempt from the idle
+    requirement and from nothing else.
+    """
+    asked = {t["sessionId"]: t for t in manifest["targets"]}
+    rows = []
+    for s in found:
+        live = status(s)
+        row = {"name": label(s), "sessionId": s["sessionId"], "live": live, "age": None, "reason": "", "eta": None,
+               "state": "", "blocker": ""}
+        t = asked.get(s["sessionId"])
+        if t is None:
+            row["state"], row["blocker"] = "not in round", "not asked in this round (started after it?); ask again"
+        else:
+            kind, r = read_reply(t["path"], manifest["at"], now)
+            if kind == "ok":
+                row["age"] = now - r["mtime"]
+            if kind == "none":
+                row["state"] = "no reply"
+                row["blocker"] = "no reply" + (f" ({t['how']})" if str(t.get("how", "")).startswith("not asked") else "")
+            elif kind == "invalid":
+                row["state"], row["blocker"] = "unreadable", f"its reply file {t['path']} is not the agreed JSON"
+            else:
+                row["reason"], row["eta"] = r["reason"], r["eta"]
+                if not r["ready"]:
+                    row["state"] = "not ready"
+                    row["blocker"] = "not ready: " + (r["reason"] or "no reason given") + (
+                        f" (eta {r['eta']} min)" if r["eta"] is not None else "")
+                elif row["age"] > max_age:
+                    row["state"] = "stale"
+                    row["blocker"] = (f"reply stale: ready reply is {_ago(row['age'])} old (older than {_ago(max_age)}); "
+                                      f"ask again")
+                else:
+                    row["state"] = "ready"
+                    if live != "idle" and s.get("pane") != caller_pane:
+                        row["blocker"] = f"ready at {time.strftime('%H:%M', time.localtime(r['mtime']))}, {live} now"
+        rows.append(row)
+    return rows
+
+
+def _ago(seconds: float) -> str:
+    n = int(seconds)
+    return f"{n}s" if n < 120 else f"{n // 60}m" if n < 7200 else f"{n // 3600}h{n % 3600 // 60:02d}m"
+
+
+def print_table(manifest: dict, rows: list[dict], max_age: int, now: float) -> None:
+    print(f"ready round {manifest['stamp']}, asked {_ago(now - manifest['at'])} ago; "
+          f"a ready reply must be under {_ago(max_age)} old")
+    print(f"{'SESSION':<24} {'REPLY':<13} {'AGE':>6}  {'LIVE':<6} DETAIL")
+    for r in rows:
+        detail = r["blocker"] if r["blocker"] else ("" if r["state"] != "ready" else r["reason"])
+        print(f"{r['name'][:24]:<24} {r['state']:<13} {_ago(r['age']) if r['age'] is not None else '-':>6}  "
+              f"{r['live']:<6} {detail}")
+    for e in manifest["excluded"]:
+        print(f"{e['name'][:24]:<24} {'excluded':<13} {'-':>6}  {'-':<6} {e['why']}")
+
+
+def _strs(d: object, *keys: str) -> bool:
+    return isinstance(d, dict) and all(isinstance(d.get(k), str) and d.get(k) for k in keys)
+
+
+def load_manifest() -> tuple[dict | None, str]:
+    """(manifest, "") when the round file is present and every field this script reads is valid, else
+    (None, why): "no ready round yet" for an absent file, "the ready round file is malformed" for the rest."""
+    if not READY_MANIFEST.exists():
+        return None, "no ready round yet"
+    d = read(READY_MANIFEST)
+    ok = (isinstance(d, dict) and isinstance(d.get("stamp"), str) and d["stamp"] and _number(d.get("at"))
+          and isinstance(d.get("targets"), list) and all(_strs(t, "sessionId", "path") for t in d["targets"])
+          and all(isinstance(t.get("name", ""), str) and isinstance(t.get("how", ""), str) for t in d["targets"])
+          and isinstance(d.get("excluded", []), list) and all(_strs(e, "name", "why") for e in d.get("excluded", [])))
+    if not ok:
+        return None, "the ready round file is malformed"
+    d.setdefault("excluded", [])
+    return d, ""
+
+
+#: A round older than --ready-max-age by more than this cannot be the round for this restart.
+ROUND_GRACE = 3600
+
+
+def round_problem(found: list[dict], manifest: dict, now: float, max_age: int) -> str:
+    """What makes the round as a whole unusable for ``found`` ("" when it is usable)."""
+    if now - manifest["at"] > max_age + ROUND_GRACE:
+        return f"the ready round {manifest['stamp']} is {_ago(now - manifest['at'])} old"
+    if not {t["sessionId"] for t in manifest["targets"]} & {s["sessionId"] for s in found}:
+        return f"the ready round {manifest['stamp']} asked none of these sessions"
+    return ""
+
+
+def go_gate(found: list[dict], force: bool, max_age: int, now: float | None = None, caller_pane: str = "",
+            dry_run: bool = False, installed: bool = False) -> int:
+    """The check before a restart: 0 to go, 3 to refuse (every blocker named, nothing installed).
+
+    A usable round is required: no round, a malformed one, an old one, or one that asked none of
+    these sessions refuses. With one, every target needs a ready reply under ``max_age`` old and an
+    idle status now (the session in ``caller_pane`` is exempt from idle only). ``force`` names the
+    blockers and goes anyway. A dry run prints instead of logging, and its caller ignores the code.
+    ``installed`` is the second call, after --nx installed: the refusal then says only that nothing restarted.
+    """
+    now = time.time() if now is None else now
+    emit = print if dry_run else log
+    manifest, why = load_manifest()
+    todo = "Run claude-restart-sessions --ask-ready first, read the table with --status, or pass --force"
+    rows: list[dict] = []
+    if manifest is None:
+        problem, lines = why, []
+    elif (bad_round := round_problem(found, manifest, now, max_age)):
+        problem, lines = bad_round, []
+    else:
+        rows = readiness(found, manifest, now, max_age, caller_pane)
+        lines = [f"{r['name']}: {r['blocker']}" for r in rows if r["blocker"]]
+        problem = f"{len(lines)} of {len(rows)} session(s) are not ready (round {manifest['stamp']})" if lines else ""
+    if not problem:
+        emit(f"ready round {manifest['stamp']}: all {len(rows)} session(s) ready and idle")
+        return 0
+    if force or dry_run:
+        emit(f"=== {'--force: restarting although' if force else 'would be REFUSED:'} {problem}")
+        for ln in lines:
+            emit(f"  {ln}")
+        return 0
+    for ln in lines:
+        log(f"  {ln}")
+    log(f"ABORT: readiness: {problem}. {todo}. "
+        + ("Nothing restarted (nx and the plugins are already installed)." if installed
+           else "Nothing installed, nothing restarted."))
+    print(f"readiness: refused, {problem}; see {LOG}")
+    return 3
+
+
+def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) -> int:
+    """--ask-ready and --status. Neither restarts anything."""
+    if a.status:
+        manifest, why = load_manifest()
+        if manifest is None:
+            print(f"{why}; run claude-restart-sessions --ask-ready")
+            return 2
+        now = time.time()
+        rows = readiness(found, manifest, now, a.ready_max_age, os.environ.get("TMUX_PANE", ""))
+        print_table(manifest, rows, a.ready_max_age, now)
+        problem = round_problem(found, manifest, now, a.ready_max_age)
+        if problem:
+            print(problem)
+        gone = [t.get("name") or t["sessionId"][:8] for t in manifest["targets"]
+                if t["sessionId"] not in {s["sessionId"] for s in found}]
+        if gone:
+            print("in the round but not live now: " + ", ".join(gone))
+        return 0 if rows and not problem and not any(r["blocker"] for r in rows) else 1
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    excluded = excluded_sessions(listed, found, a)
+    if a.dry_run:
+        for s in found:
+            print(f"{label(s)}: would ask by {'mail' if has_channel(s) else 'typing'} -> {ready_path(s, stamp)}")
+        for e in excluded:
+            print(f"{e['name']}: excluded, {e['why']}")
+        return 0
+    me = os.environ.get("TMUX_PANE", "")
+    sender = next((s["sessionId"] for s in found if s["pane"] == me), "claude-restart-sessions")
+    # The round starts before the first ask: a session can answer while later ones are still being
+    # asked, and read_reply rejects a reply older than the round's `at` (review r2).
+    t0 = time.time()
+    targets = ask_ready(found, stamp, sender)
+    write_manifest(stamp, targets, excluded, at=t0)
+    print(f"ready round {stamp}: asked {len(targets)} session(s), excluded {len(excluded)}; "
+          f"read the replies with: claude-restart-sessions --status")
+    return 0
+
+
+MODE_LINES = {"fresh": "fresh: each session writes a handoff, then starts fresh",
+              "resume": "resume: each session resumes its context"}
+
+
+def record_last_run(a: argparse.Namespace) -> None:
+    """Remember this run's mode and options, so a later bare run cannot silently flip the mode."""
+    LAST_RUN.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LAST_RUN.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"mode": "fresh" if a.fresh else "resume", "nx": a.nx, "no_update": a.no_update,
+                               "at": time.time()}), encoding="utf-8")
+    tmp.replace(LAST_RUN)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", action="append", default=[], help="restart only this session name (repeatable)")
@@ -978,7 +1369,8 @@ def main() -> int:
     ap.add_argument("--wait", type=int, default=600, help="seconds to wait for a busy session to go idle (default 600)")
     ap.add_argument("--force", action="store_true",
                     help="also restart a session whose status is 'shell' (a stale or running shell command); "
-                         "a 'busy' session, one mid-turn, is still waited for")
+                         "a 'busy' session, one mid-turn, is still waited for; and go ahead although the "
+                         "ready round says a session is not ready (the blockers are printed)")
     ap.add_argument("--nx", metavar="X.Y.Z", default="",
                     help="first bring nx and the plugins to this release (engine gate, pinned install, version checks)")
     ap.add_argument("--skip-engine-gate", action="store_true",
@@ -1001,6 +1393,20 @@ def main() -> int:
     ap.add_argument("--verify-timeout", type=int, default=60,
                     help="with --revive: seconds to wait for every launched session to register (default 60)")
     ap.add_argument("--flags", default=REVIVE_FLAGS, help=f"with --revive: claude flags (default {REVIVE_FLAGS!r})")
+    ap.add_argument("--ask-ready", action="store_true",
+                    help="ask every target session whether it can be restarted now and record the round; restarts nothing "
+                         "(see above)")
+    ap.add_argument("--status", action="store_true",
+                    help="print the ready round as a table (reply, its age, live idle|busy, excluded sessions); "
+                         "restarts nothing; exit 0 only when a restart would be allowed")
+    ap.add_argument("--ready-max-age", type=int, default=900,
+                    help="a ready reply older than this many seconds no longer counts at the restart (default 900)")
+    ap.add_argument("--resume", action="store_true",
+                    help="each session resumes its context (the default mode, stated); after a --fresh run a bare "
+                         "restart is refused until you pass --fresh or --resume")
+    ap.add_argument("--no-ready-check", action="store_true",
+                    help="skip the ready-round check entirely (sandbox gates); unlike --force it does not also "
+                         "restart sessions in status 'shell'")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--caller-pane", default="", help=argparse.SUPPRESS)
@@ -1010,7 +1416,32 @@ def main() -> int:
     if a.revive:
         return revive(a)
 
-    found = [s for s in sessions() if (not a.only or s.get("name") in a.only) and s.get("name") not in a.skip]
+    if a.fresh and a.resume:
+        ap.error("--fresh and --resume are opposites; give one")
+    if a.ask_ready and a.status:
+        ap.error("--ask-ready and --status are separate steps; run one, then the other")
+    if (a.ask_ready or a.status) and (a.nx or a.fresh or a.resume):
+        ap.error("--ask-ready and --status restart nothing; give --nx, --fresh and --resume to the restart itself")
+    listed = sessions()
+    found = [s for s in listed if (not a.only or s.get("name") in a.only) and s.get("name") not in a.skip]
+    if a.ask_ready or a.status:
+        if not found:
+            print("no interactive tmux Claude sessions found")
+            return 1
+        return ready_round(a, listed, found)
+    caller_pane = a.caller_pane if a.detached else os.environ.get("TMUX_PANE", "")
+    if not a.detached:
+        last = read(LAST_RUN)
+        if not (a.fresh or a.resume) and isinstance(last, dict) and last.get("mode") == "fresh":
+            print("the last restart was --fresh; pass --fresh or --resume")
+            if not a.dry_run:
+                return 4
+        print(MODE_LINES["fresh" if a.fresh else "resume"])
+        if found and not a.no_ready_check:
+            # The check before anything is installed or restarted. A dry run prints it and goes on.
+            gate = go_gate(found, a.force, a.ready_max_age, caller_pane=caller_pane, dry_run=a.dry_run)
+            if gate and not a.dry_run:
+                return gate
     if a.nx and not a.detached:
         # With --fresh the install waits until every handoff is written, so the handoff turns run on
         # one consistent nx and plugin version; here only the engine gate runs.
@@ -1030,6 +1461,13 @@ def main() -> int:
         print("no interactive tmux Claude sessions found")
         return 1
     if not a.detached:
+        if a.nx and not a.force and not a.no_ready_check:
+            # The install can take minutes: look again, now, before the background run starts.
+            # With --fresh only the engine gate ran above; the install waits for the handoffs.
+            gate = go_gate(found, False, a.ready_max_age, caller_pane=caller_pane, installed=not a.fresh)
+            if gate:
+                return gate
+        record_last_run(a)
         rest = sys.argv[1:]
         if a.nx and a.fresh:  # gated above; the child installs after the handoffs
             rest = [x for x in rest if x != "--skip-engine-gate"] + ["--skip-engine-gate", "--no-update"]
@@ -1041,7 +1479,9 @@ def main() -> int:
         print(f"started in the background for {len(found)} session(s); progress in {LOG}")
         return 0
 
+    t_ref = time.time()
     log(f"=== restart {len(found)} session(s): " + ", ".join(s.get("name") or "?" for s in found))
+    guard = None if a.force or a.no_ready_check else child_guard(a.ready_max_age, caller_pane, a.fresh, t_ref)
     if not a.no_update:
         update_plugins()
     # Restart whichever session goes idle first, so one busy session holds up no
@@ -1065,15 +1505,38 @@ def main() -> int:
             for s in others + callers:
                 if s["sessionId"] not in handoffs:
                     log(f"{label(s)}: no handoff; will restart with --resume (fallback)")
-    ok = run_when_idle(others, a.wait, ready, handoffs)
-    ok += run_when_idle(callers, a.wait, ready, handoffs)
+    ok = run_when_idle(others, a.wait, ready, handoffs, guard)
+    ok += run_when_idle(callers, a.wait, ready, handoffs, guard)
     kinds = list(RESULTS.values())
     log(f"=== done: {ok} of {len(found)} restarted ({kinds.count('fresh')} fresh, {kinds.count('resumed')} resumed)")
     return 0 if ok == len(found) else 1
 
 
-def run_when_idle(pending: list[dict], wait: int, ready: set[str], handoffs: dict[str, str] | None = None) -> int:
-    """Restart each session the moment its status is in `ready`; skip any still busy after `wait` seconds."""
+def child_guard(max_age: int, caller_pane: str, fresh: bool, t_ref: float) -> Callable[[dict], str]:
+    """The per-session check the background run makes immediately before each exit ("" to go).
+
+    Resume: the ready reply must still be fresh and ready and the session idle now (the caller's pane
+    exempt from idle). Fresh: a session writing its handoff is busy by design, so idle is not asked;
+    the reply is judged as of ``t_ref``, the start of the background run, because the handoff wait
+    that follows can outlast any reply, and run_when_idle itself waits for the prompt before the exit.
+    """
+    def guard(s: dict) -> str:
+        manifest, why = load_manifest()
+        if manifest is None:
+            return why
+        row = readiness([s], manifest, t_ref if fresh else time.time(), max_age, caller_pane)[0]
+        return "" if fresh and row["state"] == "ready" else row["blocker"]
+
+    return guard
+
+
+def run_when_idle(pending: list[dict], wait: int, ready: set[str], handoffs: dict[str, str] | None = None,
+                  guard: Callable[[dict], str] | None = None) -> int:
+    """Restart each session the moment its status is in `ready`; skip any still busy after `wait` seconds.
+
+    ``guard`` is the last check, run immediately before a session's exit: a non-empty answer is why
+    that session is skipped (logged, left running) instead.
+    """
     deadline = time.time() + wait
     ok = 0
     while pending:
@@ -1083,6 +1546,9 @@ def run_when_idle(pending: list[dict], wait: int, ready: set[str], handoffs: dic
                 pending.remove(s)
             elif status(s) in ready:
                 pending.remove(s)
+                if (why := guard(s) if guard else ""):
+                    log(f"SKIP {label(s)}: {why}; left running, not restarted")
+                    continue
                 ok += restart(s, (handoffs or {}).get(s["sessionId"], ""))
                 deadline = max(deadline, time.time() + 60)  # a restart takes minutes; do not spend others' wait on it
         if not pending:
