@@ -37,32 +37,46 @@ def test_the_set_is_the_ci_steps_own_arguments() -> None:
 def test_a_missing_step_fails_loud(tmp_path: Path) -> None:
     wf = tmp_path / "wf.yml"
     wf.write_text("jobs:\n  j:\n    steps:\n      - name: other\n        run: echo\n", encoding="utf-8")
-    with pytest.raises(SystemExit, match="no step named"):
+    with pytest.raises(SystemExit, match="expected one"):
         wht.ci_set_args(wf)
 
 
-def test_the_remote_command_fetches_checks_out_then_runs_like_ci() -> None:
-    cmd = wht.remote_command("wren", "abc123", ["tests/x.py", "-k", "it's"], bundle=r"C:\b\w.bundle")
-    order = [cmd.index(part) for part in (
+def test_the_ci_checkout_fixup_runs_verbatim_after_the_checkout() -> None:
+    """Git for Windows checks tracked symlinks out as stub files; CI's fixup
+    step copies their targets in. Without it the daemon resources are missing
+    and 70 tests fail (the first hand run, 2026-11-01)."""
+    fixup = wht.ci_step_run(wht.FIXUP_STEP)
+    assert "120000" in fixup and "Copy-Item" in fixup, "non-vacuity: the step materialises symlinks"
+    script = wht.remote_script("wren", "abc123", ["t.py"], bundle=None, fixup=fixup)
+    assert fixup.rstrip() in script
+    assert script.index("git checkout -q -f --detach abc123") < script.index(fixup.rstrip()) < script.index("pytest")
+
+
+def test_the_remote_script_fetches_checks_out_then_runs_like_ci() -> None:
+    script = wht.remote_script("wren", "abc123", ["tests/x.py", "-k", "it's"], bundle=r"C:\b\w.bundle", fixup="# fixup")
+    order = [script.index(part) for part in (
         "git fetch -q origin",
         "git fetch -q 'C:\\b\\w.bundle' '+refs/win-hand/wren:refs/win-hand/wren'",
-        "git checkout -q --detach abc123",
+        "Remove-Item -LiteralPath $rel -Recurse -Force",
+        "git checkout -q -f --detach abc123",
+        "# fixup",
         "$env:NX_TEST_T2_SUBSTRATE = 'none'",
         "lab-run-win.cmd' uv run --python 3.13 --frozen pytest 'tests/x.py' '-k' 'it''s' -p no:cacheprovider",
         "exit $LASTEXITCODE",
     )]
     assert order == sorted(order)
-    assert r"C:\build\hand\wren" in cmd
+    assert r"C:\build\hand\wren" in script
 
 
 def test_a_pushed_commit_needs_no_bundle() -> None:
-    assert "bundle" not in wht.remote_command("wren", "abc123", ["t.py"], bundle=None)
+    assert "bundle" not in wht.remote_script("wren", "abc123", ["t.py"], bundle=None, fixup="")
 
 
 class _Recorder:
     def __init__(self, on_origin: bool) -> None:
         self.on_origin = on_origin
         self.calls: list[list[str]] = []
+        self.scripts: list[str] = []
 
     def __call__(self, argv: list[str], **kw: object) -> subprocess.CompletedProcess:
         self.calls.append(list(argv))
@@ -70,6 +84,8 @@ class _Recorder:
             return subprocess.CompletedProcess(argv, 0, stdout="deadbeef\n")
         if "branch" in argv and "--contains" in argv:
             return subprocess.CompletedProcess(argv, 0, stdout="  origin/develop\n" if self.on_origin else "")
+        if argv[0] == "scp" and argv[2].endswith(".ps1"):
+            self.scripts.append(Path(argv[2]).read_text(encoding="utf-8"))
         if argv[0] == "git" and "bundle" in argv:
             Path(argv[argv.index("-q") + 1]).write_bytes(b"bundle")
         return subprocess.CompletedProcess(argv, 0, stdout="")
@@ -78,8 +94,9 @@ class _Recorder:
 def test_a_commit_on_origin_goes_straight_to_ssh() -> None:
     rec = _Recorder(on_origin=True)
     assert wht.main(["--session", "wren", "--", "tests/x.py"], run=rec) == 0
-    assert [c[0] for c in rec.calls].count("scp") == 0
-    assert rec.calls[-1][0] == "ssh" and "checkout -q --detach deadbeef" in rec.calls[-1][2]
+    assert not any(c[0] == "scp" and c[2].endswith(".bundle") for c in rec.calls)
+    assert rec.calls[-1][:2] == ["ssh", wht.DEFAULT_HOST] and "pwsh -NoProfile -File" in rec.calls[-1][2]
+    assert "checkout -q -f --detach deadbeef" in rec.scripts[-1]
 
 
 def test_an_unpushed_commit_travels_as_a_bundle_and_its_ref_is_dropped() -> None:
@@ -89,9 +106,9 @@ def test_an_unpushed_commit_travels_as_a_bundle_and_its_ref_is_dropped() -> None
     up = next(i for i, c in enumerate(rec.calls) if "update-ref" in c and "-d" not in c)
     bundle = next(i for i, c in enumerate(rec.calls) if "bundle" in c)
     drop = next(i for i, c in enumerate(rec.calls) if "update-ref" in c and "-d" in c)
-    scp = next(i for i, c in enumerate(rec.calls) if c[0] == "scp")
+    scp = next(i for i, c in enumerate(rec.calls) if c[0] == "scp" and c[2].endswith(".bundle"))
     assert up < bundle < drop < scp, kinds
-    assert "refs/win-hand/wren:refs/win-hand/wren" in rec.calls[-1][2]
+    assert "refs/win-hand/wren:refs/win-hand/wren" in rec.scripts[-1]
 
 
 def test_the_exit_code_is_pytests(monkeypatch: pytest.MonkeyPatch) -> None:
