@@ -208,8 +208,13 @@ def test_the_nudge_counter_seam_spawns_the_recorder(monkeypatch: pytest.MonkeyPa
 
 
 def test_importing_the_recorder_pulls_in_only_stdlib_and_nexus_modules() -> None:
+    """What the recorder module adds on top of its package. ``nexus`` and
+    ``nexus.hooks`` are imported first because the nudge already has them
+    loaded, and ``nexus/__init__`` injects truststore on Windows, which loads
+    certifi and urllib3 (the Windows set went red on that, not on the recorder)."""
     probe = (
         "import sys\n"
+        "import nexus, nexus.hooks\n"
         "before = set(sys.modules)\n"
         "import nexus.hooks.agent_dispatch_record\n"
         "new = set(sys.modules) - before\n"
