@@ -56,6 +56,7 @@ extend the tier.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from collections.abc import Collection
 from pathlib import Path
@@ -491,6 +492,8 @@ class T2Database:
                 project=project, replaced_title=result.replaced_title,
                 error=f"{type(exc).__name__}: {exc}",
             )
+            # Carried to the writer: a later row re-using the replaced title would inherit the orphans.
+            return dataclasses.replace(result, purge_failed=True)
         return result
 
     def put_or_merge(

@@ -7331,7 +7331,8 @@ def memory_put(
     replaces: Annotated[str, Field(
         description=(
             "Exact title of an entry in the same project to delete in the same write. "
-            "Its content is returned. Empty means none."
+            "Its content is returned and a `replaces: <old title>` line is appended. "
+            "Audit records (by tag or title) are refused. Empty means none."
         ),
     )] = "",
 ) -> str:
@@ -7348,6 +7349,8 @@ def memory_put(
     - `ttl=None` (the default) is permanent; `ttl<=0` is rejected.
     - `memory_get` shows the stored ttl on its `TTL:` line.
     """
+    # RDR-238: bound before the try so the error path below can tell whether a replace landed.
+    replaced: ReplacePutResult | None = None
     try:
         if not content:
             return _fail("Error: content is required")
@@ -7371,7 +7374,6 @@ def memory_put(
         # not ``content``. ``landed_content`` is what was actually sent, and is what
         # the read-back below compares against.
         landed_content = content
-        replaced: ReplacePutResult | None = None
         with _t2_ctx() as db:
             if replaces:
                 replaced = db.put_replacing(
@@ -7434,16 +7436,25 @@ def memory_put(
             + _replaced_note(project, replaced)
         )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return _mcp_tool_error("memory_put", e)
+        # Once put_replacing returned, the target is deleted. Whatever fails after that (a verify
+        # verdict, the tier-write record) must still hand the deleted content to the writer: the
+        # echo is the only record of it. A failure inside put_replacing leaves `replaced` None.
+        return _mcp_tool_error("memory_put", e) + _replaced_note(project, replaced)
 
 
 def _replaced_note(project: str, replaced: ReplacePutResult | None) -> str:
     """The deleted row's title and content, for the writer to re-put (RDR-238)."""
     if replaced is None:
         return ""
+    purge = (
+        f"\nWARNING: the taxonomy assignments of {project}/{replaced.replaced_title} were NOT purged "
+        f"(the purge failed); a row later given that title inherits them."
+        if replaced.purge_failed else ""
+    )
     return (
-        f"\nReplaced (deleted): {project}/{replaced.replaced_title}\n"
-        f"Deleted content (re-put it to undo):\n{replaced.replaced_content}"
+        f"\nReplaced (deleted): {project}/{replaced.replaced_title}"
+        + purge
+        + f"\nDeleted content (re-put it to undo):\n{replaced.replaced_content}"
     )
 
 

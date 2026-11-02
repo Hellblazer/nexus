@@ -256,24 +256,80 @@ def test_mcp_verifies_against_the_content_sent_and_returns_the_deleted_content(
     assert call["replaces"] == "A" and call["content"] == "new body"
 
 
-def test_mcp_reports_a_mismatch_when_the_landed_row_differs_from_what_was_sent(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("stored", "verdict"),
+    [(_landed("something else"), "mismatch"), (None, "missing")],
+)
+def test_mcp_reports_a_failed_read_back_and_still_hands_over_the_deleted_content(
+    monkeypatch: pytest.MonkeyPatch, stored: dict | None, verdict: str,
 ) -> None:
+    """The delete is committed once put_replacing returns; the echo is the only record of it."""
     db = _FakeDb(
-        stored=_landed("something else"),
-        result=ReplacePutResult(id=42, sent_content="new\nreplaces: A", replaced_title="A", replaced_content="x"),
+        stored=stored,
+        result=ReplacePutResult(
+            id=42, sent_content="new\nreplaces: A", replaced_title="A",
+            replaced_content="the deleted body zebrafinch",
+        ),
     )
     _use(monkeypatch, db)
     out = core.memory_put(content="new", project="p", title="B", replaces="A")
     assert out.startswith("Error:"), out
-    assert "(mismatch)" in out
+    assert f"({verdict})" in out
+    assert "Replaced (deleted): p/A" in out and "the deleted body zebrafinch" in out, out
+
+
+def test_mcp_a_raising_tier_write_record_still_hands_over_the_deleted_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception AFTER the replace landed, outside the verifier, loses the echo too without the note."""
+    db = _FakeDb(
+        stored=_landed("new\nreplaces: A"),
+        result=ReplacePutResult(
+            id=42, sent_content="new\nreplaces: A", replaced_title="A",
+            replaced_content="the deleted body zebrafinch",
+        ),
+    )
+    _use(monkeypatch, db)
+
+    def _boom(**kw):
+        raise OSError("telemetry store down")
+
+    monkeypatch.setattr(core, "_record_tier_write", _boom)
+    out = core.memory_put(content="new", project="p", title="B", replaces="A")
+    assert out.startswith("Error:"), out
+    assert "telemetry store down" in out
+    assert "the deleted body zebrafinch" in out, out
+
+
+def test_mcp_a_refusal_has_no_deleted_content_to_hand_over(monkeypatch: pytest.MonkeyPatch) -> None:
+    _use(monkeypatch, _FakeDb(stored=None, result=RuntimeError("HTTP 409: replaces target p/A not found")))
+    out = core.memory_put(content="new", project="p", title="B", replaces="A")
+    assert "Deleted content" not in out, out
+
+
+def test_mcp_says_the_taxonomy_purge_failed_when_it_did(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = "new\nreplaces: A"
+    for purge_failed, expect in ((True, True), (False, False)):
+        db = _FakeDb(
+            stored=_landed(sent),
+            result=ReplacePutResult(
+                id=42, sent_content=sent, replaced_title="A", replaced_content="old A body",
+                purge_failed=purge_failed,
+            ),
+        )
+        _use(monkeypatch, db)
+        out = core.memory_put(content="new", project="p", title="B", replaces="A")
+        assert out.startswith("Stored: [42] p/B"), out
+        assert "old A body" in out
+        assert ("NOT purged" in out) is expect, out
 
 
 @pytest.mark.parametrize(
     ("failure", "needles"),
     [
         (ReplacesEchoMissingError("p", "B", "A"), ["lacks replaces", "WAS written", "still alive"]),
-        (ReplacesOutcomeUnknownError("p", "B", "A"), ["unknown", "memory_get"]),
+        (ReplacesOutcomeUnknownError("p", "B", "A"),
+         ["unknown", "memory_get", "the replace landed", "cannot be recovered from the engine"]),
         (RuntimeError("HttpMemoryStore./v1/memory/put failed: HTTP 409: replaces target p/A is quarantined"),
          ["409", "p/A", "quarantined"]),
     ],
@@ -347,6 +403,7 @@ def test_case1_store_result_carries_the_echo_and_the_sent_content(
     db.put(project="rp", title="A", content="old A")
     result = db.put_replacing(project="rp", title="B", content="new B", replaces="A")
     assert purged == [("rp", "A")]
+    assert result.purge_failed is False
     assert result.replaced_title == "A"
     assert result.replaced_content == "old A"
     assert result.sent_content == "new B\nreplaces: A"
@@ -404,4 +461,5 @@ def test_a_failed_purge_does_not_hide_a_replace_that_landed(
     db.put(project="rp", title="A", content="old A")
     result = db.put_replacing(project="rp", title="B", content="new B", replaces="A")
     assert result.replaced_content == "old A"
+    assert result.purge_failed is True, "the writer must be told the assignments were not purged"
     assert db.get(project="rp", title="A") is None

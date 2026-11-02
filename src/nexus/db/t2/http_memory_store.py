@@ -152,6 +152,9 @@ class ReplacePutResult:
     sent_content: str
     replaced_title: str
     replaced_content: str
+    #: Set by ``T2Database.put_replacing`` when the taxonomy purge for the replaced title failed:
+    #: the replace landed, but its topic assignments are still in the taxonomy store.
+    purge_failed: bool = False
 
 
 class ReplacesEchoMissingError(RuntimeError):
@@ -174,7 +177,9 @@ class ReplacesOutcomeUnknownError(RuntimeError):
             f"the outcome of the replace is unknown: the request to replace "
             f"{project}/{replaces} with {project}/{title} got no usable answer. A replacing "
             f"put is never retried. Check with memory_get whether {project}/{title} exists "
-            f"and {project}/{replaces} is gone; if {project}/{replaces} is still there, put again."
+            f"and {project}/{replaces} is gone; if {project}/{replaces} is still there, put again. "
+            f"If {project}/{title} is present and {project}/{replaces} is gone, the replace landed: "
+            f"the deleted content was in the lost response and cannot be recovered from the engine."
         )
 
 
