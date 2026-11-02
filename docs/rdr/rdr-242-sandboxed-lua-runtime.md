@@ -159,9 +159,15 @@ LuaJIT 2.1 in an aarch64 Linux container. "Verified" means the probe ran.
   loops at once; a 64 MB `max_memory` cap raises `LuaMemoryError` for
   `string.rep` and for table growth; unbounded recursion raises "stack
   overflow".
-- **Verified: a script-created coroutine escaped the count hook on 5.4.** A
-  loop inside it ran to a 25 s timeout with the hook set on the main thread.
-  Cause not found.
+- **Verified: a script-created coroutine escapes the count hook on 5.4,
+  and a host wrapper closes it.** A loop inside a new coroutine ran to the
+  timeout with the hook set on the main thread. Cause: the debug library
+  keeps the Lua hook function per thread. A new thread inherits the hook's
+  count (`debug.gethook` inside it reports 100000) but has no function
+  registered, so nothing runs when the hook fires. A host-provided
+  `coroutine.create` that calls `debug.sethook(co, hook, "", n)` on each new
+  coroutine stops the same loop at once (`co_probe.py`, cases `native`,
+  `hookmask`, `wrapped`).
 - **Verified: bytecode loads on 5.1 and LuaJIT.** Their `loadstring` path
   runs a binary chunk; 5.2 to 5.5 refuse one when the host compiles in mode
   `"t"`. `string.dump` stays reachable through the string metatable
@@ -196,8 +202,9 @@ LuaJIT 2.1 in an aarch64 Linux container. "Verified" means the probe ran.
 What the probes force on any design: PUC Lua 5.4; host-side compile in mode
 `"t"` and a refusal of any chunk that starts with byte 27 (ESC); plain
 values in and a host-walked JSON conversion out, with depth and size caps;
-no host object and no pre-built closure in the environment; no `coroutine`
-in the first version; a result cap on the host.
+no host object and no pre-built closure in the environment; `coroutine`
+only through a host wrapper that arms the hook on each new thread, or not at
+all in the first version; a result cap on the host.
 
 ### Critical Assumptions
 
@@ -207,8 +214,9 @@ in the first version; a result cap on the host.
   and a Linux aarch64 install ran; the native Windows install is not yet run.
 - **A2:** A script can be held to an instruction or time limit and a memory
   limit that it cannot disable from inside. Verification: escape tests in the
-  Test Plan, run against the chosen runtime. Status: holds for Lua 5.4
-  without coroutines; fails for LuaJIT; wall time not yet probed.
+  Test Plan, run against the chosen runtime. Status: holds for Lua 5.4, with
+  coroutines only through the hook-arming wrapper; fails for LuaJIT; wall
+  time not yet probed.
 - **A3:** The read verbs RDR-240 needs can be served from the client without
   new engine routes. Verification: map each verb to an existing client call.
   Status: no engine route is needed, but four of the seven verbs need new
