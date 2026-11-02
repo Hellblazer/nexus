@@ -8,6 +8,7 @@ whose dim suggested prompt made the 7.92.0 restart skip six of nine handoffs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -37,6 +38,12 @@ def crs():
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def _no_sent_asks(crs, monkeypatch):
+    """Each test starts with no mailed ask on record, so none is withdrawn through a real nx."""
+    monkeypatch.setattr(crs, "SENT_ASKS", {})
 
 
 def pane(prompt_line: str) -> str:
@@ -505,6 +512,7 @@ def rd(crs, monkeypatch, tmp_path):
     monkeypatch.setattr(crs, "READY_MANIFEST", tmp_path / "restart-ready.json")
     monkeypatch.setattr(crs, "LAST_RUN", tmp_path / "restart-last.json")
     monkeypatch.setattr(crs, "ASK_DIR", ask_dir)
+    monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "")  # the sandbox gate has its own tests
     monkeypatch.delenv("TMUX_PANE", raising=False)
     return tmp_path
 
@@ -1191,3 +1199,311 @@ def test_fresh_and_resume_are_opposites(crs, rd, monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--fresh", "--resume"])
     with pytest.raises(SystemExit):
         crs.main()
+# ── the sandbox-pass gate (nexus-8zdbu) ──────────────────────────────────────────────────
+
+SHA = "a" * 64
+
+
+@pytest.fixture
+def passfile(crs, monkeypatch, tmp_path) -> Path:
+    path = tmp_path / "state" / "sandbox-pass.json"
+    monkeypatch.setattr(crs, "SANDBOX_PASS", path)
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    return path
+
+
+def test_a_recorded_pass_covers_its_script_and_claude_version(crs, passfile) -> None:
+    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll", "variant", "abort", "gate"], 756.4)
+    assert crs.sandbox_pass_problem(SHA, "2.1.316") == ""
+    rec = json.loads(passfile.read_text(encoding="utf-8"))
+    assert rec["seconds"] == 756 and rec["scenarios"] == ["roll", "variant", "abort", "gate"]
+
+
+@pytest.mark.parametrize(("script", "claude", "says"), [
+    ("b" * 64, "2.1.316", "another copy of this script"),
+    (SHA, "2.1.317", "Claude Code 2.1.316, not 2.1.317"),
+    (SHA, "", "could not read Claude Code's version"),
+], ids=["script-changed", "claude-changed", "claude-unreadable"])
+def test_a_pass_on_anything_else_does_not_count(crs, passfile, script: str, claude: str, says: str) -> None:
+    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll"], 1)
+    assert says in crs.sandbox_pass_problem(script, claude)
+
+
+@pytest.mark.parametrize(("content", "says"), [
+    (None, "no sandbox pass recorded"),
+    ("{not json", "unreadable"),
+    ("[1]", "not an object"),
+], ids=["absent", "garbled", "list"])
+def test_a_missing_or_bad_record_does_not_count(crs, passfile, content: str | None, says: str) -> None:
+    if content is not None:
+        passfile.parent.mkdir(parents=True)
+        passfile.write_text(content, encoding="utf-8")
+    assert says in crs.sandbox_pass_problem(SHA, "2.1.316")
+
+
+def test_script_sha256_is_the_hash_of_the_scripts_bytes_through_a_symlink(crs, tmp_path) -> None:
+    expected = hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
+    link = tmp_path / "claude-restart-sessions"
+    link.symlink_to(SCRIPT)
+    assert crs.script_sha256(link) == expected
+    assert crs.script_sha256() == expected  # with no path: the module's own file
+    changed = tmp_path / "changed"
+    changed.write_bytes(SCRIPT.read_bytes() + b"\n")
+    assert crs.script_sha256(changed) != expected
+
+
+def _main(crs, monkeypatch, *argv: str) -> tuple[int, list[list[str]]]:
+    """Run main with one idle session; return its exit code and the commands it ran."""
+    ran: list[list[str]] = []
+    monkeypatch.setattr(crs, "sessions", lambda: [{"pid": 1, "pane": "%1", "name": "s", "sessionId": "sid", "status": "idle", "argv": "claude", "cwd": "/w"}])
+    monkeypatch.setattr(crs, "claude_version", lambda *_: "2.1.316")
+    monkeypatch.setattr(crs, "script_sha256", lambda *_: SHA)
+    monkeypatch.setattr(crs, "converge", lambda *_a, **_k: pytest.fail("converge ran past a refused gate"))
+    monkeypatch.setattr(crs, "LAST_RUN", crs.SANDBOX_PASS.parent / "restart-last.json")  # never the operator's
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda cmd, *_a, **_k: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    # The ready round has its own tests; here it is skipped so only the sandbox gate decides.
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--no-ready-check", *argv])
+    return crs.main(), ran
+
+
+def test_a_restart_with_no_pass_is_refused_before_anything_runs(crs, monkeypatch, passfile, capsys) -> None:
+    code, ran = _main(crs, monkeypatch, "--nx", "7.93.1")
+    assert code == 3 and ran == []
+    assert "ABORT: sandbox pass: no sandbox pass recorded" in crs.LOG.read_text(encoding="utf-8")
+    out = capsys.readouterr().out.splitlines()
+    assert "ABORT: sandbox pass: no sandbox pass recorded" in out[0]
+    assert out[-1].startswith("sandbox pass: refused, no sandbox pass recorded")
+
+
+def test_a_restart_with_a_pass_goes_on(crs, monkeypatch, passfile) -> None:
+    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll"], 1)
+    code, ran = _main(crs, monkeypatch)
+    assert code == 0 and ran and ran[0][:3] == ["tmux", "run-shell", "-b"]
+
+
+def test_skip_sandbox_check_restarts_and_says_so(crs, monkeypatch, passfile) -> None:
+    code, ran = _main(crs, monkeypatch, "--skip-sandbox-check")
+    assert code == 0 and ran
+    assert "WARN: no sandbox pass recorded" in crs.LOG.read_text(encoding="utf-8")
+
+
+def test_a_dry_run_reports_the_gate_and_refuses_nothing(crs, monkeypatch, passfile, capsys) -> None:
+    code, ran = _main(crs, monkeypatch, "--dry-run")
+    assert code == 0 and ran == []
+    assert "sandbox pass: no sandbox pass recorded" in capsys.readouterr().out
+
+
+def test_revive_is_not_gated(crs, monkeypatch, passfile) -> None:
+    monkeypatch.setattr(crs, "revive", lambda _a: 0)
+    code, _ = _main(crs, monkeypatch, "--revive")
+    assert code == 0
+
+
+# ── withdrawing a mailed ask (nexus-o581r) ───────────────────────────────────────────────
+
+def _fake_mailbox(crs, monkeypatch, rows: list[str]) -> list[tuple[str, ...]]:
+    """mailbox rows by tuple id, oldest first; `in` claims the next one. Returns the calls made."""
+    calls: list[tuple[str, ...]] = []
+    queue = list(rows)
+
+    def fake(*args: str) -> subprocess.CompletedProcess:
+        calls.append(args)
+        if args[0] == "in":
+            if not queue:
+                return subprocess.CompletedProcess(args, 1, "", "No matching tuple.")
+            tid = queue.pop(0)
+            return subprocess.CompletedProcess(args, 0, json.dumps({"claim_id": f"c-{tid}", "tuple": {"id": tid}}), "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(crs, "_nx_tuple", fake)
+    return calls
+
+
+def test_mail_ask_records_the_ask_s_tuple_id(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda argv, **_k: subprocess.CompletedProcess(argv, 0, "t-ours\n", ""))
+    assert crs.mail_ask({"sessionId": "sid-9", "name": "t"}, "/tmp/h.md", "x") is True
+    assert crs.SENT_ASKS == {"sid-9": "t-ours"}
+
+
+def test_our_ask_is_acked(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    crs.SENT_ASKS["sid-9"] = "t-ours"
+    calls = _fake_mailbox(crs, monkeypatch, ["t-ours"])
+    crs.withdraw_ask("sid-9")
+    assert [c[0] for c in calls] == ["in", "ack"] and calls[1][1] == "c-t-ours"
+    assert "handoff ask t-ours withdrawn" in crs.LOG.read_text(encoding="utf-8")
+    assert crs.SENT_ASKS == {}
+
+
+def test_a_peer_s_mail_claimed_on_the_way_is_released_not_acked(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    crs.SENT_ASKS["sid-9"] = "t-ours"
+    calls = _fake_mailbox(crs, monkeypatch, ["t-peer", "t-ours"])
+    crs.withdraw_ask("sid-9")
+    assert [(c[0], c[1]) for c in calls if c[0] != "in"] == [("ack", "c-t-ours"), ("release", "c-t-peer")]
+    assert "1 other row(s) claimed and released" in crs.LOG.read_text(encoding="utf-8")
+
+
+def test_an_ask_already_taken_is_left_alone(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    crs.SENT_ASKS["sid-9"] = "t-ours"
+    calls = _fake_mailbox(crs, monkeypatch, ["t-peer"])
+    crs.withdraw_ask("sid-9")
+    assert [(c[0], c[1]) for c in calls if c[0] != "in"] == [("release", "c-t-peer")]
+    assert "already taken or expired" in crs.LOG.read_text(encoding="utf-8")
+
+
+def test_an_unrecorded_session_touches_no_mailbox(crs, monkeypatch, tmp_path) -> None:
+    calls = _fake_mailbox(crs, monkeypatch, ["t-peer"])
+    crs.withdraw_ask("sid-9")
+    assert calls == []
+
+
+def test_write_handoffs_withdraws_every_ask_even_when_it_raises(crs, monkeypatch) -> None:
+    withdrawn: list[str] = []
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid: withdrawn.append(sid) or crs.SENT_ASKS.pop(sid, None))
+
+    def boom(*_a, **_k):
+        crs.SENT_ASKS["sid-1"] = "t-1"
+        raise RuntimeError("tmux went away")
+
+    monkeypatch.setattr(crs, "_write_handoffs", boom)
+    with pytest.raises(RuntimeError):
+        crs.write_handoffs([], {"idle"}, 1, 1)
+    assert withdrawn == ["sid-1"]
+
+
+def _scripted_nx(crs, monkeypatch, replies: dict[str, list[subprocess.CompletedProcess]]) -> list[tuple[str, ...]]:
+    """_nx_tuple answering each verb from its own list of replies, in order."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake(*args: str) -> subprocess.CompletedProcess:
+        calls.append(args)
+        return replies[args[0]].pop(0)
+
+    monkeypatch.setattr(crs, "_nx_tuple", fake)
+    return calls
+
+
+def _cp(code: int, out: str = "", err: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess([], code, out, err)
+
+
+def test_an_engine_error_is_not_logged_as_a_miss(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    crs.SENT_ASKS["sid-9"] = "t-ours"
+    _scripted_nx(crs, monkeypatch, {"in": [_cp(1, err="Error: engine unreachable\n")]})
+    crs.withdraw_ask("sid-9")
+    log = crs.LOG.read_text(encoding="utf-8")
+    assert "not withdrawn (in exited 1: Error: engine unreachable)" in log
+    assert "already taken" not in log
+
+
+def test_a_failed_ack_releases_our_claim(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    crs.SENT_ASKS["sid-9"] = "t-ours"
+    calls = _scripted_nx(crs, monkeypatch, {
+        "in": [_cp(0, json.dumps({"claim_id": "c-ours", "tuple": {"id": "t-ours"}}))],
+        "ack": [_cp(1)], "release": [_cp(0)]})
+    crs.withdraw_ask("sid-9")
+    assert [(c[0], c[1]) for c in calls if c[0] != "in"] == [("ack", "c-ours"), ("release", "c-ours")]
+    assert "claimed but not acked (exit 1); released" in crs.LOG.read_text(encoding="utf-8")
+
+
+def test_a_failed_release_is_warned(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    crs.SENT_ASKS["sid-9"] = "t-ours"
+    _scripted_nx(crs, monkeypatch, {
+        "in": [_cp(0, json.dumps({"claim_id": "c-peer", "tuple": {"id": "t-peer"}})), _cp(1, err="No matching tuple.")],
+        "release": [_cp(2)]})
+    crs.withdraw_ask("sid-9")
+    assert "could not release a row it claimed (exit 2)" in crs.LOG.read_text(encoding="utf-8")
+
+
+def test_a_non_object_reply_is_logged_not_raised(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    crs.SENT_ASKS["sid-9"] = "t-ours"
+    _scripted_nx(crs, monkeypatch, {"in": [_cp(0, "[]")]})
+    crs.withdraw_ask("sid-9")
+    assert "not withdrawn (TypeError" in crs.LOG.read_text(encoding="utf-8")
+
+
+def _loop_with_mail(crs, monkeypatch, tmp_path, *, busy: bool) -> list[str]:
+    """Run the handoff loop over one channel session whose mail is sent; typing is declined.
+
+    Returns the order of withdraw and typed-ask calls.
+    """
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    s = {"sessionId": "sid-1", "name": "t", "pid": os.getpid(), "pane": "%9", "file": tmp_path / "s.json"}
+    monkeypatch.setattr(crs, "handoff_path", lambda _s, _stamp: str(tmp_path / "h.md"))
+    order: list[str] = []
+
+    def mail(*_a, **_k) -> bool:
+        crs.SENT_ASKS["sid-1"] = "t-1"
+        return True
+
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid: order.append(f"withdraw {sid}") or crs.SENT_ASKS.pop(sid, None))
+    monkeypatch.setattr(crs, "typed_ask", lambda _s, _p: order.append("typed") or False)
+    monkeypatch.setattr(crs, "has_channel", lambda _s: True)
+    monkeypatch.setattr(crs, "mail_ask", mail)
+    monkeypatch.setattr(crs, "went_busy", lambda *_a, **_k: busy)
+    monkeypatch.setattr(crs, "prompt_count", lambda _sid: 1)
+    monkeypatch.setattr(crs, "status", lambda _s: "idle")
+    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    assert crs._write_handoffs([s], {"idle"}, 60, 10_000, "x") == {}
+    return order
+
+
+def test_a_mail_that_starts_no_turn_is_withdrawn_before_the_typed_ask(crs, monkeypatch, tmp_path) -> None:
+    assert _loop_with_mail(crs, monkeypatch, tmp_path, busy=False)[:2] == ["withdraw sid-1", "typed"]
+
+
+def test_a_declined_mail_is_withdrawn_before_the_typed_ask(crs, monkeypatch, tmp_path) -> None:
+    assert _loop_with_mail(crs, monkeypatch, tmp_path, busy=True)[:2] == ["withdraw sid-1", "typed"]
+
+
+def test_a_written_handoff_withdraws_its_mailed_ask(crs, monkeypatch, tmp_path) -> None:
+    """The per-outcome withdraw, inside the loop: the ask goes as soon as the handoff counts."""
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    s = {"sessionId": "sid-1", "name": "t", "pid": os.getpid(), "pane": "%9", "file": tmp_path / "s.json"}
+    handoff = tmp_path / "h.md"
+    monkeypatch.setattr(crs, "handoff_path", lambda _s, _stamp: str(handoff))
+    body = "# Handoff\n\n## 1. State\n" + "x" * 300 + f"\n{crs.handoff_marker(s)}\n"
+    now = [1_000_000.0]
+
+    def mail(*_a, **_k) -> bool:
+        crs.SENT_ASKS["sid-1"] = "t-1"
+        handoff.write_text(body, encoding="utf-8")
+        os.utime(handoff, (now[0], now[0]))
+        return True
+
+    order: list[str] = []
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid: order.append(f"withdraw {sid}") or crs.SENT_ASKS.pop(sid, None))
+    monkeypatch.setattr(crs, "has_channel", lambda _s: True)
+    monkeypatch.setattr(crs, "mail_ask", mail)
+    monkeypatch.setattr(crs, "went_busy", lambda *_a, **_k: True)
+    monkeypatch.setattr(crs, "prompt_count", lambda _sid: 1)
+    monkeypatch.setattr(crs, "status", lambda _s: "idle")
+    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+
+    def tick() -> float:
+        now[0] += 7
+        return now[0]
+
+    setattr_in(monkeypatch, crs, "time.time", tick)
+    monkeypatch.setattr(crs, "_write_handoffs", crs._write_handoffs)
+    assert crs._write_handoffs([s], {"idle"}, 60, 10_000, "x") == {"sid-1": str(handoff)}
+    assert order == ["withdraw sid-1"]
+
+
+def test_the_sandbox_gate_refuses_before_the_ready_round_is_read(crs, monkeypatch, passfile, capsys) -> None:
+    """No pass: exit 3 from the sandbox gate; the ready-round check never runs (nexus-8zdbu, nexus-1b5rs)."""
+    monkeypatch.setattr(crs, "go_gate", lambda *_a, **_k: pytest.fail("the ready round was read first"))
+    monkeypatch.setattr(crs, "sessions", lambda: [{"pid": 1, "pane": "%1", "name": "s", "sessionId": "sid", "status": "idle", "argv": "claude", "cwd": "/w"}])
+    monkeypatch.setattr(crs, "claude_version", lambda *_: "2.1.316")
+    monkeypatch.setattr(crs, "script_sha256", lambda *_: SHA)
+    monkeypatch.setattr(crs, "LAST_RUN", passfile.parent / "restart-last.json")
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--resume", "--no-update"])
+    assert crs.main() == 3
+    assert capsys.readouterr().out.splitlines()[-1].startswith("sandbox pass: refused, no sandbox pass recorded")

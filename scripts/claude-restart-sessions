@@ -84,6 +84,17 @@ first: "fresh: each session writes a handoff, then starts fresh" or "resume: eac
 its context". A bare run (neither --fresh nor --resume) after a --fresh run refuses (exit 4): "the
 last restart was --fresh; pass --fresh or --resume".
 
+Sandbox pass (nexus-8zdbu): a restart (not --dry-run, not --revive) refuses with exit 3, before
+the ready-round check,
+unless tests/e2e/restart-sessions/run.sh has passed all its scenarios on this exact
+script (its sha256) and this Claude Code version since either last changed; a pass
+records both in ~/.local/state/claude-restart-sessions/sandbox-pass.json. --dry-run
+reports whether the pass holds. --skip-sandbox-check restarts anyway and logs it.
+
+Install as a symlink to the primary checkout, which tracks develop, so the copy you
+run cannot drift from the one the sandbox tested:
+  ln -sfn ~/git/nexus/scripts/claude-restart-sessions ~/.local/bin/claude-restart-sessions
+
 Usage:
   claude-restart-sessions --ask-ready      # ask every session whether it can be restarted now
   claude-restart-sessions --status         # the round as a table; restarts nothing
@@ -99,6 +110,7 @@ Usage:
   claude-restart-sessions --skip conexus-b8 --no-update --wait 900
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -141,10 +153,57 @@ def _claude_binary() -> str:
 
 CLAUDE = _claude_binary()
 REPO = Path.home() / "git" / "nexus"
+#: Where a passing sandbox run (tests/e2e/restart-sessions/run.sh) records what it passed on.
+SANDBOX_PASS = Path.home() / ".local" / "state" / "claude-restart-sessions" / "sandbox-pass.json"
 ENDPOINT = "https://api.conexus-nexus.com"
 PLUGINS = ("conexus@nexus-plugins", "sn@nexus-plugins")  # required: must be installed
 MARKETPLACE = "nexus-plugins"
 INSTALLED = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+
+
+def script_sha256(path: Path | None = None) -> str:
+    """The sha256 of this script's bytes (a symlink's target's, as reading follows it): the identity a sandbox pass is for."""
+    return hashlib.sha256((path or Path(__file__)).read_bytes()).hexdigest()
+
+
+def claude_version(claude: str | None = None) -> str:
+    """Claude Code's version, as `claude --version` prints its first word, or "" if it cannot be read."""
+    try:
+        r = subprocess.run([claude or CLAUDE, "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    words = r.stdout.split() if r.returncode == 0 else []
+    return words[0] if words else ""
+
+
+def sandbox_pass_problem(script: str, claude: str) -> str:
+    """Why the recorded sandbox pass does not cover this script and Claude Code, or "" when it does."""
+    if not claude:
+        return "could not read Claude Code's version"
+    try:
+        rec = json.loads(SANDBOX_PASS.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return f"no sandbox pass recorded ({SANDBOX_PASS})"
+    except (OSError, ValueError) as e:
+        return f"the sandbox pass record {SANDBOX_PASS} is unreadable ({e})"
+    if not isinstance(rec, dict):
+        return f"the sandbox pass record {SANDBOX_PASS} is not an object"
+    if rec.get("script_sha256") != script:
+        return f"the last sandbox pass ({rec.get('passed_at', '?')}) was on another copy of this script"
+    if rec.get("claude_version") != claude:
+        return (f"the last sandbox pass ({rec.get('passed_at', '?')}) was on Claude Code "
+                f"{rec.get('claude_version', '?')}, not {claude}")
+    return ""
+
+
+def record_sandbox_pass(path: Path, script: str, claude: str, scenarios: list[str], seconds: float) -> None:
+    """Write the record sandbox_pass_problem reads (the sandbox harness calls this on a full pass)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"script_sha256": script, "claude_version": claude, "scenarios": scenarios,
+           "seconds": round(seconds), "passed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rec, indent=1) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 def nexus_plugins() -> tuple[str, ...]:
@@ -731,7 +790,73 @@ def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200, *, kind: str = "r
         log(f"WARN {label(s)}: mail to mailbox/{sid} failed (exit {r.returncode}): "
             f"{(r.stdout + r.stderr).strip().splitlines()[-1:]}")
         return False
+    out = r.stdout.strip().splitlines()
+    if out:
+        SENT_ASKS[sid] = out[-1].strip()
     return True
+
+
+#: session id -> tuple id of the handoff ask mailed to it and not yet withdrawn (nexus-o581r).
+SENT_ASKS: dict[str, str] = {}
+#: Who claims an ask back out of a session's mailbox.
+ASK_CLAIMANT = "claude-restart-sessions"
+
+
+def _nx_tuple(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([_nx_binary(), "tuple", *args], capture_output=True, text=True, timeout=60)
+
+
+def withdraw_ask(sid: str) -> None:
+    """Take this script's own handoff ask back out of mailbox/<sid>, if it is still there.
+
+    A mailbox row is re-announced every 150 s (five times) until it is claimed, so an ask left
+    behind reaches a session that was skipped or resumed under the same id as a fresh request.
+    The engine has no delete by id and a claim matches by `to=<sid>` only, which a peer's mail to
+    the same session matches too: each claimed row that is not ours is released unchanged
+    (release counts no attempt), and only ours is acked. Gone already (taken by the session,
+    or expired) is the normal case.
+    """
+    tid = SENT_ASKS.pop(sid, "")
+    if not tid:
+        return
+    others: list[str] = []
+    outcome = "already taken or expired"
+    try:
+        for _ in range(10):
+            r = _nx_tuple("in", f"mailbox/{sid}", "--pattern", f"to={sid}", "--claimant", ASK_CLAIMANT,
+                          "--lease-s", "60", "--json")
+            if r.returncode != 0:
+                if "No matching tuple" not in (r.stderr or ""):  # an engine error, not a miss
+                    err = (r.stderr or "").strip().splitlines()
+                    outcome = f"not withdrawn (in exited {r.returncode}: {err[-1] if err else 'no stderr'})"
+                break
+            got = json.loads(r.stdout)
+            claim, row = got["claim_id"], got["tuple"]
+            if row.get("id") == tid:
+                a = _nx_tuple("ack", claim, "--claimant", ASK_CLAIMANT)
+                if a.returncode == 0:
+                    outcome = "withdrawn"
+                else:
+                    # A claim left to lapse counts an attempt and comes back re-announced; release it.
+                    outcome = f"claimed but not acked (exit {a.returncode}); released"
+                    others.append(claim)
+                break
+            others.append(claim)
+        else:
+            outcome = "not found among the first 10 rows"
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
+        outcome = f"not withdrawn ({type(e).__name__}: {e})"
+    finally:
+        for claim in others:
+            try:
+                rel = _nx_tuple("release", claim, "--claimant", ASK_CLAIMANT)
+                if rel.returncode != 0:
+                    log(f"WARN mailbox/{sid}: could not release a row it claimed (exit {rel.returncode}); "
+                        f"it lapses in 60 s and counts an attempt")
+            except (OSError, subprocess.SubprocessError) as e:
+                log(f"WARN mailbox/{sid}: could not release a row it claimed ({type(e).__name__}: {e})")
+    log(f"mailbox/{sid}: handoff ask {tid[:12]} {outcome}"
+        + (f"; {len(others)} other row(s) claimed and released" if others else ""))
 
 
 def _nx_binary() -> str:
@@ -774,8 +899,17 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
 
     The ask goes as mail when the session has the conexus channel (has_channel), else it is typed.
     A handoff counts once its file is non-empty, unchanged for 10 s, and the session is at its prompt again
-    ('idle', or 'shell' when a background shell is still open).
+    ('idle', or 'shell' when a background shell is still open). Every mailed ask is withdrawn once its
+    session's outcome is known, and any left when this returns or raises (nexus-o581r).
     """
+    try:
+        return _write_handoffs(found, ready, wait, timeout, sender)
+    finally:
+        for sid in list(SENT_ASKS):
+            withdraw_ask(sid)
+
+
+def _write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int, sender: str) -> dict[str, str]:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     asked: dict[str, tuple[dict, str, float]] = {}
     mailed: dict[str, int] = {}  # sessionId -> consecutive idle reads with no handoff file yet
@@ -804,8 +938,10 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
                     # The flag is on the command line but the channel may not be live, or the
                     # model may not act on the mail: fall back rather than wait out the timeout.
                     how = "typed (the mail started no turn within 60s)"
-                if how != "mail" and not typed_ask(s, path):
-                    continue
+                if how != "mail":
+                    withdraw_ask(s["sessionId"])  # a mailed ask the typed one replaces (no-op if none was sent)
+                    if not typed_ask(s, path):
+                        continue
                 asked[s["sessionId"]] = (s, path, t0)
                 if how == "mail":
                     mailed[s["sessionId"]] = 0
@@ -823,6 +959,7 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
                 mailed[sid] += 1
                 if mailed[sid] >= 2:
                     del mailed[sid]
+                    withdraw_ask(sid)  # declined: the typed ask replaces it
                     t1 = time.time()  # before typing: submit waits for busy, and the file may land first
                     if typed_ask(s, path):
                         asked[sid] = (s, path, t1)
@@ -856,6 +993,8 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
             elif time.time() - t0 > timeout:
                 done[sid] = ""
                 log(f"SKIP {label(s)}: no handoff at {path} after {timeout}s; left running, not restarted")
+            if sid in done:
+                withdraw_ask(sid)  # written or given up: either way the mailed ask has done its work
         if not waiting and all(sid in done for sid in asked):
             break
         time.sleep(5)
@@ -1407,6 +1546,8 @@ def main() -> int:
     ap.add_argument("--no-ready-check", action="store_true",
                     help="skip the ready-round check entirely (sandbox gates); unlike --force it does not also "
                          "restart sessions in status 'shell'")
+    ap.add_argument("--skip-sandbox-check", action="store_true",
+                    help="restart although no sandbox pass covers this script and Claude Code version (see above)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--caller-pane", default="", help=argparse.SUPPRESS)
@@ -1431,6 +1572,18 @@ def main() -> int:
         return ready_round(a, listed, found)
     caller_pane = a.caller_pane if a.detached else os.environ.get("TMUX_PANE", "")
     if not a.detached:
+        # The sandbox pass first: it needs no session's answer, and nothing else is worth asking
+        # of a script the sandbox has not passed (nexus-8zdbu).
+        problem = sandbox_pass_problem(script_sha256(), claude_version())
+        if a.dry_run:
+            print(f"sandbox pass: {problem or 'holds for this script and Claude Code version'}")
+        elif problem and a.skip_sandbox_check:
+            log(f"WARN: {problem}; restarting anyway (--skip-sandbox-check)")
+        elif problem:
+            log(f"ABORT: sandbox pass: {problem}. Run tests/e2e/restart-sessions/run.sh (all scenarios) first, "
+                f"or pass --skip-sandbox-check. Nothing installed, nothing restarted.")
+            print(f"sandbox pass: refused, {problem}; see {LOG}")
+            return 3
         last = read(LAST_RUN)
         if not (a.fresh or a.resume) and isinstance(last, dict) and last.get("mode") == "fresh":
             print("the last restart was --fresh; pass --fresh or --resume")

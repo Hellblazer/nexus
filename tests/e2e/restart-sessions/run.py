@@ -99,6 +99,10 @@ Run through run.sh (it supplies the automation token, RDR-219). Prints one verdi
 ``RESTART SANDBOX PASSED`` or ``RESTART SANDBOX FAILED``, and exits 0 or 1 (a precondition
 that fails once a sandbox is up is a failure, exit 1); exit 2 when the token, claude or tmux
 is missing. A failed scenario's scratch HOME is kept and named.
+
+A pass of all four scenarios is recorded in ~/.local/state/claude-restart-sessions/sandbox-pass.json
+(the script's sha256 and Claude Code's version), which the script's restart gate reads (nexus-8zdbu).
+Each sandbox HOME gets its own record for the script under test, so every roll passes that gate.
 """
 # ruff: noqa: T201 -- a gate harness: stdout carries its progress and verdict line
 from __future__ import annotations
@@ -189,6 +193,23 @@ SPECS = {
     "abort": Spec("abort", {}, (), frozenset({"rs_alpha"}), plain=("rs_alpha", "rs_nochan"), install_fails=True),
     "gate": Spec("gate", {}, ("rs_alpha",), frozenset({"rs_alpha"}), engine=("502",)),
 }
+
+
+#: Serena's user config for a sandbox HOME. With none, Serena writes its default, which opens a
+#: dashboard tab in the operator's browser for every sandbox session (Serena's macOS tray manager
+#: is shared across HOMEs). Missing keys take Serena's defaults; the operator's own file is not
+#: copied (it sets the JetBrains backend). ``projects`` is the one key Serena requires: its loader
+#: raises SerenaConfigError without it, and the session's Serena MCP then fails to start.
+SERENA_CONFIG = ("projects: []\nweb_dashboard: false\nweb_dashboard_open_on_launch: false\n"
+                 "gui_log_window: false\n")
+
+
+def write_serena_config(home: Path) -> Path:
+    """Write SERENA_CONFIG as *home*'s ~/.serena/serena_config.yml, before any session starts."""
+    path = home / ".serena" / "serena_config.yml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(SERENA_CONFIG, encoding="utf-8")
+    return path
 
 
 def load_script():
@@ -377,6 +398,7 @@ class Sandbox:
 
     def setup(self, crs) -> None:
         (self.home / ".claude").mkdir(parents=True)
+        write_serena_config(self.home)
         self.work.mkdir()
         _git(self.work, "init", "-q")
         (self.work / "README.md").write_text("restart sandbox\n", encoding="utf-8")
@@ -391,6 +413,10 @@ class Sandbox:
                         "autoMemoryEnabled": False}), encoding="utf-8")
         self.setup_market()
         self.setup_release()
+        # A pass record for the script under test, so each roll goes through the script's sandbox gate
+        # (nexus-8zdbu) and is let by it; a copy without the gate ignores it.
+        crs.record_sandbox_pass(self.home / crs.SANDBOX_PASS.relative_to(OPERATOR_HOME), crs.script_sha256(SCRIPT),
+                                crs.claude_version(self.claude), [], 0)
         floor = crs.release_engine_floor(self.to_version, self.relrepo)
         self.floor = ".".join(map(str, floor))
         self.behind = ".".join(map(str, (floor[0], floor[1], floor[2] - 1) if floor[2] else (floor[0], max(floor[1] - 1, 0), 0)))
@@ -1338,6 +1364,27 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
     return ok, failures, notes
 
 
+def record_full_pass(crs, claude: str, before: tuple[str, str], chosen: list[str], elapsed: float) -> str:
+    """Record a full pass for the script's restart gate, if what ran is still what is installed.
+
+    *before* is (script sha256, Claude Code version) read before the first scenario. Returns the
+    line to print; records nothing when the version is unreadable, either value changed during
+    the run, or the write fails.
+    """
+    sha, version = before
+    if not version:
+        return "pass NOT recorded: could not read Claude Code's version"
+    after = (crs.script_sha256(SCRIPT), crs.claude_version(claude))
+    if after != before:
+        return (f"pass NOT recorded: the script or Claude Code changed during the run "
+                f"(sha {sha[:12]} -> {after[0][:12]}, version {version} -> {after[1]})")
+    try:
+        crs.record_sandbox_pass(crs.SANDBOX_PASS, sha, version, chosen, elapsed)
+    except OSError as e:
+        return f"pass NOT recorded: could not write {crs.SANDBOX_PASS} ({e})"
+    return f"recorded the pass in {crs.SANDBOX_PASS} (Claude Code {version})"
+
+
 def main() -> int:
     if sys.argv[1:2] == ["--bump-market"]:  # the stand-in reinstall-tool.sh's publish step
         bump_market(Path(sys.argv[2]), sys.argv[3])
@@ -1365,6 +1412,10 @@ def main() -> int:
     chosen = [s for s in SCENARIOS if s in (a.scenario or SCENARIOS)]
     results = {}
     t0 = time.time()
+    # The pass covers what the scenarios ran: the script's bytes and Claude Code's version as they
+    # were before the first scenario, and only if neither changed by the end (a fast-forward of the
+    # primary or a Claude Code auto-update mid-run would otherwise be recorded as tested).
+    tested = (crs.script_sha256(SCRIPT), crs.claude_version(claude))
     for name in chosen:
         ok, failures, _ = run_scenario(name, claude, a, crs)
         results[name] = (ok, len(failures))
@@ -1373,6 +1424,8 @@ def main() -> int:
     verdict = "RESTART SANDBOX FAILED" if bad else "RESTART SANDBOX PASSED"
     print(f"{verdict} -- {len(chosen)} scenario(s) ({', '.join(chosen)}), {total} failure(s)"
           + (f" in {', '.join(bad)}" if bad else "") + f", {time.time() - t0:.0f}s", flush=True)
+    if not bad and chosen == list(SCENARIOS):
+        print(record_full_pass(crs, claude, tested, chosen, time.time() - t0), flush=True)
     return 1 if bad else 0
 
 
