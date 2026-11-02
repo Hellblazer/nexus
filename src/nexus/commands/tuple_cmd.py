@@ -762,7 +762,8 @@ def tuple_dictionary_cmd(name: str | None, json_out: bool) -> None:
 
     --json emits {template, doc, census: [...]} for a NAME, with doc null when
     the engine serves none; with no NAME, a list of those objects, one per
-    template. An engine that serves no doc for any template prints 'engine
+    template, then one with template null holding the census rows whose
+    template is not in the registry, when there are any. An engine that serves no doc for any template prints 'engine
     predates the dictionary'; one that serves docs but none for the named
     template prints 'this template has no doc block'. Both exit 0.
     """

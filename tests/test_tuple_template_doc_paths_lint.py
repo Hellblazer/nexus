@@ -44,38 +44,71 @@ _REPO_PATH = re.compile(
 _RDR_ID = re.compile(r"RDR-(\d{3,4})")
 
 
+_TRAILING_COMMENT = re.compile(r"\s+#.*$")
+
+
+def _key_value(stripped: str) -> tuple[str, str]:
+    """``(key, value)`` of a ``key: value`` line, the key unquoted and a
+    trailing comment dropped from the value."""
+    key, _, value = stripped.partition(":")
+    return key.strip().strip("\"'"), _TRAILING_COMMENT.sub("", value).strip()
+
+
 def _citing_lines(text: str) -> tuple[list[tuple[str, str]], list[str]]:
     """``(items, unreadable)``: ``(field, line)`` for every list item under
     writers/readers/see_also of the top-level ``doc:`` block, and one message per
-    line this reader cannot read. The only forms it reads are a key line ending
-    in ``:`` (or ``[]``, which lists nothing) followed by ``    - item`` lines at
-    indent 4. A value on the key's own line (a flow list, a scalar), a wrapped
-    continuation, or any other line under the key is reported, never skipped:
-    the Java check parses YAML and would see what this one missed."""
+    line this reader cannot read. The only layout it reads is a ``doc:`` line at
+    indent 0 with its keys at indent 2, a citing key ending in ``:`` (or ``[]``,
+    which lists nothing) and its ``    - item`` lines at indent 4; a trailing
+    comment and a quoted key are allowed. Anything else under ``doc`` or a citing
+    key (a value on the key's own line, a compact sequence at the key's indent, a
+    wrapped continuation, a doc block at another indent, a flow mapping, no doc
+    block at all) is reported, never skipped: the Java check parses YAML and
+    would see what this one missed."""
     out: list[tuple[str, str]] = []
     unreadable: list[str] = []
     in_doc = False
+    doc_seen = False
+    doc_key_seen = False
     field: str | None = None
     for raw in text.splitlines():
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         indent = len(raw) - len(raw.lstrip())
+        stripped = raw.strip()
         if indent == 0:
-            in_doc = raw.rstrip() == "doc:"
             field = None
+            key, value = _key_value(stripped)
+            in_doc = key == "doc"
+            if in_doc:
+                doc_seen = True
+                doc_key_seen = False
+                if value:
+                    unreadable.append(f"doc cannot be read: a value on the doc line ({stripped!r}); "
+                                      "write it as a block mapping")
+                    in_doc = False
             continue
         if not in_doc:
             continue
-        stripped = raw.strip()
+        if indent == 2 and stripped.startswith("- "):
+            if field:
+                unreadable.append(f"{field} cannot be read: item {stripped!r} sits at the key's indent; "
+                                  "indent each item to 4")
+            continue
         if indent == 2:
-            key, _, value = stripped.partition(":")
+            doc_key_seen = True
+            key, value = _key_value(stripped)
             field = key if key in _CITING_FIELDS else None
-            if field and value.strip() not in ("", "[]"):
+            if field and value not in ("", "[]"):
                 unreadable.append(f"{field} cannot be read: a value on the key's own line ({stripped!r}); "
                                   "write it as a block list")
                 field = None
-            elif field and value.strip() == "[]":
+            elif field and value == "[]":
                 field = None
+        elif not doc_key_seen:
+            unreadable.append(f"doc cannot be read: line {stripped!r} is at indent {indent}; "
+                              "the doc block's keys sit at indent 2")
+            in_doc = False
         elif field:
             if indent == 4 and stripped.startswith("- "):
                 out.append((field, stripped[2:]))
@@ -83,6 +116,8 @@ def _citing_lines(text: str) -> tuple[list[tuple[str, str]], list[str]]:
                 unreadable.append(
                     f"{field} cannot be read: line {stripped!r} is not an item; "
                     "each item is one '    - ' line at indent 4, with no wrapped continuation")
+    if not doc_seen:
+        unreadable.append("doc cannot be read: no top-level doc block found")
     return out, unreadable
 
 
@@ -188,6 +223,50 @@ def test_an_empty_flow_list_and_the_shipped_forms_are_not_flagged(tmp_path: Path
         "name: t\ndoc:\n  summary: s\n  writers: []\n"
         "  readers:\n    # a note\n    - docs/real.md\n"
         "  fields:\n    k: wrapped\n      text is not a citing field\n"
+    )
+    problems, _files, paths, _rdrs = check_templates(tdir, tmp_path)
+    assert problems == [] and paths == 1
+
+
+# Whole-file layouts the line reader cannot see (residuals review, nexus-mdbds.2.24):
+# each must be reported, never read as a file that cites nothing.
+_UNREADABLE_DOC_LAYOUTS = {
+    "a compact block sequence (dash at the key's indent)": (
+        "name: t\ndoc:\n  summary: s\n  writers:\n  - docs/gone.md\n", "writers"),
+    "a flow mapping on the doc line": (
+        "name: t\ndoc: {summary: s, writers: [docs/gone.md]}\n", "doc"),
+    "a doc block indented 4": (
+        "name: t\ndoc:\n    summary: s\n    writers:\n      - docs/gone.md\n", "doc"),
+    "no doc block at all": (
+        "name: t\nsubspace: t\n", "doc"),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(_UNREADABLE_DOC_LAYOUTS))
+def test_the_check_fails_loud_on_a_doc_layout_it_cannot_read(layout: str, tmp_path: Path) -> None:
+    """Positive control, one per layout: a template whose doc block the line
+    reader cannot read is reported naming the field or ``doc``, so a file is
+    never counted as clean because nothing in it was seen."""
+    text, field = _UNREADABLE_DOC_LAYOUTS[layout]
+    (tmp_path / "docs" / "rdr").mkdir(parents=True)
+    tdir = tmp_path / "templates"
+    tdir.mkdir()
+    (tdir / "t.yaml").write_text(text)
+    problems, files, _paths, _rdrs = check_templates(tdir, tmp_path)
+    assert files == 1
+    assert any(f"{field} " in p and "cannot be read" in p for p in problems), (layout, problems)
+
+
+def test_comments_after_a_key_and_a_quoted_key_read_clean(tmp_path: Path) -> None:
+    """Negative control: a trailing comment on the doc line or a citing key is
+    not a value, and a quoted citing key is the same key."""
+    (tmp_path / "docs" / "rdr").mkdir(parents=True)
+    (tmp_path / "docs" / "real.md").write_text("x")
+    tdir = tmp_path / "templates"
+    tdir.mkdir()
+    (tdir / "t.yaml").write_text(
+        "name: t\ndoc:  # the block\n  summary: s\n  writers: []  # none today\n"
+        "  \"readers\":  # who\n    - docs/real.md\n"
     )
     problems, _files, paths, _rdrs = check_templates(tdir, tmp_path)
     assert problems == [] and paths == 1

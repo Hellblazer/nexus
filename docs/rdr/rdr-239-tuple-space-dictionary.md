@@ -210,9 +210,9 @@ Research records: T2 `nexus_rdr/239-research-1`, `239-research-2`, and
   `nexus_rdr/239-research-4`), plus a small amount of boot work: one
   validation per template, run by the same shared validator that `out()`
   uses. The boot check and `out()` call one validator, extracted in Phase 2
-  Step 1; today the shape, nonce and size checks are private methods of
+  Step 1; before it the shape, nonce and size checks were private methods of
   `TupleRepository` (`validateOutShape`, `validateNonce`) that the template
-  loader cannot call, and a second copy would drift. The example's
+  loader could not call, and a second copy would drift. The example's
   `subspace` must resolve, by the registry's own matching, to the template
   that holds the example. Verification: the registry response in bytes
   before and after, for the default response and for `?doc=1`, and the
@@ -245,9 +245,10 @@ lint requires the block on every template shipped in the engine's resources
      below), so a typo cannot pass. When a dimension declares allowed values
      (the mailbox `address_kind` allows `agent` and `session`), a value map
      for it must have exactly those values as its keys, so the map cannot
-     disagree with the enum. Only dimensions are cross-checked: a value map for a
-     declared key (the `aspects` key `queue`) is documentation and is not
-     compared with anything. Documentation only; it does not restrict
+     disagree with the enum; a key that declares `values` is held to them the
+     same way. A one-line description is compared with nothing: the
+     `aspects` description of `queue` restates the key's one allowed value
+     and nothing checks it. Documentation only; it does not restrict
      `out()`, since RDR-211 chose free text on purpose. (Phase 1 replaced the
      drafted `dimension_values`: a meaningful name can be a key, and `from`
      and `topic` carry meaning with no enumerable values.)
@@ -394,8 +395,8 @@ Teach the reader to keep comments and serve them as text.
 **Cons:** comments are unstructured, mix maintainer reasoning with user
 documentation, and cannot carry a validated example.
 
-**Reason for rejection:** the cons; the field set in Technical Design item 1
-gives the same text a structure the engine can check.
+**Reason for rejection:** for the reasons above. The field set in Technical
+Design item 1 gives the same text a structure the engine can check.
 
 ## Trade-offs
 
@@ -443,7 +444,7 @@ carried forward, since the template is retired.
 
 Precondition: nexus-onjvw is on `develop` and inside engine-service-v0.1.174
 (verified 2026-11-01, T2 `nexus_rdr/239-research-6`), checked again
-before Step 1. The engine ships first, and the client tolerates a missing `doc`, so
+when Step 2 began (nexus-mdbds.2.10). The engine ships first, and the client tolerates a missing `doc`, so
 Phase 3 does not wait for the deployed engine except for its own
 end-to-end check.
 
@@ -519,7 +520,8 @@ one pointer sentence.
   template and the field. The shipped set loads through `loadAtBoot`.
 - Shared validator: a change to the validator makes both an `out()` call and
   the boot check of an example fail. This is a positive control run once at
-  implementation (recorded on nexus-mdbds.2.16), not a standing test; what
+  implementation (recorded on nexus-mdbds.2.9 and nexus-mdbds.2.10), not a
+  standing test; what
   stands is that both callers use the one validator.
 - Digest: a doc-only edit changes the registry digest.
 - Route: `doc` round-trips through `GET /v1/tuples/registry?doc=1`; the

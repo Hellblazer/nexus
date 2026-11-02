@@ -1065,6 +1065,8 @@ class TestTupleDictionary:
         assert i + 2 == len(text), "the entry is final"
 
     def test_no_orphan_rows_means_no_no_template_entry(self, t2_service_env) -> None:
+        """Negative control. Each test runs on a fresh tenant, so the real census
+        holds only what this test posted and no row of a removed template."""
         sub = self._post_board_ci(_uniq("example-branch"))
         payload = json.loads(_invoke(["dictionary", "--json"]).output.strip().splitlines()[-1])
         assert all(t["template"] is not None for t in payload)
