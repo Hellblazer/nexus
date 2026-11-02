@@ -199,6 +199,14 @@ LuaJIT 2.1 in an aarch64 Linux container. "Verified" means the probe ran.
   `src/nexus/commands/command_context.py`) that do not fit. `tables.get`
   needs a name-to-file mapping over `load_packaged_table`.
 
+- **Verified: the dispatcher design holds** (`design_probe.py`, Lua 5.4).
+  A single Python dispatcher taking and returning JSON strings, reached only
+  through Lua functions built in a chunk with an empty environment, with an
+  `attribute_filter` that refuses every attribute: the granted verb returns
+  its JSON, an ungranted verb is refused by name, `("").dump` is nil after
+  the string metatable's `__index` is replaced, none of 13 dangerous
+  globals is visible, and a binary chunk is refused before compile.
+
 What the probes force on any design: PUC Lua 5.4; host-side compile in mode
 `"t"` and a refusal of any chunk that starts with byte 27 (ESC); plain
 values in and a host-walked JSON conversion out, with depth and size caps;
@@ -226,42 +234,225 @@ all in the first version; a result cap on the host.
 
 ### Approach
 
-To be written after the research above.
+One Python function runs one Lua 5.4 script in a fresh, empty interpreter
+and returns plain JSON. The script reaches the outside world only through
+verbs the host puts into its environment, each one a named read, and only
+the verbs the script's caller grants. Every limit is enforced by the host,
+from outside the script: instructions, memory, wall time and result size.
+The first version has no write verb and runs only scripts from a library
+on disk (RDR-240's procedure libraries), never source an agent typed.
+
+The surface is built for one consumer. Version 1 carries exactly the read
+verbs RDR-240's first four procedures need (its Technical Design item 4).
+Tuple-space verbs, described by the dictionary (RDR-239), arrive with the
+consumer that needs them, the aura stage of nexus-mdbds, through the same
+grant rule.
 
 ### Technical Design
 
-To be written after the research above.
+1. **Runtime.** `lupa.lua54` (PUC Lua 5.4) through `lupa>=2.8,<3`. LuaJIT is
+   never loaded: its count hook skips compiled code and `lupa` cannot cap
+   its memory (Key Discoveries). One `LuaRuntime` per run, discarded after
+   it, so no state carries from one script to the next. Constructed with
+   `register_eval=False`, `register_builtins=False`,
+   `unpack_returned_tuples=False`, `max_memory` set, and an
+   `attribute_filter` that refuses every attribute access.
+2. **Environment.** Built by host Lua code that runs before the script and
+   is then dropped. The script's environment is a new table holding copies
+   of: the safe base functions (`assert`, `error`, `ipairs`, `next`,
+   `pairs`, `pcall`, `select`, `tonumber`, `tostring`, `type`, `rawequal`,
+   `rawlen`); `string` without `dump`; `table`; `math`; `utf8`; and the
+   granted verbs. The string metatable's `__index` is replaced by the same
+   reduced `string` table, so `("").dump` is nil. `coroutine` is absent in
+   version 1. When a consumer needs it, it comes only as a host wrapper
+   whose `create` arms the hook on each new thread (Key Discoveries). The
+   real `_G` is wiped once the environment is built.
+3. **Loading.** The host refuses source whose first byte is 27 (a binary
+   chunk), then compiles it with `load(src, name, "t", env)`. The script's
+   source comes from a file the runner read from a library root. The
+   runtime takes no source from a tool argument.
+4. **Verbs.** One Python dispatcher, `dispatch(verb, args_json) ->
+   result_json`, is the only Python object that crosses into Lua. A host
+   chunk loaded with an environment holding only that dispatcher builds one
+   Lua function per granted verb, which encodes its arguments, calls the
+   dispatcher and decodes the result. The script cannot read those
+   functions' upvalues, since `debug` is absent. Every value that crosses is
+   a JSON string, so no Python object, proxy or closure reaches the script.
+   The dispatcher refuses a verb not granted for this run, by name. It
+   never raises into Lua: it catches every exception and returns an error
+   object as JSON, and the verb function raises a Lua error carrying that
+   message as a string. Otherwise `pcall` hands the script the Python
+   exception itself, a host object (`design_probe.py`, case `exc_attr`:
+   the refuse-all filter held, and only `tostring` worked, but the rule
+   must not rest on the filter alone).
+5. **Version 1 verbs (read-only).** `memory.get(project, title)`,
+   `memory.list(project)`, `memory.search(query, project, limit)`,
+   `transcripts.sessions(since, until, project, bodies)`,
+   `git.diff_names(base)`, `git.diff_stat(base)`, `tables.get(name)`. Each
+   returns structured values, not the formatted text the MCP tools print:
+   the memory verbs call the T2 store layer (`db.resolve_title`,
+   `db.list_entries`, `db.search`); the other four are new client functions
+   (Key Discoveries, A3). `transcripts.sessions` never returns message
+   bodies unless `bodies` is true.
+6. **Grants.** A script's caller passes the set of verbs to grant. RDR-240's
+   runner takes that set from the procedure's header table. A requested
+   verb that does not exist, or a write verb before one ships, fails the run
+   before the script starts, naming the verb. The rule for a write verb
+   later is the same: it is granted only when named, and it is a separate
+   entry in the verb table, so read-only scripts never see it.
+7. **Limits.** Defaults, each overridable downward by the caller and never
+   upward:
+   - instructions: 50 million, counted by a hook every 10,000 instructions;
+   - memory: 64 MB (`max_memory`);
+   - wall time: 30 s, checked by the same hook against a host clock captured
+     in its closure;
+   - result: 1 MB of JSON and 32 levels of nesting, checked while the host
+     walks the returned value.
+   A run that hits a limit fails with `ScriptLimitError(limit, value)`.
+8. **Results.** The host walks the returned Lua value into JSON types itself
+   (nil, boolean, number, string, array-like and string-keyed tables). A
+   function, a userdata or a table with mixed keys fails the run with a named
+   error. The caller never receives a `lupa` proxy.
+9. **Entry point.** `nexus.lua_runtime.run_script(source, name, args,
+   grants, limits=None) -> JSON value` is the module's whole public surface.
+   RDR-240's `run_procedure` calls it. Neither the CLI nor MCP calls it
+   directly in this RDR.
 
 ### Decision Rationale
 
-To be written.
+Lua 5.4 is the only candidate the probes could hold to all four limits from
+outside, and `lupa` ships it as a wheel for every platform conexus supports.
+Passing only JSON strings across the boundary removes the three leaks the
+probes found (host-object attributes, a pre-built closure, table proxies) by
+construction rather than by filtering. Library-only source and no write
+verb make version 1's worst case a read of something the user can already
+read, so an interpreter bug in Lua is a denial of service, not a data
+change.
 
 ## Alternatives Considered
 
-To be written. Candidates to weigh: Starlark (Python-like, no loops without
-bounds); a WebAssembly sandbox; JavaScript through an embedded engine; no
-runtime (a Python verb per procedure, RDR-240 Alternative 1).
+### Alternative 1: LuaJIT
+
+**Description:** the faster runtime `lupa` also ships.
+
+**Pros:** much faster loops.
+
+**Cons:** the count hook does not fire in compiled code, so a loop cannot be
+stopped unless the JIT is off for the whole runtime; `lupa` cannot cap its
+memory on 64-bit; absent from every macOS wheel.
+
+**Reason for rejection:** two of the four limits fail, and the platform the
+project runs on daily has no LuaJIT wheel.
+
+### Alternative 2: A worker process per script
+
+**Description:** run each script in a child process with OS limits
+(`RLIMIT_AS`, `RLIMIT_CPU`, a kill on timeout) instead of in-process hooks.
+
+**Pros:** survives interpreter bugs that corrupt memory; limits enforced by
+the OS.
+
+**Cons:** a process start per run; no `RLIMIT_AS` enforcement on macOS; the
+verbs still run in the parent, so every verb call is an IPC round trip.
+
+**Reason for rejection:** not needed while scripts come only from libraries
+and nothing writes. It is the planned hardening if source from agents or
+from other users is ever accepted.
+
+### Alternative 3: Starlark, WebAssembly or embedded JavaScript
+
+**Description:** other embeddable languages with sandboxing stories.
+
+**Pros:** Starlark has no unbounded loops by design; WebAssembly has strong
+isolation.
+
+**Cons:** Sam chose Lua for the WeakAuras and Augur model; each needs a
+native dependency with less wheel coverage than `lupa`.
+
+**Reason for rejection:** the direction is Lua, and Lua 5.4 meets the
+limits.
+
+### Alternative 4: No runtime, a Python verb per procedure
+
+RDR-240's Alternative 1; rejected there for the cost per procedure.
 
 ## Trade-offs
 
 ### Consequences
 
-To be written.
+- A new runtime dependency, `lupa`, with a native extension in every
+  install.
+- Scripts are slower than LuaJIT would be; RDR-240's A2 (a 30-day transcript
+  query under a minute) is measured against Lua 5.4.
+- Every new verb is Python code with a test, reviewed like any other API.
 
 ### Risks and Mitigations
 
-To be written.
+- **A Lua interpreter bug escapes the sandbox** (Redis shipped one in 2015,
+  bytecode through `loadstring`). Mitigation: library-only source, no
+  write verbs, a pinned `lupa` range raised deliberately, and Alternative 2
+  before any untrusted source is accepted.
+- **A `lupa` release changes defaults** (for example a builtin that becomes
+  registered). Mitigation: the escape suite runs in the normal PR suite and
+  fails on any new global.
+- **The hook interval lets a costly C call run long** (one `string.rep`
+  call is one instruction). Mitigation: the memory cap bounds it; the wall
+  time check runs at the next hook.
+- **Native Windows install fails.** Mitigation: Phase 1 Step 1 installs it
+  on qwent's Windows side before anything else lands.
 
 ## Implementation Plan
 
-To be written.
+### Phase 1: The sandbox
+
+#### Step 1: Dependency
+
+Add `lupa>=2.8,<3`; install on macOS arm64, Linux x86_64 (chas) and native
+Windows (qwent) and run one script on each.
+
+#### Step 2: Runtime, loading, results and limits
+
+`src/nexus/lua_runtime/` with Technical Design items 1 to 4 and 7 to 9, and
+the escape and limit tests, with no verbs yet.
+
+### Phase 2: The read verbs
+
+#### Step 1: Memory and tables
+
+The three memory verbs over the T2 store layer, and `tables.get` with its
+name-to-file map.
+
+#### Step 2: Git and transcripts
+
+`git.diff_names`, `git.diff_stat` and `transcripts.sessions`.
+
+### Phase 3: Hand-off
+
+RDR-240's runner calls `run_script`; this RDR closes when its first
+procedure runs through it.
 
 ## Test Plan
 
-To be written. It must include escape tests (file, network, process, module
-loading, bytecode, debug library, metatable tricks) and limit tests (an
-infinite loop, unbounded allocation, a huge result), each failing with an
-error that names what it hit.
+- **Escape suite** (ported from `scripts/spikes/rdr242-lua-sandbox/`): every
+  global listed in Key Discoveries is nil; `("").dump` is nil; a binary chunk
+  is refused before compile; no attribute of the dispatcher is reachable; a
+  verb not granted is refused by name; a verb error reaches the script as
+  a string, never a Python exception object; a script cannot reach a verb
+  function's upvalues; a returned function, userdata or mixed table fails
+  with a named error.
+- **Limit suite:** `while true`, a long `for` loop and a hot call stop on the
+  instruction limit; `string.rep` and table growth stop on the memory limit;
+  unbounded recursion fails with a stack overflow; a loop that sleeps
+  through a verb stops on wall time; a 2 MB result and 40-deep nesting stop
+  on the result cap. Each asserts the limit named in the error.
+- **Isolation:** a global set by one run is absent in the next.
+- **Verbs:** each verb against the real T2 store (engine substrate) and a
+  real git repository in a temp directory; `transcripts.sessions` against
+  fixture transcripts, with and without `bodies`.
+- **Platforms:** the escape and limit suites run on macOS, Linux and native
+  Windows (`scripts/windows_hand_test.py`).
+- Each new test is shown to fail with the code it guards removed, and the
+  red run is recorded on its bead.
 
 ## Finalization Gate
 
@@ -286,3 +477,5 @@ error that names what it hit.
 - 2026-11-02: drafted (problem, context, research questions).
 - 2026-11-02: research survey folded into Key Discoveries and the
   assumptions' status.
+- 2026-11-02: Proposed Solution, Alternatives, Trade-offs, Implementation
+  Plan and Test Plan drafted from the findings.
