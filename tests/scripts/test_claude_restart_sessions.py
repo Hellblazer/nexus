@@ -433,3 +433,19 @@ def test_a_handoff_needs_two_headings(crs, monkeypatch, tmp_path, headings: int,
     setattr_in(monkeypatch, crs, "time.time", tick)
     got = crs.write_handoffs([s], {"idle"}, wait=60, timeout=200)
     assert (got == {"sid-1": str(handoff)}) is counted
+
+
+@pytest.mark.parametrize(("reported", "accepted"), [
+    ("nx, version 7.93.1", True),
+    ("nx, version 7.93.10", False),  # the old substring test read 7.93.1 in 7.93.10 as installed
+    ("nx, version 17.93.1", False),
+], ids=["exact", "longer-patch", "longer-major"])
+def test_converge_needs_nx_at_exactly_the_release(crs, monkeypatch, tmp_path, reported: str, accepted: bool) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "release_engine_floor", lambda _v, _r: (0, 1, 0))
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""))
+    monkeypatch.setattr(crs, "nx_version", lambda: reported)
+    monkeypatch.setattr(crs, "update_plugins", lambda: None)
+    monkeypatch.setattr(crs, "plugin_versions", lambda: {p: "7.93.1" for p in crs.nexus_plugins()})
+    assert crs.converge("7.93.1", tmp_path, "http://127.0.0.1:1", gate=False, dry=False) is accepted
+    assert ("ABORT: nx reports" in (tmp_path / "restart.log").read_text(encoding="utf-8")) is not accepted

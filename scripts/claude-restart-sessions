@@ -338,7 +338,8 @@ def converge(version: str, repo: Path, endpoint: str, gate: bool, dry: bool, eng
                        capture_output=True, text=True)
     log(f"reinstall-tool conexus=={version}: exit {r.returncode}")
     got = nx_version()
-    if r.returncode != 0 or version not in got:
+    # A whole token, not a substring: 7.93.1 is in "nx, version 7.93.10".
+    if r.returncode != 0 or version not in got.replace(",", " ").split():
         log(f"ABORT: nx reports '{got}', not {version}. Nothing restarted.")
         return False
     log(f"nx: {got}")
