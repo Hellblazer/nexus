@@ -130,7 +130,12 @@ from typing import Any, Protocol
 
 import structlog
 
-from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service, refuses_unbounded_read
+from nexus.upgrade_ladder.auto_guard import (
+    INTERACTIVE_REMEDY,
+    managed_service,
+    refuses_unbounded_read,
+    unattended_verify_refusal,
+)
 from nexus.upgrade_ladder.census_progress import (
     CHECKPOINT_EVERY,
     CensusProgress,
@@ -1090,6 +1095,13 @@ class Rdr192ManifestBackfillRung:
         abort the rest of `nx upgrade`. Only a real non-zero residual is a
         plain refusal."""
         self._verify_deferred = False
+        if refuses_unbounded_read(self.managed_fn):
+            # converge() refuses the census unattended against a managed service, so verify() is reached
+            # there only after detect() answered converged from the record while the walk's own ledger did
+            # not hold it: not a reason to run the census (one engine scan per collection) that converge declined.
+            self._verify_deferred = True
+            self._verify_detail = unattended_verify_refusal("every collection's chunks")
+            return False
         reading: CensusReading | None = None
         if self._last_clean is not None:
             cached, taken = self._last_clean

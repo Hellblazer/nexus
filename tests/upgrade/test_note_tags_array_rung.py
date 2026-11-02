@@ -76,6 +76,7 @@ class World:
         pass
 
     def rung(self, **kw) -> NoteTagsArrayRung:
+        kw.setdefault("record_fn", lambda: None)  # no completion on file: the default would ask the engine's ledger
         return NoteTagsArrayRung(
             reader_factory=lambda: None if self.no_catalog else self,
             writer_factory=lambda: self,
@@ -249,3 +250,58 @@ def test_the_scan_still_runs_locally_under_auto_and_interactively_on_a_managed_s
         status = world.rung(managed_fn=lambda: managed).detect()
     assert (status.applicable, status.converged) == (True, False)
     assert "1 note(s) of 1" in status.pending_detail
+
+
+# ── nexus-mq980: the record answers an unattended run, and the walk never lists to confirm it ──────────────
+
+
+def test_an_unattended_run_on_a_managed_service_with_a_recorded_completion_is_converged_and_lists_nothing(world: World) -> None:
+    """The remedy `nx doctor` names (an interactive `nx upgrade`) records the rung; the next unattended detect()
+    answers from that record. Before: it refused for ever, whatever had been recorded."""
+    from nexus.upgrade_ladder.unattended import unattended_run
+
+    world.add("1.1.1", {"tags": "a,b"})
+    reads: list[str] = []
+    world.distinct_doc_collections = lambda: reads.append("collections") or []  # type: ignore[method-assign]
+
+    with unattended_run():
+        status = world.rung(managed_fn=lambda: True, record_fn=lambda: object()).detect()
+
+    assert (status.applicable, status.converged) == (True, True)
+    assert status.from_record == "an unknown time", "says the answer came from the record"
+    assert reads == [], "zero catalog reads"
+
+
+def test_an_unreadable_ledger_is_not_a_record_for_the_unattended_refusal(world: World) -> None:
+    from nexus.upgrade_ladder.unattended import unattended_run
+
+    def broken():
+        raise RuntimeError("ledger down")
+
+    with unattended_run():
+        status = world.rung(managed_fn=lambda: True, record_fn=broken).detect()
+    assert (status.applicable, status.converged) == (False, False)
+    assert "interactive `nx upgrade`" in status.pending_detail
+
+
+def test_a_managed_auto_walk_whose_ledger_lacks_the_record_defers_and_lists_nothing(world: World) -> None:
+    """detect() answered converged from the record, the walk's own ledger holds no verified completion, so the
+    runner calls verify(): that must not list every note. A deferral, nothing recorded."""
+    from nexus.upgrade_ladder.registry import LadderRegistry
+    from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
+    from nexus.upgrade_ladder.unattended import unattended_run
+    from tests.upgrade.conftest import InMemoryCompletionLedger
+
+    world.add("1.1.1", {"tags": "a,b"})
+    reads: list[str] = []
+    world.distinct_doc_collections = lambda: reads.append("collections") or []  # type: ignore[method-assign]
+    ledger = InMemoryCompletionLedger()
+    runner = LadderRunner(
+        LadderRegistry((world.rung(managed_fn=lambda: True, record_fn=lambda: object()),)), ledger,
+        package_version_fn=lambda: "9.9.9",
+    )
+    with unattended_run():
+        report = runner.run()
+    assert [r.outcome for r in report.runs] == [RungOutcome.DEFERRED], [(r.outcome, r.detail) for r in report.runs]
+    assert "interactive `nx upgrade`" in report.runs[0].detail
+    assert reads == [] and not ledger.verified_rungs()

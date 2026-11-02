@@ -1001,13 +1001,100 @@ def test_embedding_profile_dormant_is_a_warn_naming_the_state_with_remedy(monkey
     name = "docs__1-1__voyage-context-3__v1"
     health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
         _coll(name, "docs", "voyage-context-3", "dormant"),
-    ]))
+    ], all_docs={name: 3}))  # a document still names it: "referenced"
     r = _by_label(health._check_embedding_profile(), "Collections dormant")
     assert r.ok is False and r.warn is True and not _is_red(r)
     assert name in r.detail and "dormant" in r.detail and "marked by the ghost sweep" in r.detail
     assert any("referenced but empty" in s for s in r.fix_suggestions)
     assert any("remove the references" in s for s in r.fix_suggestions)
     assert any("sweep-ghosts --apply" in s for s in r.fix_suggestions), "the remedy names what clears the mark"
+
+
+class _SweepWriter:
+    """The catalog writer's ghost sweep, dry run only: what ``nx catalog sweep-ghosts`` calls without ``--apply``."""
+
+    def __init__(self, ghost_names=(), *, error: Exception | None = None) -> None:
+        self.ghost_names = list(ghost_names)
+        self.error = error
+        self.calls: list[bool] = []
+
+    def ghost_sweep(self, *, dry_run: bool = True) -> dict:
+        self.calls.append(dry_run)
+        if self.error is not None:
+            raise self.error
+        return {"scanned": 9, "ghosts_deleted": len(self.ghost_names), "ghost_names": list(self.ghost_names),
+                "marked_dormant": 0, "dormant_names": [], "quarantine_held": 0, "dry_run": dry_run}
+
+    def close(self) -> None:
+        pass
+
+
+def _dormant_gone_and_held(monkeypatch, writer: _SweepWriter):
+    """knowledge__deploy-probes: dormant, no chunk, no catalog document (live or tombstoned) names it. A second
+    dormant row is still named by a document. Returns ``(gone, held, row)``."""
+    gone = "knowledge__deploy-probes__voyage-context-3__v1"
+    held = "docs__1-1__voyage-context-3__v1"
+    health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
+        _coll(gone, "knowledge", "voyage-context-3", "dormant"),
+        _coll(held, "docs", "voyage-context-3", "dormant"),
+    ], all_docs={held: 2}))
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda *a, **k: writer)
+    return gone, held, _by_label(health._check_embedding_profile(), "Collections dormant")
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_dormant_row_no_document_names_it_and_the_sweep_dry_run_lists_it(monkeypatch) -> None:
+    """Shakedown 7.94.0 class E: the row states what the sweep's own dry run lists, not a prediction from
+    catalog documents alone. A dormant row a document still names keeps the old wording, in the same row."""
+    writer = _SweepWriter(["knowledge__deploy-probes__voyage-context-3__v1"])
+    gone, held, r = _dormant_gone_and_held(monkeypatch, writer)
+    assert r.warn is True and not _is_red(r)
+    parts = r.detail.split(";")
+    assert "1 dormant collection(s), referenced but empty" in parts[0] and held in parts[0]
+    assert "dry run lists as ghosts to delete" in parts[1] and gone in parts[1]
+    assert gone not in parts[0]
+    assert writer.calls == [True], "one dry run, never an apply"
+    assert any("listed by the sweep's dry run" in s and "--apply" in s for s in r.fix_suggestions)
+    assert any("referenced but empty:" in s for s in r.fix_suggestions)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_dormant_row_no_document_names_it_but_the_sweep_dry_run_keeps_it(monkeypatch) -> None:
+    """The engine's ghost predicate also counts topics, taxonomy, aspects, highlights and the aspect queue. A
+    dormant row only those hold has no catalog document, and the sweep keeps it: the row must not say it deletes it."""
+    writer = _SweepWriter([])
+    gone, _held, r = _dormant_gone_and_held(monkeypatch, writer)
+    kept = r.detail.split(";")[1]
+    assert gone in kept and "does not list" in kept
+    assert "ghosts to delete" not in r.detail and "--apply" not in " ".join(
+        s for s in r.fix_suggestions if "not listed by the sweep" in s)
+    assert any("not listed by the sweep's dry run" in s and "topics" in s for s in r.fix_suggestions)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_dormant_row_says_it_does_not_know_when_the_sweep_dry_run_cannot_be_read(monkeypatch) -> None:
+    writer = _SweepWriter(error=RuntimeError("route absent"))
+    gone, _held, r = _dormant_gone_and_held(monkeypatch, writer)
+    unread = r.detail.split(";")[1]
+    assert gone in unread and "could not be read" in unread
+    assert "ghosts to delete" not in r.detail and "does not list" not in r.detail
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_dormant_row_keeps_the_referenced_wording_when_the_count_is_unreadable(monkeypatch) -> None:
+    name = "docs__1-1__voyage-context-3__v1"
+    reader = _FakeReader(_VOYAGE_PROFILE, [_coll(name, "docs", "voyage-context-3", "dormant")])
+
+    def _boom(**_kw):
+        raise RuntimeError("route absent")
+
+    reader.collection_doc_counts = _boom
+    health = _patch_profile_check(monkeypatch, reader)
+    writer = _SweepWriter(["docs__1-1__voyage-context-3__v1"])
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda *a, **k: writer)
+    r = _by_label(health._check_embedding_profile(), "Collections dormant")
+    assert "referenced but empty" in r.detail and "ghosts to delete" not in r.detail
+    assert writer.calls == [], "no unreferenced row, so the sweep is not asked"
 
 
 @pytest.mark.usefixtures("cloud_mode")

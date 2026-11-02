@@ -84,7 +84,14 @@ from nexus.db.t2.http_aspect_queue import (
     aspect_queue_mode,
     aspects_census,
 )
-from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service, refuses_unbounded_read
+from nexus.upgrade_ladder.auto_guard import (
+    INTERACTIVE_REMEDY,
+    completion_recorded_at,
+    default_completion_record,
+    managed_service,
+    refuses_unbounded_read,
+    unattended_verify_refusal,
+)
 from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
@@ -140,6 +147,10 @@ def clamp_delay(delay_s: object) -> int:
     return max(0, min(n, TEMPLATE_RETENTION_S))
 
 
+def _default_record() -> object | None:
+    return default_completion_record(RUNG_NAME)
+
+
 def _default_queue() -> HttpAspectQueue:
     return HttpAspectQueue()
 
@@ -166,8 +177,12 @@ class AspectQueueTuplesRung:
         tuples_factory: Callable[[], Any] = _default_tuples,
         batch_limit: int = DEFAULT_BATCH_LIMIT,
         managed_fn: Callable[[], bool] = managed_service,
+        record_fn: Callable[[], object | None] = _default_record,
     ) -> None:
         self._managed_fn = managed_fn
+        self._record_fn = record_fn
+        self._from_record = False  # the last detect() answered converged from the completion record
+        self._verify_deferred = False
         self._mode_fn = mode_fn
         self._queue_factory = queue_factory
         self._tuples_factory = tuples_factory
@@ -250,6 +265,7 @@ class AspectQueueTuplesRung:
         :data:`DETECT_READ_LIMIT` rows, because converged needs only "is there a
         row that can move". A full page with none movable in it could hide one
         behind the rows that stay, so that case alone reads the whole table."""
+        self._from_record = False
         try:
             reason, rows = self._probe(limit=DETECT_READ_LIMIT)
         except _CensusSlow as exc:
@@ -270,7 +286,14 @@ class AspectQueueTuplesRung:
             if refuses_unbounded_read(self._managed_fn):
                 # nexus-75w5d: the fallback is a read of the whole table, unbounded in its rows. An
                 # unattended run against a managed service does not make it; the first page holding
-                # nothing that moves is not an answer, so the rung is not applicable this run.
+                # nothing that moves is not an answer. The one cheaper answer is the completion record,
+                # which the interactive run that read the whole table and verified it wrote (nexus-mq980:
+                # the remedy `nx doctor` names has to be able to clear its row); with none, the rung is
+                # not applicable this run.
+                recorded_at = completion_recorded_at(self._record_fn, RUNG_NAME)
+                if recorded_at is not None:
+                    self._from_record = True
+                    return RungStatus(applicable=True, converged=True, from_record=recorded_at)
                 reason = (
                     f"the first {DETECT_READ_LIMIT} waiting rows hold none that can move, and "
                     f"unattended `nx upgrade --auto` does not read a managed service's whole queue; "
@@ -396,6 +419,15 @@ class AspectQueueTuplesRung:
         can move. A read that fails, or an engine that cannot answer it, is not
         'zero rows' (nexus-hdumg): it is False, with :meth:`verify_detail`."""
         self._verify_detail = ""
+        self._verify_deferred = False
+        from_record, self._from_record = self._from_record, False
+        if from_record and refuses_unbounded_read(self._managed_fn):
+            # Reached unattended against a managed service after detect answered from the record because the
+            # walk's own ledger did not hold it: not a reason to read the whole queue table. (A small table,
+            # which detect read in full, is confirmed as before.)
+            self._verify_deferred = True
+            self._verify_detail = unattended_verify_refusal("the whole queue table")
+            return False
         try:
             reason, rows = self._probe()
         except Exception as exc:  # noqa: BLE001 — an unreadable table is unknown, and unknown is not reached
@@ -412,6 +444,10 @@ class AspectQueueTuplesRung:
             return False
         self._record_detail = self._summary(sum(1 for r in rows if not r.doc_id))
         return True
+
+    def verify_deferred(self) -> bool:
+        """True when the last refusing :meth:`verify` is the unattended refusal, which the walk reports as DEFERRED."""
+        return self._verify_deferred
 
     def verify_detail(self) -> str:
         return self._verify_detail

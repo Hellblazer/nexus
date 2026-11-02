@@ -127,6 +127,20 @@ def test_pins_read_from_the_shipped_constraints_keep_only_this_platforms_line() 
     assert "+" not in pins["torch"], "the +cpu label is dropped from the pins"
 
 
+def test_pinned_version_is_the_public_read_of_one_pin() -> None:
+    """health's opencv repair command reads the headless build's pin through this, not through ``_pins``."""
+    headless = "opencv-python-headless"
+    pinned = pdf_stack.pinned_version(headless)
+    assert pinned == pdf_stack._pins((headless,))[headless] and pinned, "non-vacuity: the wheel pins it"
+    assert pdf_stack.pinned_version("no-such-distribution") is None
+
+
+def test_no_caller_outside_pdf_stack_reaches_for_the_private_pins() -> None:
+    src = Path(__file__).resolve().parents[1] / "src" / "nexus"
+    for rel in ("health.py", "commands/doctor.py"):
+        assert "pdf_stack._pins" not in (src / rel).read_text(encoding="utf-8"), rel
+
+
 @pytest.fixture
 def probes(monkeypatch: pytest.MonkeyPatch):
     """Fake ``find_spec`` and ``importlib.metadata`` for the five modules."""

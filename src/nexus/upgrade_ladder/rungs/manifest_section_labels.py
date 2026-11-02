@@ -116,7 +116,12 @@ from typing import Any
 
 import structlog
 
-from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service, refuses_unbounded_read
+from nexus.upgrade_ladder.auto_guard import (
+    INTERACTIVE_REMEDY,
+    managed_service,
+    refuses_unbounded_read,
+    unattended_verify_refusal,
+)
 from nexus.upgrade_ladder.census_progress import NoteStore, T2NoteStore, guarded
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.deadline import active_expired
@@ -638,7 +643,7 @@ class ManifestSectionLabelsRung:
             # nexus-75w5d: no record and no memo, so the answer is a walk of the whole catalog. On a
             # managed service that is a 15-minute read of shared capacity per session start (19 at once
             # on 2026-10-31), so an unattended run reads nothing. Not applicable, not pending: the walk
-            # is skipped, and `nx doctor` (no deadline bound) still reports the true state.
+            # is skipped; `nx doctor` runs its sweep as unattended too and reports the rung as not checked.
             reason = (
                 "unattended `nx upgrade --auto` does not scan a managed catalog with no completion "
                 f"record and no remembered clean scan; {INTERACTIVE_REMEDY}"
@@ -729,6 +734,14 @@ class ManifestSectionLabelsRung:
         self._verify_detail = ""
         self._verify_deferred = False
         from_memo, self._from_memo = self._from_memo, False
+        if refuses_unbounded_read(self._managed_fn):
+            # The runner calls verify() after a detect() that answered converged from the memo (or the record)
+            # and found no verified completion in its own ledger. Unattended against a managed service that
+            # would be the whole-catalog dry run detect() just declined to make (shakedown 7.94.0 census): a
+            # deferral instead. The memo stands, and an interactive `nx upgrade` confirms it and records.
+            self._verify_deferred = True
+            self._verify_detail = unattended_verify_refusal("every document and manifest")
+            return False
         try:
             counts = self._dry_run()
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached

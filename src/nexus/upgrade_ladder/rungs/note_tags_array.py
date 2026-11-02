@@ -37,7 +37,14 @@ from typing import Any
 
 import structlog
 
-from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service, refuses_unbounded_read
+from nexus.upgrade_ladder.auto_guard import (
+    INTERACTIVE_REMEDY,
+    completion_recorded_at,
+    default_completion_record,
+    managed_service,
+    refuses_unbounded_read,
+    unattended_verify_refusal,
+)
 from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
@@ -61,6 +68,10 @@ def _default_reader() -> Any:
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: keeps the registry import cheap
 
     return make_catalog_reader()
+
+
+def _default_record() -> object | None:
+    return default_completion_record(RUNG_NAME)
 
 
 def _default_writer() -> Any:
@@ -91,8 +102,11 @@ class NoteTagsArrayRung:
         writer_factory: Callable[[], Any] = _default_writer,
         batch_limit: int = DEFAULT_BATCH_LIMIT,
         managed_fn: Callable[[], bool] = managed_service,
+        record_fn: Callable[[], object | None] = _default_record,
     ) -> None:
         self._managed_fn = managed_fn
+        self._record_fn = record_fn
+        self._verify_deferred = False
         self._reader_factory = reader_factory
         self._writer_factory = writer_factory
         self._batch_limit = batch_limit
@@ -132,9 +146,15 @@ class NoteTagsArrayRung:
 
     def detect(self) -> RungStatus:
         if refuses_unbounded_read(self._managed_fn):
-            # nexus-75w5d: the scan lists every note in every knowledge__* collection, on every call,
-            # with no completion record or memo to answer from. Unattended against a managed service
-            # it reads nothing; an interactive `nx upgrade` (and `nx doctor`) still scans.
+            # nexus-75w5d: the scan lists every note in every knowledge__* collection, on every call.
+            # Unattended against a managed service it reads nothing; an interactive `nx upgrade` still scans
+            # (`nx doctor` reports the rung as not checked). The one cheaper answer is the completion record:
+            # the interactive run that scanned, converged and verified wrote it, and the tags a current client
+            # writes are arrays already, so a recorded rung is converged without a read (nexus-mq980: the
+            # remedy `nx doctor` names has to be able to clear its row).
+            recorded_at = completion_recorded_at(self._record_fn, RUNG_NAME)
+            if recorded_at is not None:
+                return RungStatus(applicable=True, converged=True, from_record=recorded_at)
             reason = (
                 "unattended `nx upgrade --auto` does not list every note of a managed catalog; "
                 f"{INTERACTIVE_REMEDY}"
@@ -213,6 +233,13 @@ class NoteTagsArrayRung:
         holding a string. A catalog that is missing or cannot be read is not 'zero strings'
         (nexus-hdumg): it is False, with :meth:`verify_detail`."""
         self._verify_detail = ""
+        self._verify_deferred = False
+        if refuses_unbounded_read(self._managed_fn):
+            # Reached unattended against a managed service only when detect answered from the record and the
+            # walk's own ledger did not hold it: not a reason to list every note.
+            self._verify_deferred = True
+            self._verify_detail = unattended_verify_refusal("every note")
+            return False
         try:
             scanned = self._read()
         except Exception as exc:  # noqa: BLE001 — an unreadable catalog is unknown, and unknown is not reached
@@ -229,6 +256,10 @@ class NoteTagsArrayRung:
             f"examined {examined} note(s), none holds a string; {self._converted} converted this run"
         )
         return True
+
+    def verify_deferred(self) -> bool:
+        """True when the last refusing :meth:`verify` is the unattended refusal, which the walk reports as DEFERRED."""
+        return self._verify_deferred
 
     def verify_detail(self) -> str:
         return self._verify_detail

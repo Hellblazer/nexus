@@ -17,6 +17,7 @@ function, so the probe's own import runs. The probe runs in a child process
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -68,6 +69,34 @@ def test_a_cv2_that_cannot_load_is_red_and_names_the_repair(fake_cv2, capsys) ->
     assert pdf_stack.repair_command() in out  # this layout's command (the plan's), not the generation-only constant
     # the do_parse row is still green: that is exactly the gap this row closes
     assert any("MinerU import" in ln and "✓" in ln for ln in out.splitlines())
+
+
+def test_both_opencv_builds_are_named_when_cv2_cannot_load(fake_cv2, monkeypatch, capsys) -> None:
+    """Shakedown 7.94.0 class F: on a bare `uv tool install` both builds are installed; the line must say so
+    instead of claiming the overrides keep only the headless one, and name the in-place repair."""
+    from nexus import health
+
+    monkeypatch.setattr(health, "_installed_opencv_builds", lambda: ("opencv-python", "opencv-python-headless"))
+    fake_cv2(f"raise ImportError({LIBGL_ERROR!r})\n")
+    doctor._run_check_mineru()
+    out = capsys.readouterr().out
+    assert "Both opencv-python and opencv-python-headless are installed" in out
+    assert "did not read the release's uv overrides" in out
+    assert "&&" not in out, "Windows PowerShell 5.1 rejects `&&`"
+    commands = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("uv pip")]
+    assert len(commands) == 2 and "uv pip uninstall" in commands[0], out
+    assert re.search(r"--reinstall opencv-python-headless==\S+$", commands[1]), commands[1]
+    assert pdf_stack.repair_command() in out
+
+
+def test_only_the_non_headless_build_keeps_the_overrides_line(fake_cv2, monkeypatch, capsys) -> None:
+    from nexus import health
+
+    monkeypatch.setattr(health, "_installed_opencv_builds", lambda: ("opencv-python",))
+    fake_cv2(f"raise ImportError({LIBGL_ERROR!r})\n")
+    doctor._run_check_mineru()
+    out = capsys.readouterr().out
+    assert "Both opencv-python" not in out and "overrides keep only the headless one" in out
 
 
 def test_a_cv2_that_loads_is_green(fake_cv2, capsys) -> None:

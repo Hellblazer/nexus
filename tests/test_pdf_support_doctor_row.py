@@ -335,6 +335,41 @@ def test_both_opencv_builds_make_the_row_red_on_linux_and_name_the_repair(monkey
     assert row.fix_suggestions and pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
 
 
+def test_both_opencv_builds_row_tells_the_truth_and_names_both_repairs(monkeypatch) -> None:
+    """Shakedown 7.94.0 class F: a bare `uv tool install conexus[pdf]` lands both builds. The row must not say
+    the install keeps only the headless one; it says this install did not read the overrides, and names the
+    override-reading reinstall AND the in-place repair (uninstall opencv-python, reinstall the headless build:
+    the two share cv2/, so the uninstall alone breaks the headless build too)."""
+    import sys
+
+    _stack(monkeypatch, "present", "5 distributions on their pins")
+    _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
+    setattr_in(monkeypatch, health, "sys.platform", "linux")
+    row = health._check_pdf_support()[0]
+    assert "did not read them" in row.detail and "keep only the headless" in row.detail
+    assert len(row.fix_suggestions) == 2, row.fix_suggestions
+    assert pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
+    inplace = row.fix_suggestions[1]
+    assert "&&" not in inplace, "Windows PowerShell 5.1 rejects `&&`: one command per line"
+    commands = [ln.strip() for ln in inplace.splitlines() if ln.strip().startswith("uv pip")]
+    assert len(commands) == 2, inplace
+    assert commands[0].endswith(" opencv-python") and "uv pip uninstall" in commands[0]
+    pin = _shipped_headless_pin()
+    assert commands[1].endswith(f"--reinstall opencv-python-headless=={pin}"), (commands[1], pin)
+    assert all(sys.executable in c for c in commands)
+    assert "shares" in inplace
+
+
+def _shipped_headless_pin() -> str:
+    """The version the wheel's constraints pin ``opencv-python-headless`` to, read here without the code under test."""
+    import re
+
+    text = (Path(health.__file__).parent / "_install" / "constraints.txt").read_text(encoding="utf-8")
+    m = re.search(r"^opencv-python-headless==(\S+)\s*$", text, re.MULTILINE)
+    assert m, "constraints.txt no longer pins opencv-python-headless"
+    return m.group(1)
+
+
 def test_both_opencv_builds_off_linux_is_a_warning_not_red(monkeypatch) -> None:
     _stack(monkeypatch, "present", "5 distributions on their pins")
     _opencv(monkeypatch, "opencv-python", "opencv-python-headless")

@@ -13,14 +13,18 @@ The rule: a ``detect()`` whose read cost grows with the catalog or a table, and 
 cheaper to answer from (a completion record, a remembered clean scan), does not read in an UNATTENDED run
 (:mod:`nexus.upgrade_ladder.unattended`: ``--auto``, ``NX_UPGRADE_UNATTENDED=1``, the version-transition
 callout) against a managed service. It reports itself NOT APPLICABLE, with a reason naming where the first scan
-happens: an interactive ``nx upgrade``. Interactive runs, ``nx doctor`` and local engines keep their
-walk.
+happens: an interactive ``nx upgrade``. Interactive ``nx upgrade`` runs and local engines keep their
+walk; ``nx doctor`` runs its sweep as unattended (nexus-mq980) and reports a refused rung as not checked.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 
+import structlog
+
 from nexus.upgrade_ladder.unattended import is_unattended
+
+_log = structlog.get_logger(__name__)
 
 #: Said in every refusal's ``pending_detail``, so the reason reads the same on every rung.
 INTERACTIVE_REMEDY = "an interactive `nx upgrade` performs the first scan"
@@ -39,3 +43,34 @@ def refuses_unbounded_read(managed_fn: Callable[[], bool] = managed_service) -> 
     """True when this run is unattended (``--auto``, ``NX_UPGRADE_UNATTENDED=1``, the version-transition
     callout) against a managed service. Keyed on the explicit signal, never on a bound deadline."""
     return is_unattended() and managed_fn()
+
+
+def default_completion_record(rung_name: str) -> object | None:
+    """This tenant's completion record for *rung_name* from the engine's ledger (one bounded read), or ``None``.
+    Raises when the ledger cannot be read."""
+    from nexus.upgrade_ladder.http_store import HttpLadderStore  # noqa: PLC0415 — deferred: keeps the registry import cheap
+
+    with HttpLadderStore() as store:
+        return store.completions().get(rung_name)
+
+
+def completion_recorded_at(record_fn: Callable[[], object | None], rung_name: str) -> str | None:
+    """When *record_fn*'s completion for *rung_name* was verified (its ``verified_at``, or ``"an unknown time"`` if the
+    record carries none), or ``None`` when no completion is on file. An unreadable ledger is not a record. This is the cheap
+    answer a refusing ``detect()`` gives BEFORE it refuses (shakedown 7.94.0, nexus-mq980): an interactive
+    ``nx upgrade`` records the rung once its scan verifies, and from then on every unattended run and every
+    ``nx doctor`` answers from that record instead of reading the catalog."""
+    try:
+        record = record_fn()
+    except Exception as exc:  # noqa: BLE001 — an unreadable ledger is 'not recorded', and the refusal decides
+        _log.info("ladder_completion_ledger_unreadable", rung=rung_name, error=str(exc))
+        return None
+    if record is None:
+        return None
+    return str(getattr(record, "verified_at", "") or "") or "an unknown time"
+
+
+def unattended_verify_refusal(what: str) -> str:
+    """The ``verify_detail`` of a rung whose ``verify()`` was reached in an unattended run against a managed
+    service (it would re-read *what*, which no unattended run does): a deferral, never a failure."""
+    return f"unattended `nx upgrade --auto` does not re-read {what} of a managed service to confirm; {INTERACTIVE_REMEDY}"

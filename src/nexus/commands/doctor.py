@@ -2286,6 +2286,42 @@ def _child_import_remedy(child_error: str, *, in_process: bool = False) -> str:
 _CV2_PROBE_TIMEOUT_S = 60.0
 
 
+def _opencv_install_state_line() -> str:
+    """What this environment holds, from distribution metadata (shakedown 7.94.0 class F).
+
+    The release's install overrides keep only ``opencv-python-headless``. A bare ``uv tool install
+    conexus[pdf]``, pip or pipx reads no overrides and lands both builds, which share ``cv2/``; saying
+    "the overrides keep only the headless one" there is false. With both installed the line says so and
+    names the in-place repair next to the reinstall."""
+    from nexus.health import _installed_opencv_builds  # noqa: PLC0415 — deferred: health imports this module's neighbours
+
+    builds = _installed_opencv_builds()
+    if len(builds) == 2:
+        return (
+            "Both opencv-python and opencv-python-headless are installed here: this install did not "
+            "read the release's uv overrides, which keep only the headless one (a bare `uv tool install`, pip "
+            "or pipx reads none). Fix: reinstall with the overrides (below), or repair in place with the "
+            "two commands printed under this paragraph."
+        )
+    return "The release's overrides keep only the headless one."
+
+
+def _opencv_in_place_lines() -> list[str]:
+    """The in-place repair, one command per line, when both OpenCV builds are installed; else nothing.
+    Separate lines because the commands are not joined with ``&&`` (Windows PowerShell 5.1 rejects it)."""
+    from nexus.health import _installed_opencv_builds, opencv_pair_uninstall_commands  # noqa: PLC0415 — deferred: health imports this module's neighbours
+
+    if len(_installed_opencv_builds()) != 2:
+        return []
+    uninstall, install = opencv_pair_uninstall_commands()
+    return [
+        "  ↳ In place, run these two commands in order (the uninstall also removes the cv2/ files the headless "
+        "build shares, so the second restores them):",
+        f"      {uninstall}",
+        f"      {install}",
+    ]
+
+
 def _probe_cv2(timeout_s: float | None = None) -> tuple[str | None, str]:
     """``(error, version)`` for ``import cv2`` in the interpreter MinerU runs in.
 
@@ -2421,13 +2457,15 @@ def _run_check_mineru() -> bool:
         click.echo(_check("MinerU cv2 import", False, cv2_error))
         click.echo(
             "  ↳ MinerU needs a cv2 that loads. The non-headless opencv-python needs a system "
-            "libGL (libGL.so.1) that this box lacks; the headless build does not, and the "
-            "release's overrides keep only the headless one. Reinstall through "
-            f"`{pdf_stack.repair_command()}` to get it, then replace a MinerU server that was "
+            "libGL (libGL.so.1) that this box lacks; the headless build does not. "
+            f"{_opencv_install_state_line()} Reinstall through "
+            f"`{pdf_stack.repair_command()}` to get the headless one alone, then replace a MinerU server that was "
             "already running (`nx mineru stop`, then `nx mineru start`): it keeps the "
             "environment it started in. Real-parse check skipped: it "
             "would fail on the same import."
         )
+        for in_place_line in _opencv_in_place_lines():
+            click.echo(in_place_line)
     else:
         click.echo(_check("MinerU cv2 import", True, f"cv2 {cv2_version} loads"))
         if child_error is not None:

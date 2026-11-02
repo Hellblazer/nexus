@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import structlog
 
@@ -2966,6 +2966,35 @@ def _installed_opencv_builds() -> tuple[str, ...]:
     return tuple(found)
 
 
+def opencv_pair_uninstall_commands() -> tuple[str, str]:
+    """The two commands that repair an environment holding both OpenCV builds, one per element, for ``nx doctor``.
+
+    Both builds write ``site-packages/cv2/``, so removing the non-headless one deletes the files the headless one
+    shares: the headless build is reinstalled afterwards. Targets the interpreter ``nx`` runs in. The reinstall is
+    pinned to the version the wheel's shipped constraints name for ``opencv-python-headless`` (the pin that holds
+    here, marker evaluated), so the repair lands the build the release was tested with, not whatever is newest.
+    Two commands, never joined with ``&&``: Windows PowerShell 5.1 does not accept it."""
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+    py = shlex.quote(sys.executable)
+    headless = "opencv-python-headless"
+    pinned = pdf_stack.pinned_version(headless)
+    target = shlex.quote(f"{headless}=={pinned}") if pinned else headless
+    return (
+        f"uv pip uninstall --python {py} opencv-python",
+        f"uv pip install --python {py} --reinstall {target}",
+    )
+
+
+def opencv_pair_uninstall_remedy() -> str:
+    """The in-place repair as text for a fix line: the two commands on lines of their own, run in order."""
+    uninstall, install = opencv_pair_uninstall_commands()
+    return (
+        "in place, run these two commands in order (removing opencv-python alone also removes the cv2/ files "
+        f"the headless build shares):\n  {uninstall}\n  {install}"
+    )
+
+
 def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
     """The healthy "PDF support" row, unless both OpenCV builds are installed.
 
@@ -2993,11 +3022,16 @@ def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
         label="PDF support", ok=False, warn=not on_linux,
         detail=(
             f"{detail}; but both opencv-python and opencv-python-headless are installed. "
-            f"{consequence}. This install ignored the release's uv overrides."
+            f"{consequence}. The release's uv overrides keep only the headless build; "
+            "this install did not read them (a bare `uv tool install`, pip or pipx reads none)."
         ),
         # nexus-11x9o: the install this row detects (a bare `uv tool install`) is a legacy tree,
         # where `nx self install --extras pdf` refuses; the plan names the command for THIS layout.
-        fix_suggestions=[f"Reinstall with the release's overrides: {pdf_stack.repair_command()}"],
+        # Shakedown 7.94.0 class F: and the in-place repair, for a box that cannot reinstall.
+        fix_suggestions=[
+            f"Reinstall with the release's overrides: {pdf_stack.repair_command()}",
+            f"Or {opencv_pair_uninstall_remedy()}",
+        ],
     )
 
 
@@ -9572,9 +9606,18 @@ def _check_pending_rungs() -> list[HealthResult]:
     """
     try:
         from nexus.upgrade_ladder import registry as _ladder_registry  # noqa: PLC0415 — deferred to avoid module-load cost
+        from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY  # noqa: PLC0415 — deferred to avoid module-load cost
         from nexus.upgrade_ladder.runner import pending_rungs  # noqa: PLC0415 — deferred to avoid module-load cost
+        from nexus.upgrade_ladder.unattended import unattended_run  # noqa: PLC0415 — deferred to avoid module-load cost
 
-        statuses = pending_rungs(_ladder_registry.default_registry())
+        # Shakedown 7.94.0 class A (nexus-mq980): a rung whose detect() walks the whole catalog (the
+        # manifest-section-labels dry run lists every document and reads manifests and T3 per batch) must not
+        # do that for a doctor row against a managed service: 43.7k documents did not finish in 30 minutes.
+        # The same refusal `nx upgrade --auto` gets applies (auto_guard: managed service, no completion
+        # record, no remembered clean scan); a local engine keeps its scan. A refused rung is reported below
+        # as NOT CHECKED, never as converged.
+        with unattended_run():
+            statuses = pending_rungs(_ladder_registry.default_registry())
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.warning("doctor_pending_rungs_check_failed", error=str(exc))
         return [HealthResult(
@@ -9585,21 +9628,55 @@ def _check_pending_rungs() -> list[HealthResult]:
         )]
 
     pending = [(name, status) for name, status in statuses if status.pending]
-    if not pending:
+    # A rung that answered "converged" from its completion record read none of the data it covers, and a record
+    # goes stale if an older client writes comma-string tags or movable queue rows afterwards: say so, with when.
+    answered_from_record = [(name, status.from_record) for name, status in statuses if status.from_record]
+    record_note = ""
+    if answered_from_record:
+        record_note = (
+            "converged per a completion record, not a read of the data (it can be stale if an older client wrote "
+            "to it since): "
+            + ", ".join(f"{name} (recorded {when})" for name, when in answered_from_record)
+        )
+    # A rung that declined to read a managed catalog says so with the shared INTERACTIVE_REMEDY text.
+    not_checked = [
+        name for name, status in statuses
+        if not status.applicable and INTERACTIVE_REMEDY in (status.pending_detail or "")
+    ]
+    if not pending and not not_checked:
         return [HealthResult(
             label="Upgrade ladder",
             ok=True,
-            detail=f"no pending rungs ({len(statuses)} registered)",
+            detail="; ".join(filter(None, [f"no pending rungs ({len(statuses)} registered)", record_note])),
         )]
-    names = "; ".join(
-        f"{name}: {status.pending_detail or 'pending'}" for name, status in pending[:6]
-    )
+    parts: list[str] = []
+    fixes: list[str] = []
+    if pending:
+        names = "; ".join(
+            f"{name}: {status.pending_detail or 'pending'}" for name, status in pending[:6]
+        )
+        parts.append(f"{len(pending)} pending upgrade rung(s) — {names}")
+        fixes.append("Run: nx upgrade")
+    else:
+        parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
+    if not_checked:
+        parts.append(
+            f"not checked: {', '.join(not_checked)} (each answers only from a read of a whole managed "
+            "catalog or table, which `nx doctor` does not make, or from what an earlier interactive run recorded)"
+        )
+        fixes.append(
+            "Run `nx upgrade` interactively (not --auto): it makes that read and records each rung it verifies "
+            "(manifest-section-labels also keeps a remembered clean scan), and this row then answers from the "
+            "record without a read"
+        )
+    if record_note:
+        parts.append(record_note)
     return [HealthResult(
         label="Upgrade ladder",
         ok=False,
         warn=True,
-        detail=f"{len(pending)} pending upgrade rung(s) — {names}",
-        fix_suggestions=["Run: nx upgrade"],
+        detail="; ".join(parts),
+        fix_suggestions=fixes,
     )]
 
 
@@ -9674,6 +9751,24 @@ def _name_list(names: list[str]) -> str:
     shown = ", ".join(names[:_MAX_NAMED_COLLECTIONS])
     extra = len(names) - _MAX_NAMED_COLLECTIONS
     return shown + (f" (+{extra} more)" if extra > 0 else "")
+
+
+def _ghost_sweep_dry_run_names() -> set[str] | None:
+    """The collection names the ghost sweep's own dry run would delete (``ghost_names``), or ``None`` when the
+    dry run cannot be read (no writer, an engine that predates the route, an unreachable service). The same call
+    ``nx catalog sweep-ghosts`` makes without ``--apply``: a read on the engine, nothing is changed."""
+    try:
+        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import
+
+        writer = make_catalog_writer()
+        try:
+            result = writer.ghost_sweep(dry_run=True)
+        finally:
+            writer.close()
+        return {str(n) for n in (result.get("ghost_names") or [])}
+    except Exception as exc:  # noqa: BLE001 — best-effort: the dormant row then says the sweep's answer is unknown
+        _log.debug("doctor_ghost_sweep_dry_run_unread", error=str(exc))
+        return None
 
 
 def _check_embedding_profile() -> list[HealthResult]:
@@ -9896,20 +9991,68 @@ def _check_embedding_profile() -> list[HealthResult]:
         ) if disputed else HealthResult(label=_DISPUTED_LABEL, ok=True, detail="none")
     )
     dormant = _names("dormant")
+    # Shakedown 7.94.0 class E: a row is dormant because documents named a collection that held no chunk. When
+    # those documents are gone (even tombstoned ones) nothing in the CATALOG references it, but the engine's ghost
+    # predicate also counts topics, taxonomy, aspects, highlights and the aspect queue, so "no document names it"
+    # does not say the sweep deletes it. One aggregate read finds the rows no document names; for those alone the
+    # sweep's own dry run (the call `nx catalog sweep-ghosts` makes) names what it would delete, and the row states
+    # only that. An unreadable count leaves every dormant row on the referenced wording; an unreadable dry run
+    # leaves the row saying it does not know what the sweep would do.
+    unreferenced: list[str] = []
+    if dormant:
+        try:
+            counted = reader.collection_doc_counts(include_deleted=True)
+            unreferenced = [n for n in dormant if not counted.get(n)]
+        except Exception as exc:  # noqa: BLE001 — best-effort: the wording falls back to "referenced but empty"
+            _log.debug("doctor_dormant_reference_count_unread", error=str(exc))
+    referenced = [n for n in dormant if n not in unreferenced]
+    sweep_lists: set[str] | None = _ghost_sweep_dry_run_names() if unreferenced else None
+    sweep_deletes = [n for n in unreferenced if sweep_lists is not None and n in sweep_lists]
+    sweep_keeps = [n for n in unreferenced if sweep_lists is not None and n not in sweep_lists]
+    sweep_unread = [n for n in unreferenced if sweep_lists is None]
+    detail_parts: list[str] = []
+    fixes: list[str] = []
+    if referenced:
+        detail_parts.append(
+            f"{len(referenced)} dormant collection(s), referenced but empty "
+            f"(marked by the ghost sweep): {_name_list(referenced)}"
+        )
+        fixes.append(
+            "referenced but empty: re-index it (nx collection reindex <name>), then "
+            "nx catalog sweep-ghosts --apply sets it live again (an engine before the "
+            "nexus-b0y6w sweep leaves it dormant), or remove the references",
+        )
+    if sweep_deletes:
+        detail_parts.append(
+            f"{len(sweep_deletes)} dormant collection(s) no catalog document names, which the ghost sweep's "
+            f"dry run lists as ghosts to delete: {_name_list(sweep_deletes)}"
+        )
+        fixes.append(
+            "listed by the sweep's dry run: nx catalog sweep-ghosts previews the delete and --apply removes the row",
+        )
+    if sweep_keeps:
+        detail_parts.append(
+            f"{len(sweep_keeps)} dormant collection(s) no catalog document names, which the ghost sweep's "
+            f"dry run does not list for deletion: {_name_list(sweep_keeps)}"
+        )
+        fixes.append(
+            "not listed by the sweep's dry run: the sweep keeps it (nx catalog sweep-ghosts shows what it would "
+            "delete); the engine keeps a row that anything besides a catalog document still holds, such as topics, "
+            "aspects, highlights or the aspect queue",
+        )
+    if sweep_unread:
+        detail_parts.append(
+            f"{len(sweep_unread)} dormant collection(s) no catalog document names, and what the ghost sweep would do "
+            f"with them could not be read here: {_name_list(sweep_unread)}"
+        )
+        fixes.append("run nx catalog sweep-ghosts to see which of them the sweep would delete")
     results.append(
         HealthResult(
             # A warn, not a fail: the ghost sweep already marked these, which is the state this row reports
             # (shakedown 7.89.0 class d: a red row nothing but a re-index or reference removal can clear).
             label=_DORMANT_LABEL, ok=False, warn=True,
-            detail=(
-                f"{len(dormant)} dormant collection(s), referenced but empty "
-                f"(marked by the ghost sweep): {_name_list(dormant)}"
-            ),
-            fix_suggestions=[
-                "referenced but empty: re-index it (nx collection reindex <name>), then "
-                "nx catalog sweep-ghosts --apply sets it live again (an engine before the "
-                "nexus-b0y6w sweep leaves it dormant), or remove the references",
-            ],
+            detail="; ".join(detail_parts),
+            fix_suggestions=fixes,
         ) if dormant else HealthResult(label=_DORMANT_LABEL, ok=True, detail="none")
     )
     quarantined = _names("quarantine")
@@ -10919,7 +11062,7 @@ _MAX_TRACKED_RUN_IDS = 5000
 _MAX_TRACKED_UNSTAMPED = 1000
 
 
-def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResult]:
+def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
     """Name documents stranded in ``index_state='indexing'`` beyond a
     threshold (nexus-5xn3k.6, bead-text amendment 2026-08-02 —
     substantive-critic on .3's client diff, T2 nexus/5xn3k3-critique-2026-08-02).
@@ -11024,7 +11167,7 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
         # nexus-ft7eg: share this walk with _check_next_seq_drift
         # (_highest_child_seqs' identical `all_documents(limit=0)` scan) —
         # doctor currently pays for the full-corpus walk TWICE per run.
-        for entry in (documents if documents is not None else cat.all_documents(limit=0)):
+        for entry in _doc_list(cat, documents):
             reported = bool(getattr(entry, "index_state_reported", True))
             state = getattr(entry, "index_state", None)
             if not reported:
@@ -11675,7 +11818,7 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
     )]
 
 
-def _check_next_seq_drift() -> list[HealthResult]:
+def _check_next_seq_drift(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
     """Name owners whose tumbler allocator has fallen BEHIND its own children
     (nexus-0ehwe item 4).
 
@@ -11745,14 +11888,18 @@ def _check_next_seq_drift() -> list[HealthResult]:
     # and say so at WARNING — a check with a total-outage history
     # (nexus-pbawi) must not vanish at debug level.
     highs: dict[str, int] | None = None
+    # The doctor run's shared walk (*documents*) was already retried by _walk_documents_for_doctor, and a
+    # walk that failed there is not repeated here; called alone, the row walks and retries as before.
     for attempt in (1, 2):
         try:
-            highs = _highest_child_seqs(cat)
+            highs = _highest_child_seqs(cat, documents)
             break
         except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
             _log.warning(
                 "doctor_next_seq_scan_failed", attempt=attempt, error=str(exc),
             )
+            if documents is not None:
+                break  # a shared list, or a shared walk that failed, does not change on a retry
     if highs is None:
         return [HealthResult(
             label=label, ok=True,
@@ -11814,23 +11961,54 @@ def _check_next_seq_drift() -> list[HealthResult]:
     )]
 
 
+class _WalkFailed:
+    """Passed to the document-list rows when the doctor run's one catalog walk failed, so no row walks again."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<catalog walk failed>"
+
+
+#: The shared walk failed (twice): each row degrades to a "skipped" row instead of re-walking a catalog
+#: that just failed to list (a re-walk from each of three rows is the load that saturated the edge).
+_WALK_FAILED = _WalkFailed()
+
+
+def _doc_list(cat: Any, documents: list[Any] | _WalkFailed | None) -> Any:
+    """The document list a row reads: the run's shared walk when given, its own walk when called alone
+    (``documents is None``), and a raise (each row's handler reports "skipped") when the shared walk failed."""
+    if documents is _WALK_FAILED:
+        raise RuntimeError("the catalog walk failed earlier in this doctor run")
+    return documents if documents is not None else cat.all_documents(limit=0)
+
+
 def _walk_documents_for_doctor() -> list | None:
-    """Every catalog document, walked once for the rows that share it, or
-    ``None`` when the walk cannot run (each row then walks and degrades on
-    its own)."""
+    """Every catalog document, walked ONCE per doctor run for the rows that read the whole list (stale
+    index-run fences, failed runs with hidden chunks, tumbler allocator drift), or ``None`` when the walk
+    cannot run (``run_health_checks`` then hands the rows :data:`_WALK_FAILED`, so none walks again).
+
+    One walk is 44 paged requests on a 43.7k-document tenant; three rows each walking were three times
+    that, plus the upgrade ladder's own scan (shakedown 7.94.0 class A, nexus-mq980). A mid-walk failure
+    blanks all three rows, so it is retried once and said at WARNING, as the drift row did when it
+    walked alone (nexus-pbawi).
+    """
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
 
         cat = make_catalog_reader()
-        if cat is None:
-            return None
-        return list(cat.all_documents(limit=0))
     except Exception as exc:  # noqa: BLE001 — best-effort: each row degrades on its own
         _log.debug("doctor_document_walk_failed", error=str(exc))
         return None
+    if cat is None:
+        return None
+    for attempt in (1, 2):
+        try:
+            return list(cat.all_documents(limit=0))
+        except Exception as exc:  # noqa: BLE001 — best-effort: each row degrades on its own
+            _log.warning("doctor_document_walk_failed", attempt=attempt, error=str(exc))
+    return None
 
 
-def _check_failed_runs_hidden_chunks(documents: list | None = None) -> list[HealthResult]:
+def _check_failed_runs_hidden_chunks(documents: list[Any] | _WalkFailed | None = None) -> list[HealthResult]:
     """Name failed documents whose stored chunks have no manifest owner
     (nexus-0ntxj).
 
@@ -11860,7 +12038,7 @@ def _check_failed_runs_hidden_chunks(documents: list | None = None) -> list[Heal
         if cat is None:
             return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
         failed = [
-            e for e in (documents if documents is not None else cat.all_documents(limit=0))
+            e for e in _doc_list(cat, documents)
             if getattr(e, "index_state", None) == "failed"
         ]
         if not failed:
@@ -11888,16 +12066,16 @@ def _check_failed_runs_hidden_chunks(documents: list | None = None) -> list[Heal
     )]
 
 
-def _highest_child_seqs(cat: Any) -> dict[str, int]:
+def _highest_child_seqs(cat: Any, documents: list[Any] | _WalkFailed | None = None) -> dict[str, int]:
     """Highest numeric child sequence per owner prefix, tombstones INCLUDED.
 
-    One ``all_documents`` walk for ALL owners. The predecessor
+    One ``all_documents`` walk for ALL owners, or none when *documents* (the doctor run's shared walk) is given. The predecessor
     (``_highest_child_seq(cat, prefix)``) re-walked the full corpus per
     owner — O(owners x documents) over the managed API (nexus-ohxzu:
     218s of a 224s doctor on 65 owners x ~22k docs).
     """
     best: dict[str, int] = {}
-    for entry in cat.all_documents(limit=0):
+    for entry in _doc_list(cat, documents):
         tumbler = str(getattr(entry, "tumbler", "") or "")
         prefix, dot, tail = tumbler.rpartition(".")
         if not dot or not tail.isdigit():
@@ -12424,7 +12602,11 @@ def run_health_checks(
     # nexus-0ntxj: one corpus walk feeds both index-run rows (the second
     # row would otherwise add a walk; nexus-ft7eg tracks the others). A
     # failed walk here passes None and each check walks, and degrades, alone.
-    _index_run_docs = _walk_documents_for_doctor()
+    # Shakedown 7.94.0 class A: the allocator-drift row below reads the same list, so ONE walk feeds all
+    # three rows (it walked on its own before).
+    _index_run_docs: list[Any] | _WalkFailed | None = _walk_documents_for_doctor()
+    if _index_run_docs is None:
+        _index_run_docs = _WALK_FAILED
     results.extend(_check_stale_indexing_runs(_index_run_docs))
     # nexus-0ntxj: a failed run's chunks stored with no manifest owner are
     # hidden by live(c). Degrades internally.
@@ -12435,7 +12617,7 @@ def run_health_checks(
     # nexus-0ehwe item 4: owners whose tumbler allocator has fallen behind
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.
-    results.extend(_check_next_seq_drift())
+    results.extend(_check_next_seq_drift(_index_run_docs))
     # nexus-c0g6e (GH #1529): topics whose cached doc_count disagrees with
     # the real topic_assignments count (6.18.1-era import drift, predating
     # taxonomy-013's recompute triggers). Self-heals on the engine's next
