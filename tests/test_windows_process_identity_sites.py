@@ -124,6 +124,21 @@ class TestServiceRegistry:
     def test_process_command_of_gone_pid_is_empty(self, api: FakeWinInfoApi) -> None:
         assert sr.process_command(999, platform="win32", win_info_api=api) == ""
 
+    def test_process_argv_keeps_a_quoted_argument_with_a_space_whole(self, api: FakeWinInfoApi) -> None:
+        spaced = FakeWinInfoApi({
+            400: FakeProc(
+                1, NOW - 1, "C:\\bin\\nx.exe",
+                '"C:\\bin\\nx.exe" daemon aspect-worker start --config-dir "C:\\Users\\Sam Smith\\nexus" --tenant default',
+            ),
+        })
+        argv = sr.process_argv(400, platform="win32", win_info_api=spaced)
+        assert argv[argv.index("--config-dir") + 1] == "C:\\Users\\Sam Smith\\nexus"
+        assert argv[-2:] == ["--tenant", "default"]
+        assert sr.process_argv(300, platform="win32", win_info_api=api)[-2:] == ["--config-dir", str(CFG)]
+        assert sr.process_argv(999, platform="win32", win_info_api=api) == []
+        api.assert_no_leaked_handles()
+        spaced.assert_no_leaked_handles()
+
     def test_process_state_is_unknown_never_a_zombie(self) -> None:
         assert sr.process_state(310, platform="win32") is None
         assert sr.process_state(0, platform="win32") is None

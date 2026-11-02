@@ -41,6 +41,7 @@ from click.testing import CliRunner
 from nexus.aspect_worker import AspectExtractionWorker
 from nexus.commands.daemon import aspect_worker_group, aspect_worker_start_cmd
 from nexus.daemon import aspect_worker_daemon as awd
+from nexus.daemon import service_registry as sr
 from nexus.daemon.service_registry import (
     ServiceRegistry,
     ServiceSupervisor,
@@ -409,6 +410,12 @@ def _lease_naming(cfg: Path, pid: int) -> ServiceRegistry:
         ("python -m nexus.cli daemon aspect-worker start --config-dir /a/b2 --tenant default", "/a/b", False),
         ("python -m nexus.cli daemon aspect-worker start --tenant default", "/a/b", False),
         ("sleep 60 --config-dir /a/b", "/a/b", False),
+        # A worker serving "/a/b c" is not a worker serving "/a/b" (a joined
+        # command line cannot tell the two apart by prefix).
+        ("python -m nexus.cli daemon aspect-worker start --config-dir /a/b c --tenant default", "/a/b", False),
+        ("python -m nexus.cli daemon aspect-worker start --config-dir=/a/b c --tenant default", "/a/b", False),
+        ("python -m nexus.cli daemon aspect-worker start --config-dir /a/b c", "/a/b", False),
+        ('python -m nexus.cli daemon aspect-worker start --config-dir "/a/b c" --tenant default', "/a/b", False),
     ],
 )
 def test_the_directory_bound_predicate_reads_the_config_dir_off_the_command_line(
@@ -416,6 +423,27 @@ def test_the_directory_bound_predicate_reads_the_config_dir_off_the_command_line
 ) -> None:
     predicate = awd.is_aspect_worker_command_serving(Path(serves))
     assert predicate(command) is expect, command
+
+
+@pytest.mark.parametrize(
+    ("argv", "serves", "expect"),
+    [
+        (["python", "-m", "nexus.cli", "daemon", "aspect-worker", "start", "--config-dir", "/a/b", "--tenant", "default"], "/a/b", True),
+        (["python", "-m", "nexus.cli", "daemon", "aspect-worker", "start", "--config-dir=/a/b", "--tenant", "default"], "/a/b", True),
+        (["python", "-m", "nexus.cli", "daemon", "aspect-worker", "start", "--config-dir", "/a/b c"], "/a/b c", True),
+        (["python", "-m", "nexus.cli", "daemon", "aspect-worker", "start", "--config-dir", "/a/b c"], "/a/b", False),
+        (["python", "-m", "nexus.cli", "daemon", "aspect-worker", "start", "--config-dir=/a/b c", "--tenant", "x"], "/a/b", False),
+        (["python", "-m", "nexus.cli", "daemon", "aspect-worker", "start", "--config-dir", "/a/b", "c"], "/a/b c", False),
+        (["python", "-m", "nexus.cli", "daemon", "aspect-worker", "start", "--config-dir", "/a/b2"], "/a/b", False),
+        (["python", "-m", "nexus.cli", "daemon", "aspect-worker", "start", "--config-dir"], "/a/b", False),
+        (["python", "-m", "nexus.cli", "daemon", "aspect-worker", "start", "--tenant", "default"], "/a/b", False),
+        (["sleep", "60", "--config-dir", "/a/b"], "/a/b", False),
+    ],
+)
+def test_the_argv_predicate_compares_the_exact_config_dir_value(
+    argv: list[str], serves: str, expect: bool,
+) -> None:
+    assert awd.is_aspect_worker_argv_serving(Path(serves))(argv) is expect, argv
 
 
 @_posix_only
@@ -446,6 +474,63 @@ def test_a_lease_in_one_dir_naming_a_worker_of_another_leaves_that_worker_alone(
     assert result.stopped == ()
     assert result.foreign == (victim.proc.pid,)
     assert len(registry.records()) == 1, "a live unmatched holder's lease is not relinquished"
+
+
+@_posix_only
+def test_a_lease_in_dir_a_naming_a_worker_of_dir_a_b_leaves_that_worker_alone(
+    tmp_path: Path, workers: Callable[..., _RealWorker],
+) -> None:
+    """The worker serves ``<tmp>/a b/cfg``; the stale lease is in ``<tmp>/a``.
+    A joined command line spells the first as ``--config-dir <tmp>/a b/cfg``,
+    whose first token is the second directory."""
+    victim = workers("a b", "--engine-unreachable-exit-seconds", "0")
+    victim.wait_for_lease()
+    stale_dir = tmp_path / "a"
+    _lease_naming(stale_dir, victim.proc.pid)
+    result = awd.stop_aspect_workers(stale_dir)
+    assert victim.alive(), "the stop for <tmp>/a signalled the worker serving <tmp>/a b/cfg"
+    assert result.stopped == ()
+    assert result.foreign == (victim.proc.pid,)
+
+
+def test_process_argv_splits_the_proc_cmdline_on_nul(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``/proc/<pid>/cmdline`` keeps an argument with a space whole; the joined
+    text of ``process_command`` cannot."""
+    (tmp_path / "uptime").write_text("1 1\n")
+    (tmp_path / "123").mkdir()
+    (tmp_path / "123" / "cmdline").write_bytes(b"python\x00--config-dir\x00/a/b c\x00--tenant\x00default\x00")
+    monkeypatch.setattr(sr, "PROCFS_ROOT", tmp_path)
+    assert sr.process_argv(123) == ["python", "--config-dir", "/a/b c", "--tenant", "default"]
+    assert sr.process_argv(124) == [], "a gone pid has no argv"
+    assert sr.process_command(123) == "python --config-dir /a/b c --tenant default"
+
+
+def test_stop_tier_holders_trusts_the_argv_over_the_joined_text(tmp_path: Path) -> None:
+    """When the argv is readable it decides; when it is not, the joined text
+    does. The bystander is a live process either way."""
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])  # noqa: S603
+    try:
+        cfg = tmp_path / "cfg"
+        registry = _lease_naming(cfg, bystander.pid)
+        joined = "python -m nexus.cli daemon aspect-worker start --config-dir /a/b c"
+        result = stop_tier_holders(
+            dir=cfg, tier=awd.TIER, grace_s=1.0, keep_foreign_leases=True,
+            command=lambda pid: joined, is_ours=lambda c: True,
+            argv_of=lambda pid: joined.split(" ")[:-1] + ["/a/b c"],
+            is_ours_argv=lambda argv: False,
+        )
+        assert result.foreign == (bystander.pid,), "the argv said not ours; the joined text must not override it"
+        assert bystander.poll() is None
+        assert len(registry.records()) == 1
+        result = stop_tier_holders(
+            dir=cfg, tier=awd.TIER, grace_s=1.0, keep_foreign_leases=True,
+            command=lambda pid: joined, is_ours=lambda c: False,
+            argv_of=lambda pid: [], is_ours_argv=lambda argv: True,
+        )
+        assert result.foreign == (bystander.pid,), "no argv: the joined-text test decides"
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=10)
 
 
 @_posix_only
@@ -678,6 +763,31 @@ def test_the_real_worker_reports_no_contact_when_every_claim_fails(tmp_path: Pat
     assert not _drive_loop(w, until=lambda: bool(calls), seconds=1.0)
     assert attempts, "the loop must have tried (non-vacuity)"
     assert not calls
+
+
+def test_a_tuple_claim_that_answered_clears_the_clock_while_the_table_route_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tuple-mode worker whose table claim route fails while the tuple claim
+    answers (empty): the tuple claim alone carries the contact, so the host's
+    unreachable clock is cleared."""
+    mono = _Mono()
+    d = _contact_daemon(tmp_path / "cfg", lambda: 0, mono, _ContactWorker())
+    d._unreachable_since = mono.now - 50.0
+    w = AspectExtractionWorker(poll_interval=0.05, config_dir=tmp_path)
+    w.set_engine_contact_handler(d.note_engine_contact)
+    table_attempts: list[int] = []
+
+    def _table_down() -> list:
+        table_attempts.append(1)
+        raise ConnectionError("table claim route failing")
+
+    monkeypatch.setattr(w._tuple_side, "supported", lambda: True)
+    monkeypatch.setattr(w._tuple_side, "claim_batch", lambda park: ([], False))
+    monkeypatch.setattr(w, "_claim_table_rows", _table_down)
+    cleared = _drive_loop(w, until=lambda: d._unreachable_since is None)
+    assert table_attempts, "the table route must have been tried and failed (non-vacuity)"
+    assert cleared, "an answered tuple claim is engine contact even when the table route fails"
 
 
 def test_a_table_only_worker_reports_contact_after_its_table_claim_answered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1625,6 +1625,34 @@ def process_command(
     return probe.stdout.strip()
 
 
+def process_argv(
+    pid: int,
+    *,
+    platform: str | None = None,
+    win_info_api: "winproc_core.WinProcessInfoApi | None" = None,
+) -> list[str]:
+    """The argv of *pid* as a list, or ``[]`` when it is gone or this platform
+    cannot give one. :func:`process_command` joins the arguments with spaces, so
+    an argument that holds a space (a config directory) cannot be told from
+    two; a caller that must compare one argument exactly reads this instead.
+    ``/proc/<pid>/cmdline`` is NUL-separated; Windows splits the kernel's
+    command line by the C runtime rules. ``ps`` (macOS) offers only the joined
+    text, so there the answer is ``[]`` and the caller falls back to
+    :func:`process_command`."""
+    if _is_windows(platform):
+        return winproc_core.process_argv(pid, _win_info(win_info_api))
+    if _procfs_available():
+        try:
+            raw = (PROCFS_ROOT / str(pid) / "cmdline").read_bytes()
+        except OSError:
+            return []
+        parts = raw.split(b"\x00")
+        if parts and parts[-1] == b"":
+            parts.pop()
+        return [part.decode("utf-8", "replace") for part in parts]
+    return []
+
+
 #: Win32 values :func:`pid_alive`'s Windows branch reads (winnt.h, winerror.h,
 #: winbase.h). Module-level so tests script the same numbers.
 PROCESS_QUERY_LIMITED_INFORMATION: int = 0x1000
@@ -2083,6 +2111,8 @@ def stop_tier_holders(
     console_api: "win_console.WinConsoleApi | None" = None,
     command: Callable[[int], str] | None = None,
     keep_foreign_leases: bool = False,
+    is_ours_argv: Callable[[list[str]], bool] | None = None,
+    argv_of: Callable[[int], list[str]] | None = None,
 ) -> HolderStopResult:
     """Stop every process a tier's lease records name, and drop the records.
 
@@ -2100,10 +2130,15 @@ def stop_tier_holders(
     A pid that is alive but runs something else (``foreign``) is a recycled
     pid, so by default its record goes as well; a caller whose stop must not
     read as done while a live process stays unexplained passes
-    ``keep_foreign_leases=True`` and the record stays (nexus-wl9pk).
+    ``keep_foreign_leases=True`` and the record stays (nexus-wl9pk). A caller
+    whose identity test must compare one argument exactly (a directory that
+    holds a space is one argv element, two tokens of the joined text) passes
+    *is_ours_argv*: it decides when the pid's argv can be read (*argv_of*,
+    default :func:`process_argv`), and *is_ours* decides when it cannot.
     Never raises for a missing or unreadable registry directory.
     """
     read_command = command or (lambda pid: process_command(pid, platform=platform))
+    read_argv = argv_of or (lambda pid: process_argv(pid, platform=platform))
     registry = ServiceRegistry(dir=dir, tier=tier)
     records = registry.records()
     targets: list[int] = []
@@ -2123,7 +2158,9 @@ def stop_tier_holders(
             if pid_running(pid):
                 unreadable.append(pid)
             continue
-        if is_ours(cmd):
+        argv = read_argv(pid) if is_ours_argv is not None else []
+        ours = is_ours_argv(argv) if is_ours_argv is not None and argv else is_ours(cmd)
+        if ours:
             targets.append(pid)
         elif pid_running(pid):
             foreign.append(pid)

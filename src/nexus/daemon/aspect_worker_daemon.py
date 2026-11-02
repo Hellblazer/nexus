@@ -750,8 +750,11 @@ class AspectWorkerDaemon:
 def aspect_worker_running(config_dir: Path | str, tenant: str = "default") -> bool:
     """Whether a worker holds a fresh lease for *tenant* in *config_dir*.
     ``nx doctor`` uses it to tell a draining backlog from one nobody is draining
-    (nexus-wl9pk: a worker leaves after an hour without an engine). Read-only;
-    creates nothing."""
+    (nexus-wl9pk: a worker leaves after an hour without an engine). Creates
+    nothing; it does best-effort delete a lease file that has expired (that is
+    ``ServiceRegistry.discover``'s own cleanup, harmless to a live worker, which
+    rewrites its lease every heartbeat). Reads this machine's *config_dir* only:
+    a worker on another machine is not seen."""
     registry = ServiceRegistry(dir=Path(config_dir), tier=TIER, ttl=ttl_for_tier(TIER))
     return registry.discover(tenant) is not None
 
@@ -1027,20 +1030,35 @@ def is_aspect_worker_command(command: str) -> bool:
     return "aspect-worker" in command and "nexus" in command
 
 
-def _config_dir_argument(command: str) -> list[str]:
-    """The text after ``--config-dir`` (space or ``=``), as the candidate
-    values it could spell: the command line is the joined argv, so a path with
-    spaces arrives as several tokens, and the next option ends it."""
+def _config_dir_value(command: str) -> str | None:
+    """The ``--config-dir`` value of a JOINED command line (space or ``=``), or
+    ``None``: the text after the flag up to the next ``--option`` or the end.
+    The joined text cannot tell a path with spaces from several arguments, so
+    the value is the whole run, never a prefix of it: ``/a/b c`` is not
+    ``/a/b``. Used where the platform offers no argv (``ps`` on macOS); the
+    argv reader (:func:`_config_dir_of_argv`) is exact."""
     match = re.search(r"--config-dir(?:=|\s+)(.*)$", command)
     if match is None:
-        return []
+        return None
     tokens = match.group(1).split()
-    candidates: list[str] = []
-    for end in range(1, len(tokens) + 1):
-        if end > 1 and tokens[end - 1].startswith("--"):
+    run: list[str] = []
+    for token in tokens:
+        if run and token.startswith("--"):
             break
-        candidates.append(" ".join(tokens[:end]).strip("\"'"))
-    return candidates
+        run.append(token)
+    return " ".join(run).strip("\"'") or None
+
+
+def _config_dir_of_argv(argv: list[str]) -> str | None:
+    """The value of the last ``--config-dir`` (``--config-dir X`` or
+    ``--config-dir=X``) in *argv*, as click would read it, else ``None``."""
+    value: str | None = None
+    for i, arg in enumerate(argv):
+        if arg == "--config-dir":
+            value = argv[i + 1] if i + 1 < len(argv) else None
+        elif arg.startswith("--config-dir="):
+            value = arg.partition("=")[2]
+    return value or None
 
 
 def _same_dir(left: str, right: str) -> bool:
@@ -1052,16 +1070,30 @@ def _same_dir(left: str, right: str) -> bool:
 
 
 def is_aspect_worker_command_serving(config_dir: Path | str) -> Callable[[str], bool]:
-    """The pid-recycle re-check of :func:`stop_aspect_workers`: an aspect-worker
-    command line whose ``--config-dir`` is *config_dir*. A lease record in
-    directory A that names a pid now running a worker of directory B must not
-    stop B (nexus-wl9pk). The spawn always passes an absolute ``--config-dir``."""
+    """The pid-recycle re-check of :func:`stop_aspect_workers` on a joined
+    command line: an aspect-worker command whose ``--config-dir`` is
+    *config_dir*. A lease record in directory A that names a pid now running a
+    worker of directory B must not stop B (nexus-wl9pk). The spawn always passes
+    an absolute ``--config-dir``. Prefer :func:`is_aspect_worker_argv_serving`
+    where the argv is readable."""
     want = str(config_dir)
 
     def _serves(command: str) -> bool:
-        return is_aspect_worker_command(command) and any(
-            _same_dir(candidate, want) for candidate in _config_dir_argument(command)
-        )
+        value = _config_dir_value(command)
+        return is_aspect_worker_command(command) and value is not None and _same_dir(value, want)
+
+    return _serves
+
+
+def is_aspect_worker_argv_serving(config_dir: Path | str) -> Callable[[list[str]], bool]:
+    """The same re-check on an argv list: the ``--config-dir`` element equals
+    *config_dir* by real path, so a worker serving ``/a/b c`` is never taken for
+    one serving ``/a/b``."""
+    want = str(config_dir)
+
+    def _serves(argv: list[str]) -> bool:
+        value = _config_dir_of_argv(argv)
+        return is_aspect_worker_command(" ".join(argv)) and value is not None and _same_dir(value, want)
 
     return _serves
 
@@ -1087,5 +1119,6 @@ def stop_aspect_workers(config_dir: Path | str) -> HolderStopResult:
     return stop_tier_holders(
         dir=Path(config_dir), tier=TIER,
         is_ours=is_aspect_worker_command_serving(config_dir),
+        is_ours_argv=is_aspect_worker_argv_serving(config_dir),
         keep_foreign_leases=True,
     )

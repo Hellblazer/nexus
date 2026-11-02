@@ -472,6 +472,9 @@ class TestAspectQueueIdleWarning:
         printed, exit_code = self._run(5, True, monkeypatch)
         assert "aspect extraction is idle: 5 pending and no aspect worker is running" in printed, printed
         assert "nx daemon aspect-worker start" in printed, printed
+        assert "this machine's worker leases only" in printed, (
+            "the WARN must say it cannot see a worker on another machine against the same cloud tenant"
+        )
         assert exit_code is None, "a warning, not a failure"
         assert "FAIL:" not in printed, printed
 

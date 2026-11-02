@@ -1190,7 +1190,9 @@ def _report_aspect_queue_service() -> None:
                     "running (a worker exits after an hour without the engine; the next store or "
                     "index starts one). Start one now with `nx daemon aspect-worker start` "
                     "(foreground; run it from a shell where `claude` works), or store or index "
-                    "anything.",
+                    "anything. (This reads this machine's worker leases only: against a cloud "
+                    "tenant, a worker on another machine is not seen and may be draining the "
+                    "queue.)",
                     err=True,
                 )
     if n_failed:
