@@ -1178,10 +1178,10 @@ def _report_aspect_queue_service() -> None:
             # nexus-wl9pk: a worker exits after an hour without an engine, and
             # only the next store or index starts another, so a backlog from
             # before an outage sits with nobody draining it.
-            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to keep CLI startup fast
+            from nexus import config as _config  # noqa: PLC0415 — deferred to keep CLI startup fast; the module attribute, so a test or caller that rebinds the resolver is seen (nexus-78blw)
 
             try:
-                worker_up = _awd.aspect_worker_running(nexus_config_dir())
+                worker_up = _awd.aspect_worker_running(_config.nexus_config_dir())
             except Exception:  # noqa: BLE001 — an unreadable lease says nothing; stay quiet rather than guess
                 worker_up = True
             if not worker_up:

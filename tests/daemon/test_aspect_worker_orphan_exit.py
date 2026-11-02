@@ -48,6 +48,7 @@ from nexus.daemon.service_registry import (
     stop_tier_holders,
     ttl_for_tier,
 )
+from tests._module_seam import setattr_in
 
 _POSIX = sys.platform != "win32"
 _posix_only = pytest.mark.skipif(not _POSIX, reason="removing a directory under a running worker needs POSIX unlink semantics")
@@ -122,7 +123,7 @@ def test_dir_exists_reads_a_stat_error_as_present(tmp_path: Path, monkeypatch: p
     def _denied(_p: Any) -> None:
         raise PermissionError("denied")
 
-    monkeypatch.setattr("nexus.daemon.service_registry.os.stat", _denied)
+    setattr_in(monkeypatch, "nexus.daemon.service_registry", "os.stat", _denied)
     assert registry.dir_exists() is True, "an unreadable directory is not a removed one"
 
 
@@ -260,10 +261,10 @@ class _RealWorker:
         # The credential guard wants an LLM backend on PATH; this one is never run.
         if _POSIX:
             claude = bindir / "claude"
-            claude.write_text("#!/bin/sh\nexit 0\n")
+            claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             claude.chmod(0o755)
         else:
-            (bindir / "claude.cmd").write_text("@exit /b 0\r\n")
+            (bindir / "claude.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
         env = {
             k: v for k, v in os.environ.items()
             if not k.startswith(("NX_", "NEXUS_", "ANTHROPIC", "CLAUDE"))
@@ -294,7 +295,7 @@ class _RealWorker:
 
     def output(self) -> str:
         self._out.flush()
-        return self.log.read_text(errors="replace")[-2000:]
+        return self.log.read_text(encoding="utf-8", errors="replace")[-2000:]
 
     def alive(self) -> bool:
         return self.proc.poll() is None
@@ -373,7 +374,7 @@ def test_the_stop_verb_stops_the_worker_leased_in_that_dir_and_no_other(workers:
     other.wait_for_lease()
     done = subprocess.run(  # noqa: S603 - fixed argv
         [sys.executable, "-m", "nexus.cli", "daemon", "aspect-worker", "stop", "--config-dir", str(mine.cfg)],
-        env=mine.env, capture_output=True, text=True, timeout=60, check=False,
+        env=mine.env, capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
     )
     assert done.returncode == 0, done.stdout + done.stderr
     assert str(mine.proc.pid) in done.stdout, done.stdout
@@ -382,7 +383,7 @@ def test_the_stop_verb_stops_the_worker_leased_in_that_dir_and_no_other(workers:
     assert not mine.lease.exists(), "the stop must drop the lease it stopped"
     again = subprocess.run(  # noqa: S603 - fixed argv
         [sys.executable, "-m", "nexus.cli", "daemon", "aspect-worker", "stop", "--config-dir", str(mine.cfg)],
-        env=mine.env, capture_output=True, text=True, timeout=60, check=False,
+        env=mine.env, capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
     )
     assert again.returncode == 0 and "No aspect-worker running" in again.stdout, "idempotent"
     assert other.alive()
@@ -498,7 +499,7 @@ def test_process_argv_splits_the_proc_cmdline_on_nul(tmp_path: Path, monkeypatch
     text of ``process_command`` cannot. The procfs branch is pinned with an explicit
     ``platform="linux"`` so the test reads the fake procfs on every host (Windows takes
     the winproc branch otherwise)."""
-    (tmp_path / "uptime").write_text("1 1\n")
+    (tmp_path / "uptime").write_text("1 1\n", encoding="utf-8")
     (tmp_path / "123").mkdir()
     (tmp_path / "123" / "cmdline").write_bytes(b"python\x00--config-dir\x00/a/b c\x00--tenant\x00default\x00")
     monkeypatch.setattr(sr, "PROCFS_ROOT", tmp_path)
