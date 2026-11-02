@@ -5,9 +5,11 @@
 RDR-239 Phase 3 (bead nexus-mdbds.2.19, review round nexus-mdbds.2.17 M1/S-C).
 The Java ``TemplateDocLintTest`` check 4 asserts the same, but the engine CI job
 runs only when ``service/**`` changes, and the files these blocks cite live
-outside ``service/`` (skills, ``docs/``, ``scripts/``). A docs-only PR that
-renames a cited file would pass until the next engine change. This is the
-cheap mirror the normal PR suite runs: no engine, no YAML parser (the blocks
+outside ``service/`` (skills, ``docs/``, ``scripts/``). This is the cheap
+mirror the lint job runs on any PR that changes code, so a rename under
+``conexus/`` or ``scripts/`` is caught in its own PR. CI skips the lint job for
+a PR that touches only ``docs/**``, so a renamed ``docs/`` file or RDR is caught
+on the next PR that changes code. No engine, no YAML parser (the blocks
 hold ``- Unverified: ...`` lines that a YAML reader turns into mappings), just
 the ``writers`` / ``readers`` / ``see_also`` lines of each ``doc:`` block read
 as text, with the same path and RDR-id rules as the Java test.

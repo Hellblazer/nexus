@@ -577,8 +577,11 @@ engine change (engine-service-v0.1.174) and is not part of this RDR.
   checks `out()` applies; the names in `fields`; value maps against declared
   values; the file paths and RDR ids cited in `writers`, `readers` and
   `see_also` (by the Java lint when the engine changes, and by a Python
-  mirror, `tests/test_tuple_template_doc_paths_lint.py`, in the normal PR
-  suite, which gates a docs-only change that renames a cited file); and the
+  mirror, `tests/test_tuple_template_doc_paths_lint.py`, in the lint job of
+  any PR that changes code, which catches a renamed cited file under
+  `conexus/` or `scripts/` in the PR that renames it; CI skips that job for
+  a PR touching only `docs/**`, so a renamed `docs/` file or RDR shows on the
+  next PR that changes code); and the
   presence of `doc.summary` and `doc.example` on every loaded template. Not enforced: what `summary`, `writers`, `readers` and
   the descriptions say. That is maintained prose, and it can go stale the
   way the comment in `ledger.yaml` did. The mitigations are that it sits in
