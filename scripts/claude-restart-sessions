@@ -323,7 +323,10 @@ def converge(version: str, repo: Path, endpoint: str, gate: bool, dry: bool, eng
             if (live and live >= floor) or time.time() >= deadline:
                 break
             time.sleep(30)
-        if not live or live < floor:
+        if not live:
+            log(f"ABORT: could not read the cloud engine's version from {endpoint}; nothing installed, nothing restarted.")
+            return False
+        if live < floor:
             log(f"ABORT: the cloud engine is behind v{version}'s floor; deploy it first. Nothing installed, nothing restarted.")
             return False
     else:
@@ -338,8 +341,11 @@ def converge(version: str, repo: Path, endpoint: str, gate: bool, dry: bool, eng
                        capture_output=True, text=True)
     log(f"reinstall-tool conexus=={version}: exit {r.returncode}")
     got = nx_version()
-    # A whole token, not a substring: 7.93.1 is in "nx, version 7.93.10".
-    if r.returncode != 0 or version not in got.replace(",", " ").split():
+    if r.returncode != 0:
+        log(f"ABORT: reinstall-tool exited {r.returncode} (nx reports '{got}'). Nothing restarted.")
+        return False
+    # Bounded, not a substring: 7.93.1 is in "nx, version 7.93.10" and in "17.93.1".
+    if not re.search(rf"(?<![\d.]){re.escape(version)}(?!\d|\.\d)", got):
         log(f"ABORT: nx reports '{got}', not {version}. Nothing restarted.")
         return False
     log(f"nx: {got}")

@@ -13,20 +13,24 @@ with nothing written to the operator's ~/.claude. Four scenarios, each in its ow
   ``rs_busy`` (mid-turn in a foreground command that waits on a hold file the harness
   removes after the roll), ``rs_shell`` (a background shell open, status ``shell``) and
   ``rs_paste`` (a bracketed paste shown as ``[Pasted text #N]``). The engine gate runs
-  against a local ``/version`` stand-in that answers below the release's floor first and at
-  it on the next read, so the gate waits once (30 s) and passes. ``--fallback-resume`` is on.
+  against a local ``/version`` stand-in that answers 502, then a version below the
+  release's floor, then the floor: the gate must wait through both (30 s each), read three
+  times, and pass before the roll starts. ``--fallback-resume`` is on.
 - ``variant``: no ``--fallback-resume``. ``rs_alpha`` (the caller) and ``rs_late`` restart;
-  ``rs_late`` is mid-turn when the roll starts and its hold is removed only once the others'
-  handoffs are written, so it must be asked after them and still restart fresh (a busy
-  session holds up no other). ``rs_shell`` stays in ``shell`` and must be skipped at the
-  handoff with no fallback line and no restart-phase SKIP. ``rs_image`` holds an
-  ``[Image #N]`` placeholder (a bracketed paste of a .png path) and is skipped at its restart.
-- ``abort``: the release's reinstall-tool.sh stand-in exits 1. Both sessions write their
+  ``rs_late`` is mid-turn when the roll starts and its hold is removed only once rs_alpha's
+  and rs_image's handoffs are written. That is the proof a busy session holds up no other:
+  a script that waited on rs_late before asking the others would never see it released and
+  fail; the check that rs_late is asked after both handoffs then guards a script that asks
+  a busy session early. ``rs_shell`` stays in ``shell`` and must be skipped at the handoff
+  with no fallback line and no restart-phase SKIP. ``rs_image`` holds an ``[Image #N]``
+  placeholder (a bracketed paste of a .png path) and is skipped at its restart.
+- ``abort``: the release's reinstall-tool.sh stand-in installs and publishes X, then exits 1,
+  so nx reports X and only the exit code can stop the roll. Both sessions write their
   handoff; the script must abort after the handoffs with nothing exited, no plugin update,
-  and the handoffs kept.
+  X absent from the plugin cache, and the handoffs kept.
 - ``gate``: the ``/version`` stand-in answers 502, then (a second run) a version below the
   floor, with ``--engine-wait 0``. Each run must exit 2 in the foreground with the gate's
-  ABORT line, before any handoff is asked or anything installed.
+  ABORT line for that case, after one read, before any handoff is asked or anything installed.
 
 Shared by every scenario:
 
@@ -43,7 +47,8 @@ Shared by every scenario:
   transport). It holds copies of the operator's installed plugins (read only). Installing
   and updating fill the versioned cache ``plugins/cache/nexus-plugins/<plugin>/<version>``,
   as on the operator's box, so the cache folder a session's MCP servers run from names the
-  version it loaded;
+  version it loaded, and a marker bump_market writes into each published tree
+  (``.sandbox-release``) proves that folder holds that release, for conexus and sn;
 - a private tmux server (``-L``, ``-f /dev/null``, a bare bash in every pane);
 - stand-ins for what --nx touches outside the sandbox: ``--repo`` is a scratch release repo
   whose tag vX holds this checkout's engine floor, and whose reinstall-tool.sh records its
@@ -75,16 +80,20 @@ first appear in its transcript inside a tool result (the read of the handoff), a
 file in the scratch HOME may hold any word. A negative control in ``roll``, one more fresh
 session in the same folder with no handoff, must not know any word.
 
-Not exercised: a real cloud engine (the gate reads the stand-in), a real PyPI install, and
-the operator's own marketplace remote.
+Not exercised: a real cloud engine (the gate reads the stand-in), a real PyPI install, the
+operator's own marketplace remote, a restart with ``--resume`` (no scenario resumes a
+session), the ``ABORT: plugins are`` branch (a plugin update that leaves an old version), and
+restart()'s fallback for a handoff that went stale.
 
 Positive controls: ``NX_RESTART_SANDBOX_SCRIPT=<copy>`` runs another copy of the script; the
-pane checks always use this checkout's reader. The pre-cmqe8 copy fails ``roll`` on rs_draft
-and the argv check. A copy that restarts the caller first, installs before the handoffs and
-counts ``shell`` as ready fails the caller-last, install-window and rs_shell checks
-(nexus-8m0ho). A copy that treats every roll as --fallback-resume fails ``variant``; one that
-restarts after a failed install fails ``abort``; one whose gate always passes fails ``gate``
-(nexus-q4m6u).
+pane checks always use this checkout's reader. Against the rewritten harness (nexus-q4m6u),
+each one-change copy fails its scenario: every roll treated as --fallback-resume fails
+``variant``; going on after a failed install, or ignoring the reinstall's exit code, fails
+``abort``; an unreadable engine passing the gate fails ``gate``; a failed read ending the
+wait fails ``roll``; and a copy whose post-handoff install never runs fails ``roll`` (fresh
+sessions on the old release). The pre-cmqe8 copy (rs_draft, argv) and a caller-first,
+install-early, shell-ready copy (caller-last, install window, rs_shell) failed the one-roll
+harness these checks come from (nexus-8m0ho); they were not rerun here.
 
 Run through run.sh (it supplies the automation token, RDR-219). Prints one verdict line,
 ``RESTART SANDBOX PASSED`` or ``RESTART SANDBOX FAILED``, and exits 0 or 1 (a precondition
@@ -131,6 +140,8 @@ PASTE_TEXT = "\n".join(f"pasted line {i} the restart cannot save from the pane" 
 OPERATOR_HOME = Path.home()
 SANDBOX_PY = Path(__file__).resolve()
 SCENARIOS = ("roll", "variant", "abort", "gate")
+#: A file bump_market writes into each published plugin tree: which release a cache folder's content is.
+RELEASE_MARK = ".sandbox-release"
 #: The typed re-asks after a mail ask name no failure word of their own, so they are banned by phrase.
 BANNED = ("SKIP", "WARN", "FAIL", "CRASH", "ABORT", "fallback", "by typed (the mail", "by typed (its mail")
 
@@ -171,7 +182,7 @@ SPECS = {
     "roll": Spec("roll", {"rs_alpha": "HELIOTROPE", "rs_draft": "MARZIPAN", "rs_nochan": "QUARTZITE"},
                  ("rs_busy", "rs_shell", "rs_paste"),
                  frozenset({"rs_alpha", "rs_draft", "rs_busy", "rs_shell", "rs_paste"}),
-                 fallback=True, engine=("behind", "floor"), engine_wait=120, busy=("rs_busy",)),
+                 fallback=True, engine=("502", "behind", "floor"), engine_wait=150, busy=("rs_busy",)),
     "variant": Spec("variant", {"rs_alpha": "HELIOTROPE", "rs_late": "OBSIDIAN"}, ("rs_shell", "rs_image"),
                     frozenset({"rs_alpha", "rs_late", "rs_shell", "rs_image"}), wait=240,
                     busy=("rs_late",), release_after=("rs_alpha", "rs_image")),
@@ -197,19 +208,20 @@ def _git(repo: Path, *args: str) -> None:
 
 def bump_market(market: Path, version: str) -> None:
     """Publish *version* to the sandbox marketplace: set it in each plugin.json and the manifest,
-    commit, and push to the bare repo the smart-HTTP server serves (``<market>.git``)."""
+    write RELEASE_MARK, commit, and push to the bare repo the smart-HTTP server serves (``srv/market.git``)."""
     for p in MARKET_PLUGINS:
         f = market / p / ".claude-plugin" / "plugin.json"
         d = json.loads(f.read_text(encoding="utf-8"))
         d["version"] = version
         f.write_text(json.dumps(d, indent=2) + "\n", encoding="utf-8")
+        (market / p / RELEASE_MARK).write_text(version + "\n", encoding="utf-8")  # names the tree a cache folder holds
     (market / ".claude-plugin" / "marketplace.json").write_text(json.dumps(
         {"name": MARKET, "owner": {"name": "restart sandbox"},
          "plugins": [{"name": p, "source": f"./{p}", "version": version} for p in MARKET_PLUGINS]}),
         encoding="utf-8")
     _git(market, "add", "--all", ".")
     _git(market, "commit", "-q", "--allow-empty", "-m", f"publish {version}")
-    _git(market, "push", "-q", str(market.with_name(market.name + ".git")), f"HEAD:{MARKET_BRANCH}")
+    _git(market, "push", "-q", str(market.parent / "srv" / "market.git"), f"HEAD:{MARKET_BRANCH}")
 
 
 class _Server:
@@ -238,9 +250,17 @@ def git_http_server(root: Path) -> _Server:
                    "PATH_INFO": urllib.parse.unquote(u.path), "QUERY_STRING": u.query,
                    "CONTENT_TYPE": self.headers.get("Content-Type", ""), "CONTENT_LENGTH": str(len(body)),
                    "REMOTE_ADDR": "127.0.0.1"}
+            if self.headers.get("Content-Encoding"):
+                env["HTTP_CONTENT_ENCODING"] = self.headers["Content-Encoding"]
             if self.headers.get("Git-Protocol"):
                 env["GIT_PROTOCOL"] = self.headers["Git-Protocol"]
-            out = subprocess.run(["git", "http-backend"], input=body, capture_output=True, env=env).stdout
+            proc = subprocess.run(["git", "http-backend"], input=body, capture_output=True, env=env)
+            if proc.returncode != 0:  # never an empty 200 for a backend that crashed
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            out = proc.stdout
             head, sep, rest = out.partition(b"\r\n\r\n")
             if not sep:
                 head, _, rest = out.partition(b"\n\n")
@@ -414,10 +434,10 @@ class Sandbox:
             patch += 1  # a real tag: a script that ignored --repo would install a real release from it
         self.to_version = f"{major}.{minor}.{patch}"
         _git(self.market, "init", "-q", "-b", MARKET_BRANCH)
-        bare = self.market.with_name("market.git")
+        bare = self.home / "srv" / "market.git"  # the only repo the server exports
         subprocess.run(["git", "init", "-q", "--bare", "-b", MARKET_BRANCH, str(bare)], check=True, capture_output=True)
         bump_market(self.market, self.from_version)
-        git_srv = git_http_server(self.home)
+        git_srv = git_http_server(self.home / "srv")
         self.servers.append(git_srv)
         self.claude_cli("plugin", "marketplace", "add", f"{git_srv.url}/market.git")
         for p in MARKET_PLUGINS:
@@ -436,15 +456,17 @@ class Sandbox:
         shutil.copy2(REPO / "src" / "nexus" / "engine_version.py", r / "src" / "nexus" / "engine_version.py")
         stub = r / "scripts" / "reinstall-tool.sh"
         record = f'printf "%s\\n" "$@" > {shlex.quote(str(self.reinstall_argv))}\n'
+        publish = ('v="${1#conexus==}"\n' + record
+                   + f'printf "%s\\n" "$v" > {shlex.quote(str(self.installed_marker))}\n'
+                   f'{shlex.quote(sys.executable)} -I {shlex.quote(str(SANDBOX_PY))} --bump-market '
+                   f'{shlex.quote(str(self.market))} "$v" || exit $?\n')
         if self.spec.install_fails:
-            body = "#!/bin/sh\n# restart sandbox stand-in: record the install, then fail it\n" + record + \
-                   'echo "sandbox: install refused" >&2\nexit 1\n'
+            # Installed and published, then a nonzero exit: nx reports X and the marketplace holds it, so
+            # only the exit code stops the roll, and a script that went on would fill the cache with X.
+            body = ("#!/bin/sh\n# restart sandbox stand-in: install and publish, then fail\n" + publish
+                    + 'echo "sandbox: install failed after it ran" >&2\nexit 1\n')
         else:
-            body = ("#!/bin/sh\n# restart sandbox stand-in: record the install, publish the version to the sandbox marketplace\n"
-                    'v="${1#conexus==}"\n' + record
-                    + f'printf "%s\\n" "$v" > {shlex.quote(str(self.installed_marker))}\n'
-                    f'exec {shlex.quote(sys.executable)} -I {shlex.quote(str(SANDBOX_PY))} --bump-market '
-                    f'{shlex.quote(str(self.market))} "$v"\n')
+            body = "#!/bin/sh\n# restart sandbox stand-in: record the install, publish the version to the sandbox marketplace\n" + publish
         stub.write_text(body, encoding="utf-8")
         stub.chmod(0o755)
         _git(r, "init", "-q")
@@ -547,7 +569,10 @@ class Sandbox:
                 d = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            pid = int(d.get("pid", 0) or 0)
+            try:
+                pid = int(d.get("pid", 0) or 0) if isinstance(d, dict) else 0
+            except (TypeError, ValueError):
+                pid = 0
             if pid <= 1:  # os.kill(0, 0) succeeds on our own process group: no pid is no session
                 continue
             try:
@@ -690,15 +715,14 @@ def body_lines(log: str) -> list[str]:
     return [ln.split(" ", 1)[1] if " " in ln else ln for ln in log.splitlines()]
 
 
-def roll_command(sb: Sandbox, *, extra: str = "", gate: bool = True, rc_file: Path | None = None) -> str:
+def roll_command(sb: Sandbox, *, rc_file: Path | None = None) -> str:
     spec = sb.spec
     assert sb.engine is not None
     cmd = (f"TMUX_PANE={shlex.quote(sb.pane_id(spec.caller))} "
            f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} --nx {sb.to_version} --fresh "
            f"--repo {shlex.quote(str(sb.relrepo))} --endpoint {sb.engine.url} --engine-wait {spec.engine_wait} "
-           + ("" if gate else "--skip-engine-gate ")
            + ("--fallback-resume " if spec.fallback else "")
-           + f"--no-update --handoff-timeout 600 --wait {spec.wait}" + (f" {extra}" if extra else ""))
+           + f"--no-update --handoff-timeout 600 --wait {spec.wait}")
     if rc_file is not None:
         cmd += f"; echo $? > {shlex.quote(str(rc_file))}"
     return cmd
@@ -808,6 +832,12 @@ def check_fresh(sb: Sandbox, before: dict[str, dict], handoffs: dict[str, str], 
             failures.append(f"{name}: the fresh process runs conexus {sorted(roots)} from the cache, not {sb.to_version}")
         else:
             notes.append(f"{name}: the fresh process runs conexus {sb.to_version} from the versioned cache (was {sb.from_version})")
+        # The folder's content is the published release, for both plugins, not an old tree renamed.
+        for p in MARKET_PLUGINS:
+            mark = sb.cache / p / sb.to_version / RELEASE_MARK
+            got = mark.read_text(encoding="utf-8").strip() if mark.is_file() else "absent"
+            if got != sb.to_version:
+                failures.append(f"{name}: the cache folder {p}/{sb.to_version} holds release {got}")
         if name == "rs_draft":
             saw = any(isinstance(c, dict) and c.get("type") == "tool_result" and DRAFT_TEXT in json.dumps(c)
                       for e in sb.events(d["sessionId"])
@@ -970,6 +1000,7 @@ def scenario_roll(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
         "OK rs_alpha: fresh as pid", "OK rs_draft: fresh as pid", "OK rs_nochan: fresh as pid",
         "rs_draft: unsent draft saved to",
         "handoff asked of rs_paste by mail", "handoff written by rs_paste",
+        f"engine gate: read of {sb.engine.url}/version failed (",
         f"engine gate: v{sb.to_version} requires engine {sb.floor}; {sb.engine.url} serves {sb.behind}",
         f"engine gate: v{sb.to_version} requires engine {sb.floor}; {sb.engine.url} serves {sb.floor}",
         f"engine gate skipped (v{sb.to_version} requires engine {sb.floor})",
@@ -977,8 +1008,8 @@ def scenario_roll(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
         "plugins: {" + ", ".join(f"'{p}@{MARKET}': '{sb.to_version}'" for p in MARKET_PLUGINS) + "}",
         "=== done: 3 of 6 restarted (3 fresh, 0 resumed)",
     ]
-    if sb.engine.reads != 2:
-        failures.append(f"engine gate: /version was read {sb.engine.reads} time(s), not twice (behind, then at the floor)")
+    if sb.engine.reads != 3:
+        failures.append(f"engine gate: /version was read {sb.engine.reads} time(s), not three (502, behind, then at the floor)")
     for name in ("rs_alpha", "rs_nochan"):
         if f"{name}: unsent draft saved to" in log:
             failures.append(f"{name}: a draft was saved for a session with nothing typed")
@@ -993,6 +1024,11 @@ def scenario_roll(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
         f"SKIP rs_paste: {placeholder_line()}",
     }
     lines = check_lines(log, expect, held, failures)
+    # The gate waits through a failed and a lagging read, and only then does the roll begin.
+    reads = [i for i, ln in enumerate(lines) if ln.startswith("engine gate: ")]
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("=== restart ")), -1)
+    if len(reads) != 3 or start < 0 or max(reads) > start:
+        failures.append(f"engine gate: its three reads (lines {reads}) do not all come before the roll starts (line {start})")
     busy_now = (sb.session("rs_busy") or {}).get("status")
     if busy_now != "busy":
         failures.append(f"rs_busy: its hold ended before the roll did (status {busy_now}); its checks prove nothing")
@@ -1112,7 +1148,7 @@ def scenario_abort(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -
         f"reinstall-tool conexus=={sb.to_version}: exit 1",
     ]
     aborts = {
-        f"ABORT: nx reports '{crs_nx_version(sb)}', not {sb.to_version}. Nothing restarted.",
+        f"ABORT: reinstall-tool exited 1 (nx reports 'nx, version {sb.to_version}'). Nothing restarted.",
         "=== ABORT: install failed after the handoffs; no session restarted (handoffs kept in /tmp)",
     }
     lines = check_lines(log, expect, aborts, failures)
@@ -1133,12 +1169,6 @@ def scenario_abort(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -
     notes.append(f"abort took {time.time() - t0:.0f}s; handoffs kept: {sorted(handoffs)}")
 
 
-def crs_nx_version(sb: Sandbox) -> str:
-    """What the script's nx_version() reads in the sandbox: the real nx's, since nothing was installed."""
-    r = subprocess.run(["nx", "--version"], capture_output=True, text=True, env=sb.env)
-    return (r.stdout + r.stderr).strip()
-
-
 def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -> None:
     spec = sb.spec
     before = boot(sb, failures)
@@ -1146,9 +1176,11 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
     if failures:
         return
     assert sb.engine is not None
-    runs = (("502", f"engine gate: read of {sb.engine.url}/version failed ("),
-            (sb.behind, f"engine gate: v{sb.to_version} requires engine {sb.floor}; {sb.engine.url} serves {sb.behind}"))
-    for i, (answer, gate_line) in enumerate(runs, 1):
+    runs = (("502", f"engine gate: read of {sb.engine.url}/version failed (",
+             f"ABORT: could not read the cloud engine's version from {sb.engine.url}; nothing installed, nothing restarted."),
+            (sb.behind, f"engine gate: v{sb.to_version} requires engine {sb.floor}; {sb.engine.url} serves {sb.behind}",
+             f"ABORT: the cloud engine is behind v{sb.to_version}'s floor; deploy it first. Nothing installed, nothing restarted."))
+    for i, (answer, gate_line, abort) in enumerate(runs, 1):
         sb.engine.answers, sb.engine.reads = [answer], 0
         rc_file = sb.home / f"gate-rc-{i}"
         n0 = len(sb.read_log().splitlines())
@@ -1163,7 +1195,6 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
         print(f"[sandbox:{spec.name}] gate run {i} ({answer}) log:\n" + "\n".join("    " + ln for ln in log.splitlines()), flush=True)
         if rc != "2":
             failures.append(f"gate run {i} ({answer}): the script exited {rc}, not 2")
-        abort = f"ABORT: the cloud engine is behind v{sb.to_version}'s floor; deploy it first. Nothing installed, nothing restarted."
         lines = body_lines(log)
         if not any(ln.startswith(gate_line) for ln in lines):
             failures.append(f"gate run {i}: log lacks: {gate_line}")
@@ -1186,6 +1217,73 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
 RUNNERS = {"roll": scenario_roll, "variant": scenario_variant, "abort": scenario_abort, "gate": scenario_gate}
 
 
+def _args_of(pid: int) -> str:
+    return subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+
+def _naming(home: Path) -> list[tuple[int, str]]:
+    """Live processes whose argv names the scratch HOME (its mkdtemp path is unique to this run)."""
+    # The mkdtemp path holds only [A-Za-z0-9_/.-]: as a pgrep pattern its "." alone is not literal, harmlessly.
+    out = subprocess.run(["pgrep", "-f", str(home)], capture_output=True, text=True).stdout.split()
+    return [(int(p), _args_of(int(p))) for p in out if p.isdigit() and int(p) not in (os.getpid(), 1)]
+
+
+def _end(procs: list[tuple[int, str]]) -> int:
+    """SIGTERM each process still running the same argv, SIGKILL any still there 5 s later; return
+    how many were signalled."""
+    sent = 0
+    for sig, pause in ((signal.SIGTERM, 5), (signal.SIGKILL, 1)):
+        live = [(p, args) for p, args in procs if args and _args_of(p) == args]  # not a reused pid
+        for p, _ in live:
+            try:
+                os.kill(p, sig)
+                sent += sig == signal.SIGTERM
+            except (ProcessLookupError, PermissionError):
+                pass
+        if live:
+            time.sleep(pause)
+    return sent
+
+
+def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
+    """End the sandbox and prove it ended; return what is still dirty (each one fails the run).
+
+    First our tmux server alone (-L): it holds the token, and its claude processes end with it;
+    then the config copy they were reading. The sessions' tool processes (rs_shell's background
+    sleep, a busy session's hold) and the killed sessions' MCP servers and hooks can outlive their
+    claude and carry its environment, token included: the descendants collected before the kill, and
+    anything whose argv still names the scratch HOME after 60 s, are ended by checked pid. The config
+    is deleted again at the end, for a lease minted by a process that lingered."""
+    leftovers: list[tuple[int, str]] = []
+    try:  # never at the cost of the kill-server and the config deletion below
+        roots = [int(d.get("pid", 0) or 0) for d in sb.entries()]
+        leftovers = [c for r in roots if r > 1 for c in sb.descendants(r) if c[0] > 1]
+    except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
+        notes.append(f"leftover tool processes not collected: {type(exc).__name__}: {exc}")
+    sb.tmux("kill-server")
+    sb.delete_config()
+    time.sleep(3)
+    ended = _end(leftovers)
+    for _ in range(30):
+        if not _naming(sb.home):
+            break
+        time.sleep(2)
+    late = _naming(sb.home)
+    ended_late = _end(late)
+    sb.delete_config()
+    notes.append(f"cleanup: {len(leftovers)} session descendant(s) collected, {ended} still running and signalled; "
+                 f"{ended_late} more still naming the HOME after 60 s")
+    dirty = []
+    if sb.tmux("has-session", "-t", "rs").returncode == 0:
+        dirty.append(f"tmux server {sb.sock} still running")
+    left = [f.name for f in sb.nexus_config.glob("*") if f.name == "config.yml" or f.name.startswith("data_token_lease.")]
+    if left:
+        dirty.append(f"credentials left in {sb.nexus_config}: {left}")
+    if still := _naming(sb.home):
+        dirty.append(f"{len(still)} process(es) still name the HOME: {[p for p, _ in still][:10]}")
+    return dirty
+
+
 def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[str]]:
     spec = SPECS[name]
     home = Path(tempfile.mkdtemp(prefix=f"nx-restart-sandbox-{name}-"))
@@ -1201,34 +1299,21 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
     except Exception as exc:  # noqa: BLE001 -- a harness fault is a failed run with its reason
         failures.append(f"harness: {type(exc).__name__}: {exc}")
     finally:
-        for hold in sb.holds.values():
-            hold.unlink(missing_ok=True)
-        sids = {str(d.get("sessionId", ""))[:8] for d in sb.entries()}
-        sids |= {str(d.get("sessionId", ""))[:8] for d in sb.before.values() if d}
+        # Nothing before the kill-server and the config deletion may raise past them: each step
+        # that reads the sandbox's files is guarded and only reported.
+        sids: set[str] = set()
+        try:
+            for hold in sb.holds.values():
+                hold.unlink(missing_ok=True)
+            sids = {str(d.get("sessionId", ""))[:8] for d in sb.entries()}
+            sids |= {str(d.get("sessionId", ""))[:8] for d in sb.before.values() if d}
+        except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
+            notes.append(f"session ids not collected: {type(exc).__name__}: {exc}")
         if not a.keep:
-            # First: ours alone (-L), it holds the token, and its claude processes end with it;
-            # then the config copy they were reading. The sessions' tool processes (rs_shell's
-            # background sleep, a busy session's hold) can outlive their claude and carry its
-            # environment, token included: collected now, ended by checked pid once the server is gone.
-            leftovers: list[tuple[int, str]] = []
-            try:  # never at the cost of the kill-server and the config deletion below
-                roots = [int(d.get("pid", 0) or 0) for d in sb.entries()]
-                leftovers = [c for r in roots if r > 1 for c in sb.descendants(r) if c[0] > 1]
-            except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
-                notes.append(f"leftover tool processes not collected: {type(exc).__name__}: {exc}")
-            sb.tmux("kill-server")
-            sb.delete_config()
-            time.sleep(3)
-            ended = 0
-            for pid, args in leftovers:
-                now = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
-                if now == args:  # the same process, not a reused pid
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                        ended += 1
-                    except (ProcessLookupError, PermissionError):
-                        pass
-            notes.append(f"cleanup: {len(leftovers)} session descendant(s) collected, {ended} still running and ended")
+            dirty = cleanup(sb, notes)
+            if dirty:
+                failures.extend(f"cleanup: {d}" for d in dirty)
+                ok = False
         sb.close_servers()
         for n in notes:
             print(f"[sandbox:{name}] {n}", flush=True)
@@ -1245,12 +1330,6 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                     f.unlink(missing_ok=True)
                 for f in Path("/tmp").glob(f"nexus-continuation-restart-rs_*-{sid}-*"):
                     f.unlink(missing_ok=True)
-            # The killed sessions' MCP servers and hooks outlive the tmux server for a while and
-            # keep writing logs under the scratch HOME: wait until no process names it (60 s at most).
-            for _ in range(30):
-                if subprocess.run(["pgrep", "-f", str(home)], capture_output=True).returncode != 0:
-                    break
-                time.sleep(2)
             shutil.rmtree(home, ignore_errors=True)
             if home.exists():
                 print(f"[sandbox:{name}] could not remove {home}; it holds no credentials (deleted above)", flush=True)

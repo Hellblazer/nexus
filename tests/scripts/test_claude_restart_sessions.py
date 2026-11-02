@@ -439,7 +439,8 @@ def test_a_handoff_needs_two_headings(crs, monkeypatch, tmp_path, headings: int,
     ("nx, version 7.93.1", True),
     ("nx, version 7.93.10", False),  # the old substring test read 7.93.1 in 7.93.10 as installed
     ("nx, version 17.93.1", False),
-], ids=["exact", "longer-patch", "longer-major"])
+    ("nx, version 7.93.1.", True),  # sentence punctuation after the version
+], ids=["exact", "longer-patch", "longer-major", "trailing-period"])
 def test_converge_needs_nx_at_exactly_the_release(crs, monkeypatch, tmp_path, reported: str, accepted: bool) -> None:
     monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
     monkeypatch.setattr(crs, "release_engine_floor", lambda _v, _r: (0, 1, 0))
@@ -449,3 +450,32 @@ def test_converge_needs_nx_at_exactly_the_release(crs, monkeypatch, tmp_path, re
     monkeypatch.setattr(crs, "plugin_versions", lambda: {p: "7.93.1" for p in crs.nexus_plugins()})
     assert crs.converge("7.93.1", tmp_path, "http://127.0.0.1:1", gate=False, dry=False) is accepted
     assert ("ABORT: nx reports" in (tmp_path / "restart.log").read_text(encoding="utf-8")) is not accepted
+
+
+def test_converge_aborts_on_a_failed_install_even_with_nx_at_the_release(crs, monkeypatch, tmp_path) -> None:
+    """A reinstall that exits nonzero aborts although nx already reports the release."""
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "release_engine_floor", lambda _v, _r: (0, 1, 0))
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", ""))
+    monkeypatch.setattr(crs, "nx_version", lambda: "nx, version 7.93.1")
+    monkeypatch.setattr(crs, "update_plugins", lambda: pytest.fail("plugins updated after a failed install"))
+    assert crs.converge("7.93.1", tmp_path, "http://127.0.0.1:1", gate=False, dry=False) is False
+    assert "ABORT: reinstall-tool exited 1" in (tmp_path / "restart.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("read", "line"), [
+    (OSError("refused"), "ABORT: could not read the cloud engine's version"),
+    ((0, 0, 9), "ABORT: the cloud engine is behind v7.93.1's floor"),
+], ids=["unreadable", "behind"])
+def test_the_engine_gate_names_why_it_refused(crs, monkeypatch, tmp_path, read, line: str) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "release_engine_floor", lambda _v, _r: (0, 1, 0))
+
+    def cloud(_ep: str) -> tuple[int, ...]:
+        if isinstance(read, Exception):
+            raise read
+        return read
+
+    monkeypatch.setattr(crs, "cloud_engine", cloud)
+    assert crs.converge("7.93.1", tmp_path, "http://127.0.0.1:1", gate=True, dry=False, engine_wait=0) is False
+    assert line in (tmp_path / "restart.log").read_text(encoding="utf-8")
