@@ -608,6 +608,35 @@ class TestMailboxSend:
         assert len(rows) == 1
         assert rows[0]["dims"]["address_kind"] == "agent"
 
+    @pytest.mark.parametrize("body", [None, "", "   \n"])
+    def test_a_send_with_no_body_is_refused_and_writes_nothing(
+        self, body, t2_service_env, monkeypatch,
+    ) -> None:
+        # nexus-eva4x: three sends that put the text in `message` (SendMessage's field)
+        # arrived as empty notes; the send must refuse instead of looking successful.
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        dest = "a" + uuid.uuid4().hex[:16]
+        result = mailbox_send(dest, body=body, kind="note")
+        assert "tuple_id" not in result
+        assert "body" in result["error"] and "message" in result["error"]
+        assert tuple_rd(f"mailbox/{dest}", {"to": dest}) == []
+
+    def test_the_text_passed_as_message_through_the_mcp_server_is_refused(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        # The real failure path: the MCP server drops the unknown `message` argument, so the
+        # tool sees body=None. The refusal must reach the caller through the server too.
+        import asyncio
+
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        dest = "a" + uuid.uuid4().hex[:16]
+        out = asyncio.run(mcp_core.mcp.call_tool(
+            "mailbox_send", {"to": dest, "message": "the text, in the wrong field"},
+        ))
+        assert "tuple_id" not in str(out)
+        assert "body" in str(out)
+        assert tuple_rd(f"mailbox/{dest}", {"to": dest}) == []
+
     def test_name_with_one_live_holder_delivers_to_that_session(
         self, t2_service_env, monkeypatch,
     ) -> None:

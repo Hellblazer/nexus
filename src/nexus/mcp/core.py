@@ -8748,7 +8748,7 @@ def mailbox_send(
         ),
     )],
     body: Annotated[str | None, Field(
-        description="Optional message payload; same size limit as tuple_out's body.",
+        description="The message text (required; not `message`); same size limit as tuple_out's body.",
     )] = None,
     kind: Annotated[str | None, Field(
         description="Optional message kind dimension, passed through unchanged to the mailbox tuple.",
@@ -8780,8 +8780,16 @@ def mailbox_send(
     agent id or this server's own session id (any other session id is
     refused; `from` is a claim, JDR-002). With no `from_address`, the sender
     defaults to this MCP server's own current session, and is refused
-    when that cannot be resolved. Either refusal writes nothing.
+    when that cannot be resolved. A missing or blank `body` is refused too.
+    Each refusal writes nothing.
     """
+    if body is None or not body.strip():
+        # nexus-eva4x: the MCP server drops an unknown argument, so text sent as `message`
+        # (SendMessage's field) arrives here as body=None and used to go out as an empty note.
+        return _fail({"error": (
+            "mailbox_send needs a body: put the message text in `body` "
+            "(an argument named `message` is ignored); nothing was sent"
+        )})
     try:
         from_id = (
             check_from_address_is_own(from_address) if from_address
