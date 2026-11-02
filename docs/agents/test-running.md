@@ -28,6 +28,15 @@ nexus-clmlb (labrun RDR-001 lever 3, approved by Sam 2026-10-18). In the week of
 
 labrun measures the change a week after it lands: `kind=hand` full-suite lines in chas and qwent `/var/log/lab-runs.log` whose commit already had a finished develop CI run, and full-suite runs on a sha that already had a green hand full run.
 
+## Native Windows
+
+The `win-release` runner on qwent's Windows side runs CI's Windows set only after a push, so a Windows-only red used to surface a CI run late (2026-11-01: an import probe that passed on macOS and Linux charged nexus's own Windows truststore setup to the dispatch recorder, red on the Windows set for two pushes). Run it before the push instead:
+
+    scripts/win_hand_test.py --session <your-session> -- tests/hooks/test_x.py
+    scripts/win_hand_test.py --session <your-session> --set        # CI's whole Windows set, ~13 min
+
+It works under `C:\build\hand\<session>\nexus` on `qwentescence` (a partial clone made on first use), checks out the commit (default `HEAD` of the checkout you run it from; one that is not on origin is sent as an incremental git bundle over scp), and runs `C:\build\lab\lab-run-win.cmd uv run --python 3.13 --frozen pytest ... -p no:cacheprovider` with `NX_TEST_T2_SUBSTRATE=none`, as the CI job does. `--set` reads the pytest arguments of the workflow's "Windows test set" step, so a hand run matches CI. `lab-run-win` takes the slot the runner's jobs also take (labrun README, "Windows native builds"): a hand run waits for a CI leg, and a CI leg waits for it. One session name per concurrent run: two runs under one name share a checkout.
+
 ## Test substrate, guard and ratchet mechanics
 
 Moved from `tests/AGENTS.md` on 2026-10-24 (docs tidy, agents guidance) so that file keeps the rules a test author obeys; the text below is the mechanism, measurements and procedures behind them, unchanged where kept; parts that a module docstring already carried were dropped in favour of it. The module docstrings (`tests/_xdist_cap.py`, `tests/_engine_substrate.py`, `tests/_tmp_root.py`, `tests/_tenant_pool.py`, `tests/_storage_touch_guard.py`, `tests/_ddl_counter.py`) are the first source for each.
