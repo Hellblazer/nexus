@@ -515,6 +515,7 @@ nexus-25wlq
 nexus-262a7
 nexus-266iu
 nexus-26b7
+nexus-26q20
 nexus-27i0m
 nexus-27i0m.1
 nexus-27u7
@@ -3205,6 +3206,7 @@ nexus-dpe79
 nexus-dpm
 nexus-dpm.1
 nexus-dpthy
+nexus-dqag1
 nexus-dqe86
 nexus-dqp
 nexus-dqp.1
@@ -3231,6 +3233,7 @@ nexus-dqrwi
 nexus-dqwf
 nexus-dqxz9
 nexus-dqxz9.1
+nexus-dr57n
 nexus-ds8e
 nexus-dsagc
 nexus-dsagc.1
@@ -6387,6 +6390,7 @@ nexus-q2t5t
 nexus-q2wif
 nexus-q3l98
 nexus-q3xrx
+nexus-q4m6u
 nexus-q4o43
 nexus-q4o43.1
 nexus-q58ow
