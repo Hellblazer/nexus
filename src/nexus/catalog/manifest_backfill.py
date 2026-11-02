@@ -205,6 +205,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import structlog
+from nexus.catalog.types import manifest_span
 from nexus.errors import collection_not_found_errors
 from nexus.indexer_utils import is_note_shaped
 
@@ -454,10 +455,12 @@ def _fetch_chunks_by_key(
             chunks.append({
                 "chash": cid,
                 "position": int(meta.get("chunk_index", 0) or 0),
-                "line_start": meta.get("line_start"),
-                "line_end": meta.get("line_end"),
-                "char_start": meta.get("chunk_start_char"),
-                "char_end": meta.get("chunk_end_char"),
+                # nexus-qe78r: the chunk row's 0 is the factory default as often as a real
+                # span; manifest_span writes a real 0 as 0 and "not recorded" as null.
+                **manifest_span(
+                    meta.get("line_start"), meta.get("line_end"),
+                    meta.get("chunk_start_char"), meta.get("chunk_end_char"),
+                ),
                 # nexus-tko2w: deliberately NO section_title / section_type / page_number. The
                 # labels on the chunk row are the last writer's (the contamination the manifest
                 # columns exist to end), and a row that carried the keys would be marked
@@ -542,10 +545,10 @@ def _fetch_chunk_by_id(
         # (store_hook.py::single_chunk_manifest_metadata) -- position 0 is
         # the only defensible value, never a guess among several.
         "position": 0,
-        "line_start": meta.get("line_start"),
-        "line_end": meta.get("line_end"),
-        "char_start": meta.get("chunk_start_char"),
-        "char_end": meta.get("chunk_end_char"),
+        **manifest_span(
+            meta.get("line_start"), meta.get("line_end"),
+            meta.get("chunk_start_char"), meta.get("chunk_end_char"),
+        ),
     }
 
 

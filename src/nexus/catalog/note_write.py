@@ -97,6 +97,7 @@ from nexus.catalog.store_hook import (
     _read_manifest_rows_with_retry,
     note_manifest_metadata,
 )
+from nexus.catalog.types import manifest_span
 from nexus.catalog.write_outcome import (
     IN_FLIGHT,
     REFUSED_BY_CLIENT,
@@ -248,10 +249,11 @@ def note_manifest_rows(manifest_metadatas: Sequence[dict], pieces: Sequence[str]
             "chash": m.get("chunk_text_hash", ""),
             "position": int(m.get("chunk_index", i)),
             "chunk_index": m.get("chunk_index"),
-            "line_start": m.get("line_start") or None,
-            "line_end": m.get("line_end") or None,
-            "char_start": m.get("chunk_start_char") or None,
-            "char_end": m.get("chunk_end_char") or None,
+            # nexus-qe78r: a note's span starts at 0, and that 0 is real (see manifest_span).
+            **manifest_span(
+                m.get("line_start"), m.get("line_end"),
+                m.get("chunk_start_char"), m.get("chunk_end_char"),
+            ),
             "section_title": labels[i] if i < len(labels) else "",
             "section_type": "",
             "page_number": None,

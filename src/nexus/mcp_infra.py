@@ -3312,15 +3312,19 @@ def manifest_write_batch_hook(
 
 
 def _manifest_chunk_rows(indexed_metas) -> list[dict]:
+    from nexus.catalog.types import manifest_span  # noqa: PLC0415 — deferred to avoid circular import (catalog)
+
     return [
         {
             "chash": m.get("chunk_text_hash", ""),
             "position": int(m.get("chunk_index", i)),
             "chunk_index": m.get("chunk_index"),
-            "line_start": m.get("line_start") or None,
-            "line_end": m.get("line_end") or None,
-            "char_start": m.get("chunk_start_char") or None,
-            "char_end": m.get("chunk_end_char") or None,
+            # nexus-qe78r: a real 0 (the first chunk's char start) travels as 0; only a span the
+            # producer did not record (the factory's 0 default) goes as null. See manifest_span.
+            **manifest_span(
+                m.get("line_start"), m.get("line_end"),
+                m.get("chunk_start_char"), m.get("chunk_end_char"),
+            ),
             # nexus-tko2w (RDR-108): position-derived labels belong to the (doc, position)
             # manifest row, not to the shared T3 chunk row. The three keys are ALWAYS sent:
             # their presence is what marks the row's labels as this document's own answer
