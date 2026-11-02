@@ -14,6 +14,8 @@ Subcommands:
   release    -- end a live claim without counting an attempt (RDR-211):
                 a hand-back that is not a failure.
   templates  -- the boot-loaded template registry (digest, sources, templates).
+  dictionary -- what each template is for: its doc block and the census of its
+                concrete subspaces (RDR-239).
   list       -- concrete subspaces that exist.
   stats      -- the census for one subspace.
   directory  -- who holds a name in the RDR-208 session directory (bead
@@ -69,7 +71,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / list / stats / directory."""
+    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / dictionary / list / stats / directory."""
 
 
 @tuple_group.command(name="out")
@@ -665,6 +667,150 @@ def tuple_templates_cmd(json_out: bool) -> None:
     click.echo(f"sources: {', '.join(reg.get('sources', []))}")
     for t in reg.get("templates", []):
         click.echo(f"  {t.get('name')}")
+
+
+#: The doc block's fields in the order the dictionary shows them (RDR-239); any
+#: other key a future engine adds follows, in the order served.
+_DOC_ORDER = ("summary", "writers", "readers", "fields", "body", "example", "see_also")
+
+#: The census columns the dictionary shows per concrete subspace (RDR-239 S5 Q1).
+_DICTIONARY_CENSUS_COLUMNS = ("available", "claimed", "consumed", "dead", "newest_created_at")
+
+_NO_DICTIONARY = "engine predates the dictionary"
+
+
+def _emit_doc_value(key: str, value: Any, indent: int) -> None:
+    pad = "  " * indent
+    if isinstance(value, dict):
+        click.echo(f"{pad}{key}:")
+        for k, v in value.items():
+            _emit_doc_value(str(k), v, indent + 1)
+    elif isinstance(value, list):
+        click.echo(f"{pad}{key}:")
+        for item in value:
+            click.echo(f"{pad}  - {item if isinstance(item, str) else json.dumps(item)}")
+    else:
+        click.echo(f"{pad}{key}: {value}")
+
+
+def _emit_doc(doc: dict[str, Any]) -> None:
+    for key in (*_DOC_ORDER, *(k for k in doc if k not in _DOC_ORDER)):
+        if key in doc:
+            _emit_doc_value(key, doc[key], 0)
+
+
+def _dictionary_census_dict(c: Any) -> dict[str, Any]:
+    return {
+        "subspace": c.subspace, "available": c.available, "claimed": c.claimed,
+        "consumed": c.consumed, "dead": c.dead, "newest_created_at": c.newest_created_at,
+    }
+
+
+def _template_census_prefix(template_name: str) -> str:
+    """The subspace-name prefix every concrete subspace of *template_name* starts
+    with: the text before its first ``<param>`` segment (the whole name for a
+    literal template)."""
+    head, sep, _ = template_name.partition("<")
+    return head if sep else template_name
+
+
+def _resolve_dictionary_name(store: Any, templates: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    """RDR-239 S5 NAME resolution (bead nexus-mdbds.2.23): (1) NAME is a registry
+    template name; (2) the census row for exactly NAME carries the engine's
+    ``template``; (3) the shared client resolver
+    (:func:`nexus.tuple_templates.resolve_tuple_template`) over the registry."""
+    from nexus.tuple_templates import resolve_tuple_template  # noqa: PLC0415 — deferred: CLI startup cost
+
+    by_name = {t.get("name"): t for t in templates}
+    if name in by_name:
+        return by_name[name]
+    for row in store.subspace_list(name):
+        if row.subspace == name and row.template_known and row.template in by_name:
+            return by_name[row.template]
+    return resolve_tuple_template(templates, name)
+
+
+@tuple_group.command(name="dictionary")
+@click.argument("name", required=False)
+@click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON.")
+def tuple_dictionary_cmd(name: str | None, json_out: bool) -> None:
+    """The tuple-space dictionary (RDR-239): what each template is for.
+
+    With no NAME, every template with its one-line summary. With NAME (a
+    template such as 'board/ci/<topic>', or a concrete subspace such as
+    'board/ci/example-branch', which resolves to its template), the
+    template's doc (summary, writers, readers, fields, body, example,
+    see_also) and a census row per concrete subspace under it (available,
+    claimed, consumed, dead, newest_created_at).
+
+    --json emits {template, doc, census: [...]} for a NAME, with doc null when
+    the engine serves none; with no NAME, a list of {template, doc}. An engine
+    that predates the dictionary prints 'engine predates the dictionary' in
+    place of the doc and exits 0.
+    """
+    store = _store()
+    try:
+        templates: list[dict[str, Any]] = store.registry(doc=True).get("templates", [])
+        if name is None:
+            if json_out:
+                click.echo(json.dumps([{"template": t.get("name"), "doc": t.get("doc")} for t in templates]))
+                return
+            for t in templates:
+                summary = (t.get("doc") or {}).get("summary")
+                click.echo(f"{t.get('name')}: {summary}" if summary else str(t.get("name")))
+            if not any(t.get("doc") for t in templates):
+                click.echo(_NO_DICTIONARY)
+            return
+        template = _resolve_dictionary_name(store, templates, name)
+        if template is None:
+            click.echo(f"Error: no template matches {name!r}; run 'nx tuple dictionary' to list them", err=True)
+            raise SystemExit(1)
+        template_name = str(template.get("name"))
+        census = [
+            row for row in store.subspace_list(_template_census_prefix(template_name))
+            if _census_template_name(row, templates) == template_name
+        ]
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
+        _print_tuple_error(e)
+        raise SystemExit(1) from e
+    finally:
+        store.close()
+    doc = template.get("doc")
+    if json_out:
+        click.echo(json.dumps({
+            "template": template_name,
+            "doc": doc,
+            "census": [_dictionary_census_dict(c) for c in census],
+        }))
+        return
+    click.echo(template_name)
+    if doc:
+        _emit_doc(doc)
+    else:
+        click.echo(_NO_DICTIONARY)
+    click.echo("")
+    if not census:
+        click.echo("census: no concrete subspaces")
+        return
+    click.echo("census:")
+    width = max(len(c.subspace) for c in census)
+    click.echo(f"  {'subspace'.ljust(width)}  " + "  ".join(_DICTIONARY_CENSUS_COLUMNS))
+    for c in census:
+        cells = [str(getattr(c, col)) for col in _DICTIONARY_CENSUS_COLUMNS]
+        click.echo(f"  {c.subspace.ljust(width)}  " + "  ".join(cells))
+
+
+def _census_template_name(row: Any, templates: list[dict[str, Any]]) -> str | None:
+    """The template a census row belongs to: the engine's own ``template`` field,
+    or, for a row from an engine that predates it, the shared resolver."""
+    if row.template_known:
+        return row.template
+    from nexus.tuple_templates import resolve_tuple_template  # noqa: PLC0415 — deferred: CLI startup cost
+
+    resolved = resolve_tuple_template(templates, row.subspace)
+    return None if resolved is None else resolved.get("name")
 
 
 @tuple_group.command(name="list")

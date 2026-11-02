@@ -5222,6 +5222,24 @@ The boot-loaded template registry: digest, source directories, and the registere
 |------|-------------|
 | `--json` | Output as JSON |
 
+### nx tuple dictionary
+
+```
+nx tuple dictionary [NAME] [--json]
+```
+
+The tuple-space dictionary (RDR-239): what each template is for. With no `NAME`, one line per template, its name and the one-line `summary` of its doc block. With `NAME`, the template's doc (`summary`, `writers`, `readers`, `fields`, `body`, `example`, `see_also`; only the parts it declares) and a census table with a row per concrete subspace under that template: `available`, `claimed`, `consumed`, `dead` and `newest_created_at`. The census reads `nx tuple list`, so a take-enabled template such as `queue/<name>` shows its acked rows under `consumed`.
+
+`NAME` is a template name (`board/ci/<topic>`) or a concrete subspace (`board/ci/example-branch`), which resolves to its template. Resolution order: a registry template of exactly that name; else the template the engine names on the census row of exactly that subspace; else the client's literal-before-pattern match against the registry (a `<param>` segment matches one segment). A name nothing resolves is an error (exit 1).
+
+The doc is requested with `?doc=1` and is served only then. An engine that predates the dictionary serves no doc: the doc part prints `engine predates the dictionary`, the census still shows, and the exit status is 0. With no `NAME` the line is printed once after the list when no template carries a doc.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | With `NAME`: `{"template": "<name>", "doc": {...} or null, "census": [{"subspace", "available", "claimed", "consumed", "dead", "newest_created_at"}, ...]}`; `doc` is `null` when the engine serves none. With no `NAME`: `[{"template": "<name>", "doc": {...} or null}, ...]` |
+
+The `tuple_registry` MCP tool takes the same switch as `doc` (default false) and returns each template's doc block as the engine serves it.
+
 ### nx tuple list
 
 ```

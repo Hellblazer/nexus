@@ -40,8 +40,12 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5024
+provisioned_tests = 5033
 tolerance_tests = 0
+# 5024 -> 5033 (nexus-mdbds.2.17, 2026-11-02): +9. tests/test_tuple_cmd.py's TestTupleDictionary adds 8 (the verb reads the real
+# registry and census, and posts, claims and acks real rows) and tests/test_mcp_tuple_tools.py adds 1 (tuple_registry's doc
+# passthrough against the real engine). tests/test_tuple_templates.py (the resolver and the census parse) is pure and
+# provisions nothing. Measured locally (the guard in fail mode): the 14 new tests ran, provisioned 9.
 # 5020 -> 5024 (nexus-mtheb.9 fix round 1, 2026-11-01): +4, tests/mcp/test_t1_handoff_flush.py 20 -> 24 (module marked
 # t2_tenant): a newer session's row replaces an older T2 entry (real T1 ts and T2 timestamp), two rows to one destination
 # keep the newest, a raise in the new scope's bookkeeping after the swap still leaves the flagged row in T2, and the flush

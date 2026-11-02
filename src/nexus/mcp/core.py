@@ -8580,17 +8580,20 @@ def tuple_release(
     # can't silently reintroduce a wrap with no test noticing.
     structured_output=False,
 )
-def tuple_registry() -> dict:
+def tuple_registry(
+    doc: Annotated[bool, Field(description="Also return each template's doc block (summary, writers, readers, fields, body, example).")] = False,
+) -> dict:
     """The boot-loaded tuple-space template set (RDR-205).
 
     Use `tuple_list` instead to see which concrete subspaces currently
     hold rows. Returns `{digest, sources, templates: [...]}`; `digest`
     changes whenever a template file changes, `sources` names the
-    directories loaded.
+    directories loaded. With `doc` true each template that has one
+    carries its `doc` block, as the engine serves it.
     """
     try:
         with _t2_ctx() as db:
-            return db.tuples.registry()
+            return db.tuples.registry(doc=doc)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _fail({"error": _mcp_tool_error("tuple_registry", e).removeprefix("Error: ")})
 

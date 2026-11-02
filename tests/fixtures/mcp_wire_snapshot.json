@@ -1539,7 +1539,12 @@
       "is_async": true,
       "module": "nexus.mcp.core",
       "parameters": {
-        "properties": {},
+        "properties": {
+          "doc": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
         "type": "object"
       },
       "qualname": "tuple_registry"

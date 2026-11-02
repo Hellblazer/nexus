@@ -9,6 +9,7 @@ template shapes.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -848,3 +849,171 @@ class TestMailboxDrainDoesNotStarveBehindALargeDeadBacklog:
         assert live_id not in remaining, (
             "the live row was never claimed, so it is still sitting in the mailbox"
         )
+
+
+class TestTupleDictionary:
+    """``nx tuple dictionary [NAME] [--json]`` (RDR-239 Phase 3, bead
+    nexus-mdbds.2.17): each template's ``doc`` block next to the live census of
+    the concrete subspaces under it. Real engine; the seven bundled templates
+    carry a doc block (nexus-mdbds.2.12)."""
+
+    @staticmethod
+    def _post_board_ci(topic: str) -> str:
+        sub = f"board/ci/{topic}"
+        res = _invoke(["out", sub, "--key", f"topic={topic}", "--dim", "from=github",
+                       "--body", "x", "--nonce", _uniq("n")])
+        assert res.exit_code == 0, res.output
+        return sub
+
+    @staticmethod
+    def _docless(monkeypatch) -> None:
+        """A narrow fake: only ``registry()`` is replaced, to return the
+        templates with their ``doc`` removed, which is what an engine that
+        predates the dictionary serves; the census still comes from the real
+        engine. A dedicated engine on a doc-less NX_TUPLE_TEMPLATE_DIR would
+        cost a second PG cluster and JVM for what is pure client rendering
+        (the engine's own absent-doc contract is pinned in the Java tests)."""
+        real = HttpTupleStore.registry
+
+        def docless(self, doc: bool = False):
+            reg = real(self, doc=doc)
+            for t in reg["templates"]:
+                t.pop("doc", None)
+            return reg
+
+        monkeypatch.setattr(HttpTupleStore, "registry", docless)
+
+    def test_no_name_lists_every_template_with_its_summary(self, t2_service_env) -> None:
+        res = _invoke(["dictionary"])
+        assert res.exit_code == 0, res.output
+        store = HttpTupleStore()
+        try:
+            reg = store.registry(doc=True)
+        finally:
+            store.close()
+        assert reg["templates"], "the engine loaded no templates"
+        for t in reg["templates"]:
+            assert t["name"] in res.output
+            assert t["doc"]["summary"] in res.output
+
+    def test_a_template_name_shows_the_doc_and_a_census_row_per_subspace(self, t2_service_env) -> None:
+        topic = _uniq("example-branch")
+        sub = self._post_board_ci(topic)
+        res = _invoke(["dictionary", "board/ci/<topic>"])
+        assert res.exit_code == 0, res.output
+        store = HttpTupleStore()
+        try:
+            doc = next(t for t in store.registry(doc=True)["templates"]
+                       if t["name"] == "board/ci/<topic>")["doc"]
+        finally:
+            store.close()
+        for part in ("summary", "writers", "readers", "fields", "body", "example", "see_also"):
+            assert part in res.output, (part, res.output)
+        assert doc["summary"] in res.output
+        assert sub in res.output
+        # board/<topic> is a different template: its rows are not listed here
+        other = _uniq("plain")
+        _invoke(["out", f"board/{other}", "--key", f"topic={other}", "--dim", "from=s",
+                 "--nonce", _uniq("n")])
+        assert f"board/{other}" not in _invoke(["dictionary", "board/ci/<topic>"]).output
+
+    def test_a_concrete_subspace_resolves_to_its_template(self, t2_service_env) -> None:
+        topic = _uniq("example-branch")
+        sub = self._post_board_ci(topic)
+        res = _invoke(["dictionary", sub, "--json"])
+        assert res.exit_code == 0, res.output
+        payload = _last_json_line(res.output)
+        assert payload["template"] == "board/ci/<topic>"
+        assert sub in [c["subspace"] for c in payload["census"]]
+        # a name no template matches is an error, not an empty answer
+        bad = _invoke(["dictionary", "no-such-template/x"])
+        assert bad.exit_code == 1 and "no-such-template/x" in bad.output
+
+    def test_a_take_enabled_template_shows_consumed_rows_after_post_claim_ack(self, t2_service_env) -> None:
+        name = _uniq("work")
+        sub = f"queue/{name}"
+        assert _invoke(["out", sub, "--key", f"queue={name}", "--dim", "from=p",
+                        "--body", "task", "--nonce", _uniq("n")]).exit_code == 0
+        claimant = _uniq("c")
+        inr = _invoke(["in", sub, "--pattern", f"queue={name}", "--claimant", claimant,
+                       "--lease-s", "30", "--json"])
+        assert inr.exit_code == 0, inr.output
+        claim_id = _last_json_line(inr.output)["claim_id"]
+        assert _invoke(["ack", claim_id, "--claimant", claimant]).exit_code == 0
+
+        payload = _last_json_line(_invoke(["dictionary", "queue/<name>", "--json"]).output)
+        row = next(c for c in payload["census"] if c["subspace"] == sub)
+        assert row["consumed"] == 1
+        assert row["available"] == 0 and row["claimed"] == 0 and row["dead"] == 0
+        assert row["newest_created_at"]
+        text = _invoke(["dictionary", "queue/<name>"]).output
+        for col in ("available", "claimed", "consumed", "dead", "newest_created_at"):
+            assert col in text
+
+    def test_an_engine_without_the_dictionary_says_so_and_still_shows_the_census(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        topic = _uniq("example-branch")
+        sub = self._post_board_ci(topic)
+        self._docless(monkeypatch)
+        res = _invoke(["dictionary", "board/ci/<topic>"])
+        assert res.exit_code == 0, res.output
+        assert "engine predates the dictionary" in res.output
+        assert sub in res.output
+        listing = _invoke(["dictionary"])
+        assert listing.exit_code == 0, listing.output
+        assert "board/ci/<topic>" in listing.output
+
+    def test_json_has_exactly_template_doc_census_and_null_doc_when_absent(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        topic = _uniq("example-branch")
+        sub = self._post_board_ci(topic)
+        payload = _last_json_line(_invoke(["dictionary", "board/ci/<topic>", "--json"]).output)
+        assert set(payload) == {"template", "doc", "census"}
+        assert payload["template"] == "board/ci/<topic>"
+        assert payload["doc"]["summary"]
+        assert any(c["subspace"] == sub for c in payload["census"])
+
+        self._docless(monkeypatch)
+        absent = _last_json_line(_invoke(["dictionary", "board/ci/<topic>", "--json"]).output)
+        assert set(absent) == {"template", "doc", "census"}
+        assert absent["doc"] is None
+        assert any(c["subspace"] == sub for c in absent["census"])
+
+    def test_the_engines_template_for_the_exact_subspace_wins_over_the_client_resolver(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        """RDR-239 S5 rule 2 (bead nexus-mdbds.2.23): a census row for exactly
+        NAME that names a registry template decides, before the client
+        resolver is asked. Fake only the row's field: the resolver alone would
+        say 'board/ci/<topic>' for this subspace."""
+        topic = _uniq("example-branch")
+        sub = self._post_board_ci(topic)
+        real = HttpTupleStore.subspace_list
+
+        def engine_says_board(self, prefix=None, **kw):
+            rows = real(self, prefix, **kw)
+            return [dataclasses.replace(r, template="board/<topic>") if r.subspace == sub else r for r in rows]
+
+        monkeypatch.setattr(HttpTupleStore, "subspace_list", engine_says_board)
+        payload = _last_json_line(_invoke(["dictionary", sub, "--json"]).output)
+        assert payload["template"] == "board/<topic>"
+
+    def test_census_rows_with_no_template_field_are_grouped_by_the_shared_resolver(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        """An old engine's census rows carry no ``template`` key. Blank the
+        field on the parsed rows (what the client's parse yields for the key's
+        absence) and the verb must still group by the shared resolver."""
+        topic = _uniq("example-branch")
+        sub = self._post_board_ci(topic)
+        real = HttpTupleStore.subspace_list
+
+        def old_engine(self, *a, **kw):
+            rows = real(self, *a, **kw)
+            return [dataclasses.replace(r, template=None, template_known=False) for r in rows]
+
+        monkeypatch.setattr(HttpTupleStore, "subspace_list", old_engine)
+        payload = _last_json_line(_invoke(["dictionary", "board/ci/<topic>", "--json"]).output)
+        assert sub in [c["subspace"] for c in payload["census"]]

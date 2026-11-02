@@ -22,6 +22,7 @@ from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
 from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
+from nexus.tuple_templates import resolve_tuple_template
 from nexus.util.nx_argv import which_off_cwd
 
 if TYPE_CHECKING:
@@ -8092,37 +8093,18 @@ def _fmt_age(seconds: float) -> str:
 def _resolve_tuple_template(templates: list[dict], subspace: str) -> dict | None:
     """Resolve *subspace* against the ``registry()`` wire's ``templates``
     list and return the matching template dict, or ``None`` when nothing
-    resolves. Mirrors ``TemplateRegistry.resolve()``'s literal-before-
-    pattern rule (``service/src/main/java/dev/nexus/service/tuples/
-    TemplateRegistry.java``): a literal template name is checked before
-    any parameterised one, and a ``<param>`` segment matches anything in
-    the corresponding position.
+    resolves. The matching itself is :func:`nexus.tuple_templates.
+    resolve_tuple_template` (RDR-239 Phase 3, bead nexus-mdbds.2.17), the
+    one client-side resolver shared with ``nexus.mcp.subscriptions`` and
+    ``nx tuple dictionary``; it mirrors ``TemplateRegistry.resolve()``'s
+    literal-before-pattern rule.
 
-    Factored out of :func:`_template_take_enabled` (RDR-211 Phase 1 Step 3,
-    bead nexus-rplay.12) so the queue-depth doctor row can ask "which
-    template does this subspace belong to", not just "is it claimable" --
-    the same matching logic answers both questions.
+    Kept as a named wrapper (RDR-211 Phase 1 Step 3, bead nexus-rplay.12) so
+    the queue-depth doctor row can ask "which template does this subspace
+    belong to", not just "is it claimable" -- the same matching logic
+    answers both questions.
     """
-    segments = subspace.split("/")
-
-    def _matches(name: str) -> bool:
-        t_segments = name.split("/")
-        if len(t_segments) != len(segments):
-            return False
-        return all(
-            (ts.startswith("<") and ts.endswith(">")) or ts == ss
-            for ts, ss in zip(t_segments, segments)
-        )
-
-    literal = [t for t in templates if "<" not in t.get("name", "")]
-    patterned = [t for t in templates if "<" in t.get("name", "")]
-    for t in literal:
-        if t.get("name", "") == subspace:
-            return t
-    for t in patterned:
-        if _matches(t.get("name", "")):
-            return t
-    return None
+    return resolve_tuple_template(templates, subspace)
 
 
 def _template_take_enabled(templates: list[dict], subspace: str) -> bool:

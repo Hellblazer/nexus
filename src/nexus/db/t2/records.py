@@ -316,6 +316,13 @@ class SubspaceCensus:
     #: ``None`` means "no claimable row"), ``False`` when it did not (so a
     #: ``None`` means "this engine cannot say"). Unknown is the safe default.
     claimable_known: bool = False
+    #: Bead nexus-mdbds.2.13 (RDR-239): the name of the template the engine
+    #: resolved for this subspace (``"board/ci/<topic>"``), ``None`` when none
+    #: resolves (a row can outlive its template) and also from an engine that
+    #: predates the field -- ``template_known`` tells the two apart, so the
+    #: client groups a row of an old engine with the shared resolver.
+    template: str | None = None
+    template_known: bool = False
 
 
 @dataclass(frozen=True)

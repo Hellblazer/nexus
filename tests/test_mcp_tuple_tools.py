@@ -501,6 +501,27 @@ class TestTupleRegistryListStats:
         assert "ledger/<session_id>" not in names, "retired by nexus-onjvw"
         assert "directory/<name>" in names
 
+    def test_registry_serves_doc_only_on_request_and_returns_it_as_served(self, t2_service_env) -> None:
+        """RDR-239 S4 Q1 = B: ``doc`` rides the registry only on ``?doc=1``; the
+        tool passes the flag through and returns the engine's payload as is."""
+        plain = tuple_registry()
+        assert "error" not in plain
+        assert all("doc" not in t for t in plain["templates"])
+
+        with_doc = tuple_registry(doc=True)
+        assert "error" not in with_doc
+        store = HttpTupleStore()
+        try:
+            served = store.registry(doc=True)
+        finally:
+            store.close()
+        assert with_doc == served
+        docs = [t for t in with_doc["templates"] if "doc" in t]
+        assert docs, "the bundled templates carry a doc block"
+        assert all(isinstance(t["doc"]["summary"], str) for t in docs)
+        # the digest covers doc, and is the same with or without it
+        assert with_doc["digest"] == plain["digest"]
+
     def test_list_and_stats_reflect_a_written_tuple(self, t2_service_env) -> None:
         addr = _uniq("addr")
         tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "sender-d"}, "x", nonce=_uniq("nonce"))
