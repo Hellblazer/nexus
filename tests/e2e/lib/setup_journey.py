@@ -411,6 +411,10 @@ class Sandbox:
         if not nx.exists():
             return
         try:
+            # The aspect worker an nx call spawned outlives the service by design
+            # (nexus-wl9pk): stop it by its lease first. An older nx has no such
+            # verb; its failure is not the journey's.
+            self.run([str(nx), "daemon", "aspect-worker", "stop"], timeout=120)
             done = self.run([str(nx), "daemon", "service", "stop", "--with-pg"], timeout=120)
             say(f"   {self.name}: service stop exit {done.returncode}")
         except (OSError, subprocess.SubprocessError) as exc:

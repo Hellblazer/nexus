@@ -1947,10 +1947,21 @@ def aspect_worker_group() -> None:
     help="Reclaim staleness threshold; MUST exceed the claude -p extraction budget (180s) "
     "or an in-flight row could be false-reclaimed.",
 )
+@click.option(
+    "--engine-unreachable-exit-seconds",
+    "engine_unreachable_exit_seconds",
+    type=float,
+    default=3600.0,
+    show_default=True,
+    help="Exit when every reclaim sweep has failed for this long (the engine is gone for "
+    "good); the next enqueue spawns a new worker. 0 disables the bound. The worker also "
+    "exits as soon as its config directory is removed.",
+)
 def aspect_worker_start_cmd(
     config_dir_str: str | None,
     tenant: str,
     stale_timeout_seconds: int,
+    engine_unreachable_exit_seconds: float,
 ) -> None:
     """Start the aspect-worker daemon (foreground; runs until SIGTERM/SIGINT).
 
@@ -1972,7 +1983,39 @@ def aspect_worker_start_cmd(
         config_dir=config_dir,
         tenant=tenant,
         stale_timeout_seconds=stale_timeout_seconds,
+        engine_unreachable_exit_seconds=engine_unreachable_exit_seconds,
     )
+
+
+@aspect_worker_group.command("stop")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory whose worker to stop (default: ~/.config/nexus/).",
+)
+def aspect_worker_stop_cmd(config_dir_str: str | None) -> None:
+    """Stop the aspect-worker daemon(s) leased in a config directory.
+
+    Found from the tier's own lease records, never by matching process names,
+    so a worker serving another config directory is untouched. Idempotent:
+    nothing to stop exits 0. ``nx daemon service stop`` leaves the worker running
+    by design (it belongs to the store path); a throwaway service's owner calls
+    this before it stops the service so the worker does not outlive the scratch
+    directory. Exits 1 when a worker survives the stop.
+    """
+    from nexus.daemon.aspect_worker_daemon import stop_aspect_workers  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
+    result = stop_aspect_workers(config_dir)
+    if result.stopped:
+        click.echo(f"Aspect-worker stopped (pid {', '.join(str(p) for p in result.stopped)}).")
+    else:
+        click.echo("No aspect-worker running.")
+    if result.survivors or result.unreadable:
+        pids = ", ".join(str(p) for p in (*result.survivors, *result.unreadable))
+        click.echo(f"Aspect-worker pid {pids} was not stopped.", err=True)
+        raise SystemExit(1)
 
 
 @daemon_group.command("restart-stale")

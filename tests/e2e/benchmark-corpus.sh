@@ -184,6 +184,10 @@ _load_sandbox() {
 
 _stop_service() {
     [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ] || return 0
+    # The aspect worker an nx call spawned outlives the service by design
+    # (nexus-wl9pk): stop it by its lease in the sandbox config dir first. An
+    # older installed nx has no such verb; the failure is ignored.
+    _nx daemon aspect-worker stop >"$WORK/stop-aspect-worker.log" 2>&1 || true
     _nx daemon service stop --with-pg >"$WORK/stop.log" 2>&1 || true
 }
 

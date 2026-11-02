@@ -512,6 +512,25 @@ class ServiceRegistry:
     def _election_path(self, scope_key: str) -> Path:
         return self._dir / f"{self._tier}_elect.{scope_key}.lock"
 
+    def dir_exists(self) -> bool:
+        """Whether the lease directory is still there (nexus-wl9pk).
+
+        ``_ensure_dir`` re-creates the directory on every publish, heartbeat and
+        election, which is right for a healthy owner and wrong for an orphan: a
+        daemon whose config directory was deleted under it (a gate's scratch
+        dir) would otherwise bring the directory back on its next tick and
+        carry on. Only a definite "not there" answers False; any other stat
+        error (permissions, I/O) reads as present, so a transient failure never
+        stands a live owner down.
+        """
+        try:
+            os.stat(self._dir)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError:
+            return True
+        return True
+
     def _ensure_dir(self) -> None:
         try:
             make_user_dir(self._dir, platform="win32" if self._windows else None)
@@ -1083,6 +1102,7 @@ class ServiceSupervisor:
         endpoint_provider: Callable[[], dict[str, Any]],
         payload: Optional[dict[str, Any]] = None,
         owner_token: Optional[str] = None,
+        stand_down_when_dir_gone: bool = False,
     ) -> None:
         self._registry = registry
         self._scope_key = scope_key
@@ -1092,6 +1112,12 @@ class ServiceSupervisor:
         self._owner_token = owner_token or mint_owner_token()
         self._record: Optional[LeaseRecord] = None
         self.fenced: bool = False
+        #: nexus-wl9pk: opt-in. When True, a tick that finds the lease directory
+        #: gone sets ``orphaned`` and writes nothing (a heartbeat would
+        #: re-create the directory and the lease). The tier's run loop owns the
+        #: exit, exactly as it does for ``fenced``.
+        self._stand_down_when_dir_gone = stand_down_when_dir_gone
+        self.orphaned: bool = False
 
     @property
     def owner_token(self) -> str:
@@ -1114,8 +1140,20 @@ class ServiceSupervisor:
 
     def heartbeat_tick(self) -> None:
         """Re-stamp the lease once. If we have been fenced by a newer
-        owner, set ``fenced`` and stop trying (the loser-quiet-exit)."""
-        if self._record is None or self.fenced:
+        owner, set ``fenced`` and stop trying (the loser-quiet-exit). A
+        supervisor built with ``stand_down_when_dir_gone`` whose lease
+        directory has been removed sets ``orphaned`` instead and stamps
+        nothing (nexus-wl9pk)."""
+        if self._record is None or self.fenced or self.orphaned:
+            return
+        if self._stand_down_when_dir_gone and not self._registry.dir_exists():
+            self.orphaned = True
+            _log.warning(
+                "service_supervisor_orphaned",
+                scope=self._scope_key,
+                owner_token=self._owner_token,
+                hint="the lease directory is gone; standing down instead of re-creating it",
+            )
             return
         try:
             self._record = self._registry.heartbeat(self._record)

@@ -4393,7 +4393,7 @@ binary and the PG bundle (RDR-161).
 ### nx daemon aspect-worker start
 
 ```
-nx daemon aspect-worker start [--config-dir DIR] [--tenant TENANT] [--stale-timeout-seconds N]
+nx daemon aspect-worker start [--config-dir DIR] [--tenant TENANT] [--stale-timeout-seconds N] [--engine-unreachable-exit-seconds N]
 ```
 
 Start the aspect-worker daemon in the foreground (runs until SIGTERM/SIGINT):
@@ -4408,6 +4408,11 @@ predecessor (one owner survives).
 | `--config-dir` | Config directory override (default: `~/.config/nexus/`) |
 | `--tenant` | Tenant scope for the lease (default `default`). Per-tenant only — per-host would need `BYPASSRLS`, forbidden by RDR-152 |
 | `--stale-timeout-seconds` | Reclaim staleness threshold (default `300`). MUST exceed the `claude -p` extraction budget (180s) or an in-flight row could be false-reclaimed |
+| `--engine-unreachable-exit-seconds` | Exit when every reclaim sweep has failed for this long (default `3600`; `0` turns it off). The worker outlives `nx daemon service stop` by design, so the bound is far longer than a restart; the next enqueue spawns a new worker if the engine returns |
+
+The worker also exits within a few seconds of its config directory being
+removed, and does not re-create it: a gate's scratch directory deleted under a
+worker no longer leaves an orphan polling a dead engine.
 
 **Credential model (RDR-173):** this command MUST be spawned as a CHILD of a
 process that already has `claude -p` credentials, so it inherits the
@@ -4416,6 +4421,21 @@ context — a credential-bare invocation fails extraction. In normal
 operation you never run this manually: the `store_put` enqueue hook
 spawns it automatically (spawn-if-absent, single-flight) from the storing
 process precisely so that inheritance happens.
+
+### nx daemon aspect-worker stop
+
+```
+nx daemon aspect-worker stop [--config-dir DIR]
+```
+
+Stop the aspect-worker daemon leased in a config directory (default
+`~/.config/nexus/`) and drop its lease. The pid comes from the tier's own lease
+record and is re-checked against the process's live command line, so a worker
+serving another config directory is never touched and nothing is found by
+matching process names. Idempotent: with no worker, prints `No aspect-worker
+running.` and exits 0; exits 1 if a worker survives the stop. `nx daemon
+service stop` leaves the worker running by design (it belongs to the store
+path), so an e2e gate's cleanup calls this before it stops its scratch service.
 
 ---
 

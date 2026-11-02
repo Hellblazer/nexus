@@ -124,6 +124,10 @@ cleanup() {
     local rc=$?
     # The sandbox holds no live process of ours unless --engine started one.
     if [ -x "$BIN/nx" ]; then
+        # The aspect worker an nx call spawned outlives the service by design
+        # (nexus-wl9pk): stop it by its lease in the sandbox config dir first. An
+        # older installed nx has no such verb; the failure is ignored.
+        _nx daemon aspect-worker stop >/dev/null 2>&1 || true
         _nx daemon service stop >/dev/null 2>&1 || true
     fi
     if [ "${NX_REHEARSAL_KEEP:-0}" = "1" ] || [ "$rc" -ne 0 ]; then
@@ -380,7 +384,7 @@ leg_f() {
 leg_u() {
     HOME_DIR="$SANDBOX/u-home"; TOOLS="$SANDBOX/u-tools"; BIN="$SANDBOX/u-bin"
     mkdir -p "$HOME_DIR" "$TOOLS" "$BIN"
-    trap '_nx daemon service stop >/dev/null 2>&1 || true' EXIT
+    trap '_nx daemon aspect-worker stop >/dev/null 2>&1 || true; _nx daemon service stop >/dev/null 2>&1 || true' EXIT
     local schema extras
 
     # 1. the previous release, by its own bootstrap: pre-split receipt, stack present.

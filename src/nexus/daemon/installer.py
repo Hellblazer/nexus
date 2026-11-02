@@ -1754,7 +1754,9 @@ _MINERU_PID_NAME = "mineru.pid"
 
 def _is_aspect_worker_command(command: str) -> bool:
     """``python -m nexus.cli daemon aspect-worker start`` (any interpreter)."""
-    return "aspect-worker" in command and "nexus" in command
+    from nexus.daemon.aspect_worker_daemon import is_aspect_worker_command  # noqa: PLC0415 — deferred import — daemon module loaded only on the path that needs it
+
+    return is_aspect_worker_command(command)
 
 
 def _is_deferred_labeling_command(command: str) -> bool:

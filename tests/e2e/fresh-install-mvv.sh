@@ -501,6 +501,10 @@ _fail() { echo "FRESH-INSTALL MVV FAILED: $*" >&2; exit 1; }
 cleanup() {
     # Stop the sandbox service + PG so nothing leaks past the gate.
     if [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ]; then
+        # The aspect worker an nx call spawned outlives the service by design
+        # (nexus-wl9pk): stop it by its lease in the sandbox config dir first. An
+        # older installed nx has no such verb; the failure is ignored.
+        _nx daemon aspect-worker stop >/dev/null 2>&1 || true
         _nx daemon service stop --with-pg >/dev/null 2>&1 || true
     fi
     if [ "$GATE_OK" != 1 ]; then

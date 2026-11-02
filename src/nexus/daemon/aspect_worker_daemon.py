@@ -47,6 +47,7 @@ import structlog
 
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
+    HolderStopResult,
     DEFAULT_STOP_ELECTION_BUDGET,
     ServiceRegistry,
     ServiceSupervisor,
@@ -92,6 +93,18 @@ _DEFAULT_STALE_TIMEOUT_S: int = 300
 #: This is the BASE cadence: the loop backs off on consecutive empty sweeps
 #: (nexus-e0ypa, see :func:`next_reclaim_wait`) and returns here on any reclaim.
 _DEFAULT_RECLAIM_INTERVAL: float = 30.0
+
+#: How long (s) every reclaim sweep may fail in a row before the daemon exits
+#: (nexus-wl9pk). The daemon outlives ``nx daemon service stop`` by design and
+#: idles with the stack down, so the bound has to be far longer than a restart or
+#: an upgrade; it is the backstop for a worker whose engine is never coming back
+#: (a gate's throwaway service, a deleted install) and whose config directory
+#: still exists, which the directory check cannot see. Exiting costs nothing the
+#: design does not already accept: the next enqueue spawns a new worker, and its
+#: reclaim-first sweep returns whatever rows this one held. A failed sweep
+#: backs off to at most the stale window (300 s by default), so a recovered
+#: engine resets the clock within that window. ``None`` or 0 turns the bound off.
+_ENGINE_UNREACHABLE_EXIT_S: float = 3600.0
 
 
 def next_reclaim_wait(
@@ -214,6 +227,8 @@ class AspectWorkerDaemon:
         stale_timeout_seconds: int = _DEFAULT_STALE_TIMEOUT_S,
         reclaim_interval: float | None = None,
         queue_factory: Callable[[], Any] | None = None,
+        engine_unreachable_exit_seconds: float | None = _ENGINE_UNREACHABLE_EXIT_S,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not tenant:
             raise ValueError("aspect-worker daemon requires a non-empty tenant (per-tenant scope)")
@@ -265,6 +280,16 @@ class AspectWorkerDaemon:
         self._reclaim_queue: Any = None
         self._reclaim_thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # nexus-wl9pk: when the reclaim sweeps began failing with no success
+        # since (monotonic seconds), and whether the daemon is leaving because
+        # that outlasted the bound. The sweep thread writes, the heartbeat
+        # thread reads; a float assignment needs no lock.
+        self._engine_unreachable_exit_s = (
+            float(engine_unreachable_exit_seconds) if engine_unreachable_exit_seconds else None
+        )
+        self._monotonic = monotonic
+        self._unreachable_since: float | None = None
+        self._left_for_unreachable_engine = False
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -288,6 +313,10 @@ class AspectWorkerDaemon:
             scope_key=self._tenant,
             version=_daemon_version(),
             endpoint_provider=lambda: endpoint,
+            # nexus-wl9pk: a worker whose config directory was deleted under it
+            # (a killed gate's scratch dir) stands down; the registry would
+            # otherwise re-create the directory on the next heartbeat.
+            stand_down_when_dir_gone=True,
         )
         self._supervisor.publish_once()
         t_lease = self._clock()
@@ -415,6 +444,7 @@ class AspectWorkerDaemon:
         queue = self._reclaim_queue
         try:
             n = int(queue.reclaim_stale(self._stale_timeout) or 0)
+            self._unreachable_since = None
             if n:
                 _log.info(
                     "aspect_worker_daemon.reclaimed_stale",
@@ -453,7 +483,11 @@ class AspectWorkerDaemon:
 
     def _back_off_after_failed_sweep(self) -> None:
         """Grow the wait after a sweep that could not reach the service (the
-        sweep raised, or the client could not be rebuilt). nexus-g5rz5."""
+        sweep raised, or the client could not be rebuilt). nexus-g5rz5. Also
+        starts the unreachable clock if no failure is already running it
+        (nexus-wl9pk)."""
+        if self._unreachable_since is None:
+            self._unreachable_since = self._monotonic()
         self._current_reclaim_wait = next_reclaim_wait(
             self._current_reclaim_wait, reclaimed=None,
             base=self._reclaim_interval, stale_timeout=self._stale_timeout,
@@ -463,6 +497,13 @@ class AspectWorkerDaemon:
         """Run a single heartbeat tick (test seam + the loop body)."""
         if self._supervisor is not None:
             self._supervisor.heartbeat_tick()
+
+    def _engine_unreachable_past_bound(self) -> bool:
+        """True once every reclaim sweep since ``_unreachable_since`` failed and
+        that has lasted past the bound (nexus-wl9pk)."""
+        since = self._unreachable_since
+        bound = self._engine_unreachable_exit_s
+        return since is not None and bound is not None and self._monotonic() - since >= bound
 
     def is_fenced(self) -> bool:
         """True once a newer-generation owner has fenced this daemon."""
@@ -479,6 +520,23 @@ class AspectWorkerDaemon:
                     # A newer daemon won the tenant scope — stand down so exactly
                     # one owner survives (RDR-149 concurrent-one-owner).
                     _log.warning("aspect_worker_daemon.fenced", tenant=self._tenant)
+                    self._stop.set()
+                elif supervisor.orphaned:
+                    _log.warning(
+                        "aspect_worker_daemon.config_dir_gone",
+                        tenant=self._tenant, config_dir=str(self._config_dir),
+                        action="exiting: the directory this worker serves was removed",
+                    )
+                    self._stop.set()
+                elif self._engine_unreachable_past_bound():
+                    self._left_for_unreachable_engine = True
+                    _log.warning(
+                        "aspect_worker_daemon.engine_unreachable_exit",
+                        tenant=self._tenant,
+                        unreachable_for_seconds=round(self._monotonic() - (self._unreachable_since or 0.0), 1),
+                        bound_seconds=self._engine_unreachable_exit_s,
+                        action="exiting: the next enqueue spawns a worker if the engine returns",
+                    )
                     self._stop.set()
             except Exception as exc:  # noqa: BLE001 - reassert is best-effort; log + keep trying
                 _log.warning(
@@ -561,7 +619,13 @@ class AspectWorkerDaemon:
                         tenant=self._tenant, error=str(exc),
                     )
             self._worker = None
-        if self._reclaim_queue is not None and not fenced:
+        if self._reclaim_queue is not None and not fenced and self._left_for_unreachable_engine:
+            # nexus-wl9pk: the engine has not answered for the whole bound; a
+            # final sweep would only wait out the client's timeouts. The rows
+            # this worker held return to pending through the next worker's
+            # reclaim-first sweep, as after a crash.
+            _log.info("aspect_worker_daemon.reclaim_skipped_engine_unreachable", tenant=self._tenant)
+        elif self._reclaim_queue is not None and not fenced:
             # RDR-173 P5 item 3 (review): a final sweep makes the daemon's death
             # OBSERVABLE — the rows it owned but could not finish — AND resets them
             # to pending for the next daemon (recovery in one). reclaim_stale(0):
@@ -626,7 +690,9 @@ class AspectWorkerDaemon:
             # record this daemon no longer owns (the comment above), so a
             # captured-False call against an actually-just-fenced record
             # costs nothing beyond a redundant round trip.
-            if not fenced and supervisor.record is not None:
+            # nexus-wl9pk: an orphaned supervisor has no lease directory to mark
+            # or relinquish in, and doing either would re-create it.
+            if not fenced and not supervisor.orphaned and supervisor.record is not None:
                 try:
                     # nexus-cd1k0 review round 3 finding 6 (sibling of the
                     # storage-service fix): both calls previously took no
@@ -859,6 +925,7 @@ def run_aspect_worker_daemon(
     config_dir: Path,
     tenant: str,
     stale_timeout_seconds: int = _DEFAULT_STALE_TIMEOUT_S,
+    engine_unreachable_exit_seconds: float | None = _ENGINE_UNREACHABLE_EXIT_S,
 ) -> None:
     """Run an aspect-worker daemon to completion (start → serve → stop on signal).
 
@@ -904,9 +971,35 @@ def run_aspect_worker_daemon(
     daemon = AspectWorkerDaemon(
         config_dir=config_dir, tenant=tenant,
         stale_timeout_seconds=stale_timeout_seconds,
+        engine_unreachable_exit_seconds=engine_unreachable_exit_seconds,
     )
     try:
         daemon.start()
         daemon.run_until_signal()
     finally:
         daemon.stop()
+
+
+def is_aspect_worker_command(command: str) -> bool:
+    """``python -m nexus.cli daemon aspect-worker start`` (any interpreter): the
+    pid-recycle re-check every stop of this tier makes before it signals."""
+    return "aspect-worker" in command and "nexus" in command
+
+
+def stop_aspect_workers(config_dir: Path | str) -> HolderStopResult:
+    """Stop every aspect worker whose lease lives in *config_dir* and drop the
+    leases (nexus-wl9pk). The verb behind ``nx daemon aspect-worker stop``.
+
+    A thin call into the shared teardown primitive
+    (:func:`~nexus.daemon.service_registry.stop_tier_holders`): the pids come
+    from the tier's own lease records, each is re-checked against its live
+    command line, and the stop is the graceful send, the drain grace, then the
+    hard kill. No process-table pattern is involved, so a worker serving another
+    config directory is never touched. A gate's cleanup calls it BEFORE it stops
+    the service, so the worker's final reclaim sweep still has an engine.
+    """
+    from nexus.daemon.service_registry import stop_tier_holders  # noqa: PLC0415 — deferred; stop-path only
+
+    return stop_tier_holders(
+        dir=Path(config_dir), tier=TIER, is_ours=is_aspect_worker_command,
+    )

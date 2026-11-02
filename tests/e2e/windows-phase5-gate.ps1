@@ -837,6 +837,12 @@ Run-Assertion 5 'a plain claude -p returns, with the stack up and with no endpoi
     "stack up: $($script:claudeUp.why); no endpoint: $($script:claudeNoEndpoint.why); no credential file under .claude; $cm"
 }
 
+# The aspect worker a live session's store_put spawned outlives `service stop` by
+# design (A4 only observes it). Stop it by its lease, after every assertion, so
+# the run leaves no worker behind (nexus-wl9pk). Best effort: a release that
+# predates the verb exits non-zero, which is not the gate's verdict.
+try { $null = Invoke-Nx 'aspect-worker-stop' @('daemon', 'aspect-worker', 'stop') } catch { Write-Output "aspect-worker stop did not run: $($_.Exception.Message)" }
+
 # -------------------------------------------------------------- verdict ----
 $results = $script:state['results']
 $executed = @(1..$DECLARED | ForEach-Object { K $results "A$_" } | Where-Object { (K $_ 'status') -in @('PASS', 'FAIL') }).Count

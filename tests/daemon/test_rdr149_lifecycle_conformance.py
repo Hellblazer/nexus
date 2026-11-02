@@ -342,6 +342,15 @@ class RecordHarness:
         its own inline check (aspect_worker), fails HERE."""
         raise NotImplementedError
 
+    def assert_orphaned_dir_stands_down(self) -> None:
+        """Delete the lease directory under a running owner and assert its REAL
+        run loop requests its own stop within a few ticks, that its stop does
+        not re-create the directory, and that nothing is written back
+        (nexus-wl9pk). Tier-specific for the same reason as the fenced check:
+        each tier's run loop has its own shape; the MECHANISM is the shared
+        ``ServiceSupervisor(stand_down_when_dir_gone=True).orphaned``."""
+        raise NotImplementedError
+
 
 class _LeaseHarness(RecordHarness):
     """Shared harness for tiers migrated onto the leased registry (T2 in P2,
@@ -663,6 +672,47 @@ class AspectWorkerRecordHarness(_LeaseHarness):
         finally:
             b.stop()
 
+    def assert_orphaned_dir_stands_down(self) -> None:
+        import shutil
+
+        from nexus.daemon import aspect_worker_daemon as awd
+
+        class _FakeWorker:
+            def start(self) -> None:
+                pass
+
+            def stop(self, timeout: float = 0) -> None:
+                pass
+
+        class _FakeQueue:
+            def reclaim_stale(self, _t: float, *, count_attempt: bool = True) -> int:
+                return 0
+
+            def close(self) -> None:
+                pass
+
+        daemon = awd.AspectWorkerDaemon(
+            config_dir=self._cd, tenant=f"tenant-orphan-{id(self)}", clock=self._clock,
+            worker_factory=_FakeWorker, queue_factory=_FakeQueue,
+            heartbeat_interval=0.05,
+        )
+        daemon.start()
+        try:
+            assert not daemon._stop.is_set()
+            shutil.rmtree(self._cd)
+            deadline = time.monotonic() + 5.0
+            while not daemon._stop.is_set() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert daemon._stop.is_set(), (
+                "an owner whose lease directory was removed must request its own "
+                "stop within a few ticks"
+            )
+        finally:
+            daemon.stop()
+        assert not self._cd.exists(), (
+            "the orphaned owner's heartbeat or stop re-created the directory it was serving"
+        )
+
 
 _HARNESS_CLASSES: dict[str, type[RecordHarness]] = {
     "storage_service": StorageServiceRecordHarness,
@@ -723,6 +773,20 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         # property existed to check it.
         "storage_service": "pass",  # nexus-cd1k0.2: _supervise_until_stopped checks fenced_exit_code
         "aspect_worker": "pass",  # RDR-173 P1: _heartbeat_loop already stands down on fenced
+    },
+    "orphaned_dir_stands_down": {
+        # nexus-wl9pk: 24 aspect workers outlived the gate scratch dirs they were
+        # spawned into, each re-creating its dir on every heartbeat. A tier's
+        # run loop opts into ServiceSupervisor(stand_down_when_dir_gone=True)
+        # and exits on `.orphaned`. The storage supervisor does not: its
+        # engine and PostgreSQL live under the config dir and its exit-on-orphan
+        # is a separate decision (it would also have to stop what it spawned).
+        "storage_service": (
+            GAP,
+            "storage supervisor does not opt into stand_down_when_dir_gone; an orphaned "
+            "supervisor would have to stop its engine and PostgreSQL too (nexus-wl9pk)",
+        ),
+        "aspect_worker": "pass",  # nexus-wl9pk: _heartbeat_loop stands down on supervisor.orphaned
     },
     "teardown_stops_holders": {
         # RDR-224 nexus-7xzc1: `nx uninstall` stops every recorded holder of a
@@ -932,6 +996,12 @@ class TestLifecycleConformance:
         # machinery; see assert_fenced_owner_stops_and_cleans_up's docstring.
         _maybe_xfail("fenced_owner_stops", tier)
         harness.assert_fenced_owner_stops_and_cleans_up()
+
+    def test_orphaned_dir_stands_down(self, harness: RecordHarness, tier: str) -> None:
+        # nexus-wl9pk: a lease directory deleted under a running owner stops the
+        # owner (real run loop) and the stop does not bring the directory back.
+        _maybe_xfail("orphaned_dir_stands_down", tier)
+        harness.assert_orphaned_dir_stands_down()
 
     def test_dead_owner_lease_reclaimed(self, harness: RecordHarness, tier: str) -> None:
         # nexus-cd1k0.17 review round 2, finding 2: a TTL-fresh lease held
