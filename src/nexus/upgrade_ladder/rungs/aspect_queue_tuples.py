@@ -86,7 +86,7 @@ from nexus.db.t2.http_aspect_queue import (
 )
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
-    completion_recorded,
+    completion_recorded_at,
     default_completion_record,
     managed_service,
     refuses_unbounded_read,
@@ -290,9 +290,10 @@ class AspectQueueTuplesRung:
                 # which the interactive run that read the whole table and verified it wrote (nexus-mq980:
                 # the remedy `nx doctor` names has to be able to clear its row); with none, the rung is
                 # not applicable this run.
-                if completion_recorded(self._record_fn, RUNG_NAME):
+                recorded_at = completion_recorded_at(self._record_fn, RUNG_NAME)
+                if recorded_at is not None:
                     self._from_record = True
-                    return RungStatus(applicable=True, converged=True)
+                    return RungStatus(applicable=True, converged=True, from_record=recorded_at)
                 reason = (
                     f"the first {DETECT_READ_LIMIT} waiting rows hold none that can move, and "
                     f"unattended `nx upgrade --auto` does not read a managed service's whole queue; "

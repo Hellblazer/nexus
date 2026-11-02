@@ -39,7 +39,7 @@ import structlog
 
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
-    completion_recorded,
+    completion_recorded_at,
     default_completion_record,
     managed_service,
     refuses_unbounded_read,
@@ -152,8 +152,9 @@ class NoteTagsArrayRung:
             # the interactive run that scanned, converged and verified wrote it, and the tags a current client
             # writes are arrays already, so a recorded rung is converged without a read (nexus-mq980: the
             # remedy `nx doctor` names has to be able to clear its row).
-            if completion_recorded(self._record_fn, RUNG_NAME):
-                return RungStatus(applicable=True, converged=True)
+            recorded_at = completion_recorded_at(self._record_fn, RUNG_NAME)
+            if recorded_at is not None:
+                return RungStatus(applicable=True, converged=True, from_record=recorded_at)
             reason = (
                 "unattended `nx upgrade --auto` does not list every note of a managed catalog; "
                 f"{INTERACTIVE_REMEDY}"

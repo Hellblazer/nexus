@@ -54,16 +54,20 @@ def default_completion_record(rung_name: str) -> object | None:
         return store.completions().get(rung_name)
 
 
-def completion_recorded(record_fn: Callable[[], object | None], rung_name: str) -> bool:
-    """True when *record_fn* finds a completion on file. An unreadable ledger is not a record. This is the cheap
+def completion_recorded_at(record_fn: Callable[[], object | None], rung_name: str) -> str | None:
+    """When *record_fn*'s completion for *rung_name* was verified (its ``verified_at``, or ``"an unknown time"`` if the
+    record carries none), or ``None`` when no completion is on file. An unreadable ledger is not a record. This is the cheap
     answer a refusing ``detect()`` gives BEFORE it refuses (shakedown 7.94.0, nexus-mq980): an interactive
     ``nx upgrade`` records the rung once its scan verifies, and from then on every unattended run and every
     ``nx doctor`` answers from that record instead of reading the catalog."""
     try:
-        return record_fn() is not None
+        record = record_fn()
     except Exception as exc:  # noqa: BLE001 — an unreadable ledger is 'not recorded', and the refusal decides
         _log.info("ladder_completion_ledger_unreadable", rung=rung_name, error=str(exc))
-        return False
+        return None
+    if record is None:
+        return None
+    return str(getattr(record, "verified_at", "") or "") or "an unknown time"
 
 
 def unattended_verify_refusal(what: str) -> str:

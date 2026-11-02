@@ -268,6 +268,7 @@ def test_an_unattended_run_on_a_managed_service_with_a_recorded_completion_is_co
         status = world.rung(managed_fn=lambda: True, record_fn=lambda: object()).detect()
 
     assert (status.applicable, status.converged) == (True, True)
+    assert status.from_record == "an unknown time", "says the answer came from the record"
     assert reads == [], "zero catalog reads"
 
 

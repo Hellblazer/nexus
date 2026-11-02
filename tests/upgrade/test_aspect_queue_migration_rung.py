@@ -499,6 +499,7 @@ class TestDetectIsBounded:
         with unattended_run():
             status = w.rung(managed_fn=lambda: True, record_fn=lambda: object()).detect()
         assert (status.applicable, status.converged) == (True, True)
+        assert status.from_record == "an unknown time", "says the answer came from the record"
         assert _limits(w) == [DETECT_READ_LIMIT], "the bounded page only"
 
     def test_a_walk_that_answered_from_the_record_but_holds_none_defers_without_the_whole_read(self) -> None:

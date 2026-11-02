@@ -265,6 +265,12 @@ def _pins(names: tuple[str, ...]) -> dict[str, str]:
     return out
 
 
+def pinned_version(dist: str) -> str | None:
+    """The version the wheel's shipped constraints pin *dist* to on this platform (environment marker evaluated),
+    or ``None`` when no applicable line pins it. For a caller outside this module that must name the pinned build."""
+    return _pins((dist,)).get(dist)
+
+
 def _find_spec(name: str) -> bool:
     import importlib.util  # noqa: PLC0415 — stdlib, deferred
 
