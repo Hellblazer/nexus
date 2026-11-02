@@ -540,6 +540,8 @@ public class TenantKeyedStateGateTest {
                 "MintRateLimiter.tenantSustainedPerMinute")) {
                 notKeyed.put(f, CONSTANT);
             }
+            notKeyed.put("AuditTags.TITLE_PATTERNS", "compiled audit-title patterns built once from the generated "
+                + "AuditTags table (RDR-238 P1); the same for every tenant, never written after class init");
             notKeyed.put("NexusService.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("AuthFilter.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("TokenAdminHandler.cache", TOKEN_CACHE_REF);

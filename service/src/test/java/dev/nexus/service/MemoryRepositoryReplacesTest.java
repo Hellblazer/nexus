@@ -14,12 +14,14 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.Statement;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -273,9 +275,11 @@ class MemoryRepositoryReplacesTest {
         String t = tenant(); String p = project();
         long oldId = put(t, p, "old-note", "old body", "a");
         replace(t, p, "new-note", "new", "x", "old-note");
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            assertThat(st.executeUpdate("UPDATE nexus.memory SET rolled_up_at = now() WHERE id = " + oldId))
-                .isEqualTo(1);
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).update(MEMORY)
+                .set(MEMORY.ROLLED_UP_AT, OffsetDateTime.now(ZoneOffset.UTC))
+                .where(MEMORY.ID.eq(oldId))
+                .execute()).isEqualTo(1);
         }
 
         assertThat(repo.reap(t)).as("a replaced row is never reaped").isEmpty();
@@ -701,15 +705,17 @@ class MemoryRepositoryReplacesTest {
     /** Polls (bounded) for a backend of the service role waiting on a lock in a statement with FOR UPDATE. */
     private boolean awaitBackendWaitingOnALockInASelectForUpdate() throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-        try (Connection su = pg.createConnection("");
-             Statement st = su.createStatement()) {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
+            var usename = DSL.field(DSL.name("usename"), String.class);
+            var waitType = DSL.field(DSL.name("wait_event_type"), String.class);
+            var query = DSL.field(DSL.name("query"), String.class);
             while (System.nanoTime() < deadline) {
-                try (ResultSet rs = st.executeQuery(
-                        "SELECT count(*) FROM pg_stat_activity WHERE usename = '" + SVC_ROLE + "' "
-                        + "AND wait_event_type = 'Lock' AND lower(query) LIKE '%for update%'")) {
-                    rs.next();
-                    if (rs.getInt(1) > 0) return true;
-                }
+                int waiting = ctx.fetchCount(activity, usename.eq(SVC_ROLE)
+                    .and(waitType.eq("Lock"))
+                    .and(DSL.lower(query).like("%for update%")));
+                if (waiting > 0) return true;
                 java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(20));
             }
         }
@@ -729,12 +735,11 @@ class MemoryRepositoryReplacesTest {
         put(t, p, "cancel-update-target", "body that survives", "a");
         List<Row> before = snapshot(t, p);
         try {
-            try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-                st.execute("CREATE OR REPLACE FUNCTION nexus.cancel_update_for_test() RETURNS trigger AS $$ "
-                    + "BEGIN IF OLD.title = 'cancel-update-target' THEN RETURN NULL; END IF; RETURN NEW; END $$ "
-                    + "LANGUAGE plpgsql");
-                st.execute("CREATE TRIGGER cancel_update_for_test BEFORE UPDATE ON nexus.memory "
-                    + "FOR EACH ROW EXECUTE FUNCTION nexus.cancel_update_for_test()");
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                PgContainerHelper.runSuperuserTestChangelog(su,
+                    "db/changelog-test/db.changelog-test-memory-cancel-update-install.xml",
+                    "databasechangelog_test_memory_cancel_update_install", Map.of());
             }
             assertThatThrownBy(() -> replace(t, p, "new-note", "N", "x", "cancel-update-target"))
                 .isInstanceOf(IllegalStateException.class)
@@ -742,9 +747,11 @@ class MemoryRepositoryReplacesTest {
                 .hasMessageContaining("cancel-update-target");
             assertThat(snapshot(t, p)).as("nothing written, nothing quarantined").isEqualTo(before);
         } finally {
-            try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-                st.execute("DROP TRIGGER IF EXISTS cancel_update_for_test ON nexus.memory");
-                st.execute("DROP FUNCTION IF EXISTS nexus.cancel_update_for_test()");
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                PgContainerHelper.runSuperuserTestChangelog(su,
+                    "db/changelog-test/db.changelog-test-memory-cancel-update-drop.xml",
+                    "databasechangelog_test_memory_cancel_update_drop", Map.of());
             }
         }
     }

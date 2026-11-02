@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-ov3zi: installs a BEFORE UPDATE trigger on nexus.memory that returns NULL for the row titled
+    cancel-update-target, so an UPDATE of that row reports 0 rows although the row is locked and visible.
+    MemoryRepositoryReplacesTest uses it to prove a replace whose quarantine affects no row is refused and
+    writes nothing. In Liquibase XML instead of Java SQL strings (Sam's rule, nexus-zrcj7); jOOQ OSS has no
+    CREATE FUNCTION and no CREATE TRIGGER. The body holds dollar quotes, hence splitStatements="false".
+    Removed by db.changelog-test-memory-cancel-update-drop.xml; run by that test directly. runAlways,
+    bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+    <changeSet id="memory-cancel-update-install" author="nexus-ov3zi" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.cancel_update_for_test() RETURNS trigger AS $$
+BEGIN IF OLD.title = 'cancel-update-target' THEN RETURN NULL; END IF; RETURN NEW; END $$ LANGUAGE plpgsql;
+CREATE TRIGGER cancel_update_for_test BEFORE UPDATE ON nexus.memory
+FOR EACH ROW EXECUTE FUNCTION nexus.cancel_update_for_test();
+        </sql>
+    </changeSet>
+</databaseChangeLog>

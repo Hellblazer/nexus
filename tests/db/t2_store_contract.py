@@ -327,6 +327,11 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'insert_summary': ['project', 'content', 'source_ids', 'model', 'produced_by'],
         'list_quarantined': ['project'],
         'list_summaries': ['project'],
+        # RDR-238 Phase 1 (nexus-qo7ie.6, nexus-ov3zi): a put that quarantines the
+        # row titled `replaces` in one engine transaction. Service-only by
+        # construction: no SQLite store had replaces. Production callers:
+        # T2Database.put_replacing, behind the memory_put MCP `replaces` parameter.
+        'put_replacing': ['project', 'title', 'content', 'replaces', 'tags', 'ttl', 'agent', 'session'],
         'reap': [],
         'restore': ['id'],
     },
