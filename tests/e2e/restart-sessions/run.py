@@ -1456,6 +1456,56 @@ def _naming(home: Path) -> list[tuple[int, str]]:
     return [(int(p), _args_of(int(p))) for p in out if p.isdigit() and int(p) not in (os.getpid(), 1)]
 
 
+def parse_cwds(lsof_out: str) -> dict[int, str]:
+    """``lsof -Fpn -d cwd`` output as {pid: cwd}."""
+    cwds, pid = {}, None
+    for line in lsof_out.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:]) if line[1:].isdigit() else None  # a bad pid line never lends its cwd to the last good one
+        elif line.startswith("n") and pid is not None:
+            cwds[pid] = line[1:]
+    return cwds
+
+
+def _cwds() -> dict[int, str]:
+    """Every visible process's working directory: /proc on Linux, lsof elsewhere."""
+    proc = Path("/proc")
+    if (proc / "self" / "cwd").exists():
+        cwds = {}
+        for d in proc.iterdir():
+            if d.name.isdigit():
+                try:
+                    cwds[int(d.name)] = os.readlink(d / "cwd")
+                except OSError:
+                    pass
+        return cwds
+    try:
+        out = subprocess.run(["lsof", "-n", "-P", "-w", "-d", "cwd", "-Fpn"], capture_output=True, text=True,
+                             timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    return parse_cwds(out)
+
+
+def under(path: str, home: Path) -> bool:
+    roots = {str(home), os.path.realpath(home)}
+    return any(path == r or path.startswith(r + os.sep) for r in roots)
+
+
+def _working_in(home: Path) -> list[tuple[int, str]]:
+    """Live processes whose working directory is in the scratch HOME. The SessionEnd launcher
+    double-forks within ~120 ms and is reparented to init with no HOME in its argv, so neither the
+    tree poll nor the argv sweep sees it; it keeps the session's working directory (the sandbox's
+    work folder). A cwd is read without reading the process's environment, which holds the token."""
+    return [(p, _args_of(p)) for p, cwd in _cwds().items()
+            if p not in (os.getpid(), 1) and under(cwd, home)]
+
+
+def _sandbox_procs(home: Path) -> list[tuple[int, str]]:
+    """Live processes that name the HOME in their argv or work in it."""
+    return sorted(set(_naming(home)) | set(_working_in(home)))
+
+
 def _end(procs: list[tuple[int, str]]) -> int:
     """SIGTERM each process still running the same argv, SIGKILL any still there 5 s later; return
     how many were signalled."""
@@ -1510,15 +1560,15 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     time.sleep(3)
     ended = _end(leftovers)
     for _ in range(30):
-        if not _naming(sb.home):
+        if not _sandbox_procs(sb.home):
             break
         time.sleep(2)
-    late = _naming(sb.home)
+    late = _sandbox_procs(sb.home)
     ended_late = _end(late)
     sb.delete_config()
     notes.append(f"cleanup: {len(watched)} process(es) recorded below the tmux server during the run; "
                  f"{len(leftovers)} session descendant(s) collected, {ended} still running and signalled; "
-                 f"{ended_late} more still naming the HOME after 60 s")
+                 f"{ended_late} more still naming or working in the HOME after 60 s")
     try:
         if sb.nx_refused.exists():
             refused = sb.nx_refused.read_text(encoding="utf-8").splitlines()
@@ -1536,13 +1586,14 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     left = credentials_left(sb.nexus_config)
     if left:
         dirty.append(f"credentials left in {sb.nexus_config}: {left}")
-    if still := _naming(sb.home):
-        dirty.append(f"{len(still)} process(es) still name the HOME: {[p for p, _ in still][:10]}")
+    if still := _sandbox_procs(sb.home):
+        dirty.append(f"{len(still)} process(es) still name or work in the HOME: {[p for p, _ in still][:10]}")
     return dirty
 
 
 def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[str]]:
     spec = SPECS[name]
+    fp_before = footprint_before()
     home = Path(tempfile.mkdtemp(prefix=f"nx-restart-sandbox-{name}-"))
     sb = Sandbox(home, f"nx-rs-{os.getpid()}-{name}", claude, a.model, spec)
     failures: list[str] = []
@@ -1561,11 +1612,14 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
         # until the sandbox is gone, then acted on.
         with signals_deferred() as pending:
             sids: set[str] = set()
+            full: set[str] = set()
             try:
                 for hold in sb.holds.values():
                     hold.unlink(missing_ok=True)
-                sids = {str(d.get("sessionId", ""))[:8] for d in sb.entries()}
-                sids |= {str(d.get("sessionId", ""))[:8] for d in sb.before.values() if d}
+                full = {str(d.get("sessionId", "")) for d in sb.entries()}
+                full |= {str(d.get("sessionId", "")) for d in sb.before.values() if d}
+                full.discard("")
+                sids = {sid[:8] for sid in full}
             except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
                 notes.append(f"session ids not collected: {type(exc).__name__}: {exc}")
             if not a.keep:
@@ -1595,8 +1649,112 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                 say(f"[sandbox:{name}] could not remove {home}; it holds no credentials (deleted above)")
         else:
             say(f"[sandbox:{name}] kept {home} (transcripts, restart log, handoffs under /tmp)")
+        if not a.keep:
+            try:  # report only, for now: what this scenario left outside its HOME
+                left = footprint_after(fp_before, sb, full, sb.real_nx)
+                for place, items in left.items():
+                    say(f"[sandbox:{name}] footprint: {place}: {items}")
+                if not left:
+                    say(f"[sandbox:{name}] footprint: nothing left outside the HOME")
+            except Exception as exc:  # noqa: BLE001 -- a report, never at the cost of the verdict
+                say(f"[sandbox:{name}] footprint not taken: {type(exc).__name__}: {exc}")
         raise_deferred(pending)
     return ok, failures, notes
+
+
+#: Where a scenario could leave something outside its scratch HOME (nexus-xwijj Phase 2): the
+#: shared temp folders, the operator's ~/.claude and nexus config, and tmux's socket folder.
+TEMP_DIRS = tuple(dict.fromkeys(Path(d) for d in ("/tmp", os.path.realpath("/tmp"), tempfile.gettempdir())))
+
+
+def _names(d: Path) -> set[str]:
+    try:
+        return {e.name for e in d.iterdir()}
+    except OSError:
+        return set()
+
+
+def _lines(f: Path) -> int:
+    try:
+        with f.open("rb") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return 0
+
+
+def footprint_before() -> dict:
+    """What the shared places hold before a scenario: names in each temp folder, the operator's
+    ~/.claude/sessions and nexus config, and the length of the operator's restart log."""
+    claude = OPERATOR_HOME / ".claude"
+    return {"temp": {str(d): _names(d) for d in TEMP_DIRS},
+            "sessions": _names(claude / "sessions"),
+            "config": _names(OPERATOR_HOME / ".config" / "nexus"),
+            "log": _lines(claude / "restart-sessions.log")}
+
+
+def footprint_after(before: dict, sb: Sandbox, sids: set[str], nx: str) -> dict[str, list[str]]:
+    """What the scenario left outside its scratch HOME, by place: new entries in a shared place
+    that name one of its sessions' ids, its tmux socket or its HOME; the tmux
+    socket file; new lines in the operator's restart log about an rs_ session; and rows still in
+    a sandbox session's mailbox or directory entry on the operator's service. Entries another
+    session on the box wrote meanwhile name none of these and are not counted."""
+    marks = {sid[:8] for sid in sids if sid} | {sb.sock, sb.home.name}
+    out: dict[str, list[str]] = {}
+
+    def ours(name: str) -> bool:
+        return any(m and m in name for m in marks)
+
+    for d, names in before["temp"].items():
+        new = sorted(n for n in _names(Path(d)) - names if ours(n))
+        if new:
+            out[f"temp {d}"] = new
+    sock_dir = Path(os.environ.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{os.getuid()}"
+    if (sock_dir / sb.sock).exists():
+        out["tmux socket"] = [str(sock_dir / sb.sock)]
+    claude = OPERATOR_HOME / ".claude"
+    new = sorted(n for n in _names(claude / "sessions") - before["sessions"])
+    mine = []
+    for n in new:
+        try:
+            d = json.loads((claude / "sessions" / n).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and (str(d.get("name", "")).startswith("rs_") or str(d.get("sessionId", "")) in sids):
+            mine.append(n)
+    if mine:
+        out["operator ~/.claude/sessions"] = mine
+    try:
+        with (claude / "restart-sessions.log").open(encoding="utf-8", errors="replace") as fh:
+            added = [ln.rstrip() for i, ln in enumerate(fh) if i >= before["log"] and "rs_" in ln]
+    except OSError:
+        added = []
+    if added:
+        out["operator restart log"] = added[:5]
+    new = sorted(n for n in _names(OPERATOR_HOME / ".config" / "nexus") - before["config"] if ours(n))
+    if new:
+        out["operator nexus config"] = new
+    if nx:
+        rows = []
+        for sid in sorted(s for s in sids if s):
+            try:
+                r = subprocess.run([nx, "tuple", "stats", f"mailbox/{sid}", "--json"], capture_output=True,
+                                   text=True, timeout=30)
+                st = json.loads(r.stdout) if r.returncode == 0 else {}
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                st = {}
+            live = {k: st.get(k, 0) for k in ("available", "claimed", "lapsed", "dead")}
+            if any(live.values()):
+                rows.append(f"mailbox/{sid[:8]} {live}")
+        for name in sb.spec.sessions:
+            try:
+                r = subprocess.run([nx, "tuple", "directory", name], capture_output=True, text=True, timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if r.returncode == 0 and "No live directory entry" not in r.stdout:
+                rows.append(f"directory/{name}: {r.stdout.strip().splitlines()[0][:120] if r.stdout.strip() else '?'}")
+        if rows:
+            out["operator service"] = rows
+    return out
 
 
 def records_a_pass(chosen: list[str], bad: list[str]) -> bool:
