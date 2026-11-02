@@ -402,11 +402,17 @@ def test_full_run_equals_one_combined_write_of_the_file(env: _Env) -> None:
     assert _present(env.collection, every) == set(every) == _present(env.control_collection, every)
     assert _index_state(env.doc_id) == "complete" == _index_state(ctl)
     # The rows carry the position fields the old manifest hook derived from each chunk's own
-    # metadata (line and character spans, an absent span stored as null).
+    # metadata (line and character spans, an absent span stored as null). A 0 line or 0 end char is the
+    # factory's "not recorded" and is stored as null; a 0 start char is real when the end is recorded,
+    # as for the first chunk of a file (nexus-qe78r).
     meta = {c["chash"]: c["metadata"] for c in chunks}
+
+    def _start(m: dict) -> int | None:
+        return m.get("chunk_start_char") if m.get("chunk_end_char") else (m.get("chunk_start_char") or None)
+
     expected = [
         (i, h, meta[h].get("line_start") or None, meta[h].get("line_end") or None,
-         meta[h].get("chunk_start_char") or None, meta[h].get("chunk_end_char") or None, i)
+         _start(meta[h]), meta[h].get("chunk_end_char") or None, i)
         for i, h in enumerate(every)
     ]
     assert _manifest(env.doc_id) == expected
