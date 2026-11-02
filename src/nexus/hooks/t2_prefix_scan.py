@@ -105,7 +105,9 @@ _MAX_NAMESPACES = 5
 _MACHINE_NAMESPACE_SUFFIXES: tuple[str, ...] = ("_taxonomy_discover_health",)
 
 #: Overall wall-clock budget for the per-namespace fetch loop, distinct
-#: from the per-request timeout below. Override via NX_T2_SCAN_BUDGET_S.
+#: from the per-request timeout below. Override via NX_T2_SCAN_BUDGET_S. A
+#: budget below the 0.5 s call floor (``_HTTP_TIMEOUT_FLOOR``) issues no call
+#: at all (nexus-dr57n), so such a value turns the scan off.
 _DEFAULT_SCAN_BUDGET_S = 8.0
 
 #: A namespace's freshest entry older than this is flagged with a visible
@@ -147,6 +149,8 @@ def _clamped_call_timeout(deadline: float, ceiling: float) -> float:
     how much budget prior calls in the same scan already spent.
     """
     remaining = deadline - time.monotonic()
+    # Both gated call sites check _budget_covers_a_call first, so remaining is
+    # at least the floor here; the max() only guards a future ungated caller.
     return max(_HTTP_TIMEOUT_FLOOR, min(ceiling, remaining))
 
 

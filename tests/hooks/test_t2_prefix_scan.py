@@ -488,11 +488,13 @@ def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
 
     ``/v1/memory/list`` answers instantly (isolating the get-call clamp
     from the list-call clamp); ``/v1/memory/get`` sleeps 5.0s, longer
-    than both the 1.5s scan budget and the 3.0s configured ceiling. With
+    than both the 2.5s scan budget and the 4.0s configured ceiling (2.5 s, not
+    1.5 s, so the instant list call has 2 s of slack under load before the 0.5 s
+    call floor would leave no get at all, nexus-dr57n). With
     the fetch clamped to what's left of the budget (and
     ``retry_read_timeout=False``, so the clamped timeout is not silently
-    retried and doubled), the first snippet attempt gives up at ~1.5s
-    (not the full 3.0s ceiling, and nowhere near 2x that from a retry)
+    retried and doubled), the first snippet attempt gives up at ~2.5s
+    (not the full 4.0s ceiling, and nowhere near 2x that from a retry)
     and the existing per-entry deadline gate then renders the remaining
     entries title-only rather than issuing further calls.
 
@@ -521,14 +523,14 @@ def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
         config_dir=tmp_path,
         env=_engine_env(
             engine,
-            NX_T2_SCAN_BUDGET_S="1.5",
-            NX_T2_SCAN_TIMEOUT_S="3.0",
+            NX_T2_SCAN_BUDGET_S="2.5",
+            NX_T2_SCAN_TIMEOUT_S="4.0",
         ),
         probe=_SCAN_PROBE_RECORDING_GET,
     )
     assert time.monotonic() - t0 < 30  # the child as a whole: a hang guard only
     assert "entry-0" in out  # the freshest entry's title still renders
-    # Exactly one request: the 5.0s sleep always outlasts the 1.5s clamp, so the
+    # Exactly one request: the 5.0s sleep always outlasts the 2.5s clamp, so the
     # first snippet attempt spends the whole budget and the per-entry deadline gate
     # renders the other two entries title-only. A second request means the gate is gone.
     assert _last_get_call_markers[0] == len(_last_get_calls), (
@@ -544,9 +546,9 @@ def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
         timeout = float(raw_timeout)
     except ValueError:
         pytest.fail(f"the get request carried timeout={raw_timeout}: the clamp was dropped")
-    assert timeout <= 1.5, (
+    assert timeout <= 2.5, (
         f"the get request was handed timeout={timeout}s, not clamped to the remaining "
-        "scan budget (<= 1.5s) but closer to the 3.0s configured ceiling"
+        "scan budget (<= 2.5s) but closer to the 4.0s configured ceiling"
     )
     assert raw_retry == "False", "a clamped timeout must not be retried (it would double the wait)"
 
@@ -608,6 +610,24 @@ def test_a_read_timeout_that_ends_just_short_of_the_budget_issues_no_second_get(
     assert len(store.get_timeouts) == 1, store.get_timeouts
     assert store.get_timeouts[0] == pytest.approx(budget)
     assert [ln for ln in lines if "entry-" in ln] == ["  entry-0", "  entry-1", "  entry-2"]
+
+
+def test_exactly_the_call_floor_left_still_issues_a_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate is ``>= floor``: with exactly the floor left a call still goes,
+    at the floor's timeout (pins the boundary against a ``>`` slip)."""
+    clock = _FakeClock()
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic))
+    budget = 1.5
+    store = _EarlyTimeoutStore(clock, budget_end=clock.now + budget, early_by=mod._HTTP_TIMEOUT_FLOOR)
+    mod._build_output(
+        store,  # type: ignore[arg-type]
+        "nexus",
+        [{"project": "nexus", "last_updated": "2026-01-01T00:00:00Z"}],
+        scan_budget_s=budget,
+        request_timeout_s=3.0,
+    )
+    assert len(store.get_timeouts) >= 2, store.get_timeouts
+    assert store.get_timeouts[1] == pytest.approx(mod._HTTP_TIMEOUT_FLOOR)
 
 
 def test_a_namespace_is_not_started_with_less_than_a_call_floor_left(
