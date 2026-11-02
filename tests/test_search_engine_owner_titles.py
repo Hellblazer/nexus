@@ -81,14 +81,15 @@ def test_json_title_is_the_attributed_owners_catalog_title() -> None:
     assert row["_display_title"] == "main.py"
 
 
-def test_json_has_no_title_when_the_catalog_names_none() -> None:
-    """No catalog title resolved: the row's title is not stood in (R1: never a label)."""
+def test_json_title_is_null_when_the_catalog_names_none() -> None:
+    """No catalog title resolved: the row's title is not stood in (R1: never a label), and the key stays
+    present as null so a consumer's schema does not change with whether the catalog resolved."""
     import json
 
     from nexus.formatters import format_json
 
     row = json.loads(format_json([_hit("h", "src/other.py:1-15")]))[0]
-    assert "title" not in row
+    assert "title" in row and row["title"] is None
 
 
 def test_a_deleted_last_writer_is_not_named() -> None:

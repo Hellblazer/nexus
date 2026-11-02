@@ -473,10 +473,9 @@ def format_json(results: list[SearchResult]) -> str:
         # nexus-fv2u4 (RDR-236 reader remedy R1): ``title`` is the attributed owner's catalog
         # title, the same one every other format labels the hit with. The chunk row's own
         # title is the last writer's (another document's ``path:lines`` on a shared chunk), so
-        # it is never output; a hit whose catalog title did not resolve carries no ``title``.
-        item.pop("title", None)
-        if title := display_title(r.metadata):
-            item["title"] = title
+        # it is never output; a hit whose catalog title did not resolve carries ``"title": null``
+        # (the key stays, so the JSON schema does not change with whether the catalog resolved).
+        item["title"] = display_title(r.metadata) or None
         items.append(item)
     return json.dumps(items, indent=2, default=str)
 

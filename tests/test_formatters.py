@@ -634,6 +634,18 @@ def test_an_unresolved_hit_shows_its_id_not_the_stale_row_title(fmt: str) -> Non
     assert "other/doc.py" not in out
 
 
+def test_json_title_key_is_always_present_and_null_when_unresolved() -> None:
+    """The JSON schema does not change with whether the catalog resolved a title: the key is there,
+    null when none did, and never the chunk row's own (last writer's) title."""
+    import json
+
+    resolved = json.loads(format_json([_titled("owner/doc.py")]))[0]
+    unresolved = json.loads(format_json([_titled(None)]))[0]
+    assert resolved["title"] == "owner/doc.py"
+    assert "title" in unresolved and unresolved["title"] is None
+    assert set(resolved) - {"_display_title"} == set(unresolved)
+
+
 def test_display_title_reads_only_the_catalog_title() -> None:
     from nexus.formatters import display_title
 
