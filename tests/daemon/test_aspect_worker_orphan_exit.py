@@ -495,14 +495,16 @@ def test_a_lease_in_dir_a_naming_a_worker_of_dir_a_b_leaves_that_worker_alone(
 
 def test_process_argv_splits_the_proc_cmdline_on_nul(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``/proc/<pid>/cmdline`` keeps an argument with a space whole; the joined
-    text of ``process_command`` cannot."""
+    text of ``process_command`` cannot. The procfs branch is pinned with an explicit
+    ``platform="linux"`` so the test reads the fake procfs on every host (Windows takes
+    the winproc branch otherwise)."""
     (tmp_path / "uptime").write_text("1 1\n")
     (tmp_path / "123").mkdir()
     (tmp_path / "123" / "cmdline").write_bytes(b"python\x00--config-dir\x00/a/b c\x00--tenant\x00default\x00")
     monkeypatch.setattr(sr, "PROCFS_ROOT", tmp_path)
-    assert sr.process_argv(123) == ["python", "--config-dir", "/a/b c", "--tenant", "default"]
-    assert sr.process_argv(124) == [], "a gone pid has no argv"
-    assert sr.process_command(123) == "python --config-dir /a/b c --tenant default"
+    assert sr.process_argv(123, platform="linux") == ["python", "--config-dir", "/a/b c", "--tenant", "default"]
+    assert sr.process_argv(124, platform="linux") == [], "a gone pid has no argv"
+    assert sr.process_command(123, platform="linux") == "python --config-dir /a/b c --tenant default"
 
 
 def test_stop_tier_holders_trusts_the_argv_over_the_joined_text(tmp_path: Path) -> None:
