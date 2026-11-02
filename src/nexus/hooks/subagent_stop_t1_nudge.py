@@ -86,7 +86,12 @@ _ERROR_PREFIX = "Error:"
 #: put"``, ``grep -rn "nx scratch put" docs/``) are not a put.
 _BASH_PUT = re.compile(
     r"(?:^|[;&|(`{\n]|\bthen\b|\bdo\b)\s*"  # a command position
-    r"(?:\w+=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)*"  # VAR=value assignments
+    # VAR=value assignments. The three value forms start with different
+    # characters (a double quote, a single quote, anything else), so a value
+    # has one parse; with a bare \S* as the third form, a quoted value matched
+    # two ways and a run of `"" 0=` backtracked exponentially (CodeQL
+    # py/redos on PR #1637).
+    r"(?:\w+=(?:\"[^\"]*\"\S*|'[^']*'\S*|(?:[^\s\"']\S*)?)\s+)*"
     r"(?:(?:sudo|env|time|nohup|timeout\s+\S+|uv\s+run)\s+)*"  # wrapper words
     r"(?:\S*/)?nx\s+scratch\s+put\b"  # nx, bare or by path
 )
