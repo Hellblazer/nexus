@@ -159,6 +159,9 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         "$ErrorActionPreference = 'Stop'",
         # $LASTEXITCODE is $null until a native command runs, so the clone's
         # check sits inside the branch that clones (a kept clone runs no git here).
+        # A clone killed midway leaves a directory that is not a repo: remove it and clone again.
+        f"if ((Test-Path {_ps_quote(repo)}) -and -not (Test-Path {_ps_quote(repo + chr(92) + '.git' + chr(92) + 'HEAD')})) "
+        f"{{ Remove-Item -LiteralPath {_ps_quote(repo)} -Recurse -Force }}",
         f"if (-not (Test-Path {_ps_quote(repo)})) {{ git clone -q --filter=blob:none {CLONE_URL} {_ps_quote(repo)}; "
         + must("clone") + " }",
         f"Set-Location {_ps_quote(repo)}",
@@ -229,6 +232,16 @@ def _check(run: Runner) -> int:
 
 
 def main(argv: Sequence[str] | None = None, *, run: Runner = subprocess.run) -> int:
+    """Exit with pytest's code, or SETUP_FAILED when any local or remote setup
+    step fails, so a setup failure is never read as a test result."""
+    try:
+        return _main(argv, run=run)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        _say(f"win_hand_test: setup failed: {exc}", err=True)
+        return SETUP_FAILED
+
+
+def _main(argv: Sequence[str] | None, *, run: Runner) -> int:
     ap = argparse.ArgumentParser(description="Run pytest on native Windows (qwent) for a commit.")
     ap.add_argument("--session", help="your session name: work goes under C:\\build\\hand\\<session>")
     ap.add_argument("--host", default=DEFAULT_HOST)
@@ -274,7 +287,11 @@ def main(argv: Sequence[str] | None = None, *, run: Runner = subprocess.run) -> 
     # qwent's ssh shell is Windows PowerShell 5.1, which turns a child's exit
     # code other than 0 or 1 into 1 unless it is passed on explicitly.
     remote_ps1 = rf"C:\build\hand\{ns.session}\win-hand.ps1"
-    proc = run(["ssh", ns.host, f"pwsh -NoProfile -File '{remote_ps1}'; exit $LASTEXITCODE"], check=False)
+    # An unset $LASTEXITCODE (pwsh never started) would exit 0: count it as setup.
+    proc = run(["ssh", ns.host,
+                f"pwsh -NoProfile -File '{remote_ps1}'; "
+                f"if ($LASTEXITCODE -eq $null) {{ exit {SETUP_FAILED} }} else {{ exit $LASTEXITCODE }}"],
+               check=False)
     return proc.returncode
 
 

@@ -82,6 +82,8 @@ def test_push_paths_are_the_workflows_filter_and_hooks_are_in_it() -> None:
         ("conexus/hooks/scripts/x.py", True),
         ("src/nexus/daemon/replace_engine.py", True),
         ("src/nexus/daemon/other.py", False),
+        ("src/nexus/daemon/replace_a/b.py", False),  # `*` in replace_*.py stops at `/`
+        ("src/nexus/hooks/deep/nested/x.py", True),  # `**` crosses it
         ("docs/foo.md", False),
     ],
 )
@@ -129,7 +131,7 @@ def test_every_powershell_single_quote_is_doubled(quote: str) -> None:
     assert quoted == f"'a{quote}{quote}b'"
 
 
-@pytest.mark.parametrize("arg", ["test[a|b]", "x&y", "a>b", "100%", 'say"hi"', "c^d"])
+@pytest.mark.parametrize("arg", ["test[a|b]", "x&y", "a>b", "a<b", "100%", 'say"hi"', "c^d"])
 def test_an_argument_cmd_would_reparse_is_refused(arg: str) -> None:
     with pytest.raises(SystemExit, match="cmd.exe"):
         wht.main(["--session", "wren", "--", arg], run=_Recorder(on_origin=True))
@@ -203,9 +205,18 @@ def test_an_unpushed_commit_travels_as_an_incremental_bundle_and_its_ref_is_drop
 
 def test_the_temp_ref_is_dropped_even_when_the_bundle_fails() -> None:
     rec = _Recorder(on_origin=False, bundle_raises=True)
-    with pytest.raises(subprocess.CalledProcessError):
-        wht.main(["--session", "wren", "--", "t.py"], run=rec)
+    assert wht.main(["--session", "wren", "--", "t.py"], run=rec) == wht.SETUP_FAILED
     assert any(c[0] == "git" and c[3] == "update-ref" and "-d" in c for c in rec.calls)
+
+
+def test_a_local_setup_failure_exits_with_the_setup_code_not_a_test_code(capsys: pytest.CaptureFixture[str]) -> None:
+    def no_such_ref(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+        if argv[0] == "git" and argv[3] == "rev-parse":
+            raise subprocess.CalledProcessError(128, argv)
+        return _Recorder(on_origin=True)(argv, **kw)
+
+    assert wht.main(["--session", "wren", "--ref", "nope", "--", "t.py"], run=no_such_ref) == wht.SETUP_FAILED
+    assert "setup failed" in capsys.readouterr().err
 
 
 def test_ref_names_the_commit_tested() -> None:
@@ -222,7 +233,10 @@ def test_the_exit_code_comes_back_unchanged(code: int) -> None:
 def test_the_ssh_line_passes_the_exit_code_through_powershell_5() -> None:
     rec = _Recorder(on_origin=True)
     wht.main(["--session", "wren", "--", "t.py"], run=rec)
-    assert rec.calls[-1][2].endswith("; exit $LASTEXITCODE")
+    line = rec.calls[-1][2]
+    assert "if ($LASTEXITCODE -eq $null) { exit 97 } else { exit $LASTEXITCODE }" in line, (
+        "pytest's code passes through, and pwsh that never ran is a setup failure, not exit 0"
+    )
 
 
 def test_a_dirty_tree_is_warned_about(capsys: pytest.CaptureFixture[str]) -> None:
@@ -250,3 +264,24 @@ def test_a_kept_clone_is_not_judged_by_an_unset_exit_code() -> None:
     assert clone_line.startswith("if (-not (Test-Path")
     assert "win_hand_test: clone failed" in clone_line, "the clone's check is inside the clone branch"
     assert script.count("clone failed") == 1
+
+
+def test_set_in_main_runs_the_ci_set_and_its_floor() -> None:
+    rec = _Recorder(on_origin=True)
+    assert wht.main(["--session", "wren", "--set"], run=rec) == 0
+    script = rec.scripts[-1]
+    assert " ".join(wht._ps_quote(a) for a in wht.ci_set_args()) in script
+    assert wht.ci_step_run(wht.FLOOR_STEP).rstrip() in script
+
+
+def test_a_run_without_set_has_no_floor() -> None:
+    rec = _Recorder(on_origin=True)
+    wht.main(["--session", "wren", "--", "t.py"], run=rec)
+    assert "check_junit_floor" not in rec.scripts[-1]
+
+
+def test_a_half_made_clone_is_removed_and_cloned_again() -> None:
+    script = wht.remote_script("wren", "abc", ["t.py"], bundle=None, fixup="", floor=None)
+    rm = script.index("Remove-Item -LiteralPath 'C:\\build\\hand\\wren\\nexus' -Recurse -Force")
+    assert "\\.git\\HEAD" in script[:rm + 200]
+    assert rm < script.index("git clone")
