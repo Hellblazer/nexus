@@ -5,6 +5,7 @@ import dev.nexus.service.jooq.t1.tables.records.ScratchRecord;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -280,24 +281,67 @@ public final class ScratchRepository {
      * {@code last_accessed} are both before the cutoff (a never-read session has a NULL newest
      * {@code last_accessed}, which counts as idle).
      *
-     * <p>Why GROUP BY / HAVING and not a per-row NOT EXISTS (nexus-mtheb.6). The first form of this
-     * condition was {@code ts < cutoff AND NOT EXISTS (a row of the same session with ts >= cutoff OR
-     * last_accessed >= cutoff)}. {@code last_accessed} has no index, and with statistics the planner
-     * made it a Hash Anti Join (a few ms on 100k rows), but a table autovacuum had not analyzed yet got
-     * a Nested Loop Anti Join: one index probe per old row, each reading the whole session, so a session
-     * of k rows cost k*k row visits (measured: 270k buffers for 10k rows, 100 ms, against 405 for the
-     * hash plan). The aggregate subquery is uncorrelated, so the planner cannot turn it into a
-     * per-row probe: the worst plan is one pass over the table plus one probe per idle session.
-     * No index is needed.
+     * <p>Why candidate sessions and one aggregate probe each, not a per-row NOT EXISTS and not a
+     * whole-table GROUP BY (nexus-mtheb.6). {@code last_accessed} has no index, so the idle test has to
+     * read a session's rows, and the question is how often. Measured with EXPLAIN (ANALYZE, BUFFERS) on
+     * 100k-row tenants, as the service role under RLS, a second 100k-row tenant beside it, in ms, with
+     * statistics / without (a table autovacuum has not analyzed yet):
+     * <pre>
+     *                         per-row NOT EXISTS   GROUP BY, whole table   this form
+     *   4000 x 25, 1% idle        27 / 33              113 / 37               18 / 15
+     *   200 x 500, 1% idle        90 / 33              109 / 35               17 /  8
+     *   nothing idle           0.016 / 1.8               63 / 37            0.025 / 1.8
+     *   40 x 2500, 5% idle      1672 / 36                58 / 37               30 / 19
+     *   4000 x 25, 50% idle        74 / 72              140 / 73              148 / 148-264
+     * </pre>
+     * The per-row NOT EXISTS (the first form: {@code ts < cutoff AND NOT EXISTS (a row of the same session
+     * with ts >= cutoff OR last_accessed >= cutoff)}) probes once per OLD ROW and each probe reads the
+     * whole session, so a session of k rows costs k*k: 100 ms and 270k buffers on 10k unanalyzed rows, and
+     * 1.7 s on 100k rows of 2500-row sessions even with statistics (Nested Loop Anti Join). The
+     * whole-table GROUP BY (the second form) is flat, one pass over the tenant whatever is idle, but a
+     * sweep that finds nothing idle still reads every row (63 ms at 100k rows against 0.014).
+     *
+     * <p>This form starts from the old rows, which idx_scratch_ts finds, takes their distinct sessions
+     * (the candidates: every idle session is among them, because every row of an idle session is old),
+     * and for each candidate runs one lateral aggregate over that session through
+     * idx_scratch_tenant_session. The cost is the rows of the sessions that have an old row: nothing when
+     * nothing is old, one probe per session rather than per row when something is. The lateral keeps the
+     * planner from turning the aggregate into a per-row probe or a whole-table pass, which is what made
+     * the plan depend on statistics. The outer {@code ts < cutoff} is redundant for the rows of an idle
+     * session and is what lets the DELETE read only old rows. No new index.
+     *
+     * <p>Known costs of this form, all at 100k rows (they scale with the tenant, and each statement is
+     * bounded by a pass over it). When half the table is idle (a catch-up after an outage) it measured
+     * 148 / 148-264 ms against 74 / 72 for the NOT EXISTS: the work is the same rows, planned with more
+     * sorting. And the planner's estimate of the candidate count can push a statement's total cost past
+     * {@code jit_above_cost}, so PostgreSQL compiles it: 12 ms on every run measured, 250 ms where the
+     * estimate was high (the superuser path, {@link #sweepExpired}, which has no production caller; the
+     * scheduled sweep is {@link #sweepTenant}). The plan is pinned by ScratchSweepVolumeTest (candidates
+     * from idx_scratch_ts, a probe keyed on the candidate session, no anti-join).
      */
     public static Condition idleSessionRows(OffsetDateTime cutoff) {
+        Scratch old = SCRATCH.as("o");
         Scratch s = SCRATCH.as("s");
-        Field<OffsetDateTime> newestRead = max(s.LAST_ACCESSED);
-        return row(SCRATCH.TENANT_ID, SCRATCH.SESSION_ID).in(
-            select(s.TENANT_ID, s.SESSION_ID)
+        Table<?> candidates = selectDistinct(old.TENANT_ID.as("t"), old.SESSION_ID.as("sid"))
+            .from(old)
+            .where(old.TS.lt(cutoff))
+            .asTable("c");
+        Field<String> candidateTenant = candidates.field("t", String.class);
+        Field<String> candidateSession = candidates.field("sid", String.class);
+        Table<?> activity = lateral(
+            select(max(s.TS).as("newest_put"), max(s.LAST_ACCESSED).as("newest_read"))
                 .from(s)
-                .groupBy(s.TENANT_ID, s.SESSION_ID)
-                .having(max(s.TS).lt(cutoff).and(newestRead.isNull().or(newestRead.lt(cutoff)))));
+                .where(s.TENANT_ID.eq(candidateTenant))
+                .and(s.SESSION_ID.eq(candidateSession)))
+            .asTable("a");
+        Field<OffsetDateTime> newestPut = activity.field("newest_put", OffsetDateTime.class);
+        Field<OffsetDateTime> newestRead = activity.field("newest_read", OffsetDateTime.class);
+        // A never-read session has a NULL newest_read, which counts as idle.
+        return SCRATCH.TS.lt(cutoff).and(row(SCRATCH.TENANT_ID, SCRATCH.SESSION_ID).in(
+            select(candidateTenant, candidateSession)
+                .from(candidates)
+                .crossJoin(activity)
+                .where(newestPut.lt(cutoff).and(newestRead.isNull().or(newestRead.lt(cutoff))))));
     }
 
     /**

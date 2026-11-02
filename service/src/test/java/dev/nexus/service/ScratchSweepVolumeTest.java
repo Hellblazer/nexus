@@ -33,15 +33,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  * correctness is pinned by ScratchRepositoryTest on a handful of rows; this class seeds a tenant in three
  * shapes (many small sessions, a few huge ones, 100k rows; layout in {@link #seed}), runs the real sweep
  * and asserts it deletes exactly the idle sessions' rows, and reads the plan of the same DELETE as the
- * service role under RLS. {@code last_accessed} has no index, so the question the plan answers is what the
- * idle test costs per candidate row. The first form was a per-row {@code NOT EXISTS}: with statistics a
- * Hash Anti Join, but on a table autovacuum had not analyzed yet a Nested Loop Anti Join, one probe per
- * old row reading the whole session (k rows cost k*k). The test pins that no plan is a per-row probe, with
- * and without statistics (the first seconds of a new table, before autovacuum analyzes it), so a rewrite that brings the correlated form back fails here.
+ * service role under RLS and as the superuser (sweepExpired). {@code last_accessed} has no index, so the
+ * question the plan answers is how often the idle test reads a session. The first form was a per-row
+ * {@code NOT EXISTS}: one probe per old row reading the whole session (k rows cost k*k), a Nested Loop Anti
+ * Join without statistics and still so with them on large sessions. The second was a whole-table GROUP BY,
+ * which reads every row of the tenant even when nothing is idle. The form now in use takes the distinct
+ * sessions of the old rows from idx_scratch_ts and aggregates each once. The test pins that shape, with and
+ * without statistics (the first seconds of a new table, before autovacuum analyzes it): a probe keyed on the
+ * candidate session ({@code session_id = c.sid}), no anti-join and no SubPlan, and on the unanalyzed table the
+ * candidates found through idx_scratch_ts. A revert to either earlier form fails on the positive half even once the table is analyzed.
  *
  * <p>The plan is the planner's estimate ({@code ctx.explain}, typed); its actual timings and buffers were
- * read with EXPLAIN (ANALYZE, BUFFERS) and are in the nexus-mtheb.6 write-back. The estimate is enough for
- * the pin because the join strategy is what differs.
+ * read with EXPLAIN (ANALYZE, BUFFERS) and are in the {@code idleSessionRows} javadoc and the nexus-mtheb.6
+ * write-back. The estimate is enough for the pin because the join strategy is what differs.
  *
  * <p>Hermetic: Testcontainers Postgres, requires Docker.
  */
@@ -161,7 +165,22 @@ class ScratchSweepVolumeTest {
             dsl.explain(dsl.deleteFrom(SCRATCH).where(ScratchRepository.idleSessionRows(cutoff))).plan());
     }
 
-    private void assertNoPerRowProbe(String what, String plan) {
+    /** The planner's plan for the same DELETE as sweepExpired runs it: superuser, no RLS, every tenant. */
+    private String explainSweepAsSuperuser(DSLContext su, OffsetDateTime cutoff) {
+        return su.explain(su.deleteFrom(SCRATCH).where(ScratchRepository.idleSessionRows(cutoff))).plan();
+    }
+
+    /**
+     * The shape idleSessionRows promises, in whatever regime the planner is in: the candidate sessions are
+     * found from the old rows, each is aggregated by one probe keyed on that session ({@code session_id = c.sid},
+     * the lateral parameter), and nothing probes per old row. The positive half is what a revert to the
+     * whole-table GROUP BY form or to the per-row NOT EXISTS fails even once the table has been analyzed
+     * (the planner then picks a Hash Semi Join or Hash Anti Join, which carry no such parameter).
+     */
+    private void assertCandidateDrivenPlan(String what, String plan) {
+        assertThat(plan).as("%s: one probe per candidate session, keyed on it:%n%s", what, plan)
+            .contains("session_id = c.sid")
+            .contains("tenant_id = c.t");
         assertThat(plan).as("%s: no per-row probe of the session:%n%s", what, plan)
             .doesNotContain("Nested Loop Anti Join")
             .doesNotContain("SubPlan");
@@ -191,7 +210,18 @@ class ScratchSweepVolumeTest {
             OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
             String noStats = explainSweepUnderRls(cutoff);
             report.append("PLAN ").append(SMALL_SESSIONS.name()).append(" (no statistics, RLS)\n").append(noStats).append("\n");
-            assertNoPerRowProbe(SMALL_SESSIONS.name() + ", no statistics", noStats);
+            assertCandidateDrivenPlan(SMALL_SESSIONS.name() + ", no statistics", noStats);
+            // Only here, where the planner has no statistics to change its mind with: the candidates are found
+            // through the ts index, not by reading the table (later shapes may have been analyzed by autovacuum,
+            // and with most of a table old a seq scan can be the planner's honest choice).
+            // Twice: the DELETE reads the old rows through it, and so does the candidate subquery. A candidate
+            // set that is not restricted to old rows (every session) would leave one.
+            assertThat(java.util.regex.Pattern.compile("(?:on|using) idx_scratch_ts").matcher(noStats).results().count())
+                .as("the delete and the candidate subquery both read the old rows through the ts index:%n%s", noStats)
+                .isGreaterThanOrEqualTo(2);
+            String noStatsSu = explainSweepAsSuperuser(su, cutoff);
+            report.append("PLAN ").append(SMALL_SESSIONS.name()).append(" (no statistics, superuser)\n").append(noStatsSu).append("\n");
+            assertCandidateDrivenPlan(SMALL_SESSIONS.name() + ", no statistics, superuser", noStatsSu);
             sweepAndAssert(su, SMALL_SESSIONS, cutoff, SMALL_SESSIONS.name() + ", no statistics");
 
             for (Shape sh : SHAPES) {
@@ -200,7 +230,10 @@ class ScratchSweepVolumeTest {
                 cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
                 String plan = explainSweepUnderRls(cutoff);
                 report.append("PLAN ").append(sh.name()).append(" (RLS)\n").append(plan).append("\n");
-                assertNoPerRowProbe(sh.name(), plan);
+                assertCandidateDrivenPlan(sh.name(), plan);
+                String planSu = explainSweepAsSuperuser(su, cutoff);
+                report.append("PLAN ").append(sh.name()).append(" (superuser)\n").append(planSu).append("\n");
+                assertCandidateDrivenPlan(sh.name() + ", superuser", planSu);
                 long t0 = System.nanoTime();
                 sweepAndAssert(su, sh, cutoff, sh.name());
                 report.append("MEASURE ").append(sh.name()).append(": sweep and assertions ")

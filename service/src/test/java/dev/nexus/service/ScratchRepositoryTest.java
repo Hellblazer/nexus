@@ -490,9 +490,10 @@ class ScratchRepositoryTest {
 
     @Test
     void sweepExpired_judgesASessionIdPerTenant() throws Exception {
-        // sweepExpired runs without RLS, so the tenant predicate inside the NOT EXISTS is the only thing
-        // keeping one tenant's live session from protecting another tenant's idle one that has the same
-        // session id (a session id is client-chosen, so two tenants can collide on it).
+        // sweepExpired runs without RLS, so the tenant column in the candidate (tenant, session) pairs and in
+        // the per-session aggregate's correlation is the only thing keeping one tenant's live session from
+        // protecting another tenant's idle one that has the same session id (a session id is client-chosen,
+        // so two tenants can collide on it).
         String tIdle = "sweep-xt-idle-" + System.nanoTime();
         String tLive = "sweep-xt-live-" + System.nanoTime();
         String shared = "sweep-xt-session-" + System.nanoTime();
