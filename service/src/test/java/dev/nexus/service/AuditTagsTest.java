@@ -47,9 +47,14 @@ class AuditTagsTest {
         "(^|[-_.: ])critique([-_.: ]|$)",
         "(^|[-_.: ])gate([-_.: ]|$)",
         "(^|[-_.: ])fix-check([-_.: ]|$)",
-        "-research-[0-9]+(\\.md)?$",
+        "-research-[0-9]+([.: ]|$)",
         "(^|[-_.: ])confirm([-_.: ]|$)",
-        "(^|[-_.: ])audit([-_.: ]|$)");
+        "(^|[-_.: ])audit([-_.: ]|$)",
+        "(^|[-_.: ])critic([-_.: ]|$)",
+        "(^|[-_.: ])confirmation([-_.: ]|$)",
+        "(^|[-_.: ])rereview([-_.: ]|$)",
+        "(^|[-_.: ])codereview([-_.: ]|$)",
+        "(^|[-_.: ])fixcheck([-_.: ]|$)");
 
     private record Parsed(Set<String> tags, List<String> patterns) {}
 
@@ -172,8 +177,8 @@ class AuditTagsTest {
             null, "", "reviewer-notes", "research-notes", "preview", "previewer-plan", "gates-notes",
             "gated-release", "critiques-index", "238-research-notes", "238-research-9-notes",
             "continuation-state", "rdr-238-a2-read-sample", "project_art_is_the_founding_use_case",
-            "chas-test-host-howto", "confirmation-plan", "auditor-notes", "reviewer-notes.md",
-            "238-research-9.md-notes", "238-research-9.mdx"}) {
+            "chas-test-host-howto", "confirmations-log", "auditor-notes", "reviewer-notes.md",
+            "238-research-9x", "238-research-v9"}) {
             Optional<String> hit = AuditTags.titlePatternOf(title);
             assertThat(hit).as("title %s", title).isEmpty();
         }
@@ -182,7 +187,7 @@ class AuditTagsTest {
     @Test
     void firstMatchingPatternIsNamed() {
         assertThat(AuditTags.titlePatternOf("critique-x")).contains("(^|[-_.: ])critique([-_.: ]|$)");
-        assertThat(AuditTags.titlePatternOf("232-research-24")).contains("-research-[0-9]+(\\.md)?$");
+        assertThat(AuditTags.titlePatternOf("232-research-24")).contains("-research-[0-9]+([.: ]|$)");
     }
 
     @Test

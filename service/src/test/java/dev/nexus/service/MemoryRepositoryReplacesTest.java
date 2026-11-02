@@ -281,8 +281,14 @@ class MemoryRepositoryReplacesTest {
             args("test-suite-compression-P2-reduced-round2-critique", "(^|[-_.: ])critique([-_.: ]|$)"),
             args("210-gate-r1-answers-sam-2026-10-17", "(^|[-_.: ])gate([-_.: ]|$)"),
             args("215-fix-check-dd95743fa", "(^|[-_.: ])fix-check([-_.: ]|$)"),
-            args("232-research-24", "-research-[0-9]+(\\.md)?$"),
-            args("232-research-24.md", "-research-[0-9]+(\\.md)?$"),
+            args("232-research-24", "-research-[0-9]+([.: ]|$)"),
+            args("232-research-24.md", "-research-[0-9]+([.: ]|$)"),
+            args("232-research-3: title-chain method", "-research-[0-9]+([.: ]|$)"),
+            args("rdr232-critic-pass-2", "(^|[-_.: ])critic([-_.: ]|$)"),
+            args("wwaqm-confirmation-72f62dab4-2026-09-14", "(^|[-_.: ])confirmation([-_.: ]|$)"),
+            args("nexus-4lkmz-rereview-2026-08-07.md", "(^|[-_.: ])rereview([-_.: ]|$)"),
+            args("x-codereview-1", "(^|[-_.: ])codereview([-_.: ]|$)"),
+            args("y_fixcheck", "(^|[-_.: ])fixcheck([-_.: ]|$)"),
             args("confirm-dsr6a-431c62543-2026-10-17", "(^|[-_.: ])confirm([-_.: ]|$)"),
             args("225-plan-audit-r1", "(^|[-_.: ])audit([-_.: ]|$)"));
     }
@@ -306,7 +312,7 @@ class MemoryRepositoryReplacesTest {
         // contain the token review, so "review" names them; they stay in the table as explicit entries.
         assertThat(dev.nexus.service.db.AuditTags.titlePatternOf("x-code-review-y"))
             .contains("(^|[-_.: ])review([-_.: ]|$)");
-        assertThat(dev.nexus.service.db.AuditTags.TITLE_PATTERN_SOURCES).hasSize(9);
+        assertThat(dev.nexus.service.db.AuditTags.TITLE_PATTERN_SOURCES).hasSize(14);
     }
 
     @ParameterizedTest
@@ -325,7 +331,7 @@ class MemoryRepositoryReplacesTest {
     @ParameterizedTest
     @ValueSource(strings = {"reviewer-notes", "research-notes", "preview", "gates-notes", "238-research-notes",
                             "continuation-state", "rdr-238-a2-read-sample", "chas-test-host-howto",
-                            "confirmation-plan", "auditor-notes"})
+                            "confirmations-log", "auditor-notes"})
     void doesNotRefuse_nearMissTitles(String title) {
         String t = tenant(); String p = project();
         put(t, p, title, "body of " + title, "bead:nexus-x");
@@ -530,14 +536,14 @@ class MemoryRepositoryReplacesTest {
         String t = tenant(); String p = project();
         put(t, p, "cancel-delete-target", "body that survives", "a");
         List<Row> before = snapshot(t, p);
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            st.execute("CREATE OR REPLACE FUNCTION nexus.cancel_delete_for_test() RETURNS trigger AS $$ "
-                + "BEGIN IF OLD.title = 'cancel-delete-target' THEN RETURN NULL; END IF; RETURN OLD; END $$ "
-                + "LANGUAGE plpgsql");
-            st.execute("CREATE TRIGGER cancel_delete_for_test BEFORE DELETE ON nexus.memory "
-                + "FOR EACH ROW EXECUTE FUNCTION nexus.cancel_delete_for_test()");
-        }
         try {
+            try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+                st.execute("CREATE OR REPLACE FUNCTION nexus.cancel_delete_for_test() RETURNS trigger AS $$ "
+                    + "BEGIN IF OLD.title = 'cancel-delete-target' THEN RETURN NULL; END IF; RETURN OLD; END $$ "
+                    + "LANGUAGE plpgsql");
+                st.execute("CREATE TRIGGER cancel_delete_for_test BEFORE DELETE ON nexus.memory "
+                    + "FOR EACH ROW EXECUTE FUNCTION nexus.cancel_delete_for_test()");
+            }
             assertThatThrownBy(() -> replace(t, p, "new-note", "N", "x", "cancel-delete-target"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("affected 0 rows")

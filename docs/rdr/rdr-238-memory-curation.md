@@ -212,9 +212,10 @@ here are the ones each pass found on a named page or table.
   for rules over a long session. This is A3, measured in Phase 2.
 - **2026-11-01, Implementation (Phase 1):** the K4 title-pattern backstop was
   chosen by Sam as option (a). `replaces` also refuses a target whose title
-  carries one of nine tokens: `review`, `code-review`, `commit-review`,
-  `critique`, `gate`, `fix-check`, `confirm`, `audit`, and the series suffix
-  `-research-N` (with or without `.md`). A token is a whole word bounded by the
+  carries one of thirteen tokens: `review`, `code-review`, `commit-review`,
+  `critique`, `critic`, `gate`, `fix-check`, `fixcheck`, `confirm`,
+  `confirmation`, `rereview`, `codereview`, `audit`, or the series suffix
+  `-research-N` at the end of the title or before `.`, `:` or a space. A token is a whole word bounded by the
   start or end of the title or by `-`, `_`, `.`, `:` or a space; `reviewer-notes`
   and `preview` do not match. Matching is case-insensitive and ASCII-only, a
   search not a full match, and the one list lives in
@@ -222,6 +223,11 @@ here are the ones each pass found on a named page or table.
   is generated. The K5 limit: a replace is never retried, so a response lost to a
   replace that landed loses the echo; the new row exists, the old one is gone,
   and the deleted content cannot be recovered from the engine.
+  Review round 1 added two refusals: a replace whose new title already names
+  another row (live or quarantined) is 409, because overwriting it would remove
+  a row without echoing it; a present but blank `replaces` is 400. Two replaces
+  that swap titles can deadlock on the row locks; PostgreSQL aborts one, and
+  nothing is written by the aborted one.
 
 ### Critical Assumptions
 

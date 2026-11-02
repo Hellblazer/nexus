@@ -50,7 +50,7 @@ def test_a_missing_file_is_caught(tmp_path, monkeypatch):
 
 def test_generated_java_names_every_title_pattern_and_states_the_rule():
     text = gen.OUTPUT.read_text(encoding="utf-8")
-    assert len(audit_tags.TITLE_PATTERNS) == 9
+    assert len(audit_tags.TITLE_PATTERNS) == 14
     for pattern in audit_tags.TITLE_PATTERNS:
         assert gen.java_string(pattern) in text, pattern
     for needle in ("case-insensitively", "anywhere in the title", "quantifier"):

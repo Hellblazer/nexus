@@ -34,10 +34,11 @@
 # end of the title or by one of '-', '_', '.', ':' or a space on each side, so
 # "review" matches "code-review-x", "x_review", "nexus-1si7z-code-review.md",
 # "gate:x" and "review of x" but not "reviewer-notes" or "preview". The -research-N
-# pattern also accepts a .md suffix. No entry may put a quantifier (star, plus,
+# pattern ends the title or is followed by
+# '.', ':' or a space (232-research-24.md, "232-research-3: method"). No entry may put a quantifier (star, plus,
 # brace) after a group: Java's regex engine recurses per character on such a
 # group and overflows the stack. The (^|[-_.: ]) prefix is a group with no
-# quantifier, and (\.md)? is one optional group, which is safe. A false refusal is the safe
+# quantifier, which is safe. A false refusal is the safe
 # direction: the writer falls back to a plain put, so a pattern may catch an
 # ordinary note (gate-jar-howto) and cost one extra step, never data.
 #
@@ -101,7 +102,12 @@ title_patterns = [
   "(^|[-_.: ])critique([-_.: ]|$)",
   "(^|[-_.: ])gate([-_.: ]|$)",
   "(^|[-_.: ])fix-check([-_.: ]|$)",
-  "-research-[0-9]+(\\.md)?$",
+  "-research-[0-9]+([.: ]|$)",
   "(^|[-_.: ])confirm([-_.: ]|$)",
   "(^|[-_.: ])audit([-_.: ]|$)",
+  "(^|[-_.: ])critic([-_.: ]|$)",
+  "(^|[-_.: ])confirmation([-_.: ]|$)",
+  "(^|[-_.: ])rereview([-_.: ]|$)",
+  "(^|[-_.: ])codereview([-_.: ]|$)",
+  "(^|[-_.: ])fixcheck([-_.: ]|$)",
 ]

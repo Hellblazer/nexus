@@ -1045,8 +1045,8 @@ public final class MemoryRepository {
             if (incumbent != null) {
                 throw new IllegalStateException(
                     "replaces refused: a row titled '" + title + "' already exists in project '" + project
-                    + "'; writing it would overwrite that row without echoing it. Replace or delete it "
-                    + "first, or choose another title (nothing written)");
+                    + "'; writing it would overwrite that row without echoing it. Delete it first (restore "
+                    + "it first if it is quarantined), or choose another title (nothing written)");
             }
             String replacedContent = target.getContent();
             int deleted = ctx.deleteFrom(MEMORY).where(MEMORY.ID.eq(target.getId())).execute();

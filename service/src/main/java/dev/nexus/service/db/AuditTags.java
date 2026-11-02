@@ -52,9 +52,14 @@ public final class AuditTags {
         "(^|[-_.: ])critique([-_.: ]|$)",
         "(^|[-_.: ])gate([-_.: ]|$)",
         "(^|[-_.: ])fix-check([-_.: ]|$)",
-        "-research-[0-9]+(\\.md)?$",
+        "-research-[0-9]+([.: ]|$)",
         "(^|[-_.: ])confirm([-_.: ]|$)",
-        "(^|[-_.: ])audit([-_.: ]|$)");
+        "(^|[-_.: ])audit([-_.: ]|$)",
+        "(^|[-_.: ])critic([-_.: ]|$)",
+        "(^|[-_.: ])confirmation([-_.: ]|$)",
+        "(^|[-_.: ])rereview([-_.: ]|$)",
+        "(^|[-_.: ])codereview([-_.: ]|$)",
+        "(^|[-_.: ])fixcheck([-_.: ]|$)");
 
     private static final List<Pattern> TITLE_PATTERNS = TITLE_PATTERN_SOURCES.stream()
             .map(p -> Pattern.compile(p, Pattern.CASE_INSENSITIVE | Pattern.UNIX_LINES))
