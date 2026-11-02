@@ -40,8 +40,10 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5044
+provisioned_tests = 5051
 tolerance_tests = 0
+# 5044 -> 5051 (nexus-qo7ie.7, rebased 2026-11-02): +7, the seven t2_tenant tests in tests/test_memory_replaces.py (the replaces
+# write path against the real engine). Was 5024 -> 5031, then 5042 -> 5049, before the rebases onto develop.
 # 5042 -> 5044 (7.94.0 shakedown, 2026-11-02): +2 in tests/upgrade/test_legacy_rows_walk_substrate.py: the note-tags-array and
 # manifest-section-labels rungs driven through the production ladder walk over seeded legacy rows on the engine (dry run pending,
 # real run converts exactly the legacy rows, second dry run converged); each fails with its rung's converge a no-op. They need
