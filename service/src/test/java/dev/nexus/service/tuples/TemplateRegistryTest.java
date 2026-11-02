@@ -769,6 +769,23 @@ class TemplateRegistryTest {
                 Map.of("k", "3889972"), Map.of("d", "one"), "hello", null, "doc.example.nonce");
     }
 
+    /**
+     * A stray example dimension that shares a declared key's name is labelled by where the
+     * value sits in the example, not by the template's declarations: {@code dims.k}, not
+     * {@code keys.k}. When the key itself is the faulty one, the key half of the validator
+     * fires first and the label stays {@code keys.k}.
+     */
+    @Test
+    void aStrayExampleDimensionSharingAKeyNameIsLabelledDimsNotKeys() {
+        assertRefusalQuotesTheSharedValidator(
+                GOOD_DOC_TEMPLATE.replace("      d: one\n", "      d: one\n      k: v\n"),
+                Map.of("k", "3889972"), Map.of("d", "one", "k", "v"), "hello", "n1", "doc.example.dims.k");
+        assertRefusalQuotesTheSharedValidator(
+                GOOD_DOC_TEMPLATE.replace("      d: one\n", "      d: one\n      k: v\n")
+                        .replace("      k: 3889972\n", "      k: \" \"\n"),
+                Map.of("k", " "), Map.of("d", "one", "k", "v"), "hello", "n1", "doc.example.keys.k");
+    }
+
     @Test
     void exampleSizeFailureIsRefusedNamingTheFieldThroughTheSharedValidator() {
         String longKey = "v".repeat(257);
@@ -834,16 +851,43 @@ class TemplateRegistryTest {
         assertEquals(base, loadGroup("test", withDoc).digest());
     }
 
+    /**
+     * Behaviour, not case names: the doc block's canonical form (what the digest hashes) carries
+     * all seven parts, and the edits in {@link #docPartEdits} between them move every one of
+     * those seven entries and move the digest each time. A part the canonical form drops (a
+     * {@code m.put} removed from {@code docCanonicalMap}) leaves the form short of seven; a part
+     * with no edit leaves one entry that nothing moves.
+     */
+    @SuppressWarnings("unchecked")
     @Test
     void theDocPartsListCoversEverySevenParts() {
-        List<String> parts = docPartEdits().map(a -> (String) a.get()[0]).toList();
-        for (String part : List.of("summary", "writers", "readers", "fields", "body", "example", "see_also")) {
-            assertTrue(parts.stream().anyMatch(p -> p.startsWith(part)), "no digest case for doc part " + part);
-        }
+        java.util.Set<String> sevenParts = new java.util.TreeSet<>(
+                List.of("summary", "writers", "readers", "fields", "body", "example", "see_also"));
+        TemplateRegistry base = loadGroup("test", GOOD_DOC_TEMPLATE);
+        Map<String, Object> baseDoc = (Map<String, Object>)
+                TemplateRegistry.toCanonicalMap(base.byName("alpha/<x>")).get("doc");
+        // A registry whose canonical doc form has dropped a part fails here, before any edit runs.
+        assertEquals(sevenParts, baseDoc.keySet(), "the canonical doc form must carry all seven parts");
+        java.util.Set<String> moved = new java.util.TreeSet<>();
+        docPartEdits().forEach(a -> {
+            String part = (String) a.get()[0];
+            TemplateRegistry edited = loadGroup("test", (String) a.get()[1]);
+            Map<String, Object> editedDoc = (Map<String, Object>)
+                    TemplateRegistry.toCanonicalMap(edited.byName("alpha/<x>")).get("doc");
+            assertNotEquals(base.digest(), edited.digest(), "digest unmoved by an edit to " + part);
+            for (String key : sevenParts) {
+                if (!java.util.Objects.equals(baseDoc.get(key), editedDoc.get(key))) {
+                    moved.add(key);
+                }
+            }
+        });
+        assertEquals(sevenParts, moved, "no edit in docPartEdits moves these doc parts");
     }
 
+    /** Pins the canonical form's key: a template without doc has no {@code doc} entry, one with
+     *  doc has it. This is not a golden digest; it does not pin any digest value. */
     @Test
-    void aTemplateWithoutDocHasNoDocKeyInItsCanonicalFormSoItsDigestIsUnmoved() {
+    void aTemplateWithoutDocHasNoDocKeyInItsCanonicalForm() {
         TemplateRegistry plain = loadGroup("test", minimalTemplateYaml("session-log/<session_id>", 100L));
         assertFalse(TemplateRegistry.toCanonicalMap(plain.byName("session-log/<session_id>")).containsKey("doc"));
         TemplateRegistry documented = loadGroup("test", GOOD_DOC_TEMPLATE);
