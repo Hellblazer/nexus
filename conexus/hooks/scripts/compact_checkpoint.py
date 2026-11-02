@@ -306,7 +306,7 @@ def _run_nx(args: list[str], cwd: str | None, timeout: float) -> tuple[str, str 
             timeout=max(timeout, 0.5), cwd=cwd if cwd and os.path.isdir(cwd) else None, check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        return _decode(exc.stdout), f"`nx {' '.join(args)}` timed out after {timeout:.0f}s"
+        return _decode(exc.stdout), f"`nx {' '.join(args)}` timed out after {timeout:g}s"
     except (subprocess.SubprocessError, OSError) as exc:
         return "", f"`nx {' '.join(args)}` failed to start: {type(exc).__name__}: {exc}"
     if result.returncode != 0:
@@ -471,12 +471,19 @@ def _board_entry(
                 if row[0] not in (r[0] for r in rows):
                     rows.append(row)
             candidates = sorted(rows[:_SESSION_CANDIDATES], key=lambda r: r[2], reverse=True)
-            for row_id, title, _ts in candidates:
+            unfetched: list[str] = []
+            for i, (row_id, title, _ts) in enumerate(candidates):
                 if phase_left() < _MIN_CALL_S:
+                    unfetched.extend(f"[{r[0]}] the time budget ran out" for r in candidates[i:])
                     break
                 body, get_error = _run_nx(["memory", "get", row_id, "--project", _BOARD_PROJECT], cwd, phase_left())
-                if not get_error and _has_session_line(body, session_id):
+                if get_error:
+                    unfetched.append(f"[{row_id}] {get_error}")
+                elif _has_session_line(body, session_id):
                     return title, body, "session id", None
+            if unfetched:
+                # Hits that were never read cannot be called absent (review r2 L2).
+                error = "the session-line search found hits that could not be fetched: " + "; ".join(unfetched)
     else:
         error = "the board lookup's time budget left no room for the session-line search"
     if not name:

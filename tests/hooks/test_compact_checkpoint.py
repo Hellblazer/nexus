@@ -1161,6 +1161,24 @@ class TestBoardBudget:
         assert (title, how, error) == (NAME, "exact title", None) and "board of linda" in body
         assert elapsed <= mod._BOARD_TIMEOUT_S
 
+    def test_hits_that_could_not_be_fetched_are_named_not_called_absent(self, mod, monkeypatch) -> None:
+        """A search that found hits whose fetches failed must not report that no entry carries the line
+        (review r2 L2); the warning names the failed fetch instead."""
+        hits = "[201] threads/h201  (-, 2026-11-01T00:00:00Z)"
+
+        def behave(kind, args):
+            if kind == "search":
+                return 0.2, hits
+            if kind == "get" and args[2] == "201":
+                return None, ""
+            return {"list": (0.3, "No entries."), "get": (0.3, "")}[kind]
+
+        (_title, body, _how, error), _calls, elapsed = self.drive(mod, monkeypatch, behave)
+        assert body == "" and error
+        assert "carries `session:" not in error, error
+        assert "could not be fetched" in error and "timed out" in error, error
+        assert elapsed <= mod._BOARD_TIMEOUT_S
+
     def test_a_call_is_not_started_on_less_than_the_minimum(self, mod, monkeypatch) -> None:
         def behave(kind, args):
             return {"search": (2.0, ""), "list": (None, ""), "get": (1.0, "x")}[kind]
