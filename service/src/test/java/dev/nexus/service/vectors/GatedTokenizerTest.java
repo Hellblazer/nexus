@@ -187,6 +187,33 @@ class GatedTokenizerTest {
         assertThat(codec.events).containsExactly("encode-end");
     }
 
+    /**
+     * Doc and query embed routers close the same delegate one after the other on the hook, so a stuck
+     * encode must cost one bound, not one per close.
+     */
+    @Test
+    void aSecondCloseDoesNotWaitOutTheBoundAgain() throws Exception {
+        BlockingCodec codec = new BlockingCodec(true);
+        GatedTokenizer tok = new GatedTokenizer(new OrtInitGate(), codec, 1_000);
+        Future<?> encode = blockedEncode(tok, codec);
+
+        long t0 = System.nanoTime();
+        tok.close();   // waits the whole 1 s bound, gives up
+        long first = (System.nanoTime() - t0) / 1_000_000;
+        assertThat(first).as("non-vacuity: the first close waited its bound").isGreaterThanOrEqualTo(900);
+
+        long t1 = System.nanoTime();
+        tok.close();
+        long second = (System.nanoTime() - t1) / 1_000_000;
+        assertThat(second).as("the second close must not wait the bound again").isLessThan(400);
+        assertThat(codec.events).as("neither close freed the handle under the encode").isEmpty();
+
+        codec.release.countDown();
+        encode.get(10, TimeUnit.SECONDS);
+        tok.close();   // the encode is gone: a later close still frees the handle
+        assertThat(codec.events).containsExactly("encode-end", "close");
+    }
+
     @Test
     void closeIsIdempotentAndEncodeAfterCloseIsRefused() {
         BlockingCodec codec = new BlockingCodec(false);

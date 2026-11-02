@@ -47,7 +47,13 @@ public final class GatedTokenizer implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(GatedTokenizer.class);
 
-    /** How long {@link #close()} waits for encodes already inside; under the supervisor's 5 s SIGKILL grace. */
+    /**
+     * How long {@link #close()} waits for encodes already inside, in total per tokenizer: once a close
+     * has waited this long, later closes try the lock without waiting (doc and query embed routers close
+     * the same delegate one after the other on Main's hook). So the worst case on an exit the gate did not
+     * drain (a stuck encode) is this one wait, 2 s, against the supervisor's 5 s SIGKILL grace; the gated
+     * path drains first and waits ~0.
+     */
     static final long CLOSE_WAIT_MILLIS = 2_000L;
 
     /** What this class guards: test seam over the native tokenizer. */
@@ -65,6 +71,8 @@ public final class GatedTokenizer implements AutoCloseable {
     /** Readers are encodes in progress; the writer is the close. */
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
     private volatile boolean closing;
+    /** Set once a close has waited its whole bound and given up; later closes do not wait again. */
+    private volatile boolean closeWaitSpent;
 
     /**
      * A truncating, non-padding tokenizer loaded from {@code tokenizerPath}, guarded by the process
@@ -101,10 +109,14 @@ public final class GatedTokenizer implements AutoCloseable {
     private Encoding guarded(Supplier<Encoding> body) {
         OrtInitGate.Scope scope = gate.enter("tokenize");
         try {
-            // Checked before the lock too: a close waiting for the encodes inside queues as the writer,
-            // and a blocking read lock would park a late encode behind it for the whole close wait.
-            // tryLock() does not queue behind a waiting writer; it fails only while the close holds it.
-            if (closing || !lock.readLock().tryLock()) {
+            // tryLock() does not queue behind a waiting writer, so a late encode is not parked behind a
+            // close that is waiting for the encodes inside; it fails only while the close holds the write
+            // lock. `closing` is read only AFTER the lock is held: a close that already finished (flag set,
+            // lock taken and released, handle freed) leaves the lock free, so tryLock succeeds on a freed
+            // handle and this read is the only thing that refuses it. Pinned by
+            // closeIsIdempotentAndEncodeAfterCloseIsRefused (finished close) and
+            // anEncodeThatStartsOnceCloseHasBegun... (late encode wins the lock against a waiting close).
+            if (!lock.readLock().tryLock()) {
                 throw closed();
             }
             try {
@@ -126,14 +138,18 @@ public final class GatedTokenizer implements AutoCloseable {
     }
 
     /**
-     * Refuse new encodes, wait for those inside, then free the native handle. Idempotent. Never throws.
+     * Refuse new encodes, wait (bounded, once per tokenizer) for those inside, then free the native
+     * handle. Idempotent. Never throws.
      */
     @Override
     public void close() {
         closing = true;
         try {
-            if (!lock.writeLock().tryLock(closeWaitMillis, TimeUnit.MILLISECONDS)) {
-                log.warn("event=tokenizer_close_skipped reason=encode_in_flight bound_ms={}", closeWaitMillis);
+            if (!lock.writeLock().tryLock(closeWaitSpent ? 0 : closeWaitMillis, TimeUnit.MILLISECONDS)) {
+                if (!closeWaitSpent) {
+                    closeWaitSpent = true;
+                    log.warn("event=tokenizer_close_skipped reason=encode_in_flight bound_ms={}", closeWaitMillis);
+                }
                 return;
             }
         } catch (InterruptedException e) {

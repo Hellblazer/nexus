@@ -356,6 +356,17 @@ public final class CrossEncoderReranker implements Reranker {
         return (topK != null && out.size() > topK) ? out.subList(0, topK) : out;
     }
 
+    /**
+     * Test seam (nexus-89lp5): mark the reranker loaded around a tokenizer, with no ONNX session, so a
+     * model-free test can drive {@link #rerank} to its tokenize step. Nothing past tokenize is reachable.
+     */
+    void adoptTokenizerForTest(GatedTokenizer t) {
+        synchronized (initLock) {
+            this.tokenizer = t;
+            this.initialized = true;
+        }
+    }
+
     /** Release the native session/tokenizer (tests; production holds process lifetime). */
     public void close() {
         synchronized (initLock) {
