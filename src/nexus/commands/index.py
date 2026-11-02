@@ -4028,10 +4028,12 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
             # The shakedown's `nx index rdr docs/rdr`: PATH is the repo root, but a directory that IS
             # <repo>/docs/rdr can only mean that repo's RDRs. The repo is the directory that holds the
             # docs/ entry as typed (a symlinked docs/ points elsewhere), and git's toplevel names it
-            # as the single-file form does.
+            # as the single-file form does. The files are listed under that resolved holder, so they
+            # sit under repo_root (the base_path): a typed path through a symlinked directory
+            # (link-to-repo/docs/rdr) would list them outside it and register absolute identities.
             holder = as_given.parent.parent
             repo_root = _git_toplevel(holder) or holder.resolve()
-            rdr_dir = as_given
+            rdr_dir = holder.resolve() / "docs" / "rdr"
         if not rdr_dir.is_dir():
             click.echo(
                 f"No docs/rdr/ directory found under {path}. PATH is the repo root that contains "

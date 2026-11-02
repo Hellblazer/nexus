@@ -448,4 +448,45 @@ def test_index_rdr_given_a_symlinked_docs_dir_indexes_into_the_repo_not_the_link
     expected = _repo_collection_or_legacy(repo.resolve(), "rdr")
     assert expected != _repo_collection_or_legacy(other.resolve(), "rdr"), "control: the two repos name two collections"
     assert mock_batch.call_args[1]["collection_name"] == expected
+    _assert_identities_relative_under_base_path(mock_batch)
+
+
+def _assert_identities_relative_under_base_path(mock_batch) -> None:
+    """Every file handed to the indexer gets a base_path-relative identity (catalog make_relative), not
+    an absolute one: a file outside base_path falls back to its absolute path, which registers a second
+    identity for a document the repo already holds."""
+    from nexus.catalog.types import make_relative
+
+    files, base_path = mock_batch.call_args[0][0], mock_batch.call_args[1]["base_path"]
+    assert files, "non-vacuity: the indexer was handed no files"
+    for f in files:
+        rel = make_relative(f, base_path)
+        assert not Path(rel).is_absolute(), f"{f} is outside base_path {base_path}: identity {rel}"
+        assert rel == str(Path("docs") / "rdr" / Path(f).name)
+
+
+@pytest.mark.t2_tenant
+def test_index_rdr_given_a_path_through_a_symlinked_repo_registers_relative_identities(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """`link-to-repo/docs/rdr` where `link-to-repo` is a symlink to the repo: base_path is the resolved
+    repo, so the files must be listed under the resolved repo too. Listed under the typed link they fall
+    outside base_path and register under absolute identities."""
+    from nexus.indexer import _repo_collection_or_legacy
+
+    repo_with_rdrs = tmp_path / "real-repo"
+    (repo_with_rdrs / "docs" / "rdr").mkdir(parents=True)
+    for name in ("001-use-sqlite.md", "002-adopt-click.md"):
+        (repo_with_rdrs / "docs" / "rdr" / name).write_text("# RDR\n\nBody.\n")
+    link = tmp_path / "link-to-repo"
+    link.symlink_to(repo_with_rdrs)
+
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        result = runner.invoke(main, ["index", "rdr", str(link / "docs" / "rdr")])
+
+    assert result.exit_code == 0, result.output
+    mock_batch.assert_called_once()
+    assert mock_batch.call_args[1]["collection_name"] == _repo_collection_or_legacy(repo_with_rdrs.resolve(), "rdr")
+    assert sorted(p.name for p in mock_batch.call_args[0][0]) == ["001-use-sqlite.md", "002-adopt-click.md"]
+    _assert_identities_relative_under_base_path(mock_batch)
 
