@@ -394,3 +394,31 @@ def test_index_rdr_reports_why_a_document_failed_and_exits_nonzero(
     assert "1 document(s) failed" in result.output
     assert "001-use-sqlite.md" in result.output
     assert "nothing was written" in result.output and "nx doctor" in result.output
+
+
+@pytest.mark.t2_tenant
+def test_index_rdr_given_the_docs_rdr_dir_itself_indexes_the_repo_root_files(
+    runner: CliRunner, repo_with_rdrs: Path
+) -> None:
+    """7.94.0 shakedown (class I): `nx index rdr docs/rdr` printed 'No docs/rdr/ directory found' and indexed
+    nothing, because PATH is the repo root. A directory that IS a repo's docs/rdr is taken as that repo's
+    RDRs, in the same collection the repo root names."""
+    from nexus.indexer import _repo_collection_or_legacy
+
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs / "docs" / "rdr")])
+
+    assert result.exit_code == 0, result.output
+    assert "No docs/rdr/ directory found" not in result.output
+    mock_batch.assert_called_once()
+    assert sorted(p.name for p in mock_batch.call_args[0][0]) == ["001-use-sqlite.md", "002-adopt-click.md"]
+    assert mock_batch.call_args[1]["collection_name"] == _repo_collection_or_legacy(repo_with_rdrs, "rdr")
+
+
+def test_index_rdr_no_rdr_dir_message_names_the_argument(runner: CliRunner, tmp_path: Path) -> None:
+    """A directory with no docs/rdr/ says what PATH is expected to be."""
+    result = runner.invoke(main, ["index", "rdr", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "No docs/rdr/ directory found" in result.output
+    assert "repo root" in result.output

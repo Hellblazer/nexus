@@ -116,3 +116,29 @@ def test_the_note_names_an_env_configured_endpoint(monkeypatch):
 
     assert isinstance(result.exception, SystemExit), type(result.exception).__name__
     assert "127.0.0.1:9/v1/" in result.output, result.output
+
+
+def test_index_pdf_against_a_stopped_engine_is_one_message_not_a_traceback(monkeypatch, tmp_path):
+    """7.94.0 shakedown (class J): `nx index pdf` with the engine stopped ended in a raw
+    ``httpx.ConnectError`` traceback (two chained ``Traceback`` blocks per failure). The catalog client is
+    httpx; the process boundary caught ``ConnectionError`` and ``URLError``, neither of which an httpx
+    connect error is."""
+    import pymupdf
+
+    pdf = tmp_path / "down.pdf"
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "engine down " * 20)
+    doc.save(str(pdf))
+    monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "sis0m-token")
+    monkeypatch.setattr(hvc, "_lease_cache", None)
+    monkeypatch.setattr("nexus.db.service_endpoint.mint_armed", lambda: False)
+
+    result = CliRunner().invoke(main, ["index", "pdf", str(pdf), "--extractor", "pymupdf"])
+
+    assert result.exit_code != 0, result.output
+    assert isinstance(result.exception, SystemExit), (
+        f"{type(result.exception).__name__} escaped as a traceback"
+    )
+    assert "did not answer" in result.output and "nx daemon service start" in result.output, result.output
+    assert "Traceback" not in result.output, result.output

@@ -3970,7 +3970,8 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
 
     PATH is either a repo root (glob all docs/rdr/*.md, excluding README/TEMPLATE)
     or a single `.md` file (index just that file — the preferred form when only
-    one RDR changed, e.g. at rdr-close time).
+    one RDR changed, e.g. at rdr-close time). A repo's docs/rdr directory itself
+    is accepted and read as its repo root.
     """
     from nexus.doc_indexer import batch_index_markdowns  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.indexer import _repo_collection_or_legacy  # noqa: PLC0415 — deliberate function-local import (heavy indexer dep deferred; startup-cost)
@@ -4013,8 +4014,16 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
     else:
         repo_root = path
         rdr_dir = repo_root / "docs" / "rdr"
+        if not rdr_dir.is_dir() and path.name == "rdr" and path.parent.name == "docs":
+            # The shakedown's `nx index rdr docs/rdr`: PATH is the repo root, but a directory that IS
+            # <repo>/docs/rdr can only mean that repo's RDRs.
+            repo_root = path.parent.parent
+            rdr_dir = path
         if not rdr_dir.is_dir():
-            click.echo("No docs/rdr/ directory found")
+            click.echo(
+                f"No docs/rdr/ directory found under {path}. PATH is the repo root that contains "
+                f"docs/rdr (or one .md file)."
+            )
             return
         # Glob only top-level .md files, excluding README.md and TEMPLATE.md
         rdr_files = sorted(

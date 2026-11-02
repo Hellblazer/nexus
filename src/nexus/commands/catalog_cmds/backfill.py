@@ -368,10 +368,15 @@ def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
             f"{report.documents_complete} complete, {report.documents_all_shared} with only shared chunks, "
             f"{verb.lower()} {report.documents_to_stamp}."
         )
+        click.echo(
+            f"  note.* keys cover the {report.documents_notes} note(s); "
+            f"doc.* keys cover the {report.documents_examined - report.documents_notes} indexed document(s)."
+        )
         for name, st in sorted(report.keys.items()):
+            why = f" ({', '.join(f'{r} {n}' for r, n in sorted(st.residue.items()))})" if st.residue else ""
             click.echo(
                 f"  {name}: examined {st.examined}, held {st.present}, skipped (shared) {st.shared}, "
-                f"{'stamped' if apply else 'would stamp'} {st.stamped}, residue {sum(st.residue.values())}"
+                f"{'stamped' if apply else 'would stamp'} {st.stamped}, residue {sum(st.residue.values())}{why}"
             )
         if report.tags_legacy_strings_left:
             click.echo(f"  {report.tags_legacy_strings_left} legacy tags strings left for the array rung (nexus-6pfgb.38).")

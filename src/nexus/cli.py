@@ -90,6 +90,8 @@ class _StorageBackendGuardGroup(click.Group):
     def invoke(self, ctx: click.Context):
         import urllib.error  # noqa: PLC0415 — deferred: keep CLI import surface light
 
+        import httpx  # noqa: PLC0415 — deferred: keep CLI import surface light
+
         from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.config import PdfConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
@@ -120,11 +122,13 @@ class _StorageBackendGuardGroup(click.Group):
             # nexus-sis0m.1: the service answered with an error mid-run (a 5xx,
             # a refusal); its message already carries any remedy.
             raise click.ClickException(f"the nexus service returned an error: {exc}") from exc
-        except (urllib.error.URLError, ConnectionError) as exc:
+        except (urllib.error.URLError, ConnectionError, httpx.ConnectError, httpx.ConnectTimeout) as exc:
             # nexus-sis0m.1: the other shape of a stopped service, a lease or
             # endpoint naming a port nothing answers on. The vector client
             # re-raises the raw error on purpose (its retry keys on the
-            # type), so the process boundary is where it becomes one line.
+            # type), so the process boundary is where it becomes one line. The catalog and T2 clients
+            # are httpx, whose connect errors are not ConnectionError: shakedown 7.94.0, `nx index pdf`
+            # with the engine stopped ended in a raw httpx.ConnectError traceback.
             notes = "; ".join(getattr(exc, "__notes__", []) or [])
             raise click.ClickException(
                 f"a service this command needs did not answer ({exc}"
