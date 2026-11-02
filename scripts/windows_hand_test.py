@@ -166,7 +166,7 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         # A clone killed midway leaves a directory that is not a repo: remove it and clone again.
         f"if ((Test-Path {_ps_quote(repo)}) -and -not (Test-Path {_ps_quote(repo + chr(92) + '.git' + chr(92) + 'HEAD')})) "
         f"{{ Remove-Item -LiteralPath {_ps_quote(repo)} -Recurse -Force }}",
-        f"if (-not (Test-Path {_ps_quote(repo)})) {{ git clone -q --filter=blob:none {CLONE_URL} {_ps_quote(repo)}; "
+        f"if (-not (Test-Path {_ps_quote(repo)})) {{ git clone -q -c core.autocrlf=false --filter=blob:none {CLONE_URL} {_ps_quote(repo)}; "
         + must("clone") + " }",
         f"Set-Location {_ps_quote(repo)}",
         "git fetch -q origin",
@@ -197,6 +197,15 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         # are made from the patched targets. Applied after the fixup, an edit to
         # conexus/daemon reached the target but not its copy (review r1).
         lines += [
+            # The patch is LF; a clone made with Windows git's default autocrlf=true
+            # (or one a previous run left CRLF) has CRLF working files, and
+            # checkout -f does not rewrite a file whose stat matches the index.
+            # Normalise the tree to LF the way CI's fixup does, before applying
+            # (confirmation r2: every fresh session exited 97 here).
+            "git rm -r -q --cached .",
+            must("normalising line endings (rm --cached)"),
+            "git reset -q --hard HEAD",
+            must("normalising line endings (reset --hard)"),
             f"git apply --binary --whitespace=nowarn {_ps_quote(patch)}",
             must("applying the uncommitted changes"),
             "git add -A",

@@ -116,6 +116,7 @@ def test_the_remote_script_order_is_fetch_checkout_fixup_verify_run() -> None:
     "step",
     [
         "clone", "git fetch origin", "bundle fetch", "git clean", "checkout", "checkout fixup",
+        "normalising line endings (rm --cached)", "normalising line endings (reset --hard)",
         "applying the uncommitted changes", "staging the uncommitted changes", "committing the uncommitted changes",
     ],
 )
@@ -394,3 +395,43 @@ def test_an_oversized_patch_is_refused() -> None:
     rec.patch = b"x" * (wht.MAX_PATCH_BYTES + 1)
     with pytest.raises(SystemExit, match="over the"):
         wht.main(["--session", "wren", "--uncommitted", "--", "t.py"], run=rec)
+
+
+def _script_git_commands(script: str, start: str, stop: str) -> list[list[str]]:
+    """The literal git commands the remote script runs from *start* up to and
+    including *stop*, as argv lists, so a test executes what ships."""
+    out, on = [], False
+    for line in script.splitlines():
+        if line.startswith(start):
+            on = True
+        if on and line.startswith("git "):
+            out.append(shlex.split(line.replace("'", "\"")))
+        if on and line.startswith(stop):
+            break
+    return out
+
+
+@pytest.mark.parametrize("prior_autocrlf", ["true", "false"])
+def test_the_scripts_own_steps_apply_a_patch_on_a_crlf_working_tree(tmp_path: Path, prior_autocrlf: str) -> None:
+    """A clone checked out with autocrlf=true has CRLF files; the script's
+    commands from checkout to apply must still apply an LF patch (r2: every
+    fresh session exited 97). Runs the generated commands themselves."""
+    repo = _git_repo(tmp_path)
+    (repo / "a.py").write_text("one\ntwo\n", encoding="utf-8")
+    patch = wht.uncommitted_patch(subprocess.run, repo)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--", "a.py"], check=True)
+    sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True,
+                         check=True).stdout.strip()
+    clone = tmp_path / "remote"
+    subprocess.run(["git", "clone", "-q", "-c", f"core.autocrlf={prior_autocrlf}", str(repo), str(clone)], check=True)
+    if prior_autocrlf == "true":
+        assert b"\r\n" in (clone / "a.py").read_bytes(), "non-vacuity: the working file is CRLF"
+    (tmp_path / "p.patch").write_bytes(patch)
+    script = wht.remote_script("wren", sha, ["t.py"], bundle=None, fixup="", floor=None,
+                               patch=str(tmp_path / "p.patch"))
+    cmds = _script_git_commands(script, "git config core.autocrlf false", "git apply")
+    assert cmds[-1][:2] == ["git", "apply"], cmds
+    for argv in cmds:
+        proc = subprocess.run(argv, cwd=clone, capture_output=True, text=True)
+        assert proc.returncode == 0, (argv, proc.stderr)
+    assert (clone / "a.py").read_text(encoding="utf-8") == "one\ntwo\n"
