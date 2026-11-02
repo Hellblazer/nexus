@@ -350,9 +350,24 @@ def test_both_opencv_builds_row_tells_the_truth_and_names_both_repairs(monkeypat
     assert len(row.fix_suggestions) == 2, row.fix_suggestions
     assert pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
     inplace = row.fix_suggestions[1]
-    assert "uv pip uninstall" in inplace and "opencv-python &&" in inplace
-    assert "--reinstall opencv-python-headless" in inplace and sys.executable in inplace
+    assert "&&" not in inplace, "Windows PowerShell 5.1 rejects `&&`: one command per line"
+    commands = [ln.strip() for ln in inplace.splitlines() if ln.strip().startswith("uv pip")]
+    assert len(commands) == 2, inplace
+    assert commands[0].endswith(" opencv-python") and "uv pip uninstall" in commands[0]
+    pin = _shipped_headless_pin()
+    assert commands[1].endswith(f"--reinstall opencv-python-headless=={pin}"), (commands[1], pin)
+    assert all(sys.executable in c for c in commands)
     assert "shares" in inplace
+
+
+def _shipped_headless_pin() -> str:
+    """The version the wheel's constraints pin ``opencv-python-headless`` to, read here without the code under test."""
+    import re
+
+    text = (Path(health.__file__).parent / "_install" / "constraints.txt").read_text(encoding="utf-8")
+    m = re.search(r"^opencv-python-headless==(\S+)\s*$", text, re.MULTILINE)
+    assert m, "constraints.txt no longer pins opencv-python-headless"
+    return m.group(1)
 
 
 def test_both_opencv_builds_off_linux_is_a_warning_not_red(monkeypatch) -> None:

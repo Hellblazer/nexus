@@ -17,6 +17,7 @@ function, so the probe's own import runs. The probe runs in a child process
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -81,7 +82,10 @@ def test_both_opencv_builds_are_named_when_cv2_cannot_load(fake_cv2, monkeypatch
     out = capsys.readouterr().out
     assert "Both opencv-python and opencv-python-headless are installed" in out
     assert "did not read the release's uv overrides" in out
-    assert "uv pip uninstall" in out and "--reinstall opencv-python-headless" in out
+    assert "&&" not in out, "Windows PowerShell 5.1 rejects `&&`"
+    commands = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("uv pip")]
+    assert len(commands) == 2 and "uv pip uninstall" in commands[0], out
+    assert re.search(r"--reinstall opencv-python-headless==\S+$", commands[1]), commands[1]
     assert pdf_stack.repair_command() in out
 
 
