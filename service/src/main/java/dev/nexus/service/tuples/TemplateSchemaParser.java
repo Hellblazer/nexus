@@ -23,7 +23,14 @@ final class TemplateSchemaParser {
 
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "name", "keys", "dimensions", "id_from", "id_dims", "take", "retention_seconds",
-            "max_body_bytes", "lock", "max_live_rows", "claim_log_ttl_seconds");
+            "max_body_bytes", "lock", "max_live_rows", "claim_log_ttl_seconds", "doc");
+
+    /** Closed field set of the {@code doc} block (RDR-239 Technical Design item 1). */
+    private static final Set<String> DOC_FIELDS =
+            Set.of("summary", "writers", "readers", "fields", "body", "example", "see_also");
+
+    /** Closed field set of {@code doc.example}. */
+    private static final Set<String> EXAMPLE_FIELDS = Set.of("subspace", "nonce", "keys", "dims", "body");
 
     private static final Set<String> DIMENSION_FIELDS = Set.of("type", "values", "required");
 
@@ -33,7 +40,22 @@ final class TemplateSchemaParser {
     private static final Set<String> TAKE_FIELDS =
             Set.of("enabled", "default_lease_seconds", "max_lease_seconds", "max_attempts");
 
+    /**
+     * The whole template, {@code doc} block included: any breach, in the structure or in the doc,
+     * throws. This is the classpath-template behaviour (RDR-239 S3); a registry source that may
+     * drop a bad doc calls {@link #parseStructure} and {@link #parseDoc} separately.
+     */
     static TemplateSchema parse(String source, Map<String, Object> doc) {
+        TemplateSchema schema = parseStructure(source, doc);
+        if (!doc.containsKey("doc")) {
+            return schema;
+        }
+        return schema.withDoc(parseDoc(source, doc.get("doc"), schema));
+    }
+
+    /** Everything but the {@code doc} block, which is checked for its name only. The returned
+     *  schema carries no doc. */
+    static TemplateSchema parseStructure(String source, Map<String, Object> doc) {
         rejectUnknownKeys(source, "", doc.keySet(), TOP_LEVEL_FIELDS);
 
         String name = requireString(source, doc, "name");
@@ -80,7 +102,208 @@ final class TemplateSchemaParser {
         Long claimLogTtlSeconds = parseClaimLogTtlSeconds(source, doc);
 
         return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
-                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds);
+                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds, null);
+    }
+
+    // ── doc block (RDR-239 Technical Design item 1, bead nexus-mdbds.2.10) ──────────
+
+    /**
+     * Parses the {@code doc} mapping of {@code schema}'s template. Documentation only, so every
+     * rule here is about the block itself and what it points at (declared keys, dimensions, the
+     * template's body ceiling); the example's shape, nonce and size checks need the whole
+     * registry and run in {@link TemplateRegistry}, through {@link TupleShapeValidator}.
+     */
+    @SuppressWarnings("unchecked")
+    static TemplateDoc parseDoc(String source, Object raw, TemplateSchema schema) {
+        if (!(raw instanceof Map)) {
+            throw breach(source, "doc", "must be a mapping");
+        }
+        Map<String, Object> d = (Map<String, Object>) raw;
+        rejectUnknownKeys(source, "doc.", d.keySet(), DOC_FIELDS);
+        int weight = weigh(d);
+        if (weight > TemplateDoc.MAX_BLOCK_BYTES) {
+            throw breach(source, "doc", "is " + weight + " bytes as read, over the "
+                    + TemplateDoc.MAX_BLOCK_BYTES + "-byte cap for a doc block");
+        }
+        String summary = describe(source, "doc.summary", d.get("summary"), "is required and must be a non-blank string");
+        List<String> writers = docStringList(source, d, "writers");
+        List<String> readers = docStringList(source, d, "readers");
+        Map<String, Object> fields = parseDocFields(source, d.get("fields"), schema);
+        Object body = parseDocBody(source, d.get("body"), schema);
+        TemplateDoc.Example example = parseExample(source, d.get("example"), schema);
+        List<String> seeAlso = docStringList(source, d, "see_also");
+        return new TemplateDoc(summary, writers, readers, fields, body, example, seeAlso);
+    }
+
+    /** UTF-8 bytes of every mapping key and every scalar in {@code o}, nested: the size of a doc
+     *  block "as the engine's reader sees it" (S4 Q3). */
+    private static int weigh(Object o) {
+        if (o instanceof Map<?, ?> m) {
+            int w = 0;
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                w += weigh(e.getKey()) + weigh(e.getValue());
+            }
+            return w;
+        }
+        if (o instanceof List<?> l) {
+            int w = 0;
+            for (Object x : l) {
+                w += weigh(x);
+            }
+            return w;
+        }
+        return o == null ? 0 : TupleLimits.utf8Length(String.valueOf(o));
+    }
+
+    /** A scalar MiniYaml read, as text; {@code null} for a null, a list or a mapping. */
+    private static String scalarText(Object o) {
+        return o instanceof String || o instanceof Long || o instanceof Boolean ? String.valueOf(o) : null;
+    }
+
+    /** One description: a non-blank scalar of at most {@link TemplateDoc#MAX_TEXT_BYTES} bytes. */
+    private static String describe(String source, String field, Object raw, String whenWrong) {
+        String text = scalarText(raw);
+        if (text == null || text.isBlank()) {
+            throw breach(source, field, whenWrong);
+        }
+        int len = TupleLimits.utf8Length(text);
+        if (len > TemplateDoc.MAX_TEXT_BYTES) {
+            throw breach(source, field, "is " + len + " bytes, over the " + TemplateDoc.MAX_TEXT_BYTES
+                    + "-byte cap for a description");
+        }
+        return text;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> docStringList(String source, Map<String, Object> d, String key) {
+        Object raw = d.get(key);
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof List<?> list)) {
+            throw breach(source, "doc." + key, "must be a list of one-line strings");
+        }
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < list.size(); i++) {
+            out.add(describe(source, "doc." + key + "[" + i + "]", list.get(i), "must be a non-blank one-line string"));
+        }
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> parseDocFields(String source, Object raw, TemplateSchema schema) {
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map)) {
+            throw breach(source, "doc.fields", "must be a mapping from a key or dimension name to a description");
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : ((Map<String, Object>) raw).entrySet()) {
+            String name = e.getKey();
+            String field = "doc.fields." + name;
+            TemplateSchema.Dimension dim = schema.dimensions().get(name);
+            if (!schema.keys().contains(name) && dim == null) {
+                throw breach(source, field, "is not a declared key or dimension of this template");
+            }
+            if (e.getValue() instanceof Map) {
+                Map<String, String> valueMap = parseValueMap(source, field, (Map<String, Object>) e.getValue());
+                List<String> declared = dim != null ? dim.values() : schema.keyValues().get(name);
+                if (declared != null && !new TreeSet<>(declared).equals(new TreeSet<>(valueMap.keySet()))) {
+                    throw breach(source, field, "value map keys " + new TreeSet<>(valueMap.keySet())
+                            + " differ from the declared values " + new TreeSet<>(declared));
+                }
+                out.put(name, valueMap);
+            } else {
+                out.put(name, describe(source, field, e.getValue(), "must be a one-line description or a value map"));
+            }
+        }
+        return out;
+    }
+
+    /** {@code value: meaning} (or {@code json field: meaning}) entries, each meaning a description. */
+    private static Map<String, String> parseValueMap(String source, String field, Map<String, Object> raw) {
+        if (raw.isEmpty()) {
+            throw breach(source, field, "must not be an empty map");
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : raw.entrySet()) {
+            out.put(e.getKey(), describe(source, field + "." + e.getKey(), e.getValue(),
+                    "must be a non-blank one-line description"));
+        }
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object parseDocBody(String source, Object raw, TemplateSchema schema) {
+        if (raw == null) {
+            return null;
+        }
+        if (schema.maxBodyBytes() != null && schema.maxBodyBytes() == 0L) {
+            throw breach(source, "doc.body", "must be omitted: this template declares max_body_bytes 0, so it carries no body");
+        }
+        if (raw instanceof Map) {
+            return parseValueMap(source, "doc.body", (Map<String, Object>) raw);
+        }
+        return describe(source, "doc.body", raw, "must be a one-line description or a map of json field to meaning");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static TemplateDoc.Example parseExample(String source, Object raw, TemplateSchema schema) {
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map)) {
+            throw breach(source, "doc.example", "must be a mapping");
+        }
+        Map<String, Object> ex = (Map<String, Object>) raw;
+        rejectUnknownKeys(source, "doc.example.", ex.keySet(), EXAMPLE_FIELDS);
+        String subspace = scalarText(ex.get("subspace"));
+        if (subspace == null || subspace.isBlank()) {
+            throw breach(source, "doc.example.subspace", "is required and must be a non-blank string");
+        }
+        String nonce = null;
+        if (ex.get("nonce") != null) {
+            nonce = scalarText(ex.get("nonce"));
+            if (nonce == null) {
+                throw breach(source, "doc.example.nonce", "must be a scalar");
+            }
+            if (schema.idFrom() != TemplateSchema.IdFrom.KEYS_NONCE) {
+                throw breach(source, "doc.example.nonce", "is allowed only when id_from is keys+nonce (this template's is "
+                        + schema.idFrom().wire() + ")");
+            }
+        }
+        String body = null;
+        if (ex.get("body") != null) {
+            body = scalarText(ex.get("body"));
+            if (body == null) {
+                throw breach(source, "doc.example.body", "must be a scalar");
+            }
+        }
+        return new TemplateDoc.Example(subspace, nonce,
+                exampleStrings(source, "doc.example.keys", ex.get("keys")),
+                exampleStrings(source, "doc.example.dims", ex.get("dims")), body);
+    }
+
+    /** An example's keys or dims: MiniYaml turns {@code 3889972} into a Long and {@code true}
+     *  into a Boolean, and {@code out()} takes strings, so every value is read back as text. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, String> exampleStrings(String source, String field, Object raw) {
+        if (raw == null) {
+            return Map.of();
+        }
+        if (!(raw instanceof Map)) {
+            throw breach(source, field, "must be a mapping");
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : ((Map<String, Object>) raw).entrySet()) {
+            String text = scalarText(e.getValue());
+            if (text == null) {
+                throw breach(source, field + "." + e.getKey(), "must be a scalar");
+            }
+            out.put(e.getKey(), text);
+        }
+        return out;
     }
 
     /**
@@ -331,7 +554,9 @@ final class TemplateSchemaParser {
         unknown.removeAll(allowed);
         if (!unknown.isEmpty()) {
             throw breach(source, prefix + unknown.iterator().next(),
-                    "unknown field (not part of the RDR-205 v1 document shape)");
+                    prefix.startsWith("doc.")
+                            ? "unknown field (not part of the RDR-239 doc block)"
+                            : "unknown field (not part of the RDR-205 v1 document shape)");
         }
     }
 

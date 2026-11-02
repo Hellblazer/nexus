@@ -28,6 +28,18 @@ nexus-clmlb (labrun RDR-001 lever 3, approved by Sam 2026-10-18). In the week of
 
 labrun measures the change a week after it lands: `kind=hand` full-suite lines in chas and qwent `/var/log/lab-runs.log` whose commit already had a finished develop CI run, and full-suite runs on a sha that already had a green hand full run.
 
+## Native Windows
+
+The `win-release` runner on qwent's Windows side runs CI's Windows set only after a push, so a Windows-only red used to surface a CI run late (2026-11-01: an import probe that passed on macOS and Linux charged nexus's own Windows truststore setup to the dispatch recorder, red on the Windows set for two pushes). Run it before the push instead:
+
+    uv run scripts/windows_hand_test.py --check                         # does this branch need it? exit 1 = yes
+    uv run scripts/windows_hand_test.py --session <name> -- tests/hooks/test_x.py
+    uv run scripts/windows_hand_test.py --session <name> --set          # CI's whole set and its floor, ~13 min
+
+`--check` reads the workflow's `on.push.paths` and lists the changed files it matches. A run tests a COMMIT, `HEAD` by default; one not in `origin/develop` travels as an incremental git bundle over scp. `--uncommitted` (for a dispatched agent, which cannot commit) also sends the working tree's uncommitted changes, tracked edits and untracked unignored files, as a patch the remote applies and commits locally before CI's fixup, so the fixup's copies of the symlinked resource trees carry the edit; without it a dirty tree is warned about. It works under `C:\build\hand\<name>\nexus` on `qwentescence` (a partial clone made on first use and kept), applies CI's own checkout fixup step (LF, tracked symlinks materialised), checks that `HEAD` is the commit, and runs `C:\build\lab\lab-run-win.cmd uv run --python 3.13 --frozen pytest ... -p no:cacheprovider` with `NX_TEST_T2_SUBSTRATE=none`; `--set` takes the Windows-set step's arguments and runs the non-vacuity floor step after it. Every CI-specific piece is read from the workflow file. Exit: pytest's code, 97 for a setup failure (never a test result), 98 when pytest passed and the floor failed.
+
+Where it differs from CI: it runs as the ssh account (`Sam`, temp under `C:\Users\Sam\AppData\Local\Temp`), not the runner's `ghwin`, which holds no symlink privilege; `CI` and `GITHUB_ACTIONS` are unset (`tests/conftest.py` and a few tests branch on them); and a full `--set` under load can trip timing tests that pass alone (nexus-dr57n). The slot is labrun's cooperative lock: a hand run waits for a running CI leg, and a CI leg waits for a hand run up to 30 minutes and then runs beside it, so do not start a `--set` in a release window. One session name per concurrent run; session directories are not cleaned up.
+
 ## Test substrate, guard and ratchet mechanics
 
 Moved from `tests/AGENTS.md` on 2026-10-24 (docs tidy, agents guidance) so that file keeps the rules a test author obeys; the text below is the mechanism, measurements and procedures behind them, unchanged where kept; parts that a module docstring already carried were dropped in favour of it. The module docstrings (`tests/_xdist_cap.py`, `tests/_engine_substrate.py`, `tests/_tmp_root.py`, `tests/_tenant_pool.py`, `tests/_storage_touch_guard.py`, `tests/_ddl_counter.py`) are the first source for each.

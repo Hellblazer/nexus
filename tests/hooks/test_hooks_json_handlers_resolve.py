@@ -87,7 +87,9 @@ _MIN_MCP_TOOL_ENTRIES = 1
 #: Unchanged at nexus-sv2wx.8 (RDR-228): six of the nine now go through the
 #: launcher and three through the shim; `tests/_hook_wiring.command_verb` reads
 #: all three forms.
-_MIN_NX_HOOK_ENTRIES = 9
+#: 9 -> 10 at nexus-mtheb.3: the SubagentStop `subagent-stop-t1-nudge` entry,
+#: through the launcher.
+_MIN_NX_HOOK_ENTRIES = 10
 
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:

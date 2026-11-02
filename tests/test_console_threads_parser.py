@@ -81,6 +81,16 @@ def test_updated_and_session_lines_are_ignored_not_notes(line: str) -> None:
     assert inside.threads[0].notes == ()
 
 
+SESSION_ID = "7c1d35ea-f694-4536-b5d6-eb1a5e4e951c"
+
+
+def test_a_session_id_line_alone_does_not_make_a_thread() -> None:
+    """The compaction checkpoint hook finds an entry by a ``session: <id>`` line (nexus-3lcda); an entry that
+    is only that line has no thread, no note and no ask."""
+    only = parse_session("bullock", f"session: {SESSION_ID}\n")
+    assert only.threads == () and only.notes == ()
+
+
 def test_headingless_fields_belong_to_an_implicit_thread_named_for_the_session() -> None:
     s = parse_session("nexus_c9c", "state: building\nneeds_sam: pick the port\n")
     assert [t.title for t in s.threads] == ["nexus_c9c"]

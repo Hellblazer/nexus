@@ -41,7 +41,9 @@ def install_windows_exe_fake(bindir: Path, name: str, script: str) -> Path:
     assert launcher.is_file(), f"setuptools ships no console launcher at {launcher}"
     exe = bindir / f"{name}.exe"
     shutil.copyfile(launcher, exe)
-    (bindir / f"{name}-script.py").write_text(script)
+    # UTF-8, as Python reads source: the locale default on Windows (cp1252) cannot hold a
+    # script that carries a non-Latin-1 glyph (nexus-qowvl).
+    (bindir / f"{name}-script.py").write_text(script, encoding="utf-8")
     return exe
 
 

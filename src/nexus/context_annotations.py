@@ -205,7 +205,9 @@ DISPLAY_SOURCE_PATH_KEY: str = "_display_source_path"
 #: named none; the engine's order picked the first holder, or, on the manifest fallback, a holder homed in the
 #: hit's own collection, else the smallest ``doc_id`` in text order: nexus-6pfgb.52). Such a choice is arbitrary, so the
 #: hit's frecency is the best of its live owners', not the chosen one's (RDR-236 Phase 1 review,
-#: nexus-6pfgb.9). Never set when the row carried its own ``doc_id``.
+#: nexus-6pfgb.9). Never set when the row carried its own ``doc_id``. That does not make an unmarked ``doc_id`` the one
+#: owner: from engine 0.1.170 a shared chunk's row carries the engine's first live owner (lowest ``doc_id``), so witness
+#: binding reads neither (RDR-088 amendment (v); ``nexus.plans.runner._position_identities``).
 DOC_ID_INFERRED_KEY: str = "_doc_id_inferred"
 
 #: The most owners of one chunk resolved for its title and facts. A chunk many

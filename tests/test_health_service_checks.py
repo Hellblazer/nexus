@@ -1065,6 +1065,7 @@ class TestCheckMigrationState:
 # Must be kept in sync with _RLS_TENANT_TABLES in health.py — the structural
 # cross-walk test below enforces this via XML grep.
 _ALL_TENANT_TABLES = [
+    "nexus.agent_dispatches",  # nexus-mtheb.4 (mirrors health._RLS_TENANT_TABLES)
     "nexus.aspect_extraction_queue",
     "nexus.aspect_promotion_log",
     "nexus.capability_census",  # nexus-gjv9b PART 1 (mirrors health._RLS_TENANT_TABLES)

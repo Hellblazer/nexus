@@ -33,7 +33,7 @@ from the original 9 files was dropped, only de-duplicated:
   - ``TestRenameLockAcceptedButIgnored`` / ``TestTimeoutPassthrough``
     (aspect_queue-only: constructor-parity ``rename_lock`` no-op + the
     store's own ``timeout`` kwarg threading through the mixin)
-  - telemetry's chartered bypass-method exemption (``query_tier_writes_once``,
+  - telemetry's chartered bypass-method exemption (``query_tier_writes_once``, ``record_agent_dispatch_once``,
     nexus-ov13k) inside the generic bypass-guard test
 """
 from __future__ import annotations
@@ -914,7 +914,9 @@ CASES: list[SelfHealCase] = [
         # evidence-gated lease-wait) has a 20-50s worst case that must
         # never run at session close. Every OTHER call site must use
         # _get/_post.
-        chartered_bypass_methods=("query_tier_writes_once",),
+        # nexus-mtheb.4: record_agent_dispatch_once is the SubagentStop hook's
+        # single-attempt write, chartered for the same reason.
+        chartered_bypass_methods=("query_tier_writes_once", "record_agent_dispatch_once"),
     ),
 ]
 

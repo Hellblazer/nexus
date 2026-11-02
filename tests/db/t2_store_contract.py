@@ -420,6 +420,13 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'list_hook_failures': ['days', 'hook_names', 'limit'],
         'query_tier_writes': ['session_id', 'since', 'last_n'],
         'query_tier_writes_once': ['session_id', 'timeout'],
+        # nexus-mtheb.4: the per-dispatch T1 put counter (agent_dispatches, telemetry-018).
+        # New service-only surface with no SQLite twin; the SubagentStop hook records, the
+        # list route reads rows plus the no-T1-put summary. _once is the hook's chartered
+        # single-attempt write (see query_tier_writes_once).
+        'record_agent_dispatch': ['session_id', 'agent_id', 't1_puts', 'agent_type', 'ts'],
+        'record_agent_dispatch_once': ['session_id', 'agent_id', 't1_puts', 'agent_type', 'ts', 'timeout'],
+        'list_agent_dispatches': ['session_id', 'since', 'agent_type', 'limit'],
         # nexus-onjvy gap 4: tier_writes.target_title was WRITE-ONLY over HTTP
         # — recordTierWrite/importTierWritesBatch stored it, but the only read
         # route, query_tier_writes, is an AGGREGATE with no target slot, and a

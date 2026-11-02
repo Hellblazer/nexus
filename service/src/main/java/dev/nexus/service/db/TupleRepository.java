@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.jooq.nexus.tables.records.TuplesRecord;
 import dev.nexus.service.tuples.TemplateRegistry;
 import dev.nexus.service.tuples.TemplateSchema;
+import dev.nexus.service.tuples.TupleShapeValidator;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -38,7 +39,6 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
@@ -549,35 +549,20 @@ public final class TupleRepository {
         // Size checks first (bead nexus-r7xao, RDR-205 amendment): subspace, keys, dims,
         // nonce, body vs the global cap, body vs the template's own (possibly lower) cap
         // -- ALL of it before the existing schema validation below, which is what lets
-        // TooLarge fire ahead of validateOutShape's value-echoing SchemaViolation
+        // TooLarge fire ahead of TupleShapeValidator.checkShape's value-echoing SchemaViolation
         // messages ("value '...' not in [...]") rather than echoing an oversized value
         // into a log line or a response body.
-        checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
+        TupleShapeValidator.checkSubspaceSize(subspace);
         TemplateSchema t = resolveOrThrow(subspace);
         Map<String, String> keysSafe = keys == null ? Map.of() : keys;
         Map<String, String> dimsSafe = dims == null ? Map.of() : dims;
-        for (var e : keysSafe.entrySet()) {
-            checkFieldSize("keys." + e.getKey(), e.getValue(), TupleLimits.MAX_FIELD_VALUE_BYTES);
-        }
-        for (var e : dimsSafe.entrySet()) {
-            checkFieldSize("dims." + e.getKey(), e.getValue(), TupleLimits.MAX_FIELD_VALUE_BYTES);
-        }
-        if (!nonceDeferred) {
-            checkFieldSize("nonce", nonce, TupleLimits.MAX_NONCE_BYTES);
-        }
-        validateBodySize(t, body);
-
-        validateOutShape(t, keysSafe, dimsSafe);
-        // The nonce check runs HERE, between the shape checks and the ttl checks,
-        // because that is where the combined validateOut ran it before this split.
-        // Moving it after the ttl checks changed which exception `out` raises when a
-        // call violates both at once, and no test covered that pair (nexus-h61dl.3
-        // review, found independently by both reviewers). `ackWithReply` defers it:
-        // a reply's nonce is hex(request id) and does not exist until the request has
-        // been consumed, so there is nothing to check at this point on that path.
-        if (!nonceDeferred) {
-            validateNonce(t, nonce);
-        }
+        // Sizes, shape, then the nonce, in that order, are TupleShapeValidator.validateOut's
+        // contract (nexus-r7xao: sizes before shape; nexus-h61dl.3: the nonce check sits
+        // between the shape checks and the ttl checks below, not after them).
+        // `ackWithReply` defers the nonce: a reply's nonce is hex(request id) and does not
+        // exist until the request has been consumed, so there is nothing to check at this
+        // point on that path.
+        TupleShapeValidator.validateOut(t, keysSafe, dimsSafe, body, nonce, nonceDeferred);
 
         if (ttlSecondsOrNull != null && ttlSecondsOrNull <= 0) {
             throw new SchemaViolationException("ttl_seconds", "must be positive");
@@ -616,34 +601,11 @@ public final class TupleRepository {
         }
     }
 
-    /** One tuple field's UTF-8 byte length against *limitBytes*; a {@code null} value is
-     *  0 bytes and always passes. Never echoes *value* itself (bead nexus-r7xao). */
-    private static void checkFieldSize(String field, String value, int limitBytes) {
-        int len = TupleLimits.utf8Length(value);
-        if (len > limitBytes) {
-            throw new TooLargeException(field, len, limitBytes);
-        }
-    }
-
     /** {@code keys_pattern} on {@code rd}/{@code rdp}/{@code in}/{@code inp}: every
      *  supplied value against the same per-field cap {@code out}'s keys/dims use. */
     private static void checkPatternSizes(Map<String, String> pattern) {
         for (var e : pattern.entrySet()) {
-            checkFieldSize("keys_pattern." + e.getKey(), e.getValue(), TupleLimits.MAX_FIELD_VALUE_BYTES);
-        }
-    }
-
-    /**
-     * {@code body} against the template's own {@code max_body_bytes} when it declares
-     * one, else the global {@link TupleLimits#MAX_BODY_BYTES} cap. A template ceiling of
-     * 0 is satisfied by both {@code null} and {@code ""} (both are 0 bytes) and refuses
-     * anything else, with no special-casing needed here.
-     */
-    private static void validateBodySize(TemplateSchema t, String body) {
-        int len = TupleLimits.utf8Length(body);
-        long limit = t.maxBodyBytes() != null ? t.maxBodyBytes() : TupleLimits.MAX_BODY_BYTES;
-        if (len > limit) {
-            throw new TooLargeException("body", len, limit);
+            TupleShapeValidator.checkFieldSize("keys_pattern." + e.getKey(), e.getValue(), TupleLimits.MAX_FIELD_VALUE_BYTES);
         }
     }
 
@@ -651,8 +613,8 @@ public final class TupleRepository {
      *  {@code release} (and {@code ackWithReply}, which does not otherwise call
      *  {@code ack}'s own checks on its reply-carrying path). */
     private static void checkClaimIdentifiers(String claimId, String claimant) {
-        checkFieldSize("claim_id", claimId, TupleLimits.MAX_CLAIM_ID_BYTES);
-        checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
+        TupleShapeValidator.checkFieldSize("claim_id", claimId, TupleLimits.MAX_CLAIM_ID_BYTES);
+        TupleShapeValidator.checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
     }
 
     /**
@@ -1057,68 +1019,8 @@ public final class TupleRepository {
                 .execute();
     }
 
-    /**
-     * The shape half of {@code out}'s validation: keys, dims and their allowed values.
-     * Split from the nonce check (RDR-206 Phase 1 Step 2) because {@code ackWithReply}
-     * must validate a reply's shape BEFORE consuming the request, while the reply's nonce
-     * does not exist until the request has been consumed and handed back its id.
-     */
-    private void validateOutShape(TemplateSchema t, Map<String, String> keys, Map<String, String> dims) {
-        TreeSet<String> unknownKeys = new TreeSet<>(keys.keySet());
-        unknownKeys.removeAll(t.keys());
-        if (!unknownKeys.isEmpty()) {
-            String first = unknownKeys.first();
-            throw new SchemaViolationException(first, NONCE_FIELD.equals(first)
-                    ? "not a key: the nonce is " + NONCE_OWN_FIELD
-                    : "not a declared key for this template");
-        }
-        for (String k : t.keys()) {
-            String v = keys.get(k);
-            if (v == null || v.isBlank()) {
-                throw new SchemaViolationException(k, "required key missing or blank");
-            }
-            List<String> allowed = t.keyValues().get(k);
-            if (allowed != null && !allowed.contains(v)) {
-                throw new SchemaViolationException(k, "value '" + v + "' not in " + allowed);
-            }
-        }
-        TreeSet<String> unknownDims = new TreeSet<>(dims.keySet());
-        unknownDims.removeAll(t.dimensions().keySet());
-        if (!unknownDims.isEmpty()) {
-            String first = unknownDims.first();
-            throw new SchemaViolationException(first, NONCE_FIELD.equals(first)
-                    ? "not a dimension: the nonce is " + NONCE_OWN_FIELD
-                    : "not a declared dimension for this template");
-        }
-        for (var e : t.dimensions().entrySet()) {
-            String name = e.getKey();
-            TemplateSchema.Dimension d = e.getValue();
-            String v = dims.get(name);
-            if (d.required() && (v == null || v.isBlank())) {
-                throw new SchemaViolationException(name, "required dimension missing or blank");
-            }
-            if (v != null && d.values() != null && !d.values().contains(v)) {
-                throw new SchemaViolationException(name, "value '" + v + "' not in " + d.values());
-            }
-        }
-    }
-
     private static final JSONB EMPTY_DIMS = JSONB.valueOf("{}");
     private static final String NONCE_FIELD = "nonce";
-    /** Bead nexus-jz3kh: what a refusal says about where the nonce goes. {@code nonce} is a
-     *  parameter of the write itself (the request's own {@code nonce} field, {@code tuple_out}'s
-     *  {@code nonce} argument); a caller who sees "nonce: required" and tries it as a key or a dim
-     *  is refused again, so every nonce-related refusal names the parameter. */
-    private static final String NONCE_OWN_FIELD = "its own field of the write (tuple_out's `nonce` parameter)";
-
-    /** The nonce half of {@code out}'s validation. See {@link #validateOutShape}. */
-    private void validateNonce(TemplateSchema t, String nonce) {
-        if (t.idFrom() == TemplateSchema.IdFrom.KEYS_NONCE && (nonce == null || nonce.isBlank())) {
-            throw new SchemaViolationException(NONCE_FIELD, "required for id_from=keys+nonce: the nonce is "
-                    + NONCE_OWN_FIELD + ", not a key or a dimension");
-        }
-    }
-
     /**
      * The label digested before the nonce: {@code out} digests {@code "nonce"}, and
      * {@code ackWithReply} digests {@code "reply-nonce"} in its place (bead nexus-b747g).
@@ -1367,7 +1269,7 @@ public final class TupleRepository {
     private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
                                       int n, ReadCursor since, WaitSpec.Announce announce,
                                       ReadOrder order) {
-        checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
+        TupleShapeValidator.checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
         // RDR-205 review (nexus-em75s.35, M4): rd/rdp must refuse an unregistered
         // subspace exactly as out() and in()/inp() (via claimOnce) do -- this was
         // the one "Once" helper that never resolved the template, so a probe/read
@@ -1756,14 +1658,14 @@ public final class TupleRepository {
                     if (subscriber.isBlank()) {
                         throw new SchemaViolationException("subscriber", "must not be blank");
                     }
-                    checkFieldSize("subscriber", subscriber, TupleLimits.MAX_CLAIMANT_BYTES);
+                    TupleShapeValidator.checkFieldSize("subscriber", subscriber, TupleLimits.MAX_CLAIMANT_BYTES);
                 }
                 // Bead nexus-rxuiq: the waiter token orders the waits one reader
                 // issues over time, so a newer waiter supersedes an older one's
                 // still-parked wait (see TupleWaitRegistry#admitWaiter). Its shape is
                 // checked here because the ordering parses it.
                 if (waiter != null) {
-                    checkFieldSize("waiter", waiter, TupleLimits.MAX_CLAIMANT_BYTES);
+                    TupleShapeValidator.checkFieldSize("waiter", waiter, TupleLimits.MAX_CLAIMANT_BYTES);
                     if (!TupleWaitRegistry.isWellFormedWaiterToken(waiter)) {
                         throw new SchemaViolationException("waiter",
                                 "must be <decimal time_ns>-<alphanumeric id>");
@@ -1866,7 +1768,7 @@ public final class TupleRepository {
         // before registerMulti ever runs.
         List<String> subspaces = new ArrayList<>(specs.size());
         for (WaitSpec spec : specs) {
-            checkFieldSize("subspace", spec.subspace(), TupleLimits.MAX_SUBSPACE_BYTES);
+            TupleShapeValidator.checkFieldSize("subspace", spec.subspace(), TupleLimits.MAX_SUBSPACE_BYTES);
             resolveOrThrow(spec.subspace());
             checkPatternSizes(spec.pattern() == null ? Map.of() : spec.pattern());
             // nexus-vsipz (RDR-213 engine half): row-level announce mode tracks
@@ -2093,8 +1995,8 @@ public final class TupleRepository {
 
     private Optional<ClaimedTuple> claimOnce(String tenant, String subspace, Map<String, String> pattern,
                                               String claimant, Long leaseSecondsOrNull) {
-        checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
-        checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
+        TupleShapeValidator.checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
+        TupleShapeValidator.checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
         Map<String, String> patternSafe = pattern == null ? Map.of() : pattern;
         checkPatternSizes(patternSafe);
         TemplateSchema t = resolveOrThrow(subspace);

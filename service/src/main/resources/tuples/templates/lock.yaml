@@ -7,20 +7,17 @@
 # an out() that meets an EXPIRED lock row reset it to available instead
 # of leaving it dead until the sweep purges it.
 #
-# To hold the lock: take it with in(); renew the lease while working;
-# end with release (RDR-211 Gap 4), which returns the tuple for the next
-# holder without consuming it and without counting an attempt. ack on a
-# lock claim is refused (SchemaViolationException naming release) by the
-# lock flag at consumeClaim (Technical Design "The lock flag"), because a
-# consumed lock row would be unobtainable until the sweep purges it; nack
-# stays allowed and counts an attempt, which this template never
-# dead-letters on.
+# release (RDR-211 Gap 4) returns the tuple for the next holder without
+# consuming it and without counting an attempt. ack on a lock claim is
+# refused (SchemaViolationException naming release) by the lock flag at
+# consumeClaim (Technical Design "The lock flag"), because a consumed lock
+# row would be unobtainable until the sweep purges it; nack stays allowed
+# and counts an attempt, which this template never dead-letters on.
 #
 # dims.from is OPTIONAL, unlike board's and queue's required from:
 # RDR-211's Technical Design table spells board and queue as "from
 # (required)" but lock only as "dims from", with no "(required)"
-# qualifier -- a caller may name the holder for diagnostics, but nothing
-# in this design depends on it being present.
+# qualifier -- nothing in this design depends on it being present.
 #
 # max_attempts intentionally OMITTED (RDR-211 Open Question 1, Approach
 # item 3): the engine treats an absent max_attempts as unbounded, so a
@@ -59,3 +56,25 @@ retention_seconds: 604800
 lock: true
 
 claim_log_ttl_seconds: 2592000
+
+doc:
+  summary: One row per resource and one holder at a time; take the row with in, renew while working, end with release. The row expires on its own if the holder dies.
+  writers:
+    - scripts/git-push-develop.sh creates the row with nx tuple out for the resource ci-develop-push, which is idempotent
+    - any session wanting mutual exclusion on a named resource, per conexus/skills/peer-messaging/SKILL.md
+  readers:
+    - scripts/git-push-develop.sh takes the lock with nx tuple in (lease 900 seconds) and ends it with nx tuple release
+    - a session holding a lock renews with tuple_renew and ends with tuple_release; ack is refused on a lock claim
+    - nx doctor (nexus.health) flags a claim renewed far past its lease
+  fields:
+    resource: the thing being locked, for example ci-develop-push
+    from: optional; the holder's name for diagnostics, nothing depends on it
+  example:
+    subspace: lock/example-resource
+    keys:
+      resource: example-resource
+    dims:
+      from: example-peer
+  see_also:
+    - RDR-211
+    - conexus/skills/peer-messaging/SKILL.md

@@ -1,8 +1,5 @@
 # RDR-208 Phase 1 Step 1 template: session-directory entries (bead
-# nexus-galkv.1). A directory entry is a short-lived lease that maps a
-# name to the session currently holding it -- decision 3 (T2
-# nexus_rdr/208-decision-gate-2026-09-14): written with ttl_seconds=300
-# and re-sent every 60s by the live holder.
+# nexus-galkv.1), decision 3 (T2 nexus_rdr/208-decision-gate-2026-09-14).
 #
 # id_dims: [session_id] (audit round-1 fix, not in the original RDR text):
 # the tuple id is sha256 over tenant, subspace, keys, id_dims and nonce
@@ -40,3 +37,23 @@ take:
 retention_seconds: 604800
 
 max_body_bytes: 0
+
+doc:
+  summary: A short lease mapping a session name to the session holding it; the holder re-sends every 60 seconds and the entry lapses in 300 seconds if the session dies.
+  writers:
+    - the session's own nexus MCP server, from the lease thread _directory_heartbeat, armed at server start from the Claude Code session name and by tuple_subscribe on mailbox/NAME
+  readers:
+    - mailbox_send resolves a name to the holding session through list_directory_entries (more than one distinct live holder is refused)
+    - nx tuple directory NAME prints the live holders and flags an ambiguous name
+  fields:
+    name: the session name as ListAgents shows it
+    session_id: the session that holds the name; part of the tuple id, so two sessions on one name stay two rows
+  example:
+    subspace: directory/example-peer
+    nonce: 1761900000.123456-4242
+    keys:
+      name: example-peer
+    dims:
+      session_id: 00000000-0000-0000-0000-000000000005
+  see_also:
+    - RDR-208

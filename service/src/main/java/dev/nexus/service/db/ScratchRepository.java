@@ -2,7 +2,10 @@ package dev.nexus.service.db;
 
 import dev.nexus.service.jooq.t1.tables.Scratch;
 import dev.nexus.service.jooq.t1.tables.records.ScratchRecord;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,7 +47,8 @@ import static org.jooq.impl.DSL.*;
  * <ul>
  *   <li>{@link #closeSession} — deletes all rows for (tenant, session_id).
  *       Called from MCP lifespan on exit (promptness guarantee).</li>
- *   <li>{@link #sweepExpired} — deletes rows older than the given cutoff.
+ *   <li>{@link #sweepExpired} / {@link #sweepTenant} — delete every row of a session
+ *       that has been idle since before the given cutoff (see {@link #idleSessionRows}).
  *       Called periodically by a service timer (crash-safety backstop).</li>
  * </ul>
  *
@@ -206,6 +210,11 @@ public final class ScratchRepository {
     /**
      * Flag an entry for SessionEnd T2 flush.
      * Returns false when not found or not owned by this session.
+     *
+     * <p>Stamps {@code ts} with now: a flag is session activity. The flush orders a row's {@code ts} against a
+     * T2 edit made after the put, so a flag that left {@code ts} at the put time would lose to an edit that
+     * came before the flag; and the idle sweep counts {@code ts}, so a session whose last act was a flag is
+     * not idle.
      */
     public boolean flag(
             String tenant, String sessionId, String id,
@@ -215,6 +224,7 @@ public final class ScratchRepository {
                 .set(SCRATCH.FLAGGED, true)
                 .set(SCRATCH.FLUSH_PROJECT, flushProject)
                 .set(SCRATCH.FLUSH_TITLE, flushTitle)
+                .set(SCRATCH.TS, OffsetDateTime.now(ZoneOffset.UTC))
                 .where(SCRATCH.ID.eq(id).and(SCRATCH.SESSION_ID.eq(sessionId)))
                 .execute();
             return updated > 0;
@@ -266,7 +276,84 @@ public final class ScratchRepository {
     }
 
     /**
-     * TTL sweep: delete rows where {@code ts < cutoff}.
+     * The rows of every session that has been idle since before {@code cutoff} (nexus-mtheb.2).
+     *
+     * <p>RDR-152 decided the sweep reaps "rows whose session_id has been idle past a bound". The
+     * first implementation keyed on each row's own put time, so a live session lost every row
+     * 24 h after that row was written. A session's last activity is the newest of its rows' put
+     * time ({@code ts}) and last read ({@code last_accessed}, stamped by {@link #get} and
+     * {@link #search}; {@link #listEntries} does not stamp it). A row is selected when its
+     * (tenant, session) is in the set of sessions whose newest {@code ts} and newest
+     * {@code last_accessed} are both before the cutoff (a never-read session has a NULL newest
+     * {@code last_accessed}, which counts as idle).
+     *
+     * <p>Why candidate sessions and one aggregate probe each, not a per-row NOT EXISTS and not a
+     * whole-table GROUP BY (nexus-mtheb.6). {@code last_accessed} has no index, so the idle test has to
+     * read a session's rows, and the question is how often. Measured with EXPLAIN (ANALYZE, BUFFERS) on
+     * 100k-row tenants, as the service role under RLS, a second 100k-row tenant beside it, in ms, with
+     * statistics / without (a table autovacuum has not analyzed yet):
+     * <pre>
+     *                         per-row NOT EXISTS   GROUP BY, whole table   this form
+     *   4000 x 25, 1% idle        27 / 33              113 / 37               18 / 15
+     *   200 x 500, 1% idle        90 / 33              109 / 35               17 /  8
+     *   nothing idle           0.016 / 1.8               63 / 37            0.025 / 1.8
+     *   40 x 2500, 5% idle      1672 / 36                58 / 37               30 / 19
+     *   4000 x 25, 50% idle        74 / 72              140 / 73              148 / 148-264
+     * </pre>
+     * The per-row NOT EXISTS (the first form: {@code ts < cutoff AND NOT EXISTS (a row of the same session
+     * with ts >= cutoff OR last_accessed >= cutoff)}) probes once per OLD ROW and each probe reads the
+     * whole session, so a session of k rows costs k*k: 100 ms and 270k buffers on 10k unanalyzed rows, and
+     * 1.7 s on 100k rows of 2500-row sessions even with statistics (Nested Loop Anti Join). The
+     * whole-table GROUP BY (the second form) is flat, one pass over the tenant whatever is idle, but a
+     * sweep that finds nothing idle still reads every row (63 ms at 100k rows against 0.014).
+     *
+     * <p>This form starts from the old rows, which idx_scratch_ts finds, takes their distinct sessions
+     * (the candidates: every idle session is among them, because every row of an idle session is old),
+     * and for each candidate runs one lateral aggregate over that session through
+     * idx_scratch_tenant_session. The cost is the rows of the sessions that have an old row: nothing when
+     * nothing is old, one probe per session rather than per row when something is. The lateral keeps the
+     * planner from turning the aggregate into a per-row probe or a whole-table pass, which is what made
+     * the plan depend on statistics. The outer {@code ts < cutoff} is redundant for the rows of an idle
+     * session (ts is NOT NULL, so every row of an idle session is older than the cutoff) and is what lets the
+     * DELETE read only old rows. No new index.
+     *
+     * <p>Known costs of this form, all at 100k rows (they scale with the tenant, and each statement is
+     * bounded by a pass over it). When half the table is idle (a catch-up after an outage) it measured
+     * 148 / 148-264 ms against 74 / 72 for the NOT EXISTS: the work is the same rows, planned with more
+     * sorting. And the planner's estimate of the candidate count can push a statement's total cost past
+     * {@code jit_above_cost}, so PostgreSQL compiles it: 12 ms on every run measured, 250 ms where the
+     * estimate was high (the superuser path, {@link #sweepExpired}, which has no production caller; the
+     * scheduled sweep is {@link #sweepTenant}). The plan is pinned by ScratchSweepVolumeTest (candidates
+     * from idx_scratch_ts, a probe keyed on the candidate session, no anti-join).
+     */
+    public static Condition idleSessionRows(OffsetDateTime cutoff) {
+        Scratch old = SCRATCH.as("o");
+        Scratch s = SCRATCH.as("s");
+        Table<?> candidates = selectDistinct(old.TENANT_ID.as("t"), old.SESSION_ID.as("sid"))
+            .from(old)
+            .where(old.TS.lt(cutoff))
+            .asTable("c");
+        Field<String> candidateTenant = candidates.field("t", String.class);
+        Field<String> candidateSession = candidates.field("sid", String.class);
+        Table<?> activity = lateral(
+            select(max(s.TS).as("newest_put"), max(s.LAST_ACCESSED).as("newest_read"))
+                .from(s)
+                .where(s.TENANT_ID.eq(candidateTenant))
+                .and(s.SESSION_ID.eq(candidateSession)))
+            .asTable("a");
+        Field<OffsetDateTime> newestPut = activity.field("newest_put", OffsetDateTime.class);
+        Field<OffsetDateTime> newestRead = activity.field("newest_read", OffsetDateTime.class);
+        // A never-read session has a NULL newest_read, which counts as idle.
+        return SCRATCH.TS.lt(cutoff).and(row(SCRATCH.TENANT_ID, SCRATCH.SESSION_ID).in(
+            select(candidateTenant, candidateSession)
+                .from(candidates)
+                .crossJoin(activity)
+                .where(newestPut.lt(cutoff).and(newestRead.isNull().or(newestRead.lt(cutoff))))));
+    }
+
+    /**
+     * TTL sweep over every tenant: delete each session that has been idle since before
+     * {@code cutoff} (all of its rows; see {@link #idleSessionRows}).
      * Returns count of deleted rows. Called by a service-internal timer as a
      * crash-safety backstop for sessions that never called session-close.
      *
@@ -278,14 +365,15 @@ public final class ScratchRepository {
      */
     public int sweepExpired(DSLContext superuserDsl, OffsetDateTime cutoff) {
         int deleted = superuserDsl.deleteFrom(SCRATCH)
-            .where(SCRATCH.TS.lt(cutoff))
+            .where(idleSessionRows(cutoff))
             .execute();
         log.info("event=t1_ttl_sweep cutoff={} deleted={}", cutoff, deleted);
         return deleted;
     }
 
     /**
-     * Per-tenant TTL sweep: delete rows for this tenant where {@code ts < cutoff}.
+     * Per-tenant TTL sweep: delete this tenant's sessions that have been idle since before
+     * {@code cutoff} (every row of such a session; see {@link #idleSessionRows}).
      * Uses {@link TenantScope} (tenant-scoped, RLS enforced). Called by the
      * /v1/t1/sweep endpoint for per-tenant cleanup AND by the internal scheduler,
      * which loops it over every token-bearing tenant (nexus-4qq1m) — the
@@ -310,7 +398,7 @@ public final class ScratchRepository {
         return tenantScope.withTenant(tenant, T1_TENANT_GUC, dsl -> {
             SweepBounds.applyStatementTimeout(dsl, statementTimeout);
             int deleted = dsl.deleteFrom(SCRATCH)
-                .where(SCRATCH.TS.lt(cutoff))
+                .where(idleSessionRows(cutoff))
                 .execute();
             log.info("event=t1_tenant_sweep tenant={} cutoff={} deleted={}", tenant, cutoff, deleted);
             return deleted;

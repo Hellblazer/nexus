@@ -44,6 +44,11 @@ import java.util.Set;
  *   GET  /v1/telemetry/tier_writes/list        per-row detail incl. target_title, capped page +
  *                                              exact total (nexus-onjvy)
  *   GET  /v1/telemetry/retention/markers       cumulative-deletes retention markers (nexus-24p05)
+ *   POST /v1/telemetry/agent_dispatches/record record one agent dispatch and its T1 put count; an
+ *                                              upsert per (session, agent) that keeps the larger
+ *                                              count and the later ts (nexus-mtheb.4)
+ *   GET  /v1/telemetry/agent_dispatches/list   per-dispatch rows (capped page, newest first) plus an
+ *                                              exact total and a no-T1-put summary (nexus-mtheb.4)
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
  *   POST /v1/telemetry/nx_answer_runs/complete one-transaction run+steps+plan-counters (RDR-203)
  *   GET  /v1/telemetry/nx_answer_runs/query     rows + exact aggregates (nexus-eho3u)
@@ -174,6 +179,8 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/tier_writes/record"     -> handleTierWriteRecord(exchange, tenant, method);
                 case "/tier_writes/query"      -> handleTierWritesQuery(exchange, tenant, method);
                 case "/tier_writes/list"       -> handleTierWritesList(exchange, tenant, method);
+                case "/agent_dispatches/record" -> handleAgentDispatchRecord(exchange, tenant, method);
+                case "/agent_dispatches/list"   -> handleAgentDispatchesList(exchange, tenant, method);
                 case "/retention/markers"      -> handleRetentionMarkers(exchange, tenant, method);
                 case "/nx_answer_runs/record"  -> handleNxAnswerRunRecord(exchange, tenant, method);
                 case "/nx_answer_runs/complete" -> handleNxAnswerRunComplete(exchange, tenant, method);
@@ -374,6 +381,49 @@ public final class TelemetryHandler implements HttpHandler {
         int limit = parseIntParam(params, "limit", 100);
         var result = repo.listTierWrites(tenant, sessionId, since, lastN, limit);
         HttpUtil.send(ex, 200, json(result));
+    }
+
+    // ── agent_dispatches (nexus-mtheb.4) ───────────────────────────────────────
+
+    /** Page cap for {@code /agent_dispatches/list}; a larger {@code limit} is clamped, not refused. */
+    private static final int AGENT_DISPATCH_LIST_MAX = 1000;
+
+    /**
+     * POST /v1/telemetry/agent_dispatches/record: one agent dispatch and the number of T1 puts it made.
+     * Body: {@code session_id}, {@code agent_id}, {@code t1_puts} (required, a whole number >= 0);
+     * {@code agent_type}, {@code ts} (optional; a blank {@code agent_type} or {@code ts} counts as absent). A
+     * {@code ts} that is not ISO-8601 with an offset is a 400 naming the field, and one more than five
+     * minutes ahead of the engine clock is stamped with the engine's now (nexus-mtheb.7). The SubagentStop
+     * hook is the caller. Idempotent per (session, agent): a repeat updates the row and never lowers the count.
+     */
+    private void handleAgentDispatchRecord(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String sessionId = requireString(body, "session_id");
+        String agentId   = requireString(body, "agent_id");
+        int t1Puts       = requireCount(body, "t1_puts");
+        // A blank type is no type: stored as "" it would replace a real type (coalesce keeps the old value
+        // only for NULL) and could not be listed by filter, since an empty filter means no filter.
+        String agentType = optStrNull(body, "agent_type");
+        if (agentType != null && agentType.isBlank()) agentType = null;
+        String tsIso     = optStr(body, "ts");
+        repo.recordAgentDispatch(tenant, sessionId, agentId, agentType, tsIso, t1Puts);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * GET /v1/telemetry/agent_dispatches/list?session_id=&amp;since=&amp;agent_type=&amp;limit=: the dispatch rows
+     * newest first (limit default 100, clamped to 1..{@value #AGENT_DISPATCH_LIST_MAX}) and a summary over the
+     * whole filtered set: {@code {rows, total, summary: {dispatches, no_t1_put, t1_puts}}}.
+     */
+    private void handleAgentDispatchesList(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        String sessionId = params.getOrDefault("session_id", "");
+        String since     = params.getOrDefault("since", "");
+        String agentType = params.getOrDefault("agent_type", "");
+        int limit = Math.max(1, Math.min(AGENT_DISPATCH_LIST_MAX, parseIntParam(params, "limit", 100)));
+        HttpUtil.send(ex, 200, json(repo.listAgentDispatches(tenant, sessionId, since, agentType, limit)));
     }
 
     /**
@@ -1448,6 +1498,34 @@ public final class TelemetryHandler implements HttpHandler {
             throw new IllegalArgumentException("Missing required field: " + key);
         }
         return v;
+    }
+
+    /**
+     * A required whole number >= 0, strictly: a JSON integer or a numeric string. A fractional number
+     * is refused (the lenient {@link #optInt} would truncate 1.5 to 1), and so is anything that is not a
+     * number, so a malformed count is a 400 naming the field and never a silent zero.
+     */
+    private int requireCount(Map<String, Object> body, String key) {
+        Object v = body.get(key);
+        if (v == null) {
+            throw new IllegalArgumentException("Missing required field: " + key);
+        }
+        long n;
+        if (v instanceof Integer || v instanceof Long || v instanceof Short || v instanceof Byte) {
+            n = ((Number) v).longValue();
+        } else if (v instanceof String s && !s.isBlank()) {
+            try {
+                n = Long.parseLong(s.trim());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Field '" + key + "' must be a whole number >= 0: " + s);
+            }
+        } else {
+            throw new IllegalArgumentException("Field '" + key + "' must be a whole number >= 0");
+        }
+        if (n < 0 || n > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Field '" + key + "' must be a whole number >= 0 and fit an int: " + n);
+        }
+        return (int) n;
     }
 
     private Object requireObj(Map<String, Object> body, String key) {

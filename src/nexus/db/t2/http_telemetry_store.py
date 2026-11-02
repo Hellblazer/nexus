@@ -62,6 +62,12 @@ Route mapping (matches TelemetryHandler Java):
                                            themselves, which POST via urllib directly —
                                            see that method's own docstring)
     GET  /v1/telemetry/routing_events/list      — list_routing_events
+    POST /v1/telemetry/agent_dispatches/record  — record_agent_dispatch, and
+                                           record_agent_dispatch_once (the
+                                           SubagentStop hook's single-attempt
+                                           variant; nexus-mtheb.4)
+    GET  /v1/telemetry/agent_dispatches/list    — list_agent_dispatches (rows plus
+                                           a no-T1-put summary; nexus-mtheb.4)
 """
 
 from __future__ import annotations
@@ -296,6 +302,116 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             for r in (resp.get("rows") or [])
         ]
         return {"rows": rows, "total": int(resp.get("total") or 0)}
+
+    def record_agent_dispatch(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        t1_puts: int,
+        agent_type: str | None = None,
+        ts: str | None = None,
+    ) -> None:
+        """Record one agent dispatch and its T1 put count (nexus-mtheb.4).
+
+        Calls ``POST /v1/telemetry/agent_dispatches/record``. The SubagentStop
+        hook is the caller. The engine keeps one row per ``(session_id,
+        agent_id)``: a second stop for the same dispatch (the nudge turn) updates
+        the row, and the stored count and time never go down. ``t1_puts`` is a
+        whole number >= 0; zero is a real answer ("wrote nothing"), so pass it.
+        ``agent_type`` and ``ts`` are left out of the payload when ``None`` (the
+        engine stamps ``ts`` itself). A ``ts`` must be ISO-8601 with an offset or
+        ``Z``: a malformed one is a 400 naming ``ts``, and one more than five
+        minutes ahead of the engine's clock is replaced by the engine's now
+        (nexus-mtheb.7), so pass the stop time or leave it out.
+
+        Requires an engine carrying telemetry-018; older engines 404, which the
+        HTTP layer raises. A best-effort caller catches it.
+        """
+        self._post(
+            "/v1/telemetry/agent_dispatches/record",
+            self._agent_dispatch_payload(session_id, agent_id, t1_puts, agent_type, ts),
+        )
+
+    def record_agent_dispatch_once(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        t1_puts: int,
+        agent_type: str | None = None,
+        ts: str | None = None,
+        timeout: float = 2.0,
+    ) -> None:
+        """Single-attempt ``agent_dispatches/record`` for the SubagentStop hook.
+
+        nexus-mtheb.4 review r1: ``record_agent_dispatch`` goes through ``_post``,
+        whose gateway backoff and re-resolve lease-wait have a 20-50 s worst case
+        that a per-request timeout does not bound (see ``query_tier_writes_once``).
+        A hook that runs at subagent stop must not wait that long. This variant
+        issues exactly ONE raw request with a hard *timeout*: no gateway retry, no
+        re-resolve, no lease wait. Any failure raises (an engine without the route
+        answers 404), and the caller's contract is best-effort. Not for general
+        use; the engine upsert is idempotent, so a caller that wants retries uses
+        ``record_agent_dispatch``.
+        """
+        import httpx  # noqa: PLC0415 — deferred import — only needed on this path
+
+        resp = self._client.request(
+            "POST",
+            self._base_url + "/v1/telemetry/agent_dispatches/record",
+            headers=self._auth_headers(),
+            json=self._agent_dispatch_payload(session_id, agent_id, t1_puts, agent_type, ts),
+            timeout=httpx.Timeout(timeout),
+        )
+        resp.raise_for_status()
+
+    @staticmethod
+    def _agent_dispatch_payload(
+        session_id: str, agent_id: str, t1_puts: int,
+        agent_type: str | None, ts: str | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "agent_id":   agent_id,
+            "t1_puts":    t1_puts,
+        }
+        if agent_type is not None:
+            payload["agent_type"] = agent_type
+        if ts is not None:
+            payload["ts"] = ts
+        return payload
+
+    def list_agent_dispatches(
+        self,
+        *,
+        session_id: str | None = None,
+        since: str | None = None,
+        agent_type: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Per-dispatch rows and a summary (nexus-mtheb.4).
+
+        ``GET /v1/telemetry/agent_dispatches/list``. Returns ``{"rows":
+        [{session_id, agent_id, agent_type, ts, t1_puts}, ...], "total": int,
+        "summary": {"dispatches", "no_t1_put", "t1_puts"}}``, newest first.
+        ``rows`` is capped at ``limit`` (the engine clamps it to 1..1000);
+        ``total`` and ``summary`` cover the whole filtered set, so
+        ``summary["no_t1_put"] / summary["dispatches"]`` is the share of
+        dispatches that wrote nothing to T1.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if session_id:
+            params["session_id"] = session_id
+        if agent_type:
+            params["agent_type"] = agent_type
+        if since:
+            params["since"] = normalize_since_filter(since)
+        resp = self._get("/v1/telemetry/agent_dispatches/list", params=params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return {"rows": [], "total": 0,
+                    "summary": {"dispatches": 0, "no_t1_put": 0, "t1_puts": 0}}
+        return resp
 
     def query_tier_writes_once(
         self,

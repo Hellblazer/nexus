@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from nexus.config import default_db_path
@@ -1833,6 +1834,108 @@ def t2_index_write(write_fn, *, op: str = "t2_write"):
     threaded straight through for :func:`service_t2_op_stats` attribution.
     """
     return _service_t2_write_locked(write_fn, op=op)
+
+
+class FlushCounts(NamedTuple):
+    """What :func:`flush_rows_to_t2` did: ``flushed`` destinations that now hold
+    the flagged row's content (written, or already identical), ``kept`` existing
+    T2 entries left alone because they were updated after the row was written."""
+
+    flushed: int
+    kept: int
+
+
+def _parse_utc(raw: object, fmt: str | None = None) -> datetime | None:
+    """A UTC instant from an engine timestamp string, or None when absent or
+    unparseable."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.strptime(raw, fmt) if fmt else datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def flush_rows_to_t2(db, entries, *, op: str, log) -> FlushCounts:
+    """Write flagged T1 rows to T2 in time order; return what reached it.
+    nexus-mtheb.9.
+
+    A flush is the row's hand-over to T2, and the T2 entry then belongs to
+    whoever last wrote it: a note the user edits (``memory_put``, an editor), or
+    a later session's flag of the same destination. So a row is written when no
+    entry exists, or when the row (T1 ``ts``, the time it was put) is newer than
+    the entry's last update (T2 ``timestamp``, set on every put). An entry
+    updated at or after the row's second was written after the row and is kept:
+    a later flush of the same row (the SessionEnd hook after a handoff flush, the
+    owner's exit flush) cannot put the T1 text back over an edit. A kept row logs
+    at WARNING with *op* and is counted in ``kept``. An entry whose content
+    already equals the row is left alone without a write and counts as flushed.
+    A row or entry whose timestamp cannot be read cannot be shown newer, so an
+    existing entry is kept.
+
+    Two rows aimed at one destination in one flush: the newest row is the one
+    considered, the older is logged (``t1_flush_superseded_row``) and dropped.
+
+    Both stamps come from the same engine's clock and T2's is second-precision,
+    so the comparison is at the second: a row written in the same second as the
+    entry's last update does not replace it. The existence check and the put are
+    two engine calls, not one atomic upsert-if-older: a user edit landing between
+    them is the one window left, bounded to a flush that races a person editing
+    that very entry.
+
+    *db* is the T2 writer ``t2_index_write`` hands its callback; *log* is the
+    caller's logger, so a caller's event stream names each outcome with its own
+    *op*.
+    """
+    newest: dict[tuple[str, str], dict] = {}
+    for entry in entries:
+        key = (entry["flush_project"], entry["flush_title"])
+        held = newest.get(key)
+        if held is None:
+            newest[key] = entry
+            continue
+        row_ts, held_ts = _parse_utc(entry.get("ts")), _parse_utc(held.get("ts"))
+        if row_ts is not None and (held_ts is None or row_ts > held_ts):
+            older, newest[key] = held, entry
+        else:
+            older = entry
+        log.info(
+            "t1_flush_superseded_row", op=op, project=key[0], title=key[1],
+            row_id=older.get("id"),
+            detail="a newer flagged row in this flush has the same destination",
+        )
+
+    flushed = kept = 0
+    for (project, title), entry in newest.items():
+        existing = db.memory.get(project=project, title=title)
+        if existing is not None:
+            if existing["content"] == entry["content"]:
+                flushed += 1
+                continue
+            row_ts = _parse_utc(entry.get("ts"))
+            entry_ts = _parse_utc(existing.get("timestamp"), "%Y-%m-%dT%H:%M:%SZ")
+            # T2's stamp is second-precision and T1's is not: compare whole seconds.
+            if row_ts is None or entry_ts is None or row_ts.replace(microsecond=0) <= entry_ts:
+                kept += 1
+                log.warning(
+                    "t1_flush_kept_existing_t2_entry", op=op, project=project, title=title,
+                    row_ts=entry.get("ts"), entry_ts=existing.get("timestamp"),
+                    detail="the T2 entry was updated at or after the T1 row was written "
+                    "(or a timestamp is unreadable), so the flush kept it",
+                )
+                continue
+        db.memory.put(
+            project=project,
+            title=title,
+            content=entry["content"],
+            tags=entry.get("tags", ""),
+            ttl=None,
+        )
+        flushed += 1
+    return FlushCounts(flushed, kept)
 
 
 # ── Search telemetry sink (nexus-vpa9q) ──────────────────────────────────────

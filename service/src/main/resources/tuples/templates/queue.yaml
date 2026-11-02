@@ -1,10 +1,8 @@
-# RDR-211 Phase 1 Step 2 (bead nexus-rplay.8), Approach item 2: shared
-# work, closing Gap 2 (no shared work queue). Take enabled: a producer
-# posts one tuple per task (id_from: keys+nonce, so the work itself is
-# addressed, not the worker) and any free worker claims the oldest
-# available one with in(); a worker that cannot finish calls nack (a
-# failure, counts toward max_attempts) or release (a hand-back that is
-# not a failure, RDR-211 Gap 4).
+# RDR-211 Phase 1 Step 2 (bead nexus-rplay.8), Approach item 2, closing
+# Gap 2 (no shared work queue). Take enabled, with id_from: keys+nonce, so
+# the work itself is addressed, not the worker. nack counts toward
+# max_attempts; release is a hand-back that is not a failure (RDR-211
+# Gap 4).
 #
 # keys: [queue] -- literally "queue", not "name", even though the path
 # parameter is <name>: RDR-211's Technical Design table spells this
@@ -12,11 +10,8 @@
 # lock.yaml follow of a key field that mirrors the address segment's
 # value (board's "topic", lock's "resource").
 #
-# from (required): the producer's session or agent id. kind: an optional
-# free-text label for the task's shape (no fixed values -- a queue's task
-# shapes are not enumerable up front). correlation_id: lets a worker's
-# ack carry a reply back to the producer's mailbox via reply-in-ack
-# (RDR-206), and lets the producer match a reply to its own request.
+# kind has no fixed values -- a queue's task shapes are not enumerable up
+# front. correlation_id rides reply-in-ack (RDR-206).
 #
 # id_dims: [from] mirrors mailbox.yaml: "from" also enters the tuple id
 # alongside the minted nonce, so it must be declared required: true.
@@ -72,3 +67,30 @@ retention_seconds: 172800
 max_live_rows: 10000
 
 claim_log_ttl_seconds: 2592000
+
+doc:
+  summary: A named work queue; a producer posts one task per unit of work, any free worker claims the oldest, and the worker acks, nacks (counts a failure) or releases (hands it back).
+  writers:
+    - Unverified: any producer, by tuple_out or nx tuple out; no code in this repository posts to queue/<name>, and the live tenant holds no such subspace
+  readers:
+    - Unverified: a worker claims with tuple_in or tuple_inp, then tuple_ack, tuple_nack or tuple_release
+    - Unverified: nx doctor (nexus.health) warns when the available backlog of a queue grows
+  fields:
+    queue: the queue name, the same as the subspace's last segment
+    from: the producer's session or agent id; recorded, not checked
+    kind: an optional free label for the task's shape; no value is in use today
+    correlation_id: lets the worker's ack reply reach the producer's mailbox, and lets the producer match a reply to its request
+  body: the task, free text up to 4096 bytes
+  example:
+    subspace: queue/example-work
+    nonce: 00000000-0000-0000-0000-000000000008
+    keys:
+      queue: example-work
+    dims:
+      from: 00000000-0000-0000-0000-000000000007
+      kind: review
+      correlation_id: req-0002
+    body: Review the diff on feature/example.
+  see_also:
+    - RDR-211
+    - RDR-206

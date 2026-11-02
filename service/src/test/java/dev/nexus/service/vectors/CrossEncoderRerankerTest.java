@@ -184,4 +184,25 @@ class CrossEncoderRerankerTest {
                 dir.resolve("model.onnx").toString(),
                 dir.resolve("tokenizer.json").toString());
     }
+
+    // ── Shutdown refusal at tokenize (nexus-89lp5) ──────────────────────────
+
+    @Test
+    void aRefusedTokenizeDegradesAsShuttingDownNotAsAScoringFailure() {
+        var gate = new OrtInitGate();
+        var tok = new GatedTokenizer(gate, new GatedTokenizer.Codec() {
+            @Override public ai.djl.huggingface.tokenizers.Encoding encode(String text) { return null; }
+            @Override public ai.djl.huggingface.tokenizers.Encoding encode(String text, String pair) { return null; }
+            @Override public void close() { }
+        }, 100);
+        assertThat(gate.quiesce(0)).as("shutdown has begun").isTrue();
+        var reranker = new CrossEncoderReranker("unused-model", "unused-tokenizer");
+        reranker.adoptTokenizerForTest(tok);
+
+        assertThatThrownBy(() -> reranker.rerank("q", List.of("a", "b"), null))
+                .isInstanceOf(RerankUpstreamException.class)
+                .hasMessageContaining("service is shutting down")
+                .hasMessageNotContaining("scoring failed")
+                .hasCauseInstanceOf(OrtInitGate.ShutdownInProgressException.class);
+    }
 }

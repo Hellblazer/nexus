@@ -604,10 +604,11 @@ def session_end_flush() -> str:
     foreign borrow -- and the gate skips.
 
     Net effect: after nexus-65a9k, ``clear()`` essentially never fires
-    for a genuine top-level SessionEnd. Rows are reaped by the 24h TTL
-    sweep (``SWEEP_TTL_HOURS`` in ``NexusService.java``, a live recurring
-    per-tenant task, verified -- not aspirational) rather than deleted
-    immediately.
+    for a genuine top-level SessionEnd. Rows are reaped by the TTL sweep
+    once the session has been idle for ``SWEEP_TTL_HOURS`` (24 h, in
+    ``NexusService.java``; a live recurring per-tenant task, verified --
+    not aspirational; session-idle since nexus-mtheb.2) rather than
+    deleted immediately.
 
     That is still strictly the safe direction: leaking rows to a TTL
     sweep is recoverable, deleting a live process's working memory is
@@ -625,7 +626,7 @@ def session_end_flush() -> str:
     """
     from nexus.db.t2.http_memory_store import MemoryExpireResult  # noqa: PLC0415 — deferred import; keeps the hook's startup cost off the T2 client
 
-    flushed = 0
+    flushed = kept = 0
     expired = MemoryExpireResult()
 
     try:
@@ -642,29 +643,28 @@ def session_end_flush() -> str:
         # only the T2 writes cross the daemon boundary below.
         entries = list(t1.flagged_entries()) if t1 is not None else []
 
+        from nexus.mcp_infra import flush_rows_to_t2, t2_index_write  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+        kept_counts: list[int] = []
+
         def _flush_and_expire(db):
-            n = 0
-            for entry in entries:
-                db.memory.put(
-                    project=entry["flush_project"],
-                    title=entry["flush_title"],
-                    content=entry["content"],
-                    tags=entry.get("tags", ""),
-                    ttl=None,
-                )
-                n += 1
+            # nexus-mtheb.9: time-ordered, like the MCP's flush. This hook
+            # often runs after the handoff or exit flush wrote the same rows,
+            # and an entry the user edited since must not be put back.
+            counts = flush_rows_to_t2(db, entries, op="session_end_flush", log=_logger())
+            kept_counts.append(counts.kept)
             # Flushed entries are permanent (ttl=None); the expire sweep
             # below only reaps already-expired rows, so flush-then-expire
             # ordering is safe.
-            return n, db.expire_detail()
+            return counts.flushed, db.expire_detail()
 
         # RDR-128 P3 (nexus-sbxbe.3): route the flush + TTL sweep through the
         # T2 daemon so the detached SessionEnd grandchild does not open
         # memory.db directly and contend on its single WAL writer lock.
         # t2_index_write falls back to a direct T2Database when the daemon
         # is unreachable (the grandchild can outlive the MCP lifespan).
-        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         flushed, expired = t2_index_write(_flush_and_expire)
+        kept = sum(kept_counts)
         # nexus-6a19f: `t1 is None` here covers every case where
         # `_open_t1()` raised -- including, since nexus-f7xyq, an explicit
         # session id with no usable lease. That is load-bearing, not
@@ -697,7 +697,11 @@ def session_end_flush() -> str:
     except Exception as exc:  # noqa: BLE001 — session-end boundary: a storage error of ANY class must not crash the host (the SQLite-specific catch went with the substrate, 2026-08-29)
         _logger().warning("session_end_storage_error", phase="flush_expire", error=str(exc))
 
-    return f"Session ended. Flushed {flushed} scratch entries. {expired.describe(prefix='memory ')}"
+    kept_note = f" Kept {kept} existing T2 entries updated since." if kept else ""
+    return (
+        f"Session ended. Flushed {flushed} scratch entries.{kept_note} "
+        f"{expired.describe(prefix='memory ')}"
+    )
 
 
 def session_end() -> str:

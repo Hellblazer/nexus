@@ -12,11 +12,12 @@ single command. Migration: ``nx enrich <coll>`` → ``nx enrich bib
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1523,6 +1524,23 @@ _DEFAULT_VALIDATE_SAMPLE_PCT = 5
 # _run_validation_sample's docstring for the incident this closes).
 _VALIDATION_FAILURES_FILENAME = "aspect_validation_failures.jsonl"
 
+# RDR-189 P1 (nexus-z1d0l.1.6): the additive all-outcomes record, one row per
+# sampled record whatever its outcome (verified, disagreement, unverifiable,
+# errored). Beside the failures file, never mixed with it; the failures file
+# keeps its schema. Retention policy of record: T2 nexus_rdr
+# 189-validation-retention-policy.
+_VALIDATION_ALL_OUTCOMES_FILENAME = "aspect_validation.jsonl"
+
+#: Both validation files keep their newest this-many complete rows (Sam, 2026-11-01).
+_VALIDATION_MAX_ROWS = 10_000
+
+#: A witness quote is cut to this many characters in a row, so no row can carry
+#: document text by way of a quote.
+_VALIDATION_QUOTE_CAP = 300
+
+#: ``schema_version`` of an ``aspect_validation.jsonl`` row.
+_VALIDATION_ROW_SCHEMA_VERSION = 1
+
 # nexus-xwvwx: the evidence handed to operator_verify is the SAME
 # full reassembled document text extract_aspects prompted the extractor
 # with (via read_indexed_text -> read_source, no truncation at that
@@ -1587,7 +1605,10 @@ def _scaled_verify_timeout(evidence_chars: int) -> float:
         "Validate N%% of newly-extracted aspects via operator_verify "
         "(claim=aspects, evidence=document text). Disagreements append "
         "to <nexus config dir>/aspect_validation_failures.jsonl (override "
-        "with --validation-out). Pass 0 to skip validation."
+        "with --validation-out); every sampled record, whatever its outcome, "
+        "also writes one row to <nexus config dir>/aspect_validation.jsonl "
+        "(override with --validation-all-out); a row that cannot be written is named "
+        "in the summary and the run exits 1. Pass 0 to skip validation."
     ),
 )
 @click.option(
@@ -1597,7 +1618,31 @@ def _scaled_verify_timeout(evidence_chars: int) -> float:
     help=(
         "Path for the validation-sample failures JSONL (nexus-xwvwx). "
         "Defaults to <nexus config dir>/aspect_validation_failures.jsonl "
-        "-- never the current working directory."
+        "-- never the current working directory. Names the failures file "
+        "only; it must differ from --validation-all-out."
+    ),
+)
+@click.option(
+    "--validation-all-out",
+    type=str,
+    default="",
+    help=(
+        "Path for the all-outcomes validation JSONL (RDR-189 P1): one row "
+        "per sampled record with its status, host-bound witness items and "
+        "evidence window. Defaults to <nexus config dir>/aspect_validation.jsonl. "
+        "Must differ from --validation-out."
+    ),
+)
+@click.option(
+    "--validation-trace/--no-validation-trace",
+    "validation_trace",
+    default=True,
+    show_default=True,
+    help=(
+        "Keep the free text (claims, quotes, verifier reasons) in the "
+        "validation files. --no-validation-trace nulls those fields in BOTH "
+        "files and keeps ids, states and counts. Unrelated to nx_answer's "
+        "trace."
     ),
 )
 @click.option(
@@ -1627,6 +1672,8 @@ def enrich_aspects(
     dry_run: bool,
     validate_sample: int,
     validation_out: str,
+    validation_all_out: str,
+    validation_trace: bool,
     extract_all: bool,
     re_extract: bool,
     extractor_version: str,
@@ -1657,6 +1704,10 @@ def enrich_aspects(
     """
     from nexus.aspect_extractor import eligible_extractor_names, select_config  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+
+    # RDR-189 P1: the two validation files never share a path. Refuse before any
+    # catalog read or extraction spend.
+    _validation_paths(validation_out, validation_all_out)
 
     config = select_config(collection)
     if config is None:
@@ -1759,6 +1810,8 @@ def enrich_aspects(
             collection=collection,
             sample_pct=validate_sample,
             validation_out=validation_out,
+            validation_all_out=validation_all_out,
+            trace=validation_trace,
         )
 
 
@@ -2377,6 +2430,8 @@ def _run_validation_sample(
     collection: str,
     sample_pct: int,
     validation_out: str = "",
+    validation_all_out: str = "",
+    trace: bool = True,
 ) -> None:
     """Sample N% of extracted records, run operator_verify against the
     INDEXED T3 chunk text (the same evidence the extractor consumed), and
@@ -2422,14 +2477,32 @@ def _run_validation_sample(
       AND the verifier reports non-verified, the row is classified
       ``unverifiable`` (evidence window was partial), never
       ``disagreement`` — the summary counts the two separately.
+
+    RDR-189 P1 (nexus-z1d0l.1.6) adds an all-outcomes record. Every sampled
+    record, whatever its outcome (including ``errored``; of the errored codes only
+    ``malformed_verify_result`` also writes a failures row), appends one row to ``aspect_validation.jsonl``
+    (``validation_all_out``): ``status`` and ``reason_code`` from the checked
+    table :mod:`nexus.tables.aspect_validation_outcomes`, the extracted claims,
+    the verify reason and the witness items. The witness is host-bound: the
+    chunks come from the catalog manifest through ``read_indexed_text``'s
+    ``chunks_out``, the host mints one :class:`~nexus.operators.witness.EvidenceRecord`
+    per chunk (``c1``..``cN``), shows the model those items, and
+    :func:`~nexus.operators.witness.bind` writes ``state``, ``span``, ``tumbler``,
+    ``chash`` and ``collection`` itself. Nothing the model emits is read as an
+    identity. A read that yields no chunk identities is verified against the plain
+    text as before, and no witness can bind there.
+
+    ``trace=False`` nulls the free-text fields in BOTH files and keeps ids, states
+    and counts (the failures file keeps its key set; see :func:`_redact_failures_row`).
+    Both files keep their newest :data:`_VALIDATION_MAX_ROWS` complete rows: every
+    append and the prune that ends the run hold an exclusive lock on a sibling
+    ``<file>.lock``.
     """
     import asyncio  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
-    import json  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
     import random  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
-    from datetime import UTC, datetime  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
 
     from nexus.aspect_extractor import read_indexed_text  # noqa: PLC0415 — command-local import; deferred to validation path
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — command-local import; deferred to validation path
+    from nexus.operators.witness import bind, defer_binding, shown_items  # noqa: PLC0415 — command-local import; deferred to validation path
 
     # Process-cached catalog projections (same builders the extractor used);
     # cheap to rebuild here so validation is self-contained.
@@ -2449,32 +2522,26 @@ def _run_validation_sample(
         f"({sample_pct}%) via operator_verify..."
     )
 
-    failures_path = (
-        Path(validation_out) if validation_out
-        else nexus_config_dir() / _VALIDATION_FAILURES_FILENAME
-    )
-    failures_path.parent.mkdir(parents=True, exist_ok=True)
+    failures_path, all_path = _validation_paths(validation_out, validation_all_out)
+    for out_path in (failures_path, all_path):
+        # A directory that cannot be made (a file in the way, no permission) must not end a run
+        # whose extraction is spent: its rows fail to append, are counted, and the summary names it.
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _log.warning("validation_dir_create_failed", path=str(out_path.parent), error=str(exc))
     failures = 0
     unverifiable = 0
+    unwitnessed = 0
     verified = 0
-    errored = 0
+    errored_by: dict[str, int] = {}  # reason_code -> count; its sum is the errored total
+    unwritten: dict[Path, int] = {}  # file -> rows whose append failed
+
+    def append(path: Path, row: dict[str, Any]) -> None:
+        if not _append_validation_row_logged(path, row):
+            unwritten[path] = unwritten.get(path, 0) + 1
 
     for source_path, record, lookup_path in sample:
-        content = read_indexed_text(
-            collection=collection,
-            source_path=source_path,
-            lookup_path=lookup_path,
-            doc_id_lookup=doc_id_lookup,
-            manifest_lookup=manifest_lookup,
-        )
-        if not content:
-            errored += 1
-            _log.warning(
-                "validate_sample_indexed_text_unavailable",
-                source_path=source_path, collection=collection,
-            )
-            continue
-
         claim_payload = {
             "problem_formulation": record.problem_formulation,
             "proposed_method": record.proposed_method,
@@ -2483,6 +2550,43 @@ def _run_validation_sample(
             "experimental_results": record.experimental_results,
         }
         claim_json = json.dumps(claim_payload)
+        timestamp = datetime.now(UTC).isoformat()
+        tumbler = _document_tumbler(doc_id_lookup, collection, lookup_path or source_path)
+
+        def write_row(
+            reason_code: str,
+            result: Mapping[str, Any] | None = None,
+            window: tuple[bool | None, int | None, int | None] = (None, None, None),
+            *,
+            identity_trusted: bool = False,
+            _source_path: str = source_path,
+            _claim: dict[str, Any] = claim_payload,
+            _tumbler: str | None = tumbler,
+            _timestamp: str = timestamp,
+        ) -> None:
+            append(all_path, _all_outcomes_row(
+                reason_code=reason_code, collection=collection, source_path=_source_path,
+                tumbler=_tumbler, claim_payload=_claim, result=result, window=window,
+                identity_trusted=identity_trusted, trace=trace, timestamp=_timestamp,
+            ))
+
+        chunks: list[tuple[str, str]] = []
+        content = read_indexed_text(
+            collection=collection,
+            source_path=source_path,
+            lookup_path=lookup_path,
+            doc_id_lookup=doc_id_lookup,
+            manifest_lookup=manifest_lookup,
+            chunks_out=chunks,
+        )
+        if not content:
+            errored_by["indexed_text_unavailable"] = errored_by.get("indexed_text_unavailable", 0) + 1
+            _log.warning(
+                "validate_sample_indexed_text_unavailable",
+                source_path=source_path, collection=collection,
+            )
+            write_row("indexed_text_unavailable")
+            continue
 
         document_chars = len(content)
         evidence_truncated = document_chars > _VALIDATION_EVIDENCE_CHAR_CAP
@@ -2490,64 +2594,521 @@ def _run_validation_sample(
             content[:_VALIDATION_EVIDENCE_CHAR_CAP] if evidence_truncated else content
         )
         evidence_chars = len(evidence)
+        window = (evidence_truncated, evidence_chars, document_chars)
 
+        records = _window_records(
+            chunks, content, _VALIDATION_EVIDENCE_CHAR_CAP,
+            tumbler=tumbler, collection=collection,
+        )
         try:
-            result = asyncio.run(_verify(claim_json, evidence))
+            if records:
+                # The model cites the host's item ids; the host binds the reply once.
+                with defer_binding(evidence_prerendered=True):
+                    raw = asyncio.run(_verify(claim_json, shown_items(records)))
+                result = bind(raw, records, "verify")
+                if isinstance(raw, Mapping) and "reason" not in raw:
+                    # bind writes reason=None for an absent reason; the failures row reads an absent
+                    # one as "" (result.get("reason", "")), as it did before RDR-189.
+                    result.pop("reason", None)
+            else:
+                result = asyncio.run(_verify(claim_json, evidence))
         except Exception as exc:  # noqa: BLE001 — per-sample isolation; verify failure counted as errored, validation loop continues
-            errored += 1
+            errored_by["verify_exception"] = errored_by.get("verify_exception", 0) + 1
             _log.warning(
                 "validate_sample_verify_failed",
                 source_path=source_path, error=str(exc),
             )
+            write_row("verify_exception", window=window)
             continue
 
-        if result.get("verified", False):
-            verified += 1
+        if not isinstance(result, Mapping):
+            errored_by["malformed_verify_result"] = errored_by.get("malformed_verify_result", 0) + 1
+            _log.warning(
+                "validate_sample_verify_malformed",
+                source_path=source_path, result_type=type(result).__name__,
+            )
+            write_row("malformed_verify_result", window=window)
+            # The table's malformed_verify_result row says legacy_failures_row = yes, whatever the
+            # reply's shape; there is no reason or citations to carry, so those fields are empty.
+            append(failures_path, _failures_row(
+                source_path=source_path, claim_payload=claim_payload, result={},
+                window=window, trace=trace, timestamp=timestamp,
+            ))
             continue
 
+        verdict = result.get("verified")
+        trusted = bool(records)
+        if not isinstance(verdict, bool):
+            reason_code = "malformed_verify_result"
+        elif verdict:
+            reason_code = (
+                "verified" if _has_bound_support(result, trusted) else "verified_unwitnessed"
+            )
+        else:
+            reason_code = "evidence_truncated" if evidence_truncated else "verifier_rejected"
+        write_row(reason_code, result, window, identity_trusted=trusted)
+
+        # The failures file follows the outcome table's legacy_failures_row: every outcome that
+        # read as non-verified before RDR-189 writes a row, as does every malformed verdict. A
+        # missing verdict read as non-verified then; a truthy non-boolean read as verified and
+        # wrote no row, and writes one now by decision (P1 review, nexus-z1d0l.1.7). Only a true
+        # boolean verdict writes none.
+        if reason_code == "malformed_verify_result":
+            errored_by[reason_code] = errored_by.get(reason_code, 0) + 1
+        elif verdict:
+            if reason_code == "verified":
+                verified += 1
+            else:
+                unwitnessed += 1  # a true verdict with no bound support is unverifiable
+            continue
         # nexus-xwvwx: a non-verified result against a TRUNCATED evidence
         # window is not a real disagreement -- the verifier may simply not
         # have seen the section the claim references. Classify separately
         # so the summary never conflates "the extraction looks wrong" with
         # "the sample's evidence window was partial".
-        if evidence_truncated:
+        elif evidence_truncated:
             unverifiable += 1
         else:
             failures += 1
-        with failures_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "source_path": source_path,
-                "extracted_aspects": claim_payload,
-                "operator_verify_reason": result.get("reason", ""),
-                "citations": result.get("citations", []),
-                "timestamp": datetime.now(UTC).isoformat(),
-                "evidence_truncated": evidence_truncated,
-                "evidence_chars": evidence_chars,
-                "document_chars": document_chars,
-            }) + "\n")
+        append(failures_path, _failures_row(
+            source_path=source_path, claim_payload=claim_payload, result=result,
+            window=window, trace=trace, timestamp=timestamp,
+        ))
+
+    # Retention: both files keep their newest rows, pruned once at the end of the run.
+    for path in (failures_path, all_path):
+        try:
+            _prune_validation_file(path)
+        except OSError as exc:
+            _log.warning("validation_file_prune_failed", path=str(path), error=str(exc))
+
+    errored = sum(errored_by.values())
+
+    def written(label: str, path: Path, ok: str = "") -> str:
+        """"<label> written to <path>." (or *ok*) only for a file that took every row; a file that
+        lost any names how many, so the summary never claims a file it failed to write."""
+        if lost := unwritten.get(path):
+            return f"{label}: {lost} row(s) could not be written to {path}."
+        return ok or f"{label} written to {path}."
 
     # nexus-vwns1: an all-errored run (no sample's indexed text could be
     # re-fetched — T3 down, collection not indexed) must NOT read as a quiet
     # pass. Surface it loudly so a broad read_indexed_text regression can't
-    # make --validate-sample silently verify nothing.
+    # make --validate-sample silently verify nothing. The warning names what
+    # errored (a count per reason_code); the T3 hint stays only when every
+    # error was an unavailable text, since a verify exception or a malformed
+    # reply says nothing about T3.
     if sample_count and errored == sample_count:
+        reasons = ", ".join(f"{code}={n}" for code, n in sorted(errored_by.items()))
+        hint = (
+            " Is the collection indexed and T3 reachable?"
+            if set(errored_by) == {"indexed_text_unavailable"} else ""
+        )
         click.echo(
-            f"WARNING: validation verified 0 samples — indexed text was "
-            f"unavailable for ALL {sample_count} sampled document(s). "
-            f"Is the collection indexed and T3 reachable? "
-            f"(no verification signal this run)",
+            f"WARNING: validation verified 0 samples — all {sample_count} sampled "
+            f"document(s) errored ({reasons}).{hint} "
+            f"(no verification signal this run) "
+            f"{written('All outcomes', all_path)}",
             err=True,
         )
-    elif failures or unverifiable:
+    elif failures or unverifiable or unwitnessed:
         click.echo(
             f"Validation: {verified} verified, {failures} disagreement(s), "
             f"{unverifiable} unverifiable (evidence truncated), "
-            f"{errored} errored. Failures written to {failures_path}."
+            f"{unwitnessed} unverifiable (no bound witness), "
+            f"{errored} errored. {written('Failures', failures_path)} "
+            f"{written('All outcomes', all_path)}"
         )
     else:
         click.echo(
             f"Validation: all {verified} sample(s) verified "
-            f"({errored} errored). Output: {failures_path}."
+            f"({errored} errored). {written('Output', failures_path, f'Output: {failures_path}.')} "
+            f"{written('All outcomes', all_path)}"
+        )
+    if unwritten:
+        # The rows are gone: a run that could not record its result has not succeeded.
+        raise click.exceptions.Exit(1)
+
+
+# ── RDR-189 P1: the validation record ──────────────────────────────────────
+
+
+def _validation_paths(validation_out: str, validation_all_out: str) -> tuple[Path, Path]:
+    """``(failures_path, all_outcomes_path)``, defaults under the config dir.
+
+    The two files carry different schemas, so one path for both is a usage error,
+    compared after ``resolve()`` (a different spelling of one path counts) and by
+    ``samefile`` when both exist (a link to the other counts).
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — command-local import; deferred to validation path
+
+    failures = (
+        Path(validation_out).expanduser() if validation_out
+        else nexus_config_dir() / _VALIDATION_FAILURES_FILENAME
+    )
+    all_out = (
+        Path(validation_all_out).expanduser() if validation_all_out
+        else nexus_config_dir() / _VALIDATION_ALL_OUTCOMES_FILENAME
+    )
+    rf, ra = failures.resolve(), all_out.resolve()
+    # Names differing only in case are one file on a case-insensitive filesystem (macOS default).
+    same = rf == ra or (rf.parent == ra.parent and rf.name.casefold() == ra.name.casefold())
+    if not same and failures.exists() and all_out.exists():
+        same = os.path.samefile(failures, all_out)
+    if same:
+        raise click.UsageError(
+            f"--validation-out and --validation-all-out name the same file ({all_out}); "
+            "the failures file and the all-outcomes file carry different schemas and "
+            "need separate paths."
+        )
+    return failures, all_out
+
+
+def _document_tumbler(
+    doc_id_lookup: Callable[[str, str], str] | None, collection: str, source_id: str,
+) -> str | None:
+    """The document's catalog tumbler, or ``None`` when the catalog has no entry for it."""
+    if doc_id_lookup is None:
+        return None
+    try:
+        return doc_id_lookup(collection, source_id) or None
+    except Exception as exc:  # noqa: BLE001 — best-effort identity; a failed lookup leaves the row without a tumbler
+        _log.warning("validate_sample_tumbler_lookup_failed", source_id=source_id, error=str(exc))
+        return None
+
+
+def _window_records(
+    chunks: list[tuple[str, str]],
+    content: str,
+    cap: int,
+    *,
+    tumbler: str | None,
+    collection: str,
+) -> list[Any] | None:
+    """One :class:`EvidenceRecord` per chunk inside the evidence window, ids ``c1``..``cN``.
+
+    ``None`` when the reader reported no chunks, or when its chunks are not the text
+    being verified (they must join, blank-line separated, to *content*): a quote must
+    never bind to text the model was not shown. The window is the first *cap*
+    characters of *content*; a chunk that straddles it is clipped, a chunk past it is
+    left out. A chunk the catalog manifest does not list (``chash`` empty) gets no
+    source fields, so nothing can bind to it.
+    """
+    from nexus.operators.witness import EvidenceRecord  # noqa: PLC0415 — command-local import; deferred to validation path
+
+    if not chunks:
+        return None
+    if "\n\n".join(text for _, text in chunks) != content:
+        _log.warning("validate_sample_chunks_do_not_join_evidence", chunks=len(chunks), chars=len(content))
+        return None
+    out: list[EvidenceRecord] = []
+    pos = 0
+    for n, (chash, text) in enumerate(chunks, start=1):
+        if pos >= cap:
+            break
+        known = bool(chash)
+        out.append(EvidenceRecord(
+            f"c{n}", text[: cap - pos],
+            tumbler if known else None, chash or None, collection if known else None,
+        ))
+        pos += len(text) + 2
+    return out
+
+
+def _has_bound_support(result: Mapping[str, Any], identity_trusted: bool) -> bool:
+    """True when at least one witness item is ``bound`` with role ``supports``.
+    Only a host-bound payload can say so: with no host records nothing is bound."""
+    if not identity_trusted:
+        return False
+    items = result.get("evidence")
+    return isinstance(items, list) and any(
+        isinstance(i, Mapping) and i.get("state") == "bound" and i.get("role") == "supports"
+        for i in items
+    )
+
+
+def _witness_items(
+    result: Mapping[str, Any], *, identity_trusted: bool, trace: bool,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """The row's witness items and their counts. Identity (``tumbler``, ``chash``,
+    ``collection``) is copied only from a payload the host bound itself; otherwise it is
+    null. A quote is cut to :data:`_VALIDATION_QUOTE_CAP` characters and is null
+    when ``trace`` is off."""
+    from nexus.operators.witness import STATES  # noqa: PLC0415 — command-local import; deferred to validation path
+
+    entries = result.get("evidence")
+    items: list[dict[str, Any]] = []
+    for e in entries if isinstance(entries, list) else []:
+        if not isinstance(e, Mapping):
+            continue
+        quote = e.get("quote")
+        items.append({
+            "item_id": e.get("item_id"),
+            "role": e.get("role"),
+            "state": e.get("state"),
+            "span": e.get("span"),
+            "tumbler": e.get("tumbler") if identity_trusted else None,
+            "chash": e.get("chash") if identity_trusted else None,
+            "collection": e.get("collection") if identity_trusted else None,
+            "quote": quote[:_VALIDATION_QUOTE_CAP] if trace and isinstance(quote, str) else None,
+        })
+    counts = dict.fromkeys(STATES, 0)
+    for i in items:
+        if i["state"] in counts:
+            counts[i["state"]] += 1
+    rejected = result.get("rejected")
+    counts["rejected"] = len(rejected) if isinstance(rejected, list) else 0
+    return items, counts
+
+
+def _all_outcomes_row(
+    *,
+    reason_code: str,
+    collection: str,
+    source_path: str,
+    tumbler: str | None,
+    claim_payload: dict[str, Any],
+    result: Mapping[str, Any] | None,
+    window: tuple[bool | None, int | None, int | None],
+    identity_trusted: bool,
+    trace: bool,
+    timestamp: str,
+) -> dict[str, Any]:
+    """One ``aspect_validation.jsonl`` row (schema_version 1). Never carries the
+    source path or document text; ``claim_id`` is a hash of collection and path."""
+    import hashlib  # noqa: PLC0415 — branch-local stdlib import; deferred to validation path
+    import unicodedata  # noqa: PLC0415 — branch-local stdlib import; deferred to validation path
+
+    from nexus.tables.aspect_validation_outcomes import status_for  # noqa: PLC0415 — command-local import; deferred to validation path
+
+    errored = status_for(reason_code) == "errored"
+    if errored or result is None:
+        items, counts = None, {s: 0 for s in ("bound", "unattributed", "unresolved", "ambiguous", "rejected")}
+        reason = None
+    else:
+        items, counts = _witness_items(result, identity_trusted=identity_trusted, trace=trace)
+        raw_reason = result.get("reason")
+        reason = raw_reason if trace and isinstance(raw_reason, str) else None
+    # ensure_ascii=False: escaping to \uXXXX first would hide a compatibility form from NFKC.
+    claim_text = unicodedata.normalize("NFKC", json.dumps(claim_payload, sort_keys=True, ensure_ascii=False))
+    return {
+        "schema_version": _VALIDATION_ROW_SCHEMA_VERSION,
+        "claim_id": hashlib.sha256(
+            f"aspects/v1\0{collection}\0{source_path}".encode("utf-8", "surrogatepass")  # a non-UTF-8 file name
+        ).hexdigest(),
+        # surrogatepass: a lone surrogate in a model reply must not end the run (NFKC leaves it as it is).
+        "claim_digest": hashlib.sha256(claim_text.encode("utf-8", "surrogatepass")).hexdigest(),
+        "collection": collection,
+        "tumbler": tumbler,
+        "status": status_for(reason_code),
+        "reason_code": reason_code,
+        "witness": items,
+        "witness_counts": counts,
+        "evidence_truncated": window[0],
+        "evidence_chars": window[1],
+        "document_chars": window[2],
+        "extracted_claims": claim_payload if trace else None,
+        "verify_reason": reason,
+        "trace": trace,
+        "redacted": [] if trace else ["extracted_claims", "verify_reason", "witness.quote"],
+        "timestamp": timestamp,
+    }
+
+
+def _failures_row(
+    *,
+    source_path: str,
+    claim_payload: dict[str, Any],
+    result: Mapping[str, Any],
+    window: tuple[bool | None, int | None, int | None],
+    trace: bool,
+    timestamp: str,
+) -> dict[str, Any]:
+    """One legacy ``aspect_validation_failures.jsonl`` row: the same keys as before
+    RDR-189. Under ``trace=False`` the key set stays and the free-text fields are
+    nulled: ``extracted_aspects`` and ``operator_verify_reason`` become ``null`` and
+    ``citations`` becomes ``[]``. ``source_path`` stays (the failures file's consumers
+    locate the document by it, and it is the user's own path in their own file)."""
+    return {
+        "source_path": source_path,
+        "extracted_aspects": claim_payload if trace else None,
+        "operator_verify_reason": result.get("reason", "") if trace else None,
+        "citations": result.get("citations", []) if trace else [],
+        "timestamp": timestamp,
+        "evidence_truncated": window[0],
+        "evidence_chars": window[1],
+        "document_chars": window[2],
+    }
+
+
+@contextlib.contextmanager
+def _validation_file_lock(target: Path) -> Iterator[None]:
+    """Exclusive lock on the sibling ``<file>.lock``. Locking the sibling keeps the lock
+    valid across the prune's inode swap: a waiting appender opens the new file."""
+    from nexus._locking import lock_fd, unlock_fd  # noqa: PLC0415 — command-local import; deferred to validation path
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(target.with_name(target.name + ".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        lock_fd(fd, blocking=True)
+        try:
+            yield
+        finally:
+            unlock_fd(fd)
+    finally:
+        os.close(fd)
+
+
+#: A key every validation row carries: ``schema_version`` (all-outcomes) or ``operator_verify_reason``
+#: (the legacy failures row). A JSON object without either is someone else's line.
+_VALIDATION_ROW_MARKERS: tuple[str, ...] = ("schema_version", "operator_verify_reason")
+
+
+def _is_validation_row(line: bytes) -> bool:
+    """True when *line* is one JSON object of a validation file's own shape (a marker key present).
+    A user's JSONL log is not a validation file, so the prune and the torn-tail cut leave it alone."""
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return False
+    return isinstance(obj, dict) and any(k in obj for k in _VALIDATION_ROW_MARKERS)
+
+
+def _is_torn_row(frag: bytes) -> bool:
+    """True when *frag* is a prefix of a row that never finished: it opens a JSON object and
+    does not parse. Any other unterminated text is a line of its own and is kept."""
+    if not frag.lstrip().startswith(b"{"):
+        return False
+    try:
+        json.loads(frag)
+    except ValueError:
+        return True
+    return False
+
+
+def _unterminated_tail(target: Path) -> tuple[int, bytes] | None:
+    """``(offset, tail)`` of the bytes after the last newline of a non-empty *target* that does
+    not end in one, else ``None``. Reads one byte unless the file is unterminated."""
+    with open(target, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        if not f.tell():
+            return None
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) == b"\n":
+            return None
+        f.seek(0)
+        data = f.read()
+    cut = data.rfind(b"\n") + 1
+    return cut, data[cut:]
+
+
+def _append_validation_row(path: Path, row: dict[str, Any]) -> None:
+    """Append one JSON row under the file lock. The path is resolved (a link is followed
+    to its target) and a new file is created 0600.
+
+    An unterminated last line is never cut unless it is a torn row: it is dropped only when it
+    does not parse as a JSON object AND the line before it does (the file is a validation
+    file). A complete row, a file with no newline at all, or a file whose lines are not rows
+    gets a newline instead, so no complete line of anyone's file is lost. A target that is
+    not a regular file (``/dev/null``, a FIFO) is written without the lock or the tail check.
+    """
+    target = path.resolve()
+    line = (json.dumps(row) + "\n").encode("utf-8")
+    if target.exists() and not target.is_file():
+        # O_NONBLOCK: a FIFO with no reader fails (ENXIO, logged by the caller) instead of hanging the run.
+        fd = os.open(target, os.O_WRONLY | os.O_APPEND | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "ab") as f:
+            f.write(line)
+        return
+    with _validation_file_lock(target):
+        lead = b""
+        tail = _unterminated_tail(target) if target.is_file() else None
+        if tail is not None:
+            cut, frag = tail
+            prev = b""
+            if cut:
+                with open(target, "rb") as f:
+                    head = f.read(cut - 1)
+                prev = head[head.rfind(b"\n") + 1:]
+            if cut and _is_torn_row(frag) and _is_validation_row(prev):
+                _log.warning("validation_file_torn_tail_dropped", path=str(target), bytes=len(frag))
+                os.truncate(target, cut)
+            else:
+                lead = b"\n"
+        if target.exists():
+            fd = os.open(target, os.O_WRONLY | os.O_APPEND)  # a file someone named keeps its own mode and ACL
+        else:
+            from nexus._winsec import open_private  # noqa: PLC0415 — command-local import; deferred to validation path
+
+            fd = open_private(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND)  # a file this run makes is owner-only
+        with os.fdopen(fd, "ab") as f:
+            f.write(lead + line)
+
+
+def _append_validation_row_logged(path: Path, row: dict[str, Any]) -> bool:
+    """:func:`_append_validation_row`, with an OS error logged instead of raised: one unwritable
+    file (a read-only directory for its lock, a symlink loop) must not end a run whose
+    extraction is already spent, nor cost the other file its row. Returns whether the row was
+    written, so the caller can count what was lost and say so."""
+    try:
+        _append_validation_row(path, row)
+    except OSError as exc:
+        _log.warning("validation_file_append_failed", path=str(path), error=str(exc))
+        return False
+    return True
+
+
+def _prune_validation_file(path: Path, keep: int = _VALIDATION_MAX_ROWS) -> None:
+    """Keep the newest *keep* complete rows of *path*, under the file lock.
+
+    The path is resolved first (the prune writes the target, never replaces a link) and
+    anything that is not a regular file is skipped. "Newest" is the last *keep* complete
+    lines in file order; a torn trailing line is dropped. The kept rows go to a temp file
+    in the same directory, fsynced, given the original's mode, and renamed over it."""
+    import secrets  # noqa: PLC0415 — branch-local stdlib import; deferred to validation path
+    import stat  # noqa: PLC0415 — branch-local stdlib import; deferred to validation path
+
+    target = path.resolve()
+    if not target.exists():
+        return
+    if not target.is_file():
+        _log.warning("validation_file_prune_skipped_not_regular", path=str(target))
+        return
+    with _validation_file_lock(target):
+        data = target.read_bytes()
+        head, sep, torn = data.rpartition(b"\n")
+        complete = head.split(b"\n") if sep else []
+        if torn and _is_validation_row(torn):
+            complete, torn = [*complete, torn], b""  # a whole row that lacks its newline is a row
+        if len(complete) <= keep and not torn:
+            return
+        if not complete or not all(_is_validation_row(ln) for ln in complete) or (torn and not _is_torn_row(torn)):
+            # Not a validation file (a user's log named by mistake): the prune never rewrites it.
+            _log.warning("validation_file_prune_skipped_not_rows", path=str(target))
+            return
+        if torn:
+            _log.warning("validation_file_torn_tail_dropped", path=str(target), bytes=len(torn))
+        kept = b"".join(line + b"\n" for line in complete[-keep:]) if keep else b""
+        # The replacement is made through open_private, not mkstemp: an owner-only file the run made
+        # must stay owner-only on Windows, where os.chmod does not carry the ACL.
+        from nexus._winsec import open_private  # noqa: PLC0415 — command-local import; deferred to validation path
+
+        tmp_name = str(target.parent / f"{target.name}.{secrets.token_hex(8)}.tmp")
+        fd = open_private(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(kept)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp_name, stat.S_IMODE(target.stat().st_mode))
+            os.replace(tmp_name, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+            raise
+        _log.info(
+            "validation_file_pruned", path=str(target),
+            kept=min(len(complete), keep), dropped=max(0, len(complete) - keep),
         )
 
 

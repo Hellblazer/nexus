@@ -60,6 +60,31 @@ an inline "Amended 2026-11-01" note pointing here. The contract itself is
     host-returned item. Verify gains the model-facing item.
   - **(iv)** Test Plan: the grounded-claim scenario asserts bound evidence
     items, not "citation spans".
+  - **(v)** 2026-11-01, approved by Sam (nexus-z1d0l.1.3 review): a
+    retrieval step's tumbler is never identity, including one search did
+    not infer. For a chunk two documents share, a non-inferred `doc_id` is
+    a pick among the co-owners, not the document the search was about:
+    from engine 0.1.170 (nexus-6pfgb.26) the engine's first live owner by
+    lowest `doc_id`, and on a legacy row the shared T3 row's last writer
+    (the defect nexus-tko2w fixed for section labels). Trusting it binds a
+    shared chunk to a guess. Only the catalog owner set (rule 4) or the
+    parent document the step named (a tumbler-id hydration, or a reserved
+    primary-stream item's named source) can supply a tumbler. Edited in
+    place under § Witness Schema v1, Evidence records and Host binding
+    rule 3. A step confined to one document could bind a shared chunk to
+    that document when it is one of the chunk's owners; that recall gain
+    is nexus-z1d0l.1.12.
+  - **(vi)** 2026-11-01, approved by Sam (nexus-z1d0l.1.10): two rules
+    the text above left unstated. First, `requires_review` is true when
+    the host holds no records for the step; `bind` has done so since
+    nexus-z1d0l.1.2 (a bundled step fed by model output). Second, a check
+    or verify step whose evidence hydrates to nothing, dispatched on its
+    own, returns the empty v1 payload with a null verdict instead of a
+    bare `text` dict. It also carries `text`, a key outside the v1 sets
+    that `bind` passes through like any key the host does not own;
+    `nx_answer` reads it, so its answer text and the answer-runs class of
+    such a run are unchanged. Edited in place under § Witness Schema v1,
+    the `requires_review` rule and Compatibility.
 
 ### Witness Schema v1
 
@@ -135,30 +160,39 @@ ledger's `_pack` shape) and nothing else from the record. Who builds the
 records:
 
 - The plan runner, for a check or verify step fed by a retrieval step. It
-  builds the records from that step's output (`ids`, `tumblers`,
-  `chunk_text_hash`, per-chunk collections, the fields the coverage ledger's
-  `_hits` already reads), zipped with the hydrated contents by position
+  builds the records from that step's output (`ids` and the per-chunk
+  collections; a chash-shaped id is its own chash, and the output's
+  `tumblers` are carried but not read), zipped with the hydrated contents by position
   BEFORE the empty-content filter, the supplement and reserved-stream
   merges, and the item cap, which today drop the alignment. The source
   step's output reaches the hydration code through argument resolution
   (`_hydrate_operator_args` sees only the resolved args today, where
   `collections` is the deduplicated list; the per-chunk values are
-  `chunk_collections`). A tumbler from the retrieval output counts as
-  identity only when it was not inferred: a hit whose `doc_id` carries
-  `_doc_id_inferred` (search picked one of several owners of a shared
-  chash) contributes no tumbler, so its record is chash-only. Items merged
-  in later (supplement, reserved stream, coverage note) get records from
-  their own provenance (`SupplementItem`, `RepairSupplement.provenance`),
-  or identity-less records when they have none. Records ride beside `args`
+  `chunk_collections`). A tumbler from the retrieval output never counts
+  as identity, inferred or not; the record's tumbler comes from rule 4's
+  owner set, or from the parent document the step itself named (a
+  tumbler-id hydration, where each id is its document). *Amended
+  2026-11-01 (v): this sentence said a tumbler counted when it was not
+  inferred. For a chunk two documents share, a non-inferred `doc_id` is a
+  pick among the co-owners (the engine's lowest `doc_id` from 0.1.170, the
+  T3 row's last writer on a legacy row), not the document the search was
+  about.* Items merged in later get records as follows: a reserved-stream
+  item from its named source (its `doc_id`, chash and collection); a
+  repair supplement item takes its chash and collection from
+  `RepairSupplement.provenance` and its tumbler only from rule 4's owner
+  set, never from the item's own tumbler; the coverage note and any text
+  with no provenance get identity-less records. Records ride beside `args`
   as a private value that never reaches the dispatched prompt or the MCP
   surface, the same way `_truncation_metadata` does. Ids are minted
   `e1, e2, ...` in record order. Binding happens once, by whoever holds the
   records: on the runner path the runner binds the operator's raw payload;
   the MCP tool binds only when it is called directly.
-- `nx enrich aspects --validate-sample`: one record, `e1`, whose `tumbler`
-  is the document's catalog tumbler (enrich already holds
-  `doc_id_lookup`), `chash` null (the evidence is the reassembled document,
-  not one chunk), `collection` the collection being enriched.
+- `nx enrich aspects --validate-sample`: one record per chunk of the
+  evidence window, `c1, c2, ...`, each carrying the document's catalog
+  tumbler, the chunk's `chash` from the catalog manifest and the collection
+  being enriched; a chunk the manifest does not list gets no source fields.
+  A read that yields no chunk identities is verified against the plain text
+  with no records.
 - The coverage ledger: its anchors already are such records.
 - A direct MCP call: records come from what the caller supplied. A check
   `items` JSON array of objects with `id` and `text` gives one record per
@@ -198,9 +232,10 @@ verify: {schema_version: 1, verified, reason, evidence: [item], rejected: [str],
    every other state nulls them. The host is the only writer of `tumbler`,
    `chash` and `collection`.
 3. A contained quote binds (`bound`) only when the record has source
-   identity: a `tumbler` that names the one owning document (never an
-   inferred one), or a `chash` with a `collection` whose single parent
-   document is known. A contained quote on a record without identity is
+   identity: a `tumbler` that names the one owning document (the parent
+   the step named, or the owner set's single owner; never a retrieval
+   step's tumbler, *amended 2026-11-01 (v)*), or a `chash` with a
+   `collection` whose single parent document is known. A contained quote on a record without identity is
    `unattributed`: the text is real, the source is not known. Every
    direct-MCP plain-text call lands here.
 4. A record with a `chash` and no `tumbler` is `ambiguous` unless the
@@ -237,7 +272,9 @@ removed from the quote before the test and kept in the returned `quote`.
   source fields null.
 
 `uncovered` (check) lists the input item ids that no `supports` or
-`contradicts` item names. `requires_review` is true when any item is not
+`contradicts` item names. `requires_review` is true when the host holds no
+records for the step (a bundled step fed by model output, or no evidence
+at all; Amendment Log (vi)), when any item is not
 `bound`, when `rejected` or `uncovered` is non-empty, or when the verdict
 (`ok`, `verified`) is true and no `supports` item is `bound`; for check
 with `ok=true`, every input item needs a bound `supports` item. It is the
@@ -267,6 +304,16 @@ Mitigations).
   `evidence` list, a `citations` key included (a model can write it and no
   production dispatch emits it), is malformed and comes back as
   `schema_version: 1` with `evidence: []` and `requires_review: true`.
+  Amended 2026-11-01 (Amendment Log (vi)): on the isolated dispatch path, a check or verify
+  step whose evidence hydrates to nothing is never sent to the model: the
+  runner returns that same empty payload, with no records, so
+  `requires_review: true`, and with no verdict
+  (`ok` / `verified` null), verify's `reason` set to the zero-evidence
+  marker, and the marker also under `text`, where `nx_answer` and the
+  answer-runs classifier read it (nexus-z1d0l.1.10). Inside a bundle the
+  step is still dispatched, with a warning, and bound as a bundled step.
+  A null verdict is not a failed one: the marker tells "never ran" apart
+  from a malformed reply.
 - `answer_shape` classifies a payload when its keys are a subset of a
   listed set, so the v1 sets are added: check
   `{schema_version, ok, evidence, rejected, uncovered, requires_review}`

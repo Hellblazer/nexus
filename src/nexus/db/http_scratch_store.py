@@ -147,6 +147,15 @@ class HttpScratchStore:
         tenant:     Tenant to stamp on every request (default: ``DEFAULT_TENANT``).
         session_id: Optional session identifier override.  When ``None``,
                     resolved from ``NX_T1_SESSION`` env var.
+        export_adopted_token: When True (the default), a session token this
+                    store adopts after a 401 (re-read from the lease, or a
+                    recovered one) is also written to ``NX_T1_SESSION``, so
+                    subprocess children spawn with the live token. A store
+                    bound to a session OTHER than the process's current scope
+                    (the handoff flush reads the old session after the swap)
+                    passes False: its token belongs to that session alone and
+                    must never replace the env token of the scope the process
+                    now holds (nexus-mtheb.9).
     """
 
     def __init__(
@@ -157,7 +166,9 @@ class HttpScratchStore:
         session_id: str | None = None,
         _token: str | None = None,
         _session_token: str | None = None,
+        export_adopted_token: bool = True,
     ) -> None:
+        self._export_adopted_token = export_adopted_token
         # nexus-wrwb7: whether the CALLER explicitly pinned the bearer (a
         # test fixture pointing at a fake server) -- tracked BEFORE the
         # env/lease-resolution fallback below overwrites the local, same
@@ -530,9 +541,11 @@ class HttpScratchStore:
         # the live token, not the stranded one. Review M1: export the id
         # alongside when absent, so a later ctor's fallback chain
         # (session_id or NX_T1_SESSION_ID or NX_T1_SESSION) can never
-        # collapse the TOKEN into a session id.
-        os.environ[_SESSION_ENV] = fresh
-        os.environ.setdefault(_SESSION_ID_ENV, session_id)
+        # collapse the TOKEN into a session id. Skipped for a store that is
+        # not the process's own scope (``export_adopted_token=False``).
+        if self._export_adopted_token:
+            os.environ[_SESSION_ENV] = fresh
+            os.environ.setdefault(_SESSION_ID_ENV, session_id)
         try:
             self._client.close()
         except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error

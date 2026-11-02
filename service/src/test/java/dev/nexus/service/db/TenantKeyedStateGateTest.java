@@ -869,8 +869,14 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, REQUEST);
             }
-            // TEMPLATE (13)
+            // TEMPLATE (19)
             for (String f : List.of(
+                "TemplateDoc.Example.dims",
+                "TemplateDoc.Example.keys",
+                "TemplateDoc.fields",
+                "TemplateDoc.readers",
+                "TemplateDoc.seeAlso",
+                "TemplateDoc.writers",
                 "TemplateRegistry.Snapshot.sources",
                 "TemplateRegistry.Snapshot.templates",
                 "TemplateRegistry.SourceGroup.files",

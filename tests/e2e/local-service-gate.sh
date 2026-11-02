@@ -557,7 +557,15 @@ print(jar_freshness_skip_reason() or "")
   # rebuild fails ("jar is read-only") right after the release checklist's
   # build-gate-jar.sh run. A private writable jar is left alone.
   gate_jar_cache_unshare "$JAR"
-  if ! (cd "$REPO_ROOT/service" && ./mvnw -q package -DskipTests); then
+  # nexus-hht72: Testcontainers' Ryuk reaper on for this build, as for the leased
+  # builds (nexus-qrldo, scripts/lib/leased-build.sh). The fenced HOME links
+  # ~/.testcontainers.properties, which sets testcontainers.ryuk.disabled=true on
+  # the dev boxes, so without this a killed gate build orphans its jOOQ codegen
+  # container and only the age sweep covers it. The environment variable beats the
+  # properties file; a caller can still pass TESTCONTAINERS_RYUK_DISABLED=true.
+  # Scoped to the build subshell: the later smoke legs keep their own environment.
+  # The line below is pinned by local_service_gate_guard_test.sh Test 4.
+  if ! (cd "$REPO_ROOT/service" && TESTCONTAINERS_RYUK_DISABLED="${TESTCONTAINERS_RYUK_DISABLED:-false}" ./mvnw -q package -DskipTests); then
     release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
     RELEASE_PROPS_SNAPSHOT=""
     echo "[gate] ERROR: service jar rebuild failed — fix the Maven build and re-run:" >&2

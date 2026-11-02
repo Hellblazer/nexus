@@ -808,3 +808,156 @@ async def test_a_verify_with_ids_composes_the_continuation_prompt_the_runner_sen
     prompt = envelope["reduction_spec"]["prompt"]
     assert prompt == sent[0]
     assert '"id": "e1"' in prompt and '"id": "e2"' in prompt and "_evidence" not in json.dumps(envelope)
+
+
+# ── RDR-189 Test Plan scenario 2: identical chunk text in two documents (nexus-z1d0l.1.3) ────────────────────
+
+from nexus.operators.witness import bind  # noqa: E402 — grouped with the scenario it serves
+
+SHARED = "Identical boilerplate paragraph shared by two documents."
+
+
+def _bound_item(args, quote: str = "boilerplate paragraph") -> dict:
+    """Bind a one-item check reply against the records the hydration built."""
+    reply = {"ok": True, "evidence": [{"item_id": "e1", "quote": quote, "role": "supports"}]}
+    (item,) = bind(reply, args["_evidence_records"], "operator_check")["evidence"]
+    return item
+
+
+class TestSharedChashScenario:
+    def test_the_supplied_parent_document_binds_the_witness(self) -> None:
+        # tumbler-path hydration: the parent document is what the step named, so it is the identity
+        hydrated = {"contents": [SHARED], "missing": []}
+        with patch.object(runner, "_hydrate_tumbler_ids", return_value=hydrated):
+            _, args = runner._hydrate_operator_args("check", {
+                "ids": ["1.1.1"], "check_instruction": "c", "_evidence_source": _source(["1.1.1"]),
+            })
+        item = _bound_item(args)
+        assert (item["state"], item["tumbler"], item["collection"]) == ("bound", "1.1.1", COLL)
+
+    def test_a_bare_chash_with_two_owners_is_ambiguous_never_the_first_owner(self) -> None:
+        catalog = _CountingCatalog([_plain("1.1.1"), _plain("1.1.2")], [_position(X, "1.1.1"), _position(X, "1.1.2")])
+        _, args = _hydrate_check(catalog, [X], {X: {"content": SHARED}}, source=_source([X], tumblers=["1.1.2"]))
+        item = _bound_item(args)
+        assert (item["state"], item["tumbler"], item["chash"], item["collection"]) == ("ambiguous", None, X, COLL)
+        assert item["span"] is not None  # the quote is in the text; only the owning document is unknown
+        assert not {"section_title", "section_type"} & set(item)
+
+    def test_the_collection_disambiguates_owners_in_different_collections(self) -> None:
+        catalog = _CountingCatalog(
+            [_plain("1.1.1"), _plain("1.1.2", collection="knowledge__other")],
+            # the other collection's owner first, so neither a first-owner guess nor a collection-blind rule passes
+            [_position(X, "1.1.2", "knowledge__other"), _position(X, "1.1.1")],
+        )
+        _, args = _hydrate_check(catalog, [X], {X: {"content": SHARED}}, source=_source([X]))
+        item = _bound_item(args)
+        assert (item["state"], item["tumbler"], item["collection"]) == ("bound", "1.1.1", COLL)
+
+    def test_the_witness_never_carries_the_other_documents_section_metadata(self) -> None:
+        # the one T3 row holds document B's labels (last writer); the witness is bound to nothing that reads them
+        catalog = _CountingCatalog([_plain("1.1.1")], [_position(X, "1.1.1")])
+        row = {X: {"content": SHARED, "section_title": "B-ONLY SECTION", "section_type": "b-only-type"}}
+        with patch("nexus.mcp.core._get_t3", return_value=_t3(row)), patch(
+            "nexus.mcp.core._get_catalog", return_value=catalog,
+        ), patch("nexus.mcp.core._read_scope", return_value=[COLL]):
+            reach = mcp_core.store_get_many(ids=[X], collections=COLL, structured=True)
+        assert "b-only-type" in reach["section_types"]  # non-vacuity: the label is in the hydration's reach
+        _, args = _hydrate_check(catalog, [X], row, source=_source([X]))
+        item = _bound_item(args)
+        assert item["state"] == "bound" and item["tumbler"] == "1.1.1"
+        assert not {"section_title", "section_type"} & set(item)
+        everything = json.dumps({"item": item, "shown": args["items"], "records": [r.text for r in args["_evidence_records"]]})
+        assert "B-ONLY SECTION" not in everything and "b-only-type" not in everything
+
+
+class TestRepairedItemOwnerRows:
+    """Owner rows for a repaired chash the hydration did not fetch (deferred here from nexus-z1d0l.1.4)."""
+
+    def test_a_repaired_chash_outside_the_hydrated_ids_with_one_owner_binds_to_it(self) -> None:
+        catalog = _CountingCatalog([_plain("1.1.1"), _plain("1.1.5")], [_position(X, "1.1.1"), _position(Z, "1.1.5")])
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.9"),))
+        _, args = _supplement_hydrate(catalog, {X: {"content": "plan body"}}, [X], supp)
+        rec = next(r for r in args["_evidence_records"] if r.text == "repair body")
+        assert (rec.tumbler, rec.chash, rec.collection) == ("1.1.5", Z, COLL)
+        assert catalog.count("chash_positions") == 2  # the hydration's batch, then one batch for the repaired chashes
+
+    def test_a_repaired_chash_outside_the_hydrated_ids_with_two_owners_stays_ambiguous(self) -> None:
+        catalog = _CountingCatalog(
+            [_plain("1.1.1"), _plain("1.1.5"), _plain("1.1.6")],
+            [_position(X, "1.1.1"), _position(Z, "1.1.5"), _position(Z, "1.1.6")],
+        )
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.5"),))
+        _, args = _supplement_hydrate(catalog, {X: {"content": "plan body"}}, [X], supp)
+        rec = next(r for r in args["_evidence_records"] if r.text == "repair body")
+        assert (rec.tumbler, rec.chash) == (None, Z)
+
+    def test_a_repaired_chash_already_hydrated_is_not_asked_twice(self) -> None:
+        catalog = _CountingCatalog([_plain("1.1.5")], [_position(Z, "1.1.5")])
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.9"),))
+        _supplement_hydrate(catalog, {Z: {"content": "repair body"}}, [Z], supp)
+        assert catalog.count("chash_positions") == 1
+
+    def test_a_failed_owner_lookup_for_a_repaired_chash_leaves_it_unbound(self) -> None:
+        catalog = _CountingCatalog([_plain("1.1.5")], [_position(Z, "1.1.5")], positions_fail=True)
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.5"),))
+        _, args = _supplement_hydrate(catalog, {X: {"content": "plan body"}}, [X], supp)
+        rec = next(r for r in args["_evidence_records"] if r.text == "repair body")
+        assert rec.tumbler is None and rec.chash == Z
+
+    def test_a_tumbler_path_step_fetches_owner_rows_for_its_repaired_chashes(self) -> None:
+        catalog = _CountingCatalog([_plain("1.1.5")], [_position(Z, "1.1.5")])
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.9"),))
+        hydrated = {"contents": ["doc body"], "missing": []}
+        with supplement_scope(supp), patch.object(runner, "_hydrate_tumbler_ids", return_value=hydrated), patch(
+            "nexus.mcp.core._get_catalog", return_value=catalog,
+        ):
+            _, args = runner._hydrate_operator_args("check", {"ids": ["1.1.1"], "check_instruction": "c"})
+        rec = next(r for r in args["_evidence_records"] if r.text == "repair body")
+        assert rec.tumbler == "1.1.5"
+
+    def test_a_repaired_chash_that_is_a_missing_hydrated_id_is_still_asked(self) -> None:
+        # Z is in the step's ids but not in T3 (missing), so the hydration's owner lookup never asked about it
+        catalog = _CountingCatalog([_plain("1.1.1"), _plain("1.1.5")], [_position(X, "1.1.1"), _position(Z, "1.1.5")])
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.9"),))
+        _, args = _supplement_hydrate(catalog, {X: {"content": "plan body"}}, [X, Z], supp)
+        rec = next(r for r in args["_evidence_records"] if r.text == "repair body")
+        assert rec.tumbler == "1.1.5"
+
+    def test_a_repair_lookup_that_fails_after_a_good_hydration_leaves_it_unbound(self) -> None:
+        class _FailsSecond(_CountingCatalog):
+            def chash_positions(self, chashes):
+                if self.count("chash_positions") >= 1:
+                    self.calls.append(("chash_positions", tuple(chashes)))
+                    raise RuntimeError("second lookup down")
+                return super().chash_positions(chashes)
+
+        catalog = _FailsSecond([_plain("1.1.1"), _plain("1.1.5")], [_position(X, "1.1.1"), _position(Z, "1.1.5")])
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.5"),))
+        _, args = _supplement_hydrate(catalog, {X: {"content": "plan body"}}, [X], supp)
+        recs = {r.text: r for r in args["_evidence_records"]}
+        assert recs["plan body"].tumbler == "1.1.1"  # the hydration's own lookup worked
+        assert (recs["repair body"].tumbler, recs["repair body"].chash) == (None, Z)
+        assert catalog.count("chash_positions") == 2
+
+
+class TestRepairedOwnerRowsOnThePassthroughPaths:
+    """The explicit ``inputs`` and listed ``items`` check paths merge the supplement too (critique of 3b239c093)."""
+
+    def _run(self, args):
+        catalog = _CountingCatalog([_plain("1.1.5")], [_position(Z, "1.1.5")])
+        supp = RepairSupplement(items=(SupplementItem(text="repair body", chash=Z, collection=COLL, tumbler="1.1.9"),))
+        with supplement_scope(supp), patch("nexus.mcp.core._get_catalog", return_value=catalog):
+            _, out = runner._hydrate_operator_args("check", {"check_instruction": "c", **args})
+        return next(r for r in out["_evidence_records"] if r.text == "repair body")
+
+    def test_the_explicit_inputs_path_binds_a_one_owner_repair(self) -> None:
+        assert self._run({"inputs": ["plan text"]}).tumbler == "1.1.5"
+
+    def test_the_listed_items_path_binds_a_one_owner_repair(self) -> None:
+        assert self._run({"items": ["repair body", "plan text"]}).tumbler == "1.1.5"
+
+
+def test_an_owner_row_naming_no_collection_does_not_bind_a_chunk_whose_collection_is_known() -> None:
+    rows = {Z: [{"chash": Z, "doc_id": "1.1.5"}]}  # a pre-catalog-025 row: no collection
+    assert runner._single_owner(rows, Z, COLL) is None
+    assert runner._single_owner(rows, Z, None) == "1.1.5"

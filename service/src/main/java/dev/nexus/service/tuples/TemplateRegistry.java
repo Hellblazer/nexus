@@ -4,6 +4,8 @@ package dev.nexus.service.tuples;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.SchemaViolationException;
+import dev.nexus.service.db.TooLargeException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,10 +20,12 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Pattern;
 
@@ -209,6 +213,12 @@ public final class TemplateRegistry {
      * {@code null} when nothing matches.
      */
     public TemplateSchema resolve(String subspace) {
+        return resolveIn(templates, subspace);
+    }
+
+    /** {@link #resolve} over an explicit list, so the boot check can resolve a doc example's
+     *  subspace before any registry instance exists. */
+    private static TemplateSchema resolveIn(List<TemplateSchema> templates, String subspace) {
         List<String> input = List.of(subspace.split("/", -1));
         for (TemplateSchema t : templates) {
             if (t.isLiteral() && t.nameSegments().equals(input)) {
@@ -339,13 +349,30 @@ public final class TemplateRegistry {
     static TemplateRegistry load(List<SourceGroup> groups, long claimLogTtlSeconds, long sweepIntervalSeconds) {
         Map<String, TemplateSchema> byName = new LinkedHashMap<>();
         Map<String, String> firstSourceOf = new LinkedHashMap<>();
+        // RDR-239 S3: a bad doc block is fatal in a classpath template and dropped, with a
+        // warning, in any other source (NX_TUPLE_TEMPLATE_DIR). Only the doc is forgiven.
+        Set<String> docDroppable = new HashSet<>();
         List<String> sources = new ArrayList<>();
 
         for (SourceGroup group : groups) {
             sources.add(group.label());
+            boolean droppable = !SOURCE_RESOURCES.equals(group.label());
             for (TemplateSource file : group.files()) {
                 Map<String, Object> doc = MiniYaml.parse(file.descriptor(), file.yamlText());
-                TemplateSchema schema = TemplateSchemaParser.parse(file.descriptor(), doc);
+                TemplateSchema schema = TemplateSchemaParser.parseStructure(file.descriptor(), doc);
+                if (doc.containsKey("doc")) {
+                    try {
+                        schema = schema.withDoc(TemplateSchemaParser.parseDoc(file.descriptor(), doc.get("doc"), schema));
+                    } catch (TemplateRegistryException e) {
+                        if (!droppable) {
+                            throw e;
+                        }
+                        warnDocDropped(schema.name(), file.descriptor(), e);
+                    }
+                }
+                if (droppable) {
+                    docDroppable.add(schema.name());
+                }
                 if (byName.containsKey(schema.name())) {
                     throw new TemplateRegistryException(file.descriptor(), "name",
                             "duplicate template name '" + schema.name() + "' (first defined in "
@@ -415,10 +442,110 @@ public final class TemplateRegistry {
             }
         }
 
+        templates = validateDocExamples(templates, docDroppable, firstSourceOf);
+
         String digest = computeDigest(templates);
         log.info("event=tuple_template_registry_loaded sources={} templates={} digest={}",
                 sources, templates.size(), digest);
         return new TemplateRegistry(templates, List.copyOf(sources), digest, claimLogTtlSeconds);
+    }
+
+    /**
+     * RDR-239 Technical Design item 1: every doc example must pass the checks {@code out()}
+     * applies to a real post, run by the same {@link TupleShapeValidator}, and its {@code
+     * subspace} must resolve, by this registry's own matching, to the template that holds it.
+     * Needs the whole sorted list, so it runs after every template has parsed. A template
+     * from a droppable source (S3) whose example fails loses its doc and logs a warning;
+     * any other template's failure throws.
+     */
+    private static List<TemplateSchema> validateDocExamples(List<TemplateSchema> templates,
+                                                            Set<String> docDroppable,
+                                                            Map<String, String> sourceOf) {
+        List<TemplateSchema> out = new ArrayList<>(templates);
+        for (int i = 0; i < templates.size(); i++) {
+            TemplateSchema t = templates.get(i);
+            if (t.doc() == null || t.doc().example() == null) {
+                continue;
+            }
+            TemplateRegistryException dropWith;
+            try {
+                dropWith = validateDocExample(t, templates, docDroppable, sourceOf);
+            } catch (TemplateRegistryException e) {
+                if (!docDroppable.contains(t.name())) {
+                    throw e;
+                }
+                dropWith = e;
+            }
+            if (dropWith != null) {
+                warnDocDropped(t.name(), sourceOf.get(t.name()), dropWith);
+                out.set(i, t.withoutDoc());
+            }
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * Checks one template's doc example. Throws on a breach; returns a non-null exception, for
+     * the caller to log and act on, when the breach is a droppable (non-classpath) template
+     * shadowing the example subspace of a classpath holder: the holder is shipped and fatal for
+     * its own doc errors, but an operator-supplied directory must not take the engine down over
+     * documentation (S3), so the holder's doc is dropped instead. Returns {@code null} when the
+     * example is sound.
+     */
+    private static TemplateRegistryException validateDocExample(TemplateSchema t, List<TemplateSchema> templates,
+                                                                Set<String> docDroppable,
+                                                                Map<String, String> sourceOf) {
+        TemplateDoc.Example ex = t.doc().example();
+        try {
+            TupleShapeValidator.checkSubspaceSize(ex.subspace());
+        } catch (TooLargeException e) {
+            throw docExampleBreach(t, "subspace", e.getMessage());
+        }
+        TemplateSchema owner = resolveIn(templates, ex.subspace());
+        if (owner == null) {
+            throw docExampleBreach(t, "subspace", "subspace '" + ex.subspace()
+                    + "' resolves to no template; the example must resolve to '" + t.name() + "'");
+        }
+        if (!owner.name().equals(t.name())) {
+            TemplateRegistryException breach = docExampleBreach(t, "subspace", "subspace '" + ex.subspace()
+                    + "' resolves to template '" + owner.name() + "' (from " + sourceOf.get(owner.name())
+                    + "), not to '" + t.name() + "', the template that declares the example");
+            if (docDroppable.contains(owner.name()) && !docDroppable.contains(t.name())) {
+                return breach;
+            }
+            throw breach;
+        }
+        try {
+            TupleShapeValidator.validateOut(t, ex.keys(), ex.dims(), ex.body(), ex.nonce(), false);
+        } catch (SchemaViolationException e) {
+            throw docExampleBreach(t, shapeFieldPath(t, ex, e.field()), e.getMessage());
+        } catch (TooLargeException e) {
+            throw docExampleBreach(t, e.field(), e.getMessage());
+        }
+        return null;
+    }
+
+    /** Maps the bare field a shape refusal names back to where it sits in the example (and in
+     *  the file): a key under {@code keys.}, a dimension under {@code dims.}, the nonce bare.
+     *  A size refusal arrives already qualified ({@code keys.k}). */
+    private static String shapeFieldPath(TemplateSchema t, TemplateDoc.Example ex, String field) {
+        if (t.keys().contains(field) || ex.keys().containsKey(field)) {
+            return "keys." + field;
+        }
+        if (t.dimensions().containsKey(field) || ex.dims().containsKey(field)) {
+            return "dims." + field;
+        }
+        return field;
+    }
+
+    private static TemplateRegistryException docExampleBreach(TemplateSchema t, String exampleField, String detail) {
+        return new TemplateRegistryException(t.name(), "doc.example." + exampleField,
+                "template '" + t.name() + "' doc example fails the checks out() applies: " + detail);
+    }
+
+    private static void warnDocDropped(String template, String source, TemplateRegistryException e) {
+        log.warn("event=tuple_template_doc_dropped template={} source={} field={} detail={}",
+                template, source, e.field(), e.getMessage());
     }
 
     private static String computeDigest(List<TemplateSchema> templates) {
@@ -432,7 +559,7 @@ public final class TemplateRegistry {
         }
     }
 
-    private static Map<String, Object> toCanonicalMap(TemplateSchema t) {
+    static Map<String, Object> toCanonicalMap(TemplateSchema t) {
         Map<String, Object> m = new TreeMap<>();
         m.put("name", t.name());
         m.put("keys", t.keys());
@@ -484,6 +611,57 @@ public final class TemplateRegistry {
         if (t.claimLogTtlSeconds() != null) {
             m.put("claim_log_ttl_seconds", t.claimLogTtlSeconds());
         }
+        // RDR-239 S4 Q2: the doc block is part of the digest, so a doc-only edit changes it and
+        // "changes whenever a template file changes" stays true. Absent doc adds no key, so a
+        // template without one keeps the digest it had before the engine learned to carry doc.
+        if (t.doc() != null) {
+            m.put("doc", docCanonicalMap(t.doc()));
+        }
         return m;
+    }
+
+    private static Map<String, Object> docCanonicalMap(TemplateDoc d) {
+        Map<String, Object> m = new TreeMap<>();
+        m.put("summary", d.summary());
+        if (d.writers() != null) {
+            m.put("writers", d.writers());
+        }
+        if (d.readers() != null) {
+            m.put("readers", d.readers());
+        }
+        if (d.fields() != null) {
+            Map<String, Object> fields = new TreeMap<>();
+            for (Map.Entry<String, Object> e : d.fields().entrySet()) {
+                fields.put(e.getKey(), canonicalDescription(e.getValue()));
+            }
+            m.put("fields", fields);
+        }
+        if (d.body() != null) {
+            m.put("body", canonicalDescription(d.body()));
+        }
+        if (d.example() != null) {
+            TemplateDoc.Example ex = d.example();
+            Map<String, Object> e = new TreeMap<>();
+            e.put("subspace", ex.subspace());
+            if (ex.nonce() != null) {
+                e.put("nonce", ex.nonce());
+            }
+            e.put("keys", new TreeMap<>(ex.keys()));
+            e.put("dims", new TreeMap<>(ex.dims()));
+            if (ex.body() != null) {
+                e.put("body", ex.body());
+            }
+            m.put("example", e);
+        }
+        if (d.seeAlso() != null) {
+            m.put("see_also", d.seeAlso());
+        }
+        return m;
+    }
+
+    /** A description (a String) or a value map (sorted, so file order never reaches the hash). */
+    @SuppressWarnings("unchecked")
+    private static Object canonicalDescription(Object o) {
+        return o instanceof Map ? new TreeMap<>((Map<String, String>) o) : o;
     }
 }

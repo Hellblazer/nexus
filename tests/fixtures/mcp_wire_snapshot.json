@@ -728,6 +728,10 @@
             "default": 10,
             "type": "integer"
           },
+          "persist": {
+            "default": false,
+            "type": "boolean"
+          },
           "query": {
             "default": "",
             "type": "string"

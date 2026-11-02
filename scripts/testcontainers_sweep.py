@@ -8,9 +8,10 @@ The laptop's ``~/.testcontainers.properties`` sets
 Maven jar rebuild), so a JVM that is killed or exits without stopping its
 containers leaves them running. Leased builds now override it with
 ``TESTCONTAINERS_RYUK_DISABLED=false`` (``leased_build_run``), so Ryuk reaps their
-containers; this sweep is the backstop for the paths that still run with Ryuk
-off (a bare ``./mvnw``, the local-service gate's own build, a caller's opt-out)
-and for a reap Ryuk missed. On
+containers, and so does the local-service gate's own jar rebuild (nexus-hht72);
+this sweep is the backstop for the paths that still run with Ryuk off (a bare
+``./mvnw`` on a host whose properties file disables it, a caller's opt-out) and
+for a reap Ryuk missed. On
 2026-11-01 the laptop's colima VM held 29 such ``pgvector/pgvector:pg17``
 containers, up to 39 h old; with their json-file logs and tmpfs PGDATA the
 100 GiB disk filled and a release leg failed with "No space left on device".

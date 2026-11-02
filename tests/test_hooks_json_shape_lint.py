@@ -121,7 +121,8 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: 16 -> 19 at nexus-3lqxv: `compact_checkpoint.py`, one script and three modes
 #: (`pre` on PreCompact, `post` on PostCompact, `inject` on a SessionStart group
 #: whose matcher is `compact` only).
-EXPECTED_CONEXUS_ENTRIES = 19
+#: 19 -> 20 at nexus-mtheb.3: the SubagentStop `subagent-stop-t1-nudge` entry.
+EXPECTED_CONEXUS_ENTRIES = 20
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"

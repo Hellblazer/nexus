@@ -1111,12 +1111,13 @@ def _split_appends_from_state(
     this_session_version: str | None = None,
     mint_lock_baseline_content: dict[str, bytes] | None = None,
     mint_lock_content: dict[str, bytes] | None = None,
+    upgrade_lock_content: bytes | None = None,
 ) -> tuple[list[_DiffEntry], list[_DiffEntry]]:
     """Split :func:`_diff_config_dir_snapshots` entries (``(verb, rel_path)``
     pairs) into (state_mutations, benign_appends), preserving each entry
     verbatim in whichever list it lands.
 
-    Four ways to be benign. (1) The path lives under a directory a live
+    Five ways to be benign. (1) The path lives under a directory a live
     daemon owns (:data:`_AMBIENT_DAEMON_DIRS`), in which case any change is
     ambient output rather than suite behaviour. (2) Its basename is a known
     append-only log, it existed before, and its size strictly GREW. A log
@@ -1138,7 +1139,13 @@ def _split_appends_from_state(
     just the first. A writer that had PYTEST_CURRENT_TEST scrubbed (a child
     with a clean env, a session hook) records null: it fails the run that
     creates the lock (ADDED) and is exempt after that. A created, rewritten or
-    removed lock stays state.
+    removed lock stays state. (5) nexus-iox43, the root-level
+    ``upgrade-auto.lock`` that existed at session start and ends holding a
+    bare pid (*upgrade_lock_content*): every take of it rewrites the taker's
+    pid, the SessionStart hook's probe included, so a session starting
+    anywhere on the box modifies it. A taker under pytest writes ``<pid>
+    pytest`` and stays state, as does a created or removed lock or any other
+    content (tests/test_real_config_upgrade_lock_touch.py).
 
     nexus-b2eaw round 2 (review finding, CRITICAL): an EARLIER version of
     this function also exempted ``last_seen_version`` whenever its content
@@ -1220,6 +1227,14 @@ def _split_appends_from_state(
             and _mint_lock_created_outside_pytest(mint_lock_baseline_content[rel])
         ):
             # A live host's mint touched a lock pytest did not create; see (4).
+            appends.append(entry)
+        elif (
+            rel == _UPGRADE_LOCK_NAME
+            and _verb == "MODIFIED"
+            and upgrade_lock_content is not None
+            and upgrade_lock_content.isdigit()
+        ):
+            # A live host took the auto-upgrade lock; see (5).
             appends.append(entry)
         elif (
             rel in (_ROTATED_LOG_NAME, _ROTATED_LOG_BACKUP_NAME)
@@ -1387,6 +1402,23 @@ def _mint_lock_created_outside_pytest(content: bytes) -> bool:
     return isinstance(record, dict) and not record.get("pytest_current_test")
 
 
+#: The auto-upgrade single-instance lock (nexus.util.upgrade_auto_lock.LOCK_NAME), named here so the
+#: guard imports nothing from nexus; tests/test_real_config_upgrade_lock_touch.py pins the two equal.
+_UPGRADE_LOCK_NAME: str = "upgrade-auto.lock"
+
+
+def _read_upgrade_lock(config_dir: Path) -> bytes | None:
+    """The real auto-upgrade lock's bytes (a pid, at most a few bytes), or ``None`` when it cannot
+    be read or is not a small regular file, so its change stays a state mutation."""
+    path = config_dir / _UPGRADE_LOCK_NAME
+    try:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > 64:
+            return None
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
 def _snapshot_mint_lock_contents(config_dir: Path) -> dict[str, bytes]:
     """``{name: bytes}`` for every root-level mint lock in *config_dir*. The
     bytes are the lock's own attribution line (pid, argv0, endpoint, tenant),
@@ -1435,6 +1467,13 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # (the retired anchored channel, nexus-rbmja.8; two peers' files modified during tests/hooks/). Append-only, one
     # line per commit, never read by any test.
     "session_commits/",
+    # The conexus PreCompact hook (conexus/hooks/scripts/compact_checkpoint.py ``pre``) of any
+    # live Claude Code session on the box writes ``compact-checkpoints/<session_id>.md``, keeps
+    # timestamped prior copies and unlinks the oldest, all in the real config dir of a session
+    # without NEXUS_CONFIG_DIR. MEASURED 2026-11-01 (nexus-z1d0l.1.3 lint run, 18 min serial): a
+    # peer session's compaction ADDED, MODIFIED and REMOVED three files under it, with no test
+    # involved; the 2295-pass run exited 1 on that alone. No unit test names this directory.
+    "compact-checkpoints/",
     # Live aspect-worker daemon's own address/heartbeat registration file
     # (``ttl=3.0``-second heartbeat_epoch bump, same size every write).
     # MEASURED directly (nexus-pfuns round 1): ran `uv run pytest tests/
@@ -1855,6 +1894,7 @@ def _check_real_config_dir_mutations(session) -> None:
         this_session_version=_this_session_conexus_version,
         mint_lock_baseline_content=_mint_lock_baseline_content,
         mint_lock_content=_snapshot_mint_lock_contents(_real_config_dir_for_guard()),
+        upgrade_lock_content=_read_upgrade_lock(_real_config_dir_for_guard()),
     )
     if benign_appends:
         print(
@@ -3411,6 +3451,9 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "NX_LLM_MAX_CONCURRENCY",
     ):
         monkeypatch.delenv(var, raising=False)
+    # nexus-mtheb.4: a SubagentStop nudge run from any test starts no detached
+    # dispatch-recorder child; tests of the recorder delenv this themselves.
+    monkeypatch.setenv("NX_DISPATCH_COUNTER", "off")
 
 
 @pytest.fixture(autouse=True, scope="session")

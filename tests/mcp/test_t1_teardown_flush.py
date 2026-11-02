@@ -78,10 +78,10 @@ def test_no_flagged_entries_writes_nothing_and_teardown_proceeds(owned_session) 
 def test_a_failing_flush_never_stops_the_teardown(owned_session, monkeypatch) -> None:
     _, order = owned_session
 
-    def _broken():
+    def _broken(session_id, session_token=None):
         raise RuntimeError("T1 unreachable")
 
-    monkeypatch.setattr(mcp_infra, "get_t1", _broken)
+    monkeypatch.setattr(core, "_open_t1_for_flush", _broken)
     core._t1_session_shutdown()
     assert order == ["lease_cleared", "token_closed"], order
 
@@ -124,11 +124,11 @@ def test_a_hanging_store_lookup_is_bounded_too(owned_session, monkeypatch) -> No
     _, order = owned_session
     release = threading.Event()
 
-    def _hang():
+    def _hang(session_id, session_token=None):
         release.wait(30)
         raise RuntimeError("never reached in time")
 
-    monkeypatch.setattr(mcp_infra, "get_t1", _hang)
+    monkeypatch.setattr(core, "_open_t1_for_flush", _hang)
     monkeypatch.setattr(core, "_TEARDOWN_FLUSH_TIMEOUT_S", 0.3)
     started = time.monotonic()
     try:

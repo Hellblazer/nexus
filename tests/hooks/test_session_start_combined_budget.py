@@ -43,7 +43,7 @@ from unittest.mock import patch
 # The emitter the bead measured as ``session_start_hook.py`` now runs as
 # ``nexus.hooks.session_context`` (RDR-215 bead nexus-q02nx.21); the plugin
 # copy was deleted at nexus-z9cz2, so the real renders come from the port.
-from nexus.hooks.session_context import _build_capabilities_block, _render_ready_beads
+from nexus.hooks.session_context import _T1_TOP_LINES, _build_capabilities_block, _render_ready_beads
 
 
 #: Representative T2-memory block, sized to match (slightly above) a live
@@ -115,7 +115,14 @@ _COMBINED_BUDGET_BYTES = 6000
 #: 6487B, stable (bd-prime and sn are static files; guidance and hook's two
 #: real sub-renders do not touch live-varying state; hook's two fixtures are
 #: fixed strings). ~8% headroom: 6487 * 1.08 ~= 7006, rounded.
-_BOUNDED_SESSIONSTART_BUDGET_BYTES = 7000
+#:
+#: nexus-mtheb (2026-11-01): re-derived. The hook fixture now carries the real
+#: ``_T1_TOP_LINES`` (the contract leads every SessionStart context), which the
+#: fixture had omitted, and the sn static section had grown 748B -> 1098B since
+#: the figure above (the sum was already 6913B against 7000 before the T1 lines
+#: went in). Measured now: guidance 1993B + hook fixture 3430B + sn static 1098B
+#: + bd-prime 992B = 7513B. 7513 * 1.08 ~= 8114, rounded.
+_BOUNDED_SESSIONSTART_BUDGET_BYTES = 8150
 
 _SN_SESSION_START_SECTION = (
     Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "session-start-section.md"
@@ -138,7 +145,9 @@ def _fixture_session_start_hook_output() -> str:
     fixture T2-memory block + REAL ``_render_ready_beads`` render of a
     fixture raw payload + REAL ``_build_capabilities_block`` + fixture
     Knowledge Map. Mirrors ``main()``'s own line assembly order."""
-    lines: list[str] = [_FIXTURE_T2_MEMORY_BLOCK, ""]
+    # nexus-mtheb: the T1 contract is the first thing main() emits, so the sum
+    # carries it (the real constant, not a fixture).
+    lines: list[str] = [*_T1_TOP_LINES, _FIXTURE_T2_MEMORY_BLOCK, ""]
     lines.extend(_render_ready_beads(_FIXTURE_READY_RAW))
     lines.extend(_build_capabilities_block())
     lines.append(_FIXTURE_KNOWLEDGE_MAP)

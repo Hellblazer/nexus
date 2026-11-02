@@ -19,7 +19,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
@@ -1306,11 +1306,12 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     on a borrow, exactly like the original mint branch) — take ownership
     and start a fresh refresh loop for the new session id.
 
-    Deliberately does NOT touch the old session's T1 rows or explicitly
-    revoke its token: they strand under the old session id and age out
-    via the T1 TTL sweep (design decision, nexus-d76vc bead body) — migrating
-    would silently merge two conversations the user explicitly separated
-    with `/clear`.
+    Deliberately does NOT migrate or delete the old session's T1 rows or
+    explicitly revoke its token: they strand under the old session id and age
+    out via the T1 TTL sweep (design decision, nexus-d76vc bead body) —
+    migrating would silently merge two conversations the user explicitly
+    separated with `/clear`. The one thing it does with them is copy the rows
+    flagged for T2 into T2 (nexus-mtheb.1); the rows themselves stay.
 
     Consecutive-failure backoff (nexus-abyi9, conexus-7hx5): a mint
     failure is NOT retried on the very next 5s tick unconditionally
@@ -1654,6 +1655,13 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         _T1_SESSION_REFRESH_TASK.cancel()
         _T1_SESSION_REFRESH_TASK = None
 
+    # nexus-mtheb.9: the token the OLD session's flush will read it with. Read
+    # here, after the refresh task is cancelled (that loop rewrites the env
+    # token on every rotation, so nothing changes it past this line) and before
+    # the env swap below overwrites it. `old_session_token` above was read at
+    # the top of the tick and can be one rotation behind.
+    flush_token = _os.environ.get("NX_T1_SESSION", "").strip() or old_session_token
+
     from nexus import mcp_infra  # noqa: PLC0415 — deferred to avoid import cycle at module load
 
     # nexus-d76vc fix-round CRITICAL (code-review-expert pass 1): a
@@ -1744,6 +1752,45 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # env vars just swapped above, then stays frozen there until the next
     # consumed marker -- never a per-call re-resolve.
     mcp_infra.reset_t1_for_release()
+
+    # nexus-mtheb.1 / .9: the old session's flagged rows go to T2 NOW, right
+    # after the swap and the singleton drop, before any of the new scope's
+    # bookkeeping below. The rows themselves strand under the old id on purpose
+    # (JDR-001), but a row the user flagged for T2 was promised to survive the
+    # session, and this tick is the only code that sees the old scope move: the
+    # SessionEnd hook for a /clear races the lease clear above and skips on
+    # lease divergence, and the owner-exit flush runs under the NEW id by then.
+    # The env is swapped, so a step below that raised (the mint bookkeeping,
+    # the refresh task, the borrow hook) would leave a re-tick seeing old ==
+    # new: it would consume the marker and the flagged rows would be lost for
+    # good. Hence the flush sits ahead of all of them, and a raise there can no
+    # longer skip it.
+    # The flush reads the session it is GIVEN (the old id and its own token,
+    # which nothing revokes at a handoff), not the T1 singleton, which is the
+    # new scope by now; that is what lets it sit here rather than before the
+    # swap. After the swap it also catches a row the old scope flagged in the
+    # window a flush before the swap spent awaiting its worker thread. Placed
+    # after the successful re-lease so a mint that is retried on a backoff
+    # does not repeat it. Idempotent (an identical entry is not rewritten) and
+    # time-ordered (an entry updated after the row was written is kept), so the
+    # exit flush of a later session over the same row is a no-op. Never raises
+    # and never blocks the handoff: bounded like the teardown flush, and run
+    # off the event loop because it joins a worker thread.
+    flushed = 0
+    if old_session_id is not None:
+        # The function never raises from its worker, but Thread.start() and
+        # the structlog import sit outside the worker's own try, and the marker
+        # is claimed and not yet consumed here: a raise would lose the handoff.
+        try:
+            flushed = await asyncio.to_thread(
+                _flush_flagged_t1_entries, old_session_id,
+                session_token=flush_token, op="t1_handoff_flush",
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed flush must never strand the handoff; surfaced via log.warning
+            log.warning(
+                "t1_handoff_flush_raised", session_id=old_session_id, error=str(exc),
+            )
+
     try:
         _start_channel_waiter()  # nexus-kdxyv: the new id's waiter, see above
     except Exception as exc:  # noqa: BLE001 — `_start_channel_waiter` already swallows its own failures; this is the same never-strand-the-handoff boundary as above
@@ -1775,6 +1822,7 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         old_session_id=old_session_id,
         new_session_id=new_session_id,
         minted_fresh=minted_fresh,
+        flushed_to_t2=flushed,
     )
 
 
@@ -2411,7 +2459,9 @@ def _t1_session_shutdown() -> None:
     # measured (6 of 6 session_end events, 2026-09-27/28): by the time it ran,
     # the lease below was unlinked and the token revoked, so the rows were
     # unreachable. The owner drains first; the SessionEnd flush stays as a
-    # best-effort second chance (T2 puts upsert, so running both is safe).
+    # best-effort second chance (running both is safe: a flush writes a row
+    # only when no T2 entry exists or the row is newer than the entry, so the
+    # second flush of the same row is a no-op).
     _flush_flagged_t1_entries(session_id)
 
     minted_here = _OWNED_T1_MINTED.pop(session_id, None)
@@ -2495,10 +2545,65 @@ def _t1_session_shutdown() -> None:
 _TEARDOWN_FLUSH_TIMEOUT_S: float = 5.0
 
 
-def _flush_flagged_t1_entries(session_id: str) -> int:
-    """Write this session's flagged T1 scratch entries to T2; return how
-    many. Never raises: a teardown step must not stop the lease clear and
-    token revoke that follow it (nexus-mgu1k).
+def _open_t1_for_flush(session_id: str, session_token: str | None = None) -> Any:
+    """A scratch store bound to *session_id* itself, for the flush to read.
+
+    Never the T1 singleton (nexus-mtheb.9): the singleton is whatever scope
+    this process holds now, and a handoff moves it. The store is built from
+    the id the flush is GIVEN and that session's own token, which nothing
+    revokes at a handoff. The token comes from, in order, the caller's
+    *session_token*, the process env when it still names *session_id*, and
+    the session's published lease; with none of those there is nothing to
+    read the session with, and this raises rather than reaching for another
+    scope. The caller closes the store."""
+    from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+    token = (session_token or "").strip() or None
+    if token is None and _os.environ.get("NX_T1_SESSION_ID", "").strip() == session_id:
+        token = _os.environ.get("NX_T1_SESSION", "").strip() or None
+    if token is None:
+        import nexus.config as _nexus_config  # noqa: PLC0415 — module attribute, not a by-value import (nexus-78blw ratchet)
+        from nexus.db.t1 import read_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+        token = read_t1_session_lease(session_id, _nexus_config.nexus_config_dir())
+    if token is None:
+        raise RuntimeError(
+            f"no token for T1 session {session_id!r} (none given, none in the env "
+            "for it, no fresh lease): its flagged rows cannot be read"
+        )
+    # export_adopted_token=False: a 401 on a dead *session_token* makes this
+    # store adopt the session's fresh lease token, and the default would write
+    # it to NX_T1_SESSION. After a handoff swap that env names the NEW scope.
+    return HttpScratchStore(
+        session_id=session_id, _session_token=token, export_adopted_token=False,
+    )
+
+
+def _flush_flagged_t1_entries(
+    session_id: str, *, session_token: str | None = None, op: str = "t1_teardown_flush",
+) -> int:
+    """Write the flagged T1 scratch entries of session *session_id* to T2;
+    return how many are in T2 as a result. Never raises: a teardown step must
+    not stop the lease clear and token revoke that follow it (nexus-mgu1k).
+    *op* names the caller's write in the T2 write log: the teardown by default,
+    ``t1_handoff_flush`` for the session handoff (nexus-mtheb.1).
+
+    Reads the session it is given, never the T1 singleton (nexus-mtheb.9): a
+    store is built for *session_id* with *session_token* (see
+    :func:`_open_t1_for_flush` for the fallbacks), so the flush is right
+    whichever scope the singleton holds when it runs, which is what lets the
+    handoff tick flush after it has swapped scopes. A flush is time-ordered
+    (:func:`nexus.mcp_infra.flush_rows_to_t2`): a row is written when no T2 entry
+    exists or the row is newer than the entry's last update; an entry updated
+    after the row was written (a user edit) is kept, logged at warning and
+    counted as ``kept`` in the summary event, and the returned count excludes it.
+
+    Only the session's OWNER and the SessionEnd hook flush. A borrower MCP's
+    exit flushes nothing, by design: a borrower exit is not a session end (the
+    owner still holds the session and its rows, and flushes them at its own
+    exit; the SessionEnd hook covers the rest), and the borrower holds no
+    ownership record, so :func:`_t1_session_shutdown` returns before reaching
+    this function for it.
 
     Bounded as a whole: this runs inside _sigterm_handler's synchronous
     chain, and a slow or unreachable engine must not delay the lease clear
@@ -2513,28 +2618,35 @@ def _flush_flagged_t1_entries(session_id: str) -> int:
 
     def _work() -> None:
         try:
-            from nexus.mcp_infra import get_t1, t2_index_write  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            from nexus.mcp_infra import flush_rows_to_t2, t2_index_write  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
-            t1, _ = get_t1()
-            entries = list(t1.flagged_entries())
+            store = _open_t1_for_flush(session_id, session_token)
+            try:
+                entries = list(store.flagged_entries())
+            finally:
+                close = getattr(store, "close", None)
+                if close is not None:
+                    close()
             outcome["pending"] = len(entries)
             if not entries:
                 outcome["flushed"] = 0
                 return
 
-            def _put_all(db) -> int:
-                for entry in entries:
-                    db.memory.put(
-                        project=entry["flush_project"],
-                        title=entry["flush_title"],
-                        content=entry["content"],
-                        tags=entry.get("tags", ""),
-                        ttl=None,
-                    )
-                return len(entries)
+            # The write callback still returns the flushed count alone (the
+            # shape every caller and test stub of t2_index_write relies on);
+            # the kept count rides out beside it for the summary line.
+            kept: list[int] = []
 
-            outcome["flushed"] = t2_index_write(_put_all, op="t1_teardown_flush")
-            _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=outcome["flushed"])
+            def _write(db) -> int:
+                counts = flush_rows_to_t2(db, entries, op=op, log=_log)
+                kept.append(counts.kept)
+                return counts.flushed
+
+            outcome["flushed"] = t2_index_write(_write, op=op)
+            _log.info(
+                "t1_teardown_flush_complete", session_id=session_id, op=op,
+                flushed=outcome["flushed"], kept=sum(kept), pending=outcome["pending"],
+            )
         except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
             outcome["error"] = str(exc)
             # Logged here, not by the caller, so an outcome that arrives after
@@ -2543,7 +2655,7 @@ def _flush_flagged_t1_entries(session_id: str) -> int:
             # SIGTERM path does not, since _sigterm_handler calls os._exit right
             # after the teardown and that kills this thread (review of
             # a956bb57f; critique of 822d9dcec).
-            _log.warning("t1_teardown_flush_failed", session_id=session_id, error=str(exc))
+            _log.warning("t1_teardown_flush_failed", session_id=session_id, op=op, error=str(exc))
 
     worker = threading.Thread(target=_work, name="t1-teardown-flush", daemon=True)
     worker.start()
@@ -2552,7 +2664,7 @@ def _flush_flagged_t1_entries(session_id: str) -> int:
         return outcome["flushed"]
     if "error" not in outcome:
         _log.warning(
-            "t1_teardown_flush_incomplete", session_id=session_id,
+            "t1_teardown_flush_incomplete", session_id=session_id, op=op,
             pending=outcome.get("pending"), timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
         )
     return 0
@@ -6219,6 +6331,14 @@ def capturing_owner_lookups() -> Iterator[OwnerLookups]:
         _OWNER_LOOKUPS.reset(token)
 
 
+def owner_rows_for_chashes(chashes: list[str]) -> dict[str, list[dict]] | None:
+    """The live manifest rows owning each chash-shaped id in *chashes*, by chash, in one
+    ``chash_positions`` batch: ``{}`` when none is chash-shaped, ``None`` when the catalog
+    cannot answer. For a caller that holds chashes no ``store_get_many`` hydrated (the plan
+    runner's repaired evidence, nexus-z1d0l.1.3)."""
+    return _owner_rows_by_chash(list(chashes), [True] * len(chashes))
+
+
 #: Whether ``store_get_many(structured=True)`` reads each chunk's section type from its owners'
 #: manifest rows. On by default; a caller that holds every label already turns it off with
 #: :func:`without_owner_section_types` (nexus-sx1t0). With the source notes off as well, the call makes
@@ -7557,12 +7677,18 @@ def scratch(
     agent: Annotated[str, Field(
         description="Optional subagent/role attribution for \"put\" (e.g. \"developer\"). Falls back to NX_AGENT env.",
     )] = "",
+    persist: Annotated[bool, Field(
+        description="For \"put\": flag the entry so it is copied to T2 at session end or session handoff.",
+    )] = False,
 ) -> str:
     """T1 session scratch pad: ephemeral, within-session-only notes.
 
     Use `memory_put`/`memory_search` instead for anything that must survive
     past this session; use `store_put` for permanent T3 knowledge. Use
     `scratch_manage` to flag an entry for persistence or promote it to T2.
+    Put with `persist=true` to flag the entry as it is written: a flagged
+    entry is copied to T2 (project `scratch_sessions`) when the session ends
+    or moves to a new session id (`/clear`, `/resume`, `/branch`).
 
     For "search"/"list", returns a human-readable list capped at `limit`
     with a footer when more entries exist; other actions return a single
@@ -7576,7 +7702,7 @@ def scratch(
             if not content:
                 return _fail("Error: content is required for put")
             agent_arg = agent if agent else ""  # T1.put falls back to NX_AGENT env
-            doc_id = t1.put(content=content, tags=tags, agent=agent_arg)
+            doc_id = t1.put(content=content, tags=tags, agent=agent_arg, persist=persist)
             _record_tier_write(
                 tool="scratch_put", tier="T1",
                 agent=agent_arg or None,
@@ -7679,8 +7805,21 @@ def scratch_manage(
         prefix = "[T1 isolated] " if isolated else ""
 
         if action == "flag":
-            t1.flag(entry_id, project=project, title=title)
-            return f"{prefix}Flagged: {entry_id}"
+            # `scratch list` prints an 8-character prefix and the engine matches
+            # the id exactly, so a prefix is resolved here, as `get` and
+            # `delete` resolve theirs (nexus-mtheb.1).
+            full_id = entry_id
+            candidates = t1.resolve_prefix_candidates(entry_id)
+            if len(candidates) == 1:
+                full_id = candidates[0]
+            elif len(candidates) > 1:
+                listed = ", ".join(c[:8] for c in candidates[:5])
+                return _fail(
+                    f"Error: ambiguous prefix {entry_id!r}; matches: {listed}. "
+                    "Pass a longer prefix or full UUID."
+                )
+            t1.flag(full_id, project=project, title=title)
+            return f"{prefix}Flagged: {full_id}"
 
         elif action == "promote":
             if not project or not title:
@@ -7826,7 +7965,7 @@ def plan_save(
             )
         # nexus-jypmj.4: a $stepN.field inside other text or an object is never substituted,
         # so the plan would fail at run time (nexus-jypmj.1.19). Refuse it at the door.
-        from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.plans.runner import claimless_verify_reason, find_embedded_step_ref  # noqa: PLC0415 — deferred import; rare/branch-local path
 
         embedded = find_embedded_step_ref(parsed_plan)
         if embedded is not None:
@@ -7834,6 +7973,9 @@ def plan_save(
                 f"Plan not saved: {embedded.ref} sits where the runner will not substitute it "
                 f"({embedded.reason})."
             )
+        # nexus-z1d0l.1.11: a verify step with no claim is refused when the runner reaches it.
+        if (claimless := claimless_verify_reason(parsed_plan)) is not None:
+            return _fail(f"Plan not saved: {claimless}.")
         # RDR-232 Phase 2 (nexus-jypmj.2.1): plan_save never writes an answer-kind declaration.
         # Only the seed loader declares curated and only the nx_answer grow site declares grown,
         # so an embedded key (valid, malformed or an unrelated one of the same name) is removed
@@ -11907,6 +12049,48 @@ def _nx_answer_planner_request_block(coverage: "RequestCoverage | None") -> str:
         return ""
 
 
+async def _claimed_verify_plan(
+    plan_json: str, prompt: str, plan_from: Callable[[str], Awaitable[str]], *, may_retry: bool,
+) -> str:
+    """*plan_json*, once no verify step in it lacks a claim (nexus-z1d0l.1.11).
+
+    ``plan_run`` refuses a verify step with no claim when it reaches it, after the steps before it
+    are paid for, and the host never invents a claim. So the planner is asked once more with the
+    step named, unless *may_retry* is false (the embedded-ref retry already asked: one retry per
+    answer). A plan that still has one raises ``ValueError`` here, before any step runs: nx_answer
+    reports it as a planner failure, and nothing is searched, answered or grown. The step is never
+    dropped, because the answer would then pass for a checked one.
+    """
+    from nexus.plans.runner import claimless_verify_reason, find_claimless_verify  # noqa: PLC0415 — deferred; runner is heavy and this is the planner path
+
+    import structlog as _slog4  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+
+    log = _slog4.get_logger()
+    index = find_claimless_verify(plan_json)
+    if index is None:
+        return plan_json
+    if may_retry:
+        log.warning("nx_answer_planner_verify_claim_retry", step=index + 1)
+        try:
+            retried = await plan_from(
+                prompt
+                + f"\n\nYour previous plan cannot run: step {index + 1} is a verify step with no "
+                + "claim. The host never invents a claim. Give every verify step a claim (text, or a "
+                + "reference such as $stepN.text), or leave verify out."
+            )
+        except Exception as exc:  # noqa: BLE001 — the retry is best-effort; the first plan's refusal below stands
+            log.warning(
+                "nx_answer_planner_verify_claim_retry_failed",
+                error_type=type(exc).__name__, error=str(exc)[:200],
+            )
+        else:
+            plan_json = retried
+    reason = claimless_verify_reason(plan_json)
+    if reason is None:
+        return plan_json
+    raise ValueError(f"planner plan cannot run: {reason}; no step was run")
+
+
 async def _nx_answer_plan_miss(
     question: str,
     *,
@@ -12159,6 +12343,7 @@ async def _nx_answer_plan_miss(
                 "nx_answer_planner_step_ref_retry_failed",
                 error_type=type(exc).__name__, error=str(exc)[:200],
             )
+    plan_json = await _claimed_verify_plan(plan_json, prompt, _plan_from, may_retry=embedded is None)
     return Match(
         plan_id=0,
         name="ad-hoc",

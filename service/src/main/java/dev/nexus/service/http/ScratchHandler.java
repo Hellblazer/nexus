@@ -66,7 +66,8 @@ public final class ScratchHandler implements HttpHandler {
     public static final String HEADER_T1_SESSION = "X-Nexus-T1-Session";
 
     /**
-     * TTL sweep cutoff: rows older than 24 hours are reaped.
+     * TTL sweep bound: a session idle for 24 hours (no put, get or search) is reaped, every row of it
+     * (nexus-mtheb.2, RDR-152's "idle past a bound"; not each row 24 h after its own put).
      * Conservative default; the real expiry is session-close which is immediate.
      */
     static final long SWEEP_HOURS = 24L;
@@ -319,8 +320,9 @@ public final class ScratchHandler implements HttpHandler {
      * Request: {} (optional: {hours: <int>})
      * Response 200: {"swept": <count>}
      *
-     * TTL sweep for idle sessions within the requesting tenant. Deletes scratch
-     * rows older than {@code hours} (default 24h) for the caller's tenant only
+     * TTL sweep for idle sessions within the requesting tenant. Deletes every scratch
+     * row of each session idle for more than {@code hours} (default 24h; a session's
+     * last activity is its newest put or read) for the caller's tenant only
      * (RLS enforced — the nexus_svc role has FORCE RLS, so rows for other tenants
      * are invisible even without explicit WHERE).
      *

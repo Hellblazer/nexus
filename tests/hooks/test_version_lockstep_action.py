@@ -977,6 +977,30 @@ class TestBackgroundUpgrade:
         assert mod.start_background_upgrade() == 4242
         assert seen["env"]["NX_UPGRADE_UNATTENDED"] == "1"
 
+    def test_the_synchronous_step_is_not_run_when_the_detach_started(self, mod, marker, log, monkeypatch) -> None:
+        calls = _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["1.0.0", "9.9.9"],
+            run_results={}, background=True,
+        )
+        mod.main(["action", "9.9.9"])
+        assert [c[:2] for c in calls] == [["uv", "tool"]], calls
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
+
+    def test_it_falls_back_to_the_bounded_synchronous_run(self, mod, marker, log, monkeypatch) -> None:
+        calls = _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["1.0.0"],
+            run_results={"nx upgrade": False}, background=False,
+        )
+        mod.main(["action", "9.9.9"])
+        assert calls[-1] == ["nx", "upgrade"]
+        assert not marker.exists()
+        assert "outcome=nx_upgrade_failed" in log.read_text(encoding="utf-8")
+
+
+class TestUnattendedMarkerOnEveryPlatform:
+    """nexus-75w5d's marker tests that run no shebang script, kept out of
+    TestBackgroundUpgrade's POSIX-only skip so the Windows set runs them (nexus-qowvl)."""
+
     def test_the_synchronous_fallbacks_are_marked_unattended_too(self, mod, monkeypatch) -> None:
         """The bounded fallback (run_cmd) and the ref-drift run are plain nx upgrade as well."""
         monkeypatch.delenv("NX_UPGRADE_UNATTENDED", raising=False)
@@ -1002,25 +1026,6 @@ class TestBackgroundUpgrade:
         from nexus.util.upgrade_auto_lock import UNATTENDED_ENV
 
         assert mod.UNATTENDED_ENV == UNATTENDED_ENV
-
-    def test_the_synchronous_step_is_not_run_when_the_detach_started(self, mod, marker, log, monkeypatch) -> None:
-        calls = _wire(
-            mod, monkeypatch, receipt=True, installed_versions=["1.0.0", "9.9.9"],
-            run_results={}, background=True,
-        )
-        mod.main(["action", "9.9.9"])
-        assert [c[:2] for c in calls] == [["uv", "tool"]], calls
-        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
-
-    def test_it_falls_back_to_the_bounded_synchronous_run(self, mod, marker, log, monkeypatch) -> None:
-        calls = _wire(
-            mod, monkeypatch, receipt=True, installed_versions=["1.0.0"],
-            run_results={"nx upgrade": False}, background=False,
-        )
-        mod.main(["action", "9.9.9"])
-        assert calls[-1] == ["nx", "upgrade"]
-        assert not marker.exists()
-        assert "outcome=nx_upgrade_failed" in log.read_text(encoding="utf-8")
 
 
 class TestSelfInstallBudget:
@@ -1077,6 +1082,8 @@ class TestWindowsDetach:
         kw = attempts[0]
         assert kw["creationflags"] == 0x08000000 | 0x00000200 | 0x01000000
         assert "start_new_session" not in kw
+        # nexus-75w5d's marker on the Windows branch too (TestBackgroundUpgrade pins the POSIX one).
+        assert kw["env"][mod.UNATTENDED_ENV] == "1"
 
     def test_a_job_that_forbids_breakaway_is_retried_without_it(self, mod, tmp_path, monkeypatch) -> None:
         attempts = self._run(mod, tmp_path, monkeypatch, [OSError("breakaway refused"), None])

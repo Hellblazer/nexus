@@ -254,7 +254,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-235](rdr-235-aspect-queue-onto-tuple-queue-template.md) | Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays | Architecture | Accepted | 2026-10-26 |
 | [RDR-236](rdr-236-chunk-row-metadata-normalization.md) | Chunk-row metadata normalization: document fields on the catalog document, position fields on the manifest, the chunk row keeps only what its text determines | Architecture | Accepted | 2026-10-26 |
 | [RDR-237](rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md) | MinerU-Only PDF Extraction with a Per-Page Fallback Ladder | Architecture | Closed | 2026-10-27 |
-| [RDR-238](rdr-238-memory-curation.md) | Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves | Feature | Draft | 2026-10-31 |
+| [RDR-238](rdr-238-memory-curation.md) | Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves | Feature | Accepted | 2026-10-31 |
 | [RDR-239](rdr-239-tuple-space-dictionary.md) | The Tuple-Space Dictionary: Every Template Publishes What It Means, Who Writes It, Who Reads It, and a Post That Validates | Feature | Accepted | 2026-10-31 |
 | [RDR-240](rdr-240-procedures-as-sandboxed-lua-scripts.md) | Procedures as Sandboxed Lua Scripts: Run the Fixed Sequence Instead of Recalling It | Feature | Draft | 2026-11-01 |
 

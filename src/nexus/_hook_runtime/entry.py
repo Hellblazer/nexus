@@ -204,6 +204,10 @@ VERB_TABLE: dict[str, str] = {
     # tests/hooks/test_mcp_connect_check_verb.py pins it; hook-cli-skew fires
     # only the current hooks.json and does not.
     "mcp-connect-check": "nexus.hooks.mcp_connect_check",
+    # SubagentStop (nexus-mtheb.3): gives an agent one more turn when its
+    # transcript shows no T1 put. A warning, not a verdict: the envelope is
+    # additionalContext and carries no decision key.
+    "subagent-stop-t1-nudge": "nexus.hooks.subagent_stop_t1_nudge",
 }
 
 #: Test-only dispatch override, read solely by

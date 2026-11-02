@@ -312,20 +312,26 @@ def _log_reserved_drops(drops: list[tuple[int, tuple[str, ...]]]) -> None:
 
 
 def _embedded_step_ref(m: Match) -> tuple[str, str] | None:
-    """``(ref, reason)`` when *m*'s plan holds a ``$stepN.field`` the runner will not substitute.
+    """``(ref, reason)`` when *m*'s plan holds a ``$stepN.field`` the runner will not substitute,
+    or a verify step with no claim (ref ``verify``; nexus-z1d0l.1.11).
 
-    The runner raises on such a plan before its first dispatch (nexus-jypmj.1.19), so a saved or
-    imported row holding one only wastes a match and bumps its failure count (nexus-jypmj.4). The
-    scan is the runner's own, imported at call time so this module stays light.
+    The runner raises on the first before its first dispatch (nexus-jypmj.1.19) and on the second
+    when it reaches the step, after the steps before it are paid for, so a saved or imported row
+    holding either only wastes a match and bumps its failure count (nexus-jypmj.4). The scans are
+    the runner's own, imported at call time so this module stays light.
     """
-    from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — deferred: the runner is heavy and this is the rare path
+    from nexus.plans.runner import claimless_verify_reason, find_embedded_step_ref  # noqa: PLC0415 — deferred: the runner is heavy and this is the rare path
 
     err = find_embedded_step_ref(m.plan_json)
-    return None if err is None else (err.ref, err.reason)
+    if err is not None:
+        return (err.ref, err.reason)
+    claimless = claimless_verify_reason(m.plan_json)
+    return None if claimless is None else ("verify", claimless)
 
 
 def _log_embedded_ref_drops(drops: list[tuple[int, str, str]]) -> None:
-    """Report plans excluded for an unsubstitutable ``$stepN.field`` in a step arg.
+    """Report plans excluded for an unsubstitutable ``$stepN.field`` in a step arg, or for a
+    verify step with no claim (``ref`` ``verify``).
 
     INFO and drained exactly like :func:`_log_reserved_drops`; the row is neither rewritten nor
     deleted, and ``nx plan hygiene`` reports it.
@@ -340,7 +346,8 @@ def _log_embedded_ref_drops(drops: list[tuple[int, str, str]]) -> None:
         detail=[{"plan_id": pid, "ref": ref, "reason": why} for pid, ref, why in snapshot],
         remedy=(
             "the plan can only fail at run time; nx plan hygiene --apply retires it, or "
-            "edit it so each arg is one $stepN.<field> reference or a list of them"
+            "edit it so each arg is one $stepN.<field> reference or a list of them, and every "
+            "verify step has a claim"
         ),
     )
 

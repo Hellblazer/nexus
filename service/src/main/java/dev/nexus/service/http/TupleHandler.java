@@ -16,6 +16,7 @@ import dev.nexus.service.db.TooLargeException;
 import dev.nexus.service.db.TupleException;
 import dev.nexus.service.db.TupleLimits;
 import dev.nexus.service.db.TupleRepository;
+import dev.nexus.service.tuples.TemplateDoc;
 import dev.nexus.service.tuples.TemplateRegistry;
 import dev.nexus.service.tuples.TemplateSchema;
 import org.slf4j.Logger;
@@ -93,9 +94,21 @@ import java.util.Optional;
  *                                   claim log nack only (nexus-7rwaj).
  *   POST /v1/tuples/renew           {claim_id, claimant, lease_s} -&gt; {"lease_until": "&lt;ISO-8601&gt;"}
  *   POST /v1/tuples/release         {claim_id, claimant} -&gt; {"released": true}
- *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
+ *   GET  /v1/tuples/registry        ?doc=1 -&gt; {"digest", "sources", "templates": [...]}
+ *                                   {@code doc=1} (bead nexus-mdbds.2.12, RDR-239 S4 Q1 = B) adds each template's
+ *                                   {@code doc} block (summary, writers, readers, fields, body, example, see_also;
+ *                                   only the parts it declares) to the template object; a template with no doc
+ *                                   block has no {@code doc} key either way. Without {@code doc=1} (the default,
+ *                                   and any other value) no template carries {@code doc}, so the hot callers see the
+ *                                   response they always did. The digest is the same either way and covers doc
+ *                                   (S4 Q2 = A).
  *   GET  /v1/tuples/subspace_list   ?prefix=&amp;limit=&amp;after= -&gt; {"subspaces": [...], "next_cursor"?: "&lt;subspace&gt;"}
- *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, lapsed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
+ *                                   each subspace is a census {subspace, total, available, claimed, dead, consumed,
+ *                                   expired_unpurged, oldest_created_at, newest_created_at, lapsed, delayed,
+ *                                   oldest_claimable_created_at, template}; {@code template} (nexus-mdbds.2.13)
+ *                                   is the name of the template the subspace resolves to, e.g.
+ *                                   {@code board/ci/<topic>}, null when none does
+ *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; the same census object for one subspace
  *   GET  /v1/tuples/park_stats      -&gt; {max_global, max_per_claimant, global_in_use, refused_global,
  *                                        refused_claimant, per_claimant: {claimant: slots}}
  *                                       (RDR-211 Phase 1 Step 1, bead nexus-rplay.7 -- process-wide counters,
@@ -546,10 +559,15 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         TemplateRegistry.Snapshot snap = repo.registry();
+        // No guard for a malformed percent-escape: the JDK HttpServer rejects such a request line
+        // (?x=%zz, ?x=%) with its own 400 before any handler runs, so parseQuery never sees one
+        // (measured 2026-11-01, nexus-mdbds.2.14 L2; it was a 400 before this route read the query too).
+        boolean withDoc = "1".equals(parseQuery(ex.getRequestURI()).get("doc"));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("digest", snap.digest());
         out.put("sources", snap.sources());
-        List<Map<String, Object>> templates = snap.templates().stream().map(this::renderTemplate).toList();
+        List<Map<String, Object>> templates =
+                snap.templates().stream().map(t -> renderTemplate(t, withDoc)).toList();
         out.put("templates", templates);
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(out));
     }
@@ -563,7 +581,7 @@ public final class TupleHandler implements HttpHandler {
      * at least one key (mirrors {@link TemplateRegistry}'s canonical-map digest
      * shape, which also omits it when empty).
      */
-    private Map<String, Object> renderTemplate(TemplateSchema t) {
+    private Map<String, Object> renderTemplate(TemplateSchema t, boolean withDoc) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", t.name());
         m.put("keys", t.keys());
@@ -605,6 +623,51 @@ public final class TupleHandler implements HttpHandler {
         }
         if (t.claimLogTtlSeconds() != null) {
             m.put("claim_log_ttl_seconds", t.claimLogTtlSeconds());
+        }
+        // nexus-mdbds.2.12 (RDR-239 S4 Q1 = B): doc rides only when the caller asked (?doc=1) and
+        // the template declares one; the default response keeps the size the hot callers rely on.
+        if (withDoc && t.doc() != null) {
+            m.put("doc", renderDoc(t.doc()));
+        }
+        return m;
+    }
+
+    /**
+     * A template's doc block as a plain JSON map in the RDR-239 field order (summary, writers,
+     * readers, fields, body, example, see_also), each part present only when the block declares it.
+     * The example is rendered exactly as the parser holds it (keys and dims already strings).
+     */
+    private static Map<String, Object> renderDoc(TemplateDoc d) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("summary", d.summary());
+        if (d.writers() != null) {
+            m.put("writers", d.writers());
+        }
+        if (d.readers() != null) {
+            m.put("readers", d.readers());
+        }
+        if (d.fields() != null) {
+            m.put("fields", d.fields());
+        }
+        if (d.body() != null) {
+            m.put("body", d.body());
+        }
+        if (d.example() != null) {
+            TemplateDoc.Example e = d.example();
+            Map<String, Object> ex = new LinkedHashMap<>();
+            ex.put("subspace", e.subspace());
+            if (e.nonce() != null) {
+                ex.put("nonce", e.nonce());
+            }
+            ex.put("keys", e.keys());
+            ex.put("dims", e.dims());
+            if (e.body() != null) {
+                ex.put("body", e.body());
+            }
+            m.put("example", ex);
+        }
+        if (d.seeAlso() != null) {
+            m.put("see_also", d.seeAlso());
         }
         return m;
     }
@@ -697,6 +760,10 @@ public final class TupleHandler implements HttpHandler {
         // among live unclaimed rows a claim could take now: null when there are none.
         m.put("delayed", c.delayed());
         m.put("oldest_claimable_created_at", c.oldestClaimableCreatedAt());
+        // nexus-mdbds.2.13 (RDR-239): additive. The name of the template TemplateRegistry.resolve returns
+        // for this subspace (e.g. "board/ci/<topic>"), JSON null when none resolves: a subspace_list row
+        // can outlive its template. The key is always written. Appended last, so no existing field moves.
+        m.put("template", repo.resolveTemplateName(c.subspace()));
         return m;
     }
 

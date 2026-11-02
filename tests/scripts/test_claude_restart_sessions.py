@@ -167,3 +167,318 @@ def test_the_local_claude_wins_over_path(crs, monkeypatch, tmp_path) -> None:
     other.chmod(0o755)
     monkeypatch.setenv("PATH", str(other.parent))
     assert crs._claude_binary() == str(local)
+
+
+@pytest.mark.parametrize(
+    ("argv", "want"),
+    [
+        ("claude --channels plugin:conexus@nexus-plugins -n x", True),
+        ("claude --channels=plugin:conexus@nexus-plugins", True),
+        ("claude --dangerously-load-development-channels server:nexus", True),
+        ("claude --channels plugin:other@elsewhere", False),
+        ("claude -n x --model sonnet", False),
+        ("claude -n 'unbalanced", False),
+        ("", False),
+        ("claude --channels plugin:other@x plugin:conexus@nexus-plugins -n x", True),
+        ("claude -n x --channels", False),
+        ("claude -n x -- --channels plugin:conexus@nexus-plugins", False),
+        ("claude --channels plugin:conexus@elsewhere", False),
+    ],
+    ids=["channels", "channels-inline", "dev-channels", "other-plugin", "none", "unparseable", "empty",
+         "second-value", "flag-last", "after-double-dash", "other-market"],
+)
+def test_has_channel(crs, argv: str, want: bool) -> None:
+    """Mail reaches a session as a turn only through the conexus channel (nexus-cmqe8)."""
+    assert crs.has_channel({"argv": argv}) is want
+
+
+def test_fresh_relaunch_carries_the_first_prompt_after_a_double_dash(crs) -> None:
+    """--channels takes values, so the positional prompt must follow `--` or it is read as a channel."""
+    cmd = crs.relaunch_command({"argv": "claude --channels plugin:conexus@nexus-plugins", "name": "tamsin",
+                                "sessionId": "sid-1", "cwd": "/w"}, fresh=True, first_prompt="cat /tmp/h f.md")
+    args = shlex.split(cmd.split(" && ", 1)[1])[1:]
+    assert args[-2:] == ["--", "cat /tmp/h f.md"]
+    assert "--resume" not in args
+
+
+def test_mail_ask_writes_the_session_mailbox_and_types_nothing(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_kw):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="tupleid\n", stderr="")
+
+    setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
+    s = {"sessionId": "sid-9", "name": "tamsin"}
+    assert crs.mail_ask(s, "/tmp/h.md", "sid-caller") is True
+    assert len(seen) == 1 and seen[0][1:4] == ["tuple", "out", "mailbox/sid-9"]
+    argv = seen[0]
+    pairs = {(argv[i], argv[i + 1]) for i in range(len(argv) - 1)}
+    assert {("--key", "to=sid-9"), ("--dim", "from=sid-caller"), ("--dim", "address_kind=session"),
+            ("--dim", "kind=restart-handoff"), ("--ttl-seconds", "1200")} <= pairs
+    assert argv[argv.index("--nonce") + 1]
+    body = argv[argv.index("--body") + 1]
+    assert "/tmp/h.md" in body and body.endswith("reply with only: cat /tmp/h.md")
+    assert len(body.encode()) <= 4096  # the mailbox template's body ceiling
+
+
+def test_mail_ask_reports_a_failed_send(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    setattr_in(monkeypatch, crs, "subprocess.run",
+               lambda argv, **_kw: subprocess.CompletedProcess(argv, 1, stdout="", stderr="refused\n"))
+    assert crs.mail_ask({"sessionId": "sid-9", "name": "t"}, "/tmp/h.md", "x") is False
+    assert "mail to mailbox/sid-9 failed (exit 1)" in (tmp_path / "restart.log").read_text()
+
+
+def test_transcript_has_matches_only_a_user_message(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    proj = tmp_path / ".claude" / "projects" / "p"
+    proj.mkdir(parents=True)
+    rows = [{"type": "assistant", "message": {"content": "cat /tmp/a.md"}},
+            {"type": "user", "message": {"role": "user", "content": "cat /tmp/b.md"}}]
+    (proj / "sid.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    assert crs.transcript_has("sid", "/tmp/b.md") is True
+    assert crs.transcript_has("sid", "/tmp/a.md") is False
+    assert crs.transcript_has("other", "/tmp/b.md") is False
+
+
+@pytest.mark.parametrize("fresh", [False, True], ids=["resume", "fresh"])
+def test_a_previous_first_prompt_is_not_carried_into_the_next_relaunch(crs, fresh: bool) -> None:
+    """After a --fresh roll, ps shows `... -- cat <old handoff>`; the next roll must drop it,
+    or -n and --resume land after `--` and claude reads them as prompt text."""
+    s = {"argv": "claude --channels plugin:conexus@nexus-plugins -n old -- cat /tmp/old.md",
+         "name": "tamsin", "sessionId": "sid-2", "cwd": "/w"}
+    cmd = crs.relaunch_command(s, fresh=fresh, first_prompt="cat /tmp/new.md" if fresh else "")
+    args = shlex.split(cmd.split(" && ", 1)[1])[1:]
+    assert "/tmp/old.md" not in " ".join(args)
+    assert args.count("--") == (1 if fresh else 0)
+    head = args[:args.index("--")] if fresh else args
+    assert ["-n", "tamsin"] == head[head.index("-n"):head.index("-n") + 2]
+    if fresh:
+        assert args[-1] == "cat /tmp/new.md" and "--resume" not in args
+    else:
+        assert head[-2:] == ["--resume", "sid-2"]
+
+
+def test_draft_text_reads_every_line_of_the_input_box(crs) -> None:
+    box = ("output\n────\n\x1b[39m❯\xa0first line of the draft\n"
+           "  second line\n────\n  footer ❯ agents\n")
+    assert crs.draft_text(box) == "first line of the draft\nsecond line"
+    assert crs.draft_text(pane("\x1b[39m❯\xa0\x1b[2mghost suggestion\x1b[0m")) == ""
+    assert crs.draft_text("") == ""
+
+
+def _write_transcript(home: Path, sid: str, rows: list[dict]) -> None:
+    proj = home / ".claude" / "projects" / "p"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / f"{sid}.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                                       encoding="utf-8")
+
+
+def test_prompt_count_counts_prompts_channel_and_peer_turns(crs, monkeypatch, tmp_path) -> None:
+    """Channel mail and peer messages start turns and are recorded as meta user entries with an
+    origin kind ("channel", "peer"; CC 2.1.316); a meta entry with no origin is not a prompt."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_transcript(tmp_path, "sid", [
+        {"type": "user", "message": {"content": "typed prompt"}},
+        {"type": "user", "isMeta": True, "origin": {"kind": "channel"}, "message": {"content": "<channel>mail"}},
+        {"type": "user", "isMeta": True, "origin": {"kind": "peer"}, "message": {"content": "<peer>hi"}},
+        {"type": "user", "isMeta": True, "message": {"content": "Caveat: local command output"}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "x"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
+    ])
+    assert crs.prompt_count("sid") == 3
+
+
+def test_transcript_has_matches_a_non_ascii_path(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = "/tmp/nexus-continuation-restart-café-12345678-20261101-000000.md"
+    _write_transcript(tmp_path, "sid", [{"type": "user", "message": {"content": f"cat {path}"}}])
+    assert crs.transcript_has("sid", path) is True
+
+
+def test_mail_ask_survives_a_missing_nx(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setenv("NX_RESTART_NX", str(tmp_path / "no-such-nx"))
+    assert crs.mail_ask({"sessionId": "sid-9", "name": "t"}, "/tmp/h.md", "x") is False
+    assert "FileNotFoundError" in (tmp_path / "restart.log").read_text()
+
+
+@pytest.mark.parametrize(
+    ("channel", "busy", "mail_turn_writes", "draft", "want_typed", "want_done"),
+    [
+        (True, True, True, False, False, True),     # mail taken: nothing typed
+        (True, True, False, False, True, True),     # mail declined: asked once by typing
+        (True, True, False, True, False, False),    # mail declined, draft in the prompt: skipped
+        (False, True, False, False, True, True),    # no channel: typed from the start
+        (True, False, False, False, True, True),    # mail started no turn: typed at once
+    ],
+    ids=["mail-taken", "mail-declined-typed", "mail-declined-draft-skipped", "no-channel-typed",
+         "mail-no-turn-typed"],
+)
+def test_write_handoffs_routes_mail_then_typing(crs, monkeypatch, tmp_path, channel, busy, mail_turn_writes,
+                                               draft, want_typed, want_done) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    s = {"sessionId": "sid-1", "name": "t", "pid": os.getpid(), "pane": "%9", "file": tmp_path / "s.json"}
+    handoff = tmp_path / "h.md"
+    monkeypatch.setattr(crs, "handoff_path", lambda _s, _stamp: str(handoff))
+    marker = crs.handoff_marker(s)
+    body = "# Handoff\n\n## 1. State\n" + "x" * 300 + f"\n{marker}\n"
+    typed: list[str] = []
+
+    now = [1_000_000.0]
+
+    def write_later() -> None:
+        handoff.write_text(body, encoding="utf-8")
+        os.utime(handoff, (now[0], now[0]))  # on the fake clock: after the ask, then stable
+
+    monkeypatch.setattr(crs, "has_channel", lambda _s: channel)
+    monkeypatch.setattr(crs, "mail_ask", lambda *_a, **_k: (write_later() if mail_turn_writes else None) or True)
+    monkeypatch.setattr(crs, "went_busy", lambda *_a, **_k: busy)
+    monkeypatch.setattr(crs, "prompt_count", lambda _sid: 1)
+    monkeypatch.setattr(crs, "status", lambda _s: "idle")
+    monkeypatch.setattr(crs, "pane_has_draft", lambda _p: draft)
+    monkeypatch.setattr(crs, "ask_line", lambda _s, _path: "Do what the ask file says")  # no /tmp write
+    monkeypatch.setattr(crs, "submit", lambda _pane, text, _f: typed.append(text) or write_later() or True)
+    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    def tick() -> float:
+        now[0] += 7
+        return now[0]
+
+    setattr_in(monkeypatch, crs, "time.time", tick)
+    got = crs.write_handoffs([s], {"idle"}, wait=60, timeout=10_000)
+    assert bool(typed) is want_typed, typed
+    assert (got == {"sid-1": str(handoff)}) is want_done, got
+    if want_typed and channel and not busy:
+        assert "by typed (the mail started no turn within 60s)" in (tmp_path / "restart.log").read_text()
+
+
+def _fake_capture(monkeypatch, crs, text: str) -> None:
+    setattr_in(monkeypatch, crs, "subprocess.run",
+               lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, stdout=text, stderr=""))
+
+
+def _box(line: str) -> str:
+    return f"out\n───\n\x1b[39m❯\xa0{line}\n───\n"
+
+
+def test_save_draft_writes_a_private_file(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    _fake_capture(monkeypatch, crs, _box("half a thought"))
+    path, refused = crs.save_draft({"pane": "%1", "sessionId": "sid", "name": "t"}, str(tmp_path / "h"))
+    assert refused == "" and path == str(tmp_path / "h.draft.txt")
+    assert "half a thought" in Path(path).read_text(encoding="utf-8")
+    assert Path(path).stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("line", ["[Pasted text #1 +12 lines]", "see [Image #2] here"], ids=["paste", "image"])
+def test_save_draft_refuses_a_placeholder(crs, monkeypatch, tmp_path, line: str) -> None:
+    """The pane shows only the placeholder, so saving it would claim a draft kept that is lost."""
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    _fake_capture(monkeypatch, crs, _box(line))
+    path, refused = crs.save_draft({"pane": "%1", "sessionId": "sid", "name": "t"}, str(tmp_path / "h"))
+    assert path == "" and "placeholder" in refused
+    assert not (tmp_path / "h.draft.txt").exists()
+
+
+def test_save_draft_with_nothing_typed(crs, monkeypatch, tmp_path) -> None:
+    _fake_capture(monkeypatch, crs, _box("\x1b[2mghost\x1b[0m"))
+    assert crs.save_draft({"pane": "%1", "sessionId": "sid", "name": "t"}, str(tmp_path / "h")) == ("", "")
+
+
+def test_mail_note_is_logged_before_the_send_and_named_in_the_body(crs, monkeypatch, tmp_path) -> None:
+    log = tmp_path / "restart.log"
+    monkeypatch.setattr(crs, "LOG", log)
+    s = {"sessionId": "sid-9", "name": "tamsin"}
+    seen: list[str] = []
+
+    def fake_run(argv, **_kw):
+        seen.append(log.read_text(encoding="utf-8") if log.exists() else "")
+        return subprocess.CompletedProcess(argv, 0, stdout="id\n", stderr="")
+
+    setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
+    assert crs.mail_ask(s, "/tmp/h.md", "x") is True
+    note = crs.mail_note(s, "/tmp/h.md")
+    assert note in seen[0]  # in the log when the send runs
+    assert note in crs.handoff_prompt(s, "/tmp/h.md", mailed=True)
+    assert note not in crs.handoff_prompt(s, "/tmp/h.md")  # the typed ask is the user's own prompt
+
+
+@pytest.mark.parametrize(("headings", "counted"), [(2, True), (1, False)], ids=["two-headings", "one-heading"])
+def test_a_handoff_needs_two_headings(crs, monkeypatch, tmp_path, headings: int, counted: bool) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    s = {"sessionId": "sid-1", "name": "t", "pid": os.getpid(), "pane": "%9", "file": tmp_path / "s.json"}
+    handoff = tmp_path / "h.md"
+    monkeypatch.setattr(crs, "handoff_path", lambda _s, _stamp: str(handoff))
+    now = [1_000_000.0]
+    body = "".join(f"# H{i}\n" for i in range(headings)) + "x" * 300 + f"\n{crs.handoff_marker(s)}\n"
+
+    def write() -> bool:
+        handoff.write_text(body, encoding="utf-8")
+        os.utime(handoff, (now[0], now[0]))
+        return True
+
+    monkeypatch.setattr(crs, "has_channel", lambda _s: True)
+    monkeypatch.setattr(crs, "mail_ask", lambda *_a, **_k: write())
+    monkeypatch.setattr(crs, "went_busy", lambda *_a, **_k: True)
+    monkeypatch.setattr(crs, "prompt_count", lambda _sid: 1)
+    monkeypatch.setattr(crs, "status", lambda _s: "idle")
+    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+
+    def tick() -> float:
+        now[0] += 7
+        return now[0]
+
+    setattr_in(monkeypatch, crs, "time.time", tick)
+    got = crs.write_handoffs([s], {"idle"}, wait=60, timeout=200)
+    assert (got == {"sid-1": str(handoff)}) is counted
+
+
+@pytest.mark.parametrize(("reported", "accepted"), [
+    ("nx, version 7.93.1", True),
+    ("nx, version 7.93.10", False),  # the old substring test read 7.93.1 in 7.93.10 as installed
+    ("nx, version 17.93.1", False),
+    ("nx, version 7.93.1.", True),  # sentence punctuation after the version
+    ("nx, version 7.93.1.dev3", False),  # a dev, pre-release or local build is not the release
+    ("nx, version 7.93.1-rc1", False),
+    ("nx, version 7.93.1+local", False),
+], ids=["exact", "longer-patch", "longer-major", "trailing-period", "dev", "rc", "local"])
+def test_converge_needs_nx_at_exactly_the_release(crs, monkeypatch, tmp_path, reported: str, accepted: bool) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "release_engine_floor", lambda _v, _r: (0, 1, 0))
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda *_a, **_k: subprocess.CompletedProcess([], 0, "", ""))
+    monkeypatch.setattr(crs, "nx_version", lambda: reported)
+    monkeypatch.setattr(crs, "update_plugins", lambda: None)
+    monkeypatch.setattr(crs, "plugin_versions", lambda: {p: "7.93.1" for p in crs.nexus_plugins()})
+    assert crs.converge("7.93.1", tmp_path, "http://127.0.0.1:1", gate=False, dry=False) is accepted
+    assert ("ABORT: nx reports" in (tmp_path / "restart.log").read_text(encoding="utf-8")) is not accepted
+
+
+def test_converge_aborts_on_a_failed_install_even_with_nx_at_the_release(crs, monkeypatch, tmp_path) -> None:
+    """A reinstall that exits nonzero aborts although nx already reports the release."""
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "release_engine_floor", lambda _v, _r: (0, 1, 0))
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", ""))
+    monkeypatch.setattr(crs, "nx_version", lambda: "nx, version 7.93.1")
+    monkeypatch.setattr(crs, "update_plugins", lambda: pytest.fail("plugins updated after a failed install"))
+    assert crs.converge("7.93.1", tmp_path, "http://127.0.0.1:1", gate=False, dry=False) is False
+    assert "ABORT: reinstall-tool exited 1" in (tmp_path / "restart.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("read", "line"), [
+    (OSError("refused"), "ABORT: could not read the cloud engine's version"),
+    ((0, 0, 9), "ABORT: the cloud engine is behind v7.93.1's floor"),
+], ids=["unreadable", "behind"])
+def test_the_engine_gate_names_why_it_refused(crs, monkeypatch, tmp_path, read, line: str) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "release_engine_floor", lambda _v, _r: (0, 1, 0))
+
+    def cloud(_ep: str) -> tuple[int, ...]:
+        if isinstance(read, Exception):
+            raise read
+        return read
+
+    monkeypatch.setattr(crs, "cloud_engine", cloud)
+    assert crs.converge("7.93.1", tmp_path, "http://127.0.0.1:1", gate=True, dry=False, engine_wait=0) is False
+    assert line in (tmp_path / "restart.log").read_text(encoding="utf-8")

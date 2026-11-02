@@ -502,7 +502,7 @@ def _gather_chroma_chunks_by_field(
     authoritative; fall back to ``chunk_index`` (then to insertion
     sequence) only when no manifest is available.
     """
-    chunks: list[tuple[int, int, str]] = []
+    chunks: list[tuple[int, int, str, str]] = []  # (position, seq, text, manifest-confirmed chash or "")
     seq = 0
     offset = 0
     page_limit = QUOTAS.MAX_QUERY_RESULTS
@@ -577,6 +577,7 @@ def _gather_chroma_chunks_by_field(
                 for md, doc in zip(mds, docs):
                     if not doc:
                         continue
+                    chash = ""
                     if isinstance(md, dict):
                         chash = md.get("chunk_text_hash", "")
                         ci = chash_position.get(
@@ -584,7 +585,7 @@ def _gather_chroma_chunks_by_field(
                         )
                     else:
                         ci = 0
-                    chunks.append((ci, seq, doc))
+                    chunks.append((ci, seq, doc, chash if chash in chash_position else ""))
                     seq += 1
         if not use_manifest_ids or not chunks:
             # Either no manifest available, or manifest-ids returned
@@ -605,6 +606,7 @@ def _gather_chroma_chunks_by_field(
                 for md, doc in zip(mds, docs):
                     if not doc:
                         continue
+                    chash = ""
                     if isinstance(md, dict):
                         chash = md.get("chunk_text_hash", "")
                         if chash_position and chash in chash_position:
@@ -613,7 +615,7 @@ def _gather_chroma_chunks_by_field(
                             ci = int(md.get("chunk_index", 0) or 0)
                     else:
                         ci = 0
-                    chunks.append((ci, seq, doc))
+                    chunks.append((ci, seq, doc, chash if chash in chash_position else ""))
                     seq += 1
                 if len(docs) < page_limit:
                     break
@@ -642,7 +644,7 @@ def _gather_chroma_chunks_by_field(
         identity_field == "doc_id"
         and not chash_position
         and len(chunks) > 1
-        and {triple[0] for triple in chunks} == {0}
+        and {quad[0] for quad in chunks} == {0}
     ):
         return ReadFail(
             reason="unreachable",
@@ -655,8 +657,8 @@ def _gather_chroma_chunks_by_field(
                 f"manifest."
             ),
         )
-    chunks.sort(key=lambda triple: (triple[0], triple[1]))
-    text = "\n\n".join(doc for _, _, doc in chunks)
+    chunks.sort(key=lambda quad: (quad[0], quad[1]))
+    text = "\n\n".join(doc for _, _, doc, _ in chunks)
     return ReadOk(
         text=text,
         metadata={
@@ -666,6 +668,12 @@ def _gather_chroma_chunks_by_field(
             "identity_field": identity_field,
             "chunk_count": len(chunks),
             "manifest_ordered": bool(chash_position),
+            # The chunks in reassembly order as (chash, text); chash is "" for a chunk
+            # the catalog manifest does not list. References to the strings already
+            # held, so it costs no text copy. ``text`` is these texts joined by a
+            # blank line, which is how a validator maps a quote back to a chunk
+            # (RDR-189 P1, nexus-z1d0l.1.6).
+            "chunks": tuple((c, d) for _, _, d, c in chunks),
         },
     )
 

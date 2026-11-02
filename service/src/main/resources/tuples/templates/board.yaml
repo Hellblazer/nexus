@@ -1,19 +1,15 @@
-# RDR-211 Phase 1 Step 2 (bead nexus-rplay.8), Approach item 1: broadcast
-# announcements, closing Gap 1 (no one-to-many announcement). Take
-# disabled: rd already serves any number of readers from one tuple, and
-# the engine wakes every reader parked on the subspace when a post lands
-# (RDR-205's signalAll). Each post is a NEW tuple (id_from: keys+nonce),
-# so the board is an append-only log; a reader pages with rd's
-# (created_at, id) cursor to read what it missed since it last looked.
+# RDR-211 Phase 1 Step 2 (bead nexus-rplay.8), Approach item 1, closing
+# Gap 1 (no one-to-many announcement). Take disabled: rd already serves any
+# number of readers from one tuple, and the engine wakes every reader parked
+# on the subspace when a post lands (RDR-205's signalAll). Each post is a
+# NEW tuple (id_from: keys+nonce), so the board is an append-only log.
 #
-# from (required): the poster's session or agent id, recorded but not
-# checked -- any session of the tenant may post (RDR-211 Open Question 4,
-# Sam: row-level security is tenant-only and nothing below the tenant has
-# an identity the engine could enforce). kind: an optional free-text label
-# for the post's shape (e.g. "release", "outage"); no fixed values, since
-# a board's topics and their post shapes are not enumerable up front the
-# way a fixed state machine's (the retired session ledger's {start, report})
-# are.
+# from is required but recorded, not checked -- any session of the tenant
+# may post (RDR-211 Open Question 4, Sam: row-level security is tenant-only
+# and nothing below the tenant has an identity the engine could enforce).
+# kind has no fixed values, since a board's topics and their post shapes
+# are not enumerable up front the way a fixed state machine's (the retired
+# session ledger's {start, report}) are.
 #
 # id_dims: [from] mirrors mailbox.yaml: "from" also enters the tuple id
 # alongside the minted nonce, so it must be declared required: true.
@@ -57,3 +53,29 @@ retention_seconds: 604800
 max_body_bytes: 1024
 
 max_live_rows: 500
+
+doc:
+  summary: An append-only announcement log per topic, many readers and no claiming; a post is a short message with a sender and an optional label.
+  writers:
+    - Unverified: any session of the tenant, by tuple_out or nx tuple out, following the board posting convention (one post per topic per minute) in conexus/skills/mailbox/SKILL.md
+    - Unverified: no code in this repository posts to board/<topic>; the live tenant holds no such subspace
+  readers:
+    - Unverified: a session that called tuple_subscribe on the topic gets each post pushed through the channel (at most 32 topics per session)
+    - Unverified: nx tuple wait and tuple_rd page the log with the (created_at, id) cursor
+  fields:
+    topic: the topic name, the same as the subspace's last segment
+    from: the poster's session or agent id; recorded, not checked
+    kind: an optional free label for the post's shape; no value is in use today
+  body: free text up to 1024 bytes
+  example:
+    subspace: board/example-topic
+    nonce: 00000000-0000-0000-0000-000000000002
+    keys:
+      topic: example-topic
+    dims:
+      from: 00000000-0000-0000-0000-000000000003
+      kind: example
+    body: An example post body.
+  see_also:
+    - RDR-211
+    - conexus/skills/mailbox/SKILL.md

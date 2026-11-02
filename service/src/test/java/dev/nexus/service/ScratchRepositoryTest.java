@@ -237,6 +237,51 @@ class ScratchRepositoryTest {
         assertThat(ok).as("flag on absent entry must return false").isFalse();
     }
 
+    // ── flag stamps ts: a flag is session activity (nexus-mtheb.6 fix r2) ────
+
+    private void backdate(String tenant, int hours) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var scratch = dev.nexus.service.jooq.t1.Tables.SCRATCH;
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES).update(scratch)
+                .set(scratch.TS, OffsetDateTime.now(ZoneOffset.UTC).minusHours(hours))
+                .where(scratch.TENANT_ID.eq(tenant))
+                .execute();
+        }
+    }
+
+    @Test
+    void flag_stampsTsSoALaterFlagOutranksAnEarlierEditInTimeOrder() throws Exception {
+        // The flush rule orders a flagged row's ts against a T2 edit made after the put. A row put at t0, a T2
+        // edit at t1, then a flag at t2 must carry a ts after t1, or the edit wins though the flag was later.
+        String t = "flag-ts-tenant-" + System.nanoTime();
+        String id = uuid();
+        repo.put(t, SESSION_A, id, "put then flagged later", null, null, false, null, null);
+        backdate(t, 3);
+        OffsetDateTime afterEdit = OffsetDateTime.now(ZoneOffset.UTC);
+        Thread.sleep(20);
+
+        assertThat(repo.flag(t, SESSION_A, id, "p", "title")).isTrue();
+
+        OffsetDateTime ts = OffsetDateTime.parse((String) repo.listEntries(t, SESSION_A).get(0).get("ts"));
+        assertThat(ts).as("flag stamps ts = now: later than the edit that came between the put and the flag")
+            .isAfter(afterEdit);
+    }
+
+    @Test
+    void flag_countsAsSessionActivityForTheIdleSweep() throws Exception {
+        // A session whose only recent act is a flag is not idle: the sweep must not reap rows the user just flagged.
+        String t = "flag-sweep-tenant-" + System.nanoTime();
+        String id = uuid();
+        repo.put(t, SESSION_A, id, "flagged just now", null, null, false, null, null);
+        backdate(t, 3);
+
+        assertThat(repo.flag(t, SESSION_A, id, "p", "title")).isTrue();
+
+        int swept = repo.sweepTenant(t, OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
+        assertThat(swept).as("a flag in the last hour keeps the session alive").isZero();
+        assertThat(repo.listEntries(t, SESSION_A)).hasSize(1);
+    }
+
     // ── Test 10: listEntries — all for session, ordered ts desc ─────────────
 
     @Test
@@ -375,6 +420,147 @@ class ScratchRepositoryTest {
         // isoTenantB entry untouched (RLS isolation: sweepTenant only sees isoTenantA rows)
         Map<String, Object> bStays = repo.get(isoTenantB, sweepSess, bId);
         assertThat(bStays).as("isoTenantB entry must survive isoTenantA sweep").isNotEmpty();
+    }
+
+    // ── nexus-mtheb.2: the sweep reaps an IDLE session, not each row on its own age ──
+    //
+    // RDR-152's decision is "a TTL sweep of rows whose session_id has been idle past a bound".
+    // The sweep used to delete WHERE ts < cutoff, so a live session lost every row 24 h after
+    // that row's own put. A session's idle time is the newest of its rows' put time and last
+    // read (get/search stamp last_accessed). The tests below build "old" and "new" with a
+    // cutoff taken between two puts, so they need no clock control and no back-dating.
+
+    @Test
+    void sweepTenant_keepsEveryRowOfASessionThatWroteAfterTheCutoff() throws Exception {
+        String t = "sweep-live-tenant-" + System.nanoTime();
+        String s = "sweep-live-session-" + System.nanoTime();
+        repo.put(t, s, uuid(), "early row of a live session", null, null, false, null, null);
+        Thread.sleep(50);
+        OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC);
+        Thread.sleep(50);
+        repo.put(t, s, uuid(), "recent row of the same session", null, null, false, null, null);
+
+        int swept = repo.sweepTenant(t, cutoff);
+
+        assertThat(swept).as("a session whose newest row is past the cutoff is not idle: nothing is reaped").isZero();
+        assertThat(repo.listEntries(t, s)).as("both rows survive, the early one included").hasSize(2);
+    }
+
+    @Test
+    void sweepTenant_reapsTheIdleSessionAndLeavesTheLiveOneInTheSameTenant() throws Exception {
+        String t = "sweep-mixed-tenant-" + System.nanoTime();
+        String idle = "sweep-idle-session-" + System.nanoTime();
+        String live = "sweep-live2-session-" + System.nanoTime();
+        repo.put(t, idle, uuid(), "idle one", null, null, false, null, null);
+        repo.put(t, idle, uuid(), "idle two", null, null, false, null, null);
+        repo.put(t, live, uuid(), "live early", null, null, false, null, null);
+        Thread.sleep(50);
+        OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC);
+        Thread.sleep(50);
+        repo.put(t, live, uuid(), "live late", null, null, false, null, null);
+
+        int swept = repo.sweepTenant(t, cutoff);
+
+        assertThat(swept).as("exactly the idle session's two rows").isEqualTo(2);
+        assertThat(repo.listEntries(t, idle)).as("the idle session is gone whole").isEmpty();
+        assertThat(repo.listEntries(t, live)).as("the live session keeps both rows").hasSize(2);
+    }
+
+    @Test
+    void sweepTenant_aReadRefreshesTheSession_getAndSearchBoth() throws Exception {
+        String t = "sweep-read-tenant-" + System.nanoTime();
+        String viaGet = "sweep-read-get-" + System.nanoTime();
+        String viaSearch = "sweep-read-search-" + System.nanoTime();
+        String idleControl = "sweep-read-control-" + System.nanoTime();
+        String getId = uuid();
+        repo.put(t, viaGet, getId, "kept alive by a get", null, null, false, null, null);
+        repo.put(t, viaSearch, uuid(), "kept alive by zebrafinch search", null, null, false, null, null);
+        repo.put(t, idleControl, uuid(), "never touched again", null, null, false, null, null);
+        Thread.sleep(50);
+        OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC);
+        Thread.sleep(50);
+        assertThat(repo.get(t, viaGet, getId)).isNotEmpty();
+        assertThat(repo.search(t, viaSearch, "zebrafinch", 5)).hasSize(1);
+
+        int swept = repo.sweepTenant(t, cutoff);
+
+        assertThat(swept).as("only the session nobody read or wrote since the cutoff is reaped").isEqualTo(1);
+        assertThat(repo.listEntries(t, idleControl)).isEmpty();
+        assertThat(repo.listEntries(t, viaGet)).as("a get past the cutoff keeps the session").hasSize(1);
+        assertThat(repo.listEntries(t, viaSearch)).as("a search past the cutoff keeps the session").hasSize(1);
+    }
+
+    @Test
+    void sweepTenant_boundedOverloadHasTheSameIdleSemantics() throws Exception {
+        // The scheduled sweep calls the statement-timeout overload; it must not keep the old per-row rule.
+        String t = "sweep-bounded-tenant-" + System.nanoTime();
+        String s = "sweep-bounded-session-" + System.nanoTime();
+        repo.put(t, s, uuid(), "early", null, null, false, null, null);
+        Thread.sleep(50);
+        OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC);
+        Thread.sleep(50);
+        repo.put(t, s, uuid(), "late", null, null, false, null, null);
+
+        int swept = repo.sweepTenant(t, cutoff, java.time.Duration.ofSeconds(5));
+
+        assertThat(swept).isZero();
+        assertThat(repo.listEntries(t, s)).hasSize(2);
+    }
+
+    @Test
+    void sweepExpired_superuserSweepHasTheSameIdleSemantics() throws Exception {
+        // sweepExpired (all tenants, no RLS) carries the same rule. Rows are back-dated as superuser so
+        // the 1 h cutoff touches only this test's tenant and leaves every other test's fresh rows alone.
+        String t = "sweep-su-tenant-" + System.nanoTime();
+        String idle = "sweep-su-idle-" + System.nanoTime();
+        String live = "sweep-su-live-" + System.nanoTime();
+        repo.put(t, idle, uuid(), "idle row", null, null, false, null, null);
+        repo.put(t, live, uuid(), "live early row", null, null, false, null, null);
+        try (Connection su = pg.createConnection("")) {
+            var ctx = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            ctx.update(dev.nexus.service.jooq.t1.Tables.SCRATCH)
+               .set(dev.nexus.service.jooq.t1.Tables.SCRATCH.TS, OffsetDateTime.now(ZoneOffset.UTC).minusHours(3))
+               .where(dev.nexus.service.jooq.t1.Tables.SCRATCH.TENANT_ID.eq(t))
+               .execute();
+            // the live session writes again now, so its newest row is inside the bound
+            repo.put(t, live, uuid(), "live late row", null, null, false, null, null);
+
+            int swept = repo.sweepExpired(ctx, OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
+
+            assertThat(swept).as("only the fully idle session's row").isEqualTo(1);
+        }
+        assertThat(repo.listEntries(t, idle)).isEmpty();
+        assertThat(repo.listEntries(t, live)).as("the live session keeps its back-dated row too").hasSize(2);
+    }
+
+    @Test
+    void sweepExpired_judgesASessionIdPerTenant() throws Exception {
+        // sweepExpired runs without RLS, so the tenant column in the candidate (tenant, session) pairs and in
+        // the per-session aggregate's correlation is the only thing keeping one tenant's live session from
+        // protecting another tenant's idle one that has the same session id (a session id is client-chosen,
+        // so two tenants can collide on it).
+        String tIdle = "sweep-xt-idle-" + System.nanoTime();
+        String tLive = "sweep-xt-live-" + System.nanoTime();
+        String shared = "sweep-xt-session-" + System.nanoTime();
+        repo.put(tIdle, shared, uuid(), "idle tenant row", null, null, false, null, null);
+        repo.put(tLive, shared, uuid(), "live tenant early row", null, null, false, null, null);
+        try (Connection su = pg.createConnection("")) {
+            var ctx = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            var scratch = dev.nexus.service.jooq.t1.Tables.SCRATCH;
+            ctx.update(scratch)
+               .set(scratch.TS, OffsetDateTime.now(ZoneOffset.UTC).minusHours(3))
+               .where(scratch.TENANT_ID.in(tIdle, tLive))
+               .execute();
+            // only the live tenant's session writes again; same session id, other tenant
+            repo.put(tLive, shared, uuid(), "live tenant late row", null, null, false, null, null);
+
+            int swept = repo.sweepExpired(ctx, OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
+
+            assertThat(swept).as("exactly the idle tenant's one row, not protected by the other tenant's write")
+                .isEqualTo(1);
+        }
+        assertThat(repo.listEntries(tIdle, shared)).as("the idle tenant's session is reaped").isEmpty();
+        assertThat(repo.listEntries(tLive, shared)).as("the live tenant's session is untouched").hasSize(2);
     }
 
     // ── Test 17: resolvePrefix — finds full UUID by prefix ───────────────────

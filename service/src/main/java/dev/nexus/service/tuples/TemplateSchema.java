@@ -107,6 +107,10 @@ import java.util.Objects;
  *                           choice open). {@code TupleRepository#insertClaimLog} reads the
  *                           effective value through {@code
  *                           TemplateRegistry#effectiveClaimLogTtlSeconds(String)}.
+ * @param doc               optional documentation block (RDR-239, bead nexus-mdbds.2.10):
+ *                           {@code null} when the template declares none. Documentation
+ *                           only; it never changes what {@code out} accepts. Part of the
+ *                           registry digest when present.
  */
 public record TemplateSchema(
         String name,
@@ -121,7 +125,8 @@ public record TemplateSchema(
         Long maxBodyBytes,
         boolean lock,
         Long maxLiveRows,
-        Long claimLogTtlSeconds) {
+        Long claimLogTtlSeconds,
+        TemplateDoc doc) {
 
     public TemplateSchema {
         Objects.requireNonNull(name, "name");
@@ -136,6 +141,19 @@ public record TemplateSchema(
         keyValues = Map.copyOf(copiedKeyValues);
         dimensions = Map.copyOf(dimensions);
         idDims = List.copyOf(idDims);
+    }
+
+    /** The same template carrying {@code doc}. */
+    public TemplateSchema withDoc(TemplateDoc newDoc) {
+        return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
+                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds, newDoc);
+    }
+
+    /** The same template with no {@code doc}: what a non-classpath template falls back to when its
+     *  doc block fails (RDR-239 S3). */
+    public TemplateSchema withoutDoc() {
+        return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
+                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds, null);
     }
 
     /** True when {@link #name} carries no {@code <param>} segment (a literal name). */

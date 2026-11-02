@@ -115,6 +115,8 @@ __all__ = [
     "PlanRunUnresolvedVarError",
     "StepRecord",
     "ToolDispatcher",
+    "claimless_verify_reason",
+    "find_claimless_verify",
     "find_embedded_step_ref",
     "merge_bindings",
     "plan_run",
@@ -1126,6 +1128,57 @@ def find_embedded_step_ref(plan: "str | dict[str, Any] | None") -> PlanRunStepRe
     return None
 
 
+#: The names a verify step goes by in plan JSON, before an ``mcp__...__`` prefix.
+_VERIFY_TOOL_NAMES: tuple[str, ...] = ("verify", "operator_verify")
+
+
+def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
+    """The 0-based index of the first verify step with no non-blank ``claim``, else ``None``
+    (nexus-z1d0l.1.11).
+
+    The host never invents a claim, and a step without one cannot be a check: ``plan_run`` refuses it
+    when it reaches it, after the steps before it have run and been paid for, and a bundle would show
+    the model an empty claim. So every door a plan comes through asks this first: the inline planner,
+    ``plan_save``, the seed loader, the matcher and ``nx plan hygiene``. A claim that is not a
+    non-blank string counts as none (a deferred-ref mapping exists only inside a running bundle,
+    never in plan JSON). The tool name is read as ``plan_run`` reads it, an ``mcp__`` prefix
+    stripped (matched by suffix, so this is no new name-parse site). Anything that is not a plan with a ``steps`` list returns ``None``, as
+    :func:`find_embedded_step_ref` does.
+    """
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except (TypeError, ValueError):
+            return None
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return None
+    for index, step in enumerate(steps):
+        tool = step.get("tool") if isinstance(step, dict) else None
+        if not isinstance(tool, str) or not (
+            tool in _VERIFY_TOOL_NAMES
+            or (tool.startswith("mcp__") and tool.endswith(tuple(f"__{n}" for n in _VERIFY_TOOL_NAMES)))
+        ):
+            continue
+        args = step.get("args")
+        claim = args.get("claim") if isinstance(args, dict) else None
+        if not (isinstance(claim, str) and claim.strip()):
+            return index
+    return None
+
+
+def claimless_verify_reason(plan: "str | dict[str, Any] | None") -> str | None:
+    """Why *plan* cannot run, when :func:`find_claimless_verify` finds a step, else ``None``: the
+    one wording every door reports."""
+    index = find_claimless_verify(plan)
+    if index is None:
+        return None
+    return (
+        f"step {index + 1} is a verify step with no claim; the host never invents one, "
+        "so the step cannot check anything"
+    )
+
+
 def _resolve_args(
     args: dict[str, Any],
     *,
@@ -2039,6 +2092,23 @@ def _no_evidence_result_text(*, tool: str, filtered_count: int) -> str:
     )
 
 
+def _zero_evidence_witness(resolved_tool: str, text: str) -> dict[str, Any]:
+    """The Witness Schema v1 payload for a check or verify step whose evidence hydrated to nothing
+    (nexus-z1d0l.1.10).
+
+    No model ran, so there is no verdict (``ok`` / ``verified`` is ``None``), no evidence and
+    ``requires_review`` true, which is what :func:`~nexus.operators.witness.bind` gives a reply with
+    no evidence and no records. A verify step's ``reason`` is the marker. The payload also keeps
+    ``text``, the marker every other operator's short-circuit returns, so ``$stepN.text`` and the
+    answer-runs classifier read it as before.
+    """
+    verb = resolved_tool.removeprefix("operator_")
+    reply: dict[str, Any] = {"evidence": []}
+    if verb == "verify":
+        reply["reason"] = text
+    return {**_bind_witness(reply, None, verb), "text": text}
+
+
 def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     """Resolve document tumblers to T3 content via the catalog manifest
     (nexus-mm5tx / nexus-zekpl class).
@@ -2495,13 +2565,16 @@ def _with_evidence_source(
 
 
 def _single_owner(owner_rows: dict[str, list[dict]] | None, chash: str, collection: str | None) -> str | None:
-    """The one document owning *chash* (in *collection*, when a row names its collection), else ``None``:
-    no owner set, no owner, or several (a shared chash is ambiguous, never a guess)."""
+    """The one document owning *chash* (in *collection*, when the chunk's collection is known), else ``None``:
+    no owner set, no owner, or several (a shared chash is ambiguous, never a guess). With the chunk's
+    collection known, a row that names no collection (a pre-catalog-025 engine) is not counted: it could be
+    an owner in another collection. Owners are live documents (``chash_positions``); a tombstoned co-owner
+    does not make the chash ambiguous."""
     if not owner_rows:
         return None
     docs = list(dict.fromkeys(
         row["doc_id"] for row in owner_rows.get(chash, ())
-        if row.get("doc_id") and (not collection or not row.get("collection") or row["collection"] == collection)
+        if row.get("doc_id") and (not collection or row.get("collection") == collection)
     ))
     return docs[0] if len(docs) == 1 else None
 
@@ -2553,6 +2626,33 @@ def _position_identities(
             ident = (_single_owner(rows, chash, collection) if chash else None, chash, collection)
         queues.setdefault(text, deque()).append(ident)
     return queues
+
+
+def _with_repaired_owner_rows(
+    rows: dict[str, list[dict]] | None, texts: list[str], supplement: RepairSupplement | None, *, asked: Any,
+) -> dict[str, list[dict]] | None:
+    """*rows* plus the owner rows of each repaired chash among *texts* that the hydration did not ask about
+    (*asked*: the chash ids its own lookup covered), fetched in one batch (nexus-z1d0l.1.3). A repaired item
+    binds only through :func:`_single_owner`, so without its rows a one-owner repair would stay ambiguous. A
+    failed lookup adds nothing: those items stay unbound, never guessed."""
+    if supplement is None:
+        return rows
+    seen = set(asked)
+    wanted: list[str] = []
+    for text in texts:
+        item = supplement.provenance(text)
+        chash = item.chash if item is not None else ""
+        if chash and _CHASH_RE.fullmatch(chash) and chash not in seen:
+            seen.add(chash)
+            wanted.append(chash)
+    if not wanted:
+        return rows
+    from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    fetched = mcp_core.owner_rows_for_chashes(wanted)
+    if not fetched:
+        return rows
+    return {**(rows or {}), **fetched}
 
 
 def _check_records_for(
@@ -2801,6 +2901,12 @@ def _hydrate_operator_args(
             # Records only when the runner builds the items: a step that supplies its own keeps its own. A
             # verify step's records are the same ones, rendered into ``evidence`` (its claim stays the author's).
             _rows = owner_lookups.owner_rows if not _tumbler_ids and owner_lookups.asked else None
+            # the ids the hydration's own owner lookup covered: found ones only (a missing id was never asked)
+            _missing = {str(m) for m in (hydrated.get("missing") or [])} if isinstance(hydrated, dict) else set()
+            _rows = _with_repaired_owner_rows(
+                _rows, non_empty, _supp,
+                asked=() if _rows is None else [str(i) for i in id_list_raw if str(i) not in _missing],
+            )
             _records = _check_records_for(non_empty, _idents, _rs if _rs_merge else None, _supp, _rows)
             args[_witness_arg] = _render_check_items(non_empty, _records)
             args[_EVIDENCE_RECORDS_KEY] = _records
@@ -2889,7 +2995,10 @@ def _hydrate_operator_args(
             note_reducer_input(value)  # nexus-jypmj.1.8: the explicit-inputs reducer input, after merge and cap
             if target_key == "items":
                 if resolved_tool == "operator_check" and value and all(isinstance(v, str) for v in value):
-                    _records = _check_records_for(value, {}, active_reserved_stream(), active_supplement())
+                    _records = _check_records_for(
+                        value, {}, active_reserved_stream(), active_supplement(),
+                        _with_repaired_owner_rows(None, value, active_supplement(), asked=()),
+                    )
                     args[_EVIDENCE_RECORDS_KEY] = _records
                     value = _render_check_items(value, _records)
                 else:
@@ -2950,7 +3059,10 @@ def _hydrate_operator_args(
     ) and isinstance(args.get("items"), list):
         _listed_items = args["items"]
         if resolved_tool == "operator_check" and _listed_items and all(isinstance(v, str) for v in _listed_items):
-            _records = _check_records_for(_listed_items, {}, active_reserved_stream(), active_supplement())
+            _records = _check_records_for(
+                _listed_items, {}, active_reserved_stream(), active_supplement(),
+                _with_repaired_owner_rows(None, _listed_items, active_supplement(), asked=()),
+            )
             args[_EVIDENCE_RECORDS_KEY] = _records
             args["items"] = _render_check_items(_listed_items, _records)
         else:
@@ -3047,6 +3159,8 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
             "nx_answer_zero_evidence_short_circuit",
             tool=tool, resolved_tool=resolved_tool,
         )
+        if resolved_tool in ("operator_check", "operator_verify"):
+            return _zero_evidence_witness(resolved_tool, _zero_evidence_text)
         return {"text": _zero_evidence_text}
 
     # RDR-196 .p2d (nexus-nyry9.17): DEFAULT-ON per-operator tiering, plus

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-mtheb.4 (T1 is used as designed, Phase C): nexus.agent_dispatches, one row per agent dispatch
+    with the number of T1 puts that dispatch made.
+
+    WHY. On 2026-11-01 about 45 dispatches across 9 sessions wrote nothing to T1 and nothing counted it. The
+    SubagentStop hook now reads each agent's transcript, counts its T1 puts, and records the count here, so the
+    rate of silent dispatches is a number that can be watched move rather than an anecdote.
+
+    WHY A TABLE AND NOT A COLUMN ON tier_writes. tier_writes is an event log of WRITES (nx tier-status counts
+    its rows as writes by tool, tier, agent and project); a dispatch row on it would be counted as a write
+    unless every reader filtered it out. It has no agent_id, and its dedup index (tenant, session, ts, tool,
+    tier) is the wrong identity for a dispatch: the hook can fire twice for one dispatch (the nudge turn runs
+    a second SubagentStop), and the second record must update the first, not add a row. So the identity here
+    is (tenant_id, session_id, agent_id), a UNIQUE constraint the record route's upsert names. One table, one
+    CREATE TABLE, and no extra index: that constraint's index leads with (tenant_id, session_id), which is the
+    only lookup the list route filters on first; a time-window read scans a table that grows by one row per
+    dispatch (tens a day).
+
+    COLUMNS. t1_puts is INTEGER NOT NULL CHECK (t1_puts >= 0): zero is a real, recorded answer ("this
+    dispatch wrote nothing"), and an unknown count is not a row at all, so there is no NULL. agent_type is
+    nullable (the harness gives some dispatches none). ts is the time of the dispatch's last SubagentStop.
+
+    NO RETENTION SWEEP, like tier_writes: the rows are tiny and the table is the metric's history.
+
+    RLS: the tier_writes policy, GUC nexus.tenant, ENABLE + FORCE + tenant_isolation. nexus_svc DML comes from
+    the runAlways grants-nexus-svc.xml loop with no edit there. nexus_diag gets no grant here and has no SELECT
+    on this table, as on tier_writes: the blanket SELECT in grants-nexus-diag.xml (lines 120-123) runs only in
+    the legacy grants era, and grants-nexus-diag-2 revokes it once nexus.diag_chash_conformance exists.
+
+    ADDITIVE ONLY: a new table, no existing row touched, so no DATA EFFECT line. An engine without this
+    changeset answers the two routes with 404, which the client treats as "counter unavailable".
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="telemetry-018-1" author="nexus-mtheb.4">
+        <comment>Create nexus.agent_dispatches (one row per agent dispatch with its T1 put count), unique per (tenant, session, agent); additive, no data effect.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.agent_dispatches (
+    id          BIGSERIAL    NOT NULL,
+    tenant_id   TEXT         NOT NULL,
+    session_id  TEXT         NOT NULL,
+    agent_id    TEXT         NOT NULL,
+    agent_type  TEXT,
+    ts          TIMESTAMPTZ  NOT NULL,
+    t1_puts     INTEGER      NOT NULL,
+    CONSTRAINT agent_dispatches_pk PRIMARY KEY (id),
+    CONSTRAINT agent_dispatches_identity UNIQUE (tenant_id, session_id, agent_id),
+    CONSTRAINT agent_dispatches_t1_puts_nonneg CHECK (t1_puts >= 0)
+);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.agent_dispatches CASCADE</rollback>
+    </changeSet>
+
+    <changeSet id="telemetry-018-2" author="nexus-mtheb.4">
+        <comment>RLS on agent_dispatches (the tier_writes policy: nexus.tenant GUC)</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.agent_dispatches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.agent_dispatches FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.agent_dispatches
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.agent_dispatches;
+            ALTER TABLE nexus.agent_dispatches NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.agent_dispatches DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

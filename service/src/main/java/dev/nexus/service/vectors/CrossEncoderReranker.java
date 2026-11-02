@@ -3,7 +3,6 @@
 package dev.nexus.service.vectors;
 
 import ai.djl.huggingface.tokenizers.Encoding;
-import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
@@ -53,7 +52,7 @@ import java.util.Map;
  * {@link #DEFAULT_MODEL_PATH} (the client is the network-facing side; the
  * local service makes no outbound HTTP — same topology invariant as bge).
  *
- * <p>Thread-safe: {@link OrtSession} and {@link HuggingFaceTokenizer} are
+ * <p>Thread-safe: {@link OrtSession} and {@link GatedTokenizer} are
  * documented thread-safe for inference/encode; init is double-checked-locked.
  */
 public final class CrossEncoderReranker implements Reranker {
@@ -82,7 +81,7 @@ public final class CrossEncoderReranker implements Reranker {
     private volatile boolean initialized;
     private OrtEnvironment       ortEnv;
     private OrtSession           session;
-    private HuggingFaceTokenizer tokenizer;
+    private GatedTokenizer       tokenizer;
     private boolean              wantsTokenTypeIds;
     /** nexus-vk1l1: {@link #fingerprint()} of the artifacts when init last failed, or null. */
     private volatile String      failedFingerprint;
@@ -161,6 +160,11 @@ public final class CrossEncoderReranker implements Reranker {
             return toScored(logits, topK);
         } catch (RerankUpstreamException e) {
             throw e;
+        } catch (OrtInitGate.ShutdownInProgressException e) {
+            // nexus-89lp5: a refused tokenize (the encode loop runs before the gated run) degrades
+            // exactly like a refused or cancelled run in scoreBatch.
+            throw new RerankUpstreamException(
+                    "local cross-encoder unavailable: service is shutting down", e);
         } catch (Exception e) {
             throw new RerankUpstreamException(
                     "local cross-encoder scoring failed: " + e.getMessage(), e);
@@ -195,7 +199,7 @@ public final class CrossEncoderReranker implements Reranker {
                         "local cross-encoder unavailable: service is shutting down", e);
             }
             OrtSession          sess = null;
-            HuggingFaceTokenizer tok = null;
+            GatedTokenizer      tok  = null;
             // nexus-vk1l1: taken before the load, so a file replaced while a load fails is not
             // recorded as the failed one.
             String attempted = fingerprint();
@@ -210,7 +214,7 @@ public final class CrossEncoderReranker implements Reranker {
                 OrtEnvironment env = OrtEnvironment.getEnvironment();
                 sess = env.createSession(modelPath, sessionOpts);
                 // nexus-17jvq: through LocalTokenizers, never the DJL builder directly. Padded per batch in scoreBatch().
-                tok = LocalTokenizers.build(tokenizerPath, MAX_SEQ_LEN);
+                tok = GatedTokenizer.build(tokenizerPath, MAX_SEQ_LEN);
                 this.ortEnv = env;
                 this.session = sess;
                 this.tokenizer = tok;
@@ -350,6 +354,17 @@ public final class CrossEncoderReranker implements Reranker {
         }
         out.sort(Comparator.comparingDouble(Scored::relevanceScore).reversed());
         return (topK != null && out.size() > topK) ? out.subList(0, topK) : out;
+    }
+
+    /**
+     * Test seam (nexus-89lp5): mark the reranker loaded around a tokenizer, with no ONNX session, so a
+     * model-free test can drive {@link #rerank} to its tokenize step. Nothing past tokenize is reachable.
+     */
+    void adoptTokenizerForTest(GatedTokenizer t) {
+        synchronized (initLock) {
+            this.tokenizer = t;
+            this.initialized = true;
+        }
     }
 
     /** Release the native session/tokenizer (tests; production holds process lifetime). */

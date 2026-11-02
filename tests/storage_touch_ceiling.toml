@@ -40,8 +40,38 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5013
+provisioned_tests = 5024
 tolerance_tests = 0
+# 5020 -> 5024 (nexus-mtheb.9 fix round 1, 2026-11-01): +4, tests/mcp/test_t1_handoff_flush.py 20 -> 24 (module marked
+# t2_tenant): a newer session's row replaces an older T2 entry (real T1 ts and T2 timestamp), two rows to one destination
+# keep the newest, a raise in the new scope's bookkeeping after the swap still leaves the flagged row in T2, and the flush
+# store's token heal leaves the new scope's env token alone. The two other files this round adds
+# (tests/test_flush_rows_to_t2.py, tests/mcp/test_open_t1_for_flush.py) are unmarked and provision nothing. Measured on chas
+# (lab-m, the guard in fail mode): those three files plus the handoff module ran 37 tests and provisioned 24, the handoff
+# module's own.
+# 5011 -> 5020 (nexus-mtheb.9, 2026-11-01): +9, tests/mcp/test_t1_handoff_flush.py 11 -> 20 (module marked t2_tenant): the
+# flush reads the session it is given, the handoff flush runs after the swap, a flush keeps a user-edited T2 entry (MCP flush
+# and SessionEnd hook). Each reads real flagged T1 rows and real T2 entries, so each needs the engine. Measured on chas
+# (lab-m, the guard in fail mode): the handoff and teardown flush modules together 28 tests, provisioned 28 (19 at the
+# parent). The CI fan-in sets the number of record.
+# 5000 -> 5011 (nexus-mtheb.1, 2026-11-01): +11, the new tests/mcp/test_t1_handoff_flush.py (module marked
+# t2_tenant): the handoff tick flushes flagged T1 rows to T2 and reads the old scope back, which needs a real
+# engine T1 and T2. Measured by CI 41357939836's fan-in (5011 at e598e4b3d), the only change in the count since 5000.
+# 4998 -> 5000 (nexus-qo7ie, 2026-11-01): +2 in tests/test_rdr_preamble.py (109 -> 111 by scripts/tenant_delta.py),
+# the PASSED-gate cases passed_gate_prior_findings_are_swept_only_where_fixed (test_regate_block_by_prior_gate_state)
+# and passed_round_three_gate_is_a_menu_not_a_split (test_rdr_fix_round_three_splits_ship_blockers_from_residuals);
+# both run under rdr_env, which opens a live T2Database, so they keep the tenant.
+# 5015 -> 4998 (nexus-zlzg0, 2026-11-01): -17. TestPlanMissPlanner (tests/test_nx_answer.py) drops its class
+# t2_tenant (8 tests) for an autouse patch of nexus.mcp.core._get_collection_names, its only storage reach; the seven
+# ids-hydration functions of TestHydrateInputsTranslation (tests/test_plan_run.py, 9 test items) drop theirs for a
+# None catalog, the empty set the runner already falls back to. Both modules on qwent under the guard in fail mode:
+# 402 passed, provisioned 103 -> 86. Assertions unchanged. test_rdr_fix_by_gate_state keeps its tenant (rdr_env
+# opens a live T2Database).
+# 5013 -> 5015 (nexus-z1d0l.1.6, 2026-11-01): tests/test_enrich_aspects.py 45 -> 47. TestValidationAllOutcomes keeps two
+# CLI tests that drive `nx enrich aspects` against the catalog fixture: test_the_cli_run_writes_both_named_files (the
+# --validation-out/--validation-all-out flags reach the run) and test_trace_flag_reaches_the_validation_sample (three
+# flag forms, one test). Its other 18 tests and the file-safety and rule pins call the helpers directly and take no tenant
+# (review of 716b0cc27 showed 19 of the first 21 tenant tests could go tenant-free; they did).
 # 5012 -> 5013 (nexus-8g2tl, nexus-qo7ie, 2026-11-01): +1, the passed_gate_findings_are_a_menu case added to
 # _FIX_STATE_CASES in tests/test_rdr_preamble.py (69f03f999), which runs under the t2_tenant-marked
 # test_rdr_fix_by_gate_state. CI on b55a04e94 counted 5013 with nothing else new (57b43bfb6 counted 5012);

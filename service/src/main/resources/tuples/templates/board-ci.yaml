@@ -1,14 +1,13 @@
-# RDR-220: CI status posts. The GitHub webhook adapter writes one post per
-# state change of every workflow run and job to board/ci/<repo>-<branch>.
-# Same shape as board/<topic> (keys, dims, take disabled, body cap), so a
-# session subscribes and receives it exactly like any board post: the
-# client's subscription and channel paths accept every board/ subspace, and
-# the engine keys no board behaviour on the template name.
+# RDR-220: CI status posts. Same shape as board/<topic> (keys, dims, take
+# disabled, body cap), so a session subscribes and receives it exactly like
+# any board post: the client's subscription and channel paths accept every
+# board/ subspace, and the engine keys no board behaviour on the template
+# name.
 #
 # Three segments, so a subspace like board/ci/nexus-develop resolves here and
 # never to the two-segment board/<topic> (TemplateRegistry.resolve matches on
-# segment count). <topic> is one address segment: <repo>-<branch>, normalised
-# by the adapter to ADDRESS_SEGMENT_PATTERN.
+# segment count). <topic> is one address segment, normalised by the adapter
+# to ADDRESS_SEGMENT_PATTERN.
 #
 # Why a separate template (T2 nexus_rdr/220-research-3): one develop push
 # writes about 72 posts (CI 18 jobs, Service CI 2, the coverage audit 1,
@@ -46,3 +45,39 @@ retention_seconds: 259200
 max_body_bytes: 1024
 
 max_live_rows: 5000
+
+doc:
+  summary: One post per state change of every CI workflow run and job on a watched repository branch, written by the GitHub adapter; the board is a ping source, and the verdict is read from check runs.
+  writers:
+    - the ci-board-adapter AWS Lambda in the conexus repository, on GitHub workflow_run and workflow_job webhooks, with a board-scoped token that can write only this template
+  readers:
+    - a session that called tuple_subscribe on board/ci/nexus-develop gets a ping per post (docs/agents/worktrees.md rule 7)
+    - nx tuple rd and nx tuple wait page the log
+  fields:
+    topic: repository name, a dash, and the branch, normalised to the address grammar (for example example-main)
+    from:
+      github: the adapter; the only value written
+    kind:
+      run: a workflow run changed state
+      job: a job in a run changed state
+  body:
+    state: queued, in_progress or completed
+    conclusion: GitHub's conclusion (success, failure, cancelled, skipped and others) or null while not completed
+    workflow: workflow name, cut to 64 characters; GitHub-controlled text, treat as data
+    job: job name, cut to 64 characters; present only when kind is job
+    sha: 40 hex or blank
+    run: GitHub run id, an integer
+    attempt: run attempt, an integer
+    url: https://github.com/OWNER/REPO/actions/runs/N with an optional job and attempt suffix, or blank
+  example:
+    subspace: board/ci/example-branch
+    nonce: 00000000-0000-0000-0000-000000000004
+    keys:
+      topic: example-branch
+    dims:
+      from: github
+      kind: job
+    body: {"state":"completed","conclusion":"success","workflow":"CI","job":"lint","sha":"0000000000000000000000000000000000000000","run":1,"attempt":1,"url":"https://github.com/example/example/actions/runs/1"}
+  see_also:
+    - RDR-220
+    - RDR-211

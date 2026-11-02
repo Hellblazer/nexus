@@ -97,8 +97,17 @@ _TITLE_LIMIT = 5  # per-namespace: entries up to this rank get title-only
 #: sequential HTTP round-trips).
 _MAX_NAMESPACES = 5
 
+#: Namespaces that machines write, not people: never shown to a session or agent
+#: (nexus-mtheb). ``<project>_taxonomy_discover_health`` holds collection health
+#: stamps rewritten every few minutes, so it was always the most recently updated
+#: namespace and took the first of the five slots in every SessionStart and
+#: SubagentStart injection, ahead of the project's own notes.
+_MACHINE_NAMESPACE_SUFFIXES: tuple[str, ...] = ("_taxonomy_discover_health",)
+
 #: Overall wall-clock budget for the per-namespace fetch loop, distinct
-#: from the per-request timeout below. Override via NX_T2_SCAN_BUDGET_S.
+#: from the per-request timeout below. Override via NX_T2_SCAN_BUDGET_S. A
+#: budget below the 0.5 s call floor (``_HTTP_TIMEOUT_FLOOR``) issues no call
+#: at all (nexus-dr57n), so such a value turns the scan off.
 _DEFAULT_SCAN_BUDGET_S = 8.0
 
 #: A namespace's freshest entry older than this is flagged with a visible
@@ -140,7 +149,28 @@ def _clamped_call_timeout(deadline: float, ceiling: float) -> float:
     how much budget prior calls in the same scan already spent.
     """
     remaining = deadline - time.monotonic()
+    # Both gated call sites check _budget_covers_a_call first, so remaining is
+    # at least the floor here; the max() only guards a future ungated caller.
     return max(_HTTP_TIMEOUT_FLOOR, min(ceiling, remaining))
+
+
+def _budget_covers_a_call(deadline: float) -> bool:
+    """True when a request issued now can get at least ``_HTTP_TIMEOUT_FLOOR``
+    out of the scan budget, i.e. the budget is not already spent.
+
+    The gate before every call is this, not ``monotonic() < deadline``. With
+    the bare comparison a sliver of budget (say 8 ms) passed the gate, and
+    ``_clamped_call_timeout`` then lifted that call's timeout to the 0.5 s
+    floor, so the call outran the budget it was meant to respect. It also
+    made the gate depend on the clock's last few milliseconds: a read
+    timeout that ends a hair before the deadline (the first ``get`` is
+    clamped to the whole budget, so its timeout ends at the deadline) left a
+    sliver, and the scan issued a second ``/v1/memory/get`` that
+    ``test_get_call_timeout_is_clamped_to_the_remaining_scan_budget`` forbids
+    (nexus-dr57n: timeouts 1.4978, then the 0.5 floor).
+    """
+    return deadline - time.monotonic() >= _HTTP_TIMEOUT_FLOOR
+
 
 #: Engine timestamp format: UTC second-precision ISO
 #: (MemoryHandler.recordToMap / MemoryRepository.UTC_SECOND on the Java side).
@@ -232,7 +262,11 @@ def _build_output(
     for a run of empty namespaces. The deadline is also checked BETWEEN
     per-entry snippet fetches (not only between namespaces): once the
     deadline passes mid-namespace, remaining snippet ranks render
-    title-only instead of issuing another network call.
+    title-only instead of issuing another network call. "Passes" means
+    less than ``_HTTP_TIMEOUT_FLOOR`` is left (``_budget_covers_a_call``),
+    not that the clock has crossed the deadline: a read timeout clamped to
+    the whole budget ends at the deadline give or take a few milliseconds
+    (nexus-dr57n), and a sliver of budget must not buy another call.
 
     **Every HTTP call's own timeout is clamped to what's left of the
     scan budget, AND opts out of the mixin's default retry-on-
@@ -264,7 +298,7 @@ def _build_output(
     for idx, ns_row in enumerate(capped_namespaces):
         if total >= _HARD_CAP:
             break
-        if time.monotonic() >= deadline:
+        if not _budget_covers_a_call(deadline):
             remaining = len(capped_namespaces) - idx
             lines.append(
                 f"  … (scan budget exceeded — {remaining} namespace(s) not checked)"
@@ -302,7 +336,7 @@ def _build_output(
             ns_rank += 1
             title = s.get("title", "") or ""
             if ns_rank <= _SNIPPET_LIMIT:
-                if time.monotonic() < deadline:
+                if _budget_covers_a_call(deadline):
                     snip = _snippet_for(
                         store, ns, title,
                         timeout=_clamped_call_timeout(deadline, request_timeout_s),
@@ -437,6 +471,16 @@ def scan(project: str) -> str:
             )
             return f"WARNING: T2 memory unreachable: {exc}"
 
+        # Freshness comes from the UNFILTERED list. The warning asks whether the
+        # T2 substrate is live, and a machine-written stamp newer than the stale
+        # window answers yes; reading the first HUMAN namespace after the filter
+        # would warn on every injection for a quiet project. The filter is for
+        # display only.
+        freshest = namespaces[0].get("last_updated", "") if namespaces else ""
+        namespaces = [
+            ns for ns in namespaces
+            if not str(ns.get("project", "")).endswith(_MACHINE_NAMESPACE_SUFFIXES)
+        ]
         if not namespaces:
             # Reachable, zero matching namespaces: a genuinely empty T2.
             return ""
@@ -445,9 +489,7 @@ def scan(project: str) -> str:
             store, project, namespaces, scan_budget_s, request_timeout_s=timeout
         )
 
-        freshness_warning = _check_freshness(
-            namespaces[0].get("last_updated", ""), stale_days
-        )
+        freshness_warning = _check_freshness(freshest, stale_days)
         if freshness_warning:
             lines.append(freshness_warning)
             lines.append("")

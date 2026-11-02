@@ -4243,6 +4243,9 @@ def _check_static_service_token() -> list[HealthResult]:
 # on any drift.  When adding a new changelog baseline, run that test to catch
 # any newly RLS-protected table that needs to be added here.
 _RLS_TENANT_TABLES: tuple[str, ...] = (
+    # nexus.agent_dispatches: nexus-mtheb.4 (telemetry-018-agent-dispatches.xml),
+    # one row per agent dispatch with its T1 put count; tier_writes RLS shape.
+    "nexus.agent_dispatches",
     "nexus.aspect_extraction_queue",
     "nexus.aspect_promotion_log",
     # nexus.capability_census: nexus-gjv9b PART 1 (telemetry-010-capability-

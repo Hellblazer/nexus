@@ -49,6 +49,9 @@ class TelemetrySchemaLiquibaseTest {
         "top_distance", "threshold");
     private static final Set<String> TIER_WRITES_COLS = Set.of(
         "id", "tenant_id", "session_id", "ts", "tool", "tier", "agent", "project", "target_title");
+    // telemetry-018-1 (nexus-mtheb.4): one row per agent dispatch with its T1 put count.
+    private static final Set<String> AGENT_DISPATCHES_COLS = Set.of(
+        "id", "tenant_id", "session_id", "agent_id", "agent_type", "ts", "t1_puts");
     private static final Set<String> NX_ANSWER_RUNS_COLS = Set.of(
         "id", "tenant_id", "question", "plan_id", "matched_confidence", "step_count",
         "final_text", "cost_usd", "duration_ms", "created_at",
@@ -72,7 +75,7 @@ class TelemetrySchemaLiquibaseTest {
     // Tables that should NOT have a tsvector column (telemetry is never FTS-searched)
     private static final List<String> ALL_TEL_TABLES = List.of(
         "relevance_log", "search_telemetry", "tier_writes",
-        "nx_answer_runs", "hook_failures", "frecency", "nx_answer_steps");
+        "nx_answer_runs", "hook_failures", "frecency", "nx_answer_steps", "agent_dispatches");
 
     PostgreSQLContainer<?> pg;
 
@@ -106,6 +109,32 @@ class TelemetrySchemaLiquibaseTest {
     @Test
     void tierWrites_hasExactColumnSet() throws Exception {
         assertColumns("tier_writes", TIER_WRITES_COLS);
+    }
+
+    @Test
+    void agentDispatches_hasExactColumnSet() throws Exception {
+        assertColumns("agent_dispatches", AGENT_DISPATCHES_COLS);
+    }
+
+    @Test
+    void agentDispatches_oneRowPerSessionAndAgentIdAndNeverNegative() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var t = dev.nexus.service.jooq.nexus.Tables.AGENT_DISPATCHES;
+            java.util.function.BiFunction<String, Integer, Integer> insert = (agent, puts) ->
+                ctx.insertInto(t)
+                    .set(t.TENANT_ID, "t").set(t.SESSION_ID, "s").set(t.AGENT_ID, agent)
+                    .set(t.TS, OffsetDateTime.now()).set(t.T1_PUTS, puts)
+                    .execute();
+            assertThat(insert.apply("a", 0)).isEqualTo(1);
+            org.junit.jupiter.api.Assertions.assertThrows(org.jooq.exception.DataAccessException.class,
+                () -> insert.apply("a", 1),
+                "a second row for the same (tenant, session, agent) must violate the unique constraint");
+            org.junit.jupiter.api.Assertions.assertThrows(org.jooq.exception.DataAccessException.class,
+                () -> insert.apply("b", -1),
+                "a negative put count must violate the CHECK");
+            ctx.deleteFrom(t).where(t.TENANT_ID.eq("t")).execute();
+        }
     }
 
     @Test

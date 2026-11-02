@@ -743,6 +743,25 @@ if [ -f "$BGE_MODEL" ]; then
   else
     echo "  FAIL no in-flight embed answered 503 (codes: $codes); OrtException from native code may not have reached the gate"; fail=1
   fi
+  # nexus-89lp5: the tokenizer is freed on the exit path too. An encode that runs after the gate
+  # drained (tokenizing is not a session.run, so it was outside the gate) meets a freed native
+  # handle: DJL's "Native resource has been released already" on a good run, a Rust panic and exit
+  # 134 on a bad one. The exit status and the 503s above can both pass while this is in the log,
+  # so the log is checked directly.
+  # This is a TRIPWIRE, not a gate: on the unfixed binary one run of this leg shows the string only
+  # about 40% of the time on amd64 (12 of 30) and 23% on arm64 (7 of 30), so a green run here does
+  # not prove the race is closed. The deterministic proof is GatedTokenizerTest. The probe's pattern
+  # itself is pinned by tests/test_native_smoke_tokenizer_probe.py (fires on the real error strings,
+  # passes a clean log, fails on an unreadable one).
+  tokrc=0
+  tokhits=$(bash "$REPO_ROOT/service/smoke-probes/tokenizer_freed_in_log.sh" "$SMOKE_TMP/svc.log") || tokrc=$?
+  if [ "$tokrc" = "0" ]; then
+    echo "  ok   no encode ran against a freed tokenizer"
+  else
+    echo "  FAIL the tokenizer was freed under an in-flight encode, or the log could not be checked (probe exit $tokrc; nexus-89lp5):"
+    head -3 <<<"$tokhits"
+    fail=1
+  fi
   SVCPID=""
 else
   echo "  WARN SIGTERM-under-inference leg NOT covered — bge model absent at $BGE_MODEL"

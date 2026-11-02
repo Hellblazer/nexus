@@ -19,7 +19,9 @@ Full cross-language end-to-end is in tests/db/test_http_telemetry_store_integrat
 """
 from __future__ import annotations
 
+import inspect
 import threading
+import time
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -57,6 +59,8 @@ _hook_failures: list[dict[str, Any]] = []
 _frecency: dict[str, dict[str, Any]] = {}  # keyed by chunk_id
 _capability_census: dict[str, dict[str, Any]] = {}  # keyed by session_id (upsert)
 _routing_events: list[dict[str, Any]] = []
+#: nexus-mtheb.4: agent_dispatches, keyed (session_id, agent_id) like the engine's unique constraint.
+_agent_dispatches: dict[tuple[str, str], dict[str, Any]] = {}
 _STORE_LOCK = threading.Lock()
 _ID_SEQ: dict[str, int] = defaultdict(int)
 #: Counts every request that reaches this fake server, regardless of path —
@@ -88,6 +92,7 @@ def _clear_all() -> None:
         _frecency.clear()
         _capability_census.clear()
         _routing_events.clear()
+        _agent_dispatches.clear()
         _ID_SEQ.clear()
         IMPORT_LOG.clear()
         _VERSION_RESPONSE.clear()
@@ -247,6 +252,29 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 "search_telemetry": st_count,
                 "hook_failures":    hf_count,
             })
+
+        elif pp == "/v1/telemetry/agent_dispatches/record":
+            # Mirrors TelemetryRepository.recordAgentDispatch: upsert per (session, agent); the count
+            # and ts each keep the larger value. t1_puts is a required whole number >= 0.
+            puts = body.get("t1_puts")
+            if (not body.get("session_id") or not body.get("agent_id")
+                    or isinstance(puts, bool) or not isinstance(puts, int) or puts < 0):
+                self._send(400, {"error": "bad agent_dispatches body"})
+                return
+            key = (body["session_id"], body["agent_id"])
+            ts = body.get("ts") or datetime.now(UTC).isoformat()
+            with _STORE_LOCK:
+                prev = _agent_dispatches.get(key)
+                if prev is None:
+                    _agent_dispatches[key] = {
+                        "session_id": key[0], "agent_id": key[1],
+                        "agent_type": body.get("agent_type"), "ts": ts, "t1_puts": puts,
+                    }
+                else:
+                    prev["t1_puts"] = max(prev["t1_puts"], puts)
+                    prev["ts"] = max(prev["ts"], ts)
+                    prev["agent_type"] = body.get("agent_type") or prev["agent_type"]
+            self._send(200, {"ok": True})
 
         elif pp == "/v1/telemetry/tier_writes/record":
             with _STORE_LOCK:
@@ -529,6 +557,31 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 )
             ]
             self._send(200, out)
+            return
+
+        elif pp == "/v1/telemetry/agent_dispatches/list":
+            session_id = qs.get("session_id", "")
+            since      = qs.get("since", "")
+            agent_type = qs.get("agent_type", "")
+            limit      = int(qs.get("limit", "100"))
+            with _STORE_LOCK:
+                rows = [dict(r) for r in _agent_dispatches.values()]
+            if session_id:
+                rows = [r for r in rows if r["session_id"] == session_id]
+            if agent_type:
+                rows = [r for r in rows if r["agent_type"] == agent_type]
+            if since:
+                rows = [r for r in rows if r["ts"] >= since]
+            rows.sort(key=lambda r: r["ts"], reverse=True)
+            self._send(200, {
+                "rows": rows[:limit],
+                "total": len(rows),
+                "summary": {
+                    "dispatches": len(rows),
+                    "no_t1_put": sum(1 for r in rows if r["t1_puts"] == 0),
+                    "t1_puts": sum(r["t1_puts"] for r in rows),
+                },
+            })
             return
 
         elif pp == "/v1/telemetry/tier_writes/list":
@@ -994,6 +1047,231 @@ class TestQueryTierWrites:
         )
         with _pytest.raises(httpx.HTTPStatusError):
             client.query_tier_writes_once(session_id="once-1", timeout=2.0)
+
+
+class TestAgentDispatches:
+    """nexus-mtheb.4: the per-dispatch T1 put counter, ``/v1/telemetry/agent_dispatches/*``.
+
+    The SubagentStop hook records one row per dispatch (payload: session_id, agent_id, agent_type,
+    t1_puts, ts); ``list_agent_dispatches`` reads the rows and a summary of the dispatches that
+    wrote nothing. The engine half is pinned by TelemetryHandlerAgentDispatchesTest.java.
+    """
+
+    def test_record_sends_the_agreed_payload_and_list_reads_it_back(self, client):
+        client.record_agent_dispatch(
+            session_id="s1", agent_id="a1", agent_type="developer",
+            t1_puts=3, ts="2026-11-01T12:00:00Z",
+        )
+        result = client.list_agent_dispatches(session_id="s1")
+        assert result["rows"] == [{
+            "session_id": "s1", "agent_id": "a1", "agent_type": "developer",
+            "ts": "2026-11-01T12:00:00Z", "t1_puts": 3,
+        }]
+        assert result["total"] == 1
+
+    def test_a_zero_put_dispatch_is_recorded_and_counted_in_the_summary(self, client):
+        client.record_agent_dispatch(session_id="s1", agent_id="quiet", agent_type="code-review-expert", t1_puts=0)
+        client.record_agent_dispatch(session_id="s1", agent_id="loud", agent_type="developer", t1_puts=2)
+        summary = client.list_agent_dispatches(session_id="s1")["summary"]
+        assert summary == {"dispatches": 2, "no_t1_put": 1, "t1_puts": 2}
+
+    def test_a_second_stop_for_one_dispatch_updates_its_row(self, client):
+        client.record_agent_dispatch(session_id="s1", agent_id="a1", agent_type="developer", t1_puts=0)
+        client.record_agent_dispatch(session_id="s1", agent_id="a1", agent_type="developer", t1_puts=2)
+        result = client.list_agent_dispatches(session_id="s1")
+        assert result["total"] == 1
+        assert result["rows"][0]["t1_puts"] == 2
+
+    def test_filters_and_limit_reach_the_wire(self, client):
+        client.record_agent_dispatch(session_id="s1", agent_id="a", agent_type="developer", t1_puts=1,
+                                     ts="2026-01-01T00:00:00Z")
+        client.record_agent_dispatch(session_id="s1", agent_id="b", agent_type="substantive-critic", t1_puts=1,
+                                     ts="2026-11-01T00:00:00Z")
+        client.record_agent_dispatch(session_id="s1", agent_id="c", agent_type="developer", t1_puts=1,
+                                     ts="2026-11-02T00:00:00Z")
+        by_type = client.list_agent_dispatches(session_id="s1", agent_type="substantive-critic")
+        assert [r["agent_id"] for r in by_type["rows"]] == ["b"]
+        recent = client.list_agent_dispatches(since="2026-06-01")
+        assert [r["agent_id"] for r in recent["rows"]] == ["c", "b"]
+        page = client.list_agent_dispatches(session_id="s1", limit=1)
+        assert len(page["rows"]) == 1 and page["total"] == 3
+
+    def test_a_negative_count_is_refused_by_the_engine_not_swallowed(self, client):
+        with pytest.raises(httpx.HTTPStatusError):
+            client.record_agent_dispatch(session_id="s1", agent_id="a1", t1_puts=-1)
+
+    def test_an_absent_agent_type_and_ts_are_omitted_from_the_payload(self, client, monkeypatch):
+        sent: list[dict[str, Any]] = []
+        real_post = type(client)._post
+
+        def spy(self, path, payload, *a, **kw):
+            sent.append(payload)
+            return real_post(self, path, payload, *a, **kw)
+
+        monkeypatch.setattr(type(client), "_post", spy)
+        client.record_agent_dispatch(session_id="s1", agent_id="a1", t1_puts=1)
+        assert sent == [{"session_id": "s1", "agent_id": "a1", "t1_puts": 1}]
+
+
+#: nexus-mtheb.4 fix r1: requests an engine-without-the-routes stub answered, and the
+#: per-request delay the slow stub sleeps. Module state like the fakes above; cleared per test.
+_STUB_HITS: list[str] = []
+_SLOW_DELAY_S = 2.0
+
+
+class _OldEngineHandler(_FakeTelemetryHandler):
+    """An engine that predates telemetry-018: the agent_dispatches routes answer 404."""
+
+    def _gone(self) -> bool:
+        pp = urlparse(self.path).path
+        if not pp.startswith("/v1/telemetry/agent_dispatches/"):
+            return False
+        _STUB_HITS.append(pp)
+        if self._check_auth():
+            self._send(404, {"error": "not found"})
+        return True
+
+    def do_POST(self):
+        if not self._gone():
+            super().do_POST()
+
+    def do_GET(self):
+        if not self._gone():
+            super().do_GET()
+
+
+class _SickGatewayHandler(_FakeTelemetryHandler):
+    """The gateway answers 503 to every agent_dispatches record, and counts the attempts."""
+
+    def do_POST(self):
+        pp = urlparse(self.path).path
+        if pp != "/v1/telemetry/agent_dispatches/record":
+            super().do_POST()
+            return
+        _STUB_HITS.append(pp)
+        if self._check_auth():
+            self._send(503, {"error": "unavailable"})
+
+
+class _SlowEngineHandler(_FakeTelemetryHandler):
+    """The record route accepts the request and then sits on it past any short timeout."""
+
+    def do_POST(self):
+        pp = urlparse(self.path).path
+        if pp != "/v1/telemetry/agent_dispatches/record":
+            super().do_POST()
+            return
+        _STUB_HITS.append(pp)
+        self._body()
+        threading.Event().wait(_SLOW_DELAY_S)
+        try:
+            self._send(200, {"ok": True})
+        except OSError:
+            pass  # the client already gave up; nothing is listening
+
+
+class TestAgentDispatchesAgainstAnOldEngine:
+    """nexus-mtheb.4 fix r1: an engine without telemetry-018 answers 404 on both routes. The
+    claim "a best-effort caller can catch it" holds only if the client raises it as
+    ``httpx.HTTPStatusError`` with status 404 rather than swallowing it or retrying it."""
+
+    def test_record_surfaces_a_404_as_http_status_error(self):
+        _STUB_HITS.clear()
+        with fake_http_server(_OldEngineHandler) as url:
+            c = HttpTelemetryStore(base_url=url, _token=TOKEN)
+            try:
+                with pytest.raises(httpx.HTTPStatusError) as exc:
+                    c.record_agent_dispatch(session_id="s1", agent_id="a1", t1_puts=1)
+            finally:
+                c.close()
+        assert exc.value.response.status_code == 404
+        assert _STUB_HITS == ["/v1/telemetry/agent_dispatches/record"]  # 404 is not retried
+
+    def test_list_surfaces_a_404_as_http_status_error(self):
+        _STUB_HITS.clear()
+        with fake_http_server(_OldEngineHandler) as url:
+            c = HttpTelemetryStore(base_url=url, _token=TOKEN)
+            try:
+                with pytest.raises(httpx.HTTPStatusError) as exc:
+                    c.list_agent_dispatches(session_id="s1")
+            finally:
+                c.close()
+        assert exc.value.response.status_code == 404
+        assert _STUB_HITS == ["/v1/telemetry/agent_dispatches/list"]
+
+    def test_record_once_surfaces_a_404_as_http_status_error(self):
+        _STUB_HITS.clear()
+        with fake_http_server(_OldEngineHandler) as url:
+            c = HttpTelemetryStore(base_url=url, _token=TOKEN)
+            try:
+                with pytest.raises(httpx.HTTPStatusError) as exc:
+                    c.record_agent_dispatch_once(session_id="s1", agent_id="a1", t1_puts=1)
+            finally:
+                c.close()
+        assert exc.value.response.status_code == 404
+
+
+class TestRecordAgentDispatchOnce:
+    """nexus-mtheb.4 fix r1: the SubagentStop hook's record is ONE bounded attempt. The mixin
+    ladder (gateway backoff, re-resolve lease-wait) is a 20-50 s worst case at subagent stop;
+    charter and rationale: ``query_tier_writes_once`` and tests/db/test_http_store_selfheal.py."""
+
+    def test_it_sends_the_same_payload_as_record_and_never_enters_the_retry_path(
+        self, client, monkeypatch,
+    ):
+        def _no_send(*_a, **_kw):
+            raise AssertionError("record_agent_dispatch_once must bypass _send")
+
+        monkeypatch.setattr(type(client), "_send", _no_send)
+        client.record_agent_dispatch_once(
+            session_id="s1", agent_id="a1", agent_type="developer", t1_puts=2,
+            ts="2026-11-01T12:00:00Z",
+        )
+        monkeypatch.undo()
+        assert client.list_agent_dispatches(session_id="s1")["rows"] == [{
+            "session_id": "s1", "agent_id": "a1", "agent_type": "developer",
+            "ts": "2026-11-01T12:00:00Z", "t1_puts": 2,
+        }]
+
+    def test_an_absent_agent_type_and_ts_are_omitted_from_the_payload(self, client):
+        client.record_agent_dispatch_once(session_id="s1", agent_id="a1", t1_puts=0)
+        row = client.list_agent_dispatches(session_id="s1")["rows"][0]
+        assert row["agent_type"] is None and row["t1_puts"] == 0
+
+    def test_a_503_is_one_request_not_the_gateway_retry_ladder(self):
+        _STUB_HITS.clear()
+        with fake_http_server(_SickGatewayHandler) as url:
+            c = HttpTelemetryStore(base_url=url, _token=TOKEN)
+            try:
+                started = time.monotonic()
+                with pytest.raises(httpx.HTTPStatusError) as exc:
+                    c.record_agent_dispatch_once(session_id="s1", agent_id="a1", t1_puts=1)
+                elapsed = time.monotonic() - started
+            finally:
+                c.close()
+        assert exc.value.response.status_code == 503
+        assert _STUB_HITS == ["/v1/telemetry/agent_dispatches/record"]
+        assert elapsed < 2.0, f"a single attempt, took {elapsed:.1f}s"
+
+    def test_a_slow_engine_is_cut_off_at_the_timeout(self):
+        _STUB_HITS.clear()
+        with fake_http_server(_SlowEngineHandler) as url:
+            c = HttpTelemetryStore(base_url=url, _token=TOKEN)
+            try:
+                started = time.monotonic()
+                with pytest.raises(httpx.TimeoutException):
+                    c.record_agent_dispatch_once(
+                        session_id="s1", agent_id="a1", t1_puts=1, timeout=0.3,
+                    )
+                elapsed = time.monotonic() - started
+            finally:
+                c.close()
+        assert elapsed < _SLOW_DELAY_S, f"cut off at the timeout, took {elapsed:.1f}s"
+        assert _STUB_HITS == ["/v1/telemetry/agent_dispatches/record"]
+
+    def test_the_default_timeout_is_short(self):
+        default = inspect.signature(HttpTelemetryStore.record_agent_dispatch_once).parameters["timeout"].default
+        assert 0 < default <= 5.0
 
 
 class TestListTierWrites:
