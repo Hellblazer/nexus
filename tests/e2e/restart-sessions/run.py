@@ -1,67 +1,86 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Sandbox gate for scripts/claude-restart-sessions --fresh (nexus-nuyju, nexus-cmqe8).
+"""Sandbox gate for scripts/claude-restart-sessions --nx --fresh (nexus-nuyju, nexus-cmqe8, nexus-8m0ho).
 
-Drives real Claude Code sessions through the coordinated-restart continuation roll and
+Drives real Claude Code sessions through the coordinated restart's continuation roll and
 checks every outcome, with nothing written to the operator's ~/.claude:
 
-- a scratch HOME (``.claude.json`` with onboarding done and the work folder trusted),
-  with the conexus plugin enabled from the operator's installed plugin cache (read only)
-  and a scratch nexus config dir holding a copy of the operator's ``config.yml``, so the
-  sessions' MCP servers and ``nx`` reach the operator's own service. The copy and the
-  data-token leases minted from it are deleted on every exit the harness sees (pass, fail,
-  SIGTERM, SIGHUP; not SIGKILL, and not under ``--keep``). The sessions write to that
-  service as the operator would: the restart mail expires with its TTL, and nothing here
-  asks a session to write anything permanent, but the harness does not police it;
+- a scratch HOME (``.claude.json`` with onboarding done and the work folder trusted) and a
+  scratch nexus config dir holding a copy of the operator's ``config.yml``, so the sessions'
+  MCP servers and ``nx`` reach the operator's own service. The copy and the data-token
+  leases minted from it are deleted on every exit the harness sees (pass, fail, SIGTERM,
+  SIGHUP; not SIGKILL, and not under ``--keep``), and the sessions' leftover tool processes
+  are ended by checked pid. The sessions write to that service as the operator would: the
+  restart mail expires with its TTL, and nothing here asks a session to write anything
+  permanent, but the harness does not police it;
+- the conexus and sn plugins from a local-directory marketplace named nexus-plugins
+  (copies of the operator's installed plugins, read only), installed with the claude CLI.
+  A directory marketplace's plugin runs from its source folder, not the versioned cache
+  (Claude Code 2.1.316), so each version is published as its own folder
+  ``<plugin>-<version>``; the folder a session's MCP servers run from names the version it
+  loaded;
 - a private tmux server (``-L``, ``-f /dev/null``, a bare bash in every pane);
 - six sessions in a scratch git repo. Three restart, each told a code word:
   ``rs_alpha`` (launched with the conexus channel, left at its prompt with whatever
   suggested prompt Claude Code draws in dim text), ``rs_draft`` (the channel, with a
   real unsent draft typed into its prompt) and ``rs_nochan`` (no channel, left at its
-  prompt). Three must be left running (nexus-8m0ho): ``rs_busy`` (mid-turn in a
-  foreground sleep past both of the script's waits), ``rs_shell`` (at its prompt with a
-  background shell open, status ``shell``) and ``rs_paste`` (a bracketed paste in its
-  prompt, shown as a ``[Pasted text #N]`` placeholder, which is a draft and not dim text);
-- the conexus and sn plugins come from a local-directory marketplace named
-  nexus-plugins, copied from the operator's installed cache (read only) and installed
-  with the claude CLI;
-- the script under test runs from a fourth pane as ``--nx X --fresh --skip-engine-gate
-  --fallback-resume --no-update`` with ``TMUX_PANE`` set to rs_alpha's pane, so rs_alpha is
-  the caller and must go last. X is the installed version's next patch; ``--repo`` names a
-  scratch release repo whose tag vX holds the engine floor and whose reinstall-tool.sh is
-  a stand-in that publishes X to the sandbox marketplace and makes the nx on PATH report X
-  (everything else goes to the real nx). The release install is the one step not real.
+  prompt). Three must be left running: ``rs_busy`` (mid-turn in a foreground command
+  that waits on a hold file the harness removes after the roll), ``rs_shell`` (at its
+  prompt with a background shell open, status ``shell``) and ``rs_paste`` (a bracketed
+  paste in its prompt, shown as a ``[Pasted text #N]`` placeholder, which is a draft and
+  not dim text);
+- the script under test runs from the control pane as ``--nx X --fresh --skip-engine-gate
+  --fallback-resume --no-update --wait 120`` with ``TMUX_PANE`` set to rs_alpha's pane,
+  so rs_alpha is the caller and must go last. X is the installed version's next patch
+  that is not a tag in this checkout. Stand-ins replace what --nx touches outside the
+  sandbox: ``--repo`` is a scratch release repo whose tag vX holds this checkout's engine
+  floor, and whose reinstall-tool.sh records its arguments and publishes X to the sandbox
+  marketplace; an ``nx`` on PATH reports X once that ran (anything else goes to the real
+  nx); a ``uv`` on PATH records every ``cache`` command and refuses ``tool install``,
+  ``upgrade`` and ``uninstall`` (anything else goes to the real uv, whose cache is the
+  operator's). The marketplace and plugin updates are the real claude CLI's.
 
 Expected: alpha, draft and paste are asked by mail and nochan by typing; all four write a
-handoff; the install runs after the last handoff and before the first exit, and moves
-both plugins to X; alpha, draft and nochan restart with a new session id whose own argv
-carries ``-- cat <handoff>`` and whose MCP servers run conexus X (they ran the old
-version before); busy and shell are skipped at the handoff and again at the restart,
-paste is skipped at its restart for its placeholder, and all three are the same process
-on the same session afterwards; alpha's exit comes after every other session's outcome;
-neither mailed session's old transcript holds a typed ask or the draft as a prompt; the
-draft is still in rs_draft's prompt from its complete handoff until its exit, is saved at
-the restart, and is read by the fresh rs_draft with its handoff; all three then answer
-their own code word and no other. The draft cannot outlive the exit in the input box
-itself: exiting Claude Code clears it, so "survives" means saved and handed on.
+handoff; the install (uv cache clean, reinstall-tool.sh with ``conexus==X
+--allow-registry-over-dev``, nx at X, both plugins updated to X) runs after the last
+handoff and before the first exit; alpha, draft and nochan restart with a new session id
+whose own argv carries ``-- cat <handoff>`` and whose MCP servers run the published X
+folder (all three ran the old version's before); busy and shell are skipped at the
+handoff and again at the restart, paste is skipped at its restart for its placeholder,
+and all three are the same process on the same session afterwards (busy still busy when
+the roll ends); alpha's exit comes after every other session's outcome; no mailed
+session's old transcript holds a typed ask or the draft as a prompt; the draft is still
+in rs_draft's prompt from its complete handoff until its exit, is saved at the restart,
+and is read by the fresh rs_draft with its handoff; all three then answer their own code
+word and no other. The draft cannot outlive the exit in the input box itself: exiting
+Claude Code clears it, so "survives" means saved and handed on.
+
+What the plugin check proves: a fresh process loaded the release published before it
+restarted. It does not show a session loading the versioned cache ``plugin update`` fills,
+as on the operator's box (that needs a git-sourced marketplace; Claude Code refuses a local
+git URL). That the update ran is read from installed_plugins.json, which the real ``claude
+plugin update`` writes. Not exercised: the engine gate, a failing install's ABORT, a roll
+without --fallback-resume, an image placeholder, a busy session that goes idle within the
+wait.
 
 Continuity is proved from the handoff, not merely observed. Auto memory is off
 (``CLAUDE_CODE_DISABLE_AUTO_MEMORY``, ``autoMemoryEnabled: false``) and the word is given
 as task context, not "remember"; each fresh session's word must be in its handoff file,
 must first appear in its transcript inside a tool result (the read of the handoff), and
-no memory file in the scratch HOME may hold any word. A negative control, a fourth fresh
+no memory file in the scratch HOME may hold any word. A negative control, one more fresh
 session in the same folder with no handoff, must not know any word.
 
-Positive control: ``NX_RESTART_SANDBOX_SCRIPT=<copy>`` runs another copy of the script;
+Positive controls: ``NX_RESTART_SANDBOX_SCRIPT=<copy>`` runs another copy of the script;
 the pane checks always use this checkout's reader. The pre-cmqe8 copy (develop before
-nexus-cmqe8) fails here. The discriminating checks are rs_draft's (skipped for its
-draft and resumed instead of a fresh start) and the argv check (it typed ``cat`` into the
-fresh sessions); its missing "by mail" log lines would fail any older copy and prove
-nothing on their own.
+nexus-cmqe8) fails on rs_draft (skipped for its draft and resumed instead of a fresh
+start) and the argv check (it typed ``cat`` into the fresh sessions). A copy that restarts
+the caller first, installs before the handoffs and counts ``shell`` as ready fails the
+caller-last, install-window and rs_shell checks (nexus-8m0ho).
 
 Run through run.sh (it supplies the automation token, RDR-219). Prints one verdict
-line, ``RESTART SANDBOX PASSED`` or ``RESTART SANDBOX FAILED``, and exits 0 or 1;
-exit 2 when a precondition is missing. On failure the scratch HOME is kept and named.
+line, ``RESTART SANDBOX PASSED`` or ``RESTART SANDBOX FAILED``, and exits 0 or 1 (a
+precondition that fails once the sandbox is up is a failure, exit 1); exit 2 when the
+token, claude or tmux is missing. On failure the scratch HOME is kept and named.
 """
 # ruff: noqa: T201 -- a gate harness: stdout carries its progress and verdict line
 from __future__ import annotations
@@ -103,8 +122,6 @@ DRAFT_TEXT = "this is an unsent draft the restart must not clobber"
 PASTE_TEXT = "\n".join(f"pasted line {i} the restart cannot save from the pane" for i in range(1, 21))
 #: --wait for the roll: how long rs_busy and rs_shell are waited for at each phase.
 WAIT = 120
-#: rs_busy's foreground sleep: past both of its waits (handoff and restart) and the install.
-BUSY_SLEEP = 560
 OPERATOR_HOME = Path.home()
 SANDBOX_PY = Path(__file__).resolve()
 
@@ -179,6 +196,9 @@ class Sandbox:
         self.real_nx = shutil.which("nx") or ""
         self.real_uv = shutil.which("uv") or ""
         self.uv_cleans = home / "uv-cache-clean.log"
+        self.uv_refused = home / "uv-refused.log"
+        self.reinstall_argv = home / "reinstall-argv.txt"
+        self.busy_hold = home / "busy.hold"
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}"
         self.from_version = self.to_version = ""
 
@@ -235,7 +255,11 @@ class Sandbox:
             raise RuntimeError(f"the operator's conexus and sn differ in version ({sorted(versions)})")
         self.from_version = versions.pop()
         major, minor, patch = (int(x) for x in self.from_version.split(".")[:3])
-        self.to_version = f"{major}.{minor}.{patch + 1}"
+        patch += 1
+        while subprocess.run(["git", "-C", str(REPO), "rev-parse", "-q", "--verify", f"refs/tags/v{major}.{minor}.{patch}"],
+                             capture_output=True).returncode == 0:
+            patch += 1  # a real tag: a script that ignored --repo would install a real release from it
+        self.to_version = f"{major}.{minor}.{patch}"
         bump_market(self.market, self.from_version)
         self.claude_cli("plugin", "marketplace", "add", str(self.market))
         for p in MARKET_PLUGINS:
@@ -253,6 +277,7 @@ class Sandbox:
         stub.write_text(
             "#!/bin/sh\n# restart sandbox stand-in: record the install, publish the version to the sandbox marketplace\n"
             'v="${1#conexus==}"\n'
+            f'printf "%s\\n" "$@" > {shlex.quote(str(self.reinstall_argv))}\n'
             f'printf "%s\\n" "$v" > {shlex.quote(str(self.installed_marker))}\n'
             f'exec {shlex.quote(sys.executable)} -I {shlex.quote(str(SANDBOX_PY))} --bump-market '
             f'{shlex.quote(str(self.market))} "$v"\n', encoding="utf-8")
@@ -278,8 +303,10 @@ class Sandbox:
             raise RuntimeError("uv is not on PATH")
         uv = self.bin / "uv"
         uv.write_text(
-            "#!/bin/sh\n# restart sandbox: uv cache clean is recorded, never run on the operator's cache\n"
-            f'if [ "$1" = "cache" ] && [ "$2" = "clean" ]; then echo "$*" >> {shlex.quote(str(self.uv_cleans))}; exit 0; fi\n'
+            "#!/bin/sh\n# restart sandbox: uv's cache and tool installs are the operator's; record, never run\n"
+            f'case " $* " in *" cache "*) echo "$*" >> {shlex.quote(str(self.uv_cleans))}; exit 0 ;; esac\n'
+            'case "$1 $2" in "tool install"|"tool upgrade"|"tool uninstall")\n'
+            f'  echo "$*" >> {shlex.quote(str(self.uv_refused))}; exit 97 ;; esac\n'
             f"exec {shlex.quote(self.real_uv)} \"$@\"\n", encoding="utf-8")
         uv.chmod(0o755)
 
@@ -303,20 +330,26 @@ class Sandbox:
         return [r.split(None, 1)[1] for r in rows.splitlines()
                 if len(r.split(None, 1)) == 2 and r.split(None, 1)[0] == str(pid)]
 
-    def _plugin_roots(self, pid: int) -> set[str]:
+    @staticmethod
+    def descendants(pid: int) -> list[tuple[int, str]]:
+        """Every process below *pid*, as (pid, argv)."""
         rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True).stdout
         kids: dict[int, list[tuple[int, str]]] = {}
         for row in rows.splitlines():
             parts = row.split(None, 2)
             if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
                 kids.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2]))
-        found, todo = set(), [pid]
-        pat = re.compile(rf"{re.escape(str(self.market))}/conexus-([^/\s]+)(?:/|\s|$)")
+        out, todo = [], [pid]
         while todo:
-            for child, args in kids.get(todo.pop(), []):
-                found |= set(pat.findall(args))
-                todo.append(child)
-        return found
+            for child in kids.get(todo.pop(), []):
+                out.append(child)
+                todo.append(child[0])
+        return out
+
+    def _plugin_roots(self, pid: int) -> set[str]:
+        roots = "|".join(re.escape(r) for r in {str(self.market), os.path.realpath(self.market)})
+        pat = re.compile(rf"(?:{roots})/conexus-([^/\s]+)(?:/|\s|$)")
+        return {v for _, args in self.descendants(pid) for v in pat.findall(args)}
 
     def start_session(self, name: str) -> None:
         self.tmux("new-window", "-d", "-t", "rs:", "-n", name, "-c", str(self.work), "bash --noprofile --norc",
@@ -506,11 +539,12 @@ def main() -> int:
                 failures.append(f"{name}: its session file has no tmux pane; the script cannot see it")
             before[name] = d or {}
         # Non-vacuity for the --nx check: before the roll the sessions run the version it moves from.
-        roots0 = sb.plugin_roots(int(before[CALLER].get("pid", 0) or 0))
-        if roots0 != {sb.from_version}:
-            failures.append(f"precondition: {CALLER} runs conexus {sorted(roots0)}, not {sb.from_version} from the "
-                            f"sandbox marketplace (pid {before[CALLER].get('pid')}, children "
-                            f"{sb.children(int(before[CALLER].get('pid', 0) or 0))[:12]})")
+        for name in WORDS:
+            pid0 = int(before[name].get("pid", 0) or 0)
+            roots0 = sb.plugin_roots(pid0)
+            if roots0 != {sb.from_version}:
+                failures.append(f"precondition: {name} runs conexus {sorted(roots0)}, not {sb.from_version} from the "
+                                f"sandbox marketplace (pid {pid0}, children {sb.children(pid0)[:12]})")
         crs = load_script()
         # A turn that invites a follow-up, so Claude Code draws a suggested next prompt (dim text):
         # the case the old check read as a draft. Poll for it rather than sleep and hope.
@@ -551,10 +585,13 @@ def main() -> int:
             sb.wait_status("rs_shell", {"shell"}, 60)
         except TimeoutError as exc:
             failures.append(f"precondition: {exc}")
-        # Mid-turn for the whole roll: a foreground command outlasting both of the script's waits.
-        # Not a bare sleep: Claude Code's Bash tool refuses a standalone foreground sleep (2.1.316).
+        # Mid-turn for the whole roll: a foreground command that waits while the hold file exists; the
+        # harness removes it after the roll. Not a bare sleep: Claude Code's Bash tool refuses a
+        # standalone foreground sleep (2.1.316). The tool's own 600 s ceiling bounds it.
+        sb.busy_hold.write_text("held\n", encoding="utf-8")
         sb.tmux("send-keys", "-t", sb.pane_of("rs_busy"), "-l",
-                f"Use the Bash tool, in the foreground with timeout 600000, to run exactly this command: python3 -c 'import time; time.sleep({BUSY_SLEEP})'. "
+                "Use the Bash tool, in the foreground with timeout 600000, to run exactly this command: "
+                f"python3 -c 'import os, time; [time.sleep(1) for _ in iter(lambda: os.path.exists({json.dumps(str(sb.busy_hold))}), False)]'. "
                 "Then reply with only: DONE", check=True)
         time.sleep(1)
         sb.tmux("send-keys", "-t", sb.pane_of("rs_busy"), "Enter", check=True)
@@ -638,6 +675,15 @@ def main() -> int:
                 if bad in ln:
                     failures.append(f"log has: {ln[:160]}")
                     break
+        busy_now = (sb.session("rs_busy") or {}).get("status")
+        if busy_now != "busy":
+            failures.append(f"rs_busy: its hold ended before the roll did (status {busy_now}); its checks prove nothing")
+        sb.busy_hold.unlink(missing_ok=True)
+        argv = sb.reinstall_argv.read_text(encoding="utf-8").split() if sb.reinstall_argv.exists() else []
+        if argv != [f"conexus=={sb.to_version}", "--allow-registry-over-dev"]:
+            failures.append(f"--nx: reinstall-tool.sh was called with {argv}")
+        if sb.uv_refused.exists():
+            failures.append(f"uv tool install refused in the sandbox: {sb.uv_refused.read_text(encoding='utf-8')[:200]!r}")
         # Each held session is left running: the same process on the same session, nothing exited.
         for name in HELD:
             now = sb.session(name) or {}
@@ -658,12 +704,13 @@ def main() -> int:
         # --nx installs after the last handoff and before the first exit.
         last_handoff = max((i for i, ln in enumerate(body_lines) if ln.startswith("handoff written by ")), default=-1)
         first_exit = min((i for i, ln in enumerate(body_lines) if ln.startswith("exit rs_")), default=len(body_lines))
-        installs = [i for i, ln in enumerate(body_lines) if ln.startswith("reinstall-tool ")] or [-1]
-        cleans = sb.uv_cleans.read_text(encoding="utf-8").split() if sb.uv_cleans.exists() else []
-        if cleans[:3] != ["cache", "clean", "conexus"]:
+        installs = [i for i, ln in enumerate(body_lines)
+                    if ln.startswith(("reinstall-tool ", "nx: ", "plugins: ", "plugin update ", "plugin marketplace update"))] or [-1]
+        cleans = sb.uv_cleans.read_text(encoding="utf-8").splitlines() if sb.uv_cleans.exists() else []
+        if "cache clean conexus" not in cleans:
             failures.append(f"--nx: uv cache clean conexus was not run through the sandbox's uv ({cleans})")
         if not all(last_handoff < i < first_exit for i in installs):
-            failures.append(f"--nx install at log line(s) {installs}, not only between the last handoff "
+            failures.append(f"--nx install (reinstall, nx, plugin update) at log line(s) {installs}, not only between the last handoff "
                             f"({last_handoff}) and the first exit ({first_exit})")
         if draft_seen is None:
             failures.append("rs_draft: its complete handoff was never seen before it was exited; draft not checked")
@@ -768,9 +815,21 @@ def main() -> int:
         sids |= {str(d.get("sessionId", ""))[:8] for d in before.values() if d}
         if not a.keep:
             # First: ours alone (-L), it holds the token, and its claude processes end with it;
-            # then the config copy they were reading.
+            # then the config copy they were reading. The sessions' tool processes (rs_shell's
+            # background sleep, rs_busy's hold) can outlive their claude and carry its environment,
+            # token included: collected now, ended by checked pid once the server is gone.
+            leftovers = [c for d in sb.entries() for c in sb.descendants(int(d.get("pid", 0) or 0))]
+            sb.busy_hold.unlink(missing_ok=True)
             sb.tmux("kill-server")
             sb.delete_config()
+            time.sleep(3)
+            for pid, args in leftovers:
+                now = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+                if now == args:  # the same process, not a reused pid
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        pass
         for n in notes:
             print(f"[sandbox] {n}", flush=True)
         for f in failures:
