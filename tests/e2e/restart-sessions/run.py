@@ -212,6 +212,32 @@ def write_serena_config(home: Path) -> Path:
     return path
 
 
+def _text_of(content) -> str:
+    """The text of a transcript message's content: a plain string, or its text parts joined."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
+    return ""
+
+
+def reply_after(events: list[dict], prompt: str) -> str | None:
+    """The first assistant text after the LAST user entry whose text is *prompt*; None while there
+    is none yet (the turn is still running, or the prompt has not landed)."""
+    at = None
+    for i, d in enumerate(events):
+        if d.get("type") == "user" and _text_of((d.get("message") or {}).get("content")).strip() == prompt.strip():
+            at = i
+    if at is None:
+        return None
+    for d in events[at + 1:]:
+        if d.get("type") == "assistant":
+            text = _text_of((d.get("message") or {}).get("content"))
+            if text:
+                return text
+    return None
+
+
 def load_script():
     """The oracle's module (its pane readers judge the preconditions)."""
     loader = importlib.machinery.SourceFileLoader("claude_restart_sessions", str(ORACLE))
@@ -626,24 +652,29 @@ class Sandbox:
     def pane_of(self, name: str) -> str:
         return f"rs:{name}"
 
-    def prompt(self, name: str, text: str, timeout: float = 240, done: frozenset[str] = frozenset({"idle"})) -> None:
-        """Type a prompt, Enter, then wait until the session is idle with a new text reply.
+    def prompt(self, name: str, text: str, timeout: float = 240, done: frozenset[str] = frozenset({"idle"})) -> str:
+        """Type a prompt, Enter, then wait until the session is idle with a text reply to THIS prompt;
+        return that reply.
 
         Status alone is not the turn's end: with the conexus plugin loaded, hooks move a fresh
         session's status timestamp on their own, and an idle status read that way returned
-        before the reply was written (nexus-cmqe8 sandbox, 2026-11-01).
+        before the reply was written (nexus-cmqe8 sandbox, 2026-11-01). Nor is a reply count: a
+        fresh session's first turn (reading its handoff) could still be writing its reply when the
+        count was taken, so that reply raised the count and was read as the answer (the
+        2026-11-02 roll: "THAT'S THE HANDOFF..." for a session that then answered HELIOTROPE).
+        The reply is the first text the assistant wrote after the user entry carrying *text*.
         """
         d0 = self.wait_status(name, {"idle"}, 120)
         sid = str(d0.get("sessionId", ""))
-        replies0 = self.reply_count(sid)
         self.tmux("send-keys", "-t", self.pane_of(name), "-l", text, check=True)
         time.sleep(1)
         self.tmux("send-keys", "-t", self.pane_of(name), "Enter", check=True)
         deadline = time.time() + timeout
         while time.time() < deadline:
             d = self.session(name) or {}
-            if d.get("status") in done and self.reply_count(sid) > replies0:
-                return
+            reply = reply_after(self.events(sid), text)
+            if d.get("status") in done and reply is not None:
+                return reply
             time.sleep(1)
         raise TimeoutError(f"{name}: prompt did not finish within {timeout:.0f}s")
 
@@ -662,16 +693,6 @@ class Sandbox:
         self.wait_status(name, {"busy"}, 60)
         time.sleep(15)  # past the request: the wait itself, not the model's turn, holds it busy
         self.wait_status(name, {"busy"}, 5)
-
-    def reply_count(self, session_id: str) -> int:
-        """Assistant transcript entries that carry text, for the session."""
-        n = 0
-        for d in self.events(session_id):
-            content = (d.get("message") or {}).get("content")
-            if d.get("type") == "assistant" and isinstance(content, list) and any(
-                    isinstance(c, dict) and c.get("type") == "text" and c.get("text") for c in content):
-                n += 1
-        return n
 
     def capture(self, name: str) -> str:
         return self.tmux("capture-pane", "-e", "-p", "-t", self.pane_of(name)).stdout
@@ -721,16 +742,6 @@ class Sandbox:
                 continue
             hits += [f"{rel}: {w}" for w in words if w in text]
         return hits
-
-    def last_reply(self, session_id: str) -> str:
-        text = ""
-        for d in self.events(session_id):
-            msg = d.get("message") or {}
-            if d.get("type") == "assistant" and isinstance(msg.get("content"), list):
-                parts = [c.get("text", "") for c in msg["content"] if isinstance(c, dict) and c.get("type") == "text"]
-                if any(parts):
-                    text = "".join(parts)
-        return text
 
     def read_log(self) -> str:
         return self.log.read_text(encoding="utf-8") if self.log.exists() else ""
@@ -874,11 +885,10 @@ def check_fresh(sb: Sandbox, before: dict[str, dict], handoffs: dict[str, str], 
             else:
                 notes.append("rs_draft: the fresh session read its saved draft with its handoff")
         try:
-            sb.prompt(name, "What is the project code word for this task? Reply with only the word.")
+            reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.").upper()
         except TimeoutError as exc:
             failures.append(str(exc))
             continue
-        reply = sb.last_reply(d["sessionId"]).upper()
         source = sb.first_mention(d["sessionId"], word, path)
         if word not in reply:
             failures.append(f"{name}: asked for its code word after the restart, replied {reply[:80]!r}")
@@ -1076,9 +1086,8 @@ def scenario_roll(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
     # Negative control: a fresh session in the same folder with no handoff must not know any word.
     sb.start_session("rs_blank")
     sb.wait_status("rs_blank", {"idle"}, 120)
-    sb.prompt("rs_blank", "What is the project code word for this task? If you do not know it, reply with only: UNKNOWN")
-    blank = sb.session("rs_blank") or {}
-    blank_reply = sb.last_reply(str(blank.get("sessionId", ""))).upper()
+    blank_reply = sb.prompt("rs_blank", "What is the project code word for this task? If you do not know it, "
+                                        "reply with only: UNKNOWN").upper()
     if any(w in blank_reply for w in spec.words.values()):
         failures.append(f"negative control: a fresh session with no handoff knew a word: {blank_reply[:80]!r}")
     elif "UNKNOWN" not in blank_reply:
