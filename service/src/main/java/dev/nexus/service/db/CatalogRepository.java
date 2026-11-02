@@ -48,6 +48,7 @@ import org.jooq.Record3;
 import org.jooq.ResultQuery;
 import org.jooq.SelectField;
 import org.jooq.Table;
+import org.jooq.TableField;
 import org.jooq.UpdateSetMoreStep;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
@@ -5443,8 +5444,12 @@ public final class CatalogRepository {
         PLAIN,
         /** Mirrors {@link #appendManifestChunks}' pre-existing minimal upsert: only
          *  {@code chash}/{@code collection} (and, nexus-tko2w, the section labels that describe the
-         *  chunk at the position, with their {@code labels_written} marker) are updated on conflict (chunk_index/line/char
-         *  positions are NOT touched — this method's long-standing contract, unchanged). */
+         *  chunk at the position, with their {@code labels_written} marker) are updated on conflict
+         *  (chunk_index is NOT touched — this method's long-standing contract, unchanged). The four span
+         *  columns follow the chunk (nexus-mzpsh): when the chash or the collection at the position changes
+         *  they take the incoming row's values, NULL included, because the old span described another chunk;
+         *  when the same chunk is written again an incoming value replaces the stored one and an incoming
+         *  NULL keeps it, so a known span is never erased by a row that states none. */
         UPSERT_APPEND,
         /** Mirrors the two RDR-176 ETL import paths' full-column upsert. */
         UPSERT_IMPORT
@@ -5554,6 +5559,15 @@ public final class CatalogRepository {
                 .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE))
                 .set(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER))
                 .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN))
+                // nexus-mzpsh: the span describes the chunk at the position. A different chunk (or the same
+                // chash under another collection) takes the incoming span, NULL too; the same chunk written
+                // again takes an incoming value and keeps its stored one against an incoming NULL. Every
+                // right-hand side reads the row as it was before this statement, so the chash comparison is
+                // against the old chash though the chash is set above.
+                .set(CATALOG_DOCUMENT_CHUNKS.LINE_START, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.LINE_START))
+                .set(CATALOG_DOCUMENT_CHUNKS.LINE_END, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.LINE_END))
+                .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.CHAR_START))
+                .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.CHAR_END))
                 .execute();
             case UPSERT_IMPORT -> insert
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -5573,6 +5587,18 @@ public final class CatalogRepository {
                 .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN))
                 .execute();
         }
+    }
+
+    /**
+     * nexus-mzpsh: the {@code ON CONFLICT DO UPDATE} value of a manifest span column for {@link
+     * ManifestInsertMode#UPSERT_APPEND}: the incoming value when the conflicting row holds another chunk (its
+     * chash or collection differs), else the incoming value if it has one and the stored one if not.
+     */
+    private static Field<Integer> spanOnConflict(TableField<?, Integer> column) {
+        Condition otherChunk = CATALOG_DOCUMENT_CHUNKS.CHASH.ne(DSL.excluded(CATALOG_DOCUMENT_CHUNKS.CHASH))
+            .or(CATALOG_DOCUMENT_CHUNKS.COLLECTION.ne(DSL.excluded(CATALOG_DOCUMENT_CHUNKS.COLLECTION)));
+        return DSL.when(otherChunk, DSL.excluded(column))
+            .otherwise(DSL.coalesce(DSL.excluded(column), column));
     }
 
     /**

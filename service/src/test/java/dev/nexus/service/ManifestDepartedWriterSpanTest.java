@@ -74,6 +74,10 @@ class ManifestDepartedWriterSpanTest {
     private static final String COLL_M_TARGET = "knowledge__departed-span-m__bge-base-en-v15-768__v1";
     /** The fail-open scenario's collection: the only one its probe constraint concerns. */
     private static final String COLL_F = "knowledge__departed-span-f__minilm-l6-v2-384__v1";
+    /** The numeric, JSON-null and append scenarios' collection; a search reads a collection's top 50, so each group keeps its own. */
+    private static final String COLL_N = "knowledge__departed-span-n__minilm-l6-v2-384__v1";
+    /** The cross-tenant trash purge's collection, registered for both tenants. */
+    private static final String COLL_X = "knowledge__departed-span-x__minilm-l6-v2-384__v1";
     private static final String BGE = "bge-base-en-v15-768";
     private static final String MODEL = "minilm-l6-v2-384";
     private static final String QUERY = "departedspan";
@@ -90,6 +94,7 @@ class ManifestDepartedWriterSpanTest {
     CombinedWriteService moveService;
     PgVectorRepositoryContractTest.FakeEmbedder embedder;
     private final AtomicInteger seq = new AtomicInteger();
+    private final AtomicInteger seqNew = new AtomicInteger();
 
     @BeforeAll
     void startAll() throws Exception {
@@ -121,8 +126,9 @@ class ManifestDepartedWriterSpanTest {
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
             for (String tenant : List.of(TENANT, OTHER_TENANT)) {
                 PgContainerHelper.insertCollection(seed, tenant, COLL);
+                PgContainerHelper.insertCollection(seed, tenant, COLL_X);
             }
-            for (String coll : List.of(COLL_D, COLL_M, COLL_M_TARGET, COLL_F)) {
+            for (String coll : List.of(COLL_D, COLL_M, COLL_M_TARGET, COLL_F, COLL_N)) {
                 PgContainerHelper.insertCollection(seed, TENANT, coll);
             }
         }
@@ -142,13 +148,30 @@ class ManifestDepartedWriterSpanTest {
     /** A scenario's unique names, so tests share one database without touching each other's rows. */
     private final class Scn {
         final Via via;
-        final String tag = "s" + seq.incrementAndGet();
-        final String docA = tag + "-a";
-        final String docB = tag + "-b";
-        final String docP = tag + "-p";
+        final String tag;
+        final String docA;
+        final String docB;
+        final String docP;
 
         Scn(Via via) {
+            this(via, "s", seq);
+        }
+
+        /**
+         * A scenario of the numeric, JSON-null, append and cross-tenant groups: its tag comes from its own
+         * counter, so adding one does not renumber the tags (and so the chunk vectors, which hash the text) of
+         * the scenarios that search {@link #COLL}'s top 50.
+         */
+        Scn(Via via, String tagPrefix) {
+            this(via, tagPrefix, seqNew);
+        }
+
+        private Scn(Via via, String tagPrefix, AtomicInteger counter) {
             this.via = via;
+            this.tag = tagPrefix + counter.incrementAndGet();
+            this.docA = tag + "-a";
+            this.docB = tag + "-b";
+            this.docP = tag + "-p";
         }
 
         String text(String name) {
@@ -766,15 +789,222 @@ class ManifestDepartedWriterSpanTest {
         assertThat(rowSpanKeys(TENANT, COLL, s.chash("z"))).as("no departed set, no clear").isEqualTo(ALL_FOUR);
     }
 
+    // ── (i) trash purge across tenants ──────────────────────────────────────────────────────────────
+
+    @Test
+    void trashPurge_anotherTenantsRowOfTheSameNameIsNotTouched_untilItsOwnPurge() throws Exception {
+        var s = new Scn(Via.WRITE_MANIFEST, "n");
+        for (String tenant : List.of(TENANT, OTHER_TENANT)) {
+            s.doc(tenant, s.docA, COLL_X);
+            s.doc(tenant, s.docP, COLL_X);
+            s.chunk(tenant, COLL_X, "z");
+            catalog.writeManifest(tenant, s.docP, COLL_X, List.of(s.row(0, "z", P_SPAN)));
+            catalog.writeManifest(tenant, s.docA, COLL_X, List.of(s.row(0, "z", null)));
+            catalog.deleteDocument(tenant, s.docP);
+            age(tenant, s.docP, 60);
+        }
+
+        catalog.purgeTrash(TENANT, 30);
+
+        assertThat(rowSpanKeys(TENANT, COLL_X, s.chash("z"))).as("the purged tenant's row: cleared").isEmpty();
+        assertThat(rowSpanKeys(OTHER_TENANT, COLL_X, s.chash("z"))).as("the other tenant's row: untouched")
+            .isEqualTo(ALL_FOUR);
+        assertThat(catalog.getManifest(OTHER_TENANT, s.docA)).as("and its manifest").isNotEmpty();
+
+        // the control: the other tenant's row WAS clearable, by its own purge, so the check above is not vacuous
+        catalog.purgeTrash(OTHER_TENANT, 30);
+        assertThat(rowSpanKeys(OTHER_TENANT, COLL_X, s.chash("z"))).isEmpty();
+    }
+
+    // ── (j) the writer test on stored numbers: 500 and 500.0 agree, a JSON null is nobody's value ─────
+
+    @ParameterizedTest
+    @EnumSource(Via.class)
+    void chunkRowSpanStoredAsADecimal_aDepartingIntegerOfTheSameValueIsTheWriter(Via via) throws Exception {
+        var s = new Scn(via, "n");
+        s.doc(s.docA, COLL_N);
+        s.doc(s.docP, COLL_N);
+        s.chunk(COLL_N, "z");
+        s.chunk(COLL_N, "p-keeps");
+        s.write(s.docA, COLL_N, s.row(0, "z", null));
+        s.write(s.docP, COLL_N, s.row(0, "z", P_SPAN), s.row(1, "p-keeps", P_SPAN));
+        // the row's span as a JSON decimal: 500.0 is 500 to the writer test
+        setRowMetadata(TENANT, COLL_N, s.chash("z"),
+            "{\"line_start\": 500.0, \"line_end\": 510.0, \"chunk_start_char\": 5000.0, \"chunk_end_char\": 5100.0}");
+
+        s.write(s.docP, COLL_N, s.row(0, "p-keeps", P_SPAN));
+
+        assertThat(rowSpanKeys(TENANT, COLL_N, s.chash("z"))).as("P's 500 is the row's 500.0: P wrote it").isEmpty();
+    }
+
+    @ParameterizedTest
+    @EnumSource(Via.class)
+    void chunkRowSpanStoredAsADecimal_aDepartingIntegerThatDiffersIsNotTheWriter(Via via) throws Exception {
+        var s = new Scn(via, "n");
+        s.doc(s.docA, COLL_N);
+        s.doc(s.docP, COLL_N);
+        s.chunk(COLL_N, "z");
+        s.chunk(COLL_N, "p-keeps");
+        s.write(s.docA, COLL_N, s.row(0, "z", null));
+        s.write(s.docP, COLL_N, s.row(0, "z", new int[]{501, 510, 5000, 5100}), s.row(1, "p-keeps", P_SPAN));
+        setRowMetadata(TENANT, COLL_N, s.chash("z"),
+            "{\"line_start\": 500.0, \"line_end\": 510.0, \"chunk_start_char\": 5000.0, \"chunk_end_char\": 5100.0}");
+
+        s.write(s.docP, COLL_N, s.row(0, "p-keeps", P_SPAN));
+
+        assertThat(rowSpanKeys(TENANT, COLL_N, s.chash("z"))).as("501 is not 500.0: only line_start stays")
+            .containsExactly("line_start");
+    }
+
+    @ParameterizedTest
+    @EnumSource(Via.class)
+    void chunkRowSpanStoredAsJsonNull_aDepartingRowWithNoValueClearsTheKey(Via via) throws Exception {
+        var s = new Scn(via, "n");
+        s.doc(s.docA, COLL_N);
+        s.doc(s.docP, COLL_N);
+        s.chunk(COLL_N, "z");
+        s.chunk(COLL_N, "p-keeps");
+        s.write(s.docA, COLL_N, s.row(0, "z", null));
+        s.write(s.docP, COLL_N, s.row(0, "z", null), s.row(1, "p-keeps", P_SPAN));
+        setRowMetadata(TENANT, COLL_N, s.chash("z"),
+            "{\"line_start\": null, \"line_end\": null, \"chunk_start_char\": null, \"chunk_end_char\": null}");
+
+        s.write(s.docP, COLL_N, s.row(0, "p-keeps", P_SPAN));
+
+        assertThat(rowSpanKeys(TENANT, COLL_N, s.chash("z"))).as("the null-valued keys are removed").isEmpty();
+    }
+
+    @ParameterizedTest
+    @EnumSource(Via.class)
+    void chunkRowSpanStoredAsJsonNull_aDepartingRowWithAValueIsNotTheWriter(Via via) throws Exception {
+        var s = new Scn(via, "n");
+        s.doc(s.docA, COLL_N);
+        s.doc(s.docP, COLL_N);
+        s.chunk(COLL_N, "z");
+        s.chunk(COLL_N, "p-keeps");
+        s.write(s.docA, COLL_N, s.row(0, "z", null));
+        s.write(s.docP, COLL_N, s.row(0, "z", P_SPAN), s.row(1, "p-keeps", P_SPAN));
+        setRowMetadata(TENANT, COLL_N, s.chash("z"),
+            "{\"line_start\": null, \"line_end\": null, \"chunk_start_char\": null, \"chunk_end_char\": null}");
+
+        s.write(s.docP, COLL_N, s.row(0, "p-keeps", P_SPAN));
+
+        assertThat(rowSpanKeys(TENANT, COLL_N, s.chash("z"))).as("a value in the manifest is not a JSON null in the row")
+            .isEqualTo(ALL_FOUR);
+    }
+
+    // ── (k) the append's upsert moves the span with the chunk (nexus-mzpsh) ──────────────────────────
+
+    @Test
+    void appendThatSwapsTheChash_theManifestRowTakesTheNewChunksSpan() {
+        var s = new Scn(Via.WRITE_MANIFEST, "n");
+        s.doc(s.docP, COLL_N);
+        s.chunk(COLL_N, "z");
+        s.chunk(COLL_N, "y");
+        s.write(s.docP, COLL_N, s.row(0, "z", new int[]{1, 2, 3, 4}));
+
+        catalog.appendManifestChunks(TENANT, s.docP, COLL_N, List.of(s.row(0, "y", new int[]{11, 12, 13, 14})));
+
+        assertThat(manifestSpan(s.docP, 0)).as("y's span, not z's").containsExactly(11, 12, 13, 14);
+        assertSpan(hit(COLL_N, s.chash("y")), 11, 12, 13, 14);
+    }
+
+    @Test
+    void appendThatSwapsTheChash_withNoSpanOfItsOwn_leavesTheRowWithNoSpanNotTheOldChunks() {
+        var s = new Scn(Via.WRITE_MANIFEST, "n");
+        s.doc(s.docP, COLL_N);
+        s.chunk(COLL_N, "z");
+        s.chunk(COLL_N, "y");
+        s.write(s.docP, COLL_N, s.row(0, "z", new int[]{1, 2, 3, 4}));
+
+        catalog.appendManifestChunks(TENANT, s.docP, COLL_N, List.of(s.row(0, "y", null)));
+
+        assertThat(manifestSpan(s.docP, 0)).as("z's span described z").containsExactly(null, null, null, null);
+    }
+
+    @Test
+    void appendThatMovesTheSameChashToAnotherCollection_takesTheIncomingSpan() {
+        var s = new Scn(Via.WRITE_MANIFEST, "n");
+        s.doc(s.docP, COLL_N);
+        s.chunk(COLL_N, "z");
+        s.chunk(COLL_D, "z");
+        s.write(s.docP, COLL_N, s.row(0, "z", new int[]{1, 2, 3, 4}));
+
+        catalog.appendManifestChunks(TENANT, s.docP, COLL_D, List.of(s.row(0, "z", null)));
+
+        assertThat(manifestSpan(s.docP, 0)).as("same chash, another collection: another chunk row")
+            .containsExactly(null, null, null, null);
+    }
+
+    @Test
+    void appendOfTheSameChunk_withNoSpan_keepsTheKnownSpan() {
+        var s = new Scn(Via.WRITE_MANIFEST, "n");
+        s.doc(s.docP, COLL_N);
+        s.chunk(COLL_N, "z");
+        s.write(s.docP, COLL_N, s.row(0, "z", new int[]{1, 2, 3, 4}));
+
+        catalog.appendManifestChunks(TENANT, s.docP, COLL_N, List.of(s.row(0, "z", null)));
+
+        assertThat(manifestSpan(s.docP, 0)).as("a row that states no span does not erase one").containsExactly(1, 2, 3, 4);
+    }
+
+    @Test
+    void appendOfTheSameChunk_withASpan_replacesTheStoredOne_andFillsAMissingField() {
+        var s = new Scn(Via.WRITE_MANIFEST, "n");
+        s.doc(s.docP, COLL_N);
+        s.chunk(COLL_N, "z");
+        s.chunk(COLL_N, "w");
+        Map<String, Object> lines = s.row(1, "w", null);
+        lines.put("line_start", 7);
+        lines.put("line_end", 8);
+        s.write(s.docP, COLL_N, s.row(0, "z", new int[]{1, 2, 3, 4}), lines);
+
+        catalog.appendManifestChunks(TENANT, s.docP, COLL_N, List.of(s.row(0, "z", new int[]{5, 6, 7, 8})));
+        catalog.appendManifestChunks(TENANT, s.docP, COLL_N, List.of(s.row(1, "w", new int[]{9, 10, 11, 12})));
+
+        assertThat(manifestSpan(s.docP, 0)).as("the newer statement of the same chunk").containsExactly(5, 6, 7, 8);
+        assertThat(manifestSpan(s.docP, 1)).as("lines restated, characters filled in").containsExactly(9, 10, 11, 12);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────
 
     private void age(String doc, int days) throws Exception {
+        age(TENANT, doc, days);
+    }
+
+    private void age(String tenant, String doc, int days) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(days))
-                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc)))
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc)))
                 .execute();
         }
+    }
+
+    /** Replaces a chunk row's metadata, as the superuser (a row a client could not have written, such as 500.0 or a JSON null). */
+    private void setRowMetadata(String tenant, String coll, String chash, String json) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.METADATA, JSONB.jsonb(json))
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(coll))
+                    .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(chash))))
+                .execute()).as("chunk row " + chash).isEqualTo(1);
+        }
+    }
+
+    /** The span the manifest row of {@code doc} at {@code position} holds: line_start, line_end, char_start, char_end. */
+    private List<Integer> manifestSpan(String doc, int position) {
+        return tenantScope.withTenant(TENANT, ctx -> {
+            var r = ctx.select(CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END,
+                    CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+                .from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc))
+                    .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(position)))
+                .fetchOne();
+            assertThat(r).as("manifest row of " + doc + " at " + position).isNotNull();
+            return new ArrayList<>(java.util.Arrays.asList(r.value1(), r.value2(), r.value3(), r.value4()));
+        });
     }
 }

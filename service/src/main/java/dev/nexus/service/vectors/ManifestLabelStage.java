@@ -1138,8 +1138,10 @@ final class ManifestLabelStage {
      *       row's) also hold the chunk; P leaves (two holders remain, no clear), then B leaves (B's span differs
      *       from the row's, so B is not the writer and the field stays), and A's hit shows P's departed span;
      *       accepted, because P's departed span cannot be told from a legacy holder's row-only span;
-     *   <li>the Python client sends a {@code chunk_start_char} of 0 as NULL ({@code or None}), so a shared first
-     *       chunk's true 0 start can be cleared from the row; the client fix is nexus-qe78r.
+     *   <li>manifest rows written before the client fix (nexus-qe78r, landing in the same push): the Python
+     *       client used to send a span field of 0 as NULL, so such a row still carries NULL for a true 0 and a
+     *       shared first chunk's 0 start can be cleared from the row, until the document is re-indexed with
+     *       force; rows written after the fix carry the 0.
      * </ul>
      */
     static void putSpan(Map<String, Object> row, Occurrence o) {

@@ -20,16 +20,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * nexus-pvkbv: pins {@link DepartedWriterSpans#guarded}'s two exits without a database. A deadlock (SQLSTATE
+ * nexus-pvkbv: pins {@link DepartedWriterSpans#guarded}'s exits without a database. A deadlock (SQLSTATE
  * 40P01, wrapped the way jOOQ and TenantScope deliver it) must reach the surrounding {@link DeadlockRetry}, so
  * the transaction re-runs; any other failure is undone to the savepoint and answered with the fallback, so the
- * manifest write that triggered the clear goes on. The connection is a recording stand-in that supports the
+ * manifest write that triggered the clear goes on, and the savepoint is released after that rollback. A call on
+ * an autocommit connection is refused (nexus-qyvz5). The connection is a recording stand-in that supports the
  * savepoint calls {@code guarded} makes; the behaviour under test is which exit {@code guarded} takes.
  */
 class DepartedWriterSpansGuardedTest {
 
-    /** The calls the connection saw, in order: {@code setSavepoint}, {@code release}, {@code rollback}. */
     private static DSLContext ctxRecording(List<String> calls) {
+        return ctxRecording(calls, false);
+    }
+
+    /** The calls the connection saw, in order: {@code setSavepoint}, {@code release}, {@code rollback}. */
+    private static DSLContext ctxRecording(List<String> calls, boolean autoCommit) {
         Savepoint sp = new Savepoint() {
             @Override
             public int getSavepointId() {
@@ -44,6 +49,9 @@ class DepartedWriterSpansGuardedTest {
         Connection conn = (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(),
             new Class<?>[] {Connection.class}, (proxy, method, args) -> {
                 switch (method.getName()) {
+                    case "getAutoCommit" -> {
+                        return autoCommit;
+                    }
                     case "setSavepoint" -> {
                         calls.add("setSavepoint");
                         return sp;
@@ -100,7 +108,34 @@ class DepartedWriterSpansGuardedTest {
         }, "fallback");
 
         assertThat(out).isEqualTo("fallback");
-        assertThat(calls).containsExactly("setSavepoint", "rollbackToSavepoint");
+        // nexus-qyvz5: the savepoint is released after the rollback to it, not left defined
+        assertThat(calls).containsExactly("setSavepoint", "rollbackToSavepoint", "release");
+    }
+
+    @Test
+    void aCallOutsideATransactionFailsLoudAndRunsNothing() {
+        List<String> calls = new ArrayList<>();
+        boolean[] ran = {false};
+
+        // nexus-qyvz5: on an autocommit connection the driver refuses the savepoint; failing open there would
+        // skip every clear with only a warning, so it is refused up front.
+        assertThatThrownBy(() -> DepartedWriterSpans.guarded(ctxRecording(calls, true), "t", "test", () -> {
+            ran[0] = true;
+            return "value";
+        }, "fallback")).isInstanceOf(IllegalStateException.class).hasMessageContaining("open transaction");
+
+        assertThat(ran[0]).as("the body is not run").isFalse();
+        assertThat(calls).as("no savepoint is taken").isEmpty();
+    }
+
+    @Test
+    void clearOnAnAutocommitConnectionFailsLoudToo() {
+        List<String> calls = new ArrayList<>();
+        var gone = new DepartedWriterSpans.Gone("c", new byte[32], null, null, null, null);
+
+        assertThatThrownBy(() -> DepartedWriterSpans.clear(ctxRecording(calls, true), "t", List.of(gone)))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(calls).isEmpty();
     }
 
     @Test
