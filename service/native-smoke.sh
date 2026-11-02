@@ -759,7 +759,7 @@ if [ -f "$BGE_MODEL" ]; then
     echo "  ok   no encode ran against a freed tokenizer"
   else
     echo "  FAIL the tokenizer was freed under an in-flight encode, or the log could not be checked (probe exit $tokrc; nexus-89lp5):"
-    printf '%s\n' "$tokhits" | head -3
+    head -3 <<<"$tokhits"
     fail=1
   fi
   SVCPID=""
