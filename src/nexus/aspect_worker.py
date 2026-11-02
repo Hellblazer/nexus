@@ -385,6 +385,9 @@ class AspectExtractionWorker:
         self._on_self_fault: Callable[[str], None] | None = on_self_fault
         self._self_fault: str | None = None
         self._self_fault_lock = threading.Lock()
+        # nexus-wl9pk: the host's "the engine answered" hook (see
+        # ``set_engine_contact_handler``); None for a loose in-process worker.
+        self._on_engine_contact: Callable[[], None] | None = None
         # nexus-59611 stage 2: mtime baseline for the local wake file, so a
         # touch is consumed exactly once. None means "no wake file observed
         # yet" (absent, or not yet baselined by start()).
@@ -451,6 +454,26 @@ class AspectExtractionWorker:
         constructions use the ``on_self_fault`` kwarg instead.
         """
         self._on_self_fault = handler
+
+    def set_engine_contact_handler(self, handler: Callable[[], None] | None) -> None:
+        """Install the host's "the engine answered" hook (nexus-wl9pk).
+
+        Called after each claim round trip the engine answered, empty or not,
+        from this worker's thread. ``AspectWorkerDaemon`` uses it to tell a
+        reachable engine from a dead one: its own reclaim sweep is one route,
+        and that route failing alone (a rotated credential, an older engine
+        without it) while claims work is not a reason to leave.
+        """
+        self._on_engine_contact = handler
+
+    def _note_engine_contact(self) -> None:
+        handler = self._on_engine_contact
+        if handler is None:
+            return
+        try:
+            handler()
+        except Exception:  # noqa: BLE001 — a host hook must not kill the claim loop
+            _log.warning("aspect_worker_engine_contact_handler_failed", exc_info=True)
 
     def self_fault(self) -> str | None:
         """The reason this worker stood down, or ``None`` if it is healthy."""
@@ -655,6 +678,7 @@ class AspectExtractionWorker:
             if table_due:
                 try:
                     rows = self._claim_table_rows()
+                    self._note_engine_contact()
                 except Exception:  # noqa: BLE001 — best-effort claim loop: must not crash worker thread, logged + retried
                     _log.warning("aspect_worker_claim_failed", exc_info=True)
                     claim_failed = True
@@ -675,6 +699,8 @@ class AspectExtractionWorker:
             if tuples_ok and not self._stop_event.is_set():
                 park = tuples_mode and not table_busy
                 claims, failed = side.claim_batch(park=park)
+                if not failed:
+                    self._note_engine_contact()
                 claim_failed = claim_failed or failed
                 tuple_failed = failed
                 parked = park and side.supported() and not failed and not claims

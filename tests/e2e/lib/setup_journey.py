@@ -410,11 +410,22 @@ class Sandbox:
         nx = current / "bin" / "nx"
         if not nx.exists():
             return
+        # The aspect worker an nx call spawned outlives the service by design
+        # (nexus-wl9pk): stop it by its lease, FIRST, and in its own try block so
+        # a hung or failing worker stop never skips the service stop below. The
+        # sandbox's installed nx may be older than the verb (journey C is a legacy
+        # tree), so the checkout's nx stops it: the verb reads the lease record
+        # and signals by pid, which also reaches a worker the older nx spawned.
         try:
-            # The aspect worker an nx call spawned outlives the service by design
-            # (nexus-wl9pk): stop it by its lease first. An older nx has no such
-            # verb; its failure is not the journey's.
-            self.run([str(nx), "daemon", "aspect-worker", "stop"], timeout=120)
+            stopped = self.run(
+                [self.uv, "run", "--no-sync", "--project", str(REPO), "nx", "daemon", "aspect-worker",
+                 "stop", "--config-dir", str(self.config)],
+                timeout=120, cwd=REPO,
+            )
+            say(f"   {self.name}: aspect-worker stop exit {stopped.returncode}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            say(f"   {self.name}: aspect-worker stop could not run: {exc}")
+        try:
             done = self.run([str(nx), "daemon", "service", "stop", "--with-pg"], timeout=120)
             say(f"   {self.name}: service stop exit {done.returncode}")
         except (OSError, subprocess.SubprocessError) as exc:

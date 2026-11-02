@@ -1925,6 +1925,14 @@ def aspect_worker_group() -> None:
     reclaim_stale loop. One more leased tier on the RDR-149 substrate."""
 
 
+def _engine_unreachable_exit_default() -> float:
+    """The worker's own default (``_ENGINE_UNREACHABLE_EXIT_S``), read at call
+    time so this module does not import the daemon module at CLI startup."""
+    from nexus.daemon.aspect_worker_daemon import _ENGINE_UNREACHABLE_EXIT_S  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    return _ENGINE_UNREACHABLE_EXIT_S
+
+
 @aspect_worker_group.command("start")
 @click.option(
     "--config-dir",
@@ -1950,12 +1958,13 @@ def aspect_worker_group() -> None:
 @click.option(
     "--engine-unreachable-exit-seconds",
     "engine_unreachable_exit_seconds",
-    type=float,
-    default=3600.0,
-    show_default=True,
-    help="Exit when every reclaim sweep has failed for this long (the engine is gone for "
-    "good); the next enqueue spawns a new worker. 0 disables the bound. The worker also "
-    "exits as soon as its config directory is removed.",
+    type=click.FloatRange(min=0),
+    default=_engine_unreachable_exit_default,
+    show_default="3600",
+    help="Exit when the engine has not answered for this long (reclaim sweeps failing "
+    "and no claim round trip answered; the engine is gone for good); the next enqueue "
+    "spawns a new worker. 0 disables the bound. The worker also exits as soon as its "
+    "config directory is removed.",
 )
 def aspect_worker_start_cmd(
     config_dir_str: str | None,
@@ -1998,11 +2007,14 @@ def aspect_worker_stop_cmd(config_dir_str: str | None) -> None:
     """Stop the aspect-worker daemon(s) leased in a config directory.
 
     Found from the tier's own lease records, never by matching process names,
-    so a worker serving another config directory is untouched. Idempotent:
-    nothing to stop exits 0. ``nx daemon service stop`` leaves the worker running
-    by design (it belongs to the store path); a throwaway service's owner calls
-    this before it stops the service so the worker does not outlive the scratch
-    directory. Exits 1 when a worker survives the stop.
+    and signalled only when its live command line is an aspect worker serving
+    THIS directory, so a worker serving another config directory is untouched.
+    Idempotent: nothing to stop exits 0. ``nx daemon service stop`` leaves the
+    worker running by design (it belongs to the store path); a throwaway
+    service's owner calls this before it stops the service so the worker does
+    not outlive the scratch directory. Exits 1 when a worker survives the
+    stop, or when a lease names a live process that is not this directory's
+    worker (not signalled; its lease is kept).
     """
     from nexus.daemon.aspect_worker_daemon import stop_aspect_workers  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
@@ -2010,11 +2022,23 @@ def aspect_worker_stop_cmd(config_dir_str: str | None) -> None:
     result = stop_aspect_workers(config_dir)
     if result.stopped:
         click.echo(f"Aspect-worker stopped (pid {', '.join(str(p) for p in result.stopped)}).")
-    else:
+    elif not (result.survivors or result.unreadable or result.foreign):
         click.echo("No aspect-worker running.")
+    failed = False
     if result.survivors or result.unreadable:
         pids = ", ".join(str(p) for p in (*result.survivors, *result.unreadable))
         click.echo(f"Aspect-worker pid {pids} was not stopped.", err=True)
+        failed = True
+    if result.foreign:
+        pids = ", ".join(str(p) for p in result.foreign)
+        click.echo(
+            f"Pid {pids} is alive but is not an aspect worker serving {config_dir}; "
+            "not signalled, and its lease is kept. If it is a stale lease whose pid was "
+            "recycled, remove the aspect_worker_addr.* file in that directory.",
+            err=True,
+        )
+        failed = True
+    if failed:
         raise SystemExit(1)
 
 

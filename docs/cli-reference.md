@@ -3737,7 +3737,7 @@ nx doctor --check-index-failures     # Surface the durable index-failures backlo
 
 The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reads the live service queue, not the local file. It counts two sides. The table side is `aspect_extraction_queue`: its pending rows and its failed rows. The tuple side is the `aspects` tuple queue that `NX_ASPECT_QUEUE` moves work onto (RDR-235): its available tasks count as pending, its dead tasks count as failed, and its claimed tasks are in flight and count as neither. The report prints one `aspect_extraction_queue:` line with the combined pending and failed totals. It adds a `  tuple queue (aspects): N available, N claimed (in flight, not pending), N dead` line when the tuple side has any tasks, and `  dead tuple tasks: nx tuple stats aspects` when it has dead ones. Under the failed total it lists up to 20 failed table rows with their collection, source path and retry count, then points at `nx aspects requeue-failed`. The service list endpoint does not carry `last_error`, so the failure text is in the worker logs. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring.
 
-Exit codes. A pending backlog never fails the check. A WARN line on stderr says the worker is idle when rows are pending and `claude` is not on PATH with no `anthropic_api_key` set, and that does not change the exit code. A transport failure to the service prints `Queue depth UNKNOWN` on stderr and exits 0, so it reports neither pass nor fail. If the tuple side cannot be read, the report prints the table side's figures with `tuple queue (aspects) UNKNOWN` on stderr and no combined count, and the exit code follows the table side alone. Any failed count, meaning failed table rows plus tuple dead tasks, above zero exits 1 with a `✗ FAIL: N failed aspect-extraction row(s) in the queue.` marker on stderr, matching the other promoted supplementary checks (nexus-fylxo).
+Exit codes. A pending backlog never fails the check. A WARN line on stderr says the worker is idle when rows are pending and `claude` is not on PATH with no `anthropic_api_key` set, and that does not change the exit code. A second WARN, with the same exit code, says rows are pending, `claude` is available and no aspect worker holds a lease: a worker exits after an hour without the engine and only the next store or index starts another, so a backlog from before an outage sits until then; it names `nx daemon aspect-worker start` as the remedy. A transport failure to the service prints `Queue depth UNKNOWN` on stderr and exits 0, so it reports neither pass nor fail. If the tuple side cannot be read, the report prints the table side's figures with `tuple queue (aspects) UNKNOWN` on stderr and no combined count, and the exit code follows the table side alone. Any failed count, meaning failed table rows plus tuple dead tasks, above zero exits 1 with a `✗ FAIL: N failed aspect-extraction row(s) in the queue.` marker on stderr, matching the other promoted supplementary checks (nexus-fylxo).
 
 The `--check-index-failures` flag (introduced nexus-nukn3, also part of the default sweep) reports the `nexus.index_failures` all-time row count (see `nx index failures` above) as information, and gates the sweep on the LATEST run that recorded any UNACKNOWLEDGED failure — never the all-time total, and never a failure an operator has durably acknowledged. Deliberately written FAIL-FIRST: this is the exact bead nexus-fylxo names as the trap to avoid, a durable failure queue whose reader never raises reproduces the aspect-queue check's original silent-backlog defect for a second queue. Two rounds of scoping close two separate traps found in review: (1) an unscoped all-time gate turned the FIRST permanent extraction failure in a tenant's history into an unfixable FAIL forever — fixed by gating on the latest run instead, with a failure older than 30 days no longer gating at all (self-heals over time with no operator action); (2) staleness alone did not self-heal a corpus re-indexed on a cadence SHORTER than that window, since every run mints a fresh run id for the identical recurring failure — fixed by `nx index failures --acknowledge`, a durable adjudication the gate excludes regardless of how many times it recurs under a new run id. `nx index failures --clear` remains the immediate one-time remedy for a failure an operator has already handled and does not want to wait out the staleness window for. A transport failure reports UNKNOWN and exits 0; a fresh (within 30 days), unacknowledged latest-run failure exits 1 with a `✗ FAIL:` marker naming that run's count.
 
@@ -4408,10 +4408,10 @@ predecessor (one owner survives).
 | `--config-dir` | Config directory override (default: `~/.config/nexus/`) |
 | `--tenant` | Tenant scope for the lease (default `default`). Per-tenant only — per-host would need `BYPASSRLS`, forbidden by RDR-152 |
 | `--stale-timeout-seconds` | Reclaim staleness threshold (default `300`). MUST exceed the `claude -p` extraction budget (180s) or an in-flight row could be false-reclaimed |
-| `--engine-unreachable-exit-seconds` | Exit when every reclaim sweep has failed for this long (default `3600`; `0` turns it off). The worker outlives `nx daemon service stop` by design, so the bound is far longer than a restart; the next enqueue spawns a new worker if the engine returns |
+| `--engine-unreachable-exit-seconds` | Exit when the engine has not answered for this long (default `3600`; `0` turns it off; negative values are refused). The clock starts at a failed reclaim sweep and any later reclaim sweep or claim round trip that is answered clears it, so a worker whose claims work never exits on a failing reclaim route. The worker outlives `nx daemon service stop` by design, so the bound is far longer than a restart; the next enqueue spawns a new worker if the engine returns |
 
 The worker also exits within a few seconds of its config directory being
-removed, and does not re-create it: a gate's scratch directory deleted under a
+removed (two consecutive heartbeats that find it gone), and does not re-create it: a gate's scratch directory deleted under a
 worker no longer leaves an orphan polling a dead engine.
 
 **Credential model (RDR-173):** this command MUST be spawned as a CHILD of a
@@ -4430,10 +4430,14 @@ nx daemon aspect-worker stop [--config-dir DIR]
 
 Stop the aspect-worker daemon leased in a config directory (default
 `~/.config/nexus/`) and drop its lease. The pid comes from the tier's own lease
-record and is re-checked against the process's live command line, so a worker
-serving another config directory is never touched and nothing is found by
-matching process names. Idempotent: with no worker, prints `No aspect-worker
-running.` and exits 0; exits 1 if a worker survives the stop. `nx daemon
+record and is re-checked against the process's live command line, which must
+be an aspect worker whose `--config-dir` is this directory (compared by real
+path), so a worker serving another config directory is never touched and
+nothing is found by matching process names. Idempotent: with no worker, prints
+`No aspect-worker running.` and exits 0. Exits 1 if a worker survives the stop,
+or if a lease names a live process that is not this directory's worker (a
+recycled pid): that process is not signalled, its lease is kept, and stderr
+names it. `nx daemon
 service stop` leaves the worker running by design (it belongs to the store
 path), so an e2e gate's cleanup calls this before it stops its scratch service.
 

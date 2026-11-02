@@ -502,9 +502,12 @@ cleanup() {
     # Stop the sandbox service + PG so nothing leaks past the gate.
     if [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ]; then
         # The aspect worker an nx call spawned outlives the service by design
-        # (nexus-wl9pk): stop it by its lease in the sandbox config dir first. An
-        # older installed nx has no such verb; the failure is ignored.
-        _nx daemon aspect-worker stop >/dev/null 2>&1 || true
+        # (nexus-wl9pk): stop it by its lease in the sandbox config dir first. The
+        # installed nx may predate the verb (--published installs the previous
+        # release), so the CHECKOUT's nx stops it: the verb reads the lease and
+        # signals by pid, which also reaches a worker the older nx spawned.
+        ( cd "$REPO_ROOT" && env HOME="$HOME_DIR" NEXUS_CONFIG_DIR="$HOME_DIR/.config/nexus" NX_NO_TELEMETRY=1 \
+            uv run --no-sync nx daemon aspect-worker stop --config-dir "$HOME_DIR/.config/nexus" ) >/dev/null 2>&1 || true
         _nx daemon service stop --with-pg >/dev/null 2>&1 || true
     fi
     if [ "$GATE_OK" != 1 ]; then

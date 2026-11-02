@@ -33,6 +33,7 @@ credential-bare spawn path is forbidden.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -94,16 +95,21 @@ _DEFAULT_STALE_TIMEOUT_S: int = 300
 #: (nexus-e0ypa, see :func:`next_reclaim_wait`) and returns here on any reclaim.
 _DEFAULT_RECLAIM_INTERVAL: float = 30.0
 
-#: How long (s) every reclaim sweep may fail in a row before the daemon exits
-#: (nexus-wl9pk). The daemon outlives ``nx daemon service stop`` by design and
-#: idles with the stack down, so the bound has to be far longer than a restart or
-#: an upgrade; it is the backstop for a worker whose engine is never coming back
-#: (a gate's throwaway service, a deleted install) and whose config directory
-#: still exists, which the directory check cannot see. Exiting costs nothing the
-#: design does not already accept: the next enqueue spawns a new worker, and its
-#: reclaim-first sweep returns whatever rows this one held. A failed sweep
-#: backs off to at most the stale window (300 s by default), so a recovered
-#: engine resets the clock within that window. ``None`` or 0 turns the bound off.
+#: How long (s) the engine may go unanswered before the daemon exits
+#: (nexus-wl9pk). The clock starts at a failed reclaim sweep and is cleared by
+#: any later success: a reclaim sweep that answers, or a claim round trip from
+#: the hosted worker (``note_engine_contact``), so a worker whose reclaim route
+#: alone fails while its claims work never exits. The daemon outlives
+#: ``nx daemon service stop`` by design and idles with the stack down, so the
+#: bound has to be far longer than a restart or an upgrade; it is the backstop
+#: for a worker whose engine is never coming back (a gate's throwaway service,
+#: a deleted install) and whose config directory still exists, which the
+#: directory check cannot see. Exiting costs nothing the design does not already
+#: accept: the next enqueue spawns a new worker, and its reclaim-first sweep
+#: returns whatever rows this one held. A failed sweep backs off to at most the
+#: stale window (300 s by default) and never past half the bound
+#: (:meth:`AspectWorkerDaemon._wait_cap`), so a recovered engine resets the
+#: clock before the bound. ``None`` or 0 turns the bound off.
 _ENGINE_UNREACHABLE_EXIT_S: float = 3600.0
 
 
@@ -337,6 +343,11 @@ class AspectWorkerDaemon:
         _attach = getattr(self._worker, "set_self_fault_handler", None)
         if callable(_attach):
             _attach(self._on_worker_self_fault)
+        # nexus-wl9pk: the worker reports each claim round trip the engine
+        # answered, which clears the unreachable clock the reclaim thread owns.
+        _attach_contact = getattr(self._worker, "set_engine_contact_handler", None)
+        if callable(_attach_contact):
+            _attach_contact(self.note_engine_contact)
         # Cleared BEFORE the worker starts: the worker thread can report a
         # self fault the instant it runs, and clearing afterwards would erase
         # that stand-down (nexus-yg70j).
@@ -453,7 +464,7 @@ class AspectWorkerDaemon:
             previous = self._current_reclaim_wait
             self._current_reclaim_wait = next_reclaim_wait(
                 previous, reclaimed=n,
-                base=self._reclaim_interval, stale_timeout=self._stale_timeout,
+                base=self._reclaim_interval, stale_timeout=self._wait_cap(),
             )
             if self._current_reclaim_wait != previous:
                 # Review of 53923fe3e: the backoff is otherwise invisible in
@@ -490,8 +501,24 @@ class AspectWorkerDaemon:
             self._unreachable_since = self._monotonic()
         self._current_reclaim_wait = next_reclaim_wait(
             self._current_reclaim_wait, reclaimed=None,
-            base=self._reclaim_interval, stale_timeout=self._stale_timeout,
+            base=self._reclaim_interval, stale_timeout=self._wait_cap(),
         )
+
+    def _wait_cap(self) -> float:
+        """The longest wait between reclaim sweeps: the stale window, and when
+        the unreachable bound is on, at most half of it, so a long
+        ``--stale-timeout-seconds`` cannot put the next sweep past the bound
+        (nexus-wl9pk). :func:`next_reclaim_wait` keeps the base as its floor."""
+        bound = self._engine_unreachable_exit_s
+        cap = float(self._stale_timeout)
+        return min(cap, bound / 2.0) if bound else cap
+
+    def note_engine_contact(self) -> None:
+        """The hosted worker's claim round trip was answered: the engine is
+        reachable, whatever the reclaim route says. Clears the unreachable
+        clock (nexus-wl9pk). Called from the worker thread; a float
+        assignment needs no lock."""
+        self._unreachable_since = None
 
     def heartbeat_once(self) -> None:
         """Run a single heartbeat tick (test seam + the loop body)."""
@@ -605,6 +632,11 @@ class AspectWorkerDaemon:
             # live process), and a successor cannot hold them. A worker fake
             # without the hook (the injected-factory protocol) is untouched.
             release = getattr(self._worker, "release_held_claims", None)
+            if self._left_for_unreachable_engine:
+                # nexus-wl9pk: each release is a request to an engine that has
+                # not answered for the whole bound; it would wait out the client
+                # timeouts claim by claim. The leases lapse on their own.
+                release = None
             if callable(release):
                 try:
                     released = release()
@@ -713,6 +745,15 @@ class AspectWorkerDaemon:
                     _log.warning("aspect_worker_daemon.relinquish_failed", tenant=self._tenant, error=str(exc))
             self._supervisor = None
         _log.info("aspect_worker_daemon.stopped", tenant=self._tenant)
+
+
+def aspect_worker_running(config_dir: Path | str, tenant: str = "default") -> bool:
+    """Whether a worker holds a fresh lease for *tenant* in *config_dir*.
+    ``nx doctor`` uses it to tell a draining backlog from one nobody is draining
+    (nexus-wl9pk: a worker leaves after an hour without an engine). Read-only;
+    creates nothing."""
+    registry = ServiceRegistry(dir=Path(config_dir), tier=TIER, ttl=ttl_for_tier(TIER))
+    return registry.discover(tenant) is not None
 
 
 def _claude_available() -> bool:
@@ -986,6 +1027,45 @@ def is_aspect_worker_command(command: str) -> bool:
     return "aspect-worker" in command and "nexus" in command
 
 
+def _config_dir_argument(command: str) -> list[str]:
+    """The text after ``--config-dir`` (space or ``=``), as the candidate
+    values it could spell: the command line is the joined argv, so a path with
+    spaces arrives as several tokens, and the next option ends it."""
+    match = re.search(r"--config-dir(?:=|\s+)(.*)$", command)
+    if match is None:
+        return []
+    tokens = match.group(1).split()
+    candidates: list[str] = []
+    for end in range(1, len(tokens) + 1):
+        if end > 1 and tokens[end - 1].startswith("--"):
+            break
+        candidates.append(" ".join(tokens[:end]).strip("\"'"))
+    return candidates
+
+
+def _same_dir(left: str, right: str) -> bool:
+    """Same directory by real path (macOS spells a temp dir /var/... and
+    /private/var/...), falling back to the lexical spelling."""
+    if left == right:
+        return True
+    return os.path.realpath(left) == os.path.realpath(right)
+
+
+def is_aspect_worker_command_serving(config_dir: Path | str) -> Callable[[str], bool]:
+    """The pid-recycle re-check of :func:`stop_aspect_workers`: an aspect-worker
+    command line whose ``--config-dir`` is *config_dir*. A lease record in
+    directory A that names a pid now running a worker of directory B must not
+    stop B (nexus-wl9pk). The spawn always passes an absolute ``--config-dir``."""
+    want = str(config_dir)
+
+    def _serves(command: str) -> bool:
+        return is_aspect_worker_command(command) and any(
+            _same_dir(candidate, want) for candidate in _config_dir_argument(command)
+        )
+
+    return _serves
+
+
 def stop_aspect_workers(config_dir: Path | str) -> HolderStopResult:
     """Stop every aspect worker whose lease lives in *config_dir* and drop the
     leases (nexus-wl9pk). The verb behind ``nx daemon aspect-worker stop``.
@@ -993,13 +1073,19 @@ def stop_aspect_workers(config_dir: Path | str) -> HolderStopResult:
     A thin call into the shared teardown primitive
     (:func:`~nexus.daemon.service_registry.stop_tier_holders`): the pids come
     from the tier's own lease records, each is re-checked against its live
-    command line, and the stop is the graceful send, the drain grace, then the
-    hard kill. No process-table pattern is involved, so a worker serving another
-    config directory is never touched. A gate's cleanup calls it BEFORE it stops
-    the service, so the worker's final reclaim sweep still has an engine.
+    command line (an aspect worker serving THIS directory,
+    :func:`is_aspect_worker_command_serving`), and the stop is the graceful
+    send, the drain grace, then the hard kill. No process-table pattern is
+    involved, so a worker serving another config directory is never touched. A
+    live pid that fails the re-check is reported in ``foreign`` and its lease
+    stays (``keep_foreign_leases``): the stop must not read as done. A gate's
+    cleanup calls it BEFORE it stops the service, so the worker's final reclaim
+    sweep still has an engine.
     """
     from nexus.daemon.service_registry import stop_tier_holders  # noqa: PLC0415 — deferred; stop-path only
 
     return stop_tier_holders(
-        dir=Path(config_dir), tier=TIER, is_ours=is_aspect_worker_command,
+        dir=Path(config_dir), tier=TIER,
+        is_ours=is_aspect_worker_command_serving(config_dir),
+        keep_foreign_leases=True,
     )

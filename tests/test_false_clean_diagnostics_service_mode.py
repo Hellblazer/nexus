@@ -38,6 +38,8 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+
+import nexus.daemon.aspect_worker_daemon as awd
 from click.testing import CliRunner
 
 from nexus.db.t2.http_aspect_queue import AspectTupleCounts
@@ -452,11 +454,43 @@ class TestAspectQueueIdleWarning:
         assert "idle" not in printed and "WARN" not in printed, printed
         assert exit_code is None
 
-    def test_pending_rows_with_claude_do_not_warn(
+    def test_pending_rows_with_claude_and_a_running_worker_do_not_warn(
         self, service_mode: None, monkeypatch,
     ) -> None:
+        monkeypatch.setattr(awd, "aspect_worker_running", lambda *a, **k: True)
         printed, exit_code = self._run(5, True, monkeypatch)
         assert "idle" not in printed and "WARN" not in printed, printed
+        assert exit_code is None
+
+    def test_pending_rows_with_claude_and_no_worker_warn_with_the_remedy(
+        self, service_mode: None, monkeypatch,
+    ) -> None:
+        """A worker leaves after an hour without an engine (nexus-wl9pk) and the
+        next store or index starts one; a backlog from before the outage sits
+        until then, so doctor says so and names the remedy."""
+        monkeypatch.setattr(awd, "aspect_worker_running", lambda *a, **k: False)
+        printed, exit_code = self._run(5, True, monkeypatch)
+        assert "aspect extraction is idle: 5 pending and no aspect worker is running" in printed, printed
+        assert "nx daemon aspect-worker start" in printed, printed
+        assert exit_code is None, "a warning, not a failure"
+        assert "FAIL:" not in printed, printed
+
+    def test_nothing_pending_and_no_worker_does_not_warn(
+        self, service_mode: None, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(awd, "aspect_worker_running", lambda *a, **k: False)
+        printed, exit_code = self._run(0, True, monkeypatch)
+        assert "idle" not in printed and "WARN" not in printed, printed
+
+    def test_a_lease_that_cannot_be_read_does_not_warn(
+        self, service_mode: None, monkeypatch,
+    ) -> None:
+        def _boom(*a, **k):
+            raise OSError("lease directory unreadable")
+
+        monkeypatch.setattr(awd, "aspect_worker_running", _boom)
+        printed, exit_code = self._run(5, True, monkeypatch)
+        assert "WARN" not in printed, printed
         assert exit_code is None
 
 

@@ -1164,9 +1164,9 @@ def _report_aspect_queue_service() -> None:
     # can run. Not applicable (silent) with nothing pending, so a virgin box
     # stays clean. The predicate is the daemon's own, imported at call time.
     if pending > 0:
-        from nexus.daemon.aspect_worker_daemon import _claude_available  # noqa: PLC0415 — deferred to keep CLI startup fast
+        import nexus.daemon.aspect_worker_daemon as _awd  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-        if not _claude_available():
+        if not _awd._claude_available():
             click.echo(
                 f"  WARN: aspect extraction is idle: {pending} pending, `claude` not on PATH "
                 "and no anthropic_api_key is set. Install Claude Code, or run "
@@ -1174,6 +1174,25 @@ def _report_aspect_queue_service() -> None:
                 "extracted once a worker can run.",
                 err=True,
             )
+        else:
+            # nexus-wl9pk: a worker exits after an hour without an engine, and
+            # only the next store or index starts another, so a backlog from
+            # before an outage sits with nobody draining it.
+            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+            try:
+                worker_up = _awd.aspect_worker_running(nexus_config_dir())
+            except Exception:  # noqa: BLE001 — an unreadable lease says nothing; stay quiet rather than guess
+                worker_up = True
+            if not worker_up:
+                click.echo(
+                    f"  WARN: aspect extraction is idle: {pending} pending and no aspect worker is "
+                    "running (a worker exits after an hour without the engine; the next store or "
+                    "index starts one). Start one now with `nx daemon aspect-worker start` "
+                    "(foreground; run it from a shell where `claude` works), or store or index "
+                    "anything.",
+                    err=True,
+                )
     if n_failed:
         if failed:
             click.echo(f"\nFailed rows (showing top {min(len(failed), 20)}):")

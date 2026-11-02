@@ -1083,6 +1083,13 @@ class ServiceRegistry:
 # for T1 any more.
 
 
+#: Consecutive heartbeat ticks that must find the lease directory gone before a
+#: supervisor built with ``stand_down_when_dir_gone`` sets ``orphaned``
+#: (nexus-wl9pk). A tick is one heartbeat interval, so a real removal is seen
+#: within two intervals and a single transient ENOENT is not an exit.
+DIR_GONE_TICKS: int = 2
+
+
 class ServiceSupervisor:
     """Owns one scope's heartbeat cadence and version-cycle.
 
@@ -1112,11 +1119,15 @@ class ServiceSupervisor:
         self._owner_token = owner_token or mint_owner_token()
         self._record: Optional[LeaseRecord] = None
         self.fenced: bool = False
-        #: nexus-wl9pk: opt-in. When True, a tick that finds the lease directory
-        #: gone sets ``orphaned`` and writes nothing (a heartbeat would
-        #: re-create the directory and the lease). The tier's run loop owns the
-        #: exit, exactly as it does for ``fenced``.
+        #: nexus-wl9pk: opt-in. When True, ``DIR_GONE_TICKS`` consecutive ticks
+        #: that find the lease directory gone set ``orphaned`` and write nothing
+        #: (a heartbeat would re-create the directory and the lease). One miss
+        #: is not enough: a remote or automounted filesystem can answer ENOENT
+        #: once, and a rename-swap of the directory shows it missing for a
+        #: moment. The tier's run loop owns the exit, exactly as it does for
+        #: ``fenced``.
         self._stand_down_when_dir_gone = stand_down_when_dir_gone
+        self._dir_gone_ticks = 0
         self.orphaned: bool = False
 
     @property
@@ -1146,15 +1157,22 @@ class ServiceSupervisor:
         nothing (nexus-wl9pk)."""
         if self._record is None or self.fenced or self.orphaned:
             return
-        if self._stand_down_when_dir_gone and not self._registry.dir_exists():
-            self.orphaned = True
-            _log.warning(
-                "service_supervisor_orphaned",
-                scope=self._scope_key,
-                owner_token=self._owner_token,
-                hint="the lease directory is gone; standing down instead of re-creating it",
-            )
-            return
+        if self._stand_down_when_dir_gone:
+            if self._registry.dir_exists():
+                self._dir_gone_ticks = 0
+            else:
+                # Stamp nothing on a miss either: a heartbeat would bring the
+                # directory back, and the next tick would then find it present.
+                self._dir_gone_ticks += 1
+                if self._dir_gone_ticks >= DIR_GONE_TICKS:
+                    self.orphaned = True
+                    _log.warning(
+                        "service_supervisor_orphaned",
+                        scope=self._scope_key,
+                        owner_token=self._owner_token,
+                        hint="the lease directory is gone; standing down instead of re-creating it",
+                    )
+                return
         try:
             self._record = self._registry.heartbeat(self._record)
         except StaleOwnerError:
@@ -2064,6 +2082,7 @@ def stop_tier_holders(
     platform: str | None = None,
     console_api: "win_console.WinConsoleApi | None" = None,
     command: Callable[[int], str] | None = None,
+    keep_foreign_leases: bool = False,
 ) -> HolderStopResult:
     """Stop every process a tier's lease records name, and drop the records.
 
@@ -2078,6 +2097,10 @@ def stop_tier_holders(
     ``payload[pid_key]`` (the storage service records ``supervisor_pid`` in its
     payload, the aspect worker ``pid`` in its endpoint). A record is relinquished unless its pid is
     still running our command afterwards, so a dead holder's lease goes too.
+    A pid that is alive but runs something else (``foreign``) is a recycled
+    pid, so by default its record goes as well; a caller whose stop must not
+    read as done while a live process stays unexplained passes
+    ``keep_foreign_leases=True`` and the record stays (nexus-wl9pk).
     Never raises for a missing or unreadable registry directory.
     """
     read_command = command or (lambda pid: process_command(pid, platform=platform))
@@ -2114,6 +2137,8 @@ def stop_tier_holders(
         else []
     )
     held = set(survivors) | set(unreadable)
+    if keep_foreign_leases:
+        held |= set(foreign)
     for record in records:
         if _pid_of(record) in held:
             continue

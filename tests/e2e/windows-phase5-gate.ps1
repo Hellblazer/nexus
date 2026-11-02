@@ -291,6 +291,15 @@ function Invoke-Nx([string]$label, [string[]]$nxArgs) {
     return @{ code = $code; out = $out; log = $log; secs = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
 }
 
+# The aspect worker a live session's store_put spawned outlives `service stop` by
+# design (RDR-224: A4 observes that it does). Stop it by its lease so the run
+# leaves no worker behind (nexus-wl9pk). Best effort: a published release that
+# predates the verb exits non-zero, which is not the gate's verdict. Never throws.
+function Stop-AspectWorker([string]$label) {
+    try { $null = Invoke-Nx "aspect-worker-stop-$label" @('daemon', 'aspect-worker', 'stop') }
+    catch { Write-Output "aspect-worker stop ($label) did not run: $($_.Exception.Message)" }
+}
+
 # The rows of nexus.chunks whose text holds $needle, counted by psql outside the
 # engine's process and HTTP path, as the local cluster's superuser: the role
 # pg_provision.windows_superuser_name derives from this account's SID, with the
@@ -641,6 +650,10 @@ function Claude-Ancestor {
     return $null
 }
 
+# The verify assertions run inside a try whose finally stops the aspect worker
+# (nexus-wl9pk), so no way out of them leaves the live session's worker behind.
+try {
+
 # V0: versions after the relaunch, and this process belongs to the live session.
 try {
     $ver = (Native { & $nx --version }).Trim()
@@ -799,6 +812,10 @@ Run-Assertion 4 'stop --with-pg leaves nothing (launcher stack); the next start 
     $new = @(Get-Content $pgLog | Select-Object -Skip $lineCount) -join "`n"
     if ($new -match 'was interrupted|not properly shut down|redo starts|automatic recovery') { Fail "next start's pg.log shows crash recovery" }
     if ($new -notmatch 'database system was shut down at') { Fail "next start's pg.log has no 'database system was shut down at' line" }
+    # The with-pg observation above needed the worker alive (it shows that a service
+    # stop leaves it). Now it is stopped, with the engine up again so its final
+    # reclaim sweep has one, and BEFORE the last service stop below (nexus-wl9pk).
+    Stop-AspectWorker 'A4'
     'next start (logon task): launcher-started again, clean shutdown recorded, no crash recovery'
 
     # The Minimum Viable Validation leg: a plain stop leaves PostgreSQL up.
@@ -837,11 +854,11 @@ Run-Assertion 5 'a plain claude -p returns, with the stack up and with no endpoi
     "stack up: $($script:claudeUp.why); no endpoint: $($script:claudeNoEndpoint.why); no credential file under .claude; $cm"
 }
 
-# The aspect worker a live session's store_put spawned outlives `service stop` by
-# design (A4 only observes it). Stop it by its lease, after every assertion, so
-# the run leaves no worker behind (nexus-wl9pk). Best effort: a release that
-# predates the verb exits non-zero, which is not the gate's verdict.
-try { $null = Invoke-Nx 'aspect-worker-stop' @('daemon', 'aspect-worker', 'stop') } catch { Write-Output "aspect-worker stop did not run: $($_.Exception.Message)" }
+} finally {
+    # Every way out of the verify assertions (a throw, an exit) leaves no worker
+    # behind (nexus-wl9pk). A4 already stopped it once, with the engine up.
+    Stop-AspectWorker 'final'
+}
 
 # -------------------------------------------------------------- verdict ----
 $results = $script:state['results']
