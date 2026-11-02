@@ -40,8 +40,15 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5020
+provisioned_tests = 5024
 tolerance_tests = 0
+# 5020 -> 5024 (nexus-mtheb.9 fix round 1, 2026-11-01): +4, tests/mcp/test_t1_handoff_flush.py 20 -> 24 (module marked
+# t2_tenant): a newer session's row replaces an older T2 entry (real T1 ts and T2 timestamp), two rows to one destination
+# keep the newest, a raise in the new scope's bookkeeping after the swap still leaves the flagged row in T2, and the flush
+# store's token heal leaves the new scope's env token alone. The two other files this round adds
+# (tests/test_flush_rows_to_t2.py, tests/mcp/test_open_t1_for_flush.py) are unmarked and provision nothing. Measured on chas
+# (lab-m, the guard in fail mode): those three files plus the handoff module ran 37 tests and provisioned 24, the handoff
+# module's own.
 # 5011 -> 5020 (nexus-mtheb.9, 2026-11-01): +9, tests/mcp/test_t1_handoff_flush.py 11 -> 20 (module marked t2_tenant): the
 # flush reads the session it is given, the handoff flush runs after the swap, a flush keeps a user-edited T2 entry (MCP flush
 # and SessionEnd hook). Each reads real flagged T1 rows and real T2 entries, so each needs the engine. Measured on chas

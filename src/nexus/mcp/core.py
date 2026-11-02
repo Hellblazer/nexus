@@ -1752,6 +1752,45 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # env vars just swapped above, then stays frozen there until the next
     # consumed marker -- never a per-call re-resolve.
     mcp_infra.reset_t1_for_release()
+
+    # nexus-mtheb.1 / .9: the old session's flagged rows go to T2 NOW, right
+    # after the swap and the singleton drop, before any of the new scope's
+    # bookkeeping below. The rows themselves strand under the old id on purpose
+    # (JDR-001), but a row the user flagged for T2 was promised to survive the
+    # session, and this tick is the only code that sees the old scope move: the
+    # SessionEnd hook for a /clear races the lease clear above and skips on
+    # lease divergence, and the owner-exit flush runs under the NEW id by then.
+    # The env is swapped, so a step below that raised (the mint bookkeeping,
+    # the refresh task, the borrow hook) would leave a re-tick seeing old ==
+    # new: it would consume the marker and the flagged rows would be lost for
+    # good. Hence the flush sits ahead of all of them, and a raise there can no
+    # longer skip it.
+    # The flush reads the session it is GIVEN (the old id and its own token,
+    # which nothing revokes at a handoff), not the T1 singleton, which is the
+    # new scope by now; that is what lets it sit here rather than before the
+    # swap. After the swap it also catches a row the old scope flagged in the
+    # window a flush before the swap spent awaiting its worker thread. Placed
+    # after the successful re-lease so a mint that is retried on a backoff
+    # does not repeat it. Idempotent (an identical entry is not rewritten) and
+    # time-ordered (an entry updated after the row was written is kept), so the
+    # exit flush of a later session over the same row is a no-op. Never raises
+    # and never blocks the handoff: bounded like the teardown flush, and run
+    # off the event loop because it joins a worker thread.
+    flushed = 0
+    if old_session_id is not None:
+        # The function never raises from its worker, but Thread.start() and
+        # the structlog import sit outside the worker's own try, and the marker
+        # is claimed and not yet consumed here: a raise would lose the handoff.
+        try:
+            flushed = await asyncio.to_thread(
+                _flush_flagged_t1_entries, old_session_id,
+                session_token=flush_token, op="t1_handoff_flush",
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed flush must never strand the handoff; surfaced via log.warning
+            log.warning(
+                "t1_handoff_flush_raised", session_id=old_session_id, error=str(exc),
+            )
+
     try:
         _start_channel_waiter()  # nexus-kdxyv: the new id's waiter, see above
     except Exception as exc:  # noqa: BLE001 — `_start_channel_waiter` already swallows its own failures; this is the same never-strand-the-handoff boundary as above
@@ -1775,37 +1814,6 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         # nexus-k9sec: a handoff that borrowed a live sibling's lease is a
         # borrower of the NEW session, with the same recovery as at startup.
         _note_t1_borrowed(new_session_id, config_dir, asyncio.get_running_loop())
-
-    # nexus-mtheb.1 / .9: the old session's flagged rows go to T2 NOW, after
-    # the swap. The rows themselves strand under the old id on purpose
-    # (JDR-001), but a row the user flagged for T2 was promised to survive the
-    # session, and this tick is the only code that sees the old scope move: the
-    # SessionEnd hook for a /clear races the lease clear above and skips on
-    # lease divergence, and the owner-exit flush runs under the NEW id by then.
-    # The flush reads the session it is GIVEN (the old id and its own token,
-    # which nothing revokes at a handoff), not the T1 singleton, which is the
-    # new scope by now; that is what lets it sit here rather than before the
-    # swap. After the swap it also catches a row the old scope flagged in the
-    # window a flush before the swap spent awaiting its worker thread. Placed
-    # after the successful re-lease so a mint that is retried on a backoff
-    # does not repeat it. Idempotent and create-if-absent, so the exit flush of
-    # a later session over the same row is a no-op. Never raises and never
-    # blocks the handoff: bounded like the teardown flush, and run off the
-    # event loop because it joins a worker thread.
-    flushed = 0
-    if old_session_id is not None:
-        # The function never raises from its worker, but Thread.start() and
-        # the structlog import sit outside the worker's own try, and the marker
-        # is claimed and not yet consumed here: a raise would lose the handoff.
-        try:
-            flushed = await asyncio.to_thread(
-                _flush_flagged_t1_entries, old_session_id,
-                session_token=flush_token, op="t1_handoff_flush",
-            )
-        except Exception as exc:  # noqa: BLE001 — a failed flush must never strand the handoff; surfaced via log.warning
-            log.warning(
-                "t1_handoff_flush_raised", session_id=old_session_id, error=str(exc),
-            )
 
     consume_claimed_marker(claimed_path)
     log.info(
@@ -2451,7 +2459,9 @@ def _t1_session_shutdown() -> None:
     # measured (6 of 6 session_end events, 2026-09-27/28): by the time it ran,
     # the lease below was unlinked and the token revoked, so the rows were
     # unreachable. The owner drains first; the SessionEnd flush stays as a
-    # best-effort second chance (T2 puts upsert, so running both is safe).
+    # best-effort second chance (running both is safe: a flush writes a row
+    # only when no T2 entry exists or the row is newer than the entry, so the
+    # second flush of the same row is a no-op).
     _flush_flagged_t1_entries(session_id)
 
     minted_here = _OWNED_T1_MINTED.pop(session_id, None)
@@ -2561,7 +2571,12 @@ def _open_t1_for_flush(session_id: str, session_token: str | None = None) -> Any
             f"no token for T1 session {session_id!r} (none given, none in the env "
             "for it, no fresh lease): its flagged rows cannot be read"
         )
-    return HttpScratchStore(session_id=session_id, _session_token=token)
+    # export_adopted_token=False: a 401 on a dead *session_token* makes this
+    # store adopt the session's fresh lease token, and the default would write
+    # it to NX_T1_SESSION. After a handoff swap that env names the NEW scope.
+    return HttpScratchStore(
+        session_id=session_id, _session_token=token, export_adopted_token=False,
+    )
 
 
 def _flush_flagged_t1_entries(
@@ -2577,9 +2592,11 @@ def _flush_flagged_t1_entries(
     store is built for *session_id* with *session_token* (see
     :func:`_open_t1_for_flush` for the fallbacks), so the flush is right
     whichever scope the singleton holds when it runs, which is what lets the
-    handoff tick flush after it has swapped scopes. A flush is create-if-absent
-    (:func:`nexus.mcp_infra.flush_rows_to_t2`): a T2 entry that already exists
-    with different content is the user's and is kept, so the count excludes it.
+    handoff tick flush after it has swapped scopes. A flush is time-ordered
+    (:func:`nexus.mcp_infra.flush_rows_to_t2`): a row is written when no T2 entry
+    exists or the row is newer than the entry's last update; an entry updated
+    after the row was written (a user edit) is kept, logged at warning and
+    counted as ``kept`` in the summary event, and the returned count excludes it.
 
     Only the session's OWNER and the SessionEnd hook flush. A borrower MCP's
     exit flushes nothing, by design: a borrower exit is not a session end (the
@@ -2615,12 +2632,20 @@ def _flush_flagged_t1_entries(
                 outcome["flushed"] = 0
                 return
 
-            outcome["flushed"] = t2_index_write(
-                lambda db: flush_rows_to_t2(db, entries, op=op, log=_log), op=op,
-            )
+            # The write callback still returns the flushed count alone (the
+            # shape every caller and test stub of t2_index_write relies on);
+            # the kept count rides out beside it for the summary line.
+            kept: list[int] = []
+
+            def _write(db) -> int:
+                counts = flush_rows_to_t2(db, entries, op=op, log=_log)
+                kept.append(counts.kept)
+                return counts.flushed
+
+            outcome["flushed"] = t2_index_write(_write, op=op)
             _log.info(
                 "t1_teardown_flush_complete", session_id=session_id, op=op,
-                flushed=outcome["flushed"], pending=outcome["pending"],
+                flushed=outcome["flushed"], kept=sum(kept), pending=outcome["pending"],
             )
         except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
             outcome["error"] = str(exc)

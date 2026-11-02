@@ -188,8 +188,9 @@ _T1_TOP_LINES: list[str] = [
     "interim findings in T1 under the round tags you give them; read their entries "
     "before acting on a hand-back.",
     "T1 survives compaction; a `/clear`, `/resume` or fresh restart starts a new scope, "
-    "rows are swept 24 h after they were written, and flagged entries land in T2 at "
-    "session end. A `claude -p` child has its own T1 unless started with `share_t1=True`.",
+    "an idle session is swept after 24 h, and flagged entries land in T2 at session end "
+    "and on a move to a new id. A `claude -p` child has its own T1 unless started with "
+    "`share_t1=True`.",
     "",
 ]
 

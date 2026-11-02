@@ -51,8 +51,9 @@ def test_every_agent_type_gets_the_t1_contract_first(agent_type, monkeypatch) ->
 def test_the_contract_states_what_t1_survives_and_asks_for_the_role_tag(monkeypatch) -> None:
     ctx = _ctx("conexus:developer", monkeypatch)
     assert "T1 survives compaction; a /clear, /resume or fresh restart starts a new scope" in ctx
-    assert "swept 24 h after they were written" in ctx
-    assert "flagged entries land in T2 at session end" in ctx
+    assert "an idle session is swept after 24 h" in ctx
+    assert "swept 24 h after they were written" not in ctx
+    assert "flagged entries land in T2 at session end and on a move to a new id" in ctx
     assert "survives resume" not in ctx
     assert 'agent="<your role>"' in ctx
 
@@ -189,7 +190,9 @@ def test_the_session_start_context_states_survival_and_the_claude_p_caveat(monke
     monkeypatch.setattr(session_context, "run_command", lambda *_a, **_k: None)
     out = session_context.run(None).stdout or ""
     assert "T1 survives compaction; a `/clear`, `/resume` or fresh restart starts a new scope" in out
-    assert "swept 24 h after they were written" in out
+    assert "an idle session is swept after 24 h" in out
+    assert "swept 24 h after they were written" not in out
+    assert "flagged entries land in T2 at session end and on a move to a new id" in out
     assert "survives resume" not in out
     assert "A `claude -p` child has its own T1 unless started with `share_t1=True`" in out
 

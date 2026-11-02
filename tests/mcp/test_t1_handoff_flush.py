@@ -434,6 +434,10 @@ def test_a_flush_never_overwrites_a_user_edited_t2_entry(handoff, flush_log) -> 
     got = mcp_infra.t2_index_write(lambda db: db.memory.get(project=project, title="note"))
     assert got is not None and got["content"] == "what the user made of it"
     assert flush_log.ops("t1_flush_kept_existing_t2_entry") == ["t1_handoff_flush"]
+    # A kept row is a warning, not an info line, and the summary event counts it.
+    assert [lvl for lvl, e, _ in flush_log.events if e == "t1_flush_kept_existing_t2_entry"] == ["warning"]
+    summary = [kw for _, e, kw in flush_log.events if e == "t1_teardown_flush_complete"][-1]
+    assert (summary["flushed"], summary["kept"]) == (0, 1)
 
 
 @pytest.mark.asyncio
@@ -495,7 +499,106 @@ def test_the_session_end_hook_flush_never_overwrites_a_user_edited_t2_entry(hand
     got = mcp_infra.t2_index_write(lambda db: db.memory.get(project=project, title="note"))
     assert got is not None and got["content"] == "edited by the user"
     assert _t2_titles(project) == ["fresh", "note"]  # an absent entry is still created
-    assert "Flushed 1 " in out, out
+    assert "Flushed 1 " in out and "Kept 1 existing T2 entries" in out, out
+
+
+def test_a_newer_row_replaces_an_older_t2_entry_and_the_engines_stamps_are_the_ones_read(handoff) -> None:
+    """A later session flagging an update to the same destination: the T2 entry
+    is older than the row, so the row is written. The row's real T1 ``ts`` and
+    the entry's real T2 ``timestamp`` are what the comparison reads; if either
+    format stopped parsing, the entry would be kept and this would fail."""
+    old_id, _ = handoff
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    mcp_infra.t2_index_write(
+        lambda db: db.memory.import_entry(
+            project=project, title="note", content="an earlier session's note",
+            timestamp="2020-01-01T00:00:00Z",
+        ),
+    )
+    t1, _ = mcp_infra.get_t1()
+    t1.put("this session's update", persist=True, flush_project=project, flush_title="note")
+    row = next(e for e in t1.flagged_entries() if e["flush_title"] == "note")
+
+    assert core._flush_flagged_t1_entries(old_id, op="t1_handoff_flush") == 1
+
+    got = mcp_infra.t2_index_write(lambda db: db.memory.get(project=project, title="note"))
+    assert got is not None and got["content"] == "this session's update"
+    row_ts = mcp_infra._parse_utc(row["ts"])
+    entry_ts = mcp_infra._parse_utc(got["timestamp"], "%Y-%m-%dT%H:%M:%SZ")
+    assert row_ts is not None and entry_ts is not None, (row["ts"], got["timestamp"])
+    assert entry_ts >= row_ts.replace(microsecond=0)  # the flush itself stamped it after the row
+
+
+def test_two_flagged_rows_to_one_destination_leave_the_newest_in_t2(handoff, flush_log) -> None:
+    old_id, _ = handoff
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    t1, _ = mcp_infra.get_t1()
+    t1.put("the first row", persist=True, flush_project=project, flush_title="note")
+    t1.put("the second row", persist=True, flush_project=project, flush_title="note")
+
+    assert core._flush_flagged_t1_entries(old_id, op="t1_handoff_flush") == 1  # one destination
+
+    got = mcp_infra.t2_index_write(lambda db: db.memory.get(project=project, title="note"))
+    assert got is not None and got["content"] == "the second row"
+    assert flush_log.ops("t1_flush_superseded_row") == ["t1_handoff_flush"]
+    assert flush_log.ops("t1_flush_kept_existing_t2_entry") == []
+
+
+# ── nexus-mtheb.9 fix round 1: the flush survives a raise after the swap ─────
+
+
+@pytest.mark.asyncio
+async def test_a_raise_in_the_new_scopes_bookkeeping_does_not_lose_the_flagged_rows(
+    handoff, monkeypatch,
+) -> None:
+    """The env is swapped before the new scope's mint bookkeeping runs. If that
+    raised ahead of the flush, a re-tick would see old == new and consume the
+    marker, and the rows flagged for T2 would be gone. The flush runs first."""
+    old_id, new_id = handoff
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    t1, _ = mcp_infra.get_t1()
+    t1.put("flagged before the raise", persist=True, flush_project=project, flush_title="kept")
+
+    def _raises(*a, **kw):
+        raise RuntimeError("bookkeeping failed after the swap")
+
+    monkeypatch.setattr(core, "_note_t1_minted", _raises)
+
+    with pytest.raises(RuntimeError, match="bookkeeping failed after the swap"):
+        await core._t1_handoff_tick(_MCP_PID, MagicMock())
+
+    assert os.environ["NX_T1_SESSION_ID"] == new_id  # the swap had happened
+    assert _t2_titles(project) == ["kept"]  # and the row is in T2 anyway
+
+
+# ── nexus-mtheb.9 fix round 1: the flush store never writes the env token ────
+
+
+@pytest.mark.asyncio
+async def test_a_flush_that_heals_its_own_token_leaves_the_new_scopes_env_token_alone(
+    handoff,
+) -> None:
+    """A borrower tick: the env still carries a token for the old session that
+    the engine no longer resolves, and the old session's lease holds the live
+    one. The flush's store 401s, adopts the lease token and reads the rows; the
+    adoption must stay on that store, because by then NX_T1_SESSION names the
+    NEW scope's token."""
+    old_id, new_id = handoff
+    live_old_token = os.environ["NX_T1_SESSION"]
+    project = f"nexus_test_mtheb9_{uuid.uuid4().hex[:6]}"
+    t1, _ = mcp_infra.get_t1()
+    t1.put("read through a healed token", persist=True, flush_project=project, flush_title="healed")
+    from nexus.db.t1 import publish_t1_session_lease  # noqa: PLC0415
+
+    publish_t1_session_lease(old_id, live_old_token, nexus_config_dir())
+    os.environ["NX_T1_SESSION"] = "a-dead-token-for-the-old-session"  # the fixture's monkeypatch restores it
+    log = MagicMock()
+
+    await core._t1_handoff_tick(_MCP_PID, log)
+
+    assert _t2_titles(project) == ["healed"]  # the store did heal, or nothing would have been read
+    assert os.environ["NX_T1_SESSION_ID"] == new_id
+    assert os.environ["NX_T1_SESSION"] == f"tok-{new_id}"  # not the old session's lease token
 
 
 # ── MCP scratch: a row can be flagged when it is written ─────────────────────

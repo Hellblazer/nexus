@@ -179,8 +179,8 @@ _NX_T1 = (
     "(gate records stay mandatory); never overwrite a T2 record it did not give you. "
     "T3 store_put only for validated, reusable knowledge.\n"
     "T1 survives compaction; a /clear, /resume or fresh restart starts a new scope, "
-    "rows are swept 24 h after they were written, and flagged entries land in T2 at "
-    "session end.\n\n"
+    "an idle session is swept after 24 h, and flagged entries land in T2 at session end "
+    "and on a move to a new id.\n\n"
 )
 
 _NX_TIERS = (
