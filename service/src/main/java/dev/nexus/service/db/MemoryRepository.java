@@ -943,6 +943,100 @@ public final class MemoryRepository {
     }
 
     /**
+     * RDR-238 Phase 1 Step 1 (bead nexus-qo7ie.6): what {@link #replaceMemory} returns. {@code id}
+     * is the written row; {@code replacedTitle} and {@code replacedContent} are the deleted row's
+     * title and the content it held, the writer's only record of what was removed.
+     */
+    public record ReplaceResult(long id, String replacedTitle, String replacedContent) {}
+
+    /**
+     * RDR-238 Phase 1 Step 1 (bead nexus-qo7ie.6): write the new row and delete the row whose title is
+     * {@code replacesTitle}, in ONE {@link TenantScope#withTenant} transaction, so there is no moment
+     * at which both rows, or neither, are visible. The new row goes through {@link #doUpsert} exactly
+     * as {@link #upsert} writes it (an incumbent at the new title is overwritten, as a plain put does).
+     *
+     * <p>{@code replacesTitle} is an exact title in the put's own tenant and project. It is never an
+     * id: a numeric title such as {@code 238} is a title, and a title that exists only in another
+     * project (or tenant) is missing.
+     *
+     * <p>REFUSES, writing nothing and deleting nothing (the exception rolls the transaction back), and
+     * names the target and the reason in the message. The checks run in this order, so a row that
+     * fails several is reported once, for the first:
+     * <ol>
+     *   <li>{@code replacesTitle} blank, or equal to {@code title} (the row being written):
+     *       {@link IllegalArgumentException}.</li>
+     *   <li>No row has that title in this tenant and project: {@link IllegalStateException}.</li>
+     *   <li>The target is quarantined: {@link IllegalStateException}. The lookup deliberately omits
+     *       the read predicate (as {@link #mergeMemories} does) and refuses explicitly; with the
+     *       predicate a quarantined target would read as "missing" and hide why.</li>
+     *   <li>The target carries a tag in {@link AuditTags#AUDIT_TAGS}, matched as a whole tag:
+     *       {@link IllegalStateException}.</li>
+     *   <li>The target's title matches a pattern in {@link AuditTags#TITLE_PATTERN_SOURCES} (the
+     *       backstop for older audit rows that carry no tag), even with clean tags:
+     *       {@link IllegalStateException}.</li>
+     * </ol>
+     * The target row is locked {@code FOR UPDATE}, so two replaces of one target cannot both succeed:
+     * the second finds it gone and is refused as missing.
+     *
+     * <p>This method deletes the row only. It does not cascade to taxonomy assignments for the replaced
+     * title; the caller does, as {@code nx memory delete} does.
+     */
+    public ReplaceResult replaceMemory(String tenant,
+                                       String project,
+                                       String title,
+                                       String content,
+                                       String tags,
+                                       String session,
+                                       String agent,
+                                       Integer ttlDays,
+                                       String replacesTitle) {
+        if (replacesTitle == null || replacesTitle.isBlank()) {
+            throw new IllegalArgumentException("replaces refused: the target title is blank (nothing written)");
+        }
+        if (replacesTitle.equals(title)) {
+            throw new IllegalArgumentException(
+                "replaces refused: '" + replacesTitle + "' is the title being written; a row cannot replace "
+                + "itself (nothing written)");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            // No NOT_QUARANTINED predicate: a quarantined target must be refused by name, not read as missing.
+            MemoryRecord target = ctx.selectFrom(MEMORY)
+                                     .where(MEMORY.PROJECT.eq(project)
+                                         .and(MEMORY.TITLE.eq(replacesTitle)))
+                                     .forUpdate()
+                                     .fetchOne();
+            if (target == null) {
+                throw new IllegalStateException(
+                    "replaces refused: no row titled '" + replacesTitle + "' in project '" + project
+                    + "' (nothing written)");
+            }
+            if (target.getQuarantinedAt() != null) {
+                throw new IllegalStateException(
+                    "replaces refused: row '" + replacesTitle + "' is quarantined; restore it first "
+                    + "(nothing written)");
+            }
+            List<String> auditTags = AuditTags.auditTagsOf(target.getTags());
+            if (!auditTags.isEmpty()) {
+                throw new IllegalStateException(
+                    "replaces refused: row '" + replacesTitle + "' carries audit tag(s) " + auditTags
+                    + "; audit records are not replaced (nothing written)");
+            }
+            Optional<String> pattern = AuditTags.titlePatternOf(target.getTitle());
+            if (pattern.isPresent()) {
+                throw new IllegalStateException(
+                    "replaces refused: row '" + replacesTitle + "' looks like an audit record: its title "
+                    + "matches the audit-record title pattern " + pattern.get() + " (nothing written)");
+            }
+            String replacedContent = target.getContent();
+            ctx.deleteFrom(MEMORY).where(MEMORY.ID.eq(target.getId())).execute();
+            long id = doUpsert(ctx, tenant, project, title, content, tags, session, agent, ttlDays);
+            log.info("event=memory_replace tenant={} project={} replaced_title={} replaced_id={} id={} title={}",
+                     tenant, project, replacesTitle, target.getId(), id, title);
+            return new ReplaceResult(id, replacesTitle, replacedContent);
+        });
+    }
+
+    /**
      * Jaccard-overlap scan + conditional merge or insert, executed atomically in one
      * {@link TenantScope#withTenant} transaction.
      *

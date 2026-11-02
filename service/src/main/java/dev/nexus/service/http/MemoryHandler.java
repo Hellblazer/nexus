@@ -186,8 +186,17 @@ public final class MemoryHandler implements HttpHandler {
 
     /**
      * POST /v1/memory/put
-     * Request: {"project","title","content","tags","ttl","agent","session"}
-     * Response 200: {"id": <long>}
+     * Request: {"project","title","content","tags","ttl","agent","session","replaces"(opt)}
+     * Response 200: {"id": <long>}; with {@code replaces}:
+     * {"id": <long>, "replaced_title": <string>, "replaced_content": <string>}
+     *
+     * <p>RDR-238 (bead nexus-qo7ie.6): {@code replaces} is the exact title of a row in the put's own
+     * tenant and project (never an id). The engine deletes that row and writes the new one in one
+     * transaction and echoes the deleted row's title and content, the writer's only record of what was
+     * removed. Absent, null or blank means a plain put, with the response shape above unchanged.
+     * Refused with nothing written or deleted ({@link MemoryRepository#replaceMemory}): 409 for a
+     * missing, quarantined or audit-record target (audit tag or audit-record title), 400 when the
+     * target is the row being written. The error names the target and the reason.
      */
     private void handlePut(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -200,6 +209,17 @@ public final class MemoryHandler implements HttpHandler {
         String session = optStringOrNull(body, "session");
         String agent   = optStringOrNull(body, "agent");
         Integer ttl    = requirePositiveOrNullTtl(optInt(body, "ttl"));
+
+        String replaces = optStringOrNull(body, "replaces");
+        if (replaces != null) {
+            var res = repo.replaceMemory(tenant, project, title, content, tags, session, agent, ttl, replaces);
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("id", res.id());
+            resp.put("replaced_title", res.replacedTitle());
+            resp.put("replaced_content", res.replacedContent());
+            HttpUtil.send(ex, 200, json(resp));
+            return;
+        }
 
         long id = repo.upsert(tenant, project, title, content, tags, session, agent, ttl);
         HttpUtil.send(ex, 200, json(Map.of("id", id)));
