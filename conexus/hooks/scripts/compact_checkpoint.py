@@ -977,7 +977,11 @@ def main(argv: list[str] | None = None) -> int:
             _log("INFO", f"{mode}: the payload carries agent_id (a hook fired inside a subagent or "
                          "teammate); nothing done, so the parent's checkpoint and restore are not touched")
             return 0
-        _probe(mode, payload, handler(payload) or "done")
+        outcome = handler(payload) or "done"
+        # inject runs on every SessionStart and is a no-op unless the source is compact; a no-op leaves
+        # no probe line, so a plain start writes nothing (tests/hooks/test_nx_launch.py, no-CLI pin).
+        if mode != "inject" or payload.get("source") == "compact":
+            _probe(mode, payload, outcome)
     except BaseException as exc:  # noqa: BLE001 -- the no-veto contract is the reason
         _log("ERROR", f"{mode}: unexpected {type(exc).__name__}: {exc}")
     return 0

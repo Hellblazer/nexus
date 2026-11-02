@@ -1214,6 +1214,16 @@ class TestProbe:
         assert "outcome=appended summary" in post
         assert "SECRET-SUMMARY-TEXT" not in env.hook_log.read_text(encoding="utf-8"), "values are never logged"
 
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear", None])
+    def test_inject_on_a_non_compact_start_writes_nothing(self, mod, env, monkeypatch, source) -> None:
+        """inject is a no-op unless SessionStart's source is compact; a no-op writes no probe line and so no
+        hook.log (a session with no CLI writes nothing; tests/hooks/test_nx_launch.py pins it end to end)."""
+        payload = {"session_id": SID, "hook_event_name": "SessionStart", "cwd": "/w"}
+        if source is not None:
+            payload["source"] = source
+        run(mod, monkeypatch, "inject", payload)
+        assert not env.hook_log.exists() or not self.lines(env), env.hook_log.read_text(encoding="utf-8")
+
     def test_the_outcome_names_a_skip_and_a_stub(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "orphan"})
