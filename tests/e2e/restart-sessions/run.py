@@ -36,9 +36,12 @@ Shared by every scenario:
 
 - a scratch HOME (onboarding done, the work folder trusted) and a scratch nexus config dir
   holding a copy of the operator's ``config.yml``, so the sessions' MCP servers and ``nx``
-  reach the operator's own service. The copy and the data-token leases minted from it are
-  deleted on every exit the harness sees (pass, fail, SIGTERM, SIGHUP; not SIGKILL, and not
-  under ``--keep``), and the sessions' leftover tool processes are ended by checked pid. The
+  reach the operator's own service. The copy, the data-token leases minted from it and the
+  sessions' T1 session leases are deleted on every exit the harness sees (pass, fail, SIGTERM,
+  SIGHUP, SIGINT; not SIGKILL, and not under ``--keep``); once cleanup starts it ignores those
+  signals. Every process below the private tmux server is recorded while the run lasts, so an
+  exited session's Serena and SessionEnd hooks, reparented with no HOME in their argv, are
+  ended by checked pid with the other leftovers. Sessions run with ``NX_UPGRADE_AUTO=0``. The
   sessions write to that service as the operator would: the restart mail expires with its
   TTL, and nothing here asks a session to write anything permanent;
 - the conexus and sn plugins from a git marketplace named nexus-plugins, served from the
@@ -56,7 +59,9 @@ Shared by every scenario:
   ``nx`` on PATH reports X once that ran (anything else goes to the real nx); a ``uv`` on
   PATH records every ``cache`` command and refuses ``tool install``, ``upgrade`` and
   ``uninstall`` (anything else goes to the real uv). X is the installed version's next
-  patch that is not a tag in this checkout. The marketplace and plugin updates are the real
+  patch that is not a tag in this checkout. The ``nx`` stand-in also records and refuses
+  ``nx upgrade`` (the version-lockstep hook's action would upgrade the operator's install).
+  The marketplace and plugin updates are the real
   claude CLI's.
 
 Expected in ``roll``: alpha, draft and paste are asked by mail and nochan by typing; all four
@@ -108,6 +113,7 @@ Each sandbox HOME gets its own record for the script under test, so every roll p
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import http.server
 import importlib.machinery
@@ -202,6 +208,114 @@ SPECS = {
 #: raises SerenaConfigError without it, and the session's Serena MCP then fails to start.
 SERENA_CONFIG = ("projects: []\nweb_dashboard: false\nweb_dashboard_open_on_launch: false\n"
                  "gui_log_window: false\n")
+
+
+#: The signals main() turns into an exit. Once cleanup starts it ignores them: a second ^C or a
+#: terminal closing mid-cleanup must not leave the tmux server (it holds the token) or the config copy.
+CLEANUP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+@contextlib.contextmanager
+def signals_ignored():
+    """Ignore CLEANUP_SIGNALS inside the block; restore the handlers that were set after it."""
+    saved = {s: signal.getsignal(s) for s in CLEANUP_SIGNALS}
+    try:
+        for s in CLEANUP_SIGNALS:
+            signal.signal(s, signal.SIG_IGN)
+        yield
+    finally:
+        for s, h in saved.items():
+            signal.signal(s, h)
+
+
+def tree_of(rows: str, root: int) -> list[tuple[int, str]]:
+    """Every process below *root* in ``ps -o pid=,ppid=,args=`` output, as (pid, argv)."""
+    kids: dict[int, list[tuple[int, str]]] = {}
+    for row in rows.splitlines():
+        parts = row.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            kids.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2]))
+    out, todo = [], [root]
+    while todo:
+        for child in kids.get(todo.pop(), []):
+            out.append(child)
+            todo.append(child[0])
+    return out
+
+
+class ProcWatch:
+    """Record every process below the given roots, polled while the sandbox runs.
+
+    A session that exits mid-roll leaves its Serena MCP server and SessionEnd hooks reparented
+    to init, with argv that names nothing of the sandbox: the pre-kill descendant walk no longer
+    reaches them and the HOME sweep cannot see them. A record taken while the tree was whole
+    can; cleanup ends each recorded process still running the same argv."""
+
+    def __init__(self, roots, interval: float = 2.0) -> None:
+        self._roots, self._interval = roots, interval
+        self._seen: dict[int, str] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="sandbox-proc-watch", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=10)
+
+    def poll(self) -> None:
+        roots = [r for r in self._roots() if r > 1]
+        if not roots:
+            return
+        rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True).stdout
+        found = [c for r in roots for c in tree_of(rows, r) if c[0] > 1]
+        with self._lock:
+            for pid, args in found:
+                self._seen[pid] = args  # a reused pid takes its newest argv; _end checks argv before it signals
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.poll()
+            except Exception:  # noqa: BLE001,S110 -- a missed poll is covered by the next and by the HOME sweep
+                pass
+            self._stop.wait(self._interval)
+
+    def seen(self) -> list[tuple[int, str]]:
+        with self._lock:
+            return sorted(self._seen.items())
+
+
+#: Files in the sandbox's nexus config dir that hold a credential: the config copy, the data-token
+#: leases minted from it, and the T1 session leases (each carries a T1 token; a kept HOME held them).
+CREDENTIAL_PREFIXES = ("data_token_lease.", "t1_session_lease.")
+
+
+def credentials_left(config_dir: Path) -> list[str]:
+    return sorted(f.name for f in config_dir.glob("*")
+                  if f.name == "config.yml" or f.name.startswith(CREDENTIAL_PREFIXES))
+
+
+#: The exit code the sandbox's nx and uv shims refuse with.
+REFUSED = 97
+
+
+def nx_shim_text(real_nx: str, marker: Path, refused_log: Path) -> str:
+    """The sandbox's nx: after the stand-in install, ``--version`` reports the installed release;
+    ``nx upgrade`` (the version-lockstep hook's action, an ``--auto`` spawn) is recorded and
+    refused, since it would upgrade the operator's install; anything else runs the real nx."""
+    m, log = shlex.quote(str(marker)), shlex.quote(str(refused_log))
+    return ("#!/bin/sh\n# restart sandbox: nx --version reports the stand-in install; nx upgrade is refused\n"
+            f'if [ "$1" = "--version" ] && [ -f {m} ]; then echo "nx, version $(cat {m})"; exit 0; fi\n'
+            'for a in "$@"; do case "$a" in\n'
+            "  -*) ;;\n"
+            f'  upgrade) echo "$*" >> {log}; exit {REFUSED} ;;\n'
+            "  *) break ;;\n"
+            "esac; done\n"
+            f"exec {shlex.quote(real_nx)} \"$@\"\n")
 
 
 def write_serena_config(home: Path) -> Path:
@@ -396,7 +510,10 @@ class Sandbox:
                 self.env.setdefault(k, str(v))
         self.env.update(HOME=str(home), NX_NO_TELEMETRY="1", NX_RESTART_CLAUDE=claude, TERM="xterm-256color",
                         CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="1", CLAUDE_CODE_DISABLE_AUTO_MEMORY="1",
-                        DISABLE_AUTOUPDATER="1")  # the dim ghost prompt that broke 7.92.0
+                        DISABLE_AUTOUPDATER="1",  # the dim ghost prompt that broke 7.92.0
+                        # nexus-75w5d's kill switch: a session's SessionStart must not spawn a detached
+                        # nx upgrade --auto, which would act on the operator's install and outlive the run
+                        NX_UPGRADE_AUTO="0")
         # --nx installs a release: the sandbox's own stand-ins (setup_release) take its place.
         self.market = home / "market"
         self.cache = home / ".claude" / "plugins" / "cache" / MARKET
@@ -407,6 +524,7 @@ class Sandbox:
         self.real_uv = shutil.which("uv") or ""
         self.uv_cleans = home / "uv-cache-clean.log"
         self.uv_refused = home / "uv-refused.log"
+        self.nx_refused = home / "nx-refused.log"
         self.reinstall_argv = home / "reinstall-argv.txt"
         self.holds = {name: home / f"{name}.hold" for name in spec.busy}
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}"
@@ -416,6 +534,8 @@ class Sandbox:
         self.floor = self.behind = ""
         #: Each session as it was before the roll (boot fills it; cleanup reads its session ids).
         self.before: dict[str, dict] = {}
+        #: Every process below the private tmux server, recorded while it runs (setup starts it).
+        self.watch = ProcWatch(self.server_pids)
 
     # tmux on the private server only
     def tmux(self, *args: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -455,6 +575,12 @@ class Sandbox:
         os.chmod(self.nexus_config / "config.yml", 0o600)
         self.tmux("new-session", "-d", "-s", "rs", "-x", "220", "-y", "50", "-n", "ctl", "-c", str(self.work),
                   "bash --noprofile --norc", check=True)
+        self.watch.start()
+
+    def server_pids(self) -> list[int]:
+        """The private tmux server's pid ([] when it is not running): every session runs below it."""
+        out = self.tmux("display-message", "-p", "#{pid}").stdout.strip()
+        return [int(out)] if out.isdigit() else []
 
     def claude_cli(self, *args: str) -> None:
         r = subprocess.run([self.claude, *args], capture_output=True, text=True, env=self.env)
@@ -530,11 +656,7 @@ class Sandbox:
             raise RuntimeError("nx is not on PATH")
         self.bin.mkdir()
         shim = self.bin / "nx"
-        marker = shlex.quote(str(self.installed_marker))
-        shim.write_text(
-            "#!/bin/sh\n# restart sandbox: after the stand-in install, --version reports the installed release\n"
-            f'if [ "$1" = "--version" ] && [ -f {marker} ]; then echo "nx, version $(cat {marker})"; exit 0; fi\n'
-            f"exec {shlex.quote(self.real_nx)} \"$@\"\n", encoding="utf-8")
+        shim.write_text(nx_shim_text(self.real_nx, self.installed_marker, self.nx_refused), encoding="utf-8")
         shim.chmod(0o755)
         # The script cleans uv's cached conexus before installing; in the detached child that runs
         # with the tmux server's environment, whose UV_CACHE_DIR is the operator's. Record it instead.
@@ -583,17 +705,7 @@ class Sandbox:
     def descendants(pid: int) -> list[tuple[int, str]]:
         """Every process below *pid*, as (pid, argv)."""
         rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True).stdout
-        kids: dict[int, list[tuple[int, str]]] = {}
-        for row in rows.splitlines():
-            parts = row.split(None, 2)
-            if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
-                kids.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2]))
-        out, todo = [], [pid]
-        while todo:
-            for child in kids.get(todo.pop(), []):
-                out.append(child)
-                todo.append(child[0])
-        return out
+        return tree_of(rows, pid)
 
     def _plugin_roots(self, pid: int) -> set[str]:
         roots = "|".join(re.escape(r) for r in {str(self.cache), os.path.realpath(self.cache)})
@@ -609,10 +721,10 @@ class Sandbox:
         self.tmux("send-keys", "-t", f"rs:{name}", "Enter", check=True)
 
     def delete_config(self) -> None:
-        """Remove the copied nexus config and the data-token leases minted from it (credentials)."""
-        (self.nexus_config / "config.yml").unlink(missing_ok=True)
-        for f in self.nexus_config.glob("data_token_lease.*"):
-            f.unlink(missing_ok=True)
+        """Remove the copied nexus config, the data-token leases minted from it and the sessions'
+        T1 session leases (credentials)."""
+        for name in credentials_left(self.nexus_config):
+            (self.nexus_config / name).unlink(missing_ok=True)
 
     def entries(self) -> list[dict]:
         out = []
@@ -1287,12 +1399,17 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     then the config copy they were reading. The sessions' tool processes (rs_shell's background
     sleep, a busy session's hold) and the killed sessions' MCP servers and hooks can outlive their
     claude and carry its environment, token included: the descendants collected before the kill, and
-    anything whose argv still names the scratch HOME after 60 s, are ended by checked pid. The config
-    is deleted again at the end, for a lease minted by a process that lingered."""
+    anything whose argv still names the scratch HOME after 60 s, are ended by checked pid; so is every
+    process the watch recorded below the tmux server during the run (an exited session's Serena and
+    SessionEnd hooks, reparented with no HOME in their argv). The config is deleted again at the
+    end, for a lease minted by a process that lingered. The caller runs it under signals_ignored()."""
     leftovers: list[tuple[int, str]] = []
     try:  # never at the cost of the kill-server and the config deletion below
+        sb.watch.poll()
+        sb.watch.stop()
         roots = [int(d.get("pid", 0) or 0) for d in sb.entries()]
         leftovers = [c for r in roots if r > 1 for c in sb.descendants(r) if c[0] > 1]
+        leftovers = sorted(set(leftovers) | set(sb.watch.seen()))
     except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
         notes.append(f"leftover tool processes not collected: {type(exc).__name__}: {exc}")
     sb.tmux("kill-server")
@@ -1308,10 +1425,16 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     sb.delete_config()
     notes.append(f"cleanup: {len(leftovers)} session descendant(s) collected, {ended} still running and signalled; "
                  f"{ended_late} more still naming the HOME after 60 s")
+    try:
+        if sb.nx_refused.exists():
+            refused = sb.nx_refused.read_text(encoding="utf-8").splitlines()
+            notes.append(f"the nx shim refused {len(refused)} nx upgrade call(s): {refused[:5]}")
+    except OSError as exc:
+        notes.append(f"nx refusals not read: {exc}")
     dirty = []
     if sb.tmux("has-session", "-t", "rs").returncode == 0:
         dirty.append(f"tmux server {sb.sock} still running")
-    left = [f.name for f in sb.nexus_config.glob("*") if f.name == "config.yml" or f.name.startswith("data_token_lease.")]
+    left = credentials_left(sb.nexus_config)
     if left:
         dirty.append(f"credentials left in {sb.nexus_config}: {left}")
     if still := _naming(sb.home):
@@ -1335,20 +1458,23 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
         failures.append(f"harness: {type(exc).__name__}: {exc}")
     finally:
         # Nothing before the kill-server and the config deletion may raise past them: each step
-        # that reads the sandbox's files is guarded and only reported.
-        sids: set[str] = set()
-        try:
-            for hold in sb.holds.values():
-                hold.unlink(missing_ok=True)
-            sids = {str(d.get("sessionId", ""))[:8] for d in sb.entries()}
-            sids |= {str(d.get("sessionId", ""))[:8] for d in sb.before.values() if d}
-        except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
-            notes.append(f"session ids not collected: {type(exc).__name__}: {exc}")
-        if not a.keep:
-            dirty = cleanup(sb, notes)
-            if dirty:
-                failures.extend(f"cleanup: {d}" for d in dirty)
-                ok = False
+        # that reads the sandbox's files is guarded and only reported, and a signal now is ignored.
+        with signals_ignored():
+            sids: set[str] = set()
+            try:
+                for hold in sb.holds.values():
+                    hold.unlink(missing_ok=True)
+                sids = {str(d.get("sessionId", ""))[:8] for d in sb.entries()}
+                sids |= {str(d.get("sessionId", ""))[:8] for d in sb.before.values() if d}
+            except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
+                notes.append(f"session ids not collected: {type(exc).__name__}: {exc}")
+            if not a.keep:
+                dirty = cleanup(sb, notes)
+                if dirty:
+                    failures.extend(f"cleanup: {d}" for d in dirty)
+                    ok = False
+            else:
+                sb.watch.stop()
         sb.close_servers()
         for n in notes:
             print(f"[sandbox:{name}] {n}", flush=True)
