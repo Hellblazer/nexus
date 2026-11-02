@@ -3,7 +3,6 @@
 package dev.nexus.service.vectors;
 
 import ai.djl.huggingface.tokenizers.Encoding;
-import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
@@ -53,7 +52,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * the T1 Python seam. A future shared base can factor the common tensor plumbing
  * if a third ONNX model arrives.
  *
- * <p>Thread-safe: {@link OrtSession} and {@link HuggingFaceTokenizer} are kept in
+ * <p>Thread-safe: {@link OrtSession} and {@link GatedTokenizer} are kept in
  * fields, both documented thread-safe for inference / encode.
  */
 public final class Bge768Embedder implements Embedder {
@@ -163,7 +162,7 @@ public final class Bge768Embedder implements Embedder {
 
     private final OrtEnvironment      ortEnv;
     private final OrtSession          session;
-    private final HuggingFaceTokenizer tokenizer;
+    private final GatedTokenizer     tokenizer;
     /** Some bge ONNX exports declare {@code token_type_ids}, some don't — feed it only if present. */
     private final boolean             wantsTokenTypeIds;
 
@@ -264,7 +263,7 @@ public final class Bge768Embedder implements Embedder {
         OrtInitGate.Scope initScope = OrtInitGate.process().enter("bge768");
 
         OrtSession          sess = null;
-        HuggingFaceTokenizer tok  = null;
+        GatedTokenizer      tok  = null;
         // SessionOptions is AutoCloseable; it holds no state once createSession returns.
         // getEnvironment() is the first statement INSIDE the try so the scope is closed by
         // the finally below on every path; nothing runs between enter() and the try.
@@ -281,7 +280,7 @@ public final class Bge768Embedder implements Embedder {
 
             // Built through LocalTokenizers (nexus-17jvq: DJL's own build otherwise probes the AWS metadata
             // service). Not padded here: we pad per-sub-batch in runOnnxSubBatch() so each tensor is rectangular.
-            tok = LocalTokenizers.build(tokenizerPath, MAX_SEQ_LEN);
+            tok = GatedTokenizer.build(tokenizerPath, MAX_SEQ_LEN);
 
             this.session = sess;
             this.tokenizer = tok;

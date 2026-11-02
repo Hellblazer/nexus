@@ -184,13 +184,15 @@ class LocalTokenizersNoImdsTest {
     private static final Pattern DIRECT_BUILD =
         Pattern.compile("HuggingFaceTokenizer\\s*\\.\\s*(builder|newInstance)\\b");
     private static final Pattern HELPER_BUILD = Pattern.compile("LocalTokenizers\\s*\\.\\s*build\\s*\\(");
+    /** nexus-89lp5: the three holders build through the guard, which is the helper's one caller. */
+    private static final Pattern GUARD_BUILD = Pattern.compile("GatedTokenizer\\s*\\.\\s*build\\s*\\(");
     private static final Pattern COMMENTS = Pattern.compile("/\\*.*?\\*/|//[^\\n]*", Pattern.DOTALL);
 
     /**
      * Census: the production classes that build a tokenizer do it through {@link LocalTokenizers}, so another direct
      * {@code HuggingFaceTokenizer.builder()} or {@code newInstance(...)} (in any spacing) cannot reopen the probe
      * unseen. Comments are stripped first, so prose that names a call is not a call. Non-vacuous: it must read the
-     * engine sources, find the three known callers and exactly the helper's own builder call.
+     * engine sources, find the guard's one helper call, the three holders' guard calls, and exactly the helper's own builder call.
      */
     @Test
     void everyProductionTokenizerBuildGoesThroughTheHelper() throws Exception {
@@ -198,6 +200,7 @@ class LocalTokenizersNoImdsTest {
         int examined = 0;
         int directBuilds = 0;
         int viaHelper = 0;
+        int viaGuard = 0;
         try (Stream<Path> files = Files.walk(root)) {
             for (Path f : files.filter(p -> p.toString().endsWith(".java")).toList()) {
                 String src = COMMENTS.matcher(Files.readString(f)).replaceAll(" ");
@@ -215,10 +218,17 @@ class LocalTokenizersNoImdsTest {
                         viaHelper++;
                     }
                 }
+                if (!f.getFileName().toString().equals("GatedTokenizer.java")) {
+                    Matcher guard = GUARD_BUILD.matcher(src);
+                    while (guard.find()) {
+                        viaGuard++;
+                    }
+                }
             }
         }
         assertThat(examined).as("the census read the engine sources").isGreaterThan(50);
         assertThat(directBuilds).as("exactly one direct DJL build: the helper's").isEqualTo(1);
-        assertThat(viaHelper).as("Bge768Embedder, CrossEncoderReranker, OnnxEmbedder").isEqualTo(3);
+        assertThat(viaHelper).as("GatedTokenizer, the one caller of the helper").isEqualTo(1);
+        assertThat(viaGuard).as("Bge768Embedder, CrossEncoderReranker, OnnxEmbedder").isEqualTo(3);
     }
 }

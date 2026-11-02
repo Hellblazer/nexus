@@ -64,6 +64,14 @@ import java.util.function.UnaryOperator;
  * refused or cancelled embed reaches the client as a retryable 503; a refused or
  * cancelled rerank degrades like any other local cross-encoder failure.
  *
+ * <p><b>Tokenizing too</b> (nexus-89lp5). {@code tokenizer.encode} is native work that precedes the
+ * run, and the shutdown hook frees the tokenizer. Left outside the gate, an encode that began after
+ * the cancelled runs released their admission permits was invisible to {@link #quiesce}, which
+ * returned with it in flight, and the hook freed the handle under it (DJL's "Native resource has been
+ * released already", or a native abort). {@link GatedTokenizer} puts every encode in a scope without a
+ * canceller (encodes are milliseconds, so they are waited for) and refuses a later one, and its
+ * {@code close} waits for the encodes inside, so the hook can no longer free a tokenizer under one.
+ *
  * <p><b>The bound</b> ({@value #WAIT_ENV}, default {@value #DEFAULT_WAIT_MILLIS} ms)
  * must sit UNDER every stop grace that ends in SIGKILL, because a wait that
  * outlives the grace is answered by SIGKILL, no better than the crash. The two

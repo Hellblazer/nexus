@@ -3,7 +3,6 @@
 package dev.nexus.service.vectors;
 
 import ai.djl.huggingface.tokenizers.Encoding;
-import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
@@ -34,7 +33,7 @@ import java.util.Map;
  * <p>Loads the IDENTICAL chromadb-cached artifact at
  * {@code ~/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx/{model.onnx,tokenizer.json}}.
  *
- * <p>Thread-safe: OrtSession and HuggingFaceTokenizer are kept in fields, both
+ * <p>Thread-safe: OrtSession and GatedTokenizer are kept in fields, both
  * are documented thread-safe for inference (session) and encode (tokenizer).
  */
 public final class OnnxEmbedder implements Embedder {
@@ -55,7 +54,7 @@ public final class OnnxEmbedder implements Embedder {
 
     private final OrtEnvironment  ortEnv;
     private final OrtSession      session;
-    private final HuggingFaceTokenizer tokenizer;
+    private final GatedTokenizer tokenizer;
 
     /** Construct with default chromadb artifact paths. */
     public OnnxEmbedder() {
@@ -92,7 +91,7 @@ public final class OnnxEmbedder implements Embedder {
 
             // DJL HuggingFace tokenizer: truncation to maxLength=256
             // nexus-17jvq: through LocalTokenizers, never the DJL builder directly. Padded in embed() so batch works.
-            this.tokenizer = LocalTokenizers.build(tokenizerPath, MAX_SEQ_LEN);
+            this.tokenizer = GatedTokenizer.build(tokenizerPath, MAX_SEQ_LEN);
 
             log.info("event=onnx_embedder_loaded model={} tokenizer={}", modelPath, tokenizerPath);
         } catch (Exception e) {

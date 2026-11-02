@@ -743,6 +743,18 @@ if [ -f "$BGE_MODEL" ]; then
   else
     echo "  FAIL no in-flight embed answered 503 (codes: $codes); OrtException from native code may not have reached the gate"; fail=1
   fi
+  # nexus-89lp5: the tokenizer is freed on the exit path too. An encode that runs after the gate
+  # drained (tokenizing is not a session.run, so it was outside the gate) meets a freed native
+  # handle: DJL's "Native resource has been released already" on a good run, a Rust panic and exit
+  # 134 on a bad one. The exit status and the 503s above can both pass while this is in the log
+  # (12 of 30 runs on the unfixed binary), so the log is checked directly.
+  if grep -qE 'Native resource has been released already|panicked at|fatal runtime error' "$SMOKE_TMP/svc.log"; then
+    echo "  FAIL the tokenizer was freed under an in-flight encode (nexus-89lp5):"
+    grep -nE 'Native resource has been released already|panicked at|fatal runtime error' "$SMOKE_TMP/svc.log" | head -3
+    fail=1
+  else
+    echo "  ok   no encode ran against a freed tokenizer"
+  fi
   SVCPID=""
 else
   echo "  WARN SIGTERM-under-inference leg NOT covered — bge model absent at $BGE_MODEL"
