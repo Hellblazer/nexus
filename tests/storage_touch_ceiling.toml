@@ -40,8 +40,12 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5051
+provisioned_tests = 5059
 tolerance_tests = 0
+# 5051 -> 5059 (nexus-ov3zi fix round 1, 2026-11-02): +8 t2_tenant tests against the real engine: tests/test_memory_replaces.py +5 (memory_get and
+# `nx memory get` name a quarantined title, the plain not-found, `nx memory list --quarantined` labels replaced and expired rows) and
+# tests/test_memory_rollup.py +3 (a replaced row survives rollup then reap, a replaced-only project has nothing to roll up, the engine
+# refuses a replaced summary source).
 # 5044 -> 5051 (nexus-qo7ie.7, rebased 2026-11-02): +7, the seven t2_tenant tests in tests/test_memory_replaces.py (the replaces
 # write path against the real engine). Was 5024 -> 5031, then 5042 -> 5049, before the rebases onto develop.
 # 5042 -> 5044 (7.94.0 shakedown, 2026-11-02): +2 in tests/upgrade/test_legacy_rows_walk_substrate.py: the note-tags-array and

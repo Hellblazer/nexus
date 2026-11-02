@@ -2,9 +2,10 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Client and MCP half of ``memory_put(replaces=...)`` (RDR-238 P1 S2, nexus-qo7ie.7).
 
-The engine half (S1, nexus-qo7ie.6) deletes the named row and writes the new one in one
-transaction and echoes ``replaced_title`` / ``replaced_content``. This file pins what the
-client adds:
+The engine half (S1, nexus-qo7ie.6; quarantine amendment nexus-ov3zi) quarantines the named
+row (hidden from reads, kept by reap, restorable by id) and writes the new one in one
+transaction and echoes ``replaced_id`` / ``replaced_title`` / ``replaced_content``. This file
+pins what the client adds:
 
 * the lineage line ``replaces: <old title>`` as the content's last line, appended once;
 * K1: ``_verify_t2_write_landed`` compares the re-read row with the content actually SENT
@@ -14,8 +15,10 @@ client adds:
   says the outcome is unknown and how to check, instead of a retry that is refused for a
   replace that already landed;
 * a response with no echo (an engine without ``replaces``) raises: the new row WAS written,
-  the old row is still alive;
-* the facade purges taxonomy assignments for the replaced title, as ``nx memory delete`` does.
+  the old row may still be alive;
+* the result and the MCP text name the quarantined row's id and the restore command;
+* the facade leaves taxonomy assignments alone, as TTL-expiry quarantine does (a restored
+  row comes back whole).
 
 Cases 1 to 3 run against the self-provisioned local engine (``t2_tenant``). Cases 4 and 5
 and the unit pins need no engine: they stub ``_post`` or the T2 context.
@@ -86,11 +89,19 @@ def test_case4_no_echo_raises_and_says_the_new_row_was_written(monkeypatch: pyte
     text = str(err.value)
     assert "lacks replaces" in text
     assert "WAS written" in text
-    assert "still alive" in text
+    assert "may still be alive" in text, "an engine built before quarantine deletes and echoes without an id"
     assert "p/B" in text and "p/A" in text, text
 
 
-@pytest.mark.parametrize("partial", [{"replaced_title": "A"}, {"replaced_content": "x"}])
+@pytest.mark.parametrize(
+    "partial",
+    [
+        {"replaced_title": "A"},
+        {"replaced_content": "x"},
+        {"replaced_id": 3},
+        {"replaced_title": "A", "replaced_content": "x"},  # no replaced_id: cannot name the restore target
+    ],
+)
 def test_a_half_echo_is_no_echo(monkeypatch: pytest.MonkeyPatch, partial: dict) -> None:
     store = _stub_store()
     monkeypatch.setattr(store, "_post", lambda path, payload, **kw: {"id": 11, **partial})
@@ -103,7 +114,7 @@ def test_case5_a_replacing_put_is_posted_without_retry(monkeypatch: pytest.Monke
 
     def _post(path, payload, **kw):
         calls.append((path, payload, kw))
-        return {"id": 12, "replaced_title": "A", "replaced_content": "old A"}
+        return {"id": 12, "replaced_id": 7, "replaced_title": "A", "replaced_content": "old A"}
 
     store = _stub_store()
     monkeypatch.setattr(store, "_post", _post)
@@ -116,7 +127,7 @@ def test_case5_a_replacing_put_is_posted_without_retry(monkeypatch: pytest.Monke
     assert payload["content"] == "content\nreplaces: A"
     assert result == ReplacePutResult(
         id=12, sent_content="content\nreplaces: A",
-        replaced_title="A", replaced_content="old A",
+        replaced_id=7, replaced_title="A", replaced_content="old A",
     )
 
 
@@ -142,6 +153,8 @@ def test_case5_a_lost_response_says_the_outcome_is_unknown(
     assert "unknown" in text
     assert "memory_get" in text
     assert "p/B" in text and "p/A" in text, text
+    assert "quarantined, not deleted" in text and "nx memory restore" in text, text
+    assert "cannot be recovered" not in text, text
     assert err.value.__cause__ is failure
 
 
@@ -238,19 +251,24 @@ def _landed(content: str) -> dict:
     return {"id": 42, "project": "p", "title": "B", "content": content, "tags": "", "timestamp": ""}
 
 
-def test_mcp_verifies_against_the_content_sent_and_returns_the_deleted_content(
+def test_mcp_verifies_against_the_content_sent_and_names_the_quarantined_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sent = "new body\nreplaces: A"
     db = _FakeDb(
         stored=_landed(sent),
-        result=ReplacePutResult(id=42, sent_content=sent, replaced_title="A", replaced_content="old A body"),
+        result=ReplacePutResult(
+            id=42, sent_content=sent, replaced_id=7, replaced_title="A", replaced_content="old A body",
+        ),
     )
     _use(monkeypatch, db)
     out = core.memory_put(content="new body", project="p", title="B", replaces="A")
-    # verified (a raw-argument comparison would report a mismatch), and says what was removed
+    # verified (a raw-argument comparison would report a mismatch), and says what was quarantined
     assert out.startswith("Stored: [42] p/B"), out
-    assert "A" in out and "old A body" in out, out
+    assert "Replaced (quarantined, not deleted): p/A [7]" in out, out
+    assert "nx memory restore 7" in out, out
+    assert "old A body" in out, out
+    assert "deleted" not in out.replace("not deleted", ""), "no text may say the row was deleted"
     assert db.plain_puts == []
     [call] = db.replacing_puts
     assert call["replaces"] == "A" and call["content"] == "new body"
@@ -260,33 +278,34 @@ def test_mcp_verifies_against_the_content_sent_and_returns_the_deleted_content(
     ("stored", "verdict"),
     [(_landed("something else"), "mismatch"), (None, "missing")],
 )
-def test_mcp_reports_a_failed_read_back_and_still_hands_over_the_deleted_content(
+def test_mcp_reports_a_failed_read_back_and_still_names_the_quarantined_row(
     monkeypatch: pytest.MonkeyPatch, stored: dict | None, verdict: str,
 ) -> None:
-    """The delete is committed once put_replacing returns; the echo is the only record of it."""
+    """The quarantine is committed once put_replacing returns; the echo says which row and how to restore it."""
     db = _FakeDb(
         stored=stored,
         result=ReplacePutResult(
-            id=42, sent_content="new\nreplaces: A", replaced_title="A",
-            replaced_content="the deleted body zebrafinch",
+            id=42, sent_content="new\nreplaces: A", replaced_id=7, replaced_title="A",
+            replaced_content="the replaced body zebrafinch",
         ),
     )
     _use(monkeypatch, db)
     out = core.memory_put(content="new", project="p", title="B", replaces="A")
     assert out.startswith("Error:"), out
     assert f"({verdict})" in out
-    assert "Replaced (deleted): p/A" in out and "the deleted body zebrafinch" in out, out
+    assert "Replaced (quarantined, not deleted): p/A [7]" in out, out
+    assert "nx memory restore 7" in out and "the replaced body zebrafinch" in out, out
 
 
-def test_mcp_a_raising_tier_write_record_still_hands_over_the_deleted_content(
+def test_mcp_a_raising_tier_write_record_still_names_the_quarantined_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An exception AFTER the replace landed, outside the verifier, loses the echo too without the note."""
     db = _FakeDb(
         stored=_landed("new\nreplaces: A"),
         result=ReplacePutResult(
-            id=42, sent_content="new\nreplaces: A", replaced_title="A",
-            replaced_content="the deleted body zebrafinch",
+            id=42, sent_content="new\nreplaces: A", replaced_id=7, replaced_title="A",
+            replaced_content="the replaced body zebrafinch",
         ),
     )
     _use(monkeypatch, db)
@@ -298,38 +317,21 @@ def test_mcp_a_raising_tier_write_record_still_hands_over_the_deleted_content(
     out = core.memory_put(content="new", project="p", title="B", replaces="A")
     assert out.startswith("Error:"), out
     assert "telemetry store down" in out
-    assert "the deleted body zebrafinch" in out, out
+    assert "nx memory restore 7" in out and "the replaced body zebrafinch" in out, out
 
 
-def test_mcp_a_refusal_has_no_deleted_content_to_hand_over(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_a_refusal_quarantined_nothing_so_names_no_restore(monkeypatch: pytest.MonkeyPatch) -> None:
     _use(monkeypatch, _FakeDb(stored=None, result=RuntimeError("HTTP 409: replaces target p/A not found")))
     out = core.memory_put(content="new", project="p", title="B", replaces="A")
-    assert "Deleted content" not in out, out
-
-
-def test_mcp_says_the_taxonomy_purge_failed_when_it_did(monkeypatch: pytest.MonkeyPatch) -> None:
-    sent = "new\nreplaces: A"
-    for purge_failed, expect in ((True, True), (False, False)):
-        db = _FakeDb(
-            stored=_landed(sent),
-            result=ReplacePutResult(
-                id=42, sent_content=sent, replaced_title="A", replaced_content="old A body",
-                purge_failed=purge_failed,
-            ),
-        )
-        _use(monkeypatch, db)
-        out = core.memory_put(content="new", project="p", title="B", replaces="A")
-        assert out.startswith("Stored: [42] p/B"), out
-        assert "old A body" in out
-        assert ("NOT purged" in out) is expect, out
+    assert "nx memory restore" not in out and "Replaced (" not in out, out
 
 
 @pytest.mark.parametrize(
     ("failure", "needles"),
     [
-        (ReplacesEchoMissingError("p", "B", "A"), ["lacks replaces", "WAS written", "still alive"]),
+        (ReplacesEchoMissingError("p", "B", "A"), ["lacks replaces", "WAS written", "may still be alive"]),
         (ReplacesOutcomeUnknownError("p", "B", "A"),
-         ["unknown", "memory_get", "the replace landed", "cannot be recovered from the engine"]),
+         ["unknown", "memory_get", "the replace landed", "quarantined, not deleted", "nx memory restore"]),
         (RuntimeError("HttpMemoryStore./v1/memory/put failed: HTTP 409: replaces target p/A is quarantined"),
          ["409", "p/A", "quarantined"]),
     ],
@@ -342,6 +344,17 @@ def test_mcp_failures_come_back_as_error_strings(
     assert out.startswith("Error:"), out
     for needle in needles:
         assert needle in out, (needle, out)
+
+
+def test_the_replaces_parameter_text_says_quarantine_restore_and_the_overwrite_limit() -> None:
+    """The text a caller reads must not say the replaced row is deleted (nexus-ov3zi)."""
+    import typing  # noqa: PLC0415 - test-local
+
+    hint = typing.get_type_hints(core.memory_put, include_extras=True)["replaces"]
+    text = hint.__metadata__[0].description
+    assert "quarantine" in text and "nx memory restore" in text, text
+    assert "plain put to the old title overwrites the quarantined row" in text, text
+    assert "delete in the same write" not in text, text
 
 
 def test_mcp_without_replaces_takes_the_plain_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -361,17 +374,21 @@ def _find_rows(db: T2Database, project: str, title: str) -> list[dict]:
 
 
 @pytest.mark.t2_tenant
-def test_case1_replace_removes_the_old_row_and_the_new_row_verifies(db: T2Database) -> None:
+def test_case1_replace_quarantines_the_old_row_and_the_new_row_verifies(db: T2Database) -> None:
     old = "zebrafinch ledger of the quarterly migration"
-    db.put(project="rp", title="A", content=old)
+    old_id = db.put(project="rp", title="A", content=old)
     out = core.memory_put(content="fresh account of the migration", project="rp", title="B", replaces="A")
 
     assert out.startswith("Stored: ["), out
-    assert old in out, "the deleted content must reach the writer so it can be re-put"
+    assert old in out, "the replaced content reaches the writer"
+    assert f"Replaced (quarantined, not deleted): rp/A [{old_id}]" in out, out
+    assert f"nx memory restore {old_id}" in out, out
 
     assert db.get(project="rp", title="A") is None
     assert _find_rows(db, "rp", "A") == []
     assert [r["title"] for r in db.search("zebrafinch", project="rp")] == []
+    assert [r["id"] for r in db.memory.list_quarantined("rp")] == [old_id], "present in the quarantined listing"
+    assert db.memory.reap() == [], "reap does not remove it: it was never marked"
 
     landed = db.get(project="rp", title="B")
     assert landed is not None
@@ -379,6 +396,11 @@ def test_case1_replace_removes_the_old_row_and_the_new_row_verifies(db: T2Databa
     assert core._verify_t2_write_landed(
         project="rp", title="B", content=landed["content"], row_id=landed["id"],
     ) == ("verified", "")
+
+    # the command the text names works, and the row comes back with its content
+    assert db.memory.restore(old_id) is True
+    restored = db.get(project="rp", title="A")
+    assert restored is not None and restored["content"] == old and restored["id"] == old_id
 
 
 def _spy_on_purge(monkeypatch: pytest.MonkeyPatch, db: T2Database) -> list[tuple[str, str]]:
@@ -398,12 +420,12 @@ def _spy_on_purge(monkeypatch: pytest.MonkeyPatch, db: T2Database) -> list[tuple
 def test_case1_store_result_carries_the_echo_and_the_sent_content(
     db: T2Database, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Also: the facade purges assignments for the replaced title, and only that one."""
+    """Also: no taxonomy purge. Expiry quarantine leaves a row's assignments, so a replace does too."""
     purged = _spy_on_purge(monkeypatch, db)
-    db.put(project="rp", title="A", content="old A")
+    old_id = db.put(project="rp", title="A", content="old A")
     result = db.put_replacing(project="rp", title="B", content="new B", replaces="A")
-    assert purged == [("rp", "A")]
-    assert result.purge_failed is False
+    assert purged == [], "a quarantined row keeps its topic assignments, as an expired one does"
+    assert result.replaced_id == old_id
     assert result.replaced_title == "A"
     assert result.replaced_content == "old A"
     assert result.sent_content == "new B\nreplaces: A"
@@ -411,12 +433,13 @@ def test_case1_store_result_carries_the_echo_and_the_sent_content(
 
 
 @pytest.mark.t2_tenant
-def test_case1_a_chain_leaves_only_the_last_row(db: T2Database) -> None:
+def test_case1_a_chain_leaves_only_the_last_row_live(db: T2Database) -> None:
     db.put(project="rp", title="A", content="a")
     db.put_replacing(project="rp", title="B", content="b", replaces="A")
     db.put_replacing(project="rp", title="C", content="c", replaces="B")
     assert [r["title"] for r in db.memory.get_all("rp")] == ["C"]
     assert db.get(project="rp", title="C")["content"] == "c\nreplaces: B"
+    assert sorted(r["title"] for r in db.memory.list_quarantined("rp")) == ["A", "B"]
 
 
 @pytest.mark.t2_tenant
@@ -451,9 +474,10 @@ def test_replacing_a_row_with_itself_is_refused_and_leaves_it(db: T2Database) ->
 
 
 @pytest.mark.t2_tenant
-def test_a_failed_purge_does_not_hide_a_replace_that_landed(
+def test_a_replace_never_touches_the_taxonomy_store(
     db: T2Database, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Even a taxonomy store that is down cannot fail or flag a replace: it is not called."""
     def _boom(project, title):
         raise ConnectionError("taxonomy store down")
 
@@ -461,5 +485,112 @@ def test_a_failed_purge_does_not_hide_a_replace_that_landed(
     db.put(project="rp", title="A", content="old A")
     result = db.put_replacing(project="rp", title="B", content="new B", replaces="A")
     assert result.replaced_content == "old A"
-    assert result.purge_failed is True, "the writer must be told the assignments were not purged"
     assert db.get(project="rp", title="A") is None
+    assert [r["title"] for r in db.memory.list_quarantined("rp")] == ["A"]
+
+
+# ── R1: a not-found title that names a quarantined row says so ──────────────────
+
+def _expire_one(db: T2Database, project: str, title: str) -> int:
+    from tests._t2_fixture_ops import backdate_memory  # noqa: PLC0415 — only these tests need the backdate helper
+
+    row_id = db.put(project=project, title=title, content="stale body", ttl=1)
+    backdate_memory(db, project, title, days=2)
+    assert row_id in db.memory.expire().quarantined_ids
+    return row_id
+
+
+@pytest.mark.t2_tenant
+def test_memory_get_on_a_replaced_title_says_quarantined_replaced_and_the_restore_command(
+    db: T2Database,
+) -> None:
+    # The successor does not extend the old title: a title that is a unique prefix of a live
+    # row resolves to that row (exact-then-prefix) and never reaches the not-found path.
+    old_id = db.put(project="rp", title="continuation", content="the old continuation")
+    db.put_replacing(project="rp", title="handoff-2026-10-07", content="newer", replaces="continuation")
+
+    out = core.memory_get(project="rp", title="continuation")
+
+    assert out.startswith("Not found: rp/continuation"), out
+    assert f"id {old_id}" in out and "quarantined" in out, out
+    assert "replaced" in out and "never reaped" in out, out
+    assert f"nx memory restore {old_id}" in out, out
+
+
+@pytest.mark.t2_tenant
+def test_memory_get_on_an_expired_title_says_expired(db: T2Database) -> None:
+    row_id = _expire_one(db, "rp", "stale-note")
+
+    out = core.memory_get(project="rp", title="stale-note")
+
+    assert f"id {row_id}" in out and "expired" in out and f"nx memory restore {row_id}" in out, out
+    assert "never reaped" not in out, out
+
+
+@pytest.mark.t2_tenant
+def test_memory_get_on_a_title_nothing_holds_is_the_plain_not_found(db: T2Database) -> None:
+    db.put(project="rp", title="A", content="a")
+    db.put_replacing(project="rp", title="B", content="b", replaces="A")
+
+    assert core.memory_get(project="rp", title="no-such-title") == "Not found: rp/no-such-title"
+    assert core.memory_get(project="other-project", title="A") == "Not found: other-project/A", (
+        "a quarantined row of another project is not a hit"
+    )
+
+
+@pytest.mark.t2_tenant
+def test_nx_memory_get_by_title_names_a_quarantined_row_and_the_restore_command(db: T2Database) -> None:
+    from unittest.mock import MagicMock, patch  # noqa: PLC0415 — only this test drives the CLI
+
+    from click.testing import CliRunner  # noqa: PLC0415
+
+    from nexus.cli import main  # noqa: PLC0415
+
+    old_id = db.put(project="rp", title="A", content="the old A")
+    db.put_replacing(project="rp", title="B", content="b", replaces="A")
+    cm = MagicMock(__enter__=MagicMock(return_value=db), __exit__=MagicMock(return_value=False))
+
+    with patch("nexus.commands.memory.t2_handle", return_value=cm):
+        hit = CliRunner().invoke(main, ["memory", "get", "-p", "rp", "-t", "A"])
+        miss = CliRunner().invoke(main, ["memory", "get", "-p", "rp", "-t", "nothing-here"])
+
+    assert hit.exit_code != 0
+    assert "entry not found" in hit.output and f"(id {old_id})" in hit.output, hit.output
+    assert f"nx memory restore {old_id}" in hit.output and "replaced" in hit.output, hit.output
+    assert miss.exit_code != 0
+    assert "quarantined" not in miss.output, miss.output
+
+
+@pytest.mark.t2_tenant
+def test_nx_memory_list_quarantined_labels_a_replaced_row_and_an_expired_one(db: T2Database) -> None:
+    from unittest.mock import MagicMock, patch  # noqa: PLC0415 — only this test drives the CLI
+
+    from click.testing import CliRunner  # noqa: PLC0415
+
+    from nexus.cli import main  # noqa: PLC0415
+
+    replaced_id = db.put(project="rp", title="A", content="a")
+    db.put_replacing(project="rp", title="B", content="b", replaces="A")
+    expired_id = _expire_one(db, "rp", "stale-note")
+    cm = MagicMock(__enter__=MagicMock(return_value=db), __exit__=MagicMock(return_value=False))
+
+    with patch("nexus.commands.memory.t2_handle", return_value=cm):
+        out = CliRunner().invoke(main, ["memory", "list", "--quarantined", "-p", "rp"])
+
+    lines = {int(ln[1:ln.index("]")]): ln for ln in out.output.splitlines() if ln.startswith("[")}
+    assert "(replaced " in lines[replaced_id], out.output
+    assert "(quarantined " in lines[expired_id], out.output
+
+
+def test_quarantined_hint_fails_closed_when_the_lookup_raises() -> None:
+    """A failed quarantine lookup leaves the plain not-found; it never becomes an error."""
+    from unittest.mock import MagicMock
+
+    from nexus.mcp.core import _quarantined_hint
+
+    db = MagicMock()
+    db.memory.find_quarantined.side_effect = RuntimeError("engine down")
+    assert _quarantined_hint(db, "p", "old.md") == ""
+    db.memory.find_quarantined.side_effect = None
+    db.memory.find_quarantined.return_value = {"project": "p", "title": "old.md", "id": 7, "ttl": None}
+    assert "nx memory restore 7" in _quarantined_hint(db, "p", "old.md")

@@ -154,7 +154,7 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 **Heat-weighted expiry (RDR-057 Phase 2a)**: T2 `access_count` and `last_accessed` columns track usage. Effective TTL becomes `base_ttl * (1 + log(access_count + 1))`. See [Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
 
-**Expiry quarantines, it does not delete (RDR-207)**: an entry past its effective TTL disappears from every read (`get`, `search`, `list`, the MCP memory tools) but stays in the table. `nx memory list --quarantined` shows these entries. `nx memory reap` deletes one only after a rollup summary covers it, `nx memory restore ID` brings one back as permanent, and `nx memory delete --id ID` removes one outright. See [nx memory](cli-reference.md#nx-memory).
+**Expiry quarantines, it does not delete (RDR-207)**: an entry past its effective TTL disappears from every read (`get`, `search`, `list`, the MCP memory tools) but stays in the table. `nx memory list --quarantined` shows these entries. `nx memory reap` deletes one only after a rollup summary covers it, `nx memory restore ID` brings one back as permanent, and `nx memory delete --id ID` removes one outright. A `memory_put` with `replaces` (RDR-238) quarantines the entry it names too, in the same write as the new entry, instead of deleting it; that entry is skipped by the rollup and never reaped, so it stays until you restore or delete it by id. See [nx memory](cli-reference.md#nx-memory).
 
 The access-count increment rides the same server-side transaction as the row fetch, arbitrated by Postgres. `search()` exposes an explicit opt-out (`access="silent"`, used by internal consolidation scans) that skips the increment as a deliberate policy choice, not a fallback.
 

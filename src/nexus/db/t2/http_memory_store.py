@@ -140,21 +140,40 @@ def with_lineage_line(content: str, replaces: str) -> str:
 
 @dataclass(frozen=True)
 class ReplacePutResult:
-    """What a replacing put did (RDR-238 P1 S2): the new row and the deleted one.
+    """What a replacing put did (RDR-238 P1 S2): the new row and the quarantined one.
 
     ``sent_content`` is the content actually posted, lineage line included;
     ``_verify_t2_write_landed`` compares the re-read row against it, not against
-    the writer's argument (K1). ``replaced_title`` and ``replaced_content`` are
-    the engine's echo of the row it deleted.
+    the writer's argument (K1). ``replaced_id``, ``replaced_title`` and
+    ``replaced_content`` are the engine's echo of the row it quarantined (nexus-ov3zi):
+    the row is hidden from every read, kept by ``reap``, and ``restore(replaced_id)``
+    (``nx memory restore <id>``) brings it back.
     """
 
     id: int
     sent_content: str
+    replaced_id: int
     replaced_title: str
     replaced_content: str
-    #: Set by ``T2Database.put_replacing`` when the taxonomy purge for the replaced title failed:
-    #: the replace landed, but its topic assignments are still in the taxonomy store.
-    purge_failed: bool = False
+
+
+def quarantined_row_hint(row: dict[str, Any]) -> str:
+    """One line saying why a title that reads as not found is quarantined, and the way back.
+
+    ``row`` is a ``list_quarantined`` / ``find_quarantined`` record. A quarantined row
+    with ``ttl`` None can only be one a replace quarantined (expiry stamps only rows
+    that have a ttl), so it is never reaped; one that still has its ``ttl`` expired,
+    and ``nx memory reap`` deletes it once a rollup has marked it.
+    """
+    name = f"{row['project']}/{row['title']}"
+    if row.get("ttl") is None:
+        why = "replaced by a later put; it is kept for good (never reaped)"
+    else:
+        why = "expired (past its TTL); `nx memory reap` deletes it once a rollup has marked it"
+    return (
+        f"{name} is quarantined, not deleted (id {row['id']}), {why}. "
+        f"Bring it back with: nx memory restore {row['id']}"
+    )
 
 
 class ReplacesEchoMissingError(RuntimeError):
@@ -162,10 +181,12 @@ class ReplacesEchoMissingError(RuntimeError):
 
     def __init__(self, project: str, title: str, replaces: str) -> None:
         super().__init__(
-            f"the engine lacks replaces: it answered without the replaced_title and "
+            f"the engine lacks replaces: it answered without the replaced_id, replaced_title and "
             f"replaced_content echo. The new row {project}/{title} WAS written; the old "
-            f"row {project}/{replaces} is still alive. Upgrade the engine, then delete "
-            f"{project}/{replaces} by hand if it should go."
+            f"row {project}/{replaces} may still be alive (an engine with no replaces ignores the "
+            f"field and leaves it; an engine built before quarantine replaced it without an id). "
+            f"Check with memory_get. Upgrade the engine, then delete "
+            f"{project}/{replaces} by hand if it is alive and should go."
         )
 
 
@@ -177,9 +198,10 @@ class ReplacesOutcomeUnknownError(RuntimeError):
             f"the outcome of the replace is unknown: the request to replace "
             f"{project}/{replaces} with {project}/{title} got no usable answer. A replacing "
             f"put is never retried. Check with memory_get whether {project}/{title} exists "
-            f"and {project}/{replaces} is gone; if {project}/{replaces} is still there, put again. "
-            f"If {project}/{title} is present and {project}/{replaces} is gone, the replace landed: "
-            f"the deleted content was in the lost response and cannot be recovered from the engine."
+            f"and {project}/{replaces} is gone from reads; if {project}/{replaces} is still there, put again. "
+            f"If {project}/{title} is present and {project}/{replaces} is gone from reads, the replace "
+            f"landed and the old row is quarantined, not deleted: `nx memory list --quarantined` shows "
+            f"its id and `nx memory restore <id>` brings it back. Its id was in the lost response."
         )
 
 
@@ -260,15 +282,16 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         agent: str | None = None,
         session: str | None = None,
     ) -> ReplacePutResult:
-        """Write ``title`` and delete the row titled ``replaces`` in one engine
-        transaction (RDR-238 Technical Design 1). Returns a :class:`ReplacePutResult`.
+        """Write ``title`` and quarantine the row titled ``replaces`` in one engine
+        transaction (RDR-238 Technical Design 1; quarantine, not delete: nexus-ov3zi).
+        Returns a :class:`ReplacePutResult`.
 
         Kept apart from :meth:`put` so a plain put still returns the row id.
 
         * ``replaces`` is an exact title in the same project, never an id. The line
           ``replaces: <title>`` becomes the content's last line (:func:`with_lineage_line`).
         * K5: the post is ``idempotent=False``. Under the retrying post a lost
-          response followed by a retry finds the target already deleted and is
+          response followed by a retry finds the target already quarantined and is
           refused, so the writer would see a refusal for a replace that landed.
           A lost response raises :class:`ReplacesOutcomeUnknownError` instead.
         * An engine refusal (missing, quarantined, audit-record target; the row
@@ -303,13 +326,15 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 raise ReplacesOutcomeUnknownError(project, title, replaces) from exc
             raise
 
+        echo_id = resp.get("replaced_id")
         echo_title = resp.get("replaced_title")
         echo_content = resp.get("replaced_content")
-        if echo_title is None or echo_content is None:
+        if echo_id is None or echo_title is None or echo_content is None:
             raise ReplacesEchoMissingError(project, title, replaces)
         return ReplacePutResult(
             id=int(resp["id"]),
             sent_content=sent,
+            replaced_id=int(echo_id),
             replaced_title=str(echo_title),
             replaced_content=str(echo_content),
         )
@@ -843,7 +868,10 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         ``POST /v1/memory/summaries``, one engine transaction. The engine
         refuses with 409 (``"code": "unknown_source_id"``), writing nothing,
-        when a source id is not a row of *project*.
+        when a source id is not a row of *project*, and with 409
+        (``"code": "replaced_source_id"``) when one is a row a replace
+        quarantined (quarantined with ``ttl`` None): such a row is never marked,
+        so ``reap`` never deletes it.
         """
         payload: dict[str, Any] = {
             "project": project,

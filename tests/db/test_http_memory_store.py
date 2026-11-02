@@ -601,7 +601,7 @@ class TestPutReplacing:
         self, store: HttpMemoryStore,
     ) -> None:
         store.put("rp", "old", "old content", ttl=30)
-        with pytest.raises(ReplacesEchoMissingError, match="still alive"):
+        with pytest.raises(ReplacesEchoMissingError, match="may still be alive"):
             store.put_replacing("rp", "new", "new content", replaces="old")
         written = store.get(project="rp", title="new")
         assert written is not None, "the old engine wrote the new row; the error must say so"

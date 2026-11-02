@@ -2703,19 +2703,19 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | `get [ID]` | Read entry by numeric ID |
 | `get --project NAME --title NAME` | Read entry by project + title |
 | `search QUERY` | Keyword search (served by the engine's Postgres full-text index) |
-| `list` | List entries (`--quarantined`: the quarantined entries instead) |
+| `list` | List entries (`--quarantined`: the quarantined entries instead, expired and replaced) |
 | `delete` | Delete one or more entries, a quarantined one included |
 | `expire` | Quarantine expired entries (hidden, not deleted) |
 | `reap` | Delete the quarantined entries that carry a rollup mark |
 | `restore ID` | Bring a quarantined entry back as a permanent entry |
 | `summaries [ID]` | List rollup summaries, or show one by ID |
-| `rollup --project NAME` | Summarize a project's quarantined entries by month and mark them for `reap` |
+| `rollup --project NAME` | Summarize a project's expired entries by month and mark them for `reap` |
 | `promote ID --collection NAME` | Promote entry to T3 by ID |
 
-**Quarantine (RDR-207).** Expiry does not delete. An entry past its TTL is quarantined: `get`, `search` and `list` stop showing it, but the row stays in the table. That is why an entry you expected to be gone can still exist while nothing finds it.
+**Quarantine (RDR-207, RDR-238).** Expiry does not delete. An entry past its TTL is quarantined: `get`, `search` and `list` stop showing it, but the row stays in the table. That is why an entry you expected to be gone can still exist while nothing finds it. A `memory_put` with `replaces` quarantines the entry it names in the same way, in the same write as the new entry. The replaced entry is never rolled up and never reaped: it stays until you restore it or delete it by id. `nx memory list --quarantined` shows it as "replaced", and `nx memory get --project P --title T` on its old title says it is quarantined and gives the restore command.
 
-- `nx memory list --quarantined [--project NAME]` shows the quarantined entries with the time each was quarantined. An entry that also shows "rolled up" is covered by a rollup summary.
-- `nx memory reap` deletes only quarantined entries that carry a rollup mark, and removes their topic assignments. It has no age horizon: an unmarked entry stays quarantined however old it is. It lists what it will delete and asks first; `-y` / `--yes` skips the prompt.
+- `nx memory list --quarantined [--project NAME]` shows the quarantined entries with the time each was quarantined. An entry that also shows "rolled up" is covered by a rollup summary. An entry shown as "replaced" was quarantined by a replace and is never reaped.
+- `nx memory reap` deletes only quarantined entries that carry a rollup mark, and removes their topic assignments. A replaced entry never carries a mark. It has no age horizon: an unmarked entry stays quarantined however old it is. It lists what it will delete and asks first; `-y` / `--yes` skips the prompt.
 - `nx memory restore ID` brings an entry back as permanent. It does not re-enter its old TTL, and any rollup mark is cleared.
 - `nx memory delete --id ID` (or `--project` + `--title`) deletes one quarantined entry outright. You do not restore it first. `--all` covers only live entries.
 - `nx memory promote` reads the entry the way `get` does, so it reports a quarantined entry as not found. Restore the entry first, then promote it. Delete and promote differ because the design names delete as the way to remove a quarantined entry and names no promote for one.
@@ -2725,7 +2725,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 **`put` flags:** `--tags`, `--ttl` (default: `permanent`, reversed 2026-09-12 by nexus-473mx: a caller now asks for a clock explicitly; `--ttl 0` is rejected, not coerced), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
 
-**`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name), `--quarantined` (list quarantined entries instead)
+**`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name), `--quarantined` (list quarantined entries instead, expired and replaced)
 
 **`reap` flags:** `-y` / `--yes` (skip the confirmation prompt)
 
@@ -2733,7 +2733,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 **`rollup` flags:** `-p` / `--project NAME` (required), `--dry-run` (print the groups and their summaries; write nothing)
 
-`nx memory rollup` is the attended step that makes quarantined entries reapable. It groups one project's unmarked quarantined entries by month and prints the groups before doing anything; the cost is one summarizer call (`claude -p`, the same path `operator_summarize` uses) per group. The month is that of each entry's timestamp, which is its last write, since a put or a merge refreshes it and no creation date is kept. A summary must contain every source entry's title, or that group is reported and left unmarked; this is a floor, not a check that the summary is faithful. A group that passes is stored as a summary and its entries are marked, one group at a time. A group that fails (the summarizer errors, the title check fails, one of its entries was restored or re-put while its summary was being written, or the engine refuses the summary) is reported, the other groups still run, and the command exits nonzero. Marking deletes nothing: `nx memory reap` does that later, and `nx memory restore` still brings an entry back until then.
+`nx memory rollup` is the attended step that makes expired entries reapable. It groups one project's unmarked expired entries by month (entries a replace quarantined are skipped, and the engine refuses them as summary sources) and prints the groups before doing anything; the cost is one summarizer call (`claude -p`, the same path `operator_summarize` uses) per group. The month is that of each entry's timestamp, which is its last write, since a put or a merge refreshes it and no creation date is kept. A summary must contain every source entry's title, or that group is reported and left unmarked; this is a floor, not a check that the summary is faithful. A group that passes is stored as a summary and its entries are marked, one group at a time. A group that fails (the summarizer errors, the title check fails, one of its entries was restored or re-put while its summary was being written, or the engine refuses the summary) is reported, the other groups still run, and the command exits nonzero. Marking deletes nothing: `nx memory reap` does that later, and `nx memory restore` still brings an entry back until then.
 
 **`promote` flags:** `--collection` (required), `--tags`, `--remove`
 

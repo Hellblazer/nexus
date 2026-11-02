@@ -221,13 +221,81 @@ here are the ones each pass found on a named page or table.
   search not a full match, and the one list lives in
   `src/nexus/tables/audit-tags.toml`, from which the engine's `AuditTags.java`
   is generated. The K5 limit: a replace is never retried, so a response lost to a
-  replace that landed loses the echo; the new row exists, the old one is gone,
-  and the deleted content cannot be recovered from the engine.
+  replace that landed loses the echo; the new row exists and the old one is
+  quarantined (see the 2026-11-02 entry below), so its id comes from
+  `nx memory list --quarantined`.
   Review round 1 added two refusals: a replace whose new title already names
   another row (live or quarantined) is 409, because overwriting it would remove
   a row without echoing it; a present but blank `replaces` is 400. Two replaces
   that swap titles can deadlock on the row locks; PostgreSQL aborts one, and
   nothing is written by the aborted one.
+- **2026-11-02, A2 measured, then Phase 1 changed to quarantine (nexus-qo7ie.8,
+  nexus-ov3zi):** *A2 outcome.* Sam could not judge the rows, so Step 3 was run
+  as a measurement and an agent read (T2 `nexus/rdr-238-a2-measure-2026-11-02`).
+  The population was 460 earlier chain members, 81 of them replaceable (no audit
+  tag, no audit title). An agent read the cards of the first 20 replacement-type
+  rows: 6 yes (the earlier row held content the newest lacks and wanted), 11
+  maybe, 3 no. By Step 3's stop rule, one "needed" stops the feature, so the gate
+  tripped. Transcript fetches by name: 408 ever for earlier members, 23 after the
+  newest row existed, on 19 of the 460 rows; of the 81 replaceable rows, 2 were
+  real replacements fetched after the newest existed (`224-continuation` fetched
+  by its bare title from a bead pointer, and `224-win-guest-walk-followups`).
+  *Caveats:* the first 20 are not a random sample; the yes/maybe/no marks are an
+  agent's first pass, not Sam's; the transcripts are the laptop's only (not
+  chas, hellmini or other harnesses); and use through search is unmeasured, which
+  is the channel a hidden row closes. Reading: content in earlier rows is often
+  unique and rarely fetched by name; A2 is neither confirmed nor refuted, and the
+  loss it risks is irreversible under delete. *Decision, Sam, 2026-11-02:* a
+  replace QUARANTINES its target instead of deleting it (Alternative 1 was not
+  taken). This entry rules for Phase 1; the sections below that say "deletes"
+  are superseded as listed at its end.
+  *What was built.* The engine, in the replace transaction, stamps
+  `quarantined_at` on the target and sets its `ttl_days` and `rolled_up_at` to
+  NULL, so every read hides the row. `nx memory restore <id>` brings it back with
+  its content, tags and title, permanent, as for an expired row. The response
+  gains `replaced_id` beside `replaced_title` and `replaced_content`, and the
+  `memory_put` result names the quarantined row, its id and the restore command.
+  The refusals, the audit backstop, the lineage line, the FOR UPDATE locks, no
+  Liquibase changeset and no CLI flag stand; a quarantine that affects other than
+  one row is a 409. *Rollup rule.* `reap` deletes only rows that are quarantined
+  and rolled up, and the attended `nx memory rollup` would have marked a replaced
+  row with the rest of the project's quarantined rows. So a replaced row is
+  distinguishable: it is quarantined with `ttl_days` NULL, a shape only a replace
+  produces, because expiry stamps only rows that have a ttl and every other
+  writer of `quarantined_at` clears it. `plan_groups` skips such rows, and
+  `POST /v1/memory/summaries` refuses any id of such a row with 409 and code
+  `replaced_source_id`, writing nothing. A replaced row is therefore never
+  summarized, marked or reaped; it leaves only by `restore` or an explicit
+  `delete` by id. The check and the mark take no row lock, so `reap` itself
+  also skips a quarantined row with `ttl_days` NULL, and the mark skips one: a
+  rollup that races a replace cannot delete the replaced row. *Taxonomy:* the facade does not purge the replaced title's
+  topic assignments, because expiry quarantine does not either (`expire` runs no
+  taxonomy cascade; only `delete` purges); the taxonomy tables hold no reference
+  to the memory table, so no taxonomy read filters quarantined rows, as for an
+  expired row today; and, unlike an expired row, a replaced row is never reaped,
+  so its topic membership and `doc_count` stay until it is restored or deleted
+  (nexus-xs3jy). *Known limit, not changed:* the quarantined row keeps its
+  title, so a later plain put at the old title overwrites it in place (RDR-207
+  behaviour: the write clears the stamps and reuses the row's id), and the
+  `replaced_id` the replacing writer was given then names that new live row, not
+  the content it replaced. A replace whose new title is a replaced row's title
+  (A to B, then B to A) is 409; restoring does not help, and the way out is to
+  delete the quarantined row by id. A second replace of the same target is 409
+  (quarantined). A reader who fetches the old title gets not-found plus a line
+  naming the quarantined row, its id and `nx memory restore`.
+  *Supersedes for Phase 1,* where it disagrees with this entry: the title and the
+  Approach ("supersession by deletion"), A2, Technical Design 1 and Steps 1 and 2
+  ("deletes", "the deleted row's content"), Step 3 (its stop rule is the measure
+  above), the Problem Statement ("the replaced entry is deleted"), the Decision
+  Rationale, the Trade-offs, Risks and Failure Modes, the Minimum Viable
+  Validation ("A is gone"), the Phase 1 heading ("replacement by deletion") and
+  body, the Test Plan engine bullet ("old row gone") and client bullet, the
+  Finalization Gate answers, the Cross-Cutting "Irreversibility" bullet (a
+  replaced row is restorable), Performance ("one delete"), the Day 2
+  Operations table row "List: none; the row is gone" (List is
+  `nx memory list --quarantined`, Backup is `nx memory restore <id>`), the
+  Contradiction Check, and the RDR-207 and RDR-074 rows of the prior-RDR table
+  (a replace now quarantines, and naming a permanent row quarantines it). This entry rules for Phase 1.
 
 ### Critical Assumptions
 
@@ -770,3 +838,4 @@ so the rest does not wait for them.
 | 2026-11-01 | Gate round 2: PASSED (0 Critical, 17 Significant, 0 ship-blockers); commit `0e6eab59c`; critique `nexus_rdr/238-gate-critique-2026-11-01-r2`. |
 | 2026-11-01 | Gate round 3: PASSED (0 Critical, 10 Significant, 0 ship-blockers); commit `3f66127f0`; critique `nexus_rdr/238-gate-critique-2026-11-01-r3`. |
 | 2026-11-01 | Accept residual dispositions (gate round 3): K1, K2, K3, K4, K5 -> nexus-qo7ie.3; S-8, S-9 -> nexus-qo7ie.4; S-7, K6, S-10 -> nexus-qo7ie.5. |
+| 2026-11-02 | Sam reversed the 2026-10-31 "supersession becomes deletion" for Phase 1: replace quarantines. A2 was measured (first 20 replacement-type rows: 6 yes, 11 maybe, 3 no by an agent read), which trips Step 3's stop rule; Sam chose quarantine instead of deletion on the A2 read; Alternative 1 was not taken. A replaced row is quarantined with `ttl_days` NULL: the rollup skips it, the engine refuses it as a summary source, and `reap` never deletes it. A later plain put at the old title overwrites the quarantined row in place, and the `replaced_id` the writer was given then names that new live row. Key Discoveries 2026-11-02 rules for Phase 1; decision sections not rewritten (nexus-ov3zi). |

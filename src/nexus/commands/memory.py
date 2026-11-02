@@ -134,6 +134,7 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
             click.echo(result["content"])
             return
         resolved, candidates = db.memory.resolve_title(project=project, title=title)
+        hint = "" if resolved is not None or candidates else _quarantined_hint(db, project, title)
     if resolved is not None:
         click.echo(resolved["content"])
         return
@@ -147,8 +148,22 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
         lines.append("Re-run with the full title or pass --id.")
         raise click.ClickException("\n".join(lines))
     raise click.ClickException(
-        "entry not found — use: nx memory list to see available entries",
+        "entry not found — use: nx memory list to see available entries" + hint,
     )
+
+
+def _quarantined_hint(db: T2Database, project: str | None, title: str | None) -> str:
+    """A not-found title that names a quarantined row: say so, with its id and the restore command.
+
+    Read only and best effort: a failed lookup leaves the plain not-found.
+    """
+    from nexus.db.t2.http_memory_store import quarantined_row_hint  # noqa: PLC0415 — deferred: keeps CLI startup light
+    try:
+        row = db.memory.find_quarantined(project=project, title=title)
+    except Exception:  # noqa: BLE001 — a hint must not turn a not-found into another error; logged
+        _log.debug("memory_get_quarantine_hint_failed", project=project, title=title, exc_info=True)
+        return ""
+    return "\n" + quarantined_row_hint(row) if row is not None else ""
 
 
 @memory.command("search")
@@ -184,15 +199,21 @@ def search_cmd(query: str, project: str | None) -> None:
     "--quarantined",
     is_flag=True,
     default=False,
-    help="List quarantined entries (expired, hidden from every other read) instead.",
+    help=(
+        "List quarantined entries (hidden from every other read) instead: "
+        "expired ones, and ones a replace quarantined (never reaped)."
+    ),
 )
 def list_cmd(project: str | None, agent: str | None, quarantined: bool) -> None:
     """List memory entries.
 
-    With ``--quarantined``, list the entries expiry has quarantined: past their
-    TTL, hidden from get, search and list, and kept until ``nx memory reap``
-    deletes them (only once a rollup marks them) or ``nx memory restore``
-    brings one back. A "rolled up" stamp means reap will delete that entry.
+    With ``--quarantined``, list the quarantined entries, hidden from get,
+    search and list. Two kinds: an expired entry (past its TTL), kept until
+    ``nx memory reap`` deletes it, which it does only once a rollup marks it,
+    and an entry a ``memory_put`` with ``replaces`` quarantined (shown as
+    "replaced"), which a rollup skips and reap never deletes. ``nx memory
+    restore`` brings either back. A "rolled up" stamp means reap will delete
+    that entry.
     """
     if quarantined:
         with t2_handle() as db, _needs_quarantine_routes("list --quarantined"):
@@ -204,9 +225,11 @@ def list_cmd(project: str | None, agent: str | None, quarantined: bool) -> None:
             return
         for e in entries:
             mark = f", rolled up {e['rolled_up_at']}" if e.get("rolled_up_at") else ""
+            # ttl None on a quarantined row is a replace: expiry stamps only rows that have a ttl.
+            kind = "replaced" if "ttl" in e and e["ttl"] is None else "quarantined"
             click.echo(
                 f"[{e['id']}] {e['project']}/{e['title']}  "
-                f"(quarantined {e['quarantined_at']}{mark})"
+                f"({kind} {e['quarantined_at']}{mark})"
             )
         return
     with t2_handle() as db:
@@ -317,6 +340,7 @@ def reap_cmd(yes: bool) -> None:
 
     Only an entry a rollup summary already covers is deleted. An unmarked
     quarantined entry is never touched, however long it has been quarantined.
+    An entry a replace quarantined is never marked, so it is never reaped.
     Each reaped entry's topic assignments are removed too, as ``nx memory
     delete`` does; the engine's reap runs no taxonomy cascade of its own.
     """
@@ -406,9 +430,10 @@ def summaries_cmd(summary_id: int | None, project: str | None) -> None:
 @click.option("--dry-run", is_flag=True, default=False,
               help="Print the groups and their summaries; write nothing")
 def rollup_cmd(project: str, dry_run: bool) -> None:
-    """Summarize a project's quarantined entries by month and mark them for reap.
+    """Summarize a project's expired entries by month and mark them for reap.
 
-    Attended: it runs when you run it and costs one summarizer call per group,
+    Entries a replace quarantined are skipped, never marked or reaped; restore
+    or delete them by id. Attended: it runs when you run it and costs one summarizer call per group,
     and it prints the groups before making any call. Groups are by the month
     of each entry's timestamp, which is its last write (a put or a merge
     refreshes it); no creation date is kept. A summary must name every source

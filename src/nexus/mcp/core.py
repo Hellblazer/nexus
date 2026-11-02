@@ -132,6 +132,7 @@ from nexus.mcp import subscriptions as _subscriptions
 from nexus.mcp import channel as _channel
 
 if TYPE_CHECKING:
+    from nexus.db.t2 import T2Database
     from nexus.db.t2.http_memory_store import ReplacePutResult
     from nexus.plans.lifecycle_stream import LifecycleStream
     from nexus.plans.primary_evidence import NamedSourceResolution, PrimaryEvidence
@@ -7330,9 +7331,11 @@ def memory_put(
     )] = "",
     replaces: Annotated[str, Field(
         description=(
-            "Exact title of an entry in the same project to delete in the same write. "
+            "Exact title of an entry in the same project to quarantine in the same write "
+            "(not deleted: `nx memory restore <id>` brings it back, id in the result). "
             "Its content is returned and a `replaces: <old title>` line is appended. "
-            "Audit records (by tag or title) are refused. Empty means none."
+            "Audit records (by tag or title) are refused. A later plain put to the old "
+            "title overwrites the quarantined row. Empty means none."
         ),
     )] = "",
 ) -> str:
@@ -7436,25 +7439,36 @@ def memory_put(
             + _replaced_note(project, replaced)
         )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        # Once put_replacing returned, the target is deleted. Whatever fails after that (a verify
-        # verdict, the tier-write record) must still hand the deleted content to the writer: the
-        # echo is the only record of it. A failure inside put_replacing leaves `replaced` None.
+        # Once put_replacing returned, the target is quarantined. Whatever fails after that (a verify
+        # verdict, the tier-write record) must still tell the writer which row it quarantined and how
+        # to restore it. A failure inside put_replacing leaves `replaced` None.
         return _mcp_tool_error("memory_put", e) + _replaced_note(project, replaced)
 
 
+def _quarantined_hint(db: T2Database, project: str, title: str) -> str:
+    """When no live row has *title*, say so if a quarantined row has that exact title.
+
+    A replace or an expiry hides a row from every read, so a later reader holding its
+    old title sees a plain not-found. The hint names the id and the restore command.
+    Read only, and best effort: a failed lookup leaves the plain not-found.
+    """
+    from nexus.db.t2.http_memory_store import quarantined_row_hint  # noqa: PLC0415 — deferred: keeps the MCP server's import cost off the startup path
+    try:
+        row = db.memory.find_quarantined(project=project, title=title)
+    except Exception:  # noqa: BLE001 — a hint must not turn a not-found into an error; logged
+        _log.debug("memory_get_quarantine_hint_failed", project=project, title=title, exc_info=True)
+        return ""
+    return "\n" + quarantined_row_hint(row) if row is not None else ""
+
+
 def _replaced_note(project: str, replaced: ReplacePutResult | None) -> str:
-    """The deleted row's title and content, for the writer to re-put (RDR-238)."""
+    """Which row a replace quarantined, how to restore it, and what it held (RDR-238)."""
     if replaced is None:
         return ""
-    purge = (
-        f"\nWARNING: the taxonomy assignments of {project}/{replaced.replaced_title} were NOT purged "
-        f"(the purge failed); a row later given that title inherits them."
-        if replaced.purge_failed else ""
-    )
     return (
-        f"\nReplaced (deleted): {project}/{replaced.replaced_title}"
-        + purge
-        + f"\nDeleted content (re-put it to undo):\n{replaced.replaced_content}"
+        f"\nReplaced (quarantined, not deleted): {project}/{replaced.replaced_title} [{replaced.replaced_id}]"
+        f"\nRestore it: nx memory restore {replaced.replaced_id}"
+        f"\nIts content:\n{replaced.replaced_content}"
     )
 
 
@@ -7516,7 +7530,7 @@ def memory_get(
                         "Re-call with the full title or a longer prefix.",
                     )
                     return "\n".join(lines)
-                return f"Not found: {project}/{title}"
+                return f"Not found: {project}/{title}" + _quarantined_hint(db, project, title)
             else:
                 entries = db.list_entries(project=project)
                 if not entries:

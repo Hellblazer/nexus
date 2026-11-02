@@ -56,7 +56,6 @@ extend the tier.
 
 from __future__ import annotations
 
-import dataclasses
 import threading
 from collections.abc import Collection
 from pathlib import Path
@@ -466,13 +465,14 @@ class T2Database:
         agent: str | None = None,
         session: str | None = None,
     ) -> ReplacePutResult:
-        """Replacing put (RDR-238): the new row and the deleted row's echo.
+        """Replacing put (RDR-238): the new row and the quarantined row's echo.
 
-        The engine deletes the replaced memory row only. Its topic assignments
-        are purged here, as :meth:`delete` does, because no FK covers them. A
-        failed purge is logged and does not mask a replace that already landed.
+        The engine quarantines the replaced row (nexus-ov3zi); it is not deleted, so
+        its topic assignments are left alone, exactly as TTL-expiry quarantine leaves
+        them (``expire`` runs no taxonomy cascade). A restored row comes back with the
+        assignments it had. ``delete`` is the path that purges them.
         """
-        result = self.memory.put_replacing(
+        return self.memory.put_replacing(
             project=project,
             title=title,
             content=content,
@@ -482,19 +482,6 @@ class T2Database:
             agent=agent,
             session=session,
         )
-        try:
-            self.taxonomy.purge_assignments_for_doc(
-                project=project, title=result.replaced_title,
-            )
-        except Exception as exc:  # noqa: BLE001 — the replace already landed; an orphan assignment must not report it as failed
-            _log.warning(
-                "replaces_taxonomy_purge_failed",
-                project=project, replaced_title=result.replaced_title,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            # Carried to the writer: a later row re-using the replaced title would inherit the orphans.
-            return dataclasses.replace(result, purge_failed=True)
-        return result
 
     def put_or_merge(
         self,

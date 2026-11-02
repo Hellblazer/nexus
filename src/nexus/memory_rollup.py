@@ -3,7 +3,8 @@
 
 Expiry quarantines a T2 row instead of deleting it, and ``nx memory reap``
 deletes only a quarantined row that carries a rollup mark. This module makes
-the marks: it groups one project's unmarked quarantined rows by month, asks
+the marks: it groups one project's unmarked, expired quarantined rows (never a
+row a replace quarantined, which is kept for good) by month, asks
 the summarize operator for one summary per group, checks each summary against
 its sources, and sends the ones that pass to ``POST /v1/memory/summaries``,
 which stores the summary and marks its sources in one engine transaction.
@@ -102,10 +103,19 @@ def plan_groups(rows: Sequence[dict[str, Any]]) -> list[RollupGroup]:
 
     The quarantined route has no unmarked filter, so rows that already carry
     ``rolled_up_at`` are dropped here (plan record A3).
+
+    A row that a replace quarantined (nexus-ov3zi) is dropped too: it is
+    quarantined with ``ttl`` None, a shape only a replace produces, because expiry
+    quarantines only rows that have a ttl. Such a row is never summarized or marked,
+    so ``nx memory reap`` never deletes it; the engine refuses it as a summary
+    source as well. A listing row with no ``ttl`` key at all is kept (the engine
+    always sends the key, so that only happens in a hand-built row).
     """
     by_month: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         if row.get("rolled_up_at"):
+            continue
+        if "ttl" in row and row["ttl"] is None:
             continue
         by_month.setdefault(str(row["timestamp"])[:7], []).append(row)
     return [
