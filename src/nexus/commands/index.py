@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx index — code repository indexing commands."""
+import os
 import subprocess
 import sys
 import threading
@@ -3984,7 +3985,26 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
             "re-embed."
         )
 
+    # The path as typed, made absolute but with its symlinks kept: the directory form below reads
+    # a docs/rdr off it. Resolving first collapses a symlinked docs/ to the directory it points at
+    # and names THAT directory's parent as the repo (review of the 7.94.0 shakedown fix).
+    as_given = Path(os.path.abspath(path))
     path = path.resolve()
+
+    def _git_toplevel(cwd: Path) -> Path | None:
+        try:
+            # nexus-gbt5u: bounded, matching indexer_utils.find_repo_root's
+            # timeout=10 on the IDENTICAL command. This site was unbounded, so
+            # a stalled git (filesystem hang, held .git lock) blocked the index
+            # run forever. A failure is "fall back to the layout heuristic", so a
+            # timeout is free.
+            return Path(run_bounded(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=cwd, stderr=subprocess.DEVNULL, check=True,
+                timeout=10,
+            ).stdout.strip()).resolve()
+        except Exception:  # noqa: BLE001 — fallback path: git toplevel resolution failed (non-repo / git absent); the caller falls back to the conventional docs/rdr/ layout heuristic
+            return None
 
     if path.is_file():
         # Single-file scoping: infer repo root from git so collection naming
@@ -3992,18 +4012,8 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
         if path.suffix.lower() != ".md":
             click.echo(f"Not a markdown file: {path.name}")
             return
-        try:
-            # nexus-gbt5u: bounded, matching indexer_utils.find_repo_root's
-            # timeout=10 on the IDENTICAL command. This site was unbounded, so
-            # a stalled git (filesystem hang, held .git lock) blocked the index
-            # run forever. The except below already treats failure as
-            # "fall back to the layout heuristic", so a timeout is free.
-            repo_root = Path(run_bounded(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=path.parent, stderr=subprocess.DEVNULL, check=True,
-                timeout=10,
-            ).stdout.strip()).resolve()
-        except Exception:  # noqa: BLE001 — fallback path: git toplevel resolution failed (non-repo / git absent); recovers via conventional docs/rdr/ layout heuristic
+        repo_root = _git_toplevel(path.parent)
+        if repo_root is None:
             # Fallback: assume conventional docs/rdr/<file>.md layout.
             if path.parent.name == "rdr" and path.parent.parent.name == "docs":
                 repo_root = path.parent.parent.parent
@@ -4014,11 +4024,14 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
     else:
         repo_root = path
         rdr_dir = repo_root / "docs" / "rdr"
-        if not rdr_dir.is_dir() and path.name == "rdr" and path.parent.name == "docs":
+        if not rdr_dir.is_dir() and as_given.name == "rdr" and as_given.parent.name == "docs" and as_given.is_dir():
             # The shakedown's `nx index rdr docs/rdr`: PATH is the repo root, but a directory that IS
-            # <repo>/docs/rdr can only mean that repo's RDRs.
-            repo_root = path.parent.parent
-            rdr_dir = path
+            # <repo>/docs/rdr can only mean that repo's RDRs. The repo is the directory that holds the
+            # docs/ entry as typed (a symlinked docs/ points elsewhere), and git's toplevel names it
+            # as the single-file form does.
+            holder = as_given.parent.parent
+            repo_root = _git_toplevel(holder) or holder.resolve()
+            rdr_dir = as_given
         if not rdr_dir.is_dir():
             click.echo(
                 f"No docs/rdr/ directory found under {path}. PATH is the repo root that contains "

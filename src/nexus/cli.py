@@ -130,6 +130,10 @@ class _StorageBackendGuardGroup(click.Group):
             # are httpx, whose connect errors are not ConnectionError: shakedown 7.94.0, `nx index pdf`
             # with the engine stopped ended in a raw httpx.ConnectError traceback.
             notes = "; ".join(getattr(exc, "__notes__", []) or [])
+            # The traceback is gone from the screen; keep the cause (which layer raised, which request)
+            # recoverable with `nx -v`.
+            import structlog  # noqa: PLC0415 — deferred import
+            structlog.get_logger(__name__).debug("service_did_not_answer", error=str(exc), exc_info=True)
             raise click.ClickException(
                 f"a service this command needs did not answer ({exc}"
                 + (f"; {notes}" if notes else "")

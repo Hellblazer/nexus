@@ -2632,6 +2632,39 @@ class TestVerifyCommand:
         assert "chunker" not in result.output.lower() or "0" in result.output
 
 
+def test_suggest_links_reads_a_catalog_larger_than_one_page(monkeypatch):
+    """7.94.0 shakedown review: suggest-links read one page of 10,000 documents, so a tenant of 10,001 lost
+    its last document silently. Here the RDR is the 10,001st; it must still be matched."""
+    from types import SimpleNamespace
+
+    def _entry(n: int, title: str, ctype: str, path: str = ""):
+        return SimpleNamespace(tumbler=f"1.1.{n}", title=title, content_type=ctype, file_path=path)
+
+    entries = [_entry(n, f"filler {n}", "prose") for n in range(1, 10_000)]
+    entries.append(_entry(10_000, "chunker module", "code", "src/nexus/chunker.py"))
+    entries.append(_entry(10_001, "RDR-027 chunker improvements", "rdr", "docs/rdr/rdr-027.md"))
+    assert len(entries) == 10_001
+
+    class _Cat:
+        def all_documents(self, limit=0, *, content_type="", offset=0):
+            rows = [e for e in entries if not content_type or e.content_type == content_type]
+            return rows[offset:offset + limit] if limit > 0 else list(rows)
+
+        def by_content_type(self, content_type):
+            return [e for e in entries if e.content_type == content_type]
+
+        def link_query(self, **kwargs):
+            return []
+
+    monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: _Cat())
+
+    result = CliRunner().invoke(main, ["catalog", "suggest-links"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 suggestion(s)" in result.output, result.output
+    assert "1.1.10000" in result.output and "1.1.10001" in result.output, result.output
+
+
 @pytest.mark.t2_tenant
 class TestLinkDensity:
     """Tests for `nx catalog link-density --by-collection` (RDR-097 P1.4)."""

@@ -422,3 +422,30 @@ def test_index_rdr_no_rdr_dir_message_names_the_argument(runner: CliRunner, tmp_
     assert result.exit_code == 0, result.output
     assert "No docs/rdr/ directory found" in result.output
     assert "repo root" in result.output
+
+
+@pytest.mark.t2_tenant
+def test_index_rdr_given_a_symlinked_docs_dir_indexes_into_the_repo_not_the_link_target(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Review of the shakedown fix: `<repo>/docs` is a symlink to another directory's docs. PATH was
+    resolved first, which collapsed the link, so `nx index rdr <repo>/docs/rdr` named the LINK TARGET's
+    parent as the repo and wrote that directory's collection. The repo root comes from the path as given."""
+    from nexus.indexer import _repo_collection_or_legacy
+
+    other = tmp_path / "other-project"
+    (other / "docs" / "rdr").mkdir(parents=True)
+    (other / "docs" / "rdr" / "001-shared.md").write_text("# RDR-001: Shared\n\nBody.\n")
+    repo = tmp_path / "the-repo"
+    repo.mkdir()
+    (repo / "docs").symlink_to(other / "docs")
+
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        result = runner.invoke(main, ["index", "rdr", str(repo / "docs" / "rdr")])
+
+    assert result.exit_code == 0, result.output
+    mock_batch.assert_called_once()
+    expected = _repo_collection_or_legacy(repo.resolve(), "rdr")
+    assert expected != _repo_collection_or_legacy(other.resolve(), "rdr"), "control: the two repos name two collections"
+    assert mock_batch.call_args[1]["collection_name"] == expected
+

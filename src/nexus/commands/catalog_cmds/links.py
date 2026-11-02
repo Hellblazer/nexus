@@ -568,9 +568,10 @@ def suggest_links_cmd(limit: int, threshold: float) -> None:
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
     cat = _cat_cmd._get_catalog()
-    entries = cat.all_documents(limit=10_000)
-    rdr_entries = [e for e in entries if e.content_type == "rdr"]
-    code_entries = [e for e in entries if e.content_type == "code" and e.file_path]
+    # One unbounded read per content type (the service filters, the client sends no limit). A single
+    # `all_documents(limit=10_000)` page silently dropped every document past the 10,000th.
+    rdr_entries = list(cat.by_content_type("rdr"))
+    code_entries = [e for e in cat.by_content_type("code") if e.file_path]
 
     if not rdr_entries or not code_entries:
         click.echo("0 suggestions (no code or RDR entries to match).")

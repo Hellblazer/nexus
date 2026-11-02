@@ -369,7 +369,7 @@ def test_the_text_report_says_which_documents_each_key_family_covers_and_why_res
     assert result.exit_code == 0, result.output
     out = result.output
     assert "Examined 4 documents (1 notes)" in out
-    assert "note.* keys cover the 1 note(s); doc.* keys cover the 3 indexed document(s)" in out
+    assert "note.* keys cover the 1 note(s); doc.* keys cover the 3 non-note document(s)" in out
     json_result, _ = _invoke(monkeypatch, _world_with_one_of_each(), "--json")
     keys = json.loads(json_result.stdout)["keys"]
     with_residue = {k: v["residue_reasons"] for k, v in keys.items() if v["residue"]}

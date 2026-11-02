@@ -118,23 +118,35 @@ def test_the_note_names_an_env_configured_endpoint(monkeypatch):
     assert "127.0.0.1:9/v1/" in result.output, result.output
 
 
-def test_index_pdf_against_a_stopped_engine_is_one_message_not_a_traceback(monkeypatch, tmp_path):
-    """7.94.0 shakedown (class J): `nx index pdf` with the engine stopped ended in a raw
-    ``httpx.ConnectError`` traceback (two chained ``Traceback`` blocks per failure). The catalog client is
-    httpx; the process boundary caught ``ConnectionError`` and ``URLError``, neither of which an httpx
-    connect error is."""
+@pytest.fixture
+def pdf_against_a_stopped_local_engine(monkeypatch, tmp_path):
+    """A one-page PDF and a self-contained local mode whose engine is not running: its own HOME and
+    config dir (a box whose real config is managed would otherwise answer through the managed-service
+    path), NX_LOCAL=1, and an endpoint on a port nothing listens on."""
     import pymupdf
 
     pdf = tmp_path / "down.pdf"
     doc = pymupdf.open()
     doc.new_page().insert_text((72, 72), "engine down " * 20)
     doc.save(str(pdf))
+    home = tmp_path / "home"
+    (home / "cfg").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(home / "cfg"))
+    monkeypatch.setenv("NX_LOCAL", "1")
     monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:9")
     monkeypatch.setenv("NX_SERVICE_TOKEN", "sis0m-token")
     monkeypatch.setattr(hvc, "_lease_cache", None)
     monkeypatch.setattr("nexus.db.service_endpoint.mint_armed", lambda: False)
+    return pdf
 
-    result = CliRunner().invoke(main, ["index", "pdf", str(pdf), "--extractor", "pymupdf"])
+
+def test_index_pdf_against_a_stopped_engine_is_one_message_not_a_traceback(pdf_against_a_stopped_local_engine):
+    """7.94.0 shakedown (class J): `nx index pdf` with the engine stopped ended in a raw
+    ``httpx.ConnectError`` traceback (two chained ``Traceback`` blocks per failure). The catalog client is
+    httpx; the process boundary caught ``ConnectionError`` and ``URLError``, neither of which an httpx
+    connect error is."""
+    result = CliRunner().invoke(main, ["index", "pdf", str(pdf_against_a_stopped_local_engine), "--extractor", "pymupdf"])
 
     assert result.exit_code != 0, result.output
     assert isinstance(result.exception, SystemExit), (
@@ -142,3 +154,14 @@ def test_index_pdf_against_a_stopped_engine_is_one_message_not_a_traceback(monke
     )
     assert "did not answer" in result.output and "nx daemon service start" in result.output, result.output
     assert "Traceback" not in result.output, result.output
+
+
+def test_the_one_message_keeps_the_cause_in_a_debug_log(pdf_against_a_stopped_local_engine):
+    """Review of the 7.94.0 fix: the traceback is gone from the screen, so the exception itself is logged at
+    debug with its traceback, and `nx -v` recovers the cause (which request, which layer) that one line drops."""
+    result = CliRunner().invoke(main, ["-v", "index", "pdf", str(pdf_against_a_stopped_local_engine), "--extractor", "pymupdf"])
+
+    assert isinstance(result.exception, SystemExit), type(result.exception).__name__
+    seen = result.output + (result.stderr if result.stderr_bytes is not None else "")
+    assert "service_did_not_answer" in seen, seen
+    assert "httpx.ConnectError" in seen, "the debug event carries the raised exception's traceback: " + seen

@@ -370,7 +370,7 @@ def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
         )
         click.echo(
             f"  note.* keys cover the {report.documents_notes} note(s); "
-            f"doc.* keys cover the {report.documents_examined - report.documents_notes} indexed document(s)."
+            f"doc.* keys cover the {report.documents_examined - report.documents_notes} non-note document(s)."
         )
         for name, st in sorted(report.keys.items()):
             why = f" ({', '.join(f'{r} {n}' for r, n in sorted(st.residue.items()))})" if st.residue else ""
