@@ -335,6 +335,26 @@ def test_both_opencv_builds_make_the_row_red_on_linux_and_name_the_repair(monkey
     assert row.fix_suggestions and pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
 
 
+def test_both_opencv_builds_row_tells_the_truth_and_names_both_repairs(monkeypatch) -> None:
+    """Shakedown 7.94.0 class F: a bare `uv tool install conexus[pdf]` lands both builds. The row must not say
+    the install keeps only the headless one; it says this install did not read the overrides, and names the
+    override-reading reinstall AND the in-place repair (uninstall opencv-python, reinstall the headless build:
+    the two share cv2/, so the uninstall alone breaks the headless build too)."""
+    import sys
+
+    _stack(monkeypatch, "present", "5 distributions on their pins")
+    _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
+    setattr_in(monkeypatch, health, "sys.platform", "linux")
+    row = health._check_pdf_support()[0]
+    assert "did not read them" in row.detail and "keep only the headless" in row.detail
+    assert len(row.fix_suggestions) == 2, row.fix_suggestions
+    assert pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
+    inplace = row.fix_suggestions[1]
+    assert "uv pip uninstall" in inplace and "opencv-python &&" in inplace
+    assert "--reinstall opencv-python-headless" in inplace and sys.executable in inplace
+    assert "shares" in inplace
+
+
 def test_both_opencv_builds_off_linux_is_a_warning_not_red(monkeypatch) -> None:
     _stack(monkeypatch, "present", "5 distributions on their pins")
     _opencv(monkeypatch, "opencv-python", "opencv-python-headless")

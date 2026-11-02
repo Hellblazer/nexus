@@ -11,7 +11,9 @@ drift per box. The signal is now its own contextvar, independent of the clock:
 * ``nx upgrade --auto`` (argv) and any ``nx`` run started with ``NX_UPGRADE_UNATTENDED=1`` set it at
   the top of the root group (:mod:`nexus.cli`) and in the ``upgrade`` command;
 * the version-transition callout sets it around its ``detect()`` calls (a cheap "pending?" answer);
-* an interactive ``nx upgrade`` and ``nx doctor`` never set it, and keep their walks.
+* ``nx doctor`` sets it around its pending-rungs sweep (nexus-mq980): a managed catalog is not walked for a
+  doctor row either, and the row reports those rungs as not checked;
+* an interactive ``nx upgrade`` never sets it, and keeps its walks.
 
 The deadline stays a clock (:mod:`nexus.upgrade_ladder.deadline`); this module is the question "is
 anyone watching?".

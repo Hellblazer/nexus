@@ -1001,13 +1001,48 @@ def test_embedding_profile_dormant_is_a_warn_naming_the_state_with_remedy(monkey
     name = "docs__1-1__voyage-context-3__v1"
     health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
         _coll(name, "docs", "voyage-context-3", "dormant"),
-    ]))
+    ], all_docs={name: 3}))  # a document still names it: "referenced"
     r = _by_label(health._check_embedding_profile(), "Collections dormant")
     assert r.ok is False and r.warn is True and not _is_red(r)
     assert name in r.detail and "dormant" in r.detail and "marked by the ghost sweep" in r.detail
     assert any("referenced but empty" in s for s in r.fix_suggestions)
     assert any("remove the references" in s for s in r.fix_suggestions)
     assert any("sweep-ghosts --apply" in s for s in r.fix_suggestions), "the remedy names what clears the mark"
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_dormant_row_no_document_names_is_reported_as_the_ghost_the_sweep_will_delete(monkeypatch) -> None:
+    """Shakedown 7.94.0 class E: knowledge__deploy-probes is dormant, holds no chunk, and no catalog document
+    (live or tombstoned) names it any more, so `nx catalog sweep-ghosts` lists it as a ghost to delete. The
+    dormant row must say that, not "referenced but empty"; a dormant row a document still names keeps the old
+    wording, in the same row."""
+    gone = "knowledge__deploy-probes__voyage-context-3__v1"
+    held = "docs__1-1__voyage-context-3__v1"
+    health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
+        _coll(gone, "knowledge", "voyage-context-3", "dormant"),
+        _coll(held, "docs", "voyage-context-3", "dormant"),
+    ], all_docs={held: 2}))
+    r = _by_label(health._check_embedding_profile(), "Collections dormant")
+    assert r.warn is True and not _is_red(r)
+    assert "1 dormant collection(s), referenced but empty" in r.detail and held in r.detail.split(";")[0]
+    assert "lists them as ghosts to delete" in r.detail and gone in r.detail.split(";")[1]
+    assert gone not in r.detail.split(";")[0]
+    assert any("no document references it" in s and "sweep-ghosts" in s and "--apply" in s for s in r.fix_suggestions)
+    assert any("referenced but empty:" in s for s in r.fix_suggestions)
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_dormant_row_keeps_the_referenced_wording_when_the_count_is_unreadable(monkeypatch) -> None:
+    name = "docs__1-1__voyage-context-3__v1"
+    reader = _FakeReader(_VOYAGE_PROFILE, [_coll(name, "docs", "voyage-context-3", "dormant")])
+
+    def _boom(**_kw):
+        raise RuntimeError("route absent")
+
+    reader.collection_doc_counts = _boom
+    health = _patch_profile_check(monkeypatch, reader)
+    r = _by_label(health._check_embedding_profile(), "Collections dormant")
+    assert "referenced but empty" in r.detail and "ghosts to delete" not in r.detail
 
 
 @pytest.mark.usefixtures("cloud_mode")

@@ -134,7 +134,7 @@ class NoteTagsArrayRung:
         if refuses_unbounded_read(self._managed_fn):
             # nexus-75w5d: the scan lists every note in every knowledge__* collection, on every call,
             # with no completion record or memo to answer from. Unattended against a managed service
-            # it reads nothing; an interactive `nx upgrade` (and `nx doctor`) still scans.
+            # it reads nothing; an interactive `nx upgrade` still scans (`nx doctor` reports the rung as not checked).
             reason = (
                 "unattended `nx upgrade --auto` does not list every note of a managed catalog; "
                 f"{INTERACTIVE_REMEDY}"
