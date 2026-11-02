@@ -1364,6 +1364,11 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
     return ok, failures, notes
 
 
+def records_a_pass(chosen: list[str], bad: list[str]) -> bool:
+    """Only a run of every scenario, in order, with none failed, is a pass the restart gate honours."""
+    return not bad and chosen == list(SCENARIOS)
+
+
 def record_full_pass(crs, claude: str, before: tuple[str, str], chosen: list[str], elapsed: float) -> str:
     """Record a full pass for the script's restart gate, if what ran is still what is installed.
 
@@ -1424,7 +1429,7 @@ def main() -> int:
     verdict = "RESTART SANDBOX FAILED" if bad else "RESTART SANDBOX PASSED"
     print(f"{verdict} -- {len(chosen)} scenario(s) ({', '.join(chosen)}), {total} failure(s)"
           + (f" in {', '.join(bad)}" if bad else "") + f", {time.time() - t0:.0f}s", flush=True)
-    if not bad and chosen == list(SCENARIOS):
+    if records_a_pass(chosen, bad):
         print(record_full_pass(crs, claude, tested, chosen, time.time() - t0), flush=True)
     return 1 if bad else 0
 

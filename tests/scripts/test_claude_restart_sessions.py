@@ -512,7 +512,10 @@ def rd(crs, monkeypatch, tmp_path):
     monkeypatch.setattr(crs, "READY_MANIFEST", tmp_path / "restart-ready.json")
     monkeypatch.setattr(crs, "LAST_RUN", tmp_path / "restart-last.json")
     monkeypatch.setattr(crs, "ASK_DIR", ask_dir)
-    monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "")  # the sandbox gate has its own tests
+    # The sandbox gate has its own tests; its inputs are stubbed too, so no test runs the real claude.
+    monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "")
+    monkeypatch.setattr(crs, "script_sha256", lambda *_a: SHA)
+    monkeypatch.setattr(crs, "claude_version", lambda *_a: "2.1.316")
     monkeypatch.delenv("TMUX_PANE", raising=False)
     return tmp_path
 
@@ -643,6 +646,19 @@ def test_status_prints_the_table_and_exits_nonzero_while_a_target_blocks(crs, rd
     rows = {ln.split()[0]: ln for ln in out.splitlines() if ln.split() and ln.split()[0] in ("alpha", "beta")}
     assert "ready" in rows["alpha"] and "idle" in rows["alpha"] and "60s" in rows["alpha"]
     assert "busy" in rows["beta"] and "busy now" in rows["beta"]
+
+
+def test_status_is_not_go_while_the_sandbox_pass_does_not_hold(crs, rd, monkeypatch, capsys) -> None:
+    """--status exits 0 only when a restart would be allowed, and the restart checks the pass too."""
+    _live(rd, "alpha")
+    _round(crs, rd, ["alpha"], alpha=60)
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--status"])
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
+    assert crs.main() == 0
+    assert "sandbox pass: holds" in capsys.readouterr().out
+    monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "no sandbox pass recorded (x)")
+    assert crs.main() == 1
+    assert "sandbox pass: no sandbox pass recorded" in capsys.readouterr().out
 
 
 def test_status_without_a_round_says_so(crs, rd, monkeypatch, capsys) -> None:
@@ -1409,6 +1425,25 @@ def test_a_failed_ack_releases_our_claim(crs, monkeypatch, tmp_path) -> None:
     crs.withdraw_ask("sid-9")
     assert [(c[0], c[1]) for c in calls if c[0] != "in"] == [("ack", "c-ours"), ("release", "c-ours")]
     assert "claimed but not acked (exit 1); released" in crs.LOG.read_text(encoding="utf-8")
+
+
+def test_an_ack_that_raises_still_releases_our_claim(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    crs.SENT_ASKS["sid-9"] = "t-ours"
+    calls: list[tuple[str, ...]] = []
+
+    def fake(*args: str) -> subprocess.CompletedProcess:
+        calls.append(args)
+        if args[0] == "in":
+            return _cp(0, json.dumps({"claim_id": "c-ours", "tuple": {"id": "t-ours"}}))
+        if args[0] == "ack":
+            raise subprocess.TimeoutExpired(["nx"], 60)
+        return _cp(0)
+
+    monkeypatch.setattr(crs, "_nx_tuple", fake)
+    crs.withdraw_ask("sid-9")
+    assert [(c[0], c[1]) for c in calls if c[0] != "in"] == [("ack", "c-ours"), ("release", "c-ours")]
+    assert "not withdrawn (TimeoutExpired" in crs.LOG.read_text(encoding="utf-8")
 
 
 def test_a_failed_release_is_warned(crs, monkeypatch, tmp_path) -> None:

@@ -820,6 +820,7 @@ def withdraw_ask(sid: str) -> None:
     if not tid:
         return
     others: list[str] = []
+    own = ""  # our row's claim until its ack succeeds; released in the finally otherwise
     outcome = "already taken or expired"
     try:
         for _ in range(10):
@@ -833,13 +834,15 @@ def withdraw_ask(sid: str) -> None:
             got = json.loads(r.stdout)
             claim, row = got["claim_id"], got["tuple"]
             if row.get("id") == tid:
+                # A claim left to lapse counts an attempt and comes back re-announced, so until the
+                # ack succeeds (a non-zero exit or a raise) the finally releases it.
+                own = claim
                 a = _nx_tuple("ack", claim, "--claimant", ASK_CLAIMANT)
                 if a.returncode == 0:
+                    own = ""
                     outcome = "withdrawn"
                 else:
-                    # A claim left to lapse counts an attempt and comes back re-announced; release it.
                     outcome = f"claimed but not acked (exit {a.returncode}); released"
-                    others.append(claim)
                 break
             others.append(claim)
         else:
@@ -847,7 +850,7 @@ def withdraw_ask(sid: str) -> None:
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
         outcome = f"not withdrawn ({type(e).__name__}: {e})"
     finally:
-        for claim in others:
+        for claim in [*others, own] if own else others:
             try:
                 rel = _nx_tuple("release", claim, "--claimant", ASK_CLAIMANT)
                 if rel.returncode != 0:
@@ -1466,7 +1469,10 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
                 if t["sessionId"] not in {s["sessionId"] for s in found}]
         if gone:
             print("in the round but not live now: " + ", ".join(gone))
-        return 0 if rows and not problem and not any(r["blocker"] for r in rows) else 1
+        # The restart checks the sandbox pass too (exit 3), so "allowed" must include it.
+        sandbox = sandbox_pass_problem(script_sha256(), claude_version())
+        print(f"sandbox pass: {sandbox or 'holds for this script and Claude Code version'}")
+        return 0 if rows and not problem and not sandbox and not any(r["blocker"] for r in rows) else 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
     excluded = excluded_sessions(listed, found, a)
     if a.dry_run:
