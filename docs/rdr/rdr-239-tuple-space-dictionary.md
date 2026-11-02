@@ -182,6 +182,16 @@ Research records: T2 `nexus_rdr/239-research-1`, `239-research-2`, and
   mailboxes hold only consumed rows, which `rd` does not return. The
   dictionary view therefore shows the consumed and claimed counts beside
   the available ones (Technical Design item 3).
+- **⚠️ Documented** (linda, 2026-11-02, nexus-mdbds.2.23): how the
+  dictionary resolves NAME without a new client matcher. NAME equal to a
+  registry template name gives that template; otherwise a census row for
+  exactly that subspace gives its engine `template` field; otherwise NAME
+  is matched against the registry names by the resolver the client already
+  had (`subscriptions._take_enabled`, literal before patterned), lifted
+  into one shared function. Census rows from an engine older than the
+  `template` field are grouped by the same resolver. An engine whose
+  registry has no `doc` prints "engine predates the dictionary", still
+  shows the census, and exits 0.
 
 ### Critical Assumptions
 
