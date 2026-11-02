@@ -112,11 +112,17 @@ def test_the_remote_script_order_is_fetch_checkout_fixup_verify_run() -> None:
     assert order == sorted(order)
 
 
-@pytest.mark.parametrize("step", ["clone", "git fetch origin", "bundle fetch", "checkout", "checkout fixup"])
+@pytest.mark.parametrize(
+    "step",
+    [
+        "clone", "git fetch origin", "bundle fetch", "git clean", "checkout", "checkout fixup",
+        "applying the uncommitted changes", "staging the uncommitted changes", "committing the uncommitted changes",
+    ],
+)
 def test_every_setup_step_stops_with_the_setup_code(step: str) -> None:
     """A native command's nonzero exit does not trip ErrorActionPreference;
     each git step is checked, or pytest would run on the previous tree."""
-    script = wht.remote_script("wren", "abc", ["t.py"], bundle=r"C:\b", fixup="", floor=None)
+    script = wht.remote_script("wren", "abc", ["t.py"], bundle=r"C:\b", fixup="", floor=None, patch=r"C:\p")
     assert f"Write-Host 'windows_hand_test: {step} failed'; exit {wht.SETUP_FAILED}" in script
 
 
@@ -328,22 +334,31 @@ def test_a_clean_tree_has_an_empty_patch(tmp_path: Path) -> None:
     assert wht.uncommitted_patch(subprocess.run, _git_repo(tmp_path)) == b""
 
 
-def test_uncommitted_ships_the_patch_and_applies_it_after_the_fixup() -> None:
+def test_uncommitted_is_committed_before_the_fixup_so_its_copies_carry_it() -> None:
+    """CI's fixup copies each tracked symlink's target over its stub
+    (src/nexus/_resources/daemon <- conexus/daemon). Applied after it, an edit
+    to conexus/daemon reached the target but not the copy the tests read, and
+    the run still said "plus uncommitted changes" (review r1, shown live). So
+    the patch is applied and committed locally first, the fixup's hard reset
+    keeps it, and HEAD's parent is the commit asked for."""
     rec = _Recorder(on_origin=True)
     rec.patch = b"diff --git a/x b/x\n"
     assert wht.main(["--session", "wren", "--uncommitted", "--", "t.py"], run=rec) == 0
     assert any(c[0] == "scp" and c[2].endswith(".patch") for c in rec.calls)
     script = rec.scripts[-1]
+    fixup = wht.ci_step_run(wht.FIXUP_STEP).rstrip()
     order = [script.index(part) for part in (
         "git clean -fdq",
         "git checkout -q -f --detach",
-        "if ($head -ne",
         "git apply --binary --whitespace=nowarn 'C:\\build\\hand\\wren\\win-hand.patch'",
+        "git add -A",
+        "commit -q --no-verify",
+        fixup,
+        "$head = (git rev-parse HEAD~1).Trim()",
         "testing sha-of-HEAD^{commit} plus uncommitted changes",
         "pytest",
     )]
     assert order == sorted(order)
-
 
 def test_uncommitted_on_a_clean_tree_is_refused() -> None:
     with pytest.raises(SystemExit, match="no uncommitted changes"):
@@ -361,3 +376,21 @@ def test_without_uncommitted_no_patch_is_sent_or_applied() -> None:
     wht.main(["--session", "wren", "--", "t.py"], run=rec)
     assert not any(c[0] == "scp" and c[2].endswith(".patch") for c in rec.calls)
     assert "git apply" not in rec.scripts[-1]
+
+
+def test_the_patch_shape_ignores_the_callers_diff_config(tmp_path: Path) -> None:
+    """diff.noprefix drops a/ and b/, and diff.external replaces the patch;
+    the builder pins its own options so git apply always gets a patch."""
+    repo = _git_repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "config", "diff.noprefix", "true"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "diff.external", "cat"], check=True)
+    (repo / "a.py").write_text("one\ntwo\n", encoding="utf-8")
+    patch = wht.uncommitted_patch(subprocess.run, repo)
+    assert b"--- a/a.py" in patch and b"+++ b/a.py" in patch
+
+
+def test_an_oversized_patch_is_refused() -> None:
+    rec = _Recorder(on_origin=True)
+    rec.patch = b"x" * (wht.MAX_PATCH_BYTES + 1)
+    with pytest.raises(SystemExit, match="over the"):
+        wht.main(["--session", "wren", "--uncommitted", "--", "t.py"], run=rec)

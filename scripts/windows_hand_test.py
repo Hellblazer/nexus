@@ -31,6 +31,7 @@ as a test result; 98 when pytest passed and the floor step failed.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import subprocess
@@ -51,6 +52,8 @@ LAB_RUN_WIN: str = r"C:\build\lab\lab-run-win.cmd"
 CLONE_URL: str = "https://github.com/Hellblazer/nexus.git"
 SETUP_FAILED: int = 97
 FLOOR_FAILED: int = 98
+#: An --uncommitted patch above this is refused: an untracked dump, not work.
+MAX_PATCH_BYTES: int = 20 * 1024 * 1024
 
 #: Every character PowerShell takes as a single-quote delimiter.
 _PS_SINGLE_QUOTES: str = "'\u2018\u2019\u201a\u201b"
@@ -185,21 +188,32 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         must("git clean"),
         f"git checkout -q -f --detach {sha}",
         must("checkout"),
+    ]
+    expected_head = "HEAD"
+    if patch is not None:
+        # Applied BEFORE CI's fixup and kept as a throwaway local commit: the
+        # fixup's hard reset then keeps it, and the copies it makes of each
+        # tracked symlink's target (src/nexus/_resources/daemon <- conexus/daemon)
+        # are made from the patched targets. Applied after the fixup, an edit to
+        # conexus/daemon reached the target but not its copy (review r1).
+        lines += [
+            f"git apply --binary --whitespace=nowarn {_ps_quote(patch)}",
+            must("applying the uncommitted changes"),
+            "git add -A",
+            must("staging the uncommitted changes"),
+            "git -c user.name=windows_hand_test -c user.email=windows_hand_test@localhost -c commit.gpgsign=false "
+            "commit -q --no-verify -m 'windows_hand_test: uncommitted changes'",
+            must("committing the uncommitted changes"),
+        ]
+        expected_head = "HEAD~1"
+    lines += [
         "# CI's own checkout fixup step, verbatim from the workflow:",
         fixup.rstrip(),
         must("checkout fixup"),
-        "$head = (git rev-parse HEAD).Trim()",
-        f"if ($head -ne '{sha}') {{ Write-Host \"windows_hand_test: HEAD is $head, not {sha}\"; exit {fail} }}",
+        f"$head = (git rev-parse {expected_head}).Trim()",
+        f"if ($head -ne '{sha}') {{ Write-Host \"windows_hand_test: {expected_head} is $head, not {sha}\"; exit {fail} }}",
+        f"Write-Host 'windows_hand_test: testing {sha}" + (" plus uncommitted changes'" if patch is not None else "'"),
     ]
-    if patch is not None:
-        lines += [
-            "# The caller's uncommitted changes, applied after the fixup step (its hard reset would undo them).",
-            f"git apply --binary --whitespace=nowarn {_ps_quote(patch)}",
-            must("applying the uncommitted changes"),
-            f"Write-Host 'windows_hand_test: testing {sha} plus uncommitted changes'",
-        ]
-    else:
-        lines.append(f"Write-Host 'windows_hand_test: testing {sha}'")
     lines += [
         "$ErrorActionPreference = 'Continue'",
         "$env:NX_TEST_T2_SUBSTRATE = 'none'",
@@ -233,11 +247,14 @@ def uncommitted_patch(run: Runner, repo: Path = REPO_ROOT) -> bytes:
     def git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
         return run(["git", "-C", str(repo), *args], capture_output=True, check=check)
 
-    parts = [git("diff", "--binary", "HEAD").stdout]
+    # Fixed diff options: a caller's diff.noprefix, diff.external or a textconv
+    # driver would otherwise change the patch's shape (review r1).
+    opts = ("--binary", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/")
+    parts = [git("diff", *opts, "HEAD").stdout]
     for raw in git("ls-files", "--others", "--exclude-standard", "-z").stdout.split(b"\0"):
         if raw:
             # --no-index exits 1 when the files differ, which they always do here.
-            parts.append(git("diff", "--binary", "--no-index", "--", "/dev/null", raw.decode(), check=False).stdout)
+            parts.append(git("diff", *opts, "--no-index", "--", "/dev/null", os.fsdecode(raw), check=False).stdout)
     return b"".join(parts)
 
 
@@ -295,6 +312,14 @@ def _main(argv: Sequence[str] | None, *, run: Runner) -> int:
     patch_bytes = uncommitted_patch(run) if ns.uncommitted else b""
     if ns.uncommitted and not patch_bytes:
         raise SystemExit("windows_hand_test: --uncommitted given but the tree has no uncommitted changes")
+    if len(patch_bytes) > MAX_PATCH_BYTES:
+        raise SystemExit(
+            f"windows_hand_test: the uncommitted changes come to {len(patch_bytes)} bytes, over the "
+            f"{MAX_PATCH_BYTES} cap; an untracked dump is likely (git status shows it), commit or ignore it"
+        )
+    if patch_bytes:
+        files = patch_bytes.count(b"\ndiff --git ") + patch_bytes.startswith(b"diff --git ")
+        _say(f"windows_hand_test: sending {files} changed file(s), {len(patch_bytes)} bytes of uncommitted changes")
     if not ns.uncommitted and ns.ref == "HEAD" and _git(run, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         _say("windows_hand_test: the tree has uncommitted changes; they are NOT tested "
              "(commit them, or pass --uncommitted to include them)", err=True)
