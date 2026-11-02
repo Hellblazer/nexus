@@ -16,4 +16,4 @@ paths:
 
 ## Windows before the push
 
-This file is in or near the code CI's Windows set covers, and that set runs only after a push. Before pushing, run `uv run scripts/windows_hand_test.py --check`; when it exits 1, run the listed tests (or `--set`) on native Windows with `uv run scripts/windows_hand_test.py --session <name> -- <tests>`. AGENTS.md rule 14; full text in [test-running](../../docs/agents/test-running.md) § Native Windows.
+This file is in or near the code CI's Windows set covers, and that set runs only after a push. Before pushing, run `uv run scripts/windows_hand_test.py --check`; when it exits 1, run the listed tests (or `--set`) on native Windows with `uv run scripts/windows_hand_test.py --session <name> -- <tests>` (add `--uncommitted` when you cannot commit). AGENTS.md rule 14; full text in [test-running](../../docs/agents/test-running.md) § Native Windows.
