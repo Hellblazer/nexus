@@ -417,6 +417,22 @@ class MemoryRepositoryReplacesTest {
     }
 
     @Test
+    void refuses_aBlankTarget_atTheRepository() {
+        // The handler refuses a blank replaces with 400 before the repository sees it, so only a
+        // direct call reaches this guard; without this case the guard can be deleted unnoticed.
+        String t = tenant(); String p = project();
+        put(t, p, "new-title", "incumbent content", "keep");
+        List<Row> before = snapshot(t, p);
+        for (String blank : new String[] {null, "", "   "}) {
+            assertThatThrownBy(() -> replace(t, p, "fresh", "REPLACEMENT", "x", blank))
+                .as("replaces=%s", blank == null ? "null" : "'" + blank + "'")
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("target title is blank");
+        }
+        assertThat(snapshot(t, p)).isEqualTo(before);
+    }
+
+    @Test
     void refuses_aQuarantinedTarget_asMissingWouldHideIt() {
         String t = tenant(); String p = project();
         long id = repo.importRow(t, p, "expired-note", "expired body", "a", null, null, 1, OLD, 0, null);
