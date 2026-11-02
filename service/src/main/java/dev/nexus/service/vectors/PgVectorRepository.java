@@ -8493,8 +8493,10 @@ FROM scope s
      * of the owner's first live manifest row in the row's own collection, and that row's span ({@code
      * line_start}, {@code line_end}, {@code chunk_start_char}, {@code chunk_end_char}) where the manifest
      * has a value, and for a NULL field the same rule as the expanded path below ({@link
-     * ManifestLabelStage#putSpan}), so the document, the file and the lines on a citation are one owner's,
-     * except where a former holder left no manifest trace (see putSpan). A chunk with no
+     * ManifestLabelStage#putSpan}), so the document, the file and the lines on a citation are one owner's.
+     * A former holder leaves no manifest trace, so the write side clears the chunk row's field when the
+     * sole holder left lacks it ({@code DepartedWriterSpans}); the cases it does not reach are listed on
+     * putSpan. A chunk with no
      * live owner keeps its own span and gets neither key.
      *
      * <p>{@code labelStageFollows}: a {@link ManifestLabelStage} pass will expand each row to its owning

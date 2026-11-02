@@ -5,7 +5,7 @@
     included). jOOQ's grant(..) takes a table, never a column list.
 
     CatalogManifestSweepRepositoryTest revokes the table-level SELECT through jOOQ first, so this column-level
-    grant leaves only the chash read (the sweep's before-read, currentManifestChashes) failing while the
+    grant leaves only the chash read (the batch writer's before-read, currentManifestRows) failing while the
     manifest write's own DELETE and INSERT carry on. The test restores the table-level grant through jOOQ.
     Run by that test directly; runAlways, bookkeeping in its own table.
     ${role} is a fixed test literal, never input.

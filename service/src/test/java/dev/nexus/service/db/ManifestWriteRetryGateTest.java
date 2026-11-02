@@ -91,22 +91,25 @@ class ManifestWriteRetryGateTest {
         "ChashRepository#renameCollection"));
 
     /** Files that mention the table without writing it, each with the reason. A pinned allowlist. */
-    private static final Map<String, String> READ_ONLY_REFERENCES = new TreeMap<>(Map.of(
-        "PgVectorRepository", "ownership, manifest and source_uri lookups (SELECT ... FROM catalog_document_chunks) and prose;"
-            + " it writes chunks, never manifest rows",
-        "SchemaMigrator", "names the table in the chash-length constraint map: DDL bookkeeping, no DML",
-        "TaxonomyRepository", "a comment naming the idiom; no code reference",
-        "TenantScope", "a table-name list for the VACUUM allowlist; VACUUM ANALYZE is not manifest DML",
-        "DeadlockRetry", "class javadoc naming the manifest writers it guards; the belt itself touches no table",
-        "CatalogHandler", "comments only",
-        "VectorHandler", "javadoc only",
-        "ManifestLabelStage", "nexus-tko2w: one SELECT over the manifest joined to its live document (the occurrences of a"
-            + " search hit's chash, for the section-label where-filter); it writes nothing",
-        "ReembedSourceReader", "RDR-210 Phase 6 Step 2 (nexus-f98bg): selects only (EXISTS and count over the manifest to"
+    private static final Map<String, String> READ_ONLY_REFERENCES = new TreeMap<>(Map.ofEntries(
+        Map.entry("PgVectorRepository", "ownership, manifest and source_uri lookups (SELECT ... FROM catalog_document_chunks) and prose;"
+            + " it writes chunks, never manifest rows"),
+        Map.entry("SchemaMigrator", "names the table in the chash-length constraint map: DDL bookkeeping, no DML"),
+        Map.entry("TaxonomyRepository", "a comment naming the idiom; no code reference"),
+        Map.entry("TenantScope", "a table-name list for the VACUUM allowlist; VACUUM ANALYZE is not manifest DML"),
+        Map.entry("DeadlockRetry", "class javadoc naming the manifest writers it guards; the belt itself touches no table"),
+        Map.entry("CatalogHandler", "comments only"),
+        Map.entry("VectorHandler", "javadoc only"),
+        Map.entry("ManifestLabelStage", "nexus-tko2w: one SELECT over the manifest joined to its live document (the occurrences of a"
+            + " search hit's chash, for the section-label where-filter); it writes nothing"),
+        Map.entry("ReembedSourceReader", "RDR-210 Phase 6 Step 2 (nexus-f98bg): selects only (EXISTS and count over the manifest to"
             + " find a source's candidate documents and what a cutover's delete would destroy); the re-embed move"
-            + " writes the manifest through CatalogRepository",
-        "ChunkOwnerLabel", "nexus-6pfgb.39: a jOOQ SELECT subquery over the manifest joined to its live document (the"
-            + " owner label of a gc-audit chunk); it builds a Select and writes nothing"));
+            + " writes the manifest through CatalogRepository"),
+        Map.entry("ChunkOwnerLabel", "nexus-6pfgb.39: a jOOQ SELECT subquery over the manifest joined to its live document (the"
+            + " owner label of a gc-audit chunk); it builds a Select and writes nothing"),
+        Map.entry("DepartedWriterSpans", "nexus-pvkbv: SELECT subqueries over the manifest (which chunks a document is the"
+            + " sole remaining holder of, and what span fields its rows lack) and an UPDATE of nexus.chunks metadata;"
+            + " it writes no manifest row. Its caller is the manifest writer, inside that writer's retried transaction")));
 
     private static final Pattern TABLE_REF = Pattern.compile("catalog_document_chunks|CatalogDocumentChunks",
         Pattern.CASE_INSENSITIVE);

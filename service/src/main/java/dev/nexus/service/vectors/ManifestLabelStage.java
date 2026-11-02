@@ -1113,11 +1113,27 @@ final class ManifestLabelStage {
      *       written before the manifest had spans carries, so dropping the field there would erase a span
      *       the owner really has.
      * </ul>
-     * A document that no longer lists the chunk leaves no trace: one whose manifest rows were purged, one
-     * re-indexed or edited so it dropped the chunk (its manifest is deleted and rewritten by doc_id), and one
-     * moved to another collection. A chunk row such a document wrote last is read as the remaining holder's
-     * own, so a sole holder with a NULL span still shows that departed writer's span; the chunk row carries no
-     * writer id to tell the two apart.
+     * A document that stops holding the chunk leaves no manifest trace here, and the chunk row records no
+     * writer, so the write side clears the row's field when it happens ({@code DepartedWriterSpans}, in the
+     * transaction that removes the manifest rows): the document was edited or re-indexed so it dropped the
+     * chunk, its manifest was purged, its trash purge ran, it moved to another collection, or an append or
+     * import put another chunk at its position. It clears a field when exactly one holder remains, that
+     * holder's manifest rows lack the field, and the departing document could have written the row's value
+     * (its own manifest value is absent or equal to the row's), so the "not shared" case above stays right:
+     * the row's span is then the sole holder's or nobody's. What is left:
+     * <ul>
+     *   <li>a chunk row written before that clear existed, whose writer had already left: it still carries
+     *       the departed writer's span until its sole holder is re-indexed with force (an incremental index
+     *       skips an unchanged file; the re-index writes the holder's own span into its manifest, which this
+     *       stage then reads); no repair pass is run, because a blanket one cannot tell a departed writer's
+     *       span from a span that is the holder's own and exists only on the chunk row (a row written before
+     *       the manifest had spans), and would erase the latter;
+     *   <li>the last two other holders of a chunk written within the hour leaving in concurrent transactions:
+     *       each still sees the other, and neither clears;
+     *   <li>the clear erases a span that really was the sole holder's own when its manifest lacks it, the
+     *       chunk had another holder at the time, and the departing document had no value of its own: the
+     *       same safe direction as dropping the field here.
+     * </ul>
      */
     static void putSpan(Map<String, Object> row, Occurrence o) {
         putField(row, "line_start", o.lineStart(), o.sharedChunk());

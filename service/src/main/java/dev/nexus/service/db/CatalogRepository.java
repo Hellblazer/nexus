@@ -2794,6 +2794,11 @@ public final class CatalogRepository {
             long chunks1024 = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024), olderThanDays);
             long eligible   = agedTombstoneCount(ctx, tenant, olderThanDays);
 
+            // nexus-pvkbv: the purge deletes the aged tombstones' manifest rows (the fk-001 cascade), and a sole
+            // remaining holder with no span would then show the departed writer's. The aged set is gone after
+            // the purge, so the clear runs before it, in the same transaction.
+            DepartedWriterSpans.clearBeforeTrashPurge(ctx, tenant, agedThreshold(olderThanDays));
+
             Long purgedRaw = dev.nexus.service.jooq.nexus.Routines.purgeTrash(
                 ctx.configuration(), olderThanInterval(olderThanDays));
             long purged = purgedRaw != null ? purgedRaw : 0L;
@@ -5587,7 +5592,7 @@ public final class CatalogRepository {
 
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           String collection, List<Map<String, Object>> rows) {
-        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null, null, null, null);
+        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null, null, null, null, null);
     }
 
     /**
@@ -5637,6 +5642,10 @@ public final class CatalogRepository {
      *        flushed by the caller only after the transaction commits, so a
      *        deadlock-retried attempt cannot count a race twice. Ignored
      *        (may be {@code null}) when {@code resolvedChunks} is null.
+     * @param priorRows nexus-pvkbv: the document's manifest rows (collection, chash and their own span) read
+     *        BEFORE this call, under the caller's own fail-open savepoint ({@link #writeManifestMany}), or {@link
+     *        #PRIOR_ROWS_UNREAD} when that read failed (the departed-chunk span clear is then skipped), or
+     *        {@code null} when the caller has none: the delete below then returns the removed rows itself.
      * @return {@code collection}, unchanged — kept as the return type so the
      *         post-commit sweep step ({@link #runSweepTransaction},
      *         {@link #writeManifestMany}) has the collection to sweep
@@ -5648,7 +5657,8 @@ public final class CatalogRepository {
                                           int[] chunksWrittenOut,
                                           Set<String> writtenThisRequest,
                                           List<String>[] writtenChashesOut,
-                                          RacedEmbeds racedOut) {
+                                          RacedEmbeds racedOut,
+                                          List<DepartedWriterSpans.Gone> priorRows) {
         requireNonBlank(collection, "collection");
         // Case-1 duty only (RDR-191): does docId exist at all? A ghost
         // document (exists, no physical_collection) is no longer a special
@@ -5682,7 +5692,19 @@ public final class CatalogRepository {
                 chunksWrittenOut[0] = written;
             }
         }
-        ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
+        // nexus-pvkbv: the span clear below needs the rows this rewrite removes (collection, chash, and the
+        // document's own span, which tells whether it could have written the chunk row's). The batch writer
+        // already read them (priorRows, fail-open, one statement it paid for anyway); any other caller gets
+        // them from the delete itself (RETURNING), with no statement of its own.
+        List<DepartedWriterSpans.Gone> removed;
+        var removal = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId));
+        if (priorRows == null) {
+            removed = DepartedWriterSpans.Gone.allOf(
+                removal.returningResult(DepartedWriterSpans.Gone.COLUMNS).fetch());
+        } else {
+            removal.execute();
+            removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows;
+        }
         if (!rows.isEmpty()) {
             stampIndexedAt(ctx, tenant, docId);
             // nexus-11gh6 §7d: routed through the single-homed insert helper.
@@ -5696,6 +5718,14 @@ public final class CatalogRepository {
             // per-row resolution outcome to vary on, so there is nothing to
             // skip.
             insertManifestChunkRows(ctx, tenant, docId, collection, rows, ManifestInsertMode.PLAIN);
+        }
+        // nexus-pvkbv: a chunk this document held and no longer does (edited so it dropped it, or now under
+        // another collection) keeps the span this document wrote on the chunk row; the row records no writer, so
+        // a sole remaining holder with no span of its own would show it. After the delete: the delete's trigger
+        // has locked these chunk rows already (see DepartedWriterSpans).
+        if (removed != null && !removed.isEmpty()) {
+            DepartedWriterSpans.clear(ctx, tenant,
+                DepartedWriterSpans.departed(removed, collection, newChashes(rows)));
         }
         // nexus-b6enc F5: the manifest IS the count's source of truth — fold
         // it in the same transaction so no REPLACE can leave a stale count.
@@ -5721,6 +5751,36 @@ public final class CatalogRepository {
                 "writeManifest refused: document is tombstoned: " + docId);
         }
         return collection;
+    }
+
+    /**
+     * nexus-pvkbv: {@code writeManifestRows}' {@code priorRows} when the batch writer's guarded before-read
+     * failed. Compared by identity; the span clear is skipped, the manifest write goes on. A private instance
+     * no other code can produce (a shared {@code List.of()} would be the JVM-wide empty list, equal by
+     * identity to every caller's).
+     */
+    private static final List<DepartedWriterSpans.Gone> PRIOR_ROWS_UNREAD =
+        Collections.unmodifiableList(new ArrayList<>());
+
+    /** Position to the lower-case hex chash {@code rows} write there (the last row of a position wins), nexus-pvkbv. */
+    private static Map<Integer, String> chashesByPosition(List<Map<String, Object>> rows) {
+        Map<Integer, String> out = new LinkedHashMap<>();
+        for (var row : rows) {
+            Integer position = i(row, "position");
+            String c = s(row, "chash");
+            if (position != null && c != null && !c.isBlank()) out.put(position, c.toLowerCase(java.util.Locale.ROOT));
+        }
+        return out;
+    }
+
+    /** The lower-case hex chashes {@code rows} write, for the departed-chunk comparison (nexus-pvkbv). */
+    private static Set<String> newChashes(List<Map<String, Object>> rows) {
+        Set<String> out = new HashSet<>(Math.max(16, rows.size() * 2));
+        for (var row : rows) {
+            String c = s(row, "chash");
+            if (c != null && !c.isBlank()) out.add(c.toLowerCase(java.util.Locale.ROOT));
+        }
+        return out;
     }
 
     /**
@@ -6296,13 +6356,16 @@ public final class CatalogRepository {
                         // entry is left out of dropped_chashes and the RDR-192 reaper covers
                         // the un-swept chunks), never the write.
                         long tBeforeReadStart = System.nanoTime();
-                        Set<String> beforeRead =
+                        // nexus-pvkbv: the same read also yields the rows' collection and own span, which
+                        // writeManifestRows hands to the departed-chunk span clear.
+                        List<DepartedWriterSpans.Gone> beforeRows =
                             withSavepointFailOpen(ctx, "write_manifest_many_sweep_before_read_failed",
                                   tenant, docId, () -> {
                                       java.util.function.Consumer<String> hook = beforeReadHookForTests;
                                       if (hook != null) hook.accept(docId);
-                                      return currentManifestChashes(ctx, tenant, docId);
+                                      return currentManifestRows(ctx, tenant, docId);
                                   }, null);
+                        Set<String> beforeRead = beforeRows == null ? null : chashesOf(beforeRows);
                         long tBeforeReadEnd = System.nanoTime();
                         // nexus-wbfpw.66: the two time accumulators (this one and writeNanosTotal) are NOT
                         // zeroed per attempt, on purpose. They measure time spent, so EVERY attempt adds
@@ -6315,7 +6378,8 @@ public final class CatalogRepository {
                         try {
                             writeManifestRows(ctx, tenant, docId, collection, rows,
                                     resolvedChunks, chunksWrittenHolder,
-                                    requestWrittenChashes, newlyWrittenChashesHolder, docRaced);
+                                    requestWrittenChashes, newlyWrittenChashesHolder, docRaced,
+                                    beforeRows == null ? PRIOR_ROWS_UNREAD : beforeRows);
                             if (move != null) {
                                 completeMove(ctx, tenant, docId, collection, move.sourceCollection(), moveSatelliteHolder);
                                 // The job's record of this move, in the same transaction. Lock order for a job's
@@ -6774,8 +6838,9 @@ public final class CatalogRepository {
     }
 
     /**
-     * Read doc_id's CURRENT manifest chashes — the sweep's "before" set,
-     * read BEFORE {@link #writeManifestRows} deletes them (nexus-eslkl).
+     * Read doc_id's CURRENT manifest rows as {@code (collection, chash, span)} — the sweep's "before" set (its
+     * chashes, {@link #chashesOf}), read BEFORE {@link #writeManifestRows} deletes them (nexus-eslkl), and the
+     * departed-chunk span clear's input (nexus-pvkbv; {@code DepartedWriterSpans}).
      *
      * <p>{@link #liveParentDoc}-filtered (TombstoneFilterGateTest): a
      * tombstoned doc_id cannot reach the sweep in practice anyway —
@@ -6786,19 +6851,23 @@ public final class CatalogRepository {
      * manifest read in the file (getManifest/getManifestMany) rather than
      * relying on a downstream throw to make an unguarded read harmless.
      */
-    private static Set<String> currentManifestChashes(DSLContext ctx, String tenant, String docId) {
-        Set<String> out = new LinkedHashSet<>();
+    private static List<DepartedWriterSpans.Gone> currentManifestRows(DSLContext ctx, String tenant, String docId) {
         // RDR-223 P1.2: ORDER BY position so the dropped list a write_many response reports is
         // in the previous manifest's order, deterministically (the sweep itself never cared).
-        var rows = ctx.select(CHK_CHASH_HEX).from(CATALOG_DOCUMENT_CHUNKS)
-                      .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                             .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
-                             .and(liveParentDoc(ctx, tenant)))
-                      .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
-                      .fetch();
+        return DepartedWriterSpans.Gone.allOf(ctx.select(DepartedWriterSpans.Gone.COLUMNS)
+                  .from(CATALOG_DOCUMENT_CHUNKS)
+                  .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                         .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                         .and(liveParentDoc(ctx, tenant)))
+                  .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
+                  .fetch());
+    }
+
+    /** The distinct hex chashes of {@code rows}, in their order (the sweep's "before" set). */
+    private static Set<String> chashesOf(List<DepartedWriterSpans.Gone> rows) {
+        Set<String> out = new LinkedHashSet<>();
         for (var r : rows) {
-            String c = r.value1();
-            if (c != null && !c.isBlank()) out.add(c);
+            if (r.chash() != null) out.add(r.hex());
         }
         return out;
     }
@@ -7352,9 +7421,14 @@ public final class CatalogRepository {
             // a batched multi-row statement. RDR-191: every row is stamped
             // with the SAME `collection` -- there is no per-row resolution
             // outcome left to vary on.
+            // nexus-pvkbv: an upsert that puts another chunk at a position this document holds displaces the
+            // chunk that stood there; the rows at these positions are read first, the displaced ones cleared after.
+            Map<Integer, String> writtenAt = chashesByPosition(rows);
+            Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
             for (var row : rows) {
                 insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_APPEND);
             }
+            DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt);
             // nexus-e4gel: fold documents.chunk_count in the SAME transaction,
             // exactly as writeManifestRows does (nexus-b6enc F5). The REPLACE
             // path folded and the APPEND path did not, so an append-grown
@@ -7652,8 +7726,16 @@ public final class CatalogRepository {
             // purged document is back. No sweep gate: a purge names no collection (it deletes the
             // document's rows whichever collection they name), and the gate is per collection.
             acquireIndexRunLock(ctx, tenant, docId);
-            int deleted = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
-                             .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
+            var removed = DepartedWriterSpans.Gone.allOf(ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+                             .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                             .returningResult(DepartedWriterSpans.Gone.COLUMNS)
+                             .fetch());
+            int deleted = removed.size();
+            // nexus-pvkbv: every chunk the document held is departed; see DepartedWriterSpans. A tombstoned
+            // document throws below and the whole transaction, this clear included, rolls back.
+            if (deleted > 0) {
+                DepartedWriterSpans.clear(ctx, tenant, DepartedWriterSpans.departed(removed, null, Set.of()));
+            }
             // nexus-eldyi: guarded, fail loud. *deleted* counts
             // catalog_document_chunks rows (a DIFFERENT table with no
             // deleted_at of its own), so it stays an honest count regardless
@@ -12261,7 +12343,12 @@ public final class CatalogRepository {
                 // batching through ONE multi-row statement per chunk stays
                 // safe.
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                // nexus-pvkbv: a changed-content import puts another chunk at a held position; see appendOneDocumentTx.
+                Map<Integer, String> writtenAt = chashesByPosition(batch);
+                Map<Integer, DepartedWriterSpans.Gone> priorAt =
+                    DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
                 insertManifestChunkRows(ctx, tenant, docId, collection, batch, ManifestInsertMode.UPSERT_IMPORT);
+                DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt);
             }
             return rows.size();
         });
@@ -12272,7 +12359,10 @@ public final class CatalogRepository {
         requireDocumentExists(ctx, tenant, docId);
         acquireSweepGateShared(ctx, tenant, collection);
         acquireIndexRunLock(ctx, tenant, docId);
+        Map<Integer, String> writtenAt = chashesByPosition(List.of(row));
+        Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
         insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_IMPORT);
+        DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt);
     }
 
     /**

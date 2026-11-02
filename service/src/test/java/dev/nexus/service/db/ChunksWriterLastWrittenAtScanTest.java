@@ -80,7 +80,12 @@ class ChunksWriterLastWrittenAtScanTest {
             "quarantine retag (nexus-wbfpw.68) merges only the origin_collection tag when an origin is renamed:"
                 + " maintenance, not a client re-write, and refreshing would extend a quarantined chunk's life")),
         Map.entry("CatalogRepository#moveScopedTable", new Decision(Kind.EXEMPT, 1,
-            "collection move over COLLECTION_SCOPED_TABLES (chunks is one): maintenance, not a client re-write"))
+            "collection move over COLLECTION_SCOPED_TABLES (chunks is one): maintenance, not a client re-write")),
+        Map.entry("DepartedWriterSpans#update", new Decision(Kind.EXEMPT, 1,
+            "nexus-pvkbv: removes the span fields a departed writer left on a chunk row whose sole remaining holder"
+                + " has none; maintenance, not a client re-write: last_written_at is the client-write clock (the"
+                + " reaper's grace window, the one-hour guard of the manifest triggers), and stamping it here would"
+                + " make a metadata cleanup look like a write"))
     ));
 
     // ── the real tree ────────────────────────────────────────────────────────
