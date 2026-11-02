@@ -46,5 +46,7 @@ it is until moved back deliberately.
 ## Awaiting the next release (pinned: v7.94.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
+- `conexus/skills/mailbox/SKILL.md` (nexus-mdbds.2.18): the cross-instance request and ack rule points at the mailbox template's doc block (`nx tuple dictionary`, `tuple_registry` with `doc=True`) for what each `kind` value means.
+- `conexus/skills/peer-messaging/SKILL.md` (nexus-mdbds.2.18): the mailbox request rule points at the same doc block for the `kind` values.
 
 ## Deferred to the next client release
