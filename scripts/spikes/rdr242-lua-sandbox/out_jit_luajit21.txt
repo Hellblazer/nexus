@@ -1,0 +1,16 @@
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+
+inst_while jiton rc=124 
+inst_while jitoff rc=1 lupa.luajit21.LuaError: bad argument #1 to '?' (function expected, got boolean)
+inst_forloop jiton rc=124 
+inst_forloop jitoff rc=1 lupa.luajit21.LuaError: bad argument #1 to '?' (function expected, got boolean)
+inst_hot_call jiton rc=124 
+inst_hot_call jitoff rc=1 lupa.luajit21.LuaError: bad argument #1 to '?' (function expected, got boolean)
+coroutine_hook jiton rc=124 
+coroutine_hook jitoff rc=1 lupa.luajit21.LuaError: bad argument #1 to '?' (function expected, got boolean)
+lua54 inst_while rc=0 ERROR 0.00s LuaError [string "<python>"]:1: INSTRUCTION-HOOK-FIRED
+lua54 inst_forloop rc=0 ERROR 0.00s LuaError [string "<python>"]:1: INSTRUCTION-HOOK-FIRED
+lua54 coroutine_hook rc=124 
