@@ -83,6 +83,22 @@ _STANDIN = textwrap.dedent(
     elif args[:2] == ["memory", "list"]:
         for i, t in enumerate(TITLES):
             print(f"[{101 + i}] threads/{t}  (-, 2026-10-31T21:46:51Z)")
+    elif args[:2] == ["memory", "search"]:
+        # nexus-3lcda: FTS for the session id. "hit" finds the entry whose body carries a session: line;
+        # "decoy_first" lists an entry that only mentions the id before it; "decoy_only" lists the decoy alone.
+        mode, sid = os.environ.get("FAKE_SEARCH", "none"), args[2]
+        rows = {"hit": [205], "decoy_first": [206, 205], "decoy_only": [206]}.get(mode, [])
+        if not rows:
+            print("No results found.")
+        for row in rows:
+            print(f"[{row}] threads/{ {205: 'bullock', 206: 'decoy'}[row] }  (-, 2026-11-02T04:37:32Z)")
+            print(f"  {sid} preview")
+    elif args[:2] == ["memory", "get"] and args[2].isdigit() and int(args[2]) >= 200:
+        sid = os.environ["FAKE_SID"]
+        if int(args[2]) == 205:
+            print(f"ref: nexus-3lqxv\\nsession: {sid}\\n## board of bullock\\nstate: building")
+        else:  # mentions the id but is not this session's entry
+            print(f"session: someone-else\\n## decoy board\\nwaiting_on: session: {sid}\\nref: nexus-zz9yx")
     elif args[:2] == ["memory", "get"]:
         if "--title" in args:  # the real CLI: exact, then a unique prefix
             want = args[args.index("--title") + 1]
@@ -121,6 +137,8 @@ def env(tmp_path: Path, monkeypatch, mod):
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
     monkeypatch.setenv("FAKE_NX_LOG", str(nx_log))
+    monkeypatch.setenv("FAKE_SID", SID)
+    monkeypatch.delenv("FAKE_SEARCH", raising=False)
     # A Windows pipe's encoding, on every platform, so the stand-in's glyphs fail here as they do there.
     monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
     monkeypatch.delenv("FAKE_NX_HANG", raising=False)
@@ -180,6 +198,7 @@ class TestPre:
         assert "### In-progress beads" in text and "P2 Auto-continuation" in text
         assert f"## Threads board entry (threads/{NAME})" in text and "state: building" in text
         assert nx_calls(env) == [  # the board first: its ref lines choose the worktree
+            f"memory search {SID} --project threads",  # by session id; no hit, so the exact title
             "memory list --project threads", "memory get 101 --project threads", "command-context continuation"
         ]
 
@@ -207,13 +226,71 @@ class TestPre:
         assert "board of linda_2" not in text and "[no board entry:" in text and "titled exactly" in text
         assert not any(c.startswith("memory get") for c in nx_calls(env))
 
+    def test_the_board_is_found_by_its_session_line_when_the_name_is_not_its_title(self, mod, env, monkeypatch) -> None:
+        """Desktop seats keep their board under a handle (``bullock``) that is not the session's name
+        (nexus-3lcda). The entry whose body carries ``session: <id>`` is found by full-text search."""
+        monkeypatch.setenv("FAKE_SEARCH", "hit")
+        monkeypatch.setenv("FAKE_BOARD", "missing")
+        run(mod, monkeypatch, "pre", pre_payload())
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert "## Threads board entry (threads/bullock)" in text and "## board of bullock" in text
+        assert "[no board entry" not in text
+        assert nx_calls(env) == [
+            f"memory search {SID} --project threads", "memory get 205 --project threads", "command-context continuation"
+        ], "one search and one get: no listing of the project"
+        # the board's ref: line still filters the in-progress beads
+        assert "nexus-zz9yx" not in mod._in_progress_section(text)
+
+    def test_the_session_line_is_found_without_a_session_name(self, mod, env, monkeypatch) -> None:
+        (env.claude / "sessions" / "4242.json").unlink()
+        monkeypatch.setenv("FAKE_SEARCH", "hit")
+        run(mod, monkeypatch, "pre", pre_payload())
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert "## Threads board entry (threads/bullock)" in text and "- session name:" not in text
+
+    def test_a_hit_that_only_mentions_the_id_is_not_this_sessions_board(self, mod, env, monkeypatch) -> None:
+        monkeypatch.setenv("FAKE_SEARCH", "decoy_first")
+        run(mod, monkeypatch, "pre", pre_payload())
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert "board of bullock" in text and "decoy" not in text
+        assert nx_calls(env)[:3] == [
+            f"memory search {SID} --project threads", "memory get 206 --project threads", "memory get 205 --project threads"
+        ]
+
+    def test_without_a_session_line_the_exact_title_is_the_fallback(self, mod, env, monkeypatch) -> None:
+        monkeypatch.setenv("FAKE_SEARCH", "decoy_only")  # a hit that is not ours
+        run(mod, monkeypatch, "pre", pre_payload())
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert f"## Threads board entry (threads/{NAME})" in text and f"board of {NAME}" in text and "decoy" not in text
+        assert nx_calls(env) == [
+            f"memory search {SID} --project threads", "memory get 206 --project threads",
+            "memory list --project threads", "memory get 101 --project threads", "command-context continuation",
+        ]
+
+    @pytest.mark.parametrize(
+        ("body", "found"),
+        [
+            (f"session: {SID}\n## A\nstate: x", True),  # the entry's first line
+            (f"## A\nstate: x\nsession: {SID}", True),  # a block-level line
+            (f"  Session:   {SID}  \n", True),
+            (f"- session: {SID}\n", True),
+            (f"session: {SID}-2\n", False),  # a longer id
+            (f"session: x{SID}\n", False),
+            (f"waiting_on: session: {SID}\n", False),  # mentions it in another field
+            (f"session: {OTHER_SID}\nref: {SID}\n", False),
+            ("", False),
+        ],
+    )
+    def test_the_session_line_matcher(self, mod, body, found) -> None:
+        assert mod._has_session_line(body, SID) is found
+
     def test_a_key_file_is_not_a_session_source(self, mod, env, monkeypatch) -> None:
         third = "33333333-3333-3333-3333-333333333333"
         (env.claude / "sessions" / "9.key").write_text(json.dumps({"sessionId": third, "name": "from_the_key"}), encoding="utf-8")
         run(mod, monkeypatch, "pre", pre_payload(session_id=third))
         text = (env.checkpoints / f"{third}.md").read_text(encoding="utf-8")
         assert "from_the_key" not in text and "- session name:" not in text
-        assert nx_calls(env) == ["command-context continuation"]
+        assert nx_calls(env) == [f"memory search {third} --project threads", "command-context continuation"]
 
     def test_no_matching_sessions_file_is_logged(self, mod, env, monkeypatch) -> None:
         (env.claude / "sessions" / "4242.json").unlink()
@@ -231,7 +308,7 @@ class TestPre:
         run(mod, monkeypatch, "pre", pre_payload())
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert "Threads board entry" not in text and "- session name:" not in text
-        assert nx_calls(env) == ["command-context continuation"]
+        assert nx_calls(env) == [f"memory search {SID} --project threads", "command-context continuation"]
 
     def test_a_missing_board_entry_is_recorded_not_fatal(self, mod, env, monkeypatch) -> None:
         monkeypatch.setenv("FAKE_BOARD", "missing")
@@ -543,6 +620,10 @@ class TestPost:
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "We discussed things at length."})
         log = env.hook_log.read_text(encoding="utf-8")
         assert log.count("names none of") == 1 and SID in log
+        line = next(ln for ln in log.splitlines() if "names none of" in ln)
+        # Desktop's summaries never name them and nothing consumes the line: a count, not a warning
+        # (nexus-3lcda); the warning level stays for what needs action.
+        assert " INFO compact-checkpoint: post:" in line and "WARNING" not in line
 
     @pytest.mark.parametrize(
         "summary", ["see nexus-3lqxv", f"the board entry {NAME} has it", "file: {path}"], ids=["bead", "board", "path"]
@@ -714,10 +795,32 @@ class TestInject:
                 ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1])
         first = ctx.splitlines()[0]
         assert "3 h 5 min ago (trigger auto)" in first
-        assert "The state may have changed since it was written, and if this compaction's PreCompact hook failed, the checkpoint is an earlier compaction's and may predate this compaction: check git, beads and the board before acting on it." in first and "just before" not in first
+        assert "may predate this compaction" in first and "The state may have changed since it was written" in first
+        assert "check git, beads and the board before acting on it." in first
+        assert "just before" not in first and "failed" not in first, "no failure is claimed from an age alone"
         assert "state: building" in ctx
         text = path.read_text(encoding="utf-8")
         assert "state: building" in text and text.rstrip().endswith("idle summary"), "post kept the real checkpoint"
+
+    def test_precomputed_says_the_summary_was_written_while_the_user_was_away(self, mod, env, monkeypatch) -> None:
+        """Desktop's deferred compaction (compact_boundary ``precomputed: true``, nexus-3lcda): the checkpoint
+        is old because the summary was prepared at idle and applied at the next message, not because pre failed."""
+        run(mod, monkeypatch, "pre", pre_payload())
+        restamp(env.checkpoints / f"{SID}.md", 69 * 60)
+        first = self._ctx(run(mod, monkeypatch, "inject",
+                              {"session_id": SID, "source": "compact", "precomputed": True})[1]).splitlines()[0]
+        assert "69 min ago (trigger auto)" in first
+        assert "summary was written while you were away" in first
+        assert "failed" not in first and "predate" not in first
+        assert "check git, beads and the board before acting on it" in first
+
+    @pytest.mark.parametrize("value", [False, None, "true", 1], ids=["false", "null", "string", "int"])
+    def test_only_a_true_precomputed_changes_the_intro(self, mod, env, monkeypatch, value) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        restamp(env.checkpoints / f"{SID}.md", 69 * 60)
+        first = self._ctx(run(mod, monkeypatch, "inject",
+                              {"session_id": SID, "source": "compact", "precomputed": value})[1]).splitlines()[0]
+        assert "while you were away" not in first and "may predate this compaction" in first and "failed" not in first
 
     def test_a_checkpoint_is_injected_once_and_a_new_pre_is_injected_again(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
@@ -901,6 +1004,100 @@ class TestInject:
         run(mod, monkeypatch, "pre", pre_payload())
         ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID})[1])
         assert "omitted for size" not in ctx and "truncated" not in ctx and "commit number 0" in ctx
+
+
+class TestDeferredApply:
+    """Claude Desktop (2.1.309, nexus-3lcda): pre and the summary run about 54 min after the last turn,
+    and the apply (boundary, SessionStart(compact), PostCompact) up to 70 min later. All three verbs, on a
+    fixed clock, in the live order (inject about 6 s before post)."""
+
+    T0 = datetime(2026, 11, 1, 22, 18, 1, tzinfo=timezone.utc)
+
+    @pytest.mark.parametrize("precomputed", [True, None], ids=["precomputed", "no-precomputed-key"])
+    def test_pre_then_inject_and_post_69_minutes_later(self, mod, env, monkeypatch, precomputed) -> None:
+        clock = [self.T0]
+        monkeypatch.setattr(mod, "_now", lambda: clock[0])
+        extra = {} if precomputed is None else {"precomputed": precomputed}
+        run(mod, monkeypatch, "pre", pre_payload(hook_event_name="PreCompact"))
+        path = env.checkpoints / f"{SID}.md"
+        before = path.read_text(encoding="utf-8")
+        assert "- written: 2026-11-01T22:18:01+00:00" in before
+
+        clock[0] = self.T0 + timedelta(minutes=69)
+        out = run(mod, monkeypatch, "inject", {"session_id": SID, "hook_event_name": "SessionStart",
+                                               "source": "compact", **extra})[1]
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        first = ctx.splitlines()[0]
+        assert "69 min ago (trigger auto)" in first and "state: building" in ctx
+        assert "failed" not in first, "an old checkpoint is not a failed pre"
+        assert ("while you were away" in first) is bool(precomputed)
+
+        clock[0] += timedelta(seconds=6)
+        run(mod, monkeypatch, "post", {"session_id": SID, "hook_event_name": "PostCompact", "trigger": "auto",
+                                       "compact_summary": "the deferred summary", **extra})
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith(before.rstrip()) and text.rstrip().endswith("the deferred summary")
+        assert "no pre-compaction checkpoint for this compaction" not in text, "post wrote a stub"
+        assert [p.name for p in env.checkpoints.iterdir() if p.suffix == ".md"] == [path.name], "nothing archived"
+        log = env.hook_log.read_text(encoding="utf-8")
+        assert "writing a stub" not in log and "WARNING" not in log
+
+
+class TestProbe:
+    """One INFO line per verb run: the probe that shows what Desktop's payload carries (nexus-3lcda)."""
+
+    @staticmethod
+    def lines(env) -> list[str]:
+        return [ln for ln in env.hook_log.read_text(encoding="utf-8").splitlines() if "probe verb=" in ln]
+
+    def test_each_verb_logs_one_info_line_with_event_source_keys_and_outcome(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        run(mod, monkeypatch, "inject", {"session_id": SID, "hook_event_name": "SessionStart", "source": "compact",
+                                         "cwd": "/w", "precomputed": True})
+        run(mod, monkeypatch, "post", {"session_id": SID, "hook_event_name": "PostCompact", "trigger": "auto",
+                                       "compact_summary": "SECRET-SUMMARY-TEXT"})
+        pre, inject, post = self.lines(env)
+        for line in (pre, inject, post):
+            assert " INFO compact-checkpoint: probe verb=" in line
+        assert "verb=pre event=PreCompact source=- trigger=auto" in pre
+        assert "keys=[cwd,hook_event_name,session_id,trigger]" in pre
+        assert "outcome=wrote checkpoint" in pre and "board: exact title" in pre
+        assert "verb=inject event=SessionStart source=compact trigger=-" in inject
+        assert "keys=[cwd,hook_event_name,precomputed,session_id,source]" in inject and "precomputed=True" in inject
+        assert "outcome=emitted" in inject
+        assert "verb=post event=PostCompact source=- trigger=auto" in post
+        assert "keys=[compact_summary,hook_event_name,session_id,trigger]" in post and "precomputed=" not in post
+        assert "outcome=appended summary" in post
+        assert "SECRET-SUMMARY-TEXT" not in env.hook_log.read_text(encoding="utf-8"), "values are never logged"
+
+    def test_the_outcome_names_a_skip_and_a_stub(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "orphan"})
+        run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})  # a stub: nothing to emit
+        inject_none, post_stub, inject_stub = self.lines(env)
+        assert "outcome=skipped: no checkpoint file" in inject_none
+        assert "outcome=wrote stub" in post_stub
+        assert "outcome=skipped: no usable written: stamp" in inject_stub
+        assert "event=-" in inject_none, "a payload without hook_event_name logs a dash"
+
+    def test_the_board_route_and_a_missing_session_id_are_in_the_outcome(self, mod, env, monkeypatch) -> None:
+        monkeypatch.setenv("FAKE_SEARCH", "hit")
+        run(mod, monkeypatch, "pre", pre_payload())
+        run(mod, monkeypatch, "pre", {"hook_event_name": "PreCompact", "trigger": "manual"})
+        by_id, bad = self.lines(env)
+        assert "board: session id" in by_id
+        assert "outcome=skipped: no usable session id" in bad
+
+    def test_a_subagent_payload_logs_no_probe(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", {**pre_payload(), "agent_id": "a1"})
+        assert self.lines(env) == []
+
+    def test_hostile_keys_and_values_cannot_forge_a_log_line(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "post", {"session_id": SID, "trigger": "x\nFORGED ERROR line", "compact_summary": "s",
+                                       "k\ney": 1, "precomputed": "yes\nFORGED"})
+        log = env.hook_log.read_text(encoding="utf-8")
+        assert not any(ln.startswith("FORGED") for ln in log.splitlines())
+        assert len(self.lines(env)) == 1
 
 
 class TestScript:

@@ -18,8 +18,9 @@ script writes that state down before the compaction and puts it back after it.
 A payload carrying ``agent_id`` (a hook fired inside a subagent or teammate) is ignored by
 all three modes. PRE writes ``<nexus config dir>/compact-checkpoints/<session_id>.md`` (mode 0600,
 atomic): a header (session id, trigger, UTC time), then, in cut-proof order, the
-session's ``threads`` board entry (looked up by the session's exact name; the judgment
-half of a session lives there and a hook cannot write it), the branch and HEAD, the
+session's ``threads`` board entry (the entry whose body has a ``session: <session id>`` line, found by one
+full-text search; failing that, the one titled exactly the session's name; the judgment half of a
+session lives there and a hook cannot write it), the branch and HEAD, the
 in-progress beads, the uncommitted files, the open PRs and the recent commits from
 ``nx command-context continuation``. Ready beads and memory titles are not kept: the
 SessionStart group that runs on the same event already injects them. Continuation runs
@@ -31,7 +32,7 @@ the in-progress list keeps only the beads the board entry names, because every s
 claims beads under one assignee (both measured on halcyon's first live compaction,
 2026-11-01).
 
-POST appends the ``compact_summary`` to the same file and logs one warning line to
+POST appends the ``compact_summary`` to the same file and logs one INFO line to
 ``<config>/logs/hook.log`` when the summary names none of the session's board title,
 the checkpoint path, or a bead id from the checkpoint. It never appends to a
 checkpoint that already carries a summary (an earlier compaction's post ran on it), or
@@ -56,10 +57,16 @@ INJECT prints ``hookSpecificOutput.additionalContext`` with this session's check
 rewrites the checkpoint. Age is judged by the file's own ``written:`` stamp, never its
 mtime (post rewrites the file); the intro states the real age and trigger, and past
 ten minutes it says the checkpoint may predate this compaction and the state may have
-changed. It reads one file and writes the sidecar: no network, no ``nx`` call, because
+changed, or, when the SessionStart payload carries ``precomputed: true`` (Claude Desktop's deferred
+compaction: the summary is written at idle and applied at the next message, 60 to 70 minutes later),
+that the summary was written while the user was away. An age alone never claims a failed pre. It reads one file and writes the sidecar: no network, no ``nx`` call, because
 the same event runs seven other verbs and must stay light (nexus-75w5d). It prints
 nothing when no checkpoint exists for this session id, the stamp is missing or past
 the prune window, the file is a stub, or the sidecar holds its stamp.
+
+Every verb run logs one INFO ``probe`` line: verb, ``hook_event_name``, ``source`` and ``trigger``, the
+sorted payload keys (never values, except a short ``precomputed``) and the outcome. Whether Desktop's
+payloads carry ``precomputed`` was unconfirmed when this was written (nexus-3lcda); the line settles it.
 
 NEVER VETOES. Every mode exits 0 whatever happens; errors go to ``hook.log`` and
 stderr only. A PreCompact veto on the context-limit recovery path fails the request,
@@ -100,6 +107,8 @@ def _load_siblings() -> None:
 _NX_TIMEOUT_S = 25.0
 #: Bound on the board lookup, and the budget the whole pre run spends on ``nx`` calls.
 _BOARD_TIMEOUT_S = 6.0
+#: Search hits fetched and checked for a ``session:`` line.
+_SESSION_CANDIDATES = 4
 #: Bound on ``git worktree list``, run before the continuation call.
 _GIT_TIMEOUT_S = 3.0
 _TOTAL_BUDGET_S = 32.0
@@ -157,6 +166,11 @@ _SUMMARY_RE = re.compile(
 )
 
 
+def _now() -> datetime:
+    """The wall clock, in one place so a test can fix it."""
+    return datetime.now(timezone.utc)
+
+
 def _config_dir() -> Path:
     return _endpoint_resolve.default_config_dir()
 
@@ -167,7 +181,7 @@ def _checkpoint_dir() -> Path:
 
 def _log(level: str, message: str) -> None:
     """One line to ``<config>/logs/hook.log`` and stderr. Never raises."""
-    line = f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {level} compact-checkpoint: {message}\n"
+    line = f"{_now().isoformat(timespec='seconds')} {level} compact-checkpoint: {message}\n"
     try:
         sys.stderr.write(line)
     except (OSError, ValueError):
@@ -354,7 +368,15 @@ def _shape_state(state: str) -> str:
     return "\n\n".join(x for x in [preamble, *(p.strip() for p in ordered)] if x)
 
 
-def _board_entry(name: str, cwd: str | None, timeout: float) -> tuple[str, str | None]:
+def _has_session_line(body: str, session_id: str) -> bool:
+    """True when *body* has a ``session: <session_id>`` line, anywhere (the board rule puts one on the
+    entry's first line; a block-level line matches too). The id must be the whole value."""
+    return re.search(
+        rf"(?mi)^[ \t]*(?:[-*][ \t]+)?session[ \t]*:[ \t]*{re.escape(session_id)}[ \t]*\r?$", body
+    ) is not None
+
+
+def _board_by_title(name: str, cwd: str | None, timeout: float) -> tuple[str, str | None]:
     """The ``threads`` entry titled exactly *name*, as ``(body, error)``.
 
     ``nx memory get --title`` is exact-then-prefix and does not print the title it resolved,
@@ -375,6 +397,43 @@ def _board_entry(name: str, cwd: str | None, timeout: float) -> tuple[str, str |
         return "", f"no {_BOARD_PROJECT} entry is titled exactly {name!r}"
     left = max(timeout - (time.monotonic() - started), 1.0)
     return _run_nx(["memory", "get", entry_id, "--project", _BOARD_PROJECT], cwd, left)
+
+
+def _board_entry(
+    session_id: str, name: str | None, cwd: str | None, timeout: float,
+) -> tuple[str, str, str, str | None]:
+    """The session's ``threads`` entry as ``(title, body, how, error)``; *how* is ``session id`` or
+    ``exact title`` (empty when nothing was found).
+
+    A Desktop session's handle differs from its name, and the board entry is filed under the
+    handle (nexus-3lcda), so the name cannot find it. Board entries carry a ``session: <id>``
+    line: one full-text search of ``threads`` for the id, then each of the first few hits is
+    fetched and kept only if its body really has that line (a peer's entry can mention the id).
+    With no such entry, the entry titled exactly *name* is the fallback. The whole lookup stays
+    inside *timeout*, give or take the one-second floor of its last call.
+    """
+    started = time.monotonic()
+
+    def left() -> float:
+        return timeout - (time.monotonic() - started)
+
+    listing, error = _run_nx(["memory", "search", session_id, "--project", _BOARD_PROJECT], cwd, max(left(), 1.0))
+    if not error:
+        seen: set[str] = set()
+        for line in listing.splitlines():
+            match = re.match(r"^\[(\d+)\] " + re.escape(_BOARD_PROJECT) + r"/(.*)$", line)
+            if match is None or match.group(1) in seen:
+                continue
+            seen.add(match.group(1))
+            if len(seen) > _SESSION_CANDIDATES or left() <= 0.5:
+                break
+            body, get_error = _run_nx(["memory", "get", match.group(1), "--project", _BOARD_PROJECT], cwd, left())
+            if not get_error and _has_session_line(body, session_id):
+                return match.group(2).rsplit("  (", 1)[0], body, "session id", None
+    if not name:
+        return "", "", "", error or f"no {_BOARD_PROJECT} entry carries a session: line for this session id"
+    body, title_error = _board_by_title(name, cwd, max(left(), 1.0))
+    return (name, body, "exact title", title_error) if body.strip() else ("", body, "", title_error)
 
 
 def _git_worktrees(cwd: str | None, timeout: float) -> list[tuple[str, str]]:
@@ -565,7 +624,7 @@ def _written_age(text: str, now: datetime | None = None) -> float | None:
         return None
     if stamp.tzinfo is None:
         return None
-    age = ((now or datetime.now(timezone.utc)) - stamp).total_seconds()
+    age = ((now or _now()) - stamp).total_seconds()
     return age if -_SKEW_S <= age <= _MAX_AGE_S else None
 
 
@@ -583,23 +642,23 @@ def _summarized(text: str) -> bool:
     return _SUMMARY_RE.search(text) is not None
 
 
-def run_pre(payload: dict) -> None:
+def run_pre(payload: dict) -> str:
+    """Write the checkpoint. Returns the outcome the probe line reports."""
     session_id = _session_id(payload)
     if session_id is None:
         _log("WARNING", "pre: the payload carried no usable session id; nothing written")
-        return
+        return "skipped: no usable session id"
     started = time.monotonic()
     # A lone surrogate in the payload would make the UTF-8 write raise and write nothing.
     trigger = str(payload.get("trigger") or "unknown")[:32].encode("utf-8", "replace").decode("utf-8")
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
     name = _session_name(session_id)
     # The board is read first: its ref: lines choose between the session's worktrees.
-    board = ""
-    board_error: str | None = None
-    if name:
-        board, board_error = _board_entry(name, cwd, _BOARD_TIMEOUT_S)
-        if board_error:
-            _log("WARNING", f"pre: board entry for {name!r}: {board_error}")
+    board_title, board, board_how, board_error = _board_entry(session_id, name, cwd, _BOARD_TIMEOUT_S)
+    if board_error and name:
+        _log("WARNING", f"pre: board entry for {name!r}: {board_error}")
+    elif board_error:
+        _log("INFO", f"pre: no board entry for session {session_id} (it has no name): {board_error}")
     worktree, other_worktrees = _session_worktrees(name, cwd, board)
     if worktree:
         cwd = worktree
@@ -613,7 +672,7 @@ def run_pre(payload: dict) -> None:
         "# Compaction checkpoint\n",
         f"- session: {session_id}",
         f"- trigger: {trigger}",
-        f"- written: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+        f"- written: {_now().isoformat(timespec='seconds')}",
     ]
     if name:
         parts.append(f"{_NAME_LINE}{name}")
@@ -623,8 +682,8 @@ def run_pre(payload: dict) -> None:
     elif name:
         parts.append(f"- worktree: none named {name} or {name}-*; the working state is the launch directory's")
     parts.append("")
-    if name:
-        parts.append(f"## Threads board entry ({_BOARD_PROJECT}/{name})\n")
+    if name or board.strip():
+        parts.append(f"## Threads board entry ({_BOARD_PROJECT}/{board_title or name})\n")
         if board.strip():
             parts.append(_cap(board).rstrip() + "\n")
         else:
@@ -639,13 +698,16 @@ def run_pre(payload: dict) -> None:
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     _archive_and_prune(directory, session_id, time.time())
     _write_atomic(directory / f"{session_id}.md", "\n".join(parts) + "\n")
+    board_note = f"board: {board_how}" if board_how and board.strip() else f"board: none ({_one_line(board_error or 'empty')})"
+    return f"wrote checkpoint ({board_note}{'; working state incomplete' if error else ''})"
 
 
-def run_post(payload: dict) -> None:
+def run_post(payload: dict) -> str:
+    """Append the summary. Returns the outcome the probe line reports."""
     session_id = _session_id(payload)
     if session_id is None:
         _log("WARNING", "post: the payload carried no usable session id; nothing written")
-        return
+        return "skipped: no usable session id"
     summary = str(payload.get("compact_summary") or "")
     directory = _checkpoint_dir()
     path = directory / f"{session_id}.md"
@@ -656,6 +718,7 @@ def run_post(payload: dict) -> None:
     except ValueError as exc:  # undecodable: not this compaction's checkpoint; archived below
         _log("WARNING", f"post: {path} is not valid UTF-8 ({exc}); archiving it")
         existing = ""
+    stub = False
     if existing is None or _written_age(existing) is None or _summarized(existing):
         # Pre did not run for this compaction (killed at its timeout, a cold start, an error
         # before the write): whatever is here is an earlier compaction's state and must not be
@@ -667,7 +730,8 @@ def run_post(payload: dict) -> None:
                         f"({'an older one was archived' if existing is not None else 'none exists'}); "
                         "writing a stub, which inject does not emit")
         existing = f"# Compaction checkpoint\n\n- session: {session_id}\n\n{_STUB_BODY}\n"
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        stub = True
+    stamp = _now().isoformat(timespec="seconds")
     # A lone surrogate in the payload would make the UTF-8 write raise and lose the summary.
     summary = summary.encode("utf-8", "replace").decode("utf-8")
     _write_atomic(path, f"{existing.rstrip()}\n\n{_SUMMARY_HEADING} ({stamp})\n\n{summary.strip()}\n")
@@ -680,11 +744,17 @@ def run_post(payload: dict) -> None:
     pointers: list[str] = [str(path), "compact-checkpoints"]
     if name:
         pointers.append(name)
+    board_heading = re.search(rf"(?m)^## Threads board entry \({_BOARD_PROJECT}/(.+)\)$", existing)
+    if board_heading and board_heading.group(1) != name:
+        pointers.append(board_heading.group(1))
     beads = set(_BEAD_ID_RE.findall(_in_progress_section(existing))) or set(_BEAD_ID_RE.findall(existing))
     pointers.extend(sorted(beads))
     if not any(p and p in summary for p in pointers):
-        _log("WARNING", f"post: the compact summary for session {session_id} names none of its threads board "
-                        f"title, its checkpoint path ({path}) or its in-flight beads; the checkpoint is the record")
+        # INFO, not a warning: Desktop's summaries never name them, the model's text is not ours to
+        # control, and nothing acts on the line (inject's footer already gives the path; nexus-3lcda).
+        _log("INFO", f"post: the compact summary for session {session_id} names none of its threads board "
+                     f"title, its checkpoint path ({path}) or its in-flight beads; the checkpoint is the record")
+    return "wrote stub" if stub else "appended summary"
 
 
 def _in_progress_section(text: str) -> str:
@@ -727,23 +797,24 @@ def _age_label(age: float) -> str:
     return f"{minutes // 60} h {minutes % 60} min"
 
 
-def run_inject(payload: dict) -> None:
+def run_inject(payload: dict) -> str:
+    """Print the checkpoint as context. Returns the outcome the probe line reports."""
     session_id = _session_id(payload)
     if session_id is None:
-        return
+        return "skipped: no usable session id"
     path = _checkpoint_dir() / f"{session_id}.md"
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
-        return
+        return "skipped: no checkpoint file"
     except ValueError as exc:
         _log("WARNING", f"inject: {path} is not valid UTF-8 ({exc}); nothing injected")
-        return
+        return "skipped: checkpoint is not valid UTF-8"
     age = _written_age(text)
     if age is None:
         _log("INFO", f"inject: {path} has no usable written: stamp (older than {_MAX_AGE_S / 3600:.0f} h, "
                      "missing, or a stub); nothing injected")
-        return
+        return "skipped: no usable written: stamp"
     written = _written_stamp(text)
     sidecar = path.with_name(f"{session_id}{_INJECTED_SUFFIX}")
     try:
@@ -756,7 +827,7 @@ def run_inject(payload: dict) -> None:
     if written is not None and last == written:
         _log("INFO", f"inject: {path} (written {written}) was already injected by an earlier compaction; "
                      "nothing injected")
-        return
+        return "skipped: already injected"
     trigger_match = _TRIGGER_RE.search(text.split("\n## ", 1)[0])
     trigger = trigger_match.group(1) if trigger_match else "unknown"
     # The compact summary is already in the new context; the injection is the state that
@@ -768,12 +839,17 @@ def run_inject(payload: dict) -> None:
     if age < _STALE_NOTE_S:
         lead += ", just before this session was compacted."
     else:
-        # Only the age is known. It is this compaction's checkpoint if the summary was used later
-        # than it was made (the changelog's deferred case); it is an earlier one if this
-        # compaction's PreCompact hook failed (nexus-702gy, nexus-mtl98).
-        lead += (". The state may have changed since it was written, and if this compaction's "
-                 "PreCompact hook failed, the checkpoint is an earlier compaction's and may predate "
-                 "this compaction: check git, beads and the board before acting on it.")
+        if payload.get("precomputed") is True:
+            # Claude Desktop's deferred compaction: the summary was prepared at idle and applied at
+            # the next message, so an old checkpoint is expected, not a failure (nexus-3lcda).
+            lead += (". This compaction's summary was written while you were away, after the "
+                     "checkpoint was taken. The state may have changed since: check git, beads and "
+                     "the board before acting on it.")
+        else:
+            # Only the age is known: a failure is not inferred from it (on Desktop every compaction
+            # is applied tens of minutes after its pre; nexus-702gy, nexus-mtl98, nexus-3lcda).
+            lead += (". The state may have changed since it was written, and the checkpoint may "
+                     "predate this compaction: check git, beads and the board before acting on it.")
     intro = (f"{lead} The state lives in version control, beads and the threads board, "
              "not in the summary.\n\n")
     footer = f"Full checkpoint (with the compact summary): {path}\n"
@@ -789,9 +865,36 @@ def run_inject(payload: dict) -> None:
             _write_atomic(sidecar, written + "\n")
         except OSError as exc:
             _log("WARNING", f"inject: could not record {path} as injected in {sidecar}: {exc}")
+    return "emitted"
 
 
 _MODES = {"pre": run_pre, "post": run_post, "inject": run_inject}
+
+
+def _one_line(value: object, limit: int = 120) -> str:
+    """*value* as a single printable line of at most *limit* characters, so it cannot forge a log line."""
+    text = " ".join(str(value).split())[:limit]
+    return "".join(c if c.isprintable() else "_" for c in text)
+
+
+def _token(value: object, limit: int = 32) -> str:
+    """*value* as one log token: no whitespace, no brackets or commas; ``-`` when empty or absent."""
+    cleaned = re.sub(r"[^\w.:@/+=-]", "_", str(value)[:limit]) if value is not None else ""
+    return cleaned or "-"
+
+
+def _probe(mode: str, payload: dict, outcome: object) -> None:
+    """One INFO line per verb run: what fired, with which payload keys, and what the verb did.
+
+    Desktop's compaction hooks were never observed directly (nexus-3lcda); this line shows whether
+    its payload carries ``source`` / ``trigger`` and ``precomputed``. Keys and a few short scalar
+    values only, never the summary or any other payload text.
+    """
+    keys = ",".join(_token(k, 40) for k in sorted(payload, key=str)[:40])
+    extra = f" precomputed={_token(payload['precomputed'], 16)}" if "precomputed" in payload else ""
+    _log("INFO", f"probe verb={mode} event={_token(payload.get('hook_event_name'))} "
+                 f"source={_token(payload.get('source'))} trigger={_token(payload.get('trigger'))} "
+                 f"keys=[{keys}]{extra} outcome={_one_line(outcome)}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -809,7 +912,7 @@ def main(argv: list[str] | None = None) -> int:
             _log("INFO", f"{mode}: the payload carries agent_id (a hook fired inside a subagent or "
                          "teammate); nothing done, so the parent's checkpoint and restore are not touched")
             return 0
-        handler(payload)
+        _probe(mode, payload, handler(payload) or "done")
     except BaseException as exc:  # noqa: BLE001 -- the no-veto contract is the reason
         _log("ERROR", f"{mode}: unexpected {type(exc).__name__}: {exc}")
     return 0
