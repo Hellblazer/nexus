@@ -67,7 +67,7 @@ def test_a_second_acquire_finds_the_lock_held_and_a_release_frees_it(config_dir:
     first = acquire_auto_lock()
     try:
         assert first.held_by_other is False and first.fd is not None
-        assert (config_dir / lock_mod.LOCK_NAME).read_text(encoding="utf-8") == str(os.getpid())
+        assert (config_dir / lock_mod.LOCK_NAME).read_text(encoding="utf-8") == f"{os.getpid()} pytest"  # a test's take is marked (nexus-iox43)
         second = acquire_auto_lock()
         assert second.held_by_other is True and second.fd is None
         assert second.holder_pid() == os.getpid()
@@ -97,7 +97,7 @@ def test_a_killed_holder_does_not_wedge_the_lock(config_dir: Path) -> None:
     try:
         assert holder.stdout.readline().strip() == "held"
         assert auto_lock_held() is True, "a live holder in ANOTHER process blocks"
-        assert (config_dir / lock_mod.LOCK_NAME).read_text(encoding="utf-8") == str(holder.pid)
+        assert (config_dir / lock_mod.LOCK_NAME).read_text(encoding="utf-8") == f"{holder.pid} pytest"  # inherits PYTEST_CURRENT_TEST
     finally:
         holder.kill()
         holder.wait(timeout=10)

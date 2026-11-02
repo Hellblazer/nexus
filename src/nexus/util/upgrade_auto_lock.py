@@ -14,7 +14,9 @@ process finds it held and exits 0 at once; the hook probes it before it forks.
 repo's one primitive: ``flock`` / ``msvcrt.locking``). The kernel drops it when
 the holder dies, so a stale pid file cannot wedge it: that is what "stale-pid
 tolerant" means here. The holder's pid is written into the file for a human
-reading it; nothing decides on it.
+reading it; nothing decides on it. A holder under pytest (``PYTEST_CURRENT_TEST`` set)
+writes ``<pid> pytest``, so the suite's real-config-dir guard can tell a live host's
+take of the real lock from a test's (nexus-iox43).
 
 Stdlib only plus ``nexus._locking`` (itself stdlib only): the hook imports this
 on every session start and must stay import-light.
@@ -102,8 +104,8 @@ class AutoLock:
     def holder_pid(self) -> int | None:
         """The pid the holder wrote, or ``None`` (unreadable, or this process holds it)."""
         try:
-            text = self.path.read_text(encoding="utf-8").strip()
-            return int(text) if text.isdigit() else None
+            first = (self.path.read_text(encoding="utf-8").split() or [""])[0]
+            return int(first) if first.isdigit() else None
         except (OSError, ValueError):
             return None
 
@@ -133,7 +135,8 @@ def acquire_auto_lock(config_dir: Path | None = None) -> AutoLock:
         return AutoLock(fd=None, held_by_other=False, path=path)
     try:
         os.ftruncate(fd, 0)
-        os.write(fd, str(os.getpid()).encode("ascii"))
+        mark = " pytest" if os.environ.get("PYTEST_CURRENT_TEST") else ""
+        os.write(fd, f"{os.getpid()}{mark}".encode("ascii"))
         os.lseek(fd, 0, os.SEEK_SET)  # msvcrt unlocks from the current position
     except OSError:
         pass  # the pid is for a human; the lock is what counts
