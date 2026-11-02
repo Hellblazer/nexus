@@ -478,7 +478,9 @@ def test_collected_family_meets_floor_and_is_visible_to_the_selector() -> None:
         cwd=REPO_ROOT, capture_output=True, text=True,
         env=dict(os.environ, NX_TEST_T2_SUBSTRATE="none"),
     )
-    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    # The output's tail is pytest's warnings summary; the reason is in its ERROR lines.
+    errors = [ln for ln in (proc.stdout + proc.stderr).splitlines() if re.match(r"(ERROR|E |FAILED|INTERNALERROR)", ln)]
+    assert proc.returncode == 0, f"exit {proc.returncode}\n" + "\n".join(errors[:40]) + "\n...\n" + proc.stderr[-2000:]
     ids = [ln for ln in proc.stdout.splitlines() if re.match(r"^[^ ]+\.py::", ln)]
     assert len(ids) >= COLLECT_FLOOR, f"collected {len(ids)}, floor {COLLECT_FLOOR}"
     collected_files = {i.split("::", 1)[0] for i in ids}
