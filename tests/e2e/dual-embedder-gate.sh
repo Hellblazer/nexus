@@ -696,7 +696,12 @@ dg_mvv_seed() {
   mkdir -p "$SCRATCH/mvv"
   for i in $(seq 1 "$DG_MVV_THEME_DOCS"); do
     path="$SCRATCH/mvv/theme-$i.md"
-    if [ $((i % 2)) -eq 1 ]; then
+    # Document 1 is the rank check's target (DG_MVV_RANK_TEXT), so it carries a clause no other document
+    # has. Without it, seven odd documents differed only in their number (1, 11, 13 share a prefix) and
+    # the top-1 hit for document 1's own text flipped to a sibling in about 1 run in 5 (7.94.0 battery).
+    if [ "$i" -eq 1 ]; then
+      text="gate mvv $DG_UID theme document $i: re-embedding moves documents between embedding families; a lighthouse keeper logs the tide tables by lamplight"
+    elif [ $((i % 2)) -eq 1 ]; then
       text="gate mvv $DG_UID theme document $i: re-embedding moves documents between embedding families"
     else
       text="gate mvv $DG_UID theme document $i: autumn apple harvest and cider pressing in the orchard"
