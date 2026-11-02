@@ -28,9 +28,11 @@ module docstring for the full correction.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
+import warnings
 
 import pytest
 
@@ -52,10 +54,15 @@ posix_only = pytest.mark.skipif(
 )
 
 
+def _marker_pattern(marker: str) -> str:
+    """A pgrep/pkill pattern that matches ``sleep <marker>`` and nothing else (ERE, anchored)."""
+    return "sleep " + marker.replace(".", "[.]") + "$"
+
+
 def _sleeper_alive(marker: str) -> bool:
     """True while a ``sleep <marker>`` process is running."""
     found = subprocess.run(  # noqa: S603 - test-local probe
-        ["pgrep", "-f", f"sleep {marker}"], capture_output=True, text=True, timeout=10
+        ["pgrep", "-f", _marker_pattern(marker)], capture_output=True, text=True, timeout=10
     )
     return found.returncode == 0
 
@@ -112,11 +119,35 @@ def test_stock_subprocess_run_does_not_hang_on_posix(shape: str) -> None:
 
 
 def _sweep(*markers: str) -> None:
-    """Kill any ``sleep <marker>`` left over from a previous run."""
+    """Kill this run's own ``sleep <marker>`` processes.
+
+    Each marker is unique to one run (``_run_marker``), so this never reaches another run's
+    sleeper: CI jobs on hellmini share one user and one PID namespace, and a fixed marker let one
+    job's sweep kill another's (nexus-8byc4).
+    """
     for marker in markers:
-        subprocess.run(  # noqa: S603 - test-local cleanup
-            ["pkill", "-f", f"sleep {marker}"], capture_output=True, timeout=10
+        subprocess.run(  # noqa: S603 - test-local cleanup of this run's own marker
+            ["pkill", "-f", _marker_pattern(marker)], capture_output=True, timeout=10
         )
+
+
+def _run_marker(tag: int) -> str:
+    """A sleep duration unique to this run: about two minutes, so a sleeper an interrupted run
+    leaves behind ends on its own; pid and clock make it distinct from any other run's."""
+    return f"120.{os.getpid()}{time.monotonic_ns() % 10**6:06d}{tag}"
+
+
+def _stock_run_times_out(argv: list[str]) -> tuple[bool, str]:
+    """Whether stock subprocess.run times out on *argv*; when it does not, what it returned."""
+    started = time.monotonic()
+    try:
+        r = subprocess.run(  # noqa: S603 - this is the defect under test, deliberately
+            argv, capture_output=True, text=True, timeout=_BOUND_S
+        )
+    except subprocess.TimeoutExpired:
+        return True, ""
+    return False, (f"returned in {time.monotonic() - started:.2f}s, rc={r.returncode}, "
+                   f"stdout={r.stdout[-300:]!r}, stderr={r.stderr[-300:]!r}")
 
 
 @posix_only
@@ -134,26 +165,35 @@ def test_timed_out_call_leaves_no_orphan() -> None:
     # marker into a trailing `# comment` failed differently, because sh
     # exec-optimizes a single-command `-c` string and the comment never
     # reaches the process table. A distinctive duration cannot be dropped.
-    stock_marker = "30111"
-    bounded_marker = "30222"
+    stock_marker = _run_marker(1)
+    bounded_marker = _run_marker(2)
 
     def _argv(marker: str) -> list[str]:
         # The `sleep` inherits the stdout pipe and outlives its parent sh.
         return ["sh", "-c", f"sleep {marker} & exit 0"]
 
-    # Both markers are swept BEFORE the run as well as after. This test
-    # deliberately creates a surviving process, and anything that stops it
-    # mid-way -- an interrupt, or a falsification probe run against a
-    # degraded helper, which is exactly how this bit -- leaves one behind
-    # that makes the NEXT run fail on a stale process rather than on the
-    # code under test.
-    _sweep(stock_marker, bounded_marker)
+    # The markers are unique to this run and about two minutes long, so a sleeper an
+    # interrupted run leaves behind (an interrupt, or a falsification probe against a degraded
+    # helper, which is how a fixed marker once bit) ends on its own and never matches the NEXT
+    # run's markers; no sweep before the run is needed, and none can reach another run's.
 
-    # Stock: times out, reaps the direct child, orphans the grandchild.
-    with pytest.raises(subprocess.TimeoutExpired):
-        subprocess.run(  # noqa: S603 - this is the defect under test, deliberately
-            _argv(stock_marker), capture_output=True, text=True, timeout=_BOUND_S
-        )
+    # Stock: times out, reaps the direct child, orphans the grandchild. On qwent (py3.13, a
+    # lab-6c18g CI job) it once returned instead, cause unknown (nexus-8byc4): the setup is
+    # tried once more, and a second miss fails with what both attempts returned.
+    misses: list[str] = []
+    for attempt in (1, 2):
+        marker = stock_marker if attempt == 1 else _run_marker(3)
+        timed_out, detail = _stock_run_times_out(_argv(marker))
+        if timed_out:
+            stock_marker = marker
+            break
+        _sweep(marker)
+        misses.append(f"attempt {attempt}: {detail}")
+    else:
+        pytest.fail("stock subprocess.run did not time out on a backgrounded sleeper holding its "
+                    "stdout, so the premise of this differential no longer holds: " + "; ".join(misses))
+    if misses:
+        warnings.warn(f"nexus-8byc4: the stock setup missed once, then held: {misses[0]}", stacklevel=1)
 
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
@@ -491,3 +531,19 @@ def test_run_bounded_still_succeeds_when_win_job_raises(
         "contain() should never reach AssignProcessToJobObject once "
         "CreateJobObjectW itself raised"
     )
+
+
+def test_run_markers_are_unique_to_the_run() -> None:
+    """Two runs (or two calls in one run) never share a sleeper marker, so one sweep cannot kill
+    another run's sleeper (nexus-8byc4)."""
+    a, b = _run_marker(1), _run_marker(1)
+    assert a != b and str(os.getpid()) in a
+    assert 120 <= float(a) < 121  # an interrupted run's leftover sleeper ends on its own
+
+
+def test_the_marker_pattern_matches_only_that_sleeper() -> None:
+    pat = re.compile(_marker_pattern("120.4321"))
+    assert pat.search("sleep 120.4321")
+    assert not pat.search("sleep 120x4321")  # the dot is literal
+    assert not pat.search("sleep 120.43210")  # anchored at the end
+    assert not pat.search("pkill -f sleep 120[.]4321$")  # the sweep's own command line
