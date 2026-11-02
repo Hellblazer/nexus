@@ -150,6 +150,7 @@ class _Recorder:
         self.dirty = dirty
         self.ssh_code = ssh_code
         self.bundle_raises = bundle_raises
+        self.patch = b""
         self.calls: list[list[str]] = []
         self.scripts: list[str] = []
 
@@ -163,6 +164,10 @@ class _Recorder:
                 return subprocess.CompletedProcess(argv, 0 if self.on_origin else 1, stdout="")
             if verb == "status":
                 return subprocess.CompletedProcess(argv, 0, stdout=" M x.py\n" if self.dirty else "")
+            if verb == "diff":
+                return subprocess.CompletedProcess(argv, 0, stdout=self.patch if "HEAD" in argv else b"")
+            if verb == "ls-files":
+                return subprocess.CompletedProcess(argv, 0, stdout=b"")
             if verb == "bundle":
                 if self.bundle_raises:
                     raise subprocess.CalledProcessError(128, argv)
@@ -285,3 +290,74 @@ def test_a_half_made_clone_is_removed_and_cloned_again() -> None:
     rm = script.index("Remove-Item -LiteralPath 'C:\\build\\hand\\wren\\nexus' -Recurse -Force")
     assert "\\.git\\HEAD" in script[:rm + 200]
     assert rm < script.index("git clone")
+
+
+# --- --uncommitted: an agent that cannot commit still tests its work ---------------
+
+
+def _git_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env_git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (repo / "a.py").write_text("one\n", encoding="utf-8")
+    subprocess.run([*env_git, "add", "-A"], check=True)
+    subprocess.run([*env_git, "commit", "-q", "-m", "base"], check=True)
+    return repo
+
+
+def test_the_patch_carries_tracked_edits_and_untracked_files_but_not_ignored_ones(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path)
+    (repo / "a.py").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "new.py").write_text("brand new\n", encoding="utf-8")
+    (repo / "ignored.txt").write_text("secret\n", encoding="utf-8")
+    patch = wht.uncommitted_patch(subprocess.run, repo)
+    assert b"+two" in patch and b"brand new" in patch
+    assert b"secret" not in patch
+    # It applies to a clean checkout of the same commit.
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(repo), str(clone)], check=True)
+    (tmp_path / "p.patch").write_bytes(patch)
+    subprocess.run(["git", "-C", str(clone), "apply", "--binary", str(tmp_path / "p.patch")], check=True)
+    assert (clone / "a.py").read_text(encoding="utf-8") == "one\ntwo\n"
+    assert (clone / "new.py").read_text(encoding="utf-8") == "brand new\n"
+
+
+def test_a_clean_tree_has_an_empty_patch(tmp_path: Path) -> None:
+    assert wht.uncommitted_patch(subprocess.run, _git_repo(tmp_path)) == b""
+
+
+def test_uncommitted_ships_the_patch_and_applies_it_after_the_fixup() -> None:
+    rec = _Recorder(on_origin=True)
+    rec.patch = b"diff --git a/x b/x\n"
+    assert wht.main(["--session", "wren", "--uncommitted", "--", "t.py"], run=rec) == 0
+    assert any(c[0] == "scp" and c[2].endswith(".patch") for c in rec.calls)
+    script = rec.scripts[-1]
+    order = [script.index(part) for part in (
+        "git clean -fdq",
+        "git checkout -q -f --detach",
+        "if ($head -ne",
+        "git apply --binary --whitespace=nowarn 'C:\\build\\hand\\wren\\win-hand.patch'",
+        "testing sha-of-HEAD^{commit} plus uncommitted changes",
+        "pytest",
+    )]
+    assert order == sorted(order)
+
+
+def test_uncommitted_on_a_clean_tree_is_refused() -> None:
+    with pytest.raises(SystemExit, match="no uncommitted changes"):
+        wht.main(["--session", "wren", "--uncommitted", "--", "t.py"], run=_Recorder(on_origin=True))
+
+
+def test_uncommitted_with_another_ref_is_refused() -> None:
+    with pytest.raises(SystemExit, match="drop --ref"):
+        wht.main(["--session", "wren", "--uncommitted", "--ref", "abc", "--", "t.py"], run=_Recorder(on_origin=True))
+
+
+def test_without_uncommitted_no_patch_is_sent_or_applied() -> None:
+    rec = _Recorder(on_origin=True)
+    rec.patch = b"diff --git a/x b/x\n"
+    wht.main(["--session", "wren", "--", "t.py"], run=rec)
+    assert not any(c[0] == "scp" and c[2].endswith(".patch") for c in rec.calls)
+    assert "git apply" not in rec.scripts[-1]

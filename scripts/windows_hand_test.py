@@ -11,8 +11,9 @@ labrun README, "Windows native builds"):
     uv run scripts/windows_hand_test.py --session wren -- tests/hooks/test_x.py
     uv run scripts/windows_hand_test.py --session wren --set          # CI's whole Windows set
 
-It tests a COMMIT (default ``HEAD``; uncommitted edits are not seen, and a
-dirty tree is warned about). It works under ``C:\\build\\hand\\<session>\\nexus``
+It tests a COMMIT (default ``HEAD``); ``--uncommitted`` adds the working
+tree's uncommitted changes as a patch applied after checkout, for an agent
+that cannot commit. Without it a dirty tree is warned about. It works under ``C:\\build\\hand\\<session>\\nexus``
 (a partial clone made on first use and kept), checks out the commit, applies
 CI's own checkout fixup step, and runs
 ``lab-run-win.cmd uv run --python 3.13 --frozen pytest ... -p no:cacheprovider``
@@ -143,7 +144,7 @@ def _check_pytest_arg(arg: str) -> str:
 
 
 def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle: str | None,
-                  fixup: str, floor: str | None) -> str:
+                  fixup: str, floor: str | None, patch: str | None = None) -> str:
     """The PowerShell (pwsh) script the remote side runs. Any setup failure
     (a git call's nonzero exit, a terminating error, the commit not checked
     out) exits SETUP_FAILED before pytest can run on the wrong tree."""
@@ -179,6 +180,9 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         "foreach ($rel in @(git ls-files -s | Where-Object { $_ -match '^120000 ' } | ForEach-Object { ($_ -split \"`t\", 2)[1] })) {",
         "  if (Test-Path -LiteralPath $rel -PathType Container) { Remove-Item -LiteralPath $rel -Recurse -Force }",
         "}",
+        "# Untracked files a previous --uncommitted run added (ignored ones such as .venv stay).",
+        "git clean -fdq",
+        must("git clean"),
         f"git checkout -q -f --detach {sha}",
         must("checkout"),
         "# CI's own checkout fixup step, verbatim from the workflow:",
@@ -186,7 +190,17 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         must("checkout fixup"),
         "$head = (git rev-parse HEAD).Trim()",
         f"if ($head -ne '{sha}') {{ Write-Host \"windows_hand_test: HEAD is $head, not {sha}\"; exit {fail} }}",
-        f"Write-Host 'windows_hand_test: testing {sha}'",
+    ]
+    if patch is not None:
+        lines += [
+            "# The caller's uncommitted changes, applied after the fixup step (its hard reset would undo them).",
+            f"git apply --binary --whitespace=nowarn {_ps_quote(patch)}",
+            must("applying the uncommitted changes"),
+            f"Write-Host 'windows_hand_test: testing {sha} plus uncommitted changes'",
+        ]
+    else:
+        lines.append(f"Write-Host 'windows_hand_test: testing {sha}'")
+    lines += [
         "$ErrorActionPreference = 'Continue'",
         "$env:NX_TEST_T2_SUBSTRATE = 'none'",
         f"& {_ps_quote(LAB_RUN_WIN)} uv run --python 3.13 --frozen pytest "
@@ -210,6 +224,21 @@ def _say(text: str, *, err: bool = False) -> None:
 
 def _git(run: Runner, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     return run(["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True, encoding="utf-8", check=check)
+
+
+def uncommitted_patch(run: Runner, repo: Path = REPO_ROOT) -> bytes:
+    """The working tree's changes against HEAD as one binary patch: tracked
+    edits (staged or not) and untracked files that are not ignored. Empty
+    when the tree is clean."""
+    def git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+        return run(["git", "-C", str(repo), *args], capture_output=True, check=check)
+
+    parts = [git("diff", "--binary", "HEAD").stdout]
+    for raw in git("ls-files", "--others", "--exclude-standard", "-z").stdout.split(b"\0"):
+        if raw:
+            # --no-index exits 1 when the files differ, which they always do here.
+            parts.append(git("diff", "--binary", "--no-index", "--", "/dev/null", raw.decode(), check=False).stdout)
+    return b"".join(parts)
 
 
 def _in_origin_develop(sha: str, run: Runner) -> bool:
@@ -248,6 +277,8 @@ def _main(argv: Sequence[str] | None, *, run: Runner) -> int:
     ap.add_argument("--ref", default="HEAD", help="the commit to test (default HEAD of this checkout)")
     ap.add_argument("--set", action="store_true", help="run CI's whole Windows test set and its floor")
     ap.add_argument("--check", action="store_true", help="say whether this branch needs a Windows run; exit 1 if so")
+    ap.add_argument("--uncommitted", action="store_true",
+                    help="also test the working tree's uncommitted changes (for an agent that cannot commit)")
     ap.add_argument("pytest_args", nargs="*", help="pytest arguments, after --")
     ns = ap.parse_args(argv)
     if ns.check:
@@ -259,9 +290,14 @@ def _main(argv: Sequence[str] | None, *, run: Runner) -> int:
         raise SystemExit("windows_hand_test: give pytest arguments after --, or --set")
 
     sha = _git(run, "rev-parse", "--verify", f"{ns.ref}^{{commit}}").stdout.strip()
-    if ns.ref == "HEAD" and _git(run, "status", "--porcelain", "--untracked-files=no").stdout.strip():
-        _say("windows_hand_test: the tree has uncommitted changes; they are NOT tested (commit first to include them)",
-             err=True)
+    if ns.uncommitted and ns.ref != "HEAD":
+        raise SystemExit("windows_hand_test: --uncommitted applies to HEAD's working tree; drop --ref")
+    patch_bytes = uncommitted_patch(run) if ns.uncommitted else b""
+    if ns.uncommitted and not patch_bytes:
+        raise SystemExit("windows_hand_test: --uncommitted given but the tree has no uncommitted changes")
+    if not ns.uncommitted and ns.ref == "HEAD" and _git(run, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        _say("windows_hand_test: the tree has uncommitted changes; they are NOT tested "
+             "(commit them, or pass --uncommitted to include them)", err=True)
     run(["ssh", ns.host, f"New-Item -ItemType Directory -Force 'C:\\build\\hand\\{ns.session}' | Out-Null"], check=True)
     bundle_remote: str | None = None
     with tempfile.TemporaryDirectory() as tmp:
@@ -277,9 +313,16 @@ def _main(argv: Sequence[str] | None, *, run: Runner) -> int:
                 _git(run, "update-ref", "-d", tmp_ref, check=False)
             bundle_remote = rf"C:\build\hand\{ns.session}\win-hand.bundle"
             run(["scp", "-q", str(local), f"{ns.host}:C:/build/hand/{ns.session}/win-hand.bundle"], check=True)
+        patch_remote: str | None = None
+        if patch_bytes:
+            local_patch = Path(tmp) / "win-hand.patch"
+            local_patch.write_bytes(patch_bytes)
+            patch_remote = rf"C:\build\hand\{ns.session}\win-hand.patch"
+            run(["scp", "-q", str(local_patch), f"{ns.host}:C:/build/hand/{ns.session}/win-hand.patch"], check=True)
         script = remote_script(
             ns.session, sha, args, bundle=bundle_remote,
             fixup=ci_step_run(FIXUP_STEP), floor=ci_step_run(FLOOR_STEP) if ns.set else None,
+            patch=patch_remote,
         )
         local_ps1 = Path(tmp) / "win-hand.ps1"
         local_ps1.write_text(script, encoding="utf-8")
