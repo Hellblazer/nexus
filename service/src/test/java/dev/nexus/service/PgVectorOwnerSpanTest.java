@@ -57,6 +57,8 @@ class PgVectorOwnerSpanTest {
     private static final String DOC_Q = "span-doc-q";
     /** Sorts after {@link #DOC_P}; holds chunk H with every manifest span field NULL. */
     private static final String DOC_P3 = "span-doc-p3";
+    /** Sorts BEFORE {@link #DOC_P}: the first owner of chunks Y and W, with no span (nexus-pvkbv). */
+    private static final String DOC_A = "span-doc-a";
     /** A tumbler-shaped pair: "1.10" sorts before "1.2" as text, after it as numbers. */
     private static final String DOC_T10 = "1.10";
     private static final String DOC_T2 = "1.2";
@@ -72,6 +74,9 @@ class PgVectorOwnerSpanTest {
     private static final String TEXT_H = "spanprobe chunk a later document holds with no span of its own";
     private static final String TEXT_T = "spanprobe chunk two tumbler-shaped documents hold";
     private static final String TEXT_S = "spanprobe chunk whose row carries no chunk_text_hash";
+    private static final String TEXT_Y = "spanprobe chunk shared by two documents whose first owner has no span at all";
+    private static final String TEXT_W = "spanprobe chunk shared by two documents whose first owner has lines only";
+    private static final String TEXT_V = "spanprobe chunk whose two holders carry different section types";
     private static final String QUERY = "spanprobe";
 
     private static final String X = Chash.ofText("owner-span-x").toHex();
@@ -81,10 +86,16 @@ class PgVectorOwnerSpanTest {
     private static final String H = Chash.ofText("owner-span-h").toHex();
     private static final String T = Chash.ofText("owner-span-t").toHex();
     private static final String S = Chash.ofText("owner-span-s").toHex();
+    private static final String Y = Chash.ofText("owner-span-y").toHex();
+    private static final String W = Chash.ofText("owner-span-w").toHex();
+    private static final String V = Chash.ofText("owner-span-v").toHex();
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
     PgVectorRepository vec;
+    /** The same database through a recording DataSource, to count the statements a call sends. */
+    RecordingDataSource recorder;
+    PgVectorRepository recVec;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -114,7 +125,13 @@ class PgVectorOwnerSpanTest {
         embedder.register(TEXT_T, 0.0f, 1.0f);
         // Farthest from the query, so a label-filtered window of ten cuts it before any other fixture row.
         embedder.register(TEXT_S, -0.28f, 0.96f);
+        // nexus-pvkbv: farther still, so no window of ten that holds the older fixture rows loses one of them.
+        embedder.register(TEXT_Y, -0.4f, 0.9165151f);
+        embedder.register(TEXT_W, -0.5f, 0.8660254f);
+        embedder.register(TEXT_V, -0.6f, 0.8f);
         vec = new PgVectorRepository(tenantScope, embedder, embedder);
+        recorder = new RecordingDataSource(svcDs);
+        recVec = new PgVectorRepository(new TenantScope(recorder.dataSource()), embedder, embedder);
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -125,6 +142,7 @@ class PgVectorOwnerSpanTest {
             insertDocument(seed, DOC_P2, COLL_C);
             insertDocument(seed, DOC_Q, COLL_D);
             insertDocument(seed, DOC_P3, COLL_C);
+            insertDocument(seed, DOC_A, COLL_C);
             insertDocument(seed, DOC_T10, COLL_C);
             insertDocument(seed, DOC_T2, COLL_C);
             PgContainerHelper.insertCollection(seed, OTHER_TENANT, COLL_C);
@@ -145,6 +163,12 @@ class PgVectorOwnerSpanTest {
         // S: the chunk row carries the last writer's lines (30-35) and NO chunk_text_hash, so the row's
         // "span" string can only be the N-M line form.
         vec.upsertChunks(TENANT, COLL_C, List.of(S), List.of(TEXT_S), List.of(span(30, 35, 300, 350)));
+        // nexus-pvkbv: Y and W are held by A (first owner, no / lines-only span) and by P; P wrote last, so the
+        // chunk rows carry P's span, which is another document's once A is the one named.
+        vec.upsertChunks(TENANT, COLL_C, List.of(Y, W), List.of(TEXT_Y, TEXT_W),
+            List.of(span(500, 510, 5000, 5100), span(700, 710, 7000, 7100)));
+        // V: A holds it as "intro" with no span, P as "body" with one; P wrote last (the row carries P's).
+        vec.upsertChunks(TENANT, COLL_C, List.of(V), List.of(TEXT_V), List.of(span(800, 810, 8000, 8100)));
         // The same text in the same collection name under another tenant (a chunk row is tenant-keyed).
         Map<String, Object> xOther = span(900, 901, 9000, 9010);
         xOther.put("chunk_text_hash", X);
@@ -168,6 +192,13 @@ class PgVectorOwnerSpanTest {
             // T: written "1.2" first; the text-order owner is "1.10".
             manifest(seed, DOC_T2, COLL_C, 0, T, "body", 200, 201, 2000, 2010);
             manifest(seed, DOC_T10, COLL_C, 0, T, "body", 300, 301, 3000, 3010);
+            // Y, W (nexus-pvkbv): A sorts first and holds no span (Y) or lines only (W); P holds the full span.
+            manifest(seed, DOC_A, COLL_C, 0, Y, "body", null, null, null, null);
+            manifest(seed, DOC_P, COLL_C, 7, Y, "body", 500, 510, 5000, 5100);
+            manifest(seed, DOC_A, COLL_C, 1, W, "body", 600, 601, null, null);
+            manifest(seed, DOC_P, COLL_C, 8, W, "body", 700, 710, 7000, 7100);
+            manifest(seed, DOC_A, COLL_C, 2, V, "intro", null, null, null, null);
+            manifest(seed, DOC_P, COLL_C, 9, V, "body", 800, 810, 8000, 8100);
             // S: P (lines 10-20) is the owner; P2 (30-35) is the last writer, whose lines the chunk row carries.
             manifest(seed, DOC_P, COLL_C, 6, S, "body", 10, 20, 100, 200);
             manifest(seed, DOC_P2, COLL_C, 1, S, "body", 30, 35, 300, 350);
@@ -247,6 +278,10 @@ class PgVectorOwnerSpanTest {
         assertThat(((Number) row.get("line_end")).intValue()).as("line_end").isEqualTo(le);
         assertThat(((Number) row.get("chunk_start_char")).intValue()).as("chunk_start_char").isEqualTo(cs);
         assertThat(((Number) row.get("chunk_end_char")).intValue()).as("chunk_end_char").isEqualTo(ce);
+    }
+
+    private static void assertNoSpan(Map<String, Object> row) {
+        assertThat(row).doesNotContainKeys("line_start", "line_end", "chunk_start_char", "chunk_end_char");
     }
 
     private static Map<String, Object> where(String key, Object value) {
@@ -440,10 +475,10 @@ class PgVectorOwnerSpanTest {
         assertThat(x.get("source_uri")).isEqualTo(uri(DOC_P));
     }
 
-    // ── a label filter: an owner with no recorded span shows the chunk row's OWN, not owner #1's ──
+    // ── a SHARED chunk's owner with no recorded span shows no span: the chunk row's is another document's ──
 
     @Test
-    void underALabelFilter_anOwnerWithNullSpans_showsTheChunkRowsOwnSpan_notTheFirstOwners() {
+    void underALabelFilter_aSharedChunksOwnerWithNullSpans_showsNoSpan_neitherTheFirstOwnersNorTheLastWriters() {
         var rows = vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, anyLabel(), true).value();
 
         var hs = rows.stream().filter(r -> H.equals(r.get("id"))).toList();
@@ -451,19 +486,194 @@ class PgVectorOwnerSpanTest {
         var p = hs.stream().filter(r -> DOC_P.equals(r.get("doc_id"))).findFirst().orElseThrow();
         var p3 = hs.stream().filter(r -> DOC_P3.equals(r.get("doc_id"))).findFirst().orElseThrow();
         assertSpan(p, 110, 120, 1100, 1200);
-        assertSpan(p3, 5, 6, 50, 60);
+        assertNoSpan(p3);
         assertThat(p3.get("source_uri")).isEqualTo(uri(DOC_P3));
     }
 
     @Test
-    void hybridAndFanOutUnderALabelFilter_anOwnerWithNullSpans_showsTheChunkRowsOwnSpan() {
+    void hybridAndFanOutUnderALabelFilter_aSharedChunksOwnerWithNullSpans_showsNoSpan() {
         var hybrid = vec.hybridSearchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, anyLabel(), true).value();
         var fan = vec.searchPerCollection(TENANT, QUERY, List.of(COLL_C), 10, 20, null, anyLabel(), true).rows();
         for (var rows : List.of(hybrid, fan)) {
             var p3 = rows.stream().filter(r -> H.equals(r.get("id")) && DOC_P3.equals(r.get("doc_id")))
                 .findFirst().orElseThrow();
-            assertSpan(p3, 5, 6, 50, 60);
+            assertNoSpan(p3);
         }
+    }
+
+    // ── nexus-pvkbv: the named owner of a shared chunk has no span ──
+
+    @Test
+    void firstOwnerPath_aSharedChunkWhoseFirstOwnerHasNullSpans_returnsNoSpan_onEveryRoute() {
+        var plain = vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, null, true).value();
+        var hybrid = vec.hybridSearchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, null, true).value();
+        var fan = vec.searchPerCollection(TENANT, QUERY, List.of(COLL_C), 10, 20, null, null, true).rows();
+        for (var rows : List.of(plain, hybrid, fan)) {
+            var y = rowFor(rows, Y, COLL_C);
+            assertThat(y.get("doc_id")).isEqualTo(DOC_A);
+            assertThat(y.get("source_uri")).isEqualTo(uri(DOC_A));
+            assertNoSpan(y);
+        }
+    }
+
+    @Test
+    void firstOwnerPath_aSharedChunkWhoseFirstOwnerHasOnlyLines_keepsThoseLines_andNoChars() {
+        var w = rowFor(vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, null, false).value(), W, COLL_C);
+
+        assertThat(w.get("doc_id")).isEqualTo(DOC_A);
+        assertThat(((Number) w.get("line_start")).intValue()).isEqualTo(600);
+        assertThat(((Number) w.get("line_end")).intValue()).isEqualTo(601);
+        assertThat(w).doesNotContainKeys("chunk_start_char", "chunk_end_char");
+    }
+
+    @Test
+    void firstOwnerPath_anUnsharedChunkWithNullSpans_stillShowsTheChunkRowsOwnSpan() {
+        // N has one live owner (P) and every manifest span NULL: the row's span is that owner's own.
+        for (var rows : List.of(
+                vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, null, true).value(),
+                vec.hybridSearchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, null, true).value())) {
+            assertSpan(rowFor(rows, N, COLL_C), 7, 8, 70, 80);
+        }
+    }
+
+    @Test
+    void expandedPath_aSharedChunksOwnerWithNullSpans_returnsNoSpan_andItsCoOwnerKeepsItsOwn() {
+        var rows = vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 40, anyLabel(), true).value();
+
+        var a = rows.stream().filter(r -> Y.equals(r.get("id")) && DOC_A.equals(r.get("doc_id")))
+            .findFirst().orElseThrow();
+        var p = rows.stream().filter(r -> Y.equals(r.get("id")) && DOC_P.equals(r.get("doc_id")))
+            .findFirst().orElseThrow();
+        assertNoSpan(a);
+        assertSpan(p, 500, 510, 5000, 5100);
+        // Y carries no chunk_text_hash, so the row's span string is the line form: none for A, P's lines for P.
+        assertThat(a.get("span")).isEqualTo("");
+        assertThat(p.get("span")).isEqualTo("500-510");
+
+        var wa = rows.stream().filter(r -> W.equals(r.get("id")) && DOC_A.equals(r.get("doc_id")))
+            .findFirst().orElseThrow();
+        assertThat(((Number) wa.get("line_start")).intValue()).isEqualTo(600);
+        assertThat(wa).doesNotContainKeys("chunk_start_char", "chunk_end_char");
+    }
+
+    @Test
+    void expandedPath_anUnsharedChunkWithNullSpans_stillShowsTheChunkRowsOwnSpan() {
+        var rows = vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 40, anyLabel(), true).value();
+
+        var n = rows.stream().filter(r -> N.equals(r.get("id"))).toList();
+        assertThat(n).hasSize(1);
+        assertSpan(n.get(0), 7, 8, 70, 80);
+        var m = rows.stream().filter(r -> M.equals(r.get("id"))).findFirst().orElseThrow();
+        assertSpan(m, 60, 70, 601, 701);
+    }
+
+    /**
+     * Tombstones {@link #DOC_P} for the duration of {@code body}. P wrote chunk Y last (the chunk rows carry
+     * P's span), so with P tombstoned the one live owner, A, has no span of its own and the row's is P's.
+     */
+    private void withPTombstoned(Runnable body) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext dsl = DSL.using(su, SQLDialect.POSTGRES);
+            dsl.update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(DOC_P)))
+                .execute();
+            try {
+                body.run();
+            } finally {
+                dsl.update(CATALOG_DOCUMENTS)
+                    .setNull(CATALOG_DOCUMENTS.DELETED_AT)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(DOC_P)))
+                    .execute();
+            }
+        }
+    }
+
+    @Test
+    void firstOwnerPath_aSharedChunkWhoseOtherHolderIsTombstoned_stillShowsNoSpan() throws Exception {
+        // Y has one live owner left (A, no span), but the tombstoned P still wrote the chunk row's span
+        // (500-510): printing it beside A's path is the bug, so a tombstoned holder counts as a holder.
+        withPTombstoned(() -> {
+            var y = rowFor(vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, null, true).value(), Y, COLL_C);
+            assertThat(y.get("doc_id")).isEqualTo(DOC_A);
+            assertNoSpan(y);
+        });
+    }
+
+    @Test
+    void expandedPath_aSharedChunkWhoseOtherHolderIsTombstoned_stillShowsNoSpan() throws Exception {
+        withPTombstoned(() -> {
+            var rows = vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 40, anyLabel(), true).value();
+            var ys = rows.stream().filter(r -> Y.equals(r.get("id"))).toList();
+            assertThat(ys).hasSize(1);
+            assertThat(ys.get(0).get("doc_id")).isEqualTo(DOC_A);
+            assertNoSpan(ys.get(0));
+        });
+    }
+
+    // ── nexus-pvkbv: shared is judged over every holder, not over the rows the filter keeps ──
+
+    @Test
+    void underALabelFilterThatDropsTheOtherHolder_theKeptOwnerStillShowsNoSpan() {
+        // V: A holds it as "intro" (no span), P as "body" (800-810, and P wrote last). The filter keeps A's
+        // copy only. Judged over the survivors A would be the sole holder and print P's lines.
+        var rows = vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10,
+            where("section_type", "intro"), true).value();
+
+        var vs = rows.stream().filter(r -> V.equals(r.get("id"))).toList();
+        assertThat(vs).hasSize(1);
+        assertThat(vs.get(0).get("doc_id")).isEqualTo(DOC_A);
+        assertNoSpan(vs.get(0));
+    }
+
+    // ── nexus-pvkbv: the holder probe costs a statement only where it is needed ──
+
+    /** The alias of the probe's VALUES table: how the statement is told apart (ManifestLabelStage#HOLDER_PROBE). */
+    private static final String HOLDER_PROBE = "holder_probe";
+
+    private static long holderProbes(RecordingDataSource rec) {
+        return rec.executed().stream().filter(x -> x.sql().contains(HOLDER_PROBE)).count();
+    }
+
+    @Test
+    void theHolderProbe_runsOnceForAWindowWithASpanlessOwner_andNeverForOneWhoseOwnersHaveFullSpans() {
+        recorder.clear();
+        var inC = recVec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, null, true).value();
+        assertThat(rowFor(inC, Y, COLL_C)).as("the window holds spanless owners").isNotNull();
+        assertThat(holderProbes(recorder)).as("collection C: one probe, however many chunks").isEqualTo(1);
+
+        // Collection D holds X only, and its one owner (Q) has all four span fields: nothing to fall back from.
+        recorder.clear();
+        var inD = recVec.searchWithTokens(TENANT, QUERY, List.of(COLL_D), 10, null, true).value();
+        assertThat(inD).isNotEmpty();
+        assertThat(holderProbes(recorder)).as("collection D: full spans, no probe").isZero();
+    }
+
+    @Test
+    void theHolderProbe_followsTheSameRule_underALabelFilter() {
+        recorder.clear();
+        recVec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 40, anyLabel(), true);
+        assertThat(holderProbes(recorder)).as("collection C: one probe for its sole-holder spanless chunks")
+            .isEqualTo(1);
+
+        recorder.clear();
+        recVec.searchWithTokens(TENANT, QUERY, List.of(COLL_D), 10, anyLabel(), true);
+        assertThat(holderProbes(recorder)).as("collection D: full spans, no probe").isZero();
+    }
+
+    @Test
+    void aGetEnvelope_readsNoSpanFromTheOwner_soItRunsNoHolderProbe() {
+        // Y's first owner (A) has no span, so a search of it probes (the control above). The envelope reads
+        // the owner's source_uri only; the probe's answer would be thrown away.
+        recorder.clear();
+        var env = recVec.get(TENANT, COLL_C, List.of(Y, W, N), 10, 0, true);
+        assertThat(env.get("source_uris")).isNotNull();
+        assertThat(holderProbes(recorder)).isZero();
+
+        recorder.clear();
+        recVec.getWhere(TENANT, COLL_C, null, 100, 0, true);
+        assertThat(holderProbes(recorder)).isZero();
     }
 
     // ── a label filter: the stage is the only owner lookup of the window ──

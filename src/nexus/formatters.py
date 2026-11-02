@@ -351,8 +351,8 @@ def _file_line_no(
     line spans for prose chunks at index time would make this O(1) and
     immune to drift.
     """
-    if "line_start" in r.metadata:
-        return int(r.metadata["line_start"]) + best_idx
+    if (line_start := r.metadata.get("line_start")) is not None:
+        return int(line_start) + best_idx
     shown = _display_path(r.metadata)
     if not shown:
         return best_idx + 1
@@ -481,6 +481,7 @@ def format_plain(results: list[SearchResult]) -> list[str]:
     format that the MCP surface uses.
     """
     lines: list[str] = []
+    file_lines: dict[str, list[str] | None] = {}
     for r in results:
         source_path = _display_path(r.metadata)
         if not source_path:
@@ -490,12 +491,15 @@ def format_plain(results: list[SearchResult]) -> list[str]:
             if snippet:
                 lines.append(f"  {snippet}")
             continue
-        line_start = r.metadata.get("line_start", 0)
         # RDR-169 Phase B fix round 1: a reference-only chunk's content is
         # None -- guard before .splitlines().
-        for i, content_line in enumerate((r.content or "").splitlines()):
-            line_no = int(line_start) + i
-            lines.append(f"{source_path}:{line_no}:{content_line}")
+        chunk_lines = (r.content or "").splitlines()
+        # A hit with no line_start (a shared chunk whose owner has no recorded
+        # span: nexus-pvkbv) is numbered from where its first line sits in the
+        # printed file, never from line 0.
+        first = _file_line_no(r, 0, chunk_lines[0] if chunk_lines else "", file_lines)
+        for i, content_line in enumerate(chunk_lines):
+            lines.append(f"{source_path}:{first + i}:{content_line}")
     return lines
 
 
@@ -519,14 +523,17 @@ def format_plain_with_context(
         return format_plain(results)
 
     output: list[str] = []
+    file_lines: dict[str, list[str] | None] = {}
     for r in results:
         source_path = _display_path_or_title(r.metadata, r.id)
-        line_start = int(r.metadata.get("line_start", 0))
         # RDR-169 Phase B fix round 1: a reference-only chunk's content is
         # None -- guard before .splitlines().
         content = r.content or ""
         chunk_lines = content.splitlines()
         total = len(chunk_lines)
+        # nexus-pvkbv: no line_start (an owner without a recorded span) is
+        # numbered from where the first line sits in the printed file.
+        line_start = _file_line_no(r, 0, chunk_lines[0] if chunk_lines else "", file_lines)
 
         if query and (lines_before > 0 or lines_after > 0):
             # Smart windowing: center on matching lines

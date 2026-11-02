@@ -8417,13 +8417,17 @@ FROM scope s
      *
      * @param tenant               the tenant whose catalog rows to query (RLS-scoped)
      * @param chashesByCollection  the 64-hex chashes of the window, by the collection they were read from
+     * @param markShared           true when the caller reads the owner's SPAN (a search row): one more
+     *                             statement then asks which owners' chunks another document holds
+     *                             ({@link ManifestLabelStage#firstOwners}); false for a caller that reads only
+     *                             the {@code source_uri} (the get-envelope), which runs no such statement
      * @return owner per {@link ManifestLabelStage#ownerKey}
      */
     private Map<String, ManifestLabelStage.Occurrence> ownersByChash(
-            String tenant, Map<String, Set<String>> chashesByCollection) {
+            String tenant, Map<String, Set<String>> chashesByCollection, boolean markShared) {
         ownerLookupCalls.incrementAndGet();
         if (chashesByCollection.isEmpty()) return Map.of();
-        return labelStage().firstOwners(tenant, chashesByCollection);
+        return labelStage().firstOwners(tenant, chashesByCollection, markShared);
     }
 
     /** Precompiled hex pattern for chunk_text_hash validation (fix #M1-cr: length+charset). */
@@ -8488,14 +8492,18 @@ FROM scope s
      * #ownersByChash}) whether or not {@code source_uri} was asked for: {@code doc_id} and {@code position}
      * of the owner's first live manifest row in the row's own collection, and that row's span ({@code
      * line_start}, {@code line_end}, {@code chunk_start_char}, {@code chunk_end_char}) where the manifest
-     * has a value, so the document, the file and the lines on a citation are one owner's. A chunk with no
+     * has a value, and for a NULL field the same rule as the expanded path below ({@link
+     * ManifestLabelStage#putSpan}), so the document, the file and the lines on a citation are one owner's,
+     * except where a former holder left no manifest trace (see putSpan). A chunk with no
      * live owner keeps its own span and gets neither key.
      *
      * <p>{@code labelStageFollows}: a {@link ManifestLabelStage} pass will expand each row to its owning
      * documents, and writes each copy's own {@code doc_id}, {@code position}, {@code source_uri} and span,
-     * falling back, for a NULL manifest field, to the CHUNK ROW's value. This method then runs NO owner
-     * lookup and leaves those fields as the chunk row has them (a null {@code source_uri} when asked for),
-     * or an owner without a recorded span would inherit the first owner's.
+     * falling back, for a NULL manifest field, to the CHUNK ROW's value when no other document holds the
+     * chunk and to no value when one does, tombstoned or not (nexus-pvkbv,
+     * {@link ManifestLabelStage#putSpan}). This method then runs NO owner lookup and leaves those fields as
+     * the chunk row has them (a null {@code source_uri} when asked for), or an owner without a recorded span
+     * would inherit the first owner's.
      *
      * <p>Field-presence contract:
      * <ul>
@@ -8527,7 +8535,7 @@ FROM scope s
                     chashesByCollection.computeIfAbsent(c, k -> new LinkedHashSet<>()).add(s);
                 }
             }
-            owners = ownersByChash(tenant, chashesByCollection);
+            owners = ownersByChash(tenant, chashesByCollection, true);
         }
         for (Map<String, Object> row : rows) {
             Object idVal = row.get("id");
@@ -8551,7 +8559,8 @@ FROM scope s
                 ? owners.get(ManifestLabelStage.ownerKey(c, chashStr)) : null;
             if (owner != null) {
                 // The row names its owner, and that owner's span replaces the shared chunk row's (the last
-                // writer's); a NULL manifest field keeps the row's value (a legacy manifest row).
+                // writer's); a NULL manifest field keeps the row's value (a legacy manifest row) unless another
+                // document holds the chunk, when it is dropped (nexus-pvkbv, ManifestLabelStage#putSpan).
                 row.put("doc_id", owner.docId());
                 row.put("position", owner.position());
                 ManifestLabelStage.putSpan(row, owner);
@@ -8609,7 +8618,7 @@ FROM scope s
             for (String id : ids) {
                 if (id != null && HEX64.matcher(id).matches()) hexes.add(id);
             }
-            owners = ownersByChash(tenant, hexes.isEmpty() ? Map.of() : Map.of(collection, hexes));
+            owners = ownersByChash(tenant, hexes.isEmpty() ? Map.of() : Map.of(collection, hexes), false);
         }
 
         List<String> chashes   = new ArrayList<>(ids.size());

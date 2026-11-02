@@ -637,3 +637,98 @@ def test_display_title_reads_only_the_catalog_title() -> None:
 
     assert display_title({"title": _STALE_ROW_TITLE}) == ""
     assert display_title({"title": _STALE_ROW_TITLE, "_display_title": "owner/doc.py"}) == "owner/doc.py"
+
+
+# ── nexus-pvkbv: a hit whose owner has no recorded span carries no line_start ──
+#
+# The engine drops line_start / line_end for a shared chunk whose named owner's manifest row has NULL
+# spans (they would be the last writer's, another document's). The formatters must then print no
+# bogus range: not line 0, not "None", not another document's lines.
+
+_NO_SPAN_CONTENT = "alpha line\nbeta line\ngamma line"
+
+
+def _no_span(**extra_meta: object) -> SearchResult:
+    meta = {"_display_path": "docs/owner.md", **extra_meta}
+    assert "line_start" not in meta and "line_end" not in meta
+    return SearchResult(id="c" * 64, content=_NO_SPAN_CONTENT, distance=0.1, collection="docs__x", metadata=meta)
+
+
+@pytest.mark.parametrize("fmt", ["plain", "vimgrep", "compact", "context", "context-query"])
+def test_a_hit_with_no_span_prints_no_line_zero_and_no_none(fmt: str, tmp_path) -> None:
+    owner = tmp_path / "owner.md"
+    owner.write_text("preamble\nalpha line\nbeta line\ngamma line\n")
+    r = _no_span()
+    r.metadata["_display_path"] = str(owner)
+    out = {
+        "plain": lambda: format_plain([r]),
+        "vimgrep": lambda: format_vimgrep([r]),
+        "compact": lambda: format_compact([r]),
+        "context": lambda: format_plain_with_context([r], lines_after=2),
+        "context-query": lambda: format_plain_with_context([r], lines_before=1, lines_after=1, query="beta"),
+    }[fmt]()
+    text = "\n".join(out)
+    assert out, fmt
+    assert "None" not in text
+    assert f"{owner}:0:" not in text, text
+    # every line number printed is a real file line (1-based), never 0 or negative
+    for line in out:
+        number = line.removeprefix(f"{owner}:").split(":", 1)[0]
+        assert number.isdigit() and int(number) >= 1, line
+
+
+@pytest.mark.parametrize("fmt", ["plain", "vimgrep", "compact", "context", "context-query"])
+def test_an_explicit_line_start_none_is_a_no_span_hit_too(fmt: str, tmp_path) -> None:
+    # A chunk row's metadata can carry the key with a null value (a JSON null from a store that keeps it):
+    # int(None) raised before, and `.get("line_start", 0)` would not have defaulted it either.
+    owner = tmp_path / "owner.md"
+    owner.write_text("preamble\nalpha line\nbeta line\ngamma line\n")
+    r = _no_span()
+    r.metadata.update(_display_path=str(owner), line_start=None, line_end=None)
+    out = {
+        "plain": lambda: format_plain([r]),
+        "vimgrep": lambda: format_vimgrep([r]),
+        "compact": lambda: format_compact([r]),
+        "context": lambda: format_plain_with_context([r], lines_after=2),
+        "context-query": lambda: format_plain_with_context([r], lines_before=1, lines_after=1, query="beta"),
+    }[fmt]()
+    text = "\n".join(out)
+    assert out, fmt
+    assert "None" not in text
+    for line in out:
+        number = line.removeprefix(f"{owner}:").split(":", 1)[0]
+        assert number.isdigit() and int(number) >= 1, line
+
+
+def test_plain_numbers_a_no_span_chunk_from_where_its_first_line_sits_in_the_printed_file(tmp_path) -> None:
+    owner = tmp_path / "owner.md"
+    owner.write_text("preamble\nalpha line\nbeta line\ngamma line\n")
+    r = _no_span()
+    r.metadata["_display_path"] = str(owner)
+
+    assert format_plain([r]) == [
+        f"{owner}:2:alpha line", f"{owner}:3:beta line", f"{owner}:4:gamma line",
+    ]
+    assert format_plain_with_context([r], lines_after=2) == format_plain([r])
+
+
+def test_a_no_span_chunk_whose_file_will_not_open_is_numbered_from_line_one() -> None:
+    r = _no_span(_display_path="/no/such/owner.md")
+
+    assert format_plain([r])[0] == "/no/such/owner.md:1:alpha line"
+
+
+def test_a_span_that_is_present_is_printed_exactly_as_before() -> None:
+    r = _no_span()
+    r.metadata.update(line_start=40, line_end=42)
+
+    assert format_plain([r]) == [
+        "docs/owner.md:40:alpha line", "docs/owner.md:41:beta line", "docs/owner.md:42:gamma line",
+    ]
+    assert format_plain_with_context([r], lines_after=1)[0] == "docs/owner.md:40:alpha line"
+
+
+def test_json_of_a_no_span_hit_carries_no_line_keys() -> None:
+    item = json.loads(format_json([_no_span()]))[0]
+
+    assert "line_start" not in item and "line_end" not in item

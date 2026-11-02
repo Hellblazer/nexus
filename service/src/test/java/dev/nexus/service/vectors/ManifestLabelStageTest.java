@@ -490,6 +490,40 @@ class ManifestLabelStageTest {
             org.assertj.core.api.Assertions.entry("chunk_end_char", 350));
     }
 
+    private static ManifestLabelStage.Occurrence sharedOwner(Integer ls, Integer le, Integer cs, Integer ce) {
+        return owner(ls, le, cs, ce).withShared(true);
+    }
+
+    @Test
+    void nexusPvkbv_aSharedChunksOwnerWithNoSpan_dropsTheRowsFields_theyAreAnotherDocumentsLines() {
+        Map<String, Object> row = w("line_start", 30, "line_end", 35, "chunk_start_char", 300, "chunk_end_char", 350,
+            "title", "kept");
+
+        ManifestLabelStage.putSpan(row, sharedOwner(null, null, null, null));
+
+        assertThat(row).containsOnlyKeys("title");
+    }
+
+    @Test
+    void nexusPvkbv_aSharedChunksOwnerWithOnlyLines_keepsItsLines_andDropsTheCharsItLacks() {
+        Map<String, Object> row = w("line_start", 30, "line_end", 35, "chunk_start_char", 300, "chunk_end_char", 350);
+
+        ManifestLabelStage.putSpan(row, sharedOwner(4, 9, null, null));
+
+        assertThat(row).containsOnlyKeys("line_start", "line_end")
+            .containsEntry("line_start", 4).containsEntry("line_end", 9);
+    }
+
+    @Test
+    void nexusPvkbv_aSharedChunksOwnerWithAFullSpan_isUnchanged() {
+        Map<String, Object> row = w("line_start", 30, "line_end", 35, "chunk_start_char", 300, "chunk_end_char", 350);
+
+        ManifestLabelStage.putSpan(row, sharedOwner(10, 20, 100, 200));
+
+        assertThat(row).containsEntry("line_start", 10).containsEntry("line_end", 20)
+            .containsEntry("chunk_start_char", 100).containsEntry("chunk_end_char", 200);
+    }
+
     @Test
     void anOwnerWithOnlyLines_writesOnlyTheTwoLineFields_andNoCharField() {
         Map<String, Object> row = w();

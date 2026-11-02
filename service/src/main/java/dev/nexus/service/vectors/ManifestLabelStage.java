@@ -13,7 +13,12 @@ import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Record;
+import org.jooq.Record1;
+import org.jooq.Record2;
 import org.jooq.ResultQuery;
+import org.jooq.Row2;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
@@ -21,6 +26,8 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -524,10 +531,33 @@ final class ManifestLabelStage {
      *                  a key that is present answers for the document (a null value is an authoritative
      *                  absence, an unenriched document's bib); a key that is absent falls back to the chunk
      *                  row (a legacy document). Empty when the filter names no document-level key.
+     * @param sharedChunk true when the chunk has a manifest holder in another document than this one, live or
+     *                  tombstoned (the tombstoned one may be the chunk row's last writer), so the chunk row's
+     *                  span fields may belong to another document (nexus-pvkbv); see {@link #putSpan}. False
+     *                  when this is not known to be so, which includes every occurrence built without the
+     *                  lookup that finds the other holders.
      */
     record Occurrence(String docId, int position, String sectionTitle, String sectionType, Integer pageNumber,
                       boolean labelsWritten, String sourceUri, Integer lineStart, Integer lineEnd,
-                      Integer charStart, Integer charEnd, Map<String, Object> docValues) {}
+                      Integer charStart, Integer charEnd, Map<String, Object> docValues, boolean sharedChunk) {
+
+        Occurrence(String docId, int position, String sectionTitle, String sectionType, Integer pageNumber,
+                   boolean labelsWritten, String sourceUri, Integer lineStart, Integer lineEnd,
+                   Integer charStart, Integer charEnd, Map<String, Object> docValues) {
+            this(docId, position, sectionTitle, sectionType, pageNumber, labelsWritten, sourceUri, lineStart,
+                lineEnd, charStart, charEnd, docValues, false);
+        }
+
+        Occurrence withShared(boolean shared) {
+            return shared == sharedChunk ? this : new Occurrence(docId, position, sectionTitle, sectionType,
+                pageNumber, labelsWritten, sourceUri, lineStart, lineEnd, charStart, charEnd, docValues, shared);
+        }
+
+        /** True when any of the four span fields is NULL on the manifest row. */
+        boolean lacksSpanField() {
+            return lineStart == null || lineEnd == null || charStart == null || charEnd == null;
+        }
+    }
 
     /** The document-level keys the predicates name. */
     static Set<String> docKeysOf(List<Predicate> predicates) {
@@ -774,14 +804,119 @@ final class ManifestLabelStage {
      * <p>Its own {@code SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id, position}, so the statement
      * returns one row per chash where {@link #apply}'s lookup returns every occurrence: a boilerplate chunk
      * held by N documents costs a search window one row, not N.
+     *
+     * <p>{@code markShared} adds ONE more statement per collection and batch of at most {@link #LOOKUP_BATCH}
+     * chashes, and only for the chashes whose first owner has a NULL span field (an owner with all four
+     * fields has nothing to fall back from, so no statement runs when every owner in the window has them):
+     * an {@code EXISTS} for any other manifest holder, live or tombstoned ({@link #sharedKeys}). It sets
+     * {@link Occurrence#sharedChunk()} on those owners. A caller that does not read the span of the owner
+     * ({@code PgVectorRepository}'s get-envelope reads only the {@code source_uri}) passes {@code false} and
+     * pays nothing for it.
      */
-    Map<String, Occurrence> firstOwners(String tenant, Map<String, Set<String>> chashesByCollection) {
+    Map<String, Occurrence> firstOwners(String tenant, Map<String, Set<String>> chashesByCollection,
+                                        boolean markShared) {
         Map<String, Occurrence> first = new HashMap<>();
         for (Map.Entry<String, List<Occurrence>> e : fetchOccurrences(tenant, chashesByCollection, Set.of(), true)
                 .entrySet()) {
             first.put(e.getKey(), e.getValue().get(0));
         }
+        if (!markShared) {
+            return first;
+        }
+        // nexus-pvkbv: whether the chunk row's span can be another document's matters only where the owner's
+        // own span has a NULL field to fall back from; look for other holders of those chunks alone.
+        Map<String, Map<String, String>> probe = new LinkedHashMap<>();
+        for (Map.Entry<String, Set<String>> e : chashesByCollection.entrySet()) {
+            for (String hex : e.getValue()) {
+                Occurrence o = first.get(key(e.getKey(), hex));
+                if (o != null && o.lacksSpanField()) {
+                    probe.computeIfAbsent(e.getKey(), k -> new LinkedHashMap<>()).put(hex, o.docId());
+                }
+            }
+        }
+        for (String shared : sharedKeys(tenant, probe)) {
+            first.computeIfPresent(shared, (k, o) -> o.withShared(true));
+        }
         return first;
+    }
+
+    /**
+     * Of the chunks in {@code ownerDocs} (collection, then chash, to the document that owns it), the
+     * {@link #ownerKey}s of those some OTHER document holds in the manifest, tombstoned or not. A tombstoned
+     * document counts: it may be the one that wrote the chunk row last, and the row's span is then not the
+     * owner's (nexus-pvkbv). Owner SELECTION stays live-only; this is only the shared-or-not decision.
+     *
+     * <p>{@code EXISTS (another doc_id for the chash)} per chash, so it stops at the first other holder and
+     * does not count a boilerplate chunk's thousands; one bounded statement per collection and batch, under
+     * the tenant's row-level security and with an explicit tenant bind. The chashes ride a {@code VALUES}
+     * table aliased {@value #HOLDER_PROBE}, which is also how a test finds the statement.
+     */
+    private Set<String> sharedKeys(String tenant, Map<String, Map<String, String>> ownerDocs) {
+        Set<String> shared = new HashSet<>();
+        if (ownerDocs.isEmpty()) {
+            return shared;
+        }
+        tenantScope.withTenant(tenant, ctx -> {
+            for (Map.Entry<String, Map<String, String>> e : ownerDocs.entrySet()) {
+                List<Map.Entry<String, String>> entries = new ArrayList<>(e.getValue().entrySet());
+                for (int start = 0; start < entries.size(); start += LOOKUP_BATCH) {
+                    var batch = entries.subList(start, Math.min(start + LOOKUP_BATCH, entries.size()));
+                    for (var r : holderProbeQuery(ctx, tenant, e.getKey(), batch).fetch()) {
+                        shared.add(key(e.getKey(), HexFormat.of().formatHex(r.value1())));
+                    }
+                }
+            }
+            return null;
+        });
+        return shared;
+    }
+
+    /**
+     * The probe statement for ONE collection and one batch: {@code (chash hex, owning doc_id)} pairs in,
+     * the chashes (bytes) some other document holds out. Package-private so a plan test can EXPLAIN the
+     * statement production runs.
+     */
+    static ResultQuery<Record1<byte[]>> holderProbeQuery(DSLContext ctx, String tenant, String collection,
+                                                         List<Map.Entry<String, String>> chashToOwnerDoc) {
+        List<Row2<byte[], String>> rows = new ArrayList<>(chashToOwnerDoc.size());
+        for (Map.Entry<String, String> k : chashToOwnerDoc) {
+            rows.add(DSL.row(Chash.fromHex(k.getKey()).toBytes(), k.getValue()));
+        }
+        Table<Record2<byte[], String>> probe =
+            DSL.values(rows.toArray(new Row2[0])).as(HOLDER_PROBE, "chash", "owner_doc");
+        Field<byte[]> pChash = probe.field("chash", byte[].class);
+        Field<String> pOwner = probe.field("owner_doc", String.class);
+        return ctx.select(pChash)
+            .from(probe)
+            .where(DSL.exists(DSL.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                    .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(pChash))
+                    .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.ne(pOwner)))));
+    }
+
+    /** The alias of the {@code VALUES} table in the holder probe ({@link #sharedKeys}). */
+    static final String HOLDER_PROBE = "holder_probe";
+
+    /**
+     * The {@link #key}s of the chunks in {@code owners} that have ONE live document and a NULL span field on
+     * some occurrence, and that another document holds in the manifest, tombstoned or not (nexus-pvkbv; see
+     * {@link #sharedKeys}). A chunk with several live documents is shared without a lookup, and one whose
+     * occurrences all carry the whole span has nothing to fall back from, so neither is asked about.
+     */
+    private Set<String> soleLiveHolderShared(String tenant, Map<String, List<Occurrence>> owners) {
+        Map<String, Map<String, String>> probe = new LinkedHashMap<>();
+        for (Map.Entry<String, List<Occurrence>> e : owners.entrySet()) {
+            List<Occurrence> occ = e.getValue();
+            if (occ.isEmpty() || occ.stream().noneMatch(Occurrence::lacksSpanField)
+                    || occ.stream().map(Occurrence::docId).distinct().limit(2).count() > 1) {
+                continue;
+            }
+            int sep = e.getKey().indexOf('\u0000');
+            probe.computeIfAbsent(e.getKey().substring(0, sep), k -> new LinkedHashMap<>())
+                 .put(e.getKey().substring(sep + 1), occ.get(0).docId());
+        }
+        return sharedKeys(tenant, probe);
     }
 
     /** The key {@link #firstOwners} answers under. */
@@ -899,6 +1034,7 @@ final class ManifestLabelStage {
         }
         Set<String> docKeys = docKeysOf(predicates);
         Map<String, List<Occurrence>> owners = occurrences(tenant, rows, docKeys);
+        Set<String> soleHolderShared = soleLiveHolderShared(tenant, owners);
         List<Map<String, Object>> out = new ArrayList<>(Math.min(rows.size(), Math.max(limit, 0)));
         for (Map<String, Object> row : rows) {
             Object id = row.get("id");
@@ -912,6 +1048,10 @@ final class ManifestLabelStage {
                 }
             } else {
                 Set<String> seenDocs = new LinkedHashSet<>();
+                // Every holder, not only the ones that pass the filter: the chunk row's span is the last
+                // writer's among all of them, live or not (nexus-pvkbv).
+                boolean shared = occ.stream().map(Occurrence::docId).distinct().limit(2).count() > 1
+                    || soleHolderShared.contains(key((String) row.get("collection"), (String) row.get("id")));
                 for (Occurrence o : occ) {
                     if (seenDocs.contains(o.docId())) {
                         continue;
@@ -919,7 +1059,7 @@ final class ManifestLabelStage {
                     Map<String, Object> labels = rowLabels(row, o, docKeys);
                     if (passes(predicates, labels)) {
                         seenDocs.add(o.docId());
-                        out.add(expanded(row, o));
+                        out.add(expanded(row, o.withShared(shared)));
                     }
                 }
             }
@@ -961,25 +1101,36 @@ final class ManifestLabelStage {
     /**
      * Writes the owner's manifest span onto {@code row} (nexus-6pfgb.26): {@code line_start}, {@code line_end},
      * {@code chunk_start_char} and {@code chunk_end_char} are the position's own, where the shared chunk row's
-     * are the last writer's. It writes each field the manifest HAS a value for and nothing else, so a key
-     * the row lacked appears when the owner's manifest holds it; a NULL manifest value leaves that field as
-     * the row has it, which is the row's own value ONLY if the row has not already been given another
-     * owner's (see {@code PgVectorRepository#enrichSearchRows}, {@code labelStageFollows}). NULL is also what
-     * a note, an orphan and a prose or PDF chunk carry for good, not only a row written before the manifest
-     * had spans, so such an owner shows the chunk row's span beside its {@code source_uri}.
+     * are the last writer's. Field by field: a value the manifest HAS is written (a key the row lacked
+     * appears). A NULL manifest value depends on the chunk (nexus-pvkbv):
+     * <ul>
+     *   <li>{@link Occurrence#sharedChunk() shared} (another document, live or tombstoned, also holds the
+     *       chunk): the chunk row's field is whichever document wrote the chunk last, quite possibly not this
+     *       owner (and a tombstoned writer still wrote it), so it is REMOVED and the result carries no such
+     *       field, where it used to print another document's lines beside this owner's path;
+     *   <li>not shared: this owner is the chunk's only manifest holder, so the chunk row's field is taken as
+     *       its own, as far as the manifest shows, and stays. NULL is what a note, an orphan and a prose or PDF chunk carry for good, and what a row
+     *       written before the manifest had spans carries, so dropping the field there would erase a span
+     *       the owner really has.
+     * </ul>
+     * A document that no longer lists the chunk leaves no trace: one whose manifest rows were purged, one
+     * re-indexed or edited so it dropped the chunk (its manifest is deleted and rewritten by doc_id), and one
+     * moved to another collection. A chunk row such a document wrote last is read as the remaining holder's
+     * own, so a sole holder with a NULL span still shows that departed writer's span; the chunk row carries no
+     * writer id to tell the two apart.
      */
     static void putSpan(Map<String, Object> row, Occurrence o) {
-        if (o.lineStart() != null) {
-            row.put("line_start", o.lineStart());
-        }
-        if (o.lineEnd() != null) {
-            row.put("line_end", o.lineEnd());
-        }
-        if (o.charStart() != null) {
-            row.put("chunk_start_char", o.charStart());
-        }
-        if (o.charEnd() != null) {
-            row.put("chunk_end_char", o.charEnd());
+        putField(row, "line_start", o.lineStart(), o.sharedChunk());
+        putField(row, "line_end", o.lineEnd(), o.sharedChunk());
+        putField(row, "chunk_start_char", o.charStart(), o.sharedChunk());
+        putField(row, "chunk_end_char", o.charEnd(), o.sharedChunk());
+    }
+
+    private static void putField(Map<String, Object> row, String key, Integer value, boolean sharedChunk) {
+        if (value != null) {
+            row.put(key, value);
+        } else if (sharedChunk) {
+            row.remove(key);
         }
     }
 

@@ -188,12 +188,20 @@ class ManifestLabelStageFirstOwnerPlanTest {
     @Test
     void firstOwners_isTheHeadOfTheFullLookup_forEveryKey() {
         var stage = new ManifestLabelStage(tenantScope);
-        var first = stage.firstOwners(TENANT, window());
+        var first = stage.firstOwners(TENANT, window(), true);
         var all = stage.allOccurrences(TENANT, window());
 
         assertThat(first).hasSize(chashes.size());
         assertThat(all.keySet()).isEqualTo(first.keySet());
-        all.forEach((key, list) -> assertThat(first.get(key)).as(key).isEqualTo(list.get(0)));
+        // The same row; only sharedChunk differs (nexus-pvkbv: the first-owner lookup counts holders for an
+        // owner with a NULL span field, and every owner here has all four NULL), pinned below.
+        all.forEach((key, list) -> assertThat(first.get(key).withShared(false)).as(key).isEqualTo(list.get(0)));
+        for (int c = 0; c < BOILERPLATE; c++) {
+            assertThat(first.get(ManifestLabelStage.ownerKey(COL, chashes.get(c))).sharedChunk())
+                .as("held by %d documents".formatted(HOLDERS)).isTrue();
+        }
+        assertThat(first.get(ManifestLabelStage.ownerKey(COL, chashes.get(BOILERPLATE))).sharedChunk())
+            .as("held by one document").isFalse();
         // And that head is the lowest doc_id, then position: doc-000 holds each boilerplate chunk at its own
         // position; the lone chunk is doc-007's.
         for (int c = 0; c < BOILERPLATE; c++) {
@@ -203,5 +211,33 @@ class ManifestLabelStageFirstOwnerPlanTest {
         }
         assertThat(first.get(ManifestLabelStage.ownerKey(COL, chashes.get(BOILERPLATE))).docId())
             .isEqualTo("doc-007");
+    }
+
+    @Test
+    void firstOwnersWithoutMarkShared_runsNoProbe_andLeavesEverySharedFlagFalse() {
+        var first = new ManifestLabelStage(tenantScope).firstOwners(TENANT, window(), false);
+
+        assertThat(first).hasSize(chashes.size());
+        first.forEach((key, o) -> assertThat(o.sharedChunk()).as(key).isFalse());
+    }
+
+    /** The probe's pairs: each chash with the document the first-owner lookup named for it. */
+    private List<Map.Entry<String, String>> probePairs() {
+        List<Map.Entry<String, String>> pairs = new ArrayList<>();
+        for (int c = 0; c < BOILERPLATE; c++) {
+            pairs.add(Map.entry(chashes.get(c), "doc-000"));
+        }
+        pairs.add(Map.entry(chashes.get(BOILERPLATE), "doc-007"));
+        return pairs;
+    }
+
+    @Test
+    void theHolderProbe_isAnExistsSemiJoin_answeringOnlyTheChunksAnotherDocumentHolds() {
+        List<String> plan = tenantScope.withTenant(TENANT, ctx -> List.of(PgContainerHelper.explainPlanWith(ctx,
+            ManifestLabelStage.holderProbeQuery(ctx, TENANT, COL, probePairs()),
+            new PgContainerHelper.ExplainOptions(true, false, false, false)).split("\n")));
+
+        assertThat(String.join("\n", plan)).as("plan").contains("Semi");
+        assertThat(topRows(plan)).as("the three boilerplate chunks, not the lone one").isEqualTo(BOILERPLATE);
     }
 }
