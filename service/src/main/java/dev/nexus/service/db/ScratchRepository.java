@@ -210,6 +210,11 @@ public final class ScratchRepository {
     /**
      * Flag an entry for SessionEnd T2 flush.
      * Returns false when not found or not owned by this session.
+     *
+     * <p>Stamps {@code ts} with now: a flag is session activity. The flush orders a row's {@code ts} against a
+     * T2 edit made after the put, so a flag that left {@code ts} at the put time would lose to an edit that
+     * came before the flag; and the idle sweep counts {@code ts}, so a session whose last act was a flag is
+     * not idle.
      */
     public boolean flag(
             String tenant, String sessionId, String id,
@@ -219,6 +224,7 @@ public final class ScratchRepository {
                 .set(SCRATCH.FLAGGED, true)
                 .set(SCRATCH.FLUSH_PROJECT, flushProject)
                 .set(SCRATCH.FLUSH_TITLE, flushTitle)
+                .set(SCRATCH.TS, OffsetDateTime.now(ZoneOffset.UTC))
                 .where(SCRATCH.ID.eq(id).and(SCRATCH.SESSION_ID.eq(sessionId)))
                 .execute();
             return updated > 0;
@@ -308,7 +314,8 @@ public final class ScratchRepository {
      * nothing is old, one probe per session rather than per row when something is. The lateral keeps the
      * planner from turning the aggregate into a per-row probe or a whole-table pass, which is what made
      * the plan depend on statistics. The outer {@code ts < cutoff} is redundant for the rows of an idle
-     * session and is what lets the DELETE read only old rows. No new index.
+     * session (ts is NOT NULL, so every row of an idle session is older than the cutoff) and is what lets the
+     * DELETE read only old rows. No new index.
      *
      * <p>Known costs of this form, all at 100k rows (they scale with the tenant, and each statement is
      * bounded by a pass over it). When half the table is idle (a catch-up after an outage) it measured

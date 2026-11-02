@@ -19,6 +19,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static dev.nexus.service.db.TenantScope.T1_TENANT_GUC;
@@ -40,8 +41,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * which reads every row of the tenant even when nothing is idle. The form now in use takes the distinct
  * sessions of the old rows from idx_scratch_ts and aggregates each once. The test pins that shape, with and
  * without statistics (the first seconds of a new table, before autovacuum analyzes it): a probe keyed on the
- * candidate session ({@code session_id = c.sid}), no anti-join and no SubPlan, and on the unanalyzed table the
- * candidates found through idx_scratch_ts. A revert to either earlier form fails on the positive half even once the table is analyzed.
+ * candidate session (the qual of the lateral's own scan of the session carries {@code tenant_id = c.t} and
+ * {@code session_id = c.sid}), no anti-join and no SubPlan, and on the unanalyzed table the candidates found
+ * through idx_scratch_ts. A revert to either earlier form, or a hybrid that keeps the candidates and replaces
+ * the lateral with a whole-table GROUP BY, fails on the positive half even once the table is analyzed.
  *
  * <p>The plan is the planner's estimate ({@code ctx.explain}, typed); its actual timings and buffers were
  * read with EXPLAIN (ANALYZE, BUFFERS) and are in the {@code idleSessionRows} javadoc and the nexus-mtheb.6
@@ -159,6 +162,26 @@ class ScratchSweepVolumeTest {
         return su.fetchCount(SCRATCH, SCRATCH.TENANT_ID.eq(tenant));
     }
 
+    /**
+     * The first shape's precondition: nobody has analyzed t1.scratch, by hand or by autovacuum (both stamp
+     * pg_stat_user_tables), so the planner is working without statistics. Fails naming the cause, not with a
+     * plan mismatch that looks like a code regression.
+     */
+    private static void assertNeverAnalyzed(DSLContext su) {
+        var stats = su.select(DSL.field(DSL.name("last_analyze"), OffsetDateTime.class),
+                              DSL.field(DSL.name("last_autoanalyze"), OffsetDateTime.class))
+            .from(DSL.table(DSL.name("pg_stat_user_tables")))
+            .where(DSL.field(DSL.name("schemaname"), String.class).eq("t1"))
+            .and(DSL.field(DSL.name("relname"), String.class).eq("scratch"))
+            .fetchOne();
+        assertThat(stats).as("t1.scratch is in pg_stat_user_tables").isNotNull();
+        assertThat(stats.value1()).as("precondition: t1.scratch was analyzed by hand; the no-statistics plan "
+            + "assertions below do not apply").isNull();
+        assertThat(stats.value2()).as("precondition: autovacuum analyzed t1.scratch between the seed and the "
+            + "explain; the no-statistics plan assertions below do not apply (this is the cluster's timing, "
+            + "not the sweep's code)").isNull();
+    }
+
     /** The planner's plan for the sweep's DELETE as the service role sees it (RLS on, tenant GUC stamped). */
     private String explainSweepUnderRls(OffsetDateTime cutoff) {
         return tenantScope.withTenant(TENANT, T1_TENANT_GUC, dsl ->
@@ -171,16 +194,33 @@ class ScratchSweepVolumeTest {
     }
 
     /**
+     * The scan of the lateral aggregate: the node over {@code scratch s} (the lateral's alias) and the qual line
+     * under it (Index Cond, Recheck Cond or Filter). A join's own Join Filter, Hash Cond or Merge Cond also name
+     * {@code c.sid}, so they cannot be what the pin reads.
+     */
+    private static final java.util.regex.Pattern LATERAL_SCAN =
+        java.util.regex.Pattern.compile("on scratch s\\b[^\\n]*\\n([^\\n]*)");
+
+    /**
      * The shape idleSessionRows promises, in whatever regime the planner is in: the candidate sessions are
-     * found from the old rows, each is aggregated by one probe keyed on that session ({@code session_id = c.sid},
-     * the lateral parameter), and nothing probes per old row. The positive half is what a revert to the
-     * whole-table GROUP BY form or to the per-row NOT EXISTS fails even once the table has been analyzed
-     * (the planner then picks a Hash Semi Join or Hash Anti Join, which carry no such parameter).
+     * found from the old rows, each is aggregated by one probe keyed on that session, and nothing probes per old
+     * row. The positive half reads the qual of the lateral's own scan of {@code scratch s}: it must carry both
+     * lateral parameters ({@code tenant_id = c.t} and {@code session_id = c.sid}). A whole-table GROUP BY joined
+     * to the candidates (the hybrid that keeps the candidate subquery and drops the lateral) scans {@code s}
+     * with no parameter, and the planner's Hash Semi Join, Hash Anti Join or Merge Join carries
+     * {@code c.sid} only in its join condition, so both fail here even once the table has been analyzed.
      */
     private void assertCandidateDrivenPlan(String what, String plan) {
-        assertThat(plan).as("%s: one probe per candidate session, keyed on it:%n%s", what, plan)
-            .contains("session_id = c.sid")
-            .contains("tenant_id = c.t");
+        var scans = LATERAL_SCAN.matcher(plan);
+        boolean keyed = false;
+        int seen = 0;
+        while (scans.find()) {
+            seen++;
+            String qual = scans.group(1);
+            keyed |= qual.contains("session_id = c.sid") && qual.contains("tenant_id = c.t");
+        }
+        assertThat(keyed).as("%s: the lateral's scan of scratch s (%d seen) is keyed on the candidate, "
+            + "tenant_id = c.t and session_id = c.sid:%n%s", what, seen, plan).isTrue();
         assertThat(plan).as("%s: no per-row probe of the session:%n%s", what, plan)
             .doesNotContain("Nested Loop Anti Join")
             .doesNotContain("SubPlan");
@@ -205,10 +245,23 @@ class ScratchSweepVolumeTest {
             // First, on a table that is seconds old: no statistics, as on one autovacuum has not reached yet.
             // The per-row NOT EXISTS planned here as a Nested Loop Anti Join (measured: 270k buffers for
             // 10k rows against 405 with statistics).
-            seed(su, SMALL_SESSIONS);
-            assertThat(countRows(su, TENANT)).isEqualTo(SMALL_SESSIONS.total());
-            OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
-            String noStats = explainSweepUnderRls(cutoff);
+            // Autovacuum is off for the table from before the seed to after the explains, so the table stays
+            // unanalyzed whatever the cluster's timing or version; the precondition is asserted, not assumed.
+            PgContainerHelper.setTableStorageParams(conn, SCRATCH, Map.of("autovacuum_enabled", "false"));
+            String noStats;
+            String noStatsSu;
+            OffsetDateTime cutoff;
+            try {
+                seed(su, SMALL_SESSIONS);
+                assertThat(countRows(su, TENANT)).isEqualTo(SMALL_SESSIONS.total());
+                cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusHours(1);
+                assertNeverAnalyzed(su);
+                noStats = explainSweepUnderRls(cutoff);
+                noStatsSu = explainSweepAsSuperuser(su, cutoff);
+                assertNeverAnalyzed(su);
+            } finally {
+                PgContainerHelper.resetTableStorageParams(conn, SCRATCH, "autovacuum_enabled");
+            }
             report.append("PLAN ").append(SMALL_SESSIONS.name()).append(" (no statistics, RLS)\n").append(noStats).append("\n");
             assertCandidateDrivenPlan(SMALL_SESSIONS.name() + ", no statistics", noStats);
             // Only here, where the planner has no statistics to change its mind with: the candidates are found
@@ -219,7 +272,6 @@ class ScratchSweepVolumeTest {
             assertThat(java.util.regex.Pattern.compile("(?:on|using) idx_scratch_ts").matcher(noStats).results().count())
                 .as("the delete and the candidate subquery both read the old rows through the ts index:%n%s", noStats)
                 .isGreaterThanOrEqualTo(2);
-            String noStatsSu = explainSweepAsSuperuser(su, cutoff);
             report.append("PLAN ").append(SMALL_SESSIONS.name()).append(" (no statistics, superuser)\n").append(noStatsSu).append("\n");
             assertCandidateDrivenPlan(SMALL_SESSIONS.name() + ", no statistics, superuser", noStatsSu);
             sweepAndAssert(su, SMALL_SESSIONS, cutoff, SMALL_SESSIONS.name() + ", no statistics");

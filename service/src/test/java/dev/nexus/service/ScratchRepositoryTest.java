@@ -237,6 +237,51 @@ class ScratchRepositoryTest {
         assertThat(ok).as("flag on absent entry must return false").isFalse();
     }
 
+    // ── flag stamps ts: a flag is session activity (nexus-mtheb.6 fix r2) ────
+
+    private void backdate(String tenant, int hours) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var scratch = dev.nexus.service.jooq.t1.Tables.SCRATCH;
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES).update(scratch)
+                .set(scratch.TS, OffsetDateTime.now(ZoneOffset.UTC).minusHours(hours))
+                .where(scratch.TENANT_ID.eq(tenant))
+                .execute();
+        }
+    }
+
+    @Test
+    void flag_stampsTsSoALaterFlagOutranksAnEarlierEditInTimeOrder() throws Exception {
+        // The flush rule orders a flagged row's ts against a T2 edit made after the put. A row put at t0, a T2
+        // edit at t1, then a flag at t2 must carry a ts after t1, or the edit wins though the flag was later.
+        String t = "flag-ts-tenant-" + System.nanoTime();
+        String id = uuid();
+        repo.put(t, SESSION_A, id, "put then flagged later", null, null, false, null, null);
+        backdate(t, 3);
+        OffsetDateTime afterEdit = OffsetDateTime.now(ZoneOffset.UTC);
+        Thread.sleep(20);
+
+        assertThat(repo.flag(t, SESSION_A, id, "p", "title")).isTrue();
+
+        OffsetDateTime ts = OffsetDateTime.parse((String) repo.listEntries(t, SESSION_A).get(0).get("ts"));
+        assertThat(ts).as("flag stamps ts = now: later than the edit that came between the put and the flag")
+            .isAfter(afterEdit);
+    }
+
+    @Test
+    void flag_countsAsSessionActivityForTheIdleSweep() throws Exception {
+        // A session whose only recent act is a flag is not idle: the sweep must not reap rows the user just flagged.
+        String t = "flag-sweep-tenant-" + System.nanoTime();
+        String id = uuid();
+        repo.put(t, SESSION_A, id, "flagged just now", null, null, false, null, null);
+        backdate(t, 3);
+
+        assertThat(repo.flag(t, SESSION_A, id, "p", "title")).isTrue();
+
+        int swept = repo.sweepTenant(t, OffsetDateTime.now(ZoneOffset.UTC).minusHours(1));
+        assertThat(swept).as("a flag in the last hour keeps the session alive").isZero();
+        assertThat(repo.listEntries(t, SESSION_A)).hasSize(1);
+    }
+
     // ── Test 10: listEntries — all for session, ordered ts desc ─────────────
 
     @Test
