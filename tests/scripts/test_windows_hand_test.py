@@ -10,6 +10,7 @@ import importlib.util
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -424,6 +425,12 @@ def test_the_scripts_own_steps_apply_a_patch_on_a_crlf_working_tree(tmp_path: Pa
                          check=True).stdout.strip()
     clone = tmp_path / "remote"
     subprocess.run(["git", "clone", "-q", "-c", f"core.autocrlf={prior_autocrlf}", str(repo), str(clone)], check=True)
+    # Leave git's racy-timestamp window, as a kept clone on qwent has: a just-made
+    # clone's entries are racy, so checkout -f re-reads them and rewrites the
+    # file to LF, hiding the CRLF failure (it did, until this wait).
+    subprocess.run(["git", "-C", str(clone), "update-index", "-q", "--refresh"], check=True)
+    time.sleep(2.1)
+    subprocess.run(["git", "-C", str(clone), "status", "--porcelain"], capture_output=True, check=True)
     if prior_autocrlf == "true":
         assert b"\r\n" in (clone / "a.py").read_bytes(), "non-vacuity: the working file is CRLF"
     (tmp_path / "p.patch").write_bytes(patch)
