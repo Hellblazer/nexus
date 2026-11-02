@@ -55,8 +55,8 @@ import java.util.logging.Level;
  *
  * <p>Container cleanup: try-with-resources stops the container on every exit path this process controls, and a
  * shutdown hook stops it on SIGINT or SIGTERM (a Maven build cancelled), as a backstop for a build that runs with
- * Ryuk off: some hosts' ~/.testcontainers.properties set testcontainers.ryuk.disabled=true, and a bare Maven run
- * or a caller's TESTCONTAINERS_RYUK_DISABLED=true keeps it off. This repo's own builds (scripts/mvnw-leased.sh,
+ * Ryuk off: some hosts' ~/.testcontainers.properties set testcontainers.ryuk.disabled=true, so a bare Maven run on
+ * such a host runs with Ryuk off, as does any build a caller starts with TESTCONTAINERS_RYUK_DISABLED=true. This repo's own builds (scripts/mvnw-leased.sh,
  * scripts/build-gate-jar.sh, the local-service gate's jar rebuild) turn Ryuk on (nexus-qrldo, nexus-hht72), which
  * reaps the container even after a SIGKILL.
  */

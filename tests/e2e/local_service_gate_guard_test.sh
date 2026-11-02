@@ -240,6 +240,15 @@ seen_optout="$(ryuk_run TESTCONTAINERS_RYUK_DISABLED=true)"
 # Scoped to the subshell: the variable must not leak into the gate's later legs.
 leak="$(env -u TESTCONTAINERS_RYUK_DISABLED REPO_ROOT="$ryuk_repo" BUILD_SUBSHELL="$build_subshell" bash -c 'eval "$BUILD_SUBSHELL" >/dev/null; echo "${TESTCONTAINERS_RYUK_DISABLED-<unset>}"')"
 [[ "$leak" == "<unset>" ]] && ok "Test 4: the export does not leak past the build subshell" || bad "Test 4: variable leaked into the gate's environment: '$leak'"
+# The extraction above only ever picks up the parenthesised subshell, so it cannot
+# see a leak written elsewhere in the gate: read the whole file for any other
+# assignment or export of the variable outside comments (review r1, nexus-hht72).
+other_sets="$(grep -n 'TESTCONTAINERS_RYUK_DISABLED' "$GATE_FILE" | grep -v "^${build_line}:" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+[[ -z "$other_sets" ]] && ok "Test 4: the gate sets the variable nowhere but its jar-rebuild line" || bad "Test 4: the gate sets TESTCONTAINERS_RYUK_DISABLED outside the build subshell: $other_sets"
+# One default for every repo build: the gate's must equal leased_build_run's.
+leased_default="$(grep -oE 'TESTCONTAINERS_RYUK_DISABLED="\$\{TESTCONTAINERS_RYUK_DISABLED:-[a-z]+\}"' "$REPO_ROOT/scripts/lib/leased-build.sh" | sed -E 's/.*:-([a-z]+)\}"/\1/')"
+gate_default="$(sed -n "${build_line}p" "$GATE_FILE" | grep -oE 'TESTCONTAINERS_RYUK_DISABLED="\$\{TESTCONTAINERS_RYUK_DISABLED:-[a-z]+\}"' | sed -E 's/.*:-([a-z]+)\}"/\1/')"
+[[ -n "$leased_default" && "$leased_default" == "$gate_default" ]] && ok "Test 4: the gate's Ryuk default ($gate_default) matches leased_build_run's" || bad "Test 4: Ryuk defaults differ: leased-build.sh '$leased_default', gate '$gate_default'"
 
 echo
 echo "local_service_gate_guard_test.sh: $PASS passed, $FAIL failed"
