@@ -5595,8 +5595,11 @@ public final class CatalogRepository {
      * chash or collection differs), else the incoming value if it has one and the stored one if not.
      */
     private static Field<Integer> spanOnConflict(TableField<?, Integer> column) {
+        // chash and collection are both NOT NULL (baseline; catalog-025), so a plain != would not misread a NULL
+        // here; isDistinctFrom on the collection costs nothing and keeps a NULL from reading as "same chunk"
+        // should the constraint ever be relaxed.
         Condition otherChunk = CATALOG_DOCUMENT_CHUNKS.CHASH.ne(DSL.excluded(CATALOG_DOCUMENT_CHUNKS.CHASH))
-            .or(CATALOG_DOCUMENT_CHUNKS.COLLECTION.ne(DSL.excluded(CATALOG_DOCUMENT_CHUNKS.COLLECTION)));
+            .or(CATALOG_DOCUMENT_CHUNKS.COLLECTION.isDistinctFrom(DSL.excluded(CATALOG_DOCUMENT_CHUNKS.COLLECTION)));
         return DSL.when(otherChunk, DSL.excluded(column))
             .otherwise(DSL.coalesce(DSL.excluded(column), column));
     }

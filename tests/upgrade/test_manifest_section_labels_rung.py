@@ -3,7 +3,8 @@
 the legacy manifest rows it is exact for.
 
 Storage-free: a catalog fake that answers the engine's reads and applies ``append_manifest_many`` as
-the engine's ``UPSERT_APPEND`` does (labels, ``labels_written`` and the chash change; nothing else) stands
+the engine's ``UPSERT_APPEND`` does for the rung's rows (labels, ``labels_written`` and the chash change; the
+span columns stay, because the rung writes the chunk already at the position with no span of its own) stands
 in for the reader and the writer, injected through the rung's factories. The same fill against the real
 engine is a step of ``tests/upgrade/test_rdr192_manifest_backfill_substrate.py``.
 """
@@ -275,7 +276,7 @@ def test_a_single_row_chash_takes_the_chunk_rows_label_and_is_marked_written(wor
     assert collection == COLL
     assert docs == [("1.1.1", [{
         "chash": h(1), "position": 0, "section_title": "Refs", "section_type": "references",
-        "page_number": 9, "labels_written": True}])], "chash, position, the three labels and the flag; nothing else"
+        "page_number": 9, "labels_written": True}])], "chash, position, the three labels and the flag; no span keys, so the engine keeps the stored span"
     assert rung.verify() is True
     assert "1 filled this run" in rung.record_detail()
 

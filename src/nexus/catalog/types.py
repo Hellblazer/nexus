@@ -335,8 +335,15 @@ def manifest_span(
     is never empty: 0 is never an end, so it is "not recorded". ``chunk_start_char`` is 0 for a chunk
     at the head of its text, and then it is real exactly when the chunk's end is recorded; a 0 start
     beside an unrecorded end is the factory default. ``None`` is "not recorded" everywhere. An
-    unrecorded field goes to the engine as null, never as a 0 that would read as a span.
+    unrecorded field goes to the engine as null, never as a 0 that would read as a span. A value that
+    is not an ``int`` (a string span on a backfilled T3 row, a float) or is a ``bool`` is not a number
+    the engine can store: it reads as not recorded, and never raises.
     """
+    def _num(v: object) -> int | None:
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    line_start, line_end, char_start, char_end = (
+        _num(line_start), _num(line_end), _num(char_start), _num(char_end))
     end = char_end if char_end is not None and char_end > 0 else None
     start = char_start if char_start is not None and (char_start > 0 or end is not None) else None
     return {

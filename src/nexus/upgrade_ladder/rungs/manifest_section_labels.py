@@ -47,8 +47,11 @@ not applicable and converge DEFERS, because filling without the read is the gap 
 (its manifest rows are gone with it, so no read can name it).
 
 SIDE EFFECT OF THE ONLY WRITE ROUTE, AND ITS REPAIR. The fill goes through ``append_manifest_many``, which
-upserts by position and, on a conflict, rewrites only ``chash``, ``collection``, the three labels and
-``labels_written`` (``CatalogRepository.insertManifestChunkRows``, ``UPSERT_APPEND``). The engine also
+upserts by position and, on a conflict, rewrites ``chash``, ``collection``, the three labels and
+``labels_written``, and the four span columns when the chash or collection at the position changes
+(``CatalogRepository.insertManifestChunkRows``, ``UPSERT_APPEND``, nexus-mzpsh). The rung sends the chash
+and collection it read, and no span key, so the row is the same chunk written again and its span is kept
+(an incoming NULL keeps the stored value). The engine also
 stamps the document's ``indexed_at`` on every manifest write. Left alone, that would switch off the
 chunk-newer guard above for the document's OTHER rows (the guard compares against the document's stamp),
 so the next pass would copy a departed co-owner's label, and ``meta_backfill``'s own guard would look at

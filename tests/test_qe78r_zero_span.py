@@ -138,3 +138,22 @@ def test_manifest_span_rule(given, expected) -> None:
     from nexus.catalog.types import manifest_span
 
     assert tuple(manifest_span(*given)[k] for k in _SPAN) == expected
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        (("12", "13", "5", "9"), (None, None, None, None)),
+        (("abc", None, "0", 7), (None, None, None, 7)),
+        ((True, True, True, True), (None, None, None, None)),
+        ((False, False, False, 5), (None, None, None, 5)),
+        ((3, 4, True, 9), (3, 4, None, 9)),
+        ((1.5, 2.0, 3.5, 4.5), (None, None, None, None)),
+    ],
+)
+def test_manifest_span_reads_a_non_int_or_a_bool_as_not_recorded(given, expected) -> None:
+    """A T3 row backfilled from elsewhere can carry a string span (``"12"``) or a bool; neither is a
+    number the engine could store, and neither may raise out of the comparison."""
+    from nexus.catalog.types import manifest_span
+
+    assert tuple(manifest_span(*given)[k] for k in _SPAN) == expected

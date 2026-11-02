@@ -50,6 +50,7 @@ class DepartedWriterSpansBatchTest {
     private static final String SVC_PASS = "svc_span_batch_pass";
     private static final String TENANT = "span-batch";
     private static final String COLL = "knowledge__span-batch-c__minilm-l6-v2-384__v1";
+    private static final String COLL2 = "knowledge__span-batch-d__minilm-l6-v2-384__v1";
     private static final List<String> SPAN_KEYS = List.of("line_start", "line_end", "chunk_start_char", "chunk_end_char");
 
     PostgreSQLContainer<?> pg;
@@ -79,6 +80,7 @@ class DepartedWriterSpansBatchTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL2);
         }
     }
 
@@ -107,6 +109,10 @@ class DepartedWriterSpansBatchTest {
 
     /** {@code n} chunk rows in {@link #COLL}, each carrying the span 500, 510, 5000, 5100; returns their hex chashes. */
     private List<String> chunks(String tag, int n) {
+        return chunks(COLL, tag, n);
+    }
+
+    private List<String> chunks(String coll, String tag, int n) {
         List<String> hex = new ArrayList<>();
         List<String> texts = new ArrayList<>();
         List<float[]> vecs = new ArrayList<>();
@@ -120,7 +126,7 @@ class DepartedWriterSpansBatchTest {
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL, hex, texts, vecs, metas);
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll, hex, texts, vecs, metas);
         } catch (java.sql.SQLException e) {
             throw new AssertionError(e);
         }
@@ -129,9 +135,13 @@ class DepartedWriterSpansBatchTest {
 
     /** A live document holding every chunk with NO span (the holder the clear works for). */
     private void liveHolder(List<String> hex) {
+        liveHolder(COLL, hex);
+    }
+
+    private void liveHolder(String coll, List<String> hex) {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.ownChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL, hex.toArray(String[]::new));
+            PgContainerHelper.ownChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll, hex.toArray(String[]::new));
         } catch (java.sql.SQLException e) {
             throw new AssertionError(e);
         }
@@ -143,10 +153,14 @@ class DepartedWriterSpansBatchTest {
 
     /** The span keys each chunk row holds, by hex chash. */
     private Map<String, List<String>> rowSpanKeys(List<String> hex) {
+        return rowSpanKeys(COLL, hex);
+    }
+
+    private Map<String, List<String>> rowSpanKeys(String coll, List<String> hex) {
         Map<String, List<String>> out = new java.util.LinkedHashMap<>();
         for (String h : hex) {
             var meta = tenantScope.withTenant(TENANT, ctx -> ctx.select(CHUNKS.METADATA).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(COLL)).and(CHUNKS.CHASH.eq(bytes(h))))
+                .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(coll)).and(CHUNKS.CHASH.eq(bytes(h))))
                 .fetchOne(CHUNKS.METADATA));
             List<String> keys = new ArrayList<>();
             for (String k : SPAN_KEYS) {
@@ -233,6 +247,10 @@ class DepartedWriterSpansBatchTest {
 
     /** An aged tombstone P holding every chunk with the row's own span in its manifest. */
     private void agedWriter(String doc, List<String> hex) {
+        agedWriter(COLL, doc, hex);
+    }
+
+    private void agedWriter(String coll, String doc, List<String> hex) {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext d = DSL.using(su, SQLDialect.POSTGRES);
@@ -240,17 +258,17 @@ class DepartedWriterSpansBatchTest {
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
                 .set(CATALOG_DOCUMENTS.TUMBLER, doc)
                 .set(CATALOG_DOCUMENTS.TITLE, doc)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, coll)
                 .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(60))
                 .execute();
-            String model = PgContainerHelper.collectionModel(d, TENANT, COLL);
+            String model = PgContainerHelper.collectionModel(d, TENANT, coll);
             var insert = d.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                 CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                 CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END,
                 CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END);
             for (int i = 0; i < hex.size(); i++) {
-                insert = insert.values(TENANT, doc, i, bytes(hex.get(i)), COLL, model, 500, 510, 5000, 5100);
+                insert = insert.values(TENANT, doc, i, bytes(hex.get(i)), coll, model, 500, 510, 5000, 5100);
             }
             insert.execute();
         } catch (java.sql.SQLException e) {
@@ -282,8 +300,13 @@ class DepartedWriterSpansBatchTest {
             .allSatisfy(k -> assertThat(k).isEqualTo(SPAN_KEYS));
     }
 
+    /**
+     * Pins that the purge, run through {@code purgeTrash}, still clears every row when its chashes span more
+     * than one batch. It does not prove the split: it stays green with the splitting disabled, because one
+     * oversized statement clears the same rows. The statement-count tests above pin the split.
+     */
     @Test
-    void purgeTrash_overMoreThanBatchChashes_clearsEveryRowBeforeThePurge() {
+    void purgeTrash_overMoreThanBatchChashes_stillClearsEveryRow_correctnessAcrossBatchesNotTheSplit() {
         String tag = "q" + seq.incrementAndGet();
         int n = DepartedWriterSpans.BATCH + 20;
         List<String> hex = chunks(tag, n);
@@ -294,6 +317,39 @@ class DepartedWriterSpansBatchTest {
 
         assertThat(((Number) purged.get("documents_purged")).intValue()).isGreaterThanOrEqualTo(1);
         assertThat(rowSpanKeys(hex).values()).allSatisfy(k -> assertThat(k).isEmpty());
+    }
+
+    /**
+     * The candidates are read ordered by (collection, chash) and a statement is built per collection: a batch
+     * flushes when the collection changes, not only when it reaches BATCH. Two collections of a few chashes
+     * each, far under BATCH, so only the collection change can separate them; without the flush the second
+     * collection's chashes ride a batch named for the first and are never matched.
+     */
+    @Test
+    void trashPurgeClear_overTwoCollections_runsOneStatementPerCollection_andClearsBoth() {
+        // the statement count is exact, so no other scenario's aged tombstone may be a candidate: purge them first
+        // (and ours at the end), because the classes' scenarios share one database
+        catalog.purgeTrash(TENANT, 30);
+        String tag = "c" + seq.incrementAndGet();
+        List<String> inFirst = chunks(COLL, tag + "-1", 3);
+        List<String> inSecond = chunks(COLL2, tag + "-2", 3);
+        agedWriter(COLL, "aged-" + tag + "-1", inFirst);
+        agedWriter(COLL2, "aged-" + tag + "-2", inSecond);
+        liveHolder(COLL, inFirst);
+        liveHolder(COLL2, inSecond);
+        var statements = new Statements();
+        var threshold = DSL.currentOffsetDateTime().sub(new YearToSecond(new YearToMonth(0, 0), new DayToSecond(30)));
+
+        int cleared = tenantScope.withTenant(TENANT, ctx ->
+            DepartedWriterSpans.clearBeforeTrashPurge(
+                ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(), TENANT, threshold));
+
+        assertThat(cleared).as("chunk rows updated in both collections").isEqualTo(6);
+        assertThat(statements.updatesOfChunks()).as("one UPDATE per collection").isEqualTo(2);
+        assertThat(rowSpanKeys(COLL, inFirst).values()).as("first collection").allSatisfy(k -> assertThat(k).isEmpty());
+        assertThat(rowSpanKeys(COLL2, inSecond).values()).as("second collection")
+            .allSatisfy(k -> assertThat(k).isEmpty());
+        catalog.purgeTrash(TENANT, 30);
     }
 
     private static List<String> concat(List<String> a, List<String> b) {

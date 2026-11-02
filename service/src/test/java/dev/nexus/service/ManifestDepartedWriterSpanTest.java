@@ -966,6 +966,22 @@ class ManifestDepartedWriterSpanTest {
         assertThat(manifestSpan(s.docP, 1)).as("lines restated, characters filled in").containsExactly(9, 10, 11, 12);
     }
 
+    @Test
+    void appendOfTheSameChunk_mergesPerColumn_theIncomingCharsOverTheStoredAndTheStoredLinesKept() {
+        var s = new Scn(Via.WRITE_MANIFEST, "n");
+        s.doc(s.docP, COLL_N);
+        s.chunk(COLL_N, "z");
+        s.write(s.docP, COLL_N, s.row(0, "z", new int[]{1, 2, 3, 4}));
+        Map<String, Object> charsOnly = s.row(0, "z", new int[]{0, 0, 7, 8});
+        charsOnly.remove("line_start");
+        charsOnly.remove("line_end");
+
+        catalog.appendManifestChunks(TENANT, s.docP, COLL_N, List.of(charsOnly));
+
+        assertThat(manifestSpan(s.docP, 0)).as("each column keeps its stored value against its own incoming NULL")
+            .containsExactly(1, 2, 7, 8);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────
 
     private void age(String doc, int days) throws Exception {
