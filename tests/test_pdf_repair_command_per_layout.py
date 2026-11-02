@@ -68,9 +68,11 @@ def test_the_doctor_pdf_row_with_both_opencv_builds_names_the_working_repair(leg
     _both_opencv_builds(monkeypatch)
     row = health._pdf_support_row_with_opencv("5 distributions on their pins")
     assert not row.ok, "both builds installed is the state this row exists to flag"
-    (fix,) = row.fix_suggestions
-    assert fix.endswith(f": {LEGACY_COMMAND}"), fix
-    assert "--extras" not in fix
+    # Shakedown 7.94.0 class F: two repairs, the override-reading reinstall first and the in-place one second.
+    reinstall, in_place = row.fix_suggestions
+    assert reinstall.endswith(f": {LEGACY_COMMAND}"), reinstall
+    assert in_place.startswith("Or "), in_place
+    assert "--extras" not in reinstall and "--extras" not in in_place
 
 
 @pytest.fixture()
