@@ -157,8 +157,10 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
     lines = [
         f"trap {{ Write-Host \"win_hand_test: setup error: $_\"; exit {fail} }}",
         "$ErrorActionPreference = 'Stop'",
-        f"if (-not (Test-Path {_ps_quote(repo)})) {{ git clone -q --filter=blob:none {CLONE_URL} {_ps_quote(repo)} }}",
-        must("clone"),
+        # $LASTEXITCODE is $null until a native command runs, so the clone's
+        # check sits inside the branch that clones (a kept clone runs no git here).
+        f"if (-not (Test-Path {_ps_quote(repo)})) {{ git clone -q --filter=blob:none {CLONE_URL} {_ps_quote(repo)}; "
+        + must("clone") + " }",
         f"Set-Location {_ps_quote(repo)}",
         "git fetch -q origin",
         must("git fetch origin"),

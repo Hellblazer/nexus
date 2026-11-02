@@ -239,3 +239,14 @@ def test_a_session_name_that_could_escape_the_path_is_refused(session: str) -> N
 def test_no_tests_named_is_refused() -> None:
     with pytest.raises(SystemExit, match="give pytest arguments"):
         wht.main(["--session", "wren"], run=_Recorder(on_origin=True))
+
+
+def test_a_kept_clone_is_not_judged_by_an_unset_exit_code() -> None:
+    """$LASTEXITCODE is $null in a fresh pwsh, and $null -ne 0 is true: a
+    clone check outside the branch that clones failed every run on a kept
+    clone (first live run of the r1 fix, 2026-11-01)."""
+    script = wht.remote_script("wren", "abc", ["t.py"], bundle=None, fixup="", floor=None)
+    [clone_line] = [ln for ln in script.splitlines() if "git clone" in ln]
+    assert clone_line.startswith("if (-not (Test-Path")
+    assert "win_hand_test: clone failed" in clone_line, "the clone's check is inside the clone branch"
+    assert script.count("clone failed") == 1
