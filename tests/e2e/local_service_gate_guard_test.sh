@@ -206,6 +206,41 @@ final3="$(cat "$repo/$props_rel")"
 [[ "$final3" == "$baseline3" ]] && ok "final tree equals the true baseline after both P and Q finish" || bad "final tree does not equal the true baseline: $final3"
 [[ ! -d "$lease_dir_common" ]] && ok "lease released after both P and Q finish" || bad "lease still held: $lease_dir_common"
 
+# ---------------------------------------------------------------------------
+# Test 4 (nexus-hht72): the gate's own jar rebuild runs with Testcontainers'
+# Ryuk reaper ON. The fenced HOME links ~/.testcontainers.properties, which sets
+# testcontainers.ryuk.disabled=true on the dev boxes; only the environment
+# variable beats it. Extract the REAL build subshell from the gate, run it
+# against a stub service/mvnw that prints the variable it receives, and check
+# the value (unset -> false, a caller's true passes through).
+# ---------------------------------------------------------------------------
+echo "Test 4 (nexus-hht72): the gate's jar rebuild passes TESTCONTAINERS_RYUK_DISABLED to mvnw"
+build_line="$(grep -n -- '^  if ! (cd "\$REPO_ROOT/service" && .*[.]/mvnw -q package -DskipTests); then$' "$GATE_FILE" | cut -d: -f1)"
+[[ -n "$build_line" && "$build_line" != *$'\n'* ]] || fail_loud_and_exit "Test 4: the gate's jar-rebuild line matched $(printf '%s' "$build_line" | grep -c .) lines, expected exactly 1 -- the line moved or was renamed; this test needs updating, not a silent pass"
+build_subshell="$(sed -n "${build_line}p" "$GATE_FILE" | sed -E 's/^  if ! (\(.*\)); then$/\1/')"
+[[ "$build_subshell" == "(cd "*"/mvnw -q package -DskipTests)" ]] || fail_loud_and_exit "Test 4: subshell extraction landed on the wrong text: $build_subshell"
+ok "Test 4: jar-rebuild subshell extraction non-vacuous"
+
+ryuk_repo="$WORKDIR/ryuk-repo"
+mkdir -p "$ryuk_repo/service"
+cat > "$ryuk_repo/service/mvnw" <<'STUB'
+#!/usr/bin/env bash
+echo "RYUK_DISABLED=${TESTCONTAINERS_RYUK_DISABLED-<unset>}"
+STUB
+chmod +x "$ryuk_repo/service/mvnw"
+
+ryuk_run() {  # ryuk_run [VAR=value ...] -- prints what the stub mvnw saw
+  env -u TESTCONTAINERS_RYUK_DISABLED "$@" REPO_ROOT="$ryuk_repo" BUILD_SUBSHELL="$build_subshell" \
+    bash -c 'eval "$BUILD_SUBSHELL"'
+}
+seen_default="$(ryuk_run)"
+[[ "$seen_default" == "RYUK_DISABLED=false" ]] && ok "Test 4: unset variable -> mvnw sees Ryuk on (false)" || bad "Test 4: gate build did not turn Ryuk on: '$seen_default'"
+seen_optout="$(ryuk_run TESTCONTAINERS_RYUK_DISABLED=true)"
+[[ "$seen_optout" == "RYUK_DISABLED=true" ]] && ok "Test 4: a caller's TESTCONTAINERS_RYUK_DISABLED=true passes through" || bad "Test 4: caller opt-out was overridden: '$seen_optout'"
+# Scoped to the subshell: the variable must not leak into the gate's later legs.
+leak="$(env -u TESTCONTAINERS_RYUK_DISABLED REPO_ROOT="$ryuk_repo" BUILD_SUBSHELL="$build_subshell" bash -c 'eval "$BUILD_SUBSHELL" >/dev/null; echo "${TESTCONTAINERS_RYUK_DISABLED-<unset>}"')"
+[[ "$leak" == "<unset>" ]] && ok "Test 4: the export does not leak past the build subshell" || bad "Test 4: variable leaked into the gate's environment: '$leak'"
+
 echo
 echo "local_service_gate_guard_test.sh: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
