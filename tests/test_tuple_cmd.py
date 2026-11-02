@@ -907,15 +907,14 @@ class TestTupleDictionary:
                        if t["name"] == "board/ci/<topic>")["doc"]
         finally:
             store.close()
+        # each doc part renders as its own line prefix (a bare substring would be
+        # satisfied by the census row or the summary prose: the word "example"
+        # is in both)
+        lines = res.output.splitlines()
         for part in ("summary", "writers", "readers", "fields", "body", "example", "see_also"):
-            assert part in res.output, (part, res.output)
+            assert any(line.startswith(f"{part}:") for line in lines), (part, res.output)
         assert doc["summary"] in res.output
         assert sub in res.output
-        # board/<topic> is a different template: its rows are not listed here
-        other = _uniq("plain")
-        _invoke(["out", f"board/{other}", "--key", f"topic={other}", "--dim", "from=s",
-                 "--nonce", _uniq("n")])
-        assert f"board/{other}" not in _invoke(["dictionary", "board/ci/<topic>"]).output
 
     def test_a_concrete_subspace_resolves_to_its_template(self, t2_service_env) -> None:
         topic = _uniq("example-branch")
@@ -927,7 +926,8 @@ class TestTupleDictionary:
         assert sub in [c["subspace"] for c in payload["census"]]
         # a name no template matches is an error, not an empty answer
         bad = _invoke(["dictionary", "no-such-template/x"])
-        assert bad.exit_code == 1 and "no-such-template/x" in bad.output
+        assert bad.exit_code == 1
+        assert "NAME 'no-such-template/x' matches no template; run 'nx tuple dictionary' to list them" in bad.output
 
     def test_a_take_enabled_template_shows_consumed_rows_after_post_claim_ack(self, t2_service_env) -> None:
         name = _uniq("work")
@@ -1017,3 +1017,123 @@ class TestTupleDictionary:
         monkeypatch.setattr(HttpTupleStore, "subspace_list", old_engine)
         payload = _last_json_line(_invoke(["dictionary", "board/ci/<topic>", "--json"]).output)
         assert sub in [c["subspace"] for c in payload["census"]]
+
+    @staticmethod
+    def _post_board(topic: str) -> str:
+        sub = f"board/{topic}"
+        res = _invoke(["out", sub, "--key", f"topic={topic}", "--dim", "from=s",
+                       "--body", "x", "--nonce", _uniq("n")])
+        assert res.exit_code == 0, res.output
+        return sub
+
+    @staticmethod
+    def _old_engine_census(monkeypatch) -> None:
+        """Census rows as an engine without the ``template`` field serves them."""
+        real = HttpTupleStore.subspace_list
+
+        def old_engine(self, *a, **kw):
+            rows = real(self, *a, **kw)
+            return [dataclasses.replace(r, template=None, template_known=False) for r in rows]
+
+        monkeypatch.setattr(HttpTupleStore, "subspace_list", old_engine)
+
+    @staticmethod
+    def _census_subspaces(name: str) -> list[str]:
+        payload = _last_json_line(_invoke(["dictionary", name, "--json"]).output)
+        return [c["subspace"] for c in payload["census"]]
+
+    @pytest.mark.parametrize("old_engine", [False, True], ids=["engine-template-field", "old-engine-resolver"])
+    def test_each_template_lists_only_its_own_subspaces(
+        self, t2_service_env, monkeypatch, old_engine: bool,
+    ) -> None:
+        """nexus-mdbds.2.17 review M2: ``board/<topic>``'s census prefix
+        (``board/``) also returns every ``board/ci/*`` row, so only the
+        per-row template filter keeps them apart. The same holds for an engine
+        whose census rows carry no ``template`` (the shared resolver decides)."""
+        ci = self._post_board_ci(_uniq("example-branch"))
+        plain = self._post_board(_uniq("plain"))
+        if old_engine:
+            self._old_engine_census(monkeypatch)
+        board = self._census_subspaces("board/<topic>")
+        assert plain in board and ci not in board
+        board_ci = self._census_subspaces("board/ci/<topic>")
+        assert ci in board_ci and plain not in board_ci
+
+    def test_a_template_without_a_doc_on_an_engine_that_serves_docs_says_so(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        """nexus-mdbds.2.17 review S-A: 'engine predates the dictionary' is only
+        true when NO template carries a doc. With another template's doc
+        present, the doc-less one says it has no doc block."""
+        real = HttpTupleStore.registry
+
+        def one_docless(self, doc: bool = False):
+            reg = real(self, doc=doc)
+            for t in reg["templates"]:
+                if t["name"] == "board/ci/<topic>":
+                    t.pop("doc", None)
+            return reg
+
+        monkeypatch.setattr(HttpTupleStore, "registry", one_docless)
+        bare = _invoke(["dictionary", "board/ci/<topic>"])
+        assert bare.exit_code == 0, bare.output
+        assert "this template has no doc block" in bare.output
+        assert "engine predates the dictionary" not in bare.output
+        kept = _invoke(["dictionary", "board/<topic>"])
+        assert kept.exit_code == 0, kept.output
+        assert any(line.startswith("summary:") for line in kept.output.splitlines())
+        assert "no doc block" not in kept.output and "predates" not in kept.output
+
+    @pytest.mark.parametrize("old_engine", [False, True], ids=["engine-template-field", "old-engine-resolver"])
+    def test_no_name_json_covers_every_template_with_its_census(
+        self, t2_service_env, monkeypatch, old_engine: bool,
+    ) -> None:
+        """RDR-239 Technical Design item 3: with no NAME the verb covers every
+        template, each as ``{template, doc, census}`` (the NAME form's shape),
+        its census built from one subspace listing grouped by template."""
+        ci = self._post_board_ci(_uniq("example-branch"))
+        plain = self._post_board(_uniq("plain"))
+        if old_engine:
+            self._old_engine_census(monkeypatch)
+        out = _last_json_line(_invoke(["dictionary", "--json"]).output)
+        store = HttpTupleStore()
+        try:
+            registry = store.registry(doc=True)["templates"]
+        finally:
+            store.close()
+        assert [e["template"] for e in out] == [t["name"] for t in registry]
+        by_name = {e["template"]: e for e in out}
+        for e in out:
+            assert set(e) == {"template", "doc", "census"}
+            assert e["doc"]["summary"]
+        assert [c["subspace"] for c in by_name["board/ci/<topic>"]["census"]] == [ci]
+        assert [c["subspace"] for c in by_name["board/<topic>"]["census"]] == [plain]
+        assert by_name["board/ci/<topic>"]["census"][0]["available"] == 1
+        assert by_name["queue/<name>"]["census"] == []
+
+    def test_no_name_text_shows_each_summary_with_its_totals(self, t2_service_env) -> None:
+        self._post_board_ci(_uniq("example-branch"))
+        self._post_board_ci(_uniq("example-branch"))
+        self._post_board(_uniq("plain"))
+        res = _invoke(["dictionary"])
+        assert res.exit_code == 0, res.output
+        lines = res.output.splitlines()
+        i = next(n for n, line in enumerate(lines) if line.startswith("board/ci/<topic>:"))
+        assert lines[i + 1].strip() == "subspaces: 2, available: 2, claimed: 0, consumed: 0, dead: 0"
+        j = next(n for n, line in enumerate(lines) if line.startswith("board/<topic>:"))
+        assert lines[j + 1].strip() == "subspaces: 1, available: 1, claimed: 0, consumed: 0, dead: 0"
+        k = next(n for n, line in enumerate(lines) if line.startswith("queue/<name>:"))
+        assert lines[k + 1].strip() == "subspaces: 0, available: 0, claimed: 0, consumed: 0, dead: 0"
+
+    def test_no_name_on_an_engine_without_docs_lists_names_and_says_so(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        sub = self._post_board_ci(_uniq("example-branch"))
+        self._docless(monkeypatch)
+        res = _invoke(["dictionary"])
+        assert res.exit_code == 0, res.output
+        assert "engine predates the dictionary" in res.output
+        assert "board/ci/<topic>" in res.output
+        out = _last_json_line(_invoke(["dictionary", "--json"]).output)
+        assert all(e["doc"] is None for e in out)
+        assert [c["subspace"] for c in next(e for e in out if e["template"] == "board/ci/<topic>")["census"]] == [sub]

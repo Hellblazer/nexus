@@ -40,8 +40,13 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5033
+provisioned_tests = 5040
 tolerance_tests = 0
+# 5033 -> 5040 (nexus-mdbds.2.17 fix round, 2026-11-02): +7, all in tests/test_tuple_cmd.py's TestTupleDictionary (8 -> 15): the
+# per-template census filter (2, engine field and old-engine resolver), the doc-less template on an engine that serves docs (1),
+# the no-NAME --json shape (2) and text totals (1), and the no-NAME listing on an engine without docs (1). Each posts to and reads
+# the real engine. The new lint (tests/test_tuple_template_doc_paths_lint.py) is marked lint and not in this suite. Measured
+# locally (the guard in fail mode): TestTupleDictionary ran 15 tests and provisioned 15.
 # 5024 -> 5033 (nexus-mdbds.2.17, 2026-11-02): +9. tests/test_tuple_cmd.py's TestTupleDictionary adds 8 (the verb reads the real
 # registry and census, and posts, claims and acks real rows) and tests/test_mcp_tuple_tools.py adds 1 (tuple_registry's doc
 # passthrough against the real engine). tests/test_tuple_templates.py (the resolver and the census parse) is pure and

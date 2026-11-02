@@ -730,46 +730,58 @@ def _resolve_dictionary_name(store: Any, templates: list[dict[str, Any]], name: 
     return resolve_tuple_template(templates, name)
 
 
+_NO_DOC_BLOCK = "this template has no doc block"
+
+#: The totals the no-NAME view shows per template, summed over its subspaces.
+_DICTIONARY_TOTALS = ("available", "claimed", "consumed", "dead")
+
+
+def _dictionary_totals_line(census: list[Any]) -> str:
+    cells = [f"subspaces: {len(census)}"]
+    cells += [f"{col}: {sum(getattr(c, col) for c in census)}" for col in _DICTIONARY_TOTALS]
+    return "  " + ", ".join(cells)
+
+
 @tuple_group.command(name="dictionary")
 @click.argument("name", required=False)
 @click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON.")
 def tuple_dictionary_cmd(name: str | None, json_out: bool) -> None:
     """The tuple-space dictionary (RDR-239): what each template is for.
 
-    With no NAME, every template with its one-line summary. With NAME (a
-    template such as 'board/ci/<topic>', or a concrete subspace such as
-    'board/ci/example-branch', which resolves to its template), the
-    template's doc (summary, writers, readers, fields, body, example,
-    see_also) and a census row per concrete subspace under it (available,
-    claimed, consumed, dead, newest_created_at).
+    With no NAME, every template with its one-line summary and the totals of
+    its live census (subspaces, available, claimed, consumed, dead), from one
+    subspace listing. With NAME (a template such as 'board/ci/<topic>', or a
+    concrete subspace such as 'board/ci/example-branch', which resolves to its
+    template), the template's doc (summary, writers, readers, fields, body,
+    example, see_also) and a census row per concrete subspace under it
+    (available, claimed, consumed, dead, newest_created_at). Quote a template
+    name in the shell: '<' is a redirection.
 
     --json emits {template, doc, census: [...]} for a NAME, with doc null when
-    the engine serves none; with no NAME, a list of {template, doc}. An engine
-    that predates the dictionary prints 'engine predates the dictionary' in
-    place of the doc and exits 0.
+    the engine serves none; with no NAME, a list of those objects, one per
+    template. An engine that serves no doc for any template prints 'engine
+    predates the dictionary'; one that serves docs but none for the named
+    template prints 'this template has no doc block'. Both exit 0.
     """
     store = _store()
     try:
         templates: list[dict[str, Any]] = store.registry(doc=True).get("templates", [])
         if name is None:
-            if json_out:
-                click.echo(json.dumps([{"template": t.get("name"), "doc": t.get("doc")} for t in templates]))
-                return
-            for t in templates:
-                summary = (t.get("doc") or {}).get("summary")
-                click.echo(f"{t.get('name')}: {summary}" if summary else str(t.get("name")))
-            if not any(t.get("doc") for t in templates):
-                click.echo(_NO_DICTIONARY)
-            return
-        template = _resolve_dictionary_name(store, templates, name)
-        if template is None:
-            click.echo(f"Error: no template matches {name!r}; run 'nx tuple dictionary' to list them", err=True)
-            raise SystemExit(1)
-        template_name = str(template.get("name"))
-        census = [
-            row for row in store.subspace_list(_template_census_prefix(template_name))
-            if _census_template_name(row, templates) == template_name
-        ]
+            grouped: dict[str | None, list[Any]] = {}
+            for row in store.subspace_list(None):
+                grouped.setdefault(_census_template_name(row, templates), []).append(row)
+        else:
+            template = _resolve_dictionary_name(store, templates, name)
+            if template is None:
+                click.echo(
+                    f"Error: NAME {name!r} matches no template; run 'nx tuple dictionary' to list them", err=True,
+                )
+                raise SystemExit(1)
+            template_name = str(template.get("name"))
+            census = [
+                row for row in store.subspace_list(_template_census_prefix(template_name))
+                if _census_template_name(row, templates) == template_name
+            ]
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
@@ -777,6 +789,24 @@ def tuple_dictionary_cmd(name: str | None, json_out: bool) -> None:
         raise SystemExit(1) from e
     finally:
         store.close()
+    any_doc = any(t.get("doc") for t in templates)
+    if name is None:
+        if json_out:
+            click.echo(json.dumps([
+                {
+                    "template": t.get("name"), "doc": t.get("doc"),
+                    "census": [_dictionary_census_dict(c) for c in grouped.get(t.get("name"), [])],
+                }
+                for t in templates
+            ]))
+            return
+        for t in templates:
+            summary = (t.get("doc") or {}).get("summary")
+            click.echo(f"{t.get('name')}: {summary}" if summary else str(t.get("name")))
+            click.echo(_dictionary_totals_line(grouped.get(t.get("name"), [])))
+        if not any_doc:
+            click.echo(_NO_DICTIONARY)
+        return
     doc = template.get("doc")
     if json_out:
         click.echo(json.dumps({
@@ -789,7 +819,7 @@ def tuple_dictionary_cmd(name: str | None, json_out: bool) -> None:
     if doc:
         _emit_doc(doc)
     else:
-        click.echo(_NO_DICTIONARY)
+        click.echo(_NO_DOC_BLOCK if any_doc else _NO_DICTIONARY)
     click.echo("")
     if not census:
         click.echo("census: no concrete subspaces")
