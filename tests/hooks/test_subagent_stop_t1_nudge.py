@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -199,6 +200,24 @@ def test_an_agent_with_the_t1_tool_is_still_nudged(tmp_path: Path, agent_type: s
 def test_a_bash_nx_scratch_put_behind_env_or_a_chain_counts(tmp_path: Path, command: str) -> None:
     path = _write(tmp_path, [_assistant(_use("b1", "Bash", command=command)), _user_result("b1", "Stored")])
     assert nudge.run(_payload(path)).stdout is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["X= nx scratch put findings", "X='a b' nx scratch put findings", 'X="a"b Y= nx scratch put findings'],
+)
+def test_an_assignment_value_of_any_form_still_counts(tmp_path: Path, command: str) -> None:
+    path = _write(tmp_path, [_assistant(_use("b1", "Bash", command=command)), _user_result("b1", "Stored")])
+    assert nudge.run(_payload(path)).stdout is None
+
+
+def test_the_put_pattern_does_not_backtrack_on_repeated_quoted_assignments() -> None:
+    # CodeQL py/redos input shape: "\n0=" then many '"" 0='. The ambiguous
+    # pattern took seconds at n=24 and doubled per step; the fixed one is linear.
+    command = '\n0=' + '"" 0=' * 5000 + ' x'
+    start = time.monotonic()
+    assert nudge._BASH_PUT.search(command) is None
+    assert time.monotonic() - start < 1.0
 
 
 @pytest.mark.parametrize(
