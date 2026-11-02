@@ -647,19 +647,38 @@ def test_a_worker_whose_claims_succeed_never_exits_on_a_failing_reclaim(tmp_path
     mono = _Mono()
     worker = _ContactWorker()
     sweeps = {"n": 0}
+    contacts = {"n": 0}
 
     def _counted_down() -> int:
         sweeps["n"] += 1
         raise ConnectionError("reclaim route failing")
 
+    install = worker.set_engine_contact_handler
+
+    def _counting_install(handler: Callable[[], None] | None) -> None:
+        # The daemon hands the worker its hook; count each contact the worker reports.
+        def _counted() -> None:
+            contacts["n"] += 1
+            if handler is not None:
+                handler()
+
+        install(_counted if handler is not None else None)
+
+    worker.set_engine_contact_handler = _counting_install  # type: ignore[method-assign]
     d = _contact_daemon(tmp_path / "cfg", _counted_down, mono, worker, bound=100.0)
     d.start()
     try:
         assert _wait(lambda: sweeps["n"] >= 1), "the reclaim-first sweep ran and failed (non-vacuity)"
-        for _ in range(5):
-            mono.now += 500.0  # far past the bound, repeatedly
-            time.sleep(0.15)
+        # Time passes in steps shorter than the bound, with claim contact in between, as it does
+        # for a live worker: a single fake-clock jump past the bound between two claims models an
+        # instant real time cannot take, and raced on a loaded CI runner (develop shard 6/6 at
+        # 61c0ec233). Twenty steps of 60 s carry the clock to 12x the bound.
+        for _ in range(20):
+            seen = contacts["n"]
+            assert _wait(lambda: contacts["n"] > seen), "a claim reported contact between clock steps"
+            mono.now += 60.0
             assert not d._stop.is_set(), "a worker with a live claim path was stopped by the reclaim clock"
+        assert sweeps["n"] >= 1 and mono.now >= 1200.0
     finally:
         d.stop()
 
