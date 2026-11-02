@@ -40,8 +40,13 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5042
+provisioned_tests = 5044
 tolerance_tests = 0
+# 5042 -> 5044 (7.94.0 shakedown, 2026-11-02): +2 in tests/upgrade/test_legacy_rows_walk_substrate.py: the note-tags-array and
+# manifest-section-labels rungs driven through the production ladder walk over seeded legacy rows on the engine (dry run pending,
+# real run converts exactly the legacy rows, second dry run converged); each fails with its rung's converge a no-op. They need
+# the engine's own legacy manifest and note rows, so they cannot be tenant-free. The batch's three new nx index rdr path tests
+# (tests/test_index_rdr_cmd.py) were made tenant-free with a pure collection-name fake instead, in the same commit.
 # 5040 -> 5042 (nexus-mdbds.2.24, 2026-11-02): +2 in tests/test_tuple_cmd.py's TestTupleDictionary (15 -> 17): the no-NAME view's
 # '(no template)' entry for orphan census rows (text and --json) and its negative control (no orphan rows, no entry). Each reads the
 # real engine's registry and census; the first fakes two extra census rows. Measured locally (the guard in fail mode): the file

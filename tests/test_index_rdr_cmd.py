@@ -396,23 +396,27 @@ def test_index_rdr_reports_why_a_document_failed_and_exits_nonzero(
     assert "nothing was written" in result.output and "nx doctor" in result.output
 
 
-@pytest.mark.t2_tenant
+def _fake_repo_collection(root: Path, kind: str) -> str:
+    """Stands in for nexus.indexer._repo_collection_or_legacy (a catalog read) in the tenant-free
+    path tests below: a pure function of the resolved root, so two repos name two collections."""
+    return f"{kind}__{Path(root).resolve().name}"
+
+
 def test_index_rdr_given_the_docs_rdr_dir_itself_indexes_the_repo_root_files(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
     """7.94.0 shakedown (class I): `nx index rdr docs/rdr` printed 'No docs/rdr/ directory found' and indexed
     nothing, because PATH is the repo root. A directory that IS a repo's docs/rdr is taken as that repo's
     RDRs, in the same collection the repo root names."""
-    from nexus.indexer import _repo_collection_or_legacy
-
-    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+    with patch("nexus.indexer._repo_collection_or_legacy", _fake_repo_collection), \
+            patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
         result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs / "docs" / "rdr")])
 
     assert result.exit_code == 0, result.output
     assert "No docs/rdr/ directory found" not in result.output
     mock_batch.assert_called_once()
     assert sorted(p.name for p in mock_batch.call_args[0][0]) == ["001-use-sqlite.md", "002-adopt-click.md"]
-    assert mock_batch.call_args[1]["collection_name"] == _repo_collection_or_legacy(repo_with_rdrs, "rdr")
+    assert mock_batch.call_args[1]["collection_name"] == _fake_repo_collection(repo_with_rdrs, "rdr")
 
 
 def test_index_rdr_no_rdr_dir_message_names_the_argument(runner: CliRunner, tmp_path: Path) -> None:
@@ -424,14 +428,13 @@ def test_index_rdr_no_rdr_dir_message_names_the_argument(runner: CliRunner, tmp_
     assert "repo root" in result.output
 
 
-@pytest.mark.t2_tenant
 def test_index_rdr_given_a_symlinked_docs_dir_indexes_into_the_repo_not_the_link_target(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     """Review of the shakedown fix: `<repo>/docs` is a symlink to another directory's docs. PATH was
     resolved first, which collapsed the link, so `nx index rdr <repo>/docs/rdr` named the LINK TARGET's
     parent as the repo and wrote that directory's collection. The repo root comes from the path as given."""
-    from nexus.indexer import _repo_collection_or_legacy
+    _repo_collection_or_legacy = _fake_repo_collection
 
     other = tmp_path / "other-project"
     (other / "docs" / "rdr").mkdir(parents=True)
@@ -440,7 +443,8 @@ def test_index_rdr_given_a_symlinked_docs_dir_indexes_into_the_repo_not_the_link
     repo.mkdir()
     (repo / "docs").symlink_to(other / "docs")
 
-    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+    with patch("nexus.indexer._repo_collection_or_legacy", _fake_repo_collection), \
+            patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
         result = runner.invoke(main, ["index", "rdr", str(repo / "docs" / "rdr")])
 
     assert result.exit_code == 0, result.output
@@ -465,14 +469,13 @@ def _assert_identities_relative_under_base_path(mock_batch) -> None:
         assert rel == str(Path("docs") / "rdr" / Path(f).name)
 
 
-@pytest.mark.t2_tenant
 def test_index_rdr_given_a_path_through_a_symlinked_repo_registers_relative_identities(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     """`link-to-repo/docs/rdr` where `link-to-repo` is a symlink to the repo: base_path is the resolved
     repo, so the files must be listed under the resolved repo too. Listed under the typed link they fall
     outside base_path and register under absolute identities."""
-    from nexus.indexer import _repo_collection_or_legacy
+    _repo_collection_or_legacy = _fake_repo_collection
 
     repo_with_rdrs = tmp_path / "real-repo"
     (repo_with_rdrs / "docs" / "rdr").mkdir(parents=True)
@@ -481,7 +484,8 @@ def test_index_rdr_given_a_path_through_a_symlinked_repo_registers_relative_iden
     link = tmp_path / "link-to-repo"
     link.symlink_to(repo_with_rdrs)
 
-    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+    with patch("nexus.indexer._repo_collection_or_legacy", _fake_repo_collection), \
+            patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
         result = runner.invoke(main, ["index", "rdr", str(link / "docs" / "rdr")])
 
     assert result.exit_code == 0, result.output
