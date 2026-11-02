@@ -294,3 +294,35 @@ def test_server_pids_names_the_private_tmux_server(run, tmp_path) -> None:
     finally:
         sb.tmux("kill-server")
     assert sb.server_pids() == []
+
+
+class _DeadStdout:
+    """A stdout whose terminal hung up: every write fails."""
+
+    def write(self, _s: str) -> int:
+        raise OSError(5, "Input/output error")
+
+    def flush(self) -> None:
+        raise OSError(5, "Input/output error")
+
+
+def test_cleanup_runs_to_the_end_with_a_dead_stdout(run, tmp_path, monkeypatch) -> None:
+    """A closed terminal sends SIGHUP and leaves stdout dead: cleanup must still kill the tmux
+    server (it holds the token) and delete the config copy."""
+    sb = _cleanup_sandbox(run, tmp_path, [(99999999, "no such process")])
+    (sb.nexus_config / "config.yml").write_text("x", encoding="utf-8")
+    tmux_calls = []
+    sb.tmux = lambda *a, **k: tmux_calls.append(a) or subprocess.CompletedProcess(a, 1, "", "")
+    monkeypatch.setattr(sys, "stdout", _DeadStdout())
+    run.cleanup(sb, [])
+    assert ("kill-server",) in tmux_calls
+    assert not (sb.nexus_config / "config.yml").exists()
+
+
+def test_no_bare_print_in_cleanup_or_the_scenario_finally() -> None:
+    """Every line cleanup and run_scenario's finally print goes through say()."""
+    fn = _function("run_scenario")
+    final = next(n for n in ast.walk(fn) if isinstance(n, ast.Try) and n.finalbody).finalbody
+    in_finally = [ast.unparse(c.func) for st in final for c in ast.walk(st) if isinstance(c, ast.Call)]
+    assert "print" not in _calls("cleanup") and "print" not in in_finally
+    assert "say" in _calls("cleanup") and "say" in in_finally

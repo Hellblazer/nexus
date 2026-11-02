@@ -234,6 +234,15 @@ def signals_deferred():
             signal.signal(s, h)
 
 
+def say(line: str) -> None:
+    """Print a progress line; a dead stdout (a hung-up terminal, a closed pipe) never stops
+    cleanup, which runs after exactly that when the operator closes the terminal."""
+    try:
+        print(line, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def raise_deferred(pending: list[int]) -> None:
     """Act on the first signal signals_deferred() held, as main()'s handlers would have."""
     if not pending:
@@ -382,9 +391,10 @@ def _text_of(content) -> str:
 
 
 def _is_prompt(d: dict) -> bool:
-    """A user entry that is a typed prompt, not a tool result."""
+    """A user entry that is a typed prompt: not a tool result, and not a meta entry Claude Code
+    writes mid-turn (skill content, a slash-command expansion, a task notification)."""
     content = (d.get("message") or {}).get("content")
-    return d.get("type") == "user" and (isinstance(content, str) or any(
+    return d.get("type") == "user" and not d.get("isMeta") and (isinstance(content, str) or any(
         isinstance(c, dict) and c.get("type") == "text" for c in content or []))
 
 
@@ -1475,7 +1485,7 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     MCP servers, reparented with no HOME in their argv) whose start time and argv still match. The
     config is deleted again at the end, for a lease minted by a process that lingered. The caller
     runs it under signals_deferred(); every subprocess here has a timeout."""
-    print(f"[sandbox:{sb.spec.name}] cleanup: running; a ^C or TERM now is held until it ends", flush=True)
+    say(f"[sandbox:{sb.spec.name}] cleanup: running; a ^C or TERM now is held until it ends")
     leftovers: list[tuple[int, str]] = []
     try:  # never at the cost of the kill-server and the config deletion below
         sb.watch.poll()
@@ -1567,14 +1577,13 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                 sb.watch.stop()
         sb.close_servers()
         for n in notes:
-            print(f"[sandbox:{name}] {n}", flush=True)
+            say(f"[sandbox:{name}] {n}")
         for f in failures:
-            print(f"[sandbox:{name}] FAIL {f}", flush=True)
-        print(f"[sandbox:{name}] {'passed' if ok else 'FAILED'}: {len(spec.sessions)} session(s), {len(failures)} failure(s)",
-              flush=True)
+            say(f"[sandbox:{name}] FAIL {f}")
+        say(f"[sandbox:{name}] {'passed' if ok else 'FAILED'}: {len(spec.sessions)} session(s), {len(failures)} failure(s)")
         if a.keep:
-            print(f"[sandbox:{name}] --keep: the sessions still run on a copy of your nexus config at "
-                  f"{sb.nexus_config}/config.yml; delete it when done; tmux -L {sb.sock} kill-server", flush=True)
+            say(f"[sandbox:{name}] --keep: the sessions still run on a copy of your nexus config at "
+                f"{sb.nexus_config}/config.yml; delete it when done; tmux -L {sb.sock} kill-server")
         if ok and not a.keep:
             for sid in filter(None, sids):  # the script's /tmp files for these sessions
                 for f in Path("/tmp").glob(f"rh-{sid}.*"):
@@ -1583,9 +1592,9 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                     f.unlink(missing_ok=True)
             shutil.rmtree(home, ignore_errors=True)
             if home.exists():
-                print(f"[sandbox:{name}] could not remove {home}; it holds no credentials (deleted above)", flush=True)
+                say(f"[sandbox:{name}] could not remove {home}; it holds no credentials (deleted above)")
         else:
-            print(f"[sandbox:{name}] kept {home} (transcripts, restart log, handoffs under /tmp)", flush=True)
+            say(f"[sandbox:{name}] kept {home} (transcripts, restart log, handoffs under /tmp)")
         raise_deferred(pending)
     return ok, failures, notes
 

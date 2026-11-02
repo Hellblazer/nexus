@@ -78,3 +78,11 @@ def test_a_turn_still_in_its_tool_call_is_none() -> None:
 def test_the_next_prompt_ends_the_turn() -> None:
     events = [_user(ASK), _said("HELIOTROPE"), _user("something else"), _said("OTHER")]
     assert _run_module().reply_after(events, ASK) == "HELIOTROPE"
+
+
+def test_a_meta_entry_mid_turn_does_not_end_it() -> None:
+    """Claude Code writes skill content, slash-command expansions and task notifications as user
+    entries with text parts and isMeta set; one landing mid-turn is not the next prompt."""
+    meta = {"type": "user", "isMeta": True, "message": {"content": [{"type": "text", "text": "skill body"}]}}
+    events = [_user(ASK), _tool(), _user([{"type": "tool_result"}]), meta, _said("HELIOTROPE")]
+    assert _run_module().reply_after(events, ASK) == "HELIOTROPE"
