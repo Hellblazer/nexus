@@ -88,8 +88,11 @@ public final class TemplateRegistry {
      * order here does not determine {@link #templates()} order — {@link
      * #load} sorts the final list by name — but is still the load order used
      * for "first defined in" duplicate-name diagnostics.
+     *
+     * <p>Package-private so {@code TemplateDocLintTest} (RDR-239 Phase 3, bead nexus-mdbds.2.19)
+     * can check that this hand-kept list and the templates directory name the same files.
      */
-    private static final List<String> RESOURCE_TEMPLATE_PATHS = List.of(
+    static final List<String> RESOURCE_TEMPLATE_PATHS = List.of(
             "/tuples/templates/aspects.yaml",
             "/tuples/templates/board.yaml",
             "/tuples/templates/board-ci.yaml",
