@@ -39,9 +39,12 @@ Shared by every scenario:
   reach the operator's own service. The copy, the data-token leases minted from it and the
   sessions' T1 session leases are deleted on every exit the harness sees (pass, fail, SIGTERM,
   SIGHUP, SIGINT; not SIGKILL, and not under ``--keep``); once cleanup starts it ignores those
-  signals. Every process below the private tmux server is recorded while the run lasts, so an
-  exited session's Serena and SessionEnd hooks, reparented with no HOME in their argv, are
-  ended by checked pid with the other leftovers. Sessions run with ``NX_UPGRADE_AUTO=0``. The
+  signals and holds them until it ends. Every process below the private tmux server is
+  recorded every 2 s while the run lasts, so a long-lived descendant of a session that exited
+  (its Serena and other MCP servers), reparented with no HOME in its argv, is ended with the
+  other leftovers when its start time and argv still match. A process that detaches within
+  one poll (the SessionEnd launcher's double fork) is not caught here. Sessions run with
+  ``NX_UPGRADE_AUTO=0`` and without the operator's ``NX_TOOLS_DIR``. The
   sessions write to that service as the operator would: the restart mail expires with its
   TTL, and nothing here asks a session to write anything permanent;
 - the conexus and sn plugins from a git marketplace named nexus-plugins, served from the
@@ -210,22 +213,34 @@ SERENA_CONFIG = ("projects: []\nweb_dashboard: false\nweb_dashboard_open_on_laun
                  "gui_log_window: false\n")
 
 
-#: The signals main() turns into an exit. Once cleanup starts it ignores them: a second ^C or a
-#: terminal closing mid-cleanup must not leave the tmux server (it holds the token) or the config copy.
+#: The signals main() turns into an exit. Once cleanup starts it holds them until it ends: a second
+#: ^C or a terminal closing mid-cleanup must not leave the tmux server (it holds the token) or the
+#: config copy, and must still stop the run once cleanup is done.
 CLEANUP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 
 
 @contextlib.contextmanager
-def signals_ignored():
-    """Ignore CLEANUP_SIGNALS inside the block; restore the handlers that were set after it."""
+def signals_deferred():
+    """Inside the block, record CLEANUP_SIGNALS instead of acting on them; yield the list they are
+    recorded in, and restore the handlers that were set after it. raise_deferred() acts on them."""
     saved = {s: signal.getsignal(s) for s in CLEANUP_SIGNALS}
+    pending: list[int] = []
     try:
         for s in CLEANUP_SIGNALS:
-            signal.signal(s, signal.SIG_IGN)
-        yield
+            signal.signal(s, lambda signum, _frame: pending.append(signum))
+        yield pending
     finally:
         for s, h in saved.items():
             signal.signal(s, h)
+
+
+def raise_deferred(pending: list[int]) -> None:
+    """Act on the first signal signals_deferred() held, as main()'s handlers would have."""
+    if not pending:
+        return
+    if pending[0] == signal.SIGINT:
+        raise KeyboardInterrupt
+    sys.exit(128 + pending[0])
 
 
 def tree_of(rows: str, root: int) -> list[tuple[int, str]]:
@@ -270,11 +285,16 @@ class ProcWatch:
         roots = [r for r in self._roots() if r > 1]
         if not roots:
             return
-        rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True).stdout
+        rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True,
+                              timeout=30).stdout
         found = [c for r in roots for c in tree_of(rows, r) if c[0] > 1]
         with self._lock:
+            new = [pid for pid, args in found if self._seen.get(pid, ("", ""))[1] != args]
+        starts = started_at(new)
+        with self._lock:
             for pid, args in found:
-                self._seen[pid] = args  # a reused pid takes its newest argv; _end checks argv before it signals
+                if pid in starts:  # a reused pid takes its newest start and argv
+                    self._seen[pid] = (starts[pid], args)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -286,7 +306,33 @@ class ProcWatch:
 
     def seen(self) -> list[tuple[int, str]]:
         with self._lock:
-            return sorted(self._seen.items())
+            return sorted((pid, args) for pid, (_, args) in self._seen.items())
+
+    def still_running(self) -> list[tuple[int, str]]:
+        """The recorded processes still running with the start time and argv they were recorded
+        with: a pid reused since by another process (the operator's, say) is left out."""
+        with self._lock:
+            seen = dict(self._seen)
+        now = started_at(list(seen))
+        return sorted((pid, args) for pid, (start, args) in seen.items()
+                      if now.get(pid) == start and _args_of(pid) == args)
+
+
+def started_at(pids: list[int]) -> dict[int, str]:
+    """Each running pid's start time as ps prints it (``lstart``); a pid not running is absent."""
+    if not pids:
+        return {}
+    try:
+        out = subprocess.run(["ps", "-ww", "-o", "pid=,lstart=", "-p", ",".join(map(str, pids))],
+                             capture_output=True, text=True, timeout=30).stdout
+    except subprocess.TimeoutExpired:
+        return {}
+    starts = {}
+    for row in out.splitlines():
+        parts = row.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            starts[int(parts[0])] = " ".join(parts[1].split())
+    return starts
 
 
 #: Files in the sandbox's nexus config dir that hold a credential: the config copy, the data-token
@@ -335,21 +381,33 @@ def _text_of(content) -> str:
     return ""
 
 
+def _is_prompt(d: dict) -> bool:
+    """A user entry that is a typed prompt, not a tool result."""
+    content = (d.get("message") or {}).get("content")
+    return d.get("type") == "user" and (isinstance(content, str) or any(
+        isinstance(c, dict) and c.get("type") == "text" for c in content or []))
+
+
 def reply_after(events: list[dict], prompt: str) -> str | None:
-    """The first assistant text after the LAST user entry whose text is *prompt*; None while there
-    is none yet (the turn is still running, or the prompt has not landed)."""
+    """The turn's answer to the LAST user entry whose text is *prompt*: the last assistant text
+    before the next prompt, once the turn's last entry is that text (no tool call or tool result
+    after it). None while there is none yet (the turn is still running, or the prompt has not
+    landed). A preamble written before a tool call is not the answer."""
     at = None
     for i, d in enumerate(events):
         if d.get("type") == "user" and _text_of((d.get("message") or {}).get("content")).strip() == prompt.strip():
             at = i
     if at is None:
         return None
+    turn = []
     for d in events[at + 1:]:
-        if d.get("type") == "assistant":
-            text = _text_of((d.get("message") or {}).get("content"))
-            if text:
-                return text
-    return None
+        if _is_prompt(d):
+            break
+        if d.get("type") in ("user", "assistant"):
+            turn.append(d)
+    if not turn or turn[-1].get("type") != "assistant":
+        return None
+    return _text_of((turn[-1].get("message") or {}).get("content")) or None
 
 
 def load_script():
@@ -500,7 +558,9 @@ class Sandbox:
                 "CLAUDE_CODE_SSE_PORT", "TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR", "NEXUS_CONFIG_DIR",
                 "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
                 "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID",
-                "NX_SESSION_ID", "NX_T1_SESSION_ID")
+                "NX_SESSION_ID", "NX_T1_SESSION_ID",
+                # the operator's generation root: hooks would resolve nx there, past the nx stand-in
+                "NX_TOOLS_DIR")
         self.env = {k: v for k, v in os.environ.items() if k not in drop}
         uv_dirs = {"UV_CACHE_DIR": OPERATOR_HOME / ".cache" / "uv",
                    "UV_PYTHON_INSTALL_DIR": OPERATOR_HOME / ".local" / "share" / "uv" / "python",
@@ -538,9 +598,9 @@ class Sandbox:
         self.watch = ProcWatch(self.server_pids)
 
     # tmux on the private server only
-    def tmux(self, *args: str, check: bool = False) -> subprocess.CompletedProcess:
+    def tmux(self, *args: str, check: bool = False, timeout: float | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(["tmux", "-L", self.sock, "-f", "/dev/null", *args],
-                              capture_output=True, text=True, env=self.env, check=check)
+                              capture_output=True, text=True, env=self.env, check=check, timeout=timeout)
 
     def setup(self, crs) -> None:
         (self.home / ".claude").mkdir(parents=True)
@@ -579,7 +639,10 @@ class Sandbox:
 
     def server_pids(self) -> list[int]:
         """The private tmux server's pid ([] when it is not running): every session runs below it."""
-        out = self.tmux("display-message", "-p", "#{pid}").stdout.strip()
+        try:
+            out = self.tmux("display-message", "-p", "#{pid}", timeout=30).stdout.strip()
+        except subprocess.TimeoutExpired:
+            return []
         return [int(out)] if out.isdigit() else []
 
     def claude_cli(self, *args: str) -> None:
@@ -704,7 +767,8 @@ class Sandbox:
     @staticmethod
     def descendants(pid: int) -> list[tuple[int, str]]:
         """Every process below *pid*, as (pid, argv)."""
-        rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True).stdout
+        rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True,
+                              timeout=30).stdout
         return tree_of(rows, pid)
 
     def _plugin_roots(self, pid: int) -> set[str]:
@@ -774,7 +838,7 @@ class Sandbox:
         fresh session's first turn (reading its handoff) could still be writing its reply when the
         count was taken, so that reply raised the count and was read as the answer (the
         2026-11-02 roll: "THAT'S THE HANDOFF..." for a session that then answered HELIOTROPE).
-        The reply is the first text the assistant wrote after the user entry carrying *text*.
+        The reply is the turn's last text after the user entry carrying *text* (reply_after).
         """
         d0 = self.wait_status(name, {"idle"}, 120)
         sid = str(d0.get("sessionId", ""))
@@ -1365,13 +1429,20 @@ RUNNERS = {"roll": scenario_roll, "variant": scenario_variant, "abort": scenario
 
 
 def _args_of(pid: int) -> str:
-    return subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    try:
+        return subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=30).stdout.strip()
+    except subprocess.TimeoutExpired:
+        return ""  # unknown: _end signals only a process whose argv it read back
 
 
 def _naming(home: Path) -> list[tuple[int, str]]:
     """Live processes whose argv names the scratch HOME (its mkdtemp path is unique to this run)."""
     # The mkdtemp path holds only [A-Za-z0-9_/.-]: as a pgrep pattern its "." alone is not literal, harmlessly.
-    out = subprocess.run(["pgrep", "-f", str(home)], capture_output=True, text=True).stdout.split()
+    try:
+        out = subprocess.run(["pgrep", "-f", str(home)], capture_output=True, text=True, timeout=30).stdout.split()
+    except subprocess.TimeoutExpired:
+        return []
     return [(int(p), _args_of(int(p))) for p in out if p.isdigit() and int(p) not in (os.getpid(), 1)]
 
 
@@ -1401,18 +1472,30 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     claude and carry its environment, token included: the descendants collected before the kill, and
     anything whose argv still names the scratch HOME after 60 s, are ended by checked pid; so is every
     process the watch recorded below the tmux server during the run (an exited session's Serena and
-    SessionEnd hooks, reparented with no HOME in their argv). The config is deleted again at the
-    end, for a lease minted by a process that lingered. The caller runs it under signals_ignored()."""
+    MCP servers, reparented with no HOME in their argv) whose start time and argv still match. The
+    config is deleted again at the end, for a lease minted by a process that lingered. The caller
+    runs it under signals_deferred(); every subprocess here has a timeout."""
+    print(f"[sandbox:{sb.spec.name}] cleanup: running; a ^C or TERM now is held until it ends", flush=True)
     leftovers: list[tuple[int, str]] = []
     try:  # never at the cost of the kill-server and the config deletion below
         sb.watch.poll()
-        sb.watch.stop()
+    except Exception as exc:  # noqa: BLE001 -- the run's earlier polls still count
+        notes.append(f"last process-watch poll failed: {type(exc).__name__}: {exc}")
+    sb.watch.stop()
+    try:
         roots = [int(d.get("pid", 0) or 0) for d in sb.entries()]
         leftovers = [c for r in roots if r > 1 for c in sb.descendants(r) if c[0] > 1]
-        leftovers = sorted(set(leftovers) | set(sb.watch.seen()))
     except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
         notes.append(f"leftover tool processes not collected: {type(exc).__name__}: {exc}")
-    sb.tmux("kill-server")
+    watched = sb.watch.seen()
+    try:
+        leftovers = sorted(set(leftovers) | set(sb.watch.still_running()))
+    except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
+        notes.append(f"watched processes not checked: {type(exc).__name__}: {exc}")
+    try:
+        sb.tmux("kill-server", timeout=30)
+    except subprocess.TimeoutExpired:
+        notes.append("tmux kill-server timed out")
     sb.delete_config()
     time.sleep(3)
     ended = _end(leftovers)
@@ -1423,7 +1506,8 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     late = _naming(sb.home)
     ended_late = _end(late)
     sb.delete_config()
-    notes.append(f"cleanup: {len(leftovers)} session descendant(s) collected, {ended} still running and signalled; "
+    notes.append(f"cleanup: {len(watched)} process(es) recorded below the tmux server during the run; "
+                 f"{len(leftovers)} session descendant(s) collected, {ended} still running and signalled; "
                  f"{ended_late} more still naming the HOME after 60 s")
     try:
         if sb.nx_refused.exists():
@@ -1432,8 +1516,13 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     except OSError as exc:
         notes.append(f"nx refusals not read: {exc}")
     dirty = []
-    if sb.tmux("has-session", "-t", "rs").returncode == 0:
-        dirty.append(f"tmux server {sb.sock} still running")
+    if sb.before and not watched:
+        dirty.append("the process watch recorded nothing below the tmux server although sessions ran")
+    try:
+        if sb.tmux("has-session", "-t", "rs", timeout=30).returncode == 0:
+            dirty.append(f"tmux server {sb.sock} still running")
+    except subprocess.TimeoutExpired:
+        dirty.append(f"tmux server {sb.sock} did not answer has-session within 30 s")
     left = credentials_left(sb.nexus_config)
     if left:
         dirty.append(f"credentials left in {sb.nexus_config}: {left}")
@@ -1458,8 +1547,9 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
         failures.append(f"harness: {type(exc).__name__}: {exc}")
     finally:
         # Nothing before the kill-server and the config deletion may raise past them: each step
-        # that reads the sandbox's files is guarded and only reported, and a signal now is ignored.
-        with signals_ignored():
+        # that reads the sandbox's files is guarded and only reported, and a signal now is held
+        # until the sandbox is gone, then acted on.
+        with signals_deferred() as pending:
             sids: set[str] = set()
             try:
                 for hold in sb.holds.values():
@@ -1496,6 +1586,7 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                 print(f"[sandbox:{name}] could not remove {home}; it holds no credentials (deleted above)", flush=True)
         else:
             print(f"[sandbox:{name}] kept {home} (transcripts, restart log, handoffs under /tmp)", flush=True)
+        raise_deferred(pending)
     return ok, failures, notes
 
 

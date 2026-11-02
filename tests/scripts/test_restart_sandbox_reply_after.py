@@ -59,3 +59,22 @@ def test_the_last_asking_counts_when_a_prompt_repeats() -> None:
 def test_text_parts_in_a_list_prompt_match() -> None:
     events = [_user([{"type": "text", "text": ASK}]), _said("HELIOTROPE")]
     assert _run_module().reply_after(events, ASK) == "HELIOTROPE"
+
+
+def test_a_preamble_before_a_tool_call_is_not_the_answer() -> None:
+    """Text, a tool call, its result, then the answer: the answer is the turn's last text."""
+    events = [_user(ASK), _said("Let me check the handoff."), _tool(), _user([{"type": "tool_result"}]),
+              _said("HELIOTROPE")]
+    assert _run_module().reply_after(events, ASK) == "HELIOTROPE"
+
+
+def test_a_turn_still_in_its_tool_call_is_none() -> None:
+    """A preamble then a pending tool call or result: the turn is not over, whatever the status says."""
+    run = _run_module()
+    assert run.reply_after([_user(ASK), _said("Let me check the handoff."), _tool()], ASK) is None
+    assert run.reply_after([_user(ASK), _said("Let me check."), _tool(), _user([{"type": "tool_result"}])], ASK) is None
+
+
+def test_the_next_prompt_ends_the_turn() -> None:
+    events = [_user(ASK), _said("HELIOTROPE"), _user("something else"), _said("OTHER")]
+    assert _run_module().reply_after(events, ASK) == "HELIOTROPE"
