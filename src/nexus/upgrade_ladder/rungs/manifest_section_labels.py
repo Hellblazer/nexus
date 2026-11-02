@@ -638,7 +638,7 @@ class ManifestSectionLabelsRung:
             # nexus-75w5d: no record and no memo, so the answer is a walk of the whole catalog. On a
             # managed service that is a 15-minute read of shared capacity per session start (19 at once
             # on 2026-10-31), so an unattended run reads nothing. Not applicable, not pending: the walk
-            # is skipped, and `nx doctor` (no deadline bound) still reports the true state.
+            # is skipped; `nx doctor` runs its sweep as unattended too and reports the rung as not checked.
             reason = (
                 "unattended `nx upgrade --auto` does not scan a managed catalog with no completion "
                 f"record and no remembered clean scan; {INTERACTIVE_REMEDY}"
