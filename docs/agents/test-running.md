@@ -32,9 +32,9 @@ labrun measures the change a week after it lands: `kind=hand` full-suite lines i
 
 The `win-release` runner on qwent's Windows side runs CI's Windows set only after a push, so a Windows-only red used to surface a CI run late (2026-11-01: an import probe that passed on macOS and Linux charged nexus's own Windows truststore setup to the dispatch recorder, red on the Windows set for two pushes). Run it before the push instead:
 
-    uv run scripts/win_hand_test.py --check                         # does this branch need it? exit 1 = yes
-    uv run scripts/win_hand_test.py --session <name> -- tests/hooks/test_x.py
-    uv run scripts/win_hand_test.py --session <name> --set          # CI's whole set and its floor, ~13 min
+    uv run scripts/windows_hand_test.py --check                         # does this branch need it? exit 1 = yes
+    uv run scripts/windows_hand_test.py --session <name> -- tests/hooks/test_x.py
+    uv run scripts/windows_hand_test.py --session <name> --set          # CI's whole set and its floor, ~13 min
 
 `--check` reads the workflow's `on.push.paths` and lists the changed files it matches. A run tests a COMMIT, `HEAD` by default (uncommitted edits are not seen; a dirty tree is warned about); one not in `origin/develop` travels as an incremental git bundle over scp. It works under `C:\build\hand\<name>\nexus` on `qwentescence` (a partial clone made on first use and kept), applies CI's own checkout fixup step (LF, tracked symlinks materialised), checks that `HEAD` is the commit, and runs `C:\build\lab\lab-run-win.cmd uv run --python 3.13 --frozen pytest ... -p no:cacheprovider` with `NX_TEST_T2_SUBSTRATE=none`; `--set` takes the Windows-set step's arguments and runs the non-vacuity floor step after it. Every CI-specific piece is read from the workflow file. Exit: pytest's code, 97 for a setup failure (never a test result), 98 when pytest passed and the floor failed.
 

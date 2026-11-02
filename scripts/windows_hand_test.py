@@ -7,9 +7,9 @@ Windows-only red used to be found a CI run late. This runs the same thing
 before the push, in the slot ``lab-run-win`` shares with that runner (the
 labrun README, "Windows native builds"):
 
-    uv run scripts/win_hand_test.py --check                       # does this branch need it?
-    uv run scripts/win_hand_test.py --session wren -- tests/hooks/test_x.py
-    uv run scripts/win_hand_test.py --session wren --set          # CI's whole Windows set
+    uv run scripts/windows_hand_test.py --check                       # does this branch need it?
+    uv run scripts/windows_hand_test.py --session wren -- tests/hooks/test_x.py
+    uv run scripts/windows_hand_test.py --session wren --set          # CI's whole Windows set
 
 It tests a COMMIT (default ``HEAD``; uncommitted edits are not seen, and a
 dirty tree is warned about). It works under ``C:\\build\\hand\\<session>\\nexus``
@@ -78,7 +78,7 @@ def ci_step_run(name: str, workflow: Path = WORKFLOW) -> str:
         if step.get("name") == name
     ]
     if len(runs) != 1:
-        raise SystemExit(f"win_hand_test: {len(runs)} steps named {name!r} in {workflow}, expected one")
+        raise SystemExit(f"windows_hand_test: {len(runs)} steps named {name!r} in {workflow}, expected one")
     return runs[0]
 
 
@@ -87,7 +87,7 @@ def ci_set_args(workflow: Path = WORKFLOW) -> list[str]:
     passes them (its ``--junitxml`` included: the floor step reads that file)."""
     words = shlex.split(ci_step_run(SET_STEP, workflow))
     if words.count("pytest") != 1:
-        raise SystemExit(f"win_hand_test: the {SET_STEP!r} step must run pytest exactly once; its shape changed")
+        raise SystemExit(f"windows_hand_test: the {SET_STEP!r} step must run pytest exactly once; its shape changed")
     return words[words.index("pytest") + 1:]
 
 
@@ -98,7 +98,7 @@ def push_paths(workflow: Path = WORKFLOW) -> list[str]:
     on = doc.get("on", doc.get(True)) or {}  # YAML 1.1 reads a bare `on:` key as True
     paths = ((on.get("push") or {}).get("paths")) or []
     if not paths:
-        raise SystemExit(f"win_hand_test: no on.push.paths in {workflow}")
+        raise SystemExit(f"windows_hand_test: no on.push.paths in {workflow}")
     return [str(p) for p in paths]
 
 
@@ -136,7 +136,7 @@ def _check_pytest_arg(arg: str) -> str:
     bad = sorted(set(arg) & _CMD_METACHARS)
     if bad:
         raise SystemExit(
-            f"win_hand_test: argument {arg!r} carries {''.join(bad)!r}, which cmd.exe "
+            f"windows_hand_test: argument {arg!r} carries {''.join(bad)!r}, which cmd.exe "
             "(lab-run-win.cmd) would re-parse; select the test another way"
         )
     return arg
@@ -152,10 +152,10 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
     fail = SETUP_FAILED
 
     def must(what: str) -> str:
-        return f"if ($LASTEXITCODE -ne 0) {{ Write-Host 'win_hand_test: {what} failed'; exit {fail} }}"
+        return f"if ($LASTEXITCODE -ne 0) {{ Write-Host 'windows_hand_test: {what} failed'; exit {fail} }}"
 
     lines = [
-        f"trap {{ Write-Host \"win_hand_test: setup error: $_\"; exit {fail} }}",
+        f"trap {{ Write-Host \"windows_hand_test: setup error: $_\"; exit {fail} }}",
         "$ErrorActionPreference = 'Stop'",
         # $LASTEXITCODE is $null until a native command runs, so the clone's
         # check sits inside the branch that clones (a kept clone runs no git here).
@@ -185,8 +185,8 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         fixup.rstrip(),
         must("checkout fixup"),
         "$head = (git rev-parse HEAD).Trim()",
-        f"if ($head -ne '{sha}') {{ Write-Host \"win_hand_test: HEAD is $head, not {sha}\"; exit {fail} }}",
-        f"Write-Host 'win_hand_test: testing {sha}'",
+        f"if ($head -ne '{sha}') {{ Write-Host \"windows_hand_test: HEAD is $head, not {sha}\"; exit {fail} }}",
+        f"Write-Host 'windows_hand_test: testing {sha}'",
         "$ErrorActionPreference = 'Continue'",
         "$env:NX_TEST_T2_SUBSTRATE = 'none'",
         f"& {_ps_quote(LAB_RUN_WIN)} uv run --python 3.13 --frozen pytest "
@@ -223,11 +223,11 @@ def _check(run: Runner) -> int:
     changed = _git(run, "diff", "--name-only", "origin/develop...HEAD").stdout.split()
     hits = files_needing_windows(changed)
     if hits:
-        _say("win_hand_test: this branch touches the Windows set's push filter; run it on Windows first:")
+        _say("windows_hand_test: this branch touches the Windows set's push filter; run it on Windows first:")
         for f in hits:
             _say(f"  {f}")
         return 1
-    _say(f"win_hand_test: none of {len(changed)} changed files is in the Windows set's push filter")
+    _say(f"windows_hand_test: none of {len(changed)} changed files is in the Windows set's push filter")
     return 0
 
 
@@ -237,7 +237,7 @@ def main(argv: Sequence[str] | None = None, *, run: Runner = subprocess.run) -> 
     try:
         return _main(argv, run=run)
     except (subprocess.CalledProcessError, OSError) as exc:
-        _say(f"win_hand_test: setup failed: {exc}", err=True)
+        _say(f"windows_hand_test: setup failed: {exc}", err=True)
         return SETUP_FAILED
 
 
@@ -253,14 +253,14 @@ def _main(argv: Sequence[str] | None, *, run: Runner) -> int:
     if ns.check:
         return _check(run)
     if not ns.session or not _SESSION_RE.fullmatch(ns.session) or ns.session.lower() in _WINDOWS_DEVICE_NAMES:
-        raise SystemExit("win_hand_test: --session must be 1-40 ASCII letters, digits, - or _, and not a device name")
+        raise SystemExit("windows_hand_test: --session must be 1-40 ASCII letters, digits, - or _, and not a device name")
     args = (ci_set_args() if ns.set else []) + [_check_pytest_arg(a) for a in ns.pytest_args]
     if not args:
-        raise SystemExit("win_hand_test: give pytest arguments after --, or --set")
+        raise SystemExit("windows_hand_test: give pytest arguments after --, or --set")
 
     sha = _git(run, "rev-parse", "--verify", f"{ns.ref}^{{commit}}").stdout.strip()
     if ns.ref == "HEAD" and _git(run, "status", "--porcelain", "--untracked-files=no").stdout.strip():
-        _say("win_hand_test: the tree has uncommitted changes; they are NOT tested (commit first to include them)",
+        _say("windows_hand_test: the tree has uncommitted changes; they are NOT tested (commit first to include them)",
              err=True)
     run(["ssh", ns.host, f"New-Item -ItemType Directory -Force 'C:\\build\\hand\\{ns.session}' | Out-Null"], check=True)
     bundle_remote: str | None = None

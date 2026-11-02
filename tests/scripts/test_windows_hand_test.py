@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""scripts/win_hand_test.py: a hand run of pytest on qwent's Windows side.
+"""scripts/windows_hand_test.py: a hand run of pytest on qwent's Windows side.
 
 The ssh and scp calls go to a recording fake; git calls that read the local
 repo go to the fake too, except where a test names a real repo.
@@ -15,10 +15,10 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-_spec = importlib.util.spec_from_file_location("win_hand_test", REPO_ROOT / "scripts" / "win_hand_test.py")
+_spec = importlib.util.spec_from_file_location("windows_hand_test", REPO_ROOT / "scripts" / "windows_hand_test.py")
 assert _spec is not None and _spec.loader is not None
 wht = importlib.util.module_from_spec(_spec)
-sys.modules["win_hand_test"] = wht
+sys.modules["windows_hand_test"] = wht
 _spec.loader.exec_module(wht)
 
 
@@ -117,7 +117,7 @@ def test_every_setup_step_stops_with_the_setup_code(step: str) -> None:
     """A native command's nonzero exit does not trip ErrorActionPreference;
     each git step is checked, or pytest would run on the previous tree."""
     script = wht.remote_script("wren", "abc", ["t.py"], bundle=r"C:\b", fixup="", floor=None)
-    assert f"Write-Host 'win_hand_test: {step} failed'; exit {wht.SETUP_FAILED}" in script
+    assert f"Write-Host 'windows_hand_test: {step} failed'; exit {wht.SETUP_FAILED}" in script
 
 
 def test_a_wrong_head_stops_with_the_setup_code() -> None:
@@ -262,7 +262,7 @@ def test_a_kept_clone_is_not_judged_by_an_unset_exit_code() -> None:
     script = wht.remote_script("wren", "abc", ["t.py"], bundle=None, fixup="", floor=None)
     [clone_line] = [ln for ln in script.splitlines() if "git clone" in ln]
     assert clone_line.startswith("if (-not (Test-Path")
-    assert "win_hand_test: clone failed" in clone_line, "the clone's check is inside the clone branch"
+    assert "windows_hand_test: clone failed" in clone_line, "the clone's check is inside the clone branch"
     assert script.count("clone failed") == 1
 
 
