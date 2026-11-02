@@ -699,7 +699,14 @@ from __future__ import annotations
 #: (nexus-jypmj). No data-effecting changeset (vectors-040/041 replace
 #: functions with rollback blocks). The pin rises so a local install converges
 #: to an engine that answers all of these.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 174)
+#:
+#: 7.94.0 pairs with engine-service-v0.1.175 (tagged 2026-11-02 on 05afaab5f,
+#: published with 36 assets, --acquire PASSED; cut bead nexus-wgj5h). It
+#: carries the T1 engine half (session-idle sweep, the agent_dispatches
+#: routes and table, telemetry-018), RDR-239's additive registry doc and
+#: census template fields, and the GatedTokenizer shutdown fix
+#: (nexus-89lp5). The pin rises so a local install converges to it.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 175)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
