@@ -30,7 +30,7 @@ checks every outcome, with nothing written to the operator's ~/.claude:
   paste in its prompt, shown as a ``[Pasted text #N]`` placeholder, which is a draft and
   not dim text);
 - the script under test runs from the control pane as ``--nx X --fresh --skip-engine-gate
-  --fallback-resume --no-update --wait 120`` with ``TMUX_PANE`` set to rs_alpha's pane,
+  --fallback-resume --no-update --handoff-timeout 600 --wait 120`` with ``TMUX_PANE`` set to rs_alpha's pane,
   so rs_alpha is the caller and must go last. X is the installed version's next patch
   that is not a tag in this checkout. Stand-ins replace what --nx touches outside the
   sandbox: ``--repo`` is a scratch release repo whose tag vX holds this checkout's engine
@@ -305,8 +305,11 @@ class Sandbox:
         uv.write_text(
             "#!/bin/sh\n# restart sandbox: uv's cache and tool installs are the operator's; record, never run\n"
             f'case " $* " in *" cache "*) echo "$*" >> {shlex.quote(str(self.uv_cleans))}; exit 0 ;; esac\n'
-            'case "$1 $2" in "tool install"|"tool upgrade"|"tool uninstall")\n'
-            f'  echo "$*" >> {shlex.quote(str(self.uv_refused))}; exit 97 ;; esac\n'
+            "tool=0\n"
+            'for a in "$@"; do case "$a" in\n'
+            "  tool) tool=1 ;;\n"
+            f'  install|upgrade|uninstall) if [ "$tool" = 1 ]; then echo "$*" >> {shlex.quote(str(self.uv_refused))}; exit 97; fi ;;\n'
+            "esac; done\n"
             f"exec {shlex.quote(self.real_uv)} \"$@\"\n", encoding="utf-8")
         uv.chmod(0o755)
 
@@ -373,6 +376,8 @@ class Sandbox:
             except (OSError, ValueError):
                 continue
             pid = int(d.get("pid", 0) or 0)
+            if pid <= 1:  # os.kill(0, 0) succeeds on our own process group: no pid is no session
+                continue
             try:
                 os.kill(pid, 0)
             except (ProcessLookupError, ValueError):
@@ -818,18 +823,26 @@ def main() -> int:
             # then the config copy they were reading. The sessions' tool processes (rs_shell's
             # background sleep, rs_busy's hold) can outlive their claude and carry its environment,
             # token included: collected now, ended by checked pid once the server is gone.
-            leftovers = [c for d in sb.entries() for c in sb.descendants(int(d.get("pid", 0) or 0))]
+            leftovers: list[tuple[int, str]] = []
+            try:  # never at the cost of the kill-server and the config deletion below
+                roots = [int(d.get("pid", 0) or 0) for d in sb.entries()]
+                leftovers = [c for r in roots if r > 1 for c in sb.descendants(r) if c[0] > 1]
+            except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
+                notes.append(f"leftover tool processes not collected: {type(exc).__name__}: {exc}")
             sb.busy_hold.unlink(missing_ok=True)
             sb.tmux("kill-server")
             sb.delete_config()
             time.sleep(3)
+            ended = 0
             for pid, args in leftovers:
                 now = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
                 if now == args:  # the same process, not a reused pid
                     try:
                         os.kill(pid, signal.SIGTERM)
+                        ended += 1
                     except (ProcessLookupError, PermissionError):
                         pass
+            notes.append(f"cleanup: {len(leftovers)} session descendant(s) collected, {ended} still running and ended")
         for n in notes:
             print(f"[sandbox] {n}", flush=True)
         for f in failures:
