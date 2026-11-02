@@ -101,8 +101,9 @@ def _display_path_or_title(meta: dict, result_id: str) -> str:
 
 
 def display_title(meta: dict) -> str:
-    """The catalog's title for a hit's document(s) when the search attached
-    one (``_display_title``, nexus-sis0m.5), else nothing. The chunk row's own
+    """The catalog's title for the document a hit is attributed to when the search
+    attached one (``_display_title``, nexus-sis0m.5; the attributed owner's alone, never a
+    join of the other holders of a shared chunk, nexus-fv2u4), else nothing. The chunk row's own
     title is the last writer's (a code chunk's is another document's
     ``path:lines`` once the chunk is shared), so it is never a label
     (nexus-fv2u4, RDR-236 reader remedy R1)."""
@@ -469,6 +470,13 @@ def format_json(results: list[SearchResult]) -> str:
             "hybrid_score": r.hybrid_score,
             "collection": r.collection,
         }
+        # nexus-fv2u4 (RDR-236 reader remedy R1): ``title`` is the attributed owner's catalog
+        # title, the same one every other format labels the hit with. The chunk row's own
+        # title is the last writer's (another document's ``path:lines`` on a shared chunk), so
+        # it is never output; a hit whose catalog title did not resolve carries no ``title``.
+        item.pop("title", None)
+        if title := display_title(r.metadata):
+            item["title"] = title
         items.append(item)
     return json.dumps(items, indent=2, default=str)
 

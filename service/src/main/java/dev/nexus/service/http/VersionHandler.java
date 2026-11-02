@@ -364,8 +364,9 @@ public final class VersionHandler implements HttpHandler {
      *
      * <p>An independent flag. An engine without it removes the relay's edges and says nothing about the
      * nodes behind it, so a client that must rank or role-filter those nodes reads this flag before it
-     * sends the predicate and walks unfiltered otherwise. Invisible to cloud clients until the public
-     * conexus edge allowlists it (nexus-04sff precedent; engine-release pre-tag check 3e).
+     * sends the predicate and walks unfiltered otherwise. Cloud clients see it only once the public conexus
+     * edge allowlists it (nexus-04sff precedent; engine-release pre-tag check 3e); the cloud /version carried it
+     * on 2026-11-02.
      */
     static void appendCatalogGraphNodeWalkCapabilityField(StringBuilder body) {
         body.append(",\"catalog_graph_node_walk_supported\":true");
@@ -379,7 +380,8 @@ public final class VersionHandler implements HttpHandler {
      * <p>An independent flag: an engine without the limit ignores the request key and returns every row of
      * every document, so a client that relied on the limit to keep a read inside its row budget would blow
      * the budget without an error. It reads this flag before it sends the key and still requires the echo.
-     * Invisible to cloud clients until the public conexus edge allowlists it (nexus-04sff precedent).
+     * Cloud clients see it only once the public conexus edge allowlists it (nexus-04sff precedent); the cloud
+     * /version carried it on 2026-11-02.
      */
     static void appendCatalogManifestRowLimitCapabilityField(StringBuilder body) {
         body.append(",\"catalog_manifest_row_limit_supported\":true");
@@ -392,7 +394,8 @@ public final class VersionHandler implements HttpHandler {
      *
      * <p>An independent flag, for the reason {@link #appendNxAnswerRunSummaryCapabilityField} gives: an old
      * engine drops the key without an error, so HTTP 200 is no evidence of persistence. A client that reads
-     * the flag absent omits the field. Invisible to cloud clients until the public conexus edge allowlists it.
+     * the flag absent omits the field. Cloud clients see it only once the public conexus edge allowlists it;
+     * the cloud /version carried it on 2026-11-02.
      */
     static void appendNxAnswerOutOfStepCostCapabilityField(StringBuilder body) {
         body.append(",\"nx_answer_out_of_step_cost_supported\":true");
@@ -410,8 +413,9 @@ public final class VersionHandler implements HttpHandler {
      *
      * <p>An independent flag, and the only evidence: both engines answer the same keys with HTTP 200, so a
      * client that prints {@code file:line} beside a document it picked itself must read this flag first.
-     * Always present, always {@code true} on an engine carrying the change. Invisible to cloud clients until
-     * the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff).
+     * Always present, always {@code true} on an engine carrying the change. Cloud clients see it only
+     * once the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff);
+     * the cloud /version carried it on 2026-11-02.
      */
     static void appendSearchRowOwnerSpanCapabilityField(StringBuilder body) {
         body.append(",\"search_row_owner_span_supported\":true");
@@ -424,9 +428,9 @@ public final class VersionHandler implements HttpHandler {
      *
      * <p>An independent flag, and the only evidence: an engine without the feature ignores the unknown key and
      * answers 200 with an UNRESTRICTED search, so a client that relies on the confinement must read this flag
-     * before it sends the key. Always present, always {@code true} on an engine carrying the change. Invisible to
-     * cloud clients until the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent,
-     * nexus-04sff).
+     * before it sends the key. Always present, always {@code true} on an engine carrying the change. Cloud clients
+     * see it only once the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent,
+     * nexus-04sff); the cloud /version carried it on 2026-11-02.
      */
     static void appendVectorSearchChashAllowCapabilityField(StringBuilder body) {
         body.append(",\"vector_search_chash_allow_supported\":true");
@@ -456,9 +460,10 @@ public final class VersionHandler implements HttpHandler {
      * precisely why it is not the predicate.
      *
      * <p>Both additive: no existing field changes shape. As with every new
-     * {@code /version} field, they stay invisible to cloud clients until the
-     * public edge allowlists them (the {@code nx_answer_steps_supported}
-     * precedent, nexus-04sff) — that relay is paired work, not an engine defect.
+     * {@code /version} field, cloud clients see them only once the public edge
+     * allowlists them (the {@code nx_answer_steps_supported} precedent,
+     * nexus-04sff); on 2026-11-02 the cloud /version carried
+     * {@code process_uptime_seconds} and not {@code process_start_time} — that relay is paired work, not an engine defect.
      *
      * <p><b>THE ANCHOR IS HANDLER CONSTRUCTION, NOT PROCESS START, AND THAT IS
      * DELIBERATE.</b> {@code SchemaMigrator.migrate()} runs before this service is

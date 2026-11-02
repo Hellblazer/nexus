@@ -615,17 +615,19 @@ def _fv2u4_render(fmt: str, r: SearchResult) -> str:
         return "\n".join(format_vimgrep([r], query="solo"))
     if fmt == "compact":
         return "\n".join(format_compact([r], query="solo"))
+    if fmt == "json":
+        return format_json([r])
     return "\n".join(format_plain_with_context([r], query="solo", lines_before=1, lines_after=1))
 
 
-@pytest.mark.parametrize("fmt", ["plain", "vimgrep", "compact", "context"])
+@pytest.mark.parametrize("fmt", ["plain", "vimgrep", "compact", "context", "json"])
 def test_a_shared_chunk_is_labelled_with_the_attributed_owners_catalog_title(fmt: str) -> None:
     out = _fv2u4_render(fmt, _titled("owner/doc.py"))
     assert "owner/doc.py" in out
     assert _STALE_ROW_TITLE not in out and "other/doc.py" not in out
 
 
-@pytest.mark.parametrize("fmt", ["plain", "vimgrep", "compact", "context"])
+@pytest.mark.parametrize("fmt", ["plain", "vimgrep", "compact", "context", "json"])
 def test_an_unresolved_hit_shows_its_id_not_the_stale_row_title(fmt: str) -> None:
     out = _fv2u4_render(fmt, _titled(None))
     assert "r1" in out

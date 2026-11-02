@@ -5817,8 +5817,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `traverse` walks under the document's address; a step on a route that takes no such filter (`search_metadata_scoped`,
   `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`, a `query` with `author`, `content_type`,
   `follow_links` or `subtree`) is not dispatched. `steps_not_run` when the engine does not advertise the flag (an
-  older engine, or an edge that trims `/version`; until `engine-service-v0.1.171` and the edge allowlist
-  (conexus-zvbp) are live that is every cloud request, and this fallback has not run live): no secondary retrieval step and no traversal is dispatched, and
+  older engine, or an edge that trims `/version`; the cloud is not one of these: its `/version` reports
+  `vector_search_chash_allow_supported` since `engine-service-v0.1.171` and the edge allowlist (conexus-zvbp),
+  so a cloud request runs `engine_filter`, and this fallback has not run live): no secondary retrieval step and no traversal is dispatched, and
   each skipped step is listed in `scope_diagnostics` with `scope_kind: document` and outcome `document_confined`
   (a step that carried the filter reports `document_filtered`, the traversal `document_scoped`). The coverage
   repair keeps only hits whose chunk hash is in the document's manifest (a verbatim chunk shared with a sibling

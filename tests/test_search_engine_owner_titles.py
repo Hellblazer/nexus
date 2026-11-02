@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-sis0m.5: a search hit's display title comes from the catalog's live
-documents holding its chunk, not the chunk row's last-writer title."""
+"""nexus-sis0m.5, nexus-fv2u4: a search hit's display title is the catalog title of the
+document the hit is attributed to (``doc_id``), never the chunk row's last-writer title and
+never a join of the other documents sharing the chunk (shakedown 7.94.0 class B)."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -33,7 +34,7 @@ def _hit(chash: str, title: str) -> SearchResult:
                         metadata={"chunk_text_hash": chash, "title": title})
 
 
-def test_a_shared_chunk_names_every_live_owner() -> None:
+def test_a_shared_chunk_shows_the_attributed_owner_only() -> None:
     cat = _Catalog(
         [{"chash": "h", "doc_id": "1.1.1", "position": 0, "chunk_count": 1},
          {"chash": "h", "doc_id": "1.1.2", "position": 0, "chunk_count": 1}],
@@ -42,7 +43,52 @@ def test_a_shared_chunk_names_every_live_owner() -> None:
     hits = [_hit("h", "note B")]
     assert _attach_from_chash_positions(hits, ["h"], cat)
     _attach_display_paths(hits, cat)
-    assert display_title(hits[0].metadata) == "note A · note B"
+    # The lookup attributes the hit to the smallest doc_id (1.1.1); B's title is not joined on.
+    assert hits[0].metadata["doc_id"] == "1.1.1"
+    assert display_title(hits[0].metadata) == "note A"
+
+
+def test_a_shared_chunk_whose_row_names_its_owner_shows_that_owner() -> None:
+    cat = _Catalog(
+        [{"chash": "h", "doc_id": "1.1.1", "position": 0, "chunk_count": 1},
+         {"chash": "h", "doc_id": "1.1.2", "position": 0, "chunk_count": 1}],
+        {"1.1.1": ("note A", "c"), "1.1.2": ("note B", "c")},
+    )
+    hit = _hit("h", "note A")
+    hit.metadata["doc_id"] = "1.1.2"
+    assert _attach_from_chash_positions([hit], ["h"], cat)
+    _attach_display_paths([hit], cat)
+    assert display_title(hit.metadata) == "note B"
+
+
+def test_json_title_is_the_attributed_owners_catalog_title() -> None:
+    """The ``title`` key of --json output, not only ``_display_title``: the live tenant
+    printed the chunk row's ``path:lines`` on 10 of 10 sampled hits."""
+    import json
+
+    from nexus.formatters import format_json
+
+    cat = _Catalog(
+        [{"chash": "h", "doc_id": "1.1.1", "position": 0, "chunk_count": 1},
+         {"chash": "h", "doc_id": "1.1.2", "position": 0, "chunk_count": 1}],
+        {"1.1.1": ("main.py", "c"), "1.1.2": ("__init__.py", "c")},
+    )
+    hits = [_hit("h", "src/m3docrag/datasets/__init__.py:1-15")]
+    assert _attach_from_chash_positions(hits, ["h"], cat)
+    _attach_display_paths(hits, cat)
+    row = json.loads(format_json(hits))[0]
+    assert row["title"] == "main.py"
+    assert row["_display_title"] == "main.py"
+
+
+def test_json_has_no_title_when_the_catalog_names_none() -> None:
+    """No catalog title resolved: the row's title is not stood in (R1: never a label)."""
+    import json
+
+    from nexus.formatters import format_json
+
+    row = json.loads(format_json([_hit("h", "src/other.py:1-15")]))[0]
+    assert "title" not in row
 
 
 def test_a_deleted_last_writer_is_not_named() -> None:
