@@ -94,15 +94,15 @@ def test_a_body_mentioning_a_tag_is_not_in_scope_of_the_tag_match():
 
 #: Typed out on purpose: the table must equal this list, not itself.
 _RDR_238_PATTERNS = (
-    "(^|[-_])review([-_]|$)",
-    "(^|[-_])code-review([-_]|$)",
-    "(^|[-_])commit-review([-_]|$)",
-    "(^|[-_])critique([-_]|$)",
-    "(^|[-_])gate([-_]|$)",
-    "(^|[-_])fix-check([-_]|$)",
-    "-research-[0-9]+$",
-    "(^|[-_])confirm([-_]|$)",
-    "(^|[-_])audit([-_]|$)",
+    "(^|[-_.: ])review([-_.: ]|$)",
+    "(^|[-_.: ])code-review([-_.: ]|$)",
+    "(^|[-_.: ])commit-review([-_.: ]|$)",
+    "(^|[-_.: ])critique([-_.: ]|$)",
+    "(^|[-_.: ])gate([-_.: ]|$)",
+    "(^|[-_.: ])fix-check([-_.: ]|$)",
+    "-research-[0-9]+(\\.md)?$",
+    "(^|[-_.: ])confirm([-_.: ]|$)",
+    "(^|[-_.: ])audit([-_.: ]|$)",
 )
 
 
@@ -121,28 +121,36 @@ def test_no_pattern_puts_a_quantifier_after_a_group():
 
 def test_the_header_states_the_title_matching_rule():
     text = audit_tags.header_text()
-    for needle in ("case-insensitively", "anywhere in the title", "'-' or '_'", "quantifier"):
+    for needle in ("case-insensitively", "anywhere in the title", "'-', '_', '.', ':' or a space", "UNIX_LINES", "quantifier"):
         assert needle in text, needle
 
 
 @pytest.mark.parametrize(
     ("title", "pattern"),
     [
-        ("code-review-nexus-d9xt2", "(^|[-_])review([-_]|$)"),
-        ("critique-wbfpw28-r3", "(^|[-_])critique([-_]|$)"),
-        ("nexus-1si7z-critique-round2-2026-07-12", "(^|[-_])critique([-_]|$)"),
-        ("nexus-5b9v0-collision-guard-review-round4", "(^|[-_])review([-_]|$)"),
-        ("pr539-a2-failure-handling-code-review-round2-2026-10-12", "(^|[-_])review([-_]|$)"),
-        ("test-suite-compression-P2-reduced-round2-critique", "(^|[-_])critique([-_]|$)"),
-        ("210-gate-r1-answers-sam-2026-10-17", "(^|[-_])gate([-_]|$)"),
-        ("215-fix-check-dd95743fa", "(^|[-_])fix-check([-_]|$)"),
-        ("232-research-24", "-research-[0-9]+$"),
-        ("confirm-dsr6a-431c62543-2026-10-17", "(^|[-_])confirm([-_]|$)"),
-        ("225-plan-audit-r1", "(^|[-_])audit([-_]|$)"),
-        ("x_review", "(^|[-_])review([-_]|$)"),
-        ("review", "(^|[-_])review([-_]|$)"),
-        ("Critique-X", "(^|[-_])critique([-_]|$)"),  # case-insensitive
-        ("CODE-REVIEW-1", "(^|[-_])review([-_]|$)"),
+        ("code-review-nexus-d9xt2", "(^|[-_.: ])review([-_.: ]|$)"),
+        ("critique-wbfpw28-r3", "(^|[-_.: ])critique([-_.: ]|$)"),
+        ("nexus-1si7z-critique-round2-2026-07-12", "(^|[-_.: ])critique([-_.: ]|$)"),
+        ("nexus-5b9v0-collision-guard-review-round4", "(^|[-_.: ])review([-_.: ]|$)"),
+        ("pr539-a2-failure-handling-code-review-round2-2026-10-12", "(^|[-_.: ])review([-_.: ]|$)"),
+        ("test-suite-compression-P2-reduced-round2-critique", "(^|[-_.: ])critique([-_.: ]|$)"),
+        ("210-gate-r1-answers-sam-2026-10-17", "(^|[-_.: ])gate([-_.: ]|$)"),
+        ("215-fix-check-dd95743fa", "(^|[-_.: ])fix-check([-_.: ]|$)"),
+        ("232-research-24", "-research-[0-9]+(\\.md)?$"),
+        ("confirm-dsr6a-431c62543-2026-10-17", "(^|[-_.: ])confirm([-_.: ]|$)"),
+        ("225-plan-audit-r1", "(^|[-_.: ])audit([-_.: ]|$)"),
+        ("x_review", "(^|[-_.: ])review([-_.: ]|$)"),
+        ("review", "(^|[-_.: ])review([-_.: ]|$)"),
+        ("Critique-X", "(^|[-_.: ])critique([-_.: ]|$)"),  # case-insensitive
+        ("CODE-REVIEW-1", "(^|[-_.: ])review([-_.: ]|$)"),
+        # the first review's survey: a .md suffix, ':' and a space are boundaries too
+        ("nexus-sdp0u-round1-critique.md", "(^|[-_.: ])critique([-_.: ]|$)"),
+        ("nexus-9qq85-phase1-code-review.md", "(^|[-_.: ])review([-_.: ]|$)"),
+        ("qc4p1-substantive-critique.md", "(^|[-_.: ])critique([-_.: ]|$)"),
+        ("rdr-238-gate.md", "(^|[-_.: ])gate([-_.: ]|$)"),
+        ("gate:x", "(^|[-_.: ])gate([-_.: ]|$)"),
+        ("review of x", "(^|[-_.: ])review([-_.: ]|$)"),
+        ("238-research-9.md", "-research-[0-9]+(\\.md)?$"),
     ],
 )
 def test_real_audit_titles_match_a_pattern(title, pattern):
@@ -153,15 +161,15 @@ def test_real_audit_titles_match_a_pattern(title, pattern):
 @pytest.mark.parametrize("pattern", _RDR_238_PATTERNS)
 def test_each_pattern_matches_some_title_alone(pattern):
     samples = {
-        "(^|[-_])review([-_]|$)": "review-x",
-        "(^|[-_])code-review([-_]|$)": "code-review",
-        "(^|[-_])commit-review([-_]|$)": "commit-review-abc",
-        "(^|[-_])critique([-_]|$)": "a-critique",
-        "(^|[-_])gate([-_]|$)": "238-gate-latest",
-        "(^|[-_])fix-check([-_]|$)": "x_fix-check_y",
-        "-research-[0-9]+$": "238-research-9",
-        "(^|[-_])confirm([-_]|$)": "confirm-dsr6a-431c62543",
-        "(^|[-_])audit([-_]|$)": "225-plan-audit-r1",
+        "(^|[-_.: ])review([-_.: ]|$)": "review-x",
+        "(^|[-_.: ])code-review([-_.: ]|$)": "code-review",
+        "(^|[-_.: ])commit-review([-_.: ]|$)": "commit-review-abc",
+        "(^|[-_.: ])critique([-_.: ]|$)": "a-critique",
+        "(^|[-_.: ])gate([-_.: ]|$)": "238-gate-latest",
+        "(^|[-_.: ])fix-check([-_.: ]|$)": "x_fix-check_y",
+        "-research-[0-9]+(\\.md)?$": "238-research-9",
+        "(^|[-_.: ])confirm([-_.: ]|$)": "confirm-dsr6a-431c62543",
+        "(^|[-_.: ])audit([-_.: ]|$)": "225-plan-audit-r1",
     }
     assert re.search(pattern, samples[pattern], re.I | re.A)
 
@@ -182,6 +190,11 @@ def test_each_pattern_matches_some_title_alone(pattern):
         "rdr-238-a2-read-sample",
         "project_art_is_the_founding_use_case",
         "chas-test-host-howto",
+        "confirmation-plan",
+        "auditor-notes",
+        "reviewer-notes.md",
+        "238-research-9.md-notes",
+        "238-research-9.mdx",
         "",
         None,
     ],
@@ -189,3 +202,20 @@ def test_each_pattern_matches_some_title_alone(pattern):
 def test_near_misses_and_ordinary_notes_are_replaceable(title):
     assert audit_tags.title_pattern_of(title) is None
     assert not audit_tags.is_audit_title(title)
+
+
+@pytest.mark.parametrize(
+    ("title", "audit"),
+    [
+        ("x-gate ", True),  # a space is a boundary
+        ("x-gate\n", True),  # '$' also matches before a final \n, in Python and (UNIX_LINES) in Java
+        ("232-research-24\n", True),
+        ("x-gate\r", False),  # \r, NEL and the Unicode separators are not boundaries in either
+        ("x-gate\u0085", False),
+        ("x-gate\u2028", False),
+        ("232-research-24\r", False),
+    ],
+)
+def test_dollar_and_space_boundaries_match_the_java_side(title, audit):
+    """Mirrors AuditTagsTest.dollarMatchesOnlyBeforeAFinalNewline_asInPython."""
+    assert audit_tags.is_audit_title(title) is audit

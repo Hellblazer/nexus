@@ -210,6 +210,18 @@ here are the ones each pass found on a named page or table.
 - **Assumed:** moving a rule out of the always-loaded index into an
   on-demand tier does not lower compliance with it. No paper measures this
   for rules over a long session. This is A3, measured in Phase 2.
+- **2026-11-01, Implementation (Phase 1):** the K4 title-pattern backstop was
+  chosen by Sam as option (a). `replaces` also refuses a target whose title
+  carries one of nine tokens: `review`, `code-review`, `commit-review`,
+  `critique`, `gate`, `fix-check`, `confirm`, `audit`, and the series suffix
+  `-research-N` (with or without `.md`). A token is a whole word bounded by the
+  start or end of the title or by `-`, `_`, `.`, `:` or a space; `reviewer-notes`
+  and `preview` do not match. Matching is case-insensitive and ASCII-only, a
+  search not a full match, and the one list lives in
+  `src/nexus/tables/audit-tags.toml`, from which the engine's `AuditTags.java`
+  is generated. The K5 limit: a replace is never retried, so a response lost to a
+  replace that landed loses the echo; the new row exists, the old one is gone,
+  and the deleted content cannot be recovered from the engine.
 
 ### Critical Assumptions
 

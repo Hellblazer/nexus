@@ -193,10 +193,11 @@ public final class MemoryHandler implements HttpHandler {
      * <p>RDR-238 (bead nexus-qo7ie.6): {@code replaces} is the exact title of a row in the put's own
      * tenant and project (never an id). The engine deletes that row and writes the new one in one
      * transaction and echoes the deleted row's title and content, the writer's only record of what was
-     * removed. Absent, null or blank means a plain put, with the response shape above unchanged.
+     * removed. Absent or JSON null means a plain put, with the response shape above unchanged; a
+     * present but blank {@code replaces} is 400.
      * Refused with nothing written or deleted ({@link MemoryRepository#replaceMemory}): 409 for a
-     * missing, quarantined or audit-record target (audit tag or audit-record title), 400 when the
-     * target is the row being written. The error names the target and the reason.
+     * missing, quarantined or audit-record target (audit tag or audit-record title) or when a row
+     * with the new title already exists, 400 when the target is the row being written. The error names the target and the reason.
      */
     private void handlePut(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -210,6 +211,11 @@ public final class MemoryHandler implements HttpHandler {
         String agent   = optStringOrNull(body, "agent");
         Integer ttl    = requirePositiveOrNullTtl(optInt(body, "ttl"));
 
+        // Absent or JSON null is a plain put. A key that is present but blank is a caller who believes
+        // it is replacing something: answering 200 {id} would tell it so. Refuse (400), write nothing.
+        if (body.get("replaces") != null && body.get("replaces").toString().isBlank()) {
+            throw new IllegalArgumentException("replaces is blank (nothing written)");
+        }
         String replaces = optStringOrNull(body, "replaces");
         if (replaces != null) {
             var res = repo.replaceMemory(tenant, project, title, content, tags, session, agent, ttl, replaces);

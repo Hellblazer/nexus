@@ -26,8 +26,9 @@ import java.util.regex.Pattern;
  * <p><b>Title rule (the backstop for older untagged audit rows).</b> Each entry of
  * {@link #TITLE_PATTERN_SOURCES} is one regular expression, searched anywhere in the title
  * ({@code find()}, not {@code matches()}), case-insensitively and ASCII-only
- * ({@link Pattern#CASE_INSENSITIVE}). A token entry is a whole word bounded by the start or end of
- * the title or by '-' or '_' on each side. No entry may put a quantifier (star, plus, brace) after a
+ * ({@link Pattern#CASE_INSENSITIVE}, with {@link Pattern#UNIX_LINES} so that '$' matches only before a
+ * final '\n', as Python's does). A token entry is a whole word bounded by the start or end of
+ * the title or by '-', '_', '.', ':' or a space on each side. No entry may put a quantifier (star, plus, brace) after a
  * group: Java's regex engine recurses per character on such a group and overflows the stack.
  */
 public final class AuditTags {
@@ -45,18 +46,18 @@ public final class AuditTags {
 
     /** The title patterns' source text, in table order. */
     public static final List<String> TITLE_PATTERN_SOURCES = List.of(
-        "(^|[-_])review([-_]|$)",
-        "(^|[-_])code-review([-_]|$)",
-        "(^|[-_])commit-review([-_]|$)",
-        "(^|[-_])critique([-_]|$)",
-        "(^|[-_])gate([-_]|$)",
-        "(^|[-_])fix-check([-_]|$)",
-        "-research-[0-9]+$",
-        "(^|[-_])confirm([-_]|$)",
-        "(^|[-_])audit([-_]|$)");
+        "(^|[-_.: ])review([-_.: ]|$)",
+        "(^|[-_.: ])code-review([-_.: ]|$)",
+        "(^|[-_.: ])commit-review([-_.: ]|$)",
+        "(^|[-_.: ])critique([-_.: ]|$)",
+        "(^|[-_.: ])gate([-_.: ]|$)",
+        "(^|[-_.: ])fix-check([-_.: ]|$)",
+        "-research-[0-9]+(\\.md)?$",
+        "(^|[-_.: ])confirm([-_.: ]|$)",
+        "(^|[-_.: ])audit([-_.: ]|$)");
 
     private static final List<Pattern> TITLE_PATTERNS = TITLE_PATTERN_SOURCES.stream()
-            .map(p -> Pattern.compile(p, Pattern.CASE_INSENSITIVE))
+            .map(p -> Pattern.compile(p, Pattern.CASE_INSENSITIVE | Pattern.UNIX_LINES))
             .toList();
 
     /** The audit tags {@code tags} carries, in the order they appear (empty when none). */

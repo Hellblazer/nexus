@@ -1157,13 +1157,39 @@ class MemoryHandlerTest {
         assertThat(resp.statusCode()).isEqualTo(200);
         assertThat(mapper.readValue(resp.body(), MAP_T).keySet())
             .as("a put without replaces answers {id} and nothing else").containsExactly("id");
-        // null and blank replaces mean "absent", like the other optional fields
-        for (String absent : new String[] {"null", "\"\"", "\"  \""}) {
+        // JSON null replaces means "absent", like the other optional fields
+        var r = post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-shape\",\"title\":\"b\",\"content\":\"c\",\"replaces\":null}");
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(r.body(), MAP_T).keySet()).containsExactly("id");
+    }
+
+    @Test
+    void put_withABlankReplaces_is400_andWritesNothing() throws Exception {
+        for (String blank : new String[] {"\"\"", "\"  \"", "\"\\t\""}) {
             var r = post("/v1/memory/put", TENANT,
-                "{\"project\":\"rep-shape\",\"title\":\"b\",\"content\":\"c\",\"replaces\":" + absent + "}");
-            assertThat(r.statusCode()).isEqualTo(200);
-            assertThat(mapper.readValue(r.body(), MAP_T).keySet()).containsExactly("id");
+                "{\"project\":\"rep-blank\",\"title\":\"b\",\"content\":\"c\",\"replaces\":" + blank + "}");
+            assertThat(r.statusCode()).as("replaces=%s", blank).isEqualTo(400);
+            assertThat((String) mapper.readValue(r.body(), MAP_T).get("error")).contains("replaces is blank");
         }
+        assertThat(get("/v1/memory/get?project=rep-blank&title=b", TENANT).statusCode())
+            .as("a blank replaces writes nothing").isEqualTo(404);
+    }
+
+    @Test
+    void put_withReplaces_whenTheNewTitleExists_is409_andBothRowsAreUnchanged() throws Exception {
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-exists\",\"title\":\"old\",\"content\":\"old body\"}");
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-exists\",\"title\":\"x\",\"content\":\"x body\"}");
+        var resp = post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-exists\",\"title\":\"x\",\"content\":\"NEW\",\"replaces\":\"old\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat((String) mapper.readValue(resp.body(), MAP_T).get("error")).contains("already exists");
+        assertThat((String) mapper.readValue(get("/v1/memory/get?project=rep-exists&title=old", TENANT).body(),
+            MAP_T).get("content")).isEqualTo("old body");
+        assertThat((String) mapper.readValue(get("/v1/memory/get?project=rep-exists&title=x", TENANT).body(),
+            MAP_T).get("content")).isEqualTo("x body");
     }
 
     @Test
@@ -1201,7 +1227,7 @@ class MemoryHandlerTest {
             new Case("plain", "plain", 400, "plain", "title being written"),
             new Case("tagged", "n3", 409, "tagged", "audit tag", "kind:gate"),
             new Case("code-review-nexus-d9xt2", "n4", 409, "code-review-nexus-d9xt2", "audit-record title pattern",
-                     "(^|[-_])review([-_]|$)")}) {
+                     "(^|[-_.: ])review([-_.: ]|$)")}) {
             var resp = post("/v1/memory/put", TENANT,
                 "{\"project\":\"rep-no\",\"title\":\"" + c.title() + "\",\"content\":\"X\",\"replaces\":\""
                 + c.replaces() + "\"}");

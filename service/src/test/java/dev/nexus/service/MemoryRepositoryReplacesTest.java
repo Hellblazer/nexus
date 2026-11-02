@@ -14,13 +14,22 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -44,6 +53,7 @@ class MemoryRepositoryReplacesTest {
 
     PostgreSQLContainer<?> pg;
     MemoryRepository repo;
+    TenantScope scope;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
@@ -62,7 +72,8 @@ class MemoryRepositoryReplacesTest {
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
         svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
-        repo = new MemoryRepository(new TenantScope(svcDs));
+        scope = new TenantScope(svcDs);
+        repo = new MemoryRepository(scope);
     }
 
     @AfterAll
@@ -157,16 +168,38 @@ class MemoryRepositoryReplacesTest {
     }
 
     @Test
-    void replace_whenTheNewTitleAlreadyExists_overwritesIt_likeAPlainPut() {
+    void replace_whenTheNewTitleAlreadyExists_isRefused_andBothRowsAreUnchanged() {
         String t = tenant(); String p = project();
         put(t, p, "old", "old body", "a");
-        long incumbent = put(t, p, "new", "incumbent", "a");
+        put(t, p, "new", "incumbent", "a");
+        put(t, p, "bystander", "untouched", "z");
+        List<Row> before = snapshot(t, p);
+        assertThat(before).hasSize(3);
 
-        var res = replace(t, p, "new", "fresh", "b", "old");
+        assertThatThrownBy(() -> replace(t, p, "new", "fresh", "b", "old"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("already exists")
+            .hasMessageContaining("'new'");
 
-        assertThat(res.id()).as("the upsert path keeps the incumbent id").isEqualTo(incumbent);
-        assertThat(live(t, p, "old")).isEmpty();
-        assertThat(live(t, p, "new").orElseThrow().getContent()).isEqualTo("fresh");
+        assertThat(snapshot(t, p)).as("both rows unchanged, nothing written").isEqualTo(before);
+        // A plain put at that title still overwrites, as before.
+        long again = put(t, p, "new", "plain overwrite", "a");
+        assertThat(again).isEqualTo(before.stream().filter(r -> r.title().equals("new")).findFirst().orElseThrow().id());
+    }
+
+    @Test
+    void replace_whenAQuarantinedRowHoldsTheNewTitle_isRefused_andItStaysQuarantined() {
+        String t = tenant(); String p = project();
+        put(t, p, "old", "old body", "a");
+        long id = repo.importRow(t, p, "new", "expired body", "a", null, null, 1, OLD, 0, null);
+        assertThat(repo.expire(t).quarantinedIds()).containsExactly(id);
+        List<Row> before = snapshot(t, p);
+
+        assertThatThrownBy(() -> replace(t, p, "new", "fresh", "b", "old"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("already exists");
+
+        assertThat(snapshot(t, p)).isEqualTo(before);
     }
 
     // ── Case 2: refusals ──────────────────────────────────────────────────────
@@ -242,15 +275,16 @@ class MemoryRepositoryReplacesTest {
     /** One real-shaped title per pattern, in table order, with the pattern it must be refused by. */
     static Stream<org.junit.jupiter.params.provider.Arguments> auditTitlePerPattern() {
         return Stream.of(
-            args("nexus-5b9v0-collision-guard-review-round4", "(^|[-_])review([-_]|$)"),
-            args("pr539-a2-failure-handling-code-review-round2-2026-10-12", "(^|[-_])review([-_]|$)"),
-            args("abc-commit-review", "(^|[-_])review([-_]|$)"),
-            args("test-suite-compression-P2-reduced-round2-critique", "(^|[-_])critique([-_]|$)"),
-            args("210-gate-r1-answers-sam-2026-10-17", "(^|[-_])gate([-_]|$)"),
-            args("215-fix-check-dd95743fa", "(^|[-_])fix-check([-_]|$)"),
-            args("232-research-24", "-research-[0-9]+$"),
-            args("confirm-dsr6a-431c62543-2026-10-17", "(^|[-_])confirm([-_]|$)"),
-            args("225-plan-audit-r1", "(^|[-_])audit([-_]|$)"));
+            args("nexus-5b9v0-collision-guard-review-round4", "(^|[-_.: ])review([-_.: ]|$)"),
+            args("pr539-a2-failure-handling-code-review-round2-2026-10-12", "(^|[-_.: ])review([-_.: ]|$)"),
+            args("abc-commit-review", "(^|[-_.: ])review([-_.: ]|$)"),
+            args("test-suite-compression-P2-reduced-round2-critique", "(^|[-_.: ])critique([-_.: ]|$)"),
+            args("210-gate-r1-answers-sam-2026-10-17", "(^|[-_.: ])gate([-_.: ]|$)"),
+            args("215-fix-check-dd95743fa", "(^|[-_.: ])fix-check([-_.: ]|$)"),
+            args("232-research-24", "-research-[0-9]+(\\.md)?$"),
+            args("232-research-24.md", "-research-[0-9]+(\\.md)?$"),
+            args("confirm-dsr6a-431c62543-2026-10-17", "(^|[-_.: ])confirm([-_.: ]|$)"),
+            args("225-plan-audit-r1", "(^|[-_.: ])audit([-_.: ]|$)"));
     }
 
     private static org.junit.jupiter.params.provider.Arguments args(String title, String firstPattern) {
@@ -271,14 +305,17 @@ class MemoryRepositoryReplacesTest {
         // The first-match message names the earliest pattern. code-review and commit-review titles
         // contain the token review, so "review" names them; they stay in the table as explicit entries.
         assertThat(dev.nexus.service.db.AuditTags.titlePatternOf("x-code-review-y"))
-            .contains("(^|[-_])review([-_]|$)");
+            .contains("(^|[-_.: ])review([-_.: ]|$)");
         assertThat(dev.nexus.service.db.AuditTags.TITLE_PATTERN_SOURCES).hasSize(9);
     }
 
     @ParameterizedTest
     @ValueSource(strings = {
         "code-review-nexus-d9xt2", "critique-wbfpw28-r3", "nexus-1si7z-critique-round2-2026-07-12",
-        "Critique-X", "x_review", "review"})
+        "Critique-X", "x_review", "review",
+        // a .md suffix, ':' and a space are boundaries too (the first review's survey)
+        "nexus-sdp0u-round1-critique.md", "nexus-9qq85-phase1-code-review.md",
+        "qc4p1-substantive-critique.md", "rdr-238-gate.md", "gate:x", "review of x"})
     void refuses_theRealUntaggedAuditTitles(String title) {
         String t = tenant(); String p = project();
         put(t, p, title, "body", "");
@@ -407,5 +444,110 @@ class MemoryRepositoryReplacesTest {
             .isInstanceOf(RuntimeException.class);
 
         assertThat(snapshot(t, p)).as("the delete rolled back with the failed insert").isEqualTo(before);
+    }
+
+    // ── The FOR UPDATE lock: two replaces of one target cannot both succeed ───
+
+    /**
+     * tx1 holds the row lock on the target (it locked it FOR UPDATE and deleted it, as a replace does)
+     * and stays open. tx2 replaces the same target and must BLOCK on that lock, in the SELECT ... FOR
+     * UPDATE; once tx1 commits, tx2 re-reads, finds the row gone and is refused as missing. Without
+     * {@code .forUpdate()} tx2 reads the target from its snapshot, runs on, and stops at its own DELETE
+     * with a different message ("affected 0 rows"), and the wait below never sees a blocked FOR UPDATE.
+     * No sleep stands in for synchronisation: the latches order the two sides and pg_stat_activity is
+     * polled, with a deadline, for tx2's wait on the lock.
+     */
+    @Test
+    void twoReplacesOfOneTarget_theSecondBlocksOnTheRowLock_thenIsRefusedAsMissing() throws Exception {
+        String t = tenant(); String p = project();
+        long targetId = put(t, p, "old-note", "old body", "a");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            Future<?> tx1 = pool.submit(() -> scope.withTenant(t, ctx -> {
+                ctx.selectFrom(MEMORY).where(MEMORY.ID.eq(targetId)).forUpdate().fetch();
+                ctx.deleteFrom(MEMORY).where(MEMORY.ID.eq(targetId)).execute();
+                locked.countDown();
+                try {
+                    release.await(60, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return null;
+            }));
+            assertThat(locked.await(30, TimeUnit.SECONDS)).as("tx1 holds the lock").isTrue();
+
+            Future<MemoryRepository.ReplaceResult> tx2 =
+                pool.submit(() -> replace(t, p, "second", "S", "x", "old-note"));
+
+            assertThat(awaitBackendWaitingOnALockInASelectForUpdate())
+                .as("tx2 blocked on the row lock inside its SELECT ... FOR UPDATE").isTrue();
+            assertThat(tx2.isDone()).as("tx2 has not returned while tx1 holds the lock").isFalse();
+
+            release.countDown();
+            tx1.get(30, TimeUnit.SECONDS);
+
+            assertThatThrownBy(() -> tx2.get(30, TimeUnit.SECONDS))
+                .isInstanceOf(ExecutionException.class)
+                .cause()
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("no row titled 'old-note'");
+            assertThat(live(t, p, "second")).as("the refused second replace wrote nothing").isEmpty();
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    /** Polls (bounded) for a backend of the service role waiting on a lock in a statement with FOR UPDATE. */
+    private boolean awaitBackendWaitingOnALockInASelectForUpdate() throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        try (Connection su = pg.createConnection("");
+             Statement st = su.createStatement()) {
+            while (System.nanoTime() < deadline) {
+                try (ResultSet rs = st.executeQuery(
+                        "SELECT count(*) FROM pg_stat_activity WHERE usename = '" + SVC_ROLE + "' "
+                        + "AND wait_event_type = 'Lock' AND lower(query) LIKE '%for update%'")) {
+                    rs.next();
+                    if (rs.getInt(1) > 0) return true;
+                }
+                java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(20));
+            }
+        }
+        return false;
+    }
+
+    // ── The delete must affect exactly one row ────────────────────────────────
+
+    /**
+     * A BEFORE DELETE trigger that returns NULL cancels the delete for one title: the DELETE reports 0
+     * rows although the row is locked and visible. The replace must refuse and roll back, never write the
+     * new row and echo content as deleted that was not.
+     */
+    @Test
+    void aDeleteThatAffectsNoRow_isRefused_andNothingIsWritten() throws Exception {
+        String t = tenant(); String p = project();
+        put(t, p, "cancel-delete-target", "body that survives", "a");
+        List<Row> before = snapshot(t, p);
+        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+            st.execute("CREATE OR REPLACE FUNCTION nexus.cancel_delete_for_test() RETURNS trigger AS $$ "
+                + "BEGIN IF OLD.title = 'cancel-delete-target' THEN RETURN NULL; END IF; RETURN OLD; END $$ "
+                + "LANGUAGE plpgsql");
+            st.execute("CREATE TRIGGER cancel_delete_for_test BEFORE DELETE ON nexus.memory "
+                + "FOR EACH ROW EXECUTE FUNCTION nexus.cancel_delete_for_test()");
+        }
+        try {
+            assertThatThrownBy(() -> replace(t, p, "new-note", "N", "x", "cancel-delete-target"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("affected 0 rows")
+                .hasMessageContaining("cancel-delete-target");
+            assertThat(snapshot(t, p)).as("nothing written, nothing deleted").isEqualTo(before);
+        } finally {
+            try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+                st.execute("DROP TRIGGER IF EXISTS cancel_delete_for_test ON nexus.memory");
+                st.execute("DROP FUNCTION IF EXISTS nexus.cancel_delete_for_test()");
+            }
+        }
     }
 }

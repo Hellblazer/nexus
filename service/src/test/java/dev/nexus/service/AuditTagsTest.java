@@ -41,15 +41,15 @@ class AuditTagsTest {
     private static final Set<String> DECISION_TAGS =
         Set.of("kind:gate", "gate", "critique", "research", "fix-check", "commit-review");
     private static final List<String> DECISION_PATTERNS = List.of(
-        "(^|[-_])review([-_]|$)",
-        "(^|[-_])code-review([-_]|$)",
-        "(^|[-_])commit-review([-_]|$)",
-        "(^|[-_])critique([-_]|$)",
-        "(^|[-_])gate([-_]|$)",
-        "(^|[-_])fix-check([-_]|$)",
-        "-research-[0-9]+$",
-        "(^|[-_])confirm([-_]|$)",
-        "(^|[-_])audit([-_]|$)");
+        "(^|[-_.: ])review([-_.: ]|$)",
+        "(^|[-_.: ])code-review([-_.: ]|$)",
+        "(^|[-_.: ])commit-review([-_.: ]|$)",
+        "(^|[-_.: ])critique([-_.: ]|$)",
+        "(^|[-_.: ])gate([-_.: ]|$)",
+        "(^|[-_.: ])fix-check([-_.: ]|$)",
+        "-research-[0-9]+(\\.md)?$",
+        "(^|[-_.: ])confirm([-_.: ]|$)",
+        "(^|[-_.: ])audit([-_.: ]|$)");
 
     private record Parsed(Set<String> tags, List<String> patterns) {}
 
@@ -118,7 +118,7 @@ class AuditTagsTest {
         moreTags.add("review");
         assertThat(AuditTags.AUDIT_TAGS).isNotEqualTo(moreTags);
         List<String> morePatterns = new ArrayList<>(p.patterns());
-        morePatterns.add("(^|[-_])audit([-_]|$)");
+        morePatterns.add("(^|[-_.: ])audit([-_.: ]|$)");
         assertThat(AuditTags.TITLE_PATTERN_SOURCES).isNotEqualTo(morePatterns);
         Set<String> fewerTags = new HashSet<>(p.tags());
         fewerTags.remove("research");
@@ -157,7 +157,11 @@ class AuditTagsTest {
             "pr539-a2-failure-handling-code-review-round2-2026-10-12",
             "test-suite-compression-P2-reduced-round2-critique", "210-gate-r1-answers-sam-2026-10-17",
             "215-fix-check-dd95743fa", "232-research-24", "x_review", "review", "Critique-X",
-            "CODE-REVIEW-1", "abc-commit-review"}) {
+            "CODE-REVIEW-1", "abc-commit-review",
+            // a .md suffix, ':' and a space are boundaries too (the first review's survey)
+            "nexus-sdp0u-round1-critique.md", "nexus-9qq85-phase1-code-review.md",
+            "qc4p1-substantive-critique.md", "rdr-238-gate.md", "gate:x", "review of x",
+            "238-research-9.md", "232-research-24"}) {
             assertThat(AuditTags.titlePatternOf(title)).as("title %s", title).isPresent();
         }
     }
@@ -168,7 +172,8 @@ class AuditTagsTest {
             null, "", "reviewer-notes", "research-notes", "preview", "previewer-plan", "gates-notes",
             "gated-release", "critiques-index", "238-research-notes", "238-research-9-notes",
             "continuation-state", "rdr-238-a2-read-sample", "project_art_is_the_founding_use_case",
-            "chas-test-host-howto"}) {
+            "chas-test-host-howto", "confirmation-plan", "auditor-notes", "reviewer-notes.md",
+            "238-research-9.md-notes", "238-research-9.mdx"}) {
             Optional<String> hit = AuditTags.titlePatternOf(title);
             assertThat(hit).as("title %s", title).isEmpty();
         }
@@ -176,8 +181,8 @@ class AuditTagsTest {
 
     @Test
     void firstMatchingPatternIsNamed() {
-        assertThat(AuditTags.titlePatternOf("critique-x")).contains("(^|[-_])critique([-_]|$)");
-        assertThat(AuditTags.titlePatternOf("232-research-24")).contains("-research-[0-9]+$");
+        assertThat(AuditTags.titlePatternOf("critique-x")).contains("(^|[-_.: ])critique([-_.: ]|$)");
+        assertThat(AuditTags.titlePatternOf("232-research-24")).contains("-research-[0-9]+(\\.md)?$");
     }
 
     @Test
@@ -185,5 +190,23 @@ class AuditTagsTest {
         String longTitle = "a-".repeat(20_000) + "notes";
         assertThat(AuditTags.titlePatternOf(longTitle)).isEmpty();
         assertThat(AuditTags.titlePatternOf(longTitle + "-review")).isPresent();
+    }
+
+    /**
+     * '$' means "end, or before a final \n" in Python; Pattern.UNIX_LINES gives Java the same meaning.
+     * Without it Java's '$' also matches before a final \r, \u0085, \u2028 or \u2029 and the two sides
+     * classify such a title differently. tests/test_audit_tags_table.py pins the same table of cases.
+     */
+    @Test
+    void dollarMatchesOnlyBeforeAFinalNewline_asInPython() {
+        // classified as audit: space and a final \n are boundaries
+        for (String title : new String[] {"x-gate ", "x-gate\n", "x-review\n", "232-research-24\n"}) {
+            assertThat(AuditTags.titlePatternOf(title)).as("title %s", title.replace("\n", "\\n")).isPresent();
+        }
+        // not audit: \r, NEL and the Unicode separators are not boundaries
+        for (String title : new String[] {"x-gate\r", "x-gate\u0085", "x-gate\u2028", "x-gate\u2029",
+                                          "232-research-24\r", "232-research-24\u0085"}) {
+            assertThat(AuditTags.titlePatternOf(title)).as("title %s", title.replace("\r", "\\r")).isEmpty();
+        }
     }
 }

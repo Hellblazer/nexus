@@ -28,13 +28,16 @@
 # any pattern in [audit] title_patterns below, even with clean tags. The
 # matching rule, stated here and in the Java javadoc: each entry is one regular
 # expression, matched anywhere in the title (a search, not a full match),
-# case-insensitively and ASCII-only (Java CASE_INSENSITIVE; Python re.I|re.A).
-# A token pattern is a whole word bounded by the start or end of the title or
-# by '-' or '_' on each side, so "review" matches "code-review-x" and
-# "x_review" but not "reviewer-notes" or "preview". No entry may put a
-# quantifier (star, plus, brace) after a group: Java's regex engine recurses
-# per character on such a group and overflows the stack. The (^|[-_]) prefix
-# is a group with no quantifier, which is safe. A false refusal is the safe
+# case-insensitively and ASCII-only (Java CASE_INSENSITIVE | UNIX_LINES;
+# Python re.I|re.A; UNIX_LINES makes Java's $ match only before a final \n,
+# as Python's does). A token pattern is a whole word bounded by the start or
+# end of the title or by one of '-', '_', '.', ':' or a space on each side, so
+# "review" matches "code-review-x", "x_review", "nexus-1si7z-code-review.md",
+# "gate:x" and "review of x" but not "reviewer-notes" or "preview". The -research-N
+# pattern also accepts a .md suffix. No entry may put a quantifier (star, plus,
+# brace) after a group: Java's regex engine recurses per character on such a
+# group and overflows the stack. The (^|[-_.: ]) prefix is a group with no
+# quantifier, and (\.md)? is one optional group, which is safe. A false refusal is the safe
 # direction: the writer falls back to a plain put, so a pattern may catch an
 # ordinary note (gate-jar-howto) and cost one extra step, never data.
 #
@@ -92,13 +95,13 @@ emit = { series = "per-commit review records (inferred from titles, RDR-238 rese
 # Title patterns, one per line: the Java pin (AuditTagsTest) reads this array
 # with a line parser, so keep one quoted string per line and no comments inside.
 title_patterns = [
-  "(^|[-_])review([-_]|$)",
-  "(^|[-_])code-review([-_]|$)",
-  "(^|[-_])commit-review([-_]|$)",
-  "(^|[-_])critique([-_]|$)",
-  "(^|[-_])gate([-_]|$)",
-  "(^|[-_])fix-check([-_]|$)",
-  "-research-[0-9]+$",
-  "(^|[-_])confirm([-_]|$)",
-  "(^|[-_])audit([-_]|$)",
+  "(^|[-_.: ])review([-_.: ]|$)",
+  "(^|[-_.: ])code-review([-_.: ]|$)",
+  "(^|[-_.: ])commit-review([-_.: ]|$)",
+  "(^|[-_.: ])critique([-_.: ]|$)",
+  "(^|[-_.: ])gate([-_.: ]|$)",
+  "(^|[-_.: ])fix-check([-_.: ]|$)",
+  "-research-[0-9]+(\\.md)?$",
+  "(^|[-_.: ])confirm([-_.: ]|$)",
+  "(^|[-_.: ])audit([-_.: ]|$)",
 ]

@@ -953,7 +953,7 @@ public final class MemoryRepository {
      * RDR-238 Phase 1 Step 1 (bead nexus-qo7ie.6): write the new row and delete the row whose title is
      * {@code replacesTitle}, in ONE {@link TenantScope#withTenant} transaction, so there is no moment
      * at which both rows, or neither, are visible. The new row goes through {@link #doUpsert} exactly
-     * as {@link #upsert} writes it (an incumbent at the new title is overwritten, as a plain put does).
+     * as {@link #upsert} writes it (a plain put overwrites an incumbent at the title; this path refuses it).
      *
      * <p>{@code replacesTitle} is an exact title in the put's own tenant and project. It is never an
      * id: a numeric title such as {@code 238} is a title, and a title that exists only in another
@@ -974,7 +974,12 @@ public final class MemoryRepository {
      *   <li>The target's title matches a pattern in {@link AuditTags#TITLE_PATTERN_SOURCES} (the
      *       backstop for older audit rows that carry no tag), even with clean tags:
      *       {@link IllegalStateException}.</li>
+     *   <li>A row (live or quarantined) already has the NEW title: {@link IllegalStateException}. The
+     *       upsert would overwrite it with no echo. The check locks that row {@code FOR UPDATE}; a row
+     *       inserted at the new title by another transaction between the check and the write is still
+     *       overwritten, as in a plain put.</li>
      * </ol>
+     * The delete must affect exactly one row, else {@link IllegalStateException} and nothing is written.
      * The target row is locked {@code FOR UPDATE}, so two replaces of one target cannot both succeed:
      * the second finds it gone and is refused as missing.
      *
@@ -1027,8 +1032,31 @@ public final class MemoryRepository {
                     "replaces refused: row '" + replacesTitle + "' looks like an audit record: its title "
                     + "matches the audit-record title pattern " + pattern.get() + " (nothing written)");
             }
+            // A row already at the NEW title would be overwritten by the upsert below with no echo of
+            // what it held, while the echo is the writer's only record of what was removed. Refuse
+            // (no NOT_QUARANTINED predicate: a quarantined incumbent is overwritten too). The target
+            // cannot be this row: replacesTitle differs from title (checked above).
+            Long incumbent = ctx.select(MEMORY.ID)
+                                .from(MEMORY)
+                                .where(MEMORY.PROJECT.eq(project)
+                                    .and(MEMORY.TITLE.eq(title)))
+                                .forUpdate()
+                                .fetchOne(MEMORY.ID);
+            if (incumbent != null) {
+                throw new IllegalStateException(
+                    "replaces refused: a row titled '" + title + "' already exists in project '" + project
+                    + "'; writing it would overwrite that row without echoing it. Replace or delete it "
+                    + "first, or choose another title (nothing written)");
+            }
             String replacedContent = target.getContent();
-            ctx.deleteFrom(MEMORY).where(MEMORY.ID.eq(target.getId())).execute();
+            int deleted = ctx.deleteFrom(MEMORY).where(MEMORY.ID.eq(target.getId())).execute();
+            if (deleted != 1) {
+                // The row is locked FOR UPDATE, so 0 means a DELETE policy or trigger hid it. Writing the
+                // new row now would echo content as deleted that was not: roll everything back.
+                throw new IllegalStateException(
+                    "replaces refused: deleting '" + replacesTitle + "' affected " + deleted
+                    + " rows, expected 1 (nothing written)");
+            }
             long id = doUpsert(ctx, tenant, project, title, content, tags, session, agent, ttlDays);
             log.info("event=memory_replace tenant={} project={} replaced_title={} replaced_id={} id={} title={}",
                      tenant, project, replacesTitle, target.getId(), id, title);

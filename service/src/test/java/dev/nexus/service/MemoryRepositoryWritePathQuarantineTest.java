@@ -110,19 +110,20 @@ class MemoryRepositoryWritePathQuarantineTest {
     }
 
     @Test
-    void replaceMemory_onQuarantinedMarkedNewTitle_isAConflictBranchWrite_restoresLikeUpsert() {
-        // RDR-238 (nexus-qo7ie.6): the NEW row of a replace goes through doUpsert, so writing it
-        // over a quarantined incumbent is the same decision to keep that title as a plain put.
+    void replaceMemory_onQuarantinedMarkedNewTitle_isRefused_theIncumbentStaysQuarantined() {
+        // RDR-238 (nexus-qo7ie.6): a replace refuses when any row, a quarantined one included, already
+        // holds the NEW title; the upsert would restore it and overwrite it with no echo.
         String t = tenant(); String p = project();
         long id = quarantinedMarked(t, p, "keep");
         repo.upsert(t, p, "old-note", "old body", "t", null, null, 90);
 
-        var res = repo.replaceMemory(t, p, "keep", "new content", "t", null, null, 45, "old-note");
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> repo.replaceMemory(t, p, "keep", "new content", "t", null, null, 45, "old-note"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("already exists");
 
-        assertThat(res.id()).isEqualTo(id);
-        assertRestoredByWrite(repo.findById(t, id).orElseThrow(), id, "new content", 45);
-        assertThat(repo.listQuarantined(t, p)).isEmpty();
-        assertThat(repo.getAll(t, p)).extracting(MemoryRecord::getTitle).containsExactly("keep");
+        assertThat(repo.listQuarantined(t, p)).extracting(MemoryRecord::getId).containsExactly(id);
+        assertThat(repo.getAll(t, p)).extracting(MemoryRecord::getTitle).containsExactly("old-note");
     }
 
     @Test
