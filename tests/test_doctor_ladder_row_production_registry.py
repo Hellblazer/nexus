@@ -167,8 +167,9 @@ def test_the_interactive_run_the_remedy_names_clears_every_not_checked_entry(ins
 
     row = _row()
     assert _not_checked(row) == "", row.detail
+    head = row.detail.split("converged per a completion record")[0]
     for rung in REFUSABLE:
-        assert rung not in row.detail, (rung, row.detail)
+        assert rung not in head, (rung, row.detail)
     assert install.scan_reads == [], "the row answered from the records, without a scan"
     # rdr192-manifest-backfill has no record here and says so: pending, which `nx upgrade` clears.
     assert "rdr192-manifest-backfill" in row.detail
@@ -186,3 +187,23 @@ def test_a_walk_over_the_production_registry_under_auto_lists_nothing_once_recor
     assert {r.outcome for r in report.runs} == {RungOutcome.ALREADY_RECORDED}, [
         (r.name, r.outcome, r.detail) for r in report.runs]
     assert install.scan_reads == []
+
+
+def test_a_row_answered_from_a_record_says_so_and_when_the_record_was_made(install: _Install) -> None:
+    """A record can go stale (an older client writes comma-string tags or movable queue rows afterwards), so
+    a rung that answers 'converged' from one without reading the data says that in the row, with the record's
+    time. A rung that read the data (manifest-section-labels here) is not named."""
+    refusing = LadderRegistry(tuple(r for r in default_registry() if r.name in REFUSABLE))
+    LadderRunner(refusing, install.ledger, package_version_fn=lambda: "9.9.9").run()
+    records = install.ledger.completions()
+    answered = (RUNG_NOTE_TAGS_ARRAY, RUNG_ASPECT_QUEUE_TUPLES)
+    assert all(records[r].verified_at for r in answered), "non-vacuity: the records carry a time"
+
+    row = _row()
+
+    _, _, note = row.detail.partition("converged per a completion record")
+    assert note, row.detail
+    assert "not a read of the data" in row.detail and "stale" in note
+    for rung in answered:
+        assert f"{rung} (recorded {records[rung].verified_at})" in note, (rung, row.detail)
+    assert RUNG_MANIFEST_SECTION_LABELS not in note

@@ -1001,3 +1001,25 @@ def test_an_unattended_converge_on_a_local_engine_and_an_interactive_one_on_a_ma
     with bound(Deadline(900)):
         clocked.rung(managed_fn=lambda: True).converge(_Reporter())
     assert clocked.censuses >= 1
+
+
+def test_an_unattended_verify_on_a_managed_service_censuses_nothing_and_defers() -> None:
+    """detect() answered converged from the record while the walk's own ledger did not hold it, so verify()
+    is reached unattended against a managed service: it must not run the census converge declined. A
+    deferral, never a failure; local engines and interactive runs still read."""
+    from nexus.upgrade_ladder.unattended import unattended_run
+
+    tenant = FakeTenant({"knowledge__a": 7})
+    with unattended_run():
+        rung = tenant.rung(managed_fn=lambda: True)
+        assert rung.verify() is False
+    assert rung.verify_deferred() is True
+    assert "interactive `nx upgrade`" in rung.verify_detail()
+    assert tenant.censuses == 0, "the guard refuses before any census read"
+
+    for managed, unattended in ((False, True), (True, False)):
+        t = FakeTenant({"knowledge__a": 7})
+        with unattended_run(unattended):
+            r = t.rung(managed_fn=lambda m=managed: m)
+            r.verify()
+        assert t.censuses >= 1 and not r.verify_deferred()

@@ -48,11 +48,14 @@ class RungStatus:
     ``converged`` — the data is already at this rung's target state.
     ``pending_detail`` — human-readable detail for the doctor surface when
     the rung is pending (what remains, roughly how much).
+    ``from_record`` — set (to when the record says it was verified) only when ``converged`` was answered from
+    the completion record, with no read of the data it covers; empty when detect() looked at the data.
     """
 
     applicable: bool
     converged: bool
     pending_detail: str = ""
+    from_record: str = ""
 
     @property
     def pending(self) -> bool:

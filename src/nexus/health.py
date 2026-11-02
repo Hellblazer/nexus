@@ -2979,7 +2979,7 @@ def opencv_pair_uninstall_commands() -> tuple[str, str]:
 
     py = shlex.quote(sys.executable)
     headless = "opencv-python-headless"
-    pinned = pdf_stack._pins((headless,)).get(headless)
+    pinned = pdf_stack.pinned_version(headless)
     target = shlex.quote(f"{headless}=={pinned}") if pinned else headless
     return (
         f"uv pip uninstall --python {py} opencv-python",
@@ -9610,6 +9610,16 @@ def _check_pending_rungs() -> list[HealthResult]:
         )]
 
     pending = [(name, status) for name, status in statuses if status.pending]
+    # A rung that answered "converged" from its completion record read none of the data it covers, and a record
+    # goes stale if an older client writes comma-string tags or movable queue rows afterwards: say so, with when.
+    answered_from_record = [(name, status.from_record) for name, status in statuses if status.from_record]
+    record_note = ""
+    if answered_from_record:
+        record_note = (
+            "converged per a completion record, not a read of the data (it can be stale if an older client wrote "
+            "to it since): "
+            + ", ".join(f"{name} (recorded {when})" for name, when in answered_from_record)
+        )
     # A rung that declined to read a managed catalog says so with the shared INTERACTIVE_REMEDY text.
     not_checked = [
         name for name, status in statuses
@@ -9619,7 +9629,7 @@ def _check_pending_rungs() -> list[HealthResult]:
         return [HealthResult(
             label="Upgrade ladder",
             ok=True,
-            detail=f"no pending rungs ({len(statuses)} registered)",
+            detail="; ".join(filter(None, [f"no pending rungs ({len(statuses)} registered)", record_note])),
         )]
     parts: list[str] = []
     fixes: list[str] = []
@@ -9641,6 +9651,8 @@ def _check_pending_rungs() -> list[HealthResult]:
             "(manifest-section-labels also keeps a remembered clean scan), and this row then answers from the "
             "record without a read"
         )
+    if record_note:
+        parts.append(record_note)
     return [HealthResult(
         label="Upgrade ladder",
         ok=False,
