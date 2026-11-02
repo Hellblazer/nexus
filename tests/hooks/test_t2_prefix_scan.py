@@ -34,10 +34,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 
+from nexus.hooks import t2_prefix_scan as mod
 from nexus.hooks.t2_prefix_scan import _SNIPPET_LIMIT
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 
@@ -546,6 +549,85 @@ def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
         "scan budget (<= 1.5s) but closer to the 3.0s configured ceiling"
     )
     assert raw_retry == "False", "a clamped timeout must not be retried (it would double the wait)"
+
+
+class _FakeClock:
+    """A monotonic clock the test moves by hand, so a budget edge is exact."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+class _EarlyTimeoutStore:
+    """Stands in for ``HttpMemoryStore``: one namespace of three entries whose
+    ``get`` times out and returns ``early_by`` seconds BEFORE the scan budget
+    is spent, the way a socket read timeout can on Windows (``select`` waking
+    a timer tick ahead of ``time.monotonic``)."""
+
+    def __init__(self, clock: _FakeClock, budget_end: float, early_by: float) -> None:
+        self._clock = clock
+        self._budget_end = budget_end
+        self._early_by = early_by
+        self.get_timeouts: list[float] = []
+        self.list_calls = 0
+
+    def list_entries(self, **_: object) -> list[dict[str, str]]:
+        self.list_calls += 1
+        return [{"title": f"entry-{i}", "timestamp": "2026-01-01T00:00:00Z"} for i in range(3)]
+
+    def get(self, *, timeout: float, **_: object) -> dict[str, str]:
+        self.get_timeouts.append(timeout)
+        self._clock.now = self._budget_end - self._early_by
+        raise httpx.ReadTimeout("simulated early read timeout")
+
+
+@pytest.mark.parametrize("early_by", [0.0, 0.002, 0.016, 0.4])
+def test_a_read_timeout_that_ends_just_short_of_the_budget_issues_no_second_get(
+    monkeypatch: pytest.MonkeyPatch, early_by: float
+) -> None:
+    """nexus-dr57n. The first ``get`` is clamped to the whole budget, so its
+    timeout ends at the budget edge; a clock or socket that lets it end a few
+    milliseconds early left a sliver of budget, the old gate
+    (``monotonic() < deadline``) let a second ``get`` through, and the clamp
+    floor handed it the 0.5s floor, outrunning the budget. A call is only
+    issued when the floor still fits in what is left."""
+    clock = _FakeClock()
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic))
+    budget = 1.5
+    store = _EarlyTimeoutStore(clock, budget_end=clock.now + budget, early_by=early_by)
+    lines = mod._build_output(
+        store,  # type: ignore[arg-type]
+        "nexus",
+        [{"project": "nexus", "last_updated": "2026-01-01T00:00:00Z"}],
+        scan_budget_s=budget,
+        request_timeout_s=3.0,
+    )
+    assert len(store.get_timeouts) == 1, store.get_timeouts
+    assert store.get_timeouts[0] == pytest.approx(budget)
+    assert [ln for ln in lines if "entry-" in ln] == ["  entry-0", "  entry-1", "  entry-2"]
+
+
+def test_a_namespace_is_not_started_with_less_than_a_call_floor_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The namespace gate follows the same rule: a list fetch the budget cannot
+    cover at the floor is not issued, and the skip is reported."""
+    clock = _FakeClock()
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic))
+    store = _EarlyTimeoutStore(clock, budget_end=clock.now, early_by=0.0)
+    lines = mod._build_output(
+        store,  # type: ignore[arg-type]
+        "nexus",
+        [{"project": "nexus", "last_updated": "2026-01-01T00:00:00Z"}],
+        scan_budget_s=mod._HTTP_TIMEOUT_FLOOR / 2,
+        request_timeout_s=3.0,
+    )
+    assert store.list_calls == 0
+    assert store.get_timeouts == []
+    assert any("scan budget exceeded" in ln for ln in lines), lines
 
 
 # ── Scoped to what is rendered (nexus-fow78) ─────────────────────────────────

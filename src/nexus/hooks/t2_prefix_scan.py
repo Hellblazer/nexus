@@ -149,6 +149,25 @@ def _clamped_call_timeout(deadline: float, ceiling: float) -> float:
     remaining = deadline - time.monotonic()
     return max(_HTTP_TIMEOUT_FLOOR, min(ceiling, remaining))
 
+
+def _budget_covers_a_call(deadline: float) -> bool:
+    """True when a request issued now can get at least ``_HTTP_TIMEOUT_FLOOR``
+    out of the scan budget, i.e. the budget is not already spent.
+
+    The gate before every call is this, not ``monotonic() < deadline``. With
+    the bare comparison a sliver of budget (say 8 ms) passed the gate, and
+    ``_clamped_call_timeout`` then lifted that call's timeout to the 0.5 s
+    floor, so the call outran the budget it was meant to respect. It also
+    made the gate depend on the clock's last few milliseconds: a read
+    timeout that ends a hair before the deadline (the first ``get`` is
+    clamped to the whole budget, so its timeout ends at the deadline) left a
+    sliver, and the scan issued a second ``/v1/memory/get`` that
+    ``test_get_call_timeout_is_clamped_to_the_remaining_scan_budget`` forbids
+    (nexus-dr57n: timeouts 1.4978, then the 0.5 floor).
+    """
+    return deadline - time.monotonic() >= _HTTP_TIMEOUT_FLOOR
+
+
 #: Engine timestamp format: UTC second-precision ISO
 #: (MemoryHandler.recordToMap / MemoryRepository.UTC_SECOND on the Java side).
 _TIMESTAMP_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -239,7 +258,11 @@ def _build_output(
     for a run of empty namespaces. The deadline is also checked BETWEEN
     per-entry snippet fetches (not only between namespaces): once the
     deadline passes mid-namespace, remaining snippet ranks render
-    title-only instead of issuing another network call.
+    title-only instead of issuing another network call. "Passes" means
+    less than ``_HTTP_TIMEOUT_FLOOR`` is left (``_budget_covers_a_call``),
+    not that the clock has crossed the deadline: a read timeout clamped to
+    the whole budget ends at the deadline give or take a few milliseconds
+    (nexus-dr57n), and a sliver of budget must not buy another call.
 
     **Every HTTP call's own timeout is clamped to what's left of the
     scan budget, AND opts out of the mixin's default retry-on-
@@ -271,7 +294,7 @@ def _build_output(
     for idx, ns_row in enumerate(capped_namespaces):
         if total >= _HARD_CAP:
             break
-        if time.monotonic() >= deadline:
+        if not _budget_covers_a_call(deadline):
             remaining = len(capped_namespaces) - idx
             lines.append(
                 f"  … (scan budget exceeded — {remaining} namespace(s) not checked)"
@@ -309,7 +332,7 @@ def _build_output(
             ns_rank += 1
             title = s.get("title", "") or ""
             if ns_rank <= _SNIPPET_LIMIT:
-                if time.monotonic() < deadline:
+                if _budget_covers_a_call(deadline):
                     snip = _snippet_for(
                         store, ns, title,
                         timeout=_clamped_call_timeout(deadline, request_timeout_s),
