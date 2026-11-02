@@ -72,6 +72,15 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * locking the chunk rows in key order first), and the cost is paid by every manifest write, not only the rare
  * race.
  *
+ * <p>Not covered, by design, and this is not a closed list of what the clear leaves behind: (a) a sequential
+ * departure. P wrote the row's span; A (no span of its own) and B (a span that differs from the row's) also hold
+ * the chunk. P leaves: two holders remain, nothing is cleared. B leaves: A is the sole holder and lacks the
+ * field, but B's own span differs from the row's, so B is not the writer and the field stays; A's hit then shows
+ * P's departed span. The test cannot tell P's departed span from a legacy holder's row-only span, so it errs
+ * toward keeping. (b) A zero start: the Python client sends a {@code chunk_start_char} of 0 as NULL
+ * ({@code mcp_infra.py} and {@code note_write.py} use {@code or None}), so a shared first chunk's true 0 start
+ * reads as "never had the field" and can be cleared from the row. The client fix is nexus-qe78r.
+ *
  * <p>Maintenance, not a client write: only {@code metadata} is set, never {@code last_written_at}, so the
  * reaper's grace window does not restart (nexus-wbfpw.43). Each cleared row is still a chunk-row UPDATE, and
  * a chunk-row UPDATE re-inserts the row into the vector index (vectors-021), so a purge that clears many
@@ -90,7 +99,7 @@ final class DepartedWriterSpans {
     /** Chashes per statement, the bind budget {@code PgVectorRepository.SOURCE_URI_JOIN_BATCH} also uses. */
     static final int BATCH = 300;
 
-    /** Departing-row tuples per statement: six binds each, in one CTE the statement references four times. */
+    /** Departing-row tuples per statement: six binds each, in one CTE the statement references eight times (nine in the trash variant). */
     private static final int MAX_TUPLES = 1000;
 
     private DepartedWriterSpans() {

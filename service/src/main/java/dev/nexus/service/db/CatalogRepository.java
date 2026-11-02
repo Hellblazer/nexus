@@ -5722,7 +5722,8 @@ public final class CatalogRepository {
         // nexus-pvkbv: a chunk this document held and no longer does (edited so it dropped it, or now under
         // another collection) keeps the span this document wrote on the chunk row; the row records no writer, so
         // a sole remaining holder with no span of its own would show it. After the delete: the delete's trigger
-        // has locked these chunk rows already (see DepartedWriterSpans).
+        // has locked only those of these chunk rows that are older than an hour, in key order; a younger row is
+        // locked by nothing before the clear's UPDATE, and a deadlock there retries (see DepartedWriterSpans).
         if (removed != null && !removed.isEmpty()) {
             DepartedWriterSpans.clear(ctx, tenant,
                 DepartedWriterSpans.departed(removed, collection, newChashes(rows)));

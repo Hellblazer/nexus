@@ -1120,7 +1120,8 @@ final class ManifestLabelStage {
      * import put another chunk at its position. It clears a field when exactly one holder remains, that
      * holder's manifest rows lack the field, and the departing document could have written the row's value
      * (its own manifest value is absent or equal to the row's), so the "not shared" case above stays right:
-     * the row's span is then the sole holder's or nobody's. What is left:
+     * the row's span is then the sole holder's or nobody's. The list below is what is known to be left, not a
+     * closed list:
      * <ul>
      *   <li>a chunk row written before that clear existed, whose writer had already left: it still carries
      *       the departed writer's span until its sole holder is re-indexed with force (an incremental index
@@ -1132,7 +1133,13 @@ final class ManifestLabelStage {
      *       each still sees the other, and neither clears;
      *   <li>the clear erases a span that really was the sole holder's own when its manifest lacks it, the
      *       chunk had another holder at the time, and the departing document had no value of its own: the
-     *       same safe direction as dropping the field here.
+     *       same safe direction as dropping the field here;
+     *   <li>a sequential departure: P wrote the row's span, A (no span) and B (a span that differs from the
+     *       row's) also hold the chunk; P leaves (two holders remain, no clear), then B leaves (B's span differs
+     *       from the row's, so B is not the writer and the field stays), and A's hit shows P's departed span;
+     *       accepted, because P's departed span cannot be told from a legacy holder's row-only span;
+     *   <li>the Python client sends a {@code chunk_start_char} of 0 as NULL ({@code or None}), so a shared first
+     *       chunk's true 0 start can be cleared from the row; the client fix is nexus-qe78r.
      * </ul>
      */
     static void putSpan(Map<String, Object> row, Occurrence o) {
