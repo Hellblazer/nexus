@@ -14,16 +14,31 @@ checks every outcome, with nothing written to the operator's ~/.claude:
   service as the operator would: the restart mail expires with its TTL, and nothing here
   asks a session to write anything permanent, but the harness does not police it;
 - a private tmux server (``-L``, ``-f /dev/null``, a bare bash in every pane);
-- three sessions in a scratch git repo, each told a code word:
+- six sessions in a scratch git repo. Three restart, each told a code word:
   ``rs_alpha`` (launched with the conexus channel, left at its prompt with whatever
   suggested prompt Claude Code draws in dim text), ``rs_draft`` (the channel, with a
   real unsent draft typed into its prompt) and ``rs_nochan`` (no channel, left at its
-  prompt);
-- the script under test runs from a fourth pane with ``--fresh --fallback-resume
-  --no-update``, exactly as the operator runs it, minus the release install.
+  prompt). Three must be left running (nexus-8m0ho): ``rs_busy`` (mid-turn in a
+  foreground sleep past both of the script's waits), ``rs_shell`` (at its prompt with a
+  background shell open, status ``shell``) and ``rs_paste`` (a bracketed paste in its
+  prompt, shown as a ``[Pasted text #N]`` placeholder, which is a draft and not dim text);
+- the conexus and sn plugins come from a local-directory marketplace named
+  nexus-plugins, copied from the operator's installed cache (read only) and installed
+  with the claude CLI;
+- the script under test runs from a fourth pane as ``--nx X --fresh --skip-engine-gate
+  --fallback-resume --no-update`` with ``TMUX_PANE`` set to rs_alpha's pane, so rs_alpha is
+  the caller and must go last. X is the installed version's next patch; ``--repo`` names a
+  scratch release repo whose tag vX holds the engine floor and whose reinstall-tool.sh is
+  a stand-in that publishes X to the sandbox marketplace and makes the nx on PATH report X
+  (everything else goes to the real nx). The release install is the one step not real.
 
-Expected: alpha and draft are asked by mail and nochan by typing; all three write a
-handoff and restart with a new session id whose own argv carries ``-- cat <handoff>``;
+Expected: alpha, draft and paste are asked by mail and nochan by typing; all four write a
+handoff; the install runs after the last handoff and before the first exit, and moves
+both plugins to X; alpha, draft and nochan restart with a new session id whose own argv
+carries ``-- cat <handoff>`` and whose MCP servers run conexus X (they ran the old
+version before); busy and shell are skipped at the handoff and again at the restart,
+paste is skipped at its restart for its placeholder, and all three are the same process
+on the same session afterwards; alpha's exit comes after every other session's outcome;
 neither mailed session's old transcript holds a typed ask or the draft as a prompt; the
 draft is still in rs_draft's prompt from its complete handoff until its exit, is saved at
 the restart, and is read by the fresh rs_draft with its handoff; all three then answer
@@ -71,12 +86,27 @@ REPO = Path(__file__).resolve().parents[3]
 #: how its positive control runs: the pre-fix script must fail here on the ghost case.
 SCRIPT = Path(os.environ.get("NX_RESTART_SANDBOX_SCRIPT") or REPO / "scripts" / "claude-restart-sessions")
 WORDS = {"rs_alpha": "HELIOTROPE", "rs_draft": "MARZIPAN", "rs_nochan": "QUARTZITE"}
+#: Sessions the roll must leave running: mid-turn (busy), at the prompt with a background shell
+#: open (shell), and holding a pasted-text placeholder as its draft (paste) (nexus-8m0ho).
+HELD = ("rs_busy", "rs_shell", "rs_paste")
+SESSIONS = (*WORDS, *HELD)
 #: Sessions launched with the conexus channel; the rest are asked by typing.
-CHANNEL = {"rs_alpha", "rs_draft"}
+CHANNEL = {"rs_alpha", "rs_draft", *HELD}
+#: The session the script is started from (its TMUX_PANE): it must go last.
+CALLER = "rs_alpha"
 CHANNEL_FLAGS = "--channels plugin:conexus@nexus-plugins"
-PLUGIN = "conexus@nexus-plugins"
+MARKET = "nexus-plugins"
+#: Every plugin the script's --nx install checks (its PLUGINS); the sandbox marketplace holds both.
+MARKET_PLUGINS = ("conexus", "sn")
 DRAFT_TEXT = "this is an unsent draft the restart must not clobber"
+#: Pasted with bracketed paste: Claude Code shows a paste this long as a [Pasted text #N] placeholder.
+PASTE_TEXT = "\n".join(f"pasted line {i} the restart cannot save from the pane" for i in range(1, 21))
+#: --wait for the roll: how long rs_busy and rs_shell are waited for at each phase.
+WAIT = 120
+#: rs_busy's foreground sleep: past both of its waits (handoff and restart) and the install.
+BUSY_SLEEP = 560
 OPERATOR_HOME = Path.home()
+SANDBOX_PY = Path(__file__).resolve()
 
 
 #: The harness's own pane reader: always this checkout's script, never the one under test,
@@ -92,6 +122,27 @@ def load_script():
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+def bump_market(market: Path, version: str) -> None:
+    """Publish *version* to the sandbox marketplace: each plugin as its own folder ``<plugin>-<version>``
+    copied from ``base/<plugin>`` with that version in its plugin.json, and the manifest pointing there.
+
+    A plugin from a directory marketplace runs from its source folder, not the versioned cache
+    (Claude Code 2.1.316), so one folder per version is what lets the folder a session's MCP servers
+    run from name the version it loaded; the old folder stays for the sessions still on it."""
+    for p in MARKET_PLUGINS:
+        dest = market / f"{p}-{version}"
+        if not dest.exists():
+            shutil.copytree(market / "base" / p, dest, symlinks=True)
+        f = dest / ".claude-plugin" / "plugin.json"
+        d = json.loads(f.read_text(encoding="utf-8"))
+        d["version"] = version
+        f.write_text(json.dumps(d, indent=2) + "\n", encoding="utf-8")
+    (market / ".claude-plugin" / "marketplace.json").write_text(json.dumps(
+        {"name": MARKET, "owner": {"name": "restart sandbox"},
+         "plugins": [{"name": p, "source": f"./{p}-{version}", "version": version} for p in MARKET_PLUGINS]}),
+        encoding="utf-8")
 
 
 class Sandbox:
@@ -120,6 +171,16 @@ class Sandbox:
         self.env.update(HOME=str(home), NX_NO_TELEMETRY="1", NX_RESTART_CLAUDE=claude, TERM="xterm-256color",
                         CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="1", CLAUDE_CODE_DISABLE_AUTO_MEMORY="1",
                         DISABLE_AUTOUPDATER="1")  # the dim ghost prompt that broke 7.92.0
+        # --nx installs a release: the sandbox's own stand-ins (setup_release) take its place.
+        self.market = home / "market"
+        self.relrepo = home / "release-repo"
+        self.bin = home / "bin"
+        self.installed_marker = home / ".nx-sandbox-installed"
+        self.real_nx = shutil.which("nx") or ""
+        self.real_uv = shutil.which("uv") or ""
+        self.uv_cleans = home / "uv-cache-clean.log"
+        self.env["PATH"] = f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}"
+        self.from_version = self.to_version = ""
 
     # tmux on the private server only
     def tmux(self, *args: str, check: bool = False) -> subprocess.CompletedProcess:
@@ -139,21 +200,11 @@ class Sandbox:
                     for key in {str(self.work), os.path.realpath(self.work)}}
         (self.home / ".claude.json").write_text(
             json.dumps({"hasCompletedOnboarding": True, "projects": projects}), encoding="utf-8")
-        # The conexus plugin, from the operator's installed cache (read only): the channel the
-        # mail ask travels on is its MCP server.
-        plugins = json.loads((OPERATOR_HOME / ".claude" / "plugins" / "installed_plugins.json").read_text(encoding="utf-8"))
-        markets = json.loads((OPERATOR_HOME / ".claude" / "plugins" / "known_marketplaces.json").read_text(encoding="utf-8"))
-        market = PLUGIN.split("@", 1)[1]
-        (self.home / ".claude" / "plugins").mkdir()
-        (self.home / ".claude" / "plugins" / "installed_plugins.json").write_text(json.dumps(
-            {"version": plugins.get("version", 2), "plugins": {PLUGIN: plugins["plugins"][PLUGIN]}}), encoding="utf-8")
-        (self.home / ".claude" / "plugins" / "known_marketplaces.json").write_text(
-            json.dumps({market: markets[market]}), encoding="utf-8")
         (self.home / ".claude" / "settings.json").write_text(
             json.dumps({"skipDangerousModePermissionPrompt": True, "promptSuggestionEnabled": True,
-                        "autoMemoryEnabled": False, "enabledPlugins": {PLUGIN: True},
-                        "extraKnownMarketplaces": {market: {"source": markets[market]["source"], "autoUpdate": False}}}),
-            encoding="utf-8")
+                        "autoMemoryEnabled": False}), encoding="utf-8")
+        self.setup_market()
+        self.setup_release()
         # The operator's nexus config, copied (never printed) so nx and the MCP servers reach the
         # same service; delete_config() removes it in every outcome.
         self.nexus_config.mkdir(parents=True)
@@ -161,6 +212,111 @@ class Sandbox:
         os.chmod(self.nexus_config / "config.yml", 0o600)
         self.tmux("new-session", "-d", "-s", "rs", "-x", "220", "-y", "50", "-n", "ctl", "-c", str(self.work),
                   "bash --noprofile --norc", check=True)
+
+    def claude_cli(self, *args: str) -> None:
+        r = subprocess.run([self.claude, *args], capture_output=True, text=True, env=self.env)
+        if r.returncode != 0:
+            raise RuntimeError(f"claude {' '.join(args)}: exit {r.returncode}: {(r.stdout + r.stderr).strip()[-300:]}")
+
+    def setup_market(self) -> None:
+        """A local-directory marketplace named nexus-plugins holding copies of the operator's installed
+        conexus and sn (read only), installed into the scratch HOME through the claude CLI, so the
+        script's --nx install has a marketplace it can move to a new version."""
+        plugins = json.loads((OPERATOR_HOME / ".claude" / "plugins" / "installed_plugins.json").read_text(encoding="utf-8"))
+        plugins = plugins.get("plugins", plugins)
+        (self.market / ".claude-plugin").mkdir(parents=True)
+        versions = set()
+        for p in MARKET_PLUGINS:
+            entry = plugins[f"{p}@{MARKET}"]
+            entry = entry[0] if isinstance(entry, list) else entry
+            shutil.copytree(entry["installPath"], self.market / "base" / p, symlinks=True)
+            versions.add(str(entry["version"]))
+        if len(versions) != 1:
+            raise RuntimeError(f"the operator's conexus and sn differ in version ({sorted(versions)})")
+        self.from_version = versions.pop()
+        major, minor, patch = (int(x) for x in self.from_version.split(".")[:3])
+        self.to_version = f"{major}.{minor}.{patch + 1}"
+        bump_market(self.market, self.from_version)
+        self.claude_cli("plugin", "marketplace", "add", str(self.market))
+        for p in MARKET_PLUGINS:
+            self.claude_cli("plugin", "install", f"{p}@{MARKET}", "--scope", "user")
+
+    def setup_release(self) -> None:
+        """Stand-ins for what --nx X touches outside the sandbox: a release repo whose tag vX holds the
+        engine floor, a reinstall-tool.sh that records the install and publishes X to the sandbox
+        marketplace, and an nx on PATH that reports X once installed (anything else goes to the real nx)."""
+        r = self.relrepo
+        (r / "src" / "nexus").mkdir(parents=True)
+        (r / "scripts").mkdir()
+        shutil.copy2(REPO / "src" / "nexus" / "engine_version.py", r / "src" / "nexus" / "engine_version.py")
+        stub = r / "scripts" / "reinstall-tool.sh"
+        stub.write_text(
+            "#!/bin/sh\n# restart sandbox stand-in: record the install, publish the version to the sandbox marketplace\n"
+            'v="${1#conexus==}"\n'
+            f'printf "%s\\n" "$v" > {shlex.quote(str(self.installed_marker))}\n'
+            f'exec {shlex.quote(sys.executable)} -I {shlex.quote(str(SANDBOX_PY))} --bump-market '
+            f'{shlex.quote(str(self.market))} "$v"\n', encoding="utf-8")
+        stub.chmod(0o755)
+        git = ["git", "-C", str(r), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "add", "."], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "release"], check=True)
+        subprocess.run([*git, "tag", f"v{self.to_version}"], check=True)
+        if not self.real_nx:
+            raise RuntimeError("nx is not on PATH")
+        self.bin.mkdir()
+        shim = self.bin / "nx"
+        marker = shlex.quote(str(self.installed_marker))
+        shim.write_text(
+            "#!/bin/sh\n# restart sandbox: after the stand-in install, --version reports the installed release\n"
+            f'if [ "$1" = "--version" ] && [ -f {marker} ]; then echo "nx, version $(cat {marker})"; exit 0; fi\n'
+            f"exec {shlex.quote(self.real_nx)} \"$@\"\n", encoding="utf-8")
+        shim.chmod(0o755)
+        # The script cleans uv's cached conexus before installing; in the detached child that runs
+        # with the tmux server's environment, whose UV_CACHE_DIR is the operator's. Record it instead.
+        if not self.real_uv:
+            raise RuntimeError("uv is not on PATH")
+        uv = self.bin / "uv"
+        uv.write_text(
+            "#!/bin/sh\n# restart sandbox: uv cache clean is recorded, never run on the operator's cache\n"
+            f'if [ "$1" = "cache" ] && [ "$2" = "clean" ]; then echo "$*" >> {shlex.quote(str(self.uv_cleans))}; exit 0; fi\n'
+            f"exec {shlex.quote(self.real_uv)} \"$@\"\n", encoding="utf-8")
+        uv.chmod(0o755)
+
+    def pane_id(self, name: str) -> str:
+        return self.tmux("display-message", "-p", "-t", self.pane_of(name), "#{pane_id}", check=True).stdout.strip()
+
+    def plugin_roots(self, pid: int, wait: float = 30) -> set[str]:
+        """The conexus versions the process's descendants run from (its MCP servers' --directory, a
+        ``market/conexus-<version>`` folder),
+        read until one shows or *wait* seconds pass; empty means none did."""
+        deadline = time.time() + wait
+        while True:
+            found = self._plugin_roots(pid)
+            if found or time.time() >= deadline:
+                return found
+            time.sleep(3)
+
+    def children(self, pid: int) -> list[str]:
+        """The process's direct children, by command name only: a diagnostic line for a failure."""
+        rows = subprocess.run(["ps", "-A", "-o", "ppid=,comm="], capture_output=True, text=True).stdout
+        return [r.split(None, 1)[1] for r in rows.splitlines()
+                if len(r.split(None, 1)) == 2 and r.split(None, 1)[0] == str(pid)]
+
+    def _plugin_roots(self, pid: int) -> set[str]:
+        rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True).stdout
+        kids: dict[int, list[tuple[int, str]]] = {}
+        for row in rows.splitlines():
+            parts = row.split(None, 2)
+            if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+                kids.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2]))
+        found, todo = set(), [pid]
+        pat = re.compile(rf"{re.escape(str(self.market))}/conexus-([^/\s]+)(?:/|\s|$)")
+        while todo:
+            for child, args in kids.get(todo.pop(), []):
+                found |= set(pat.findall(args))
+                todo.append(child)
+        return found
 
     def start_session(self, name: str) -> None:
         self.tmux("new-window", "-d", "-t", "rs:", "-n", name, "-c", str(self.work), "bash --noprofile --norc",
@@ -209,7 +365,7 @@ class Sandbox:
     def pane_of(self, name: str) -> str:
         return f"rs:{name}"
 
-    def prompt(self, name: str, text: str, timeout: float = 240) -> None:
+    def prompt(self, name: str, text: str, timeout: float = 240, done: frozenset[str] = frozenset({"idle"})) -> None:
         """Type a prompt, Enter, then wait until the session is idle with a new text reply.
 
         Status alone is not the turn's end: with the conexus plugin loaded, hooks move a fresh
@@ -225,7 +381,7 @@ class Sandbox:
         deadline = time.time() + timeout
         while time.time() < deadline:
             d = self.session(name) or {}
-            if d.get("status") == "idle" and self.reply_count(sid) > replies0:
+            if d.get("status") in done and self.reply_count(sid) > replies0:
                 return
             time.sleep(1)
         raise TimeoutError(f"{name}: prompt did not finish within {timeout:.0f}s")
@@ -308,6 +464,9 @@ class Sandbox:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["--bump-market"]:  # the stand-in reinstall-tool.sh's publish step
+        bump_market(Path(sys.argv[2]), sys.argv[3])
+        return 0
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--keep", action="store_true", help="keep the scratch HOME and tmux server even on a pass")
@@ -335,16 +494,23 @@ def main() -> int:
     try:
         sb.setup()
         print(f"[sandbox] HOME {home}; watch: tmux -L {sb.sock} attach -t rs", flush=True)
-        for name in WORDS:
+        for name in SESSIONS:
             sb.start_session(name)
-        for name in WORDS:
+        for name in SESSIONS:
             sb.wait_status(name, {"idle"}, 120)
         for name, word in WORDS.items():
             sb.prompt(name, f"For this task, the project code word is {word}. Reply with only: OK")
+        for name in SESSIONS:
             d = sb.session(name)
             if not d or not d.get("tmux"):
                 failures.append(f"{name}: its session file has no tmux pane; the script cannot see it")
             before[name] = d or {}
+        # Non-vacuity for the --nx check: before the roll the sessions run the version it moves from.
+        roots0 = sb.plugin_roots(int(before[CALLER].get("pid", 0) or 0))
+        if roots0 != {sb.from_version}:
+            failures.append(f"precondition: {CALLER} runs conexus {sorted(roots0)}, not {sb.from_version} from the "
+                            f"sandbox marketplace (pid {before[CALLER].get('pid')}, children "
+                            f"{sb.children(int(before[CALLER].get('pid', 0) or 0))[:12]})")
         crs = load_script()
         # A turn that invites a follow-up, so Claude Code draws a suggested next prompt (dim text):
         # the case the old check read as a draft. Poll for it rather than sleep and hope.
@@ -370,13 +536,44 @@ def main() -> int:
         time.sleep(2)
         if not crs.has_draft(sb.capture("rs_draft")):
             failures.append("precondition: rs_draft's typed draft is not read as a draft")
+        # A bracketed paste: Claude Code collapses it to a [Pasted text #N] placeholder, which is
+        # a draft (not dim suggestion text) that the pane cannot hand on.
+        sb.tmux("set-buffer", "-b", "rs-paste", PASTE_TEXT, check=True)
+        sb.tmux("paste-buffer", "-p", "-d", "-b", "rs-paste", "-t", sb.pane_of("rs_paste"), check=True)
+        time.sleep(2)
+        paste_cap = sb.capture("rs_paste")
+        if not crs.has_draft(paste_cap) or "[Pasted text #" not in crs.draft_text(paste_cap):
+            failures.append("precondition: rs_paste's prompt does not read as a [Pasted text] draft")
+        # A background shell left open: the session is at its prompt with status 'shell'.
+        sb.prompt("rs_shell", "Use the Bash tool with run_in_background set to true to run exactly this command: sleep 1500. "
+                  "Then reply with only: STARTED", done=frozenset({"idle", "shell"}))
+        try:
+            sb.wait_status("rs_shell", {"shell"}, 60)
+        except TimeoutError as exc:
+            failures.append(f"precondition: {exc}")
+        # Mid-turn for the whole roll: a foreground command outlasting both of the script's waits.
+        # Not a bare sleep: Claude Code's Bash tool refuses a standalone foreground sleep (2.1.316).
+        sb.tmux("send-keys", "-t", sb.pane_of("rs_busy"), "-l",
+                f"Use the Bash tool, in the foreground with timeout 600000, to run exactly this command: python3 -c 'import time; time.sleep({BUSY_SLEEP})'. "
+                "Then reply with only: DONE", check=True)
+        time.sleep(1)
+        sb.tmux("send-keys", "-t", sb.pane_of("rs_busy"), "Enter", check=True)
+        try:
+            sb.wait_status("rs_busy", {"busy"}, 60)
+            time.sleep(15)  # past the request: the sleep itself, not the model's turn, holds it busy
+            sb.wait_status("rs_busy", {"busy"}, 5)
+        except TimeoutError as exc:
+            failures.append(f"precondition: {exc}")
         if failures:
             return 1
 
         t0 = time.time()
+        # Started from rs_alpha's pane, as a session runs it: that session must go last.
         sb.tmux("send-keys", "-t", "rs:ctl", "-l",
-                f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} --fresh --fallback-resume --no-update "
-                "--handoff-timeout 600 --wait 300",
+                f"TMUX_PANE={shlex.quote(sb.pane_id(CALLER))} "
+                f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} --nx {sb.to_version} --fresh "
+                f"--skip-engine-gate --repo {shlex.quote(str(sb.relrepo))} --fallback-resume --no-update "
+                f"--handoff-timeout 600 --wait {WAIT}",
                 check=True)
         sb.tmux("send-keys", "-t", "rs:ctl", "Enter", check=True)
         # The draft must survive the ask: from the moment rs_draft's handoff file is complete until
@@ -406,7 +603,11 @@ def main() -> int:
             "handoff written by rs_alpha", "handoff written by rs_draft", "handoff written by rs_nochan",
             "OK rs_alpha: fresh as pid", "OK rs_draft: fresh as pid", "OK rs_nochan: fresh as pid",
             "rs_draft: unsent draft saved to",
-            "=== done: 3 of 3 restarted (3 fresh, 0 resumed)",
+            "handoff asked of rs_paste by mail", "handoff written by rs_paste",
+            f"engine gate skipped (v{sb.to_version} requires engine",
+            f"reinstall-tool conexus=={sb.to_version}: exit 0", f"nx: nx, version {sb.to_version}",
+            "plugins: {" + ", ".join(f"'{p}@{MARKET}': '{sb.to_version}'" for p in MARKET_PLUGINS) + "}",
+            "=== done: 3 of 6 restarted (3 fresh, 0 resumed)",
         ]
         for name in ("rs_alpha", "rs_nochan"):
             if f"{name}: unsent draft saved to" in log:
@@ -414,10 +615,56 @@ def main() -> int:
         for line in expect:
             if line not in log:
                 failures.append(f"log lacks: {line}")
-        # The typed re-asks after a mail ask name no failure word of their own.
-        for bad in ("SKIP", "WARN", "FAIL", "CRASH", "ABORT", "fallback", "by typed (the mail", "by typed (its mail"):
-            if bad in log:
-                failures.append(f"log has: {bad}")
+        # The held sessions' lines, exactly; no other line may name a failure word. The typed
+        # re-asks after a mail ask name no failure word of their own, so they are banned by phrase.
+        held_lines = {
+            f"SKIP rs_busy: still busy after {WAIT}s; no handoff asked, not restarted",
+            f"SKIP rs_shell: still shell after {WAIT}s; no handoff asked, not restarted",
+            "rs_busy: no handoff; will restart with --resume (fallback)",
+            "rs_shell: no handoff; will restart with --resume (fallback)",
+            f"SKIP rs_busy: still busy after {WAIT}s; not restarted",
+            f"SKIP rs_shell: still shell after {WAIT}s; not restarted",
+            "SKIP rs_paste: its unsent draft holds pasted text or an image, which the pane shows only as a "
+            "placeholder; left running, not restarted",
+        }
+        body_lines = [ln.split(" ", 1)[1] if " " in ln else ln for ln in log.splitlines()]
+        for want in sorted(held_lines):
+            if want not in body_lines:
+                failures.append(f"log lacks: {want}")
+        for ln in body_lines:
+            if ln in held_lines:
+                continue
+            for bad in ("SKIP", "WARN", "FAIL", "CRASH", "ABORT", "fallback", "by typed (the mail", "by typed (its mail"):
+                if bad in ln:
+                    failures.append(f"log has: {ln[:160]}")
+                    break
+        # Each held session is left running: the same process on the same session, nothing exited.
+        for name in HELD:
+            now = sb.session(name) or {}
+            if now.get("pid") != before[name].get("pid") or now.get("sessionId") != before[name].get("sessionId"):
+                failures.append(f"{name}: not left running as it was (before pid {before[name].get('pid')}, now {now.get('pid')})")
+            if f"exit {name} " in log:
+                failures.append(f"{name}: the script exited it")
+        if "[Pasted text #" not in crs.draft_text(sb.capture("rs_paste")):
+            failures.append("rs_paste: its pasted draft is gone from its prompt")
+        # The caller's pane goes last: after every other session's restart or final skip.
+        caller_exit = next((i for i, ln in enumerate(body_lines) if ln.startswith(f"exit {CALLER} ")), -1)
+        last_other = max((i for i, ln in enumerate(body_lines)
+                          if re.match(r"(OK|SKIP) rs_(?!alpha)", ln) and "no handoff asked" not in ln), default=-1)
+        if caller_exit < 0 or caller_exit < last_other:
+            failures.append(f"{CALLER} (the caller's pane) was not exited last (line {caller_exit}, last other {last_other})")
+        else:
+            notes.append(f"{CALLER}, the caller's pane, exited after every other session's outcome")
+        # --nx installs after the last handoff and before the first exit.
+        last_handoff = max((i for i, ln in enumerate(body_lines) if ln.startswith("handoff written by ")), default=-1)
+        first_exit = min((i for i, ln in enumerate(body_lines) if ln.startswith("exit rs_")), default=len(body_lines))
+        installs = [i for i, ln in enumerate(body_lines) if ln.startswith("reinstall-tool ")] or [-1]
+        cleans = sb.uv_cleans.read_text(encoding="utf-8").split() if sb.uv_cleans.exists() else []
+        if cleans[:3] != ["cache", "clean", "conexus"]:
+            failures.append(f"--nx: uv cache clean conexus was not run through the sandbox's uv ({cleans})")
+        if not all(last_handoff < i < first_exit for i in installs):
+            failures.append(f"--nx install at log line(s) {installs}, not only between the last handoff "
+                            f"({last_handoff}) and the first exit ({first_exit})")
         if draft_seen is None:
             failures.append("rs_draft: its complete handoff was never seen before it was exited; draft not checked")
         elif not draft_seen:
@@ -461,6 +708,12 @@ def main() -> int:
             want = f"-- cat {handoffs.get(name, '?')}"
             if fresh and want not in argv:
                 failures.append(f"{name}: the fresh process's argv lacks {want!r}")
+            # The fresh process runs the release --nx installed, not the one it was asked on.
+            roots = sb.plugin_roots(int(d.get("pid", 0) or 0))
+            if roots != {sb.to_version}:
+                failures.append(f"{name}: the fresh process runs conexus {sorted(roots)}, not {sb.to_version}")
+            else:
+                notes.append(f"{name}: the fresh process runs conexus {sb.to_version} (was {sb.from_version})")
             if name == "rs_draft":
                 saw = any(isinstance(c, dict) and c.get("type") == "tool_result" and DRAFT_TEXT in json.dumps(c)
                           for e in sb.events(d["sessionId"])
@@ -523,7 +776,7 @@ def main() -> int:
         for f in failures:
             print(f"[sandbox] FAIL {f}", flush=True)
         verdict = "RESTART SANDBOX PASSED" if ok else "RESTART SANDBOX FAILED"
-        print(f"{verdict} -- 3 sessions and a no-handoff control, {len(failures)} failure(s)", flush=True)
+        print(f"{verdict} -- 6 sessions and a no-handoff control, {len(failures)} failure(s)", flush=True)
         if a.keep:
             print(f"[sandbox] --keep: the sessions still run on a copy of your nexus config at "
                   f"{sb.nexus_config}/config.yml; delete it when done", flush=True)
