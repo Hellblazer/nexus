@@ -1164,9 +1164,9 @@ def _report_aspect_queue_service() -> None:
     # can run. Not applicable (silent) with nothing pending, so a virgin box
     # stays clean. The predicate is the daemon's own, imported at call time.
     if pending > 0:
-        import nexus.daemon.aspect_worker_daemon as _awd  # noqa: PLC0415 — deferred to keep CLI startup fast
+        from nexus.daemon.aspect_worker_daemon import _claude_available  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-        if not _awd._claude_available():
+        if not _claude_available():
             click.echo(
                 f"  WARN: aspect extraction is idle: {pending} pending, `claude` not on PATH "
                 "and no anthropic_api_key is set. Install Claude Code, or run "
@@ -1179,9 +1179,10 @@ def _report_aspect_queue_service() -> None:
             # only the next store or index starts another, so a backlog from
             # before an outage sits with nobody draining it.
             from nexus import config as _config  # noqa: PLC0415 — deferred to keep CLI startup fast; the module attribute, so a test or caller that rebinds the resolver is seen (nexus-78blw)
+            from nexus.daemon.aspect_worker_daemon import aspect_worker_running  # noqa: PLC0415 — deferred to keep CLI startup fast
 
             try:
-                worker_up = _awd.aspect_worker_running(_config.nexus_config_dir())
+                worker_up = aspect_worker_running(_config.nexus_config_dir())
             except Exception:  # noqa: BLE001 — an unreadable lease says nothing; stay quiet rather than guess
                 worker_up = True
             if not worker_up:
