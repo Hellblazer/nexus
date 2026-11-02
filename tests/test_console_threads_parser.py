@@ -84,17 +84,11 @@ def test_updated_and_session_lines_are_ignored_not_notes(line: str) -> None:
 SESSION_ID = "7c1d35ea-f694-4536-b5d6-eb1a5e4e951c"
 
 
-def test_a_leading_session_id_line_is_not_a_thread_or_a_note() -> None:
-    """The compaction checkpoint hook finds an entry by a ``session: <id>`` first line (nexus-3lcda); the
-    board must not show it as a thread, a note or an ask."""
-    s = parse_session("bullock", f"session: {SESSION_ID}\n## Prose editor\nref: nexus-ger02\nstate: building\n")
-    assert [t.title for t in s.threads] == ["Prose editor"]
-    assert s.notes == () and s.threads[0].notes == () and s.threads[0].needs_sam == ""
+def test_a_session_id_line_alone_does_not_make_a_thread() -> None:
+    """The compaction checkpoint hook finds an entry by a ``session: <id>`` line (nexus-3lcda); an entry that
+    is only that line has no thread, no note and no ask."""
     only = parse_session("bullock", f"session: {SESSION_ID}\n")
     assert only.threads == () and only.notes == ()
-    block_level = parse_session("bullock", f"## A\nstate: x\nsession: {SESSION_ID}\n## B\nstate: y\n")
-    assert [t.title for t in block_level.threads] == ["A", "B"]
-    assert all(t.notes == () for t in block_level.threads)
 
 
 def test_headingless_fields_belong_to_an_implicit_thread_named_for_the_session() -> None:

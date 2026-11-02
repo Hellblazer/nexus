@@ -86,16 +86,28 @@ _STANDIN = textwrap.dedent(
     elif args[:2] == ["memory", "search"]:
         # nexus-3lcda: FTS for the session id. "hit" finds the entry whose body carries a session: line;
         # "decoy_first" lists an entry that only mentions the id before it; "decoy_only" lists the decoy alone.
+        # "fail" exits 1, "hang" never answers; "tie_*" list two entries that both carry the line, 208
+        # written 2026-11-01 and 207 written 2026-11-03, in the order the name says.
         mode, sid = os.environ.get("FAKE_SEARCH", "none"), args[2]
-        rows = {"hit": [205], "decoy_first": [206, 205], "decoy_only": [206]}.get(mode, [])
+        if mode == "fail":
+            print("service unavailable", file=sys.stderr)
+            sys.exit(1)
+        if mode == "hang":
+            time.sleep(30)
+        rows = {"hit": [205], "decoy_first": [206, 205], "decoy_only": [206],
+                "tie_old_first": [208, 207], "tie_new_first": [207, 208]}.get(mode, [])
         if not rows:
             print("No results found.")
+        titles = {205: "bullock", 206: "decoy", 207: "newer", 208: "older"}
+        stamps = {207: "2026-11-03T00:00:00Z", 208: "2026-11-01T00:00:00Z"}
         for row in rows:
-            print(f"[{row}] threads/{ {205: 'bullock', 206: 'decoy'}[row] }  (-, 2026-11-02T04:37:32Z)")
+            print(f"[{row}] threads/{titles[row]}  (-, {stamps.get(row, '2026-11-02T04:37:32Z')})")
             print(f"  {sid} preview")
     elif args[:2] == ["memory", "get"] and args[2].isdigit() and int(args[2]) >= 200:
         sid = os.environ["FAKE_SID"]
-        if int(args[2]) == 205:
+        if int(args[2]) in (207, 208):
+            print(f"session: {sid}\\n## board of {'newer' if int(args[2]) == 207 else 'older'}\\nref: nexus-3lqxv")
+        elif int(args[2]) == 205:
             print(f"ref: nexus-3lqxv\\nsession: {sid}\\n## board of bullock\\nstate: building")
         else:  # mentions the id but is not this session's entry
             print(f"session: someone-else\\n## decoy board\\nwaiting_on: session: {sid}\\nref: nexus-zz9yx")
@@ -266,6 +278,49 @@ class TestPre:
             f"memory search {SID} --project threads", "memory get 206 --project threads",
             "memory list --project threads", "memory get 101 --project threads", "command-context continuation",
         ]
+
+    @pytest.mark.parametrize("order", ["tie_old_first", "tie_new_first"])
+    def test_when_two_entries_carry_the_session_line_the_newest_wins(self, mod, env, monkeypatch, order) -> None:
+        """Both bodies pass the line check; the listing's timestamp decides, not the search rank."""
+        monkeypatch.setenv("FAKE_SEARCH", order)
+        run(mod, monkeypatch, "pre", pre_payload())
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert "## Threads board entry (threads/newer)" in text and "board of older" not in text
+        assert nx_calls(env)[:2] == [f"memory search {SID} --project threads", "memory get 207 --project threads"]
+
+    def test_a_failing_search_falls_back_to_the_exact_title(self, mod, env, monkeypatch) -> None:
+        monkeypatch.setenv("FAKE_SEARCH", "fail")
+        run(mod, monkeypatch, "pre", pre_payload())
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert f"## Threads board entry (threads/{NAME})" in text and f"board of {NAME}" in text
+        assert nx_calls(env)[:3] == [
+            f"memory search {SID} --project threads", "memory list --project threads", "memory get 101 --project threads"
+        ]
+
+    def test_a_search_that_times_out_falls_back_to_the_exact_title_inside_the_budget(self, mod, env, monkeypatch) -> None:
+        monkeypatch.setenv("FAKE_SEARCH", "hang")
+        monkeypatch.setattr(mod, "_SEARCH_TIMEOUT_S", 0.8)
+        started = time.monotonic()
+        run(mod, monkeypatch, "pre", pre_payload())
+        assert time.monotonic() - started < mod._BOARD_TIMEOUT_S + 10, "the 30 s hang was cut"
+        text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert f"## Threads board entry (threads/{NAME})" in text and f"board of {NAME}" in text
+        assert [c.split()[1] for c in nx_calls(env)[:3]] == ["search", "list", "get"]
+
+    @pytest.mark.parametrize("search", ["fail", "hang"])
+    def test_a_failed_search_and_no_entry_names_both_lookups_in_the_warning(self, mod, env, monkeypatch, search) -> None:
+        monkeypatch.setenv("FAKE_SEARCH", search)
+        monkeypatch.setenv("FAKE_BOARD", "missing")
+        monkeypatch.setattr(mod, "_SEARCH_TIMEOUT_S", 0.8)
+        run(mod, monkeypatch, "pre", pre_payload())
+        log = env.hook_log.read_text(encoding="utf-8")
+        assert "also failed" in log and "titled exactly 'linda'" in log
+
+    def test_no_entry_at_all_names_the_session_line_and_the_title_in_the_warning(self, mod, env, monkeypatch) -> None:
+        monkeypatch.setenv("FAKE_BOARD", "missing")
+        run(mod, monkeypatch, "pre", pre_payload())
+        warning = next(ln for ln in env.hook_log.read_text(encoding="utf-8").splitlines() if " WARNING " in ln)
+        assert f"no threads entry carries `session: {SID}` and none is titled exactly 'linda'" in warning
 
     @pytest.mark.parametrize(
         ("body", "found"),
@@ -802,16 +857,16 @@ class TestInject:
         text = path.read_text(encoding="utf-8")
         assert "state: building" in text and text.rstrip().endswith("idle summary"), "post kept the real checkpoint"
 
-    def test_precomputed_says_the_summary_was_written_while_the_user_was_away(self, mod, env, monkeypatch) -> None:
-        """Desktop's deferred compaction (compact_boundary ``precomputed: true``, nexus-3lcda): the checkpoint
-        is old because the summary was prepared at idle and applied at the next message, not because pre failed."""
+    def test_precomputed_says_the_summary_was_prepared_while_the_session_was_idle(self, mod, env, monkeypatch) -> None:
+        """A payload with ``precomputed: true`` (nexus-3lcda): the intro says what the payload marked and gives
+        the checkpoint's age, and claims neither a failed pre nor how the client times its compactions."""
         run(mod, monkeypatch, "pre", pre_payload())
         restamp(env.checkpoints / f"{SID}.md", 69 * 60)
         first = self._ctx(run(mod, monkeypatch, "inject",
                               {"session_id": SID, "source": "compact", "precomputed": True})[1]).splitlines()[0]
         assert "69 min ago (trigger auto)" in first
-        assert "summary was written while you were away" in first
-        assert "failed" not in first and "predate" not in first
+        assert "summary was prepared while the session was idle" in first
+        assert "failed" not in first and "predate" not in first and "away" not in first
         assert "check git, beads and the board before acting on it" in first
 
     @pytest.mark.parametrize("value", [False, None, "true", 1], ids=["false", "null", "string", "int"])
@@ -820,7 +875,7 @@ class TestInject:
         restamp(env.checkpoints / f"{SID}.md", 69 * 60)
         first = self._ctx(run(mod, monkeypatch, "inject",
                               {"session_id": SID, "source": "compact", "precomputed": value})[1]).splitlines()[0]
-        assert "while you were away" not in first and "may predate this compaction" in first and "failed" not in first
+        assert "while the session was idle" not in first and "may predate this compaction" in first and "failed" not in first
 
     def test_a_checkpoint_is_injected_once_and_a_new_pre_is_injected_again(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
@@ -1007,9 +1062,8 @@ class TestInject:
 
 
 class TestDeferredApply:
-    """Claude Desktop (2.1.309, nexus-3lcda): pre and the summary run about 54 min after the last turn,
-    and the apply (boundary, SessionStart(compact), PostCompact) up to 70 min later. All three verbs, on a
-    fixed clock, in the live order (inject about 6 s before post)."""
+    """A compaction applied long after its pre (nexus-3lcda, nexus-702gy): measured on Desktop 2.1.309 at 7 to 69
+    minutes. All three verbs, on a fixed clock, in the live order (inject about 6 s before post)."""
 
     T0 = datetime(2026, 11, 1, 22, 18, 1, tzinfo=timezone.utc)
 
@@ -1030,7 +1084,7 @@ class TestDeferredApply:
         first = ctx.splitlines()[0]
         assert "69 min ago (trigger auto)" in first and "state: building" in ctx
         assert "failed" not in first, "an old checkpoint is not a failed pre"
-        assert ("while you were away" in first) is bool(precomputed)
+        assert ("while the session was idle" in first) is bool(precomputed)
 
         clock[0] += timedelta(seconds=6)
         run(mod, monkeypatch, "post", {"session_id": SID, "hook_event_name": "PostCompact", "trigger": "auto",
@@ -1041,6 +1095,78 @@ class TestDeferredApply:
         assert [p.name for p in env.checkpoints.iterdir() if p.suffix == ".md"] == [path.name], "nothing archived"
         log = env.hook_log.read_text(encoding="utf-8")
         assert "writing a stub" not in log and "WARNING" not in log
+
+
+class TestBoardBudget:
+    """The whole board lookup (search, then the title fallback's list and get) fits ``_BOARD_TIMEOUT_S`` end
+    to end (nexus-3lcda review). ``_run_nx`` is replaced by a stand-in that spends a fake clock: it is handed
+    a timeout and burns ``min(duration, timeout)``, so the arithmetic is exact and nothing sleeps."""
+
+    @staticmethod
+    def drive(mod, monkeypatch, behave):
+        """Run ``_board_entry`` on a fake clock. *behave(kind, args)* gives ``(seconds, stdout)``; ``None``
+        seconds never answers. Returns ``(result, calls, elapsed)``; *calls* is ``(kind, timeout, started_at)``."""
+        clock = [0.0]
+        calls: list[tuple[str, float, float]] = []
+        monkeypatch.setattr(mod, "_mono", lambda: clock[0], raising=False)
+
+        def fake(args, cwd, timeout):
+            kind = args[1]
+            calls.append((kind, timeout, clock[0]))
+            assert timeout <= mod._BOARD_TIMEOUT_S - clock[0] + 1e-9, f"{kind} was given more than the budget has left"
+            seconds, out = behave(kind, args)
+            if seconds is None or seconds > timeout:
+                clock[0] += timeout
+                return "", f"`nx memory {kind}` timed out after {timeout:.0f}s"
+            clock[0] += seconds
+            return out, None
+
+        monkeypatch.setattr(mod, "_run_nx", fake)
+        result = mod._board_entry(SID, NAME, None, mod._BOARD_TIMEOUT_S)
+        return result, calls, clock[0]
+
+    TITLE_ROW = "[101] threads/linda  (-, 2026-10-31T21:46:51Z)"
+
+    def test_a_hung_search_is_capped_and_the_title_fallback_is_reached(self, mod, monkeypatch) -> None:
+        def behave(kind, args):
+            return {"search": (None, ""), "list": (0.3, self.TITLE_ROW), "get": (0.3, "## board of linda")}[kind]
+
+        (title, body, how, error), calls, elapsed = self.drive(mod, monkeypatch, behave)
+        assert [c[0] for c in calls] == ["search", "list", "get"]
+        assert calls[0][1] <= 2.0, "the search is capped at 2 s"
+        assert (title, how, error) == (NAME, "exact title", None) and "board of linda" in body
+        assert elapsed <= mod._BOARD_TIMEOUT_S
+
+    def test_a_slow_search_and_a_slow_list_never_exceed_the_budget(self, mod, monkeypatch) -> None:
+        def behave(kind, args):
+            return {"search": (1.9, "No results found."), "list": (3.9, self.TITLE_ROW), "get": (3.0, "## board")}[kind]
+
+        (_title, body, _how, error), calls, elapsed = self.drive(mod, monkeypatch, behave)
+        assert [c[0] for c in calls] == ["search", "list"], "no get is started on the 0.2 s left"
+        assert body == "" and error and "time budget" in error
+        assert elapsed <= mod._BOARD_TIMEOUT_S
+
+    def test_hits_whose_fetches_hang_leave_the_fallback_its_share(self, mod, monkeypatch) -> None:
+        hits = "\n".join(f"[{n}] threads/h{n}  (-, 2026-11-0{n - 200}T00:00:00Z)" for n in (201, 202, 203, 204))
+
+        def behave(kind, args):
+            if kind == "search":
+                return 0.2, hits
+            if kind == "get" and args[2].isdigit() and int(args[2]) >= 200:
+                return None, ""
+            return {"list": (0.3, self.TITLE_ROW), "get": (0.3, "## board of linda")}[kind]
+
+        (title, body, how, error), calls, elapsed = self.drive(mod, monkeypatch, behave)
+        assert [c[0] for c in calls] == ["search", "get", "list", "get"], "the first hung fetch ends the session-line phase"
+        assert (title, how, error) == (NAME, "exact title", None) and "board of linda" in body
+        assert elapsed <= mod._BOARD_TIMEOUT_S
+
+    def test_a_call_is_not_started_on_less_than_the_minimum(self, mod, monkeypatch) -> None:
+        def behave(kind, args):
+            return {"search": (2.0, ""), "list": (None, ""), "get": (1.0, "x")}[kind]
+
+        _result, calls, elapsed = self.drive(mod, monkeypatch, behave)
+        assert all(c[1] >= mod._MIN_CALL_S for c in calls) and elapsed <= mod._BOARD_TIMEOUT_S
 
 
 class TestProbe:
@@ -1087,6 +1213,25 @@ class TestProbe:
         by_id, bad = self.lines(env)
         assert "board: session id" in by_id
         assert "outcome=skipped: no usable session id" in bad
+
+    def test_only_four_values_are_logged_and_only_when_str_or_bool(self, mod, env, monkeypatch) -> None:
+        """cwd, an unknown key, compact_summary and non-scalar values of the allowed keys never reach the log."""
+        base = {"cwd": "/CANARY-CWD", "unknown_key": "CANARY-EXTRA",
+                "compact_summary": "CANARY-SUMMARY", "agent_name": "CANARY-AGENT"}
+        run(mod, monkeypatch, "pre", pre_payload(**base))
+        run(mod, monkeypatch, "inject", {"session_id": SID, **base, "hook_event_name": "SessionStart",
+                                         "source": "compact", "trigger": {"nested": "CANARY-NESTED"},
+                                         "precomputed": ["CANARY-LIST"]})
+        run(mod, monkeypatch, "post", {"session_id": SID, **base, "hook_event_name": "PostCompact",
+                                       "trigger": "auto", "precomputed": True})
+        probes = "\n".join(self.lines(env))
+        assert len(self.lines(env)) == 3
+        for canary in ("CANARY-CWD", "CANARY-EXTRA", "CANARY-SUMMARY", "CANARY-AGENT", "CANARY-NESTED", "CANARY-LIST"):
+            assert canary not in probes, f"{canary} was logged"
+        for key in ("cwd", "unknown_key", "compact_summary", "agent_name"):
+            assert key in probes, "keys are logged by name"
+        assert "event=SessionStart source=compact trigger=-" in probes, "a dict value reads as absent"
+        assert "precomputed=True" in probes and "precomputed=-" in probes, "a list value reads as absent"
 
     def test_a_subagent_payload_logs_no_probe(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", {**pre_payload(), "agent_id": "a1"})

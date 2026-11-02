@@ -57,15 +57,17 @@ INJECT prints ``hookSpecificOutput.additionalContext`` with this session's check
 rewrites the checkpoint. Age is judged by the file's own ``written:`` stamp, never its
 mtime (post rewrites the file); the intro states the real age and trigger, and past
 ten minutes it says the checkpoint may predate this compaction and the state may have
-changed, or, when the SessionStart payload carries ``precomputed: true`` (Claude Desktop's deferred
-compaction: the summary is written at idle and applied at the next message, 60 to 70 minutes later),
-that the summary was written while the user was away. An age alone never claims a failed pre. It reads one file and writes the sidecar: no network, no ``nx`` call, because
+changed, or, when the SessionStart payload carries ``precomputed: true``, that the payload marked
+the summary precomputed (prepared while the session was idle, after the checkpoint was taken). The
+intro gives the checkpoint's age; an age alone never claims a failed pre. It reads one file and
+writes the sidecar: no network, no ``nx`` call, because
 the same event runs seven other verbs and must stay light (nexus-75w5d). It prints
 nothing when no checkpoint exists for this session id, the stamp is missing or past
 the prune window, the file is a stub, or the sidecar holds its stamp.
 
-Every verb run logs one INFO ``probe`` line: verb, ``hook_event_name``, ``source`` and ``trigger``, the
-sorted payload keys (never values, except a short ``precomputed``) and the outcome. Whether Desktop's
+Every verb run logs one INFO ``probe`` line: verb, the sorted payload keys (by name only) and the
+outcome. The values of ``hook_event_name``, ``source``, ``trigger`` and ``precomputed`` are logged
+too, and only when they are a string or a bool; no other value is logged. Whether a client's
 payloads carry ``precomputed`` was unconfirmed when this was written (nexus-3lcda); the line settles it.
 
 NEVER VETOES. Every mode exits 0 whatever happens; errors go to ``hook.log`` and
@@ -105,8 +107,15 @@ def _load_siblings() -> None:
 #: Wall clock for ``nx command-context continuation`` (measured 5.4 s); hooks.json gives
 #: this hook 45 s, so the whole of pre (budget below) stays inside it.
 _NX_TIMEOUT_S = 25.0
-#: Bound on the board lookup, and the budget the whole pre run spends on ``nx`` calls.
+#: Bound on the whole board lookup (session-line search and its fetches, then the title fallback's
+#: list and get), end to end, and the budget the whole pre run spends on ``nx`` calls.
 _BOARD_TIMEOUT_S = 6.0
+#: Cap on the session-line search. The search and the fetches of its hits share the first
+#: ``_SESSION_PHASE_S`` of the lookup, so the title fallback keeps the rest.
+_SEARCH_TIMEOUT_S = 2.0
+_SESSION_PHASE_S = 4.0
+#: A call with less budget than this left is not made (``_run_nx`` raises a shorter timeout to 0.5 s).
+_MIN_CALL_S = 0.5
 #: Search hits fetched and checked for a ``session:`` line.
 _SESSION_CANDIDATES = 4
 #: Bound on ``git worktree list``, run before the continuation call.
@@ -376,26 +385,54 @@ def _has_session_line(body: str, session_id: str) -> bool:
     ) is not None
 
 
-def _board_by_title(name: str, cwd: str | None, timeout: float) -> tuple[str, str | None]:
+def _mono() -> float:
+    """Monotonic seconds; the board lookup's clock, a seam for tests."""
+    return time.monotonic()
+
+
+_LISTING_ROW_RE = re.compile(r"^\[(\d+)\] " + re.escape(_BOARD_PROJECT) + r"/(.*)$")
+
+
+def _listing_rows(listing: str) -> list[tuple[str, str, str]]:
+    """``(id, title, timestamp)`` for each ``[id] threads/<title>  (<access>, <timestamp>)`` row of a
+    ``nx memory list`` or ``search`` listing; the timestamp is ``""`` when the row has none."""
+    rows: list[tuple[str, str, str]] = []
+    for line in listing.splitlines():
+        match = _LISTING_ROW_RE.match(line)
+        if match is None:
+            continue
+        title, sep, tail = match.group(2).rpartition("  (")
+        if not sep:
+            rows.append((match.group(1), match.group(2), ""))
+        else:
+            rows.append((match.group(1), title, tail.rstrip(")").rpartition(",")[2].strip()))
+    return rows
+
+
+def _board_by_title(
+    name: str, cwd: str | None, timeout: float, missing: str = "",
+) -> tuple[str, str | None]:
     """The ``threads`` entry titled exactly *name*, as ``(body, error)``.
 
     ``nx memory get --title`` is exact-then-prefix and does not print the title it resolved,
     so a session ``linda`` with no entry would get ``linda_2``'s board. The listing is read
-    for the exact title and the entry is fetched by its id.
+    for the exact title and the entry is fetched by its id. The listing and the get share
+    *timeout*: neither is started with less than ``_MIN_CALL_S`` left. *missing* leads the
+    error for an absent title (it names the session-line lookup that failed first).
     """
-    started = time.monotonic()
+    started = _mono()
+    if timeout < _MIN_CALL_S:
+        return "", "the board lookup's time budget was spent before the exact-title listing"
     listing, error = _run_nx(["memory", "list", "--project", _BOARD_PROJECT], cwd, timeout)
     if error:
         return "", error
-    entry_id = None
-    for line in listing.splitlines():
-        match = re.match(r"^\[(\d+)\] " + re.escape(_BOARD_PROJECT) + r"/(.*)$", line)
-        if match and match.group(2).rsplit("  (", 1)[0] == name:
-            entry_id = match.group(1)
-            break
+    entry_id = next((row_id for row_id, title, _ts in _listing_rows(listing) if title == name), None)
     if entry_id is None:
-        return "", f"no {_BOARD_PROJECT} entry is titled exactly {name!r}"
-    left = max(timeout - (time.monotonic() - started), 1.0)
+        return "", f"{missing}none is titled exactly {name!r}" if missing else (
+            f"no {_BOARD_PROJECT} entry is titled exactly {name!r}")
+    left = timeout - (_mono() - started)
+    if left < _MIN_CALL_S:
+        return "", f"the board lookup's time budget was spent before fetching the entry titled {name!r}"
     return _run_nx(["memory", "get", entry_id, "--project", _BOARD_PROJECT], cwd, left)
 
 
@@ -407,32 +444,47 @@ def _board_entry(
 
     A Desktop session's handle differs from its name, and the board entry is filed under the
     handle (nexus-3lcda), so the name cannot find it. Board entries carry a ``session: <id>``
-    line: one full-text search of ``threads`` for the id, then each of the first few hits is
-    fetched and kept only if its body really has that line (a peer's entry can mention the id).
-    With no such entry, the entry titled exactly *name* is the fallback. The whole lookup stays
-    inside *timeout*, give or take the one-second floor of its last call.
+    line: one full-text search of ``threads`` for the id (at most ``_SEARCH_TIMEOUT_S``), then the
+    first few hits are fetched, newest first by the listing's timestamp, and the first whose body
+    really has that line wins (a peer's entry can mention the id; two entries can carry it). That
+    phase ends by ``_SESSION_PHASE_S``. With no such entry, the entry titled exactly *name* is the
+    fallback, and spends what is left of *timeout*: the whole lookup is inside *timeout*, no call
+    is started with less than ``_MIN_CALL_S`` of it left, and each call gets at most what is left.
     """
-    started = time.monotonic()
+    started = _mono()
 
     def left() -> float:
-        return timeout - (time.monotonic() - started)
+        return timeout - (_mono() - started)
 
-    listing, error = _run_nx(["memory", "search", session_id, "--project", _BOARD_PROJECT], cwd, max(left(), 1.0))
-    if not error:
-        seen: set[str] = set()
-        for line in listing.splitlines():
-            match = re.match(r"^\[(\d+)\] " + re.escape(_BOARD_PROJECT) + r"/(.*)$", line)
-            if match is None or match.group(1) in seen:
-                continue
-            seen.add(match.group(1))
-            if len(seen) > _SESSION_CANDIDATES or left() <= 0.5:
-                break
-            body, get_error = _run_nx(["memory", "get", match.group(1), "--project", _BOARD_PROJECT], cwd, left())
-            if not get_error and _has_session_line(body, session_id):
-                return match.group(2).rsplit("  (", 1)[0], body, "session id", None
+    def phase_left() -> float:
+        return min(left(), _SESSION_PHASE_S - (_mono() - started))
+
+    error: str | None = None
+    if phase_left() >= _MIN_CALL_S:
+        listing, error = _run_nx(
+            ["memory", "search", session_id, "--project", _BOARD_PROJECT], cwd,
+            min(_SEARCH_TIMEOUT_S, phase_left()),
+        )
+        if not error:
+            rows: list[tuple[str, str, str]] = []
+            for row in _listing_rows(listing):
+                if row[0] not in (r[0] for r in rows):
+                    rows.append(row)
+            candidates = sorted(rows[:_SESSION_CANDIDATES], key=lambda r: r[2], reverse=True)
+            for row_id, title, _ts in candidates:
+                if phase_left() < _MIN_CALL_S:
+                    break
+                body, get_error = _run_nx(["memory", "get", row_id, "--project", _BOARD_PROJECT], cwd, phase_left())
+                if not get_error and _has_session_line(body, session_id):
+                    return title, body, "session id", None
+    else:
+        error = "the board lookup's time budget left no room for the session-line search"
     if not name:
         return "", "", "", error or f"no {_BOARD_PROJECT} entry carries a session: line for this session id"
-    body, title_error = _board_by_title(name, cwd, max(left(), 1.0))
+    missing = "" if error else f"no {_BOARD_PROJECT} entry carries `session: {session_id}` and "
+    body, title_error = _board_by_title(name, cwd, left(), missing)
+    if title_error and error:
+        title_error = f"{title_error} (the session-line search also failed: {error})"
     return (name, body, "exact title", title_error) if body.strip() else ("", body, "", title_error)
 
 
@@ -840,14 +892,14 @@ def run_inject(payload: dict) -> str:
         lead += ", just before this session was compacted."
     else:
         if payload.get("precomputed") is True:
-            # Claude Desktop's deferred compaction: the summary was prepared at idle and applied at
-            # the next message, so an old checkpoint is expected, not a failure (nexus-3lcda).
-            lead += (". This compaction's summary was written while you were away, after the "
+            # The payload marked the summary precomputed: it was prepared while the session was
+            # idle, after pre ran, so an old checkpoint is no evidence of a failed pre (nexus-3lcda).
+            lead += (". This compaction's summary was prepared while the session was idle, after the "
                      "checkpoint was taken. The state may have changed since: check git, beads and "
                      "the board before acting on it.")
         else:
-            # Only the age is known: a failure is not inferred from it (on Desktop every compaction
-            # is applied tens of minutes after its pre; nexus-702gy, nexus-mtl98, nexus-3lcda).
+            # Only the age is known: a failure is not inferred from it (nexus-702gy, nexus-mtl98,
+            # nexus-3lcda).
             lead += (". The state may have changed since it was written, and the checkpoint may "
                      "predate this compaction: check git, beads and the board before acting on it.")
     intro = (f"{lead} The state lives in version control, beads and the threads board, "
@@ -887,13 +939,19 @@ def _probe(mode: str, payload: dict, outcome: object) -> None:
     """One INFO line per verb run: what fired, with which payload keys, and what the verb did.
 
     Desktop's compaction hooks were never observed directly (nexus-3lcda); this line shows whether
-    its payload carries ``source`` / ``trigger`` and ``precomputed``. Keys and a few short scalar
-    values only, never the summary or any other payload text.
+    its payload carries ``source`` / ``trigger`` and ``precomputed``. Every key is logged by name;
+    a value is logged only for ``hook_event_name``, ``source``, ``trigger`` and ``precomputed``, and only when it is a str or a bool.
+    Never the summary, ``cwd`` or any other payload text.
     """
     keys = ",".join(_token(k, 40) for k in sorted(payload, key=str)[:40])
-    extra = f" precomputed={_token(payload['precomputed'], 16)}" if "precomputed" in payload else ""
-    _log("INFO", f"probe verb={mode} event={_token(payload.get('hook_event_name'))} "
-                 f"source={_token(payload.get('source'))} trigger={_token(payload.get('trigger'))} "
+
+    def value(key: str) -> str:
+        raw = payload.get(key)
+        return _token(raw) if isinstance(raw, (str, bool)) else "-"
+
+    extra = f" precomputed={value('precomputed')}" if "precomputed" in payload else ""
+    _log("INFO", f"probe verb={mode} event={value('hook_event_name')} "
+                 f"source={value('source')} trigger={value('trigger')} "
                  f"keys=[{keys}]{extra} outcome={_one_line(outcome)}")
 
 
