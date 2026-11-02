@@ -443,8 +443,9 @@ carried forward, since the template is retired.
 ### Phase 2: Engine
 
 Precondition: nexus-onjvw is on `develop` and inside engine-service-v0.1.174
-(verified 2026-11-01, T2 `nexus_rdr/239-research-6`), checked again
-when Step 2 began (nexus-mdbds.2.10). The engine ships first, and the client tolerates a missing `doc`, so
+(verified 2026-11-01, T2 `nexus_rdr/239-research-6`); its commit was
+checked again as an ancestor of the branch when Step 2 began
+(nexus-mdbds.2.10). The engine ships first, and the client tolerates a missing `doc`, so
 Phase 3 does not wait for the deployed engine except for its own
 end-to-end check.
 

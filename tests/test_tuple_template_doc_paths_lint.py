@@ -91,7 +91,11 @@ def _citing_lines(text: str) -> tuple[list[tuple[str, str]], list[str]]:
         if not in_doc:
             continue
         if indent == 2 and stripped.startswith("- "):
-            if field:
+            if not doc_key_seen:
+                unreadable.append(f"doc cannot be read: item {stripped!r} makes the doc block a list; "
+                                  "it is a mapping of summary, writers, readers, ...")
+                in_doc = False
+            elif field:
                 unreadable.append(f"{field} cannot be read: item {stripped!r} sits at the key's indent; "
                                   "indent each item to 4")
             continue
@@ -270,3 +274,14 @@ def test_comments_after_a_key_and_a_quoted_key_read_clean(tmp_path: Path) -> Non
     )
     problems, _files, paths, _rdrs = check_templates(tdir, tmp_path)
     assert problems == [] and paths == 1
+
+
+def test_a_doc_block_that_is_a_list_is_reported(tmp_path: Path) -> None:
+    """Positive control: ``doc:`` followed by a sequence is no mapping; the Java
+    loader refuses it, so the line reader must not read it as an empty block."""
+    (tmp_path / "docs" / "rdr").mkdir(parents=True)
+    tdir = tmp_path / "templates"
+    tdir.mkdir()
+    (tdir / "t.yaml").write_text("name: t\ndoc:\n  - docs/gone.md\n")
+    problems, _files, _paths, _rdrs = check_templates(tdir, tmp_path)
+    assert any("doc " in p and "cannot be read" in p for p in problems), problems
