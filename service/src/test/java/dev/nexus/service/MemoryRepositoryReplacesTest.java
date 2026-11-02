@@ -34,10 +34,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * RDR-238 Phase 1 Step 1 (nexus-qo7ie.6): {@link MemoryRepository#replaceMemory} deletes the row
- * named by {@code replaces} and writes the new row in ONE transaction, on real Postgres.
+ * RDR-238 Phase 1 Step 1 (nexus-qo7ie.6, amended by nexus-ov3zi): {@link MemoryRepository#replaceMemory}
+ * QUARANTINES the row named by {@code replaces} (it is restorable, never deleted) and writes the new row
+ * in ONE transaction, on real Postgres.
  *
- * <p>Refusals write nothing and delete nothing. Every refusal test snapshots ALL rows of the project
+ * <p>Refusals write nothing and change nothing. Every refusal test snapshots ALL rows of the project
  * (live and quarantined) before and after and requires the two to be equal, so "both rows unchanged
  * and the new row not written" is one assertion over the whole project, not a pair of spot checks.
  *
@@ -139,21 +140,31 @@ class MemoryRepositoryReplacesTest {
     // ── Case 1: replace in one transaction ────────────────────────────────────
 
     @Test
-    void replace_deletesTheOldRow_writesTheNewOneAsSent_andEchoesTheOldContent() {
+    void replace_quarantinesTheOldRow_writesTheNewOneAsSent_andEchoesTheOldRow() {
         String t = tenant(); String p = project();
         long oldId = put(t, p, "old-note", "old body uniqueoldword", "a,b");
         put(t, p, "bystander", "untouched", "z");
 
         var res = replace(t, p, "new-note", "new body\nreplaces: old-note", "n1,n2", "old-note");
 
+        assertThat(res.replacedId()).as("the echo names the old row's id").isEqualTo(oldId);
         assertThat(res.replacedTitle()).isEqualTo("old-note");
         assertThat(res.replacedContent()).isEqualTo("old body uniqueoldword");
         assertThat(res.id()).isNotEqualTo(oldId).isPositive();
 
-        assertThat(live(t, p, "old-note")).as("old row gone from getAll").isEmpty();
-        assertThat(repo.findByTitle(t, p, "old-note")).as("old row gone from findByTitle").isEmpty();
-        assertThat(repo.findById(t, oldId)).as("old row gone by id").isEmpty();
-        assertThat(repo.search(t, "uniqueoldword", p)).as("old row gone from search").isEmpty();
+        assertThat(live(t, p, "old-note")).as("old row absent from getAll").isEmpty();
+        assertThat(repo.findByTitle(t, p, "old-note")).as("old row absent from findByTitle").isEmpty();
+        assertThat(repo.findById(t, oldId)).as("old row absent by id").isEmpty();
+        assertThat(repo.search(t, "uniqueoldword", p)).as("old row absent from search").isEmpty();
+
+        // Present in the quarantined listing, intact, and NOT marked rolled up.
+        MemoryRecord q = repo.listQuarantined(t, p).stream()
+            .filter(r -> r.getId() == oldId).findFirst().orElseThrow();
+        assertThat(q.getQuarantinedAt()).isNotNull();
+        assertThat(q.getRolledUpAt()).as("rolled_up_at stays NULL, so reap cannot delete it").isNull();
+        assertThat(q.getContent()).isEqualTo("old body uniqueoldword");
+        assertThat(q.getTitle()).isEqualTo("old-note");
+        assertThat(q.getTags()).isEqualTo("a,b");
 
         MemoryRecord n = repo.findByTitle(t, p, "new-note").orElseThrow();
         assertThat(n.getId()).isEqualTo(res.id());
@@ -165,6 +176,182 @@ class MemoryRepositoryReplacesTest {
 
         assertThat(live(t, p, "bystander")).as("a neighbour is untouched").isPresent();
         assertThat(repo.getAll(t, p)).hasSize(2);
+    }
+
+    @Test
+    void replacedRow_isNotReaped_andRestoreBringsItBackWithItsContent() {
+        String t = tenant(); String p = project();
+        long oldId = repo.upsert(t, p, "old-note", "old body", "a,b", null, null, 90);
+        var res = replace(t, p, "new-note", "new", "x", "old-note");
+        assertThat(res.replacedId()).isEqualTo(oldId);
+
+        assertThat(repo.reap(t)).as("reap deletes only quarantined AND rolled-up rows").isEmpty();
+        assertThat(repo.listQuarantined(t, p)).extracting(MemoryRecord::getId).containsExactly(oldId);
+
+        assertThat(repo.restore(t, oldId)).isTrue();
+        MemoryRecord back = repo.findById(t, oldId).orElseThrow();
+        assertThat(back.getTitle()).isEqualTo("old-note");
+        assertThat(back.getContent()).as("content intact after restore").isEqualTo("old body");
+        assertThat(back.getTags()).isEqualTo("a,b");
+        assertThat(back.getQuarantinedAt()).isNull();
+        assertThat(back.getTtlDays()).as("restore makes the row permanent").isNull();
+        assertThat(repo.listQuarantined(t, p)).isEmpty();
+        assertThat(repo.getAll(t, p)).extracting(MemoryRecord::getTitle)
+            .containsExactlyInAnyOrder("old-note", "new-note");
+    }
+
+    /** nexus-ov3zi B1: the attended rollup path must not mark a replaced row, so reap cannot delete it. */
+    @Test
+    void replacedRow_hasNullTtl_isRefusedBySummary_survivesReap_andRestores() {
+        String t = tenant(); String p = project();
+        long oldId = put(t, p, "old-note", "old body uniqueoldword", "a,b");
+        replace(t, p, "new-note", "new", "x", "old-note");
+        MemoryRecord q = repo.listQuarantined(t, p).get(0);
+        assertThat(q.getTtlDays()).as("the replace nulls ttl: quarantined AND ttl NULL marks a replaced row")
+            .isNull();
+
+        assertThatThrownBy(() -> repo.insertSummary(t, p, "summary of old-note", List.of(oldId), "m", null))
+            .isInstanceOf(MemoryRepository.ReplacedSourceIdException.class)
+            .hasMessageContaining(String.valueOf(oldId))
+            .hasMessageContaining("nx memory restore");
+        assertThat(repo.listSummaries(t, p)).as("no summary row written").isEmpty();
+        assertThat(repo.listQuarantined(t, p).get(0).getRolledUpAt()).as("no mark").isNull();
+
+        assertThat(repo.reap(t)).as("nothing marked, so nothing reaped").isEmpty();
+        assertThat(repo.restore(t, oldId)).isTrue();
+        assertThat(repo.findById(t, oldId).orElseThrow().getContent()).isEqualTo("old body uniqueoldword");
+    }
+
+    /** One replaced id in a batch refuses the whole batch: an expired row beside it is not marked either. */
+    @Test
+    void aSummaryNamingAReplacedRowAndAnExpiredOne_isRefusedWhole_nothingMarked() {
+        String t = tenant(); String p = project();
+        long expired = repo.importRow(t, p, "expired-note", "expired body", "a", null, null, 1, OLD, 0, null);
+        assertThat(repo.expire(t).quarantinedIds()).containsExactly(expired);
+        long replaced = put(t, p, "old-note", "old body", "a");
+        replace(t, p, "new-note", "new", "x", "old-note");
+
+        assertThatThrownBy(() -> repo.insertSummary(t, p, "both", List.of(expired, replaced), "m", null))
+            .isInstanceOf(MemoryRepository.ReplacedSourceIdException.class);
+
+        assertThat(repo.listSummaries(t, p)).isEmpty();
+        assertThat(repo.listQuarantined(t, p)).extracting(MemoryRecord::getRolledUpAt).containsOnlyNulls();
+    }
+
+    /** Control: an expired row (quarantined WITH a ttl) is summarized and reaped exactly as before. */
+    @Test
+    void anExpiredRow_isStillSummarizedAndReaped() {
+        String t = tenant(); String p = project();
+        long expired = repo.importRow(t, p, "expired-note", "expired body", "a", null, null, 1, OLD, 0, null);
+        assertThat(repo.expire(t).quarantinedIds()).containsExactly(expired);
+        assertThat(repo.listQuarantined(t, p).get(0).getTtlDays()).as("expiry keeps the ttl").isEqualTo(1);
+
+        repo.insertSummary(t, p, "summary of expired-note", List.of(expired), "m", null);
+
+        assertThat(repo.reap(t)).containsExactly(expired);
+    }
+
+    /** A live row can already be marked (insertSummary admits any existing id); the replace must clear it. */
+    @Test
+    void aLiveRowAlreadyMarkedRolledUp_isNotReapedAfterItIsReplaced() {
+        String t = tenant(); String p = project();
+        long oldId = put(t, p, "old-note", "old body", "a");
+        repo.insertSummary(t, p, "summary of a live row", List.of(oldId), "m", null);
+        replace(t, p, "new-note", "new", "x", "old-note");
+
+        assertThat(repo.listQuarantined(t, p).get(0).getRolledUpAt()).as("the replace clears the mark").isNull();
+        assertThat(repo.reap(t)).isEmpty();
+        assertThat(repo.restore(t, oldId)).isTrue();
+    }
+
+    /**
+     * The race the unlocked replaced-source check leaves open: a rollup marks a row after a replace
+     * quarantined it. Reap refuses a quarantined row with a NULL ttl, so the replaced row survives.
+     */
+    @Test
+    void aReplacedRowMarkedByARacingRollup_isStillNotReaped() throws Exception {
+        String t = tenant(); String p = project();
+        long oldId = put(t, p, "old-note", "old body", "a");
+        replace(t, p, "new-note", "new", "x", "old-note");
+        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
+            assertThat(st.executeUpdate("UPDATE nexus.memory SET rolled_up_at = now() WHERE id = " + oldId))
+                .isEqualTo(1);
+        }
+
+        assertThat(repo.reap(t)).as("a replaced row is never reaped").isEmpty();
+        assertThat(repo.restore(t, oldId)).isTrue();
+    }
+
+    /** R2: A to B to A. The refusal names the replaced incumbent's id, and its way out works. */
+    @Test
+    void aToBToA_isRefusedNamingTheIncumbent_restoreDoesNotHelp_deleteByIdDoes() {
+        String t = tenant(); String p = project();
+        long aId = put(t, p, "A", "a body", "x");
+        replace(t, p, "B", "b body", "x", "A");
+
+        assertThatThrownBy(() -> replace(t, p, "A", "a again", "x", "B"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("is quarantined (id " + aId + ")")
+            .hasMessageContaining("restoring it would not help")
+            .hasMessageContaining("nx memory delete --id " + aId);
+
+        // Restoring A makes it a live incumbent: still refused, the message now says it exists.
+        assertThat(repo.restore(t, aId)).isTrue();
+        assertThatThrownBy(() -> replace(t, p, "A", "a again", "x", "B"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("already exists")
+            .hasMessageContaining("exists (id " + aId + ")");
+
+        // Deleting it by id, quarantined or not, clears the way.
+        assertThat(repo.deleteById(t, aId)).isTrue();
+        var res = replace(t, p, "A", "a again", "x", "B");
+        assertThat(res.replacedTitle()).isEqualTo("B");
+        assertThat(repo.findByTitle(t, p, "A").orElseThrow().getContent()).isEqualTo("a again");
+    }
+
+    @Test
+    void aReplaceOfAQuarantinedTarget_saysRestoreThenReplaceAgain_andThatWorks() {
+        String t = tenant(); String p = project();
+        long aId = put(t, p, "A", "a body", "x");
+        replace(t, p, "B", "b body", "x", "A");
+
+        assertThatThrownBy(() -> replace(t, p, "C", "c body", "x", "A"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("nx memory restore " + aId)
+            .hasMessageContaining("replace again");
+
+        assertThat(repo.restore(t, aId)).isTrue();
+        assertThat(replace(t, p, "C", "c body", "x", "A").replacedId()).isEqualTo(aId);
+    }
+
+    @Test
+    void aSecondReplaceOfTheSameTarget_isRefusedAsQuarantined() {
+        String t = tenant(); String p = project();
+        put(t, p, "old-note", "old body", "a");
+        replace(t, p, "first", "1", "x", "old-note");
+        List<Row> before = snapshot(t, p);
+
+        assertThatThrownBy(() -> replace(t, p, "second", "2", "x", "old-note"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("quarantined")
+            .hasMessageContaining("old-note");
+
+        assertThat(snapshot(t, p)).isEqualTo(before);
+    }
+
+    /** Known limit (RDR-238 Key Discoveries): a plain put at the old title overwrites the quarantined row. */
+    @Test
+    void aLaterPlainPutAtTheOldTitle_overwritesTheQuarantinedRow_asRdr207Always_did() {
+        String t = tenant(); String p = project();
+        long oldId = put(t, p, "old-note", "old body", "a");
+        replace(t, p, "new-note", "new", "x", "old-note");
+
+        long again = put(t, p, "old-note", "a fresh note at the old title", "a");
+
+        assertThat(again).as("the upsert reuses the quarantined row's id").isEqualTo(oldId);
+        assertThat(repo.listQuarantined(t, p)).isEmpty();
+        assertThat(repo.findByTitle(t, p, "old-note").orElseThrow().getContent())
+            .isEqualTo("a fresh note at the old title");
     }
 
     @Test
@@ -266,7 +453,8 @@ class MemoryRepositoryReplacesTest {
             put(t, p, "plain-title", "body", tags);
             var res = replace(t, p, "next", "n", "x", "plain-title");
             assertThat(res.replacedContent()).as("tags %s replaceable", tags).isEqualTo("body");
-            assertThat(live(t, p, "plain-title")).as("tags %s: old row gone", tags).isEmpty();
+            assertThat(live(t, p, "plain-title")).as("tags %s: old row hidden", tags).isEmpty();
+            assertThat(repo.listQuarantined(t, p)).as("tags %s: old row quarantined", tags).hasSize(1);
         }
     }
 
@@ -337,7 +525,7 @@ class MemoryRepositoryReplacesTest {
         put(t, p, title, "body of " + title, "bead:nexus-x");
         var res = replace(t, p, "next", "n", "x", title);
         assertThat(res.replacedTitle()).isEqualTo(title);
-        assertThat(live(t, p, title)).as("old row gone").isEmpty();
+        assertThat(live(t, p, title)).as("old row hidden").isEmpty();
     }
 
     @Test
@@ -367,6 +555,7 @@ class MemoryRepositoryReplacesTest {
 
         assertThat(res.replacedContent()).contains("kind:gate");
         assertThat(live(t, p, "howto-note")).isEmpty();
+        assertThat(repo.listQuarantined(t, p)).extracting(MemoryRecord::getTitle).containsExactly("howto-note");
         assertThat(live(t, p, "howto-note-v2")).isPresent();
     }
 
@@ -423,7 +612,7 @@ class MemoryRepositoryReplacesTest {
     // ── Case 7: a chain A, B, C leaves only C ─────────────────────────────────
 
     @Test
-    void aChainOfReplacesLeavesOnlyTheLast_withItsLineage() {
+    void aChainOfReplacesLeavesOnlyTheLastLive_withItsLineage_andQuarantinesTheRest() {
         String t = tenant(); String p = project();
         put(t, p, "A", "A body", "x");
         // Each put sends its content with the lineage line already appended, as the client will.
@@ -435,36 +624,38 @@ class MemoryRepositoryReplacesTest {
         List<MemoryRecord> rows = repo.getAll(t, p);
         assertThat(rows).extracting(MemoryRecord::getTitle).containsExactly("C");
         assertThat(rows.get(0).getContent()).endsWith("replaces: B");
+        assertThat(repo.listQuarantined(t, p)).extracting(MemoryRecord::getTitle)
+            .as("every replaced row is kept, restorable").containsExactlyInAnyOrder("A", "B");
     }
 
-    // ── Atomicity: a failing write after the delete rolls the delete back ─────
+    // ── Atomicity: a failing write after the quarantine rolls the quarantine back ─
 
     @Test
-    void aFailureWritingTheNewRow_rollsBackTheDelete() {
+    void aFailureWritingTheNewRow_rollsBackTheQuarantine() {
         String t = tenant(); String p = project();
         put(t, p, "old-note", "old body", "a");
         List<Row> before = snapshot(t, p);
 
-        // ttl 0 violates memory_ttl_days_positive_chk at the INSERT, after the target was deleted.
+        // ttl 0 violates memory_ttl_days_positive_chk at the INSERT, after the target was quarantined.
         assertThatThrownBy(() -> repo.replaceMemory(t, p, "new-note", "n", "x", null, null, 0, "old-note"))
             .isInstanceOf(RuntimeException.class);
 
-        assertThat(snapshot(t, p)).as("the delete rolled back with the failed insert").isEqualTo(before);
+        assertThat(snapshot(t, p)).as("the quarantine rolled back with the failed insert").isEqualTo(before);
     }
 
     // ── The FOR UPDATE lock: two replaces of one target cannot both succeed ───
 
     /**
-     * tx1 holds the row lock on the target (it locked it FOR UPDATE and deleted it, as a replace does)
+     * tx1 holds the row lock on the target (it locked it FOR UPDATE and quarantined it, as a replace does)
      * and stays open. tx2 replaces the same target and must BLOCK on that lock, in the SELECT ... FOR
-     * UPDATE; once tx1 commits, tx2 re-reads, finds the row gone and is refused as missing. Without
-     * {@code .forUpdate()} tx2 reads the target from its snapshot, runs on, and stops at its own DELETE
+     * UPDATE; once tx1 commits, tx2 re-reads, finds the row quarantined and is refused as such. Without
+     * {@code .forUpdate()} tx2 reads the target from its snapshot, runs on, and stops at its own UPDATE
      * with a different message ("affected 0 rows"), and the wait below never sees a blocked FOR UPDATE.
      * No sleep stands in for synchronisation: the latches order the two sides and pg_stat_activity is
      * polled, with a deadline, for tx2's wait on the lock.
      */
     @Test
-    void twoReplacesOfOneTarget_theSecondBlocksOnTheRowLock_thenIsRefusedAsMissing() throws Exception {
+    void twoReplacesOfOneTarget_theSecondBlocksOnTheRowLock_thenIsRefusedAsQuarantined() throws Exception {
         String t = tenant(); String p = project();
         long targetId = put(t, p, "old-note", "old body", "a");
         ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -473,7 +664,8 @@ class MemoryRepositoryReplacesTest {
         try {
             Future<?> tx1 = pool.submit(() -> scope.withTenant(t, ctx -> {
                 ctx.selectFrom(MEMORY).where(MEMORY.ID.eq(targetId)).forUpdate().fetch();
-                ctx.deleteFrom(MEMORY).where(MEMORY.ID.eq(targetId)).execute();
+                ctx.update(MEMORY).set(MEMORY.QUARANTINED_AT, OffsetDateTime.now(ZoneOffset.UTC))
+                   .where(MEMORY.ID.eq(targetId)).execute();
                 locked.countDown();
                 try {
                     release.await(60, TimeUnit.SECONDS);
@@ -498,7 +690,7 @@ class MemoryRepositoryReplacesTest {
                 .isInstanceOf(ExecutionException.class)
                 .cause()
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("no row titled 'old-note'");
+                .hasMessageContaining("'old-note' is quarantined");
             assertThat(live(t, p, "second")).as("the refused second replace wrote nothing").isEmpty();
         } finally {
             release.countDown();
@@ -524,35 +716,35 @@ class MemoryRepositoryReplacesTest {
         return false;
     }
 
-    // ── The delete must affect exactly one row ────────────────────────────────
+    // ── The quarantine must affect exactly one row ────────────────────────────
 
     /**
-     * A BEFORE DELETE trigger that returns NULL cancels the delete for one title: the DELETE reports 0
+     * A BEFORE UPDATE trigger that returns NULL cancels the update for one title: the UPDATE reports 0
      * rows although the row is locked and visible. The replace must refuse and roll back, never write the
-     * new row and echo content as deleted that was not.
+     * new row and echo a row as quarantined that was not.
      */
     @Test
-    void aDeleteThatAffectsNoRow_isRefused_andNothingIsWritten() throws Exception {
+    void aQuarantineThatAffectsNoRow_isRefused_andNothingIsWritten() throws Exception {
         String t = tenant(); String p = project();
-        put(t, p, "cancel-delete-target", "body that survives", "a");
+        put(t, p, "cancel-update-target", "body that survives", "a");
         List<Row> before = snapshot(t, p);
         try {
             try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-                st.execute("CREATE OR REPLACE FUNCTION nexus.cancel_delete_for_test() RETURNS trigger AS $$ "
-                    + "BEGIN IF OLD.title = 'cancel-delete-target' THEN RETURN NULL; END IF; RETURN OLD; END $$ "
+                st.execute("CREATE OR REPLACE FUNCTION nexus.cancel_update_for_test() RETURNS trigger AS $$ "
+                    + "BEGIN IF OLD.title = 'cancel-update-target' THEN RETURN NULL; END IF; RETURN NEW; END $$ "
                     + "LANGUAGE plpgsql");
-                st.execute("CREATE TRIGGER cancel_delete_for_test BEFORE DELETE ON nexus.memory "
-                    + "FOR EACH ROW EXECUTE FUNCTION nexus.cancel_delete_for_test()");
+                st.execute("CREATE TRIGGER cancel_update_for_test BEFORE UPDATE ON nexus.memory "
+                    + "FOR EACH ROW EXECUTE FUNCTION nexus.cancel_update_for_test()");
             }
-            assertThatThrownBy(() -> replace(t, p, "new-note", "N", "x", "cancel-delete-target"))
+            assertThatThrownBy(() -> replace(t, p, "new-note", "N", "x", "cancel-update-target"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("affected 0 rows")
-                .hasMessageContaining("cancel-delete-target");
-            assertThat(snapshot(t, p)).as("nothing written, nothing deleted").isEqualTo(before);
+                .hasMessageContaining("cancel-update-target");
+            assertThat(snapshot(t, p)).as("nothing written, nothing quarantined").isEqualTo(before);
         } finally {
             try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-                st.execute("DROP TRIGGER IF EXISTS cancel_delete_for_test ON nexus.memory");
-                st.execute("DROP FUNCTION IF EXISTS nexus.cancel_delete_for_test()");
+                st.execute("DROP TRIGGER IF EXISTS cancel_update_for_test ON nexus.memory");
+                st.execute("DROP FUNCTION IF EXISTS nexus.cancel_update_for_test()");
             }
         }
     }

@@ -64,7 +64,7 @@ class MemoryRepositoryQuarantineReadPathTest {
         "importRow", "importBatch", "reap", "restore", "insertSummary",
         "listSummaries",
         // RDR-238 (nexus-qo7ie.6): a write. Its return type is a ReplaceResult record carrying the
-        // deleted row's title and content, which the by-return-type walk cannot see as a read. It
+        // quarantined row's id, title and content, which the by-return-type walk cannot see as a read. It
         // looks its target up WITHOUT the read predicate on purpose, to refuse a quarantined target by
         // name (MemoryRepositoryReplacesTest.refuses_aQuarantinedTarget_asMissingWouldHideIt).
         "replaceMemory",

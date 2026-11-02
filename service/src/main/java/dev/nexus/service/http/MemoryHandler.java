@@ -188,16 +188,19 @@ public final class MemoryHandler implements HttpHandler {
      * POST /v1/memory/put
      * Request: {"project","title","content","tags","ttl","agent","session","replaces"(opt)}
      * Response 200: {"id": <long>}; with {@code replaces}:
-     * {"id": <long>, "replaced_title": <string>, "replaced_content": <string>}
+     * {"id": <long>, "replaced_id": <long>, "replaced_title": <string>, "replaced_content": <string>}
      *
-     * <p>RDR-238 (bead nexus-qo7ie.6): {@code replaces} is the exact title of a row in the put's own
-     * tenant and project (never an id). The engine deletes that row and writes the new one in one
-     * transaction and echoes the deleted row's title and content, the writer's only record of what was
-     * removed. Absent or JSON null means a plain put, with the response shape above unchanged; a
-     * present but blank {@code replaces} is 400.
-     * Refused with nothing written or deleted ({@link MemoryRepository#replaceMemory}): 409 for a
+     * <p>RDR-238 (beads nexus-qo7ie.6, nexus-ov3zi): {@code replaces} is the exact title of a row in the
+     * put's own tenant and project (never an id). The engine QUARANTINES that row in the same
+     * transaction as the write and echoes its id, title and content. The row is not deleted: every read
+     * hides it, {@code reap} and the rollup leave it (it has {@code ttl_days} NULL and
+     * {@code rolled_up_at} NULL), and {@code POST /v1/memory/{id}/restore} with {@code replaced_id}
+     * brings it back. Absent or JSON null means a plain put with the response shape above unchanged;
+     * a present but blank {@code replaces} is 400.
+     * Refused with nothing written or changed ({@link MemoryRepository#replaceMemory}): 409 for a
      * missing, quarantined or audit-record target (audit tag or audit-record title) or when a row
-     * with the new title already exists, 400 when the target is the row being written. The error names the target and the reason.
+     * with the new title already exists, 400 when the target is the row being written.
+     * The error names the target and the reason.
      */
     private void handlePut(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -221,6 +224,7 @@ public final class MemoryHandler implements HttpHandler {
             var res = repo.replaceMemory(tenant, project, title, content, tags, session, agent, ttl, replaces);
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("id", res.id());
+            resp.put("replaced_id", res.replacedId());
             resp.put("replaced_title", res.replacedTitle());
             resp.put("replaced_content", res.replacedContent());
             HttpUtil.send(ex, 200, json(resp));
@@ -549,7 +553,9 @@ public final class MemoryHandler implements HttpHandler {
      *      Response 200: {"id": <long>}; 400 on an empty source list or blank
      *      content/model; 409 when a source id is not a row of that project
      *      (nothing written — MemoryRepository.UnknownSourceIdException, with
-     *      "code":"unknown_source_id" so a client can tell it from other 409s).
+     *      "code":"unknown_source_id" so a client can tell it from other 409s); 409 with
+     *      "code":"replaced_source_id" when a source id is a row a replace quarantined
+     *      (nexus-ov3zi: never summarized, so never reaped).
      */
     private void handleSummaries(HttpExchange ex, String tenant, String method) throws IOException {
         switch (method) {
@@ -573,6 +579,11 @@ public final class MemoryHandler implements HttpHandler {
                               tenant, project, e.getMessage());
                     HttpUtil.send(ex, 409, json(Map.of(
                         "error", e.getMessage(), "code", "unknown_source_id")));
+                } catch (MemoryRepository.ReplacedSourceIdException e) {
+                    log.debug("event=memory_summary_refused tenant={} project={} error={}",
+                              tenant, project, e.getMessage());
+                    HttpUtil.send(ex, 409, json(Map.of(
+                        "error", e.getMessage(), "code", "replaced_source_id")));
                 }
             }
             default -> {

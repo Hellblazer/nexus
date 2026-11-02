@@ -1193,9 +1193,10 @@ class MemoryHandlerTest {
     }
 
     @Test
-    void put_withReplaces_deletesTheTarget_andEchoesItsTitleAndContent() throws Exception {
-        post("/v1/memory/put", TENANT,
-            "{\"project\":\"rep-ok\",\"title\":\"old\",\"content\":\"old body\",\"tags\":\"a\"}");
+    void put_withReplaces_quarantinesTheTarget_andEchoesItsIdTitleAndContent() throws Exception {
+        long oldId = ((Number) mapper.readValue(post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-ok\",\"title\":\"old\",\"content\":\"old body\",\"tags\":\"a\",\"ttl\":30}").body(),
+            MAP_T).get("id")).longValue();
 
         var resp = post("/v1/memory/put", TENANT,
             "{\"project\":\"rep-ok\",\"title\":\"new\",\"content\":\"new body\\nreplaces: old\","
@@ -1203,13 +1204,82 @@ class MemoryHandlerTest {
 
         assertThat(resp.statusCode()).isEqualTo(200);
         var body = mapper.readValue(resp.body(), MAP_T);
-        assertThat(body.keySet()).containsExactlyInAnyOrder("id", "replaced_title", "replaced_content");
+        assertThat(body.keySet()).containsExactlyInAnyOrder("id", "replaced_id", "replaced_title", "replaced_content");
+        assertThat(((Number) body.get("replaced_id")).longValue()).as("the old row's id").isEqualTo(oldId);
         assertThat(body.get("replaced_title")).isEqualTo("old");
         assertThat(body.get("replaced_content")).isEqualTo("old body");
-        assertThat(((Number) body.get("id")).longValue()).isPositive();
+        assertThat(((Number) body.get("id")).longValue()).isPositive().isNotEqualTo(oldId);
+
+        // Hidden from get (by title and by id), list and search ...
         assertThat(get("/v1/memory/get?project=rep-ok&title=old", TENANT).statusCode()).isEqualTo(404);
+        assertThat(get("/v1/memory/get?id=" + oldId, TENANT).statusCode()).isEqualTo(404);
+        assertThat(mapper.readValue(get("/v1/memory/list?project=rep-ok", TENANT).body(), LIST_T))
+            .extracting(r -> r.get("title")).containsExactly("new");
+        assertThat(mapper.readValue(post("/v1/memory/search", TENANT,
+            "{\"query\":\"body\",\"project\":\"rep-ok\"}").body(), LIST_T))
+            .extracting(r -> r.get("title")).containsExactly("new");
         var stored = mapper.readValue(get("/v1/memory/get?project=rep-ok&title=new", TENANT).body(), MAP_T);
         assertThat(stored.get("content")).isEqualTo("new body\nreplaces: old");
+
+        // ... present in the quarantined listing, unmarked, so reap leaves it.
+        var q = mapper.readValue(get("/v1/memory/quarantined?project=rep-ok", TENANT).body(), LIST_T);
+        assertThat(q).singleElement().satisfies(r -> {
+            assertThat(((Number) r.get("id")).longValue()).isEqualTo(oldId);
+            assertThat(r.get("content")).isEqualTo("old body");
+            assertThat(r.get("quarantined_at")).isNotNull();
+            assertThat(r.get("rolled_up_at")).isNull();
+        });
+        var reap = post("/v1/memory/reap", TENANT, "{}");
+        assertThat((List<?>) mapper.readValue(reap.body(), MAP_T).get("deleted_ids"))
+            .extracting(o -> ((Number) o).longValue())
+            .as("reap deletes only quarantined AND rolled-up rows").doesNotContain(oldId);
+
+        // ... and restorable by id with its content intact.
+        var restored = post("/v1/memory/" + oldId + "/restore", TENANT, "");
+        assertThat(mapper.readValue(restored.body(), MAP_T)).containsEntry("restored", true);
+        var back = mapper.readValue(get("/v1/memory/get?id=" + oldId, TENANT).body(), MAP_T);
+        assertThat(back.get("title")).isEqualTo("old");
+        assertThat(back.get("content")).isEqualTo("old body");
+        assertThat(back.get("tags")).isEqualTo("a");
+        assertThat(back.get("ttl")).as("restore makes the row permanent").isNull();
+    }
+
+    @Test
+    void summaries_aReplacedSourceId_is409WithCode_nothingWritten_andReapLeavesTheRow() throws Exception {
+        String project = "rep-rollup-" + System.nanoTime();
+        long oldId = ((Number) mapper.readValue(post("/v1/memory/put", TENANT,
+            "{\"project\":\"" + project + "\",\"title\":\"old\",\"content\":\"old body\",\"ttl\":30}").body(),
+            MAP_T).get("id")).longValue();
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"" + project + "\",\"title\":\"new\",\"content\":\"n\",\"replaces\":\"old\"}");
+
+        var resp = post("/v1/memory/summaries", TENANT, mapper.writeValueAsString(Map.of(
+            "project", project, "content", "summary of old", "source_ids", List.of(oldId), "model", "m")));
+
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(mapper.readValue(resp.body(), MAP_T)).containsEntry("code", "replaced_source_id");
+        assertThat(mapper.readValue(get("/v1/memory/summaries?project=" + project, TENANT).body(), LIST_T))
+            .isEmpty();
+        var q = mapper.readValue(get("/v1/memory/quarantined?project=" + project, TENANT).body(), LIST_T);
+        assertThat(q).singleElement().satisfies(r -> {
+            assertThat(r.get("rolled_up_at")).isNull();
+            assertThat(r.get("ttl")).as("the wire shows ttl null for a replaced row").isNull();
+        });
+        assertThat((List<?>) mapper.readValue(post("/v1/memory/reap", TENANT, "{}").body(), MAP_T)
+            .get("deleted_ids")).extracting(o -> ((Number) o).longValue()).doesNotContain(oldId);
+    }
+
+    @Test
+    void put_withReplaces_aSecondReplaceOfTheSameTarget_is409Quarantined() throws Exception {
+        post("/v1/memory/put", TENANT, "{\"project\":\"rep-twice\",\"title\":\"old\",\"content\":\"o\"}");
+        assertThat(post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-twice\",\"title\":\"n1\",\"content\":\"1\",\"replaces\":\"old\"}")
+            .statusCode()).isEqualTo(200);
+        var again = post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-twice\",\"title\":\"n2\",\"content\":\"2\",\"replaces\":\"old\"}");
+        assertThat(again.statusCode()).isEqualTo(409);
+        assertThat((String) mapper.readValue(again.body(), MAP_T).get("error")).contains("quarantined");
+        assertThat(get("/v1/memory/get?project=rep-twice&title=n2", TENANT).statusCode()).isEqualTo(404);
     }
 
     @Test
