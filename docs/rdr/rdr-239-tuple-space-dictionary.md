@@ -190,8 +190,12 @@ Research records: T2 `nexus_rdr/239-research-1`, `239-research-2`, and
   had (`subscriptions._take_enabled`, literal before patterned), lifted
   into one shared function. Census rows from an engine older than the
   `template` field are grouped by the same resolver. An engine whose
-  registry has no `doc` prints "engine predates the dictionary", still
-  shows the census, and exits 0.
+  registry has no `doc` for any template prints "engine predates the
+  dictionary", still shows the census, and exits 0; a template without a
+  doc on an engine that serves docs for others prints "this template has
+  no doc block" (fix round, nexus-mdbds.2.17). With no NAME the verb
+  covers every template with its census totals, from one listing of every
+  subspace grouped by the same resolver.
 
 ### Critical Assumptions
 
@@ -572,8 +576,10 @@ engine change (engine-service-v0.1.174) and is not part of this RDR.
 - **Drift.** Enforced: the example, which the engine validates with the
   checks `out()` applies; the names in `fields`; value maps against declared
   values; the file paths and RDR ids cited in `writers`, `readers` and
-  `see_also`; and the presence of `doc.summary` and `doc.example` on every
-  loaded template. Not enforced: what `summary`, `writers`, `readers` and
+  `see_also` (by the Java lint when the engine changes, and by a Python
+  mirror, `tests/test_tuple_template_doc_paths_lint.py`, in the normal PR
+  suite, which gates a docs-only change that renames a cited file); and the
+  presence of `doc.summary` and `doc.example` on every loaded template. Not enforced: what `summary`, `writers`, `readers` and
   the descriptions say. That is maintained prose, and it can go stale the
   way the comment in `ledger.yaml` did. The mitigations are that it sits in
   the file whose shape it describes, and that board and queue say

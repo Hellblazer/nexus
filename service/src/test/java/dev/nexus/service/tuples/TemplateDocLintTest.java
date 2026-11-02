@@ -33,7 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Placeholder rules, as built:
  * <ul>
  *   <li>A placeholder slot of the template name ({@code <topic>}) takes an example segment that
- *       starts with {@code example}, or a reserved UUID (the mailbox address is a session id).
+ *       starts with {@code example}. Only {@code mailbox/<address>} may instead take a reserved
+ *       UUID in its slot (the mailbox address is a session id and cannot start with a word).
  *       Literal segments ({@code aspects}, the {@code ci} of {@code board/ci/<topic>}) are exempt.</li>
  *   <li>Every UUID-shaped run in the example (subspace, nonce, keys, dims, body) must be
  *       {@code 00000000-0000-0000-0000-00000000000[0-9]}.</li>
@@ -52,6 +53,8 @@ class TemplateDocLintTest {
      *  the prefix. */
     private static final List<String> UNVERIFIED_TEMPLATES = List.of("board/<topic>", "queue/<name>");
     private static final String UNVERIFIED_PREFIX = "Unverified: ";
+    /** The one template whose placeholder slot may hold a reserved UUID instead of an {@code example...} segment. */
+    private static final String RESERVED_UUID_SLOT_TEMPLATE = "mailbox/<address>";
 
     private static final Pattern PLACEHOLDER_SEGMENT = Pattern.compile("<[^>]+>");
     private static final Pattern UUID_SHAPED = Pattern.compile(
@@ -147,6 +150,15 @@ class TemplateDocLintTest {
     }
 
     // ── 3: reserved example names (S7) ──────────────────────────────────
+    //
+    // What checks 3 and 4 do NOT cover (nexus-mdbds.2.17 review L6; the Python mirror,
+    // tests/test_tuple_template_doc_paths_lint.py, carries the same list):
+    //   - paths whose extension is outside the REPO_PATH list (sh, md, py, java, yaml, yml,
+    //     json, xml, toml, txt), extensionless paths (scripts/lab-run), directories, and
+    //     root-level files (CHANGELOG.md has no slash);
+    //   - prose fields other than writers, readers and see_also (summary, fields, body);
+    //   - cross-repo paths (a path in another repository does not exist under this root);
+    //   - hex runs of any length but 40 and 64.
 
     @Test
     void examplesUseOnlyReservedPlaceholderNames() {
@@ -174,9 +186,12 @@ class TemplateDocLintTest {
                         continue;
                     }
                     segmentsChecked++;
-                    if (!exSegs[i].startsWith("example") && !RESERVED_UUID.matcher(exSegs[i]).matches()) {
+                    boolean reservedUuidOk = t.name().equals(RESERVED_UUID_SLOT_TEMPLATE)
+                            && RESERVED_UUID.matcher(exSegs[i]).matches();
+                    if (!exSegs[i].startsWith("example") && !reservedUuidOk) {
                         problems.add(t.name() + ": example.subspace segment '" + exSegs[i]
-                                + "' fills a placeholder; it must start with 'example' or be a reserved UUID");
+                                + "' fills a placeholder; it must start with 'example'"
+                                + (RESERVED_UUID_SLOT_TEMPLATE.equals(t.name()) ? " or be a reserved UUID" : ""));
                     }
                 }
             }
