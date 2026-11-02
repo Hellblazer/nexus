@@ -44,10 +44,16 @@ _REPO_PATH = re.compile(
 _RDR_ID = re.compile(r"RDR-(\d{3,4})")
 
 
-def _citing_lines(text: str) -> list[tuple[str, str]]:
-    """``(field, line)`` for every list item under writers/readers/see_also of
-    the top-level ``doc:`` block."""
+def _citing_lines(text: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """``(items, unreadable)``: ``(field, line)`` for every list item under
+    writers/readers/see_also of the top-level ``doc:`` block, and one message per
+    line this reader cannot read. The only forms it reads are a key line ending
+    in ``:`` (or ``[]``, which lists nothing) followed by ``    - item`` lines at
+    indent 4. A value on the key's own line (a flow list, a scalar), a wrapped
+    continuation, or any other line under the key is reported, never skipped:
+    the Java check parses YAML and would see what this one missed."""
     out: list[tuple[str, str]] = []
+    unreadable: list[str] = []
     in_doc = False
     field: str | None = None
     for raw in text.splitlines():
@@ -62,11 +68,22 @@ def _citing_lines(text: str) -> list[tuple[str, str]]:
             continue
         stripped = raw.strip()
         if indent == 2:
-            key = stripped.split(":", 1)[0]
-            field = key if key in _CITING_FIELDS and stripped.endswith(":") else None
-        elif field and stripped.startswith("- "):
-            out.append((field, stripped[2:]))
-    return out
+            key, _, value = stripped.partition(":")
+            field = key if key in _CITING_FIELDS else None
+            if field and value.strip() not in ("", "[]"):
+                unreadable.append(f"{field} cannot be read: a value on the key's own line ({stripped!r}); "
+                                  "write it as a block list")
+                field = None
+            elif field and value.strip() == "[]":
+                field = None
+        elif field:
+            if indent == 4 and stripped.startswith("- "):
+                out.append((field, stripped[2:]))
+            else:
+                unreadable.append(
+                    f"{field} cannot be read: line {stripped!r} is not an item; "
+                    "each item is one '    - ' line at indent 4, with no wrapped continuation")
+    return out, unreadable
 
 
 def _rdr_exists(root: Path, rdr_id: str) -> bool:
@@ -79,7 +96,9 @@ def check_templates(templates_dir: Path, root: Path) -> tuple[list[str], int, in
     files = paths = rdrs = 0
     for f in sorted(templates_dir.glob("*.yaml")):
         files += 1
-        for field, line in _citing_lines(f.read_text(encoding="utf-8")):
+        items, unreadable = _citing_lines(f.read_text(encoding="utf-8"))
+        problems.extend(f"{f.name}: {u}" for u in unreadable)
+        for field, line in items:
             for m in _REPO_PATH.finditer(line):
                 paths += 1
                 if not (root / m.group(1)).exists():
@@ -123,3 +142,52 @@ def test_the_check_flags_a_missing_path_and_a_missing_rdr_and_ignores_prose(tmp_
     assert len(problems) == 2
     assert any("docs/gone.md" in p for p in problems)
     assert any("RDR-998" in p for p in problems)
+
+
+# Planted forms the line reader cannot see: each must fail loud, never pass silently.
+_UNREADABLE_FORMS = {
+    "a flow-style list on the key's own line": (
+        "  writers: [docs/real.md, docs/gone.md]\n", "writers"),
+    "a scalar on the key's own line": (
+        "  readers: docs/gone.md\n", "readers"),
+    "a bare scalar under the key": (
+        "  see_also:\n    docs/gone.md\n", "see_also"),
+    "a wrapped continuation under a list item": (
+        "  writers:\n    - Unverified: docs/real.md and\n      docs/gone.md\n", "writers"),
+    "a list item at the wrong indent": (
+        "  readers:\n      - docs/gone.md\n", "readers"),
+}
+
+
+@pytest.mark.parametrize("form", sorted(_UNREADABLE_FORMS))
+def test_the_check_fails_loud_on_a_form_it_cannot_read(form: str, tmp_path: Path) -> None:
+    """Positive control, one per unreadable form: a planted template whose
+    writers/readers/see_also is written in a form the line reader cannot see
+    (the Java check parses YAML and would see it) is reported, naming the field,
+    not passed over."""
+    body, field = _UNREADABLE_FORMS[form]
+    (tmp_path / "docs" / "rdr").mkdir(parents=True)
+    (tmp_path / "docs" / "real.md").write_text("x")
+    tdir = tmp_path / "templates"
+    tdir.mkdir()
+    (tdir / "t.yaml").write_text("name: t\ndoc:\n  summary: s\n" + body)
+    problems, files, _paths, _rdrs = check_templates(tdir, tmp_path)
+    assert files == 1
+    assert any(field in p and "cannot be read" in p for p in problems), (form, problems)
+
+
+def test_an_empty_flow_list_and_the_shipped_forms_are_not_flagged(tmp_path: Path) -> None:
+    """Negative control: ``writers: []`` lists nothing, so nothing is missed; a
+    plain block list with a comment line, and a non-citing field's wrapped text,
+    read clean."""
+    (tmp_path / "docs" / "rdr").mkdir(parents=True)
+    (tmp_path / "docs" / "real.md").write_text("x")
+    tdir = tmp_path / "templates"
+    tdir.mkdir()
+    (tdir / "t.yaml").write_text(
+        "name: t\ndoc:\n  summary: s\n  writers: []\n"
+        "  readers:\n    # a note\n    - docs/real.md\n"
+        "  fields:\n    k: wrapped\n      text is not a citing field\n"
+    )
+    problems, _files, paths, _rdrs = check_templates(tdir, tmp_path)
+    assert problems == [] and paths == 1
