@@ -73,7 +73,7 @@ from nexus.db.t2.records import _sanitize_fts5
 if TYPE_CHECKING:
     import httpx
 
-    from nexus.db.t2.http_memory_store import MemoryExpireResult
+    from nexus.db.t2.http_memory_store import MemoryExpireResult, ReplacePutResult
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 _log = structlog.get_logger()
@@ -453,6 +453,45 @@ class T2Database:
             agent=agent,
             session=session,
         )
+
+    def put_replacing(
+        self,
+        project: str,
+        title: str,
+        content: str,
+        replaces: str,
+        tags: str = "",
+        ttl: int | None = None,
+        agent: str | None = None,
+        session: str | None = None,
+    ) -> ReplacePutResult:
+        """Replacing put (RDR-238): the new row and the deleted row's echo.
+
+        The engine deletes the replaced memory row only. Its topic assignments
+        are purged here, as :meth:`delete` does, because no FK covers them. A
+        failed purge is logged and does not mask a replace that already landed.
+        """
+        result = self.memory.put_replacing(
+            project=project,
+            title=title,
+            content=content,
+            replaces=replaces,
+            tags=tags,
+            ttl=ttl,
+            agent=agent,
+            session=session,
+        )
+        try:
+            self.taxonomy.purge_assignments_for_doc(
+                project=project, title=result.replaced_title,
+            )
+        except Exception as exc:  # noqa: BLE001 — the replace already landed; an orphan assignment must not report it as failed
+            _log.warning(
+                "replaces_taxonomy_purge_failed",
+                project=project, replaced_title=result.replaced_title,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        return result
 
     def put_or_merge(
         self,

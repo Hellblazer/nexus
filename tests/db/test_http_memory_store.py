@@ -40,7 +40,7 @@ from urllib.parse import urlparse
 import httpx
 import pytest
 
-from nexus.db.t2.http_memory_store import DEFAULT_TENANT, HttpMemoryStore
+from nexus.db.t2.http_memory_store import DEFAULT_TENANT, HttpMemoryStore, ReplacesEchoMissingError
 from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 TOKEN = "fake-service-token-xyz"
@@ -587,6 +587,26 @@ class TestPutGet:
     def test_get_requires_id_or_project_title(self, store: HttpMemoryStore) -> None:
         with pytest.raises(ValueError):
             store.get()
+
+
+class TestPutReplacing:
+    """RDR-238 P1 S2. The fake server ignores unknown fields and answers {"id"}, which
+    is exactly an engine that predates ``replaces``; the engine-backed cases are in
+    tests/test_memory_replaces.py."""
+
+    def test_plain_put_still_returns_the_row_id(self, store: HttpMemoryStore) -> None:
+        assert isinstance(store.put("rp", "plain", "content", ttl=30), int)
+
+    def test_an_engine_without_replaces_fails_after_writing_the_new_row(
+        self, store: HttpMemoryStore,
+    ) -> None:
+        store.put("rp", "old", "old content", ttl=30)
+        with pytest.raises(ReplacesEchoMissingError, match="still alive"):
+            store.put_replacing("rp", "new", "new content", replaces="old")
+        written = store.get(project="rp", title="new")
+        assert written is not None, "the old engine wrote the new row; the error must say so"
+        assert written["content"] == "new content\nreplaces: old"
+        assert store.get(project="rp", title="old") is not None
 
 
 class TestResolveTitle:

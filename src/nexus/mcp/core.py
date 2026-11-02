@@ -132,6 +132,7 @@ from nexus.mcp import subscriptions as _subscriptions
 from nexus.mcp import channel as _channel
 
 if TYPE_CHECKING:
+    from nexus.db.t2.http_memory_store import ReplacePutResult
     from nexus.plans.lifecycle_stream import LifecycleStream
     from nexus.plans.primary_evidence import NamedSourceResolution, PrimaryEvidence
     from nexus.plans.request_coverage import RequestCoverage
@@ -7327,6 +7328,12 @@ def memory_put(
     session: Annotated[str, Field(
         description="Optional explicit session_id override. Falls back to the parent's session resolution chain.",
     )] = "",
+    replaces: Annotated[str, Field(
+        description=(
+            "Exact title of an entry in the same project to delete in the same write. "
+            "Its content is returned. Empty means none."
+        ),
+    )] = "",
 ) -> str:
     """Store a T2 memory entry; upserts by (project, title).
 
@@ -7360,20 +7367,39 @@ def memory_put(
         else:
             import os as _os  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
             session_arg = _os.environ.get("NX_SESSION_ID", "").strip() or None
+        # RDR-238 K1: the store appends the lineage line, so the row that lands is
+        # not ``content``. ``landed_content`` is what was actually sent, and is what
+        # the read-back below compares against.
+        landed_content = content
+        replaced: ReplacePutResult | None = None
         with _t2_ctx() as db:
-            row_id = db.put(
-                project=project,
-                title=title,
-                content=content,
-                tags=tags,
-                # nexus-tk070.p6a: no coercion — ttl flows verbatim. A ttl<=0
-                # is rejected by the engine's own boundary validation
-                # (MemoryHandler.requirePositiveOrNullTtl -> 400), surfaced to
-                # the caller via _mcp_tool_error below, never swallowed here.
-                ttl=ttl,
-                agent=agent_arg,
-                session=session_arg,
-            )
+            if replaces:
+                replaced = db.put_replacing(
+                    project=project,
+                    title=title,
+                    content=content,
+                    replaces=replaces,
+                    tags=tags,
+                    ttl=ttl,
+                    agent=agent_arg,
+                    session=session_arg,
+                )
+                row_id = replaced.id
+                landed_content = replaced.sent_content
+            else:
+                row_id = db.put(
+                    project=project,
+                    title=title,
+                    content=content,
+                    tags=tags,
+                    # nexus-tk070.p6a: no coercion — ttl flows verbatim. A ttl<=0
+                    # is rejected by the engine's own boundary validation
+                    # (MemoryHandler.requirePositiveOrNullTtl -> 400), surfaced to
+                    # the caller via _mcp_tool_error below, never swallowed here.
+                    ttl=ttl,
+                    agent=agent_arg,
+                    session=session_arg,
+                )
         _record_tier_write(
             tool="memory_put", tier="T2",
             agent=agent_arg, project=project, target_title=title,
@@ -7383,7 +7409,7 @@ def memory_put(
         # returned row id is not evidence and why "unreachable" is its own
         # verdict rather than a pass.
         verdict, detail = _verify_t2_write_landed(
-            project=project, title=title, content=content, row_id=row_id,
+            project=project, title=title, content=landed_content, row_id=row_id,
         )
         if verdict == "unreachable":
             return (
@@ -7392,6 +7418,7 @@ def memory_put(
                 f"verification path is unavailable ({detail}). This is neither "
                 f"a confirmed success nor a confirmed failure — re-read before "
                 f"relying on this entry."
+                + _replaced_note(project, replaced)
             )
         if verdict != "verified":
             # Raised, not returned, so it funnels through _mcp_tool_error and
@@ -7402,9 +7429,22 @@ def memory_put(
                 f"memory_put reported success but the row did not land "
                 f"({verdict}): {detail}"
             )
-        return f"Stored: [{row_id}] {project}/{title} (ttl: {_render_ttl(ttl)})"
+        return (
+            f"Stored: [{row_id}] {project}/{title} (ttl: {_render_ttl(ttl)})"
+            + _replaced_note(project, replaced)
+        )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("memory_put", e)
+
+
+def _replaced_note(project: str, replaced: ReplacePutResult | None) -> str:
+    """The deleted row's title and content, for the writer to re-put (RDR-238)."""
+    if replaced is None:
+        return ""
+    return (
+        f"\nReplaced (deleted): {project}/{replaced.replaced_title}\n"
+        f"Deleted content (re-put it to undo):\n{replaced.replaced_content}"
+    )
 
 
 def _render_ttl(ttl: object) -> str:

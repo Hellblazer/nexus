@@ -120,6 +120,68 @@ class MemoryExpireResult:
         return f"{deleted}."
 
 
+def with_lineage_line(content: str, replaces: str) -> str:
+    """Return *content* ending with the line ``replaces: <old title>`` (RDR-238).
+
+    Deterministic, and idempotent: content whose last line already is that line is
+    returned unchanged (a trailing newline after it included). Otherwise the line
+    is appended after the content as given, with one ``\n`` inserted unless the
+    content is empty or already ends with a newline. Nothing is stripped, so the
+    stored content equals what was sent and the writer's own text is untouched.
+    """
+    line = f"replaces: {replaces}"
+    body = content.rstrip("\n")
+    if body == line or body.endswith("\n" + line):
+        return content
+    if not content or content.endswith("\n"):
+        return content + line
+    return content + "\n" + line
+
+
+@dataclass(frozen=True)
+class ReplacePutResult:
+    """What a replacing put did (RDR-238 P1 S2): the new row and the deleted one.
+
+    ``sent_content`` is the content actually posted, lineage line included;
+    ``_verify_t2_write_landed`` compares the re-read row against it, not against
+    the writer's argument (K1). ``replaced_title`` and ``replaced_content`` are
+    the engine's echo of the row it deleted.
+    """
+
+    id: int
+    sent_content: str
+    replaced_title: str
+    replaced_content: str
+
+
+class ReplacesEchoMissingError(RuntimeError):
+    """A put that sent ``replaces`` got no echo: the engine does not know the field."""
+
+    def __init__(self, project: str, title: str, replaces: str) -> None:
+        super().__init__(
+            f"the engine lacks replaces: it answered without the replaced_title and "
+            f"replaced_content echo. The new row {project}/{title} WAS written; the old "
+            f"row {project}/{replaces} is still alive. Upgrade the engine, then delete "
+            f"{project}/{replaces} by hand if it should go."
+        )
+
+
+class ReplacesOutcomeUnknownError(RuntimeError):
+    """The response to a replacing put was lost: the replace may or may not have landed."""
+
+    def __init__(self, project: str, title: str, replaces: str) -> None:
+        super().__init__(
+            f"the outcome of the replace is unknown: the request to replace "
+            f"{project}/{replaces} with {project}/{title} got no usable answer. A replacing "
+            f"put is never retried. Check with memory_get whether {project}/{title} exists "
+            f"and {project}/{replaces} is gone; if {project}/{replaces} is still there, put again."
+        )
+
+
+#: Gateway statuses that mean "the answer was lost", not "the engine refused".
+_GATEWAY_LOST_STATUSES = frozenset({502, 503, 504})
+
+
 class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """MemoryStore drop-in that delegates to the RDR-152 Java HTTP service.
 
@@ -181,6 +243,71 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         resp = self._post("/v1/memory/put", payload)
         return int(resp["id"])
+
+    def put_replacing(
+        self,
+        project: str,
+        title: str,
+        content: str,
+        replaces: str,
+        tags: str = "",
+        ttl: int | None = None,
+        agent: str | None = None,
+        session: str | None = None,
+    ) -> ReplacePutResult:
+        """Write ``title`` and delete the row titled ``replaces`` in one engine
+        transaction (RDR-238 Technical Design 1). Returns a :class:`ReplacePutResult`.
+
+        Kept apart from :meth:`put` so a plain put still returns the row id.
+
+        * ``replaces`` is an exact title in the same project, never an id. The line
+          ``replaces: <title>`` becomes the content's last line (:func:`with_lineage_line`).
+        * K5: the post is ``idempotent=False``. Under the retrying post a lost
+          response followed by a retry finds the target already deleted and is
+          refused, so the writer would see a refusal for a replace that landed.
+          A lost response raises :class:`ReplacesOutcomeUnknownError` instead.
+        * An engine refusal (missing, quarantined, audit-record target; the row
+          itself) is a definitive ``httpx.HTTPStatusError``: nothing was written.
+        * A response without the echo raises :class:`ReplacesEchoMissingError`:
+          an engine without ``replaces`` ignores the field and has already
+          written the new row.
+        """
+        if not replaces or not replaces.strip():
+            raise ValueError("replaces must name the exact title of the row to replace.")
+        sent = with_lineage_line(content, replaces)
+        agent, session = resolve_attribution(agent, session)
+        payload: dict[str, Any] = {
+            "project": project,
+            "title": title,
+            "content": sent,
+            "tags": tags or "",
+            "ttl": ttl,
+            "replaces": replaces,
+        }
+        if agent is not None:
+            payload["agent"] = agent
+        if session is not None:
+            payload["session"] = session
+
+        try:
+            resp = self._post("/v1/memory/put", payload, idempotent=False)
+        except httpx.TransportError as exc:
+            raise ReplacesOutcomeUnknownError(project, title, replaces) from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in _GATEWAY_LOST_STATUSES:
+                raise ReplacesOutcomeUnknownError(project, title, replaces) from exc
+            raise
+
+        echo_title = resp.get("replaced_title")
+        echo_content = resp.get("replaced_content")
+        if echo_title is None or echo_content is None:
+            raise ReplacesEchoMissingError(project, title, replaces)
+        return ReplacePutResult(
+            id=int(resp["id"]),
+            sent_content=sent,
+            replaced_title=str(echo_title),
+            replaced_content=str(echo_content),
+        )
 
     def import_entry(
         self,
