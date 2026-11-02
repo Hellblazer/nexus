@@ -881,6 +881,44 @@ def test_a_managed_auto_walk_skips_the_rung_and_reads_nothing(world: World) -> N
     assert ledger.verified_rungs() == frozenset() or not ledger.verified_rungs()
 
 
+def test_a_managed_auto_walk_with_a_standing_memo_and_no_record_defers_and_scans_nothing(world: World) -> None:
+    """The rung is converged from the memo (one /stats read), the walk's ledger holds no completion, so the
+    runner calls verify(): it used to run the whole-catalog dry run that detect() had just declined to make,
+    on every session start (shakedown 7.94.0 census). Now a deferral; the memo stands for the interactive run."""
+    from nexus.upgrade_ladder.deadline import Deadline
+    from nexus.upgrade_ladder.unattended import unattended_run
+
+    _remembered(world)
+    note = dict(world.memo.note)
+    before = world.engine_reads()
+    ledger = InMemoryCompletionLedger()
+    runner = LadderRunner(
+        LadderRegistry((world.rung(managed_fn=lambda: True),)), ledger,
+        package_version_fn=lambda: "9.9.9", deadline=Deadline(900),
+    )
+
+    with unattended_run():
+        report = runner.run()
+
+    assert [r.outcome for r in report.runs] == [RungOutcome.DEFERRED], [(r.outcome, r.detail) for r in report.runs]
+    assert "interactive `nx upgrade`" in report.runs[0].detail
+    after = world.engine_reads()
+    assert after[:4] == before[:4], "no listing, manifest, owner or chunk read"
+    assert after[4] - before[4] == 1, "only detect's one /stats read"
+    assert world.memo.note == note and not ledger.verified_rungs()
+
+
+def test_the_same_walk_interactively_confirms_the_memo_and_records(world: World) -> None:
+    _remembered(world)
+    ledger = InMemoryCompletionLedger()
+    runner = LadderRunner(
+        LadderRegistry((world.rung(managed_fn=lambda: True),)), ledger, package_version_fn=lambda: "9.9.9",
+    )
+    report = runner.run()  # not unattended
+    assert [r.outcome for r in report.runs] == [RungOutcome.RECORDED], [(r.outcome, r.detail) for r in report.runs]
+    assert world.listings >= 2
+
+
 # ── attribution by title ─────────────────────────────────────────────────────
 
 

@@ -134,6 +134,7 @@ class World:
 
     # wiring --------------------------------------------------------------
     def rung(self, **kw) -> AspectQueueTuplesRung:
+        kw.setdefault("record_fn", lambda: None)  # no completion on file: the default would ask the engine's ledger
         return AspectQueueTuplesRung(
             mode_fn=lambda: self.flag,
             queue_factory=lambda: self,
@@ -486,6 +487,36 @@ class TestDetectIsBounded:
         assert (status.applicable, status.converged) == (False, False)
         assert "interactive `nx upgrade`" in status.pending_detail
         assert _limits(w) == [DETECT_READ_LIMIT], "the bounded page only"
+
+    def test_an_unattended_run_on_a_managed_service_with_a_recorded_completion_is_converged_without_the_whole_read(self) -> None:
+        """nexus-mq980: the remedy `nx doctor` names is an interactive `nx upgrade`, which reads the whole table,
+        verifies and records the rung. The next unattended detect() answers from that record. Before: it refused
+        for ever, whatever had been recorded."""
+        from nexus.upgrade_ladder.unattended import unattended_run
+
+        stay = [_row(f"/stay{i}.md", "") for i in range(DETECT_READ_LIMIT)]
+        w = World(rows=[*stay, _row("/late.md", "1.1.9")])
+        with unattended_run():
+            status = w.rung(managed_fn=lambda: True, record_fn=lambda: object()).detect()
+        assert (status.applicable, status.converged) == (True, True)
+        assert _limits(w) == [DETECT_READ_LIMIT], "the bounded page only"
+
+    def test_a_walk_that_answered_from_the_record_but_holds_none_defers_without_the_whole_read(self) -> None:
+        from nexus.upgrade_ladder.registry import LadderRegistry
+        from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
+        from nexus.upgrade_ladder.unattended import unattended_run
+
+        stay = [_row(f"/stay{i}.md", "") for i in range(DETECT_READ_LIMIT)]
+        w = World(rows=[*stay, _row("/late.md", "1.1.9")])
+        ledger = InMemoryCompletionLedger()
+        runner = LadderRunner(
+            LadderRegistry((w.rung(managed_fn=lambda: True, record_fn=lambda: object()),)), ledger,
+            package_version_fn=lambda: "9.9.9",
+        )
+        with unattended_run():
+            report = runner.run()
+        assert [r.outcome for r in report.runs] == [RungOutcome.DEFERRED], [(r.outcome, r.detail) for r in report.runs]
+        assert _limits(w) == [DETECT_READ_LIMIT] and not ledger.verified_rungs()
 
     def test_the_whole_table_is_still_read_locally_under_auto_and_interactively_when_managed(self) -> None:
         from nexus.upgrade_ladder.deadline import Deadline, bound

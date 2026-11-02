@@ -147,3 +147,13 @@ def test_a_local_engine_keeps_the_rung_scan_in_doctor(monkeypatch) -> None:
     (row,) = health._check_pending_rungs()
     assert cat.calls == 1, "doctor on a local engine still runs the rung's dry-run scan"
     assert row.ok and "no pending rungs" in row.detail
+
+
+@pytest.mark.parametrize("check", ["_check_stale_indexing_runs", "_check_failed_runs_hidden_chunks", "_check_next_seq_drift"])
+def test_the_shared_walk_parameter_has_a_precise_type(check: str) -> None:
+    """The three rows take the doctor run's one walk: a list of documents, the failed-walk marker, or None (called alone).
+    It was annotated ``object``, which a type checker reads as 'anything'."""
+    import typing
+
+    hint = typing.get_type_hints(getattr(health, check))["documents"]
+    assert {typing.get_origin(a) or a for a in typing.get_args(hint)} == {list, health._WalkFailed, type(None)}, hint

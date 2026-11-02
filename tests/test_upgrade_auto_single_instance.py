@@ -375,7 +375,10 @@ class _CountingReader:
 
 def _managed_note_tags_registry(monkeypatch) -> None:
     _CountingReader.reads = []
-    rung = NoteTagsArrayRung(reader_factory=_CountingReader, writer_factory=lambda: None, managed_fn=lambda: True)
+    rung = NoteTagsArrayRung(
+        reader_factory=_CountingReader, writer_factory=lambda: None, managed_fn=lambda: True,
+        record_fn=lambda: None,  # no completion on file (the default would ask the engine's ledger)
+    )
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: [rung])
 
 
