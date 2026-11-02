@@ -5228,7 +5228,7 @@ The boot-loaded template registry: digest, source directories, and the registere
 nx tuple dictionary [NAME] [--json]
 ```
 
-The tuple-space dictionary (RDR-239): what each template is for. With no `NAME`, every template: its name with the one-line `summary` of its doc block, then a totals line over its live census (`subspaces`, `available`, `claimed`, `consumed`, `dead`), from one listing of every subspace grouped by template. With `NAME`, the template's doc (`summary`, `writers`, `readers`, `fields`, `body`, `example`, `see_also`; only the parts it declares) and a census table with a row per concrete subspace under that template: `available`, `claimed`, `consumed`, `dead` and `newest_created_at`. The census reads `nx tuple list`, so a take-enabled template such as `queue/<name>` shows its acked rows under `consumed`.
+The tuple-space dictionary (RDR-239): what each template is for. With no `NAME`, every template: its name with the one-line `summary` of its doc block, then a totals line over its live census (`subspaces`, `available`, `claimed`, `consumed`, `dead`), from one listing of every subspace grouped by template. Subspaces that outlived their template (the engine names no template for them, or one the registry no longer holds) are not left out: a final `(no template)` entry shows their totals line, and appears only when there are such rows. With `NAME`, the template's doc (`summary`, `writers`, `readers`, `fields`, `body`, `example`, `see_also`; only the parts it declares) and a census table with a row per concrete subspace under that template: `available`, `claimed`, `consumed`, `dead` and `newest_created_at`. The census reads `nx tuple list`, so a take-enabled template such as `queue/<name>` shows its acked rows under `consumed`.
 
 `NAME` is a template name (`'board/ci/<topic>'`; quote it, because the shell reads `<` as a redirection) or a concrete subspace (`board/ci/example-branch`), which resolves to its template. Resolution order: a registry template of exactly that name; else the template the engine names on the census row of exactly that subspace; else the client's literal-before-pattern match against the registry (a `<param>` segment matches one segment). A `NAME` nothing resolves is an error naming the argument (`NAME 'x' matches no template; run 'nx tuple dictionary' to list them`, exit 1).
 
@@ -5236,7 +5236,7 @@ The doc is requested with `?doc=1` and is served only then. An engine that preda
 
 | Flag | Description |
 |------|-------------|
-| `--json` | With `NAME`: `{"template": "<name>", "doc": {...} or null, "census": [{"subspace", "available", "claimed", "consumed", "dead", "newest_created_at"}, ...]}`; `doc` is `null` when the engine serves none. With no `NAME`: a list of those same objects, one per template, its `census` the rows of the subspaces that resolve to it |
+| `--json` | With `NAME`: `{"template": "<name>", "doc": {...} or null, "census": [{"subspace", "available", "claimed", "consumed", "dead", "newest_created_at"}, ...]}`; `doc` is `null` when the engine serves none. With no `NAME`: a list of those same objects, one per template, its `census` the rows of the subspaces that resolve to it, then, only when some census row resolves to no registered template, a final `{"template": null, "doc": null, "census": [...]}` holding those rows |
 
 The `tuple_registry` MCP tool takes the same switch as `doc` (default false) and returns each template's doc block as the engine serves it.
 

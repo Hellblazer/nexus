@@ -732,6 +732,9 @@ def _resolve_dictionary_name(store: Any, templates: list[dict[str, Any]], name: 
 
 _NO_DOC_BLOCK = "this template has no doc block"
 
+#: The no-NAME view's final entry for census rows no registered template owns.
+_NO_TEMPLATE_ENTRY = "(no template)"
+
 #: The totals the no-NAME view shows per template, summed over its subspaces.
 _DICTIONARY_TOTALS = ("available", "claimed", "consumed", "dead")
 
@@ -791,19 +794,33 @@ def tuple_dictionary_cmd(name: str | None, json_out: bool) -> None:
         store.close()
     any_doc = any(t.get("doc") for t in templates)
     if name is None:
+        # Rows whose template is not in the registry (the engine named none, or
+        # named one that was removed) belong to no listed template; they get a
+        # final entry of their own instead of vanishing.
+        registered = {t.get("name") for t in templates}
+        orphans = sorted(
+            (row for key, rows in grouped.items() if key not in registered for row in rows),
+            key=lambda row: row.subspace,
+        )
         if json_out:
-            click.echo(json.dumps([
+            entries = [
                 {
                     "template": t.get("name"), "doc": t.get("doc"),
                     "census": [_dictionary_census_dict(c) for c in grouped.get(t.get("name"), [])],
                 }
                 for t in templates
-            ]))
+            ]
+            if orphans:
+                entries.append({"template": None, "doc": None, "census": [_dictionary_census_dict(c) for c in orphans]})
+            click.echo(json.dumps(entries))
             return
         for t in templates:
             summary = (t.get("doc") or {}).get("summary")
             click.echo(f"{t.get('name')}: {summary}" if summary else str(t.get("name")))
             click.echo(_dictionary_totals_line(grouped.get(t.get("name"), [])))
+        if orphans:
+            click.echo(_NO_TEMPLATE_ENTRY)
+            click.echo(_dictionary_totals_line(orphans))
         if not any_doc:
             click.echo(_NO_DICTIONARY)
         return

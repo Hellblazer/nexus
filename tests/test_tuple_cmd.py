@@ -32,6 +32,9 @@ from nexus.db.t2.http_tuple_store import (
     ReplyNotWrittenError,
     SchemaViolationError,
 )
+from nexus.db.t2.records import SubspaceCensus
+
+
 def _uniq(label: str) -> str:
     return f"{label}-{uuid.uuid4().hex[:10]}"
 
@@ -1017,6 +1020,56 @@ class TestTupleDictionary:
         monkeypatch.setattr(HttpTupleStore, "subspace_list", old_engine)
         payload = _last_json_line(_invoke(["dictionary", "board/ci/<topic>", "--json"]).output)
         assert sub in [c["subspace"] for c in payload["census"]]
+
+    def test_census_rows_whose_template_was_removed_show_as_a_no_template_entry(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        """nexus-mdbds.2.24 (P3 observation 2): a census row whose subspace
+        resolves to no template (an orphan whose template was removed) used to
+        group under None and show nowhere. The no-NAME view ends with a
+        '(no template)' entry holding their totals, and --json with a final
+        ``{template: null, doc: null, census: [...]}``.
+
+        The engine accepts no post to an unknown subspace, so two orphan rows
+        are faked: ``subspace_list`` is wrapped to append them (one with the
+        engine's ``template`` null, one naming a template the registry does not
+        hold). Everything else, the registry and the rest of the census, comes
+        from the real engine."""
+        sub = self._post_board_ci(_uniq("example-branch"))
+        real = HttpTupleStore.subspace_list
+        orphans = [
+            SubspaceCensus(subspace="retired/one", total=2, available=2, claimed=0, dead=0, consumed=0,
+                           expired_unpurged=0, oldest_created_at=None, newest_created_at=None,
+                           template=None, template_known=True),
+            SubspaceCensus(subspace="gone/two", total=1, available=1, claimed=0, dead=0, consumed=3,
+                           expired_unpurged=0, oldest_created_at=None, newest_created_at=None,
+                           template="gone/<x>", template_known=True),
+        ]
+
+        def with_orphans(self, prefix=None, **kw):
+            rows = real(self, prefix, **kw)
+            return [*rows, *orphans] if prefix is None and not kw else rows
+
+        monkeypatch.setattr(HttpTupleStore, "subspace_list", with_orphans)
+        payload = json.loads(_invoke(["dictionary", "--json"]).output.strip().splitlines()[-1])
+        last = payload[-1]
+        assert last["template"] is None and last["doc"] is None
+        assert [c["subspace"] for c in last["census"]] == ["gone/two", "retired/one"]  # sorted by subspace
+        assert all(t["template"] is not None for t in payload[:-1])
+        # the registered template's own row stays with its template
+        assert sub in [c["subspace"] for t in payload[:-1] for c in t["census"]]
+
+        text = _invoke(["dictionary"]).output.splitlines()
+        i = text.index("(no template)")
+        assert text[i + 1] == "  subspaces: 2, available: 3, claimed: 0, consumed: 3, dead: 0"
+        assert i + 2 == len(text), "the entry is final"
+
+    def test_no_orphan_rows_means_no_no_template_entry(self, t2_service_env) -> None:
+        sub = self._post_board_ci(_uniq("example-branch"))
+        payload = json.loads(_invoke(["dictionary", "--json"]).output.strip().splitlines()[-1])
+        assert all(t["template"] is not None for t in payload)
+        assert sub in [c["subspace"] for t in payload for c in t["census"]]
+        assert "(no template)" not in _invoke(["dictionary"]).output
 
     @staticmethod
     def _post_board(topic: str) -> str:
