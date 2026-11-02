@@ -51,8 +51,8 @@ retention and limits. The seven shipped templates (`aspects`,
 `board/<topic>`, `board/ci/<topic>`, `directory/<name>`,
 `lock/<resource>`, `mailbox/<address>`, `queue/<name>`) carry their meaning in YAML comment headers: what the
 subspace is for, why take is disabled, what the retention bounds, what
-`kind` values mean. `board.yaml` has 37 lines of such comment above 25 lines
-of schema. The engine reads these files with its own reader
+`kind` values mean. Before Phase 2, `board.yaml` had 35 comment lines and
+17 lines of schema. The engine reads these files with its own reader
 (`service/src/main/java/dev/nexus/service/tuples/MiniYaml.java`), which
 drops comments. So the meaning never leaves the repository. The fix
 delivers the meaning as schema fields that the registry serves.
@@ -228,7 +228,8 @@ Research records: T2 `nexus_rdr/239-research-1`, `239-research-2`, and
 Add one optional, closed `doc` block to the template schema. Serve it from
 the registry route on request (`?doc=1`). Fill it for the seven shipped
 templates. Render a dictionary view that joins it with the live census. A
-lint requires the block on every template the engine loads.
+lint requires the block on every template shipped in the engine's resources
+(a template loaded from `NX_TUPLE_TEMPLATE_DIR` is not linted).
 
 ### Technical Design
 
@@ -244,7 +245,9 @@ lint requires the block on every template the engine loads.
      below), so a typo cannot pass. When a dimension declares allowed values
      (the mailbox `address_kind` allows `agent` and `session`), a value map
      for it must have exactly those values as its keys, so the map cannot
-     disagree with the enum. Documentation only; it does not restrict
+     disagree with the enum. Only dimensions are cross-checked: a value map for a
+     declared key (the `aspects` key `queue`) is documentation and is not
+     compared with anything. Documentation only; it does not restrict
      `out()`, since RDR-211 chose free text on purpose. (Phase 1 replaced the
      drafted `dimension_values`: a meaningful name can be a key, and `from`
      and `topic` carry meaning with no enumerable values.)
@@ -342,9 +345,16 @@ lint requires the block on every template the engine loads.
    loaded, fails the lint instead of going unchecked. It checks that every
    file path and RDR id cited in `writers`, `readers` and `see_also` exists
    in the repository (paths and RDR ids only; module and symbol names are
-   not checked). And it checks the placeholder rule for examples: an
-   address segment starts with `example`, a UUID-shaped value is all zeros
-   except its last digit, and a 40-hex value is all zeros.
+   not checked). It checks the placeholder rule for examples: a subspace
+   segment that fills a `<param>` slot starts with `example`, except in
+   `mailbox/<address>`, whose slot may hold a reserved UUID; literal
+   segments and the literal subspace `aspects` are exempt; a UUID-shaped
+   value is all zeros except its last digit; and a 40-hex or 64-hex value is
+   all zeros. It checks that the `writers` and `readers` of `board/<topic>`
+   and `queue/<name>` carry the `Unverified:` prefix. Each check fails when
+   it examined nothing. A Python mirror of the path and RDR-id check,
+   `tests/test_tuple_template_doc_paths_lint.py`, runs in the lint job of
+   PRs that change code (see Drift).
 
 ### Decision Rationale
 
@@ -384,8 +394,8 @@ Teach the reader to keep comments and serve them as text.
 **Cons:** comments are unstructured, mix maintainer reasoning with user
 documentation, and cannot carry a validated example.
 
-**Reason for rejection:** comments mix maintainer reasoning with user
-documentation, and cannot carry an example that the engine validates.
+**Reason for rejection:** the cons; the field set in Technical Design item 1
+gives the same text a structure the engine can check.
 
 ## Trade-offs
 
@@ -408,6 +418,11 @@ documentation, and cannot carry an example that the engine validates.
 - **The registry response grows.** Mitigation: `doc` rides only
   `?doc=1`, caps bound each string and each block, and A2 measures the
   bytes before and after.
+- **The shared validator changes the write path.** Step 1 moves `out()`'s
+  shape, nonce and size checks into one validator that the boot check also
+  calls, so a defect there would refuse real posts. Mitigation: the
+  extraction keeps the checks and their order, and `TupleRepositoryTest`
+  and `TupleSizeLimitsWireTest` run unchanged against it.
 - **Scope creep into stage 2.** Mitigation: the constraint at the top; a
   trigger or action field proposed during review goes to the stage-2 RDR.
 
@@ -427,8 +442,8 @@ carried forward, since the template is retired.
 ### Phase 2: Engine
 
 Precondition: nexus-onjvw is on `develop` and inside engine-service-v0.1.174
-(verified 2026-11-01, T2 `nexus_rdr/239-research-6`); Step 1 checks it
-again. The engine ships first, and the client tolerates a missing `doc`, so
+(verified 2026-11-01, T2 `nexus_rdr/239-research-6`), checked again
+before Step 1. The engine ships first, and the client tolerates a missing `doc`, so
 Phase 3 does not wait for the deployed engine except for its own
 end-to-end check.
 
@@ -489,6 +504,9 @@ one pointer sentence.
   field parses; an unknown `doc` field is refused naming it; an undeclared
   name in `fields` is refused naming it; a value map whose keys differ from
   a dimension's declared values is refused (one missing key, one extra key);
+  a `doc` without `summary` is refused; `doc.body` on a template whose
+  `max_body_bytes` is 0 is refused; an `example` without `subspace` is
+  refused;
   `nonce` is required exactly when `id_from` is `keys+nonce` and refused
   otherwise; an example whose subspace resolves to a different template is
   refused; `writers: []` is accepted; `Long` and `Boolean` example keys and
@@ -500,20 +518,23 @@ one pointer sentence.
   the template loads without `doc` and a structured warning names the
   template and the field. The shipped set loads through `loadAtBoot`.
 - Shared validator: a change to the validator makes both an `out()` call and
-  the boot check of an example fail (a positive control, so the two cannot
-  have drifted apart).
+  the boot check of an example fail. This is a positive control run once at
+  implementation (recorded on nexus-mdbds.2.16), not a standing test; what
+  stands is that both callers use the one validator.
 - Digest: a doc-only edit changes the registry digest.
 - Route: `doc` round-trips through `GET /v1/tuples/registry?doc=1`; the
   default response carries no `doc`; census rows carry `template`.
 - Client: `nx tuple dictionary 'board/ci/<topic>'` shows the summary,
   writers, readers, example and the census (`available`, `claimed`,
-  `consumed`, `dead`, `newest_created_at`) for `board/ci/nexus-develop`;
+  `consumed`, `dead`, `newest_created_at`) for a `board/ci/example-branch`
+  the test posts first;
   against a registry with no `doc` it prints "engine predates the
   dictionary" and still shows the census.
 - Lint: removing `doc.example` from one template fails it; a template file
   in the templates directory and not in `RESOURCE_TEMPLATE_PATHS` fails it;
   a cited path that does not exist fails it; an example that breaks the
-  placeholder rule fails it.
+  placeholder rule fails it; a board or queue writer without `Unverified:`
+  fails it; a run that examined no template fails it.
 
 ## Finalization Gate
 
@@ -550,7 +571,8 @@ default response and for `?doc=1`, before the change ships.
 The four gaps map to four deliverables: Gap 1 to the schema field and the
 route, Gap 2 to `writers`, `readers` and `fields`, Gap 3 to the validated
 `example`, and Gap 4 to `nx tuple dictionary` and the census `template`
-field. Nothing in scope serves the
+field. Phase 3 Step 3 (repointing the restated mailbox `kind` meanings at
+the dictionary) serves Gap 2. Nothing in scope serves the
 later stages beyond documenting what exists. Stages 2 and 3 get their own
 RDRs (nexus-mdbds.1 first). The ledger's retirement shipped as its own
 engine change (engine-service-v0.1.174) and is not part of this RDR.

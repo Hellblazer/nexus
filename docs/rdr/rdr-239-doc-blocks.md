@@ -474,6 +474,21 @@ A2 is untouched by this pass (no engine run).
 
 ## How the blocks were checked
 
+A note on the `- Unverified: ...` items: in YAML proper a list item of the
+form `key: value` is a one-key mapping, but the engine's `MiniYaml` reads it as
+a plain string, which is what the doc means, and the Python path lint reads
+the lines as text. If a YAML-proper reader ever parses these blocks, quote
+those items.
+
+Since Phase 2 the standing check is the engine's own: every shipped
+template's `example` is validated at boot through `TupleShapeValidator`, the
+validator `out()` calls (`TemplateRegistry`, nexus-mdbds.2.10), and
+`TemplateDocLintTest` (nexus-mdbds.2.19) checks the doc fields and the
+placeholder rule. The engine tests passed on the revised blocks with all
+seven templates loaded (nexus-mdbds.2.16). The scratch-driver run below is
+the Phase 1 record, made on the pre-revision eight blocks; it is kept as
+history and is not re-run.
+
 The eight blocks were extracted from this file and each was run through a
 throwaway Java driver in the scratchpad (not in the repository), compiled
 against the real `MiniYaml`, `TemplateSchema`, `TemplateSchemaParser` and
