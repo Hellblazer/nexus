@@ -1769,7 +1769,8 @@ public final class PgVectorRepository {
                     result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null,
                                              manifestWhere != null, tenant, String.join(",", colls),
                                              manifestWhere == null ? null
-                                                 : manifestQualifying(ctx, colls, manifestWhere, model, tenant));
+                                                 : manifestQualifying(ctx, colls, manifestWhere, model, tenant,
+                                                                      true, null));
                 }
                 completed = true;
                 return result;
@@ -3741,7 +3742,8 @@ public final class PgVectorRepository {
             return exactSelectFrom(ctx, nResults,
                 manifestSearchFn(dim, queryVec, gateQueryText, null, colls, wherePlan, nResults, model, tenant),
                 rebind ? statementTimeoutMs : null, true, tenant, String.join(",", colls),
-                manifestQualifying(ctx, colls, wherePlan, model, tenant));
+                manifestQualifying(ctx, colls, wherePlan, model, tenant, true,
+                                   gateQueryText));
         }
         org.jooq.Table<?> hnswFirstFn = switch (dim) {
             case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
@@ -4969,7 +4971,8 @@ public final class PgVectorRepository {
                 ? exactSelectFrom(ctx, nResults, fn, null, true, tenant, String.join(",", colls),
                                   countable && rb.countable()
                                       ? manifestQualifying(ctx, colls, new WherePlan(rb.containment(), null,
-                                                                                     rb.manifest()), model, tenant)
+                                                                                     rb.manifest()), model, tenant,
+                                                                          false, null)
                                       : null)
                 : ctx.selectFrom(fn).fetch();
         });
@@ -7879,6 +7882,12 @@ FROM scope s
         if (!empty) {
             return shortPageRerun(ctx, nResults, fetch, rebindTimeoutMs, first, tenant, collection, qualifyingUpTo);
         }
+        if (qualifyingUpTo != null
+                && manifestAdmitsNothing(ctx, nResults, rebindTimeoutMs, tenant, collection, qualifyingUpTo)) {
+            // nexus-zk7rw (nexus-bq06h): the manifest admits no chunk at all, so the exact re-run, which can only return
+            // rows the manifest admits, has nothing to find either; the empty page is the answer.
+            return first;
+        }
         PgSession.disableIndexScanForExactFallback(ctx);
         if (rebindTimeoutMs != null) {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
@@ -7962,6 +7971,42 @@ FROM scope s
     }
 
     /**
+     * Whether the manifest predicate admits no chunk at all, asked of an EMPTY page before its exact re-run
+     * (nexus-zk7rw, nexus-bq06h). The count is bounded at one: it stops at the first chunk the predicate admits. A count
+     * of zero means the re-run, whose rows are a subset of what the count admits, would be empty too. A count that fails
+     * for a reason other than a fan-out arm's deadline is "unknown" and the re-run runs, as it did before the count; the
+     * arm's deadline propagates, as it does for a short page. The count runs under a savepoint so its failure does not
+     * leave the transaction aborted for the re-run that follows.
+     */
+    private static boolean manifestAdmitsNothing(DSLContext ctx, int nResults,
+                                                 java.util.function.IntSupplier rebindTimeoutMs, String tenant,
+                                                 String collection,
+                                                 java.util.function.IntUnaryOperator qualifyingUpTo) {
+        java.sql.Savepoint[] taken = new java.sql.Savepoint[1];
+        ctx.connection(conn -> taken[0] = conn.setSavepoint());
+        try {
+            if (rebindTimeoutMs != null) {
+                PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
+            }
+            int hits = qualifyingHits(ctx, qualifyingUpTo, 1, taken[0], rebindTimeoutMs != null, tenant, collection);
+            if (hits == 0) {
+                SHORT_PAGE_SKIPS.incrementAndGet();
+                log.info("event=vector_short_page_complete tenant={} collection={} page_rows=0 qualifying=0 n_results={}",
+                         tenant, collection, nResults);
+            }
+            ctx.connection(conn -> conn.releaseSavepoint(taken[0]));
+            return hits == 0;
+        } catch (RuntimeException e) {
+            if (rebindTimeoutMs != null && isArmDeadline(e)) {
+                SHORT_PAGE_COUNT_DEADLINES.incrementAndGet();
+                log.warn("event=vector_short_page_count_deadline tenant={} collection={} indexed_rows=0 n_results={} error={}",
+                         tenant, collection, nResults, String.valueOf(e.getMessage()).replace('\n', ' '));
+            }
+            throw e;
+        }
+    }
+
+    /**
      * The bounded qualifying count for a short page, or {@link Integer#MAX_VALUE} (unknown: re-run) when the count
      * itself failed for a reason other than the arm's deadline. A failed statement leaves the transaction aborted, so
      * the savepoint is rolled back after the failure is logged; if the rollback fails too, that failure escapes with the
@@ -7991,18 +8036,42 @@ FROM scope s
 
     /**
      * The bounded count of chunks a manifest predicate admits for {@link #exactOnUnderReturn}'s short-page check
-     * (nexus-8ptg4): {@code manifest_qualifying_hits} (vectors-047) over the statement's own collections, model,
-     * tenant, chunk-row where and manifest predicate, at most {@code cap} rows. It never under-counts, so a page
-     * with as many rows as this count has every qualifying chunk. The text gate of a hybrid statement is not
-     * applied, which can only raise the count.
+     * (nexus-8ptg4): {@code manifest_qualifying_hits} (vectors-047, -052) over the statement's own collections, model,
+     * tenant, chunk-row where and manifest predicate, counted only up to the cap it is given. It never under-counts, so
+     * a page with as many rows as this count has every qualifying chunk. {@code queryText}, the text gate of a hybrid
+     * statement's dense branch, is applied as {@code manifest_search_<dim>} applies it (nexus-zk7rw), so a page the gate
+     * leaves short is not read as one the scan cap cut short; null (every other statement) applies none, which can only
+     * raise the count. The route (b) and plain route (a) statements pass null.
+     *
+     * <p>{@code distinctChunks} says what grain the page it is compared with has. A route (a) page
+     * ({@code manifest_search_<dim>}) is one row per chunk, so the count is of distinct (collection, chash) and a chunk
+     * with several qualifying owners counts once (nexus-zk7rw). A route (b) page is one row per owner, so its count stays
+     * a count of occurrences: a distinct count there could fall below the page and skip a re-run it needs. The function
+     * is streaming and cannot dedupe without reading every qualifying occurrence, so the distinct count is taken over at
+     * most twice the cap: if the function returns fewer rows than that it has run out, and the distinct count is exact;
+     * if it fills the bound, the chunks seen are a lower bound, and a lower bound under the cap is raised to the cap (an
+     * over-count, which only costs a re-run).
      */
     private static java.util.function.IntUnaryOperator manifestQualifying(DSLContext ctx, String[] colls,
                                                                          WherePlan wherePlan, String model,
-                                                                         String tenant) {
+                                                                         String tenant, boolean distinctChunks,
+                                                                         String queryText) {
         ManifestPushdown.Plan m = wherePlan.manifest();
-        return cap -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
+        return cap -> {
+            int fetchCap = distinctChunks && cap <= Integer.MAX_VALUE / 2 ? 2 * cap : cap;
+            Result<?> rows = ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
                 colls, wherePlan.containment(), wherePlan.jsonPath(), m.containment(), m.jsonPath(),
-                cap, model, tenant)).fetch().size();
+                fetchCap, model, tenant, queryText)).fetch();
+            if (!distinctChunks) {
+                return rows.size();
+            }
+            java.util.Set<String> chunks = new java.util.HashSet<>();
+            for (Record r : rows) {
+                chunks.add(r.get(MANIFEST_QUALIFYING_HITS.CHUNK_COLLECTION) + "/"
+                           + java.util.HexFormat.of().formatHex(r.get(MANIFEST_QUALIFYING_HITS.CHUNK_CHASH)));
+            }
+            return rows.size() < fetchCap ? chunks.size() : Math.max(chunks.size(), cap);
+        };
     }
 
     /**

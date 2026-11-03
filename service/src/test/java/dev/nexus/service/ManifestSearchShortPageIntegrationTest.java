@@ -73,15 +73,26 @@ class ManifestSearchShortPageIntegrationTest {
     private static final String MODEL = "minilm-l6-v2-384";
     private static final String DOC = "sp-doc";
     private static final String QUERY = "spikeprobe";
+    /** nexus-zk7rw: a query whose text gate admits the rank-5 and rank-6 chunks only (see {@link #text}). */
+    private static final String GATE_QUERY = "alphagate";
     private static final int N = 21_000;
     private static final List<Integer> RARE = List.of(5, 10_000, 20_900);
+    /** nexus-zk7rw: a label on one chunk past the 1,000-tuple scan cap, so an empty page has something to repair. */
+    private static final int TAIL = 20_950;
+    /** nexus-zk7rw: a label whose one chunk is owned, with that label, by two documents (DOC and DOC_TWIN). */
+    private static final int TWIN = 20_970;
+    /** nexus-zk7rw: a label on a chunk the capped scan reaches (7, owned twice) and one it does not (20,960). */
+    private static final List<Integer> MIXED = List.of(7, 20_960);
+    private static final String DOC_TWIN = "sp-doc-twin";
 
     private static String chash(int i) {
         return Chash.ofText("sp-" + i).toHex();
     }
 
     private static String text(int g) {
-        return "spikeprobe chunk " + g;
+        // nexus-zk7rw: the rank-5 chunk (a rare one) and the rank-6 chunk (not) carry a word of their own, so a text gate
+        // on it admits those two and nothing else, and selectiveGateMax 1 sends it down the dense branch.
+        return "spikeprobe chunk " + g + (g == 5 || g == 6 ? " alphagate" : "");
     }
 
     PostgreSQLContainer<?> pg;
@@ -117,6 +128,7 @@ class ManifestSearchShortPageIntegrationTest {
 
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         embedder.register(QUERY, 1.0f, 0.0f);
+        embedder.register(GATE_QUERY, 1.0f, 0.0f);
         for (int g = 0; g < N; g++) {
             double theta = (Math.PI / 2.0) * g / (N - 1);
             embedder.register(text(g), (float) Math.cos(theta), (float) Math.sin(theta));
@@ -190,14 +202,43 @@ class ManifestSearchShortPageIntegrationTest {
                     CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN);
                 for (int g = from; g < Math.min(N, from + 500); g++) {
                     step = step.values(TENANT, DOC, g, HexFormat.of().parseHex(chash(g)), COLLECTION, MODEL,
-                        RARE.contains(g) ? "appendix-x" : "body", true);
+                        labelOf(g), true);
                 }
                 step.execute();
+            }
+            // nexus-zk7rw: a second document owning the chunks whose owners are counted. It labels them the way the
+            // first one does, so a manifest count that counts owners sees two qualifying owners of one chunk.
+            seed.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, DOC_TWIN)
+                .set(CATALOG_DOCUMENTS.TITLE, "short-page-twin.md")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///short-page-twin.md")
+                .execute();
+            int position = 0;
+            for (int g : List.of(7, TWIN)) {
+                seed.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                        CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
+                    .values(TENANT, DOC_TWIN, position++, HexFormat.of().parseHex(chash(g)), COLLECTION, MODEL,
+                        labelOf(g), true)
+                    .execute();
             }
             PgContainerHelper.analyzeTable(su, CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
         }
+    }
+
+    /** The manifest label of chunk {@code g} in DOC (and, for the owned-twice chunks, in DOC_TWIN). */
+    private static String labelOf(int g) {
+        if (RARE.contains(g)) return "appendix-x";
+        if (g == TAIL) return "tail-x";
+        if (g == TWIN) return "twin-x";
+        if (MIXED.contains(g)) return "mixed-x";
+        return "body";
     }
 
     @AfterAll
@@ -388,6 +429,98 @@ class ManifestSearchShortPageIntegrationTest {
 
         assertThat(reruns() - before).isZero();
         assertThat(skips() - skipsBefore).isEqualTo(2);
+    }
+
+    // ── nexus-zk7rw: the count's grain and the empty page ────────────────────────────────────────────────────────────
+
+    private static List<String> distinctIds(List<Map<String, Object>> rows) {
+        return ids(rows).stream().distinct().collect(Collectors.toList());
+    }
+
+    private static Map<String, Object> label(String name) {
+        Map<String, Object> w = new LinkedHashMap<>();
+        w.put("section_type", name);
+        return w;
+    }
+
+    @Test
+    void anEmptyPageWhoseManifestAdmitsNothing_isNotRerunExact() {
+        // nexus-zk7rw item 5 (nexus-bq06h). No chunk carries the label, so the walk finds nothing and the exact re-run
+        // of an empty page (3.6-4.0 s at 220,000 chunks) has nothing to find either: the manifest count is 0.
+        long fallbacksBefore = PgVectorRepository.exactFallbackCount();
+        long skipsBefore = skips();
+
+        var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, label("no-such-label-x"));
+
+        assertThat(rows).isEmpty();
+        assertThat(PgVectorRepository.exactFallbackCount() - fallbacksBefore)
+            .as("the empty-page exact re-run is not paid when the manifest admits no chunk").isZero();
+        assertThat(skips() - skipsBefore).isEqualTo(1);
+    }
+
+    @Test
+    void anEmptyPageWhoseManifestAdmitsAChunkPastTheScanCap_isStillRepairedExact() {
+        // The guard for the item above: the capped walk (1,000 tuples) reaches none of the tail chunk, so the page is
+        // empty, but the manifest admits it: the count is 1 and the exact re-run (nexus-bq06h) runs and finds it.
+        PgSession.overrideScanBudgetForTests(1000, 100);
+        long fallbacksBefore = PgVectorRepository.exactFallbackCount();
+        long skipsBefore = skips();
+
+        var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, label("tail-x"));
+
+        assertThat(ids(rows)).containsExactly(chash(TAIL));
+        assertThat(PgVectorRepository.exactFallbackCount() - fallbacksBefore).isEqualTo(1);
+        assertThat(skips() - skipsBefore).isZero();
+    }
+
+    @Test
+    void aShortPageWhoseOneChunkHasTwoQualifyingOwners_isNotRerun() {
+        // nexus-zk7rw item 4. The default budget walks every tuple, so the one chunk is all the filter admits and the
+        // page (1 row) is complete. The manifest holds TWO qualifying owners of it (DOC and DOC_TWIN): a count of
+        // occurrences is 2 against a page of 1 and the O(collection) re-run is paid for nothing; a count of the
+        // distinct (collection, chash) is 1 and it is skipped.
+        long reruns = reruns();
+        long skipsBefore = skips();
+
+        var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, label("twin-x"));
+
+        // The label stage hands back one row per qualifying owner of a chunk (ManifestLabelStage#expanded); the SQL
+        // page it reads is one row per chunk, and that is the page the count is compared with.
+        assertThat(distinctIds(rows)).containsExactly(chash(TWIN));
+        assertThat(reruns() - reruns).isZero();
+        assertThat(skips() - skipsBefore).isEqualTo(1);
+    }
+
+    @Test
+    void aStarvedPageWhoseReachedChunkHasTwoOwners_isStillRerun() {
+        // The guard for the distinct count: chunk 7, which the capped walk reaches, has two owners, and chunk 20,960,
+        // which it does not, has one. The page holds 1 row, the manifest admits 2 distinct chunks (3 owners), so the
+        // re-run runs and returns both. A count that fell below the distinct chunks would skip it.
+        PgSession.overrideScanBudgetForTests(1000, 100);
+        long reruns = reruns();
+        long skipsBefore = skips();
+
+        var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, label("mixed-x"));
+
+        assertThat(distinctIds(rows)).containsExactly(chash(7), chash(20_960));
+        assertThat(reruns() - reruns).isEqualTo(1);
+        assertThat(skips() - skipsBefore).isZero();
+    }
+
+    @Test
+    void theHybridDenseBranch_countsOnlyTheChunksItsTextGateAdmits_soAGatedShortPageIsNotRerun() {
+        // nexus-zk7rw item 3. The query text is also the text gate: "alphagate" admits the rank-5 chunk and the
+        // rank-6 one, and not the other two chunks the label qualifies (10,000 and 20,900), so the page is ONE row and complete (the default
+        // budget walks every tuple). The manifest count ignored the gate and said 3 qualifying chunks against a page of 1,
+        // so the O(collection) exact re-run was paid and found nothing more; counted under the same gate it is 1.
+        long before = reruns();
+        long skipsBefore = skips();
+
+        var rows = vec.hybridSearchWithTokens(TENANT, GATE_QUERY, List.of(COLLECTION), 10, rare(), false, 1).value();
+
+        assertThat(distinctIds(rows)).containsExactly(chash(5));
+        assertThat(reruns() - before).as("a page the text gate leaves short is not a starved one").isZero();
+        assertThat(skips() - skipsBefore).isEqualTo(1);
     }
 
     /** Median milliseconds of {@code runs} timed calls. */

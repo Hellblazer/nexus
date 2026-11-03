@@ -155,7 +155,11 @@ migration_wal_bytes_per_worker = 11038000
 # document) adds 2 DDL statements to a fresh migration: 1 CREATE OR REPLACE FUNCTION (nexus.manifest_admits_chunk, new) and its GRANT EXECUTE to nexus_svc. Counted
 # from the changeset's statements (2) and measured: macOS laptop, 2026-11-03, scoped substrate run of
 # tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2245.
-migration_ddl_per_worker = 2245
+# 2245 -> 2248 (2026-11-03, after vectors-051 above): vectors-052-1 (nexus-zk7rw, manifest_qualifying_hits names its chunk and takes the text gate) adds 3 DDL statements to a
+# fresh migration: 1 DROP FUNCTION (the eight-argument form), 1 CREATE FUNCTION (the nine-argument one) and its GRANT EXECUTE to nexus_svc; the post-condition DO block is not DDL.
+# Counted from the changeset's statements (3) and measured: chas (lab-m), 2026-11-03, scoped substrate run of
+# tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2248.
+migration_ddl_per_worker = 2248
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

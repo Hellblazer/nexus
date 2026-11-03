@@ -226,7 +226,7 @@ class ManifestQualifyingHitsTest {
     private int hits(String tenant, String[] collections, ManifestPushdown.Plan plan, JSONB chunkWhere, int cap,
                      String model) {
         return tenantScope.withTenant(tenant, ctx -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
-            collections, chunkWhere, null, plan.containment(), plan.jsonPath(), cap, model, tenant)).fetch().size());
+            collections, chunkWhere, null, plan.containment(), plan.jsonPath(), cap, model, tenant, null)).fetch().size());
     }
 
     /** The rows {@code manifest_search_384} returns over the same predicate: every qualifying, live chunk. */
@@ -286,6 +286,26 @@ class ManifestQualifyingHitsTest {
         // Non-vacuity: the matrix ran and most of it found rows to compare.
         assertThat(examined).isEqualTo(12);
         assertThat(nonEmpty).as("predicates that matched at least one chunk").isGreaterThanOrEqualTo(9);
+    }
+
+    @Test
+    void eachHitNamesItsChunk_soADistinctCountEqualsTheRowsOfManifestSearch() {
+        // nexus-zk7rw: the rows carry the (collection, chash) of their chunk. Intro in C1 has 7 owners of 6 chunks (chunk
+        // 0 is intro for D1 and D5), and manifest_search returns one row per chunk, so the distinct pairs, not the rows,
+        // are what a route (a) page is compared with.
+        ManifestPushdown.Plan intro = plan(where("section_type", "intro"));
+        var rows = tenantScope.withTenant(TENANT, ctx -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
+            colls(C1), null, null, intro.containment(), intro.jsonPath(), 1000, MODEL, TENANT, null)).fetch());
+
+        var pairs = new java.util.HashSet<String>();
+        for (var r : rows) {
+            assertThat(r.getChunkCollection()).isEqualTo(C1);
+            pairs.add(r.getChunkCollection() + "/" + HexFormat.of().formatHex(r.getChunkChash()));
+        }
+        assertThat(rows).hasSize(7);
+        assertThat(pairs).as("distinct chunks").hasSize(6);
+        assertThat(pairs).hasSize(searchRows(TENANT, colls(C1), intro, null));
+        assertThat(pairs).contains(C1 + "/" + chash(C1, 0), C1 + "/" + chash(C1, 5));
     }
 
     @Test
