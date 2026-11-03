@@ -1571,6 +1571,13 @@ def claude_temp_roots() -> list[Path]:
     return list(dict.fromkeys(Path(os.path.realpath(d)) / f"claude-{uid}" for d in ("/tmp", tempfile.gettempdir())))
 
 
+def claude_session_files(sids: set[str]) -> list[Path]:
+    """Files Claude Code keeps per session in its temp roots (``cache-break-state-<session id>.json``,
+    seen from 2.1.317), for these full session ids."""
+    return sorted(f for d in claude_temp_roots() for sid in sids if sid
+                  for f in [d / f"cache-break-state-{sid}.json"] if f.exists())
+
+
 def claude_temp_dirs(home: Path) -> list[Path]:
     """This run's folders under the Claude temp roots: their slug carries the HOME's name, which
     mkdtemp made unique to this run."""
@@ -1726,6 +1733,9 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
             else:
                 sb.watch.stop()
             sb.close_servers()
+            if not a.keep:
+                for f in claude_session_files(full):  # Claude Code's own per-session temp files
+                    f.unlink(missing_ok=True)
             if ok and not a.keep:
                 for sid in filter(None, sids):  # the script's /tmp files for these sessions
                     for f in Path("/tmp").glob(f"rh-{sid}.*"):

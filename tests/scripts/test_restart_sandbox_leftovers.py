@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._module_seam import setattr_in
+
 RUN_PY = Path(__file__).resolve().parents[1] / "e2e" / "restart-sessions" / "run.py"
 SID = "1234abcd-0000-0000-0000-000000000000"
 
@@ -131,7 +133,7 @@ def test_an_orphan_working_in_the_home_is_found_and_a_parented_process_is_not(ru
 
 def test_the_sweep_says_so_when_it_cannot_read_the_table(run, tmp_path, monkeypatch) -> None:
     """A read that misses the harness itself would miss a leftover too: it is not a clean read."""
-    monkeypatch.setattr(run.os, "getpid", lambda: 2**22 + 7)
+    setattr_in(monkeypatch, run, "os.getpid", lambda: 2**22 + 7)
     with pytest.raises(run.SweepUnavailable):
         run._cwds()
     _, err = run._sandbox_procs(tmp_path / "absent-home")
@@ -401,7 +403,7 @@ def test_a_sweep_that_times_out_is_not_clean(run, tmp_path, monkeypatch) -> None
             raise subprocess.TimeoutExpired(argv, 30)
         return real(argv, *a, **k)
 
-    monkeypatch.setattr(run.subprocess, "run", slow)
+    setattr_in(monkeypatch, run, "subprocess.run", slow)
     _, err = run._sandbox_procs(tmp_path / "absent-home")
     assert "argv search did not answer" in err
 
@@ -471,3 +473,22 @@ def test_run_scenario_passes_with_only_what_is_left_on_purpose(run, scenario) ->
     ok, failures, notes = run.run_scenario("gate", "claude", _Args(), None)
     assert ok and failures == []
     assert any(n.startswith("left on purpose: directory lease") for n in notes)
+
+
+def test_claude_session_files_names_only_this_scenario_s(run, tmp_path, monkeypatch) -> None:
+    root = tmp_path / "claude-tmp"
+    root.mkdir()
+    mine, other = root / f"cache-break-state-{SID}.json", root / "cache-break-state-ffff0000-1.json"
+    for f in (mine, other):
+        f.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(run, "claude_temp_roots", lambda: [root])
+    assert run.claude_session_files({SID, ""}) == [mine]
+
+
+def test_run_scenario_removes_claude_session_files(run, scenario, tmp_path, monkeypatch) -> None:
+    removed = tmp_path / f"cache-break-state-{SID}.json"
+    removed.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(run.Sandbox, "entries", lambda self: [{"sessionId": SID}])
+    monkeypatch.setattr(run, "claude_session_files", lambda sids: [removed] if SID in sids else [])
+    ok, _, _ = run.run_scenario("gate", "claude", _Args(), None)
+    assert ok and not removed.exists()
