@@ -1691,6 +1691,14 @@ def main() -> int:
     ap.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--caller-pane", default="", help=argparse.SUPPRESS)
     a = ap.parse_args()
+    # Checked on the parsed value, so every spelling argparse accepts (--flag=X, an abbreviation) is
+    # held to it, before anything else runs (--revive included); non-printing characters (an escape,
+    # a zero-width space) are dropped and whitespace collapsed, so a reason can neither be blank in
+    # disguise nor forge a second log line.
+    skip_reason = (" ".join("".join(ch for ch in a.skip_sandbox_check if ch.isprintable() or ch.isspace()).split())
+                   if a.skip_sandbox_check is not None else "")
+    if a.skip_sandbox_check is not None and not skip_reason:
+        ap.error("--skip-sandbox-check takes a reason, logged with the restart")
     global FALLBACK_RESUME
     FALLBACK_RESUME = a.fallback_resume
     if a.revive:
@@ -1700,11 +1708,6 @@ def main() -> int:
         ap.error("--fresh and --resume are opposites; give one")
     if a.ask_ready and a.status:
         ap.error("--ask-ready and --status are separate steps; run one, then the other")
-    # Checked on the parsed value, so every spelling argparse accepts (--flag=X, an abbreviation) is
-    # held to it; whitespace is collapsed so a reason cannot forge a second log line.
-    skip_reason = " ".join(a.skip_sandbox_check.split()) if a.skip_sandbox_check is not None else ""
-    if a.skip_sandbox_check is not None and not skip_reason:
-        ap.error("--skip-sandbox-check takes a reason, logged with the restart")
     if (a.ask_ready or a.status) and (a.nx or a.fresh or a.resume):
         ap.error("--ask-ready and --status restart nothing; give --nx, --fresh and --resume to the restart itself")
     listed = sessions()

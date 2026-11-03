@@ -522,7 +522,8 @@ def test_run_scenario_fails_a_rolling_scenario_with_no_mailed_ask_to_check(run, 
 
 def _probe_crs(tmp_path, *, mailed=True, tid=True, outcome="withdrawn"):
     from types import SimpleNamespace  # noqa: PLC0415 -- test-local
-    crs = SimpleNamespace(LOG=tmp_path / "operator.log", SENT_ASKS={}, calls=[])
+    crs = SimpleNamespace(LOG=tmp_path / "operator.log", SENT_ASKS={}, calls=[], nx=None)
+    crs._nx_binary = lambda: crs.nx
 
     def mail_ask(s, path, sender, ttl=1200, **kw):
         crs.calls.append(("mail", crs.LOG))
@@ -550,7 +551,8 @@ def _probe_crs(tmp_path, *, mailed=True, tid=True, outcome="withdrawn"):
 def test_the_withdrawal_probe(run, tmp_path, kw, stats, want) -> None:
     crs = _probe_crs(tmp_path, **kw)
     sb = _sandbox(run, tmp_path / "home")
-    sb.real_nx = _fake_nx(tmp_path, stats=stats)
+    sb.real_nx = "/nonexistent/nx"  # the probe reads back with the script's own nx, not the harness's
+    crs.nx = _fake_nx(tmp_path, stats=stats)
     failures, notes = [], []
     run.check_real_withdrawal(sb, crs, failures, notes)
     if want is None:
@@ -564,3 +566,16 @@ def test_the_withdrawal_probe(run, tmp_path, kw, stats, want) -> None:
 def test_the_gate_scenario_runs_the_withdrawal_probe() -> None:
     calls = [ast.unparse(c.func) for c in ast.walk(_function("scenario_gate")) if isinstance(c, ast.Call)]
     assert "check_real_withdrawal" in calls and "check_sandbox_refusal" in calls
+
+
+def test_harness_under_test_is_the_harness_beside_the_script_under_test(run, tmp_path, monkeypatch) -> None:
+    """The sandbox HOME's record carries the harness the script under test computes for itself: the
+    repo's run.py for the repo script, none for a positive control's copy outside a checkout."""
+    import hashlib  # noqa: PLC0415 -- test-local
+    crs = run.load_script()
+    assert run.harness_under_test(crs) == hashlib.sha256(RUN_PY.read_bytes()).hexdigest()
+    copy = tmp_path / "scripts" / "claude-restart-sessions"
+    copy.parent.mkdir()
+    copy.write_bytes(run.SCRIPT.read_bytes())
+    monkeypatch.setattr(run, "SCRIPT", copy)
+    assert run.harness_under_test(crs) == ""

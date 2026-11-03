@@ -1314,8 +1314,10 @@ def test_skip_sandbox_check_restarts_and_logs_its_reason(crs, monkeypatch, passf
 
 
 @pytest.mark.parametrize("argv", [["--skip-sandbox-check", " "], ["--skip-sandbox-check"], ["--skip-sandbox-check=  "],
-                                  ["--skip-sandbox", " "], ["--skip-sandbox-ch=\t"]],
-                         ids=["blank", "bare", "equals-blank", "abbrev-blank", "abbrev-equals-tab"])
+                                  ["--skip-sandbox", " "], ["--skip-sandbox-ch=\t"], ["--skip-sandbox-check", "\u200b\x1b"],
+                                  ["--revive", "--skip-sandbox-check", " "]],
+                         ids=["blank", "bare", "equals-blank", "abbrev-blank", "abbrev-equals-tab", "non-printing",
+                              "revive-blank"])
 def test_skip_sandbox_check_needs_a_reason(crs, monkeypatch, passfile, argv) -> None:
     with pytest.raises(SystemExit) as exc:
         _main(crs, monkeypatch, *argv)

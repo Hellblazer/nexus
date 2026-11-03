@@ -1504,7 +1504,7 @@ def check_real_withdrawal(sb: Sandbox, crs, failures: list[str], notes: list[str
         else:
             notes.append("withdrawal probe: an ask no session could take was withdrawn against the real engine")
         try:
-            r = subprocess.run([sb.real_nx, "tuple", "stats", f"mailbox/{sid}", "--json"], capture_output=True,
+            r = subprocess.run([crs._nx_binary(), "tuple", "stats", f"mailbox/{sid}", "--json"], capture_output=True,
                                text=True, timeout=30)
             st = json.loads(r.stdout) if r.returncode == 0 else None
         except (OSError, ValueError, subprocess.TimeoutExpired):
