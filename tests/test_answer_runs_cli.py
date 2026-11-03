@@ -2241,14 +2241,14 @@ class TestKeysetPaging:
         out = CliRunner().invoke(answer_runs_cmd, ["--before-id", "6", "--limit", "2", "--json"])
         assert out.exit_code == 0, out.output
         assert calls == [{"limit": 2, "before_id": 6}]
-        payload = json.loads(out.output)
+        payload = json.loads(out.stdout)
         assert payload["before_id"] == 6
         assert payload["total"] == 9, "aggregates stay the whole since-filtered set, not the window"
         calls.clear()
         out = CliRunner().invoke(answer_runs_cmd, ["--json"])
         assert out.exit_code == 0, out.output
         assert calls == [{"limit": 20}], "no before_id kwarg unless asked for"
-        assert "before_id" not in json.loads(out.output)
+        assert "before_id" not in json.loads(out.stdout)
 
     def test_human_output_says_the_totals_are_whole_set_when_windowed(self, monkeypatch) -> None:
         from nexus.commands.answer_runs import answer_runs_cmd
@@ -2282,7 +2282,7 @@ class TestKeysetPaging:
         out = CliRunner().invoke(answer_runs_cmd, ["--all", "--since", "2026-07-25T00:00:00Z", "--json"])
         assert out.exit_code == 0, out.output
         assert seen == {"since": "2026-07-25T00:00:00Z", "include_steps": False}
-        payload = json.loads(out.output)
+        payload = json.loads(out.stdout)
         assert len(payload["rows"]) == 614 and payload["total"] == 614
         assert payload["all"] is True
         assert payload["limit"] == 614
