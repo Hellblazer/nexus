@@ -526,6 +526,29 @@ class TupleOutReplaceTest {
     }
 
     @Test
+    void aLateAckAndALateNack_fromTheLapsedHolderOfADirtiedClaim_areClaimNotFound_andChangeNothing() throws Exception {
+        Room r = newRoom();
+        byte[] id = out(r, "doc-1", "v1");
+        var c = claim(r, "w1");
+        lapseLease(id);
+        assertThat(replace(r, "doc-1", "v2").outcome()).isEqualTo(DIRTIED);
+        Row before = row(id);
+        assertThat(before.dirty()).isTrue();
+
+        assertThatThrownBy(() -> repo.ack(TENANT, c.claimId(), "w1"))
+                .as("the lapsed holder's ack finds no live claim").isInstanceOf(ClaimNotFoundException.class);
+        assertThatThrownBy(() -> repo.nack(TENANT, c.claimId(), "w1", null))
+                .as("the lapsed holder's nack finds no live claim").isInstanceOf(ClaimNotFoundException.class);
+
+        Row after = row(id);
+        assertThat(after).as("neither late call moved the row").isEqualTo(before);
+        assertThat(after.body()).isEqualTo("v2");
+        assertThat(after.dirty()).isTrue();
+        assertThat(after.consumedAt()).isNull();
+        assertThat(transitions(id)).containsExactly("claim");
+    }
+
+    @Test
     void aReplaceOnAnUnclaimedAvailableRow_doesNotDirtyIt_whetherFreshOrReleasedByANack() throws Exception {
         Room r = newRoom();
         byte[] fresh = out(r, "doc-1", "v1");

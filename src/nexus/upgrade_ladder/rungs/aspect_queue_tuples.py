@@ -26,7 +26,8 @@ WHAT IT DOES.
              between the two leaves the row in both places, never in neither;
              the re-run replaces the same task (nonce = ``doc_id``) and deletes.
              ``in_progress`` rows move as pending, with no delay: a worker may
-             still hold one, and a replace of a live claim only marks it dirty.
+             still hold one, and a replace of a claimed row (live or lapsed)
+             only marks it dirty.
              Batches of :data:`DEFAULT_BATCH_LIMIT` rows are RESUMABLE; the
              rung is COMPLETED when nothing movable is left.
   verify   : positive signal only. The read of the waiting rows SUCCEEDED and

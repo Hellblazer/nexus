@@ -10,6 +10,7 @@ import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.tuples.TemplateRegistry;
 import org.jooq.SQLDialect;
+import org.jooq.types.DayToSecond;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -21,10 +22,12 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -147,6 +150,29 @@ class TupleReplaceAndDeadHttpTest {
         // the holder's ack returns the row to available with the newest body
         post("/v1/tuples/ack", Map.of("claim_id", claim.get("claim_id").asText(), "claimant", "w"));
         assertThat(inp(q).get("tuple").get("body").asText()).isEqualTo("v3");
+    }
+
+    @Test
+    void outModeReplace_onALapsedUnsweptClaim_answersDirtied() throws Exception {
+        String q = newQueue();
+        Map<String, Object> body = outBody(q, "n-1", "v1");
+        body.put("mode", "replace");
+        post("/v1/tuples/out", body);
+        JsonNode claim = inp(q);
+        assertThat(claim.get("claim_id").asText()).isNotEmpty();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            int n = DSL.using(su, SQLDialect.POSTGRES).update(TUPLES)
+                    .set(TUPLES.LEASE_UNTIL, DSL.currentOffsetDateTime().sub(DayToSecond.valueOf(Duration.ofSeconds(300))))
+                    .where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.CLAIM_ID.eq(claim.get("claim_id").asText())))
+                    .execute();
+            assertThat(n).as("the lease was lapsed on the claimed row").isEqualTo(1);
+        }
+
+        body.put("body", "v2");
+        JsonNode dirtied = post("/v1/tuples/out", body);
+
+        assertThat(dirtied.get("outcome").asText()).as("a lapsed, unswept claim is still claimed").isEqualTo("dirtied");
     }
 
     @Test

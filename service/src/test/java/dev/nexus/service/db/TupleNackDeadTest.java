@@ -474,6 +474,31 @@ class TupleNackDeadTest {
     }
 
     @Test
+    void sweepOfAClaimReplacedAfterItsLeaseLapsed_belowMaxAttempts_releasesItWithTheMarkCleared_andTheNewBody()
+            throws Exception {
+        Q q = newQueue();   // max_attempts 3
+        byte[] id = out(q);
+        claimOrFail(q, "w1");
+        lapseLease(q);
+        replaceAfterLapse(q, "fixed-after-lapse");
+
+        var result = repo.releaseLapsedClaimsBatch(TENANT, 10, Duration.ofSeconds(30));
+
+        assertThat(result.released()).isEqualTo(1);
+        assertThat(result.deadLettered()).isZero();
+        Content c = content(q);
+        assertThat(c.claimState()).as("released to available").isNull();
+        assertThat(c.dirty()).as("the mark is cleared by the release").isFalse();
+        assertThat(c.attempts()).as("the lapse counts an attempt, as for any lapse").isEqualTo(1);
+        assertThat(c.body()).as("the new body is intact").isEqualTo("fixed-after-lapse");
+        assertThat(c.claimId()).isNull();
+        assertThat(c.claimant()).isNull();
+        assertThat(c.leaseUntil()).isNull();
+        assertThat(transitions(id)).containsExactly("claim", "expire");
+        assertThat(claimOrFail(q, "w2").tuple().body()).isEqualTo("fixed-after-lapse");
+    }
+
+    @Test
     void claimOfALapsedCleanClaimAtMaxAttempts_stillDeadLetters() throws Exception {
         Q q = newQueue();
         byte[] id = out(q);
