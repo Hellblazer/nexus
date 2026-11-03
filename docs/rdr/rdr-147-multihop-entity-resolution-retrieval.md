@@ -371,9 +371,11 @@ precision below 0.30 (0.0); oracle recall 1.00 (1.0) and issue5 precision 0.61
 **Derived, not measured:** if `nx_answer` named every company that the customer
 ids in its recorded evidence resolve to, its issue5 F1 would be 0.823 (recall
 0.867, precision 0.835), computed from the same file's `evidence_companies`
-rows. That is above the script's 0.764, so the bar can be cleared without any
-change to retrieval, if the ids already held are resolved and the answer names
-them.
+rows. **Measured with the joined items (147-research-9):** the answer named
+exactly the companies its resolved ids give, and issue5 F1 was 0.7167 (recall
+0.6267, precision 0.9667) in both repetitions. It is below the derived 0.823
+because the measured runs' evidence held fewer customer ids (q2 retrieved 1 id
+against 5 gold companies). Hop-1 retrieval recall, not the join, sets the gap.
 
 **Reading.** On the issue lookups, hop-1 precision is not the problem (0.967).
 The problem is that `nx_answer` never turns held ids into names. Hop-1 recall at
@@ -443,8 +445,13 @@ Three changes. Only the first two are on the path to the MVV.
    coverage boundary finds a facet unsupported and the evidence it holds
    contains tokens that a configured *entity-key pattern* recognises (for
    example `CUST-\d{4}`), its one repair runs `resolve` on those tokens and adds
-   the resolved records to the evidence before the single re-check. Then the
-   answer is generated from evidence that holds the names. The gate is the signal
+   each resolved record *joined* to the evidence item that named its key (the
+   item's text, then the record's text, as one item) before the single re-check.
+   The re-check judges only new items (RDR-232's rule, `coverage_ledger.py`
+   `evaluate(..., prior=...)`), so a record alone, which names a company but not
+   the issue, is never judged supporting (0 of 8, 147-research-8), while the
+   joined item is (10 of 10, 147-research-9). Then the answer is generated from
+   evidence that holds the names. The gate is the signal
    itself: an unsupported facet AND entity-key tokens in the evidence. A question
    with no such tokens never reaches it, so simple questions are untouched
    (Beyond-Static guidance), and no second planning round, new plan dimension or
@@ -487,11 +494,14 @@ if first ledger has an unsupported facet (entry rule: see Step 4 sub-step 1)
    and anchors hold tokens matching the collection's entity-key pattern:
      tokens = distinct matches, capped
      r = resolve(tokens)
-     merge r's records into the reduction's input as chash anchors
+     for each (anchor, token) with a resolved record:
+       one joined item = anchor text, then the resolved record's text
+     merge the joined items into the reduction's input
        (the existing repair_stream supplement, inside its cap of
         MAX_REPAIR_ITEMS = 12 items; HERB needs at most 10)
      report r.missing and r.ambiguous in the RepairReport
-     re-evaluate once (the existing single re-check)
+     re-evaluate once (the existing single re-check, unchanged:
+       it judges the new joined items only)
 ```
 
 The resolution queries run together with, or in place of, the semantic facet
@@ -686,12 +696,21 @@ where evidence is seen.
 ### Minimum Viable Validation
 
 On the Step 0 sandbox and conditions (nx and engine at the versions under test,
-bge-768, k=20, the same 1559 artifacts), **`nx_answer`'s company F1 on the 5
-issue questions is at or above the fixed script's issue5 F1 recorded in Step 0,
-0.7642857142857142.** The scorecard asserts the baseline exactly (`==
-0.7642857142857142`), so a harness change that moves the baseline fails loudly
-instead of moving the bar, and records `nx_answer`'s measured F1 exactly beside
-it. The test is `nx_answer_f1_issue5 >= 0.7642857142857142`.
+bge-768, k=20, the same 1559 artifacts), with grown user plans disabled for the
+run (a plan grown from one question otherwise captures later ones,
+147-research-9), and two runs per question, the MVV gates what the exact-key join
+controls (Sam, 2026-11-03, superseding the F1-against-the-script bar):
+
+- **Join completeness:** on every issue question whose evidence holds at least
+  one customer id, the answer names every company those ids resolve to (measured
+  10 of 10, 147-research-9).
+- **Precision:** the companies the answer names have precision ≥ 0.95 against
+  HERB ground truth on the 5 issue questions (measured 0.9667).
+
+Reported, not gated: issue5 company recall and F1 beside the script's
+0.7642857142857142 (asserted exactly, as the diagnostic baseline). Hop-1
+retrieval recall, which sets the remaining gap (measured issue5 F1 0.7167), is
+separate later work.
 
 The measured system is `nx_answer`, through the harness's product rung (company
 names read from `final_text` against the 10-name company universe). The script
@@ -713,13 +732,14 @@ exactly, so silent drift fails.
 | P1 (Step 2, conditional) | `mentions` link recall and precision | 37 artifact → customer-id pairs (`fixtures/herb/artifact_mentions.json`; all from Slack messages) | not built | recall 1.0, precision 1.0 |
 | P2 (Step 3) | resolution accuracy | the 29 SearchFlow member customers (`p2_member_customers.json`) | 1.0 (by the harness's own exact-title lookup) | 1.0 through the `resolve` step, with `missing` and `ambiguous` empty |
 | P3 (diagnostic) | hop-1 precision | question → affected customers | all7 0.6904761904761905; issue5 0.9666666666666666 | reported, not gated |
-| E2E script (diagnostic) | company recall / precision / F1 | HERB ground truth | issue5 F1 0.7642857142857142 | pinned exactly; it is the MVV baseline |
-| E2E `nx_answer` (MVV) | company recall / precision / F1 | HERB ground truth | issue5 F1 0.0 | issue5 F1 ≥ 0.7642857142857142 |
+| E2E script (diagnostic) | company recall / precision / F1 | HERB ground truth | issue5 F1 0.7642857142857142 | pinned exactly; reported beside `nx_answer` |
+| E2E `nx_answer` (MVV) | join completeness; company precision; recall / F1 reported | HERB ground truth | issue5 F1 0.0 | every resolved company named; precision ≥ 0.95 |
 | Aggregation (reported) | company recall / precision / F1 on agg2 | HERB ground truth | script 0.0, `nx_answer` 0.0 | reported, not gated |
 
 **Jointness, as measured.** On HERB the MVV needs: the resolution repair enters
-(Assumption #5) AND `resolve` returns the right records (P2) AND the generated
-answer names the resolved companies. Hop-1 precision (P3) is not a factor on the
+(Assumption #5) AND `resolve` returns the right records (P2) AND the re-check
+judges the joined items supporting (147-research-9) AND the generated answer
+names the resolved companies. Hop-1 precision (P3) is not a factor on the
 issue lookups at k=20. The linker (P1) is not on the path. Each phase review
 asserts its own rung and reports the `nx_answer` rung honestly.
 
@@ -762,7 +782,7 @@ a `$ref` step") is dropped: it already works.
 2. **Branch on the result:**
    - (a) Facets are `unsupported` / `no_supporting_evidence` and the repair
      enters (the measured case, 147-research-7): add the exact-key branch to the
-     existing repair as designed.
+     existing repair as designed, merging joined items (147-research-9).
    - (b) Excluded by measurement: no facet is `source_missing` and no question
      names a source (147-research-7). Kept for the record: facets `source_missing`
      would mean the repair is skipped by RDR-232's rule.
@@ -843,10 +863,10 @@ is built (Step 2). #5 was acknowledged unverified at gate round 2 (Sam,
 ### Scope Verification
 
 The Minimum Viable Validation is in scope and is the Step 4 exit test: on the
-Step 0 sandbox and conditions, `nx_answer`'s company F1 on the 5 issue questions
-is at or above 0.7642857142857142, the fixed script's measured baseline, with the
-baseline asserted exactly and the resolution branch shown to have entered on the
-questions that pass. The 2 aggregation questions are reported, not gated (Sam,
+Step 0 sandbox and conditions, with grown plans disabled and two runs per
+question, the answer names every company its retrieved customer ids resolve to,
+at precision ≥ 0.95 on the 5 issue questions; recall and F1 are reported beside
+the script's 0.7642857142857142. The 2 aggregation questions are reported, not gated (Sam,
 2026-11-03).
 
 ### Cross-Cutting Concerns
