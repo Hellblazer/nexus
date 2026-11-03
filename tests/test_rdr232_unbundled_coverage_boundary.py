@@ -145,6 +145,22 @@ INLINE_PLANS: dict[str, dict[str, Any]] = {
         {"tool": "extract", "args": {"inputs": "$step3.contents", "fields": "decision"}},
         {"tool": "generate", "args": {"context": ["$step4.contents", "$step5.extractions"], "question": "q"}},
     ]},
+    #: Two closure steps read the retrieved items directly; the stream goes to the later one only (nexus-dfrfp).
+    "rank-compare-both-read": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "rank", "args": {"criterion": "c", "inputs": "$step2.contents"}},
+        {"tool": "compare", "args": {"focus": "$step3.ranked", "inputs": "$step2.contents"}},
+    ]},
+    #: An operator reads retrieved evidence BEFORE the trailing run: the first-consumer rule stands (no targets).
+    "pre-run-reader": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "summarize", "args": {"inputs": "$step2.contents"}},
+        {"tool": "search", "args": {"query": "$step3.summary", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step4.ids", "collections": "$step4.collections"}},
+        {"tool": "generate", "args": {"context": "$step5.contents", "question": "q"}},
+    ]},
     #: The generate's whole evidence arg is the extract's output: in the run it is a lone deferred ref, no text at all.
     "only-deferred-ref": {"steps": [
         {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
@@ -888,3 +904,27 @@ async def test_every_step_outside_the_answer_closure_is_left_out_of_the_anchors_
     assert _anchor_contents(result) == expected
     handed = _handed_items(_answer_args(calls, "generate", how))
     assert set(handed) == expected, "the anchors are what the answer step was handed"
+
+
+@pytest.mark.parametrize(
+    ("plan", "expected"),
+    [
+        ("review-default", {4}),
+        ("analyze-default", {5}),
+        ("rank-compare-both-read", {3}),
+        ("two-branch-probe", {4}),  # the generate mixes retrieved items with the extract's output
+        ("pre-run-reader", set()),
+    ],
+)
+def test_the_merge_target_is_the_last_evidence_reader_of_the_closure(plan: str, expected: set[int]) -> None:
+    """One copy of the reserved and repair evidence: two closure readers are not each handed it, and an operator
+    reading retrieved evidence before the trailing run keeps the first-consumer rule (nexus-dfrfp)."""
+    steps = _plan(plan)["steps"]
+    run_start = len(steps)
+    while run_start > 0 and runner._is_operator_tool(runner._extract_tool_name(steps[run_start - 1])):
+        run_start -= 1
+    run = range(run_start, len(steps))
+    closure = runner._answer_closure(
+        steps, run, extract_tool=runner._extract_tool_name, is_witness_tool=runner._is_witness_tool,
+    )
+    assert runner._merge_targets(steps, run, closure) == frozenset(expected)

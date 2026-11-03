@@ -1852,7 +1852,7 @@ def _merge_targets(
 ) -> frozenset[int]:
     """The steps the reserved stream, the repair supplement and the reducer-input recorder are handed to (nexus-dfrfp).
 
-    Those are the steps of the answer *closure* that read retrieved evidence directly
+    That is the last step of the answer *closure* that reads retrieved evidence directly
     (:func:`_reads_retrieved_evidence`): the first consumer outside it (``review-default``'s ``extract`` beside its
     ``compare``, ``analyze-default``'s ``rank`` beside its ``summarize``) feeds a branch the answer does not read, so
     evidence merged there never reaches it. Empty, which keeps the first-consumer rule, when the closure reads no
@@ -1866,7 +1866,36 @@ def _merge_targets(
     )
     if pre_run_reader:
         return frozenset()
-    return frozenset(i for i in closure if _reads_retrieved_evidence(i, steps))
+    # The LAST evidence reader of the closure only: two closure steps that both read retrieved evidence
+    # (``rank(items=$s2)`` then ``compare(items=$s2, focus=$s3)``) would otherwise each be handed the stream, a second
+    # copy of the primary chunks in a fused prompt. The last reader is the one nearest the answer.
+    # A reader whose evidence arg mixes retrieved items with an operator's output (``context: [$s4.contents,
+    # $s5.extractions]``) cannot take the merge, so the last PURE reader is chosen; with none, every reader is.
+    readers = [i for i in closure if _reads_retrieved_evidence(i, steps)]
+    pure = [i for i in readers if _reads_only_retrieved_evidence(i, steps)]
+    if pure:
+        return frozenset({max(pure)})
+    return frozenset(readers)
+
+
+def _reads_only_retrieved_evidence(index: int, steps: list[dict[str, Any]]) -> bool:
+    """True when every ``$stepN`` ref in step *index*'s evidence args names a step that is not an operator (nexus-dfrfp):
+    the merge takes such an arg, while one that mixes in an operator's output is left as it is."""
+    raw = steps[index].get("args", {}) or {}
+    refs: list[int] = []
+
+    def _walk(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                _walk(item)
+        elif isinstance(value, str) and (m := _STEPREF_RE.match(value)):
+            refs.append(int(m.group(1)) - 1)
+
+    for key in _RESERVED_EVIDENCE_KEYS:
+        _walk(raw.get(key))
+    return bool(refs) and all(
+        0 <= r < len(steps) and not _is_operator_tool(_extract_tool_name(steps[r])) for r in refs
+    )
 
 
 def _validate_var_refs(
