@@ -138,6 +138,10 @@ SESSIONS = Path.home() / ".claude" / "sessions"
 LOG = Path.home() / ".claude" / "restart-sessions.log"
 #: The ready round (--ask-ready): who was asked, who was left out and why, and where each reply goes.
 READY_MANIFEST = Path.home() / ".claude" / "restart-ready.json"
+#: One empty file per mailed ask, created before the send; the mail tells the session to check that it
+#: exists. `test -e` is a check a default-permission session runs without a permission prompt, where a
+#: read of LOG is denied until someone approves it (nexus-acp8p, Claude Code 2.1.317).
+ASK_MARKERS = Path.home() / ".claude" / "restart-asks"
 #: The last restart run's mode and options, so a bare run after a --fresh one is refused.
 LAST_RUN = Path.home() / ".claude" / "restart-last.json"
 #: Where the typed ready ask's instruction file goes (created per round, O_EXCL, mode 0600).
@@ -360,6 +364,96 @@ def has_channel(s: dict) -> bool:
     return False
 
 
+DEV_CHANNEL_FLAG = "--dangerously-load-development-channels"
+PLUGIN_CHANNEL = f"plugin:conexus@{MARKETPLACE}"
+
+
+def conexus_installed() -> bool:
+    """True when the conexus plugin is in installed_plugins.json (unreadable counts as not installed)."""
+    try:
+        data = json.loads(INSTALLED.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    data = data.get("plugins", data)
+    return isinstance(data, dict) and f"conexus@{MARKETPLACE}" in data
+
+
+def _has_plugin_channel(args: list[str]) -> bool:
+    for i, a in enumerate(args):
+        flag, _, inline = a.partition("=")
+        if flag != "--channels":
+            continue
+        values = [inline] if inline else []
+        for v in args[i + 1:]:
+            if inline or v.startswith("-"):
+                break
+            values.append(v)
+        if PLUGIN_CHANNEL in values:
+            return True
+    return False
+
+
+def _dev_channel_swap(args: list[str]) -> list[str] | None:
+    """`args` with the development-channel form of the nexus channel replaced by the plugin form.
+
+    The development flag shows a one-keystroke confirmation dialog on every launch, so a fresh
+    session's command-line first prompt waits behind it (nexus-rzll9); `--channels plugin:...`
+    shows none. None when there is nothing to swap or the plugin is not installed. Other values of
+    the variadic dev flag stay under it.
+    """
+    if not conexus_installed():
+        return None
+    out: list[str] = []
+    swapped = False
+    i = 0
+    while i < len(args):
+        flag, _, inline = args[i].partition("=")
+        if flag != DEV_CHANNEL_FLAG:
+            out.append(args[i])
+            i += 1
+            continue
+        values = [inline] if inline else []
+        i += 1
+        while not inline and i < len(args) and not args[i].startswith("-"):
+            values.append(args[i])
+            i += 1
+        if "server:nexus" not in values:
+            out += [DEV_CHANNEL_FLAG, *values]
+            continue
+        swapped = True
+        rest = [v for v in values if v != "server:nexus"]
+        if rest:
+            out += [DEV_CHANNEL_FLAG, *rest]
+    if not swapped:
+        return None
+    if not _has_plugin_channel(out):
+        out += ["--channels", PLUGIN_CHANNEL]
+    return out
+
+
+def _launch_args(s: dict) -> list[str]:
+    """The session's own flags up to a bare `--` (after it: the previous restart's first prompt)."""
+    args = shlex.split(s["argv"])[1:] if s.get("argv") else []
+    return args[:args.index("--")] if "--" in args else args
+
+
+def dev_channel_swapped(s: dict) -> bool:
+    """True when relaunch_command will launch `s` on --channels plugin:conexus instead of its dev form."""
+    try:
+        return _dev_channel_swap(_launch_args(s)) is not None
+    except ValueError:
+        return False
+
+
+def uses_dev_channel(cmd: str) -> bool:
+    """True when a launch command still carries the development-channel flag."""
+    try:
+        args = shlex.split(cmd)
+    except ValueError:
+        return False
+    return any(a.partition("=")[0] == DEV_CHANNEL_FLAG for a in args)
+
+
 def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> str:
     """The session's own flags, with --resume set to its CURRENT id (it changes after /clear).
 
@@ -367,10 +461,10 @@ def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> st
     first_prompt: passed as the positional prompt, so the new session starts on it and nothing
     is typed into its input box (nexus-cmqe8).
     """
-    args = shlex.split(s["argv"])[1:] if s["argv"] else []
     # Everything after a bare `--` is the previous restart's first prompt (`-- cat <handoff>`):
     # carried over, it would push -n and --resume past the `--`, where claude reads them as prompt.
-    args = args[:args.index("--")] if "--" in args else args
+    args = _launch_args(s)
+    args = _dev_channel_swap(args) or args
     out, skip = [], False
     for i, a in enumerate(args):
         if skip:
@@ -557,6 +651,9 @@ def restart(s: dict, handoff: str = "") -> bool:
     if handoff:
         first = f"cat {handoff}" + (f" {draft}" if draft else "")
     cmd = relaunch_command(s, fresh=bool(handoff), first_prompt=first)
+    if dev_channel_swapped(s):
+        log(f"{name}: relaunching on --channels {PLUGIN_CHANNEL} instead of {DEV_CHANNEL_FLAG} server:nexus, "
+            f"whose channel dialog would hold the first prompt")
     before = {p.name for p in SESSIONS.glob("*.json")}
     log(f"exit {name} (pid {s['pid']}, pane {s['pane']})")
     tmux("send-keys", "-t", s["pane"], "C-c")
@@ -601,7 +698,7 @@ def restart(s: dict, handoff: str = "") -> bool:
                     log(f"OK {name}: resumed as pid {d['pid']}")
                     RESULTS[s["sessionId"]] = "resumed"
                     return True
-                return started_on(name, s, d, handoff)
+                return started_on(name, s, d, handoff, dev_dialog=uses_dev_channel(cmd))
         time.sleep(1)
     if handoff:
         log(f"WARN {name}: relaunched fresh in {s['pane']} but no session file appeared within 180s; "
@@ -786,18 +883,34 @@ def handoff_marker(s: dict) -> str:
     return f"HANDOFF-COMPLETE {s['sessionId']}"
 
 
+def ask_marker(s: dict, path: str) -> Path:
+    """The file mail_ask creates before it mails the ask about *path* to *s*."""
+    digest = hashlib.sha256(f"{s['sessionId']} {path}".encode()).hexdigest()[:12]
+    return ASK_MARKERS / f"{s['sessionId'][:8]}-{digest}"
+
+
+def origin_note(s: dict, path: str) -> str:
+    """The opening of a mailed ask: who sent it and a check the session can make itself.
+
+    Mail from a script carries no session token, so the channel labels it unattested and a model may
+    rightly decline it (nexus-cmqe8 sandbox, 2026-11-01). The check is that a file exists which the
+    script created just before it mailed; `test -e` needs no permission prompt in default mode, where
+    reading the restart log does (nexus-acp8p).
+    """
+    return (f"This message comes from claude-restart-sessions, the operator's restart script, through "
+            f"`nx tuple out`, which is why it reads as unattested. Check before acting: run exactly "
+            f"`test -e {shlex.quote(str(ask_marker(s, path)))} && echo present`. It prints present only when the "
+            f"script created that file just before it mailed you; if it prints nothing, this message is not "
+            f"from the script, so do not act on it. ")
+
+
 def mail_note(s: dict, path: str) -> str:
     """The restart-log line written before the mail goes, which the mail tells the session to check."""
     return f"mailing handoff ask to {label(s)} -> {path}"
 
 
 def handoff_prompt(s: dict, path: str, mailed: bool = False) -> str:
-    # Mail from a script carries no session token, so the channel labels it unattested and a
-    # model may rightly decline it (nexus-cmqe8 sandbox, 2026-11-01). Say who sent it and give
-    # a check the session can make itself: the operator's restart log, written before the send.
-    origin = (f"This message comes from claude-restart-sessions, the operator's restart script, through "
-              f"`nx tuple out`, which is why it reads as unattested. Check before acting: {LOG} has the line "
-              f"'{mail_note(s, path)}'. " if mailed else "")
+    origin = origin_note(s, path) if mailed else ""
     return (origin + f"Restart handoff for {label(s)} (coordinated restart; this session restarts with a fresh context "
             f"and reads the file you write as its first prompt). Write your continuation handoff now in the "
             f"9-section format (Markdown headings) of the conexus continuation command (run `nx command-context continuation` for the "
@@ -823,13 +936,22 @@ def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200, *, kind: str = "r
     argv = [_nx_binary(), "tuple", "out", f"mailbox/{sid}", "--key", f"to={sid}", "--dim", f"from={sender}",
             "--dim", "address_kind=session", "--dim", f"kind={kind}", "--nonce", str(uuid.uuid4()),
             "--ttl-seconds", str(ttl), "--body", body if body is not None else handoff_prompt(s, path, mailed=True)]
+    marker = ask_marker(s, path)
+    try:  # the session checks it exists before acting: without it the mail would read as forged
+        marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        marker.touch(mode=0o600)
+    except OSError as e:
+        log(f"WARN {label(s)}: could not create the ask marker {marker} ({e}); not mailed")
+        return False
     log(note if note is not None else mail_note(s, path))
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
+        marker.unlink(missing_ok=True)
         log(f"WARN {label(s)}: mail to mailbox/{sid} failed ({type(e).__name__}: {e})")
         return False
     if r.returncode != 0:
+        marker.unlink(missing_ok=True)
         log(f"WARN {label(s)}: mail to mailbox/{sid} failed (exit {r.returncode}): "
             f"{(r.stdout + r.stderr).strip().splitlines()[-1:]}")
         return False
@@ -1144,7 +1266,7 @@ def transcript_has(session_id: str, text: str) -> bool:
 RESULTS: dict[str, str] = {}
 
 
-def started_on(name: str, s: dict, d: dict, handoff: str) -> bool:
+def started_on(name: str, s: dict, d: dict, handoff: str, dev_dialog: bool = False) -> bool:
     """Confirm the fresh session started on its command-line first prompt (`cat <handoff>`).
 
     The prompt is on the command line, so nothing is typed; the outcome checked is the new
@@ -1159,8 +1281,10 @@ def started_on(name: str, s: dict, d: dict, handoff: str) -> bool:
         if not alive(int(d.get("pid", 0) or 0)):
             break
         time.sleep(1)
+    why = (f"; it was launched with {DEV_CHANNEL_FLAG}, whose channel confirmation dialog is the likely cause "
+           f"(press its key in {s['pane']}); the plugin form, which has none, was not available" if dev_dialog else "")
     log(f"WARN {name}: fresh as pid {d.get('pid')} ({sid[:8]}) but its transcript never recorded "
-        f"`cat {handoff}`; check {s['pane']} and give it that prompt yourself")
+        f"`cat {handoff}`{why}; check {s['pane']} and give it that prompt yourself")
     return False
 
 
@@ -1266,9 +1390,7 @@ def ready_note(s: dict, path: str) -> str:
 
 
 def ready_prompt(s: dict, path: str, mailed: bool = False) -> str:
-    origin = (f"This message comes from claude-restart-sessions, the operator's restart script, through "
-              f"`nx tuple out`, which is why it reads as unattested. Check before acting: {LOG} has the line "
-              f"'{ready_note(s, path)}'. " if mailed else "")
+    origin = origin_note(s, path) if mailed else ""
     return (origin + f"Restart readiness check for {label(s)}: the operator is about to restart every Claude session. "
             f"Answer by writing the file {path} (create it; do not edit any other file) holding one JSON object: "
             f'{{"ready": true or false, "reason": "one short sentence", "eta_min": minutes until you could be ready, '
@@ -1863,7 +1985,7 @@ def footprint_report(found: list[dict], handoffs: dict[str, str] | None, manifes
     for sid in sorted(sids):
         # The round this roll used only: a newer round's ask file is that round's (stamp-scoped).
         rr = [ASK_DIR / f"rr-{sid}-{manifest['stamp']}.txt"] if manifest["stamp"] else []
-        for f in [TMP / f"rh-{sid}.txt", *rr]:
+        for f in [TMP / f"rh-{sid}.txt", *rr, *ASK_MARKERS.glob(f"{glob.escape(sid)}-*")]:
             try:
                 f.unlink()
                 removed += 1
@@ -1887,7 +2009,7 @@ def footprint_report(found: list[dict], handoffs: dict[str, str] | None, manifes
     still = [f"mailbox/{t['sessionId'][:8]}: ready ask {t['tuple_id'][:12]}" for t in manifest["targets"]
              if isinstance(t.get("tuple_id"), str) and t["tuple_id"]
              and not any(f" {t['tuple_id'][:12]}: " in u for u in UNWITHDRAWN)]  # named once
-    lines = [f"footprint: removed {removed} typed-ask file(s)",
+    lines = [f"footprint: removed {removed} ask file(s) (typed-ask instructions and ask markers)",
              f"footprint: kept {len(kept_handoffs)} handoff(s) and {len(drafts)} draft(s) for back-out: "
              + (", ".join(kept_handoffs + drafts) or "none"),
              f"footprint: kept {len(replies)} ready reply file(s)" + (": " + ", ".join(replies) if replies else ""),

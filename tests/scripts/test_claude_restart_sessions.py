@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -41,12 +42,13 @@ def crs():
 
 
 @pytest.fixture(autouse=True)
-def _no_sent_asks(crs, monkeypatch):
+def _no_sent_asks(crs, monkeypatch, tmp_path_factory):
     """Each test starts with no mailed ask on record, so none is withdrawn through a real nx, and no
     unwithdrawn ask either; and the script's TERM/HUP handlers (exit_on_stop_signals) are never
     installed in the pytest process: a test that checks them patches signal.signal again itself."""
     monkeypatch.setattr(crs, "SENT_ASKS", {})
     monkeypatch.setattr(crs, "UNWITHDRAWN", [])
+    monkeypatch.setattr(crs, "ASK_MARKERS", tmp_path_factory.mktemp("ask-markers") / "restart-asks")
     setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
 
 
@@ -213,6 +215,123 @@ def test_fresh_relaunch_carries_the_first_prompt_after_a_double_dash(crs) -> Non
     args = shlex.split(cmd.split(" && ", 1)[1])[1:]
     assert args[-2:] == ["--", "cat /tmp/h f.md"]
     assert "--resume" not in args
+
+
+DEV_ARGV = ("claude --model sonnet --dangerously-load-development-channels server:nexus "
+            "--permission-mode auto -n old")
+
+
+def _installed(monkeypatch, crs, tmp_path, plugins: dict) -> None:
+    f = tmp_path / "installed_plugins.json"
+    f.write_text(json.dumps({"version": 2, "plugins": plugins}), encoding="utf-8")
+    monkeypatch.setattr(crs, "INSTALLED", f)
+
+
+def test_a_dev_channel_session_relaunches_on_the_dialog_free_form_when_the_plugin_is_installed(
+        crs, monkeypatch, tmp_path) -> None:
+    """The development channel flag shows a one-key confirmation on every launch; the plugin form does not (nexus-rzll9)."""
+    _installed(monkeypatch, crs, tmp_path, {"conexus@nexus-plugins": [{"version": "7.94.1"}]})
+    s = {"argv": DEV_ARGV, "name": "tamsin", "sessionId": "sid-1", "cwd": "/w"}
+    for fresh in (False, True):
+        args = shlex.split(crs.relaunch_command(s, fresh=fresh, first_prompt="cat /tmp/h.md" if fresh else "")
+                           .split(" && ", 1)[1])[1:]
+        assert "--dangerously-load-development-channels" not in args and "server:nexus" not in args
+        assert args[args.index("--channels") + 1] == "plugin:conexus@nexus-plugins"
+        assert args[args.index("--model") + 1] == "sonnet" and args[args.index("--permission-mode") + 1] == "auto"
+        assert crs.has_channel({"argv": " ".join(args)})  # still a mail-capable session
+    assert crs.dev_channel_swapped(s) is True
+
+
+def test_other_values_of_the_dev_channel_flag_stay_under_it(crs, monkeypatch, tmp_path) -> None:
+    _installed(monkeypatch, crs, tmp_path, {"conexus@nexus-plugins": [{}]})
+    s = {"argv": "claude --dangerously-load-development-channels server:nexus server:other -n x",
+         "name": "t", "sessionId": "sid-1", "cwd": "/w"}
+    args = shlex.split(crs.relaunch_command(s).split(" && ", 1)[1])[1:]
+    i = args.index("--dangerously-load-development-channels")
+    assert args[i + 1] == "server:other" and "server:nexus" not in args
+    assert "plugin:conexus@nexus-plugins" in args
+
+
+def test_a_dev_channel_session_keeps_the_dev_form_when_the_plugin_is_not_installed(crs, monkeypatch, tmp_path) -> None:
+    for plugins in ({}, {"sn@nexus-plugins": [{}]}, {"conexus@elsewhere": [{}]}):
+        _installed(monkeypatch, crs, tmp_path, plugins)
+        s = {"argv": DEV_ARGV, "name": "t", "sessionId": "sid-1", "cwd": "/w"}
+        args = shlex.split(crs.relaunch_command(s).split(" && ", 1)[1])[1:]
+        assert args[args.index("--dangerously-load-development-channels") + 1] == "server:nexus"
+        assert "--channels" not in args
+        assert crs.dev_channel_swapped(s) is False
+    monkeypatch.setattr(crs, "INSTALLED", tmp_path / "missing.json")  # unreadable: no swap either
+    assert crs.dev_channel_swapped({"argv": DEV_ARGV}) is False
+
+
+def test_a_session_already_on_the_plugin_channel_is_left_alone(crs, monkeypatch, tmp_path) -> None:
+    _installed(monkeypatch, crs, tmp_path, {"conexus@nexus-plugins": [{}]})
+    s = {"argv": "claude --channels plugin:conexus@nexus-plugins -n x", "name": "t", "sessionId": "sid-1", "cwd": "/w"}
+    args = shlex.split(crs.relaunch_command(s).split(" && ", 1)[1])[1:]
+    assert args.count("--channels") == 1 and crs.dev_channel_swapped(s) is False
+
+
+def test_restart_logs_and_types_the_plugin_channel_form_for_a_dev_channel_session(crs, monkeypatch, tmp_path) -> None:
+    """restart() of a dev-channel session with a handoff: the typed launch line is the dialog-free form, said in the log."""
+    _installed(monkeypatch, crs, tmp_path, {"conexus@nexus-plugins": [{}]})
+    (tmp_path / "sessions").mkdir()
+    monkeypatch.setattr(crs, "SESSIONS", tmp_path / "sessions")  # nothing registers: the WARN path ends the run
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    handoff = tmp_path / "h.md"
+    handoff.write_text("# a\n# b\n", encoding="utf-8")
+    typed: list[tuple] = []
+    monkeypatch.setattr(crs, "tmux", lambda *a: typed.append(a))
+    monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
+    monkeypatch.setattr(crs, "alive", lambda _pid: False)  # the old pid is already gone
+    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    s = {"sessionId": "old-sid", "name": "tamsin", "pid": 111, "pane": "%1", "cwd": "/w", "argv": DEV_ARGV}
+    assert crs.restart(s, str(handoff)) is False
+    launch = [a[-1] for a in typed if "-l" in a]
+    assert len(launch) == 1 and "--channels plugin:conexus@nexus-plugins" in launch[0]
+    assert "development-channels" not in launch[0]
+    log = (tmp_path / "restart.log").read_text(encoding="utf-8")
+    assert "tamsin: relaunching on --channels plugin:conexus@nexus-plugins" in log
+
+
+@pytest.mark.parametrize(("plugins", "dialog"), [({"conexus@nexus-plugins": [{}]}, False), ({}, True)],
+                         ids=["plugin-installed", "plugin-missing"])
+def test_restart_hands_started_on_whether_the_dev_dialog_may_be_up(crs, monkeypatch, tmp_path, plugins, dialog) -> None:
+    _installed(monkeypatch, crs, tmp_path, plugins)
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    monkeypatch.setattr(crs, "SESSIONS", sessions_dir)
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    handoff = tmp_path / "h.md"
+    handoff.write_text("# a\n# b\n", encoding="utf-8")
+    monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
+    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    new = {"sessionId": "new-sid", "pid": 999, "kind": "interactive", "tmux": "x:@1.%1"}
+
+    def fake_tmux(*a) -> None:
+        if "-l" in a:  # the launch line is typed: the new session registers
+            (sessions_dir / "new.json").write_text(json.dumps(new), encoding="utf-8")
+
+    monkeypatch.setattr(crs, "tmux", fake_tmux)
+    monkeypatch.setattr(crs, "alive", lambda pid: pid == 999)
+    seen: list[dict] = []
+    monkeypatch.setattr(crs, "started_on", lambda *_a, **kw: seen.append(kw) or True)
+    s = {"sessionId": "old-sid", "name": "tamsin", "pid": 111, "pane": "%1", "cwd": "/w", "argv": DEV_ARGV}
+    assert crs.restart(s, str(handoff)) is True
+    assert seen == [{"dev_dialog": dialog}]
+
+
+def test_started_on_names_the_channel_dialog_when_the_dev_form_is_still_in_use(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "transcript_has", lambda *_a: False)
+    monkeypatch.setattr(crs, "alive", lambda _pid: False)  # the loop ends at once
+    s = {"sessionId": "old", "pane": "%1"}
+    d = {"sessionId": "new-sid-00", "pid": 5}
+    assert crs.started_on("tamsin", s, d, "/tmp/h.md", dev_dialog=True) is False
+    warn = (tmp_path / "restart.log").read_text(encoding="utf-8")
+    assert "WARN tamsin" in warn and "--dangerously-load-development-channels" in warn and "dialog" in warn
+    (tmp_path / "restart.log").unlink()
+    assert crs.started_on("tamsin", s, d, "/tmp/h.md") is False
+    assert "dialog" not in (tmp_path / "restart.log").read_text(encoding="utf-8")
 
 
 def test_mail_ask_writes_the_session_mailbox_and_types_nothing(crs, monkeypatch, tmp_path) -> None:
@@ -415,8 +534,65 @@ def test_mail_note_is_logged_before_the_send_and_named_in_the_body(crs, monkeypa
     assert crs.mail_ask(s, "/tmp/h.md", "x") is True
     note = crs.mail_note(s, "/tmp/h.md")
     assert note in seen[0]  # in the log when the send runs
-    assert note in crs.handoff_prompt(s, "/tmp/h.md", mailed=True)
-    assert note not in crs.handoff_prompt(s, "/tmp/h.md")  # the typed ask is the user's own prompt
+    assert note not in crs.handoff_prompt(s, "/tmp/h.md", mailed=True)  # the mail's check is the marker, not the log
+    assert str(crs.ask_marker(s, "/tmp/h.md")) in crs.handoff_prompt(s, "/tmp/h.md", mailed=True)
+    assert "test -e" not in crs.handoff_prompt(s, "/tmp/h.md")  # the typed ask is the user's own prompt
+
+
+def _marker_command(crs, body: str) -> str:
+    """The shell command a mailed ask tells the session to run: the backticked `test -e ...` span."""
+    return next(part for part in body.split("`") if part.startswith("test -e "))
+
+
+@pytest.mark.parametrize("kind", ["handoff", "ready"])
+def test_the_mail_check_is_a_marker_file_that_exists_when_the_mail_goes(crs, monkeypatch, tmp_path, kind) -> None:
+    """nexus-acp8p: reading the restart log stops a default-permission session on a prompt; `test -e` does not.
+
+    The check is real: run as the session would run it, it prints 'present' while the marker exists and
+    nothing once it does not; the marker is there at the moment the send runs, and the log is not read.
+    """
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    s = {"sessionId": "sid-9abcdef", "name": "tamsin"}
+    path = "/tmp/h.md" if kind == "handoff" else "/tmp/ready.json"
+    seen: list[tuple[list[str], bool]] = []
+    marker = crs.ask_marker(s, path)
+
+    def fake_run(argv, **_kw):
+        seen.append((list(argv), marker.exists()))
+        return subprocess.CompletedProcess(argv, 0, stdout="id\n", stderr="")
+
+    setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
+    extra = {"kind": "restart-ready", "body": crs.ready_prompt(s, path, mailed=True)} if kind == "ready" else {}
+    assert crs.mail_ask(s, path, "x", **extra) is True
+    argv, existed = seen[0]
+    body = argv[argv.index("--body") + 1]
+    assert existed and str(marker) in body and str(crs.LOG) not in body
+    assert "do not act on it" in body and len(body.encode()) <= 4096
+    cmd = _marker_command(crs, body)
+    ran = lambda: subprocess.run(["bash", "-c", cmd], capture_output=True, text=True).stdout.strip()  # noqa: E731
+    assert ran() == "present"
+    marker.unlink()
+    assert ran() == ""
+
+
+def test_a_marker_that_cannot_be_made_stops_the_mail(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    monkeypatch.setattr(crs, "ASK_MARKERS", blocker / "restart-asks")  # a parent that is a file
+    sent: list = []
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda argv, **_kw: sent.append(argv))
+    assert crs.mail_ask({"sessionId": "sid-9", "name": "t"}, "/tmp/h.md", "x") is False
+    assert sent == [] and "could not create the ask marker" in (tmp_path / "restart.log").read_text()
+
+
+def test_a_failed_send_takes_its_marker_back(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    setattr_in(monkeypatch, crs, "subprocess.run",
+               lambda argv, **_kw: subprocess.CompletedProcess(argv, 1, stdout="", stderr="refused\n"))
+    s = {"sessionId": "sid-9", "name": "t"}
+    assert crs.mail_ask(s, "/tmp/h.md", "x") is False
+    assert not crs.ask_marker(s, "/tmp/h.md").exists()
 
 
 @pytest.mark.parametrize(("headings", "counted"), [(2, True), (1, False)], ids=["two-headings", "one-heading"])
@@ -728,7 +904,7 @@ def test_the_ready_ask_is_mail_of_its_own_kind_naming_the_reply_file(crs, rd, mo
     assert argv[1:4] == ["tuple", "out", "mailbox/sid-9"] and "kind=restart-ready" in argv
     body = argv[argv.index("--body") + 1]
     path = crs.ready_path(s, "20261102-100000")
-    assert path in body and crs.ready_note(s, path) in _log(rd) and crs.ready_note(s, path) in body
+    assert path in body and crs.ready_note(s, path) in _log(rd) and str(crs.ask_marker(s, path)) in body
     assert len(body.encode()) <= 4096  # the mailbox template's body ceiling
     assert out == [{"name": "tamsin", "sessionId": "sid-9", "path": path, "how": "mail", "tuple_id": "id"}]
     assert crs.SENT_ASKS == {}  # kept in the manifest, not in this process (nexus-xwijj)
@@ -1789,6 +1965,11 @@ def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd,
     for f in files:
         (t / f).write_text("x", encoding="utf-8")
     crs.UNWITHDRAWN.append("mailbox/aaaa1111: ready ask t-1: not withdrawn (in exited 1: boom)")
+    marker = crs.ask_marker({"sessionId": "aaaa1111-rest"}, "/tmp/h.md")
+    other_marker = crs.ask_marker({"sessionId": "bbbb2222-rest"}, "/tmp/h.md")
+    for m in (marker, other_marker):
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.touch()
     lines = crs.footprint_report([{"sessionId": "aaaa1111-rest", "name": "alpha"}],
                                  {"aaaa1111-rest": str(t / "nexus-continuation-restart-alpha-aaaa1111-1.md")},
                                  crs.load_manifest()[0])
@@ -1797,7 +1978,8 @@ def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd,
     assert (t / "rr-aaaa1111-20261103-090000.txt").exists()  # nor a newer round's
     assert "0-earlier" not in lines[1]  # an earlier run's handoff is not this run's
     assert str(t / "nexus-continuation-restart-alpha-aaaa1111-1.draft.txt") in lines[1]  # save_draft's real name
-    assert lines[0] == "footprint: removed 2 typed-ask file(s)"
+    assert lines[0] == "footprint: removed 3 ask file(s) (typed-ask instructions and ask markers)"
+    assert not marker.exists() and other_marker.exists()  # this round's marker only
     assert lines[1].startswith("footprint: kept 1 handoff(s) and 2 draft(s) for back-out:")
     assert "cccc3333" not in lines[1]
     assert lines[2] == f"footprint: kept 1 ready reply file(s): {t / 'nexus-restart-ready-alpha-aaaa1111-1.json'}"
