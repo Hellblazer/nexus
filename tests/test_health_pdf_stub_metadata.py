@@ -222,6 +222,92 @@ def test_a_collection_past_the_chunk_cap_is_partial(monkeypatch) -> None:
     assert sum(len(r) for r in col.reads) == cap, "no more than the cap is read"
 
 
+def _legacy_collection(monkeypatch, docs: int, per_doc: int, stub_docs: set[int]):
+    """*docs* method-less PDF documents of *per_doc* chunks each behind a stub catalog; the documents whose
+    index is in *stub_docs* carry the upload placeholder on every chunk, the rest are titled legacy rows
+    (indexed before nexus-6pfgb.6, so no extraction_method, but healthy). Returns the column that serves them."""
+    entries, held = [], {}
+    for d in range(docs):
+        tumbler = f"1.1.{d + 1}"
+        entries.append(SimpleNamespace(
+            tumbler=tumbler, title=f"doc{d}", meta={}, content_type="paper", file_path=f"/doc{d}.pdf",
+            source_uri=f"file:///doc{d}.pdf", physical_collection=_COLLECTION,
+        ))
+        held[tumbler] = [f"{d * per_doc + i + 1:064x}" for i in range(per_doc)]
+
+    class _Reader:
+        def list_by_collection(self, collection):
+            return entries
+
+        def get_manifests(self, doc_ids):
+            return {t: [SimpleNamespace(chash=c, collection=_COLLECTION) for c in held[t]] for t in doc_ids}
+
+        def close(self):
+            pass
+
+    stub_chashes = {c for d in stub_docs for c in held[f"1.1.{d + 1}"]}
+
+    class _Col:
+        def __init__(self) -> None:
+            self.read: list[str] = []
+
+        def get(self, *, ids=None, include=None, limit=None, **kw):
+            assert "where" not in kw
+            self.read.extend(ids)
+            return {
+                "ids": list(ids),
+                "metadatas": [
+                    {"content_type": "pdf", "title": "" if c in stub_chashes else "Old Paper"} for c in ids
+                ],
+            }
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Reader())
+    return _Col()
+
+
+def test_a_large_legacy_collection_gets_a_definite_verdict_within_the_read_bound(monkeypatch) -> None:
+    """nexus-iho0e: 30 titled method-less documents (600 chunks, three times the 200-chunk read bound) and 2
+    real stubs. Before, the bound counted every chunk of every method-less document, so the scan ran out on
+    healthy legacy rows and read PARTIAL for good; now only a stub is read in full."""
+    col = _legacy_collection(monkeypatch, docs=30, per_doc=20, stub_docs={4, 21})
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _t3_of(col))
+    monkeypatch.setattr("nexus.db.limits.MAX_QUERY_RESULTS", 10)
+
+    row = _row(health._check_pdf_stub_metadata())
+
+    assert "PARTIAL" not in row.detail, row.detail
+    assert not row.ok and row.warn, row.detail
+    assert "40 PDF chunk(s) in 2 document(s)" in row.detail, row.detail
+    assert "doc4.pdf (20)" in row.detail and "doc21.pdf (20)" in row.detail, row.detail
+    assert len(col.read) == len(set(col.read)) <= health._PDF_STUB_MAX_PAGES * 10, "each chunk once, within the bound"
+
+
+def test_a_large_legacy_collection_with_no_stub_reads_clean(monkeypatch) -> None:
+    col = _legacy_collection(monkeypatch, docs=30, per_doc=20, stub_docs=set())
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _t3_of(col))
+    monkeypatch.setattr("nexus.db.limits.MAX_QUERY_RESULTS", 10)
+
+    row = _row(health._check_pdf_stub_metadata())
+
+    assert row.ok and not row.warn and "PARTIAL" not in row.detail, row.detail
+    assert 0 < len(col.read) < 600, "a sample, not the whole 600"
+
+
+def test_a_collection_too_large_to_sample_is_partial_and_says_why_and_what_to_run(monkeypatch) -> None:
+    """100 documents at four probes each is 400 reads against a 200-chunk bound: the scan genuinely cannot
+    finish, so it says so, with the reason and the way to shrink the set."""
+    col = _legacy_collection(monkeypatch, docs=100, per_doc=20, stub_docs={0})
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _t3_of(col))
+    monkeypatch.setattr("nexus.db.limits.MAX_QUERY_RESULTS", 10)
+
+    row = _row(health._check_pdf_stub_metadata())
+
+    assert not row.ok and row.warn, row.detail
+    assert "PARTIAL" in row.detail and "floor" in row.detail, row.detail
+    assert "method-less" in row.detail and "backfill-meta" in row.detail, row.detail
+    assert len(col.read) <= health._PDF_STUB_MAX_PAGES * 10, "the bound holds even when it is reached"
+
+
 def test_a_collection_that_cannot_be_read_is_not_a_clean_verdict(monkeypatch) -> None:
     class _Col:
         def get(self, **kw):

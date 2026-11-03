@@ -11571,10 +11571,17 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
 #: ``rdr__`` holds only RDR markdown; skipping both saves one request each.
 _PDF_STUB_SCAN_PREFIXES: tuple[str, ...] = ("knowledge__", "docs__")
 #: Pages of chunk rows read per collection before the scan of that collection
-#: stops and is reported as partial. Only the chunks of PDF documents whose
-#: catalog meta records no extraction_method are read (111 placeholder chunks
-#: in 2 documents on the production tenant, 2026-09-24), so one page is the norm.
+#: stops and is reported as partial. Only PDF documents whose catalog meta
+#: records no extraction_method are looked at (111 placeholder chunks in 2
+#: documents on the production tenant, 2026-09-24). Their chunks are all read
+#: while they fit under the bound; past it a sample of each document is read
+#: and only a document whose sample holds a placeholder is read in full
+#: (nexus-iho0e: a legacy collection holds many healthy method-less
+#: documents, 24,517 chunks in 244 on the local tenant, 2026-11-03).
 _PDF_STUB_MAX_PAGES = 20
+#: Chunks sampled per method-less document once a collection holds more of
+#: them than the bound: spread evenly, the first and the last included.
+_PDF_STUB_PROBES = 4
 #: Concurrent collection reads. Matches the search fan-out ceiling
 #: (``search_engine``); the round trip, not the query, is the cost.
 #: Measured 2026-09-25 against the managed service, 58 collections, during
@@ -11603,6 +11610,13 @@ def _is_pdf_stub_metadata(meta: dict, *, document_has_method: bool) -> bool:
     return not meta.get("title") and not document_has_method
 
 
+def _spread_sample(items: list[str], k: int) -> list[str]:
+    """Up to *k* of *items*, evenly spaced, the first and the last included."""
+    if len(items) <= k:
+        return list(items)
+    return [items[round(i * (len(items) - 1) / (k - 1))] for i in range(k)]
+
+
 def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dict[str, int], bool]:
     """Placeholder-metadata PDF chunks in one collection, keyed by owning document's source.
 
@@ -11624,9 +11638,16 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
     2. Those documents' manifest chunks, read as rows by id. A row whose ``title`` is empty is the
        placeholder; a titled row of a method-less document (indexed before nexus-6pfgb.6) is healthy.
     A chunk two such documents hold is counted under each. A manifest chunk with no T3 row is skipped.
-    At most ``_PDF_STUB_MAX_PAGES * page_size`` distinct chunk rows are read; past that the second element
-    is True. A catalog that cannot be read raises, so the collection is reported as NOT CHECKED, never as
-    clean. Raises on a read failure; the caller names it.
+    At most ``_PDF_STUB_MAX_PAGES * page_size`` distinct chunk rows are read (the bound). When the candidate
+    documents hold no more chunks than that, every chunk is read and the count is exact. When they hold more
+    (a large legacy corpus, mostly healthy titled rows indexed before nexus-6pfgb.6), ``_PDF_STUB_PROBES``
+    chunks spread across each document are read, and a document whose sample holds a placeholder is then
+    read in full: a stub document is named with its true chunk count within the bound, and a collection of
+    healthy documents is cleared in a few reads per document. A document stubbed only in chunks the sample
+    skips is missed on that path. The second element is True only when the bound stopped the scan: the
+    samples alone exceed it, or the stub documents' remaining chunks do. A catalog that cannot be read
+    raises, so the collection is reported as NOT CHECKED, never as clean. Raises on a read failure; the
+    caller names it.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.catalog.indexed_meta import catalog_source_format  # noqa: PLC0415 — deferred, as above
@@ -11660,19 +11681,46 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
         ordered.extend(c for c in chashes if c)
     ordered = list(dict.fromkeys(ordered))
     cap = _PDF_STUB_MAX_PAGES * page_size
-    truncated = len(ordered) > cap
-    ordered = ordered[:cap]
 
     # Not get_collection(): that re-lists every collection in the tenant to
     # prove existence, one extra stats round trip per collection, and the
     # caller has just listed them.
     col = t3.get_or_create_collection(name)  # type: ignore[attr-defined]
     rows: dict[str, dict] = {}
-    for start in range(0, len(ordered), page_size):
-        batch = ordered[start:start + page_size]
-        page = col.get(ids=batch, include=["metadatas"], limit=len(batch))
-        for chash, meta in zip(page.get("ids") or [], page.get("metadatas") or []):
-            rows[chash] = meta or {}
+
+    def _read(chashes: list[str]) -> None:
+        for start in range(0, len(chashes), page_size):
+            batch = chashes[start:start + page_size]
+            page = col.get(ids=batch, include=["metadatas"], limit=len(batch))
+            for chash, meta in zip(page.get("ids") or [], page.get("metadatas") or []):
+                rows[chash] = meta or {}
+
+    truncated = False
+    if len(ordered) <= cap:
+        _read(ordered)
+    else:
+        # More method-less chunks than the bound. Only the chunk row says whether a document is a stub (the
+        # catalog's title is its file stem), so reading all of them is the exact answer and is unbounded.
+        # Probe a spread sample of each document instead, then read in full only the documents whose sample
+        # held a placeholder, so a healthy legacy corpus costs a few reads per document, not its size.
+        probes = list(dict.fromkeys(
+            c for d in candidates for c in _spread_sample(held[str(d.tumbler)], _PDF_STUB_PROBES) if c
+        ))
+        truncated = len(probes) > cap
+        _read(probes[:cap])
+        budget = cap - len(rows)
+        for d in candidates:
+            chashes = [c for c in dict.fromkeys(held[str(d.tumbler)]) if c]
+            if not any(
+                c in rows and _is_pdf_stub_metadata(rows[c], document_has_method=False) for c in chashes
+            ):
+                continue
+            rest = [c for c in chashes if c not in rows]
+            if len(rest) > budget:
+                truncated = True
+                rest = rest[:budget]
+            budget -= len(rest)
+            _read(rest)
 
     stubs: dict[str, int] = {}
     for d in candidates:
@@ -11756,9 +11804,10 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
         gaps += f" NOT CHECKED: {len(unreadable)} collection(s) could not be read: {shown}{more}."
     if partial:
         gaps += (
-            f" PARTIAL: {len(partial)} collection(s) hit the "
-            f"{_PDF_STUB_MAX_PAGES}-page cap, so their count is a floor: "
-            f"{', '.join(partial[:5])}."
+            f" PARTIAL: {len(partial)} collection(s) hold more method-less PDF documents or stub "
+            f"chunks than the {_PDF_STUB_MAX_PAGES}-page read bound lets the scan cover, so their "
+            f"count is a floor: {', '.join(partial[:5])}. `nx catalog backfill-meta` stamps "
+            "extraction_method on legacy documents, which takes them out of this scan."
         )
 
     if stubs:

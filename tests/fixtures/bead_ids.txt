@@ -3231,6 +3231,7 @@ nexus-dotwy.1
 nexus-dpe79
 nexus-dpm
 nexus-dpm.1
+nexus-dpspj
 nexus-dpthy
 nexus-dqag1
 nexus-dqe86
@@ -3259,6 +3260,7 @@ nexus-dqrwi
 nexus-dqwf
 nexus-dqxz9
 nexus-dqxz9.1
+nexus-dr0da
 nexus-dr57n
 nexus-drza4
 nexus-ds8e
@@ -4530,6 +4532,7 @@ nexus-igzz
 nexus-ih2
 nexus-ih2.1
 nexus-ih383
+nexus-iho0e
 nexus-iitif
 nexus-iiy11
 nexus-iiy11.1
@@ -6579,6 +6582,8 @@ nexus-qo7ie.24
 nexus-qo7ie.25
 nexus-qo7ie.26
 nexus-qo7ie.27
+nexus-qo7ie.28
+nexus-qo7ie.29
 nexus-qo7ie.3
 nexus-qo7ie.4
 nexus-qo7ie.5
