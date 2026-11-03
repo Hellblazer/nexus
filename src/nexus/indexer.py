@@ -1012,6 +1012,12 @@ def _delete_docs_for_paths(repo: Path, deleted_relpaths: list[str]) -> None:
 
     Best-effort per path; a failed lookup/delete is logged and skipped (the
     next FULL run's housekeeping recovers it).
+
+    A full walk also feeds paths that are still present but no longer
+    indexable (an excluded RDR basename, a whitespace-only file, a symlink,
+    nexus-gnw42). On a ``--since-head`` run that happens only when the delta
+    is non-empty: an empty delta returns before the walk, so such a path is
+    retired by the next run with any change, or the next full run.
     """
     try:
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -1120,6 +1126,75 @@ def _stored_paths_among(repo: Path, candidate_relpaths: set[str]) -> set[str]:
         _log.debug("rdr_excluded_present_filter_unavailable", exc_info=True)
         return set()
     return candidate_relpaths & owned_paths
+
+
+def _warn_symlink_ghosts_with_dependents(
+    repo: Path, ghost_relpaths: set[str], symlink_targets: dict[str, str | None],
+) -> None:
+    """Warn before a stored entry at a symlink path is tombstoned when it
+    carries something besides its indexed text (nexus-gnw42).
+
+    The entry is tombstoned either way. What the warning names is what goes
+    with it: catalog links whose ``created_by`` is not ``filepath_extractor``
+    (the indexer's own path links, regenerated on the target), and an aspect
+    row. Nothing is moved: the target may already hold the same edges, and
+    which of the ghost's belong on it is a decision, not a rename. The target's
+    tumbler is named when the target is indexed in this repository.
+
+    Called only when a symlink path still has a stored entry, so steady state
+    pays nothing. Best-effort: a failed read is logged at debug and skipped.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return
+        _, repo_hash = _repo_identity(repo)
+        owner = reader.owner_for_repo(repo_hash)
+        if owner is None:
+            return
+        by_path = {e.file_path: e for e in reader.by_owner(owner)}
+    except Exception:  # noqa: BLE001 — advisory only; the tombstone does not depend on it
+        _log.debug("symlink_ghost_dependents_check_unavailable", exc_info=True)
+        return
+    for rel in sorted(ghost_relpaths):
+        entry = by_path.get(rel)
+        if entry is None:
+            continue
+        try:
+            links = [
+                lnk for lnk in [*reader.links_from(entry.tumbler), *reader.links_to(entry.tumbler)]
+                if getattr(lnk, "created_by", "") != "filepath_extractor"
+            ]
+        except Exception:  # noqa: BLE001 — advisory only
+            _log.debug("symlink_ghost_links_read_failed", file_path=rel, exc_info=True)
+            links = []
+        has_aspects = False
+        try:
+            from nexus.mcp_infra import t2_ctx  # noqa: PLC0415 — deliberate function-scoped import (avoid circular import)
+
+            with t2_ctx() as t2:
+                has_aspects = t2.document_aspects.get_by_doc_id(str(entry.tumbler)) is not None
+        except Exception:  # noqa: BLE001 — advisory only
+            _log.debug("symlink_ghost_aspects_read_failed", file_path=rel, exc_info=True)
+        if not links and not has_aspects:
+            continue
+        target_rel = symlink_targets.get(rel)
+        target_entry = by_path.get(target_rel) if target_rel else None
+        _log.warning(
+            "symlink_ghost_retired_with_dependents",
+            ghost_tumbler=str(entry.tumbler),
+            file_path=rel,
+            target_path=target_rel,
+            target_tumbler=str(target_entry.tumbler) if target_entry is not None else None,
+            links=len(links),
+            link_types=sorted({str(getattr(lnk, "link_type", "")) for lnk in links}),
+            has_aspects=has_aspects,
+            detail="tombstoned anyway; nothing was moved. Re-create on the "
+                   "target any link or aspect that still belongs there.",
+        )
 
 
 def _catalog_progress(
@@ -5504,8 +5579,13 @@ def _run_index(
     # nexus-gnw42: worktree-relative paths of tracked symlinks the main walk
     # skipped. Every one present is collected whatever the delta says; one
     # that still has a stored document (an earlier walk followed the link)
-    # rides the same same-run tombstone as whitespace_skipped_present.
+    # rides the same same-run tombstone as whitespace_skipped_present. On a
+    # --since-head run that needs a NON-EMPTY delta: an empty one returns
+    # above, before the walk, so the next run with any change (or the next
+    # full run) retires it. ``symlink_targets`` maps each to its target's
+    # worktree-relative path, or None for a target outside the repository.
     symlink_skipped_present: set[str] = set()
+    symlink_targets: dict[str, str | None] = {}
 
     rdr_md_paths: list[tuple[float, Path]] = []
     for rdr_rel in dict.fromkeys(rdr_paths):  # de-dupe while preserving order
@@ -5560,15 +5640,9 @@ def _run_index(
     rdr_md_paths.sort(key=lambda x: x[0], reverse=True)
     have_rdr_files = bool(rdr_md_paths)
 
-    if rdr_excluded_present:
-        # nexus-d6qmz round 2: filter to paths that actually still HAVE a
-        # stored document before merging into delta_deleted — see
-        # _stored_paths_among's docstring for why the unfiltered set made
-        # delta_deleted permanently non-empty on --since-head runs.
-        _stored = _stored_paths_among(repo, rdr_excluded_present)
-        if _stored:
-            _already = set(delta_deleted)
-            delta_deleted.extend(sorted(_stored - _already))
+    # rdr_excluded_present is filtered against the stored documents after the
+    # main walk, in the one _stored_paths_among call it shares with the
+    # whitespace and symlink sets (nexus-gnw42: one by_owner read per run).
 
     # Walk repo and classify files into code, prose, and PDF lists
     code_files: list[tuple[float, Path]] = []
@@ -5614,10 +5688,18 @@ def _run_index(
         # already excluded symlinks). Skipped here, before the delta filter: a
         # symlink's blob never changes when its target's text does, so a
         # --since-head delta never names it, and a stored document at its path
-        # must still be retired (below, the same-run tombstone). A target inside
-        # the repo is indexed under its own path; one outside it is not indexed.
+        # must still be retired (below, the same-run tombstone; on a
+        # --since-head run only when the delta is non-empty, see
+        # symlink_skipped_present). A target inside the repo is indexed under
+        # its own path when the walk admits it; a target outside the repo, or
+        # one the walk filters (hidden, ignored), is not indexed under either.
         if path.is_symlink():
-            symlink_skipped_present.add(str(path.relative_to(repo)))
+            _link_rel = str(path.relative_to(repo))
+            symlink_skipped_present.add(_link_rel)
+            try:
+                symlink_targets[_link_rel] = str(path.resolve().relative_to(repo.resolve()))
+            except (ValueError, OSError):
+                symlink_targets[_link_rel] = None  # outside the repository
             continue
         if not path.is_file():
             continue  # git ls-files may list deleted files not yet committed
@@ -5711,19 +5793,31 @@ def _run_index(
                     ext=path.suffix.lower(),
                 )
 
-    if whitespace_skipped_present or symlink_skipped_present:
+    _symlink_stored: set[str] = set()
+    if rdr_excluded_present or whitespace_skipped_present or symlink_skipped_present:
+        # nexus-d6qmz round 2: filter to paths that actually still HAVE a
+        # stored document before merging into delta_deleted — see
+        # _stored_paths_among's docstring for why the unfiltered set made
+        # delta_deleted permanently non-empty on --since-head runs.
         # nexus-5j8fp: same-run retirement of a still-present whitespace-only
-        # file's existing document, through the nexus-d6qmz tombstone path
-        # (see rdr_excluded_present above). Filtered to paths with a live
-        # stored document so steady state leaves delta_deleted empty.
-        # nexus-gnw42: a symlink's stored document rides the same path, in
-        # the same batched lookup (one by_owner read for both sets).
-        _ws_stored = _stored_paths_among(
-            repo, whitespace_skipped_present | symlink_skipped_present,
+        # file's existing document rides the same nexus-d6qmz tombstone path.
+        # nexus-gnw42: so does a symlink's stored document, and the three
+        # sets share ONE batched lookup (one by_owner read per run).
+        _stored = _stored_paths_among(
+            repo,
+            rdr_excluded_present | whitespace_skipped_present | symlink_skipped_present,
         )
-        if _ws_stored:
-            _ws_already = set(delta_deleted)
-            delta_deleted.extend(sorted(_ws_stored - _ws_already))
+        _symlink_stored = _stored & symlink_skipped_present
+        if _symlink_stored:
+            _warn_symlink_ghosts_with_dependents(repo, _symlink_stored, symlink_targets)
+        if _stored:
+            _already = set(delta_deleted)
+            delta_deleted.extend(sorted(_stored - _already))
+    _log.info(
+        "symlink_walk_summary",
+        symlinks_skipped=len(symlink_skipped_present),
+        stored_symlink_entries_retired=len(_symlink_stored),
+    )
 
     # Sort all lists descending by frecency
     code_files.sort(key=lambda x: x[0], reverse=True)
