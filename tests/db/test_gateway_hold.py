@@ -310,6 +310,69 @@ class TestOwnPace:
         assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url="https://edge", others_only=True) > 3.0
 
 
+class TestHolderSet:
+    """nexus-wfmfi: the hold names every process that recorded into it, not only the last."""
+
+    def test_a_later_foreign_recorder_does_not_hide_this_process_but_this_process_keeps_waiting_on_it(self, cfg: Path) -> None:
+        """B records, then this process records into B's hold: the file names both, so this process's
+        ``others_only`` wait still follows B's hold. (Before: pid was overwritten with ours and the wait was skipped.)"""
+        other = os.getpid() + 1
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1010.0, "strikes": 1, "last_503": 1000.0, "url": "https://edge", "pid": other}
+        ))
+        gh.record_503(0.4, retry_after=None, url="https://edge", now=1001.0, rng=_rng(), own_pace=True)
+        state = json.loads((cfg / gh.HOLD_FILENAME).read_text())
+        assert state["pid"] == os.getpid()  # the field an older reader looks at is still the last recorder
+        assert state["pids"] == [other, os.getpid()]
+        assert gh.wait_before_attempt(now=1001.5, rng=_rng(), url="https://edge", others_only=True) > 3.0
+
+    def test_a_hold_only_this_process_wrote_is_still_ours(self, cfg: Path) -> None:
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1001.0, rng=_rng())
+        assert json.loads((cfg / gh.HOLD_FILENAME).read_text())["pids"] == [os.getpid()]
+        assert gh.wait_before_attempt(now=1001.5, rng=_rng(), url="https://edge", others_only=True) == 0.0
+
+    def test_a_second_recording_in_a_foreign_hold_stays_foreign_for_the_mint(self, cfg: Path) -> None:
+        """A mint recorded into a foreign hold follows it on every later 503 of the wave, not one slot."""
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1010.0, "strikes": 1, "last_503": 1000.0, "url": "https://edge", "pid": os.getpid() + 1}
+        ))
+        for now in (1001.0, 1002.0, 1003.0):
+            assert gh.record_503(0.4, retry_after=None, url="https://edge", now=now, rng=_rng(), own_pace=True) >= 6.0
+
+    def test_an_older_writers_file_with_only_pid_is_one_holder_and_is_kept(self, cfg: Path) -> None:
+        other = os.getpid() + 1
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1010.0, "strikes": 1, "last_503": 1000.0, "url": "https://edge", "pid": other}
+        ))
+        gh.record_503(2.0, retry_after=None, url="https://edge", now=1001.0, rng=_rng())
+        assert json.loads((cfg / gh.HOLD_FILENAME).read_text())["pids"] == [other, os.getpid()]
+
+    def test_the_set_is_bounded_and_keeps_the_newest_and_the_writer(self, cfg: Path) -> None:
+        pids = list(range(900_000, 900_000 + 3 * gh.MAX_HOLDERS))
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1010.0, "strikes": 1, "last_503": 1000.0, "url": "https://edge", "pid": pids[-1], "pids": pids}
+        ))
+        gh.record_503(2.0, retry_after=None, url="https://edge", now=1001.0, rng=_rng())
+        got = json.loads((cfg / gh.HOLD_FILENAME).read_text())["pids"]
+        assert len(got) == gh.MAX_HOLDERS
+        assert got[-1] == os.getpid() and got[:-1] == pids[-(gh.MAX_HOLDERS - 1):]
+
+    def test_a_new_wave_after_the_hold_ended_starts_a_fresh_set(self, cfg: Path) -> None:
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1002.0, "strikes": 1, "last_503": 1000.0, "url": "https://edge", "pid": os.getpid() + 1,
+             "pids": [os.getpid() + 1]}
+        ))
+        gh.record_503(2.0, retry_after=None, url="https://edge", now=1005.0, rng=_rng())
+        assert json.loads((cfg / gh.HOLD_FILENAME).read_text())["pids"] == [os.getpid()]
+
+    def test_garbled_pids_are_dropped_not_fatal(self, cfg: Path) -> None:
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1010.0, "strikes": 1, "last_503": 1000.0, "url": "https://edge", "pids": [True, "x", 7, None]}
+        ))
+        assert gh._read(cfg / gh.HOLD_FILENAME)["pids"] == [7]
+
+
 class TestEngineReason:
     """nexus-cphvg: a 503 with an engine reason is about one tenant or request, not the edge."""
 

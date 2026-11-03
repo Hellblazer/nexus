@@ -551,6 +551,13 @@ class _EndpointRegistrar:
         )
 
 
+def _hook_deadline_left() -> float | None:
+    """Seconds left of the hook deadline the caller set (:func:`~nexus.db.data_token.mint_deadline`), or ``None``."""
+    from nexus.db.data_token import deadline_left  # noqa: PLC0415 — deferred to avoid circular import
+
+    return deadline_left()
+
+
 def _response_body(response: httpx.Response) -> bytes:
     """A response's body, ``b""`` when it cannot be read (a streamed one that was never read)."""
     try:
@@ -1364,6 +1371,9 @@ class RefreshableHttpStoreMixin:
                 after=slept_until, max_wait=_numeric_timeout(kwargs.get("timeout", getattr(getattr(self, "_client", None), "timeout", None))),
                 url=hold_url,
             )
+            hook_left = _hook_deadline_left()
+            if hook_left is not None:
+                held_s = min(held_s, hook_left)  # nexus-wfmfi: the hook's own deadline outranks the hold
             if held_s > 0.0:
                 _log.info(
                     "refreshable_http_store.gateway_hold_wait",
@@ -1388,6 +1398,16 @@ class RefreshableHttpStoreMixin:
                         url=hold_url,
                         reason=gateway_hold.reason_from_body(_response_body(exc.response)),
                     )
+                hook_left = _hook_deadline_left()
+                if hook_left is not None and sleep_s >= hook_left:
+                    # nexus-wfmfi: a caller with a hard deadline (the SubagentStart T2 scan) cannot
+                    # use a retry that starts after it: hold plus slot reach about 60 s, so give up now.
+                    _log.warning(
+                        "refreshable_http_store.gateway_retry_past_deadline",
+                        store=type(self).__name__, path=path, code=exc.response.status_code,
+                        attempt=i + 1, sleep_s=sleep_s, left_s=hook_left,
+                    )
+                    raise
                 _log.warning(
                     "vector_gateway_retry_embed_write_504" if floored
                     else "refreshable_http_store.gateway_retry",

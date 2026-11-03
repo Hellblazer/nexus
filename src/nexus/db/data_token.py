@@ -454,6 +454,36 @@ _MINT_HOLD_WAIT_BUDGET_S: float = 15.0
 _mint_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar("nexus_mint_deadline", default=None)
 
 
+#: The least transport timeout a mint attempt gets under a deadline (nexus-wfmfi):
+#: an attempt sent with the deadline already spent still gets a real round trip
+#: (a zero timeout is a non-blocking socket, which fails at once).
+_MINT_TRANSPORT_FLOOR_S: float = 0.5
+
+#: The transport timeout of the mint attempt now being sent, set by
+#: :meth:`DataTokenManager._mint` around each poster call and read by
+#: :func:`_default_poster`, so the ``Poster`` signature stays three arguments.
+_mint_transport_timeout: contextvars.ContextVar[float] = contextvars.ContextVar(
+    "nexus_mint_transport_timeout", default=_MINT_TIMEOUT_S,
+)
+
+
+def deadline_left() -> float | None:
+    """Seconds left of the enclosing :func:`mint_deadline` / ``bearer_for(deadline_s=...)`` block, or ``None`` outside one.
+
+    The same deadline bounds the mint's sleeps, so a store call made inside the
+    block (the SubagentStart T2 scan) can bound its own gateway waits by it."""
+    deadline = _mint_deadline.get()
+    return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+
+def _transport_timeout(remaining: float | None) -> float:
+    """The transport timeout for one mint attempt: :data:`_MINT_TIMEOUT_S`, cut to
+    the caller's *remaining* deadline (``None``: no deadline) but never under the floor."""
+    if remaining is None:
+        return _MINT_TIMEOUT_S
+    return min(_MINT_TIMEOUT_S, max(_MINT_TRANSPORT_FLOOR_S, remaining))
+
+
 @contextlib.contextmanager
 def mint_deadline(seconds: float | None) -> Iterator[None]:
     """Bound the sleeps of every mint made inside the block to *seconds* from now.
@@ -462,8 +492,9 @@ def mint_deadline(seconds: float | None) -> Iterator[None]:
     has a hard deadline of its own (the SubagentStart hook's T2 scan). Within
     the block a mint waits on a gateway hold for no more than what is left,
     and retries only when its sleep fits in what is left, so it stops
-    retrying rather than outlast the caller. A transport timeout of an
-    attempt already sent (:data:`_MINT_TIMEOUT_S`) is not shortened. A nested
+    retrying rather than outlast the caller. An attempt's transport timeout is the shorter of :data:`_MINT_TIMEOUT_S` and
+    what the deadline has left (never under :data:`_MINT_TRANSPORT_FLOOR_S`; nexus-wfmfi),
+    so a mint sent late in the hook's time does not wait out ten seconds. A nested
     block keeps the earlier of the two deadlines; ``None`` sets none.
     """
     if seconds is None:
@@ -1077,7 +1108,7 @@ def _default_poster(
     )
     before_request()  # nexus-ldf2s: a mint is a request like any other
     try:
-        with urllib.request.urlopen(req, timeout=_MINT_TIMEOUT_S) as resp:  # noqa: S310 — fixed https/http scheme from configured base_url
+        with urllib.request.urlopen(req, timeout=_mint_transport_timeout.get()) as resp:  # noqa: S310 — fixed https/http scheme from configured base_url
             raw = resp.read()
             return resp.status, (json.loads(raw) if raw else {}), dict(resp.headers)
     except urllib.error.HTTPError as exc:
@@ -2088,6 +2119,7 @@ class DataTokenManager:
                         tenant=body_tenant, endpoint=_log_endpoint(url), attempt=attempt, sleep_s=held_s,
                     )
                     self._sleep(held_s)
+            timeout_token = _mint_transport_timeout.set(_transport_timeout(left()))
             try:
                 status, payload, resp_headers = self._poster(url, headers, body)
             except Exception as exc:  # noqa: BLE001 — any transport failure becomes the typed mint error
@@ -2104,6 +2136,8 @@ class DataTokenManager:
                 mint_error = DataTokenMintError(
                     f"data-token mint request to {_log_endpoint(url)} failed: {reason}"
                 )
+            finally:
+                _mint_transport_timeout.reset(timeout_token)
             if mint_error is not None:
                 raise mint_error from None
 

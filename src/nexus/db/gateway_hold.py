@@ -92,6 +92,11 @@ SPREAD_WINDOW_S: float = 30.0
 #: proxy's own JSON body) is treated as the edge's.
 ENGINE_BUSY_REASONS: frozenset[str] = frozenset({TENANT_CREATION_BUSY_REASON, QUARANTINE_RESTORE_BUSY_REASON})
 
+#: The most processes a hold names. A hold in force is replaced by the next wave,
+#: so the list holds the distinct processes that recorded into one wave; past this
+#: the oldest drop off (the newest, including the writer itself, always stay).
+MAX_HOLDERS: int = 8
+
 #: A 503 more than this long after the previous one starts the strike count over.
 STRIKE_WINDOW_S: float = 60.0
 
@@ -108,7 +113,7 @@ def _hold_path() -> Path:
 
 
 def _read(path: Path) -> dict[str, Any]:
-    """The hold file's fields (numbers, ``pid`` as an integer, and ``url`` as text), or ``{}`` when it is absent or unusable."""
+    """The hold file's fields (numbers, ``pid`` as an integer, ``pids`` as a list of integers, and ``url`` as text), or ``{}`` when it is absent or unusable."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -124,6 +129,8 @@ def _read(path: Path) -> dict[str, Any]:
         out["url"] = raw["url"]
     if isinstance(raw.get("pid"), int) and not isinstance(raw["pid"], bool):
         out["pid"] = raw["pid"]
+    if isinstance(raw.get("pids"), list):
+        out["pids"] = [p for p in raw["pids"] if isinstance(p, int) and not isinstance(p, bool)][-MAX_HOLDERS:]
     return out
 
 
@@ -195,9 +202,21 @@ def _sane(state: dict[str, Any], now: float) -> dict[str, Any]:
     return state
 
 
+def _holder_list(state: dict[str, Any]) -> list[int]:
+    """The processes that recorded a 503 into the hold in the file, oldest first: ``pids``, plus ``pid`` (the last one; all an older writer records)."""
+    holders = list(state.get("pids", ()))
+    if "pid" in state and state["pid"] not in holders:
+        holders.append(state["pid"])
+    return holders
+
+
 def _ours(state: dict[str, Any]) -> bool:
-    """True when this process wrote the hold in the file."""
-    return state.get("pid") == os.getpid()
+    """True when this process is the only one that wrote the hold in the file.
+
+    A hold another process also recorded into is not ours alone: that process
+    is waiting on it too, so a caller that ignores its own hold (``others_only``)
+    must not ignore this one."""
+    return set(_holder_list(state)) == {os.getpid()}
 
 
 def _tail_draw(earliest: float, latest: float, rng: random.Random | None) -> float:
@@ -430,6 +449,8 @@ def record_503(
             strikes += 1
         else:
             strikes = 1
+        holders = [] if now >= not_before else [p for p in _holder_list(state) if p != os.getpid()]
+        holders = [*holders, os.getpid()][-MAX_HOLDERS:]
         escalated = ESCALATION_S[min(strikes, len(ESCALATION_S)) - 1]
         hold = min(max(own, escalated, not_before - now), HOLD_CAP_S)
         new_not_before = min(max(not_before, now + hold), now + HOLD_CAP_S)
@@ -441,6 +462,7 @@ def record_503(
             "last_503": now,
             "url": _safe_url(url),
             "pid": os.getpid(),
+            "pids": holders,
         })
         return wake - now, strikes, foreign
 

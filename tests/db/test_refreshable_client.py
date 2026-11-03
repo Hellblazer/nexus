@@ -1074,6 +1074,67 @@ class TestGatewayTransientRetry:
         assert store._once_with_gateway_retry("POST", "/v1/echo", json={"value": "x"}, timeout=3.0) == {"echo": {"value": "x"}}
         assert len(sleeps) == 1 and 0.0 < sleeps[0] <= 3.0  # a moment inside the call's own 3 s, not the hold's 10 s
 
+    def test_wfmfi_the_hook_deadline_cuts_the_wait_on_another_processs_hold(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-wfmfi: inside a hook's deadline (the SubagentStart scan) a 20 s hold is waited out
+        only to what the deadline has left, not to the call timeout's 30 s."""
+        from nexus.db import gateway_hold
+        from nexus.db.data_token import mint_deadline
+        from nexus.db.t2 import _refreshable_client as mod
+
+        (_config_dir() / gateway_hold.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": time.time() + 20.0, "strikes": 1, "last_503": time.time()}
+        ))
+        sleeps: list[float] = []
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
+        store = _make_echo_store()
+
+        with mint_deadline(2.0):
+            assert store._once_with_gateway_retry("POST", "/v1/echo", json={"value": "x"}, timeout=30.0) == {"echo": {"value": "x"}}
+        assert len(sleeps) == 1 and 0.0 < sleeps[0] <= 2.0
+
+    def test_wfmfi_a_retry_that_starts_after_the_hook_deadline_is_not_made(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-wfmfi: three strikes on the box make the ladder sleep 20 s; a scan with 5 s left raises
+        the 503 at once (one round trip, no sleep) where it used to sleep the hold and the slot (about 60 s)."""
+        from nexus.db import gateway_hold
+        from nexus.db.data_token import mint_deadline
+        from nexus.db.t2 import _refreshable_client as mod
+
+        hold = _config_dir() / gateway_hold.HOLD_FILENAME
+        hold.write_text(json.dumps({"not_before": 0.0, "strikes": 3, "last_503": time.time()}))
+        sleeps: list[float] = []
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
+        _GATEWAY_FAIL_QUEUE.extend([503])
+        store = _make_echo_store()
+
+        with mint_deadline(5.0), pytest.raises(httpx.HTTPStatusError, match="503"):
+            store.echo_post("late")
+        assert sleeps == []
+        assert _REQUEST_COUNT["POST /v1/echo"] == 1
+
+    def test_wfmfi_a_retry_that_fits_the_hook_deadline_is_still_made(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Control for the pin above: the same 20 s ladder sleep with 60 s left is slept and retried."""
+        from nexus.db import gateway_hold
+        from nexus.db.data_token import mint_deadline
+        from nexus.db.t2 import _refreshable_client as mod
+
+        hold = _config_dir() / gateway_hold.HOLD_FILENAME
+        hold.write_text(json.dumps({"not_before": 0.0, "strikes": 3, "last_503": time.time()}))
+        sleeps: list[float] = []
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
+        _GATEWAY_FAIL_QUEUE.extend([503])
+        store = _make_echo_store()
+
+        with mint_deadline(60.0):
+            assert store.echo_post("fits") == {"echo": {"value": "fits"}}
+        assert len(sleeps) == 1 and sleeps[0] >= 20.0
+        assert _REQUEST_COUNT["POST /v1/echo"] == 2
+
     def test_v1929_an_engine_deadline_503_holds_no_one_else(
         self, fake_service, monkeypatch: pytest.MonkeyPatch
     ) -> None:
