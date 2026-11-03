@@ -93,15 +93,20 @@ declare -A HARNESS_ARGS=(
 # below, under random fake uids that no real user has. HARD-CODED /tmp stays in lock.sh, not
 # ${TMPDIR:-/tmp} (a per-context TMPDIR would give two contexts different lockdirs).
 unset NX_E2E_LOCK_ROOT
-REAL_ROOT="/tmp/nexus-e2e-locks-$(id -u)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/harness_lock_test.XXXXXX")"
+# An empty root would make rm_own's "strictly under TEST_ROOT" test match every absolute path
+# (review r1 of nexus-xzwyo): stop before anything is created or removed.
+if [[ -z "$TEST_ROOT" || ! -d "$TEST_ROOT" ]]; then
+    echo "  [FAIL] mktemp did not give this run a root (TMPDIR=${TMPDIR:-/tmp}); nothing was run" >&2
+    exit 1
+fi
 trap 'rm -rf "${TEST_ROOT:?}"' EXIT
 
 # rm_own <path>: remove a path ONLY if this run created it, i.e. it sits strictly under TEST_ROOT.
 # Anything else (the real lock root, a harness's lock, an empty or relative value) is refused loudly.
 rm_own() {
     local p="${1:-}"
-    if [[ -n "$p" && "$p" == "$TEST_ROOT"/?* && "$p" != *..* ]]; then
+    if [[ -n "$TEST_ROOT" && -d "$TEST_ROOT" && -n "$p" && "$p" == "$TEST_ROOT"/?* && "$p" != *..* ]]; then
         rm -rf "${p:?}"
     else
         echo "  [FAIL] rm_own refused to remove '$p': not under this run's $TEST_ROOT" >&2
@@ -274,17 +279,30 @@ for name in migration-rehearsal gc-ab sandbox; do
 done
 
 # ── the real lock root is out of reach ───────────────────────────────────
-# Each harness's lock line must be under the test's root, never REAL_ROOT; the test's only removal
+# Each harness's lock line must be under the test's root, never the real per-user root; the test's only removal
 # primitive refuses anything outside TEST_ROOT.
 echo
 echo "=== the real lock root is untouched ==="
 FAIL_BEFORE=$FAIL
-if rm_own "$REAL_ROOT/sandbox.lock" 2>/dev/null; then
+# The refusal is checked on a decoy outside the root, never on the real lock path: a regression in
+# rm_own must not be able to delete a live harness's lock (review r1 of nexus-xzwyo).
+DECOY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/harness_lock_decoy.XXXXXX")"
+mkdir -p "$DECOY_DIR/sandbox.lock"
+if rm_own "$DECOY_DIR/sandbox.lock" 2>/dev/null || [[ ! -d "$DECOY_DIR/sandbox.lock" ]]; then
     bad "rm_own removed a path outside this run's root"
 else
-    ok "rm_own refuses the real harness lock path ($REAL_ROOT/sandbox.lock)"
+    ok "rm_own refuses a lock path outside this run's root"
 fi
 FAIL=$FAIL_BEFORE # rm_own counted its own refusal as a failure; it was the expected one
+# With an empty root rm_own must still refuse (a failed mktemp left unchecked would otherwise
+# turn "under TEST_ROOT" into "any absolute path").
+if (TEST_ROOT=""; rm_own "$DECOY_DIR/sandbox.lock") 2>/dev/null || [[ ! -d "$DECOY_DIR/sandbox.lock" ]]; then
+    bad "rm_own with an empty TEST_ROOT accepted a path outside the run"
+else
+    ok "rm_own with an empty TEST_ROOT refuses"
+fi
+FAIL=$FAIL_BEFORE
+rm -rf "${DECOY_DIR:?}"
 if rm_own "" 2>/dev/null || rm_own "$TEST_ROOT" 2>/dev/null || rm_own "$TEST_ROOT/../x" 2>/dev/null; then
     bad "rm_own accepted an empty path, the root itself or a .. path"
 else

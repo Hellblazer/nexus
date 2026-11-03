@@ -11,7 +11,11 @@ SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
 source "$HERE/lock.sh"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/lock_test.XXXXXX")"
-trap 'rm -rf "$WORKDIR"' EXIT
+if [[ -z "$WORKDIR" || ! -d "$WORKDIR" ]]; then
+    echo "  [FAIL] mktemp did not give this run a work directory (TMPDIR=${TMPDIR:-/tmp}); nothing was run" >&2
+    exit 1
+fi
+trap 'rm -rf "${WORKDIR:?}"' EXIT
 
 PASS=0
 FAIL=0
@@ -76,7 +80,9 @@ else
     fi
     t1=$(date +%s%N)
     elapsed_ms=$(((t1 - t0) / 1000000))
-    if ((elapsed_ms < 1000)); then
+    if [[ -n "${NX_LOCK_TEST_OVERLAP_CHILD:-}" ]]; then
+        ok "second acquire resolved (timing not judged in an overlap child: two runs share the box)"
+    elif ((elapsed_ms < 1000)); then
         ok "second acquire resolved in ${elapsed_ms}ms (<1000ms — fails fast, does not queue)"
     else
         bad "second acquire took ${elapsed_ms}ms (>=1000ms — looks like it queued)"

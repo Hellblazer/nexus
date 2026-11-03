@@ -199,10 +199,10 @@ SUITES = [
         if _lock_suite_has_flock_tests() or sys.platform.startswith("linux")
         else _LOCK_SUITE_FLOOR_WITHOUT_FLOCK,
     ),
-    # 51 (nexus-xzwyo: private lock roots, the overlap sections, the e2e_lock_root wiring checks). It was 32
+    # 52 (nexus-xzwyo: private lock roots, the overlap sections, the e2e_lock_root wiring checks, the empty-root refusal). It was 32
     # after nexus-boz84 dropped the per-harness wall-clock assertion (35 before; 3 harnesses, one assertion
     # each); the output checks still prove no harness body ran.
-    _Suite("tests/e2e/lib/harness_lock_test.sh", 51),
+    _Suite("tests/e2e/lib/harness_lock_test.sh", 52),
     # 16, not the 19 this suite reports on macOS: its Test F only runs its
     # 3 assertions under the stock macOS /bin/bash 3.2 (the guard's actual
     # target); on any host whose /bin/bash is already 4+ -- every Linux CI

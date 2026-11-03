@@ -382,6 +382,12 @@ _lock_explain_held() {
 # process tree; the lock tests set it to a mktemp directory of their own so they never share, hold
 # or delete a real harness's lock. A real harness run never sets it.
 e2e_lock_root() {
+    # An override (the lock tests' private roots) is said out loud on stderr: a value left exported
+    # in a real run's shell would give two real runs different lockdirs and silently drop the
+    # cross-run exclusion this lock exists for.
+    if [[ -n "${NX_E2E_LOCK_ROOT:-}" ]]; then
+        echo "e2e lock root overridden by NX_E2E_LOCK_ROOT=$NX_E2E_LOCK_ROOT (tests only)" >&2
+    fi
     printf '%s\n' "${NX_E2E_LOCK_ROOT:-/tmp/nexus-e2e-locks-$(id -u)}"
 }
 
