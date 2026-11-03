@@ -461,12 +461,54 @@ def _row(monkeypatch: pytest.MonkeyPatch, *rungs: _Rung):
     return row
 
 
+#: The completions the doctor's ledger stand-in returns (the doctor reads them only when a streak would escalate).
+_LEDGER: dict[str, CompletionRecord] = {}
+
+
+class _LedgerStandIn:
+    def completions(self) -> dict[str, CompletionRecord]:
+        return dict(_LEDGER)
+
+    def close(self) -> None:
+        pass
+
+
 @pytest.fixture
 def doctor_note(monkeypatch: pytest.MonkeyPatch) -> _MemoryStore:
-    """The note the doctor row reads, in memory, with the real clock."""
+    """The note the doctor row reads, in memory, with the real clock, and a ledger with no completions."""
     store = _MemoryStore()
     monkeypatch.setattr(deferral_log_mod, "t2_deferral_log", lambda: DeferralLog(store))
+    _LEDGER.clear()
+    monkeypatch.setattr("nexus.upgrade_ladder.http_store.DeferredLadderLedger", _LedgerStandIn)
     return store
+
+
+def test_a_rung_that_converged_since_its_streak_does_not_escalate_when_it_pends_again(
+    monkeypatch: pytest.MonkeyPatch, doctor_note: _MemoryStore,
+) -> None:
+    """A clean walk writes nothing, so a rung that converged keeps its old streak in the note; after a client upgrade
+    it is pending again with no new deferral. Its completion, later than the streak's last deferral, rules it out
+    (confirmation r2 reproduced the false REPEATEDLY DEFERRED this pins)."""
+    _seed(doctor_note, "slow", ESCALATE_AFTER, started_ago=timedelta(days=3))
+    row = _row(monkeypatch, _Rung("slow"))
+    assert row.detail.startswith("REPEATEDLY DEFERRED: "), "control: the streak escalates with no completion"
+    _LEDGER.update(_done("slow", datetime.now(UTC) - timedelta(hours=1)))  # converged after the last deferral
+    row = _row(monkeypatch, _Rung("slow"))
+    assert row.warn is True and "REPEATEDLY DEFERRED" not in row.detail
+    _LEDGER.update(_done("slow", datetime.now(UTC) - timedelta(days=10)))  # a completion before the streak: still due
+    row = _row(monkeypatch, _Rung("slow"))
+    assert row.detail.startswith("REPEATEDLY DEFERRED: ")
+
+
+def test_a_ledger_that_cannot_be_read_is_no_escalation(monkeypatch: pytest.MonkeyPatch, doctor_note: _MemoryStore) -> None:
+    class _Down(_LedgerStandIn):
+        def completions(self):
+            raise ConnectionError("engine down")
+
+    monkeypatch.setattr("nexus.upgrade_ladder.http_store.DeferredLadderLedger", _Down)
+    _seed(doctor_note, "slow", ESCALATE_AFTER, started_ago=timedelta(days=3))
+    row = _row(monkeypatch, _Rung("slow"))
+    assert row.warn is True and "REPEATEDLY DEFERRED" not in row.detail, "fail toward silence, never a false report"
 
 
 def test_the_row_stays_soft_below_the_count(monkeypatch: pytest.MonkeyPatch, doctor_note: _MemoryStore) -> None:

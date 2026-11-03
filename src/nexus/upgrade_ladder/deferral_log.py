@@ -211,10 +211,25 @@ class DeferralLog:
             for name, e in self._entries().items()
         }
 
-    def escalated(self) -> dict[str, RungDeferral]:
-        """The rungs whose streak has reached :data:`ESCALATE_AFTER` over at least :data:`ESCALATE_MIN_SPAN`."""
+    def escalated(
+        self, completions_fn: Callable[[], Mapping[str, CompletionRecord]] | None = None,
+    ) -> dict[str, RungDeferral]:
+        """The rungs whose streak has reached :data:`ESCALATE_AFTER` over at least :data:`ESCALATE_MIN_SPAN`.
+
+        A clean walk writes nothing, so a rung that converged after its streak keeps the entry until its next
+        deferral. With *completions_fn*, called only when some streak would escalate, a rung whose completion is
+        later than its last deferral is left out: it converged since, and a re-pending after a client upgrade is
+        not a deferral. An error from *completions_fn* propagates; the caller decides (the doctor reads it as no
+        escalation)."""
         now = self._now()
-        return {name: d for name, d in self.deferrals().items() if d.escalated(now)}
+        found = {name: d for name, d in self.deferrals().items() if d.escalated(now)}
+        if not found or completions_fn is None:
+            return found
+        completions = completions_fn()
+        return {
+            name: d for name, d in found.items()
+            if not _converged_since({"last": d.last}, completions.get(name))
+        }
 
     def describe(self, deferral: RungDeferral) -> str:
         """The doctor's text for one escalated rung, at this log's clock."""

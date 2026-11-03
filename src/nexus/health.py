@@ -9652,9 +9652,20 @@ def _check_pending_rungs() -> list[HealthResult]:
         from nexus.upgrade_ladder.census_progress import guarded  # noqa: PLC0415 — deferred to avoid module-load cost
         from nexus.upgrade_ladder.deferral_log import t2_deferral_log  # noqa: PLC0415 — deferred to avoid module-load cost
 
+        def _ledger_completions() -> dict:
+            from nexus.upgrade_ladder.http_store import DeferredLadderLedger  # noqa: PLC0415 — deferred to avoid module-load cost
+
+            ledger = DeferredLadderLedger()
+            try:
+                return dict(ledger.completions())
+            finally:
+                ledger.close()
+
         def _escalated_text() -> list[str]:
+            # The ledger is read only when a streak would escalate: a rung that converged since its streak and went
+            # pending again (a client upgrade) is no repeated deferral. A failed read is no escalation (guarded).
             log = t2_deferral_log()
-            escalated = log.escalated()
+            escalated = log.escalated(_ledger_completions)
             return [log.describe(escalated[name]) for name, _status in pending if name in escalated]
 
         stuck = guarded("deferral_log_read", _escalated_text, [])
