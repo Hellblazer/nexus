@@ -34,6 +34,7 @@ import argparse
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -146,6 +147,47 @@ def _check_pytest_arg(arg: str) -> str:
     return arg
 
 
+#: Seconds between the watchdog's checks that the ssh session is still there.
+WATCHDOG_POLL_S: int = 5
+
+#: Ends this script's process tree when its ssh client is gone (nexus-bj8e7). Windows OpenSSH does not end a
+#: session's processes when the client goes away: measured 2026-11-03 on qwent, a killed client left pwsh, its
+#: powershell parent and both sshd session processes alive, so a client killed while queued for lab-run-win left the
+#: wrapper to take the build slot later and run with nobody reading it. What does change is the session's TCP
+#: connection, which goes to CloseWait at once. The watchdog polls that connection (its ports come from
+#: SSH_CONNECTION) and, once it is no longer Established, taskkill /T ends this script and everything under it,
+#: lab-run-win's queue wait included. That needs a connection of the run's own: the run's ssh call (SSH_OWN_CONNECTION)
+#: turns connection sharing off, because a shared (ControlMaster) connection outlives a dead client. With no
+#: SSH_CONNECTION (run by hand on qwent) no watchdog starts.
+WATCHDOG_LINES: list[str] = [
+    "# End this run when its ssh client is gone (nexus-bj8e7). A failure here only loses the watchdog.",
+    "try {",
+    "if ($env:SSH_CONNECTION) {",
+    "  $conn = $env:SSH_CONNECTION -split ' '",
+    "  $watch = @\"",
+    "while (`$true) {",
+    "  if (-not (Get-Process -Id $PID -ErrorAction SilentlyContinue)) { exit 0 }",
+    "  `$t = Get-NetTCPConnection -LocalPort $($conn[3]) -RemotePort $($conn[1]) -State Established "
+    "-ErrorAction SilentlyContinue",
+    "  if (-not `$t) {",
+    "    & taskkill.exe /T /F /PID $PID | Out-Null",
+    "    exit 0",
+    "  }",
+    f"  Start-Sleep -Seconds {WATCHDOG_POLL_S}",
+    "}",
+    "\"@",
+    "  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watch))",
+    "  Start-Process -FilePath 'pwsh' -ArgumentList '-NoProfile', '-NonInteractive', '-EncodedCommand', $enc "
+    "-WindowStyle Hidden | Out-Null",
+    "  Write-Host \"windows_hand_test: watchdog on the ssh connection from port $($conn[1])\"",
+    "}",
+    "} catch { Write-Host \"windows_hand_test: no watchdog ($_)\" }",
+]
+
+#: ssh options for the run's own connection: no sharing, so the connection ends with the client (see WATCHDOG_LINES).
+SSH_OWN_CONNECTION: list[str] = ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
+
+
 def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle: str | None,
                   fixup: str, floor: str | None, patch: str | None = None) -> str:
     """The PowerShell (pwsh) script the remote side runs. Any setup failure
@@ -228,6 +270,7 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         f"if ($head -ne '{sha}') {{ Write-Host \"windows_hand_test: {expected_head} is $head, not {sha}\"; exit {fail} }}",
         f"Write-Host 'windows_hand_test: testing {sha}" + (" plus uncommitted changes'" if patch is not None else "'"),
     ]
+    lines += WATCHDOG_LINES
     lines += [
         "$ErrorActionPreference = 'Continue'",
         "$env:NX_TEST_T2_SUBSTRATE = 'none'",
@@ -370,12 +413,26 @@ def _main(argv: Sequence[str] | None, *, run: Runner) -> int:
     # code other than 0 or 1 into 1 unless it is passed on explicitly.
     remote_ps1 = rf"C:\build\hand\{ns.session}\win-hand.ps1"
     # An unset $LASTEXITCODE (pwsh never started) would exit 0: count it as setup.
-    proc = run(["ssh", ns.host,
+    proc = run(["ssh", *SSH_OWN_CONNECTION, ns.host,
                 f"pwsh -NoProfile -File '{remote_ps1}'; "
                 f"if ($LASTEXITCODE -eq $null) {{ exit {SETUP_FAILED} }} else {{ exit $LASTEXITCODE }}"],
                check=False)
     return proc.returncode
 
 
+def end_on_signal() -> None:
+    """SIGTERM and SIGHUP end the client through SystemExit (nexus-bj8e7). Their default action kills Python at
+    once and leaves its ssh child running, which keeps the run's connection Established and the remote watchdog
+    blind; raised as SystemExit, subprocess.run kills the ssh child on the way out and the connection closes. A
+    SIGKILL cannot be caught: its orphaned ssh lives until its output pipe breaks."""
+    def _exit(signum: int, _frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    for name in ("SIGTERM", "SIGHUP"):  # no SIGHUP on Windows
+        if (sig := getattr(signal, name, None)) is not None:
+            signal.signal(sig, _exit)
+
+
 if __name__ == "__main__":
+    end_on_signal()
     sys.exit(main())

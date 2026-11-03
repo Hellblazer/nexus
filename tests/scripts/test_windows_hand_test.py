@@ -7,7 +7,9 @@ repo go to the fake too, except where a test names a real repo.
 from __future__ import annotations
 
 import importlib.util
+import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -183,7 +185,7 @@ class _Recorder:
                 Path(argv[argv.index("-q") + 1]).write_bytes(b"bundle")
         if argv[0] == "scp" and argv[2].endswith(".ps1"):
             self.scripts.append(Path(argv[2]).read_text(encoding="utf-8"))
-        if argv[0] == "ssh" and "pwsh" in argv[2]:
+        if argv[0] == "ssh" and "pwsh" in argv[-1]:
             return subprocess.CompletedProcess(argv, self.ssh_code, stdout="")
         return subprocess.CompletedProcess(argv, 0, stdout="")
 
@@ -247,7 +249,7 @@ def test_the_exit_code_comes_back_unchanged(code: int) -> None:
 def test_the_ssh_line_passes_the_exit_code_through_powershell_5() -> None:
     rec = _Recorder(on_origin=True)
     wht.main(["--session", "wren", "--", "t.py"], run=rec)
-    line = rec.calls[-1][2]
+    line = rec.calls[-1][-1]
     assert "if ($LASTEXITCODE -eq $null) { exit 97 } else { exit $LASTEXITCODE }" in line, (
         "pytest's code passes through, and pwsh that never ran is a setup failure, not exit 0"
     )
@@ -443,3 +445,61 @@ def test_the_scripts_own_steps_apply_a_patch_on_a_crlf_working_tree(tmp_path: Pa
         proc = subprocess.run(argv, cwd=clone, capture_output=True, text=True)
         assert proc.returncode == 0, (argv, proc.stderr)
     assert (clone / "a.py").read_text(encoding="utf-8") == "one\ntwo\n"
+
+
+# ---------------------------------------------------------------------------
+# A dead client takes its remote run with it (nexus-bj8e7)
+# ---------------------------------------------------------------------------
+
+
+def test_the_watchdog_starts_before_the_run_and_watches_the_sessions_own_connection() -> None:
+    script = wht.remote_script("wren", "abc", ["t.py"], bundle=None, fixup="", floor=None)
+    watch = script.index("# End this run when its ssh client is gone")
+    assert watch < script.index("lab-run-win.cmd"), "the watchdog must be up before the slot wait starts"
+    block = script[watch:script.index("$ErrorActionPreference = 'Continue'")]
+    for needle in ("$env:SSH_CONNECTION", "Get-NetTCPConnection -LocalPort $($conn[3]) -RemotePort $($conn[1])",
+                   "-State Established", "taskkill.exe /T /F /PID $PID", "-EncodedCommand", "} catch {"):
+        assert needle in block, needle
+
+
+def test_the_runs_ssh_call_has_a_connection_of_its_own() -> None:
+    """A shared ControlMaster connection stays Established after its client dies (measured on qwent 2026-11-03),
+    so the run's ssh call turns sharing off; the short setup calls may share."""
+    rec = _Recorder(on_origin=True)
+    wht.main(["--session", "wren", "--", "t.py"], run=rec)
+    run_call = rec.calls[-1]
+    assert run_call[0] == "ssh" and "pwsh -NoProfile -File" in run_call[-1]
+    joined = " ".join(run_call[:-1])
+    assert "ControlMaster=no" in joined and "ControlPath=none" in joined
+
+
+def test_sigterm_ends_the_client_and_its_ssh_child(tmp_path: Path) -> None:
+    """A real child process: under end_on_signal a SIGTERM to the client also ends the process subprocess.run is
+    waiting on (the ssh stand-in), where the default action would leave it running."""
+    pidfile = tmp_path / "child.pid"
+    standin = tmp_path / "standin.py"
+    standin.write_text(f"import os, time\nopen({str(pidfile)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+    client_py = tmp_path / "client.py"
+    client_py.write_text(
+        "import importlib.util, subprocess, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(REPO_ROOT / 'scripts' / 'windows_hand_test.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); sys.modules['w'] = w; spec.loader.exec_module(w)\n"
+        "w.end_on_signal()\n"
+        f"subprocess.run([sys.executable, {str(standin)!r}])\n"
+    )
+    client = subprocess.Popen([sys.executable, str(client_py)])
+    deadline = time.monotonic() + 20
+    while not pidfile.exists() or not pidfile.read_text():
+        assert time.monotonic() < deadline, "the stand-in never started"
+        time.sleep(0.05)
+    child = int(pidfile.read_text())
+    client.send_signal(signal.SIGTERM)
+    assert client.wait(timeout=20) == 128 + signal.SIGTERM
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, "the ssh stand-in outlived its client"
+        time.sleep(0.05)
