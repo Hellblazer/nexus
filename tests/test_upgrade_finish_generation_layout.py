@@ -181,6 +181,12 @@ def test_the_current_generation_is_still_enumerated(tmp_path, monkeypatch) -> No
         ("/g/bin/nx index /papers/mineru-benchmarks/", "other"),
         ("/g/bin/nx search aspect-worker", "other"),
         ("/usr/bin/vim /notes/mineru.md", "other"),
+        # nexus-hx7r5: a Windows CommandLine quotes a path with a space; it is one argv entry, not two.
+        (r'"C:\Users\John Smith\AppData\Local\nexus\tools\g\Scripts\python.exe" -m nexus._mineru_api_child --port 8899',
+         "mineru"),
+        (r'"C:\Users\John Smith\AppData\Local\nexus\tools\g\Scripts\mineru-api.exe" --port 8899', "mineru"),
+        (r'"C:\Program Files\nexus\Scripts\nx.exe" daemon aspect-worker start --tenant default', "aspect-worker"),
+        (r'"C:\Program Files\nexus\Scripts\nx.exe" index "C:\papers\mineru benchmarks"', "other"),
     ],
 )
 def test_classify_does_not_mistake_an_argument_for_a_daemon(command, expected) -> None:
@@ -485,3 +491,20 @@ def test_the_venv_root_follows_the_site_packages_shape(tmp_path) -> None:
     windows = tmp_path / "w" / "Lib" / "site-packages"
     assert upgrade_finish.venv_root_of_site_packages(posix) == tmp_path / "v"
     assert upgrade_finish.venv_root_of_site_packages(windows) == tmp_path / "w"
+
+
+@pytest.mark.parametrize(
+    "command,argv",
+    [
+        ("/g/bin/nx search a b", ["/g/bin/nx", "search", "a", "b"]),
+        (r'"C:\a b\x.exe" -m mod', [r"C:\a b\x.exe", "-m", "mod"]),
+        (r'x.exe "a\"b"', ["x.exe", 'a"b']),
+        (r'x.exe "a\\" c', ["x.exe", "a\\", "c"]),
+        (r'x.exe a\\b "c d"', ["x.exe", r"a\\b", "c d"]),
+        ('x.exe "a""b"', ["x.exe", 'a"b']),
+        ('x.exe ""', ["x.exe", ""]),
+    ],
+)
+def test_command_argv_follows_the_windows_quoting_rules(command, argv) -> None:
+    """nexus-hx7r5: a quoted command line tokenises as CommandLineToArgvW does; an unquoted one splits as before."""
+    assert upgrade_finish._command_argv(command) == argv

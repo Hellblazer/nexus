@@ -452,6 +452,66 @@ def self_staleness(baseline: tuple[float, str]) -> SelfStaleness:
     )
 
 
+def _command_argv(command: str) -> list[str]:
+    """The argv of a process command line, as :func:`_classify` reads it (nexus-hx7r5).
+
+    A POSIX ``ps`` command line is argv joined by spaces and never quoted, so it splits on whitespace, as before.
+    A Windows command line is the raw ``CommandLine`` string, in which a path with a space is double-quoted
+    (``"C:\\Users\\John Smith\\...\\python.exe" -m ...``); a whitespace split cut it at the space and the
+    process read as ``other``. A command that contains a double quote is therefore tokenised with the
+    ``CommandLineToArgvW`` rules: a quote toggles quoting, 2n backslashes before a quote are n backslashes and the
+    quote toggles, 2n+1 are n backslashes and a literal quote, and a backslash anywhere else is literal.
+    """
+    if '"' not in command:
+        return command.split()
+    argv: list[str] = []
+    current: list[str] = []
+    in_token = False
+    quoted = False
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            j = i
+            while j < n and command[j] == "\\":
+                j += 1
+            run = j - i
+            if j < n and command[j] == '"':
+                current.append("\\" * (run // 2))
+                if run % 2:
+                    current.append('"')
+                    i = j + 1
+                else:
+                    quoted = not quoted
+                    i = j + 1
+            else:
+                current.append("\\" * run)
+                i = j
+            in_token = True
+            continue
+        if c == '"':
+            if quoted and i + 1 < n and command[i + 1] == '"':
+                current.append('"')  # "" inside quotes is a literal quote (the post-2008 msvcrt rule)
+                i += 2
+                continue
+            quoted = not quoted
+            in_token = True
+            i += 1
+            continue
+        if c in " \t" and not quoted:
+            if in_token:
+                argv.append("".join(current))
+                current, in_token = [], False
+            i += 1
+            continue
+        current.append(c)
+        in_token = True
+        i += 1
+    if in_token:
+        argv.append("".join(current))
+    return argv
+
+
 def _classify(command: str) -> str:
     """What KIND of process this is, from its argv structure.
 
@@ -467,7 +527,7 @@ def _classify(command: str) -> str:
     Structural instead: the EXECUTABLE decides, and for `nx` the verb sequence
     decides. An argument is not a daemon.
     """
-    parts = command.split()
+    parts = _command_argv(command)
     if not parts:
         return "other"
 
