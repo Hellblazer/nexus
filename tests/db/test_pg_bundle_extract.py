@@ -22,6 +22,8 @@ round-trip is proven against a genuine artifact by
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import os
 import platform
 import tarfile
@@ -31,6 +33,22 @@ import pytest
 
 from nexus.db import pg_bundle
 from nexus.db.pg_provision import PgBinaries
+
+
+class _CountingQuiesce:
+    """A quiesce that records how often a swap entered it, and stops nothing: the
+    tests below are about the extraction, not the stop (see
+    tests/daemon/test_posix_upgrade_replace.py), and this keeps them off the real
+    process table."""
+
+    def __init__(self) -> None:
+        self.entered = 0
+
+    def __enter__(self) -> None:
+        self.entered += 1
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
 
 
 # ── platform tag ────────────────────────────────────────────────────────────────
@@ -130,8 +148,8 @@ def test_extract_bundle_reextracts_when_handed_a_DIFFERENT_archive(
     initdb.write_text("FROM-FIRST-ARCHIVE\n")
 
     # A genuinely different archive: distinct file, distinct content.
-    second = make_pg_bundle_txz(tmp_path / "second", "nexus-pg-second.txz")
-    again = pg_bundle.extract_bundle(second, extract_root)
+    second = make_pg_bundle_txz(tmp_path / "second", "nexus-pg-second.txz", variant="second")
+    again = pg_bundle.extract_bundle(second, extract_root, quiesce=contextlib.nullcontext())
 
     assert again == bin_dir
     assert initdb.read_text() != "FROM-FIRST-ARCHIVE\n", (
@@ -147,9 +165,7 @@ def test_extract_bundle_records_archive_identity_in_the_marker(
     extract_root = tmp_path / "cache"
     pg_bundle.extract_bundle(archive, extract_root)
     marker = (extract_root / pg_bundle._EXTRACT_MARKER).read_text()
-    stat = archive.stat()
-    assert f"size={stat.st_size}" in marker
-    assert f"mtime_ns={stat.st_mtime_ns}" in marker
+    assert marker == f"sha256={hashlib.sha256(archive.read_bytes()).hexdigest()}\n"
 
 
 def test_a_failed_reextract_leaves_the_WORKING_bundle_intact(
@@ -177,7 +193,7 @@ def test_a_failed_reextract_leaves_the_WORKING_bundle_intact(
     corrupt = tmp_path / "nexus-pg-corrupt.txz"
     corrupt.write_bytes(b"not a tarball at all")
     with pytest.raises(Exception):
-        pg_bundle.extract_bundle(corrupt, extract_root)
+        pg_bundle.extract_bundle(corrupt, extract_root, quiesce=contextlib.nullcontext())
 
     # ...and the bundle that was working before the call must still be there.
     assert pg_bundle.is_bundle_extracted(extract_root), (
@@ -200,7 +216,7 @@ def test_an_incomplete_replacement_archive_also_leaves_the_bundle_intact(
         tmp_path / "noprefix", "nexus-pg-noprefix2.txz", with_build_prefix=False
     )
     with pytest.raises(RuntimeError, match="build_prefix|relocation"):
-        pg_bundle.extract_bundle(no_prefix, extract_root)
+        pg_bundle.extract_bundle(no_prefix, extract_root, quiesce=contextlib.nullcontext())
 
     assert pg_bundle.is_bundle_extracted(extract_root)
     assert PgBinaries.from_dir(bin_dir).initdb.read_text() == "THE-WORKING-BUNDLE\n"
@@ -216,14 +232,97 @@ def test_a_pre_xzop6_marker_upgrades_in_place_without_losing_the_bundle(
     pg_bundle.extract_bundle(archive, extract_root)
     (extract_root / pg_bundle._EXTRACT_MARKER).write_text(f"source={archive}\n")
 
-    bin_dir = pg_bundle.extract_bundle(archive, extract_root)
+    bin_dir = pg_bundle.extract_bundle(archive, extract_root, quiesce=contextlib.nullcontext())
 
     assert PgBinaries.from_dir(bin_dir).all_present()
     marker = (extract_root / pg_bundle._EXTRACT_MARKER).read_text()
-    assert f"size={archive.stat().st_size}" in marker, "marker upgraded to the new format"
+    assert marker.startswith("sha256="), "marker upgraded to the new format"
     # No staging or backup residue left behind.
     assert not (extract_root.parent / (extract_root.name + ".incoming")).exists()
     assert not (extract_root.parent / (extract_root.name + ".replaced")).exists()
+
+
+def test_a_copy_of_the_same_bytes_with_a_new_mtime_is_the_same_archive(
+    tmp_path, make_pg_bundle_txz
+) -> None:
+    """nexus-86aaz: identity is the archive's content. ``install-binary`` places the
+    archive by a fresh copy, so an identical bundle arrived with a new mtime and was
+    swapped in (with the stack stopped) on every run."""
+    extract_root = tmp_path / "cache"
+    archive = make_pg_bundle_txz(tmp_path)
+    bin_dir = pg_bundle.extract_bundle(archive, extract_root)
+    PgBinaries.from_dir(bin_dir).initdb.write_text("MUTATED-BY-TEST\n")
+
+    copy = tmp_path / "placed" / "nexus-pg-copy.txz"
+    copy.parent.mkdir()
+    copy.write_bytes(archive.read_bytes())
+    os.utime(copy, ns=(archive.stat().st_atime_ns, archive.stat().st_mtime_ns + 5_000_000_000))
+    swaps = _CountingQuiesce()
+    pg_bundle.extract_bundle(copy, extract_root, quiesce=swaps)
+
+    assert swaps.entered == 0, "same bytes: nothing is swapped, so nothing is stopped"
+    assert PgBinaries.from_dir(bin_dir).initdb.read_text() == "MUTATED-BY-TEST\n"
+
+
+def test_a_different_archive_swaps_once(tmp_path, make_pg_bundle_txz) -> None:
+    extract_root = tmp_path / "cache"
+    first = make_pg_bundle_txz(tmp_path, "nexus-pg-first.txz")
+    second = make_pg_bundle_txz(tmp_path / "second", "nexus-pg-second.txz", variant="second")
+    assert first.read_bytes() != second.read_bytes(), "non-vacuity: the two differ in bytes"
+    pg_bundle.extract_bundle(first, extract_root)
+    swaps = _CountingQuiesce()
+    pg_bundle.extract_bundle(second, extract_root, quiesce=swaps)
+    assert swaps.entered == 1
+
+
+def _legacy_marker(archive: Path) -> str:
+    """The marker text the releases through nexus-xzop6 wrote (name, size, mtime)."""
+    st = archive.stat()
+    return f"source={archive}\nname={archive.name}\nsize={st.st_size}\nmtime_ns={st.st_mtime_ns}\n"
+
+
+def test_a_name_size_mtime_marker_over_an_untouched_archive_is_adopted_without_a_swap(
+    tmp_path, make_pg_bundle_txz
+) -> None:
+    """Migration (nexus-86aaz): an existing install carries the old marker. When the
+    archive on disk is still exactly the file that marker names (nothing has touched
+    it since the last extraction), its content is the extracted content: the marker is
+    rewritten in the new format and nothing is swapped or stopped."""
+    extract_root = tmp_path / "cache"
+    archive = make_pg_bundle_txz(tmp_path)
+    bin_dir = pg_bundle.extract_bundle(archive, extract_root)
+    PgBinaries.from_dir(bin_dir).initdb.write_text("MUTATED-BY-TEST\n")
+    (extract_root / pg_bundle._EXTRACT_MARKER).write_text(_legacy_marker(archive))
+
+    swaps = _CountingQuiesce()
+    pg_bundle.extract_bundle(archive, extract_root, quiesce=swaps)
+
+    assert swaps.entered == 0
+    assert PgBinaries.from_dir(bin_dir).initdb.read_text() == "MUTATED-BY-TEST\n"
+    assert (extract_root / pg_bundle._EXTRACT_MARKER).read_text() == pg_bundle._archive_identity(archive)
+    # and the next call is the ordinary content comparison
+    pg_bundle.extract_bundle(archive, extract_root, quiesce=swaps)
+    assert swaps.entered == 0
+
+
+def test_a_name_size_mtime_marker_over_a_touched_archive_swaps_once_and_migrates(
+    tmp_path, make_pg_bundle_txz
+) -> None:
+    """The legacy marker proves nothing once the file's mtime moved: the old rule's
+    behaviour (one swap) stands, and the marker comes out in the new format, so the
+    swap is the last one for these bytes."""
+    extract_root = tmp_path / "cache"
+    archive = make_pg_bundle_txz(tmp_path)
+    pg_bundle.extract_bundle(archive, extract_root)
+    (extract_root / pg_bundle._EXTRACT_MARKER).write_text(_legacy_marker(archive))
+    os.utime(archive, ns=(archive.stat().st_atime_ns, archive.stat().st_mtime_ns + 5_000_000_000))
+
+    swaps = _CountingQuiesce()
+    pg_bundle.extract_bundle(archive, extract_root, quiesce=swaps)
+    assert swaps.entered == 1
+    assert (extract_root / pg_bundle._EXTRACT_MARKER).read_text() == pg_bundle._archive_identity(archive)
+    pg_bundle.extract_bundle(archive, extract_root, quiesce=swaps)
+    assert swaps.entered == 1
 
 
 def test_extract_bundle_incomplete_tree_fails_loud(tmp_path) -> None:

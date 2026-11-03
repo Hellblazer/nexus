@@ -4966,7 +4966,14 @@ def make_pg_bundle_txz():
     """
     import tarfile
 
-    def _factory(tmp: Path, name: str = "nexus-pg-test.txz", *, with_build_prefix: bool = True) -> Path:
+    def _factory(
+        tmp: Path, name: str = "nexus-pg-test.txz", *, with_build_prefix: bool = True,
+        variant: str = "",
+    ) -> Path:
+        # *variant* is written into the tree so two bundles differ in BYTES, not
+        # only in file name: tar records member mtimes in whole seconds, so two
+        # bundles built in the same second would otherwise be byte-identical, and
+        # the extraction marker identifies an archive by its content (nexus-86aaz).
         staging = tmp / f"_stage_{name}"
         bundle = staging / "bundle"
         bin_dir = bundle / "bin"
@@ -4980,6 +4987,8 @@ def make_pg_bundle_txz():
             f.chmod(0o755)
         for sub in ("include", "lib", "share"):
             (bundle / sub).mkdir()
+        if variant:
+            (bundle / "share" / "VARIANT").write_text(variant + "\n")
         if with_build_prefix:
             (bundle / ".build_prefix").write_text("/build/prefix/nexus-pg\n")
         archive = tmp / name

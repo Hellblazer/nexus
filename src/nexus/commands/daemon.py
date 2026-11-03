@@ -39,6 +39,7 @@ from nexus.bounded_subprocess import run_bounded
 from nexus.util.nx_argv import nx_argv
 
 if TYPE_CHECKING:
+    from nexus.daemon.replace_quiesce import SharedQuiesce
     from nexus.daemon.service_registry import LeaseRecord, ServiceRegistry
 
 _log = structlog.get_logger(__name__)
@@ -825,7 +826,8 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
         "Storage service supervisor did not become ready within 60s. "
         f"Check {supervisor_log} (supervisor) and "
         f"{', '.join(str(path) for path in engine_logs)} (engine), "
-        "or run 'nx daemon service start --foreground' to see the error."
+        "or run 'nx daemon service start --foreground' to see the error.",
+        still_starting=True,
     )
 
 
@@ -963,7 +965,10 @@ def _start_via_autostart_unit(
         f"{detail}"
         f"Check {' and '.join(str(path) for path in unit_logs)}, "
         f"{config_dir / 'logs' / 'storage_service.log'} (supervisor), "
-        "or stop the unit and run 'nx daemon service start --foreground' to see the error."
+        "or stop the unit and run 'nx daemon service start --foreground' to see the error.",
+        # A unit whose supervisor reported an error (a crash loop, a halted migration) is a
+        # failure; one that reported nothing may still be migrating.
+        still_starting=not last_error,
     )
 
 
@@ -1184,15 +1189,7 @@ def service_install_binary_cmd(
     """
     from importlib.metadata import PackageNotFoundError, version as _pkg_version  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
-    from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-        BinaryVerificationError,
-        asset_name,
-        install_binary,
-        install_pg_bundle,
-        pg_bundle_asset_name,
-    )
-    from nexus.daemon.replace_guard import ReplaceBlockedError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-    from nexus.daemon.replace_quiesce import RestartAfterReplaceError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.replace_quiesce import RestartAfterReplaceError, SharedQuiesce  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     try:
         _nx_version = _pkg_version("conexus")
@@ -1221,17 +1218,90 @@ def service_install_binary_cmd(
     # is one source of truth; a probe failure never blocks a legitimate install.
     _emit_chash_poison_gate(config_dir, force=force)
 
+    # nexus-86aaz: the engine and the PostgreSQL bundle are replaced under ONE stop.
+    # The first replacement that actually happens stops the service (and PostgreSQL
+    # when the bundle is swapped), and the service is started once when the run ends;
+    # an engine already at this release, or a bundle already extracted from these
+    # bytes, replaces nothing and stops nothing.
+    shared = SharedQuiesce(config_dir)
+    try:
+        try:
+            with shared:
+                _install_binary_steps(tag, config_dir, installed_by, want_pg_bundle, shared)
+        except RestartAfterReplaceError as exc:
+            # The files are in; what failed is starting the stack again. Slow is not
+            # failed: a supervisor that is alive while the new engine migrates has not
+            # answered within the start's 60 s, which says nothing about whether it will.
+            if not exc.slow_start:
+                click.echo(f"Error: {exc}", err=True)
+                sys.exit(2)
+            click.echo(
+                f"\nWarning: the files are replaced and the storage service was started "
+                f"again, but it has not answered yet ({exc}). It may still be migrating "
+                "the database to the new engine, which can take many minutes. Check "
+                "`nx daemon service status`, `nx doctor` and the engine log "
+                "(logs/storage_service_native.log under the config directory).",
+                err=True,
+            )
+            return
+    finally:
+        # What the stop could not verify, whether the run ended well or not.
+        if shared.state is not None:
+            for warning in shared.state.warnings:
+                click.echo(f"Warning: {warning}", err=True)
+
+    state = shared.state
+    if state is None:
+        click.echo("\nNothing was replaced, so the storage service was not stopped.")
+    elif "service" in state.restarted:
+        click.echo(
+            "\nThe storage service was stopped for the swap and started again on the "
+            "new files."
+        )
+    else:
+        click.echo(
+            "\nThe storage service was not running, so it was not started. Start it: "
+            "nx daemon service start"
+        )
+
+
+def _install_binary_steps(
+    tag: str,
+    config_dir: Path,
+    installed_by: str,
+    want_pg_bundle: bool,
+    shared: SharedQuiesce,
+) -> None:
+    """The body of ``install-binary`` that replaces files: engine, then bundle.
+
+    Every ``sys.exit(2)`` here leaves ``with shared:`` first, which starts again
+    whatever this run stopped."""
+    from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        BinaryVerificationError,
+        asset_name,
+        install_binary,
+        install_pg_bundle,
+        pg_bundle_asset_name,
+    )
+    from nexus.daemon.replace_guard import ReplaceBlockedError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
     click.echo(f"Resolving {asset_name()} from release {tag}…")
     try:
-        dest, prov = install_binary(tag, config_dir, installed_by=installed_by)
-    except (BinaryVerificationError, ReplaceBlockedError, RestartAfterReplaceError) as exc:
-        # On Windows the install stops the service to free the engine files;
-        # these two (RDR-224, nexus-f9bgu.20) carry a message meant to be
-        # printed as it stands, naming the session or the file and the remedy.
+        dest, prov = install_binary(
+            tag, config_dir, installed_by=installed_by,
+            quiesce=shared.guard("engine"), skip_if_current=True,
+        )
+    except (BinaryVerificationError, ReplaceBlockedError) as exc:
+        # The stop that frees the engine files (RDR-224, nexus-f9bgu.20) can refuse;
+        # its message is meant to be printed as it stands, naming the session or the
+        # file and the remedy.
         click.echo(f"Error: {exc}", err=True)
         sys.exit(2)
 
-    click.echo(f"Installed {prov['asset']} ({tag})")
+    if prov.get("unchanged"):
+        click.echo(f"Already installed {prov['asset']} ({tag}); nothing replaced")
+    else:
+        click.echo(f"Installed {prov['asset']} ({tag})")
     click.echo(f"  -> {dest}")
     click.echo(f"  version: {prov['version']}")
     click.echo(f"  sha256:  {prov['sha256'][:16]}…")
@@ -1266,16 +1336,19 @@ def service_install_binary_cmd(
         # (pg_bundle.extracted_bin_dir), so an archive that is only placed is
         # never used: a restart kept the old PostgreSQL, and a box whose
         # extracted tree was gone stayed unstartable. extract_bundle is a no-op
-        # for the archive already extracted; a different one is staged first
-        # and swapped in (on Windows with the stack stopped for the swap only).
+        # for an archive with the bytes already extracted; a different one is
+        # staged first and swapped in under the same stop as the engine.
         import lzma  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         import tarfile  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
         from nexus.db import pg_bundle as _pg_bundle  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
         try:
-            pg_bin = _pg_bundle.extract_bundle(pg_dest, _pg_bundle.bundle_extract_root(config_dir))
-        except (ReplaceBlockedError, RestartAfterReplaceError) as exc:
+            pg_bin = _pg_bundle.extract_bundle(
+                pg_dest, _pg_bundle.bundle_extract_root(config_dir),
+                quiesce=shared.guard("pg_bundle"),
+            )
+        except ReplaceBlockedError as exc:
             click.echo(f"Error: {exc}", err=True)
             sys.exit(2)
         except (RuntimeError, OSError, tarfile.TarError, lzma.LZMAError) as exc:
@@ -1288,11 +1361,6 @@ def service_install_binary_cmd(
             )
             sys.exit(2)
         click.echo(f"  extracted -> {pg_bin.parent.parent}")
-
-    click.echo(
-        "\nRestart the service to pick it up: nx daemon service stop && "
-        "nx daemon service start"
-    )
 
 
 def _refused_stop_lines(refusals: object) -> list[str]:

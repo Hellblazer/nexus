@@ -149,7 +149,7 @@ def test_pg_bundle_publish_download_select_roundtrip(tmp_path, monkeypatch, make
 # ── CLI --pg-bundle / --no-pg-bundle toggle ─────────────────────────────────
 
 
-def _stub_binary(tag, config_dir, *, installed_by=""):
+def _stub_binary(tag, config_dir, *, installed_by="", **_kw):
     return config_dir / "service" / "nexus-service", {
         "asset": "nexus-service-x", "version": "0.1.3",
         "sha256": "a" * 64, "source_url": "u",
@@ -194,6 +194,20 @@ def test_cli_extracts_the_installed_bundle_so_the_daemon_finds_it(tmp_path, monk
     from nexus.commands.daemon import service_install_binary_cmd
     from nexus.db import pg_bundle
 
+    from nexus.daemon import replace_quiesce as rq
+
+    stops: list[str] = []
+
+    def _no_stop(config_dir):
+        # The real stop would scan the process table; here any stop is a failure of
+        # what the test claims (the first extraction and a repeat stop nothing).
+        def stop_service():
+            stops.append("stop_service")
+            raise AssertionError("nothing is replaced, so nothing may be stopped")
+
+        return rq.QuiesceOps(stop_service, lambda: False, lambda: None, lambda: None, lambda: None)
+
+    monkeypatch.setattr(rq, "default_ops", _no_stop)
     monkeypatch.setattr(b, "install_binary", _stub_binary)
     built = make_pg_bundle_txz(tmp_path / "release", b.pg_bundle_asset_name())
 
@@ -210,9 +224,14 @@ def test_cli_extracts_the_installed_bundle_so_the_daemon_finds_it(tmp_path, monk
     assert r.exit_code == 0, r.output
     assert pg_bundle.extracted_bin_dir(cfg) == pg_bundle.bundle_bin_dir(cfg / "pg-bundle")
     assert "extracted" in r.output.lower()
-    # a second run with the same archive extracts nothing again (no swap, nothing stopped)
+    marker = cfg / "pg-bundle" / pg_bundle._EXTRACT_MARKER
+    marker_before = marker.read_text(encoding="utf-8")
+    # a second run places an archive with the same bytes (a fresh file, so a new
+    # mtime) and swaps nothing: nothing is stopped and the extracted tree is untouched
     r2 = CliRunner().invoke(service_install_binary_cmd, [_TAG, "--config-dir", str(cfg)])
     assert r2.exit_code == 0, r2.output
+    assert stops == []
+    assert marker.read_text(encoding="utf-8") == marker_before
 
 
 def test_cli_extraction_failure_exits_2_and_keeps_the_archive(tmp_path, monkeypatch):

@@ -4406,9 +4406,33 @@ workflow identity), then placed atomically. Verification **fails closed**:
 nothing is installed unless BOTH gates pass. One verified seam covers the
 binary and the PG bundle (RDR-161).
 
+On every platform the swap itself runs with the storage service stopped, under
+one stop and one start for the whole run. The first replacement that actually
+happens stops the service running from this config directory (the same stop as
+`nx daemon service stop`; a service of another config directory is never
+touched), and when the run ends the service is started again on the new files,
+so there is nothing to restart by hand. A service that was not running is left
+stopped, and a run that fails part way starts it again. The download and the
+verification run with the service up. An engine already at this release (the
+install receipt names the tag and asset and records the verified digest, and the
+files on disk match it) is not replaced, and a PostgreSQL bundle already
+extracted from the same bytes is not swapped, so a repeat run stops nothing. When
+the PostgreSQL bundle does change, the same stop also stops a running cluster and
+the same start brings it back first. If the stop could not rule out a running
+service (the process table could not be read), the swap goes ahead and the run
+prints a warning telling you to restart by hand. If the service was started again
+but has not answered within 60 seconds (the new engine may be migrating the
+database), the run prints a warning naming `nx daemon service status`, `nx doctor`
+and the engine log, and exits 0; a supervisor that exited, an autostart unit whose
+supervisor reported an error during the start (a crash loop or a halted migration),
+or a start that failed otherwise, exits 2. The bundle is downloaded after the engine is placed, so on a
+run that replaces the engine the service is down during that download. Before this
+change the stop applied to Windows only; on macOS and Linux the old engine kept
+serving until a manual `stop` and `start` (nexus-86aaz).
+
 | Flag | Description |
 |------|-------------|
-| `--pg-bundle/--no-pg-bundle` | Also acquire + verify the relocatable PostgreSQL bundle from the same release (default on), and extract it into `~/.config/nexus/pg-bundle`, where the storage service finds PostgreSQL. The archive already extracted is left alone; a different one is extracted beside the running tree and swapped in (on Windows the stack stops only for the swap). Through 7.78.0 the archive was placed but not extracted, so the next start kept the old PostgreSQL (nexus-f9bgu.56). `--no-pg-bundle` installs only the service binary (e.g. a cloud habitat with a managed Postgres). |
+| `--pg-bundle/--no-pg-bundle` | Also acquire + verify the relocatable PostgreSQL bundle from the same release (default on), and extract it into `~/.config/nexus/pg-bundle`, where the storage service finds PostgreSQL. The archive already extracted is left alone (the same bytes, by SHA-256 recorded in the extraction marker, not the same file); a different one is extracted beside the running tree and swapped in (the service and PostgreSQL stop only for the swap and start again after it). Through 7.78.0 the archive was placed but not extracted, so the next start kept the old PostgreSQL (nexus-f9bgu.56). `--no-pg-bundle` installs only the service binary (e.g. a cloud habitat with a managed Postgres). |
 | `--config-dir` | Config directory override. |
 | `--force` | Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). The gate classifies the store first: width-non-conformant rows REFUSE the install (re-index the affected collections and confirm `nx doctor` clears before swapping engines — see [migration-runbook.md](migration-runbook.md)); an unverifiable store (service/PG not up) proceeds with a loud UNVERIFIED warning — install-binary is the designated recovery tool for the will-not-boot class. Use `--force` ONLY after remediating. |
 

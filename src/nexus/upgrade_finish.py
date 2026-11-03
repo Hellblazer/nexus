@@ -1745,7 +1745,13 @@ def _sweep_surviving_stack(
     *, unreadable: Sequence[int] = (),
 ) -> str:
     """The note :func:`_sweep_surviving_stack_detail` produces, without the
-    refusals (kept for callers that only report)."""
+    refusals (kept for callers that only report).
+
+    nexus-86aaz: still needed. The engine install now stops the service itself
+    (``replace_quiesce.quiesced``), but :func:`_restart_and_verify` also serves the
+    restart-only branches (right file on disk, stale process) and ``nx daemon
+    restart-stale``, where no install and no quiesce run and its own ``service stop``
+    is the only stop."""
     return _sweep_surviving_stack_detail(config_dir, before, unreadable=unreadable)[0]
 
 
@@ -2481,10 +2487,11 @@ def converge_engine(
         ]
 
     try:
-        # restart_after=False: on Windows the install stops the service to free
-        # the executable (RDR-224, nexus-f9bgu.20); the cycle below starts it
-        # again AND verifies the version, so the install must not start it
-        # first. A failed install still restarts what it stopped.
+        # restart_after=False: the install stops a running service for the swap on
+        # every platform (RDR-224, nexus-f9bgu.20; macOS and Linux nexus-86aaz); the
+        # cycle below starts it again AND verifies the version, so the install must
+        # not start it first (one stop, one start per upgrade; the cycle's own stop
+        # then finds nothing). A failed install still restarts what it stopped.
         install_binary(
             tag, config_dir, installed_by="upgrade-finish engine convergence",
             restart_after=False,

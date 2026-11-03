@@ -5,10 +5,12 @@ what it stopped.
 
 The host platform is injected (``platform="win32"``) and the stop and start
 effects are fakes, so every Windows branch runs on macOS and Linux as well and
-nothing skips. A test that only asserted "no error" would pass with the Windows
-branch deleted, so each asserts an ordering or a state the POSIX branch cannot
-produce: a stop before the first replace, a start after the last, a file set
-that is wholly old after a failure, a retry count.
+nothing skips. A test that only asserted "no error" would pass with the branch
+deleted, so each asserts an ordering or a state: a stop before the first replace,
+a start after the last, a file set that is wholly old after a failure, a retry
+count. The stop and start are the same on macOS and Linux since nexus-86aaz
+(``test_posix_upgrade_replace.py``); what stays Windows-only here is the
+session refusal, the sharing-violation retry and the DLL set.
 """
 from __future__ import annotations
 
@@ -339,14 +341,6 @@ def _refusal(pid=4242, target=3, own=1):
     )
 
 
-def test_posix_stops_and_starts_nothing(tmp_path):
-    fake = _Ops()
-    ran: list[str] = []
-    with rq.quiesced(tmp_path, replacing="engine", platform="linux", ops=fake.ops()):
-        ran.append("body")
-    assert ran == ["body"] and fake.events == []
-
-
 def test_engine_replacement_stops_then_replaces_then_starts_the_service(tmp_path):
     fake = _Ops(pg_up=True)
     with rq.quiesced(tmp_path, replacing="engine", platform=_WIN, ops=fake.ops()) as st:
@@ -641,18 +635,6 @@ def test_install_with_restart_after_false_leaves_the_start_to_the_caller(tmp_pat
     assert fake.events == ["stop_service"]
 
 
-def test_install_on_a_posix_host_does_not_stop_anything(tmp_path, monkeypatch):
-    fake = _Ops()
-    monkeypatch.setattr(rq, "default_ops", lambda config_dir: fake.ops())
-    _serve(monkeypatch, _archive("new"))
-    b.install_binary(
-        _TAG, tmp_path, checker=_OkChecker(), download_dir=tmp_path,
-        platform_tag="windows-x64", host_platform="linux",
-    )
-    assert fake.events == []
-    assert (tmp_path / "service" / WINDOWS_ENGINE_EXE).read_text(encoding="utf-8") == f"new:{WINDOWS_ENGINE_EXE}"
-
-
 # ── pg_bundle swap ────────────────────────────────────────────────────────────
 
 _MARKER = pg_bundle._EXTRACT_MARKER
@@ -665,7 +647,7 @@ def _initdb(bin_dir):
 
 def _two_archives(tmp_path, make_pg_bundle_txz):
     first = make_pg_bundle_txz(tmp_path, "nexus-pg-first.txz")
-    second = make_pg_bundle_txz(tmp_path / "second", "nexus-pg-second.txz")
+    second = make_pg_bundle_txz(tmp_path / "second", "nexus-pg-second.txz", variant="second")
     root = tmp_path / "pg-bundle"
     bin_dir = pg_bundle.extract_bundle(first, root, platform=_WIN)
     _initdb(bin_dir).write_text("FROM-FIRST-ARCHIVE\n", encoding="utf-8")

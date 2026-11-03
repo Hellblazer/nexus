@@ -11,6 +11,7 @@ every host.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -85,9 +86,12 @@ def _release(monkeypatch, files: dict[str, bytes], *, urls: list[str],
 
 
 def _install(tmp_path, ptag="linux-amd64", checker=None):
+    # These tests are about the asset and the placement, not the stop: a no-op
+    # quiesce keeps them off the real process table (the stop is covered in
+    # test_posix_upgrade_replace.py).
     return b.install_binary(
         _TAG, tmp_path, checker=checker or _OkChecker(), download_dir=tmp_path,
-        platform_tag=ptag,
+        platform_tag=ptag, quiesce=contextlib.nullcontext(),
     )
 
 

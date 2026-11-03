@@ -1,33 +1,58 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Stop what holds the installed engine or PostgreSQL bundle, replace, restart.
 
-RDR-224 (nexus-f9bgu.20). On Windows a running ``nexus-service.exe`` cannot be
-overwritten and a running ``postgres.exe`` keeps its bundle directory from being
-renamed, so an upgrade stops them first and starts them again afterwards.
+RDR-224 (nexus-f9bgu.20), extended to macOS and Linux by nexus-86aaz. On Windows
+a running ``nexus-service.exe`` cannot be overwritten and a running
+``postgres.exe`` keeps its bundle directory from being renamed. On macOS and
+Linux a running binary CAN be replaced, but the process that runs keeps the old
+file and a following ``nx daemon service start`` finds the live lease and
+starts nothing, so the swap succeeded and the old engine went on serving (the
+well-known-path half of the nexus-4e96a class). So on every platform an upgrade
+stops what holds the files first and starts it again afterwards.
 
 :func:`quiesced` is the one context manager every replacement site uses:
 
 * the storage service (supervisor and engine) is stopped with the same
-  function ``nx daemon service stop`` uses, which is the ``CTRL_BREAK`` channel
-  of nexus-f9bgu.17 confirmed by the target's exit;
+  function ``nx daemon service stop`` uses (``stop_storage_service``; on
+  Windows the ``CTRL_BREAK`` channel of nexus-f9bgu.17, on POSIX ``SIGTERM``),
+  confirmed by the target's exit, and only the service of THIS config
+  directory: another directory's service is never touched;
 * PostgreSQL is stopped as well, but only when the PostgreSQL bundle is what is
   being replaced and a cluster is running (``replacing="pg_bundle"``); an engine
   replacement leaves PostgreSQL alone;
-* a service that runs in another Windows session cannot be reached, and is
-  never hard-killed: the context manager raises
-  :class:`~nexus.daemon.replace_guard.ReplaceBlockedError` that names the
-  session and says to run the upgrade there, before anything is replaced;
+* a service that survives the stop blocks the replacement: the context manager
+  raises :class:`~nexus.daemon.replace_guard.ReplaceBlockedError` before
+  anything is replaced. On Windows a service in another session cannot be
+  reached at all, is never hard-killed, and the error names the session and
+  says to run the upgrade there (a Windows-only outcome: the POSIX stop never
+  reports a refusal);
 * afterwards PostgreSQL starts first, then the service, but only what this
-  context manager stopped, and on failure as well as on success so a failed
-  replacement does not leave the box down.
+  context manager stopped (a service that was not running is not started), and
+  on failure as well as on success so a failed replacement does not leave the
+  box down. A start that fails after a good replacement raises
+  :class:`RestartAfterReplaceError`.
 
-On POSIX the context manager does nothing: a running binary can be replaced
-there, and the behaviour is the one the code had before.
+*restart_after* False leaves the start after a SUCCESSFUL body to the caller,
+for one that restarts and verifies the service itself next
+(the upgrade finish pass's engine convergence), so the service is stopped once and started
+once per upgrade. Only the swap stops anything: a caller wraps just the
+placement, so the download and the extraction run with the service up.
+
+A stop whose result cannot be fully trusted (the process-table sweep did not run,
+or a process could not be placed in any directory) does not block the swap, which
+would leave a box with no ``ps`` unable to upgrade; it is logged and carried in
+:attr:`QuiesceState.warnings` for the caller to print.
+
+:class:`SharedQuiesce` is the same stop-replace-start for a run that replaces
+several things in turn (``nx daemon service install-binary``: the engine, then the
+PostgreSQL bundle): the first replacement that actually happens stops the stack, a
+later one that needs more (PostgreSQL) stops that too, and the stack is started
+once when the run ends. A replacement that is skipped as unchanged never joins, so
+a run that changes nothing stops nothing.
 """
 from __future__ import annotations
 
 import contextlib
-import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,7 +68,16 @@ Replacing = Literal["engine", "pg_bundle"]
 
 
 class RestartAfterReplaceError(OSError):
-    """The replacement succeeded but what was stopped could not be started again."""
+    """The replacement succeeded but what was stopped could not be started again.
+
+    ``slow_start`` is True when the start did not fail but did not finish: the
+    supervisor was spawned and is alive, and the engine has not answered within the
+    start's 60 s (a migration can take far longer). It is the same split
+    ``upgrade_finish._restart_and_verify`` makes ("may still be migrating"); a
+    supervisor that exited, or any other failure, is False.
+    """
+
+    slow_start: bool = False
 
 
 @dataclass
@@ -65,6 +99,13 @@ class QuiesceState:
     stopped_service: bool = False
     stopped_pg: bool = False
     restarted: list[str] = field(default_factory=list)
+    #: Things the caller should tell the operator: a stop whose result could not be
+    #: fully verified. The swap went ahead anyway.
+    warnings: list[str] = field(default_factory=list)
+    #: Stops PostgreSQL too when a cluster is running, for a replacement that joins
+    #: a stop made for the engine. Set by :func:`quiesced`; raises
+    #: :class:`ReplaceBlockedError` when the cluster cannot be stopped.
+    stop_pg_if_running: Callable[[], None] = field(default=lambda: None, repr=False)
 
 
 def default_ops(config_dir: Path) -> QuiesceOps:
@@ -179,14 +220,41 @@ def blocked_message(outcome: Any, *, replacing: Replacing) -> str | None:
         remedies.append("Stop them by hand, then run the upgrade again.")
     if not parts:
         return None
-    return (
-        f"cannot replace the {what}: " + "; ".join(parts) + ". Nothing was "
-        "hard-killed across sessions and no file was replaced. " + " ".join(remedies)
+    if refused:
+        tail = "Nothing was hard-killed across sessions and no file was replaced. "
+    else:
+        tail = "No file was replaced. "
+    return f"cannot replace the {what}: " + "; ".join(parts) + ". " + tail + " ".join(remedies)
+
+
+def unverified_stop_warning(outcome: Any) -> str | None:
+    """What the operator should know when the stop could not rule out a running
+    service, or ``None`` when the stop is fully verified.
+
+    The stop can finish without having looked everywhere: the process-table sweep
+    did not run (``sweep_verified`` False, or ``source == "process_table_unavailable"``)
+    or a candidate process could not be placed in any config directory
+    (``unreadable``). A service started some way the lease does not record may then
+    still be running on the old files. The replacement is not blocked for it (a box
+    without a readable process table could never upgrade), so the caller says so.
+    """
+    unreadable = tuple(getattr(outcome, "unreadable", ()) or ())
+    unverified = (
+        getattr(outcome, "sweep_verified", True) is False
+        or getattr(outcome, "source", "") == "process_table_unavailable"
+        or bool(unreadable)
     )
-
-
-def _is_windows(platform: str | None) -> bool:
-    return (platform if platform is not None else sys.platform).startswith("win")
+    if not unverified:
+        return None
+    detail = (
+        f"pid(s) {', '.join(str(p) for p in unreadable)} could not be placed in any "
+        "config directory" if unreadable else "the process table could not be read"
+    )
+    return (
+        f"a running storage service could not be ruled out ({detail}); if one is "
+        "running it may still be using the old files. Restart it by hand: "
+        "nx daemon service stop && nx daemon service start"
+    )
 
 
 @contextlib.contextmanager
@@ -204,15 +272,17 @@ def quiesced(
     caller that restarts (and verifies) the service itself next; a failed body
     always restarts, so a failed replacement never leaves the service down.
 
+    The stop and the start are the same on every platform (nexus-86aaz).
+    *platform* is accepted for the callers and tests that inject the host; it
+    no longer changes what is done, only which refusals the stop can carry
+    (a refusal exists on Windows alone).
+
     Raises :class:`ReplaceBlockedError` before the body runs when the stack
     cannot be stopped (see :func:`blocked_message`), and
     :class:`RestartAfterReplaceError` after a successful body when what was
     stopped could not be started.
     """
     state = QuiesceState()
-    if not _is_windows(platform):
-        yield state
-        return
     effects = ops if ops is not None else default_ops(config_dir)
 
     outcome = effects.stop_service()
@@ -227,25 +297,37 @@ def quiesced(
             "replace_quiesce_blocked", replacing=replacing, reason=blocked,
             stopped_service=state.stopped_service,
         )
-        if state.stopped_service and not survivors and not refused_pids:
-            _restart_best_effort(effects, state)
         raise ReplaceBlockedError(blocked)
 
-    if replacing == "pg_bundle":
+    warning = unverified_stop_warning(outcome)
+    if warning is not None:
+        _log.warning("replace_quiesce_stop_unverified", replacing=replacing, warning=warning)
+        state.warnings.append(warning)
+
+    def _stop_pg_if_running() -> None:
+        if state.stopped_pg:
+            return
         try:
             if effects.pg_running():
                 effects.stop_pg()
                 state.stopped_pg = True
+        except ReplaceBlockedError:
+            raise
         except Exception as exc:
-            _restart_best_effort(effects, state)
-            if isinstance(exc, ReplaceBlockedError):
-                raise
             raise ReplaceBlockedError(
                 f"cannot replace the PostgreSQL bundle: PostgreSQL could not be "
                 f"stopped ({exc}). The storage service was started again if this "
                 "run had stopped it. Stop PostgreSQL by hand and run the command "
                 "again."
             ) from exc
+
+    state.stop_pg_if_running = _stop_pg_if_running
+    if replacing == "pg_bundle":
+        try:
+            _stop_pg_if_running()
+        except ReplaceBlockedError:
+            _restart_best_effort(effects, state)
+            raise
     _log.info(
         "replace_quiesced", replacing=replacing,
         stopped_service=state.stopped_service, stopped_pg=state.stopped_pg,
@@ -263,22 +345,29 @@ def quiesced(
 
 
 def _restart(effects: QuiesceOps, state: QuiesceState) -> None:
-    """Start what this run stopped, PostgreSQL first. Raises on failure."""
+    """Start what this run stopped, PostgreSQL first. Raises on failure.
+
+    A step that already ran (``state.restarted``) is not run again, so a restart on
+    a failure path after one that already happened does not start anything twice."""
     step = ""
     try:
-        if state.stopped_pg:
+        if state.stopped_pg and "postgresql" not in state.restarted:
             step = "PostgreSQL"
             effects.start_pg()
             state.restarted.append("postgresql")
-        if state.stopped_service:
+        if state.stopped_service and "service" not in state.restarted:
             step = "the storage service"
             effects.start_service()
             state.restarted.append("service")
     except Exception as exc:
-        raise RestartAfterReplaceError(
+        err = RestartAfterReplaceError(
             f"{step} could not be started again after the replacement: {exc}. "
             "Run 'nx daemon service start'."
-        ) from exc
+        )
+        # nexus-86aaz r2: the raiser decides (StorageServiceStartError.still_starting), never the
+        # message text, so a unit that is crash-looping or reported an error stays a failure.
+        err.slow_start = step == "the storage service" and bool(getattr(exc, "still_starting", False))
+        raise err from exc
 
 
 def _restart_best_effort(effects: QuiesceOps, state: QuiesceState) -> str | None:
@@ -289,3 +378,84 @@ def _restart_best_effort(effects: QuiesceOps, state: QuiesceState) -> str | None
         _log.error("replace_quiesce_restart_failed", error=str(exc))
         return str(exc)
     return None
+
+
+class SharedQuiesce:
+    """One stop and one start across the replacements of one run.
+
+    A caller that replaces several things in turn (``nx daemon service
+    install-binary``: the engine, then the PostgreSQL bundle) hands each site
+    :meth:`guard` as that site's *quiesce*. The first site to enter stops the
+    stack (the stop :func:`quiesced` makes); a later one that needs PostgreSQL
+    stopped as well stops it; a site that is skipped as unchanged never enters and
+    stops nothing. Leaving a guard starts nothing. Leaving this object does: what
+    was stopped is started, PostgreSQL first, once, and also when the run failed
+    (a failed run never leaves the box down).
+
+    Use it as a context manager around all the sites::
+
+        with SharedQuiesce(config_dir) as shared:
+            install_binary(..., quiesce=shared.guard("engine"))
+            extract_bundle(..., quiesce=shared.guard("pg_bundle"))
+
+    *restart_after*, *platform* and *ops* mean what they mean for
+    :func:`quiesced`. :attr:`state` is the :class:`QuiesceState` once a site has
+    entered, ``None`` before.
+    """
+
+    def __init__(
+        self,
+        config_dir: Path,
+        *,
+        platform: str | None = None,
+        restart_after: bool = True,
+        ops: QuiesceOps | None = None,
+    ) -> None:
+        self._config_dir = config_dir
+        self._platform = platform
+        self._restart_after = restart_after
+        self._ops = ops
+        self._cm: contextlib.AbstractContextManager[QuiesceState] | None = None
+        self.state: QuiesceState | None = None
+
+    def guard(self, replacing: Replacing) -> contextlib.AbstractContextManager[QuiesceState]:
+        """The context manager one replacement site enters around its swap."""
+        return _SharedGuard(self, replacing)
+
+    def _join(self, replacing: Replacing) -> QuiesceState:
+        if self._cm is None:
+            cm = quiesced(
+                self._config_dir, replacing=replacing, platform=self._platform,
+                restart_after=self._restart_after, ops=self._ops,
+            )
+            state = cm.__enter__()  # raises ReplaceBlockedError with nothing held
+            self._cm, self.state = cm, state
+            return state
+        assert self.state is not None
+        if replacing == "pg_bundle":
+            self.state.stop_pg_if_running()
+        return self.state
+
+    def __enter__(self) -> SharedQuiesce:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool | None:
+        cm, self._cm = self._cm, None
+        if cm is None:
+            return None
+        return cm.__exit__(exc_type, exc, tb)
+
+
+class _SharedGuard:
+    """What :meth:`SharedQuiesce.guard` returns: joins the shared stop on enter,
+    does nothing on exit (the shared object owns the start)."""
+
+    def __init__(self, shared: SharedQuiesce, replacing: Replacing) -> None:
+        self._shared = shared
+        self._replacing = replacing
+
+    def __enter__(self) -> QuiesceState:
+        return self._shared._join(self._replacing)
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
