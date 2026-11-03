@@ -2,7 +2,8 @@
 title: "The Tuple-Space Dictionary: Every Template Publishes What It Means, Who Writes It, Who Reads It, and a Post That Validates"
 id: RDR-239
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-03
 priority: medium
 author: Sam
 reviewed-by: self
@@ -642,6 +643,6 @@ served comments) fail the drift test this RDR exists for.
 | 2026-10-31 | Phase 1 content written (`docs/rdr/rdr-239-doc-blocks.md`); A1 refuted and resolved: `fields` replaces `dimension_values`, `body` added, `example` gains `subspace` and `nonce`; stale-comment and writerless-template findings recorded. |
 | 2026-10-31 | Pre-gate revision: Background and Investigation added; Finalization Gate written; seven templates after the ledger retirement (nexus-onjvw); `dimension_values` in Risks corrected to `fields`; plan uses Phase and Step headings. |
 | 2026-11-01 | Amended after gate round 1 for the planning decisions of nexus-mdbds.2 (decision beads nexus-mdbds.2.1 to 2.5): `doc` rides only `?doc=1` and enters the digest, with byte caps and a response-size measure for A2; a failing `doc` is fatal for classpath templates and dropped with a warning for `NX_TUPLE_TEMPLATE_DIR` templates; the drift claim is restated and board and queue are marked `Unverified`; census columns, the `template` field and `NAME` are defined; the lint is a Java test over `loadAtBoot`; the boot check and `out()` share one validator; the ledger retirement is verified shipped; the Test Plan gaps are filled. Research: `nexus_rdr/239-research-3` to `-7`. |
-| 2026-11-02 | Implementation-time additions after the gate, each in a bead: the Python mirror lint `tests/test_tuple_template_doc_paths_lint.py` (nexus-mdbds.2.19); the NAME-resolution rules, recorded under Key Discoveries (nexus-mdbds.2.17); the old-engine messages "engine predates the dictionary" and "this template has no doc block" (nexus-mdbds.2.23); the lint's exemption and non-vacuity rules (nexus-mdbds.2.24). |
+| 2026-11-02 | Implementation-time additions after the gate, each in a bead: the Python mirror lint `tests/test_tuple_template_doc_paths_lint.py` (nexus-mdbds.2.19); the NAME-resolution rules and the "engine predates the dictionary" message, recorded under Key Discoveries (nexus-mdbds.2.23); the per-template "this template has no doc block" message (nexus-mdbds.2.17); the lint's exemption and non-vacuity rules (nexus-mdbds.2.24). |
 | 2026-11-03 | Close records (rdr-close critique, T2 `nexus_rdr/239-scope-critique-2026-11-03`): A2's measured figures recorded in Critical Assumptions and Assumption Verification; the 2026-11-02 row above added. |
-- 2026-11-01: Gate round 1 — PASSED (0 Critical, 9 Significant, 0 ship-blocker(s)); commit `2ae483be1` (content-identical to the pre-rebase commit the gate read); critique `nexus_rdr/239-gate-critique-2026-11-01-r1`.
+| 2026-11-01 | Gate round 1 — PASSED (0 Critical, 9 Significant, 0 ship-blocker(s)); commit `2ae483be1` (content-identical to the pre-rebase commit the gate read); critique `nexus_rdr/239-gate-critique-2026-11-01-r1`. |
