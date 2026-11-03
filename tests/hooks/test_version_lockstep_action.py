@@ -265,6 +265,64 @@ class TestUpgradeRetryMarker:
     def test_the_sentinel_is_not_a_version(self, mod) -> None:
         assert mod._VERSION_RE.search(mod.UPGRADE_RETRY_MARKER) is None
 
+    def test_a_dev_tree_replaces_the_sentinel_with_the_target(self, mod, marker, monkeypatch) -> None:
+        """nexus-emiky review: gate 1 returns before the retry path, so a sentinel left by an earlier managed
+        install would nudge a dev box at every session start. The action settles it."""
+        calls = _wire(mod, monkeypatch, receipt=False, installed_versions=["1.0.0"], run_results={})
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert calls == []
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
+
+    def test_a_dev_tree_leaves_an_ordinary_marker_alone(self, mod, marker, monkeypatch) -> None:
+        _wire(mod, monkeypatch, receipt=False, installed_versions=["1.0.0"], run_results={})
+        marker.parent.mkdir(parents=True)
+        marker.write_text("8.0.0", encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert marker.read_text(encoding="utf-8").strip() == "8.0.0"
+
+    def test_the_ref_drift_dispatch_never_writes_its_sentinel_over_the_marker(self, mod, marker, monkeypatch) -> None:
+        _wire(mod, monkeypatch, receipt=False, installed_versions=["1.0.0"], run_results={})
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
+        mod.main(["action", mod._REF_DRIFT_SENTINEL])
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
+
+    def test_the_version_is_in_the_marker_before_the_start_wait(self, mod, marker, monkeypatch) -> None:
+        """nexus-emiky review I2: sessions that start while the action waits ~2 s for the child must find a
+        version, not the sentinel, or each dispatches another action and another waiting child."""
+        _wire(mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "9.9.9"], run_results={})
+        seen: list[str] = []
+
+        def _start() -> int:
+            seen.append(marker.read_text(encoding="utf-8").strip())
+            return 4242
+
+        monkeypatch.setattr(mod, "start_background_upgrade", _start)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert seen == ["9.9.9"]
+
+    def test_the_sentinel_comes_back_when_nothing_was_started(self, mod, marker, monkeypatch) -> None:
+        """The child did not start and the synchronous fallback failed: the work is still owed."""
+        _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "9.9.9"],
+            run_results={"nx upgrade": False},
+        )
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
+
+    def test_the_sentinel_comes_back_when_the_version_slipped_below_the_target(self, mod, marker, monkeypatch) -> None:
+        _wire(mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "1.0.0"], run_results={}, background=True)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
+
 
 class TestSatisfies:
     def test_equal_satisfies(self, mod) -> None:

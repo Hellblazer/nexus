@@ -168,6 +168,14 @@ def upgrade(
         # filesystem write, not under --auto, never under --dry-run.
         if not auto_mode and not dry_run:
             _install_beads_prime_best_effort(no_beads_prime=no_beads_prime)
+
+        # nexus-emiky: a lockstep child that lost the upgrade lock left the retry sentinel in the lockstep
+        # marker, saying this work (plugin convergence, agents and hooks refresh, the advisory) is owed. A
+        # run that did it settles the marker; `--auto` skips that work and `--dry-run` does none.
+        if not auto_mode and not dry_run:
+            from nexus.lockstep_marker import running_version, settle_upgrade_retry  # noqa: PLC0415 — deferred, keeps the cold start light
+
+            settle_upgrade_retry(running_version())
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)

@@ -604,6 +604,15 @@ def write_marker(version: str) -> None:
     debug(f"wrote marker {path} = {version}")
 
 
+def try_write_marker(text: str) -> None:
+    """:func:`write_marker`, but an unwritable marker is logged and not raised: the callers are the
+    retry-sentinel moves (nexus-emiky), which must not stop the upgrade they accompany."""
+    try:
+        write_marker(text)
+    except OSError as exc:
+        debug(f"marker could not be written: {exc}")
+
+
 def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
     """The nexus-konsk ref-drift-only branch's sole action: run
     ``nx upgrade`` and log what its own plugin-lockstep step reported
@@ -678,6 +687,11 @@ def main(argv: list[str]) -> None:
         generation = generation_install_present()
         if not generation and not uv_receipt_present():
             debug("no generation layout and no uv-tool receipt (dev tree); skipping")
+            # nexus-emiky: a retry sentinel left by an earlier managed install must not nudge a dev box at
+            # every session start for work this action will never do. The target is not a version for the
+            # ref-drift dispatch, which has no claim on the marker.
+            if not ref_drift_only and read_marker() == UPGRADE_RETRY_MARKER:
+                try_write_marker(target)
             return
 
         if ref_drift_only:
@@ -766,6 +780,11 @@ def main(argv: list[str]) -> None:
         #     by the next SessionStart's `nx upgrade --auto`. "Started" is
         #     checked (the child survived its first seconds); if it cannot be
         #     started, fall back to the bounded synchronous run, as before.
+        # nexus-emiky: in retry mode the version goes into the marker BEFORE the start wait, so a session that
+        # starts inside that window (about 2 s) finds a version and not the sentinel, and does not dispatch
+        # another action and another waiting child. The sentinel goes back if nothing was started.
+        if retry_owed:
+            try_write_marker(target)
         child_pid = start_background_upgrade()
         if child_pid is not None:
             log_event(
@@ -775,6 +794,8 @@ def main(argv: list[str]) -> None:
         elif not run_cmd(["nx", "upgrade"], timeout=_NX_UPGRADE_TIMEOUT):
             debug("nx upgrade failed; leaving marker stale for retry")
             log_event("lockstep_upgrade_result", target=target, outcome="nx_upgrade_failed")
+            if retry_owed:
+                try_write_marker(UPGRADE_RETRY_MARKER)
             return
 
         # 4. Marker only on confirmed lockstep (installed >= target).
@@ -792,6 +813,8 @@ def main(argv: list[str]) -> None:
                 "lockstep_upgrade_result", target=target,
                 outcome="version_still_mismatched", installed=str(after),
             )
+            if retry_owed:
+                try_write_marker(UPGRADE_RETRY_MARKER)
     except Exception as exc:  # noqa: BLE001 - detached action must never raise
         debug(f"swallowed unexpected error: {exc}")
 

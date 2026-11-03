@@ -435,6 +435,16 @@ class TestPluginLockstepPrecondition:
         assert "6.13.0" in r.detail and "6.12.0" in r.detail
         assert r.actions == ()
 
+    def test_the_retry_sentinel_is_reported_as_owed_work_not_as_a_cli_version(self) -> None:
+        """nexus-emiky review: the sentinel is not a CLI version, so it must not read as
+        "last-confirmed CLI retry-nx-upgrade"."""
+        from nexus.lockstep_marker import UPGRADE_RETRY_MARKER
+
+        r = self._report("6.13.0", UPGRADE_RETRY_MARKER)
+        assert r.current is False and r.applicable is True and r.actions == ()
+        assert "last-confirmed" not in r.detail
+        assert "lost the upgrade lock" in r.detail and "6.13.0" in r.detail
+
     def test_matched_versions_are_current(self) -> None:
         r = self._report("6.12.0", "6.12.0")
         assert r.applicable is True

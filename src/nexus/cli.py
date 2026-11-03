@@ -209,9 +209,9 @@ def main(ctx: click.Context, verbose: bool) -> None:
                 "another unattended `nx upgrade` still holds the lock; this run did not start and is retried later",
                 err=True,
             )
-            from nexus.lockstep_marker import mark_upgrade_retry  # noqa: PLC0415 — deferred import, the 75 path only
+            from nexus.lockstep_marker import mark_upgrade_retry, running_version  # noqa: PLC0415 — deferred import, the 75 path only
 
-            mark_upgrade_retry()
+            mark_upgrade_retry(running_version())
             ctx.exit(75)
         ctx.call_on_close(_auto_lock.release)
 

@@ -49,6 +49,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/mailbox/SKILL.md` (nexus-mdbds.2.18): the cross-instance request and ack rule points at the mailbox template's doc block (`nx tuple dictionary`, `tuple_registry` with `doc=True`) for what each `kind` value means.
 - `conexus/skills/peer-messaging/SKILL.md` (nexus-mdbds.2.18): the mailbox request rule points at the same doc block for the `kind` values.
 - `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-emiky): a lockstep marker holding the retry sentinel `retry-nx-upgrade` is skew whatever `nx --version` reports, so the session dispatches the upgrade again.
-- `conexus/hooks/scripts/version_lockstep_action.py` (nexus-emiky): with the retry sentinel in the marker the action skips the fast path and the binary step and starts the detached `nx upgrade` again.
+- `conexus/hooks/scripts/version_lockstep_action.py` (nexus-emiky): with the retry sentinel in the marker the action skips the fast path and the binary step and starts the detached `nx upgrade` again. In retry mode it writes the target version before its start wait (and restores the sentinel if nothing started), and on a dev/editable tree it replaces the sentinel with the target.
 
 ## Deferred to the next client release
