@@ -5813,11 +5813,12 @@ def _run_index(
         if _stored:
             _already = set(delta_deleted)
             delta_deleted.extend(sorted(_stored - _already))
-    _log.info(
-        "symlink_walk_summary",
-        symlinks_skipped=len(symlink_skipped_present),
-        stored_symlink_entries_retired=len(_symlink_stored),
-    )
+    if symlink_skipped_present or _symlink_stored:
+        _log.info(
+            "symlink_walk_summary",
+            symlinks_skipped=len(symlink_skipped_present),
+            stored_symlink_entries_retired=len(_symlink_stored),
+        )
 
     # Sort all lists descending by frecency
     code_files.sort(key=lambda x: x[0], reverse=True)
