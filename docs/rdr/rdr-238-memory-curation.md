@@ -320,6 +320,21 @@ here are the ones each pass found on a named page or table.
   compliance test counts only measured rules whose index line moved out of the
   always tier. At least 3 of the 5 must move; with fewer, Phase 2 Step 3
   records A3 as still assumed rather than tested.
+- **2026-11-03, S-10 mapping and the near-duplicate measure as built
+  (nexus-qo7ie.17).** The memory directory comes from one stdlib-only function,
+  `nexus._hook_runtime.memory_dir.memory_dir`, shared by `nx memory curate
+  --files` and the SessionStart check. A custom path wins: `autoMemoryDirectory`
+  from `.claude/settings.local.json` or `.claude/settings.json` (working
+  directory, then the primary checkout) or `<config dir>/settings.json`, when it
+  is an absolute or `~/` path to an existing directory. Otherwise it is
+  `<config dir>/projects/<key>/memory`, with `<config dir>` = `$CLAUDE_CONFIG_DIR`
+  or `~/.claude` and `<key>` the primary checkout's absolute path with every
+  non-alphanumeric character replaced by `-`; the primary is the parent of
+  `git rev-parse --git-common-dir`. A missing directory, a non-repository or a
+  failed git call gives nothing. Near-duplicates (S-7) are file pairs whose
+  frontmatter name and description tokens overlap at Jaccard 0.5 or more; files
+  with fewer than 4 tokens are skipped. Technical Design 3's mapping sentence is
+  read with this entry.
 
 ### Critical Assumptions
 
