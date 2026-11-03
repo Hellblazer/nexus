@@ -682,7 +682,9 @@ def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days
     """Report what to curate: memory files, T2 rows and reviewer memory.
 
     With no section flag, runs --files, --t2 and --agents. Prints the report and stores
-    it in T2 as <repo>/curation-report-<date> with a 90-day TTL (RDR-238). Report only:
+    it in T2 as <repo>/curation-report-<date> with a 90-day TTL (RDR-238); a run of only
+    some sections stores <repo>/curation-report-<date>-<sections> instead, so it never
+    replaces the day's full report. Report only:
     it deletes and changes nothing, never blocks, and exits 0 whatever it finds; a section
     that cannot run prints one "not available" line and the others still run.
     """
@@ -711,7 +713,7 @@ def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days
     if do_cold:
         lines += mc.section("--cold", mc.cold_lines)
 
-    title = f"curation-report-{now:%Y-%m-%d}"
+    title = mc.report_title(now, files=do_files, t2=do_t2, agents=do_agents, cold=do_cold)
     report = "\n".join(lines).rstrip("\n") + "\n"
     click.echo(report, nl=False)
     try:

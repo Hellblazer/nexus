@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Find Claude Code's auto-memory directory for a repository (RDR-238 gate residual S-10).
 
-Standard library only, on purpose. The SessionStart curation verb (nexus-qo7ie.16) imports
-this on every session start, so nothing here may pull in a heavier module
-(``tests/hooks/test_hook_runtime_thin.py`` pins the property for the whole package), and
-``nx memory curate --files`` (nexus-qo7ie.17) imports the same function, so the two never
-disagree about which directory they are looking at.
+Standard library only, on purpose, at import time AND at call time. The SessionStart curation
+verb (nexus-qo7ie.16) imports this on every session start, so nothing here may pull in a heavier
+module (``tests/hooks/test_hook_runtime_thin.py`` pins the import; ``tests/test_memory_curate.py``
+pins the call, in a fresh interpreter), and ``nx memory curate --files`` (nexus-qo7ie.17) imports
+the same function, so the two never disagree about which directory they are looking at.
 
 THE MAPPING, :func:`memory_dir`. Given a working directory *cwd*:
 
@@ -24,12 +24,24 @@ THE MAPPING, :func:`memory_dir`. Given a working directory *cwd*:
    * ``<key>`` is the PRIMARY checkout's absolute path with every character that is not an
      ASCII letter or digit replaced by ``-`` (:func:`mangle_path`; ``/Users/a.b/git/r-x``
      becomes ``-Users-a-b-git-r-x``);
-   * the primary checkout is the parent of ``git rev-parse --path-format=absolute
-     --git-common-dir`` run in *cwd*, so every linked worktree of a repository (and any
-     subdirectory of one) resolves to the one directory its primary checkout owns.
-3. :func:`memory_dir` returns ``None`` when *cwd* is not inside a git repository, git is
-   unavailable or slow (5 s limit), or the resulting directory does not exist. The caller
-   stays silent; this module never raises.
+   * the primary checkout is the parent of the git common directory, so every linked worktree of
+     a repository (and any subdirectory of one) resolves to the one directory its primary
+     checkout owns. The common directory is found by READING, with no process spawned
+     (:func:`primary_checkout_root`): walk up from *cwd* to the first ``.git``. A ``.git``
+     directory is the common directory. A ``.git`` file holds ``gitdir: <path>``; that gitdir's
+     ``commondir`` file (relative to the gitdir) names the common directory, and a gitdir with no
+     ``commondir`` (a ``--separate-git-dir`` or submodule layout) is its own common directory,
+     the answer ``git rev-parse --git-common-dir`` gives. A spawn costs about 55 ms here (it
+     loads structlog and ~230 modules) against 0.1 ms for the read.
+     FALLBACK: only when ``GIT_DIR`` or ``GIT_COMMON_DIR`` is set (they redirect git away from
+     the layout on disk) or the layout is unrecognised (a ``.git`` directory without ``HEAD``, a
+     ``gitdir:`` line that is malformed or points nowhere, a ``commondir`` that points nowhere)
+     does it run ``git rev-parse --path-format=absolute --git-common-dir`` through
+     ``run_bounded`` (deferred import; 5 s limit). Not matched to git by the read:
+     ``GIT_CEILING_DIRECTORIES``, filesystem-boundary stops and ``safe.directory``.
+3. :func:`memory_dir` returns ``None`` when *cwd* is not inside a git repository (no ``.git``
+   above it), git is unavailable or slow on the fallback path, or the resulting directory does
+   not exist. The caller stays silent; this module never raises.
 
 Claude Code also shortens a very long mangled key; such a path is not reproduced here and
 resolves to ``None`` (silent), which is the safe failure for a hook.
@@ -59,11 +71,85 @@ def claude_config_dir(env: Mapping[str, str] | None = None, home: Path | None = 
     return (home if home is not None else Path.home()) / ".claude"
 
 
-def primary_checkout_root(cwd: Path) -> Path | None:
-    """The primary checkout's root: the parent of the git common directory, or None."""
-    # Deferred, as every hook-side spawn is: a module-scope run_bounded import pulls structlog and
-    # about 231 modules (14 ms / 106 modules becomes 62-84 ms / 337, measured on the deleted
-    # hooks/verification_config), and only a caller that reaches the git call pays it.
+class _Unrecognised(Exception):
+    """The ``.git`` layout on disk is not one the read understands; ask git."""
+
+
+def _real(path: str | os.PathLike[str]) -> Path:
+    return Path(os.path.realpath(path))
+
+
+def _first_line(path: Path) -> str:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            return fh.readline().strip()
+    except OSError as exc:
+        raise _Unrecognised(f"cannot read {path}") from exc
+
+
+def _common_dir_from_gitfile(dot_git: Path) -> Path:
+    line = _first_line(dot_git)
+    if not line.startswith("gitdir:"):
+        raise _Unrecognised(f"{dot_git} has no gitdir line")
+    target = line[len("gitdir:"):].strip()
+    if not target:
+        raise _Unrecognised(f"{dot_git} has an empty gitdir line")
+    gitdir = Path(os.path.join(dot_git.parent, target))  # an absolute target wins the join
+    if not gitdir.is_dir():
+        raise _Unrecognised(f"{gitdir} is not a directory")
+    commondir_file = gitdir / "commondir"
+    if not commondir_file.is_file():
+        return _real(gitdir)  # a separate-git-dir or submodule gitdir is its own common directory
+    relative = _first_line(commondir_file)
+    if not relative:
+        raise _Unrecognised(f"{commondir_file} is empty")
+    common = Path(os.path.join(gitdir, relative))
+    if not common.is_dir():
+        raise _Unrecognised(f"{common} is not a directory")
+    return _real(common)
+
+
+def _common_dir_by_reading(cwd: Path) -> Path | None:
+    """The git common directory of the repository containing *cwd*, read from disk.
+
+    None when no ``.git`` exists at or above *cwd* (not a repository). Raises
+    :class:`_Unrecognised` for a layout it cannot interpret. Spawns nothing.
+    """
+    here = Path(os.path.abspath(cwd))
+    if not here.is_dir():
+        return None  # git -C refuses a directory that does not exist; so does this
+    for directory in (here, *here.parents):
+        dot_git = directory / ".git"
+        if dot_git.is_dir():
+            if not (dot_git / "HEAD").is_file():
+                raise _Unrecognised(f"{dot_git} is a directory without HEAD")
+            return _real(dot_git)
+        if dot_git.is_file():
+            return _common_dir_from_gitfile(dot_git)
+    return None
+
+
+def primary_checkout_root(cwd: Path, env: Mapping[str, str] | None = None) -> Path | None:
+    """The primary checkout's root: the parent of the git common directory, or None.
+
+    Reads ``.git`` and spawns nothing; asks git (:func:`_primary_via_git`) only when ``GIT_DIR`` or
+    ``GIT_COMMON_DIR`` is set in *env* or the layout is unrecognised. See the module docstring.
+    """
+    e = os.environ if env is None else env
+    if not (e.get("GIT_DIR") or e.get("GIT_COMMON_DIR")):
+        try:
+            common = _common_dir_by_reading(cwd)
+        except _Unrecognised:
+            pass
+        else:
+            return None if common is None else common.parent
+    return _primary_via_git(cwd)
+
+
+def _primary_via_git(cwd: Path) -> Path | None:
+    """The fallback: ask git. The imports are deferred because they pull structlog and ~230 modules."""
+    # A module-scope run_bounded import takes 14 ms / 106 modules to 62-84 ms / 337 (measured on the
+    # deleted hooks/verification_config); only a caller that reaches this fallback pays it.
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred by the hooks convention, measurement above
     from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 — stdlib-only; kept off the import path until a spawn
 
@@ -108,7 +194,7 @@ def memory_dir(
         start = Path.cwd() if cwd is None else Path(cwd)
         h = home if home is not None else Path.home()
         config = claude_config_dir(env, h)
-        primary = primary_checkout_root(start)
+        primary = primary_checkout_root(start, env)
         if primary is None:
             return None
         sources = [

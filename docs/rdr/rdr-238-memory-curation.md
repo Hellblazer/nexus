@@ -322,19 +322,24 @@ here are the ones each pass found on a named page or table.
   records A3 as still assumed rather than tested.
 - **2026-11-03, S-10 mapping and the near-duplicate measure as built
   (nexus-qo7ie.17).** The memory directory comes from one stdlib-only function,
-  `nexus._hook_runtime.memory_dir.memory_dir`, shared by `nx memory curate
-  --files` and the SessionStart check. A custom path wins: `autoMemoryDirectory`
+  `nexus._hook_runtime.memory_dir.memory_dir` (stdlib at call time too: no
+  process is spawned), shared by `nx memory curate --files` and the SessionStart
+  check. A custom path wins: `autoMemoryDirectory`
   from `.claude/settings.local.json` or `.claude/settings.json` (working
   directory, then the primary checkout) or `<config dir>/settings.json`, when it
   is an absolute or `~/` path to an existing directory. Otherwise it is
   `<config dir>/projects/<key>/memory`, with `<config dir>` = `$CLAUDE_CONFIG_DIR`
   or `~/.claude` and `<key>` the primary checkout's absolute path with every
-  non-alphanumeric character replaced by `-`; the primary is the parent of
-  `git rev-parse --git-common-dir`. A missing directory, a non-repository or a
-  failed git call gives nothing. Near-duplicates (S-7) are file pairs whose
+  non-alphanumeric character replaced by `-`; the primary is the parent of the
+  git common directory, found by reading `.git` (a directory, or a `gitdir:`
+  file and its `commondir`), and by `git rev-parse --git-common-dir` only when
+  `GIT_DIR` or `GIT_COMMON_DIR` is set or the layout is unrecognised. A missing
+  directory, a non-repository or a failed fallback git call gives nothing. Near-duplicates (S-7) are file pairs whose
   frontmatter name and description tokens overlap at Jaccard 0.5 or more; files
-  with fewer than 4 tokens are skipped. Technical Design 3's mapping sentence is
-  read with this entry.
+  with fewer than 4 tokens are skipped. The `--t2` census reads "phase closed" as
+  the RDR's frontmatter `status: closed`, so a closed phase of a still-open RDR
+  is not flagged; per-phase flagging is nexus-qo7ie.28. Technical Design 3's
+  mapping sentence is read with this entry.
 
 ### Critical Assumptions
 

@@ -916,10 +916,9 @@ def _nx_memory_titles_block(repo: str) -> list[str]:
 def _feedback_memories_block(cwd: Path) -> list[str]:
     """Return feedback-memory filenames from the Claude Code auto-memory dir.
 
-    Computes ``PWD_KEY`` by replacing every non-alnum char in the absolute
-    cwd with a dash (mirroring Claude Code's session-dir naming).  Lists
-    ``feedback_*`` files under
-    ``~/.claude/projects/<PWD_KEY>/memory/``, head 10.
+    The directory is the one ``nexus._hook_runtime.memory_dir.memory_dir`` finds (RDR-238 S-10):
+    ``autoMemoryDirectory`` when set, else ``<config dir>/projects/<key>/memory`` keyed on the
+    PRIMARY checkout, with ``$CLAUDE_CONFIG_DIR`` honoured.  Lists ``feedback_*`` files in it, head 10.
 
     Args:
         cwd: The working directory (absolute path).
@@ -928,12 +927,11 @@ def _feedback_memories_block(cwd: Path) -> list[str]:
         List starting with ``"### Feedback memories (auto-memory dir, if present)"``.
     """
     header = "### Feedback memories (auto-memory dir, if present)"
-    from nexus._hook_runtime.memory_dir import mangle_path  # noqa: PLC0415 — deferred: the one mangling rule lives in the stdlib-only hook module; deferring keeps this file's line numbers (the subprocess-encoding ratchet keys on them) and costs nothing at import
+    from nexus._hook_runtime.memory_dir import memory_dir  # noqa: PLC0415 — deferred: the one directory rule lives in the stdlib-only hook module, shared with `nx memory curate` (RDR-238 S-10)
 
-    pwd_key = mangle_path(cwd)  # the one mangling rule, shared with `nx memory curate` (RDR-238 S-10)
-    proj_dir = Path.home() / ".claude" / "projects" / pwd_key / "memory"
     try:
-        if proj_dir.is_dir():
+        proj_dir = memory_dir(cwd)
+        if proj_dir is not None:
             files = sorted(
                 p.name
                 for p in proj_dir.iterdir()

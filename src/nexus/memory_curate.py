@@ -13,7 +13,9 @@ naming a missing file, and declared ``replaces`` targets that still exist. Sam's
 likely near-duplicates for review instead, by the measure on :func:`near_duplicates`.
 
 ``--t2`` lists live T2 rows that a later row names as replaced, skipping audit records (the
-AUDIT_TAGS table, tags and title backstop), and RDR-209 Phase 3 Step 4's census flag. It
+AUDIT_TAGS table, tags and title backstop), rows tagged ``superseded`` and titles that are only a
+number, and RDR-209 Phase 3 Step 4's census flag ("phase closed" is read as the RDR's status:
+closed; per-phase flagging is nexus-qo7ie.28). It
 reads every row of the repo's projects once (``get_all``), so a project with thousands of
 rows costs one large read; run it at a release step, not in a loop.
 
@@ -52,16 +54,47 @@ _STOPWORDS = frozenset(
     "will when what which they them their then than also only more some such".split()
 )
 _TOKEN = re.compile(r"[a-z0-9]+")
+_BULLET_START = re.compile(r"^\s*[-*](?:\s|$)")  # "- x", "* x", and a line cut to just "-" or "*"
 
+#: The reviewer definitions say "keep its index under 40 lines", so an index of this many lines or more is flagged.
 AGENT_INDEX_CAP = 40
 CENSUS_DAYS = 30
 _ENTRY = re.compile(r"^\s*[-*]\s*\[([^\]]*)\]\(([^)\s]+)\)")
-_REPO_NAMED = re.compile(
-    r"\brepo(?:sitory)?\s*[:=]\s*[\w./-]+"
-    r"|(?<![\w-])(?!(?:the|a|an|this|that|any|each|every|one|your|their|its|which|same|another|other|no|per)\b)"
-    r"[\w.-]+\s+repo(?:sitory)?\b",
-    re.IGNORECASE,
+# "Names a repo" (--agents), applied to an entry's index line and to the file it links. Three forms,
+# each a candidate name that counts unless it is a generic word (_GENERIC_REPO_WORDS):
+#   repo: <name>          (also "repository: <name>", "repo=<name>")
+#   learned in <name>     (optionally "learned in the <name>", with or without a trailing "repo")
+#   <name> repo           (also "<name> repository")
+# "whole repo", "the Java repo", "any git repo", "this repo" and "learned in a session" name no repo.
+_REPO_FORMS = (
+    re.compile(r"\brepo(?:sitory)?\s*[:=]\s*([\w./-]+)", re.IGNORECASE),
+    re.compile(r"\blearned\s+in\s+(?:the\s+)?([\w.-]+)", re.IGNORECASE),
+    re.compile(r"(?<![\w-])([\w.-]+)\s+repo(?:sitory)?\b", re.IGNORECASE),
 )
+_GENERIC_REPO_WORDS = frozenset(
+    # determiners and quantifiers
+    "the a an this that these those any each every one your their its our my which same another other "
+    "no per all some both either neither whole entire full main whichever whatever "
+    # the words around "repo" that are not names
+    "repo repository repos repositories project projects codebase code git local remote upstream parent "
+    "child target source current given first second last next previous "
+    # where heuristics are learned, as opposed to which repo
+    "session sessions practice general review reviews production testing "
+    # languages and stacks ("the Java repo")
+    "java python rust go golang kotlin scala typescript javascript node nodejs ruby php swift c cpp "
+    "csharp dotnet shell bash sql".split()
+)
+
+
+def names_a_repo(text: str) -> bool:
+    """True when *text* names a specific repository by one of the three forms above."""
+    for form in _REPO_FORMS:
+        for m in form.finditer(text):
+            name = m.group(1).strip(".-_/").lower()
+            if name and name not in _GENERIC_REPO_WORDS:
+                return True
+    return False
+
 
 NOT_AVAILABLE_READS = "unread files: not available (needs RDR-240's memory query; planned in nexus-qo7ie.18)"
 
@@ -165,7 +198,7 @@ def scan_agent_dir(directory: Path) -> AgentFindings:
     index = read_text(directory / "MEMORY.md")
     lines = index.splitlines()
     out = AgentFindings(name=directory.name, line_count=len(lines))
-    out.over_cap = out.line_count > AGENT_INDEX_CAP
+    out.over_cap = out.line_count >= AGENT_INDEX_CAP
 
     seen_lines: set[str] = set()
     titles_by_target: dict[str, list[str]] = {}
@@ -185,7 +218,7 @@ def scan_agent_dir(directory: Path) -> AgentFindings:
         titles_by_target.setdefault(target, []).append(title)
         linked = directory / target if "://" not in target else None
         body = read_text(linked) if linked is not None and linked.is_file() else ""
-        if not _REPO_NAMED.search(line) and not _REPO_NAMED.search(body):
+        if not names_a_repo(line) and not names_a_repo(body):
             out.no_repo.append(title)
     for target, titles in titles_by_target.items():
         if len(titles) > 1:
@@ -193,7 +226,7 @@ def scan_agent_dir(directory: Path) -> AgentFindings:
 
     if index and not index.endswith("\n"):
         last = lines[-1] if lines else ""
-        if last.lstrip().startswith(("- ", "* ")) and not _ENTRY.match(last):
+        if _BULLET_START.match(last) and not _ENTRY.match(last):
             out.truncated = last
 
     out.dangling = [t for t in index_link_targets(index) if not (directory / t).is_file()]
@@ -212,13 +245,13 @@ def agents_section(root: Path | None) -> list[str]:
     found = [scan_agent_dir(d) for d in sorted(root.iterdir()) if d.is_dir() and (d / "MEMORY.md").is_file()]
     lines = [f"directories scanned: {len(found)}"]
     for f in found:
-        head = f"{f.name}: {f.line_count} index lines (cap {AGENT_INDEX_CAP}), {f.entries} entries"
+        head = f"{f.name}: {f.line_count} index lines (keep under {AGENT_INDEX_CAP}), {f.entries} entries"
         if f.clean:
             lines.append(f"{head}, clean")
             continue
         lines.append(head)
         if f.over_cap:
-            lines.append(f"  - over the {AGENT_INDEX_CAP}-line cap by {f.line_count - AGENT_INDEX_CAP}")
+            lines.append(f"  - {f.line_count} lines; the index must stay under {AGENT_INDEX_CAP}")
         lines += [f"  - entry names no repo: {t}" for t in f.no_repo]
         lines += [f"  - duplicate entry (concurrent-write damage): {d}" for d in f.duplicates]
         if f.truncated is not None:
@@ -259,6 +292,9 @@ _NAMES_REPLACED = re.compile(r"\b(?:replaces|supersedes)\b\s*:?\s*(.+)", re.IGNO
 _STRIP = " \t\"'`()[]{}.:;,"
 _RDR_TAG = re.compile(r"^rdr:0*(\d+)$")
 _RDR_TITLE = re.compile(r"^(?:rdr-)?0*(\d+)(?!\d)", re.IGNORECASE)
+#: A row titled "100" or "RDR-107" is never a replaced candidate: an incidental number after "supersedes"
+#: in a research finding names an RDR, not a row (measured on the first live run: 2 of 6 candidates).
+_BARE_NUMBER_TITLE = re.compile(r"^(?:rdr-)?[0-9]+$", re.IGNORECASE)
 
 
 def _named_titles(title: str, content: str) -> set[str]:
@@ -293,19 +329,21 @@ def t2_findings(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime) -> 
     cutoff = now - timedelta(days=CENSUS_DAYS)
     census_projects = {repo, f"{repo}_rdr"}
     for project in result.projects:
-        rows = [r for r in db.get_all(project) if not r.get("quarantined_at")]
+        rows = list(db.get_all(project))  # live rows only: the engine's getAll hides quarantined ones
         result.rows_read += len(rows)
         by_title = {r["title"]: r for r in rows}
         named: dict[str, list[dict[str, Any]]] = {}
         for later in rows:
             for cand in _named_titles(later["title"], later.get("content") or ""):
                 earlier = by_title.get(cand)
-                if earlier is None or earlier["id"] == later["id"]:
+                if earlier is None or earlier["id"] == later["id"] or _BARE_NUMBER_TITLE.match(cand):
                     continue
                 if (later.get("timestamp") or "") > (earlier.get("timestamp") or ""):
                     named.setdefault(earlier["title"], []).append(later)
         for title in sorted(named):
             earlier = by_title[title]
+            if "superseded" in split_tags(earlier.get("tags")):
+                continue  # already marked as replaced: nothing to confirm
             if audit_tags_of(earlier.get("tags")) or is_audit_title(title):
                 result.skipped_audit += 1
                 continue
@@ -421,6 +459,22 @@ def section(title: str, body: Any) -> list[str]:
     except Exception as exc:  # noqa: BLE001 — a section failing never stops the report or the exit status
         lines = [f"not available: {type(exc).__name__}: {exc}" if str(exc) else f"not available: {type(exc).__name__}"]
     return [f"== {title} ==", *lines, ""]
+
+
+def report_title(now: datetime, *, files: bool, t2: bool, agents: bool, cold: bool) -> str:
+    """The T2 title the report is stored under.
+
+    A run with --files, --t2 and --agents (the default; --cold may ride along) is the day's full
+    report: ``curation-report-<date>``. A run of fewer sections stores
+    ``curation-report-<date>-<sections>`` (the selected sections in files, t2, agents, cold order,
+    joined with ``-``), so a partial run never replaces the full report that a T2 upsert on
+    (project, title) would otherwise overwrite.
+    """
+    base = f"curation-report-{now:%Y-%m-%d}"
+    if files and t2 and agents:
+        return base
+    chosen = [n for n, on in (("files", files), ("t2", t2), ("agents", agents), ("cold", cold)) if on]
+    return f"{base}-{'-'.join(chosen)}"
 
 
 def cold_lines() -> list[str]:
