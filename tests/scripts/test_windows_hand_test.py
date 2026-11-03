@@ -100,6 +100,7 @@ def test_the_remote_script_order_is_fetch_checkout_fixup_verify_run() -> None:
                                fixup="# fixup", floor=None)
     order = [script.index(part) for part in (
         "trap {",
+        "git remote set-url origin https://github.com/Hellblazer/nexus.git",
         "git fetch -q origin",
         "git fetch -q 'C:\\b\\w.bundle' '+refs/win-hand/wren:refs/win-hand/wren'",
         "Remove-Item -LiteralPath $rel -Recurse -Force",
@@ -116,7 +117,7 @@ def test_the_remote_script_order_is_fetch_checkout_fixup_verify_run() -> None:
 @pytest.mark.parametrize(
     "step",
     [
-        "clone", "git fetch origin", "bundle fetch", "git clean", "checkout", "checkout fixup",
+        "clone", "pointing origin at the repo", "git fetch origin", "bundle fetch", "git clean", "checkout", "checkout fixup",
         "normalising line endings (rm --cached)", "normalising line endings (reset --hard)",
         "applying the uncommitted changes", "staging the uncommitted changes", "committing the uncommitted changes",
     ],

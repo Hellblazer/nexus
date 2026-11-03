@@ -169,6 +169,11 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         f"if (-not (Test-Path {_ps_quote(repo)})) {{ git clone -q -c core.autocrlf=false --filter=blob:none {CLONE_URL} {_ps_quote(repo)}; "
         + must("clone") + " }",
         f"Set-Location {_ps_quote(repo)}",
+        # A kept clone may come from another tool or an older session of the same name whose origin is a local
+        # bundle file; such a clone never sees develop's tip, and the bundle fetch below then fails on a missing
+        # prerequisite. The script owns this directory, so origin is always the repo it clones from.
+        f"git remote set-url origin {CLONE_URL}",
+        must("pointing origin at the repo"),
         "git fetch -q origin",
         must("git fetch origin"),
     ]
