@@ -181,4 +181,54 @@ class AspectUpsertClaimFenceTest extends AtomicWriteTestBase {
         assertThat(claimless.status()).as(claimless.body()).isEqualTo(200);
         assertThat(written(g)).isTrue();
     }
+
+    /**
+     * nexus-eyynd M1: the fence runs before the confidence and field gates. A lapsed or foreign claim answers
+     * 404 or 403 over HTTP whatever the payload is; a live claim on its own task keeps the payload answers
+     * (200 written=false for a low confidence, 400 for a missing field or a blank doc_id).
+     */
+    @Test
+    void theFenceRunsBeforeThePayloadGates_overHttp() throws Exception {
+        Fx f = fixture("hg");
+        var a = seedAndClaim(f, "wA:0");
+
+        Map<String, Object> lowLive = aspectBody(f, a.claimId(), "wA:0");
+        lowLive.put("confidence", 0.1);
+        Resp live = post(lowLive);
+        assertThat(live.status()).as(live.body()).isEqualTo(200);
+        assertThat(live.json().get("written").asBoolean()).isFalse();
+        Map<String, Object> noFieldLive = aspectBody(f, a.claimId(), "wA:0");
+        noFieldLive.remove("extractor_name");
+        assertThat(post(noFieldLive).status()).as("a live claim keeps the 400").isEqualTo(400);
+        Map<String, Object> blankLive = aspectBody(f, a.claimId(), "wA:0");
+        blankLive.put("doc_id", "");
+        Resp blank = post(blankLive);
+        assertThat(blank.status()).isEqualTo(400);
+        assertThat(blank.json().get("error").asText()).isEqualTo("doc_id required");
+
+        Map<String, Object> lowForeign = aspectBody(f, a.claimId(), "wB:0");
+        lowForeign.put("confidence", 0.1);
+        Resp foreign = post(lowForeign);
+        assertThat(foreign.status()).as(foreign.body()).isEqualTo(403);
+        assertThat(foreign.json().get("error").asText()).isEqualTo("ClaimOwnership");
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(TUPLES)
+                    .set(TUPLES.LEASE_UNTIL, OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5))
+                    .where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.CLAIM_ID.eq(a.claimId()))).execute();
+        }
+        Map<String, Object> lowLapsed = aspectBody(f, a.claimId(), "wA:0");
+        lowLapsed.put("confidence", 0.1);
+        Map<String, Object> noFieldLapsed = aspectBody(f, a.claimId(), "wA:0");
+        noFieldLapsed.remove("extractor_name");
+        Map<String, Object> blankLapsed = aspectBody(f, a.claimId(), "wA:0");
+        blankLapsed.put("doc_id", "");
+        for (var payload : java.util.List.of(lowLapsed, noFieldLapsed, blankLapsed)) {
+            Resp r = post(payload);
+            assertThat(r.status()).as(r.body()).isEqualTo(404);
+            assertThat(r.json().get("error").asText()).isEqualTo("ClaimNotFound");
+        }
+        assertThat(written(f)).isFalse();
+    }
 }

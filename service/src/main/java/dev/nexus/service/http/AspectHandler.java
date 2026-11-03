@@ -32,7 +32,12 @@ import java.util.Optional;
  *                                                 in the upsert's transaction, BEFORE the retired-collection check, so a 409 means the
  *                                                 claim was live at that instant. 404 ClaimNotFound (no live claim: lapsed, released,
  *                                                 acked, re-taken), 403 ClaimOwnership (another claimant) or 403 ClaimTaskMismatch (not
- *                                                 the aspects task for this doc_id); nothing is written on any of them
+ *                                                 the aspects task for this doc_id); nothing is written on any of them.
+ *                                                 Order (nexus-eyynd M1): pair check (400), then the claim (404/403, ownership
+ *                                                 then task match), THEN the payload gates, so a lapsed or foreign claim is 404/403
+ *                                                 whatever the payload is; with a claim on the right task a confidence below 0.3
+ *                                                 (or null/absent) is 200 {"written":false,...} and a missing required field or a
+ *                                                 blank doc_id is 400. A claim-less write runs the payload gates only.
  *   GET   /v1/aspects/get                         get by collection= &amp; source_path=
  *   GET   /v1/aspects/get_by_doc_id               get by doc_id=
  *   GET   /v1/aspects/list_by_collection          list by collection= (limit=, offset=)

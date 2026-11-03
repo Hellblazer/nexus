@@ -709,6 +709,13 @@ itself changed are listed in the Revision History.
   the three seams, and it is where the six-CI-shard run will be recorded
   after the push.
   *Source: nexus-5r2sc.3.7; nexus-fx9k2; tests/test_rdr235_mvv_aspect_queue_tuples.py*
+- **2026-11-03, whole-collection re-home (nexus-eyynd).** A whole-collection
+  re-home is the same case as a one-document move: it rewrites the unconsumed
+  tasks to the target and leaves the source registered, so a holder's fenced
+  write, which still names the source, passes the fence (it compares `doc_id`
+  only) and lands under the source name. The row is picked up by a later re-home
+  of the source, and the re-home status counts it as remaining until then.
+  Accepted, as for a one-document move.
 
 ### Critical Assumptions
 
@@ -1787,3 +1794,4 @@ so the question is not reopened without new evidence.
 - 2026-10-27: the bulk backlog measured (nexus-5r2sc.1.3): F29 added; max_live_rows 10,000 proposed on the E3 bead. All four prerequisites settled.
 - 2026-10-29: Phase 1 client half built and gated (beads nexus-5r2sc.3.1 to 3.7, review gate nexus-5r2sc.3.10); text corrections and outcome records by nexus-5r2sc.3.8. Gap 4 and Alternative 2 no longer give the 4,096-byte body as a reason, because E2 removed it (gate S5). Performance Expectations records the producer's time per document (gate S2). Migration records that a migrated row restarts at attempts 0 (gate O3). F30 to F38 record the sixth engine surface `list_waiting`, the rung's delete key, the producer and 409 outcomes, the renewer deadline, scenario 14's worker half, `requeue-failed` in tuples mode, the foreign key's missing creation-side guard and the Minimum Viable Validation's approximations. No decision text changed in this entry.
 - 2026-10-29: decision text recorded from the Phase 1 client half (bead nexus-5r2sc.3.8, held for Sam's go; review gate nexus-5r2sc.3.10). S1: the worker drains both queues whenever the engine has the `aspects` template, whatever its flag, and Activation Step 1 requires worker hosts upgraded first. Worker slot order: slots 1 to 4 first, slot 0 parks only when none found a task. S3: transport failures reading T3, the manifest or an HTTP source are retried on the ladder, on the old table's path too; a scenario for each is added. S4: the unclaimed-age sentence moves from Positive to Negative and the age row skips `aspects`. The renewer deadline replaces "about 1,270 s". The 409 memory bound, `requeue-failed` in `tuples` mode, and the two open items before the default flip (nexus-p909o, nexus-1o3ft) are stated.
+- 2026-11-03: nexus-eyynd (engine follow-ups from the E4/E5 critique). The fence now runs before the confidence and field gates on `POST /v1/aspects/upsert`, so a lapsed or foreign claim answers 404 or 403 whatever the payload is. A re-home leaves the source registered, so a holder's fenced write lands under the source name; stated beside the one-document move in Technical Design, accepted. No decision text changed.

@@ -57,7 +57,20 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
  *
  * <p><b>What it does not cover.</b> A task queued after the select, in the same READ COMMITTED window every
  * registry statement has (see {@code collectionIsEmpty}); and a rewrite that makes a body longer than the
- * 4096-byte cap, which the table's CHECK constraint refuses.
+ * 4096-byte cap, which the table's CHECK constraint refuses. That includes a rewrite to a name of the SAME
+ * length: the body goes through {@code jsonb_set} and back to text, which re-serialises it (jsonb's text form
+ * puts a space after every {@code :} and {@code ,} and orders keys by length, then alphabetically), so the
+ * four-field identity body grows by about 7 bytes and a task body within that of 4096 bytes fails the
+ * rename's transaction even on an equal-length rename (nexus-eyynd). The producer's bodies are far smaller
+ * (a path and three ids), so none is near the cap in practice.
+ *
+ * <p><b>A re-home leaves the source registered (nexus-eyynd M2).</b> A claimed task rewritten by
+ * {@code rehomeCollection} now names the target, but its holder still has the body it read when it claimed,
+ * and that names the source. The holder's fenced write passes the fence (the fence compares the {@code doc_id}
+ * only) and the source is still registered, so the aspect row lands under the SOURCE name. A later re-home of
+ * the source moves it, and {@code rehomeStatus} counts it as remaining until then. A rename differs: it retires
+ * the old name, so the same write is refused 409. The RDR accepts the same exposure for a one-document move;
+ * pinned by {@code AspectTaskRefsRenameTest#aHoldersWriteAfterARehome_landsUnderTheStillRegisteredSource}.
  */
 public final class AspectTaskRefs {
 

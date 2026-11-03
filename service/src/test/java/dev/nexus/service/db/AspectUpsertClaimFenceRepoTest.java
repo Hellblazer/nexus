@@ -305,6 +305,123 @@ class AspectUpsertClaimFenceRepoTest extends AtomicWriteTestBase {
         assertThat(problemOf(f)).isNull();
     }
 
+    // ── order: the claim fence runs before the confidence and field gates (nexus-eyynd M1) ─────────────
+
+    /**
+     * A well-formed pair is checked against the claim before the payload is judged, so a lapsed or foreign
+     * claim answers 404 or 403 whatever the payload would have got: a low confidence (200 written=false
+     * before), a missing required field or a blank doc_id (400 before). With a LIVE claim on the right task
+     * the payload gates answer as they always did, and nothing is written either way.
+     */
+    @Test
+    void lapsedClaim_isClaimNotFound_whateverTheEmbeddedPayloadWouldHaveAnswered() throws Exception {
+        Fx f = fixture("o1");
+        seedTask(f);
+        var a = claim("wA:0");
+        lapse(a.claimId());
+
+        Map<String, Object> lowConfidence = aspectBody(f, "x", a.claimId(), "wA:0");
+        lowConfidence.put("confidence", 0.1);
+        Map<String, Object> nullConfidence = aspectBody(f, "x", a.claimId(), "wA:0");
+        nullConfidence.put("confidence", null);
+        Map<String, Object> missingField = aspectBody(f, "x", a.claimId(), "wA:0");
+        missingField.remove("extractor_name");
+        Map<String, Object> blankDocId = aspectBody(f, "x", a.claimId(), "wA:0");
+        blankDocId.put("doc_id", " ");
+
+        for (var payload : java.util.List.of(lowConfidence, nullConfidence, missingField, blankDocId)) {
+            assertThatThrownBy(() -> aspects.upsertAspect(TENANT, payload))
+                    .as("payload %s", payload).isInstanceOf(ClaimNotFoundException.class);
+        }
+        assertThat(problemOf(f)).isNull();
+    }
+
+    @Test
+    void foreignClaimant_isClaimOwnership_whateverTheEmbeddedPayloadWouldHaveAnswered() throws Exception {
+        Fx f = fixture("o2");
+        seedTask(f);
+        var a = claim("wA:0");
+
+        Map<String, Object> lowConfidence = aspectBody(f, "x", a.claimId(), "wB:0");
+        lowConfidence.put("confidence", 0.1);
+        Map<String, Object> missingField = aspectBody(f, "x", a.claimId(), "wB:0");
+        missingField.remove("source_path");
+        Map<String, Object> blankDocId = aspectBody(f, "x", a.claimId(), "wB:0");
+        blankDocId.put("doc_id", "");
+
+        for (var payload : java.util.List.of(lowConfidence, missingField, blankDocId)) {
+            assertThatThrownBy(() -> aspects.upsertAspect(TENANT, payload))
+                    .as("payload %s", payload).isInstanceOf(ClaimOwnershipException.class);
+        }
+        assertThat(problemOf(f)).isNull();
+    }
+
+    @Test
+    void liveClaimOnAnotherDocumentsTask_isATaskMismatch_evenForALowConfidenceWrite() throws Exception {
+        Fx held = fixture("o3");
+        Fx other = fixture("o4");
+        seedTask(held);
+        var a = claim("wA:0");
+
+        Map<String, Object> lowConfidence = aspectBody(other, "x", a.claimId(), "wA:0");
+        lowConfidence.put("confidence", 0.1);
+        Map<String, Object> missingField = aspectBody(other, "x", a.claimId(), "wA:0");
+        missingField.remove("model_version");
+
+        for (var payload : java.util.List.of(lowConfidence, missingField)) {
+            assertThatThrownBy(() -> aspects.upsertAspect(TENANT, payload))
+                    .as("payload %s", payload)
+                    .isInstanceOfSatisfying(TupleException.class, t -> assertThat(t.code()).isEqualTo("ClaimTaskMismatch"));
+        }
+        assertThat(problemOf(other)).isNull();
+    }
+
+    @Test
+    void liveClaimOnItsOwnTask_keepsThePayloadGatesAnswers_andWritesNothingForThem() throws Exception {
+        Fx f = fixture("o5");
+        seedTask(f);
+        var a = claim("wA:0");
+
+        Map<String, Object> lowConfidence = aspectBody(f, "x", a.claimId(), "wA:0");
+        lowConfidence.put("confidence", 0.1);
+        assertThat(aspects.upsertAspect(TENANT, lowConfidence)).as("a low confidence is dropped, as ever").isEqualTo(-1L);
+
+        Map<String, Object> missingField = aspectBody(f, "x", a.claimId(), "wA:0");
+        missingField.remove("extractor_name");
+        assertThatThrownBy(() -> aspects.upsertAspect(TENANT, missingField))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("required fields missing");
+
+        Map<String, Object> blankDocId = aspectBody(f, "x", a.claimId(), "wA:0");
+        blankDocId.put("doc_id", "");
+        assertThatThrownBy(() -> aspects.upsertAspect(TENANT, blankDocId))
+                .isInstanceOf(IllegalArgumentException.class).hasMessage("doc_id required");
+
+        assertThat(problemOf(f)).isNull();
+        assertThat(aspects.upsertAspect(TENANT, aspectBody(f, "ok", a.claimId(), "wA:0")))
+                .as("the claim is untouched by those refusals").isPositive();
+    }
+
+    @Test
+    void aMalformedPair_isStill400_beforeTheLookup_whateverTheConfidence() throws Exception {
+        Fx f = fixture("o6");
+        Map<String, Object> lowConfidence = aspectBody(f, "x", "any", null);
+        lowConfidence.put("confidence", 0.1);
+        assertThatThrownBy(() -> aspects.upsertAspect(TENANT, lowConfidence))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("claim_id");
+    }
+
+    @Test
+    void claimlessLowConfidenceAndMissingField_answerAsEver() throws Exception {
+        Fx f = fixture("o7");
+        Map<String, Object> lowConfidence = aspectBody(f, "x", null, null);
+        lowConfidence.put("confidence", 0.1);
+        assertThat(aspects.upsertAspect(TENANT, lowConfidence)).isEqualTo(-1L);
+        Map<String, Object> missingField = aspectBody(f, "x", null, null);
+        missingField.remove("extractor_name");
+        assertThatThrownBy(() -> aspects.upsertAspect(TENANT, missingField))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("required fields missing");
+    }
+
     // ── claim-less callers are unchanged ─────────────────────────────────────
 
     @Test
