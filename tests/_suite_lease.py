@@ -39,6 +39,23 @@ shared path, and a file this module creates is group-writable so users of one
 group can append to it. An immediate, uncontended acquire writes nothing, so the
 log is a record of contention. Best-effort: a failure to write is swallowed and
 never changes an outcome.
+
+FIFO QUEUE (nexus-74bc6). A waiter used to poll ``mkdir`` once a second, so
+whichever waiter's poll happened to land first after a release won, and with
+three or more waiters one could lose every round. A waiter now takes a TICKET
+(a file under ``suite.queue``, named by the nanosecond it arrived and its pid)
+before its first attempt and may ``mkdir`` the lease only while no LIVE older
+ticket exists. A ticket whose pid is dead, or that is older than
+``TICKET_MAX_AGE_SECONDS``, is ignored and removed, so a killed waiter cannot
+block the line. ``mkdir`` stays the only mutual exclusion; the tickets only
+order who tries. A run with no wait budget takes no ticket and does not queue.
+Any failure to read or write the queue falls back to the old unordered poll.
+
+THE DEADLINE IS READ ON TWO CLOCKS (nexus-74bc6). ``time.monotonic`` does not
+advance while a Mac sleeps, so a laptop closed through a 30-minute wait kept
+waiting 30 minutes after it woke. The wait now ends when EITHER the monotonic
+or the wall clock has spent the budget: the wall clock catches the sleep, the
+monotonic one catches a wall clock stepped backwards.
 """
 from __future__ import annotations
 
@@ -108,6 +125,15 @@ LEASE_FILE_MODE = 0o664
 #: Younger than this, its reclaimer may still be removing it.
 STALE_SWEEP_AGE_SECONDS = 3600.0
 
+#: The directory of waiters' tickets, a sibling of the lease. Its name does not
+#: start with ``suite.stale.``, so the stale sweep never touches it.
+QUEUE_DIR = f"{RESOURCE}.queue"
+
+#: A ticket older than this is ignored (and removed) whatever its pid says: a
+#: waiter never legitimately waits longer than its budget, so an older ticket
+#: belongs to a pid that was reused. The slack covers a budget a little over the default.
+TICKET_MAX_AGE_SECONDS = 1800.0 + 600.0
+
 _STALE_PREFIX = f"{RESOURCE}.stale."
 
 #: The per-user, per-host contention log; default ``${XDG_STATE_HOME:-$HOME/.local/state}/nexus/lease-events.log``.
@@ -149,6 +175,7 @@ def record_event(
     holder_pid: int | None = None,
     holder_label: str | None = None,
     unguarded: bool = False,
+    extra: dict[str, object] | None = None,
 ) -> None:
     """Append ONE contention line to the per-user, per-host log. Never raises, never prints.
 
@@ -158,6 +185,10 @@ def record_event(
     ``holder_label`` when known, then ``unguarded=1`` when the run went on
     despite the refusal (``NX_SUITE_LEASE_UNGUARDED=1``: that line is a bypass,
     not a blocked run) -- the shape build-lease.sh writes for ``lease=service``.
+    ``extra`` appends ``key=value`` pairs after those (the ``local_heavy`` event's
+    ``workers`` and ``reason``). The outcome ``local_heavy`` is not a lease
+    contention at all: the laptop guard (``tests/conftest.py``) writes it when
+    ``NX_LOCAL_HEAVY=1`` lets a heavy run start on a laptop, so the bypass leaves a trace.
     One ``os.write`` on an ``O_APPEND`` descriptor, so concurrent writers do not
     interleave lines. A file this call creates is mode 0664 whatever the umask
     (users of one group can share a path via ``NX_LEASE_EVENTS_LOG``); an
@@ -182,6 +213,8 @@ def record_event(
             parts.append(f"holder_label={_kv(holder_label)}")
         if unguarded:
             parts.append("unguarded=1")
+        for key, value in (extra or {}).items():
+            parts.append(f"{key}={_kv(value)}")
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, EVENTS_LOG_MODE)
@@ -449,6 +482,71 @@ def _describe(fields: tuple[int | None, str | None]) -> str:
     return f"pid {pid}" + (f" ({label})" if label else "")
 
 
+def _take_ticket(root: Path, label: str) -> Path | None:
+    """Join the line: a file named by arrival time and pid. ``None`` when the queue cannot be written (no ordering then)."""
+    try:
+        queue = root / QUEUE_DIR
+        queue.mkdir(parents=True, exist_ok=True)
+        try:
+            queue.chmod(LEASE_DIR_MODE)  # a peer's umask 077 must not hide the line from the next run
+        except OSError:
+            pass  # not ours to chmod: the creator already set it
+        path = queue / f"{time.time_ns():020d}-{os.getpid()}"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, LEASE_FILE_MODE)
+        try:
+            os.write(fd, f"{label}\n".encode())
+            os.fchmod(fd, LEASE_FILE_MODE)
+        finally:
+            os.close(fd)
+        return path
+    except Exception:  # noqa: BLE001 -- no queue is the old behaviour, not an error
+        return None
+
+
+def _drop_ticket(ticket: Path | None) -> None:
+    if ticket is None:
+        return
+    try:
+        ticket.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 -- a ticket that cannot be removed is ignored once its pid is dead
+        pass
+
+
+def _ticket_ahead(ticket: Path) -> tuple[int | None, str | None] | None:
+    """The oldest LIVE ticket that arrived before *ticket*, as ``(pid, label)``; ``None`` when this one is first.
+
+    A dead pid, an over-age ticket or a name that does not parse is not in the
+    line: it is removed best-effort and skipped. An unreadable queue reads as
+    "first", so a queue this user cannot read degrades to the unordered poll
+    rather than to a wait that cannot end.
+    """
+    try:
+        names = sorted(os.listdir(ticket.parent))
+    except OSError:
+        return None
+    oldest_ns = time.time_ns() - int(TICKET_MAX_AGE_SECONDS * 1e9)
+    for name in names:
+        if name >= ticket.name:
+            return None
+        try:
+            arrived, _, pid_text = name.partition("-")
+            arrived_ns, pid = int(arrived), int(pid_text)
+        except ValueError:
+            continue
+        if arrived_ns < oldest_ns or not _pid_alive(pid):
+            _drop_ticket(ticket.parent / name)
+            continue
+        return pid, _read_label_file(ticket.parent / name)
+    return None
+
+
+def _read_label_file(path: Path) -> str | None:
+    try:
+        return path.read_text().strip() or None
+    except Exception:  # noqa: BLE001 -- best-effort
+        return None
+
+
 def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None,
             now: Callable[[], float] = time.time, unguarded: bool = False,
             on_wait: Callable[[str, float], None] | None = None):
@@ -478,82 +576,98 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
     root = lease_root or _lease_root()
     lease = root / RESOURCE
     started = time.monotonic()
-    deadline = started + max(0, wait_seconds)
+    started_wall = time.time()
+    budget = max(0, wait_seconds)
     contended = False  # slept at least once: a wait, not an immediate acquire
     seen: tuple[int | None, str | None] = (None, None)  # the holder last waited on
     last_report: float | None = None  # monotonic time of the last on_wait call
 
+    def elapsed() -> float:
+        # Both clocks, the larger: monotonic stops while a Mac sleeps, the wall clock can step back.
+        return max(time.monotonic() - started, time.time() - started_wall)
+
     _sweep_stale(root, now)
-    while True:
-        gone: tuple[int | None, str | None] | None = None  # what THIS pass set aside; used only if its re-claim wins
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-            os.mkdir(lease)
-        except FileExistsError:
-            gone = _reclaim_if_dead(lease, now)
-            try:
-                os.mkdir(lease)
-            except FileExistsError:
-                if time.monotonic() >= deadline:
+    # Only a run that will wait joins the line; a no-wait run never queues (it refuses or takes a free lease).
+    ticket = _take_ticket(root, label) if budget > 0 else None
+    try:
+        while True:
+            gone: tuple[int | None, str | None] | None = None  # what THIS pass set aside; used only if its re-claim wins
+            held = False
+            ahead = _ticket_ahead(ticket) if ticket is not None else None
+            if ahead is not None:
+                held, seen = True, ahead  # someone who arrived first is owed the next try
+            else:
+                try:
+                    root.mkdir(parents=True, exist_ok=True)
+                    os.mkdir(lease)
+                except FileExistsError:
+                    gone = _reclaim_if_dead(lease, now)
+                    try:
+                        os.mkdir(lease)
+                    except FileExistsError:
+                        held, seen = True, _holder_fields(lease)
+                except Exception:  # noqa: BLE001 — an unwritable lease root must not block the suite
+                    return lambda: None
+            if held:
+                if elapsed() >= budget:
                     # No wait budget is a refusal; a spent one is a give-up.
-                    holder_pid, holder_label = _holder_fields(lease)
+                    holder_pid, holder_label = seen if ahead is not None else _holder_fields(lease)
                     record_event(RESOURCE, "refused" if wait_seconds <= 0 else "gave_up",
-                                 time.monotonic() - started, holder_pid=holder_pid, holder_label=holder_label,
+                                 elapsed(), holder_pid=holder_pid, holder_label=holder_label,
                                  unguarded=unguarded)
                     return None
-                seen = _holder_fields(lease)
                 contended = True
                 if on_wait is not None:
                     tick = time.monotonic()
                     if last_report is None or tick - last_report >= WAIT_REPORT_SECONDS:
                         last_report = tick
                         try:
-                            on_wait(_describe(seen), tick - started)
+                            on_wait(_describe(seen), elapsed())
                         except Exception:  # noqa: BLE001 -- a progress line must never change the outcome
                             pass
                 time.sleep(1.0)
                 continue
-        except Exception:  # noqa: BLE001 — an unwritable lease root must not block the suite
-            return lambda: None
 
-        # The pid first, each step on its own: a lease whose pid write is
-        # skipped because an earlier step raised reads as pid-less and is
-        # reclaimed after the grace while its holder is live (round-5 review I1).
-        try:
-            (lease / "pid").write_text(f"{os.getpid()}\n")
-        except Exception:  # noqa: BLE001 — a half-written lease reads as free, which is correct
-            pass
-        for target, mode in ((lease / "pid", LEASE_FILE_MODE), (lease, LEASE_DIR_MODE)):
+            # The pid first, each step on its own: a lease whose pid write is
+            # skipped because an earlier step raised reads as pid-less and is
+            # reclaimed after the grace while its holder is live (round-5 review I1).
             try:
-                target.chmod(mode)  # umask 077 would hide a live holder from the next run
-            except Exception:  # noqa: BLE001 — unreadable to peers reads as HELD, which is safe
+                (lease / "pid").write_text(f"{os.getpid()}\n")
+            except Exception:  # noqa: BLE001 — a half-written lease reads as free, which is correct
                 pass
-        try:
-            _write_shared(lease / "label", f"{label}\n")
-        except Exception:  # noqa: BLE001
-            pass
-
-        # Logged here, after the claim and the populate, never inside the
-        # reclaim window. A pass that set a corpse aside and WON the re-claim
-        # reports it (with the whole wait); otherwise a wait reports the holder
-        # it waited on.
-        if gone is not None:
-            record_event(RESOURCE, "stale_reclaimed", time.monotonic() - started,
-                         holder_pid=gone[0], holder_label=gone[1])
-        elif contended:
-            record_event(RESOURCE, "acquired_after_wait", time.monotonic() - started,
-                         holder_pid=seen[0], holder_label=seen[1])
-
-        # Descendants inherit this and skip the lease entirely.
-        os.environ[HELD_BY_ENV] = str(os.getpid())
-
-        def _release() -> None:
-            os.environ.pop(HELD_BY_ENV, None)
+            for target, mode in ((lease / "pid", LEASE_FILE_MODE), (lease, LEASE_DIR_MODE)):
+                try:
+                    target.chmod(mode)  # umask 077 would hide a live holder from the next run
+                except Exception:  # noqa: BLE001 — unreadable to peers reads as HELD, which is safe
+                    pass
             try:
-                for child in lease.iterdir():
-                    child.unlink(missing_ok=True)
-                lease.rmdir()
-            except Exception:  # noqa: BLE001 — a release that cannot finish leaves a lease its pid disowns
+                _write_shared(lease / "label", f"{label}\n")
+            except Exception:  # noqa: BLE001
                 pass
 
-        return _release
+            # Logged here, after the claim and the populate, never inside the
+            # reclaim window. A pass that set a corpse aside and WON the re-claim
+            # reports it (with the whole wait); otherwise a wait reports the holder
+            # it waited on.
+            if gone is not None:
+                record_event(RESOURCE, "stale_reclaimed", elapsed(),
+                             holder_pid=gone[0], holder_label=gone[1])
+            elif contended:
+                record_event(RESOURCE, "acquired_after_wait", elapsed(),
+                             holder_pid=seen[0], holder_label=seen[1])
+
+            # Descendants inherit this and skip the lease entirely.
+            os.environ[HELD_BY_ENV] = str(os.getpid())
+
+            def _release() -> None:
+                os.environ.pop(HELD_BY_ENV, None)
+                try:
+                    for child in lease.iterdir():
+                        child.unlink(missing_ok=True)
+                    lease.rmdir()
+                except Exception:  # noqa: BLE001 — a release that cannot finish leaves a lease its pid disowns
+                    pass
+
+            return _release
+    finally:
+        _drop_ticket(ticket)

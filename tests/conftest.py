@@ -312,6 +312,11 @@ def _selected_t2_substrate_boots_engine() -> bool:
 #: does not hold one (a worker, a non-engine run, or a box that let it pass).
 _suite_lease_release = None
 
+#: True once this process had to WAIT for the suite lease (set by the progress line).
+#: The worker clamp read the box's shared-memory headroom before that wait, so a run
+#: that queued re-reads it afterwards (``_reclamp_xdist_workers_after_lease_wait``).
+_suite_lease_waited = False
+
 
 #: Explicit opt-out for a run that must go ahead even though the lease cannot
 #: be taken. Never set by CI; the default is to fail closed.
@@ -321,6 +326,10 @@ _SUITE_LEASE_UNGUARDED_ENV = "NX_SUITE_LEASE_UNGUARDED"
 #: Explicit opt-out of the laptop heavy-run guard, for a run that needs claude, bd or
 #: this machine's credentials and so cannot go through ``lab-remote``.
 _LOCAL_HEAVY_ENV = "NX_LOCAL_HEAVY"
+
+#: Optional free text beside ``NX_LOCAL_HEAVY=1``: why this run could not go through
+#: ``lab-remote``. It is logged with the ``local_heavy`` event and never required.
+_LOCAL_HEAVY_REASON_ENV = "NX_LOCAL_HEAVY_REASON"
 
 #: A ``lab-run`` grant exports these (``tests/_tmp_root.py`` reads LAB_CPUS the same
 #: way); ``lab-remote``'s host copy also sets LAB_REMOTE.
@@ -360,7 +369,12 @@ def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -
     boot it is not known until they run), and xdist will run more than one worker. A scoped
     serial run, ``NX_TEST_T2_SUBSTRATE=none`` and a nested pytest are never
     refused. ``NX_LOCAL_HEAVY=1`` opts out for a run that needs claude, bd or the
-    laptop's credentials, and says so. Controller-only, like ``_take_suite_lease``.
+    laptop's credentials, says so on stderr and leaves a ``local_heavy`` line (with
+    the workers and an optional ``NX_LOCAL_HEAVY_REASON``) in the lease events log,
+    so a bypass is countable afterwards (nexus-74bc6). ``--collect-only`` is never
+    refused: it runs no test, so the engine cannot boot. A ``-n`` that came from
+    ``PYTEST_ADDOPTS`` is part of the ``lab-remote`` line the refusal prints.
+    Controller-only, like ``_take_suite_lease``.
     """
     import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
 
@@ -370,6 +384,8 @@ def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -
         return
     if not _selected_t2_substrate_boots_engine():
         return
+    if getattr(getattr(config, "option", None), "collectonly", False):
+        return  # collects only: no fixture runs, so no engine boots
     try:
         workers = _xdist_worker_count(config)
         if workers is None or workers <= 1:
@@ -384,11 +400,23 @@ def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -
                 "against the engine substrate on this machine, outside a lab-run grant\n"
             )
             _sys.stderr.flush()
+            extra: dict[str, object] = {"workers": workers}
+            reason = (env.get(_LOCAL_HEAVY_REASON_ENV) or "").strip()
+            if reason:
+                extra["reason"] = reason
+            _suite_lease.record_event(_suite_lease.RESOURCE, "local_heavy", 0, extra=extra)
             return
         import shlex  # noqa: PLC0415
 
         params = getattr(config, "invocation_params", None)
         args = list(getattr(params, "args", None) or _sys.argv[1:])
+        # pytest reads PYTEST_ADDOPTS before the command line, and lab-remote does not carry
+        # the environment: an `-n` set there is part of the run being asked for.
+        addopts = env.get("PYTEST_ADDOPTS") or ""
+        try:
+            args = shlex.split(addopts) + args
+        except ValueError:
+            args = addopts.split() + args
     except Exception as exc:  # noqa: BLE001 — the guard must never break collection on its own bug
         _sys.stderr.write(f"laptop heavy-run guard skipped on its own error: {exc!r}\n")
         return
@@ -434,7 +462,8 @@ def _take_suite_lease(*, platform: str | None = None) -> None:
     Controller-only, like the gate above: xdist workers spawn after this
     returns and must not each take a lease they would then each release.
     """
-    global _suite_lease_release
+    global _suite_lease_release, _suite_lease_waited
+    _suite_lease_waited = False
     if not _selected_t2_substrate_boots_engine():
         return
     try:
@@ -513,6 +542,8 @@ def _announce_suite_lease_wait(who: str, waited_s: float, budget_s: float) -> No
     """One progress line for a queued run; also what keeps watched_pytest.py's stall clock from firing."""
     import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
 
+    global _suite_lease_waited
+    _suite_lease_waited = True
     _sys.stderr.write(
         f"suite lease: waiting for {who}; waited {int(waited_s)} s of {int(budget_s)} s, "
         "will start when it finishes\n"
@@ -669,9 +700,18 @@ def _preflight_engine_substrate() -> None:
 _is_controller_or_serial: bool = False
 
 
-def _clamp_xdist_workers(config) -> None:
+_REQUESTED_WORKERS_ATTR = "_nexus_requested_workers"
+
+
+def _clamp_xdist_workers(config, *, announce: bool = True) -> None:
     """Hold xdist parallelism inside the box's shared-memory budget (nexus-6qp25)
-    and inside the run's memory grant (nexus-vo9qn)."""
+    and inside the run's memory grant (nexus-vo9qn).
+
+    The count the user asked for is kept on the config the first time, so a run
+    that queued for the suite lease can ask again from that number
+    (``_reclamp_xdist_workers_after_lease_wait``) instead of from an already
+    reduced one. ``announce=False`` is that second call: it prints no clamp notes.
+    """
     try:
         requested = getattr(config.option, "numprocesses", None)
     except Exception:  # noqa: BLE001 — never let the cap break collection
@@ -679,6 +719,11 @@ def _clamp_xdist_workers(config) -> None:
     if not isinstance(requested, int):
         # "auto"/"logical" unresolved (xdist absent), or no -n at all.
         return
+    if getattr(config, _REQUESTED_WORKERS_ATTR, None) is None:
+        try:
+            setattr(config, _REQUESTED_WORKERS_ATTR, requested)
+        except Exception:  # noqa: BLE001 — a config that refuses the attribute just never re-clamps
+            pass
     try:
         from tests._xdist_cap import (
             clamp_numprocesses,
@@ -696,13 +741,46 @@ def _clamp_xdist_workers(config) -> None:
                 requested = value
                 # Printed, not logged: the operator needs to see this before a
                 # 15-minute run, and log level here is not yet configured.
-                print(f"\n[nexus] {note}\n")
+                if announce:
+                    print(f"\n[nexus] {note}\n")
         mem_cap = effective_memory_cap()
         if mem_cap is not None and requested > mem_cap:
             set_worker_count(config.option, mem_cap)
-            print(f"\n[nexus] {memory_clamp_note(requested=requested, cap=mem_cap)}\n")
+            if announce:
+                print(f"\n[nexus] {memory_clamp_note(requested=requested, cap=mem_cap)}\n")
     except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
         return
+
+
+def _reclamp_xdist_workers_after_lease_wait(config, *, platform: str | None = None, env=None) -> None:
+    """Re-read the worker caps once the suite lease wait is over (nexus-74bc6).
+
+    ``_clamp_xdist_workers`` runs in ``pytest_configure``, before the lease: while
+    a peer's suite held its clusters it saw little SysV headroom and cut this run's
+    workers, and the run then queued for that peer and started, after the peer
+    left, still throttled. Workers are spawned after ``pytest_sessionstart``'s
+    gates, so the count can still be changed here. Only a run that actually waited
+    does this. The laptop guard looks again if the count went UP, because it
+    judged the run on the lower number.
+    """
+    if not _suite_lease_waited:
+        return
+    original = getattr(config, _REQUESTED_WORKERS_ATTR, None)
+    if not isinstance(original, int):
+        return
+    before = _xdist_worker_count(config)
+    try:
+        from tests._xdist_cap import set_worker_count  # noqa: PLC0415 — configure-time helper
+
+        set_worker_count(config.option, original)
+    except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
+        return
+    _clamp_xdist_workers(config, announce=False)
+    after = _xdist_worker_count(config)
+    if after != before:
+        print(f"\n[nexus] suite lease wait over: xdist workers {before} -> {after} (headroom re-read)\n")
+        if isinstance(before, int) and isinstance(after, int) and after > before:
+            _refuse_heavy_laptop_run(config, platform=platform, env=env)
 
 
 def _begin_pg_root_session(config) -> None:
@@ -752,6 +830,25 @@ def pytest_unconfigure(config):
         return
 
 
+def _run_session_start_gates(config) -> None:
+    """The controller's gates, in order; any refusal after the lease is taken gives it back.
+
+    pytest does not call ``pytest_sessionfinish`` for an ``Exit`` raised in
+    ``pytest_sessionstart``, so a refusal after ``_take_suite_lease`` (the engine
+    preflight, a laptop re-check) used to leave a lease its dead pid disowned: the
+    next run reclaimed it and logged a spurious ``stale_reclaimed`` (nexus-74bc6).
+    """
+    try:
+        _refuse_heavy_laptop_run(config)
+        _gate_on_build_lease()
+        _take_suite_lease()
+        _reclamp_xdist_workers_after_lease_wait(config)
+        _preflight_engine_substrate()
+    except pytest.exit.Exception:
+        _release_suite_lease()
+        raise
+
+
 def pytest_sessionstart(session):
     """Snapshot fixture cache files in ~/.config/nexus/ at session
     start so ``pytest_sessionfinish`` can detect leaks introduced
@@ -786,10 +883,7 @@ def pytest_sessionstart(session):
     if _is_controller_or_serial:
         _capture_real_manager_env()
     if _is_controller_or_serial:
-        _refuse_heavy_laptop_run(session.config)
-        _gate_on_build_lease()
-        _take_suite_lease()
-        _preflight_engine_substrate()
+        _run_session_start_gates(session.config)
 
     # nexus-pfuns: FENCE $HOME before any test runs. The gates were fenced
     # first; this suite was not, and it runs with the operator's real home.
