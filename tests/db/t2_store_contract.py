@@ -445,6 +445,9 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # the read surface's first and only home, not a port of a SQLite
         # reader, so it needs the supplemental entry.
         'query_nx_answer_runs': ['since', 'limit'],
+        # nexus-1ss4n: the keyset walk behind `nx answer-runs --all`; same no-twin shape as
+        # query_nx_answer_runs (a read added long after the SQLite stores were deleted).
+        'query_nx_answer_runs_all': ['since'],
         # RDR-203 D1/P3 (nexus-dt2tu.3): POST /v1/telemetry/nx_answer_runs/complete
         # is a brand-new route added long after every SQLite store was
         # deleted (RDR-158 P4) — service-mode-only by construction, same

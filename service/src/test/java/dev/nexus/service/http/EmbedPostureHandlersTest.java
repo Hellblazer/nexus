@@ -323,6 +323,15 @@ class EmbedPostureHandlersTest {
     }
 
     @Test
+    void version_throughTheRealHandler_advertisesTheRunsBeforeIdCapability() throws Exception {
+        // nexus-1ss4n: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves
+        // the handler's body actually calls it.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("nx_answer_runs_before_id_supported").asBoolean()).isTrue();
+    }
+
+    @Test
     void version_throughTheRealHandler_advertisesTheGraphScopeFilterCapability() throws Exception {
         // nexus-jypmj.1.13: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this
         // proves the handler's body actually calls it.

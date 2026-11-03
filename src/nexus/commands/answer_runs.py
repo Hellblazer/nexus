@@ -939,6 +939,26 @@ def _add_predicted_costs(by_plan: dict[str, dict[str, Any]], telemetry_store: An
     help="Max rows in the listed page (does not affect the whole-set aggregates).",
 )
 @click.option(
+    "--before-id", "before_id", type=click.IntRange(min=1), default=None,
+    help=(
+        "List only runs with id below N, highest id first (nexus-1ss4n). The engine caps a page at 300 "
+        "rows, so --limit alone cannot reach older runs: take the smallest id of the page you have and "
+        "pass it here for the next one. Ids do not move while runs are recorded, so pages neither skip nor "
+        "repeat. The totals and averages stay those of the whole --since-filtered set, not of this "
+        "window. Needs an engine that advertises nx_answer_runs_before_id_supported; an older engine "
+        "would ignore the bound and return the newest rows again, so the command refuses (exit 1) instead."
+    ),
+)
+@click.option(
+    "--all", "all_rows", is_flag=True, default=False,
+    help=(
+        "List EVERY run in the --since window, newest id first, paging the engine 300 rows at a time "
+        "(nexus-1ss4n). Replaces --limit (not combinable with it, --before-id or --derive-budget). "
+        "The totals and averages are the whole --since-filtered set, as without --all. Same engine "
+        "requirement and refusal as --before-id."
+    ),
+)
+@click.option(
     "--steps", "want_steps", is_flag=True, default=False,
     help=(
         "Also fetch and render the per-step breakdown (by operator, by "
@@ -984,9 +1004,13 @@ def _add_predicted_costs(by_plan: dict[str, dict[str, Any]], telemetry_store: An
     "--json", "json_out", is_flag=True, default=False,
     help="Emit structured JSON instead of the human table.",
 )
+@click.pass_context
 def answer_runs_cmd(
+    ctx: click.Context,
     since: str | None,
     limit: int,
+    before_id: int | None,
+    all_rows: bool,
     want_steps: bool,
     include_failed: bool,
     derive_budget: bool,
@@ -1037,6 +1061,13 @@ def answer_runs_cmd(
     coverage ``unavailable`` it is counted in the same classes, or as
     ``non_answer/no_usable_answer`` when the prose was no usable answer.
     """
+    # nexus-1ss4n: option conflicts are usage errors, raised before any read.
+    if all_rows and before_id is not None:
+        raise click.UsageError("--all starts from the newest run and cannot be combined with --before-id")
+    if all_rows and ctx.get_parameter_source("limit") == click.core.ParameterSource.COMMANDLINE:
+        raise click.UsageError("--all lists every run; it cannot be combined with --limit")
+    if derive_budget and (all_rows or before_id is not None):
+        raise click.UsageError("--derive-budget reads its own window and cannot be combined with --all or --before-id")
     # nexus-spbay: validate/normalize --since BEFORE the service try-block —
     # a bad value must fail as a usage error naming the value, never fall
     # into the except arm below and masquerade as a service-read failure
@@ -1061,10 +1092,26 @@ def answer_runs_cmd(
                 json_out=json_out,
             )
             return
-        result = store.query_nx_answer_runs(since=since, limit=limit, include_steps=want_steps)
+        if all_rows:
+            result = store.query_nx_answer_runs_all(since=since, include_steps=want_steps)
+            limit = len(result.get("rows") or [])
+        elif before_id is not None:
+            result = store.query_nx_answer_runs(
+                since=since, limit=limit, include_steps=want_steps, before_id=before_id,
+            )
+        else:
+            result = store.query_nx_answer_runs(since=since, limit=limit, include_steps=want_steps)
     except Exception as exc:  # noqa: BLE001 — degrade to the honest failure-shaped message, never a silent 0
         _log.debug("answer_runs_service_read_failed", exc_info=True)
-        from nexus.db.t2.http_telemetry_store import nx_answer_runs_read_failure_message  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+        from nexus.db.t2.http_telemetry_store import (  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+            AnswerRunsPagingUnsupportedError,
+            nx_answer_runs_read_failure_message,
+        )
+
+        if isinstance(exc, AnswerRunsPagingUnsupportedError):
+            # nexus-1ss4n: asked to page, engine cannot. Never the zero-exit "(no runs)" degrade: a paging
+            # caller scripting on the exit status must see the refusal.
+            raise click.ClickException(str(exc)) from exc
 
         msg = nx_answer_runs_read_failure_message(exc)
         if json_out:
@@ -1075,7 +1122,7 @@ def answer_runs_cmd(
     _emit_report(
         result, since=since, limit=limit, json_out=json_out,
         want_steps=want_steps, include_failed=include_failed,
-        telemetry_store=store,
+        telemetry_store=store, before_id=before_id, all_rows=all_rows,
     )
 
 
@@ -1121,6 +1168,8 @@ def _emit_report(
     want_steps: bool = False,
     include_failed: bool = False,
     telemetry_store: Any = None,
+    before_id: int | None = None,
+    all_rows: bool = False,
 ) -> None:
     rows = result.get("rows") or []
     # RDR-232 Phase 3 (nexus-jypmj.3.3): partial answers are their own bucket, taken off before the four-way split.
@@ -1196,6 +1245,9 @@ def _emit_report(
             "since": since,
             "limit": limit,
             "captured_at": datetime.now(UTC).isoformat(),
+            # nexus-1ss4n: present only when the keyset options were used, so the default envelope is unchanged.
+            **({"before_id": before_id} if before_id is not None else {}),
+            **({"all": True} if all_rows else {}),
             **result,
             # RDR-196 .p1e: PAGE-scoped (of the listed rows, not the
             # whole --since-filtered set the `latency_buckets`/
@@ -1231,6 +1283,8 @@ def _emit_report(
 
     total = result.get("total", 0)
     scope_label = f"since {since}" if since else "all time"
+    if before_id is not None:
+        scope_label += f", listing ids below {before_id}"
     click.echo(f"nx_answer_runs ({scope_label}):")
     if total == 0:
         click.echo("  (no runs)")
@@ -1243,6 +1297,11 @@ def _emit_report(
     oldest = result.get("oldest_created_at") or "<unknown>"
 
     click.echo(f"  total: {total}")
+    if before_id is not None:
+        click.echo(
+            "  (the totals and averages below cover the whole --since-filtered set, "
+            f"not only the ids below {before_id})"
+        )
     click.echo(f"  oldest: {oldest}")
     click.echo(
         f"  plan-match hit: {hit}  inline-planner fallback: {fallback}"
@@ -1398,9 +1457,12 @@ def _emit_report(
                     )
 
     rows_page = result.get("rows") or []
+    if before_id is not None and not rows_page:
+        click.echo()
+        click.echo(f"  (no runs with id below {before_id}: the start of the window)")
     if rows_page:
         click.echo()
-        click.echo(f"  last {len(rows_page)} run(s):")
+        click.echo(f"  {'all' if all_rows else 'last'} {len(rows_page)} run(s):")
         for r in rows_page:
             plan_id = r.get("plan_id")
             # plan_id 0 is the ad-hoc Match sentinel every successful

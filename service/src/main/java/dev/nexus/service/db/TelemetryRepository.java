@@ -1528,11 +1528,36 @@ public final class TelemetryRepository {
      */
     public Map<String, Object> queryNxAnswerRuns(String tenant, String sinceIso, int limit,
                                                   boolean includeSteps) {
+        return queryNxAnswerRuns(tenant, sinceIso, limit, includeSteps, null);
+    }
+
+    /**
+     * {@code beforeId} overload (nexus-1ss4n): the keyset bound that lets a reader page past the
+     * handler's 300-row clamp. When non-null, the page holds only rows with {@code id < beforeId} and
+     * is ordered by {@code id} descending, the key the bound is on. A caller pages by passing the
+     * smallest {@code id} of the previous page as the next {@code beforeId}, and stops on an empty page.
+     * Keyset on {@code id} is stable while rows are inserted (a new row takes a higher id and lands
+     * above every cursor); an offset is not.
+     *
+     * <p>The order switches to {@code id} because {@code created_at} is client-supplied (imports and
+     * backfills) and need not rise with {@code id}: a {@code created_at} order under an {@code id}
+     * bound would skip or repeat rows between pages. With {@code beforeId == null} the order is the
+     * original {@code created_at DESC, id DESC}, so every pre-existing caller is unchanged.
+     *
+     * <p>The aggregates ({@code total}, {@code oldest_created_at}, {@code hit_count}, ...) are
+     * computed under the {@code since} filter alone, never under {@code beforeId}: they describe the
+     * whole since-filtered set on every page, the meaning they had before the bound existed. A caller
+     * summing page sizes gets the same figure as {@code total}.
+     */
+    public Map<String, Object> queryNxAnswerRuns(String tenant, String sinceIso, int limit,
+                                                  boolean includeSteps, Long beforeId) {
         return tenantScope.withTenant(tenant, ctx -> {
             var cond = noCondition();
             if (sinceIso != null && !sinceIso.isBlank()) {
                 cond = cond.and(NX_ANSWER_RUNS.CREATED_AT.ge(parseSinceFilter(sinceIso)));
             }
+            // Aggregates keep `cond` (the since set); only the row page is bounded.
+            var pageCond = beforeId != null ? cond.and(NX_ANSWER_RUNS.ID.lt(beforeId)) : cond;
 
             var agg = ctx.select(
                     count().as("total"),
@@ -1589,8 +1614,10 @@ public final class TelemetryRepository {
                     NX_ANSWER_RUNS.RUN_SUMMARY,
                     NX_ANSWER_RUNS.OUT_OF_STEP_COST_USD)
                 .from(NX_ANSWER_RUNS)
-                .where(cond)
-                .orderBy(NX_ANSWER_RUNS.CREATED_AT.desc(), NX_ANSWER_RUNS.ID.desc())
+                .where(pageCond)
+                .orderBy(beforeId != null
+                    ? new org.jooq.SortField<?>[] { NX_ANSWER_RUNS.ID.desc() }
+                    : new org.jooq.SortField<?>[] { NX_ANSWER_RUNS.CREATED_AT.desc(), NX_ANSWER_RUNS.ID.desc() })
                 .limit(limit)
                 .fetch();
 

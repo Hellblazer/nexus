@@ -35,6 +35,7 @@ import java.util.function.Supplier;
  *  "process_start_time":"2026-09-12T09:00:00Z",
  *  "nx_answer_run_complete_supported":true,
  *  "nx_answer_run_summary_supported":true,
+ *  "nx_answer_runs_before_id_supported":true,
  *  "catalog_graph_scope_filter_supported":true,
  *  "catalog_manifest_row_limit_supported":true,
  *  "nx_answer_out_of_step_cost_supported":true,
@@ -339,6 +340,21 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-1ss4n capability advertisement: does {@code GET /v1/telemetry/nx_answer_runs/query} take a
+     * {@code before_id} keyset bound (rows with {@code id < before_id}, id descending)?
+     *
+     * <p>Its own flag, for the reason {@link #appendNxAnswerRunSummaryCapabilityField} gives, with a
+     * sharper edge: an engine without the bound ignores the unknown query parameter and answers HTTP
+     * 200 with the newest page again, so a client paging by {@code before_id} against it would loop on,
+     * or read as complete, a window it never moved. The client refuses to page unless this is a JSON
+     * {@code true}. Like every new {@code /version} field it stays invisible to cloud clients until the
+     * public conexus edge allowlists it (engine-release pre-tag check 3e).
+     */
+    static void appendNxAnswerRunsBeforeIdCapabilityField(StringBuilder body) {
+        body.append(",\"nx_answer_runs_before_id_supported\":true");
+    }
+
+    /**
      * RDR-232 section 3 (nexus-jypmj.1.13) capability advertisement: does {@code POST /v1/catalog/traverse}
      * apply an optional {@code scope_filter} to the walk BEFORE its 500-node cut, and answer with a
      * {@code scope_filter} marker?
@@ -617,6 +633,7 @@ public final class VersionHandler implements HttpHandler {
         appendNxAnswerStepsCapabilityField(body);
         // RDR-232 P3 (nexus-jypmj.3.4): its own flag, true on any engine with the run_summary column.
         appendNxAnswerRunSummaryCapabilityField(body);
+        appendNxAnswerRunsBeforeIdCapabilityField(body);
         // RDR-232 s3 (nexus-jypmj.1.13): the traverse scope predicate that runs before the node cut.
         appendCatalogGraphScopeFilterCapabilityField(body);
         // nexus-jypmj.18: depth and best role of every node of a scoped traverse, relay-proof.

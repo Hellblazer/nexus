@@ -1919,6 +1919,55 @@ class TelemetryRepositoryTest {
     }
 
     @Test
+    void queryNxAnswerRuns_beforeId_keysetOnIdEvenWhenCreatedAtDisagreesWithInsertionOrder() {
+        // nexus-1ss4n: created_at is client-supplied (imports, backfills), so it need not rise with id.
+        // The keyset page orders by id, the key it bounds on: a created_at order here would skip or
+        // repeat rows between pages. Rows are written with created_at DEscending against id.
+        String tenant = "nar-keyset-" + System.nanoTime();
+        for (int i = 0; i < 5; i++) {
+            repo.importNxAnswerRunRow(tenant, "ks-" + i, null, null,
+                0, "a", 0.0, 1_000L, "2026-08-01T00:0" + (4 - i) + ":00Z");
+        }
+
+        // Unbounded call keeps its created_at-newest-first order: the pre-existing behaviour.
+        @SuppressWarnings("unchecked")
+        var unbounded = (List<Map<String, Object>>) repo.queryNxAnswerRuns(tenant, "", 100).get("rows");
+        assertThat(unbounded.get(0).get("question")).isEqualTo("ks-0");
+
+        var seen = new java.util.ArrayList<String>();
+        Long cursor = Long.MAX_VALUE;
+        while (true) {
+            @SuppressWarnings("unchecked")
+            var page = (List<Map<String, Object>>) repo.queryNxAnswerRuns(tenant, "", 2, false, cursor).get("rows");
+            if (page.isEmpty()) break;
+            for (var r : page) seen.add((String) r.get("question"));
+            cursor = ((Number) page.get(page.size() - 1).get("id")).longValue();
+        }
+        assertThat(seen).as("every row exactly once, highest id first")
+            .containsExactly("ks-4", "ks-3", "ks-2", "ks-1", "ks-0");
+    }
+
+    @Test
+    void queryNxAnswerRuns_beforeId_composesWithSinceAndKeepsAggregatesOverTheSinceSet() {
+        String tenant = "nar-keyset-since-" + System.nanoTime();
+        repo.importNxAnswerRunRow(tenant, "old", null, null, 0, "a", 0.0, 1_000L, "2020-01-01T00:00:00Z");
+        repo.importNxAnswerRunRow(tenant, "new-1", null, null, 0, "a", 0.0, 1_000L, "2099-01-01T00:00:00Z");
+        repo.importNxAnswerRunRow(tenant, "new-2", null, null, 0, "a", 0.0, 1_000L, "2099-01-02T00:00:00Z");
+
+        @SuppressWarnings("unchecked")
+        var first = (List<Map<String, Object>>) repo.queryNxAnswerRuns(tenant, "2030-01-01T00:00:00Z", 1, false, Long.MAX_VALUE).get("rows");
+        assertThat(first).extracting(r -> r.get("question")).containsExactly("new-2");
+        long bound = ((Number) first.get(0).get("id")).longValue();
+
+        var out = repo.queryNxAnswerRuns(tenant, "2030-01-01T00:00:00Z", 10, false, bound);
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) out.get("rows");
+        assertThat(rows).as("since still filters inside the window: 'old' never appears")
+            .extracting(r -> r.get("question")).containsExactly("new-1");
+        assertThat(out.get("total")).as("total is the whole since-filtered set, not the bounded window").isEqualTo(2);
+    }
+
+    @Test
     void queryNxAnswerRuns_sinceFilterExcludesOlderRows() {
         String tenant = "nar-since-" + System.nanoTime();
         repo.importNxAnswerRunRow(tenant, "old", null, null,

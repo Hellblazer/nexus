@@ -5403,7 +5403,7 @@ In service mode the counts are read from the engine via `GET /v1/telemetry/tier_
 ## nx answer-runs
 
 ```
-nx answer-runs [--since ISO8601] [--limit N] [--steps] [--include-failed] [--derive-budget] [--json]
+nx answer-runs [--since ISO8601] [--limit N | --before-id N | --all] [--steps] [--include-failed] [--derive-budget] [--json]
 ```
 
 Reads the `nx_answer_runs` telemetry table: every `nx_answer` MCP call
@@ -5415,6 +5415,32 @@ session_id column, so unlike `nx tier-status` there is no per-session
 default — `--since` bounds the window (accepts `2026-08-01`, `2026-08-01T12:00:00`, or full offset forms; date-only means midnight UTC — nexus-spbay), `--limit` caps the listed page
 (default 20, does not affect the whole-set aggregates below), `--json`
 emits structured output.
+
+**Reading past the newest 300 runs (nexus-1ss4n).** The engine caps a page at
+300 rows, so `--limit` alone only ever sees the newest 300 of a `--since`
+window. `--before-id N` lists the runs with id below N, highest id first, and
+`--all` pages the whole window for you, 300 rows per request, to its oldest
+run (`--all` replaces `--limit` and cannot be combined with `--limit`,
+`--before-id` or `--derive-budget`). To page by hand, pass the smallest `id` of
+the page you have as the next `--before-id`; an empty page is the start of the
+window. Ids do not move while runs are recorded (a new run takes a higher id
+than every cursor), so the pages neither skip nor repeat, which an offset could
+not promise. Under `--before-id` and `--all` the rows are ordered by id; an
+unbounded call keeps its `created_at` order (the two agree for runs the engine
+stamped itself and can differ for imported ones). **The whole-set aggregates
+below do not change meaning: they cover the whole `--since`-filtered set on
+every page, never only the bounded window**, so a `--before-id` page reports the
+same `total` as the first page, and `--json` echoes `before_id` (or `all: true`)
+beside `since` and `limit` so a snapshot says which window its rows came from.
+Paging needs an engine that advertises `nx_answer_runs_before_id_supported` on
+`GET /version` (the engine release after the one that carries nexus-1ss4n; none is cut yet). Against an engine
+without it, both flags refuse with exit 1 and a message naming the flag: an older engine ignores
+the unknown `before_id` and would return the newest 300 again with HTTP 200. The
+public cloud edge trims `/version` to an allowlist, so a cloud client also reads
+the capability as absent, and refuses, until conexus lists
+`nx_answer_runs_before_id_supported` (engine-release pre-tag check 3e). Python:
+`HttpTelemetryStore.query_nx_answer_runs(before_id=N)` for one page and
+`query_nx_answer_runs_all()` for the walk.
 
 Reports, computed by the ENGINE over the WHOLE `--since`-filtered set
 independent of `--limit`, **including degenerate and failed rows**: total

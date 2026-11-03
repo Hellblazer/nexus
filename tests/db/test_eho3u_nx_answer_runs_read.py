@@ -258,3 +258,37 @@ def test_answer_runs_cli_reports_recorded_runs(
     assert "plan-match hit" in result.output
     assert "inline-planner fallback" in result.output
     assert tag[:60] in result.output or tag in result.output
+
+
+# ── nexus-1ss4n: the keyset bound against the real engine ─────────────────
+
+
+def test_keyset_walk_reaches_past_the_300_row_clamp(db: T2Database) -> None:
+    """The bead's own symptom: more than 300 runs in the window and only the newest 300 readable.
+
+    Records 305 runs, walks them with ``query_nx_answer_runs_all`` and checks the whole set comes back once,
+    highest id first, that no single request exceeded the clamp, and that the aggregates are the whole-set ones.
+    """
+    tag = _unique_question("keyset")
+    for i in range(305):
+        db.telemetry.record_nx_answer_run(
+            question=f"{tag}-{i:03d}", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=0.0, duration_ms=1_000,
+        )
+
+    assert db.telemetry._supports_nx_answer_runs_before_id() is True
+
+    unbounded = db.telemetry.query_nx_answer_runs(limit=10_000)
+    assert len(unbounded["rows"]) == 300, "the clamp is unchanged: an unbounded read still stops at 300"
+
+    walked = db.telemetry.query_nx_answer_runs_all()
+    mine = [r for r in walked["rows"] if str(r["question"]).startswith(tag)]
+    assert len(mine) == 305, "every run in the window, including the five past the clamp"
+    ids = [r["id"] for r in walked["rows"]]
+    assert ids == sorted(ids, reverse=True) and len(set(ids)) == len(ids)
+    assert walked["total"] >= 305
+    assert walked["total"] == unbounded["total"], "aggregates cover the whole set on every page"
+
+    page = db.telemetry.query_nx_answer_runs(limit=5, before_id=ids[10])
+    assert [r["id"] for r in page["rows"]] == ids[11:16], "before_id is exclusive and starts at the next id down"
+    assert page["total"] == unbounded["total"]

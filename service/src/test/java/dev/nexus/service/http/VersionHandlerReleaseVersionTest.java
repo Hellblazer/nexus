@@ -160,6 +160,17 @@ class VersionHandlerReleaseVersionTest {
             .doesNotContain("run_summary");
     }
 
+    // ── nexus-1ss4n: the nx_answer_runs keyset bound ──
+
+    @Test
+    void versionAdvertisesTheRunsBeforeIdBoundAsItsOwnFlag() {
+        // Its own flag: an engine without the bound ignores an unknown query parameter and returns the
+        // newest page again, so a client must know before it asks to page.
+        var body = new StringBuilder();
+        VersionHandler.appendNxAnswerRunsBeforeIdCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"nx_answer_runs_before_id_supported\":true");
+    }
+
     // ── RDR-232 (nexus-jypmj.1.13): the engine pre-cap graph-scope filter ──
 
     @Test

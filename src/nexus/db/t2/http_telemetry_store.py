@@ -79,9 +79,15 @@ from typing import Any
 
 import structlog
 
-from nexus.db.limits import QUOTAS
+from nexus.db.limits import MAX_QUERY_RESULTS, QUOTAS
 
 _log = structlog.get_logger(__name__)
+
+
+class AnswerRunsPagingUnsupportedError(RuntimeError):
+    """``nx_answer_runs`` cannot be paged by ``before_id`` against this engine (nexus-1ss4n): it does not
+    advertise ``nx_answer_runs_before_id_supported``, or it advertises it and ignored the bound. Raised
+    instead of returning the newest page again, which a pager reads as a window it never moved."""
 
 #: Latch for ``nx_answer_out_of_step_cost_unsupported_by_engine`` (nexus-jypmj.5/.9): module-level because the
 #: store is built fresh per call in production, so an instance attribute would latch nothing.
@@ -677,6 +683,18 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         return self._version_capabilities().get("nx_answer_run_summary_supported") is True
 
+    def _supports_nx_answer_runs_before_id(self) -> bool:
+        """nexus-1ss4n: does ``GET /v1/telemetry/nx_answer_runs/query`` on this engine take a ``before_id``
+        keyset bound (``GET /version``'s ``nx_answer_runs_before_id_supported``)?
+
+        The strict reading, only a JSON ``true``, with a sharper reason than the other flags: an engine
+        without the bound ignores the unknown parameter and answers HTTP 200 with the newest page again, so a
+        client paging against it would repeat that page or read it as the whole window. Absent, non-boolean,
+        non-2xx and transport failure all read as unsupported. The public cloud edge trims ``/version`` to an
+        allowlist, so until it lists this flag a cloud client reads unsupported too (engine-release pre-tag
+        check 3e). Same cached body and TTL as the other flags. NEVER raises."""
+        return self._version_capabilities().get("nx_answer_runs_before_id_supported") is True
+
     def _supports_nx_answer_out_of_step_cost(self) -> bool:
         """nexus-jypmj.5: does the engine THIS store talks to keep an ``out_of_step_cost_usd`` on the run row
         (``GET /version``'s ``nx_answer_out_of_step_cost_supported``, changeset telemetry-017-1)?
@@ -973,6 +991,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         since: str | None = None,
         limit: int = 20,
         include_steps: bool = False,
+        before_id: int | None = None,
     ) -> dict[str, Any]:
         """Read nx_answer_runs rows plus exact aggregates (nexus-eho3u).
 
@@ -991,7 +1010,25 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             since: only rows with ``created_at >= since``; ``None``/empty
                 means no time bound.
             limit: max rows in the returned page; does not affect the
-                aggregates.
+                aggregates. The engine clamps a page to 300 rows
+                (``MAX_QUERY_RESULTS``); with *before_id* a larger value is a
+                ``ValueError`` here rather than a silent engine clamp, so a pager
+                never mistakes a clamped page for a short one.
+            before_id: nexus-1ss4n, the keyset bound that reaches past the
+                newest 300 rows: only rows with ``id < before_id``, highest id
+                first. Page by passing the smallest ``id`` of the previous page and
+                stop on an empty page (:meth:`query_nx_answer_runs_all` does this).
+                Ids are stable while rows are inserted (a new run takes a higher id),
+                so the walk neither skips nor repeats; an offset would. The page
+                order under the bound is ``id`` descending, not the ``created_at``
+                order of an unbounded call (the two agree for rows the engine
+                stamped itself; they can differ for imported rows). The whole-set
+                aggregates below are NOT narrowed by it: they describe the
+                ``since``-filtered set on every page. Raises
+                :class:`AnswerRunsPagingUnsupportedError`, before any request, when
+                the engine does not advertise ``nx_answer_runs_before_id_supported``
+                (an older engine would ignore the parameter and return the newest
+                page again). Must be a positive ``int``.
             include_steps: RDR-196 .p1c-b (nexus-lme1s) — when ``True``,
                 sends ``?include_steps=true`` and each row in the returned
                 page gains a ``steps`` list (one dict per
@@ -1060,6 +1097,20 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         filter here would be a speculative field this table cannot back).
         """
         params: dict[str, Any] = {"limit": limit}
+        if before_id is not None:
+            if isinstance(before_id, bool) or not isinstance(before_id, int) or before_id < 1:
+                raise ValueError(f"before_id must be a positive int, got {before_id!r}")
+            if limit > MAX_QUERY_RESULTS:
+                raise ValueError(
+                    f"a keyset page holds at most {MAX_QUERY_RESULTS} rows (the engine clamps to it); got limit={limit}"
+                )
+            if not self._supports_nx_answer_runs_before_id():
+                raise AnswerRunsPagingUnsupportedError(
+                    "this engine does not advertise nx_answer_runs_before_id_supported on GET /version, so it "
+                    "would ignore before_id and return the newest rows again; upgrade the engine (nexus-1ss4n) "
+                    "to page past the newest 300 runs"
+                )
+            params["before_id"] = before_id
         if since:
             # nexus-spbay: normalize BEFORE the wire — see normalize_since_filter.
             params["since"] = normalize_since_filter(since)
@@ -1092,6 +1143,58 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if include_steps:
             out["steps_supported"] = self._supports_nx_answer_steps()
         return out
+
+    def query_nx_answer_runs_all(
+        self,
+        *,
+        since: str | None = None,
+        include_steps: bool = False,
+    ) -> dict[str, Any]:
+        """Every ``nx_answer_runs`` row from the newest back to the start of the *since* window (nexus-1ss4n).
+
+        Pages :meth:`query_nx_answer_runs` by ``before_id`` in ``MAX_QUERY_RESULTS``-row requests (the paging
+        rule in ``nexus.db.limits``), starting from the top of the id space, and stops on the first empty page.
+        Rows come back highest id first. The aggregates (``total``, ``hit_count``, ``avg_*``,
+        ``latency_buckets`` ...) are the first page's, which are those of the whole ``since``-filtered set,
+        the same meaning they have on an unbounded call; runs recorded while the walk is in progress take
+        higher ids than every cursor, so they are in neither the rows nor, necessarily, ``total``. ``steps_supported`` is
+        present when *include_steps* was asked for.
+
+        Raises :class:`AnswerRunsPagingUnsupportedError` when the engine does not advertise
+        ``nx_answer_runs_before_id_supported`` (no request is sent), and the same error, never an endless
+        loop, when an engine that does advertise it returns a page that does not move the cursor or a row
+        with no integer ``id``.
+        """
+        cursor = 2**63 - 1  # the top of the id space: the first page is the newest rows, by id
+        merged: dict[str, Any] | None = None
+        rows: list[Any] = []
+        while True:
+            page = self.query_nx_answer_runs(
+                since=since, limit=MAX_QUERY_RESULTS, include_steps=include_steps, before_id=cursor,
+            )
+            if merged is None:
+                merged = page
+            page_rows = page["rows"]
+            if not page_rows:
+                break
+            ids = []
+            for row in page_rows:
+                rid = row.get("id") if isinstance(row, dict) else None
+                if isinstance(rid, bool) or not isinstance(rid, int):
+                    raise AnswerRunsPagingUnsupportedError(
+                        f"an nx_answer_runs row came back with no integer id ({rid!r}); cannot page by id"
+                    )
+                ids.append(rid)
+            if max(ids) >= cursor:
+                raise AnswerRunsPagingUnsupportedError(
+                    f"the engine returned id {max(ids)} for before_id={cursor}: the bound did not advance the "
+                    "page, so the engine is ignoring before_id; stopping rather than loop"
+                )
+            rows.extend(page_rows)
+            cursor = min(ids)
+        assert merged is not None  # the loop body ran once
+        merged["rows"] = rows
+        return merged
 
     def record_hook_failure(
         self,

@@ -2205,3 +2205,140 @@ class TestNonAnswerShapes:
                                {"operator": "rank+generate", "ok": True}])
         ok, failed, handed_off, degenerate, reports = _split_four_way([row])
         assert [r["id"] for r in ok] == [706] and degenerate == {}
+
+
+class TestKeysetPaging:
+    """nexus-1ss4n: ``--before-id`` and ``--all`` reach past the engine's 300-row page."""
+
+    @staticmethod
+    def _result(ids: list[int], total: int) -> dict:
+        res = dict(_EMPTY_RESULT)
+        res["rows"] = [
+            {"id": i, "question": f"q{i}", "plan_id": None, "matched_confidence": None, "step_count": 0,
+             "final_text": "x", "cost_usd": 0.0, "duration_ms": 1000, "created_at": "2026-08-01T00:00:00Z"}
+            for i in ids
+        ]
+        res["total"] = total
+        res["fallback_count"] = total
+        res["oldest_created_at"] = "2026-08-01T00:00:00Z"
+        return res
+
+    def _patch(self, monkeypatch, store) -> None:
+        monkeypatch.setattr("nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: store)
+
+    def test_before_id_is_forwarded_and_the_default_call_does_not_carry_it(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        calls: list[dict] = []
+
+        class _Store:
+            def query_nx_answer_runs(self, *, since=None, limit=20, include_steps=False, **kw):
+                calls.append({"limit": limit, **kw})
+                return _steps_gated(self_result, include_steps)
+
+        self_result = self._result([5, 4], total=9)
+        self._patch(monkeypatch, _Store())
+        out = CliRunner().invoke(answer_runs_cmd, ["--before-id", "6", "--limit", "2", "--json"])
+        assert out.exit_code == 0, out.output
+        assert calls == [{"limit": 2, "before_id": 6}]
+        payload = json.loads(out.output)
+        assert payload["before_id"] == 6
+        assert payload["total"] == 9, "aggregates stay the whole since-filtered set, not the window"
+        calls.clear()
+        out = CliRunner().invoke(answer_runs_cmd, ["--json"])
+        assert out.exit_code == 0, out.output
+        assert calls == [{"limit": 20}], "no before_id kwarg unless asked for"
+        assert "before_id" not in json.loads(out.output)
+
+    def test_human_output_says_the_totals_are_whole_set_when_windowed(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        class _Store:
+            def query_nx_answer_runs(self, *, since=None, limit=20, include_steps=False, **kw):
+                return _steps_gated(res, include_steps)
+
+        res = self._result([5, 4], total=9)
+        self._patch(monkeypatch, _Store())
+        out = CliRunner().invoke(answer_runs_cmd, ["--before-id", "6"])
+        assert out.exit_code == 0, out.output
+        assert "ids below 6" in out.output
+        assert "whole" in out.output and "total: 9" in out.output
+
+    def test_all_lists_every_row_and_reports_the_count(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        seen: dict = {}
+
+        class _Store:
+            def query_nx_answer_runs_all(self, *, since=None, include_steps=False):
+                seen.update(since=since, include_steps=include_steps)
+                return _steps_gated(res, include_steps)
+
+            def query_nx_answer_runs(self, **kw):  # pragma: no cover - --all must not take this path
+                raise AssertionError("--all must page through query_nx_answer_runs_all")
+
+        res = self._result(list(range(614, 0, -1)), total=614)
+        self._patch(monkeypatch, _Store())
+        out = CliRunner().invoke(answer_runs_cmd, ["--all", "--since", "2026-07-25T00:00:00Z", "--json"])
+        assert out.exit_code == 0, out.output
+        assert seen == {"since": "2026-07-25T00:00:00Z", "include_steps": False}
+        payload = json.loads(out.output)
+        assert len(payload["rows"]) == 614 and payload["total"] == 614
+        assert payload["all"] is True
+        assert payload["limit"] == 614
+
+    def test_all_human_label_counts_every_run(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        class _Store:
+            def query_nx_answer_runs_all(self, *, since=None, include_steps=False):
+                return _steps_gated(res, include_steps)
+
+        res = self._result([3, 2, 1], total=3)
+        self._patch(monkeypatch, _Store())
+        out = CliRunner().invoke(answer_runs_cmd, ["--all"])
+        assert out.exit_code == 0, out.output
+        assert "all 3 run(s):" in out.output
+
+    @pytest.mark.parametrize(
+        "args, needle",
+        [
+            (["--all", "--before-id", "5"], "--before-id"),
+            (["--all", "--limit", "10"], "--limit"),
+            (["--all", "--derive-budget"], "--derive-budget"),
+            (["--before-id", "5", "--derive-budget"], "--derive-budget"),
+        ],
+    )
+    def test_conflicting_options_are_usage_errors_before_any_read(self, monkeypatch, args, needle) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        def _boom():
+            raise AssertionError("no store may be built for a usage error")
+
+        monkeypatch.setattr("nexus.db.t2.http_telemetry_store.HttpTelemetryStore", _boom)
+        out = CliRunner().invoke(answer_runs_cmd, args)
+        assert out.exit_code == 2, out.output
+        assert needle in out.output
+
+    @pytest.mark.parametrize("flags", [["--all"], ["--before-id", "7"]])
+    def test_old_engine_is_refused_loudly_with_a_nonzero_exit(self, monkeypatch, flags) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+        from nexus.db.t2.http_telemetry_store import AnswerRunsPagingUnsupportedError
+
+        class _OldEngineStore:
+            def query_nx_answer_runs(self, **kw):
+                raise AnswerRunsPagingUnsupportedError("engine lacks nx_answer_runs_before_id_supported")
+
+            query_nx_answer_runs_all = query_nx_answer_runs
+
+        self._patch(monkeypatch, _OldEngineStore())
+        out = CliRunner().invoke(answer_runs_cmd, flags)
+        assert out.exit_code == 1, out.output
+        assert "nx_answer_runs_before_id_supported" in out.output
+        assert "no runs" not in out.output
+
+    def test_before_id_must_be_positive(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        out = CliRunner().invoke(answer_runs_cmd, ["--before-id", "0"])
+        assert out.exit_code == 2, out.output
