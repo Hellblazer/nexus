@@ -131,12 +131,18 @@ moves the table's waiting rows; a stalled tuple queue shows in `nx doctor`'s
 aspects row.
 
 **Retired: `NX_ASPECT_QUEUE=table`** (nexus-bpikw, RDR-235). The producer's table
-mode is gone: the value is refused with an error that names the retirement, and
-there is no rollback to the table producer. A producer host whose only worker
-host is older (above) must now be upgraded in the same step. Rows the table still
+mode is gone and there is no rollback to the table producer. The value does not
+stop ingest: the indexer, the MCP store path and the single-document hook log one
+warning per process (`aspect_queue_table_mode_retired_using_tuples`, saying to
+unset the variable) and queue the document on the tuple queue. The operator
+surfaces refuse it instead: `nx aspects requeue-failed` prints the retirement
+message and exits 1 before it reads or writes, and this rung reports itself not
+applicable and says the value is retired. A producer host whose only worker host
+is older (above) must now be upgraded in the same step. Rows the table still
 holds are still drained by the worker, moved by this rung, and listed by
 `nx doctor`; a failed row is re-enqueued as a task by `nx aspects
-requeue-failed`.
+requeue-failed`, which on an engine older than `engine-service-v0.1.169` says to
+upgrade the engine and exits 1 without writing.
 
 **No rollback to the table producer.** Nothing is lost in the move: a row is
 either still in the table or already a task, and a crash between the two steps
@@ -144,8 +150,10 @@ leaves it in both places, never in neither. An engine older than
 `engine-service-v0.1.169` has no `aspects` template and refuses the `tuples`
 producer with a message naming that release; upgrade the engine. A process that
 still has `NX_ASPECT_QUEUE=table` in its environment (an MCP server session, a
-running indexer, a shell profile) logs the refusal at each enqueue until the
-variable is removed: unset it and restart those processes.
+running indexer, a shell profile) logs one warning and queues on the tuple queue;
+nothing is dropped. Unset the variable and restart those processes to silence it.
+Until then this rung and `nx aspects requeue-failed` in that environment report
+the value as retired and do nothing.
 
 - It applies only when `NX_ASPECT_QUEUE` is `tuples` (the default, unset
   included; the retired `table` is reported as not applicable), the engine has the `aspects` template, and the engine answers

@@ -381,6 +381,9 @@ class TestSkips:
         assert w.events == [], "a table-mode install makes no request at all"
         assert len(logs.events("aspect_queue_rung_skipped")) == 1
         assert ASPECT_QUEUE_ENV in status.pending_detail
+        assert "retired" in status.pending_detail and "unset" in status.pending_detail, (
+            "the detail says the value is retired and to unset it (nexus-bpikw D1)"
+        )
 
     def test_a_stale_table_value_in_the_environment_is_not_applicable_and_does_not_raise(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -399,6 +402,7 @@ class TestSkips:
         ).detect()
         assert status.applicable is False and status.converged is False
         assert ASPECT_QUEUE_ENV in status.pending_detail
+        assert "retired" in status.pending_detail and "unset" in status.pending_detail
 
     def test_an_engine_without_the_aspects_template_is_not_applicable(self, logs) -> None:
         w = World(rows=[_row("/a.md", "1.1.1")], template=False)

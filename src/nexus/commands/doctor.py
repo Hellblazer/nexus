@@ -1098,8 +1098,8 @@ def _report_aspect_queue_service() -> None:
     matching the 4 sibling supplementary checks (resources / plan-library /
     taxonomy / t1) that already signal failure this way.
 
-    RDR-235 F18: the queue has two sides while ``NX_ASPECT_QUEUE`` moves it from
-    the table onto the ``aspects`` tuple template. Pending is the table's
+    RDR-235 F18: the queue has two sides while rows the retired table producer
+    wrote (nexus-bpikw) drain, and new work goes to the ``aspects`` tuple template. Pending is the table's
     pending plus the tuple side's ``available``; failed is the table's failed
     plus the tuple side's ``dead``. ``claimed`` is in flight and counts as
     neither. A tuple side that cannot be read is reported UNKNOWN and no combined

@@ -49,8 +49,8 @@ _log = structlog.get_logger(__name__)
 
 #: The tuple-space address of the queue (RDR-235 E3). Mirrors
 #: ``http_aspect_queue.ASPECTS_SUBSPACE`` / ``ASPECTS_KEYS`` (pinned equal by
-#: tests/test_aspect_worker_tuples.py); not imported so a table-mode worker
-#: never loads the producer's module for them.
+#: tests/test_aspect_worker_tuples.py); not imported so the worker on an engine
+#: with no ``aspects`` template never loads the producer's module for them.
 SUBSPACE: str = "aspects"
 KEYS: dict[str, str] = {"queue": "aspects"}
 
@@ -106,7 +106,7 @@ def worker_id(tenant: str, *, pid: int, nonce: str) -> str:
 
 
 def _lapse_errors() -> tuple[type[BaseException], ...]:
-    from nexus.db.t2.http_tuple_store import (  # noqa: PLC0415 — deferred: a table-mode worker never loads the tuple client
+    from nexus.db.t2.http_tuple_store import (  # noqa: PLC0415 — deferred: keeps this module's import light
         ClaimNotFoundError,
         ClaimOwnershipError,
         ClaimTaskMismatchError,
@@ -281,7 +281,7 @@ class TupleQueueSide:
         claims already taken are returned with ``failed=True``. An engine with
         no ``aspects`` template (``UnknownSubspaceError``) is logged once per
         process and not asked again for an hour."""
-        from nexus.db.t2.http_tuple_store import (  # noqa: PLC0415 — deferred: a table-mode worker never loads the tuple client
+        from nexus.db.t2.http_tuple_store import (  # noqa: PLC0415 — deferred: keeps this module's import light
             ParkCapExceededError,
             UnknownSubspaceError,
         )
@@ -397,7 +397,7 @@ class TupleQueueSide:
     def _verdict(self, claim: HeldClaim, result: Any) -> None:
         from nexus import aspect_worker as w  # noqa: PLC0415 — deferred: aspect_worker imports this module lazily
         from nexus.aspect_extractor import ExtractFail  # noqa: PLC0415 — deferred: heavy module
-        from nexus.db.t2.http_document_aspects_store import (  # noqa: PLC0415 — deferred: table-mode never loads it
+        from nexus.db.t2.http_document_aspects_store import (  # noqa: PLC0415 — deferred: keeps this module's import light
             AspectUpsertBadRequestError,
             AspectUpsertConflictError,
         )

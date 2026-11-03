@@ -46,7 +46,7 @@ WHAT STAYS IN THE TABLE.
     counts them; they do not keep the rung from converging.
 
 THE SKIPS ARE NOT RECORDED (plan-audit residual R2). Every reason this rung does
-not apply (flag still ``table``, engine without the template, engine without
+not apply (the retired ``table`` value set, engine without the template, engine without
 the route) is reported through ``detect()`` as ``applicable=False``. The runner
 records NOTHING for a not-applicable rung, so the rung is re-detected on every
 ``nx upgrade``, including the first one after the Phase 2 default flip to
@@ -168,7 +168,7 @@ def _default_queue() -> HttpAspectQueue:
 
 
 def _default_tuples() -> Any:
-    from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: a table-mode install never loads it
+    from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: not loaded unless the rung applies
 
     return HttpTupleStore()
 
@@ -210,9 +210,15 @@ class AspectQueueTuplesRung:
 
     def _skip_reason(self, queue: Any | None = None, tuples: Any | None = None) -> str:
         """The reason this rung does not apply, or ``""`` when it does. The flag
-        is checked before anything is built or sent, so a table-mode install
+        is checked before anything is built or sent, so an install with the retired value
         makes no request at all."""
-        if self._mode_fn() != "tuples":
+        mode = self._mode_fn()
+        if mode == "table":
+            return (
+                f"{ASPECT_QUEUE_ENV}=table is retired (nexus-bpikw); unset {ASPECT_QUEUE_ENV} "
+                "so this step can move the table's waiting rows to the tuple queue"
+            )
+        if mode != "tuples":
             return f"{ASPECT_QUEUE_ENV} is not 'tuples'"
         return ""
 

@@ -45,9 +45,11 @@ DEFAULT_TENANT: str = "default"
 # ── RDR-235: the producer behind NX_ASPECT_QUEUE ─────────────────────────────
 
 #: The variable that once selected the producer. ``tuples`` (or unset) is the only
-#: producer; ``table`` is refused (:class:`AspectQueueTableModeRetiredError`).
+#: producer. ``table`` is retired (nexus-bpikw): the producer paths warn once and use
+#: tuples (:func:`producer_queue_mode`); the operator surfaces refuse it
+#: (:func:`aspect_queue_mode`, :class:`AspectQueueTableModeRetiredError`).
 ASPECT_QUEUE_ENV: str = "NX_ASPECT_QUEUE"
-ASPECT_QUEUE_MODES: tuple[str, str] = ("table", "tuples")
+ASPECT_QUEUE_MODES: tuple[str, ...] = ("tuples",)
 
 #: The tuple-space subspace, key and the engine release that carries the
 #: ``aspects`` template (RDR-235 E3). One queue per tenant; the collection is a
@@ -63,45 +65,71 @@ ASPECTS_ENGINE_RELEASE: str = "engine-service-v0.1.169"
 ENQUEUE_FANOUT_WORKERS: int = 8
 
 _warned_unknown_modes: set[str] = set()
+_warned_table_retired: list[bool] = []
 
 
 class AspectQueueTableModeRetiredError(RuntimeError):
     """``NX_ASPECT_QUEUE=table`` was asked for after the table producer was retired
-    (nexus-bpikw step A, RDR-235). The tuple queue is the only producer."""
+    (nexus-bpikw, RDR-235). The tuple queue is the only producer."""
 
 
-def aspect_queue_mode() -> str:
-    """``"tuples"``, read from ``NX_ASPECT_QUEUE`` at call time. An unset or blank
-    value is ``tuples``. ``table`` raises :class:`AspectQueueTableModeRetiredError`:
-    the producer's table mode is retired (nexus-bpikw step A), so the old opt-out
-    and the runbook's old rollback are refused instead of quietly routed to the
-    tuple queue. Any other value logs one warning per process and means ``tuples``,
-    the only producer left: a typo (``tuple``) must not fail every ingest hook.
-
-    The worker does not call this: it drains both queues whatever the variable
-    says (RDR-235 gate S1), so rows an older client left in the table are still
-    claimed.
-
-    ``enqueue`` and ``enqueue_many`` still carry a table branch, taken only when
-    this function returns ``"table"``, which production never does. It is the seam
-    the suite uses to seed legacy table rows for the worker's drain and the
-    table readers (``tests/_aspect_table_producer.py``); step B deletes it with
-    the table."""
+def _env_mode() -> str:
+    """The variable as written: ``"tuples"`` (unset, blank or ``tuples``), ``"table"``,
+    or ``"tuples"`` for any other value after one warning per process (a typo such as
+    ``tuple`` must not fail every ingest hook). Read at call time."""
     raw = os.environ.get(ASPECT_QUEUE_ENV, "").strip().lower()
     if raw in ("", "tuples"):
         return "tuples"
     if raw == "table":
-        raise AspectQueueTableModeRetiredError(
-            f"{ASPECT_QUEUE_ENV}=table is retired: the aspect queue table producer was "
-            "removed (nexus-bpikw, RDR-235) and the engine's 'aspects' tuple queue is the "
-            f"only producer. Unset {ASPECT_QUEUE_ENV} or set it to 'tuples'. Rows already in "
-            "the table are still drained by the worker."
-        )
+        return "table"
     if raw not in _warned_unknown_modes:
         _warned_unknown_modes.add(raw)
         _log.warning(
             "aspect_queue_mode_unknown_falling_back_to_tuples",
             env=ASPECT_QUEUE_ENV, value=raw, allowed=list(ASPECT_QUEUE_MODES),
+        )
+    return "tuples"
+
+
+def aspect_queue_mode() -> str:
+    """The STRICT reader, for the operator surfaces (``nx aspects requeue-failed``,
+    the ``aspect-queue-tuples`` rung): ``"tuples"``, or
+    :class:`AspectQueueTableModeRetiredError` for ``NX_ASPECT_QUEUE=table``. An
+    operator who typed the retired value is told so and nothing runs, instead of a
+    quiet reroute.
+
+    The producer paths do not call this: they use :func:`producer_queue_mode`, which
+    never drops a document over a stale value. The worker calls neither: it drains
+    both queues whatever the variable says (RDR-235 gate S1)."""
+    if _env_mode() == "table":
+        raise AspectQueueTableModeRetiredError(
+            f"{ASPECT_QUEUE_ENV}=table is retired: the aspect queue table producer was "
+            "removed (nexus-bpikw, RDR-235) and the engine's 'aspects' tuple queue is the "
+            f"only producer. Unset {ASPECT_QUEUE_ENV} (or set it to 'tuples'). Rows already "
+            "in the table are still drained by the worker."
+        )
+    return "tuples"
+
+
+def producer_queue_mode() -> str:
+    """The PRODUCER reader (``HttpAspectQueue.enqueue`` and ``enqueue_many``, reached
+    from the indexer's flush and the MCP and single-document hooks): always
+    ``"tuples"``. A stale ``NX_ASPECT_QUEUE=table`` (a shell profile, an MCP server
+    config) logs one warning per process saying to unset it and uses tuples; a
+    refusal here would drop the documents of every ingest until someone found the
+    variable (nexus-bpikw design decision D1).
+
+    ``enqueue`` and ``enqueue_many`` still carry a legacy table branch, taken only
+    when this function returns ``"table"``, which production never does. It is the
+    seam the suite uses to seed legacy table rows for the worker's drain and the
+    table readers (``tests/_aspect_table_producer.py``); nexus-hbnml deletes it with
+    the table."""
+    if _env_mode() == "table" and not _warned_table_retired:
+        _warned_table_retired.append(True)
+        _log.warning(
+            "aspect_queue_table_mode_retired_using_tuples",
+            env=ASPECT_QUEUE_ENV, bead="nexus-bpikw",
+            action=f"unset {ASPECT_QUEUE_ENV}; the aspects tuple queue is the only producer",
         )
     return "tuples"
 
@@ -343,19 +371,23 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     ) -> None:
         """Persist a new pending row for (collection, source_path).
 
-        INSERT OR REPLACE semantics: re-enqueue at the same key resets
-        status='pending' and retry_count=0.
+        Writes one ``aspects`` task, replaced by ``doc_id`` (RDR-235): a re-enqueue
+        replaces the task and never adds a second.
         """
         if not collection:
             raise ValueError("collection must not be empty")
         if not source_path:
             raise ValueError("source_path must not be empty")
-        if aspect_queue_mode() == "tuples":
+        if producer_queue_mode() == "tuples":
             # RDR-235 E2: the identity goes out as a replace; ``content`` is
             # dropped (the worker re-reads the document).
             self._enqueue_tuple(collection, source_path, content_hash, doc_id)
             self._signal_wake()
             return
+        # LEGACY table branch (nexus-bpikw): reached only through
+        # tests/_aspect_table_producer.py, which patches ``producer_queue_mode``
+        # to seed table rows for the worker's drain and the table readers;
+        # production never gets here. nexus-hbnml deletes it with the table.
         # RDR-204 Phase 1 (nexus-f5wwx): the engine no longer
         # auto-registers a collection on first write — ensure it here,
         # once per process per collection (cached), and retry once if
@@ -373,7 +405,11 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         self._signal_wake()
 
     def enqueue_many(self, rows: list[dict]) -> int:
-        """Batch-enqueue N documents in ONE round trip (nexus-nj4ch,
+        """Batch-enqueue N documents. In production this is the tuple fan-out
+        (:meth:`_enqueue_many_tuples`); the rest of this docstring describes the
+        legacy table batch that nexus-hbnml deletes.
+
+        Table form: N documents in ONE round trip (nexus-nj4ch,
         nexus-duoak follow-up: replaces the indexer's per-document
         ``enqueue()`` call under the ChunkBatcher's flush-grain hook,
         measured at ~34.7s across ~250 real inserts in this repo's own
@@ -401,8 +437,11 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not rows:
             return 0
-        if aspect_queue_mode() == "tuples":
+        if producer_queue_mode() == "tuples":
             return self._enqueue_many_tuples(rows)
+        # LEGACY table branch (nexus-bpikw): reached only through
+        # tests/_aspect_table_producer.py; production never gets here.
+        # nexus-hbnml deletes it with the table.
         try:
             result = self._post("/enqueue_many", {"rows": rows})
             enqueued = int((result or {}).get("enqueued", 0))
@@ -476,8 +515,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         except UnknownSubspaceError as exc:
             raise AspectQueueEngineUnsupportedError(
                 f"{ASPECT_QUEUE_ENV}=tuples needs the 'aspects' tuple template, which the "
-                f"engine does not have; it predates {ASPECTS_ENGINE_RELEASE}. Upgrade the "
-                f"engine, or set {ASPECT_QUEUE_ENV}=table to use the table queue."
+                f"engine does not have; it predates {ASPECTS_ENGINE_RELEASE}. Upgrade the engine."
             ) from exc
         return outcome
 

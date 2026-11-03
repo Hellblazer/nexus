@@ -412,8 +412,8 @@ class AspectWorkerDaemon:
         touches the ``aspects`` tuple queue: a tuple claim lives and dies by its
         lease (the engine reclaims a lapsed one on the next claim and counts an
         attempt), so there is nothing here to sweep for it. It keeps running in
-        every mode because the table can still hold rows whatever the producer's
-        flag says (a table-mode producer on another box, rows left by a rollback,
+        every mode because the table can still hold rows the retired table producer
+        wrote (nexus-bpikw: an older client on another box, rows left by a rollback,
         ``in_progress`` rows of an older worker), and the worker drains both
         queues (gate S1)."""
         while True:

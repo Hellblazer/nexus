@@ -20,6 +20,8 @@ classifier died with the sweep).
 """
 from __future__ import annotations
 
+from typing import Any
+
 import click
 import structlog
 
@@ -246,7 +248,10 @@ def _task_identity(row) -> dict | None:  # noqa: ANN001 — a TupleRow
     return body if isinstance(body, dict) and body.get("doc_id") else None
 
 
-def _dead_aspect_tasks(tuples, collection: str | None) -> list:  # noqa: ANN001 — an HttpTupleStore
+_CENSUS_UNREAD: Any = object()
+
+
+def _dead_aspect_tasks(tuples, collection: str | None, *, census: Any = _CENSUS_UNREAD) -> list:  # noqa: ANN001 — an HttpTupleStore
     """Dead tasks of the ``aspects`` subspace, oldest first, optionally those of
     one collection (read from the body: the queue is one per tenant).
 
@@ -257,7 +262,8 @@ def _dead_aspect_tasks(tuples, collection: str | None) -> list:  # noqa: ANN001 
     has none (RDR-235)."""
     from nexus.db.t2.http_aspect_queue import ASPECTS_KEYS, ASPECTS_SUBSPACE, aspects_census  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    census = aspects_census(tuples)
+    if census is _CENSUS_UNREAD:  # a caller that already read it passes it in
+        census = aspects_census(tuples)
     if census is None or census.dead == 0:
         return []
     dead: list = []
@@ -327,7 +333,9 @@ def aspects_requeue_failed(
     its retention clock restarted. ``--limit`` caps the two sides together: the
     table's failed rows first, then dead tasks oldest first. ``--collection``
     matches a task by the collection in its body. An engine with no ``aspects``
-    template has no dead tasks, and the verb reads the table alone.
+    template has no dead tasks; if the table still holds failed rows the verb
+    says the engine must be upgraded and exits 1 before writing anything, as a
+    failed row can only become a task.
 
     \b
     Examples:
@@ -352,10 +360,12 @@ def aspects_requeue_failed(
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.db.t2.http_aspect_queue import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        ASPECTS_ENGINE_RELEASE,
         ASPECTS_KEYS,
         ASPECTS_SUBSPACE,
         AspectQueueTableModeRetiredError,
         aspect_queue_mode,
+        aspects_census,
     )
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
@@ -385,7 +395,8 @@ def aspects_requeue_failed(
     with T2Database(mem_path) as db:  # boundary-allow: read-only failed-row inspection for requeue-failed; routes to active backend, no WAL writer contention
         failed = db.aspect_queue.list_failed(collection)
         try:
-            dead = _dead_aspect_tasks(db.tuples, collection)
+            census = aspects_census(db.tuples)
+            dead = _dead_aspect_tasks(db.tuples, collection, census=census)
         except Exception as exc:  # noqa: BLE001 — fail loud before any write: reporting the table alone would hide the dead tasks
             click.echo(
                 f"Could not read the dead tasks of the 'aspects' queue: {exc}. "
@@ -393,6 +404,19 @@ def aspects_requeue_failed(
                 err=True,
             )
             raise SystemExit(1) from exc
+
+    if failed and census is None:
+        # A failed table row can only become an `aspects` task, and this engine has no
+        # such template (it predates ASPECTS_ENGINE_RELEASE): every enqueue would raise
+        # part way through the loop, after earlier rows were already moved. Say so
+        # before any write, dry run included, so it does not promise a re-enqueue.
+        click.echo(
+            f"{len(failed)} failed row(s) in the aspect queue table cannot be re-enqueued: "
+            f"the engine has no 'aspects' tuple template, because it predates "
+            f"{ASPECTS_ENGINE_RELEASE}. Upgrade the engine, then re-run. Nothing was re-enqueued.",
+            err=True,
+        )
+        raise SystemExit(1)
 
     # --limit caps the two sides together: table rows first, then dead tasks.
     if limit is not None:

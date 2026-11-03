@@ -494,8 +494,14 @@ class TestRequeueWithStubs:
         assert "no failed rows" in res.output
         assert stub.rd_calls == 0, "the census says dead=0, so no rd scan"
 
-    def test_a_table_only_engine_behaves_as_before(self, run) -> None:
-        """No ``aspects`` template: the tuple side reads as nothing, no error."""
+    @pytest.mark.parametrize("args", [["requeue-failed"], ["requeue-failed", "--dry-run"]])
+    def test_failed_rows_on_an_engine_without_the_template_say_upgrade_and_write_nothing(
+        self, run, args,
+    ) -> None:
+        """nexus-bpikw D3: a failed table row can only become an ``aspects`` task. On an
+        engine that predates the template the verb says so, naming the release, and
+        exits 1 before anything is written; the dry run says the same instead of
+        promising a re-enqueue that the real run could not do."""
         from nexus.db.t2.records import QueueRow
 
         failed = [QueueRow(
@@ -503,11 +509,22 @@ class TestRequeueWithStubs:
             retry_count=3, doc_id="1.1.1",
         )]
         stub = _StubTuples([], unknown=True)
-        run(stub, failed)
+        db = run(stub, failed)
+        writes: list[str] = []
+        db.aspect_queue.enqueue = lambda *a, **k: writes.append("enqueue")  # type: ignore[attr-defined]
+        db.aspect_queue.mark_done = lambda *a, **k: writes.append("mark_done")  # type: ignore[attr-defined]
+        res = CliRunner().invoke(aspects_group, args)
+        assert res.exit_code == 1, res.output
+        assert "engine-service-v0.1.169" in res.output and "Upgrade the engine" in res.output, res.output
+        assert "Would re-enqueue" not in res.output, "the dry run must not promise a re-enqueue"
+        assert writes == [] and stub.out_calls == [], "nothing was written"
+
+    def test_no_template_and_no_failed_rows_is_not_an_error(self, run) -> None:
+        """Only a failed table row triggers the upgrade message: without the template
+        there are no dead tasks, and nothing to say."""
+        run(_StubTuples([], unknown=True))
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
-        assert res.exit_code == 0, res.output
-        assert "Would re-enqueue 1 failed row(s)" in res.output
-        assert "dead task" not in res.output
+        assert res.exit_code == 0 and "Upgrade the engine" not in res.output, res.output
 
     def test_a_table_only_engine_with_nothing_failed(self, run) -> None:
         run(_StubTuples([], unknown=True))
