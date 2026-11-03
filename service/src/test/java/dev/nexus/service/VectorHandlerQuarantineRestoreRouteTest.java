@@ -452,7 +452,7 @@ class VectorHandlerQuarantineRestoreRouteTest {
     }
 
     @Test
-    void reattachFalseMovesBytesOnly_andStillReportsWhatItWouldHaveDone() throws Exception {
+    void reattachFalseMovesBytesOnly_reportsWhatItWouldHaveDone_andWarnsThatTheOwnerLinkIsDropped() throws Exception {
         String o = col();
         String h = quarantinedForLiveDoc(TENANT_A, o, "9.2.1", "bytes-only");
 
@@ -464,13 +464,17 @@ class VectorHandlerQuarantineRestoreRouteTest {
         assertThat(row.get("outcome")).isEqualTo("restored");
         assertThat(row.get("attached")).isEqualTo(false);
         assertThat(row.get("reattach")).as("what it would have done").isEqualTo("attach");
+        // nexus-l003p: the restored row keeps the chunk keys only, so the forward owner link is lost; the wire says so.
+        assertThat(row.get("reason")).isEqualTo("owner_link_dropped");
+        assertThat(row.get("owner")).isEqualTo("9.2.1");
         assertThat(row.get("no_manifest")).isEqualTo(true);
         assertThat(manifestRows(TENANT_A, "9.2.1")).isZero();
-        // A repeat with reattach (the default) finishes it.
+        // A repeat with reattach (the default) cannot finish it: the row names no document any more.
         var again = json(post(TOKEN_A, req(o, "chashes", List.of(h))));
         assertThat(again.get("present")).isEqualTo(1);
-        assertThat(again.get("attached")).isEqualTo(1);
-        assertThat(manifestRows(TENANT_A, "9.2.1")).isEqualTo(1);
+        assertThat(again.get("attached")).isEqualTo(0);
+        assertThat(rows(again).get(0).get("reattach")).isEqualTo("no_live_owner");
+        assertThat(manifestRows(TENANT_A, "9.2.1")).isZero();
     }
 
     @Test

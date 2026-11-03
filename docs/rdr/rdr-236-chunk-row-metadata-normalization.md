@@ -489,8 +489,12 @@ critiqued once before Sam's gate decision (T2
   `quarantine_restore_chunks`, resolves a quarantined chunk's owner forward
   by its metadata `catalog_doc_id` or `doc_id` and its position by
   `chunk_index` (RF-24), so the quarantine sweep keeps those three LEGACY
-  keys on `quarantine-*` rows until j67ix.1 moves the plan's forward path to
-  the manifest and the census record.
+  keys on `quarantine-*` rows, which the restore reads once, before it moves
+  the chunk: nexus-l003p owns moving the plan's forward path off the
+  restored row (the restore keeps the chunk keys only and the plan is judged
+  from the quarantine copy; j67ix.1 closed unlanded and never had this
+  scope), and a bytes-only restore of a chunk those keys named can no longer
+  be reattached by a rerun (the accepted narrowing).
 - **RF-20 (Verified, source search 2026-10-27).** The note tag path
   stores a comma string end to end (CLI, MCP, `put_note`,
   `note_catalog_meta`, the recovery bundle); two keyless-note definitions
@@ -1010,7 +1014,7 @@ part of K, determines it.
 | quarantined_at, origin_collection, quarantined_by, reaper_quarantined_at | the physical row; written only by the engine | quarantined_by implies quarantined_at (CHECK); quarantined_at alone is a gc orphan move (158 rows in the quarantine collections, RF-16); gc restores today drop two | ROW; refused from a client write; the bypass prefixes (`quarantine-*`) stay exempt from the allow-list; the 158 rows with quarantined_at alone were stamped by the engine's `gc_quarantine_orphans`, which `chunk_quarantine.py` calls and which writes two of the four keys (RF-22); the restore fix for the four keys is 6pfgb.40, and the Step 3 sweep strips retired document keys from quarantined rows too so a restore passes the validated CHECK (RF-23) | stays; CHECK in Phase 4 |
 | last_written_at, retention, collection, embedding_model (columns) | the row | columns | ROW | stays |
 | `nexus.frecency` table (telemetry-001: frecency_score, ttl_days keyed by chunk) | a third home with no client writer found | engine-internal writers UNCONFIRMED | retire, or list its writer and reader | 6pfgb.42 settles |
-| doc_id, chunk_index, chunk_count | legacy (RDR-108 Phase 3) | on old rows; `indexer.py` ~3375 still sets doc_id | LEGACY; from engine 0.1.170 the search row itself names its owner (6pfgb.26, `/v1/vectors/search`); for a row that names none, the client resolves the chash through `chash_positions` (tenant-wide, each row carrying its `collection`) or the manifest fallback, and in both it prefers the smallest doc_id homed in the hit's collection, else the smallest doc_id in text order (text order equals the engine's `ORDER BY doc_id` only under C collation, which the local bundle's `initdb --no-locale` gives; the cloud collation is not verified in this repo). The pick is marked inferred (`DOC_ID_INFERRED_KEY`), `_owner_doc_ids` keeps every owner, and the score readers take the best live owner, so the pick is deterministic but not a fact about the row (6pfgb.52); read by the engine's manifest-less census forward join, the rdr192 rung and `manifest_backfill.py` to attribute a manifest-less chunk (RF-19) until the tenant's rdr192 completion record exists and 6pfgb.39 lands; then swept; kept on `quarantine-*` rows until j67ix.1 moves the reattach plan's forward path off them (RF-24); chunk_index lives on as the manifest column (CHECK equal to position) | 6pfgb.39, sweep |
+| doc_id, chunk_index, chunk_count | legacy (RDR-108 Phase 3) | on old rows; `indexer.py` ~3375 still sets doc_id | LEGACY; from engine 0.1.170 the search row itself names its owner (6pfgb.26, `/v1/vectors/search`); for a row that names none, the client resolves the chash through `chash_positions` (tenant-wide, each row carrying its `collection`) or the manifest fallback, and in both it prefers the smallest doc_id homed in the hit's collection, else the smallest doc_id in text order (text order equals the engine's `ORDER BY doc_id` only under C collation, which the local bundle's `initdb --no-locale` gives; the cloud collation is not verified in this repo). The pick is marked inferred (`DOC_ID_INFERRED_KEY`), `_owner_doc_ids` keeps every owner, and the score readers take the best live owner, so the pick is deterministic but not a fact about the row (6pfgb.52); read by the engine's manifest-less census forward join, the rdr192 rung and `manifest_backfill.py` to attribute a manifest-less chunk (RF-19) until the tenant's rdr192 completion record exists and 6pfgb.39 lands; then swept; kept on `quarantine-*` rows, which the restore reads before it moves the chunk, with nexus-l003p owning the move of the reattach plan's forward path off the restored row (RF-24); chunk_index lives on as the manifest column (CHECK equal to position) | 6pfgb.39, sweep |
 | source_path | legacy (RDR-102 D2) | absent | LEGACY; its dead client reads are removed in Phase 2; the engine's `/reapable` and reaper audit display read it until 6pfgb.39 (RF-19) | 6pfgb.39, sweep |
 | store_type, corpus, git_meta, git_project_name, git_branch, git_commit_hash, git_remote_url | legacy (RDR-101 Phase 5c) | the repo PDF dict still sets the flat git keys | LEGACY; writer removed in Phase 0 | sweep |
 | RDR-222 fence fields, lifecycle_state, tumbler | D or the collection | catalog columns | not row keys; listed so no one looks for them on the row | n/a |
@@ -1603,7 +1607,8 @@ this lands.
   (.41); route (b) position labels and route (c) get (u9dc5); a cap on
   per-hit expansion (6cmam); an old-client manifest rewrite must not reset
   labels_written (3xjlq); quarantine reattach reads the owner's file hash
-  (j67ix.1); the engine's row-key readers move to the manifest and a chunk
+  (j67ix.1, closed unlanded: its version check is unreachable on
+  engine-written data; the forward-path move is nexus-l003p); the engine's row-key readers move to the manifest and a chunk
   text prefix (.39); the gc restore functions strip all four quarantine
   keys (.40).
 - Each entry additive in the wire ledger. Client halves gate on a
@@ -1701,8 +1706,10 @@ row) over existing rows in batches, as a direct UPDATE that does not bump
 `last_written_at`, with the bypass prefixes exempt from the CHECK but
 `quarantine-*` rows included in the sweep (their retired document keys go,
 the four ROW keys stay, and `catalog_doc_id`, `doc_id` and `chunk_index`
-stay on them until j67ix.1 moves `quarantine_reattach_plan`'s forward path
-off them, RF-24, so a later gc restore passes the validated CHECK, RF-23)
+stay on them because `quarantine_reattach_plan` reads them from the
+quarantine copy before the move, RF-24; nexus-l003p, not j67ix.1, moves its
+forward path off the restored row: a restore keeps the chunk keys only, so a
+restored row and a later gc restore pass the validated CHECK, RF-23)
 and the chash-length guard (a leftover 16-byte row would fail the existing NOT VALID
 `chunks_chash_octet_check` on any update, RF-23; RF-16 found none on
 2026-10-27), batched by tenant_id explicitly,
@@ -2063,7 +2070,8 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   skipped and excluded from the count; the engine counts the preconditions
   per tenant for the rung and the operator verb alike; `.39` reads the
   tenant's ladder record; the quarantine sweep keeps the reattach plan's
-  three keys until j67ix.1; the pre-`.18` held notes are listed for Sam,
+  three keys, read from the quarantine copy before the move (nexus-l003p owns
+  the forward-path move; j67ix.1 closed unlanded); the pre-`.18` held notes are listed for Sam,
   not stamped; Phase 5 gated on .29 and .38's engine half too, with the
   NULL count first; the EXISTS carries every label operator and the stage
   attributes; A8's spike pins the bound; citations and the 36 count.
@@ -2146,3 +2154,19 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   in-engine manifest-predicate text as what shipped; and the key-table
   history line now says the column was "first ruled as GENERATED". Beads
   nexus-xrfev, nexus-9cstf, nexus-3ax49.
+- 2026-11-03: factual correction, no decision change (nexus-l003p). The five
+  sites that kept `catalog_doc_id`, `doc_id` and `chunk_index` on
+  `quarantine-*` rows "until j67ix.1 moves the reattach plan's forward path"
+  named a bead that closed unlanded and never had that scope. nexus-l003p owns
+  the forward-path move, with an accepted narrowing: `quarantine_restore_chunks`
+  restores the chunk keys only (this RDR's own rule), and the reattach plan is
+  judged from the quarantine copy before the move (vectors-053), so a restore
+  with reattach (the default) attaches in the same call, a note found by its own
+  `doc_id` still attaches on a rerun, and a bytes-only restore of a chunk whose
+  owner those keys named reports `owner_link_dropped` and cannot be reattached
+  by a rerun. The "never attach one of two versions of a position" refusal
+  holds within one call, across every quarantine sibling the call spans (the
+  engine judges the whole selection first, so the dry run equals the real run);
+  across separate calls, including the pages of a window or audit selection
+  (the route takes 1000 chashes per call), the earlier call's restored row is
+  stripped and cannot be compared, an accepted narrowing.

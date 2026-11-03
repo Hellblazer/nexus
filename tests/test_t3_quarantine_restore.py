@@ -303,6 +303,55 @@ class TestCli:
         assert "Run the command again without it" in out
         assert "nx store put" not in out, "the remedy is a rerun, not a re-put"
 
+    def test_no_reattach_warns_when_the_owner_link_is_dropped_and_recommends_the_default(self, runner) -> None:
+        # nexus-l003p: a restored row keeps only the chunk keys, so a bytes-only restore of a chunk whose owner its
+        # quarantine copy named loses that link. The engine marks the row; the verb says what is lost and what to do.
+        a, b = _chash("a"), _chash("b")
+        dropped = _hidden_row(a, verdict="attach", owner="1.2.3", owner_title="Legacy Note", position=4,
+                              reason="owner_link_dropped")
+        plain = _hidden_row(b, verdict="no_live_owner")
+        stub = _Stub([_page([dropped, plain], audit_id=2)])
+
+        result = _run(runner, stub, "--chash", a, "--chash", b, "--no-reattach")
+
+        assert result.exit_code == 3, result.output
+        out = result.output
+        assert "WARNING: --no-reattach dropped the owner link of 1 chunk ('Legacy Note' (1.2.3))" in out
+        assert "a later run cannot attach them" in out and "Restore with reattach (the default)" in out
+        assert "the link to 'Legacy Note' (1.2.3) at position 4 is gone and a later run cannot attach it" in out, \
+            "the NOTE column names the owner and position that do not survive"
+        assert "a run without the flag would attach 0" in out, "a dropped link is not something a rerun attaches"
+        assert "Run the command again without it" not in out, "that advice is false for a dropped link"
+        assert "re-index the owning document" in out.lower() or "Re-index the owning document" in out
+        assert "reattach: off" in out
+        assert "WARNING" not in _run(runner, _Stub([_page([plain], audit_id=2)]), "--chash", b, "--no-reattach").output, \
+            "a chunk with no owner loses nothing, so there is no warning"
+
+    def test_a_dry_run_with_no_reattach_warns_that_the_flag_would_cost_the_link(self, runner) -> None:
+        a = _chash("a")
+        row = _row(a, "would_restore", reattach="attach", owner="1.2.3", owner_title="Legacy Note", position=0,
+                   reason="owner_link_dropped")
+        stub = _Stub([_page([row], dry_run=True)])
+
+        result = _run(runner, stub, "--chash", a, "--dry-run", "--no-reattach")
+
+        out = result.output
+        assert "WARNING: --no-reattach would drop the owner link of 1 chunk ('Legacy Note' (1.2.3))" in out
+        assert "Run without --no-reattach, the default, to attach them in the same call" in out
+        assert "a run without the flag would attach 1" in out, "run without the flag, a dry run's chunk does attach"
+        assert "--no-reattach would restore the bytes and lose the link" in out
+
+    def test_the_json_tally_counts_the_dropped_links(self, runner) -> None:
+        a, b = _chash("a"), _chash("b")
+        rows = [_hidden_row(a, verdict="attach", owner="1.2.3", position=0, reason="owner_link_dropped"),
+                _attached_row(b)]
+        stub = _Stub([_page(rows, audit_id=2)])
+
+        result = _run(runner, stub, "--chash", a, "--chash", b, "--json")
+
+        assert _doc(result.stdout)["reattach_totals"]["owner_link_dropped"] == 1
+        assert _doc(result.stdout)["rows"][0]["reason"] == "owner_link_dropped"
+
     def test_a_dry_run_reports_would_attach_and_would_stay_hidden_and_passes_dry_run_through(self, runner) -> None:
         a, b = _chash("a"), _chash("b")
         stub = _Stub([_page([
@@ -405,7 +454,7 @@ class TestCli:
         assert doc["reattach"] is True
         assert doc["totals"] == {"restored": 2, "would_restore": 0, "present": 1, "dim_conflict": 0, "missing": 0}
         assert doc["reattach_totals"] == {"attached": 1, "would_attach": 0, "superseded": 1,
-                                          "no_live_owner": 0, "no_position": 0}
+                                          "no_live_owner": 0, "no_position": 0, "owner_link_dropped": 0}
         assert doc["audit_ids"] == [5]
         assert [r["outcome"] for r in doc["rows"]] == ["restored", "present", "restored"]
         assert doc["reapable_again_after"] == "2026-10-31T12:00:00Z"
@@ -744,8 +793,9 @@ def test_reattach_makes_a_restored_chunk_visible_again_against_the_real_engine(
     origin = "knowledge__qrestore-reattach__bge-base-en-v15-768__v1"
     doc = register_real_doc_id(title="Legacy Note", physical_collection=origin, owner_name="qrestore-reattach-owner")
     hs, _ = _seed_quarantined(
-        t2_service_env, origin, ["named", "stranger"],
-        metas=[{"title": "Legacy Note", "catalog_doc_id": doc, "chunk_index": 0}, {"title": "Stranger"}])
+        t2_service_env, origin, ["named", "stranger", "second"],
+        metas=[{"title": "Legacy Note", "catalog_doc_id": doc, "chunk_index": 0}, {"title": "Stranger"},
+               {"title": "Second Stranger"}])
     assert not _visible(origin, hs[0]), "fixture: in quarantine, so not in the collection"
 
     result = runner.invoke(t3, ["quarantine", "restore", "--collection", origin,
@@ -768,27 +818,47 @@ def test_reattach_makes_a_restored_chunk_visible_again_against_the_real_engine(
     assert _visible(origin, hs[0]), "the attached chunk is returned by get"
     assert not _visible(origin, hs[1]), "a chunk with no live owner is restored but stays hidden"
 
-    # And the text output says so, with the re-put recipe for the hidden one.
-    text = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[1]])
+    # And the text output says so, with the re-put recipe for the hidden one: the restore that brings a chunk back
+    # reads its title off the quarantine copy.
+    text = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[2]])
     assert "HIDDEN from search and get" in text.output
-    assert f"nx store put - --collection {origin} --title Stranger" in text.output
+    assert f"nx store put - --collection {origin} --title 'Second Stranger'" in text.output
+    # nexus-l003p: the restored row keeps only the chunk keys, so a rerun over a chunk already back no longer
+    # knows its title; the recipe names no title rather than a stale one.
+    rerun = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[1]])
+    assert "HIDDEN from search and get" in rerun.output and "no title recorded" in rerun.output
 
 
-def test_no_reattach_against_the_real_engine_then_a_rerun_attaches(runner: CliRunner, t2_service_env) -> None:
+def test_no_reattach_against_the_real_engine_drops_the_owner_link_and_a_rerun_cannot_attach(
+    runner: CliRunner, t2_service_env,
+) -> None:
+    # nexus-l003p (RDR-236 Phase 4): the restored row keeps only the chunk keys, so the forward key the reattach step
+    # reads goes with the quarantine copy. The bytes-only call warns; the rerun finds no owner.
     origin = "knowledge__qrestore-noreattach__bge-base-en-v15-768__v1"
     doc = register_real_doc_id(title="Legacy Note", physical_collection=origin, owner_name="qrestore-noreattach-owner")
     hs, _ = _seed_quarantined(
-        t2_service_env, origin, ["bytes"], metas=[{"title": "Legacy Note", "catalog_doc_id": doc, "chunk_index": 0}])
+        t2_service_env, origin, ["bytes", "again"],
+        metas=[{"title": "Legacy Note", "catalog_doc_id": doc, "chunk_index": 0},
+               {"title": "Legacy Note", "catalog_doc_id": doc, "chunk_index": 1}])
 
     first = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[0],
                                "--no-reattach", "--json"])
     assert first.exit_code == t3_quarantine.EXIT_HIDDEN, "bytes-only leaves it hidden: exit 3\n" + first.output
     row = _doc(first.stdout)["rows"][0]
     assert row["outcome"] == "restored" and row["attached"] is False and row["reattach"] == "attach"
+    assert row["reason"] == "owner_link_dropped" and row["owner"] == doc and row["position"] == 0
+    assert _doc(first.stdout)["reattach_totals"]["owner_link_dropped"] == 1
     assert not _visible(origin, hs[0])
 
     second = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[0], "--json"])
-    assert second.exit_code == 0, "attached: everything requested is visible\n" + second.output
+    assert second.exit_code == t3_quarantine.EXIT_HIDDEN, "no owner is left to attach to: still hidden\n" + second.output
     row = _doc(second.stdout)["rows"][0]
-    assert row["outcome"] == "present" and row["attached"] is True
-    assert _visible(origin, hs[0])
+    assert row["outcome"] == "present" and row["attached"] is False and row["reattach"] == "no_live_owner"
+    assert not _visible(origin, hs[0])
+
+    # The default restore is the way: the plan is judged from the quarantine copy before the move.
+    third = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[1], "--json"])
+    assert third.exit_code == 0, "attached in the same call: visible\n" + third.output
+    row = _doc(third.stdout)["rows"][0]
+    assert row["outcome"] == "restored" and row["attached"] is True and row["reason"] is None
+    assert _visible(origin, hs[1])

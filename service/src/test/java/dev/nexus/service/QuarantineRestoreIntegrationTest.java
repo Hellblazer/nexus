@@ -205,6 +205,19 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         }
     }
 
+    /** The manifest row's {@code [line_start, line_end, char_start, char_end]} at {@code position} of {@code doc}. */
+    private List<Integer> manifestSpan(String tenant, String doc, int position) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END,
+                        CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+                .from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc))
+                    .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(position)))
+                .fetchOne(r -> List.of(r.value1(), r.value2(), r.value3(), r.value4()));
+        }
+    }
+
     /** What the engine's read paths show: live(c) hides a chunk no live manifest row names. */
     private boolean visibleToGet(String tenant, String collection, String hex) {
         var r = vectors.get(tenant, collection, List.of(hex), 10, 0, false);
@@ -345,8 +358,10 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(after.text()).isEqualTo("stamps text");
         // Keys, not substrings: "reaper_quarantined_at" contains "quarantined_at", so a substring check goes red
         // the moment the reaper's own tag is present and green when it is stripped by accident.
-        assertThat(metadataOf(after)).containsEntry("title", "stamps")
-            .doesNotContainKeys("quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at");
+        assertThat(metadataOf(after)).as("nexus-l003p: the CHUNK keys only; the title stays behind with the copy")
+            .containsOnlyKeys("chunk_text_hash", "embedding_model")
+            .containsEntry("chunk_text_hash", h)
+            .doesNotContainKeys("title", "quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at");
         assertThat(after.createdAt().toInstant()).as("created_at is carried through").isEqualTo(old.toInstant());
         // Neither the quarantine row's last_written_at (10 days ago: copying it would shorten the grace by the time
         // spent in quarantine) nor anything derived from created_at (90 days ago: reapable at the very next pass).
@@ -835,13 +850,24 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void withoutReattachTheBytesComeBackHidden_andARerunAttachesThePresentChunk() throws Exception {
+    void withoutReattachTheBytesComeBackHiddenWithTheOwnerLinkDropped_andARerunCannotAttachThePresentChunk()
+            throws Exception {
+        // nexus-l003p (RDR-236 Phase 4): the restored row carries the CHUNK keys only, so the forward key the plan read
+        // (catalog_doc_id, chunk_index) is gone with the quarantine copy. A bytes-only restore says so on the verdict
+        // row, and a rerun finds no owner. Restore with reattach (the default) is the way to attach a forward-keyed chunk.
         String t = newTenant();
         String c = col("knowledge");
         String doc = "1.2.1";
         String h = quarantinedWith(t, c, Map.of("legacy", Map.<String, Object>of(
             "catalog_doc_id", doc, "title", "Legacy Note", "chunk_index", 0))).get(0);
         liveDoc(t, c, doc, "Legacy Note", 1, "legacy.md", Map.of());
+
+        QuarantineRestoreOutcome dryReattachOff =
+            vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, true, false);
+        QuarantineRestoreOutcome dryReattachOn =
+            vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, true, true);
+        assertThat(reasonOf(dryReattachOff, h)).as("the dry run predicts the warning").isEqualTo("owner_link_dropped");
+        assertThat(reasonOf(dryReattachOn, h)).as("a run with reattach on drops nothing").isNull();
 
         QuarantineRestoreOutcome bytesOnly =
             vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false, false);
@@ -850,22 +876,128 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(row.outcome()).isEqualTo("restored");
         assertThat(row.attached()).isFalse();
         assertThat(row.reattach()).as("what reattach WOULD have done is still reported").isEqualTo("attach");
+        assertThat(row.reason()).as("and the verdict row warns that the owner link does not survive")
+            .isEqualTo("owner_link_dropped");
+        assertThat(row.owner()).as("the owner the link named").isEqualTo(doc);
+        assertThat(row.position()).as("and the position").isZero();
         assertThat(row.noManifest()).isTrue();
         assertThat(row.reapableAfter()).isNotNull();
         assertThat(manifest(t, doc)).isEmpty();
         assertThat(visibleToGet(t, c, h)).as("hidden: restored, but no live owner row names it").isFalse();
         assertThat(visibleToSearch(t, c, "legacy text", h)).isFalse();
+        assertThat(metadataOf(chunk(t, c, h))).as("the restored row holds the CHUNK keys and nothing else")
+            .containsOnlyKeys("chunk_text_hash", "embedding_model");
         assertThat(audit(t, "quarantine_restore")).singleElement()
             .satisfies(a -> assertThat(a.details()).contains("\"reattach\": false").contains("\"attached\": 0"));
 
-        // Bytes-only is not a dead end: the chunk is present, and the same verb with reattach on finishes the job.
+        // The rerun with reattach on: the chunk is present and its row names no document, so there is no owner.
+        QuarantineRestoreOutcome again = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+        assertThat(again.present()).containsExactly(h);
+        assertThat(again.attached()).isEmpty();
+        assertThat(verdictOf(again, h)).isEqualTo("no_live_owner");
+        assertThat(reasonOf(again, h)).as("a chunk with no owner carries no warning").isNull();
+        assertThat(manifest(t, doc)).isEmpty();
+        assertThat(visibleToGet(t, c, h)).isFalse();
+        assertThat(audit(t, "quarantine_restore")).as("the rerun moved and attached nothing: no second row").hasSize(1);
+    }
+
+    @Test
+    void aSingleCallRestoreWithReattachStillAttachesAForwardKeyedChunk_whileTheRestoredRowHoldsChunkKeysOnly()
+            throws Exception {
+        // The plan is judged from the quarantine copy before the move, so the stripped row still attaches in the call.
+        String t = newTenant();
+        String c = col("knowledge");
+        String doc = "1.2.2";
+        Map<String, Object> keyed = new java.util.LinkedHashMap<>();
+        keyed.put("catalog_doc_id", doc);
+        keyed.put("chunk_index", 1);
+        keyed.put("title", "Forward");
+        keyed.put("line_start", 10);
+        keyed.put("line_end", 20);
+        keyed.put("chunk_start_char", 100);
+        keyed.put("chunk_end_char", 400);
+        // A stale chunk_text_hash: the CHUNK key is derived from the chash column, never copied.
+        keyed.put("chunk_text_hash", "0".repeat(64));
+        String h = quarantinedWith(t, c, Map.of("forward", keyed)).get(0);
+        liveDoc(t, c, doc, "Forward", 2, "forward.md", Map.of());
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        assertThat(out.restored()).containsExactly(h);
+        assertThat(out.attached()).containsExactly(h);
+        assertThat(reasonOf(out, h)).as("an attach has no reason").isNull();
+        assertThat(manifest(t, doc)).containsExactly(new ManifestRow(1, h, c));
+        assertThat(manifestSpan(t, doc, 1)).as("the span keys of the quarantine copy reach the manifest row")
+            .containsExactly(10, 20, 100, 400);
+        assertThat(metadataOf(chunk(t, c, h))).containsOnlyKeys("chunk_text_hash", "embedding_model")
+            .containsEntry("chunk_text_hash", h);
+        assertThat(visibleToGet(t, c, h)).isTrue();
+    }
+
+    @Test
+    void aNoteFoundByItsOwnDocIdAttachesOnARerunAfterABytesOnlyRestore_withNoWarning() throws Exception {
+        // The reverse path reads the catalog (the note's metadata.doc_id equals the chash), not the chunk row, so the
+        // strip costs it nothing: no warning on the bytes-only restore, and the rerun attaches.
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantinedWith(t, c, Map.of("note", Map.<String, Object>of("title", "A note"))).get(0);
+        liveDoc(t, c, "1.2.3", "A note", 1, "", Map.of("doc_id", h));
+
+        QuarantineRestoreOutcome bytesOnly =
+            vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false, false);
+        assertThat(verdictOf(bytesOnly, h)).isEqualTo("attach");
+        assertThat(reasonOf(bytesOnly, h)).as("nothing is lost: the note is found by the chash").isNull();
+        assertThat(bytesOnly.attached()).isEmpty();
+
         QuarantineRestoreOutcome again = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
         assertThat(again.present()).containsExactly(h);
         assertThat(again.attached()).containsExactly(h);
-        assertThat(manifest(t, doc)).containsExactly(new ManifestRow(0, h, c));
+        assertThat(manifest(t, "1.2.3")).containsExactly(new ManifestRow(0, h, c));
         assertThat(visibleToGet(t, c, h)).isTrue();
-        assertThat(audit(t, "quarantine_restore")).as("the attach is audited too").hasSize(2);
-        assertThat(audit(t, "quarantine_restore").get(1).chashes()).contains(h);
+    }
+
+    @Test
+    void aBytesOnlyRestoreOfAChunkTheForwardKeyCannotPlaceCarriesNoWarning() throws Exception {
+        // The warning is for a link that would have attached. A chunk the plan refuses (a document mid index run) or
+        // that names no live document loses nothing by the strip, so its reason stays the plan's own.
+        String t = newTenant();
+        String c = col("knowledge");
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("indexing", Map.of("catalog_doc_id", "1.2.4", "chunk_index", 0));
+        meta.put("ownerless", Map.of("title", "no owner named"));
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, "1.2.4", "Mid run", 1, "m.md", Map.of());
+        setIndexState(t, "1.2.4", "indexing");
+
+        QuarantineRestoreOutcome out =
+            vectors.quarantineRestore(t, c, quarantineOf(c), hs, ACTOR, false, false);
+
+        assertThat(verdictOf(out, hs.get(0))).isEqualTo("superseded");
+        assertThat(reasonOf(out, hs.get(0))).isEqualTo("indexing");
+        assertThat(verdictOf(out, hs.get(1))).isEqualTo("no_live_owner");
+        assertThat(reasonOf(out, hs.get(1))).isNull();
+    }
+
+    @Test
+    void aPresentKeyedChunkIsNotTouchedByTheRestore_soItsOwnKeysStillReattachItOnTheNextCall() throws Exception {
+        // present = the origin already has the row (a client write that still carries its document keys, written
+        // before the Phase 4 sweep): the restore never rewrites it, so the plan still reads its keys, with no warning.
+        String t = newTenant();
+        String c = col("knowledge");
+        quarantined(t, c, "something-else");
+        String h = orphan(t, c, "live-keyed", Map.<String, Object>of(
+            "catalog_doc_id", "1.2.5", "chunk_index", 0, "title", "p"));
+        liveDoc(t, c, "1.2.5", "P", 1, "p.md", Map.of());
+
+        QuarantineRestoreOutcome bytesOnly =
+            vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false, false);
+        assertThat(bytesOnly.present()).containsExactly(h);
+        assertThat(reasonOf(bytesOnly, h)).as("nothing is stripped, so nothing is dropped").isNull();
+        assertThat(metadataOf(chunk(t, c, h))).containsEntry("title", "p").containsEntry("catalog_doc_id", "1.2.5");
+
+        QuarantineRestoreOutcome again = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+        assertThat(again.attached()).containsExactly(h);
+        assertThat(manifest(t, "1.2.5")).containsExactly(new ManifestRow(0, h, c));
     }
 
     @Test
@@ -1020,12 +1152,12 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "disputed")
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(t).and(CATALOG_COLLECTIONS.NAME.eq(c))).execute();
             assertThatThrownBy(() -> ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
-                    t, c, quarantineOf(c), new String[] {h}, ACTOR, (Long) null, false, true)).fetch())
+                    t, c, quarantineOf(c), new String[] {h}, ACTOR, (Long) null, false, true, (String[]) null)).fetch())
                 .hasStackTraceContaining("not a registered live collection");
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "live")
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(t).and(CATALOG_COLLECTIONS.NAME.eq(c))).execute();
             assertThatThrownBy(() -> ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
-                    t, c, quarantineOf(c), new String[] {"NOT-HEX"}, ACTOR, (Long) null, false, true)).fetch())
+                    t, c, quarantineOf(c), new String[] {"NOT-HEX"}, ACTOR, (Long) null, false, true, (String[]) null)).fetch())
                 .hasStackTraceContaining("64 lowercase hex");
         }
         assertThat(inCollection(t, quarantineOf(c), h)).as("both refusals moved nothing").isTrue();
@@ -1100,7 +1232,7 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
 
         try (Connection su = pg.createConnection("")) {
             var rows = DSL.using(su, SQLDialect.POSTGRES).selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
-                a, c, quarantineOf(c), new String[] {h}, ACTOR, (Long) null, false, true)).fetch();
+                a, c, quarantineOf(c), new String[] {h}, ACTOR, (Long) null, false, true, (String[]) null)).fetch();
             assertThat(rows.get(0).get(QUARANTINE_RESTORE_CHUNKS.R_OUTCOME)).isEqualTo("restored");
             assertThat(rows.get(0).get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH))
                 .as("tenant B's live document is not tenant A's owner").isEqualTo("no_live_owner");
@@ -1154,8 +1286,9 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         }
 
         vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
-        assertThat(metadataOf(chunk(t, c, h))).containsEntry("title", "tagged")
-            .doesNotContainKeys("quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at");
+        assertThat(metadataOf(chunk(t, c, h))).as("nexus-l003p: the CHUNK keys only, so the title does not survive")
+            .containsOnlyKeys("chunk_text_hash", "embedding_model")
+            .doesNotContainKeys("title", "quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at");
 
         // Restore, let it age past the grace, and the reaper takes it again; it must restore again, clean.
         ReapableFixtures.agePastGrace(pg, t, c);
@@ -1163,8 +1296,8 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(inCollection(t, quarantineOf(c), h)).as("quarantined once more").isTrue();
         QuarantineRestoreOutcome second = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
         assertThat(second.restored()).containsExactly(h);
-        assertThat(metadataOf(chunk(t, c, h))).containsEntry("title", "tagged")
-            .doesNotContainKeys("quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at");
+        assertThat(metadataOf(chunk(t, c, h))).containsOnlyKeys("chunk_text_hash", "embedding_model")
+            .doesNotContainKeys("title", "quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at");
     }
 
     @Test
@@ -1245,7 +1378,7 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
             DSL.using(su, SQLDialect.POSTGRES).select(DSL.function("set_config", String.class,
                 DSL.val("TimeZone"), DSL.val("Asia/Tokyo"), DSL.val(false))).fetch();
             DSL.using(su, SQLDialect.POSTGRES).selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
-                t, c, quarantineOf(c), new String[] {h}, ACTOR, (Long) null, false, false)).fetch();
+                t, c, quarantineOf(c), new String[] {h}, ACTOR, (Long) null, false, false, (String[]) null)).fetch();
         }
 
         var details = MAPPER.readTree(audit(t, "quarantine_restore").get(0).details());
@@ -1306,7 +1439,7 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void twoVersionsOfOnePositionAreRefusedWhenTheyLandInSeparateCalls() throws Exception {
+    void twoVersionsOfOnePositionAreRefusedWhileOneStillHoldsItsKeys_butNotAfterAnEarlierCallRestoredIt() throws Exception {
         // The page-split case: each call names only one of the two, so a per-call check sees no claim at all.
         String t = newTenant();
         String c = col("knowledge");
@@ -1321,20 +1454,26 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(verdictOf(first, hs.get(0))).as("v2 still sits in quarantine, naming the same position")
             .isEqualTo("superseded");
         assertThat(reasonOf(first, hs.get(0))).isEqualTo("rival");
+        assertThat(metadataOf(chunk(t, c, hs.get(0)))).as("v1 came back bytes-only, stripped to the CHUNK keys")
+            .containsOnlyKeys("chunk_text_hash", "embedding_model");
         QuarantineRestoreOutcome second = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(hs.get(1)), ACTOR, false);
-        assertThat(verdictOf(second, hs.get(1))).as("v1 is in the collection now, naming the same position")
-            .isEqualTo("superseded");
-        assertThat(reasonOf(second, hs.get(1))).isEqualTo("rival");
-        assertThat(manifest(t, "1.22.1")).as("neither version was chosen for the operator").isEmpty();
-        assertThat(visibleToGet(t, c, hs.get(0))).isFalse();
-        assertThat(visibleToGet(t, c, hs.get(1))).isFalse();
+        // nexus-l003p, the accepted narrowing: v1 is in the collection but no longer names the document or the
+        // position (the restore stripped them), so it is not a rival of v2. The refusal holds within one call and
+        // against any chunk still carrying its keys; it does not hold against a version an earlier call restored.
+        // v1 stays hidden bytes, and v2 was named by the operator on purpose.
+        assertThat(verdictOf(second, hs.get(1))).as("v1 no longer names the position")
+            .isEqualTo("attach");
+        assertThat(reasonOf(second, hs.get(1))).isNull();
+        assertThat(manifest(t, "1.22.1")).containsExactly(new ManifestRow(0, hs.get(1), c));
+        assertThat(visibleToGet(t, c, hs.get(0))).as("v1 stays hidden: no manifest row names it").isFalse();
+        assertThat(visibleToGet(t, c, hs.get(1))).isTrue();
 
         QuarantineRestoreOutcome control = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(hs.get(2)), ACTOR, false);
         assertThat(verdictOf(control, hs.get(2))).as("the control: a position with one chunk attaches").isEqualTo("attach");
     }
 
     @Test
-    void twoVersionsOfOnePositionAreRefusedWhenTheyLandOnDifferentPagesOfOneSelection() throws Exception {
+    void twoVersionsOfOnePositionOnDifferentPagesOfOneSelectionAreRefusedOnlyWhileTheFirstStillHoldsItsKeys() throws Exception {
         String t = newTenant();
         String c = col("knowledge");
         Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
@@ -1352,11 +1491,14 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
             assertThat(r.reattach()).isEqualTo("superseded");
             assertThat(r.reason()).isEqualTo("rival");
         });
+        // nexus-l003p, the accepted narrowing: page 1's chunk came back stripped to the CHUNK keys, so it no longer
+        // names the position and page 2's chunk is not refused for it (the operator walked the selection on purpose).
         assertThat(page2.rows()).singleElement().satisfies(r -> {
-            assertThat(r.reattach()).isEqualTo("superseded");
-            assertThat(r.reason()).isEqualTo("rival");
+            assertThat(r.reattach()).isEqualTo("attach");
+            assertThat(r.reason()).isNull();
         });
-        assertThat(manifest(t, "1.23.1")).isEmpty();
+        assertThat(manifest(t, "1.23.1")).extracting(ManifestRow::chash)
+            .containsExactly(page2.rows().get(0).chash());
         for (String h : hs) assertThat(inCollection(t, c, h)).isTrue();
     }
 
@@ -1441,10 +1583,12 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void aDeadlockWithAnotherWriterOfTheSameRowsIsTheTypedRetryableBusy_notAnOpaqueError() throws Exception {
-        // The restore holds the quarantine row it deleted and waits for the document's index-run lock; the other
-        // session holds that lock and then wants the same row. The restore waited first, so the deadlock detector
-        // picks it as the victim (40P01).
+    void aWriterHoldingTheDocumentLockAndWantingTheQuarantineRowCannotDeadlockTheRestore_itIsTheTypedBusyWithNothingMoved()
+            throws Exception {
+        // nexus-l003p: the document locks are now taken BEFORE the move, so the restore waits for the lock holding no
+        // row. It used to hold the quarantine row it had deleted while it waited, and a session that held the lock
+        // and then wanted that row deadlocked with it (40P01); that class is gone. The other session's delete goes
+        // straight through, and the restore trips its 2 s lock bound: the typed retryable busy, nothing moved.
         String t = newTenant();
         String c = col("knowledge");
         String doc = "1.27.1";
@@ -1467,15 +1611,16 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
                 .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(quarantineOf(c)))
                        .and(CHUNKS.CHASH.eq(Chash.fromHex(h).toBytes()))).execute());
 
+            rowWanted.get(5, java.util.concurrent.TimeUnit.SECONDS);   // the other session's delete is not blocked
             assertThatThrownBy(() -> call.get(15, java.util.concurrent.TimeUnit.SECONDS))
                 .hasCauseInstanceOf(PgVectorRepository.QuarantineRestoreBusyException.class)
-                .hasStackTraceContaining("deadlock");
-            rowWanted.get(15, java.util.concurrent.TimeUnit.SECONDS);   // the survivor's delete goes through
+                .hasStackTraceContaining("lock timeout")
+                .satisfies(e -> assertThat(e.getCause().getMessage()).contains("nothing was moved"));
             holder.rollback();
         } finally {
             pool.shutdownNow();
         }
-        assertThat(inCollection(t, quarantineOf(c), h)).as("the victim rolled back whole: still in quarantine").isTrue();
+        assertThat(inCollection(t, quarantineOf(c), h)).as("nothing moved: still in quarantine").isTrue();
         assertThat(inCollection(t, c, h)).isFalse();
         assertThat(manifest(t, doc)).isEmpty();
     }
@@ -1906,18 +2051,20 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void twoVersionsOfOnePositionInDifferentSiblingsAreRefusedForBoth_inOneCall() throws Exception {
+    void twoVersionsOfOnePositionInDifferentSiblingsAreRefusedForBoth_inOneCall_andTheDryRunEqualsTheRealRun()
+            throws Exception {
+        // nexus-l003p: each sibling's restore strips the rows it brings back, so the whole selection is judged BEFORE
+        // any sibling moves (the dry run of each sibling sees every version still in quarantine) and the real calls are
+        // told the rivals. Both versions are refused and restored bytes-only, exactly as before the strip.
         Rivals r = rivalsAcrossSiblings();
+        List<String> all = List.of(r.inReaperSibling(), r.inClientSibling(), r.control());
 
-        QuarantineRestoreOutcome dry = vectors.quarantineRestore(r.t(), r.c(), null,
-            List.of(r.inReaperSibling(), r.inClientSibling(), r.control()), ACTOR, true);
-        assertThat(reasonOf(dry, r.inReaperSibling())).as("the dry run predicts what the real call does")
-            .isEqualTo("rival");
+        QuarantineRestoreOutcome dry = vectors.quarantineRestore(r.t(), r.c(), null, all, ACTOR, true);
+        assertThat(reasonOf(dry, r.inReaperSibling())).isEqualTo("rival");
         assertThat(reasonOf(dry, r.inClientSibling())).isEqualTo("rival");
         assertThat(verdictOf(dry, r.control())).isEqualTo("attach");
 
-        QuarantineRestoreOutcome out = vectors.quarantineRestore(r.t(), r.c(), null,
-            List.of(r.inReaperSibling(), r.inClientSibling(), r.control()), ACTOR, false);
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(r.t(), r.c(), null, all, ACTOR, false);
 
         assertThat(verdictOf(out, r.inReaperSibling())).isEqualTo("superseded");
         assertThat(reasonOf(out, r.inReaperSibling())).isEqualTo("rival");
@@ -1925,10 +2072,55 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(reasonOf(out, r.inClientSibling())).isEqualTo("rival");
         assertThat(verdictOf(out, r.control())).as("a position with one chunk attaches").isEqualTo("attach");
         assertThat(manifest(r.t(), "1.42.1")).extracting(ManifestRow::position).containsExactly(1);
+        // The dry run is the real run's prediction: the same verdict and reason for every chash.
+        for (String h : all) {
+            assertThat(verdictOf(out, h)).as("dry run == real run, verdict of " + h).isEqualTo(verdictOf(dry, h));
+            assertThat(reasonOf(out, h)).as("dry run == real run, reason of " + h).isEqualTo(reasonOf(dry, h));
+        }
+        assertThat(inCollection(r.t(), r.c(), r.inReaperSibling())).as("both versions came back as bytes").isTrue();
+        assertThat(inCollection(r.t(), r.c(), r.inClientSibling())).isTrue();
+        assertThat(visibleToGet(r.t(), r.c(), r.inReaperSibling())).isFalse();
+        assertThat(visibleToGet(r.t(), r.c(), r.inClientSibling())).isFalse();
     }
 
     @Test
-    void twoVersionsOfOnePositionInDifferentSiblingsAreRefusedForBoth_reaperSiblingFirstInSeparateCalls()
+    void theRivalsParameterRefusesAChunkThePlanWouldAttach_andOnlyThatChunk() throws Exception {
+        // The SQL half of the whole-selection verdict, called directly: a chash named in p_rivals that the sibling-local
+        // plan would attach reads superseded:rival; one that is not named attaches; a malformed one is refused.
+        String t = newTenant();
+        String c = col("knowledge");
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("named", Map.of("catalog_doc_id", "1.44.1", "chunk_index", 0));
+        meta.put("unnamed", Map.of("catalog_doc_id", "1.44.1", "chunk_index", 1));
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, "1.44.1", "Doc", 2, "d.md", Map.of());
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThatThrownBy(() -> ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
+                    t, c, quarantineOf(c), hs.toArray(String[]::new), ACTOR, (Long) null, false, true,
+                    new String[] {"NOT-HEX"})).fetch())
+                .hasStackTraceContaining("rival chash must be 64 lowercase hex");
+            var rows = ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
+                t, c, quarantineOf(c), hs.toArray(String[]::new), ACTOR, (Long) null, false, true,
+                new String[] {hs.get(0)})).fetch();
+            for (var row : rows) {
+                String h = row.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH);
+                assertThat(row.get(QUARANTINE_RESTORE_CHUNKS.R_OUTCOME)).isEqualTo("restored");
+                if (h.equals(hs.get(0))) {
+                    assertThat(row.get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH)).isEqualTo("superseded");
+                    assertThat(row.get(QUARANTINE_RESTORE_CHUNKS.R_REASON)).isEqualTo("rival");
+                    assertThat(row.get(QUARANTINE_RESTORE_CHUNKS.R_ATTACHED)).isFalse();
+                } else {
+                    assertThat(row.get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH)).isEqualTo("attach");
+                    assertThat(row.get(QUARANTINE_RESTORE_CHUNKS.R_ATTACHED)).isTrue();
+                }
+            }
+        }
+        assertThat(manifest(t, "1.44.1")).containsExactly(new ManifestRow(1, hs.get(1), c));
+    }
+
+    @Test
+    void twoVersionsOfOnePositionInDifferentSiblings_reaperSiblingFirstInSeparateCalls_secondAttachesOnceTheFirstIsStripped()
             throws Exception {
         Rivals r = rivalsAcrossSiblings();
 
@@ -1938,13 +2130,15 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
             .isEqualTo("rival");
         QuarantineRestoreOutcome two = vectors.quarantineRestore(r.t(), r.c(), null, List.of(r.inClientSibling()),
             ACTOR, false);
-        assertThat(reasonOf(two, r.inClientSibling())).as("and now the first version is in the origin")
-            .isEqualTo("rival");
-        assertThat(manifest(r.t(), "1.42.1")).as("neither version was chosen for the operator").isEmpty();
+        // nexus-l003p, the accepted narrowing: the first version is in the origin but stripped to the CHUNK keys, so it
+        // no longer names the position; the second, named on purpose, attaches. In one call both are still refused.
+        assertThat(verdictOf(two, r.inClientSibling())).as("the first version was stripped on its way back")
+            .isEqualTo("attach");
+        assertThat(manifest(r.t(), "1.42.1")).extracting(ManifestRow::chash).contains(r.inClientSibling());
     }
 
     @Test
-    void twoVersionsOfOnePositionInDifferentSiblingsAreRefusedForBoth_clientSiblingFirstInSeparateCalls()
+    void twoVersionsOfOnePositionInDifferentSiblings_clientSiblingFirstInSeparateCalls_secondAttachesOnceTheFirstIsStripped()
             throws Exception {
         Rivals r = rivalsAcrossSiblings();
 
@@ -1954,8 +2148,9 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
             .isEqualTo("rival");
         QuarantineRestoreOutcome two = vectors.quarantineRestore(r.t(), r.c(), null, List.of(r.inReaperSibling()),
             ACTOR, false);
-        assertThat(reasonOf(two, r.inReaperSibling())).isEqualTo("rival");
-        assertThat(manifest(r.t(), "1.42.1")).isEmpty();
+        // As above: the version an earlier call restored is stripped and no longer a rival.
+        assertThat(verdictOf(two, r.inReaperSibling())).isEqualTo("attach");
+        assertThat(manifest(r.t(), "1.42.1")).extracting(ManifestRow::chash).contains(r.inReaperSibling());
     }
 
     @Test

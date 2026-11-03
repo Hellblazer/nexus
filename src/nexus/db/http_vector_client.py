@@ -5144,7 +5144,11 @@ class HttpVectorClient:
         "owner_chunks": int|None}], "source": {...}|None, "next_after":
         str|None}``. ``reason`` says why a ``superseded`` verdict was reached
         (``indexing``, ``complete``, ``failed``, ``version``, ``position_taken``,
-        ``rival``, ``other_collection``, ``has_rows``, ``past_end``, ``race``);
+        ``rival``, ``other_collection``, ``has_rows``, ``past_end``, ``race``), and
+        on an ``attach`` verdict of a call with ``reattach`` false (or its dry run) it reads
+        ``owner_link_dropped`` when the chunk's owner was named by its own ``catalog_doc_id`` /
+        ``doc_id``: a restored row keeps only the chunk keys (nexus-l003p), so ``owner`` and
+        ``position`` on that row are not kept and a later call cannot attach it;
         ``owner_rows`` / ``owner_chunks`` are the owner's manifest rows in the
         origin after the call against its registered chunk count. See the
         engine route's docstring (``VectorHandler#handleGcQuarantineRestore``) for

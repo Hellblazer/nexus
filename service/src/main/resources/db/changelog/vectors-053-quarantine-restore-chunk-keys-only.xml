@@ -1,0 +1,807 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-l003p (RDR-236 Phase 4 gate, engine): nexus.quarantine_restore_chunks restores a chunk row holding only the
+    CHUNK keys, and the reattach plan is judged from the quarantine copy BEFORE the move.
+
+    THE PROBLEM. The restore verb strips the four quarantine keys but, until now, kept every other key of the quarantined
+    row on purpose (vectors-030-1; the note in vectors-050's header): its reattach plan (nexus.quarantine_reattach_plan,
+    vectors-025-1, unchanged here) reads catalog_doc_id/doc_id (the forward owner), chunk_index (the position),
+    content_hash and the four span keys off the chunk row, and a second call that reattached a chunk an earlier call had
+    restored needed them. The Phase 4 allow-list CHECK (RDR-236 Phase 4 Step 3) admits CHUNK and ROW keys only, so a
+    restored row holding `title` or `doc_id` would be refused by the CHECK the validate step is about to turn on.
+
+    WHAT THE PLAN CAN READ INSTEAD, AND WHAT IT CANNOT. Nothing but the chunk's own metadata says which document a
+    manifest-less chash belongs to and where: a quarantined chunk has no manifest row (the manifest's foreign key to
+    nexus.chunks needs the origin row), and chash_positions and the census read that manifest or those same keys.
+    The one place the keys are still available is the quarantine copy, until the move deletes it.
+
+    THE CHANGE (decision of record on nexus-l003p, 2026-11-03).
+      1. The INSERT builds the restored row's metadata from the two CHUNK keys of the key table, chunk_text_hash and
+         embedding_model, derived from the chash and embedding_model columns (the vectors-050 expression), so the four
+         quarantine keys and every document or position key stay behind. ChunkMetadataKeys.CHUNK is the generated set;
+         QuarantineRestoreChunkKeysSqlPinTest holds the literals here equal to it.
+      2. The plan is computed from the quarantine copy BEFORE the move (p_from_quarantine true, the dry run's own call),
+         over the chashes the move will restore plus the ones already present, with the dry run's classification. The
+         per-document index-run locks are taken in tumbler order before the move and the plan is judged again under them;
+         the manifest rows written after the move are the ones judged. A lock that cannot be had still rolls the whole
+         call back with nothing moved. Restore with reattach (the default) is unchanged for the operator.
+      3. A restore with reattach OFF of a chunk the plan would attach through its forward key loses that link: the strip
+         deletes the only record of owner and position. The verdict row says so. r_reattach stays 'attach' (what a
+         reattach call would have done), r_attached false, and r_reason, null for an attach until now, reads
+         'owner_link_dropped' for exactly the chunks this call restored bytes-only and whose owner was found through
+         the quarantine copy's own catalog_doc_id/doc_id (r_owner and r_position name the owner and position that will
+         not survive). A dry run with reattach off predicts it for the chunks it would restore. No new column.
+      4. The function gains a ninth parameter, p_rivals text[] DEFAULT NULL: the chashes a caller's whole-selection plan
+         judged rival. A restore that spans several quarantine siblings calls this function once per sibling, each call its
+         own transaction, and the first sibling's restore strips its rows, so a later sibling's plan could no longer see
+         them as rivals. PgVectorRepository therefore judges the whole selection first, with a dry run per sibling (every
+         version still in quarantine, the dry run's own predictions), and passes the chashes it named rival; a chunk the
+         call would attach and the selection judged rival is refused as rival, so the "never attach when another stored
+         chunk names the same document and position" rule holds across the siblings of ONE call exactly as before the
+         strip, and the dry run equals the real run. A new parameter list is a new function: the eight-argument one is
+         dropped and the nine-argument one created and granted; DEFAULT NULL keeps an eight-argument call working.
+
+    WHAT THIS NARROWS (accepted on nexus-l003p).
+      - A bytes-only restore followed by a rerun with reattach no longer attaches a chunk whose owner was a forward key:
+        the rerun reads the stripped origin row, so the forward path finds no owner and the verdict is no_live_owner.
+        The reverse path (a live note whose own metadata.doc_id is the chash, position 0) reads the catalog, not the
+        row, and still attaches. The advice is to restore with reattach, which is the default.
+      - A chunk restored and stripped no longer counts as a rival of a LATER CALL's chunk for the same document and
+        position (the rival scan reads the doc keys of stored rows, and the restored row has none). The refusal of two
+        versions of one position holds within one call, across every sibling the call spans (item 4), and against any
+        chunk that still carries its keys (a quarantine sibling, an origin row written by a client); it does not hold
+        against a version an EARLIER call restored. That includes the pages of a window or audit selection, which are
+        separate calls (the route takes at most 1000 chashes per call and the client already sends full
+        1000-chash calls, so a larger selection cannot be one). The stripped copy is hidden bytes (no manifest row names it) and the operator named the later
+        chunk on purpose.
+
+    NOT CHANGED. quarantine_reattach_plan, the dimension and width classification, the move itself (one statement, the
+    exclusive sweep gate, last_written_at = now(), created_at carried), the audit row, and every outcome name.
+
+    ROLLBACK. Drops the nine-argument function and re-creates the vectors-030-1 eight-argument one with its grant.
+
+    No DATA EFFECT: one function dropped and created, and its grant. After vectors-052 (current tail), before the
+    grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-053-1" author="nexus-l003p">
+        <comment>nexus.quarantine_restore_chunks restores a chunk with metadata holding only the CHUNK keys of the key table (chunk_text_hash, embedding_model, derived from the chash and embedding_model columns) and judges the reattach plan from the quarantine copy before the move, so a restore with reattach still attaches in the same call while no document key returns to the live collection; a restore with reattach off marks the verdict row of a chunk whose forward owner link it drops with reason owner_link_dropped (nexus-l003p, RDR-236 Phase 4). A ninth parameter, p_rivals, carries the whole-selection rival verdict of a restore that spans several quarantine siblings, so the refusal of two versions of one position holds across them in one call. One function dropped and created, and its grant. No data effect.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.quarantine_restore_chunks(text, text, text, text[], text, bigint, boolean, boolean);
+
+-- ---- quarantine_restore_chunks (nexus-l003p)
+CREATE OR REPLACE FUNCTION nexus.quarantine_restore_chunks(p_tenant_id text, p_origin_collection text, p_quarantine_collection text, p_chashes text[], p_actor text, p_source_audit_id bigint, p_dry_run boolean, p_reattach boolean, p_rivals text[] DEFAULT NULL)
+ RETURNS TABLE(r_chash text, r_outcome text, r_audit_id bigint, r_no_manifest boolean, r_reapable_after timestamp with time zone, r_reattach text, r_attached boolean, r_owner text, r_owner_title text, r_position integer, r_chunk_title text, r_reason text, r_owner_rows integer, r_owner_chunks integer)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    -- The default grace of the reapable predicate (vectors-021-2), for the report only; see the header.
+    v_default_grace  CONSTANT interval := interval '30 days';
+    v_now            timestamptz := now();
+    v_requested      text[];
+    v_class          jsonb;
+    v_plan           jsonb := '[]'::jsonb;
+    v_cand           text[];
+    v_attachable     text[];
+    v_fwd            text[] := '{}'::text[];
+    v_doc            text;
+    v_restored       text[] := '{}'::text[];
+    v_present        text[];
+    v_dim_conflict   text[];
+    v_missing        text[];
+    v_no_manifest    text[];
+    v_attached       text[] := '{}'::text[];
+    v_superseded     text[];
+    v_no_owner       text[];
+    v_no_position    text[];
+    v_audit_chashes  text[];
+    v_audit_id       bigint;
+    v_actor          text;
+BEGIN
+    IF p_chashes IS NULL OR cardinality(p_chashes) = 0 THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: at least one chash is required'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF cardinality(p_chashes) > 5000 THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: at most 5000 chashes per call, got %', cardinality(p_chashes)
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF EXISTS (SELECT 1 FROM unnest(p_chashes) h WHERE h IS NULL OR h !~ '^[0-9a-f]{64}$') THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: every chash must be 64 lowercase hex characters'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_rivals IS NOT NULL AND EXISTS (SELECT 1 FROM unnest(p_rivals) h WHERE h IS NULL OR h !~ '^[0-9a-f]{64}$') THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: every rival chash must be 64 lowercase hex characters'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_origin_collection IS NULL OR p_origin_collection = ''
+       OR left(p_origin_collection, 11) = 'quarantine-' THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: the origin collection must be a non-quarantine collection, got %',
+            p_origin_collection
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections cc
+                    WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection
+                      AND cc.lifecycle_state = 'live') THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: origin collection % is not a registered live collection for tenant % -- a chunk is restored into a registered live collection, never into a name',
+            p_origin_collection, p_tenant_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections cc
+                    WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection
+                      AND cc.lifecycle_state = 'quarantine') THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: % is not a registered quarantine collection for tenant %',
+            p_quarantine_collection, p_tenant_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- The distinct requested chashes in first-seen order: the result carries one row per chash.
+    SELECT array_agg(x.h ORDER BY x.ord)
+      INTO v_requested
+      FROM (SELECT u.h, min(u.ord) AS ord
+              FROM unnest(p_chashes) WITH ORDINALITY AS u(h, ord)
+             GROUP BY u.h) x;
+
+    IF p_dry_run THEN
+        SELECT jsonb_agg(jsonb_build_object('h', x.h, 'outcome', x.outcome) ORDER BY x.ord)
+          INTO v_class
+          FROM (
+            SELECT r.h, r.ord,
+                   CASE
+                       WHEN o.chash IS NOT NULL AND q.chash IS NOT NULL
+                            AND (CASE WHEN o.embedding_384 IS NOT NULL THEN 384
+                                      WHEN o.embedding_768 IS NOT NULL THEN 768
+                                      WHEN o.embedding_1024 IS NOT NULL THEN 1024 END)
+                                IS DISTINCT FROM
+                                (CASE WHEN q.embedding_384 IS NOT NULL THEN 384
+                                      WHEN q.embedding_768 IS NOT NULL THEN 768
+                                      WHEN q.embedding_1024 IS NOT NULL THEN 1024 END) THEN 'dim_conflict'
+                       WHEN o.chash IS NOT NULL THEN 'present'
+                       WHEN q.chash IS NOT NULL THEN 'would_restore'
+                       ELSE 'missing'
+                   END AS outcome
+              FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
+              LEFT JOIN nexus.chunks o
+                ON o.tenant_id = p_tenant_id AND o.collection = p_origin_collection AND o.chash = decode(r.h, 'hex')
+              LEFT JOIN nexus.chunks q
+                ON q.tenant_id = p_tenant_id AND q.collection = p_quarantine_collection AND q.chash = decode(r.h, 'hex')
+               AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+          ) x;
+        v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, p_quarantine_collection,
+            ARRAY(SELECT t.j->>'h' FROM jsonb_array_elements(v_class) AS t(j)
+                   WHERE t.j->>'outcome' IN ('would_restore', 'present')), true);
+        -- nexus-l003p: the chunks a real call would restore bytes-only and whose owner link the strip would lose.
+        v_fwd := ARRAY(
+            SELECT pl.chash
+              FROM jsonb_to_recordset(v_plan) AS pl(chash text, verdict text, doc text)
+              JOIN nexus.chunks q
+                ON q.tenant_id = p_tenant_id AND q.collection = p_quarantine_collection
+               AND q.chash = decode(pl.chash, 'hex')
+             WHERE pl.verdict = 'attach' AND pl.doc IS NOT NULL
+               AND pl.doc = NULLIF(COALESCE(NULLIF(q.metadata->>'catalog_doc_id', ''),
+                                            NULLIF(q.metadata->>'doc_id', '')), ''));
+        RETURN QUERY
+        SELECT t.j->>'h', t.j->>'outcome', NULL::bigint, NULL::boolean, NULL::timestamptz,
+               pl.verdict, false, pl.doc, pl.title, pl.pos, pl.chunk_title,
+               CASE WHEN NOT p_reattach AND t.j->>'outcome' = 'would_restore' AND pl.verdict = 'attach'
+                         AND (t.j->>'h') = ANY (v_fwd) THEN 'owner_link_dropped'
+                    ELSE pl.why END,
+               oc.n_rows, oc.n_chunks
+          FROM jsonb_array_elements(v_class) WITH ORDINALITY AS t(j, ord)
+          LEFT JOIN jsonb_to_recordset(v_plan)
+                    AS pl(chash text, verdict text, why text, doc text, title text, pos integer, chunk_title text)
+            ON pl.chash = t.j->>'h'
+          LEFT JOIN LATERAL (
+                SELECT (SELECT count(*) FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = p_tenant_id AND m.doc_id = pl.doc
+                           AND m.collection = p_origin_collection)::integer AS n_rows,
+                       (SELECT d.chunk_count FROM nexus.catalog_documents d
+                         WHERE d.tenant_id = p_tenant_id AND d.tumbler = pl.doc) AS n_chunks) oc
+            ON pl.doc IS NOT NULL
+         ORDER BY t.ord;
+        RETURN;
+    END IF;
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_origin_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            RAISE EXCEPTION
+                'quarantine_restore_chunks: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it; retry',
+                p_tenant_id, p_origin_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- THE PLAN IS JUDGED BEFORE THE MOVE (nexus-l003p). The restored row now carries the CHUNK keys only (below), so
+    -- the document keys the reattach plan reads (catalog_doc_id/doc_id, chunk_index, content_hash, the span keys) exist
+    -- only on the quarantine copy, and the move deletes it. The plan is therefore computed from the quarantine copy
+    -- (p_from_quarantine true, as the dry run does) over the chashes the move will restore plus the ones already
+    -- present, in the same classification the dry run makes; the manifest rows written after the move are the ones
+    -- judged here. Every document the plan names is locked in tumbler order BEFORE the move, and the plan is judged
+    -- again under the locks, so what is written is what was judged under them; a lock that cannot be had rolls the
+    -- whole call back with nothing moved, as before.
+    SELECT jsonb_agg(jsonb_build_object('h', x.h, 'outcome', x.outcome) ORDER BY x.ord)
+      INTO v_class
+      FROM (
+        SELECT r.h, r.ord,
+               CASE
+                   WHEN o.chash IS NOT NULL AND q.chash IS NOT NULL
+                        AND (CASE WHEN o.embedding_384 IS NOT NULL THEN 384
+                                  WHEN o.embedding_768 IS NOT NULL THEN 768
+                                  WHEN o.embedding_1024 IS NOT NULL THEN 1024 END)
+                            IS DISTINCT FROM
+                            (CASE WHEN q.embedding_384 IS NOT NULL THEN 384
+                                  WHEN q.embedding_768 IS NOT NULL THEN 768
+                                  WHEN q.embedding_1024 IS NOT NULL THEN 1024 END) THEN 'dim_conflict'
+                   WHEN o.chash IS NOT NULL THEN 'present'
+                   WHEN q.chash IS NOT NULL THEN 'would_restore'
+                   ELSE 'missing'
+               END AS outcome
+          FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
+          LEFT JOIN nexus.chunks o
+            ON o.tenant_id = p_tenant_id AND o.collection = p_origin_collection AND o.chash = decode(r.h, 'hex')
+          LEFT JOIN nexus.chunks q
+            ON q.tenant_id = p_tenant_id AND q.collection = p_quarantine_collection AND q.chash = decode(r.h, 'hex')
+           AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+      ) x;
+    v_cand := ARRAY(SELECT t.j->>'h' FROM jsonb_array_elements(v_class) AS t(j)
+                     WHERE t.j->>'outcome' IN ('would_restore', 'present'));
+    IF cardinality(v_cand) > 0 THEN
+        v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, p_quarantine_collection, v_cand, true);
+        IF p_reattach THEN
+            -- The per-document index-run lock manifest writers take, in tumbler order so two restores cannot
+            -- deadlock, then the plan again under it.
+            FOR v_doc IN
+                SELECT DISTINCT pl.doc
+                  FROM jsonb_to_recordset(v_plan) AS pl(chash text, verdict text, doc text)
+                 WHERE pl.doc IS NOT NULL
+                 ORDER BY pl.doc
+            LOOP
+                PERFORM pg_advisory_xact_lock(hashtext('indexrun:' || p_tenant_id || ':' || v_doc));
+            END LOOP;
+            v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, p_quarantine_collection, v_cand, true);
+        END IF;
+        -- THE WHOLE-SELECTION VERDICT (nexus-l003p). A restore that spans several quarantine siblings runs this function once per
+        -- sibling, each in its own transaction, and the first sibling's restore strips its rows, so a later sibling's plan can no
+        -- longer see them as rivals. The caller therefore judges the whole selection first, with a dry run per sibling (every
+        -- version still in quarantine), and passes the chashes that run named rival here: a chunk this call would attach and
+        -- the selection judged rival is refused as rival, as it would have been before any sibling moved.
+        IF p_rivals IS NOT NULL AND cardinality(p_rivals) > 0 THEN
+            v_plan := COALESCE((SELECT jsonb_agg(
+                                    CASE WHEN t.e->>'verdict' = 'attach' AND (t.e->>'chash') = ANY (p_rivals)
+                                         THEN t.e || jsonb_build_object('verdict', 'superseded', 'why', 'rival')
+                                         ELSE t.e END ORDER BY t.ord)
+                                  FROM jsonb_array_elements(v_plan) WITH ORDINALITY AS t(e, ord)), '[]'::jsonb);
+        END IF;
+        -- The chunks whose owner the plan found through the quarantine copy's own forward key. Restored with reattach
+        -- off, their keys are gone and a later call cannot reattach them: the verdict row says so (owner_link_dropped).
+        v_fwd := ARRAY(
+            SELECT pl.chash
+              FROM jsonb_to_recordset(v_plan) AS pl(chash text, verdict text, doc text)
+              JOIN nexus.chunks q
+                ON q.tenant_id = p_tenant_id AND q.collection = p_quarantine_collection
+               AND q.chash = decode(pl.chash, 'hex')
+             WHERE pl.verdict = 'attach' AND pl.doc IS NOT NULL
+               AND pl.doc = NULLIF(COALESCE(NULLIF(q.metadata->>'catalog_doc_id', ''),
+                                            NULLIF(q.metadata->>'doc_id', '')), ''));
+    END IF;
+
+    -- THE MOVE: one statement, vectors-024's reaper_quarantine_chunks in reverse. The DELETE's WHERE skips a chash
+    -- the origin already has (it is not deleted, so it stays in quarantine); the INSERT takes last_written_at = now()
+    -- (see the header) and the carried created_at; ON CONFLICT DO NOTHING is the single-statement race's backstop.
+    WITH req AS (
+        SELECT decode(r.h, 'hex') AS chash FROM unnest(v_requested) AS r(h)
+    ),
+    del AS (
+        DELETE FROM nexus.chunks q
+         USING req
+         WHERE q.tenant_id  = p_tenant_id
+           AND q.collection = p_quarantine_collection
+           AND q.chash      = req.chash
+           AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND NOT EXISTS (SELECT 1 FROM nexus.chunks o
+                            WHERE o.tenant_id  = p_tenant_id
+                              AND o.collection = p_origin_collection
+                              AND o.chash      = q.chash)
+        RETURNING q.chash, q.chunk_text, q.embedding_384, q.embedding_768, q.embedding_1024,
+                  q.metadata, q.created_at, q.embedding_model
+    ),
+    ins AS (
+        -- RDR-225: the chunk's own embedding_model rides with the move (an origin registered under another
+        -- model refuses it at the composite foreign key); the arbiter is the four-column primary key.
+        INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                                   embedding_384, embedding_768, embedding_1024,
+                                   metadata, created_at, last_written_at, embedding_model)
+        SELECT p_tenant_id, p_origin_collection, d.chash, d.chunk_text,
+               d.embedding_384, d.embedding_768, d.embedding_1024,
+               -- nexus-l003p, RDR-236 Phase 3: the CHUNK keys of the key table (src/nexus/tables/chunk-metadata-keys.toml,
+               -- class CHUNK), derived from the columns as vectors-050 does for the gc restores: the four quarantine keys
+               -- are the physical row's and every other key is a document or position key whose home is the catalog.
+               jsonb_build_object('chunk_text_hash', encode(d.chash, 'hex'), 'embedding_model', d.embedding_model),
+               d.created_at, v_now, d.embedding_model
+          FROM del d
+        ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING
+        RETURNING chash
+    )
+    SELECT COALESCE(array_agg(encode(i.chash, 'hex') ORDER BY i.chash), '{}'::text[])
+      INTO v_restored
+      FROM ins i;
+
+    -- Everything not restored is already in the origin (present, or dim_conflict when the quarantine copy is still
+    -- there and holds a different width) or nowhere (missing).
+    SELECT COALESCE(array_agg(c.h ORDER BY c.ord) FILTER (WHERE c.has_o AND NOT c.dim_differs), '{}'::text[]),
+           COALESCE(array_agg(c.h ORDER BY c.ord) FILTER (WHERE c.has_o AND c.dim_differs), '{}'::text[]),
+           COALESCE(array_agg(c.h ORDER BY c.ord) FILTER (WHERE NOT c.has_o), '{}'::text[])
+      INTO v_present, v_dim_conflict, v_missing
+      FROM (
+        SELECT r.h, r.ord,
+               o.chash IS NOT NULL AS has_o,
+               (o.chash IS NOT NULL AND q.chash IS NOT NULL
+                AND (CASE WHEN o.embedding_384 IS NOT NULL THEN 384
+                          WHEN o.embedding_768 IS NOT NULL THEN 768
+                          WHEN o.embedding_1024 IS NOT NULL THEN 1024 END)
+                    IS DISTINCT FROM
+                    (CASE WHEN q.embedding_384 IS NOT NULL THEN 384
+                          WHEN q.embedding_768 IS NOT NULL THEN 768
+                          WHEN q.embedding_1024 IS NOT NULL THEN 1024 END)) AS dim_differs
+          FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
+          LEFT JOIN nexus.chunks o
+            ON o.tenant_id = p_tenant_id AND o.collection = p_origin_collection AND o.chash = decode(r.h, 'hex')
+          LEFT JOIN nexus.chunks q
+            ON q.tenant_id = p_tenant_id AND q.collection = p_quarantine_collection AND q.chash = decode(r.h, 'hex')
+           AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+         WHERE NOT (r.h = ANY (v_restored))
+      ) c;
+
+    -- REATTACH. The plan was judged before the move (above), from the quarantine copy. The chunks to write are the ones
+    -- it judged attach that are now in the origin: the ones this call restored and the ones that were already there
+    -- (not a width conflict, and not a chash the move lost to a client write of a different width).
+    v_attachable := v_restored || v_present;
+    IF p_reattach AND cardinality(v_attachable) > 0 THEN
+        WITH ins AS (
+            -- RDR-225: the manifest row carries the origin collection's embedding_model, the model its
+            -- chunk rows carry (one model per collection), so the four-column chunk foreign key holds.
+            INSERT INTO nexus.catalog_document_chunks
+                (tenant_id, doc_id, position, chash, chunk_index, line_start, line_end, char_start, char_end,
+                 collection, embedding_model)
+            SELECT p_tenant_id, pl.doc, pl.pos, decode(pl.chash, 'hex'), pl.pos, pl.ls, pl.le, pl.cs, pl.ce,
+                   p_origin_collection,
+                   (SELECT oc.embedding_model FROM nexus.catalog_collections oc
+                     WHERE oc.tenant_id = p_tenant_id AND oc.name = p_origin_collection)
+              FROM jsonb_to_recordset(v_plan)
+                   AS pl(chash text, verdict text, doc text, pos integer, ls integer, le integer,
+                         cs integer, ce integer)
+             WHERE pl.verdict = 'attach' AND pl.chash = ANY (v_attachable)
+            ON CONFLICT (tenant_id, doc_id, position) DO NOTHING
+            RETURNING chash
+        )
+        SELECT COALESCE(array_agg(encode(i.chash, 'hex') ORDER BY i.chash), '{}'::text[])
+          INTO v_attached
+          FROM ins i;
+    END IF;
+
+    -- What reattach left alone, by reason; a chunk the plan would have attached but whose insert lost a race
+    -- (cannot happen under the gate and the document lock, but the report must not claim it) reads superseded.
+    SELECT COALESCE(array_agg(pl.chash ORDER BY pl.chash) FILTER
+                        (WHERE pl.verdict = 'superseded' OR (pl.verdict = 'attach' AND p_reattach
+                                                              AND NOT (pl.chash = ANY (v_attached)))),
+                    '{}'::text[]),
+           COALESCE(array_agg(pl.chash ORDER BY pl.chash) FILTER (WHERE pl.verdict = 'no_live_owner'), '{}'::text[]),
+           COALESCE(array_agg(pl.chash ORDER BY pl.chash) FILTER (WHERE pl.verdict = 'no_position'), '{}'::text[])
+      INTO v_superseded, v_no_owner, v_no_position
+      FROM jsonb_to_recordset(v_plan) AS pl(chash text, verdict text);
+
+    -- Restored chunks with no own-collection manifest row AFTER the attach: hidden, and reapable again at
+    -- v_now + the default grace.
+    SELECT COALESCE(array_agg(r.h ORDER BY r.h), '{}'::text[])
+      INTO v_no_manifest
+      FROM unnest(v_restored) AS r(h)
+     WHERE NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                        WHERE m.tenant_id  = p_tenant_id
+                          AND m.collection = p_origin_collection
+                          AND m.chash      = decode(r.h, 'hex'));
+
+    v_actor := COALESCE(NULLIF(left(btrim(p_actor), 256), ''), 'operator');
+    v_audit_chashes := ARRAY(SELECT x FROM unnest(v_restored || v_attached) AS x GROUP BY x ORDER BY x);
+
+    IF cardinality(v_audit_chashes) > 0 THEN
+        INSERT INTO nexus.gc_audit
+            (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+        VALUES (
+            p_tenant_id, 'quarantine_restore', p_origin_collection, v_actor, false,
+            cardinality(v_audit_chashes), to_jsonb(v_audit_chashes),
+            jsonb_build_object(
+                'quarantine_collection', p_quarantine_collection,
+                'source_audit_id', p_source_audit_id,
+                'requested', cardinality(v_requested),
+                'restored', cardinality(v_restored),
+                'present', cardinality(v_present),
+                'dim_conflict', cardinality(v_dim_conflict),
+                'missing', cardinality(v_missing),
+                'present_chashes', to_jsonb(v_present),
+                'dim_conflict_chashes', to_jsonb(v_dim_conflict),
+                'missing_chashes', to_jsonb(v_missing),
+                'no_manifest', cardinality(v_no_manifest),
+                'reattach', p_reattach,
+                'attached', cardinality(v_attached),
+                'attached_chashes', to_jsonb(v_attached),
+                'superseded', cardinality(v_superseded),
+                'superseded_chashes', to_jsonb(v_superseded),
+                'no_live_owner', cardinality(v_no_owner),
+                'no_live_owner_chashes', to_jsonb(v_no_owner),
+                'no_position', cardinality(v_no_position),
+                'no_position_chashes', to_jsonb(v_no_position),
+                'reapable_again_after',
+                    to_char((v_now + v_default_grace) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')))
+        RETURNING id INTO v_audit_id;
+    END IF;
+
+    RETURN QUERY
+    SELECT r.h,
+           CASE WHEN r.h = ANY (v_restored)      THEN 'restored'
+                WHEN r.h = ANY (v_dim_conflict)  THEN 'dim_conflict'
+                WHEN r.h = ANY (v_present)       THEN 'present'
+                ELSE 'missing' END,
+           CASE WHEN r.h = ANY (v_audit_chashes) THEN v_audit_id END,
+           CASE WHEN r.h = ANY (v_restored) THEN r.h = ANY (v_no_manifest) END,
+           CASE WHEN r.h = ANY (v_no_manifest) THEN v_now + v_default_grace END,
+           CASE WHEN pl.verdict = 'attach' AND p_reattach AND NOT (r.h = ANY (v_attached)) THEN 'superseded'
+                ELSE pl.verdict END,
+           (r.h = ANY (v_attached)),
+           pl.doc, pl.title, pl.pos, pl.chunk_title,
+           CASE WHEN pl.verdict = 'attach' AND p_reattach AND NOT (r.h = ANY (v_attached)) THEN 'race'
+                -- nexus-l003p: restored bytes-only, the chunk's forward owner link was on the quarantine copy and is gone.
+                WHEN pl.verdict = 'attach' AND NOT p_reattach AND r.h = ANY (v_restored) AND r.h = ANY (v_fwd)
+                     THEN 'owner_link_dropped'
+                ELSE pl.why END,
+           oc.n_rows, oc.n_chunks
+      FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
+      LEFT JOIN jsonb_to_recordset(v_plan)
+                AS pl(chash text, verdict text, why text, doc text, title text, pos integer, chunk_title text)
+        ON pl.chash = r.h
+      LEFT JOIN LATERAL (
+            SELECT (SELECT count(*) FROM nexus.catalog_document_chunks m
+                     WHERE m.tenant_id = p_tenant_id AND m.doc_id = pl.doc
+                       AND m.collection = p_origin_collection)::integer AS n_rows,
+                   (SELECT d.chunk_count FROM nexus.catalog_documents d
+                     WHERE d.tenant_id = p_tenant_id AND d.tumbler = pl.doc) AS n_chunks) oc
+        ON pl.doc IS NOT NULL
+     ORDER BY r.ord;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION nexus.quarantine_restore_chunks(text, text, text, text[], text, bigint, boolean, boolean, text[]) TO nexus_svc;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.quarantine_restore_chunks(text, text, text, text[], text, bigint, boolean, boolean, text[]);
+
+-- ---- quarantine_restore_chunks
+CREATE OR REPLACE FUNCTION nexus.quarantine_restore_chunks(p_tenant_id text, p_origin_collection text, p_quarantine_collection text, p_chashes text[], p_actor text, p_source_audit_id bigint, p_dry_run boolean, p_reattach boolean)
+ RETURNS TABLE(r_chash text, r_outcome text, r_audit_id bigint, r_no_manifest boolean, r_reapable_after timestamp with time zone, r_reattach text, r_attached boolean, r_owner text, r_owner_title text, r_position integer, r_chunk_title text, r_reason text, r_owner_rows integer, r_owner_chunks integer)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    -- The default grace of the reapable predicate (vectors-021-2), for the report only; see the header.
+    v_default_grace  CONSTANT interval := interval '30 days';
+    v_now            timestamptz := now();
+    v_requested      text[];
+    v_class          jsonb;
+    v_plan           jsonb := '[]'::jsonb;
+    v_cand           text[];
+    v_doc            text;
+    v_restored       text[] := '{}'::text[];
+    v_present        text[];
+    v_dim_conflict   text[];
+    v_missing        text[];
+    v_no_manifest    text[];
+    v_attached       text[] := '{}'::text[];
+    v_superseded     text[];
+    v_no_owner       text[];
+    v_no_position    text[];
+    v_audit_chashes  text[];
+    v_audit_id       bigint;
+    v_actor          text;
+BEGIN
+    IF p_chashes IS NULL OR cardinality(p_chashes) = 0 THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: at least one chash is required'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF cardinality(p_chashes) > 5000 THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: at most 5000 chashes per call, got %', cardinality(p_chashes)
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF EXISTS (SELECT 1 FROM unnest(p_chashes) h WHERE h IS NULL OR h !~ '^[0-9a-f]{64}$') THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: every chash must be 64 lowercase hex characters'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_origin_collection IS NULL OR p_origin_collection = ''
+       OR left(p_origin_collection, 11) = 'quarantine-' THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: the origin collection must be a non-quarantine collection, got %',
+            p_origin_collection
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections cc
+                    WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection
+                      AND cc.lifecycle_state = 'live') THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: origin collection % is not a registered live collection for tenant % -- a chunk is restored into a registered live collection, never into a name',
+            p_origin_collection, p_tenant_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections cc
+                    WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection
+                      AND cc.lifecycle_state = 'quarantine') THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: % is not a registered quarantine collection for tenant %',
+            p_quarantine_collection, p_tenant_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- The distinct requested chashes in first-seen order: the result carries one row per chash.
+    SELECT array_agg(x.h ORDER BY x.ord)
+      INTO v_requested
+      FROM (SELECT u.h, min(u.ord) AS ord
+              FROM unnest(p_chashes) WITH ORDINALITY AS u(h, ord)
+             GROUP BY u.h) x;
+
+    IF p_dry_run THEN
+        SELECT jsonb_agg(jsonb_build_object('h', x.h, 'outcome', x.outcome) ORDER BY x.ord)
+          INTO v_class
+          FROM (
+            SELECT r.h, r.ord,
+                   CASE
+                       WHEN o.chash IS NOT NULL AND q.chash IS NOT NULL
+                            AND (CASE WHEN o.embedding_384 IS NOT NULL THEN 384
+                                      WHEN o.embedding_768 IS NOT NULL THEN 768
+                                      WHEN o.embedding_1024 IS NOT NULL THEN 1024 END)
+                                IS DISTINCT FROM
+                                (CASE WHEN q.embedding_384 IS NOT NULL THEN 384
+                                      WHEN q.embedding_768 IS NOT NULL THEN 768
+                                      WHEN q.embedding_1024 IS NOT NULL THEN 1024 END) THEN 'dim_conflict'
+                       WHEN o.chash IS NOT NULL THEN 'present'
+                       WHEN q.chash IS NOT NULL THEN 'would_restore'
+                       ELSE 'missing'
+                   END AS outcome
+              FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
+              LEFT JOIN nexus.chunks o
+                ON o.tenant_id = p_tenant_id AND o.collection = p_origin_collection AND o.chash = decode(r.h, 'hex')
+              LEFT JOIN nexus.chunks q
+                ON q.tenant_id = p_tenant_id AND q.collection = p_quarantine_collection AND q.chash = decode(r.h, 'hex')
+               AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+          ) x;
+        v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, p_quarantine_collection,
+            ARRAY(SELECT t.j->>'h' FROM jsonb_array_elements(v_class) AS t(j)
+                   WHERE t.j->>'outcome' IN ('would_restore', 'present')), true);
+        RETURN QUERY
+        SELECT t.j->>'h', t.j->>'outcome', NULL::bigint, NULL::boolean, NULL::timestamptz,
+               pl.verdict, false, pl.doc, pl.title, pl.pos, pl.chunk_title, pl.why, oc.n_rows, oc.n_chunks
+          FROM jsonb_array_elements(v_class) WITH ORDINALITY AS t(j, ord)
+          LEFT JOIN jsonb_to_recordset(v_plan)
+                    AS pl(chash text, verdict text, why text, doc text, title text, pos integer, chunk_title text)
+            ON pl.chash = t.j->>'h'
+          LEFT JOIN LATERAL (
+                SELECT (SELECT count(*) FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = p_tenant_id AND m.doc_id = pl.doc
+                           AND m.collection = p_origin_collection)::integer AS n_rows,
+                       (SELECT d.chunk_count FROM nexus.catalog_documents d
+                         WHERE d.tenant_id = p_tenant_id AND d.tumbler = pl.doc) AS n_chunks) oc
+            ON pl.doc IS NOT NULL
+         ORDER BY t.ord;
+        RETURN;
+    END IF;
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_origin_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            RAISE EXCEPTION
+                'quarantine_restore_chunks: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it; retry',
+                p_tenant_id, p_origin_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- THE MOVE: one statement, vectors-024's reaper_quarantine_chunks in reverse. The DELETE's WHERE skips a chash
+    -- the origin already has (it is not deleted, so it stays in quarantine); the INSERT takes last_written_at = now()
+    -- (see the header) and the carried created_at; ON CONFLICT DO NOTHING is the single-statement race's backstop.
+    WITH req AS (
+        SELECT decode(r.h, 'hex') AS chash FROM unnest(v_requested) AS r(h)
+    ),
+    del AS (
+        DELETE FROM nexus.chunks q
+         USING req
+         WHERE q.tenant_id  = p_tenant_id
+           AND q.collection = p_quarantine_collection
+           AND q.chash      = req.chash
+           AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND NOT EXISTS (SELECT 1 FROM nexus.chunks o
+                            WHERE o.tenant_id  = p_tenant_id
+                              AND o.collection = p_origin_collection
+                              AND o.chash      = q.chash)
+        RETURNING q.chash, q.chunk_text, q.embedding_384, q.embedding_768, q.embedding_1024,
+                  q.metadata, q.created_at, q.embedding_model
+    ),
+    ins AS (
+        -- RDR-225: the chunk's own embedding_model rides with the move (an origin registered under another
+        -- model refuses it at the composite foreign key); the arbiter is the four-column primary key.
+        INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                                   embedding_384, embedding_768, embedding_1024,
+                                   metadata, created_at, last_written_at, embedding_model)
+        SELECT p_tenant_id, p_origin_collection, d.chash, d.chunk_text,
+               d.embedding_384, d.embedding_768, d.embedding_1024,
+               (COALESCE(d.metadata, '{}'::jsonb)
+                    - 'quarantined_at' - 'origin_collection' - 'quarantined_by' - 'reaper_quarantined_at'),
+               d.created_at, v_now, d.embedding_model
+          FROM del d
+        ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING
+        RETURNING chash
+    )
+    SELECT COALESCE(array_agg(encode(i.chash, 'hex') ORDER BY i.chash), '{}'::text[])
+      INTO v_restored
+      FROM ins i;
+
+    -- Everything not restored is already in the origin (present, or dim_conflict when the quarantine copy is still
+    -- there and holds a different width) or nowhere (missing).
+    SELECT COALESCE(array_agg(c.h ORDER BY c.ord) FILTER (WHERE c.has_o AND NOT c.dim_differs), '{}'::text[]),
+           COALESCE(array_agg(c.h ORDER BY c.ord) FILTER (WHERE c.has_o AND c.dim_differs), '{}'::text[]),
+           COALESCE(array_agg(c.h ORDER BY c.ord) FILTER (WHERE NOT c.has_o), '{}'::text[])
+      INTO v_present, v_dim_conflict, v_missing
+      FROM (
+        SELECT r.h, r.ord,
+               o.chash IS NOT NULL AS has_o,
+               (o.chash IS NOT NULL AND q.chash IS NOT NULL
+                AND (CASE WHEN o.embedding_384 IS NOT NULL THEN 384
+                          WHEN o.embedding_768 IS NOT NULL THEN 768
+                          WHEN o.embedding_1024 IS NOT NULL THEN 1024 END)
+                    IS DISTINCT FROM
+                    (CASE WHEN q.embedding_384 IS NOT NULL THEN 384
+                          WHEN q.embedding_768 IS NOT NULL THEN 768
+                          WHEN q.embedding_1024 IS NOT NULL THEN 1024 END)) AS dim_differs
+          FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
+          LEFT JOIN nexus.chunks o
+            ON o.tenant_id = p_tenant_id AND o.collection = p_origin_collection AND o.chash = decode(r.h, 'hex')
+          LEFT JOIN nexus.chunks q
+            ON q.tenant_id = p_tenant_id AND q.collection = p_quarantine_collection AND q.chash = decode(r.h, 'hex')
+           AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+         WHERE NOT (r.h = ANY (v_restored))
+      ) c;
+
+    -- REATTACH. The candidates are the chunks now in the origin that this call named and that are not a width
+    -- conflict: the ones it restored and the ones that were already there.
+    v_cand := v_restored || v_present;
+    IF cardinality(v_cand) > 0 THEN
+        v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, p_quarantine_collection, v_cand, false);
+        IF p_reattach THEN
+            -- The per-document index-run lock manifest writers take, in tumbler order so two restores cannot
+            -- deadlock, then the plan again under it: what is written is what was judged under the lock.
+            FOR v_doc IN
+                SELECT DISTINCT pl.doc
+                  FROM jsonb_to_recordset(v_plan) AS pl(chash text, verdict text, doc text)
+                 WHERE pl.doc IS NOT NULL
+                 ORDER BY pl.doc
+            LOOP
+                PERFORM pg_advisory_xact_lock(hashtext('indexrun:' || p_tenant_id || ':' || v_doc));
+            END LOOP;
+            v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, p_quarantine_collection, v_cand, false);
+
+            WITH ins AS (
+                -- RDR-225: the manifest row carries the origin collection's embedding_model, the model its
+                -- chunk rows carry (one model per collection), so the four-column chunk foreign key holds.
+                INSERT INTO nexus.catalog_document_chunks
+                    (tenant_id, doc_id, position, chash, chunk_index, line_start, line_end, char_start, char_end,
+                     collection, embedding_model)
+                SELECT p_tenant_id, pl.doc, pl.pos, decode(pl.chash, 'hex'), pl.pos, pl.ls, pl.le, pl.cs, pl.ce,
+                       p_origin_collection,
+                       (SELECT oc.embedding_model FROM nexus.catalog_collections oc
+                         WHERE oc.tenant_id = p_tenant_id AND oc.name = p_origin_collection)
+                  FROM jsonb_to_recordset(v_plan)
+                       AS pl(chash text, verdict text, doc text, pos integer, ls integer, le integer,
+                             cs integer, ce integer)
+                 WHERE pl.verdict = 'attach'
+                ON CONFLICT (tenant_id, doc_id, position) DO NOTHING
+                RETURNING chash
+            )
+            SELECT COALESCE(array_agg(encode(i.chash, 'hex') ORDER BY i.chash), '{}'::text[])
+              INTO v_attached
+              FROM ins i;
+        END IF;
+    END IF;
+
+    -- What reattach left alone, by reason; a chunk the plan would have attached but whose insert lost a race
+    -- (cannot happen under the gate and the document lock, but the report must not claim it) reads superseded.
+    SELECT COALESCE(array_agg(pl.chash ORDER BY pl.chash) FILTER
+                        (WHERE pl.verdict = 'superseded' OR (pl.verdict = 'attach' AND p_reattach
+                                                              AND NOT (pl.chash = ANY (v_attached)))),
+                    '{}'::text[]),
+           COALESCE(array_agg(pl.chash ORDER BY pl.chash) FILTER (WHERE pl.verdict = 'no_live_owner'), '{}'::text[]),
+           COALESCE(array_agg(pl.chash ORDER BY pl.chash) FILTER (WHERE pl.verdict = 'no_position'), '{}'::text[])
+      INTO v_superseded, v_no_owner, v_no_position
+      FROM jsonb_to_recordset(v_plan) AS pl(chash text, verdict text);
+
+    -- Restored chunks with no own-collection manifest row AFTER the attach: hidden, and reapable again at
+    -- v_now + the default grace.
+    SELECT COALESCE(array_agg(r.h ORDER BY r.h), '{}'::text[])
+      INTO v_no_manifest
+      FROM unnest(v_restored) AS r(h)
+     WHERE NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                        WHERE m.tenant_id  = p_tenant_id
+                          AND m.collection = p_origin_collection
+                          AND m.chash      = decode(r.h, 'hex'));
+
+    v_actor := COALESCE(NULLIF(left(btrim(p_actor), 256), ''), 'operator');
+    v_audit_chashes := ARRAY(SELECT x FROM unnest(v_restored || v_attached) AS x GROUP BY x ORDER BY x);
+
+    IF cardinality(v_audit_chashes) > 0 THEN
+        INSERT INTO nexus.gc_audit
+            (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+        VALUES (
+            p_tenant_id, 'quarantine_restore', p_origin_collection, v_actor, false,
+            cardinality(v_audit_chashes), to_jsonb(v_audit_chashes),
+            jsonb_build_object(
+                'quarantine_collection', p_quarantine_collection,
+                'source_audit_id', p_source_audit_id,
+                'requested', cardinality(v_requested),
+                'restored', cardinality(v_restored),
+                'present', cardinality(v_present),
+                'dim_conflict', cardinality(v_dim_conflict),
+                'missing', cardinality(v_missing),
+                'present_chashes', to_jsonb(v_present),
+                'dim_conflict_chashes', to_jsonb(v_dim_conflict),
+                'missing_chashes', to_jsonb(v_missing),
+                'no_manifest', cardinality(v_no_manifest),
+                'reattach', p_reattach,
+                'attached', cardinality(v_attached),
+                'attached_chashes', to_jsonb(v_attached),
+                'superseded', cardinality(v_superseded),
+                'superseded_chashes', to_jsonb(v_superseded),
+                'no_live_owner', cardinality(v_no_owner),
+                'no_live_owner_chashes', to_jsonb(v_no_owner),
+                'no_position', cardinality(v_no_position),
+                'no_position_chashes', to_jsonb(v_no_position),
+                'reapable_again_after',
+                    to_char((v_now + v_default_grace) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')))
+        RETURNING id INTO v_audit_id;
+    END IF;
+
+    RETURN QUERY
+    SELECT r.h,
+           CASE WHEN r.h = ANY (v_restored)      THEN 'restored'
+                WHEN r.h = ANY (v_dim_conflict)  THEN 'dim_conflict'
+                WHEN r.h = ANY (v_present)       THEN 'present'
+                ELSE 'missing' END,
+           CASE WHEN r.h = ANY (v_audit_chashes) THEN v_audit_id END,
+           CASE WHEN r.h = ANY (v_restored) THEN r.h = ANY (v_no_manifest) END,
+           CASE WHEN r.h = ANY (v_no_manifest) THEN v_now + v_default_grace END,
+           CASE WHEN pl.verdict = 'attach' AND p_reattach AND NOT (r.h = ANY (v_attached)) THEN 'superseded'
+                ELSE pl.verdict END,
+           (r.h = ANY (v_attached)),
+           pl.doc, pl.title, pl.pos, pl.chunk_title,
+           CASE WHEN pl.verdict = 'attach' AND p_reattach AND NOT (r.h = ANY (v_attached)) THEN 'race'
+                ELSE pl.why END,
+           oc.n_rows, oc.n_chunks
+      FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
+      LEFT JOIN jsonb_to_recordset(v_plan)
+                AS pl(chash text, verdict text, why text, doc text, title text, pos integer, chunk_title text)
+        ON pl.chash = r.h
+      LEFT JOIN LATERAL (
+            SELECT (SELECT count(*) FROM nexus.catalog_document_chunks m
+                     WHERE m.tenant_id = p_tenant_id AND m.doc_id = pl.doc
+                       AND m.collection = p_origin_collection)::integer AS n_rows,
+                   (SELECT d.chunk_count FROM nexus.catalog_documents d
+                     WHERE d.tenant_id = p_tenant_id AND d.tumbler = pl.doc) AS n_chunks) oc
+        ON pl.doc IS NOT NULL
+     ORDER BY r.ord;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION nexus.quarantine_restore_chunks(text, text, text, text[], text, bigint, boolean, boolean) TO nexus_svc;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

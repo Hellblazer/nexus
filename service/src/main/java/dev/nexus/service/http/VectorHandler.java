@@ -1998,6 +1998,10 @@ public final class VectorHandler implements HttpHandler {
      * {@code owned}, or null) whether or not it ran, and {@code attached} says this call wrote the manifest row.
      * {@code reason} says why {@code superseded} was reached ({@code indexing}, {@code complete}, {@code failed}, {@code version},
      * {@code position_taken}, {@code rival}, {@code other_collection}, {@code has_rows}, {@code past_end}, {@code race}),
+     * or, on an {@code attach} verdict of a call with {@code reattach} false (or its dry run), {@code owner_link_dropped}
+     * for a chunk whose owner its quarantine copy named by {@code catalog_doc_id}/{@code doc_id}: the restored row
+     * keeps only the chunk keys, so {@code owner} and {@code position} are not kept and a later call cannot attach it
+     * (nexus-l003p),
      * and {@code owner_rows} / {@code owner_chunks} are the owner's manifest rows in the origin after the call
      * against its registered chunk count (a partial attach reads M of N).
      * Page by sending {@code next_after} back as {@code after_chash} (window source) or {@code source.next_offset}

@@ -25,6 +25,22 @@ engine writes that document's manifest row too and the chunk is visible again. A
 cannot attach is still restored, and the output says plainly that it stays hidden and what to
 do about it.
 
+Why ``--no-reattach`` costs more than it used to (nexus-l003p, RDR-236 Phase 4): a restored row
+now carries only the chunk keys (``chunk_text_hash``, ``embedding_model``). The document keys the
+reattach step reads (``catalog_doc_id``/``doc_id``, ``chunk_index``) live on the quarantine copy
+and go with it when the chunk moves, so a bytes-only restore of a chunk whose owner was named by
+those keys can no longer be attached by a later run. The engine marks such a row with the reason
+``owner_link_dropped`` and this verb prints a warning that names the owner and position and
+recommends the default (reattach) restore. A note found by its own ``doc_id`` is not affected.
+
+The refusal to attach one of two versions of the same document position (``rival``) holds within
+ONE engine call, across every quarantine sibling the call spans: the engine judges the whole
+selection before it moves anything. It does not hold across calls, because the earlier call's
+restored row no longer names a document to compare against. This verb sends full engine-sized calls
+(``_BATCH`` = 1000 chashes, the route's ceiling) and pages a window or audit selection by call, so
+two versions that land in different batches are two calls; restore both in one batch (name them
+with ``--chash``) when they matter.
+
 The chunks are named in one of three ways, because the places that record what was
 quarantined differ in completeness: explicit ``--chash`` values, a ``--audit-id`` (the
 chash list of a ``reaper_quarantine`` row; a ``gc_quarantine_orphans`` row lists only a
@@ -43,6 +59,10 @@ from typing import Any, NoReturn
 import click
 
 from nexus.db.engine_reasons import QUARANTINE_RESTORE_BUSY_REASON
+
+#: The ``reason`` on an ``attach`` verdict row of a bytes-only restore (or its dry run) that drops the forward owner
+#: link: the owner and position named on the row are not kept (nexus-l003p).
+OWNER_LINK_DROPPED = "owner_link_dropped"
 
 #: Most chashes one engine call takes (``VectorHandler.MAX_QUARANTINE_RESTORE_PER_CALL``).
 _BATCH = 1000
@@ -171,7 +191,13 @@ def _tally(rows: list[dict]) -> dict[str, int]:
         "superseded": sum(1 for r in rows if r.get("reattach") == "superseded"),
         "no_live_owner": sum(1 for r in rows if r.get("reattach") == "no_live_owner"),
         "no_position": sum(1 for r in rows if r.get("reattach") == "no_position"),
+        "owner_link_dropped": sum(1 for r in rows if _link_dropped(r)),
     }
+
+
+def _link_dropped(row: dict) -> bool:
+    """Whether the engine marked *row* as a bytes-only restore (or dry run of one) that drops the owner link."""
+    return row.get("reattach") == "attach" and not row.get("attached") and row.get("reason") == OWNER_LINK_DROPPED
 
 
 def _hidden(rows: list[dict], reattach: bool) -> list[dict]:
@@ -196,14 +222,14 @@ _AMBIGUOUS = frozenset({"rival", "race"})
 
 def _hidden_kind(row: dict, content_type: str) -> str:
     """The guidance class of a hidden chunk: one of ``not_attached`` (reattach was off), ``moved_on``,
-    ``indexing``, ``failed``, ``other_collection``, ``ambiguous``, ``no_key_note`` (a ``knowledge`` chunk no document
+    ``owner_link_dropped`` (reattach was off and the owner link did not survive), ``indexing``, ``failed``, ``other_collection``, ``ambiguous``, ``no_key_note`` (a ``knowledge`` chunk no document
     names: a re-put can bring it back), ``no_key_file`` (a chunk of an indexed file, which carries no key
     at all: the file is what to re-index) or ``no_key_unknown`` (the collection's content type could not be
     read, so the guidance names both remedies)."""
     verdict = row.get("reattach")
     why = row.get("reason")
     if verdict == "attach":
-        return "not_attached"
+        return "owner_link_dropped" if why == OWNER_LINK_DROPPED else "not_attached"
     if verdict == "superseded":
         if why == "indexing":
             return "indexing"
@@ -236,6 +262,11 @@ def _row_note(row: dict, dry_run: bool, content_type: str = "") -> str:
         return "not in the quarantine collection"
     if row.get("attached"):
         parts.append(f"attached to {who} at position {pos}")
+    elif _link_dropped(row):
+        parts.append(f"WARNING: --no-reattach would drop the link to {who} at position {pos}: bytes only, hidden, and "
+                     "a later run could not attach it; run without --no-reattach" if dry_run
+                     else f"NOT attached (--no-reattach); the link to {who} at position {pos} is gone and a later "
+                     "run cannot attach it")
     elif verdict == "attach":
         parts.append(f"would attach to {who} at position {pos}" if dry_run
                      else f"NOT attached (--no-reattach); a run without it attaches to {who} at position {pos}")
@@ -336,8 +367,25 @@ def _render_text(origin: str, siblings: list[str], dry_run: bool, reattach: bool
                f"missing {totals['missing']}")
     tally = _tally(rows)
     if not reattach:
+        dropped = tally["owner_link_dropped"]
+        # A real run's dropped chunks are past attaching (their link went with the quarantine copy); a dry run's are
+        # what the flag would cost, and run without it they attach.
+        again = tally["would_attach"] - (0 if dry_run else dropped)
         click.echo("reattach: off (--no-reattach). Chunks that name a live document are not attached; "
-                   f"a run without the flag would attach {tally['would_attach']}.")
+                   f"a run without the flag would attach {again}.")
+        if dropped:
+            who = ", ".join(sorted({f"{r.get('owner_title') or r.get('owner')!r} ({r.get('owner')})"
+                                    for r in rows if _link_dropped(r)}))
+            if dry_run:
+                click.echo(f"WARNING: --no-reattach would drop the owner link of {dropped} chunk"
+                           f"{'s' if dropped != 1 else ''} ({who}): a restored row keeps only its chunk keys, so a "
+                           "later run could not attach them. Run without --no-reattach, the default, to attach them "
+                           "in the same call.")
+            else:
+                click.echo(f"WARNING: --no-reattach dropped the owner link of {dropped} chunk"
+                           f"{'s' if dropped != 1 else ''} ({who}): a restored row keeps only its chunk keys, so a "
+                           "later run cannot attach them. Restore with reattach (the default) from now on; to make "
+                           "these visible, re-index the owning document or re-put the note.")
     else:
         verb = "would attach" if dry_run else "attached"
         click.echo(f"reattach: {verb} {tally['would_attach'] if dry_run else tally['attached']}, "
@@ -382,6 +430,14 @@ def _render_text(origin: str, siblings: list[str], dry_run: bool, reattach: bool
                            "same position of the same document, so none was attached and the version is yours to "
                            "pick. Compare the text with `nx store get CHASH`, then re-index the document or re-put "
                            "the note.")
+            elif kind == "owner_link_dropped" and dry_run:
+                click.echo(f"\n{what}: --no-reattach would restore the bytes and lose the link to the owning "
+                           "document. Run the command without --no-reattach to restore and attach in one call.")
+            elif kind == "owner_link_dropped":
+                click.echo(f"\n{what}: restored with --no-reattach, which dropped the link to the owning document "
+                           "with the quarantine copy, so a rerun cannot attach them. Re-index the owning document "
+                           "(`nx index repo --force`, or the matching verb: `nx index pdf`, `nx index md`, "
+                           "`nx index rdr`), or re-put the note under the same title.")
             elif kind == "not_attached":
                 click.echo(f"\n{what}: not attached because of --no-reattach. Run the command again without it.")
             elif kind == "no_key_note":
