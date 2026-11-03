@@ -190,9 +190,10 @@ def main(ctx: click.Context, verbose: bool) -> None:
     # child per session start; on 2026-10-31 nineteen walked the cloud catalog at once because the only lock in
     # the path was a rung's, taken after detect(). A second `--auto` exits 0 here, silently. A PLAIN unattended
     # `nx upgrade` (the lockstep child) does work `--auto` skips, so it WAITS for a holder (PLAIN_WAIT_S) and
-    # only then exits 75; its detached starter already wrote the version marker at spawn, so the plain run's
-    # extra work (plugin convergence, agents and hooks refresh) waits for the next version or ref drift or a
-    # manual `nx upgrade` (bead: PLAIN_WAIT_S is below the 900 s --auto ceiling). The kernel drops
+    # only then exits 75. Its detached starter already wrote the version marker at spawn, so on that exit it
+    # leaves the retry sentinel in the marker (nexus-emiky): the next session's hook reads it as skew and the
+    # action starts the upgrade again, instead of the plain run's extra work (plugin convergence, agents and
+    # hooks refresh, the engine install) waiting for the next version or ref drift. The kernel drops
     # the lock with the process, so a killed holder never wedges the next run.
     if argv_is_unattended_upgrade(sys.argv[1:]):
         _auto_lock = acquire_auto_lock() if argv_is_auto_upgrade(sys.argv[1:]) else acquire_auto_lock_waiting()
@@ -208,6 +209,9 @@ def main(ctx: click.Context, verbose: bool) -> None:
                 "another unattended `nx upgrade` still holds the lock; this run did not start and is retried later",
                 err=True,
             )
+            from nexus.lockstep_marker import mark_upgrade_retry  # noqa: PLC0415 — deferred import, the 75 path only
+
+            mark_upgrade_retry()
             ctx.exit(75)
         ctx.call_on_close(_auto_lock.release)
 

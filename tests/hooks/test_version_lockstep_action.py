@@ -217,6 +217,55 @@ class TestDowngradeLoopBroken:
         )
 
 
+class TestUpgradeRetryMarker:
+    """nexus-emiky. The sentinel the detached `nx upgrade` writes when it lost the lock (exit 75) says the
+    binary is current and the rest of the upgrade is owed. The fast path would write the plugin's version
+    over it and stop, so with the sentinel the action skips the binary step and starts the upgrade again."""
+
+    def test_the_sentinel_starts_the_upgrade_again_without_the_binary_step(
+        self, mod, marker, monkeypatch,
+    ) -> None:
+        calls = _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["9.9.9", "9.9.9"], run_results={},
+        )
+        started: list[int] = []
+        monkeypatch.setattr(mod, "start_background_upgrade", lambda: started.append(1) or 4242)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert started == [1], "the owed `nx upgrade` is started again"
+        assert calls == [], "the binary is current: no `uv tool upgrade` / `nx self install`"
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9", "the child rewrites the sentinel if it loses again"
+
+    def test_without_the_sentinel_a_current_cli_starts_nothing(self, mod, marker, monkeypatch) -> None:
+        """The control: the same installed version with an ordinary marker stays on the fast path."""
+        calls = _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["9.9.9", "9.9.9"], run_results={},
+        )
+        started: list[int] = []
+        monkeypatch.setattr(mod, "start_background_upgrade", lambda: started.append(1) or 4242)
+        marker.parent.mkdir(parents=True)
+        marker.write_text("9.0.0", encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert started == [] and calls == []
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
+
+    def test_the_sentinel_with_an_older_cli_takes_the_whole_upgrade(self, mod, marker, monkeypatch) -> None:
+        calls = _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["1.0.0", "9.9.9"], run_results={},
+        )
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert calls[0][:4] == ["uv", "tool", "upgrade", "conexus"]
+
+    def test_the_sentinel_is_not_a_version(self, mod) -> None:
+        assert mod._VERSION_RE.search(mod.UPGRADE_RETRY_MARKER) is None
+
+
 class TestSatisfies:
     def test_equal_satisfies(self, mod) -> None:
         assert mod.satisfies("5.7.0", "5.7.0") is True

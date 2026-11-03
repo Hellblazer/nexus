@@ -582,6 +582,20 @@ def start_background_upgrade() -> int | None:
     return proc.pid
 
 
+#: What ``nx upgrade`` leaves in the marker when it is this action's detached child and loses the upgrade lock
+#: (exit 75, nexus-emiky): the binary is current and the rest of the upgrade is owed. Not a version. Copy of
+#: ``nexus.lockstep_marker.UPGRADE_RETRY_MARKER``; a test keeps the copies equal.
+UPGRADE_RETRY_MARKER = "retry-nx-upgrade"
+
+
+def read_marker() -> str | None:
+    """The marker's text, or None when it is absent, empty or unreadable."""
+    try:
+        return marker_path().read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def write_marker(version: str) -> None:
     """Record *version* as the confirmed-in-lockstep CLI version."""
     path = marker_path()
@@ -697,7 +711,10 @@ def main(argv: list[str]) -> None:
         # behavioral gain, and (test seam note) would consume a second
         # element from callers' scripted installed_versions() sequences.
         before = installed_nx_version()
-        if satisfies(before, target):
+        # nexus-emiky: the retry sentinel says the binary is current and an earlier detached `nx upgrade` lost
+        # the upgrade lock (exit 75), so the fast path must not write the version over it and stop.
+        retry_owed = read_marker() == UPGRADE_RETRY_MARKER
+        if satisfies(before, target) and not retry_owed:
             debug(f"nx already satisfies target {target}; writing marker")
             write_marker(target)
             return
@@ -728,7 +745,10 @@ def main(argv: list[str]) -> None:
         # `nx self install` of a first ~0.8 GB generation gets the long
         # budget; the legacy `uv tool upgrade` keeps the short one.
         step_timeout = _SELF_INSTALL_TIMEOUT if generation else _UV_TIMEOUT
-        if not run_cmd(upgrade_cmd, timeout=step_timeout):
+        if satisfies(before, target):
+            debug("retry owed and the binary is current; starting the upgrade again without the binary step")
+            log_event("lockstep_upgrade_retry", target=target, installed=str(before))
+        elif not run_cmd(upgrade_cmd, timeout=step_timeout):
             debug("uv tool upgrade failed; leaving marker stale for retry")
             log_event("lockstep_upgrade_result", target=target, outcome="uv_upgrade_failed")
             return

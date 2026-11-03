@@ -333,6 +333,7 @@ def test_a_burst_of_session_starts_forks_one_child_at_most(config_dir: Path, mon
 
 from nexus.upgrade_ladder.rungs.note_tags_array import NoteTagsArrayRung  # noqa: E402
 from nexus.upgrade_ladder.unattended import UNATTENDED_ENV, is_unattended, unattended_run  # noqa: E402
+from nexus.lockstep_marker import UPGRADE_RETRY_MARKER  # noqa: E402
 from nexus.util.upgrade_auto_lock import argv_is_unattended_upgrade, env_unattended  # noqa: E402
 from tests.upgrade.conftest import InMemoryCompletionLedger  # noqa: E402
 
@@ -405,15 +406,18 @@ def test_the_same_plain_upgrade_without_the_env_walks_and_takes_no_lock(plain_up
 
 
 def test_a_plain_unattended_upgrade_that_outlasts_the_holder_does_not_start_and_says_so(
-    plain_upgrade, monkeypatch,
+    plain_upgrade, monkeypatch, config_dir,
 ) -> None:
     """The lockstep child waits for the lock (the hook starts an `--auto` in the same instant) and, when the
-    holder outlasts the wait, exits 75; its detached starter wrote the marker at spawn, so the plain run's extra work waits for the
-    next session. A silent 0 would mark it done."""
+    holder outlasts the wait, exits 75; its detached starter wrote the version marker at spawn, so the run leaves the
+    retry sentinel there and the next session's hook starts it again (nexus-emiky). A silent 0 would mark it done."""
     _managed_note_tags_registry(monkeypatch)
     monkeypatch.setenv(UNATTENDED_ENV, "1")
     monkeypatch.setattr(lock_mod, "PLAIN_WAIT_S", 0.2)
     monkeypatch.setattr(lock_mod, "_PLAIN_POLL_S", 0.05)
+    marker = config_dir / "cli_lockstep_marker"
+    monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
+    marker.write_text("7.94.1", encoding="utf-8")  # what the action wrote at spawn
     holder = acquire_auto_lock()
     try:
         result = CliRunner().invoke(main, ["upgrade"])
@@ -421,6 +425,8 @@ def test_a_plain_unattended_upgrade_that_outlasts_the_holder_does_not_start_and_
         holder.release()
     assert result.exit_code == 75
     assert "holds the lock" in result.output
+    # nexus-emiky: the lost run is retried by the next session, which reads the sentinel as skew.
+    assert marker.read_text(encoding="utf-8") == UPGRADE_RETRY_MARKER
     assert plain_upgrade == {}, "the ladder never ran"
     assert _CountingReader.reads == []
 
@@ -561,3 +567,12 @@ def test_the_hook_child_env_carries_the_unattended_signal(config_dir: Path, monk
     upgrade_auto.run({"hook_event_name": "SessionStart"})
     assert captured["argv"][-2:] == ["upgrade", "--auto"]
     assert captured["env"][UNATTENDED_ENV] == "1"
+
+
+def test_the_plain_wait_outlasts_the_auto_ceiling_with_room_for_what_the_ceiling_does_not_bound() -> None:
+    """nexus-emiky: an `--auto` holder stops starting new work at its ceiling, then still runs the finish
+    pass and the service cycle (about 60 s each). The wait must clear that, or the common loser is a run
+    whose holder was merely slow."""
+    from nexus.upgrade_ladder.deadline import DEFAULT_AUTO_DEADLINE_S
+
+    assert lock_mod.PLAIN_WAIT_S >= DEFAULT_AUTO_DEADLINE_S + 2 * 60

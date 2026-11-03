@@ -420,6 +420,49 @@ def _load_action():
     return action_mod
 
 
+class TestUpgradeRetryMarker:
+    """nexus-emiky. The lockstep child (a plain `nx upgrade`) that outlasts the single-instance lock's
+    holder exits 75 and writes the retry sentinel into the marker: the action had already written the
+    plugin's version at spawn, and a deleted marker would not do, because a CLI that satisfies the plugin
+    reads as lockstep (nexus-ehg1y). The hook reads the sentinel as skew whatever the CLI reports."""
+
+    def _arm(self, mod, plugin_root, tmp_path, monkeypatch, marker_text, cli_version="9.9.9"):
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        marker = tmp_path / "marker"
+        marker.write_text(marker_text, encoding="utf-8")
+        monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
+        dispatched: list[str] = []
+        monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
+        monkeypatch.setattr(mod, "read_cli_version", lambda: cli_version)
+        return dispatched
+
+    def test_the_sentinel_dispatches_even_though_the_cli_satisfies_the_plugin(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys,
+    ) -> None:
+        dispatched = self._arm(mod, plugin_root, tmp_path, monkeypatch, mod.UPGRADE_RETRY_MARKER)
+        mod.main()
+        assert dispatched == ["9.9.9"]
+        assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+
+    def test_a_stale_marker_with_a_satisfying_cli_still_dispatches_nothing(
+        self, mod, plugin_root, tmp_path, monkeypatch, capsys,
+    ) -> None:
+        """The control: the same CLI with an ordinary stale marker is lockstep (nexus-ehg1y), so the
+        test above is red only because of the sentinel."""
+        dispatched = self._arm(mod, plugin_root, tmp_path, monkeypatch, "1.0.0")
+        mod.main()
+        assert dispatched == []
+        assert capsys.readouterr().out.strip() == ""
+
+    def test_the_sentinel_is_the_actions_and_the_clis(self, mod) -> None:
+        from nexus import lockstep_marker
+
+        assert mod.UPGRADE_RETRY_MARKER == _load_action().UPGRADE_RETRY_MARKER == lockstep_marker.UPGRADE_RETRY_MARKER
+
+    def test_the_sentinel_is_not_a_version(self, mod) -> None:
+        assert mod._VERSION_RE.search(mod.UPGRADE_RETRY_MARKER) is None
+
+
 class TestVersionRuleCopiesMatchTheAction:
     """The hook judges skew by the action's rule, but the two bare stdlib
     scripts cannot import each other, so the regex and the comparison are

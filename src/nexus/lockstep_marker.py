@@ -13,7 +13,14 @@ Who writes it:
   rule;
 * ``nx self install --bootstrap`` (nexus-sv2wx.28), for the installer scripts
   (``web/install.sh``, ``web/install.ps1``), which build the CLI without the plugin's setup;
-* the lockstep action, after it finds the CLI already satisfies the plugin.
+* the lockstep action, after it finds the CLI already satisfies the plugin;
+* ``nx upgrade`` itself, :func:`mark_upgrade_retry`, when it is the lockstep action's detached
+  child and loses the single-instance lock (exit 75): the action wrote the plugin's version at
+  spawn, so without this the work the child owed (plugin convergence, the generated agents and
+  hooks refresh, the engine install, the dimension advisory) waits for the next version or ref
+  drift. The sentinel is :data:`UPGRADE_RETRY_MARKER`. Deleting the marker would not do: a marker
+  that is missing or stale reads as lockstep whenever the CLI is not older than the plugin
+  (nexus-ehg1y), and the binary is current by then.
 
 ``NX_LOCKSTEP_MARKER`` replaces the path, as it does for the hook and the action.
 """
@@ -23,6 +30,13 @@ import os
 from pathlib import Path
 
 from nexus import config as _config
+
+
+#: What :func:`mark_upgrade_retry` writes: "the binary is current, the rest of ``nx upgrade`` is owed". Not a
+#: version, so no version comparison can mistake it for one. The hook and the action are stdlib scripts that
+#: import nothing from ``nexus`` and keep a copy of this string; ``tests/hooks/test_version_lockstep_hook.py``
+#: keeps the three equal.
+UPGRADE_RETRY_MARKER = "retry-nx-upgrade"
 
 
 def marker_path() -> Path:
@@ -51,3 +65,13 @@ def write_marker(version: str) -> None:
     path = marker_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(version, encoding="utf-8")
+
+
+def mark_upgrade_retry() -> None:
+    """Leave :data:`UPGRADE_RETRY_MARKER` in the marker, so the next session's lockstep hook dispatches
+    the upgrade again (nexus-emiky). Best effort: an unwritable path changes nothing, because the run is
+    already exiting with a refusal and the marker was only ever a retry signal."""
+    try:
+        write_marker(UPGRADE_RETRY_MARKER)
+    except OSError:
+        pass

@@ -69,3 +69,21 @@ def test_the_upgrade_ladders_precondition_reads_the_same_file(
     monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(tmp_path / "marker"))
     lockstep_marker.write_marker("7.81.0")
     assert preconditions._default_lockstep_marker() == "7.81.0"
+
+
+def test_mark_upgrade_retry_replaces_the_version_and_the_marker_stays_unequal_to_any_plugin_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-emiky: the lockstep child that lost the upgrade lock leaves the sentinel where the version was."""
+    monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(tmp_path / "marker"))
+    lockstep_marker.write_marker("7.94.1")
+    lockstep_marker.mark_upgrade_retry()
+    assert lockstep_marker.read_marker() == lockstep_marker.UPGRADE_RETRY_MARKER
+    assert lockstep_marker.UPGRADE_RETRY_MARKER != "7.94.1"
+
+
+def test_mark_upgrade_retry_never_raises_on_an_unwritable_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    blocker = tmp_path / "file"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(blocker / "marker"))  # its parent is a file
+    lockstep_marker.mark_upgrade_retry()  # must not raise
