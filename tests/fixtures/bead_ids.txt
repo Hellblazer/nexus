@@ -587,6 +587,13 @@ nexus-2k1y
 nexus-2k66t
 nexus-2k66t.1
 nexus-2k66t.2
+nexus-2k66t.2.1
+nexus-2k66t.2.2
+nexus-2k66t.2.3
+nexus-2k66t.2.4
+nexus-2k66t.2.5
+nexus-2k66t.2.6
+nexus-2k66t.2.7
 nexus-2k66t.3
 nexus-2k66t.4
 nexus-2k66t.4.1

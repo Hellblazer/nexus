@@ -189,13 +189,15 @@ and the telemetry of one nx_answer run; those findings are in the Deferred secti
 - **Verified** (research-8): a result row's path comes from `_display_path`, then
   `source_path`, then `file_path` (`scripts/bench/paths.py` lines 42 to 52). In
   `scripts/bench/metrics.py`, `dedupe_by_doc` treats an empty path as one bucket.
-  An empty identity therefore merges every such chunk into one document.
+  An empty identity therefore merges every such chunk into one document. The design
+  does not use the row path for identity. It takes each document key from the chunk
+  hash through `docs_for_chashes`, as Track A identity and scoring sets out.
 - **Verified** (research-8): identical chunk text in one collection collapses to one
   T3 row by design (`CLAUDE.md`, catalog/T3 split). Two CoIR documents with the
   same text share a row.
-- **Unverified** (research-8): whether `_display_path` is set for a note stored
-  with `store put --title`. The catalog file path is not set by that path, so the
-  row may carry an empty path. The spike decides.
+- **Moot** (research-8): whether `_display_path` is set for a note stored with
+  `store put --title`. Identity no longer comes from the row path, so the answer
+  decides nothing in the design.
 - **Unverified** (research-8): the collection token for local mode. The
   `t3_collection_name` docstring shows `voyage-context-3` for a bare subject. The
   rendered name in local mode is not shown and the spike must print it.
@@ -234,7 +236,7 @@ and the telemetry of one nx_answer run; those findings are in the Deferred secti
 
 ### Critical Assumptions
 
-- [ ] Each CoIR dataset in the subset carries a licence that allows publishing a derived manifest and results. **Status**: Unverified (paper table read; the Hugging Face pages show no licence field, research-12). **Method**: Docs Only (each dataset card read directly in Step 0, and the paper's table).
+- [ ] Each CoIR dataset in the subset carries a licence that allows publishing a derived manifest and results. **Status**: Unverified (paper table read; the Hugging Face pages show no licence field, research-12). **Method**: Docs Only (each dataset card read directly in Step 0, and the paper's table; verified before publishing, per Decisions).
 - [ ] A search result row's chunk hash maps, through `docs_for_chashes`, to the loaded documents and their `<dataset>:<id>` titles, so that a hit maps to a CoIR document id. **Status**: Unverified. **Method**: Spike (one dataset, twenty documents, `nx search --json`).
 - [ ] The local-mode collection name renders from the subject, and `--corpus <full collection name>` scopes a search to that collection alone. **Status**: Unverified. **Method**: Spike.
 - [ ] The subset's chunks index within the run-time cap at $0 with local bge-768. **Status**: Unverified. **Method**: Spike (per-document index time and chunk counts).
@@ -279,21 +281,22 @@ collection and the title `<dataset>:<coir-document-id>`. It then calls
 until `install_default_hooks` is called (`hook_registry.py:54` to 66, 526 to 556),
 and the loader does not call it. So no aspect row, no taxonomy assignment and no
 document hook runs for the bench documents. The title is the identity (research-8).
-The subject is `code-retrieval`, a durable topic, not a dataset or a run
-(`docs/collections.md` Rule 1). Before the first write, the loader runs
-`nx collection list` and stops if a `code-retrieval` collection already holds other
-content (Rule 2). The loader is the only writer to that collection. The per-document
+Each dataset loads into its own collection (Decisions, 2026-11-03). The subject
+name for each is open (Decisions), and `docs/collections.md` Rule 1 governs it. Before
+the first write to a dataset's collection, the loader runs `nx collection list` and
+stops if that collection already holds other content (Rule 2). The loader is the only
+writer to each such collection. The per-document
 cost of one in-process call is measured in Step 0. If Step 0 finds any aspect row,
 or an aspect row after a test ingest, the per-call opt-out is not enough and a
 per-collection switch is new work; this RDR does not design it.
 
 **Track A collection name.** The name is what the resolver renders from the
 subject (`t3_collection_name`). The results file records the full rendered name,
-and the spike prints it for local mode (Critical Assumption 3). The search call
-uses that full name as `--corpus`, so no other collection is searched.
+and the spike prints it for local mode (Critical Assumption 3). Each query's
+search uses its dataset's full name as `--corpus`, so no other collection is searched.
 
 **Track A query run.** For each query in the subset, call
-`nx search "<query text>" --corpus <full name> -m 100 --json`, with no `--hybrid`,
+`nx search "<query text>" --corpus <its dataset's full name> -m 100 --json`, with no `--hybrid`,
 `--lexical` or `--no-rerank` flag, and record the ordered rows. `-m 100` is fixed
 by this design, so enough chunks return to fill ten distinct documents when a
 document has several chunks. The `-m` value and the flags are part of the pin.
@@ -330,9 +333,10 @@ the count. It is not bucketed (`dedupe_by_doc` would merge them).
 **Track A subset rule.** The pool is the five datasets the paper's table lists as
 Apache 2.0: Synthetic Text2SQL, CodeTransOcean-DL, CodeTransOcean-Contest,
 CodeFeedback-ST and CodeFeedback-MT. The licence source is that table, because no
-Hugging Face dataset page shows a licence field (research-12). Step 0 reads each
-card's licence directly; a dataset whose card gives a different licence leaves the
-pool. If the pool is empty after that, Track A stops and the owner decides. Nothing
+Hugging Face dataset page shows a licence field (research-12). Each
+dataset's card licence is read in Step 0 and verified before publishing (Decisions,
+2026-11-03). A dataset whose card is not clean, or gives a licence other than the
+table's, leaves the subset. If the pool is empty after that, Track A stops and the owner decides. Nothing
 is substituted.
 
 The subset is the whole pool, and each dataset's corpus is capped at 5,000
@@ -343,7 +347,8 @@ are 816 (codetrans-dl), 66.4k (codefeedback-mt), 106k (synthetic-text2sql) and
 the total is at most 25,000 documents. Sampling changes the corpus and so the
 difficulty relative to CoIR's full corpora, and the results page says so. The
 run-time cap is set from the Step 0 per-document write time, and the
-pre-registration file records it. The non-commercial datasets (APPS, CosQA,
+pre-registration file records it. The cap's unit, value and fallback are open
+(nexus-2k66t.2.7). The non-commercial datasets (APPS, CosQA,
 CodeSearchNet) stay out of the default subset. Adding one is an owner decision,
 because it changes what the public data licence statement can say.
 
@@ -366,7 +371,7 @@ separately. p50 and p95 are taken over all query calls in the run.
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
 | Track A search call | `scripts/bench/runner.py` path A (`run_path_a`) | Reuse the subprocess pattern only. Path A requests `-m K*3` with K=3 and takes the first K documents, so it cannot return ten documents for K=10. New call with `-m 100` and the K=10 rule. |
-| Document identity | `scripts/bench/paths.py` `_chunk_path` | Reuse the field order (`_display_path`, `source_path`, `file_path`). Add the title key and the empty-key error. |
+| Document identity | `scripts/bench/paths.py` `_chunk_path` | Replace. Not reused: identity comes from the chunk hash through `docs_for_chashes`, keyed by catalog title, with the empty-key error (Track A identity and scoring). The row path is not read. |
 | Recall@10, MRR and NDCG@10 scorer | `scripts/bench/metrics.py` (NDCG at k=3 for RDR-090) | Extend: keep NDCG@3 for RDR-090, add document-level recall@10 and MRR, and call NDCG at k=10. Its gain formula is checked against CoIR in the spike. |
 | Corpus load | none for CoIR | New loader: `put_note` plus `fire_note_chains` with an empty `HookRegistry`, both existing (`note_write.py`). Not `nx store put`, which fires the aspect hook. Per-call cost measured in the spike. |
 | Timing | `scripts/bench/paths.py` `elapsed_s` (per call, wall-clock) | Reuse the timer. Define it as in Technical Design (warm, client-side) and record it per call. |
@@ -398,18 +403,22 @@ keeps the default subset to datasets the paper lists as Apache 2.0.
 - The harness is search-only: no nx_answer, no Claude command-line tool.
 - Track B and RDR-090's N=30 are deferred until LitQA2's blockers (open-access status, 248 versus 199 rows, option count) are answered; reopening them is a new owner decision.
 
-**Open after the gate-r1 fix** (new; this RDR does not decide them):
+**Decided 2026-11-03, nexus-2k66t.8** (Sam; relayed by linda):
 
-1. **Licence result on publishing.** The paper lists the default pool as Apache 2.0, and no Hugging Face dataset page shows a licence field (research-12). A card check in Step 0 may contradict the paper; that dataset then leaves the pool, and the publish decision stands for the rest. If the owner wants a non-commercial dataset in the public subset, that is a separate decision.
-2. **Corpus cap.** The 5,000-document cap and its seeded sample change CoIR's corpora. The owner decides before the first run whether the sampled corpus is acceptable for a published number.
-3. **Shared corpus or per-dataset corpus.** The design loads the subset into one collection, so one search can return documents from any subset dataset. CoIR's own protocol searches each dataset's corpus alone. The shared design is harder than CoIR's protocol, so its numbers are not comparable to CoIR's published numbers. The per-dataset alternative needs one collection per dataset, which the collection rules (Rule 1) do not allow for a dataset name. The design takes the shared option until the owner decides.
+- Corpus shape: one collection per dataset, so each dataset's results compare to its published CoIR numbers. Each dataset costs one ingest. The subject name for each collection is not yet settled: `docs/collections.md` Rule 1 does not allow a dataset name as a subject, so Step 0 picks a Rule 1 subject, and if none fits, that is a new owner decision.
+- Licence: each dataset's Hugging Face card licence is verified before publishing. A dataset whose card is not clean leaves the subset, and the results page names it. Publishing waits for these checks (Activation Step 1).
+
+**Open** (this RDR does not decide them):
+
+1. **Corpus cap.** The 5,000-document cap and its seeded sample change CoIR's corpora. The owner decides before the first run whether the sampled corpus is acceptable for a published number.
+2. **Run-time cap.** The cap has no unit, value or fallback yet. Its owner and proposal are on nexus-2k66t.2.7 (a per-dataset wall-clock cap, with an over-cap dataset dropped and named).
 
 ## Trade-offs
 
 ### Consequences
 
 - A public number for code search over a CoIR subset, with its caveats printed beside it. A weak number is published too, and that is the point.
-- The published numbers are not CoIR's published numbers (shared corpus, subset, warm latency), and the results page says so.
+- The published numbers are not CoIR's published numbers (sampled corpus, subset, warm latency), and the results page says so.
 - The harness is a maintained artefact. Pins go stale when conexus or the engine changes, so each results file records its versions.
 
 ### Risks and Mitigations
@@ -435,7 +444,7 @@ Only the modes that change a decision:
 ### Prerequisites
 
 - [x] Owner decisions 1 to 5 recorded (2026-11-03, nexus-2k66t.7).
-- [ ] Each pool dataset's licence checked against its Hugging Face card in Step 0 (Critical Assumption 1).
+- [ ] Each pool dataset's licence checked against its Hugging Face card before publishing (Critical Assumption 1). A dataset that is not clean leaves the subset.
 - [ ] Pre-registration file committed before the first run: subset, seed, query count, scoring rule, interval method, and the decision the owner will take from the result (see Validation).
 
 ### Minimum Viable Validation
@@ -492,12 +501,12 @@ Run the subset with pinned versions, and record the numbers and their intervals.
 
 Publish the harness, the query-set manifest, the dataset manifest with the licence
 line for each dataset, and each `results.json`, with the RDR-090 result beside them.
-Waits for the licence check (Open decision 1) and for the first run's results.
+Waits for each dataset's licence check (Decisions, 2026-11-03) and for the first run's results.
 
 ### Day 2 Operations
 
-The only persistent output is result files. The corpus is loaded into the `code-retrieval`
-collection, which is a Nexus collection, and is re-loadable from the dataset
+The only persistent output is result files. The corpus is loaded into one collection per dataset,
+each a Nexus collection, and is re-loadable from the dataset
 revision recorded in the manifest.
 
 ### New Dependencies
@@ -510,11 +519,11 @@ revision recorded in the manifest.
 - **Scenario**: Track A scorer on a hand-computed three-query example — **Verify**: NDCG@10, document-level recall@10 and MRR match the hand values exactly.
 - **Scenario**: K=10 dedupe — a result list of 30 chunks from 4 documents — **Verify**: four documents scored, count reported, no padding.
 - **Scenario**: empty document key in a result row — **Verify**: the run fails and reports the count; no bucket.
-- **Scenario**: Track A run twice with the same pins and the same loaded collection — **Verify**: identical ranked key lists and identical NDCG@10, recall@10 and MRR values. Latency is excluded from equality and reported as a distribution.
+- **Scenario**: Track A run twice with the same pins and the same loaded collections — **Verify**: identical ranked key lists and identical NDCG@10, recall@10 and MRR values. Latency is excluded from equality and reported as a distribution.
 - **Scenario**: changed query-set file — **Verify**: the hash differs and the run is labelled as a different set.
 - **Scenario**: a subset dataset with no recorded licence — **Verify**: the run refuses to start and names the dataset.
 - **Scenario**: loader ingest of twenty documents against the real T2 and T3, with the empty registry — **Verify**: the aspect queue's pending count and its rows for the collection are unchanged, and no `claude` process starts (integration, not a mock).
-- **Scenario**: two documents with identical text, ingested in the subset collection — **Verify**: one chunk row, both document keys credited for it, shared-row count 1.
+- **Scenario**: two documents with identical text, ingested into one dataset's collection — **Verify**: one chunk row, both document keys credited for it, shared-row count 1.
 - **Scenario**: a result row with no chunk hash match in `docs_for_chashes` — **Verify**: the run fails and names the row, not a silent drop.
 
 ## Validation
@@ -588,7 +597,7 @@ a condition of accepting Track A.
 - **Deployment model**: N/A; runs from a checkout.
 - **Incremental adoption**: N/A (Track A is the whole RDR).
 - **Secret/credential lifecycle**: none. Track A uses no key.
-- **Memory management**: N/A beyond the subset collection.
+- **Memory management**: N/A beyond the dataset collections.
 
 ### Proportionality
 
@@ -664,3 +673,12 @@ Spike).
 - 2026-11-03: Gate r1 fixes (critique T2 `nexus_rdr/244-gate-critique-2026-11-03-r1`): Track A ingestion, identity, K=10, subset and pin design added (C1); Track B, its assumptions and its validation moved to Deferred (S1); RDR-090 result carries its recorded causes (S2); CoIR metric corrected to NDCG@10 and data licences made per dataset, CodeSearchNet rejection restated (S3); RDR-028 marked unrelated, RDR-155 and RDR-225 added as adjacent recall references (S4); engine pin corrected to 0.1.175, latency defined, pins and reproducibility test restated (S5). Research `nexus_rdr/244-research-8` to `-10`.
 - 2026-11-03: Gate r2 fixes (critique T2 `nexus_rdr/244-gate-critique-2026-11-03-r2`): the loader uses `put_note` and `fire_note_chains` with an empty registry, because `store put` queues Claude-CLI aspect rows and `NX_ASPECT_WORKER_AUTOSTART` does not stop the queue write; Step 0 aspect check added; Critical Assumption 5 corrected to unverified (C1). Reranker and boosts stated as they run for one collection, with topic assignments and hybrid pinned (S-a). Shared-chunk credit rule specified (S-b). Pool capped at 5,000 documents per dataset by a seeded sample, with the measured sizes (S-c). Empty-pool fallback and Step 0 wording fixed (S-d). Path-most-users claim dropped (S-e). "Graded" dropped from the qrels source (S-f). Research `nexus_rdr/244-research-11` to `-14`.
 - 2026-11-03: Gate round 3 — PASSED (0 Critical, 8 Significant, 0 ship-blockers); commit `6516100dd`; critique `nexus_rdr/244-gate-critique-2026-11-03-r3`.
+- 2026-11-03: Owner rulings (nexus-2k66t.8; Sam, relayed by linda): one collection per dataset, so results compare to CoIR's published numbers (Technical Design, Decisions); each dataset's Hugging Face card licence verified before publishing, and a dataset that is not clean drops from the subset (Subset rule, Prerequisites, Critical Assumption 1, Decisions). The run-time cap stays open (nexus-2k66t.2.7).
+- 2026-11-03: Gate r3 residual, hybrid_default and pinned settings: nexus-2k66t.2.1.
+- 2026-11-03: Gate r3 residual, Step 0 aspect check: nexus-2k66t.2.2.
+- 2026-11-03: Gate r3 residual, stamp_note: nexus-2k66t.2.3.
+- 2026-11-03: Gate r3 residual, shared-chunk key order and rank: nexus-2k66t.2.4.
+- 2026-11-03: Gate r3 residual, docs_for_chashes scope: nexus-2k66t.2.5.
+- 2026-11-03: Gate r3 residual, documents over 16 KB: nexus-2k66t.2.6.
+- 2026-11-03: Gate r3 residual, run-time cap: nexus-2k66t.2.7.
+- 2026-11-03: Gate r3 residual, Infrastructure Audit row and Key Discoveries path identity: fixed in text (Infrastructure Audit row, Key Discoveries); fix check pending the commit that carries this revision.
