@@ -190,7 +190,10 @@ def watchdog_lines(session: str) -> list[str]:
         "'@",
         "    $sa = New-Object WinHand.Std+SA; $sa.n = [Runtime.InteropServices.Marshal]::SizeOf($sa); $sa.inherit = $true",
         "    $nul = [WinHand.Std]::CreateFileW('NUL', [uint32]3221225472, 3, [ref]$sa, 3, 0, [IntPtr]::Zero)",
-        "    if ($nul -ne [IntPtr]::new(-1)) { [void][WinHand.Std]::SetStdHandle(-10, $nul) }",
+        "    if ($nul -eq [IntPtr]::new(-1) -or -not [WinHand.Std]::SetStdHandle(-10, $nul)) {",
+        f"      \"$(Get-Date -Format o) children keep the heartbeat pipe as stdin: NUL redirect failed\" | Add-Content -LiteralPath {_ps_quote(log)} -ErrorAction SilentlyContinue",
+        "      Write-Host 'windows_hand_test: NUL redirect failed; a child reading stdin can take the heartbeat'",
+        "    }",
         "    $wdRunspace = [runspacefactory]::CreateRunspace(); $wdRunspace.Open()",
         "    $wdShell = [powershell]::Create(); $wdShell.Runspace = $wdRunspace",
         "    [void]$wdShell.AddScript({",
@@ -483,8 +486,9 @@ def _main(argv: Sequence[str] | None, *, run: Runner, beat: Callable[[Sequence[s
     # code other than 0 or 1 into 1 unless it is passed on explicitly.
     remote_ps1 = rf"C:\build\hand\{ns.session}\win-hand.ps1"
     # An unset $LASTEXITCODE (pwsh never started) would exit 0: count it as setup.
+    opt_in = f"$env:{HEARTBEAT_ENV} = '1'; " if beat is not None else ""
     ssh_argv = ["ssh", ns.host,
-                f"$env:{HEARTBEAT_ENV} = '1'; pwsh -NoProfile -File '{remote_ps1}'; "
+                f"{opt_in}pwsh -NoProfile -File '{remote_ps1}'; "
                 f"if ($LASTEXITCODE -eq $null) {{ exit {SETUP_FAILED} }} else {{ exit $LASTEXITCODE }}"]
     if beat is not None:
         return beat(ssh_argv)

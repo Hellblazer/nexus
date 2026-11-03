@@ -497,6 +497,15 @@ def test_children_get_nul_stdin_once_the_watchdog_holds_the_heartbeat() -> None:
     before(block, "$wdIn = [Console]::OpenStandardInput()", "CreateFileW('NUL', [uint32]3221225472, 3, [ref]$sa, 3",
            "SetStdHandle(-10, $nul)", "AddArgument($wdIn)")
     assert "$sa.inherit = $true" in block, "children inherit NUL only through an inheritable handle"
+    assert "if ($nul -eq [IntPtr]::new(-1) -or -not [WinHand.Std]::SetStdHandle(-10, $nul)) {" in block
+    before(block, "SetStdHandle(-10, $nul)) {", "NUL redirect failed", "Add-Content", "}")
+
+
+def test_without_a_heartbeat_runner_the_script_is_not_armed() -> None:
+    rec = _Recorder(on_origin=True)
+    wht.main(["--session", "wren", "--", "t.py"], run=rec)
+    (call,) = [c for c in rec.calls if c[0] == "ssh" and "pwsh -NoProfile -File" in c[-1]]
+    assert wht.HEARTBEAT_ENV not in call[-1], "nothing beats, so nothing may arm the watchdog"
 
 
 def test_the_watchdog_ends_the_tree_on_end_of_file_or_silence_and_never_on_its_own_error() -> None:
@@ -601,7 +610,7 @@ def test_a_sigkilled_client_closes_the_childs_stdin(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 def test_sigterm_ends_the_client_and_its_ssh_child(tmp_path: Path) -> None:
-    """A real child process: under end_on_signal a SIGTERM to the client also ends the process subprocess.run is
+    """A real child process: under end_on_signal a SIGTERM to the client also ends the process run_with_heartbeat is
     waiting on (the ssh stand-in), where the default action would leave it running."""
     pidfile = tmp_path / "child.pid"
     standin = tmp_path / "standin.py"
