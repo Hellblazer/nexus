@@ -25,12 +25,13 @@
     against manifest_search_<dim> over a matrix of predicates.
 
     KEEP IN STEP. The object below is a copy of manifest_search_<dim>'s (vectors-045); a key added there must be added
-    here. ManifestObjectParityTest fails when the stored text of the object (from the CROSS JOIN LATERAL that derives
-    the source format through the ) e that closes the lateral building eff, comments and layout aside) differs between
-    manifest_search_384/768/1024 and manifest_qualifying_hits, and ManifestQualifyingHitsTest fails when the two
-    disagree on a pushed predicate. A function that gains another copy of the object is added to the first test's
-    FUNCTIONS list. A table function (not a
-    scalar) so the engine inlines it into the calling statement, with the compiled predicate a constant at plan time
+    here. ManifestObjectParityTest compares the stored text of the object block, ignoring comments and layout, across
+    manifest_search_384/768/1024 and manifest_qualifying_hits, and fails when they differ. The block runs from the
+    CROSS JOIN LATERAL that derives the source format to the end of the lateral that builds eff.
+    ManifestQualifyingHitsTest fails when the two functions disagree on a pushed predicate. Any new function that
+    carries a copy of the object is added to ManifestObjectParityTest's FUNCTIONS list.
+
+    A table function, not a scalar, so the engine inlines it into the calling statement, with the compiled predicate a constant at plan time
     (the engine sets plan_cache_mode = force_custom_plan) and manifest_names_key folding as it does in the search.
 
     No DATA EFFECT: one function definition and a grant. After vectors-046, before the runAlways grants blocks.
