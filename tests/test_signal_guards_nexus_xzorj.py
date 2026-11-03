@@ -207,9 +207,22 @@ def _nonce() -> str:
 
 
 def _spawn_sleeper(tag: str) -> subprocess.Popen:
-    return subprocess.Popen(  # noqa: S603 — fixed argv, test-owned
+    """Start a sleeper whose command line carries *tag*, and return once that command line is visible.
+
+    Right after ``Popen`` the child may not have exec'd yet, and on Linux its /proc cmdline is then still the
+    parent's, so an identity check made at once reads a stranger (develop CI, b7c423ea8). Waiting for the tag
+    keeps every test here about the guard, not about exec timing."""
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, test-owned
         [sys.executable, "-c", f"import time; time.sleep(120)  # {tag}"], start_new_session=True,
     )
+    deadline = time.monotonic() + 10.0
+    while not pid_is(proc.pid, tag):
+        if proc.poll() is not None or time.monotonic() > deadline:
+            proc.kill()
+            proc.wait(timeout=10)
+            raise AssertionError(f"the sleeper's command line never showed its tag {tag!r} within 10 s")
+        time.sleep(0.02)
+    return proc
 
 
 def _wait_dead(proc: subprocess.Popen) -> bool:
