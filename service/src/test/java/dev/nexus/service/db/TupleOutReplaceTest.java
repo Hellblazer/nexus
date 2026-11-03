@@ -461,19 +461,102 @@ class TupleOutReplaceTest {
         assertThat(transitions(id)).containsExactly("claim", "expire", "claim", "ack");
     }
 
+    // ── nexus-7h2jj (Sam, 2026-11-03, option a): any CLAIMED row is dirtied, live lease or lapsed ──────
+
     @Test
-    void aLapsedClaimIsNotDirtied_itIsAPlainBodyReplace() throws Exception {
+    void aLapsedUnsweptClaim_isDirtied_theBodyIsReplaced_andNothingElseMoves() throws Exception {
+        Room r = newRoom();
+        byte[] id = out(r, "doc-1", "v1");
+        var c = claim(r, "w1");
+        lapseLease(id);
+        Row before = row(id);
+
+        var res = replace(r, "doc-1", "v2", 60L);
+
+        assertThat(res.outcome()).as("a lapsed, unswept claim is still a claimed row: dirtied").isEqualTo(DIRTIED);
+        Row after = row(id);
+        assertThat(after.body()).isEqualTo("v2");
+        assertThat(after.dirty()).isTrue();
+        assertThat(after.claimState()).as("claim columns untouched: it is still claimed").isEqualTo("claimed");
+        assertThat(after.claimId()).isEqualTo(c.claimId());
+        assertThat(after.claimant()).isEqualTo("w1");
+        assertThat(after.leaseUntil()).as("the lease stays lapsed").isEqualTo(before.leaseUntil());
+        assertThat(after.attempts()).isEqualTo(before.attempts());
+        assertThat(after.availableAt()).as("never stamped on a claimed row").isNull();
+    }
+
+    @Test
+    void aLapsedDirtiedClaim_isClearedByTheNextClaim_whichCountsTheLapse_andGetsTheNewBody() throws Exception {
         Room r = newRoom();
         byte[] id = out(r, "doc-1", "v1");
         claim(r, "w1");
         lapseLease(id);
+        assertThat(replace(r, "doc-1", "v2").outcome()).isEqualTo(DIRTIED);
 
-        var res = replace(r, "doc-1", "v2");
+        var second = claim(r, "w2");
 
-        assertThat(res.outcome()).as("nobody holds it: no ack is coming").isEqualTo(REPLACED);
-        Row row = row(id);
-        assertThat(row.body()).isEqualTo("v2");
-        assertThat(row.dirty()).isFalse();
+        assertThat(second.tuple().body()).isEqualTo("v2");
+        Row held = row(id);
+        assertThat(held.dirty()).as("the mark is spent: w2's ack consumes").isFalse();
+        assertThat(held.attempts()).as("below max_attempts the lapse still counts").isEqualTo(1);
+        repo.ack(TENANT, second.claimId(), "w2");
+        assertThat(row(id).consumedAt()).isNotNull();
+    }
+
+    @Test
+    void aLapsedDirtiedClaim_atMaxAttempts_isRequeuedWithTheNewBody_notDeadLettered() throws Exception {
+        Room r = newRoom();   // max_attempts 3
+        byte[] id = out(r, "doc-1", "v1");
+        repo.nack(TENANT, claim(r, "w1").claimId(), "w1", null);   // attempts 1
+        repo.nack(TENANT, claim(r, "w2").claimId(), "w2", null);   // attempts 2
+        claim(r, "w3");
+        lapseLease(id);
+        // The replace lands AFTER the lapse: before nexus-7h2jj it wrote the body with dirty false, and
+        // the claim below then dead-lettered a body nobody extracted.
+        assertThat(replace(r, "doc-1", "v2").outcome()).isEqualTo(DIRTIED);
+
+        var got = repo.inp(TENANT, r.subspace(), r.keys(), "w4", 60L);
+
+        assertThat(got).as("requeued per nexus-7rwaj, not dead-lettered").isPresent();
+        assertThat(got.get().tuple().body()).isEqualTo("v2");
+        Row held = row(id);
+        assertThat(held.claimState()).isEqualTo("claimed");
+        assertThat(held.attempts()).as("7rwaj: attempts 0").isZero();
+        assertThat(transitions(id)).doesNotContain("dead");
+    }
+
+    @Test
+    void aReplaceOnAnUnclaimedAvailableRow_doesNotDirtyIt_whetherFreshOrReleasedByANack() throws Exception {
+        Room r = newRoom();
+        byte[] fresh = out(r, "doc-1", "v1");
+        assertThat(replace(r, "doc-1", "v2").outcome()).isEqualTo(REPLACED);
+        assertThat(row(fresh).dirty()).as("never claimed").isFalse();
+
+        var c = claim(r, "w1");
+        repo.nack(TENANT, c.claimId(), "w1", null);   // claim columns cleared, attempts 1
+        assertThat(replace(r, "doc-1", "v3").outcome()).isEqualTo(REPLACED);
+        Row nacked = row(fresh);
+        assertThat(nacked.claimState()).isNull();
+        assertThat(nacked.dirty()).as("released by a nack: no holder, nothing to re-extract").isFalse();
+        assertThat(nacked.attempts()).isEqualTo(1);
+    }
+
+    @Test
+    void anIdenticalBodyReplaceOnALapsedClaim_dirtiesIt_asOnALiveClaim() throws Exception {
+        // The engine never compares bodies (nexus-eyynd pins the live-claim case in AspectTaskRefsRenameTest):
+        // an identical-body replace on a claimed row dirties it, so the document is extracted once more.
+        Room liveRoom = newRoom();
+        byte[] live = out(liveRoom, "doc", "same");
+        claim(liveRoom, "w1");
+        assertThat(replace(liveRoom, "doc", "same").outcome()).as("control: live lease").isEqualTo(DIRTIED);
+        assertThat(row(live).dirty()).isTrue();
+
+        Room lapsedRoom = newRoom();
+        byte[] lapsed = out(lapsedRoom, "doc", "same");
+        claim(lapsedRoom, "w1");
+        lapseLease(lapsed);
+        assertThat(replace(lapsedRoom, "doc", "same").outcome()).as("lapsed lease").isEqualTo(DIRTIED);
+        assertThat(row(lapsed).dirty()).isTrue();
     }
 
     @Test
@@ -712,12 +795,12 @@ class TupleOutReplaceTest {
         assertThat(replaceAs(claimed, "d", "v2", "sess-C").outcome()).isEqualTo(DIRTIED);
         assertThat(row(c).senderSession()).as("claimed branch: the replacing writer's").isEqualTo("sess-C");
 
-        // claimed whose lease lapsed (plain replace)
+        // claimed whose lease lapsed (dirtied too, nexus-7h2jj)
         Room lapsed = newRoom();
         byte[] l = outAs(lapsed, "d", "v1", "sess-A");
         claim(lapsed, "w1");
         lapseLease(l);
-        assertThat(replaceAs(lapsed, "d", "v2", "sess-D").outcome()).isEqualTo(REPLACED);
+        assertThat(replaceAs(lapsed, "d", "v2", "sess-D").outcome()).isEqualTo(DIRTIED);
         assertThat(row(l).senderSession()).as("lapsed-claim branch: the replacing writer's").isEqualTo("sess-D");
 
         // consumed (the revival branch)

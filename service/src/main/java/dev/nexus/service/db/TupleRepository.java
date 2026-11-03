@@ -833,9 +833,13 @@ public final class TupleRepository {
     public enum OutOutcome {
         /** No row held the id: a new row was written, as a plain out writes it. */
         CREATED("created"),
-        /** A consumed, expired, dead, available or lapsed-claim row took the new body. */
+        /** A consumed, expired, dead or available (unclaimed) row took the new body. */
         REPLACED("replaced"),
-        /** A live-claimed row took the new body and was marked dirty; its holder's ack returns it to available. */
+        /**
+         * A claimed row (claim_state 'claimed', its lease live OR lapsed and unswept) took the new body and was
+         * marked dirty. A live holder's ack returns it to available; a lapsed row is released by the next
+         * claim or the sweep, requeued rather than dead-lettered at max_attempts (nexus-7h2jj, nexus-7rwaj).
+         */
         DIRTIED("dirtied");
 
         private final String wire;
@@ -874,13 +878,21 @@ public final class TupleRepository {
      *       expired) counts against {@code max_live_rows} and is refused with
      *       {@link MaxLiveRowsExceededException} when over; a dead row is already live, so its revival
      *       adds nothing and is never refused (bead decision, fix-check item 5).</li>
-     *   <li><b>available</b>, or a claimed row whose lease has lapsed (outcome {@link OutOutcome#REPLACED}):
-     *       the body and dims are replaced and nothing else moves. Attempts and {@code available_at} are
-     *       kept: a pending retry's backoff is worker state, and a bulk re-index must not defeat it.</li>
-     *   <li><b>claimed with a live lease</b> (outcome {@link OutOutcome#DIRTIED}): the body and dims are
-     *       replaced and {@code dirty} is set; nothing else changes, and {@code available_at} is never
-     *       stamped on a claimed row. The holder's {@code ack} then returns the row to available
-     *       instead of consuming it.</li>
+     *   <li><b>available</b> (outcome {@link OutOutcome#REPLACED}): {@code claim_state} is NULL, so no
+     *       holder is named. The body and dims are replaced and nothing else moves. Attempts and
+     *       {@code available_at} are kept: a pending retry's backoff is worker state, and a bulk re-index
+     *       must not defeat it. {@code dirty} stays false.</li>
+     *   <li><b>claimed</b>, live lease or lapsed (outcome {@link OutOutcome#DIRTIED}; nexus-7h2jj, extending
+     *       nexus-7rwaj): {@code claim_state = 'claimed'} with the holder and {@code claim_id} still set,
+     *       whatever {@code lease_until} says. A lease that has passed but was not yet released by the
+     *       sweep or taken over by a claimer does not make the row available. The body and dims are
+     *       replaced and {@code dirty} is set; nothing else changes (claim columns, lease, attempts), and
+     *       {@code available_at} is never stamped on a claimed row. For a live lease the holder's
+     *       {@code ack} then returns the row to available instead of consuming it. For a lapsed one no
+     *       ack is coming (a late ack is {@code ClaimNotFound}): the next claim or the sweep releases the
+     *       row, clears the mark, and a release that would dead-letter it at {@code max_attempts} requeues
+     *       it with attempts 0 instead (nexus-7rwaj), so the new body is extracted once more and never
+     *       buried unread. The engine does not compare bodies: an identical-body replace dirties too.</li>
      * </ul>
      * No row at all is written as a plain out writes it (outcome {@link OutOutcome#CREATED}), under the
      * same {@code max_live_rows} check. Every replace branch stamps {@code sender_session} with THIS
@@ -956,8 +968,13 @@ public final class TupleRepository {
         boolean consumed = existing.getConsumedAt() != null;
         boolean expired = !existing.getExpiresAt().isAfter(now);
         boolean dead = CLAIM_STATE_DEAD.equals(existing.getClaimState());
-        boolean liveClaim = CLAIM_STATE_CLAIMED.equals(existing.getClaimState())
-                && existing.getLeaseUntil() != null && existing.getLeaseUntil().isAfter(now);
+        // nexus-7h2jj (Sam, 2026-11-03): "claimed" is claim_state = 'claimed' and nothing more. The lease
+        // column is NOT consulted: a claim whose lease_until has passed but which no sweep has released and
+        // no claimer has taken over is still a claimed row (holder and claim_id set), and its body is one
+        // the holder never saw. Consumed, expired and dead rows were handled above, so a row that reaches
+        // the arm below with claim_state 'claimed' is unconsumed and unexpired. An available row has a NULL
+        // claim_state (a nack, release or sweep clears it with the holder), so it is never claimed here.
+        boolean claimed = CLAIM_STATE_CLAIMED.equals(existing.getClaimState());
         if (consumed || expired || dead) {
             if (consumed || expired) {
                 // Not live before, live after: the revival counts. A dead row is already live.
@@ -990,12 +1007,12 @@ public final class TupleRepository {
                 .set(TUPLES.BODY, body)
                 .set(TUPLES.DIMS, p.dimsJsonb())
                 .set(TUPLES.SENDER_SESSION, senderSession);
-        if (liveClaim) {
+        if (claimed) {
             update.set(TUPLES.DIRTY, true);
         }
         update.where(TUPLES.ID.eq(id).and(TUPLES.TENANT_ID.eq(tenant))).execute();
         maintainTenant(ctx, tenant);
-        return liveClaim ? OutOutcome.DIRTIED : OutOutcome.REPLACED;
+        return claimed ? OutOutcome.DIRTIED : OutOutcome.REPLACED;
     }
 
     private static Field<JSONB> dimsValue(PreparedOut p) {
