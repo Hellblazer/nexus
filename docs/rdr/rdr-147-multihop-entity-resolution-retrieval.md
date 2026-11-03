@@ -2,13 +2,13 @@
 title: "Multi-hop entity-resolution retrieval: an exact-key resolve step and a resolution repair inside the coverage boundary"
 id: RDR-147
 type: Architecture
-status: draft
+status: accepted
 resumed_date: 2026-11-03
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-03
-accepted_date: 2026-06-05
+accepted_date: 2026-11-03
 deferred_date: 2026-07-08
 deferred_reason: "All 11 tracking beads, including epic nexus-bwct4, are DEFERRED (P1/P2/P3 rungs incl. entity-linker hook, resolve operator, type-mismatch trigger, phase-review gates, E2E/MVV) as of 2026-07-08. Corrects 2026-08-18 audit finding: this deferral was visible in beads but not reflected in the RDR frontmatter, the audit's highest-value single correction."
 related_issues: []
@@ -899,3 +899,4 @@ linker conditional.
 - 2026-11-03: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `68c697ec1`; critique `nexus_rdr/147-gate-critique-2026-11-03-r2`.
 - 2026-11-03: Gate round 2 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `0de44d26a`; critique `nexus_rdr/147-gate-critique-2026-11-03-r3`.
 - 2026-11-03: Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `7e79312f0`; critique `nexus_rdr/147-gate-critique-2026-11-03-r4`.
+- 2026-11-03: Accepted. Round 3 residual dispositions: S1 nexus-wunaf; S2 nexus-v3g1n; S3 nexus-nx6eq (Phase 1 Step 4).
