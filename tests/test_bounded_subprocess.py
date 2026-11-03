@@ -32,7 +32,6 @@ import re
 import subprocess
 import sys
 import time
-import warnings
 
 import pytest
 
@@ -122,8 +121,9 @@ def _sweep(*markers: str) -> None:
     """Kill this run's own ``sleep <marker>`` processes.
 
     Each marker is unique to one run (``_run_marker``), so this never reaches another run's
-    sleeper: CI jobs on hellmini share one user and one PID namespace, and a fixed marker let one
-    job's sweep kill another's (nexus-8byc4).
+    sleeper: CI jobs on hellmini share one user and one PID namespace, as chas's did until its
+    lab-runner gained PrivatePIDs on 2026-11-02, and a fixed marker let one job's sweep kill
+    another's (nexus-79yg6, nexus-8byc4).
     """
     for marker in markers:
         subprocess.run(  # noqa: S603 - test-local cleanup of this run's own marker
@@ -177,23 +177,16 @@ def test_timed_out_call_leaves_no_orphan() -> None:
     # helper, which is how a fixed marker once bit) ends on its own and never matches the NEXT
     # run's markers; no sweep before the run is needed, and none can reach another run's.
 
-    # Stock: times out, reaps the direct child, orphans the grandchild. On qwent (py3.13, a
-    # lab-6c18g CI job) it once returned instead, cause unknown (nexus-8byc4): the setup is
-    # tried once more, and a second miss fails with what both attempts returned.
-    misses: list[str] = []
-    for attempt in (1, 2):
-        marker = stock_marker if attempt == 1 else _run_marker(3)
-        timed_out, detail = _stock_run_times_out(_argv(marker))
-        if timed_out:
-            stock_marker = marker
-            break
-        _sweep(marker)
-        misses.append(f"attempt {attempt}: {detail}")
-    else:
+    # Stock: times out, reaps the direct child, orphans the grandchild. Both CI misses
+    # (nexus-79yg6 on 10-25, nexus-8byc4 on 11-01, each a py3.13 shard on chas while chas's CI
+    # jobs still shared one PID namespace and one uid) were a concurrent twin shard's sweep of
+    # the then-fixed marker killing this run's sleeper inside the 1 s wait; the per-run marker
+    # removes that, so there is no retry here: a miss is a real change in the premise.
+    timed_out, detail = _stock_run_times_out(_argv(stock_marker))
+    if not timed_out:
+        _sweep(stock_marker)
         pytest.fail("stock subprocess.run did not time out on a backgrounded sleeper holding its "
-                    "stdout, so the premise of this differential no longer holds: " + "; ".join(misses))
-    if misses:
-        warnings.warn(f"nexus-8byc4: the stock setup missed once, then held: {misses[0]}", stacklevel=1)
+                    "stdout, so the premise of this differential no longer holds: " + detail)
 
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
@@ -539,6 +532,40 @@ def test_run_markers_are_unique_to_the_run() -> None:
     a, b = _run_marker(1), _run_marker(1)
     assert a != b and str(os.getpid()) in a
     assert 120 <= float(a) < 121  # an interrupted run's leftover sleeper ends on its own
+
+
+@posix_only
+def test_another_runs_sweep_never_reaches_this_runs_sleeper() -> None:
+    """The cause of both CI misses, as a behaviour (nexus-79yg6, nexus-8byc4).
+
+    A second process stands in for a concurrent run on the same box: it mints its marker and
+    sweeps it, exactly as that run's cleanup does. This run's sleeper must survive. With a
+    marker that does not depend on the run (the fixed ``30111`` both misses ran under), the
+    twin's sweep kills it, which is what made the stock call return inside its 1 s wait.
+    """
+    mine = _run_marker(1)
+    proc = subprocess.Popen(  # noqa: S603 - test-local sleeper, swept below
+        ["sh", "-c", f"sleep {mine} & exit 0"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    proc.wait(timeout=10)
+    try:
+        assert _sleeper_alive(mine), "the sleeper never started, so this test proves nothing"
+        twin = subprocess.run(  # noqa: S603 - the twin run, same box, same user
+            [sys.executable, "-c",
+             "from tests.test_bounded_subprocess import _run_marker, _sweep; "
+             "m = _run_marker(1); _sweep(m); print(m)"],
+            capture_output=True, text=True, timeout=60,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        )
+        assert twin.returncode == 0, twin.stderr[-2000:]
+        time.sleep(0.3)  # let a kill, had there been one, land
+        assert _sleeper_alive(mine), (
+            f"the twin run's sweep of its marker {twin.stdout.strip()!r} killed this run's "
+            f"sleeper {mine!r}: concurrent runs on one box can fail each other's stock leg"
+        )
+    finally:
+        _sweep(mine)
 
 
 def test_the_marker_pattern_matches_only_that_sleeper() -> None:
