@@ -305,8 +305,9 @@ conexus records [23758], [22578], [22526] and conexus-h2ol.
   follow and the lists a new tenant table must update: rename and re-home move
   every `COLLECTION_SCOPED_TABLES` entry, every registry-row delete is one of
   four sites in `CatalogRepository`, `purge_trash` never deletes a registry
-  row, nexus_svc reaches new tables through default privileges and nexus_diag
-  only through a grant by name, and `relevance_log` already stores query text
+  row, nexus_svc reaches new tables through default privileges and nexus_diag,
+  in the view era, only through a grant by name (in the legacy era it reads
+  every table; `-32`), and `relevance_log` already stores query text
   (Technical Design 6; `nexus_rdr/230-research-23`, `-24`, `-25`).
 
 ### Critical Assumptions
@@ -362,8 +363,8 @@ measurement.
   unchanged. The substrate tests in Phase 1 (comment) and Phase 2 (attachment)
   still pin it in the engine's own roles and schemas.
 - [ ] **A6.** Enough own-topic queries accumulate in the persisted ring
-  (Technical Design 6) for every indexed collection to get a first verdict
-  within about seven days of the Phase 1 deploy, and a daily re-measure after
+  (Technical Design 6) for each indexed collection with own-topic traffic to
+  get a first verdict within about seven days of the Phase 1 deploy, and a daily re-measure after
   that. **Status**: The draft's form of A6 (a verdict at least daily from an
   in-memory ring) is refuted by measurement (`nexus_rdr/230-research-21`).
   Over seven days of production telemetry, `code__1-1` had 186 own-topic
@@ -385,7 +386,9 @@ measurement.
   and any tenant other than nexus (no other tenant has telemetry rows). A
   collection nobody queries is still never measured. **Method**: the status
   object's `unmeasured` count and each index's first `measured_at`, seven days
-  after the Phase 1 deploy.
+  after the Phase 1 deploy; a collection still short of three queries then is
+  reported `unmeasured` with its ring's query count, and Phase 2 does not wait
+  on it (Minimum Viable Validation).
 
 Two Unknowns are not assumptions of this design and are named so they are not
 lost: per-path routing of scoped and hybrid searches onto leaf graphs was not
@@ -654,7 +657,13 @@ upsert), so a repeated query adds no row; in the same statement it deletes
 that ring's rows beyond the 32 newest by `added_at` and its rows older than
 30 days (Open Question 6). A ring that gets no new query is never written, so
 the builder's pass also deletes every ring row older than 30 days, under each
-tenant's scope; no row outlives 30 days by more than one pass.
+tenant's scope; while the lock holder's builder runs, no row outlives 30 days
+by more than one pass, and while it does not, rows on rings nobody writes are
+not aged (Failure Modes). The connection, statement and tenant list for that
+delete are not specified here: no existing path deletes across tenants for
+this table (the builder reaches tenants only through `nexus.chunks` leaves and
+only reads; ledger retention lists its own `request_ledger_tenants`;
+`nexus_rdr/230-research-31`), so implementation settles them.
 That statement is one Liquibase SQL function that jOOQ generates a routine
 for, so the Java side sends no SQL text. Rows are written only for collections
 in the valid-index set, so the table holds at most 32 rows per indexed
@@ -714,8 +723,14 @@ exist (`nexus_rdr/230-research-23`):
   nothing) leaves the old name's rows the same way.
 
 *Grants.* nexus_svc reads and writes the table through the schema's default
-privileges (`grants-nexus-svc.xml:190`); no grant is added. nexus_diag gets no
-SELECT. It bypasses row-level security across every tenant, its tables are
+privileges (`grants-nexus-svc.xml:190`); no grant is added. In the view era
+(the counts view `nexus.diag_chash_conformance` exists) nexus_diag gets no
+SELECT: `grants-nexus-diag-2` revokes its SELECT on every table nexus_admin
+owns, and P1.2a's test asserts the denial. In the legacy era (no counts view)
+`grants-nexus-diag-1` grants it SELECT on every table in schema `nexus`, the
+ring included, and the content boundary there is the product choke point
+`run_diagnostic_sql` (`grants-nexus-diag.xml:23-34`, `:120-122`;
+`nexus_rdr/230-research-32`). nexus_diag bypasses row-level security across every tenant, its tables are
 granted one by one after their rows are checked for content
 (`CatalogRepository.NEXUS_DIAG_READABLE_TABLES`, `CatalogRepository.java:10081`),
 and a query embedding is content (next paragraph). No diagnostic needs the
@@ -736,6 +751,9 @@ PITR fork of production. The database already keeps query text in
 a different set of searches, those on indexed collections. A row stays at most
 30 days: the same trim that keeps the 32-row bound deletes rows older than 30
 days (Open Question 6, answered by Sam 2026-11-03; `nexus_rdr/230-research-28`).
+That holds for a ring that is still written; a ring nobody writes is aged only
+by the builder's pass, so its rows can stay longer while the builder is not
+running (Failure Modes).
 
 *Cold start.* After a restart the ring is still in the table. Only a ring that
 has never been written (the first deploy, a newly indexed collection) is
@@ -819,7 +837,9 @@ dedicated method: `runReindex`, `runComment` and `runVacuum` in
 `PciBuilderSession`, each registered in `RawSqlGateTest.SANCTIONED_STATEMENTS`
 with `.execute(sql)` once and a `// SANCTIONED RAW` comment giving this RDR. The
 leaf-leftover drop reuses `runDrop`. The canary needs no admin statement: it
-runs the serving and exact statements on the pool as nexus_svc.
+runs the serving and exact statements on the pool as nexus_svc. The pass's
+30-day delete of ring rows (Technical Design 6) is not in this set: its
+connection is not chosen here (`nexus_rdr/230-research-31`).
 
 ### Existing Infrastructure Audit
 
@@ -940,8 +960,9 @@ near-tie noise.
   first REINDEX on the cloud and re-gates STEP-6 after it, expecting near-tie
   re-rolls and not regressions (the proposal's ownership split).
 - The database keeps recent query embeddings: up to 32 per indexed collection
-  per tenant, in a table under FORCE row-level security that only nexus_svc
-  can read, never the query text and never in a log (Technical Design 6). An
+  per tenant, in a table under FORCE row-level security that nexus_svc reads
+  and nexus_diag cannot in the view era (Technical Design 6, Grants), never
+  the query text and never in a log (Technical Design 6). An
   embedding can be inverted to much of its text, so the table is treated as
   holding the queries themselves, in every backup and PITR fork.
 - One more tenant table, and with it a changeset on the cloud, rehearsed on a
@@ -970,14 +991,17 @@ near-tie noise.
   `pci_`, item 4 for the leaf index).
 - **Risk**: the ring table grows without bound. **Mitigation**: every write
   trims its ring to 32 rows and 30 days in the same statement, and the
-  builder's pass drops rows past 30 days on rings nobody writes; rows are written only for
+  builder's pass drops rows past 30 days on rings nobody writes, while the
+  lock holder's builder runs (Failure Modes); rows are written only for
   indexed collections; the foreign key's cascade removes a collection's rows
   with its registry row. A test pins the bound and the cascade (P1.2a, P1.2).
 - **Risk**: a query vector crosses tenants. **Mitigation**: FORCE row-level
   security with the tenant policy, whose check also refuses a write naming
   another tenant; writes and reads only under the tenant's scope as
-  nexus_svc; no nexus_diag grant; the table in the doctor's RLS canary list
-  (P1.2a). A test has a second tenant read none of the first's rows.
+  nexus_svc; no nexus_diag SELECT in the view era (Technical Design 6,
+  Grants); the table in the doctor's RLS canary list (P1.2a). A test has a
+  second tenant read none of the first's rows, and a test has nexus_diag
+  denied SELECT on the table (P1.2a).
 - **Risk**: the changeset fails on the cloud's Liquibase walk. **Mitigation**:
   the PITR-fork walk before the deploy (P1.6). The changeset only creates
   objects and changes no existing row.
@@ -1005,6 +1029,11 @@ near-tie noise.
   flush's log line; nothing else changes.
 - A ring read fails during a canary run: that run is `unmeasured` with
   `error`, like a failed canary statement.
+- No builder pass runs (`NX_SEARCH_PCI=0`, `auth_failed`, `no_privilege`, or no
+  engine holds the lock): rings nobody writes are not aged, so their rows can
+  outlive 30 days until a pass runs again; rings still written are trimmed by
+  their writes. The 30-day bound holds only while the lock holder's builder is
+  `ok`.
 
 ## Implementation Plan
 
@@ -1019,8 +1048,10 @@ near-tie noise.
 ### Minimum Viable Validation
 
 Phase 1, on the cloud with REINDEX absent: the canary reports a verdict for
-`code__1-1` within 24 hours of the deploy and for every indexed collection
-within seven days (A6, at the measured query rates), an engine restart in that
+`code__1-1` within 24 hours of the deploy; seven days after the deploy, each
+indexed collection with own-topic traffic has a verdict or is reported
+`unmeasured` with its ring's query count (A6), and Phase 2 does not wait on a
+collection whose ring never reaches three queries; an engine restart in that
 window does not empty any ring, and the readings are recorded in T2 as the
 aged-index measurement (A1).
 
@@ -1066,7 +1097,15 @@ is test-first: its failing test lands first in the same branch.
   `scripts/list_data_effects.py:19-21`). Tests: the schema test (row-level
   security forced, the policy, the CHECK refuses a vector of the wrong
   dimension, deleting the registry row deletes the ring rows); a rename moves
-  the rows; the ghost sweep removes a registry row that only ring rows name.
+  the rows; the ghost sweep removes a registry row that only ring rows name;
+  nexus_diag is denied SELECT on `nexus.canary_query_ring`, in
+  `GrantsNexusDiagViewAccessIntegrationTest` in the shape of its
+  `reembedJobTables_svcHasDml_diagIsDenied` (`:308-372`:
+  `NEXUS_DIAG_READABLE_TABLES` does not contain the table, and a SELECT as
+  nexus_diag after the walk fails with "permission denied for table"). That
+  test walks the changelog into the view era and reboots it (`:378-381`), so
+  it covers the view era only; in the legacy era nexus_diag holds SELECT on the
+  table by design (Technical Design 6, Grants).
 - P1.2 The query ring: admission rule, digest dedupe, the 32-row bound, the
   write queue and background writer, reads under the tenant's scope, nothing
   logged but counts. Tests: a single-collection search admits; a fan-out
@@ -1091,7 +1130,9 @@ is test-first: its failing test lands first in the same branch.
 - P1.6 Engine cut; the Liquibase walk of the ring changeset on a PITR fork of
   production before the cloud deploy (the pre-deploy gate for any tag carrying
   a changeset, `docs/agents/engine-service-release.md:21`); cloud run; first
-  canary readings to T2 (A1) and the seven-day reading of A6; a read-only
+  canary readings to T2 (A1) and the seven-day reading of A6 (each indexed
+  collection with own-topic traffic has a verdict or is reported `unmeasured`
+  with its ring's query count, Minimum Viable Validation); a read-only
   query by conexus for A4 (per-leaf dead fraction, `last_autovacuum`, `VACUUM`
   durations). A red reading here is acted on by hand and reported to Sam.
 - P1.R Review gate (code-review-expert and substantive-critic; "Ship when the
@@ -1121,7 +1162,8 @@ is test-first: its failing test lands first in the same branch.
 ### Phase dependencies
 
 P1.1 blocks P1.3 and P2.2. P1.2a blocks P1.2, which blocks P1.3. P1.5 and P1.6 block P2.1, which
-blocks P2.2 and P2.3. P2.4 blocks P2.5. nexus-s9wav (R1) is independent but
+blocks P2.2 and P2.3. P1.6 is done at its seven-day reading; a collection whose
+ring has not reached three queries by then is reported and does not hold P2.1. P2.4 blocks P2.5. nexus-s9wav (R1) is independent but
 should land before P2.5, so autovacuum is already acting at 5% when REINDEX is
 enabled; nexus-dxsjc (R4) consumes the status object and may land before or
 after P1.4.
@@ -1133,7 +1175,7 @@ after P1.4.
 | Anchor comments | `obj_description` on `pci_` indexes | the status entry's `anchor`, `size_ratio`, `deletes_since_build` | dropped with the index | adopted again if unparsable | N/A (derived) |
 | Canary results | status `maintenance.canary` | `event=pci_canary` log lines | lost on restart by design | the doctor row (nexus-dxsjc) | logs |
 | REINDEX | status `reindexing`, `last_reindex_at` | `event=pci_ddl_done op=reindex took_ms=` | N/A | `reindex_leftover` returns to 0 | N/A |
-| Query ring | rows of `nexus.canary_query_ring` under the tenant's scope as nexus_svc (no other role reads it) | the status entry's `queries`; `event=pci_ring_write_failed` | cascades with the collection's registry row; an operator may delete a ring's rows under the tenant's scope | the doctor's RLS canary lists the table | in database backups and PITR forks, as query content |
+| Query ring | rows of `nexus.canary_query_ring` under the tenant's scope as nexus_svc (nexus_diag is denied SELECT in the view era, P1.2a's test) | the status entry's `queries`; `event=pci_ring_write_failed` | cascades with the collection's registry row; an operator may delete a ring's rows under the tenant's scope | the doctor's RLS canary lists the table | in database backups and PITR forks, as query content |
 
 To stop maintenance without stopping builds, set `NX_SEARCH_PCI_REINDEX=0` and
 restart the engine.
@@ -1244,7 +1286,9 @@ production query and a fork measurement of `VACUUM` duration (2026-10-20); leaf
 Phase 1's cloud run. A1 is answered in part by a recall run on a production
 fork (k 10, all `pci_` indexes 1.0000; one read as aged). A6 in the draft's
 form was refuted by the 2026-11-03 census and is restated for the persisted
-ring; its new form is read seven days into Phase 1.
+ring; its new form is read seven days into Phase 1, where a collection still
+short of three queries is reported `unmeasured` with its query count and does
+not hold Phase 2.
 
 #### API Verification
 
@@ -1277,7 +1321,8 @@ deferred.
   a bge install's rings hold 768-dimension vectors.
 - **Tenancy**: the canary runs as nexus_svc under the tenant's scope; the ring
   is a table under FORCE row-level security, read and written only under the
-  tenant's scope, with no nexus_diag grant; the status carries no names; the
+  tenant's scope, with no nexus_diag SELECT in the view era (P1.2a's test;
+  the legacy era's blanket grant covers it like every table); the status carries no names; the
   counts carry an explicit `tenant_id` predicate.
 - **Deployment and rehearsal**: one additive Liquibase changeset, the ring
   table (P1.2a), walked on a PITR fork of production before the Phase 1
