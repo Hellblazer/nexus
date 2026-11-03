@@ -125,6 +125,7 @@ nexus-0hqez
 nexus-0i4sc
 nexus-0i4w0
 nexus-0ib6r
+nexus-0ihqj
 nexus-0ikca
 nexus-0ite2
 nexus-0ixqc
@@ -2072,6 +2073,7 @@ nexus-8g79.6
 nexus-8g79.7
 nexus-8g79.8
 nexus-8g79.9
+nexus-8g913
 nexus-8gue1
 nexus-8h9t5
 nexus-8hb14
@@ -2758,6 +2760,7 @@ nexus-bivz3.8
 nexus-bivz3.9
 nexus-biw
 nexus-biw.1
+nexus-bj8e7
 nexus-bj9nx
 nexus-bjavr
 nexus-bjdi
@@ -4119,6 +4122,7 @@ nexus-gmme9
 nexus-gndj
 nexus-gnrow
 nexus-gnrow.1
+nexus-gnw42
 nexus-go5ou
 nexus-gomuo
 nexus-gomuo.1
@@ -5168,6 +5172,7 @@ nexus-kyujr
 nexus-kyvfj
 nexus-kyzmw
 nexus-kzso5
+nexus-l003p
 nexus-l0ai3
 nexus-l0yh
 nexus-l1eou
@@ -8262,6 +8267,7 @@ nexus-x2g1z.1
 nexus-x2k4b
 nexus-x2x6v
 nexus-x37zt
+nexus-x3bxj
 nexus-x3eoc
 nexus-x3gig
 nexus-x3gig.1
