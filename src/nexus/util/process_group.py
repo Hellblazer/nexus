@@ -147,6 +147,14 @@ def safe_killpg(
             msg="pid <= 0 would target the caller's own pgid — skipping killpg",
         )
         return False
+    # A handle that says it was reaped (``returncode`` is an int: ``Popen`` after wait()/poll(),
+    # an asyncio ``Process`` once its child watcher reaped it) names a pid the kernel may already
+    # have handed to someone else, and ``getpgid`` would resolve THEIR group (nexus-xzorj, the
+    # reaped-pid class of nexus-hjw3o). A bare int pid and a mock carry no such state and pass.
+    returncode = getattr(proc_or_pid, "returncode", None)
+    if isinstance(returncode, int) and not isinstance(returncode, bool):
+        _log.debug("safe_killpg_reaped_proc_guard", pid=pid, returncode=returncode)
+        return False
     killpg = getattr(os, "killpg", None)
     if killpg is None:
         # Windows: one process, and any sig is TerminateProcess (docstring).
@@ -352,6 +360,11 @@ def _signal_group(pgid: int, sig: int) -> bool:
     here."""
     if getattr(os, "killpg", None) is None:
         return False
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 1:
+        # 0 is the caller's own group, -1 and below name a single pid or "every process", 1 is init's
+        # group: none is ever a group this module should signal, whatever path got here (nexus-xzorj).
+        _log.warning("process_group_refused_pgid", pgid=pgid, sig=sig)
+        return False
     if pgid == os.getpgrp():
         # A caller handing in nx's own group is a caller bug; signalling it
         # would take nx (or, sparing it, every sibling) down with the target.
@@ -412,7 +425,7 @@ def contain(proc_or_pid: Any) -> int | None:
     return job
 
 
-def kill_tree(proc_or_pid: Any, job: int | None, sig: int = KILL_SIGNAL) -> bool:
+def kill_tree(proc_or_pid: Any, job: int | None, sig: int = KILL_SIGNAL, *, pgid: int | None = None) -> bool:
     """Kill *proc_or_pid*'s whole tree: via the process group on POSIX, via
     the Windows job object when *job* is not ``None`` (from :func:`contain`),
     or via :func:`safe_killpg`'s single-process reach otherwise.
@@ -422,9 +435,18 @@ def kill_tree(proc_or_pid: Any, job: int | None, sig: int = KILL_SIGNAL) -> bool
     then be a different, unrelated job. Callers hold *job* exactly as long
     as the process it was assigned to is live and clear it (set the
     variable back to ``None``) once this returns.
+
+    *pgid* is the group id recorded at spawn (``start_new_session=True`` makes it the leader's
+    pid). With it, POSIX signals that group directly (:func:`safe_killpg_group`) and never
+    resolves a group from the pid: a leader that another thread or an event loop's child watcher
+    reaps between the caller's liveness check and ``getpgid`` would otherwise resolve to whoever
+    the kernel gave the pid to (nexus-xzorj). The recorded group id stays reserved while any
+    member lives, and is ESRCH once none does.
     """
     if job is not None:
         return win_job.close_job(job)
+    if pgid is not None and getattr(os, "killpg", None) is not None:
+        return safe_killpg_group(pgid, sig)
     return safe_killpg(proc_or_pid, sig)
 
 

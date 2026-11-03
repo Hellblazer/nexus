@@ -14,8 +14,6 @@ Windows. The lint keeps captured-pipe ``pg_ctl ... start`` calls out of ``tests/
 from __future__ import annotations
 
 import ast
-import os
-import signal
 import subprocess
 import sys
 import textwrap
@@ -24,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_process import kill_if_identity
 from tests._pg_ctl import PG_CTL_STDERR, PG_CTL_STDOUT, pg_ctl_start
 
 _TESTS = Path(__file__).resolve().parent
@@ -50,10 +49,14 @@ def _fake_pg_ctl(tmp_path: Path, exit_code: int = 0) -> tuple[Path, Path]:
 
 
 def _kill_fake_postmaster(pid_file: Path) -> None:
+    """Stop the fake postmaster the fake pg_ctl recorded, when the number still names it: a ``sleep`` whose
+    command line is ``sleep <_POSTMASTER_LIFETIME_S>``. The pid file outlives the sleep, so a bare kill could
+    reach whatever the number was reused for (nexus-xzorj)."""
     try:
-        os.kill(int(pid_file.read_text().strip()), signal.SIGKILL)
+        pid = int(pid_file.read_text().strip())
     except (OSError, ValueError):
-        pass
+        return
+    kill_if_identity(pid, f"sleep {_POSTMASTER_LIFETIME_S}")
 
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="the fake pg_ctl is a POSIX shell script")

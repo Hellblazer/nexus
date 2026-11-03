@@ -152,10 +152,9 @@ def _record_engine_child(proc: subprocess.Popen) -> None:
 
 
 def _signal_group(proc: subprocess.Popen, sig: int) -> None:
-    try:
-        os.killpg(os.getpgid(proc.pid), sig)
-    except (ProcessLookupError, PermissionError):
-        pass
+    # The product's primitive, not a raw killpg(getpgid(pid)): it refuses a pgid of 0 or 1, the caller's own
+    # group, and a handle that says it was reaped (its pid may be someone else's by now), nexus-xzorj.
+    process_group.safe_killpg(proc, sig)
 
 
 def signal_group(proc: subprocess.Popen, sig: int) -> None:
@@ -222,12 +221,47 @@ def group_alive(pgid: int) -> bool:
     alive. Windows has no process groups, so the recorded leader pid is probed instead."""
     if not _POSIX:
         return pid_alive(pgid)
+    if pgid <= 1:  # 0 probes the caller's own group (always alive), 1 is init's: neither is a group a test spawned
+        return False
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    return True
+
+
+def pid_is(pid: object, expect: str) -> bool:
+    """Is *pid* a live process whose command line contains *expect*? ``False`` for anything that is not a
+    positive int other than this process, for a process that is gone and for one whose command cannot be
+    read. An empty *expect* matches everything, so it is refused."""
+    if not expect:
+        raise ValueError("pid_is needs a non-empty identity token")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1 or pid == os.getpid():
+        return False
+    from nexus.daemon.service_registry import process_command  # noqa: PLC0415 — deferred: the daemon package pulls more than this helper module needs
+
+    return expect in process_command(pid)
+
+
+def kill_if_identity(pid: object, expect: str, *, sig: int = process_group.KILL_SIGNAL) -> bool:
+    """Signal the ONE process *pid* only when it is still the process a test spawned: its live command
+    line contains *expect* (a path under the test's own tmp dir, or the script it ran).
+
+    For a kill whose pid came from a status or pid file, which outlives its process: by the time the test
+    cleans up, the process may have exited and the number may belong to anything, a process of another
+    test in this job (labrun gives each CI job its own PID namespace, where low pids are real processes)
+    or of another job on a shared pool user. ``True`` when a signal was sent; ``False`` when nothing was
+    (see :func:`pid_is`; or it exited since the read). Signals the process alone, not its group
+    (nexus-xzorj).
+    """
+    if not pid_is(pid, expect):
+        return False
+    try:
+        os.kill(pid, sig)  # type: ignore[arg-type] — pid_is proved an int
+    except OSError:  # exited since the read, or not ours to signal
+        return False
     return True
 
 

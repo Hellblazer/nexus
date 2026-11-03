@@ -418,7 +418,7 @@ class TestKillEngineLegUsesProcessGroup:
             killpg_calls.append((pgid, sig))
             return real_killpg(pgid, sig)
 
-        setattr_in(monkeypatch, "tests._engine_substrate", "os.killpg", _tracking_killpg)
+        setattr_in(monkeypatch, "nexus.util.process_group", "os.killpg", _tracking_killpg)
 
         _kill_engine_leg(proc.pid, grace_s=1.0)
 

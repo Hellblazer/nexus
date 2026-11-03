@@ -44,12 +44,14 @@ from tests._module_seam import patch_in, setattr_in
 posix_only = pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
 
 
-def _reaped_worker(pid: int, rc: int, *, stop_after_reap: bool = False):
+def _reaped_worker(pid: int, rc: int, *, stop_after_reap: bool = False, stop_before_reap: bool = False):
     """Rung 2's subprocess: reports *pid*, leaves a parse behind and is reaped with *rc*.
 
     ``returncode`` is ``None`` until the reap, as on a real ``Popen``. With *stop_after_reap*,
     ``stop_mineru_workers`` runs once the returncode is set and before the wait returns, the
-    window in which the stage thread has reaped the worker but not yet unregistered it."""
+    window in which the stage thread has reaped the worker but not yet unregistered it. With
+    *stop_before_reap* it runs while ``returncode`` is still ``None``: the live-worker lambda reads
+    the worker as alive, which is the state in which the reap can land before the kill (nexus-xzorj)."""
 
     def popen(args, **_kwargs):
         pdf, result_dir, start, _end, _formula = args[-5:]
@@ -57,6 +59,8 @@ def _reaped_worker(pid: int, rc: int, *, stop_after_reap: bool = False):
         proc.returncode = None
 
         def wait(timeout=None):
+            if stop_before_reap:
+                assert pdf_extractor.stop_mineru_workers() == 1, "the live worker is registered"
             base = Path(result_dir) / Path(pdf).name / "auto"
             base.mkdir(parents=True, exist_ok=True)
             name = Path(pdf).name
@@ -142,4 +146,26 @@ def test_a_stop_that_lands_after_the_reap_never_resolves_the_pid_either(
     assert reached == [], _NO_SIGNAL.format(reached)
     # Once from the live-worker kill, once from the stopped path's own sweep.
     assert group_sweep.call_args_list == [((stand_in.pid,),), ((stand_in.pid,),)], group_sweep.call_args_list
+    assert stand_in.poll() is None
+
+
+@posix_only
+def test_a_stop_while_the_worker_reads_as_alive_signals_the_recorded_group_not_the_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stand_in: subprocess.Popen,
+) -> None:
+    """nexus-xzorj: the live-worker lambda reads ``proc.returncode`` unlocked, and the stage thread's reap
+    can land between that read and the kill. A kill that resolves the group from the pid
+    (``killpg(getpgid(pid))``) then reaches whoever the pid was recycled to; the recorded group id does
+    not. Here ``returncode`` is still ``None`` at the stop, the pid is the stand-in's, and nothing may
+    reach the stand-in through the pid."""
+    outcome, reached, group_sweep = _run(
+        tmp_path, monkeypatch, stand_in,
+        _reaped_worker(stand_in.pid, -signal.SIGKILL, stop_before_reap=True),
+    )
+    assert isinstance(outcome, pdf_extractor.MineruWorkerStopped), outcome  # the stopped path ran
+    assert reached == [], _NO_SIGNAL.format(reached)
+    # The live kill goes by the recorded group id, hard (kill_tree's call carries the signal), and the
+    # worker's own sweeps follow it.
+    assert group_sweep.call_args_list[0] == ((stand_in.pid, pg.KILL_SIGNAL),), group_sweep.call_args_list
+    assert all(c.args[0] == stand_in.pid for c in group_sweep.call_args_list), group_sweep.call_args_list
     assert stand_in.poll() is None

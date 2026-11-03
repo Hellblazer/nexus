@@ -29,7 +29,7 @@ import pytest
 
 from nexus import bounded_subprocess
 from nexus.util import process_group as pg
-from tests._child_process import kill_group
+from tests._child_process import kill_if_identity
 from tests._module_seam import delattr_in, setattr_in
 
 posix_only = pytest.mark.skipif(
@@ -256,6 +256,10 @@ def test_without_process_groups_the_single_process_is_terminated_and_a_group_is_
 # ── real children: a tracker-marked process survives, the others die ─────────
 
 
+#: The part of a member's command line that is the same for every sleeper ``_spawn_group`` starts.
+_SLEEPER_ARGV = "time.sleep(120)"
+
+
 def _spawn_group(marker_in_argv: str | None) -> tuple[subprocess.Popen, int, int]:
     """A group leader with two children in its group: one whose argv carries
     *marker_in_argv* (None: a plain sleeper) and one plain sleeper. Returns
@@ -297,12 +301,20 @@ def _gone(pid: int, timeout: float = 10.0) -> bool:
     return False
 
 
+def _raw_group_kill(leader: subprocess.Popen) -> None:
+    """The control's whole-group SIGKILL that does NOT spare the tracker: the product's one raw ``killpg``
+    (``tests._child_process.kill_group`` goes through the sparing primitive now, nexus-xzorj)."""
+    assert pg._plain_killpg(os.getpgid(leader.pid), signal.SIGKILL), "the leader's group was not signalled"
+
+
 def _reap_group(leader: subprocess.Popen, *pids: int) -> None:
-    for pid in (leader.pid, *pids):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+    """Kill what a test left. The leader is ours: ``Popen.kill`` is a no-op once it is reaped, where a bare
+    ``os.kill(leader.pid)`` after a ``leader.wait()`` would hit whatever the kernel gave the number to. The
+    members are not our children (``_spawn_group``), so each is killed only while its live command line is
+    still the sleeper this test started (nexus-xzorj)."""
+    for pid in pids:
+        kill_if_identity(pid, _SLEEPER_ARGV)
+    leader.kill()
     leader.wait(timeout=10)
 
 
@@ -348,7 +360,7 @@ def test_control_a_raw_group_kill_takes_the_tracker_marked_process_too() -> None
     """Non-vacuity of the test above: a raw ``killpg`` DOES reach it."""
     leader, tracker_like, plain = _spawn_group("multiprocessing@.resource_tracker")
     try:
-        kill_group(leader)  # a raw group SIGKILL, the pre-fix behaviour
+        _raw_group_kill(leader)  # a raw group SIGKILL, the pre-fix behaviour
         leader.wait(timeout=10)
         assert _gone(tracker_like) and _gone(plain)
     finally:
@@ -442,7 +454,7 @@ def _run_pool_and_kill(killer, exists, unlink) -> tuple[list[str], list[str]]:
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX named semaphores")
 def test_control_a_raw_whole_group_kill_leaks_the_pools_semaphores() -> None:
     exists, unlink = _sem_api()
-    names, leaked = _run_pool_and_kill(kill_group, exists, unlink)  # a raw group SIGKILL
+    names, leaked = _run_pool_and_kill(_raw_group_kill, exists, unlink)  # a raw group SIGKILL
     assert leaked, (
         f"control: a whole-group SIGKILL of a spawn pool should leak its semaphores "
         f"(made {len(names)}); if it no longer does, the tests below prove nothing"

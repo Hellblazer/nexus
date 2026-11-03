@@ -28,6 +28,7 @@ from typing import Any
 import pytest
 
 from tests._child_encoding import PYTHON_CHILD_ENCODING
+from tests._child_process import kill_if_identity
 from tests._module_seam import setattr_in
 from tests._platform import (
     IS_WINDOWS,
@@ -393,11 +394,11 @@ def _retry(action: Any) -> Any:
             time.sleep(0.02)
 
 
-def _terminate(pid: int) -> None:
-    try:
-        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-    except (OSError, ProcessLookupError):
-        pass
+def _terminate(pid: int, expect: str) -> None:
+    """Hard-stop *pid* if it is still the process this test started: its live command line holds *expect*.
+    The pid comes from a status file or a fake's log, which outlive the process, so a bare kill could
+    reach whatever the number was reused for (nexus-xzorj)."""
+    kill_if_identity(pid, expect)
 
 
 def _make_stale_lock(setup: Path, *, age: float = 120.0, owner: str = "dead-owner") -> None:
@@ -1179,8 +1180,8 @@ def test_a_run_killed_inside_nx_init_resumes_with_nx_init(box: Box) -> None:
         time.sleep(0.05)
     assert (box.config / "pg_credentials").exists()
     pid = box.status_file()["pid"]
-    _terminate(pid)
-    _terminate(init["pid"])
+    _terminate(pid, _SETUP.name)
+    _terminate(init["pid"], str(box.tools))
     old = time.time() - 120
     os.utime(box.setup / "lock" / "heartbeat", (old, old))
     assert box.status()["state"] == "interrupted"
@@ -1292,7 +1293,7 @@ def test_a_terminated_run_leaves_a_terminal_status_and_no_lock(box: Box) -> None
     box.behave([{"prog": "nx", "match": ["init"], "sleep": 30, "effects": box.init_effects()}])
     box.start("local")
     init = box.wait_call("nx", "init")
-    os.kill(box.status_file()["pid"], signal.SIGTERM)
+    assert kill_if_identity(box.status_file()["pid"], _SETUP.name, sig=signal.SIGTERM), "the run was live, so its pid was signalled"
     done = box.wait_terminal()
     assert done["state"] == "failed"
     assert done["failed_step"] == "init"
@@ -2456,7 +2457,7 @@ def test_a_cloud_call_removes_the_marker_and_starts_a_run_that_serves_the_page(b
     assert not (box.setup / "not-now").exists()
     _wait_for(lambda: (box.status_file() or {}).get("credentials") == "waiting for credentials", 30, "the page to be served")
     assert box.open_record.read_text(encoding="utf-8").strip().endswith("credentials-opener.html")
-    _terminate(box.status()["pid"])
+    _terminate(box.status()["pid"], _SETUP.name)
 
 
 def test_a_cloud_call_on_a_fresh_box_starts_a_run_and_downloads_no_service(box: Box) -> None:
@@ -2466,7 +2467,7 @@ def test_a_cloud_call_on_a_fresh_box_starts_a_run_and_downloads_no_service(box: 
     _wait_for(lambda: (box.status_file() or {}).get("credentials") == "waiting for credentials", 30, "the page to be served")
     assert not (box.config / "service").exists() and not (box.config / "postgres").exists()
     assert box.calls() == [], "the layout's nx was found, so the build was skipped, and no service step runs in mode cloud"
-    _terminate(box.status()["pid"])
+    _terminate(box.status()["pid"], _SETUP.name)
 
 
 def test_a_cloud_call_while_a_run_is_live_leaves_it_alone(box: Box) -> None:

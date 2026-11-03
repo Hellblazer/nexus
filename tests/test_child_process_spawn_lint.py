@@ -36,8 +36,6 @@ HELPER = "tests/_child_process.py"
 #: sweep, on purpose. Each is a POSIX test of a POSIX mechanism (the product's Windows arms
 #: are tested separately), not an engine or PG fixture.
 EXEMPT: dict[tuple[str, str], int] = {
-    # The stale-cluster sweep reaches a recorded engine pid's group (its Windows arm is safe_killpg).
-    ("tests/_engine_substrate.py", "_kill_engine_leg"): 1,
     # Pins that _kill_engine_leg signals the group: spawns a real group, wraps os.killpg.
     ("tests/test_engine_substrate_sweep.py", "TestKillEngineLegUsesProcessGroup"): 2,
     # nexus.bounded_subprocess's own group kill, checked against a real group.

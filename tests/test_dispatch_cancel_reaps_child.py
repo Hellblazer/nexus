@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 
 from nexus.operators.dispatch import CliBackend, claude_dispatch
+from nexus.util import process_group as pg
+from tests._child_process import kill_if_identity
 from tests._module_seam import patch_in
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "killpg"), reason="needs a POSIX process group")
@@ -69,6 +71,13 @@ async def _gone(pids: tuple[int, ...], limit: float = 6.0) -> bool:
     return False
 
 
+def _kill_leftovers(pids: tuple[int, ...]) -> None:
+    """Cleanup of a failed test, from pids a file recorded: each is signalled only while its live command line is
+    still the fake claude (the leader) or its sleeping grandchild (nexus-xzorj)."""
+    for pid, identity in zip(pids, ("fake_claude.py", "time.sleep(120)")):
+        kill_if_identity(pid, identity)
+
+
 def _spawn_fake(script: Path, pid_file: Path):
     real = asyncio.create_subprocess_exec
 
@@ -94,11 +103,7 @@ async def test_a_call_cut_by_wait_for_kills_the_whole_process_tree(tmp_path: Pat
                 await asyncio.wait_for(task, timeout=0.5)
         assert await _gone(pids), f"the cut call left a live child (pids {pids})"
     finally:
-        for p in pids:
-            try:
-                os.kill(p, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        _kill_leftovers(pids)
 
 
 @pytest.mark.asyncio
@@ -119,8 +124,41 @@ async def test_a_cancelled_call_kills_its_child_and_reraises_cancellation(tmp_pa
         pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
         assert pending == [], f"tasks left pending: {pending}"
     finally:
-        for p in pids:
-            try:
-                os.kill(p, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        _kill_leftovers(pids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["cancelled", "dispatcher-timeout"])
+async def test_the_kill_goes_by_the_group_recorded_at_spawn_never_by_resolving_the_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str,
+) -> None:
+    """nexus-xzorj: asyncio's child watcher reaps the child on its own schedule, so by the time a timeout or
+    cancel kills the tree the pid may already be someone else's, and ``killpg(getpgid(pid))`` would signal THEIR
+    group. The call kills the group id it recorded at spawn (``kill_tree(pgid=)``); nothing resolves the pid.
+    Real child, real group: both primitives are wrapped, not replaced, so the tree still dies."""
+    script = tmp_path / "fake_claude.py"
+    script.write_text(_SCRIPT)
+    pid_file = tmp_path / "pids"
+    resolved: list[object] = []
+    by_group: list[object] = []
+    real_resolve, real_group = pg.safe_killpg, pg.safe_killpg_group
+    monkeypatch.setattr(pg, "safe_killpg", lambda proc, *a, **k: resolved.append(proc) or real_resolve(proc, *a, **k))
+    monkeypatch.setattr(pg, "safe_killpg_group", lambda pgid, *a, **k: by_group.append(pgid) or real_group(pgid, *a, **k))
+    pids: tuple[int, ...] = ()
+    try:
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=_spawn_fake(script, pid_file)):
+            timeout = 60.0 if how == "cancelled" else 1.0
+            task = asyncio.ensure_future(claude_dispatch("prompt", _SCHEMA, timeout=timeout, backend=CliBackend()))
+            pids = await _wait_for_pids(pid_file)
+            if how == "cancelled":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                with pytest.raises(Exception):  # noqa: B017 — the dispatcher's own timeout error; the kill is the subject
+                    await asyncio.wait_for(task, timeout=30.0)
+        assert await _gone(pids), f"the call left a live child (pids {pids})"
+        assert resolved == [], f"the kill resolved a group from the pid: {resolved}"
+        assert by_group and by_group[0] == pids[0], f"the kill did not go by the recorded group {pids[0]}: {by_group}"
+    finally:
+        _kill_leftovers(pids)
