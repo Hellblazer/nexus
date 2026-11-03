@@ -10792,9 +10792,14 @@ def _nx_answer_record_run(
     out_of_step_cost_usd: float | None = None,
     run_summary: "RunSummaryRecorder | None" = None,
     summary_outcome: str = "recorded",
+    answer_text: str | None = None,
 ) -> None:
     """Persist one ``nx_answer_runs`` row (+ its ``step_records``, when any)
     via the telemetry store. Redacts when ``trace=False``.
+
+    *answer_text* (nexus-ix3fj) is the run's FULL final text when the caller cuts *final_text* before this call; the
+    summary records its length and class, so a payload cut at 2000 characters is still classified whole. ``None``
+    means *final_text* is the whole text.
 
     *run_summary* (RDR-232 Phase 3, nexus-jypmj.3.5) is the call's summary recorder: when given, the run
     summary rides on the same ``/record`` write (with the stamp that finds the row again), under the store's
@@ -10836,6 +10841,7 @@ def _nx_answer_record_run(
         summary = run_summary.prepare(
             telemetry, outcome=summary_outcome, plan_id=plan_id, step_count=step_count,
             duration_ms=duration_ms, cost_usd=cost_usd,
+            answer_text=final_text if answer_text is None else answer_text,
         )
         if summary is not None:
             created_at = _utc_now_iso()
@@ -11757,6 +11763,7 @@ def _nx_answer_record_complete(
     early_bump_fired: bool,
     out_of_step_cost_usd: float | None = None,
     run_summary: "RunSummaryRecorder | None" = None,
+    answer_text: str | None = None,
 ) -> None:
     """RDR-203 P1/P3 choke point: the ``nx_answer_runs`` record and the plan
     outcome-counter bump for ONE converting arm, issued as ONE function
@@ -11849,6 +11856,10 @@ def _nx_answer_record_complete(
     hygiene and the always-failing skip. The composite route carries a verdict, so a verdictless
     run takes the per-call record path on either capability, as the 404 fallback does.
 
+    **answer_text** (nexus-ix3fj): the run's FULL final text when the caller cuts *final_text* to 2000 characters
+    before this call. The run summary records its length and class (``final_chars``, ``answer_class``), so a raw
+    payload over the cut is still classified whole. ``None`` means *final_text* is the whole text.
+
     **run_summary** (RDR-232 Phase 3, nexus-jypmj.3.5): the call's summary recorder. The summary rides on
     the SAME write (``/complete``, or ``/record`` on the degradation path and the 404 fallback), prepared
     once so both attempts carry the one object and one stamp; the store sends it only to an engine that
@@ -11894,6 +11905,7 @@ def _nx_answer_record_complete(
         summary = run_summary.prepare(
             db.telemetry, outcome="unscored" if success is None else "success" if success else "failure",
             plan_id=plan_id, step_count=step_count, duration_ms=duration_ms, cost_usd=cost_usd,
+            answer_text=final_text if answer_text is None else answer_text,
         )
 
     if composite_supported_at_start and success is not None:
@@ -13584,7 +13596,7 @@ async def nx_answer(
                 _nx_answer_record_complete(
                     db, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=len(result.steps),
-                    final_text=budget_final_text[:2000], step_records=_step_records,
+                    final_text=budget_final_text[:2000], answer_text=budget_final_text, step_records=_step_records,
                     duration_ms=int((time.monotonic() - start) * 1000), trace=trace,
                     success=False,
                     composite_supported_at_start=composite_supported_at_start,
@@ -14409,7 +14421,7 @@ async def nx_answer(
                     _nx_answer_record_complete(
                         db, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=str(result_text)[:2000], step_records=[],
+                        final_text=str(result_text)[:2000], answer_text=str(result_text), step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
                         # a scope conflict is the caller's error: the run counts no outcome
                         success=None if _fast_conflict else not _nx_answer_text_is_empty(str(result_text)),
@@ -15121,7 +15133,7 @@ async def nx_answer(
                     db, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
-                    final_text=no_match[:2000], step_records=_result_step_records,
+                    final_text=no_match[:2000], answer_text=no_match, step_records=_result_step_records,
                     duration_ms=elapsed_ms, trace=trace,
                     success=_nx_answer_empty_retrieval_outcome(result.steps),
                     composite_supported_at_start=composite_supported_at_start,
@@ -15201,7 +15213,7 @@ async def nx_answer(
                     db, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
-                    final_text=notice[:2000], step_records=_result_step_records,
+                    final_text=notice[:2000], answer_text=notice, step_records=_result_step_records,
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
@@ -15390,7 +15402,7 @@ async def nx_answer(
             lambda db: _nx_answer_record_complete(
                 db, question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
-                final_text=final_text[:2000], step_records=_result_step_records,
+                final_text=final_text[:2000], answer_text=final_text, step_records=_result_step_records,
                 duration_ms=elapsed_ms, trace=trace, success=True,
                 composite_supported_at_start=composite_supported_at_start,
                 early_bump_fired=early_bump_fired,

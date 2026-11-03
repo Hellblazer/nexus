@@ -42,6 +42,8 @@ from typing import Any
 import click
 import structlog
 
+from nexus.plans.answer_text_class import heuristic_class, is_redacted_row
+
 _log = structlog.get_logger(__name__)
 
 #: Fixed latency bucket order for human-table rendering — matches the
@@ -205,62 +207,6 @@ def _bucketize_durations(durations_ms: "list[int]") -> dict[str, int]:
     return buckets
 
 
-#: Code-templated header identifying nx_answer's single-step-guard
-#: reroute to ``query()`` (nexus-x79ne / RDR-200 Phase 1b-1c gate:
-#: q06/q08/q19, both arms, plan_id 471, ``step_count == 1`` — a REAL
-#: ``query()`` call that ran to completion and returned a well-formed
-#: document listing, never reduced). This shape carries ``step_count >
-#: 0``, so without a dedicated check it lands in executed_ok/executed_
-#: failed (no "Error:"/exhaustion prefix, no per-step ``ok=False``
-#: signal) — reading as a normal success.
-#:
-#: ANCHORED to the start of ``final_text`` (code review, T2 [24198]): a
-#: bare ``in`` substring match let a genuine synthesized answer that
-#: happens to discuss "several documents (from the 2023 filing)"
-#: misclassify. core.py's plain-corpus ``query()`` renderer (the ONLY
-#: variant nx_answer's single-step guard can reach — it never passes
-#: catalog-routing params) always emits this header as line 1, verbatim
-#: (``"Found {N} documents (from {M} chunks across {K} collections)"``);
-#: the catalog-routed variant is a DIFFERENT, unreachable-from-nx_answer
-#: code path whose header is preceded by a routing-note line, so
-#: anchoring to start-of-string costs nothing here. Checked together
-#: with ``step_count == 1`` in :func:`_classify_degenerate_row` — every
-#: gate-artifact instance of this shape carries it (the single-step
-#: guard is the ONLY producer of this header, and it always records
-#: exactly one step).
-_QUERY_LISTING_REROUTE_HEADER_RE = _re.compile(r"^Found \d+ documents \(from ")
-
-#: Prefix of a budget WARNING line (RDR-196 .p3c) — distinct from
-#: ``NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX``'s ``"[budget exhausted"``:
-#: a warning lets execution proceed; an exhaustion halts it. Both are
-#: emitted by ``nx_answer``'s single ``_result`` closure (core.py).
-_BUDGET_WARNING_LINE_PREFIX = "[budget warning ("
-
-#: Heuristic phrases an LLM operator step emits when it was fed entirely
-#: empty/placeholder hydrated content (nexus-x79ne, RDR-200 Phase 1b q12
-#: both arms: ``operator_compare`` received ten empty strings). NOT a
-#: deterministic code-level marker — verified against
-#: ``nexus.mcp.operator_requests``'s ``build_*_request`` builders: none
-#: of them short-circuit on empty input, every one always dispatches to
-#: ``claude -p``, so the model always produces free text. Heuristic, like
-#: :func:`_row_is_failed`'s own documented blind spot: a model phrasing
-#: this differently is invisible to this list. Kept broad enough to
-#: catch the gate-artifact class without over-matching a real
-#: comparative answer that happens to discuss an absence of differences
-#: (checked as a substring of the FULL final_text, not an exact match).
-_EMPTY_HYDRATION_PHRASES: tuple[str, ...] = (
-    "no comparison performed",
-    "nothing to compare",
-    "no items to compare",
-    "no items were provided",
-    "no content was provided",
-    "nothing to summarize",
-    "no content to summarize",
-    "empty input",
-    "no evidence was provided",
-    "no evidence provided",
-)
-
 #: The subset of :func:`_classify_degenerate_row`'s return values that
 #: are reachable regardless of ``step_count`` (nexus-x79ne). Unlike the
 #: pre-existing ``redacted``/``planner_error``/``error``/``other``
@@ -289,132 +235,52 @@ _WELL_FORMED_DEGENERATE_CLASSES: frozenset[str] = frozenset({
 })
 
 
-def _redacted_coverage_class(summary: object) -> str | None:
-    """The coverage-decided non-answer class of a redacted row, read from its run summary; ``None`` unless the
-    summary is an ``nx_answer`` run whose coverage state is ``unavailable``. ``fit_summary`` may cut the
-    ``coverage`` block (and its reason), so a missing reason falls back to ``no_usable_answer``."""
-    if not isinstance(summary, dict) or summary.get("kind") != "nx_answer":
+#: Longest recorded class name the reader accepts; the real ones are under 40 characters.
+_RECORDED_CLASS_MAX_CHARS = 64
+
+
+def _recorded_answer_class(row: dict) -> str | None:
+    """The class the writer recorded in the row's run summary (``answer_class``), or ``None`` when the row has none
+    or it is unusable (nexus-ix3fj). The writer computed it over the FULL final text with
+    :func:`classify_answer_text`; the row's own ``final_text`` is cut at 2000 characters."""
+    summary = row.get("run_summary")
+    if not isinstance(summary, dict):
         return None
-    if summary.get("coverage_state") != "unavailable":
-        return None
-    block = summary.get("coverage")
-    reason = block.get("reason") if isinstance(block, dict) else None
-    if reason == "uncovered":
-        return "non_answer/uncovered"
-    if reason in ("no_evidence", "scope_conflict"):
-        return "non_answer/no_evidence"
-    return "non_answer/no_usable_answer"
-
-_NON_ANSWER_NOTICE_RE = _re.compile(r"^\[non-answer: ([a-z_]+)\]")
-
-
-def _is_budget_warning_only_body(final_text: str) -> bool:
-    """True when *final_text* is one or more ``[budget warning (...):
-    ...]`` lines and NOTHING ELSE (nexus-x79ne: the run proceeded past
-    the warning — every recorded over-cap line "ran anyway" — but
-    produced no answer at all; RDR-200 Phase 1b q01 x2/q03/q13/q15,
-    Phase 1c q01a1/q13a1/q22a1/q22a2 — code review, T2 [24198]:
-    corrects the citation, which previously named q22 without q03).
-
-    A warning followed by a real answer does NOT match: the remainder
-    after stripping every leading warning line is non-empty, which is
-    the documented common case (a warned-but-successful run) and must
-    stay out of ``degenerate``.
-    """
-    remainder = final_text
-    matched = False
-    while remainder.startswith(_BUDGET_WARNING_LINE_PREFIX):
-        matched = True
-        newline_idx = remainder.find("\n")
-        remainder = remainder[newline_idx + 1:] if newline_idx != -1 else ""
-    return matched and remainder.strip() == ""
+    recorded = summary.get("answer_class")
+    if isinstance(recorded, str) and 0 < len(recorded) <= _RECORDED_CLASS_MAX_CHARS:
+        return recorded
+    return None
 
 
 def _classify_degenerate_row(row: dict) -> str:
-    """Sub-classify a row from fields visible on the row itself.
+    """The class of one row: the class the writer recorded over the full final text when the row's run summary
+    carries one, else :func:`_heuristic_class` over the stored (cut) text (nexus-ix3fj).
 
-    NOT the per-id source disposition (dead code / live-fixed / harness
-    artifact) the nx-answer-degenerate-row-taxonomy census recorded (T2
-    nexus/nx-answer-degenerate-row-taxonomy-2026-08-20) — that requires
-    reading the CODE at the time of the run, not the telemetry row, and
-    changes as code is fixed. This is a read-time heuristic over the row's
-    own ``question``/``final_text``, stable across code changes.
-
-    That census found 24 of 39 degenerate rows (62%) were the BENIGN
-    ``trace=False`` redaction class, not errors — so "degenerate" must
-    never be rendered as a synonym for "broken"; the ``redacted`` class
-    exists specifically so this command doesn't imply that.
-
-    nexus-x79ne (RDR-200 Phase 1b/1c gate): three well-formed-but-
-    structurally-empty body shapes accounted for 9 of 24 gate questions
-    while the pre-fix server-side field reported 1 (``planner_error``
-    only) — reachable on ANY row, not only ``step_count == 0`` ones (see
-    :data:`_WELL_FORMED_DEGENERATE_CLASSES` and :func:`_split_four_way`,
-    which is what actually widens the routing for the ``step_count > 0``
-    case — this function alone cannot, since it is only ever called on a
-    row already selected for classification).
-
-    ORDERING (code review, T2 [24198] — Important, falsified live): the
-    pre-existing ``"[redacted]"``/``"Planner error:"``/``"Error:"``
-    checks run FIRST, before the three new heuristics below. A row like
-    ``{"final_text": "Error: no evidence was provided by the upstream
-    retrieval service (timeout)", "step_count": 0}`` genuinely contains
-    the empty-hydration phrase "no evidence was provided" as a
-    substring — checking the heuristics first misclassified it
-    ``empty_hydration`` instead of ``error``, and (via the widened
-    ``_split_four_way``) diverted an ``step_count > 0`` row shaped like
-    it straight into ``degenerate`` WITHOUT ever reaching
-    :func:`_row_is_failed`. The three new heuristics are all narrow
-    enough (a code-templated header, a code-templated warning-line
-    prefix, an explicit refusal-phrase list) that none of them can
-    plausibly fire on real error/redaction text, so this reordering
-    costs nothing in the other direction.
+    A redacted row (``trace=False``) is the exception: its redaction rule decides first, exactly as before, so
+    the benign ``redacted`` class keeps its meaning. See :func:`_classification_basis` for which of the two
+    decided a row.
     """
-    final_text = str(row.get("final_text") or "")
-    question = str(row.get("question") or "")
-    if final_text == "[redacted]" or question == "[redacted]":
-        # A trace=False row's text cannot carry the coverage notice, so its run summary decides
-        # (nexus-jypmj.3.15): unavailable coverage means the call returned a non-answer.
-        return _redacted_coverage_class(row.get("run_summary")) or "redacted"
-    if final_text.startswith("Planner error:"):
-        return "planner_error"
-    if final_text.startswith("Error:"):
-        return "error"
-    if _is_budget_warning_only_body(final_text):
-        return "budget_warning_only"
-    if (
-        int(row.get("step_count") or 0) == 1
-        and _QUERY_LISTING_REROUTE_HEADER_RE.match(final_text) is not None
-    ):
-        return "query_listing_reroute"
-    # nexus-mm5tx: the runner's zero-evidence short-circuit never reaches a
-    # model; it returns this fixed prefix, so the match is exact, not a
-    # phrase heuristic. Prefix-anchored: a real answer quoting the phrase
-    # mid-text is not a short-circuit.
-    from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
-    if final_text.startswith(_NO_EVIDENCE_RESULT_PREFIX):
-        return "empty_hydration"
-    if any(phrase in final_text.strip().lower() for phrase in _EMPTY_HYDRATION_PHRASES):
-        return "empty_hydration"
-    # nexus-90gyo / nexus-zy0kj: the write side's own verdict first (a
-    # code-templated notice, exact prefix), then the shared text-only
-    # classifier over the body for rows written before the notice
-    # existed (run 706 / plan 488 class).
-    m = _NON_ANSWER_NOTICE_RE.match(final_text)
-    if m is not None:
-        return f"non_answer/{m.group(1)}"
-    from nexus.plans.answer_shape import (  # noqa: PLC0415 - deferred: keep CLI startup fast
-        NON_ANSWER_SHAPES,
-        AnswerShape,
-        classify_answer_shape,
-    )
-    shape = classify_answer_shape(final_text)
-    if shape in NON_ANSWER_SHAPES and shape is not AnswerShape.LISTING:
-        # LISTING is already named by the step_count==1 header rule above
-        # (``query_listing_reroute``); a header at another step_count is
-        # deliberately "other" (see that rule's own tests).
-        return f"non_answer/{shape.value}"
-    return "other"
+    if not is_redacted_row(row):
+        recorded = _recorded_answer_class(row)
+        if recorded is not None:
+            return recorded
+    return heuristic_class(row)
+
+
+def _classification_basis(row: dict) -> str:
+    """``recorded`` when :func:`_classify_degenerate_row` takes the writer's class for *row*, else ``heuristic``
+    (an old row, a row from an engine without the run summary, or a redacted row)."""
+    return "recorded" if not is_redacted_row(row) and _recorded_answer_class(row) is not None else "heuristic"
+
+
+def _classification_basis_counts(rows: "list[dict]") -> dict[str, int]:
+    """How many of *rows* were classified from a recorded class and how many by the read-time heuristic. The
+    heuristic sees only the stored text, cut at 2000 characters, so a raw payload longer than that reads as an
+    answer: the degenerate count among the heuristic rows is a lower bound."""
+    counts = {"recorded": 0, "heuristic": 0}
+    for r in rows:
+        counts[_classification_basis(r)] += 1
+    return counts
 
 
 def _row_is_failed(row: dict) -> bool:
@@ -1199,6 +1065,13 @@ def _emit_report(
     ) = _split_four_way(split_rows)
     degenerate_count = sum(len(v) for v in degenerate_by_class.values())
     degenerate_breakdown = {k: len(v) for k, v in degenerate_by_class.items()}
+    # nexus-ix3fj: which rows were classified from the class the writer recorded over the full text, and which by
+    # the read-time heuristic over the stored text (cut at 2000 characters). The rows that went through the
+    # classifier: every run row, not the insufficient-evidence bucket (decided by its summary) and not the
+    # continuation handoff and report rows (decided by their markers).
+    classification_basis = _classification_basis_counts(
+        executed_ok_rows + executed_failed_rows + [r for v in degenerate_by_class.values() for r in v]
+    )
     # RDR-200 §Telemetry (nexus-4e75w.5): continuation runs are NEVER
     # folded into the headless cost population — handed_off_rows is a
     # SEPARATE bucket from executed_ok/executed_failed by construction
@@ -1276,6 +1149,8 @@ def _emit_report(
             "executed_failed_count": len(executed_failed_rows),
             "degenerate_count": degenerate_count,
             "degenerate_breakdown": degenerate_breakdown,
+            # nexus-ix3fj: how the rows above were classified; ``heuristic`` rows undercount a raw payload over 2000 chars.
+            "classification_basis": classification_basis,
             # RDR-232 Phase 3 (nexus-jypmj.3.3): partial answers returned with the insufficient-evidence notice.
             "insufficient_evidence_count": len(insufficient_evidence_rows),
             "executed_ok_avg_duration_ms": executed_ok_avg_duration_ms,
@@ -1378,6 +1253,15 @@ def _emit_report(
     )
     for cls in sorted(degenerate_breakdown):
         click.echo(f"    degenerate/{cls}: {degenerate_breakdown[cls]}")
+    click.echo(
+        f"  classified: {classification_basis['recorded']} by recorded class (full final text), "
+        f"{classification_basis['heuristic']} by read-time heuristic (stored text, cut at 2000 characters)"
+    )
+    if classification_basis["heuristic"]:
+        click.echo(
+            "    the degenerate counts above are a lower bound while heuristic rows remain: a raw payload "
+            "longer than the stored text reads as an answer there"
+        )
 
     if handed_off_rows or report_event_rows:
         click.echo(

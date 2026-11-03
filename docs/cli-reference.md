@@ -5558,8 +5558,21 @@ every row is split three ways:
   recognizable as insufficient-evidence. The human report's `of the N row(s)
   shown` line counts the bucket as `insufficient-evidence N`.
 
+**How a row's class was decided.** A run's `final_text` is stored
+cut at 2000 characters, so a raw ids or extractions payload longer than that no
+longer parses on read-back and the text-only heuristic counts it as an answer.
+A client that records a run summary now classifies the FULL final text at write
+time with the same classifier and records `final_chars` (the full length) and
+`answer_class` in the summary; the reader takes that class when it is present and
+falls back to the heuristic on a row without one (a row written before this
+change, or by an engine that does not keep the run summary). A `trace=False` row
+keeps its `redacted` rule. The report says how many rows each way: `classified: N
+by recorded class (full final text), M by read-time heuristic`, with a note that
+the degenerate counts are a lower bound while heuristic rows remain.
+
 `--json` carries `executed_ok_count`, `executed_failed_count`,
 `degenerate_count`, `degenerate_breakdown: {class: count}`,
+`classification_basis: {recorded: N, heuristic: M}`,
 `insufficient_evidence_count`, plus a
 page-scoped, executed-ok-only latency view: `executed_ok_avg_duration_ms`
 and `executed_ok_latency_buckets` (same fixed edges as the whole-set
