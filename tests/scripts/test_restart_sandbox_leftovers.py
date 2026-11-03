@@ -115,8 +115,20 @@ def test_a_failed_scenario_s_kept_files_are_not_counted(run, tmp_path, monkeypat
         (temp / n).write_text("x", encoding="utf-8")
     assert run.footprint_after(before, sb, {"1234abcd-y"}, "", kept=True) == {f"temp {temp}": ["other-1234abcd.log"]}
     assert run.footprint_after(before, sb, {"1234abcd-y"}, "", kept=False)[f"temp {temp}"] == [
-        "nexus-continuation-restart-rs_alpha-1234abcd-x.md", "nx-restart-sandbox-roll-abc", "other-1234abcd.log",
-        "rh-1234abcd.txt"]
+        "nexus-continuation-restart-rs_alpha-1234abcd-x.md", "other-1234abcd.log", "rh-1234abcd.txt"]
+
+
+def test_the_home_itself_is_never_counted(run, tmp_path, monkeypatch) -> None:
+    """run_scenario checks before it removes the HOME on a pass (the 2026-11-02 run failed all four
+    scenarios on their own HOME when it did not)."""
+    temp = tmp_path / "shared-tmp"
+    temp.mkdir()
+    monkeypatch.setattr(run, "TEMP_DIRS", (temp,))
+    monkeypatch.setattr(run, "OPERATOR_HOME", tmp_path / "operator")
+    sb = _sandbox(run, temp / "nx-restart-sandbox-gate-xyz")
+    before = run.footprint_before()
+    sb.home.mkdir()
+    assert run.footprint_after(before, sb, {"1234abcd-y"}, "", kept=False) == {}
 
 
 def test_directory_leases_count_only_this_scenario_s_sessions(run, tmp_path, monkeypatch) -> None:

@@ -1727,8 +1727,9 @@ def footprint_after(before: dict, sb: Sandbox, sids: set[str], nx: str, kept: bo
     socket file; new lines in the operator's restart log about an rs_ session; and rows still in
     a sandbox session's mailbox, and a directory lease one of its sessions holds, on the operator's
     service. Entries another session on the box wrote meanwhile name none of these and are not
-    counted. *kept*: the scenario failed and keeps its HOME and its handoffs under /tmp on purpose,
-    so those are not counted."""
+    counted, nor is the HOME itself (run_scenario removes it next, or keeps it on a failure).
+    *kept*: the scenario failed and keeps its handoffs under /tmp on purpose, so those are not
+    counted."""
     marks = {sid[:8] for sid in sids if sid} | {sb.sock, sb.home.name}
     out: dict[str, list[str]] = {}
 
@@ -1736,7 +1737,8 @@ def footprint_after(before: dict, sb: Sandbox, sids: set[str], nx: str, kept: bo
         return any(m and m in name for m in marks)
 
     def on_purpose(n: str) -> bool:
-        return kept and (n == sb.home.name or n.startswith(("nexus-continuation-restart-rs_", "rh-")))
+        # The HOME itself is removed right after this on a pass and kept on a failure: never counted.
+        return n == sb.home.name or (kept and n.startswith(("nexus-continuation-restart-rs_", "rh-")))
 
     for d, names in before["temp"].items():
         new = sorted(n for n in _names(Path(d)) - names if ours(n) and not on_purpose(n))
