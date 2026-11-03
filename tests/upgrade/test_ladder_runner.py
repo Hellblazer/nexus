@@ -23,7 +23,7 @@ from nexus.upgrade_ladder.protocol import (
     ProgressReporter,
     RungStatus,
 )
-from nexus.upgrade_ladder.registry import LadderRegistry
+from nexus.upgrade_ladder.registry import RUNG_ORDER, LadderRegistry, default_registry
 from nexus.upgrade_ladder.runner import (
     LadderRunner,
     LadderRunReport,
@@ -202,21 +202,46 @@ def test_stuck_resumable_rung_exhausts_step_budget(store: InMemoryLedger) -> Non
     assert store.verified_rungs() == frozenset()
 
 
-def test_deferred_rung_stops_walk_without_failing(store: InMemoryLedger) -> None:
-    """RDR-142 would-defer class: a deferred rung records nothing and stops
-    the walk (hard edges), but the report is NOT hard-failed — deferral is
-    designed to retry on a later run, never to fail the trigger."""
+def test_a_deferred_rung_holds_back_only_its_dependents(store: InMemoryLedger) -> None:
+    """RDR-142 would-defer class: a deferred rung records nothing and is NOT hard-failed (it retries on a later
+    run). It holds back the rungs with a hard edge from it; an independent later rung still runs (nexus-dfemn: a
+    persistently deferring census starved note-tags-array and manifest-section-labels on every upgrade)."""
     deferred = ScriptedRung("deferred", defer=True)
-    later = ScriptedRung("later")
-    report = _runner((deferred, later), store).run()
+    dependent = ScriptedRung("dependent")
+    on_dependent = ScriptedRung("on-dependent")
+    independent = ScriptedRung("independent")
+    registry = LadderRegistry(
+        (deferred, dependent, on_dependent, independent),
+        edges=(("deferred", "dependent"), ("dependent", "on-dependent")),
+    )
+    report = LadderRunner(registry, store, package_version_fn=lambda: "6.12.0").run()
     assert _outcomes(report) == [
         ("deferred", RungOutcome.DEFERRED),
-        ("later", RungOutcome.NOT_ATTEMPTED),
+        ("dependent", RungOutcome.NOT_ATTEMPTED),
+        ("on-dependent", RungOutcome.NOT_ATTEMPTED),
+        ("independent", RungOutcome.RECORDED),
     ]
-    assert store.verified_rungs() == frozenset()
+    assert "waits on deferred" in report.runs[1].detail
+    assert dependent.converge_calls == 0 and on_dependent.converge_calls == 0
+    assert store.verified_rungs() == frozenset({"independent"})
+    assert report.position == 0, "the position is the verified prefix: it never passes the deferred rung"
     assert not report.converged
     assert not report.hard_failed
     assert deferred.verify_calls == 0  # deferral bypasses verify: nothing claims completion
+
+
+def test_with_no_edges_a_deferral_stops_nothing_after_it(store: InMemoryLedger) -> None:
+    deferred = ScriptedRung("deferred", defer=True)
+    later = ScriptedRung("later")
+    report = _runner((deferred, later), store).run()
+    assert _outcomes(report) == [("deferred", RungOutcome.DEFERRED), ("later", RungOutcome.RECORDED)]
+
+
+def test_the_production_rungs_have_no_rung_to_rung_edges() -> None:
+    """The registry's own claim (none depends on another), read from the edges the runner now follows."""
+    registry = default_registry()
+    assert [r.name for r in registry] == list(RUNG_ORDER)
+    assert all(registry.prerequisites(name) == frozenset() for name in RUNG_ORDER)
 
 
 # ── Crash resume: converged-but-unrecorded heals by verify-then-record ──────

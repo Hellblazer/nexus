@@ -12,9 +12,12 @@ sequencer's validate-then-``mark_migrated`` with partial-leg refusal, and
 ``bootstrap_version``'s guarded stamp (RDR-142: the position must never
 advance past deferred or failed work).
 
-Failure semantics: the ladder's hard edges make later rungs depend on
-earlier ones, so any failure (converge error, verify fail, step-budget
-exhaustion) STOPS the walk; remaining rungs report ``NOT_ATTEMPTED``.
+Failure semantics: any failure (converge error, verify fail, step-budget
+exhaustion) STOPS the walk; remaining rungs report ``NOT_ATTEMPTED``. A
+DEFERRED rung (non-fatal, retried on a later run) holds back only the rungs
+with a hard edge from it (:meth:`LadderRegistry.prerequisites`); the walk
+goes on to the independent ones (nexus-dfemn). The position cannot pass the
+deferred rung either way: it is the verified prefix.
 
 Crash resume: a crash between converge and record leaves the derived
 position at the last VERIFIED rung. The next run detects the rung as
@@ -140,7 +143,7 @@ class RungOutcome(str, Enum):
     SKIPPED_NOT_APPLICABLE = "skipped-not-applicable"  # N/A for this mode
     ALREADY_RECORDED = "already-recorded"              # converged + fact on file
     RECORDED = "recorded"                              # verify passed; fact written
-    DEFERRED = "deferred"                              # precondition blocks remainder —
+    DEFERRED = "deferred"                              # precondition blocks this rung and its dependents —
                                                        # non-fatal, NOT recorded (RDR-142
                                                        # MigrationRetry class)
     VERIFY_FAILED = "verify-failed"                    # NOT recorded (RDR-142 guard)
@@ -221,7 +224,8 @@ class LadderRunner:
 
     def run(self) -> LadderRunReport:
         """Walk the ladder: converge every pending rung in order, recording
-        each ONLY after its verify passes. Stops at the first failure.
+        each ONLY after its verify passes. Stops at the first failure; a
+        deferral holds back only the rungs that depend on it.
 
         With a ``deadline`` (the detached ``--auto`` child only, nexus-dcbof)
         the walk stops STARTING work at safe points. Here, before each rung:
@@ -234,8 +238,18 @@ class LadderRunner:
         :mod:`nexus.upgrade_ladder.deadline`); nothing is killed mid-call and
         the next run resumes from the first rung not yet verified."""
         runs: list[RungRun] = []
+        #: Rungs that did not reach a recorded state this walk; a later rung with a hard edge from one waits.
+        held: set[str] = set()
         rungs = iter(self._registry)
         for rung in rungs:
+            waits_on = self._registry.prerequisites(rung.name) & held
+            if waits_on:
+                runs.append(RungRun(
+                    rung.name, RungOutcome.NOT_ATTEMPTED,
+                    detail=f"waits on {', '.join(sorted(waits_on))}, which did not finish this run",
+                ))
+                held.add(rung.name)
+                continue
             if (
                 self._deadline is not None
                 and self._deadline.expired()
@@ -246,16 +260,15 @@ class LadderRunner:
             with bound(self._deadline):
                 run = self._run_rung(rung)
             runs.append(run)
-            # A failed OR deferred rung stops the walk: the hard edges make
-            # later rungs depend on earlier ones. Deferred differs only in
-            # severity (non-fatal, retried later), not in walk semantics.
-            if run.outcome in (
-                RungOutcome.VERIFY_FAILED,
-                RungOutcome.FAILED,
-                RungOutcome.DEFERRED,
-            ):
+            # A failed rung stops the walk: a failure is loud and may be systemic, and the operator looks at it
+            # before anything else runs. A deferred rung (non-fatal, retried later) holds back only the rungs with
+            # a hard edge from it (nexus-dfemn): the registry's other rungs are independent, and stopping the
+            # whole walk let one persistently deferring rung starve them on every run, silently under --auto.
+            if run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED):
                 runs.extend(self._not_attempted(rungs))
                 break
+            if run.outcome is RungOutcome.DEFERRED:
+                held.add(rung.name)
         return LadderRunReport(
             runs=tuple(runs),
             position=derive_ladder_position(

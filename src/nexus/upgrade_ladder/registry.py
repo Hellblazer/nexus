@@ -182,7 +182,7 @@ class LadderRegistry:
     accepted in the order given; edges over KNOWN names are enforced.
     """
 
-    def __init__(self, rungs: Sequence[Rung]) -> None:
+    def __init__(self, rungs: Sequence[Rung], *, edges: Sequence[tuple[str, str]] = HARD_EDGES) -> None:
         validate_hard_edges()
         names = [rung.name for rung in rungs]
         seen: set[str] = set()
@@ -191,12 +191,21 @@ class LadderRegistry:
                 raise LadderOrderError(f"duplicate rung name {name!r} in ladder registry")
             seen.add(name)
         position = {name: i for i, name in enumerate(names)}
-        for before, after in expand_edges(HARD_EDGES, RUNG_ORDER):
-            if before in position and after in position and position[before] >= position[after]:
-                raise LadderOrderError(
-                    f"registry order violates hard edge {before!r} → {after!r}"
-                )
+        requires: dict[str, set[str]] = {name: set() for name in names}
+        for before, after in expand_edges(edges, [*RUNG_ORDER, *(n for n in names if n not in RUNG_ORDER)]):
+            if before in position and after in position:
+                if position[before] >= position[after]:
+                    raise LadderOrderError(
+                        f"registry order violates hard edge {before!r} → {after!r}"
+                    )
+                requires[after].add(before)
         self._rungs: tuple[Rung, ...] = tuple(rungs)
+        self._requires: dict[str, frozenset[str]] = {k: frozenset(v) for k, v in requires.items()}
+
+    def prerequisites(self, name: str) -> frozenset[str]:
+        """The rungs *name* has a hard edge from (nexus-dfemn): a rung that did not reach a recorded state blocks
+        only these. Preconditions are not rungs and never appear here."""
+        return self._requires.get(name, frozenset())
 
     @property
     def rungs(self) -> tuple[Rung, ...]:
