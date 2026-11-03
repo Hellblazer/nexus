@@ -129,13 +129,13 @@ def test_an_orphan_working_in_the_home_is_found_and_a_parented_process_is_not(ru
             pass
 
 
-def test_the_sweep_says_so_when_it_cannot_read_the_table(run, monkeypatch) -> None:
+def test_the_sweep_says_so_when_it_cannot_read_the_table(run, tmp_path, monkeypatch) -> None:
     """A read that misses the harness itself would miss a leftover too: it is not a clean read."""
     monkeypatch.setattr(run.os, "getpid", lambda: 2**22 + 7)
     with pytest.raises(run.SweepUnavailable):
         run._cwds()
-    procs, err = run._sandbox_procs(Path("/nonexistent-home"))
-    assert procs == [] and "lacks this harness" in err
+    _, err = run._sandbox_procs(tmp_path / "absent-home")
+    assert "lacks this harness" in err
 
 
 class _Watch:
@@ -362,3 +362,112 @@ def test_shell_settles_only_a_session_without_the_channel(run) -> None:
     roll = run.SPECS["roll"]
     assert run.settled_for(roll, "rs_nochan") == frozenset({"idle", "shell"})
     assert run.settled_for(roll, "rs_alpha") == frozenset({"idle"})
+
+
+# -- review round 2 ---------------------------------------------------------------------------
+
+def test_cleanup_ends_an_orphan_s_children_too(run, tmp_path, monkeypatch) -> None:
+    """Ending an orphaned tree's root orphans its children; cleanup sweeps again and ends them."""
+    monkeypatch.setattr(run, "LINGER_S", 0)
+    home = tmp_path / "home"
+    (home / "work").mkdir(parents=True)
+    pidfile = tmp_path / "tree.pid"
+    subprocess.run([sys.executable, "-c",
+                    "import subprocess\n"
+                    "p = subprocess.Popen(['sh', '-c', 'sleep 321 & echo $! > " + str(pidfile) + ".kid; wait'],"
+                    f" cwd={str(home / 'work')!r}, start_new_session=True)\n"
+                    f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"], check=True)
+    for _ in range(50):
+        if Path(f"{pidfile}.kid").exists() and Path(f"{pidfile}.kid").read_text(encoding="utf-8").strip():
+            break
+        time.sleep(0.1)
+    root, kid = int(pidfile.read_text(encoding="utf-8")), int(Path(f"{pidfile}.kid").read_text(encoding="utf-8"))
+    try:
+        assert run.cleanup(_cleanup_sandbox(run, home), []) == []
+        assert _gone(root) and _gone(kid)
+    finally:
+        for p in (root, kid):
+            try:
+                os.kill(p, 9)
+            except ProcessLookupError:
+                pass
+
+
+def test_a_sweep_that_times_out_is_not_clean(run, tmp_path, monkeypatch) -> None:
+    real = subprocess.run
+
+    def slow(argv, *a, **k):
+        if argv[0] == "pgrep":
+            raise subprocess.TimeoutExpired(argv, 30)
+        return real(argv, *a, **k)
+
+    monkeypatch.setattr(run.subprocess, "run", slow)
+    _, err = run._sandbox_procs(tmp_path / "absent-home")
+    assert "argv search did not answer" in err
+
+
+def test_a_new_session_file_that_will_not_parse_is_a_finding(run, tmp_path, places) -> None:
+    _, _, op = places
+    sb = _sandbox(run, tmp_path / "home")
+    before = run.footprint_before()
+    (op / ".claude" / "sessions" / "77.json").write_text("{not json", encoding="utf-8")
+    left = run.footprint_after(before, sb, {SID}, _fake_nx(tmp_path))
+    assert left == {"operator ~/.claude/sessions": ["77.json (not parsable: cannot tell whose it is)"]}
+
+
+def test_check_fresh_waits_with_settled_for() -> None:
+    calls = [ast.unparse(c) for c in ast.walk(_function("check_fresh")) if isinstance(c, ast.Call)]
+    assert sum("settled_for(sb.spec, name)" in c for c in calls) >= 2
+    assert not any("SETTLED" in c and "settled_for" not in c for c in calls)
+
+
+class _Args:
+    keep = False
+    model = "sonnet"
+
+
+@pytest.fixture
+def scenario(run, monkeypatch):
+    """run_scenario with the sandbox stubbed: no tmux, no sessions; each check returns what a test sets."""
+    state = {"dirty": [], "upgrade": [], "left": {}, "raise": None, "guarded": []}
+    monkeypatch.setattr(run.Sandbox, "setup", lambda self, crs: None)
+    monkeypatch.setattr(run.Sandbox, "entries", lambda self: [])
+    monkeypatch.setattr(run, "RUNNERS", {"gate": lambda sb, crs, a, failures, notes: None})
+    monkeypatch.setattr(run, "cleanup", lambda sb, notes: list(state["dirty"]))
+    monkeypatch.setattr(run, "upgrade_check", lambda sb: list(state["upgrade"]))
+    original = run.signal.getsignal(run.signal.SIGTERM)
+
+    def footprint(before, sb, sids, nx, kept=False):
+        state["guarded"].append(run.signal.getsignal(run.signal.SIGTERM) is not original)
+        if state["raise"]:
+            raise state["raise"]
+        return dict(state["left"])
+
+    monkeypatch.setattr(run, "footprint_after", footprint)
+    return state
+
+
+def test_run_scenario_passes_a_clean_scenario(run, scenario) -> None:
+    ok, failures, _ = run.run_scenario("gate", "claude", _Args(), None)
+    assert ok and failures == []
+    assert scenario["guarded"] == [True]  # the footprint runs inside the signal guard
+
+
+@pytest.mark.parametrize(("key", "value", "expect"), [
+    ("dirty", ["tmux server x still running"], "cleanup: tmux server x still running"),
+    ("upgrade", ["auto-upgrade: a session spawned nx upgrade --auto"], "auto-upgrade: a session spawned"),
+    ("left", {"tmux socket": ["/tmp/x"]}, "left outside the HOME: tmux socket"),
+    ("raise", RuntimeError("boom"), "left outside the HOME: footprint: ['not taken: RuntimeError: boom']"),
+])
+def test_run_scenario_fails_on_each_check(run, scenario, key, value, expect) -> None:
+    scenario[key] = value
+    ok, failures, _ = run.run_scenario("gate", "claude", _Args(), None)
+    assert not ok
+    assert any(f.startswith(expect) for f in failures), failures
+
+
+def test_run_scenario_passes_with_only_what_is_left_on_purpose(run, scenario) -> None:
+    scenario["left"] = {"directory lease": ["directory/rs_alpha (1234abcd)"]}
+    ok, failures, notes = run.run_scenario("gate", "claude", _Args(), None)
+    assert ok and failures == []
+    assert any(n.startswith("left on purpose: directory lease") for n in notes)

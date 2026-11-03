@@ -1464,13 +1464,17 @@ def _args_of(pid: int) -> str:
         return ""  # unknown: _end signals only a process whose argv it read back
 
 
+class SweepUnavailable(RuntimeError):
+    """A process sweep could not read the process table: a scenario must not read that as clean."""
+
+
 def _naming(home: Path) -> list[tuple[int, str]]:
     """Live processes whose argv names the scratch HOME (its mkdtemp path is unique to this run)."""
     # The mkdtemp path holds only [A-Za-z0-9_/.-]: as a pgrep pattern its "." alone is not literal, harmlessly.
     try:
         out = subprocess.run(["pgrep", "-f", str(home)], capture_output=True, text=True, timeout=30).stdout.split()
-    except subprocess.TimeoutExpired:
-        return []
+    except subprocess.TimeoutExpired as exc:
+        raise SweepUnavailable("the argv search did not answer within 30 s") from exc
     return [(int(p), _args_of(int(p))) for p in out if p.isdigit() and int(p) not in (os.getpid(), 1)]
 
 
@@ -1483,10 +1487,6 @@ def parse_cwds(lsof_out: str) -> dict[int, str]:
         elif line.startswith("n") and pid is not None:
             cwds[pid] = line[1:]
     return cwds
-
-
-class SweepUnavailable(RuntimeError):
-    """The cwd sweep could not read the process table: a scenario must not read that as clean."""
 
 
 def _cwds() -> dict[int, str]:
@@ -1526,13 +1526,13 @@ def _ppid_args(pids: list[int]) -> dict[int, tuple[int, str]]:
     try:
         out = subprocess.run(["ps", "-ww", "-o", "pid=,ppid=,args=", "-p", ",".join(map(str, pids))],
                              capture_output=True, text=True, timeout=30).stdout
-    except subprocess.TimeoutExpired:
-        return {}
+    except subprocess.TimeoutExpired as exc:
+        raise SweepUnavailable("the parent-pid read did not answer within 30 s") from exc
     got = {}
     for row in out.splitlines():
         parts = row.split(None, 2)
         if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
-            got[int(parts[0])] = (int(parts[1]), parts[2])
+            got[int(parts[0])] = (int(parts[1]), parts[2].strip())
     return got
 
 
@@ -1550,12 +1550,13 @@ def _working_in(home: Path) -> list[tuple[int, str]]:
 def _sandbox_procs(home: Path) -> tuple[list[tuple[int, str]], str]:
     """Live processes that name the HOME in their argv, or are orphans working in it; and why the
     cwd half could not run ("" when it did)."""
-    procs, err = set(_naming(home)), ""
-    try:
-        procs |= set(_working_in(home))
-    except SweepUnavailable as exc:
-        err = str(exc)
-    return sorted(procs), err
+    procs, errs = set(), []
+    for half in (_naming, _working_in):
+        try:
+            procs |= set(half(home))
+        except SweepUnavailable as exc:
+            errs.append(str(exc))
+    return sorted(procs), "; ".join(errs)
 
 
 def _slug(text: str) -> str:
@@ -1637,8 +1638,12 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     deadline = time.time() + LINGER_S
     while time.time() < deadline and _sandbox_procs(sb.home)[0]:
         time.sleep(2)
-    late = _sandbox_procs(sb.home)[0]
-    ended_late = _end(late)
+    ended_late = 0
+    for _ in range(3):  # an orphan's own children become orphans when it is ended: sweep again
+        late = _sandbox_procs(sb.home)[0]
+        if not late:
+            break
+        ended_late += _end(late)
     for d in claude_temp_dirs(sb.home):  # Claude Code's per-folder temp for the work folder
         shutil.rmtree(d, ignore_errors=True)
     sb.delete_config()
@@ -1852,23 +1857,42 @@ def footprint_after(before: dict, sb: Sandbox, sids: set[str], nx: str, kept: bo
         out["tmux socket"] = [str(sb.socket_path())]
     claude = OPERATOR_HOME / ".claude"
     mine = []
-    for n in sorted(_names(claude / "sessions") - before["sessions"]):
-        try:
-            d = json.loads((claude / "sessions" / n).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(d, dict) and str(d.get("sessionId", "")) in sids:
+    try:
+        new_sessions = sorted(_names(claude / "sessions", strict=True) - before["sessions"])
+    except OSError as exc:
+        out["operator ~/.claude/sessions"] = [f"not readable: {exc}"]
+        new_sessions = []
+    for n in new_sessions:
+        d = None
+        for _ in range(2):  # a file another session is writing parses a moment later
+            try:
+                d = json.loads((claude / "sessions" / n).read_text(encoding="utf-8"))
+                break
+            except FileNotFoundError:
+                d = {}
+                break
+            except (OSError, ValueError):
+                time.sleep(1)
+        if d is None:
+            mine.append(f"{n} (not parsable: cannot tell whose it is)")
+        elif isinstance(d, dict) and str(d.get("sessionId", "")) in sids:
             mine.append(n)
     if mine:
-        out["operator ~/.claude/sessions"] = mine
+        out.setdefault("operator ~/.claude/sessions", []).extend(mine)
+    log = claude / "restart-sessions.log"
     try:
-        with (claude / "restart-sessions.log").open(encoding="utf-8", errors="replace") as fh:
+        with log.open(encoding="utf-8", errors="replace") as fh:
             added = [ln.rstrip() for i, ln in enumerate(fh) if i >= before["log"] and ours(ln)]
-    except OSError:
+    except FileNotFoundError:
         added = []
+    except OSError as exc:
+        added = [f"not readable: {exc}"]
     if added:
         out["operator restart log"] = added[:5]
-    new = sorted(n for n in _names(OPERATOR_HOME / ".config" / "nexus") - before["config"] if ours(n))
+    try:
+        new = sorted(n for n in _names(OPERATOR_HOME / ".config" / "nexus", strict=True) - before["config"] if ours(n))
+    except OSError as exc:
+        new = [f"not readable: {exc}"]
     if new:
         out["operator nexus config"] = new
     if not nx:
