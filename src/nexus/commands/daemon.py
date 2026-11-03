@@ -2109,6 +2109,11 @@ def restart_stale_cmd(dry_run: bool) -> None:
         )
 
     config_dir = _config.nexus_config_dir()
+    # nexus-n8gpr: the engine leg found the RUNNING service positively not converged (another version) or
+    # up without a version (an engine halted at startup, nexus-bivz3.25). The verb still runs every leg,
+    # then exits 1 if the service is in that state after them, so automation that reads exit codes does
+    # not see green after a halted upgrade. A stopped service is an ordinary state and stays exit 0.
+    engine_unconverged = False
 
     # nexus-cfgo9 code-review HIGH: converge_engine documents a "never
     # raises" contract, but that contract lives in one function's docstring
@@ -2157,6 +2162,7 @@ def restart_stale_cmd(dry_run: bool) -> None:
                         f"reports v{req_s}"
                     )
                 elif running.version is not None:
+                    engine_unconverged = True
                     got_run = ".".join(str(p) for p in running.version)
                     click.echo(
                         f"engine: not converged — installed engine is v{req_s} "
@@ -2165,6 +2171,7 @@ def restart_stale_cmd(dry_run: bool) -> None:
                         "`nx daemon service status`."
                     )
                 elif running.up:
+                    engine_unconverged = True
                     click.echo(
                         f"engine: installed engine is v{req_s} (the release "
                         "dependency); the running service did not report a "
@@ -2245,3 +2252,20 @@ def restart_stale_cmd(dry_run: bool) -> None:
             f"service autostart convergence failed ({exc}) — skipping this leg.",
             err=True,
         )
+
+    if engine_unconverged:
+        # A later leg (the autostart unit convergence) may have cycled the service onto the right engine, so the
+        # exit status is decided from what the running service reports now, with the same probe.
+        try:
+            required = detect_engine_convergence(config_dir).required_version
+            now = _running_engine(config_dir)
+            still = now.up and now.version != required
+        except Exception:  # noqa: BLE001 — a probe failure is not evidence of convergence
+            still = True
+        if still:
+            click.echo(
+                "engine: the running service is not on the release's engine after every leg ran; "
+                "exiting 1 (nexus-n8gpr).",
+                err=True,
+            )
+            sys.exit(1)

@@ -339,3 +339,63 @@ class TestRestartStaleLaunchagentUnload:
         assert "unexpected gap in the never-raises contract" in result.output
         assert "healed: nexus_diag lacked SELECT" in result.output
         unload.assert_called_once_with(tmp_path)
+
+
+class TestRestartStaleExitStatus:
+    """nexus-n8gpr: automation reading the exit code saw green after a halted upgrade. A running service that is
+    positively not on the release's engine (another version, or up with no version: an engine halted at a
+    changeset) exits 1 after every leg runs; a stopped service is an ordinary state and exits 0."""
+
+    @staticmethod
+    def _applicable():
+        req = REQUIRED_ENGINE_VERSION
+        return patch(
+            "nexus.upgrade_finish.detect_engine_convergence",
+            return_value=EngineConvergence(
+                applicable=True, installed_version=req, required_version=req, converged=True,
+            ),
+        )
+
+    @staticmethod
+    def _older():
+        req = REQUIRED_ENGINE_VERSION
+        return (*req[:-1], req[-1] - 1) if req[-1] > 0 else (*req[:-1], req[-1] + 1)
+
+    def test_a_running_service_on_another_version_exits_1_after_every_leg(self, tmp_path: Path) -> None:
+        with self._applicable(), patch(
+            "nexus.upgrade_finish._running_engine",
+            return_value=RunningEngine(up=True, version=self._older()),
+        ):
+            result, _c, heal, unload = _invoke(tmp_path, engine_actions=[])
+        assert result.exit_code == 1, result.output
+        assert "engine: not converged" in result.output
+        heal.assert_called_once()
+        unload.assert_called_once()
+
+    def test_a_service_up_without_a_version_exits_1(self, tmp_path: Path) -> None:
+        with self._applicable(), patch(
+            "nexus.upgrade_finish._running_engine",
+            return_value=RunningEngine(up=True, version=None, reason="/version answered 503"),
+        ):
+            result, _c, _h, _u = _invoke(tmp_path, engine_actions=[])
+        assert result.exit_code == 1, result.output
+        assert "convergence is unverified" in result.output
+
+    def test_a_stopped_service_exits_0(self, tmp_path: Path) -> None:
+        with self._applicable(), patch(
+            "nexus.upgrade_finish._running_engine",
+            return_value=RunningEngine(up=False, version=None, reason="no discoverable storage-service lease"),
+        ):
+            result, _c, _h, _u = _invoke(tmp_path, engine_actions=[])
+        assert result.exit_code == 0, result.output
+        assert "the service is not running" in result.output
+
+    def test_a_later_leg_that_brings_the_service_onto_the_release_engine_exits_0(self, tmp_path: Path) -> None:
+        req = REQUIRED_ENGINE_VERSION
+        with self._applicable(), patch(
+            "nexus.upgrade_finish._running_engine",
+            side_effect=[RunningEngine(up=True, version=self._older()), RunningEngine(up=True, version=req)],
+        ) as probe:
+            result, _c, _h, _u = _invoke(tmp_path, engine_actions=[])
+        assert result.exit_code == 0, result.output
+        assert probe.call_count == 2
