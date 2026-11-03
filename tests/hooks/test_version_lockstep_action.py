@@ -14,9 +14,13 @@ hook. It owns the editable gate and the marker write. Contract:
     2. ``nx upgrade``               (migrations only)
   NEVER raw ``uv tool install`` / ``--force`` / ``--reinstall`` (the
   dominant hazard that strips the ``[local]`` extra).
-- MARKER ON CONFIRMED SUCCESS ONLY: after both commands succeed, re-read
-  ``nx --version``; write the marker only if it now equals the target.
-  Any failure leaves the marker stale so the next session retries.
+- MARKER ON CONFIRMED WORK ONLY (nexus-rcngf): after both commands succeed,
+  re-read ``nx --version``; nothing is written unless the binary satisfies the
+  target. Work the action saw finish (fast path, synchronous fallback, a child
+  that exited 0 inside the start window) writes the target. A detached child
+  still running writes the retry sentinel, which the child's completed
+  ``nx upgrade`` turns into its version. Any failure leaves the marker as it
+  was so the next session retries.
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ import time
 from pathlib import Path
 
 import pytest
+from nexus.lockstep_marker import mark_upgrade_retry, settle_upgrade_retry
 from tests._fence_home import _link_through
 from tests._module_seam import setattr_in
 
@@ -220,7 +225,10 @@ class TestDowngradeLoopBroken:
 class TestUpgradeRetryMarker:
     """nexus-emiky. The sentinel the detached `nx upgrade` writes when it lost the lock (exit 75) says the
     binary is current and the rest of the upgrade is owed. The fast path would write the plugin's version
-    over it and stop, so with the sentinel the action skips the binary step and starts the upgrade again."""
+    over it and stop, so with the sentinel the action skips the binary step and starts the upgrade again.
+
+    nexus-rcngf: the action never writes the version for work it only STARTED. A detached child that is still
+    running leaves the sentinel; the child's completed plain `nx upgrade` settles it."""
 
     def test_the_sentinel_starts_the_upgrade_again_without_the_binary_step(
         self, mod, marker, monkeypatch,
@@ -236,7 +244,9 @@ class TestUpgradeRetryMarker:
         mod.main(["action", "9.9.9"])
         assert started == [1], "the owed `nx upgrade` is started again"
         assert calls == [], "the binary is current: no `uv tool upgrade` / `nx self install`"
-        assert marker.read_text(encoding="utf-8").strip() == "9.9.9", "the child rewrites the sentinel if it loses again"
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER, (
+            "a started child has not done the work: the sentinel stays until the child's `nx upgrade` settles it"
+        )
 
     def test_without_the_sentinel_a_current_cli_starts_nothing(self, mod, marker, monkeypatch) -> None:
         """The control: the same installed version with an ordinary marker stays on the fast path."""
@@ -289,9 +299,11 @@ class TestUpgradeRetryMarker:
         mod.main(["action", mod._REF_DRIFT_SENTINEL])
         assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
 
-    def test_the_version_is_in_the_marker_before_the_start_wait(self, mod, marker, monkeypatch) -> None:
-        """nexus-emiky review I2: sessions that start while the action waits ~2 s for the child must find a
-        version, not the sentinel, or each dispatches another action and another waiting child."""
+    def test_the_marker_is_never_the_target_while_the_child_runs(self, mod, marker, monkeypatch) -> None:
+        """nexus-rcngf (replaces the emiky pre-start write): at the start wait the marker still holds the
+        sentinel, and after the action it still does. A session that starts inside the ~2 s window finds the
+        sentinel, dispatches another action, and that action's child loses the lock (exit 75) and leaves the
+        sentinel again; the pre-start version write is gone."""
         _wire(mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "9.9.9"], run_results={})
         seen: list[str] = []
 
@@ -303,12 +315,13 @@ class TestUpgradeRetryMarker:
         marker.parent.mkdir(parents=True)
         marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
         mod.main(["action", "9.9.9"])
-        assert seen == ["9.9.9"]
+        assert seen == [mod.UPGRADE_RETRY_MARKER]
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
 
-    def test_the_sentinel_comes_back_when_nothing_was_started(self, mod, marker, monkeypatch) -> None:
+    def test_the_sentinel_stays_when_nothing_was_started(self, mod, marker, monkeypatch) -> None:
         """The child did not start and the synchronous fallback failed: the work is still owed."""
         _wire(
-            mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "9.9.9"],
+            mod, monkeypatch, receipt=True, installed_versions=["9.9.9"],
             run_results={"nx upgrade": False},
         )
         marker.parent.mkdir(parents=True)
@@ -316,30 +329,172 @@ class TestUpgradeRetryMarker:
         mod.main(["action", "9.9.9"])
         assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
 
-    def test_the_sentinel_does_not_come_back_over_a_marker_someone_else_wrote(self, mod, marker, monkeypatch) -> None:
+    def test_a_marker_someone_else_settled_during_the_wait_is_left_alone(self, mod, marker, monkeypatch) -> None:
         """A sibling that finished (or a newer plugin's action) wrote the marker while this action waited:
-        that is not ours to overwrite (review r2 S1)."""
+        nothing here writes over it (review r2 S1). In retry mode the action writes nothing after a started
+        child, so a settle that lands in the post-check window is not undone."""
         _wire(
             mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "9.9.9"],
-            run_results={"nx upgrade": False},
+            run_results={}, background=True,
         )
 
-        def failing_upgrade(argv, timeout=None):
-            marker.write_text("9.9.10", encoding="utf-8")  # the sibling settles meanwhile
-            return False
+        def settling_start() -> int:
+            marker.write_text("9.9.10", encoding="utf-8")  # the sibling's child settles meanwhile
+            return 4242
 
-        monkeypatch.setattr(mod, "run_cmd", failing_upgrade)
+        monkeypatch.setattr(mod, "start_background_upgrade", settling_start)
         marker.parent.mkdir(parents=True)
         marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
         mod.main(["action", "9.9.9"])
         assert marker.read_text(encoding="utf-8").strip() == "9.9.10"
 
-    def test_the_sentinel_comes_back_when_the_version_slipped_below_the_target(self, mod, marker, monkeypatch) -> None:
+    def test_the_sentinel_stays_when_the_version_slipped_below_the_target(self, mod, marker, monkeypatch) -> None:
         _wire(mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "1.0.0"], run_results={}, background=True)
         marker.parent.mkdir(parents=True)
         marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
         mod.main(["action", "9.9.9"])
         assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
+
+    def test_a_non_oserror_in_retry_mode_cannot_strand_the_target(self, mod, marker, monkeypatch) -> None:
+        """nexus-rcngf, the hazard of emiky review r2 I2: an exception other than OSError between the old
+        pre-start write and its restore left the target in the marker (the outer except swallowed it). With
+        no pre-start write there is nothing to strand."""
+        _wire(mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "9.9.9"], run_results={})
+
+        def boom() -> int:
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(mod, "start_background_upgrade", boom)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
+        mod.main(["action", "9.9.9"])  # must not raise
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
+
+
+class TestMarkerRecordsFinishedWorkNotASpawn:
+    """nexus-rcngf. The marker used to take the target when the action SPAWNED the detached `nx upgrade`
+    child, so a child that took the lock and then failed lost the work it owed until the next drift. Now a
+    started child leaves the retry sentinel, and only a completed plain `nx upgrade` turns it into a version."""
+
+    def test_a_detached_spawn_leaves_the_sentinel_not_the_version(self, mod, marker, log, monkeypatch) -> None:
+        _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["1.0.0", "9.9.9"],
+            run_results={}, background=True,
+        )
+        marker.parent.mkdir(parents=True)
+        marker.write_text("1.0.0", encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
+        text = log.read_text(encoding="utf-8")
+        assert "outcome=success" in text and "upgrade=detached" in text and "marker=retry" in text
+
+    def test_a_detached_spawn_with_no_marker_at_all_leaves_the_sentinel(self, mod, marker, monkeypatch) -> None:
+        _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["1.0.0", "9.9.9"],
+            run_results={}, background=True,
+        )
+        assert not marker.exists()
+        mod.main(["action", "9.9.9"])
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
+
+    def test_the_synchronous_fallback_writes_the_version(self, mod, marker, log, monkeypatch) -> None:
+        """`nx upgrade` ran to a successful exit here, so the work is done."""
+        calls = _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["1.0.0", "9.9.9"],
+            run_results={}, background=False,
+        )
+        mod.main(["action", "9.9.9"])
+        assert calls[-1] == ["nx", "upgrade"]
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
+        text = log.read_text(encoding="utf-8")
+        assert "upgrade=finished" in text and "marker=version" in text
+
+    def test_the_synchronous_fallback_in_retry_mode_settles_the_sentinel_to_the_version(
+        self, mod, marker, monkeypatch,
+    ) -> None:
+        calls = _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "9.9.9"],
+            run_results={}, background=False,
+        )
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert calls == [["nx", "upgrade"]]
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
+
+    def test_a_child_that_finished_inside_the_start_window_counts_as_done(self, mod, marker, monkeypatch) -> None:
+        """A child that exited 0 before the action looked has run the whole plain `nx upgrade`: the action
+        writes the version, as for the synchronous run. The sentinel would be a retry for work already done."""
+        _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["1.0.0", "9.9.9"],
+            run_results={}, background=False,
+        )
+
+        def finished_child() -> int:
+            mod._last_start_state = "finished"
+            return 4242
+
+        monkeypatch.setattr(mod, "start_background_upgrade", finished_child)
+        mod.main(["action", "9.9.9"])
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
+
+    def test_the_binary_below_the_target_writes_nothing_after_a_spawn(self, mod, marker, monkeypatch) -> None:
+        """No binary confirmation, no sentinel either: the stale marker stays and the next session re-nudges."""
+        _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["1.0.0", "1.0.1"],
+            run_results={}, background=True,
+        )
+        marker.parent.mkdir(parents=True)
+        marker.write_text("1.0.0", encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert marker.read_text(encoding="utf-8").strip() == "1.0.0"
+
+    def test_a_dead_child_leaves_the_sentinel_and_the_next_action_retries(self, mod, marker, monkeypatch) -> None:
+        """The incident: the child took the lock and then died, so nothing settled the sentinel. The next
+        SessionStart dispatches the action again; it sees the sentinel, skips the binary step and starts
+        `nx upgrade` again. When that child completes it settles the sentinel through the CLI's own
+        `settle_upgrade_retry`, and the action after that is the plain fast path."""
+        calls = _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["1.0.0", "9.9.9", "9.9.9", "9.9.9", "9.9.9"],
+            run_results={},
+        )
+        started: list[int] = []
+        monkeypatch.setattr(mod, "start_background_upgrade", lambda: started.append(1) or 4242)
+
+        mod.main(["action", "9.9.9"])  # first dispatch: binary upgraded, child spawned, then the child dies
+        assert started == [1] and calls[0][:4] == ["uv", "tool", "upgrade", "conexus"]
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
+
+        calls.clear()
+        mod.main(["action", "9.9.9"])  # next session: the sentinel is skew, the action retries
+        assert started == [1, 1], "the owed `nx upgrade` is started again"
+        assert calls == [], "the binary is current: only the child is started again"
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
+
+        settle_upgrade_retry("9.9.9")  # this child completes a plain `nx upgrade`
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
+        mod.main(["action", "9.9.9"])
+        assert started == [1, 1], "settled: the next action is the fast path and starts nothing"
+
+    def test_a_second_action_whose_child_loses_the_lock_leaves_the_marker_for_the_first_child(
+        self, mod, marker, monkeypatch,
+    ) -> None:
+        """Concurrent sessions: while child A runs, a new session sees the sentinel and dispatches action B.
+        B's child loses the lock (exit 75) and writes the sentinel, which is no newer than the running CLI,
+        so the marker stays the sentinel until A's child settles it."""
+        _wire(mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "9.9.9"], run_results={})
+
+        def child_b_loses_the_lock() -> int:
+            mark_upgrade_retry("9.9.9")  # what `nx upgrade` does on exit 75
+            return 4343
+
+        monkeypatch.setattr(mod, "start_background_upgrade", child_b_loses_the_lock)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")  # child A is running; this is what it left
+        mod.main(["action", "9.9.9"])
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
+        settle_upgrade_retry("9.9.9")  # A completes
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
 
 
 class TestSatisfies:
@@ -968,7 +1123,9 @@ class TestBackgroundUpgrade:
         try:
             os.kill(pid, 0)  # raises when the child is gone
             assert not done.exists(), "the upgrade must still be running when the action returns"
-            assert marker.read_text(encoding="utf-8").strip() == "9.9.9", "the action must complete its other steps"
+            assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER, (
+                "the child is still running: the marker says the work is owed, not done (nexus-rcngf)"
+            )
             assert f"log={cfg / 'logs' / 'lockstep-upgrade.log'}" in text
             assert "state=running" in text
             assert "nx_upgrade_failed" not in text
@@ -1109,7 +1266,7 @@ class TestBackgroundUpgrade:
         )
         mod.main(["action", "9.9.9"])
         assert [c[:2] for c in calls] == [["uv", "tool"]], calls
-        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
+        assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
 
     def test_it_falls_back_to_the_bounded_synchronous_run(self, mod, marker, log, monkeypatch) -> None:
         calls = _wire(

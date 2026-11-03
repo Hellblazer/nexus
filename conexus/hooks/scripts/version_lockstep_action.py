@@ -28,9 +28,19 @@ Flow:
           skips plugin convergence, the generated-agent and hooks refresh,
           the repos.json migration, beads PRIME and the engine install, and
           this action is where those run. See :func:`start_background_upgrade`.
-  4. Marker on confirmed success only: re-read ``nx --version`` and write
-     the marker iff it now equals the target. Any failure leaves the
-     marker stale so the next session re-nudges and retries.
+  4. Marker on confirmed work only: re-read ``nx --version``; the binary
+     must satisfy the target before anything is written. Then the marker
+     records what is actually known (nexus-rcngf). Work this action saw
+     finish (the fast path, the synchronous ``nx upgrade`` fallback, a
+     detached child that exited 0 inside the start window) writes the
+     target. Work it only STARTED (a detached child still running) writes
+     the retry sentinel ``UPGRADE_RETRY_MARKER`` instead: the child's own
+     completed plain ``nx upgrade`` turns the sentinel into its running
+     version (``nexus.lockstep_marker.settle_upgrade_retry``), and a child
+     that dies first (the ladder raises, a crash, OOM, a reboot) leaves the
+     sentinel, so the next session dispatches this action again and the
+     retry path runs ``nx upgrade`` once more. Any failure leaves the
+     marker as it was, so the next session re-nudges and retries.
 
 nexus-konsk (P0, 2026-09-11): a FIFTH entry point, gated by the sentinel
 target ``_REF_DRIFT_SENTINEL`` (``version_lockstep_hook.detect_ref_drift``
@@ -604,14 +614,6 @@ def write_marker(version: str) -> None:
     debug(f"wrote marker {path} = {version}")
 
 
-def restore_retry_marker(target: str) -> None:
-    """Put the retry sentinel back, but only over the target this action wrote before the start wait: a
-    sibling that finished and settled the marker, or a newer plugin's action, has written something
-    else since, and that is not ours to overwrite (nexus-emiky review r2)."""
-    if read_marker() == target:
-        try_write_marker(UPGRADE_RETRY_MARKER)
-
-
 def try_write_marker(text: str) -> None:
     """:func:`write_marker`, but an unwritable marker is logged and not raised: the callers are the
     retry-sentinel moves (nexus-emiky), which must not stop the upgrade they accompany."""
@@ -771,7 +773,7 @@ def main(argv: list[str]) -> None:
             debug("retry owed and the binary is current; starting the upgrade again without the binary step")
             log_event("lockstep_upgrade_retry", target=target, installed=str(before))
         elif not run_cmd(upgrade_cmd, timeout=step_timeout):
-            debug("uv tool upgrade failed; leaving marker stale for retry")
+            debug("uv tool upgrade failed; leaving marker as it was for retry")
             log_event("lockstep_upgrade_result", target=target, outcome="uv_upgrade_failed")
             return
         # nexus-vyy65: this build runs detached and its output is shown only under NX_HOOK_DEBUG, so a
@@ -782,17 +784,14 @@ def main(argv: list[str]) -> None:
             log_event("lockstep_pdf_slim", target=target, line=slim_line)
         # 3b. The migrations and any upgrade-time rebuild run DETACHED
         #     (nexus-qytet): this step must not be the timeout that kills a
-        #     ~0.8 GB rebuild. Step 4 below confirms the BINARY (3a installed
-        #     it); the marker means "binary confirmed", NOT "nx upgrade
-        #     finished". A migration that fails or does not finish is retried
-        #     by the next SessionStart's `nx upgrade --auto`. "Started" is
-        #     checked (the child survived its first seconds); if it cannot be
-        #     started, fall back to the bounded synchronous run, as before.
-        # nexus-emiky: in retry mode the version goes into the marker BEFORE the start wait, so a session that
-        # starts inside that window (about 2 s) finds a version and not the sentinel, and does not dispatch
-        # another action and another waiting child. The sentinel goes back if nothing was started.
-        if retry_owed:
-            try_write_marker(target)
+        #     ~0.8 GB rebuild. "Started" is checked (the child survived its
+        #     first seconds); if it cannot be started, fall back to the
+        #     bounded synchronous run, as before. This step writes NO marker
+        #     (nexus-rcngf): the marker is written in step 4, after the binary
+        #     is confirmed, and says what is known there. A marker holding the
+        #     retry sentinel stays the sentinel through a failed fallback, a
+        #     binary below the target, or a crash of this action; there is no
+        #     window in which it holds a version the work has not earned.
         child_pid = start_background_upgrade()
         if child_pid is not None:
             log_event(
@@ -800,29 +799,36 @@ def main(argv: list[str]) -> None:
                 pid=str(child_pid), log=str(upgrade_log_path()),
             )
         elif not run_cmd(["nx", "upgrade"], timeout=_NX_UPGRADE_TIMEOUT):
-            debug("nx upgrade failed; leaving marker stale for retry")
+            debug("nx upgrade failed; leaving marker as it was for retry")
             log_event("lockstep_upgrade_result", target=target, outcome="nx_upgrade_failed")
-            if retry_owed:
-                restore_retry_marker(target)
             return
 
-        # 4. Marker only on confirmed lockstep (installed >= target).
+        # 4. Marker only on a confirmed binary (installed >= target), and then
+        #    only what is known. A detached child still running has not done
+        #    the work: leave (or write) the retry sentinel, which the child's
+        #    completed `nx upgrade` settles (nexus-rcngf). In retry mode the
+        #    marker already holds it, and is left alone: a child that settled
+        #    it since must not be overwritten with the sentinel again.
         after = installed_nx_version()
         if satisfies(after, target):
-            write_marker(target)
+            child_running = child_pid is not None and _last_start_state != "finished"
+            if child_running:
+                if not retry_owed:
+                    try_write_marker(UPGRADE_RETRY_MARKER)
+            else:
+                write_marker(target)
             log_event(
                 "lockstep_upgrade_result", target=target, outcome="success",
                 installed=str(after),
-                upgrade="detached" if child_pid is not None else "finished",
+                upgrade="detached" if child_running else "finished",
+                marker="retry" if child_running else "version",
             )
         else:
-            debug("version still below target after upgrade; leaving marker stale")
+            debug("version still below target after upgrade; leaving marker as it was")
             log_event(
                 "lockstep_upgrade_result", target=target,
                 outcome="version_still_mismatched", installed=str(after),
             )
-            if retry_owed:
-                restore_retry_marker(target)
     except Exception as exc:  # noqa: BLE001 - detached action must never raise
         debug(f"swallowed unexpected error: {exc}")
 

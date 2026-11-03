@@ -18,7 +18,9 @@ diverge it
 upgrade is in flight, and (b) dispatches a DETACHED action that performs
 the extras-preserving two-command upgrade. The hook returns immediately
 and NEVER wedges synchronous SessionStart (CA-4), NEVER writes the marker
-(the action owns that, on confirmed upgrade only), and NEVER raises
+(the action owns that, once the upgrade is known finished; for a detached
+child still running it leaves the retry sentinel, which the child settles
+on completion, nexus-rcngf), and NEVER raises
 (fail-safe exit 0).
 
 nexus-konsk (P0, 2026-09-11): a same-version plugin-only cut (RDR-197)

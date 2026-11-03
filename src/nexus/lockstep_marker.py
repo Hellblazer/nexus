@@ -13,16 +13,25 @@ Who writes it:
   rule;
 * ``nx self install --bootstrap`` (nexus-sv2wx.28), for the installer scripts
   (``web/install.sh``, ``web/install.ps1``), which build the CLI without the plugin's setup;
-* the lockstep action, after it finds the CLI already satisfies the plugin;
+* the lockstep action, once the CLI satisfies the plugin and the work behind that is KNOWN done: the
+  fast path (the CLI already satisfies it), the synchronous ``nx upgrade`` fallback that succeeded, or a
+  detached child that exited 0 inside the start window. When it has only STARTED a detached ``nx upgrade``
+  child (still running when it checks the binary), it writes the retry sentinel,
+  :data:`UPGRADE_RETRY_MARKER`, not the version (nexus-rcngf): the marker records a finished upgrade, not a
+  spawned one, so a child that takes the lock and then fails (the ladder raises, a crash, OOM, a reboot)
+  leaves the sentinel and the next session dispatches the action again. Before, the version went in at
+  spawn, and the work that child owed (plugin convergence, the generated agents and hooks refresh, the
+  engine install, the dimension advisory) was lost until the next version or ref drift;
 * ``nx upgrade`` itself, :func:`mark_upgrade_retry`, when it is the lockstep action's detached
-  child and loses the single-instance lock (exit 75): the action wrote the plugin's version at
-  spawn, so without this the work the child owed (plugin convergence, the generated agents and
-  hooks refresh, the engine install, the dimension advisory) waits for the next version or ref
-  drift. The sentinel is :data:`UPGRADE_RETRY_MARKER`. Deleting the marker would not do: a marker
-  that is missing or stale reads as lockstep whenever the CLI is not older than the plugin
-  (nexus-ehg1y), and the binary is current by then.
-  The sentinel is written only over a marker no newer than the running CLI, and a completed
-  ``nx upgrade`` that does the owed work replaces it with its version (:func:`settle_upgrade_retry`).
+  child and loses the single-instance lock (exit 75): the work the child owed waits for a retry, so it
+  leaves the sentinel (the action's own write may not have happened yet, or may be the sentinel already).
+  Deleting the marker would not do: a marker that is missing or
+  stale reads as lockstep whenever the CLI is not older than the plugin (nexus-ehg1y), and the binary is
+  current by then.
+  The sentinel is written only over a marker no newer than the running CLI, and a completed plain
+  ``nx upgrade`` (not ``--auto``, ``--dry-run`` or ``--skip-t3``) that does the owed work replaces it with
+  its version (:func:`settle_upgrade_retry`). That settle is what turns the action's sentinel into a version
+  when its detached child finishes.
 
 ``NX_LOCKSTEP_MARKER`` replaces the path, as it does for the hook and the action.
 """
@@ -95,12 +104,12 @@ def mark_upgrade_retry(running: str | None) -> None:
     already exiting with a refusal and the marker was only ever a retry signal.
 
     The sentinel goes in only over what this run may speak for: a missing marker, the sentinel itself, or a
-    version no newer than *running* (the action wrote the plugin's pin at spawn, and the child runs that pin
-    or a later build). A run that waited 20 minutes for the lock must not put a stale sentinel over a newer
-    version a later session has confirmed since. The comparison is with the running CLI, not with the marker
-    as the run saw it when its wait began: the action writes its version about two seconds after spawning,
-    so that snapshot would be the version before it. An unknown *running* or a marker that is not a version
-    changes nothing: the claim cannot be checked.
+    version no newer than *running* (a marker the action or an earlier run left at the plugin's pin, which the
+    child runs or a later build runs). A run that waited 20 minutes for the lock must not put a stale sentinel
+    over a newer version a later session has confirmed since. The comparison is with the running CLI, not with
+    the marker as the run saw it when its wait began, since the action may have written the sentinel or a
+    version in between. An unknown *running* or a marker that is not a version changes nothing: the claim
+    cannot be checked.
     """
     held = read_marker()
     if held is not None and held != UPGRADE_RETRY_MARKER:
