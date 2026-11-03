@@ -1191,8 +1191,10 @@ def rename_model_conflict(
 
     ``None`` also when *new* is not conformant (it carries no model token to
     compare; the caller's own non-conformant gate decides) or when the
-    source model cannot be determined (a row lacking the field, or holding
-    an empty one).
+    source model cannot be determined (a row lacking the field). The
+    engine never stores an empty model (``embedding_model <> ''`` is a CHECK
+    since hygiene-002), so an empty string is not a row state; ``not
+    source_model`` below only guards a resolver that answers ``None``.
 
     ``correct_name`` is *new* with the model token replaced by the source's
     own, so a refusal can name the rename that would be accepted.
@@ -1210,8 +1212,8 @@ def rename_model_conflict(
         old, "embedding_model", name_fallback or embedding_model_for_collection,
         row_resolver=row_resolver,
     )
-    # An empty string is a row that never recorded a model (a legacy
-    # grandfathered registration): no basis to refuse on, same as None.
+    # None is no basis to refuse on (no row, no derivable token). An empty
+    # string cannot come from the engine (CHECK embedding_model <> '').
     if not source_model or source_model == token:
         return None
     correct = f"{seg['ct']}__{seg['owner']}__{source_model}__v{seg['ver']}"

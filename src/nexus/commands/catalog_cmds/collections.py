@@ -479,7 +479,7 @@ def rename_collection_cmd(
     if counts["catalog_docs"]:
         parts.append(f"{counts['catalog_docs']} catalog docs")
     parts.extend(rename_summary_parts(counts))
-    suffix =f" ({'; '.join(parts)})" if parts else ""
+    suffix = f" ({'; '.join(parts)})" if parts else ""
     click.echo(f"Renamed: {old} -> {new}{suffix}")
     # nexus-cecqy: only claim the supersede when it actually marked a row.
     # Against a CURRENT engine this always fires: renameCollectionTxn retires the
