@@ -57,11 +57,12 @@ class TestCompose:
             assert heading in developer_body and heading in body, heading
         assert body.index("activate_project") < body.index("## Pre-flight"), "activation comes before the method"
         # Everything of the developer body survives except the rewritten links.
-        stripped = developer_body.replace("../resources/agent-shared/", "")
+        stripped = developer_body.replace("${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/", "")
         assert stripped.strip("\n") in body.replace((CONEXUS_DIR / "resources" / "agent-shared").as_posix() + "/", "")
 
     def test_shared_links_resolve_from_the_agents_dir(self, composed: str) -> None:
         assert "](../resources/agent-shared/" not in composed
+        assert "${CLAUDE_PLUGIN_ROOT}" not in composed  # not a plugin file: nothing would substitute it
         shared = CONEXUS_DIR / "resources" / "agent-shared"
         assert f"]({shared.as_posix()}/CONTEXT_PROTOCOL.md" in composed
         assert (shared / "CONTEXT_PROTOCOL.md").is_file()

@@ -132,8 +132,9 @@ class TestSubagentStartHook:
         result = _run_hook()
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "| Search scope |" in ctx
-        assert "Search only under the roots your brief names" in ctx
-        assert "never `find /`, `grep -r /` or `mdfind`" in ctx
+        assert "Search only under the roots your brief names, or your working directory" in ctx
+        assert "never a whole-disk or whole-home search" in ctx
+        assert "hand back naming it" in ctx
 
 
 class TestClaimantIdInjection:

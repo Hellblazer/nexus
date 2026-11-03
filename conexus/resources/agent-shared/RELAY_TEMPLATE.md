@@ -147,7 +147,7 @@ Skills should reference this template rather than inline it:
 ## Agent Invocation
 
 Use the Agent tool with standardized relay format.
-See [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md) for required fields.
+See [RELAY_TEMPLATE.md](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md) for required fields.
 ```
 
 ## Usage in Agents

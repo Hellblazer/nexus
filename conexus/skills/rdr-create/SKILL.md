@@ -53,7 +53,7 @@ If `$RDR_DIR` does not exist:
 3. Copy post-mortem template from `${CLAUDE_PLUGIN_ROOT}/resources/rdr/post-mortem/TEMPLATE.md` to `$RDR_DIR/post-mortem/TEMPLATE.md`
 4. Create `$RDR_DIR/README.md` from `${CLAUDE_PLUGIN_ROOT}/resources/rdr/README-TEMPLATE.md`
 
-If `${CLAUDE_PLUGIN_ROOT}` is not available, use the templates inline (they are embedded below in the Templates section).
+If the plugin's resources directory cannot be read, use the templates inline (they are embedded below in the Templates section).
 
 > **Gap convention** (enforced at `/conexus:rdr-gate` Layer 1 for post-65 RDRs): the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex: `^#{3,5} Gap \d+:`). Fill these in during drafting — the template scaffolds `Gap 1` and `Gap 2` placeholders. Replacing the Problem Statement with free-form prose and removing the gap headings will fail the gate. Authors can override with `/conexus:rdr-gate <id> --skip-gaps` when the gap structure truly does not fit (audit-trail escape only; prefer adding real gap headings).
 

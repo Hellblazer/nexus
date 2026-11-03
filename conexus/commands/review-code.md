@@ -43,4 +43,4 @@ Structured code review with severity-rated findings, grouped by category (correc
 $ARGUMENTS
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../resources/agent-shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md).

@@ -14,7 +14,10 @@ unresolved:
   not set in a session's Bash, so the unbraced form stays literal.
 
 Allowed: ``${CLAUDE_PLUGIN_ROOT}/resources/...`` (rendered as an absolute
-path) and a ``../`` link target (relative to the markdown file itself).
+path), and in skills only a ``../`` link target: Claude Code shows a loaded
+skill with its base directory, so the reader can resolve it. An agent or
+command body arrives as a prompt with no base directory, so a ``../`` target
+there is unanchored too (review r1 of nexus-egv6q: 38 such links).
 
 File-only, so it runs in the ``-m lint`` job. Planted fixtures prove each
 rule fires (nexus-moht0), and the live check prints what it scanned.
@@ -30,17 +33,24 @@ pytestmark = pytest.mark.lint
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_MD_DIRS = tuple(REPO_ROOT / "conexus" / d for d in ("skills", "commands", "agents"))
+#: Plugin docs an agent is sent to read; they carry snippets of agent text. An
+#: agent opens them by path, so a relative link between them resolves.
+SHARED_DOCS_DIR = REPO_ROOT / "conexus" / "resources" / "agent-shared"
 
 #: ``resources/`` not preceded by ``/`` (``${CLAUDE_PLUGIN_ROOT}/``, ``../``),
 #: a word character (``conexus/resources`` is fine as a repo path too, it has
 #: a slash) or ``}``/``.``.
 _BARE_RESOURCES = re.compile(r"(?<![/\w}.])resources/[\w./-]+")
 _UNBRACED_ROOT = re.compile(r"\$CLAUDE_PLUGIN_ROOT\b")
+_RELATIVE_TARGET = re.compile(r"\]\((\.\.?/[^)]*)\)")
 
 
-def _violations(text: str) -> list[str]:
+def _violations(text: str, *, relative_links_ok: bool = True) -> list[str]:
     found = []
     for lineno, line in enumerate(text.splitlines(), 1):
+        if not relative_links_ok:
+            for m in _RELATIVE_TARGET.finditer(line):
+                found.append(f"{lineno}: relative link {m.group(1)!r} in a prompt with no base directory")
         for m in _BARE_RESOURCES.finditer(line):
             found.append(f"{lineno}: bare plugin path {m.group(0)!r}")
         for m in _UNBRACED_ROOT.finditer(line):
@@ -60,6 +70,12 @@ def test_planted_bad_path_is_flagged(text: str) -> None:
     assert _violations(text)
 
 
+def test_relative_link_is_flagged_outside_skills_only() -> None:
+    text = "Follow the [protocol](../resources/agent-shared/CONTEXT_PROTOCOL.md)."
+    assert _violations(text, relative_links_ok=False)
+    assert not _violations(text, relative_links_ok=True)
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -73,13 +89,19 @@ def test_anchored_path_passes(text: str) -> None:
 
 
 def test_plugin_markdown_names_plugin_files_by_an_openable_path() -> None:
-    files = sorted(p for d in PLUGIN_MD_DIRS if d.is_dir() for p in d.rglob("*.md"))
-    mentions = 0
+    dirs = (*PLUGIN_MD_DIRS, SHARED_DOCS_DIR)
+    files = sorted(p for d in dirs if d.is_dir() for p in d.rglob("*.md"))
+    skills = REPO_ROOT / "conexus" / "skills"
+    mentions = relative_checked = 0
     bad: list[str] = []
     for path in files:
         text = path.read_text(encoding="utf-8")
         mentions += text.count("resources/") + text.count("CLAUDE_PLUGIN_ROOT")
-        bad += [f"{path.relative_to(REPO_ROOT)}:{v}" for v in _violations(text)]
+        has_base_dir = skills in path.parents or SHARED_DOCS_DIR in path.parents
+        relative_checked += 0 if has_base_dir else 1
+        bad += [f"{path.relative_to(REPO_ROOT)}:{v}" for v in _violations(text, relative_links_ok=has_base_dir)]
+    print(f"relative-link rule applied to {relative_checked} agent and command files")
+    assert relative_checked >= 20, f"only {relative_checked} agent and command files: wrong roots?"
     print(f"scanned {len(files)} files, {mentions} resources/ or plugin-root mentions")
     assert len(files) >= 50, f"only {len(files)} plugin markdown files found: wrong root?"
     assert mentions >= 20, f"only {mentions} mentions: the scan saw nothing to check"
