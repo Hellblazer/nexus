@@ -359,7 +359,9 @@ def test_without_a_job_the_backstop_is_the_hard_kill(
         with structlog.testing.capture_logs() as logs:
             sup._stop_service()
         assert engine.poll() == _KILLED_RC
-    assert killed == [engine.pid]
+    # The backstop passes the handle, not its pid, so a reaped engine is refused (nexus-xzorj).
+    assert [getattr(k, "pid", k) for k in killed] == [engine.pid]
+    assert not isinstance(killed[0], int), "the hard-kill backstop must hand safe_killpg the Popen, not a bare pid"
     assert job.names() == ["break"], "no job to terminate, and none invented"
     unclean = [e for e in logs if e["event"] == "storage_service_engine_unclean_stop"]
     assert len(unclean) == 1 and unclean[0]["via"] == "hard_kill"
