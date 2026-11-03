@@ -190,8 +190,9 @@ def main(ctx: click.Context, verbose: bool) -> None:
     # child per session start; on 2026-10-31 nineteen walked the cloud catalog at once because the only lock in
     # the path was a rung's, taken after detect(). A second `--auto` exits 0 here, silently. A PLAIN unattended
     # `nx upgrade` (the lockstep child) does work `--auto` skips, so it WAITS for a holder (PLAIN_WAIT_S) and
-    # only then exits 75. Its detached starter already wrote the version marker at spawn, so on that exit it
-    # leaves the retry sentinel in the marker (nexus-emiky): the next session's hook reads it as skew and the
+    # only then exits 75. Its detached starter wrote the retry sentinel into the marker before it spawned the child
+    # (nexus-rcngf) and settles it to the version only on a clean exit, so on that exit the sentinel is there
+    # and the child leaves it (nexus-emiky): the next session's hook reads it as skew and the
     # action starts the upgrade again, instead of the plain run's extra work (plugin convergence, agents and
     # hooks refresh, the engine install) waiting for the next version or ref drift. The kernel drops
     # the lock with the process, so a killed holder never wedges the next run.

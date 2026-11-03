@@ -13,25 +13,29 @@ Who writes it:
   rule;
 * ``nx self install --bootstrap`` (nexus-sv2wx.28), for the installer scripts
   (``web/install.sh``, ``web/install.ps1``), which build the CLI without the plugin's setup;
-* the lockstep action, once the CLI satisfies the plugin and the work behind that is KNOWN done: the
-  fast path (the CLI already satisfies it), the synchronous ``nx upgrade`` fallback that succeeded, or a
-  detached child that exited 0 inside the start window. When it has only STARTED a detached ``nx upgrade``
-  child (still running when it checks the binary), it writes the retry sentinel,
-  :data:`UPGRADE_RETRY_MARKER`, not the version (nexus-rcngf): the marker records a finished upgrade, not a
-  spawned one, so a child that takes the lock and then fails (the ladder raises, a crash, OOM, a reboot)
-  leaves the sentinel and the next session dispatches the action again. Before, the version went in at
-  spawn, and the work that child owed (plugin convergence, the generated agents and hooks refresh, the
-  engine install, the dimension advisory) was lost until the next version or ref drift;
+* the lockstep action, once the CLI satisfies the plugin, and only for work it KNOWS is done (nexus-rcngf):
+  the fast path (the CLI already satisfies it), the synchronous ``nx upgrade`` fallback that succeeded, or
+  a detached child it waited on that exited 0 (compare-and-swap: only while the marker still holds the
+  sentinel, so a version a sibling wrote stays). Before it spawns that child it writes the retry sentinel,
+  :data:`UPGRADE_RETRY_MARKER`, not the version: the marker records a finished upgrade, not a spawned one,
+  so a child that takes the lock and then fails (the ladder raises, a crash, OOM, a reboot), or an action
+  that dies waiting, leaves the sentinel and the next session dispatches the action again. The action
+  confirms the marker itself and needs nothing from this module, so a plugin-only release that ships a CLI
+  without :func:`settle_upgrade_retry` settles all the same. It also spawns nothing while the upgrade lock is
+  held or after three consecutive failed upgrade exits for one target (its own counter file beside the
+  marker). Before, the version went in at spawn, and the work that child owed (plugin convergence, the
+  generated agents and hooks refresh, the engine install, the dimension advisory) was lost until the next
+  version or ref drift;
 * ``nx upgrade`` itself, :func:`mark_upgrade_retry`, when it is the lockstep action's detached
   child and loses the single-instance lock (exit 75): the work the child owed waits for a retry, so it
-  leaves the sentinel (the action's own write may not have happened yet, or may be the sentinel already).
+  leaves the sentinel (already there, as the action wrote it before the spawn).
   Deleting the marker would not do: a marker that is missing or
   stale reads as lockstep whenever the CLI is not older than the plugin (nexus-ehg1y), and the binary is
   current by then.
   The sentinel is written only over a marker no newer than the running CLI, and a completed plain
   ``nx upgrade`` (not ``--auto``, ``--dry-run`` or ``--skip-t3``) that does the owed work replaces it with
-  its version (:func:`settle_upgrade_retry`). That settle is what turns the action's sentinel into a version
-  when its detached child finishes.
+  its version (:func:`settle_upgrade_retry`). That settle serves an interactive or a hand-run ``nx upgrade``
+  (the remedy when the action gives up); the action's own confirmation does not depend on it.
 
 ``NX_LOCKSTEP_MARKER`` replaces the path, as it does for the hook and the action.
 """

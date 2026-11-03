@@ -120,8 +120,9 @@ def _lockstep_report(
         return PreconditionReport(
             name=name, applicable=True, current=False,
             detail=(
-                f"plugin {plugin_version}: an earlier unattended `nx upgrade` lost the upgrade lock and "
-                "left its work owed — the next Claude session starts it again, or run `nx upgrade`"
+                f"plugin {plugin_version}: an unattended `nx upgrade` has not finished and "
+                "its work is owed (it was started and did not complete, or lost the upgrade lock) — the next Claude "
+                "session starts it again, or run `nx upgrade`"
             ),
         )
     if marker_version != plugin_version:
