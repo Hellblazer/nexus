@@ -480,21 +480,37 @@ def test_the_watchdog_is_the_first_thing_the_script_does() -> None:
     assert "trap {" not in block, "the setup trap must not turn a watchdog failure into a setup failure"
 
 
-def test_starting_the_watchdog_cannot_fail_the_run_and_needs_an_ssh_session() -> None:
+def test_starting_the_watchdog_cannot_fail_the_run_and_needs_the_clients_opt_in() -> None:
+    """Armed only by the env var the heartbeat client sets in its ssh command: a plain ssh rerun of the script (or
+    ssh -n, whose stdin is empty) is never ended for a heartbeat nobody sends (live on qwent: ssh -n ran to the end)."""
     _, block, _ = _watchdog_parts()
     lines = block.splitlines()
-    assert lines[1] == "try {" and lines[-1].startswith("} catch { Write-Host"), "the whole start is one try/catch"
-    assert "throw" not in block
-    before(block, "if ($env:SSH_CONNECTION) {", "CreateRunspace()", "BeginInvoke()")
+    assert lines[1] == "try {" and lines[-1] == "}" and lines[-4] == "} catch {", "the whole start is one try/catch"
+    assert "throw" not in block and "SSH_CONNECTION" not in block
+    before(block, f"if ($env:{wht.HEARTBEAT_ENV} -eq '1') {{", "OpenStandardInput()", "CreateRunspace()", "BeginInvoke()")
+
+
+def test_children_get_nul_stdin_once_the_watchdog_holds_the_heartbeat() -> None:
+    """A child reading stdin (git, cmd, a hook a test spawns) must neither take the beats nor block on the pipe. Live
+    on qwent without this, `cmd /c sort` hung the run on the pipe; with it, sort returned at once."""
+    _, block, _ = _watchdog_parts()
+    before(block, "$wdIn = [Console]::OpenStandardInput()", "CreateFileW('NUL', [uint32]3221225472, 3, [ref]$sa, 3",
+           "SetStdHandle(-10, $nul)", "AddArgument($wdIn)")
+    assert "$sa.inherit = $true" in block, "children inherit NUL only through an inheritable handle"
 
 
 def test_the_watchdog_ends_the_tree_on_end_of_file_or_silence_and_never_on_its_own_error() -> None:
     _, block, thread = _watchdog_parts()
-    before(thread, "[Console]::OpenStandardInput()", "ReadAsync(", "if (-not $read.Wait($silence * 1000)) { break }",
-           "if ($read.Result -le 0) { break }", "} catch { return }", "& taskkill.exe /T /F /PID $target")
-    assert thread.count("break") == 2, "only silence and end of file leave the loop toward the kill"
-    assert f"AddArgument($PID).AddArgument({wht.WATCHDOG_SILENCE_S})" in block
-    assert wht.WATCHDOG_SILENCE_S >= 6 * wht.HEARTBEAT_S, "silence means many missed beats, never one slow one"
+    before(thread, "ReadAsync(", "if (-not $read.Wait($silence * 1000))", "if ($read.Result -le 0)", "} catch {",
+           "return", "& taskkill.exe /T /F /PID $target")
+    assert thread.count("break }") == 2, "only silence and end of file leave the loop toward the kill"
+    catch = thread[thread.index("} catch {"):thread.index("return")]
+    assert "watchdog failed, run continues unwatched" in catch and "[Console]::Error.WriteLine" in catch
+    before(thread[thread.index("return"):], "ending the run", "Add-Content", "SilentlyContinue",
+           "[Console]::Error.WriteLine", "taskkill.exe")
+    assert f".AddArgument({wht.WATCHDOG_SILENCE_S})" in block
+    assert wht.WATCHDOG_SILENCE_S > 90, "longer than ssh's own 90 s dead-link tolerance (ServerAlive 30 x 3)"
+    assert r"C:\build\hand\wren\watchdog.log" in block
 
 
 def test_the_runs_ssh_call_goes_through_the_heartbeat() -> None:
@@ -508,12 +524,22 @@ def test_the_runs_ssh_call_goes_through_the_heartbeat() -> None:
     assert wht.main(["--session", "wren", "--", "t.py"], run=rec, beat=beat) == 7
     (call,) = seen
     assert call[0] == "ssh" and "pwsh -NoProfile -File" in call[-1]
+    before(call[-1], f"$env:{wht.HEARTBEAT_ENV} = '1';", "pwsh -NoProfile -File")
     assert not any("pwsh -NoProfile -File" in c[-1] for c in rec.calls if c[0] == "ssh"), "the run is not sent twice"
 
 
-def test_main_defaults_to_the_heartbeat_for_the_real_runner() -> None:
-    src = inspect.getsource(wht.main)
-    assert "if beat is None and run is subprocess.run:" in src and "beat = run_with_heartbeat" in src
+def test_main_defaults_to_the_heartbeat_for_the_real_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the real subprocess.run and no beat, the run's ssh call goes through run_with_heartbeat."""
+    seen: list[list[str]] = []
+    rec = _Recorder(on_origin=True)
+
+    def real_run_standin(argv, *args, **kwargs):  # stands in for subprocess.run, which main() compares by identity
+        return rec(argv, *args, **kwargs)
+
+    monkeypatch.setattr(wht.subprocess, "run", real_run_standin)
+    monkeypatch.setattr(wht, "run_with_heartbeat", lambda argv: seen.append(list(argv)) or 3)
+    assert wht.main(["--session", "wren", "--", "t.py"], run=real_run_standin) == 3
+    assert seen and "pwsh -NoProfile -File" in seen[0][-1]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="select on a pipe is POSIX")
@@ -563,6 +589,8 @@ def test_a_sigkilled_client_closes_the_childs_stdin(tmp_path: Path) -> None:
     while not pidfile.exists() or not pidfile.read_text():
         assert time.monotonic() < deadline, "the stand-in never started"
         time.sleep(0.05)
+    time.sleep(0.5)
+    assert not eof.exists(), "the child saw end of file before the client died: its stdin is not the pipe"
     client.kill()
     client.wait(timeout=20)
     deadline = time.monotonic() + 10
