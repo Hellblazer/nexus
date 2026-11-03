@@ -83,7 +83,7 @@ that says whether the curation helped.
 The same drift reaches beyond memory, to anything that keeps running or
 keeping after its purpose ends with nobody assigned to notice. Found on
 2026-10-31 alone: the main `MEMORY.md` injected into every subagent (about
-15M tokens in 60 days, research 5); thirteen plugins unused for 30 days (about
+15M tokens over about 32 days of transcripts, research 5); thirteen plugins unused for 30 days (about
 4K tokens per session start); 19 detached `nx upgrade --auto` walkers
 saturating the cloud edge (nexus-75w5d); about 2,500 permanent gate records;
 and the RDR-205 session ledger, whose writer and readers 7.70.0 deleted while
