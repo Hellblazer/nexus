@@ -34,8 +34,8 @@ source "$SCRIPT_DIR/lib/lock.sh"
 # Per-USER root (nexus-c6lsu): the uid is in the name, because /tmp is shared across Unix users and a
 # root another user created is unwritable here (lock_acquire fails). $(id -u) is context-independent,
 # so the cross-context contention above is unchanged for one user.
-LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/sandbox.lock"
-[[ -n "${NEXUS_SANDBOX_HOME:-}" ]] && LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/sandbox-$(printf '%s' "$SANDBOX" | shasum -a 256 | cut -c1-12).lock"
+LOCKDIR="$(e2e_lock_root)/sandbox.lock"
+[[ -n "${NEXUS_SANDBOX_HOME:-}" ]] && LOCKDIR="$(e2e_lock_root)/sandbox-$(printf '%s' "$SANDBOX" | shasum -a 256 | cut -c1-12).lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
 trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT

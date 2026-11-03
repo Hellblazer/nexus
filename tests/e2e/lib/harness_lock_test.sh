@@ -85,22 +85,39 @@ declare -A HARNESS_ARGS=(
     [gc-ab]=""
     [sandbox]=""
 )
-# Machine-global lock root the harnesses themselves use (must match — this
-# test exercises the REAL lockdir path each harness computes, not a
-# lookalike). HARD-CODED /tmp, not ${TMPDIR:-/tmp} (code-review SIGNIFICANT
-# fix, mirrors the same fix in all 4 harnesses): a per-context TMPDIR
-# divergence would make this test compute a DIFFERENT lockdir than the
-# harness itself, silently validating nothing.
-# Per-user, matching the harnesses (nexus-c6lsu).
-LOCKROOT="/tmp/nexus-e2e-locks-$(id -u)"
+# Lock roots (nexus-xzwyo). The harnesses take their lockdir from lock.sh's e2e_lock_root: the
+# machine-global per-user /tmp/nexus-e2e-locks-<uid> by default, NX_E2E_LOCK_ROOT when set. This test
+# never touches that default root: every harness run below sets NX_E2E_LOCK_ROOT to a mktemp
+# directory of this run's own, so an overlapping run (or a real harness holding sandbox.lock) neither
+# collides with it nor loses its lock to it. The default is exercised only in the per-user section
+# below, under random fake uids that no real user has. HARD-CODED /tmp stays in lock.sh, not
+# ${TMPDIR:-/tmp} (a per-context TMPDIR would give two contexts different lockdirs).
+unset NX_E2E_LOCK_ROOT
+REAL_ROOT="/tmp/nexus-e2e-locks-$(id -u)"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/harness_lock_test.XXXXXX")"
+trap 'rm -rf "${TEST_ROOT:?}"' EXIT
 
-for name in migration-rehearsal gc-ab sandbox; do
-    echo
-    echo "=== $name ==="
+# rm_own <path>: remove a path ONLY if this run created it, i.e. it sits strictly under TEST_ROOT.
+# Anything else (the real lock root, a harness's lock, an empty or relative value) is refused loudly.
+rm_own() {
+    local p="${1:-}"
+    if [[ -n "$p" && "$p" == "$TEST_ROOT"/?* && "$p" != *..* ]]; then
+        rm -rf "${p:?}"
+    else
+        echo "  [FAIL] rm_own refused to remove '$p': not under this run's $TEST_ROOT" >&2
+        FAIL=$((FAIL + 1))
+        return 1
+    fi
+}
+
+# harness_cycle <name> <lockroot>: wiring, simulated holder, blocked and past-the-lock invocation for
+# one harness, every lock under <lockroot>. Prints [ok]/[FAIL] lines; touches the counters only
+# through ok/bad, so the concurrent section below runs it in subshells and counts the printed lines.
+harness_cycle() {
+    local name="$1" lockroot="$2" script args lockdir out rc out2 rc2
     script="${HARNESS_SCRIPT[$name]}"
     args="${HARNESS_ARGS[$name]}"
-    lock_name="$name"
-    lockdir="$LOCKROOT/$lock_name.lock"
+    lockdir="$lockroot/$name.lock"
 
     # ── non-vacuity: wiring assertion ────────────────────────────────────
     # shellcheck disable=SC2016 # intentional literal — grepping for the literal source line, not expanding it
@@ -108,25 +125,24 @@ for name in migration-rehearsal gc-ab sandbox; do
         ok "wiring: $script calls lock_acquire"
     else
         bad "wiring: $script has NO lock_acquire call — silently unwired (non-vacuity guard tripped)"
-        continue # nothing further to test for an unwired harness
+        return 0 # nothing further to test for an unwired harness
     fi
 
-    # Start from a clean slate — a leftover lockdir from a previous aborted
-    # test run must not be mistaken for a live holder.
-    rm -rf "$lockdir"
-    mkdir -p "$LOCKROOT"
+    # Start from a clean slate inside this run's own root.
+    rm_own "$lockdir" || return 0
+    mkdir -p "$lockroot"
 
     # ── (2) simulate a running holder ────────────────────────────────────
     if lock_acquire "$lockdir" >/dev/null 2>&1; then
         ok "simulated holder acquired $lockdir"
     else
         bad "test setup: could not acquire $lockdir as simulated holder"
-        continue
+        return 0
     fi
 
     # ── (3) blocked invocation: real harness, lock held ──────────────────
     # shellcheck disable=SC2086 # $args is a single trusted literal per harness, intentionally unquoted for the (possibly-empty) split
-    out="$(cd "$REPO_ROOT" && bash "$script" $args 2>&1)"
+    out="$(cd "$REPO_ROOT" && NX_E2E_LOCK_ROOT="$lockroot" bash "$script" $args 2>&1)"
     rc=$?
 
     if [[ $rc -ne 0 ]]; then
@@ -138,6 +154,14 @@ for name in migration-rehearsal gc-ab sandbox; do
         ok "$name: failure message names the lock"
     else
         bad "$name: no lock-failure message in output: $out"
+    fi
+    # The harness honoured the override: the lock it was refused is the one in THIS run's root, not
+    # the real /tmp/nexus-e2e-locks-<uid> one (a harness that ignored NX_E2E_LOCK_ROOT would have
+    # acquired the real lockdir and never been blocked by our simulated holder).
+    if [[ "$out" == *"$lockdir"* ]]; then
+        ok "$name: the blocked invocation names this run's own lockdir"
+    else
+        bad "$name: blocked invocation does not name $lockdir (override ignored?): $out"
     fi
     # No wall-clock bound here (nexus-boz84): "the harness body never ran" is proven by
     # the nonzero exit above and the output check below ('lock acquired' absent). A
@@ -156,14 +180,14 @@ for name in migration-rehearsal gc-ab sandbox; do
     # ── (4) past-the-lock invocation: real harness, lock free, self-test
     #     seam stops it immediately after lock_acquire succeeds ───────────
     # shellcheck disable=SC2086
-    out2="$(cd "$REPO_ROOT" && NX_E2E_LOCK_SELFTEST=1 bash "$script" $args 2>&1)"
+    out2="$(cd "$REPO_ROOT" && NX_E2E_LOCK_ROOT="$lockroot" NX_E2E_LOCK_SELFTEST=1 bash "$script" $args 2>&1)"
     rc2=$?
     if [[ $rc2 -eq 0 ]]; then
         ok "$name: past-the-lock invocation exited 0 (self-test seam fired)"
     else
         bad "$name: past-the-lock invocation exited $rc2 (expected 0 — did the self-test seam get skipped?): $out2"
     fi
-    if [[ "$out2" == *"lock acquired"* ]]; then
+    if [[ "$out2" == *"lock acquired: $lockdir "* ]]; then
         ok "$name: re-invocation acquired the (now-free) lock and printed the acquire line"
     else
         bad "$name: re-invocation never got past the lock: $out2"
@@ -172,13 +196,101 @@ for name in migration-rehearsal gc-ab sandbox; do
     # firing on the self-test seam's `exit 0`) — not left held.
     if [[ -d "$lockdir" ]]; then
         bad "$name: lockdir still present after past-the-lock invocation exited — EXIT trap did not release it"
-        rm -rf "$lockdir"
+        rm_own "$lockdir"
     else
         ok "$name: lockdir released after past-the-lock invocation (EXIT trap fired)"
     fi
 
-    rm -rf "$lockdir"
+    rm_own "$lockdir"
+}
+
+for name in migration-rehearsal gc-ab sandbox; do
+    echo
+    echo "=== $name ==="
+    harness_cycle "$name" "$TEST_ROOT/solo"
 done
+
+# ── two overlapping runs do not interfere (nexus-xzwyo) ──────────────────
+# Before the override, every run for one uid used /tmp/nexus-e2e-locks-<uid>/<name>.lock: run A's
+# simulated holder made run B's setup fail, and B's `rm -rf` of the lockdir deleted A's live lock.
+# (a) Deterministic overlap: A holds its lock while a harness runs against B's root and gets
+#     straight through; the same harness against A's root stays blocked.
+# (b) Concurrent: two full cycles at once, each in its own root.
+echo
+echo "=== overlapping runs do not interfere ==="
+for name in migration-rehearsal gc-ab sandbox; do
+    root_a="$TEST_ROOT/overlap-a"
+    root_b="$TEST_ROOT/overlap-b"
+    rm_own "$root_a/$name.lock" || continue
+    rm_own "$root_b/$name.lock" || continue
+    mkdir -p "$root_a" "$root_b"
+    args="${HARNESS_ARGS[$name]}"
+    if ! lock_acquire "$root_a/$name.lock" >/dev/null 2>&1; then
+        bad "$name: overlap setup: could not hold $root_a/$name.lock"
+        continue
+    fi
+    # shellcheck disable=SC2086
+    out_b="$(cd "$REPO_ROOT" && NX_E2E_LOCK_ROOT="$root_b" NX_E2E_LOCK_SELFTEST=1 bash "${HARNESS_SCRIPT[$name]}" $args 2>&1)"
+    rc_b=$?
+    # shellcheck disable=SC2086
+    out_a="$(cd "$REPO_ROOT" && NX_E2E_LOCK_ROOT="$root_a" NX_E2E_LOCK_SELFTEST=1 bash "${HARNESS_SCRIPT[$name]}" $args 2>&1)"
+    rc_a=$?
+    if [[ $rc_b -eq 0 && "$out_b" == *"lock acquired: $root_b/$name.lock "* ]]; then
+        ok "$name: run B passed the lock while run A held its own"
+    else
+        bad "$name: run B was affected by run A's held lock (rc $rc_b): $out_b"
+    fi
+    if [[ $rc_a -ne 0 && "$out_a" == *"FAILED to acquire"* ]]; then
+        ok "$name: run A is still blocked by its own held lock"
+    else
+        bad "$name: run A's held lock did not block A (rc $rc_a): $out_a"
+    fi
+    if [[ -d "$root_a/$name.lock" ]]; then
+        ok "$name: run A's lock survived run B (not deleted)"
+    else
+        bad "$name: run A's lock was deleted while run B ran"
+    fi
+    lock_release "$root_a/$name.lock" 2>/dev/null || true
+done
+conc_a="$TEST_ROOT/conc-a.out"
+conc_b="$TEST_ROOT/conc-b.out"
+for name in migration-rehearsal gc-ab sandbox; do
+    harness_cycle "$name" "$TEST_ROOT/conc-a" >"$conc_a" 2>&1 &
+    pid_a=$!
+    harness_cycle "$name" "$TEST_ROOT/conc-b" >"$conc_b" 2>&1 &
+    pid_b=$!
+    wait "$pid_a"
+    wait "$pid_b"
+    n_ok_a="$(grep -c '^  \[ok\]' "$conc_a" || true)"
+    n_ok_b="$(grep -c '^  \[ok\]' "$conc_b" || true)"
+    n_bad="$(cat "$conc_a" "$conc_b" | grep -c '\[FAIL\]' || true)"
+    # Non-vacuity: a cycle that ran prints 9 [ok] lines; both must have, and neither a [FAIL].
+    if [[ "$n_ok_a" -ge 9 && "$n_ok_b" -ge 9 && "$n_bad" -eq 0 ]]; then
+        ok "$name: two concurrent full cycles in separate roots both passed ($n_ok_a/$n_ok_b ok lines)"
+    else
+        fail_lines="$(grep -h 'FAIL' "$conc_a" "$conc_b" || true)"
+        bad "$name: concurrent cycles interfered (ok $n_ok_a/$n_ok_b, FAIL lines $n_bad): ${fail_lines:0:600}"
+    fi
+done
+
+# ── the real lock root is out of reach ───────────────────────────────────
+# Each harness's lock line must be under the test's root, never REAL_ROOT; the test's only removal
+# primitive refuses anything outside TEST_ROOT.
+echo
+echo "=== the real lock root is untouched ==="
+FAIL_BEFORE=$FAIL
+if rm_own "$REAL_ROOT/sandbox.lock" 2>/dev/null; then
+    bad "rm_own removed a path outside this run's root"
+else
+    ok "rm_own refuses the real harness lock path ($REAL_ROOT/sandbox.lock)"
+fi
+FAIL=$FAIL_BEFORE # rm_own counted its own refusal as a failure; it was the expected one
+if rm_own "" 2>/dev/null || rm_own "$TEST_ROOT" 2>/dev/null || rm_own "$TEST_ROOT/../x" 2>/dev/null; then
+    bad "rm_own accepted an empty path, the root itself or a .. path"
+else
+    ok "rm_own refuses an empty path, the root itself and a .. path"
+fi
+FAIL=$FAIL_BEFORE
 
 # ── migration-rehearsal arg-conflict region regression ───────────────────
 # Code-review CRITICAL finding: the FIRST trap (originally installed before
@@ -224,8 +336,9 @@ fi
 # never fail to create or write into) each other's lockdirs. Simulate two uids
 # with a PATH shim that answers `id -u` and defers everything else to the real
 # `id`, run each harness's self-test seam under both, and require the two lock
-# paths to differ and to name their own uid. The loop above already pins that
-# the REAL harness computes $LOCKROOT, so this proves the uid reaches it.
+# paths to differ and to be exactly the documented default,
+# /tmp/nexus-e2e-locks-<uid>/<name>.lock (NX_E2E_LOCK_ROOT is unset above, so this is the only place
+# the default root is exercised, and only under fake uids no real user has).
 echo
 echo "=== per-user lock root ==="
 REAL_ID="$(command -v id)"
@@ -249,7 +362,8 @@ for name in migration-rehearsal gc-ab sandbox; do
         seen[$fake]="$(printf '%s\n' "$outu" | sed -n 's/.*lock acquired: \(.*\) (pid .*/\1/p')"
     done
     if [[ -n "${seen[$FAKE_A]}" && -n "${seen[$FAKE_B]}" && "${seen[$FAKE_A]}" != "${seen[$FAKE_B]}" \
-          && "${seen[$FAKE_A]}" == *"-$FAKE_A/"* && "${seen[$FAKE_B]}" == *"-$FAKE_B/"* ]]; then
+          && "${seen[$FAKE_A]}" == "/tmp/nexus-e2e-locks-$FAKE_A/$name.lock" \
+          && "${seen[$FAKE_B]}" == "/tmp/nexus-e2e-locks-$FAKE_B/$name.lock" ]]; then
         ok "$name: two uids get different lock dirs (${seen[$FAKE_A]} vs ${seen[$FAKE_B]})"
     else
         bad "$name: lock dir is not per-user: uid $FAKE_A -> '${seen[$FAKE_A]}', uid $FAKE_B -> '${seen[$FAKE_B]}'"
@@ -259,7 +373,7 @@ done
 rm -rf "${SHIM_DIR:?}"
 # The shim runs above create /tmp/nexus-e2e-locks-<fake uid> roots (the harnesses mkdir them).
 # They are empty once every lock is released; remove them so a test run leaves nothing behind.
-rm -rf "/tmp/nexus-e2e-locks-$FAKE_A" "/tmp/nexus-e2e-locks-$FAKE_B"
+rm -rf "/tmp/nexus-e2e-locks-${FAKE_A:?}" "/tmp/nexus-e2e-locks-${FAKE_B:?}"
 
 # ── no harness may still name the shared (uid-less) lock root ─────────────
 # Scan the sources: any lock path under the bare "/tmp/nexus-e2e-locks/" root (no uid) is the
@@ -270,19 +384,25 @@ echo
 echo "=== no harness names the shared lock root ==="
 shared_root_hits=""
 for name in "${!HARNESS_SCRIPT[@]}"; do
-    hits="$(grep -nE '/tmp/nexus-e2e-locks/' "$REPO_ROOT/${HARNESS_SCRIPT[$name]}" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+    # Any non-comment mention of the root, with or without the uid: the root comes from
+    # lock.sh's e2e_lock_root only, so a hard-coded path would bypass NX_E2E_LOCK_ROOT (nexus-xzwyo).
+    hits="$(grep -nE 'nexus-e2e-locks' "$REPO_ROOT/${HARNESS_SCRIPT[$name]}" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
     [[ -n "$hits" ]] && shared_root_hits+="${HARNESS_SCRIPT[$name]}: $hits"$'\n'
 done
 if [[ -z "$shared_root_hits" ]]; then
-    ok "no harness script assigns a lock path under the uid-less /tmp/nexus-e2e-locks/ root"
+    ok "no harness script hard-codes a /tmp/nexus-e2e-locks path (uid-less or not)"
 else
-    bad "harness(es) still use the shared uid-less lock root: $shared_root_hits"
+    bad "harness(es) hard-code a lock root instead of e2e_lock_root: $shared_root_hits"
 fi
-if grep -qE 'LOCKDIR="/tmp/nexus-e2e-locks-\$\(id -u\)/migration-rehearsal\.lock"' "$REPO_ROOT/tests/e2e/migration-rehearsal/run.sh"; then
-    ok "migration-rehearsal lock is per-user"
-else
-    bad "migration-rehearsal LOCKDIR is missing or not per-user (non-vacuity guard tripped)"
-fi
+# Non-vacuity: every harness must take its LOCKDIR from e2e_lock_root (a scan that matched nothing
+# proves nothing); the default it resolves to is pinned per uid by the section above.
+for name in "${!HARNESS_SCRIPT[@]}"; do
+    if grep -qE 'LOCKDIR="\$\(e2e_lock_root\)/' "$REPO_ROOT/${HARNESS_SCRIPT[$name]}"; then
+        ok "$name: LOCKDIR comes from e2e_lock_root"
+    else
+        bad "$name: LOCKDIR is not assigned from e2e_lock_root (non-vacuity guard tripped)"
+    fi
+done
 
 echo
 echo "harness_lock_test.sh: ${PASS} passed, ${FAIL} failed"

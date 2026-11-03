@@ -374,6 +374,17 @@ _lock_explain_held() {
     fi
 }
 
+# e2e_lock_root: the directory that holds the harnesses' lockdirs (nexus-xzwyo).
+# Default is the machine-global per-USER root the real harnesses share, so two real runs contend
+# (nexus-c6lsu: the uid is in the name because /tmp is shared across Unix users). HARD-CODED /tmp,
+# not ${TMPDIR:-/tmp}: a per-context TMPDIR would give two contexts different lockdirs and silently
+# remove the contention the lock exists for. NX_E2E_LOCK_ROOT=<dir> relocates the root for ONE
+# process tree; the lock tests set it to a mktemp directory of their own so they never share, hold
+# or delete a real harness's lock. A real harness run never sets it.
+e2e_lock_root() {
+    printf '%s\n' "${NX_E2E_LOCK_ROOT:-/tmp/nexus-e2e-locks-$(id -u)}"
+}
+
 # lock_acquire <lockdir-path> [timeout_s]
 lock_acquire() {
     local lockdir="$1" timeout="${2:-0}" start_ts now holder_pid

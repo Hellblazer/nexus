@@ -6,6 +6,7 @@
 set -u -o pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
 # shellcheck source=./lock.sh disable=SC1091
 source "$HERE/lock.sh"
 
@@ -27,10 +28,10 @@ bad() {
 # ── Test 1: acquire/release roundtrip ────────────────────────────────────
 echo "Test 1: acquire/release roundtrip"
 LOCKDIR="$WORKDIR/roundtrip.lock"
-if lock_acquire "$LOCKDIR" >/tmp/lock_test_out1 2>&1; then
+if lock_acquire "$LOCKDIR" >"$WORKDIR/out1" 2>&1; then
     ok "lock_acquire succeeded"
 else
-    bad "lock_acquire failed: $(cat /tmp/lock_test_out1)"
+    bad "lock_acquire failed: $(cat "$WORKDIR/out1")"
 fi
 if [[ -d "$LOCKDIR" ]]; then ok "lockdir exists after acquire"; else bad "lockdir missing after acquire"; fi
 if [[ -f "$LOCKDIR/pid" && "$(cat "$LOCKDIR/pid")" == "$$" ]]; then
@@ -39,10 +40,10 @@ else
     bad "pid file wrong/missing"
 fi
 
-if lock_release "$LOCKDIR" 2>/tmp/lock_test_out1; then
+if lock_release "$LOCKDIR" 2>"$WORKDIR/out1"; then
     ok "lock_release succeeded"
 else
-    bad "lock_release failed: $(cat /tmp/lock_test_out1)"
+    bad "lock_release failed: $(cat "$WORKDIR/out1")"
 fi
 if [[ ! -d "$LOCKDIR" ]]; then ok "lockdir gone after release"; else bad "lockdir still present after release"; fi
 
@@ -62,12 +63,12 @@ if [[ ! -f "$LOCKDIR/pid" ]]; then
     bad "background holder never acquired the lock (setup failure)"
 else
     t0=$(date +%s%N)
-    if lock_acquire "$LOCKDIR" 0 2>/tmp/lock_test_out2; then
+    if lock_acquire "$LOCKDIR" 0 2>"$WORKDIR/out2"; then
         bad "second concurrent acquire unexpectedly SUCCEEDED (should have failed)"
         lock_release "$LOCKDIR" 2>/dev/null || true
     else
         ok "second concurrent acquire failed as expected"
-        if grep -q "FAILED to acquire" /tmp/lock_test_out2; then
+        if grep -q "FAILED to acquire" "$WORKDIR/out2"; then
             ok "failure message is loud (stderr)"
         else
             bad "no loud failure message"
@@ -99,7 +100,7 @@ wait "$dead_pid" 2>/dev/null
 printf '%s\n' "$dead_pid" >"$LOCKDIR/pid"
 echo "unknown" >"$LOCKDIR/start_token"
 
-if lock_acquire "$LOCKDIR" 0 2>/tmp/lock_test_out3; then
+if lock_acquire "$LOCKDIR" 0 2>"$WORKDIR/out3"; then
     ok "stale lock (dead pid $dead_pid) was reclaimed"
     if [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$$" ]]; then
         ok "reclaimed lockdir now records this process"
@@ -108,7 +109,7 @@ if lock_acquire "$LOCKDIR" 0 2>/tmp/lock_test_out3; then
     fi
     lock_release "$LOCKDIR"
 else
-    bad "stale lock was NOT reclaimed: $(cat /tmp/lock_test_out3)"
+    bad "stale lock was NOT reclaimed: $(cat "$WORKDIR/out3")"
     rm -rf "$LOCKDIR"
 fi
 
@@ -125,11 +126,11 @@ done
 if [[ ! -f "$LOCKDIR/pid" ]]; then
     bad "background holder never acquired the lock (setup failure)"
 else
-    if lock_release "$LOCKDIR" 2>/tmp/lock_test_out4; then
+    if lock_release "$LOCKDIR" 2>"$WORKDIR/out4"; then
         bad "lock_release unexpectedly SUCCEEDED for a lock this process does not hold"
     else
         ok "lock_release correctly refused (not the holder)"
-        if grep -q "refusing to release" /tmp/lock_test_out4; then
+        if grep -q "refusing to release" "$WORKDIR/out4"; then
             ok "refusal message is loud (stderr)"
         else
             bad "no loud refusal message"
@@ -146,7 +147,17 @@ kill "$holder_pid" 2>/dev/null || true
 wait "$holder_pid" 2>/dev/null || true
 rm -rf "$LOCKDIR"
 
-rm -f /tmp/lock_test_out1 /tmp/lock_test_out2 /tmp/lock_test_out3 /tmp/lock_test_out4
+rm -f "$WORKDIR/out1" "$WORKDIR/out2" "$WORKDIR/out3" "$WORKDIR/out4"
+
+# Overlap-check child (nexus-xzwyo): the final test below runs two copies of this script at
+# once to prove they share no path. A child needs only the tests above, the ones that used to
+# write fixed /tmp/lock_test_out* files; it stops here and reports in the same summary form.
+if [[ -n "${NX_LOCK_TEST_OVERLAP_CHILD:-}" ]]; then
+    echo
+    echo "lock_test.sh: ${PASS} passed, ${FAIL} failed"
+    [[ "$FAIL" -eq 0 ]]
+    exit
+fi
 
 # ── Test 5: a DELAYED reclaimer must not clobber a lock recreated in ────
 # ── the interim (RDR-184 P0 review C1: reclaim TOCTOU) ───────────────────
@@ -760,6 +771,8 @@ dead_pid3=$!
 wait "$dead_pid3" 2>/dev/null
 printf '%s\n' "$dead_pid3" >"$LOCKDIR/pid"
 echo "unknown" >"$LOCKDIR/start_token"
+# Created before the read-only parent below: a 555 $WORKDIR cannot take a new file, an existing one still writes.
+: >"$WORKDIR/out8"
 
 if command -v chflags >/dev/null 2>&1; then
     chflags uchg "$LOCKDIR"
@@ -772,7 +785,7 @@ else
 fi
 
 t0=$(date +%s)
-timeout 5 bash -c "source '$HERE/lock.sh'; lock_acquire '$LOCKDIR' 1" >/tmp/lock_test_out8 2>&1
+timeout 5 bash -c "source '$HERE/lock.sh'; lock_acquire '$LOCKDIR' 1" >"$WORKDIR/out8" 2>&1
 rc8=$?
 t1=$(date +%s)
 elapsed8=$((t1 - t0))
@@ -786,7 +799,7 @@ else
 fi
 
 rm -rf "$LOCKDIR" 2>/dev/null || true
-rm -f /tmp/lock_test_out8
+rm -f "$WORKDIR/out8"
 
 # ── Test 6: EPERM-shape kill failure must NOT misclassify a live holder ──
 # ── as stale (RDR-184 P0 review: kill -0 EPERM/ESRCH conflation) ─────────
@@ -1100,6 +1113,38 @@ DRIVER_EOF
     rm -rf "$LOCKDIR"
 else
     echo "Tests 10-16: skipped (no flock(1) or bash older than 4.1 on this host; pid-rule lockdirs only)"
+fi
+
+# ── Test 17: two overlapping runs of this script do not interfere ────────
+# nexus-xzwyo: the output files were fixed /tmp/lock_test_out1..8, so two runs on one box (two
+# worktrees, a hand run beside CI) overwrote each other's captured stderr and one saw the other's
+# "FAILED to acquire" or "refusing to release" text: a false red. Every file now lives under the
+# run's own mktemp $WORKDIR. Run two children at once (they stop after the tests that used
+# the files) and require both clean; the static pin keeps a fixed /tmp path from coming back.
+echo "Test 17: overlapping runs share no path (nexus-xzwyo)"
+child_a="$WORKDIR/overlap_a.out"
+child_b="$WORKDIR/overlap_b.out"
+NX_LOCK_TEST_OVERLAP_CHILD=1 bash "$SELF" >"$child_a" 2>&1 &
+pid_a=$!
+NX_LOCK_TEST_OVERLAP_CHILD=1 bash "$SELF" >"$child_b" 2>&1 &
+pid_b=$!
+wait "$pid_a"
+rc_a=$?
+wait "$pid_b"
+rc_b=$?
+if [[ $rc_a -eq 0 && $rc_b -eq 0 ]] \
+    && grep -qE 'lock_test\.sh: [1-9][0-9]* passed, 0 failed' "$child_a" \
+    && grep -qE 'lock_test\.sh: [1-9][0-9]* passed, 0 failed' "$child_b"; then
+    ok "two overlapping runs both passed (rc ${rc_a}/${rc_b}, at least one assertion each)"
+else
+    bad "overlapping runs interfered (rc ${rc_a}/${rc_b}): A: $(tail -3 "$child_a" | tr '\n' ' ') B: $(tail -3 "$child_b" | tr '\n' ' ')"
+fi
+# Pattern assembled from two halves so this line does not match itself.
+fixed_hits="$(grep -nE '/tmp/lock_''test_' "$SELF" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+if [[ -z "$fixed_hits" ]]; then
+    ok "no fixed lock_test output path under /tmp in this script"
+else
+    bad "fixed /tmp path back in lock_test.sh: $fixed_hits"
 fi
 
 echo
