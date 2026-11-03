@@ -39,7 +39,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 `{rdr_dir}` below is the RDR directory: `.nexus.yml` `indexing.rdr_paths[0]`, default `docs/rdr` (the Step 0 snippet of the rdr-create skill, stored as `RDR_DIR`).
 
 `<RDR dir>` is the absolute path of the RDR directory: `$RDR_DIR` joined to the repository root of the worktree in use.
-Write it out in any brief or relay: a dispatched agent cannot expand the variable.
+In any brief or relay, put the absolute path itself where `<RDR dir>` stands, never the placeholder or the shell variable: a dispatched agent cannot expand either.
 
 ## Behavior
 

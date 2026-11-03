@@ -420,3 +420,20 @@ def test_plugin_markdown_names_plugin_files_by_an_openable_path() -> None:
     assert len(files) >= 50, f"only {len(files)} plugin markdown files found: wrong root?"
     assert mentions >= 20, f"only {mentions} mentions: the scan saw nothing to check"
     assert not bad, "\n".join(bad)
+
+
+_GITHUB_MAIN = re.compile(r"https://github\.com/Hellblazer/nexus/blob/main/([\w./-]+)")
+
+
+def test_every_github_main_link_in_plugin_text_names_a_file_in_the_tree() -> None:
+    """A link to the repo's main branch stands in for a repo-only path (nexus-4deer): a renamed or moved target would
+    be a silent 404 for an agent in another project, so each target must exist in this checkout."""
+    roots = (*PLUGIN_MD_DIRS, SHARED_DOCS_DIR)
+    targets: set[tuple[str, str]] = set()
+    for path in sorted(p for d in roots if d.is_dir() for p in d.rglob("*.md")):
+        for m in _GITHUB_MAIN.finditer(path.read_text(encoding="utf-8")):
+            targets.add((m.group(1).rstrip("."), str(path.relative_to(REPO_ROOT))))
+    print(f"{len(targets)} GitHub main link targets in plugin text")
+    assert len(targets) >= 5, f"only {len(targets)} links: the pattern saw nothing"
+    missing = sorted(f"{src}: {t}" for t, src in targets if not (REPO_ROOT / t).is_file())
+    assert not missing, "\n".join(missing)

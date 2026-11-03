@@ -89,6 +89,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/resources/agent-shared/RELAY_TEMPLATE.md` (nexus-egv6q): the agent-link snippets use `${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/`, and maintainer notes name repo paths.
 - `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-egv6q): the incident template is named by `${CLAUDE_PLUGIN_ROOT}/resources/rdr_process/INCIDENT-TEMPLATE.md`, not a repo-only path.
 - `conexus/skills/composition-probe/SKILL.md` (nexus-4deer, nexus-3811j): the Maven runner is `<mvn>`: `scripts/mvnw-leased.sh` only where the project has it (the nexus repo, Maven under `service/`), else `./mvnw` or `mvn`; the chosen runner is passed into the pinned subagent prompt.
+- `conexus/commands/continuation.md` (nexus-4deer): the commit-scope audit runs `tests/e2e/lib/commit_scope_audit.sh` only when the project has it, with a `git diff --name-only` fallback elsewhere.
+- `conexus/skills/orchestration/SKILL.md` (nexus-4deer): the review-round cap is named as the nexus wheel's `review-rounds.toml` table with the cap stated inline, not a bare file an agent in another project cannot open.
 - `conexus/skills/decision-drift-review/SKILL.md` (nexus-4deer): the plan authoring guide is a GitHub link, not a `docs/` path an agent in another project cannot open.
 - `conexus/skills/nexus/reference.md` (nexus-4deer): the collection rule is a GitHub link, not `docs/collections.md`.
 - `conexus/skills/orchestration/reference.md` (nexus-4deer): the collection rules are a GitHub link, and the review-round cap is stated (2 for a code review) with the nexus wheel's `review-rounds.toml` named as its source.

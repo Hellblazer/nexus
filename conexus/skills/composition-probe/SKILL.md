@@ -90,8 +90,8 @@ declared outputs}` with the map from Step 2, and `<runner>` with the full runner
 > - Fail fast on any exception
 > - Print which dependency's contract was violated if the composition fails
 >
-> Write the test to `/tmp/probe-{bead_id}.{ext}` and run it with exactly `<runner>`, never a bare
-> `mvn` or `./mvnw`. Report pass/fail + which dependency (if any) violated its declared output shape.
+> Write the test to `/tmp/probe-{bead_id}.{ext}` and run it with exactly `<runner>`, never another
+> build or test command. Report pass/fail + which dependency (if any) violated its declared output shape.
 >
 > If you cannot attribute the failure to a specific dependency bead, say so explicitly rather than
 > guessing.
