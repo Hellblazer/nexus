@@ -221,6 +221,10 @@ def _is_grown_plan_tags(tags: str | None) -> bool:
     The plan-grow save path at ``nx_answer`` writes ``ad-hoc,grown``;
     we match the comma-token presence so future tag additions don't
     silently break the detection (RDR-090 P1.3 / nexus-zgko).
+
+    This reads the TAG only. A tag-only row with no grown declaration is
+    unattested to eligibility (nexus-3ihve) but still gets the grown
+    matcher treatment here, which is stricter, never looser.
     """
     if not tags:
         return False

@@ -7980,7 +7980,9 @@ def plan_save(
       `tags` before the save (they are logged and the reply names them):
       only the plan-grow site and the seed loader earn them. A plan saved
       here declares nothing and reads as unattested, so `nx_answer` does
-      not serve it for a lookup or a listing.
+      not serve it for a lookup or a listing when the eligibility gate
+      enforces (it runs in shadow on a failed or skipped extraction, an
+      unreseeded library, or the kill switch).
     """
     try:
         if not query or not plan_json:
@@ -8087,7 +8089,7 @@ def plan_save(
         if _declaration_removed:
             saved += " (answer_kind field removed: only seeded templates declare an answer kind)"
         if _tags_removed:
-            saved += f" (reserved tags removed: {', '.join(_tags_removed)}; only the grow site and the seed loader set them)"
+            saved += f" (reserved tags removed: {', '.join(_tags_removed)}; only the grow site and the seed loader set them; the plan reads as unattested and serves no lookup or listing)"
         return saved
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("plan_save", e)
