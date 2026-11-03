@@ -647,6 +647,118 @@ class CatalogHandlerRenameTest {
             .contains("Unwind the rename chain");
     }
 
+    // ── nexus-ucagi: the model token the client reads off the new name ───────────────────────────
+
+    private static final String MINILM = "minilm-l6-v2-384";
+    private static final String BGE = "bge-base-en-v15-768";
+
+    private void seedCollectionWithModel(String name, String model) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, name, model);
+        }
+    }
+
+    private String documentCollection(String tumbler) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                .fetchOne(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION);
+        }
+    }
+
+    @Test
+    void post_newNameTokenDisagreesWithTheSourceRowsModel_409sAndWritesNothing() throws Exception {
+        String old = "hren__mm-old";
+        String neu = "hren__mm-new";
+        seedCollectionWithModel(old, MINILM);
+        seedDocumentIn(old, "9.710");
+
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"" + old + "\",\"new_name\":\"" + neu + "\",\"embedding_model\":\"" + BGE + "\"}");
+
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(409);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body.get("reason")).isEqualTo("collection_model_mismatch");
+        assertThat(body.get("source_collection")).isEqualTo(old);
+        assertThat(body.get("source_model")).isEqualTo(MINILM);
+        assertThat(body.get("target_collection")).isEqualTo(neu);
+        assertThat(body.get("target_model")).isEqualTo(BGE);
+        assertThat((String) body.get("error")).contains("rename").contains(MINILM).contains(BGE);
+        // NOTHING WRITTEN: no new row, the source is still live under its own model, its document
+        // still names it. (The refusal is raised inside the rename transaction, before step 1.)
+        assertThat(collectionRow(neu)).as("no row for the refused new name").isNull();
+        var src = collectionRow(old);
+        assertThat(src.get("embedding_model")).isEqualTo(MINILM);
+        assertThat(src.get("superseded_by")).as("source not retired").isIn(null, "");
+        assertThat(documentCollection("9.710")).isEqualTo(old);
+    }
+
+    @Test
+    void post_newNameTokenMatchesTheSourceRowsModel_renames() throws Exception {
+        String old = "hren__mm-ok-old";
+        String neu = "hren__mm-ok-new";
+        seedCollectionWithModel(old, MINILM);
+        seedDocumentIn(old, "9.711");
+
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"" + old + "\",\"new_name\":\"" + neu + "\",\"embedding_model\":\"" + MINILM + "\"}");
+
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        assertThat(collectionRow(neu).get("embedding_model")).isEqualTo(MINILM);
+        assertThat(documentCollection("9.711")).isEqualTo(neu);
+    }
+
+    @Test
+    void post_noEmbeddingModelField_anOlderClientStillRenames() throws Exception {
+        // OLD client + NEW engine: the field is absent, so there is no check and the rename keeps
+        // the source row's model exactly as before. A name that would have been refused with the
+        // field is accepted without it; that is the additive contract, not a hole to close here.
+        String old = "hren__mm-oldclient-old";
+        String neu = "hren__mm-oldclient-new";
+        seedCollectionWithModel(old, MINILM);
+
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"" + old + "\",\"new_name\":\"" + neu + "\"}");
+
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        assertThat(collectionRow(neu).get("embedding_model")).isEqualTo(MINILM);
+    }
+
+    @Test
+    void post_disputedSource_isNotComparedWithTheToken() throws Exception {
+        // hygiene-002: a disputed row's bytes disagree with its model, so the row's model is itself
+        // in doubt and the client verbs skip the comparison with a warning; the engine matches.
+        String old = "hren__mm-disp-old";
+        String neu = "hren__mm-disp-new";
+        seedCollectionWithModel(old, MINILM);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
+                .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "disputed")
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(old))
+                .execute();
+        }
+
+        var resp = post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"" + old + "\",\"new_name\":\"" + neu + "\",\"embedding_model\":\"" + BGE + "\"}");
+
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+    }
+
+    @Test
+    void post_blankOrNonStringEmbeddingModel_is400() throws Exception {
+        seedCollectionWithModel("hren__mm-bad-old", MINILM);
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__mm-bad-old\",\"new_name\":\"hren__mm-bad-new\",\"embedding_model\":\"\"}")
+            .statusCode()).as("blank").isEqualTo(400);
+        assertThat(post("/v1/catalog/collections/rename",
+            "{\"old_name\":\"hren__mm-bad-old\",\"new_name\":\"hren__mm-bad-new\",\"embedding_model\":7}")
+            .statusCode()).as("non-string").isEqualTo(400);
+        assertThat(collectionRow("hren__mm-bad-new")).as("neither request wrote").isNull();
+    }
+
     @Test
     void get_returns405() throws Exception {
         var req = HttpRequest.newBuilder()

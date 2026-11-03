@@ -2530,6 +2530,12 @@ public final class CatalogHandler implements HttpHandler {
         // present must be a non-blank string.
         String newContentType = optionalNonBlank(body, "content_type");
         String newOwnerId = optionalNonBlank(body, "owner_id");
+        // nexus-ucagi: the model token the client read off the new name. A rename keeps the source
+        // row's embedding_model, so a token that differs is refused 409 collection_model_mismatch
+        // inside the rename transaction (nothing written). The engine does not parse names (RDR-204),
+        // so the token is the client's, like content_type and owner_id above. Absent -- an older
+        // client, or a legacy new name with no token -- skips the check; present must be non-blank.
+        String newNameEmbeddingModel = optionalNonBlank(body, "embedding_model");
         // Guard 0 (nexus-mxzxs) — old == new. Mirrors handleCollectionSupersede's guard 0,
         // whose comment already claimed this verb refused the case. That was only ever
         // INCIDENTALLY true: collectionExists(newName) was true when newName == oldName, so
@@ -2648,7 +2654,7 @@ public final class CatalogHandler implements HttpHandler {
         // target is STILL a non-live tombstone at commit time, same as this handler's own
         // identityOk/empty gate above.
         Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName, tgtSuperseded,
-            newContentType, newOwnerId);
+            newContentType, newOwnerId, newNameEmbeddingModel);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
     }
 

@@ -9729,12 +9729,31 @@ public final class CatalogRepository {
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName,
                                                    String expectedTargetSupersededBy,
                                                    String newContentType, String newOwnerId) {
+        return renameCollection(tenant, oldName, newName, expectedTargetSupersededBy,
+            newContentType, newOwnerId, null);
+    }
+
+    /**
+     * Same as the six-argument form, plus the model token the CLIENT read off the new name
+     * (nexus-ucagi). A rename keeps the source row's {@code embedding_model}, so a new name
+     * carrying another token would claim a model the vectors are not in. When
+     * {@code newNameEmbeddingModel} is non-null and the source row holds a model, a
+     * difference is refused with {@link CollectionModelMismatchException} (a 409
+     * {@code collection_model_mismatch}) before anything is written. The engine does not
+     * parse names (RDR-204), so the token is the caller's, exactly as {@code newContentType}
+     * and {@code newOwnerId} are; {@code null} (a client predating the field, or a legacy new
+     * name that carries no token) skips the check.
+     */
+    public Map<String, Integer> renameCollection(String tenant, String oldName, String newName,
+                                                   String expectedTargetSupersededBy,
+                                                   String newContentType, String newOwnerId,
+                                                   String newNameEmbeddingModel) {
         // nexus-wbfpw.71: a rename re-homes chunks and registry rows with no audit row, so it is refused on a
         // quarantine collection, as source or as target (the sanctioned verbs are restore and expiry).
         QuarantineOrigin.requireNotQuarantine("rename", oldName);
         QuarantineOrigin.requireNotQuarantine("rename", newName);
         Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy,
-            newContentType, newOwnerId);
+            newContentType, newOwnerId, newNameEmbeddingModel);
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
         // evict it so a later same-named collection re-registers.
         //
@@ -10200,7 +10219,8 @@ public final class CatalogRepository {
 
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
                                                         String expectedTargetSupersededBy,
-                                                        String newContentTypeOrNull, String newOwnerIdOrNull) {
+                                                        String newContentTypeOrNull, String newOwnerIdOrNull,
+                                                        String newNameEmbeddingModelOrNull) {
         // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection, which fires
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
@@ -10223,6 +10243,29 @@ public final class CatalogRepository {
             // documents out of or into is not renamed underneath it. Read under the sweep gates above, in the
             // rename's own transaction.
             refuseUnderReembedJob(ctx, tenant, "rename", oldName, newName);
+            // nexus-ucagi: step 1 below copies the SOURCE row's embedding_model onto the new row, and
+            // step 2 re-files the chunks under it, so the vectors stay in that model's space whatever
+            // the new name says. A new name whose token (the caller's, RDR-204: the engine does not
+            // parse names) disagrees would register a name claiming a model the vectors are not in;
+            // readers that trust the token over the row then disagree with what the engine embeds by.
+            // Refused here, before step 1, so nothing is written. Skipped when the caller sent no
+            // token (an older client, or a legacy new name) and for a `disputed` source, whose row
+            // model is itself in doubt (hygiene-002) -- the two cases the client verbs
+            // (corpus.rename_model_conflict and their disputed warning) already exempt.
+            if (newNameEmbeddingModelOrNull != null) {
+                var src = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                    .from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(oldName))
+                    .fetchOne();
+                if (src != null) {
+                    String srcModel = src.value1();
+                    boolean disputed = "disputed".equals(src.value2());
+                    if (!disputed && srcModel != null && !srcModel.equals(newNameEmbeddingModelOrNull)) {
+                        throw CollectionModelMismatchException.forRename(
+                            oldName, srcModel, newName, newNameEmbeddingModelOrNull);
+                    }
+                }
+            }
             // nexus-cecqy: LIVE target, not merely "a row exists". Since step 3 retires X
             // as a superseded tombstone instead of deleting it, a round-trip rename
             // (X->Y then Y->X) finds X's tombstone sitting at the target. A tombstone is

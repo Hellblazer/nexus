@@ -3582,13 +3582,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         expire_cached_registration(old_name)
         return int(result.get("updated", 0)) if isinstance(result, dict) else 0
 
-    def rename_collection(self, old: str, new: str) -> int:
+    def rename_collection(
+        self, old: str, new: str, *, check_model_token: bool = True,
+    ) -> int:
         # RDR-164 P3: the consolidated endpoint returns {"renamed": {per-table counts}}.
         # The int contract reports the re-homed catalog_documents count.
-        renamed = self.rename_collection_cascade(old, new)
+        renamed = self.rename_collection_cascade(
+            old, new, check_model_token=check_model_token,
+        )
         return int(renamed.get("catalog_documents", 0))
 
-    def rename_collection_cascade(self, old: str, new: str) -> dict[str, int]:
+    def rename_collection_cascade(
+        self, old: str, new: str, *, check_model_token: bool = True,
+    ) -> dict[str, int]:
         """RDR-164 P3: atomically re-home a collection X->Y and all its in-Postgres
         derived state via the service's single transactional renameCollection.
 
@@ -3607,6 +3613,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         The service rejects an existing ``new`` with 409: a rename onto an existing
         collection is a collision. The RDR-162 ``cross_model`` COPY repoint is gone
         from both halves (nexus-avjrb).
+
+        nexus-ucagi: a conformant ``new`` also sends its model token as
+        ``embedding_model``. A rename keeps the source row's model, so the
+        engine answers 409 ``collection_model_mismatch`` (nothing written)
+        when the token disagrees with it. This is the guard for every caller
+        of this method and of ``rename_collection``. A legacy ``new`` has no
+        token and sends none. ``check_model_token=False`` omits it (the
+        ``nx collection rename --force-prefix-change`` override). An engine
+        predating the field ignores it.
         """
         body: dict[str, Any] = {"old_name": old, "new_name": new}
         # nexus-sis0m.3: the new row's content_type/owner_id, derived from
@@ -3620,6 +3635,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             body["content_type"], body["owner_id"] = collection_type_and_owner(new)
         except ValueError:
             pass
+        if check_model_token:
+            from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            token = embedding_model_for_collection_name(new)
+            if token is not None:
+                body["embedding_model"] = token
         # idempotent=False (nexus-ll31n sibling): a cascade rename over
         # EVERY row matching `old` across a dozen tables is a
         # population-discovery sweep, not a caller-supplied-id mutation. A

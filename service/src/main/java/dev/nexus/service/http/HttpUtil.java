@@ -377,7 +377,10 @@ public final class HttpUtil {
      *       {@code POST /v1/catalog/collections/rehome}) would file chunks of one embedding model under a
      *       collection of another ({@link #COLLECTION_MODEL_MISMATCH_REASON}, RDR-225); the body also
      *       carries {@code source_collection}, {@code source_model}, {@code target_collection} and
-     *       {@code target_model}. Not retryable: a move between models is a cross-model migration.</li>
+     *       {@code target_model}. Not retryable: a move between models is a cross-model migration.
+     *       Also {@code POST /v1/catalog/collections/rename} (nexus-ucagi) when the request's optional
+     *       {@code embedding_model} (the token the client read off the new name) differs from the source
+     *       row's: {@code target_collection} is then the new name and {@code target_model} the token.</li>
      *   <li>{@code collection_superseded} (409): a chunk write (upsert-chunks, or the combined
      *       write_many / append / append_many) named a collection whose row carries {@code superseded_by}
      *       ({@link #COLLECTION_SUPERSEDED_REASON}, nexus-mp8ys). {@code error} carries the same value; the body

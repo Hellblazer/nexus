@@ -267,6 +267,7 @@ def rename_collection_cmd(
           knowledge__1-1__voyage-context-3__v1 --yes
       nx catalog rename-collection docs__nexus-571b8edd ... --dry-run
     """
+    from nexus.collection_rename import rename_summary_parts  # noqa: PLC0415  — command-local import (nexus.collection_rename)
     from nexus.commands.collection import (  # noqa: PLC0415  — command-local import (nexus.commands.collection)
         rename_collection_data_plane,
     )
@@ -477,7 +478,8 @@ def rename_collection_cmd(
         parts.append(f"{counts['chash']} chash rows")
     if counts["catalog_docs"]:
         parts.append(f"{counts['catalog_docs']} catalog docs")
-    suffix = f" ({'; '.join(parts)})" if parts else ""
+    parts.extend(rename_summary_parts(counts))
+    suffix =f" ({'; '.join(parts)})" if parts else ""
     click.echo(f"Renamed: {old} -> {new}{suffix}")
     # nexus-cecqy: only claim the supersede when it actually marked a row.
     # Against a CURRENT engine this always fires: renameCollectionTxn retires the

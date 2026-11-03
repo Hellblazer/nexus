@@ -100,7 +100,9 @@ class TestCollectionRenameVerb:
             old, new, {old: _row(_BGE)}, "--force-prefix-change",
         )
         assert result.exit_code == 0, result.output
-        cascade.assert_called_once_with(old, new)
+        # nexus-ucagi: the override withholds the model token, or the engine
+        # would refuse the rename this flag exists to allow.
+        cascade.assert_called_once_with(old, new, check_model_token=False)
 
     def test_row_beats_the_old_names_own_token(self) -> None:
         """A conformant old name whose row disagrees with its own token: the

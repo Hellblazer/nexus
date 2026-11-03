@@ -25,14 +25,39 @@ public final class CollectionModelMismatchException extends RuntimeException {
 
     public CollectionModelMismatchException(String sourceCollection, String sourceModel,
                                             String targetCollection, String targetModel) {
-        super("refusing to re-home chunks of collection '" + sourceCollection + "' (embedding model '"
+        this(sourceCollection, sourceModel, targetCollection, targetModel,
+            "refusing to re-home chunks of collection '" + sourceCollection + "' (embedding model '"
             + sourceModel + "') into collection '" + targetCollection + "' (embedding model '"
             + targetModel + "'): a chunk keeps its collection's model, and moving between models is a "
             + "cross-model migration into a new collection, not a rename");
+    }
+
+    private CollectionModelMismatchException(String sourceCollection, String sourceModel,
+                                             String targetCollection, String targetModel,
+                                             String message) {
+        super(message);
         this.sourceCollection = sourceCollection;
         this.sourceModel = sourceModel;
         this.targetCollection = targetCollection;
         this.targetModel = targetModel;
+    }
+
+    /**
+     * A rename whose new name carries a model token that differs from the source row's
+     * {@code embedding_model} (nexus-ucagi). A rename keeps the source row's model, so the vectors stay in
+     * that model's space whatever the new name says; the engine does not parse names (RDR-204), so
+     * {@code nameModel} is the token the client derived and sent as {@code embedding_model}. Carries the same
+     * wire fields as the re-home refusal: {@code target_collection} is the new name and {@code target_model}
+     * the token it claims.
+     */
+    public static CollectionModelMismatchException forRename(String oldName, String sourceModel,
+                                                             String newName, String nameModel) {
+        return new CollectionModelMismatchException(oldName, sourceModel, newName, nameModel,
+            "refusing to rename collection '" + oldName + "' (embedding model '" + sourceModel
+            + "') to '" + newName + "', whose name carries the model token '" + nameModel
+            + "': a rename keeps the source row's embedding model and never re-embeds, so the new name would "
+            + "claim a model the vectors are not in. Rename to a name carrying '" + sourceModel
+            + "', or migrate across models into a new collection");
     }
 
     public String sourceCollection() { return sourceCollection; }

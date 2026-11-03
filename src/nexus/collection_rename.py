@@ -21,6 +21,45 @@ import click
 from nexus.db.collection_state import CollectionState, probe_collection_state
 
 
+def rename_summary_parts(counts: dict[str, int]) -> list[str]:
+    """The aspect-family clauses of a rename summary (nexus-l0ai3).
+
+    ``aspect_tasks`` is the engine's ``aspects_tasks`` count: the unconsumed
+    ``aspects`` task bodies the rename rewrites to name the new collection
+    (RDR-235). ``aspect_queue`` is ``aspect_extraction_queue``, which the
+    engine still reports until that table is dropped. Zero or absent counts
+    (an engine predating a key) print nothing. Shared by ``nx collection
+    rename`` and ``nx catalog rename-collection`` so they cannot drift.
+    """
+    parts: list[str] = []
+    if counts.get("aspect_queue"):
+        parts.append(f"{counts['aspect_queue']} aspect queue rows")
+    if counts.get("aspect_tasks"):
+        parts.append(f"{counts['aspect_tasks']} aspect tasks")
+    return parts
+
+
+def _engine_model_mismatch_detail(exc: Exception) -> str | None:
+    """The engine's text when *exc* is its 409 ``collection_model_mismatch``
+    (nexus-ucagi), else ``None``. The bare ``HTTPStatusError`` string is only
+    the status line; the body names both models and the name that would be
+    accepted."""
+    import json  # noqa: PLC0415 — stdlib, branch-local
+
+    from nexus.db.engine_reasons import COLLECTION_MODEL_MISMATCH_REASON  # noqa: PLC0415 — deferred: error path only
+
+    response = getattr(exc, "response", None)
+    if response is None or getattr(response, "status_code", None) != 409:
+        return None
+    try:
+        body = json.loads(response.text)
+    except Exception:  # noqa: BLE001 — an unparseable body is simply not ours
+        return None
+    if not isinstance(body, dict) or body.get("reason") != COLLECTION_MODEL_MISMATCH_REASON:
+        return None
+    return str(body.get("error") or COLLECTION_MODEL_MISMATCH_REASON)
+
+
 def rename_collection_data_plane(
     old: str,
     new: str,
@@ -28,6 +67,7 @@ def rename_collection_data_plane(
     t3_db: Any,
     catalog: Any | None = None,
     on_warn: Callable[[str], None] | None = None,
+    check_model_token: bool = True,
 ) -> dict[str, int]:
     """Rename a collection across T2 + T3 + catalog cascades.
 
@@ -60,6 +100,14 @@ def rename_collection_data_plane(
     nexus-8g79.10 (V5): ``t3_db`` is now required (no ``_t3()`` default).
     CLI callers pass ``_t3()`` explicitly; library callers (the
     indexer's RDR-103 P5 migrator) construct their own T3 handle.
+
+    nexus-ucagi: a conformant *new* name's model token is sent to the engine,
+    which refuses (409 ``collection_model_mismatch``, nothing written) a token
+    that disagrees with the source row's ``embedding_model``. That makes every
+    caller of this function guarded, not only the CLI verbs that check first.
+    ``check_model_token=False`` withholds the token: the operator override
+    ``nx collection rename --force-prefix-change`` documents, for a row that is
+    the wrong one.
     """
     if on_warn is None:
         on_warn = lambda msg: click.echo(msg, err=True)  # noqa: E731
@@ -105,6 +153,7 @@ def rename_collection_data_plane(
         "chash": 0,
         "aspects": 0,
         "aspect_queue": 0,
+        "aspect_tasks": 0,
         "highlights": 0,
         "relevance_log": 0,
         "search_telemetry": 0,
@@ -134,11 +183,17 @@ def rename_collection_data_plane(
     if client is None:  # service mode always returns a client; guard for a clear error
         raise click.ClickException("catalog service client unavailable")
     try:
-        renamed = client.rename_collection_cascade(old, new)
+        if check_model_token:
+            renamed = client.rename_collection_cascade(old, new)
+        else:
+            renamed = client.rename_collection_cascade(
+                old, new, check_model_token=False,
+            )
     except Exception as exc:
+        detail = _engine_model_mismatch_detail(exc) or str(exc)
         raise click.ClickException(
             f"service rename failed -- collection {old!r} is unchanged "
-            f"(the re-home is atomic). Fix the error and retry:\n  {exc}"
+            f"(the re-home is atomic). Fix the error and retry:\n  {detail}"
         ) from exc
     counts["tax_topics"] = renamed.get("topics", 0)
     counts["tax_assignments"] = renamed.get("topic_assignments", 0)
@@ -163,6 +218,8 @@ def rename_collection_data_plane(
     counts["chash"] = renamed.get("chash_index", 0)
     counts["aspects"] = renamed.get("document_aspects", 0)
     counts["aspect_queue"] = renamed.get("aspect_extraction_queue", 0)
+    # nexus-l0ai3: the unconsumed aspects task bodies the rename rewrote.
+    counts["aspect_tasks"] = renamed.get("aspects_tasks", 0)
     counts["highlights"] = renamed.get("document_highlights", 0)
     counts["relevance_log"] = renamed.get("relevance_log", 0)
     counts["search_telemetry"] = renamed.get("search_telemetry", 0)
