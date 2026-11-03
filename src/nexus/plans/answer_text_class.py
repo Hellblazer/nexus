@@ -7,6 +7,12 @@ ONE classifier, shared by the reader (``nx answer-runs``, ``nexus.commands.answe
 here, under ``plans``, so neither depends on the other's layer. :func:`heuristic_class` is the read-time
 heuristic that ``nx answer-runs`` has always run over a row; :func:`classify_answer_text` is the same rule over
 a bare text and step count.
+
+:data:`ANSWER_CLASSES` is the closed vocabulary of a class a TEXT can have (the reader accepts a recorded class only
+from it), and :data:`CLASS_VERSION` numbers the rule: bump it whenever a change to this module can change the class
+of a text, so a recorded class from an older rule is told apart from a current one. The heuristic matches a refusal
+phrase anywhere in the text it is given, so it can count a real answer as degenerate on a long text as well as a
+short one, and on a text cut at 2000 characters it misses a raw payload that no longer parses; neither is a bound.
 """
 from __future__ import annotations
 
@@ -14,7 +20,21 @@ import re
 
 from nexus.plans.answer_shape import NON_ANSWER_SHAPES, AnswerShape, classify_answer_shape
 
-__all__ = ["classify_answer_text", "heuristic_class", "is_redacted_row"]
+__all__ = ["ANSWER_CLASSES", "CLASS_VERSION", "classify_answer_text", "heuristic_class", "is_redacted_row"]
+
+#: The version of the classification rule in this module. Recorded in the run summary next to ``answer_class``
+#: (``class_version``); a change that can move the class of a text bumps it.
+CLASS_VERSION: int = 1
+
+#: Every class :func:`classify_answer_text` can return for a text: the five code-templated shapes, ``other`` (an
+#: answer, or a shape nothing names), and ``non_answer/<shape>`` for each non-answer shape the notice or the body can
+#: name, plus the one a coverage verdict names without text. ``redacted`` is not here: it is a property of a stored
+#: row, never of a text.
+ANSWER_CLASSES: frozenset[str] = frozenset({
+    "other", "planner_error", "error", "budget_warning_only", "query_listing_reroute", "empty_hydration",
+    "non_answer/no_usable_answer",
+    *(f"non_answer/{shape.value}" for shape in NON_ANSWER_SHAPES),
+})
 
 #: Code-templated header identifying nx_answer's single-step-guard
 #: reroute to ``query()`` (nexus-x79ne / RDR-200 Phase 1b-1c gate:
@@ -35,7 +55,7 @@ __all__ = ["classify_answer_text", "heuristic_class", "is_redacted_row"]
 #: the catalog-routed variant is a DIFFERENT, unreachable-from-nx_answer
 #: code path whose header is preceded by a routing-note line, so
 #: anchoring to start-of-string costs nothing here. Checked together
-#: with ``step_count == 1`` in :func:`_classify_degenerate_row` — every
+#: with ``step_count == 1`` in :func:`heuristic_class` — every
 #: gate-artifact instance of this shape carries it (the single-step
 #: guard is the ONLY producer of this header, and it always records
 #: exactly one step).
@@ -54,7 +74,7 @@ _BUDGET_WARNING_LINE_PREFIX = "[budget warning ("
 #: ``nexus.mcp.operator_requests``'s ``build_*_request`` builders: none
 #: of them short-circuit on empty input, every one always dispatches to
 #: ``claude -p``, so the model always produces free text. Heuristic, like
-#: :func:`_row_is_failed`'s own documented blind spot: a model phrasing
+#: ``answer_runs._row_is_failed``'s own documented blind spot: a model phrasing
 #: this differently is invisible to this list. Kept broad enough to
 #: catch the gate-artifact class without over-matching a real
 #: comparative answer that happens to discuss an absence of differences
@@ -143,7 +163,7 @@ def heuristic_class(row: dict) -> str:
     structurally-empty body shapes accounted for 9 of 24 gate questions
     while the pre-fix server-side field reported 1 (``planner_error``
     only) — reachable on ANY row, not only ``step_count == 0`` ones (see
-    :data:`_WELL_FORMED_DEGENERATE_CLASSES` and :func:`_split_four_way`,
+    ``answer_runs._WELL_FORMED_DEGENERATE_CLASSES`` and ``answer_runs._split_four_way``,
     which is what actually widens the routing for the ``step_count > 0``
     case — this function alone cannot, since it is only ever called on a
     row already selected for classification).
@@ -156,9 +176,9 @@ def heuristic_class(row: dict) -> str:
     the empty-hydration phrase "no evidence was provided" as a
     substring — checking the heuristics first misclassified it
     ``empty_hydration`` instead of ``error``, and (via the widened
-    ``_split_four_way``) diverted an ``step_count > 0`` row shaped like
+    ``answer_runs._split_four_way``) diverted an ``step_count > 0`` row shaped like
     it straight into ``degenerate`` WITHOUT ever reaching
-    :func:`_row_is_failed`. The three new heuristics are all narrow
+    ``answer_runs._row_is_failed``. The three new heuristics are all narrow
     enough (a code-templated header, a code-templated warning-line
     prefix, an explicit refusal-phrase list) that none of them can
     plausibly fire on real error/redaction text, so this reordering
@@ -185,7 +205,7 @@ def heuristic_class(row: dict) -> str:
     # model; it returns this fixed prefix, so the match is exact, not a
     # phrase heuristic. Prefix-anchored: a real answer quoting the phrase
     # mid-text is not a short-circuit.
-    from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+    from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX  # noqa: PLC0415 - deferred: heavy import (the plan runner), needed only past the cheap checks above
     if final_text.startswith(_NO_EVIDENCE_RESULT_PREFIX):
         return "empty_hydration"
     if any(phrase in final_text.strip().lower() for phrase in _EMPTY_HYDRATION_PHRASES):

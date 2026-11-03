@@ -25,7 +25,9 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from nexus.commands.answer_runs import _classify_degenerate_row
 from nexus.mcp.core import _nx_answer_record_complete, _nx_answer_record_run
+from nexus.plans.answer_text_class import CLASS_VERSION
 from nexus.plans.coverage_ledger import AssessmentCall, AssessmentReport, CoverageLedger, CoverageResult, FacetFinding
 from nexus.plans.request_coverage import Facet, RequestCoverage
 from nexus.plans.run_summary import (
@@ -195,6 +197,35 @@ class TestChokePointAgainstTheEngine:
         assert stored["unassessed_by_cause"]["other"] == 0 and stored["repair_entered"] is False and stored["facets_conflicted"] == 0
         assert row["run_summary"]["repair"]["entered"] is False and row["run_summary"]["version"] == 1
         assert summary_digest(row["run_summary"]) == rec.digest
+
+    @pytest.mark.parametrize("trace", [True, False])
+    def test_the_answer_text_facts_survive_jsonb_and_a_cut_row_reads_back_degenerate(self, tel_store, trace):
+        """nexus-ix3fj: ``final_chars``, ``answer_class`` and ``class_version`` go through the engine's JSONB, the digest
+        still matches, and ``nx answer-runs``'s classifier reads the row the engine returns (text cut at 2000, or redacted)
+        as degenerate from the recorded class."""
+        raw = json.dumps({"extractions": [{"id": f"chash:{i:04d}", "text": "evidence " * 12} for i in range(40)]})
+        assert len(raw) > 2000
+        q, rec = f"it-answer-text-{trace}", _recorder(trace=trace)
+        db = _db(tel_store)
+        with patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db)):
+            _nx_answer_record_complete(
+                db, question=q, plan_id=0, matched_confidence=0.5, step_count=3, final_text=raw[:2000], answer_text=raw,
+                step_records=[], duration_ms=1200, trace=trace, success=True,
+                composite_supported_at_start=True, early_bump_fired=False, run_summary=rec,
+            )
+        assert rec.persistence == "persisted", rec.detail
+        # A redacted row's question is "[redacted]", shared with other tests' rows: find ours by what it recorded.
+        [row] = [
+            r for r in _rows(tel_store, q if trace else "[redacted]")
+            if (r.get("run_summary") or {}).get("final_chars") == len(raw)
+        ]
+        stored = row["run_summary"]
+        assert stored["final_chars"] == len(raw)
+        assert stored["answer_class"] == "non_answer/extractions_only"
+        assert stored["class_version"] == CLASS_VERSION
+        assert summary_digest(stored) == rec.digest
+        assert row["final_text"] == ("[redacted]" if not trace else raw[:2000])
+        assert _classify_degenerate_row(row) == "non_answer/extractions_only"
 
     def test_degradation_path_is_persisted_by_readback(self, tel_store):
         q, rec = "it-choke-record", _recorder()

@@ -42,7 +42,7 @@ from typing import Any
 import click
 import structlog
 
-from nexus.plans.answer_text_class import heuristic_class, is_redacted_row
+from nexus.plans.answer_text_class import ANSWER_CLASSES, heuristic_class, is_redacted_row
 
 _log = structlog.get_logger(__name__)
 
@@ -235,49 +235,65 @@ _WELL_FORMED_DEGENERATE_CLASSES: frozenset[str] = frozenset({
 })
 
 
-#: Longest recorded class name the reader accepts; the real ones are under 40 characters.
-_RECORDED_CLASS_MAX_CHARS = 64
-
-
 def _recorded_answer_class(row: dict) -> str | None:
     """The class the writer recorded in the row's run summary (``answer_class``), or ``None`` when the row has none
-    or it is unusable (nexus-ix3fj). The writer computed it over the FULL final text with
-    :func:`classify_answer_text`; the row's own ``final_text`` is cut at 2000 characters."""
+    or it is not in the classifier's vocabulary (nexus-ix3fj). The writer computed it over the FULL final text with
+    :func:`nexus.plans.answer_text_class.classify_answer_text`; the row's own ``final_text`` is cut at 2000
+    characters. Only a name in :data:`nexus.plans.answer_text_class.ANSWER_CLASSES` is taken, so a summary from a
+    future or foreign writer cannot put an arbitrary string into the degenerate breakdown."""
     summary = row.get("run_summary")
     if not isinstance(summary, dict):
         return None
     recorded = summary.get("answer_class")
-    if isinstance(recorded, str) and 0 < len(recorded) <= _RECORDED_CLASS_MAX_CHARS:
+    if isinstance(recorded, str) and recorded in ANSWER_CLASSES:
         return recorded
     return None
 
 
+def _classify_with_basis(row: dict) -> tuple[str, str]:
+    """``(class, basis)`` of one row. The basis says what decided the class:
+
+    * ``recorded``: the class the writer recorded over the full final text. It is taken for every row that has one,
+      a redacted (``trace=False``) row included: the writer classified the real text before the row was redacted,
+      so a redacted raw payload is degenerate here. One exception: a recorded ``other`` on a redacted row still
+      yields to a coverage verdict in its run summary (``unavailable`` coverage is a non-answer whatever prose
+      was generated; nexus-jypmj.3.15).
+    * ``redacted``: a redacted row with no recorded class; it stays ``redacted`` (or the coverage verdict), the benign
+      class that says nothing was recorded to judge it by.
+    * ``heuristic``: a row with a visible text and no recorded class (written before this change, or by an engine
+      without the run summary); :func:`nexus.plans.answer_text_class.heuristic_class` over the stored text, which is
+      cut at 2000 characters.
+    """
+    recorded = _recorded_answer_class(row)
+    redacted = is_redacted_row(row)
+    if recorded is not None:
+        if redacted and recorded == "other":
+            verdict = heuristic_class(row)
+            if verdict != "redacted":
+                return verdict, "recorded"
+        return recorded, "recorded"
+    return heuristic_class(row), "redacted" if redacted else "heuristic"
+
+
 def _classify_degenerate_row(row: dict) -> str:
     """The class of one row: the class the writer recorded over the full final text when the row's run summary
-    carries one, else :func:`_heuristic_class` over the stored (cut) text (nexus-ix3fj).
-
-    A redacted row (``trace=False``) is the exception: its redaction rule decides first, exactly as before, so
-    the benign ``redacted`` class keeps its meaning. See :func:`_classification_basis` for which of the two
-    decided a row.
-    """
-    if not is_redacted_row(row):
-        recorded = _recorded_answer_class(row)
-        if recorded is not None:
-            return recorded
-    return heuristic_class(row)
+    carries one, else :func:`nexus.plans.answer_text_class.heuristic_class` over the stored (cut) text
+    (nexus-ix3fj). See :func:`_classify_with_basis` for which one decided and the redacted-row rules."""
+    return _classify_with_basis(row)[0]
 
 
 def _classification_basis(row: dict) -> str:
-    """``recorded`` when :func:`_classify_degenerate_row` takes the writer's class for *row*, else ``heuristic``
-    (an old row, a row from an engine without the run summary, or a redacted row)."""
-    return "recorded" if not is_redacted_row(row) and _recorded_answer_class(row) is not None else "heuristic"
+    """``recorded``, ``redacted`` or ``heuristic``: what decided *row*'s class (see :func:`_classify_with_basis`)."""
+    return _classify_with_basis(row)[1]
 
 
 def _classification_basis_counts(rows: "list[dict]") -> dict[str, int]:
-    """How many of *rows* were classified from a recorded class and how many by the read-time heuristic. The
-    heuristic sees only the stored text, cut at 2000 characters, so a raw payload longer than that reads as an
-    answer: the degenerate count among the heuristic rows is a lower bound."""
-    counts = {"recorded": 0, "heuristic": 0}
+    """How many of *rows* were classified from a recorded class, how many were redacted with none recorded, and how
+    many by the read-time heuristic over the stored text. Only the heuristic rows are text-limited: they see the
+    text cut at 2000 characters, so a raw payload past the cut reads as an answer there, and the phrase match can
+    count a real answer as degenerate (on a recorded row too, where it saw the whole text). The degenerate counts
+    are exact on no basis; they are limited by truncation while ``heuristic`` is non-zero."""
+    counts = {"recorded": 0, "heuristic": 0, "redacted": 0}
     for r in rows:
         counts[_classification_basis(r)] += 1
     return counts
@@ -1072,6 +1088,10 @@ def _emit_report(
     classification_basis = _classification_basis_counts(
         executed_ok_rows + executed_failed_rows + [r for v in degenerate_by_class.values() for r in v]
     )
+    # True while a row with a visible text and no recorded class is in the counts: it was classified from text cut at
+    # 2000 characters, so a raw payload past the cut is not counted degenerate. Redacted rows without a recorded
+    # class are named apart (``redacted``) and do not set it: nothing was recorded to judge them by.
+    truncation_limited = classification_basis["heuristic"] > 0
     # RDR-200 §Telemetry (nexus-4e75w.5): continuation runs are NEVER
     # folded into the headless cost population — handed_off_rows is a
     # SEPARATE bucket from executed_ok/executed_failed by construction
@@ -1151,6 +1171,7 @@ def _emit_report(
             "degenerate_breakdown": degenerate_breakdown,
             # nexus-ix3fj: how the rows above were classified; ``heuristic`` rows undercount a raw payload over 2000 chars.
             "classification_basis": classification_basis,
+            "degenerate_count_truncation_limited": truncation_limited,
             # RDR-232 Phase 3 (nexus-jypmj.3.3): partial answers returned with the insufficient-evidence notice.
             "insufficient_evidence_count": len(insufficient_evidence_rows),
             "executed_ok_avg_duration_ms": executed_ok_avg_duration_ms,
@@ -1255,12 +1276,14 @@ def _emit_report(
         click.echo(f"    degenerate/{cls}: {degenerate_breakdown[cls]}")
     click.echo(
         f"  classified: {classification_basis['recorded']} by recorded class (full final text), "
-        f"{classification_basis['heuristic']} by read-time heuristic (stored text, cut at 2000 characters)"
+        f"{classification_basis['heuristic']} by read-time heuristic (stored text, cut at 2000 characters), "
+        f"{classification_basis['redacted']} redacted with no recorded class"
     )
-    if classification_basis["heuristic"]:
+    if truncation_limited:
         click.echo(
-            "    the degenerate counts above are a lower bound while heuristic rows remain: a raw payload "
-            "longer than the stored text reads as an answer there"
+            "    the degenerate counts above are not exact while heuristic rows remain: a raw payload cut at "
+            "2000 characters reads as an answer there, and the empty-hydration phrase match can count a "
+            "real answer as degenerate on any row"
         )
 
     if handed_off_rows or report_event_rows:

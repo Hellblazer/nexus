@@ -5562,17 +5562,26 @@ every row is split three ways:
 cut at 2000 characters, so a raw ids or extractions payload longer than that no
 longer parses on read-back and the text-only heuristic counts it as an answer.
 A client that records a run summary now classifies the FULL final text at write
-time with the same classifier and records `final_chars` (the full length) and
-`answer_class` in the summary; the reader takes that class when it is present and
-falls back to the heuristic on a row without one (a row written before this
-change, or by an engine that does not keep the run summary). A `trace=False` row
-keeps its `redacted` rule. The report says how many rows each way: `classified: N
-by recorded class (full final text), M by read-time heuristic`, with a note that
-the degenerate counts are a lower bound while heuristic rows remain.
+time with the same classifier and records `final_chars` (the full length),
+`answer_class` and `class_version` (the number of the classifier's rule) in the
+summary; the reader takes that class when it is one of the classifier's known
+names, and falls back to the heuristic on a row without one (a row written before
+this change, or by an engine that does not keep the run summary). A `trace=False`
+row takes its recorded class too, because the writer classified the real text
+before it was redacted and records only the class name and the length; a
+`trace=False` row with none recorded stays `redacted`. The report says how many
+rows each way: `classified: N by recorded class (full final text), M by read-time
+heuristic (stored text, cut at 2000 characters), K redacted with no recorded
+class`. While any heuristic row is counted the degenerate counts are not exact,
+and the report says so: a raw payload cut at 2000 characters reads as an answer on
+those rows (a miss), and the empty-hydration phrase match can count a real answer
+as degenerate on any row (an over-count; on a recorded row the phrase was matched
+anywhere in the full text). So the counts are not a lower bound.
 
 `--json` carries `executed_ok_count`, `executed_failed_count`,
 `degenerate_count`, `degenerate_breakdown: {class: count}`,
-`classification_basis: {recorded: N, heuristic: M}`,
+`classification_basis: {recorded: N, heuristic: M, redacted: K}`,
+`degenerate_count_truncation_limited` (true while a heuristic row is counted),
 `insufficient_evidence_count`, plus a
 page-scoped, executed-ok-only latency view: `executed_ok_avg_duration_ms`
 and `executed_ok_latency_buckets` (same fixed edges as the whole-set

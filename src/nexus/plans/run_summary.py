@@ -32,13 +32,18 @@ The cut ladder drops ``coverage.assessment_call_log`` before ``eligibility`` and
 until ``coverage`` itself goes. All of it is closed names and counts: no question, facet or evidence text, with or
 without ``trace``.
 
-**Answer text facts (nexus-ix3fj), additive to version 1.** ``final_chars`` is the character count of the run's FULL final text and
-``answer_class`` the class :func:`nexus.plans.answer_text_class.classify_answer_text` (the classifier ``nx answer-runs`` reads with, so there is
-one rule) gives that text and the run's step count. The row's ``final_text`` is cut at 2000 characters, so a raw ids or
-extractions payload over that length no longer parses when ``nx answer-runs`` reads it back; the reader takes the recorded
-class instead. Both are a count and a closed name, kept with or without ``trace`` and by the last-resort cut. A summary built
-without the text (the continuation report row) carries neither key, and a row from an engine that does not keep the run
-summary has none: the reader falls back to its heuristic there.
+**Answer text facts (nexus-ix3fj), additive to version 1.** ``final_chars`` is the character count of the run's FULL final
+text, ``answer_class`` the class :func:`nexus.plans.answer_text_class.classify_answer_text` (the classifier ``nx answer-runs``
+reads with, so there is one rule) gives that text and the run's step count, and ``class_version`` the
+:data:`~nexus.plans.answer_text_class.CLASS_VERSION` of the rule that gave it. The row's ``final_text`` is cut at 2000
+characters, so a raw ids or extractions payload over that length no longer parses when ``nx answer-runs`` reads it back; the
+reader takes the recorded class instead, for a ``trace=False`` row too (the class is computed from the real text before it is
+redacted, and only a class name and a length are recorded). All three are a count, a closed name and a number, kept with or
+without ``trace`` and by the last-resort cut. A summary built without the text (the continuation report row) carries none of
+them; a class that could not be computed (the classifier raised, ``RecursionError`` on a deeply nested payload included, or
+named something outside :data:`~nexus.plans.answer_text_class.ANSWER_CLASSES`) is left out with ``final_chars`` kept, and the
+rest of the summary is unharmed. A row from an engine that does not keep the run summary has none: the reader falls back to
+its heuristic there.
 
 **Redaction.** The question never appears. ``trace=False`` also drops facet text, source hints, the topic
 sentence and every source label; ids, counts and closed names stay. The summary is built from the same
@@ -71,7 +76,7 @@ from typing import Any, Literal
 
 import structlog
 
-from nexus.plans.answer_text_class import classify_answer_text
+from nexus.plans.answer_text_class import ANSWER_CLASSES, CLASS_VERSION, classify_answer_text
 
 _log = structlog.get_logger(__name__)
 
@@ -124,7 +129,7 @@ _CUT_LADDER: tuple[str, ...] = (
 #: What survives the last-resort cut.
 _KEEP_ALWAYS = (
     "version", "kind", "outcome", "trace", "coverage_complete", "coverage_partial", "coverage_unavailable",
-    "coverage_unassessed", "coverage_state", "run", "final_chars", "answer_class",
+    "coverage_unassessed", "coverage_state", "run", "final_chars", "answer_class", "class_version",
 )
 
 
@@ -347,8 +352,23 @@ def build_run_summary(
     }
     if answer_text is not None:
         summary["final_chars"] = len(answer_text)
-        summary["answer_class"] = classify_answer_text(answer_text, step_count=step_count)
+        answer_class = _answer_class_or_none(answer_text, step_count)
+        if answer_class is not None:
+            summary["answer_class"] = answer_class
+            summary["class_version"] = CLASS_VERSION
     return fit_summary(summary)
+
+
+def _answer_class_or_none(answer_text: str, step_count: int) -> str | None:
+    """The class of *answer_text*, or ``None`` when it cannot be recorded: the classifier raised (a payload nested
+    deeply enough to overflow the JSON parser raises ``RecursionError``, an ``Exception``) or named something the
+    reader would refuse. Its own failure domain: a class that cannot be had never costs the rest of the summary."""
+    try:
+        answer_class = classify_answer_text(answer_text, step_count=step_count)
+    except Exception as exc:  # noqa: BLE001 — the class is an extra; the summary is still worth recording without it
+        _log.warning("nx_answer_run_summary_classify_failed", error=type(exc).__name__)
+        return None
+    return answer_class if answer_class in ANSWER_CLASSES else None
 
 
 def _drop(summary: dict[str, Any], path: str) -> bool:

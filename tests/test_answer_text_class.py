@@ -19,12 +19,14 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.commands.answer_runs import (
+    _WELL_FORMED_DEGENERATE_CLASSES,
     _classification_basis_counts,
     _classify_degenerate_row,
+    _recorded_answer_class,
     _split_four_way,
     answer_runs_cmd,
 )
-from nexus.plans.answer_text_class import classify_answer_text, heuristic_class
+from nexus.plans.answer_text_class import ANSWER_CLASSES, CLASS_VERSION, classify_answer_text
 from nexus.mcp.core import _nx_answer_record_complete, _nx_answer_record_run
 from nexus.plans.run_summary import (
     RunSummaryInputs,
@@ -61,8 +63,14 @@ def _recorded(cls: str, chars: int) -> dict[str, Any]:
     return {
         "version": 1, "kind": "nx_answer", "outcome": "success", "trace": True,
         "coverage_complete": 0, "coverage_partial": 0, "coverage_unavailable": 0, "coverage_unassessed": 1,
-        "coverage_state": "unassessed", "final_chars": chars, "answer_class": cls,
+        "coverage_state": "unassessed", "final_chars": chars, "answer_class": cls, "class_version": CLASS_VERSION,
     }
+
+
+def _redacted_row(*, summary: dict[str, Any] | None = None, steps: int = 3) -> dict[str, Any]:
+    row = _row("[redacted]", summary=summary, steps=steps)
+    row["question"] = "[redacted]"
+    return row
 
 
 class TestFixturesAreRealRuns:
@@ -88,15 +96,50 @@ class TestTheReaderPrefersTheRecordedClass:
         assert _classify_degenerate_row(_row(short_raw)) == "non_answer/extractions_only"
         assert _classify_degenerate_row(_row(_kept(RAW_EXTRACTIONS))) == "other", "old row: the heuristic still undercounts"
 
-    @pytest.mark.parametrize("bad", [None, "", 7, ["x"], "x" * 200])
-    def test_an_unusable_recorded_class_falls_back_to_the_heuristic(self, bad: Any) -> None:
+    @pytest.mark.parametrize("bad", [
+        None, "", 7, ["x"], "x" * 200, "sentinel/x", "non_answer/not_a_shape", "redacted", "non_answer/answered",
+        "non_answer/insufficient_evidence", "Other",
+    ])
+    def test_a_recorded_class_outside_the_vocabulary_falls_back_to_the_heuristic(self, bad: Any) -> None:
         summary = {**_recorded("other", 10), "answer_class": bad}
+        assert _recorded_answer_class(_row("x", summary=summary)) is None
         assert _classify_degenerate_row(_row(_kept(RAW_EXTRACTIONS), summary=summary)) == "other"
 
-    def test_a_redacted_row_keeps_its_redaction_class(self) -> None:
-        row = _row("[redacted]", summary={**_recorded("non_answer/extractions_only", 9000), "trace": False})
-        row["question"] = "[redacted]"
-        assert _classify_degenerate_row(row) == "redacted"
+    @pytest.mark.parametrize("cls", sorted(ANSWER_CLASSES))
+    def test_every_class_in_the_vocabulary_is_accepted(self, cls: str) -> None:
+        assert _recorded_answer_class(_row("x", summary=_recorded(cls, 1))) == cls
+
+    def test_the_vocabulary_covers_the_degenerate_routing_set_and_the_classifier_outputs(self) -> None:
+        assert _WELL_FORMED_DEGENERATE_CLASSES <= ANSWER_CLASSES
+        outputs = {
+            classify_answer_text(t, step_count=n) for t, n in [
+                (RAW_EXTRACTIONS, 3), (RAW_IDS, 3), ("Error: x", 0), ("Planner error: x", 0), ("An answer.", 3), ("", 0),
+                ("[non-answer: uncovered]\nb", 2), ("[budget warning (x): y]\n", 2), ("Found 2 documents (from 2 chunks)", 1),
+                ("nothing to summarize", 2), ('{"ranked": [1]}', 2), ('{"contents": []}', 2), ('{"groups": []}', 2),
+            ]
+        }
+        assert len(outputs) >= 8, "non-vacuity: the battery reaches many classes"
+        assert outputs <= ANSWER_CLASSES, outputs - ANSWER_CLASSES
+
+
+class TestRedactedRows:
+    """A redacted (``trace=False``) row's text is ``[redacted]``, but the writer classified the real text first."""
+
+    @pytest.mark.parametrize("raw,cls", [(RAW_EXTRACTIONS, "non_answer/extractions_only"), (RAW_IDS, "non_answer/retrieval_only")])
+    def test_a_redacted_raw_payload_with_a_recorded_class_is_degenerate(self, raw: str, cls: str) -> None:
+        row = _redacted_row(summary={**_recorded(cls, len(raw)), "trace": False})
+        assert _classify_degenerate_row(row) == cls
+        _ok, _failed, _handed, degenerate, _reports = _split_four_way([row])
+        assert degenerate == {cls: [row]}
+
+    def test_a_redacted_row_with_no_recorded_class_stays_redacted(self) -> None:
+        for row in (_redacted_row(), _redacted_row(summary={**_recorded("other", 5), "answer_class": None, "trace": False})):
+            assert _classify_degenerate_row(row) == "redacted"
+
+    def test_a_recorded_other_on_a_redacted_row_still_yields_to_the_coverage_verdict(self) -> None:
+        unavailable = {**_recorded("other", 5), "trace": False, "coverage_state": "unavailable", "coverage_unavailable": 1}
+        assert _classify_degenerate_row(_redacted_row(summary=unavailable)) == "non_answer/no_usable_answer"
+        assert _classify_degenerate_row(_redacted_row(summary={**_recorded("other", 5), "trace": False})) == "other"
 
     def test_a_recorded_answer_class_keeps_an_answer_an_answer(self) -> None:
         row = _row("A real answer.", summary=_recorded("other", 14))
@@ -112,8 +155,10 @@ class TestTheBasisIsReported:
             _row("An answer.", summary=_recorded("other", 10), rid=2),
             _row(_kept(RAW_IDS), rid=3),
             _row("Old answer.", rid=4),
+            _redacted_row(summary={**_recorded("non_answer/retrieval_only", len(RAW_IDS)), "trace": False}),
+            _redacted_row(),
         ]
-        assert _classification_basis_counts(rows) == {"recorded": 2, "heuristic": 2}
+        assert _classification_basis_counts(rows) == {"recorded": 3, "heuristic": 2, "redacted": 1}
 
     @staticmethod
     def _store(rows: list[dict[str, Any]]):
@@ -141,19 +186,32 @@ class TestTheBasisIsReported:
         payload = json.loads(result.stdout)
         assert payload["degenerate_breakdown"] == {"non_answer/extractions_only": 1}
         assert payload["executed_ok_count"] == 2
-        assert payload["classification_basis"] == {"recorded": 1, "heuristic": 2}
+        assert payload["classification_basis"] == {"recorded": 1, "heuristic": 2, "redacted": 0}
+        assert payload["degenerate_count_truncation_limited"] is True
 
-    def test_human_report_says_the_heuristic_rows_are_a_floor(self, monkeypatch) -> None:
+    def test_human_report_says_the_degenerate_counts_are_not_exact_while_heuristic_rows_remain(self, monkeypatch) -> None:
         monkeypatch.setattr("nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: self._store(self._rows()))
         out = " ".join(CliRunner().invoke(answer_runs_cmd, []).output.split())
-        assert "1 by recorded class" in out and "2 by read-time heuristic" in out
-        assert "lower bound" in out
+        assert "1 by recorded class" in out and "2 by read-time heuristic" in out and "0 redacted with no recorded class" in out
+        assert "not exact" in out and "can count a real answer as degenerate" in out
+        assert "lower bound" not in out, "the heuristic can over-count as well as miss, so it is no bound"
 
-    def test_human_report_omits_the_floor_note_when_every_row_is_recorded(self, monkeypatch) -> None:
-        rows = [_row("An answer.", summary=_recorded("other", 10))]
+    def test_a_redacted_row_with_no_recorded_class_is_not_a_truncation_limit(self, monkeypatch) -> None:
+        rows = [_row("An answer.", summary=_recorded("other", 10)), _redacted_row()]
         monkeypatch.setattr("nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: self._store(rows))
+        payload = json.loads(CliRunner().invoke(answer_runs_cmd, ["--json"]).stdout)
+        assert payload["classification_basis"] == {"recorded": 1, "heuristic": 0, "redacted": 1}
+        assert payload["degenerate_count_truncation_limited"] is False
         out = " ".join(CliRunner().invoke(answer_runs_cmd, []).output.split())
-        assert "1 by recorded class" in out and "lower bound" not in out
+        assert "1 by recorded class" in out and "1 redacted with no recorded class" in out
+        assert "not exact" not in out
+
+    def test_a_redacted_raw_payload_is_counted_degenerate_in_the_report(self, monkeypatch) -> None:
+        rows = [_redacted_row(summary={**_recorded("non_answer/extractions_only", len(RAW_EXTRACTIONS)), "trace": False})]
+        monkeypatch.setattr("nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: self._store(rows))
+        payload = json.loads(CliRunner().invoke(answer_runs_cmd, ["--json"]).stdout)
+        assert payload["degenerate_breakdown"] == {"non_answer/extractions_only": 1}
+        assert payload["classification_basis"] == {"recorded": 1, "heuristic": 0, "redacted": 0}
 
 
 class TestTheWriterRecordsTheFullTextClass:
@@ -167,24 +225,49 @@ class TestTheWriterRecordsTheFullTextClass:
         s = self._summary(RAW_EXTRACTIONS)
         assert s["final_chars"] == len(RAW_EXTRACTIONS) > 2000
         assert s["answer_class"] == "non_answer/extractions_only"
+        assert s["class_version"] == CLASS_VERSION and isinstance(CLASS_VERSION, int)
         assert s["version"] == 1, "additive: the schema version does not move"
 
     def test_no_text_means_no_keys(self) -> None:
         s = self._summary(None, kind="continuation_report")
-        assert "final_chars" not in s and "answer_class" not in s
+        assert not {"final_chars", "answer_class", "class_version"} & set(s)
 
-    def test_the_two_new_keys_survive_the_last_resort_cut(self) -> None:
+    def test_a_classifier_that_raises_costs_the_class_keys_and_nothing_else(self) -> None:
+        whole = self._summary("An answer.")
+        with patch("nexus.plans.run_summary.classify_answer_text", side_effect=RecursionError("deep")):
+            s = self._summary("An answer.")
+        assert s["final_chars"] == len("An answer.")
+        assert "answer_class" not in s and "class_version" not in s
+        assert {k: v for k, v in whole.items() if k not in ("answer_class", "class_version")} == s, "the rest is unharmed"
+
+    def test_a_deeply_nested_payload_is_recorded_without_a_class_and_the_summary_survives_prepare(self) -> None:
+        deep = '{"a":' * 200_000 + "1" + "}" * 200_000
+        tel = FakeTelemetry()
+        rec = RunSummaryRecorder(trace=True, readback=False, inputs=lambda: RunSummaryInputs())
+        summary = rec.prepare(
+            tel, outcome="success", plan_id=1, step_count=2, duration_ms=3, cost_usd=None, answer_text=deep,
+        )
+        assert summary is not None, "the summary is not dropped for a payload the classifier cannot read"
+        assert summary["final_chars"] == len(deep) and summary["version"] == 1
+
+    def test_a_class_outside_the_vocabulary_is_not_recorded(self) -> None:
+        with patch("nexus.plans.run_summary.classify_answer_text", return_value="sentinel/one"):
+            s = self._summary("anything")
+        assert s["final_chars"] == len("anything") and "answer_class" not in s and "class_version" not in s
+
+    def test_the_new_keys_survive_the_last_resort_cut(self) -> None:
         s = self._summary(RAW_IDS)
         s["request"] = {"filler": "x" * 70_000}
         s["coverage"] = {"filler": "x" * 70_000}
         out = fit_summary(s)
         assert out["truncated"] and out["final_chars"] == len(RAW_IDS) and out["answer_class"] == "non_answer/retrieval_only"
+        assert out["class_version"] == CLASS_VERSION
 
     def test_there_is_one_classifier(self) -> None:
         """The writer calls the shared classifier; a stand-in for it decides the recorded class."""
-        with patch("nexus.plans.run_summary.classify_answer_text", return_value="sentinel/one") as spy:
+        with patch("nexus.plans.run_summary.classify_answer_text", return_value="non_answer/ranking_only") as spy:
             s = self._summary("anything")
-        assert s["answer_class"] == "sentinel/one"
+        assert s["answer_class"] == "non_answer/ranking_only"
         spy.assert_called_once_with("anything", step_count=3)
 
     @pytest.mark.parametrize("text,steps", [
@@ -237,6 +320,7 @@ class TestTheWriterRecordsTheFullTextClass:
         [(_kind, kw)] = tel.writes()
         assert kw["final_text"] == "[redacted]" and kw["question"] == "[redacted]"
         assert kw["run_summary"]["answer_class"] == "non_answer/retrieval_only"
+        assert kw["run_summary"]["class_version"] == CLASS_VERSION and kw["run_summary"]["final_chars"] == len(RAW_IDS)
         assert "chash:" not in json.dumps(kw["run_summary"]), "a closed name and a count, never the text"
 
 
