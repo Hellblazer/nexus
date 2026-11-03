@@ -29,7 +29,9 @@ from unittest.mock import patch
 import pytest
 
 from nexus.plans import coverage_ledger
+from nexus.plans.answer_shape import AnswerShape
 from nexus.plans.coverage_ledger import CoverageBoundary
+from nexus.plans.coverage_outcome import decide_outcome, render_insufficient_evidence
 from nexus.plans.coverage_repair import MAX_REPAIR_ITEMS, MAX_REPAIR_QUERIES
 from nexus.plans.run_summary import RunSummaryInputs, build_run_summary
 from tests import test_rdr232_coverage_ledger as ledger_fixture
@@ -169,6 +171,9 @@ async def test_a_contradicting_tail_item_marks_the_covered_facet_conflicted_and_
     assert f1 is not None and f1.state == "covered" and f1.reason == "conflicted"
     assert set(f1.evidence_ids) == {_anchor(cov, "HEAD").item_id, _anchor(cov, "TAIL").item_id}
     assert cov.conflicted_facet_ids == ("f1",)
+    assert (cov.state, cov.reason) == ("complete", "all_covered"), "covered then conflicted: the run is as complete as before"
+    verdict = decide_outcome(cov, AnswerShape.ANSWERED)
+    assert (verdict.shape, verdict.success, verdict.no_grow) == (AnswerShape.ANSWERED, True, False)
 
 
 # ── the envelope says why the repair ran ─────────────────────────────────────────────────────────────────────
@@ -326,17 +331,35 @@ async def test_repair_switched_off_stays_off_for_a_contradicted_facet_too() -> N
 
 @pytest.mark.asyncio
 async def test_support_found_in_the_tail_moves_a_contradicted_facet_to_conflicted() -> None:
-    """The ledger's own rule (``facets_conflicted``): a facet with support and a contradiction is covered with the
-    ``conflicted`` reason. The reread finds support for the contradicted facet, so it becomes that, not plain covered."""
+    """The ledger's own rule (``facets_conflicted``): a facet with support and a contradiction is covered and conflicted.
+    The reread finds support for the contradicted facet, so it becomes that, not plain covered. Its reason keeps the
+    origin (``conflicted_from_contradicted``, Sam's option b, nexus-se11w) so the run can stay partial."""
     _, first = await _drive(12, check=_contradicted_check(tail="supports"), max_repair_queries=0)
     assert first.counts()["facets_conflicted"] == 0 and first.conflicted_facet_ids == ()
     _, cov = await _drive(12, check=_contradicted_check(tail="supports"))
     head, tail = _anchor(cov, "HEAD"), _anchor(cov, "TAIL")
     f1 = cov.ledger.finding("f1")
-    assert f1 is not None and (f1.state, f1.reason) == ("covered", "conflicted")
+    assert f1 is not None and (f1.state, f1.reason) == ("covered", "conflicted_from_contradicted")
     assert set(f1.evidence_ids) == {head.item_id, tail.item_id}, "the contradiction is kept, the support is added"
-    assert cov.conflicted_facet_ids == ("f1",) and cov.counts()["facets_conflicted"] == 1
-    assert cov.state == "complete" and cov.unresolved_facet_ids == (), "no longer an unresolved facet"
+    assert cov.conflicted_facet_ids == ("f1",) and cov.counts()["facets_conflicted"] == 1, "the conflict is recorded"
+
+
+@pytest.mark.asyncio
+async def test_a_contradicted_facet_turned_conflicted_by_the_tail_keeps_the_run_partial_with_the_notice() -> None:
+    """Sam's option (b), nexus-se11w: the tail is read and the conflict recorded, but the facet STARTED contradicted, so
+    the run stays ``partial``, the answer carries the insufficient-evidence notice and the plan does not grow. A facet
+    that started covered and became conflicted is unchanged (the test above)."""
+    d, cov = await _drive(12, check=_contradicted_check(tail="supports"))
+    assert (cov.state, cov.reason) == ("partial", "unresolved_facets") and not cov.skip_generation
+    assert d.tools.count("generate") == 1, "the answer is still generated"
+    verdict = decide_outcome(cov, AnswerShape.ANSWERED)
+    assert (verdict.shape, verdict.success, verdict.no_grow) == (AnswerShape.INSUFFICIENT_EVIDENCE, True, True)
+    text = render_insufficient_evidence(cov, {"f1": "the facet"}, "the prose")
+    assert text.startswith("[insufficient-evidence: 1 unresolved]"), text
+    assert "f1 (the evidence conflicts" in text and text.endswith("the prose")
+    assert "were not read by the coverage check" in text, "the unread count is still disclosed"
+    note = d.args_of("generate")[0]["context"]
+    assert "f1" in note and "conflicts" in note, "the reduction is told the evidence on f1 conflicts"
 
 
 @pytest.mark.asyncio
@@ -392,8 +415,9 @@ async def test_unsupported_then_contradicted_then_covered_is_the_repair_priority
     assert cov.repair.facet_ids == ("f3", "f2", "f1")
     assert (cov.repair.reason, cov.repair.unread_facet_ids) == ("unsupported_and_unread_tail", ("f2", "f1"))
     assert [a["query"] for a in d.repair_searches()] == ["what the document says about topic 3"], "retrieval for the unsupported facet only"
-    assert (cov.ledger.finding("f2").state, cov.ledger.finding("f2").reason) == ("covered", "conflicted")
+    assert (cov.ledger.finding("f2").state, cov.ledger.finding("f2").reason) == ("covered", "conflicted_from_contradicted")
     assert (cov.ledger.finding("f1").state, cov.ledger.finding("f1").reason) == ("covered", "")
+    assert cov.state == "partial", "f2 started contradicted: the run stays partial"
 
 
 @pytest.mark.asyncio
@@ -408,13 +432,35 @@ async def test_with_more_than_six_targets_a_contradicted_facet_is_reassessed_bef
 
 
 @pytest.mark.asyncio
+async def test_a_cut_of_the_last_group_drops_the_covered_facet_before_the_contradicted_one() -> None:
+    """f1 covered, f2 contradicted, f3..f7 unsupported: seven targets, the contradicted facet in the first group of six
+    and the covered one alone in the second. The second group's call is cut (it fails here: a deadline or USD skip drops
+    the same group): the covered facet is the one left as it was, the contradicted one was reread and turned conflicted."""
+    inner = _contradicted_check(tail="supports", covered=("f1",), contradicted=("f2",))
+
+    def check(items: str, instruction: str) -> dict:
+        if "TAIL" in items and _tag_lines(instruction) == ["f1"]:
+            raise RuntimeError("cut")
+        return inner(items, instruction)
+
+    d, cov = await _drive(12, facets=7, check=check)
+    assert cov.repair.facet_ids == ("f3", "f4", "f5", "f6", "f7", "f2", "f1")
+    groups = [_tag_lines(c["check_instruction"]) for c in d.args_of("operator_check") if "TAIL" in c["items"]]
+    assert groups == [["f3", "f4", "f5", "f6", "f7", "f2"], ["f1"]], groups
+    head = _anchor(cov, "HEAD")
+    assert (cov.ledger.finding("f1").state, cov.ledger.finding("f1").evidence_ids) == ("covered", (head.item_id,)), "cut: as it was"
+    assert (cov.ledger.finding("f2").state, cov.ledger.finding("f2").reason) == ("covered", "conflicted_from_contradicted")
+
+
+@pytest.mark.asyncio
 async def test_the_repair_budget_is_unchanged_for_a_contradicted_facet_beside_an_unsupported_one() -> None:
-    """One query slot goes to the unsupported facet; the contradicted facet adds no query and the caps stand."""
+    """The default budget: one unsupported facet takes one query and the chunk cap binds; the contradicted facet adds no
+    query. 30 hits are on offer and exactly MAX_REPAIR_ITEMS are merged."""
     assert (MAX_REPAIR_ITEMS, MAX_REPAIR_QUERIES) == (12, 6)
     hits = [f"repair hit number {i:02d} with some text" for i in range(30)]
-    d, cov = await _drive(12, facets=2, check=_contradicted_check(tail="supports"), max_repair_queries=1, repair_hits=hits)
+    d, cov = await _drive(12, facets=2, check=_contradicted_check(tail="supports"), repair_hits=hits)
     assert [a["query"] for a in d.repair_searches()] == ["what the document says about topic 2"]
-    assert cov.repair.queries <= 1 and 0 < cov.repair.items_merged <= MAX_REPAIR_ITEMS
+    assert cov.repair.queries == 1 and cov.repair.items_merged == 12 == MAX_REPAIR_ITEMS
     assert cov.repair.facet_ids == ("f2", "f1") and cov.ledger.rounds == 2
     assert d.tools.count("generate") == 1
 
@@ -426,6 +472,17 @@ async def test_a_contradicted_tail_repair_the_usd_allowance_cannot_carry_is_skip
     assert cov.repair.outcome == "skipped_budget" and cov.repair.unread_facet_ids == ("f1",)
     f1 = cov.ledger.finding("f1")
     assert f1 is not None and f1.state == "contradicted" and cov.ledger.rounds == 1
+
+
+@pytest.mark.asyncio
+async def test_a_contradicted_tail_repair_with_too_little_deadline_is_skipped_and_the_facet_stands() -> None:
+    d = RepairDispatcher(_contradicted_check(tail="supports"))
+    _, cov = await _drive(12, dispatcher=d, run_kw={"deadline": time.monotonic() + 40.0})
+    assert cov.repair.outcome == "skipped_deadline" and d.repair_searches() == []
+    assert (cov.repair.reason, cov.repair.unread_facet_ids) == ("unread_tail", ("f1",))
+    f1 = cov.ledger.finding("f1")
+    assert f1 is not None and (f1.state, f1.evidence_ids) == ("contradicted", (_anchor(cov, "HEAD").item_id,))
+    assert cov.ledger.rounds == 1 and d.tools.count("generate") == 1
 
 
 @pytest.mark.asyncio

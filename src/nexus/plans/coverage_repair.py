@@ -17,8 +17,9 @@ caller's explicit scope. The targets are therefore never wider than the scope th
 primary collection the caller's scope excludes is not asked (a corpus scope by collection, a catalog-subtree scope
 by the documents the named source holds), a subtree scope rides every query that can take one, a plan target
 carries the plan step's own ``where`` / ``content_type`` / ``author`` filters, and a retrieved hit outside the
-caller's scope is dropped (the coverage ledger does that). Contradicted facets are not repair targets
-(``CoverageResult.repair_facet_ids`` excludes them): a repair would be a search for agreement.
+caller's scope is dropped (the coverage ledger does that). Contradicted facets are not a retrieval target
+(``CoverageResult.repair_facet_ids`` excludes them: a query would be a search for agreement); the unread-tail reread
+can still read their tail (``CoverageResult.unread_tail_facet_ids``, nexus-se11w).
 
 **The bounds are starting points, not measurements** (Phase 3 step 4 owns re-fitting them), each a constant:
 

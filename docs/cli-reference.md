@@ -6325,8 +6325,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   reads) or `unsupported_and_unread_tail`, empty when no repair ran, and `unread_facet_ids` names the
   facets of the second kind (`facet_ids` lists the unsupported ones first, then the contradicted, then the covered). A covered
   facet stays covered whatever the unread anchors say: a supporting one adds to its evidence, a
-  contradicting one marks it `conflicted`. A contradicted facet (nexus-se11w) becomes covered and
-  `conflicted` when an unread anchor supports it, and stays contradicted otherwise. The repair budget is unchanged (6 queries, 12 items). `assessment` also reports what each call came back as
+  contradicting one marks it `conflicted`. A contradicted facet (nexus-se11w) is recorded as covered
+  with the reason `conflicted_from_contradicted` when an unread anchor supports it, and the run stays `partial` with its notice;
+  it stays contradicted otherwise. The repair budget is unchanged (6 queries, 12 items). `assessment` also reports what each call came back as
   (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
   `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,

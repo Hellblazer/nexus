@@ -28,7 +28,7 @@ What the boundary does, in order:
    ``item_id`` must be one of the call's input ids and its ``quote`` must open with the facet tag
    (``[f2] ...``, any case) of a facet in that call; anything else is rejected and counted
    (:attr:`AssessmentReport.rejected_records`). ``supports`` covers a facet, ``neutral`` does nothing, and
-   ``contradicts`` marks a facet ``contradicted`` (retained for the reduction, never repaired into agreement)
+   ``contradicts`` marks a facet ``contradicted`` (retained for the reduction; not a retrieval target)
    only when no item supports it: a facet with both is ``covered`` and carries the reason ``conflicted``, so
    the reduction and the notice can say the evidence conflicts.
    **An unusable reply is a failed assessment, not a finding.** A call that returns no evidence record at
@@ -174,7 +174,9 @@ __all__ = [
     "ASSESSMENT_MAX_ITEM_CHARS",
     "ASSESSMENT_OPERATOR",
     "ASSESSMENT_STAGE_DEADLINE_SHARE",
+    "CONFLICTED_FROM_CONTRADICTED_REASON",
     "CONFLICTED_REASON",
+    "CONFLICTED_REASONS",
     "INSTRUCTION_MARKER",
     "MAX_ANCHORS_PER_ASSESSMENT_CALL",
     "MAX_CONCURRENT_ASSESSMENT_CALLS",
@@ -255,6 +257,13 @@ _ROLES = frozenset({"supports", "contradicts", "neutral"})
 
 #: A finding's ``reason`` for a facet that is ``covered`` while other items contradict it.
 CONFLICTED_REASON = "conflicted"
+#: The reason of a facet that STARTED ``contradicted`` and ended covered-and-conflicted because the unread-tail reread
+#: found support (nexus-se11w; Sam's option b). It is a conflict like :data:`CONFLICTED_REASON` (``conflicted_facet_ids``,
+#: ``facets_conflicted``, the notice) but the run stays ``partial``: the facet was contradicted on what was read, so the
+#: answer keeps its insufficient-evidence notice and the plan does not grow.
+CONFLICTED_FROM_CONTRADICTED_REASON = "conflicted_from_contradicted"
+#: Both reasons of a conflicted facet.
+CONFLICTED_REASONS: frozenset[str] = frozenset({CONFLICTED_REASON, CONFLICTED_FROM_CONTRADICTED_REASON})
 #: A finding's ``reason`` for a facet left ``unassessed`` because the assessor's reply for it was unusable.
 UNUSABLE_REASON = "assessment_unusable"
 #: A finding's ``reason`` for a facet left ``unassessed`` because the assessment call for it raised.
@@ -535,7 +544,8 @@ class CoverageResult:
 
     ``skip_generation`` is the only field the runner acts on. ``repair_facet_ids`` are the facets a
     targeted retrieval can still help (assessed, nothing in the held evidence bears on them); a missing
-    source, a scope conflict, a contradiction and an unassessed facet are not repair targets.
+    source, a scope conflict, a contradiction and an unassessed facet are not retrieval targets (the unread-tail reread
+    can still read a contradicted facet's tail, :attr:`unread_tail_facet_ids`).
     """
 
     state: CoverageState
@@ -554,9 +564,9 @@ class CoverageResult:
         contradicted ones nexus-se11w, the same ruling): strictly more than half of the ledger's anchors were never read,
         the per-call size cap having left them out. Every facet is assessed against every anchor, so the unread share is
         the ledger's own. A covered facet is repaired for these although it is covered, and a contradicted one although
-        a repair for it reads for agreement: support in the unread tail is otherwise never read, and it would turn a
-        contradicted facet into a conflicted one (run 990, H29: 187 of 301 anchors unread). An unsupported facet is
-        already a repair target. Contradicted facets come before covered ones: the contradicted facet is an unresolved
+        it is not a retrieval target, only its unread tail is reread: support there is otherwise never read, and would turn
+        a contradicted facet into a conflicted one (run 990, H29: 187 of 301 anchors unread; the run then stays partial,
+        nexus-se11w). An unsupported facet is already a repair target. Contradicted facets come before covered ones: the contradicted facet is an unresolved
         gap the tail can still settle, a covered facet only gains evidence from it, so under a size or budget cut the
         covered one is the one dropped."""
         a = self.ledger.assessment
@@ -579,7 +589,7 @@ class CoverageResult:
     def conflicted_facet_ids(self) -> tuple[str, ...]:
         """Facets that are covered and also contradicted by other evidence: answered, but the reduction and the
         notice say the evidence conflicts."""
-        return tuple(f.facet_id for f in self.ledger.findings if f.state == "covered" and f.reason == CONFLICTED_REASON)
+        return tuple(f.facet_id for f in self.ledger.findings if f.state == "covered" and f.reason in CONFLICTED_REASONS)
 
     @property
     def unassessed_by_cause(self) -> dict[str, int]:
@@ -1070,6 +1080,8 @@ class CoverageBoundary:
         state, why, skip = state_for(
             [f.state for f in findings], assessment_outcome=report.outcome, anchors=len(anchors), observed=view.observed, scope_conflict=conflict,
         )
+        if state == "complete" and any(f.reason == CONFLICTED_FROM_CONTRADICTED_REASON for f in findings):
+            state, why = "partial", "unresolved_facets"  # a facet that started contradicted keeps the run partial (nexus-se11w)
         result = CoverageResult(state, why, skip and self.skip_generation_when_uncovered, replace(base, findings=findings, assessment=report), carried)
         self._log(result)
         return result
@@ -1654,15 +1666,16 @@ def _with_tail_evidence(earlier: FacetFinding, new: FacetFinding | None) -> Face
     item adds to its evidence, a contradicting one marks it ``conflicted``, and a reassessment that found nothing, failed
     or was skipped leaves the finding as it was. Reading more never takes support away.
 
-    A contradicted facet (nexus-se11w) keeps its contradiction. Support in the tail makes it covered and ``conflicted``,
+    A contradicted facet (nexus-se11w) keeps its contradiction. Support in the tail makes it covered and conflicted,
     the ledger's one rule for a facet with support and a contradiction both (:meth:`CoverageResult.conflicted_facet_ids`,
-    ``facets_conflicted``), whatever the tail also says; a tail that only contradicts adds to its evidence."""
+    ``facets_conflicted``), whatever the tail also says, with the reason :data:`CONFLICTED_FROM_CONTRADICTED_REASON` so the
+    run stays ``partial`` (Sam's option b); a tail that only contradicts adds to its evidence."""
     if new is None or new.state not in ("covered", "contradicted"):
         return earlier
     if earlier.state == "contradicted":
         evidence = tuple(sorted(set(earlier.evidence_ids) | set(new.evidence_ids)))
         if new.state == "covered":
-            return FacetFinding(earlier.facet_id, "covered", evidence, CONFLICTED_REASON)
+            return FacetFinding(earlier.facet_id, "covered", evidence, CONFLICTED_FROM_CONTRADICTED_REASON)
         return FacetFinding(earlier.facet_id, "contradicted", evidence, earlier.reason)
     conflicted = earlier.reason == CONFLICTED_REASON or new.state == "contradicted" or new.reason == CONFLICTED_REASON
     return FacetFinding(
