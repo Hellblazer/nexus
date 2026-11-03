@@ -163,7 +163,7 @@ If assumed findings remain:
 
 ### Layer 3 — AI Critique (substantive-critic agent)
 
-The critique itself follows `resources/rdr/REGISTER.md` (clear, simple, concise; addressed to the author, not the machine). Include this question in the critic's brief as criterion 6, WARN-CLASS ONLY (a readability miss never fails or blocks the gate): could a smart reader who does not know this project's jargon follow the problem and the decision from this RDR alone? The useful answer is a list: each undefined term, each sentence assuming tribal knowledge. (REGISTER.md names the reader per stage; jargon is fine when defined on first use.)
+The critique itself follows the prose register, `$RDR_DIR/REGISTER.md`, falling back to `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md` (clear, simple, concise; addressed to the author, not the machine). Criterion 6 below states everything the critic needs, so the brief does not send the critic to that file; if a brief names it, write the absolute path (nexus-egv6q). Include this question in the critic's brief as criterion 6, WARN-CLASS ONLY (a readability miss never fails or blocks the gate): could a smart reader who does not know this project's jargon follow the problem and the decision from this RDR alone? The useful answer is a list: each undefined term, each sentence assuming tribal knowledge. (REGISTER.md names the reader per stage; jargon is fine when defined on first use.)
 
 Before dispatch, seed link-context so the gate critique auto-links to the RDR:
 ```
@@ -190,7 +190,7 @@ Structured critique with pass/warn/fail per finalization gate criterion:
 3. Scope Verification — pass/warn/fail
 4. Cross-Cutting Concerns — pass/warn/fail
 5. Proportionality — pass/warn/fail
-6. Register Readability — pass/warn ONLY (never fail, never blocks): could a smart reader who does not know this project's jargon follow the problem and the decision from this RDR alone? List each undefined term and each sentence assuming tribal knowledge (see resources/rdr/REGISTER.md). A warn here is guidance to the author, not a gate outcome. A term listed here never appears as a Critical or Significant.
+6. Register Readability — pass/warn ONLY (never fail, never blocks): could a smart reader who does not know this project's jargon follow the problem and the decision from this RDR alone? List each undefined term and each sentence assuming tribal knowledge; jargon is fine when defined on first use. A warn here is guidance to the author, not a gate outcome. A term listed here never appears as a Critical or Significant.
 
 Gate round: N (from the preamble). Ship-blocker for an RDR gate: "yes" iff an implementer executing the plan as written would build the wrong thing, or the decision rests on a refuted assumption. A documentation-accuracy defect (wrong attribution, wrong citation, a wrong count that changes no decision) is never a ship-blocker.
 
@@ -289,7 +289,7 @@ Structured critique with pass/warn/fail per finalization gate criterion:
 3. Scope Verification
 4. Cross-Cutting Concerns
 5. Proportionality
-6. Register Readability (pass/warn ONLY — never fail, never blocks; list undefined terms and tribal-knowledge sentences per resources/rdr/REGISTER.md)
+6. Register Readability (pass/warn ONLY — never fail, never blocks; list undefined terms and tribal-knowledge sentences; jargon is fine when defined on first use)
 
 ### Quality Criteria
 - [ ] Every fail has a specific section reference and fix suggestion

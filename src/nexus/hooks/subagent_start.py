@@ -153,6 +153,9 @@ _ORCH = (
     "wins |\n"
     "| Git | Shared tree: NEVER git add/commit (hook-ENFORCED; linked worktrees "
     "exempt). Hand back diffs+paths; orchestrator commits pathspec-limited |\n"
+    "| Search scope | Search only under the roots your brief names; never `find /`, "
+    "`grep -r /` or `mdfind`. A file you cannot find is a question for the caller "
+    "(nexus-egv6q) |\n"
 )
 
 _WORKTREE_PREFLIGHT = (

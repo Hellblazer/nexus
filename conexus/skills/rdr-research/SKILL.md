@@ -48,7 +48,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
    A value outside either set is refused. Source stays in the finding text.
 
 3. **Append to RDR markdown**: Add a formatted entry to the Research Findings > Key Discoveries section:
-   Prose register (`$RDR_DIR/REGISTER.md`, fallback `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md`): findings in plain terms a non-native-speaker expert can follow; say what is known and what is not; a dead end recorded plainly is a finding.
+   Prose register (`$RDR_DIR/REGISTER.md`, fallback `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md`): findings in plain terms a non-native-speaker expert can follow; say what is known and what is not; a dead end recorded plainly is a finding.
    ```markdown
    - **✅ Verified** (source search) — Finding text here
      *Source: source description*

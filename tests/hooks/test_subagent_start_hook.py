@@ -125,6 +125,17 @@ class TestSubagentStartHook:
         assert "NEVER git add/commit" in ctx
         assert "orchestrator commits pathspec-limited" in ctx
 
+    def test_search_scope_row_injected(self) -> None:
+        """nexus-egv6q: a gate critic that could not find a briefed file ran
+        ``find /`` over the whole disk. Every subagent gets the search-scope
+        row, reviewers included."""
+        result = _run_hook()
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "| Search scope |" in ctx
+        assert "Search only under the roots your brief names" in ctx
+        assert "never `find /`, `grep -r /` or `mdfind`" in ctx
+
+
 class TestClaimantIdInjection:
     """RDR-205 "Identity and addressing" (bead nexus-em75s.11): this is the
     ONE line subagent-start.sh adds beyond its existing injection -- the

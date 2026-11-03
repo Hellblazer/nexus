@@ -51,4 +51,19 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-emiky): a lockstep marker holding the retry sentinel `retry-nx-upgrade` is skew whatever `nx --version` reports, so the session dispatches the upgrade again.
 - `conexus/hooks/scripts/version_lockstep_action.py` (nexus-emiky): with the retry sentinel in the marker the action skips the fast path and the binary step and starts the detached `nx upgrade` again. In retry mode it writes the target version before its start wait (and restores the sentinel if nothing started), and on a dev/editable tree it replaces the sentinel with the target.
 
+- `conexus/skills/analyze/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
+- `conexus/skills/deep-analysis/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
+- `conexus/skills/design-to-code-trace/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
+- `conexus/skills/document/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
+- `conexus/skills/knowledge-tidying/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
+- `conexus/skills/rdr-accept-checklist/SKILL.md` (nexus-egv6q): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path.
+- `conexus/skills/rdr-close/SKILL.md` (nexus-egv6q): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path.
+- `conexus/skills/rdr-create/SKILL.md` (nexus-egv6q): plugin template and register paths use the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes.
+- `conexus/skills/rdr-fix-checklist/SKILL.md` (nexus-egv6q): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path.
+- `conexus/skills/rdr-gate-checklist/SKILL.md` (nexus-egv6q): the critic's register criterion is self-contained and the register is named as `$RDR_DIR/REGISTER.md` with the `${CLAUDE_PLUGIN_ROOT}` fallback, never a bare `resources/` path.
+- `conexus/skills/rdr-research/SKILL.md` (nexus-egv6q): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path.
+- `conexus/skills/research-synthesis/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
+- `conexus/skills/why-was-this-written/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
+- `conexus/skills/writing-nx-skills/SKILL.md` (nexus-egv6q): the relay template is named by `${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md`.
+
 ## Deferred to the next client release

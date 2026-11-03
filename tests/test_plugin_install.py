@@ -229,7 +229,7 @@ def _collect_all_plugin_root_refs(plugin_root: Path) -> list[tuple[str, str]]:
         except UnicodeDecodeError:
             continue
         label = str(src_file.relative_to(plugin_root))
-        for match in re.finditer(r"\$CLAUDE_PLUGIN_ROOT/([^\s'\"`)]+)", text):
+        for match in re.finditer(r"\$\{?CLAUDE_PLUGIN_ROOT\}?/([^\s'\"`)}\]]+)", text):
             results.append((label, match.group(1)))
     return results
 

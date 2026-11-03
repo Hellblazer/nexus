@@ -8,7 +8,7 @@ effort: medium
 
 ## When This Skill Activates
 
-Prose follows `resources/rdr/REGISTER.md`: written for a smart reader who may not know this project's jargon; simplified, never simplistic; jargon defined on first use. Each lifecycle stage has a named reader there; write the RDR for the create-stage reader.
+Prose follows the register, `$RDR_DIR/REGISTER.md` (copied from `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md` in Step 1b): written for a smart reader who may not know this project's jargon; simplified, never simplistic; jargon defined on first use. Each lifecycle stage has a named reader there; write the RDR for the create-stage reader.
 
 - User says "create an RDR", "new RDR", "start an RDR"
 - User invokes `/conexus:rdr-create`
@@ -49,17 +49,17 @@ Use this value as `RDR_DIR` throughout all steps below (wherever `docs/rdr` appe
 
 If `$RDR_DIR` does not exist:
 1. Create `$RDR_DIR/` and `$RDR_DIR/post-mortem/` directories
-2. Copy RDR template from `$CLAUDE_PLUGIN_ROOT/resources/rdr/TEMPLATE.md` to `$RDR_DIR/TEMPLATE.md`
-3. Copy post-mortem template from `$CLAUDE_PLUGIN_ROOT/resources/rdr/post-mortem/TEMPLATE.md` to `$RDR_DIR/post-mortem/TEMPLATE.md`
-4. Create `$RDR_DIR/README.md` from `$CLAUDE_PLUGIN_ROOT/resources/rdr/README-TEMPLATE.md`
+2. Copy RDR template from `${CLAUDE_PLUGIN_ROOT}/resources/rdr/TEMPLATE.md` to `$RDR_DIR/TEMPLATE.md`
+3. Copy post-mortem template from `${CLAUDE_PLUGIN_ROOT}/resources/rdr/post-mortem/TEMPLATE.md` to `$RDR_DIR/post-mortem/TEMPLATE.md`
+4. Create `$RDR_DIR/README.md` from `${CLAUDE_PLUGIN_ROOT}/resources/rdr/README-TEMPLATE.md`
 
-If `$CLAUDE_PLUGIN_ROOT` is not available, use the templates inline (they are embedded below in the Templates section).
+If `${CLAUDE_PLUGIN_ROOT}` is not available, use the templates inline (they are embedded below in the Templates section).
 
 > **Gap convention** (enforced at `/conexus:rdr-gate` Layer 1 for post-65 RDRs): the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex: `^#{3,5} Gap \d+:`). Fill these in during drafting — the template scaffolds `Gap 1` and `Gap 2` placeholders. Replacing the Problem Statement with free-form prose and removing the gap headings will fail the gate. Authors can override with `/conexus:rdr-gate <id> --skip-gaps` when the gap structure truly does not fit (audit-trail escape only; prefer adding real gap headings).
 
 ### Step 1b: Ensure the prose register is present (every invocation)
 
-If `$RDR_DIR/REGISTER.md` does not exist, copy it from `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md`. This runs on EVERY invocation, not only at bootstrap: repos onboarded before the register existed never re-run bootstrap, and the pointer lines across the rdr-* surfaces assume the file is there. Idempotent: present means untouched.
+If `$RDR_DIR/REGISTER.md` does not exist, copy it from `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md`. This runs on EVERY invocation, not only at bootstrap: repos onboarded before the register existed never re-run bootstrap, and the pointer lines across the rdr-* surfaces assume the file is there. Idempotent: present means untouched.
 
 ### Step 2: Assign ID
 
