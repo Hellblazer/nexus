@@ -23,7 +23,14 @@ from nexus.upgrade_ladder.protocol import (
     ProgressReporter,
     RungStatus,
 )
-from nexus.upgrade_ladder.registry import RUNG_ORDER, LadderRegistry, default_registry
+from nexus.upgrade_ladder.registry import (
+    RUNG_MANIFEST_SECTION_LABELS,
+    RUNG_ORDER,
+    RUNG_RDR192_MANIFEST_BACKFILL,
+    LadderOrderError,
+    LadderRegistry,
+    default_registry,
+)
 from nexus.upgrade_ladder.runner import (
     LadderRunner,
     LadderRunReport,
@@ -237,11 +244,44 @@ def test_with_no_edges_a_deferral_stops_nothing_after_it(store: InMemoryLedger) 
     assert _outcomes(report) == [("deferred", RungOutcome.DEFERRED), ("later", RungOutcome.RECORDED)]
 
 
-def test_the_production_rungs_have_no_rung_to_rung_edges() -> None:
-    """The registry's own claim (none depends on another), read from the edges the runner now follows."""
+def test_the_production_edges_hold_section_labels_behind_the_backfill_only() -> None:
+    """The section-labels rung fills the rows the RDR-192 backfill adds and then reads converged for good, so it waits
+    on the backfill; the other rungs depend on nothing (nexus-dfemn review r1)."""
     registry = default_registry()
     assert [r.name for r in registry] == list(RUNG_ORDER)
-    assert all(registry.prerequisites(name) == frozenset() for name in RUNG_ORDER)
+    assert registry.prerequisites(RUNG_MANIFEST_SECTION_LABELS) == frozenset({RUNG_RDR192_MANIFEST_BACKFILL})
+    others = [n for n in RUNG_ORDER if n != RUNG_MANIFEST_SECTION_LABELS]
+    assert all(registry.prerequisites(n) == frozenset() for n in others)
+
+
+def test_a_deferred_backfill_holds_section_labels_and_lets_the_others_run(store: InMemoryLedger) -> None:
+    """The production edge set, with stand-ins under the production names."""
+    rungs = tuple(ScriptedRung(n, defer=(n == RUNG_RDR192_MANIFEST_BACKFILL)) for n in RUNG_ORDER)
+    report = LadderRunner(LadderRegistry(rungs), store, package_version_fn=lambda: "6.12.0").run()
+    outcomes = dict(_outcomes(report))
+    assert outcomes[RUNG_RDR192_MANIFEST_BACKFILL] is RungOutcome.DEFERRED
+    assert outcomes[RUNG_MANIFEST_SECTION_LABELS] is RungOutcome.NOT_ATTEMPTED
+    assert all(outcomes[n] is RungOutcome.RECORDED for n in RUNG_ORDER
+               if n not in (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SECTION_LABELS))
+
+
+def test_an_edge_against_the_order_is_refused() -> None:
+    a, b = ScriptedRung("a"), ScriptedRung("b")
+    with pytest.raises(LadderOrderError):
+        LadderRegistry((b, a), edges=(("a", "b"),))
+
+
+def test_a_failure_after_a_deferral_still_stops_the_walk(store: InMemoryLedger) -> None:
+    deferred = ScriptedRung("deferred", defer=True)
+    boom = ScriptedRung("boom", fail_converge=True)
+    later = ScriptedRung("later")
+    report = _runner((deferred, boom, later), store).run()
+    assert _outcomes(report) == [
+        ("deferred", RungOutcome.DEFERRED),
+        ("boom", RungOutcome.FAILED),
+        ("later", RungOutcome.NOT_ATTEMPTED),
+    ]
+    assert report.hard_failed
 
 
 # ── Crash resume: converged-but-unrecorded heals by verify-then-record ──────

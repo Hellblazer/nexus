@@ -25,8 +25,9 @@ appear in :data:`RUNG_ORDER`. Their edges here document the walk contract;
 the registry can only mechanically enforce rung-to-rung order.
 
 :data:`RUNG_ORDER` holds four rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
-:data:`RUNG_ASPECT_QUEUE_TUPLES`, :data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`; none
-depends on another).
+:data:`RUNG_ASPECT_QUEUE_TUPLES`, :data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`). One
+depends on another: section labels waits on the RDR-192 backfill, whose rows it fills. The walk follows the edges
+(nexus-dfemn): a deferred rung holds back only the rungs with an edge from it.
 Inserting a new rung means adding both a :data:`RUNG_ORDER` entry and its edges
 in :data:`HARD_EDGES`; the order is validated against the edges at
 import/construction time.
@@ -70,7 +71,7 @@ RUNG_NOTE_TAGS_ARRAY = "note-tags-array"
 
 #: RDR-236 (nexus-1nrcu): copy a chunk row's section label onto the legacy manifest rows (written before
 #: catalog-046, labels_written false) whose chash has exactly one live manifest row in the tenant. Fill-only,
-#: independent of the other rungs; it sits after the RDR-192 backfill, whose rows it may then fill.
+#: it has a hard edge from the RDR-192 backfill, whose legacy rows it fills (see :data:`HARD_EDGES`).
 RUNG_MANIFEST_SECTION_LABELS = "manifest-section-labels"
 
 #: Stateless preconditions — NOT rungs (see module docstring).
@@ -94,6 +95,9 @@ RUNG_ORDER: tuple[str, ...] = (
 #: the source precedes every rung.
 HARD_EDGES: tuple[tuple[str, str], ...] = (
     (PRECONDITION_PACKAGE, ALL_RUNGS),
+    # The section-labels rung fills the legacy manifest rows the RDR-192 backfill adds, and once recorded it reads
+    # converged for good, so it must not run while the backfill is deferred (nexus-dfemn review r1).
+    (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SECTION_LABELS),
 )
 
 #: RQ2 edges 4–5 (chunk-identity / embedder-era co-residency inside the

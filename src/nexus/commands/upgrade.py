@@ -501,9 +501,11 @@ def _run_ladder(
         # stated out loud, never inferred from the absence of output.
         click.echo("Upgrade ladder: converged and verified (no rungs registered).")
     if report.hard_failed:
+        # A deferral earlier in the walk is listed too: since nexus-dfemn the walk goes on past it, and a later
+        # rung failing on the same outage must not hide the first cause.
         failed = [
             run for run in report.runs
-            if run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED)
+            if run.outcome in (RungOutcome.DEFERRED, RungOutcome.VERIFY_FAILED, RungOutcome.FAILED)
         ]
         summary = "; ".join(f"{run.name}: {run.outcome.value} ({run.detail})" for run in failed)
         raise click.ClickException(f"upgrade ladder did not converge — {summary}")

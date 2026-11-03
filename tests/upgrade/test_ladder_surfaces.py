@@ -517,3 +517,22 @@ def test_run_ladder_flushes_even_when_a_rung_hard_fails(
     assert ledger.verified_rungs() == frozenset({"t2-schema"}), (
         "the verified rung's fact flushed before the hard-failure surfaced"
     )
+
+
+class _DeferringRung(SurfaceRung):
+    def converge(self, report: ProgressReporter) -> ConvergeResult:
+        self.converge_calls += 1
+        return ConvergeResult(ConvergeOutcome.DEFERRED, detail="engine census unavailable")
+
+
+def test_a_failure_after_a_deferral_names_the_deferral_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Since nexus-dfemn the walk goes on past a deferral; a later rung failing on the same outage must not hide the
+    first cause in the operator's error."""
+    deferring = _DeferringRung("census")
+    failing = SurfaceRung("labels", verify_result=False)
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((deferring, failing)))
+    with pytest.raises(click.ClickException) as exc:
+        _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=InMemoryLedger)
+    message = exc.value.message
+    assert "census: deferred (engine census unavailable)" in message
+    assert "labels: verify-failed" in message

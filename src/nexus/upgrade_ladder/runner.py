@@ -262,8 +262,8 @@ class LadderRunner:
             runs.append(run)
             # A failed rung stops the walk: a failure is loud and may be systemic, and the operator looks at it
             # before anything else runs. A deferred rung (non-fatal, retried later) holds back only the rungs with
-            # a hard edge from it (nexus-dfemn): the registry's other rungs are independent, and stopping the
-            # whole walk let one persistently deferring rung starve them on every run, silently under --auto.
+            # a hard edge from it, transitively (nexus-dfemn): stopping the whole walk let one persistently
+            # deferring rung starve the rungs that do not depend on it on every run, silently under --auto.
             if run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED):
                 runs.extend(self._not_attempted(rungs))
                 break
