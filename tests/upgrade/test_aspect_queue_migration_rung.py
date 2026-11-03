@@ -570,7 +570,10 @@ class TestDetectIsBounded:
         rung.converge(Report())
         rung.verify()
         assert w.census_timeouts[1:] == [None, None]
-        assert w.census_single_shots[1:] == [False, False], "converge and verify keep the mixin's retries"
+        assert w.census_single_shots[1:] == [True, False], (
+            "nexus-g6ic6: converge's census is one attempt too (a timeout defers; a retry only delays it); "
+            "verify keeps the mixin's retries, since a verify that gives up on a blip fails a move already made"
+        )
 
     @pytest.mark.parametrize("error", [
         CensusTimeoutError("the census ran too long"), httpx.ReadTimeout("slow"),
@@ -582,23 +585,36 @@ class TestDetectIsBounded:
         assert "census" in status.pending_detail and f"{DETECT_CENSUS_TIMEOUT_S:g}s" in status.pending_detail
         assert _limits(w) == [], "no waiting-row read after the census failed"
 
-    def test_a_census_that_times_out_in_converge_defers_the_rung_to_a_later_walk(self) -> None:
-        """nexus-g6ic6: the engine's statement timeout fired; the engine is up and the table is slow, which a
-        later walk may find otherwise. FAILED would end this walk red on a slow census; DEFERRED names it."""
-        w = World(rows=[_row("/a.md", "1.1.1")], census_error=CensusTimeoutError("the census ran too long"))
+    @pytest.mark.parametrize("error", [
+        CensusTimeoutError("the census ran too long"), httpx.ReadTimeout("slow"),
+    ], ids=["engine-statement-timeout", "client-default-timeout"])
+    def test_a_census_that_times_out_in_converge_defers_the_rung_to_a_later_walk(self, error: Exception) -> None:
+        """nexus-g6ic6: the census is slow; the engine is up and the table may be smaller on a later walk. FAILED
+        would end this walk red on it; DEFERRED names it. Whichever timeout fires first (the engine's statement
+        timeout, or the client's own request default) gets the same answer."""
+        w = World(rows=[_row("/a.md", "1.1.1")], census_error=error)
         result = w.rung().converge(Report())
         assert result.outcome is ConvergeOutcome.DEFERRED
-        assert "census" in result.detail and "the census ran too long" in result.detail
+        assert "census" in result.detail and (str(error) in result.detail)
         assert w.calls("out_replace") == [] and w.calls("mark_done") == [], "nothing moved"
         assert _limits(w) == [], "no waiting-row read after the census failed"
 
-    def test_the_runner_reports_a_converge_census_timeout_as_deferred_not_failed(self) -> None:
-        w = World(rows=[_row("/a.md", "1.1.1")], census_error=CensusTimeoutError("the census ran too long"))
+    @pytest.mark.parametrize("error", [
+        CensusTimeoutError("the census ran too long"), httpx.ReadTimeout("slow"),
+    ], ids=["engine-statement-timeout", "client-default-timeout"])
+    def test_the_runner_reports_a_converge_census_timeout_as_deferred_not_failed(self, error: Exception) -> None:
+        w = World(rows=[_row("/a.md", "1.1.1")], census_error=error)
         ledger = InMemoryCompletionLedger()
         runner = LadderRunner(LadderRegistry((w.rung(),)), ledger, package_version_fn=lambda: "9.9.9")
         report = runner.run()
         assert [r.outcome for r in report.runs] == [RungOutcome.DEFERRED], [(r.outcome, r.detail) for r in report.runs]
         assert not ledger.verified_rungs()
+
+    def test_a_converge_census_that_fails_with_a_connection_error_still_raises_the_control(self) -> None:
+        """Only a TIMEOUT defers; a refused connection is not 'slow' and is not widened into DEFERRED."""
+        w = World(rows=[_row("/a.md", "1.1.1")], census_error=httpx.ConnectError("down"))
+        with pytest.raises(httpx.ConnectError):
+            w.rung().converge(Report())
 
     def test_a_converge_read_that_fails_otherwise_still_raises_the_control(self) -> None:
         """Only the census timeout defers. Any other failure of the census is not 'slow', and stays loud."""

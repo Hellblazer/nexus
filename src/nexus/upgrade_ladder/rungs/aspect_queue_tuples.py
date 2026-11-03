@@ -243,10 +243,12 @@ class AspectQueueTuplesRung:
         finally:
             _close(queue)
 
-    def _probe(self, limit: int | None = None) -> tuple[str, list[WaitingRow]]:
+    def _probe(self, limit: int | None = None, *, single_shot: bool = False) -> tuple[str, list[WaitingRow]]:
         """``(skip_reason, rows)``: a non-empty reason means not applicable (and
         no rows). Any other failure of a read propagates. *limit* bounds the
-        waiting-row read to its first rows (see :data:`DETECT_READ_LIMIT`)."""
+        waiting-row read to its first rows (see :data:`DETECT_READ_LIMIT`).
+        *single_shot* (nexus-g6ic6) sends an uncapped census once, for a caller that
+        defers on a timeout: a resend or a gateway backoff only delays that answer."""
         reason = self._skip_reason()
         if reason:
             return reason, []
@@ -254,7 +256,8 @@ class AspectQueueTuplesRung:
         try:
             try:
                 census = (
-                    aspects_census(tuples) if limit is None
+                    aspects_census(tuples, single_shot=True) if limit is None and single_shot
+                    else aspects_census(tuples) if limit is None
                     else aspects_census(tuples, timeout=DETECT_CENSUS_TIMEOUT_S, single_shot=True)
                 )
             except (CensusTimeoutError, httpx.TimeoutException) as exc:
@@ -343,15 +346,19 @@ class AspectQueueTuplesRung:
 
     def converge(self, report: ProgressReporter) -> ConvergeResult:
         try:
-            reason, rows = self._probe()
-        except CensusTimeoutError as exc:
-            # nexus-g6ic6: the engine's own statement timeout fired on the template census. The engine is up and
-            # the table is slow, which a later walk may find otherwise; FAILED would end this walk red on it.
-            _log.warning("aspect_queue_rung_census_timeout", error=str(exc)[:200])
+            reason, rows = self._probe(single_shot=True)
+        except (CensusTimeoutError, httpx.TimeoutException) as exc:
+            # nexus-g6ic6: the template census timed out, either the engine's own statement timeout or the
+            # client's request default, whichever fired first. The engine is up and the table is slow, which a
+            # later walk may find otherwise; FAILED would end this walk red on it. Only a timeout defers: any
+            # other failure of the census still raises. The census is one attempt (single_shot), so the
+            # deferral does not wait out the 2/5/10 s gateway backoff or write the box-wide gateway hold.
+            detail = str(exc) or type(exc).__name__
+            _log.warning("aspect_queue_rung_census_timeout", error=detail[:200])
             return ConvergeResult(
                 ConvergeOutcome.DEFERRED,
                 detail=(
-                    f"the 'aspects' tuple census ran past the engine's statement timeout ({exc}); "
+                    f"the 'aspects' tuple census timed out ({detail}); "
                     f"nothing moved, and the move resumes on the next `nx upgrade`"
                 ),
             )
