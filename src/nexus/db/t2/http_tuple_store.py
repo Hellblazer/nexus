@@ -1386,14 +1386,25 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         return rows, (r or {}).get("next_cursor")
 
     def subspace_stats(
-        self, subspace: str, *, timeout: float | None = None,
+        self, subspace: str, *, timeout: float | None = None, single_shot: bool = False,
     ) -> SubspaceCensus:
         """The exact-name form of :meth:`subspace_list` for one subspace.
 
         *timeout* (RDR-235, additive): a per-request cap in seconds, for a
         caller that shares a longer-timeout client (the queue-depth hook shares
-        the index run's). ``None`` sends the request exactly as before."""
+        the index run's). ``None`` sends the request exactly as before.
+
+        *single_shot* (nexus-g6ic6): send the request ONCE. The default resends a
+        ``ReadTimeout`` once and backs a gateway 503 off (and a 503 writes the box-wide
+        gateway hold), so a census capped at *timeout* costs about twice the cap plus
+        backoff when the table is slow, and an engine ``CensusTimeout`` (its own statement
+        timeout; the engine is up) is retried as if it were a gateway fault. It rides the
+        mixin's ``idempotent=False`` path, which keeps only the one 401 re-mint. The price:
+        a connection error is not re-resolved and retried on this call. For a caller that
+        would rather say "unknown" than wait."""
         if not subspace:
             raise ValueError("subspace must not be empty")
-        r = self._get("/subspace_stats", {"subspace": subspace}, timeout=timeout)
+        r = self._get(
+            "/subspace_stats", {"subspace": subspace}, timeout=timeout, idempotent=not single_shot,
+        )
         return _body_to_census(r)

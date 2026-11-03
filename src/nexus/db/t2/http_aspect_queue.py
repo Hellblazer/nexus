@@ -186,7 +186,7 @@ class WaitingRow:
 _warned_no_aspects_template: list[bool] = []
 
 
-def aspects_census(store: Any, *, timeout: float | None = None) -> Any:
+def aspects_census(store: Any, *, timeout: float | None = None, single_shot: bool = False) -> Any:
     """The ``aspects`` subspace's census from *store* (an ``HttpTupleStore``),
     or ``None`` when the engine has no ``aspects`` template.
 
@@ -197,13 +197,17 @@ def aspects_census(store: Any, *, timeout: float | None = None) -> Any:
     caller reads it as zero, and one log line per process says so. Any other
     failure propagates; a caller decides what an unreadable side means.
 
-    *timeout* caps the one request (seconds); ``None`` sends it unchanged."""
+    *timeout* caps the one request (seconds); ``None`` sends it unchanged. *single_shot*
+    (nexus-g6ic6) sends it once: no ``ReadTimeout`` resend, no gateway backoff."""
     from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: table mode never loads it
 
     try:
-        if timeout is None:
+        if timeout is None and not single_shot:
             return store.subspace_stats(ASPECTS_SUBSPACE)
-        return store.subspace_stats(ASPECTS_SUBSPACE, timeout=timeout)
+        kwargs: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+        if single_shot:
+            kwargs["single_shot"] = True
+        return store.subspace_stats(ASPECTS_SUBSPACE, **kwargs)
     except UnknownSubspaceError:
         if not _warned_no_aspects_template:
             _warned_no_aspects_template.append(True)

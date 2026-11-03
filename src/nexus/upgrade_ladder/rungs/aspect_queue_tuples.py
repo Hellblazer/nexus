@@ -127,7 +127,9 @@ DETECT_READ_LIMIT = 50
 #: The request cap (seconds) on the ``aspects`` census ``detect()`` makes to learn whether the engine has the
 #: template (nexus-s72c5). The census counts the subspace's rows, and the answer used here is only "is there a
 #: template"; a census that runs past this, or that the engine's own statement timeout cuts, makes ``detect``
-#: say pending with the reason, not raise. ``converge`` and ``verify`` send it unchanged.
+#: say pending with the reason, not raise. ``converge`` and ``verify`` send it unchanged. The capped call is
+#: single-shot (nexus-g6ic6): the cap is per attempt, so a resent ``ReadTimeout`` or a backed-off 503
+#: ``CensusTimeout`` would cost about twice the cap plus backoff at every ``nx doctor``.
 DETECT_CENSUS_TIMEOUT_S = 10.0
 
 
@@ -253,7 +255,7 @@ class AspectQueueTuplesRung:
             try:
                 census = (
                     aspects_census(tuples) if limit is None
-                    else aspects_census(tuples, timeout=DETECT_CENSUS_TIMEOUT_S)
+                    else aspects_census(tuples, timeout=DETECT_CENSUS_TIMEOUT_S, single_shot=True)
                 )
             except (CensusTimeoutError, httpx.TimeoutException) as exc:
                 if limit is None:
@@ -340,7 +342,19 @@ class AspectQueueTuplesRung:
     # ── converge ─────────────────────────────────────────────────────────────
 
     def converge(self, report: ProgressReporter) -> ConvergeResult:
-        reason, rows = self._probe()
+        try:
+            reason, rows = self._probe()
+        except CensusTimeoutError as exc:
+            # nexus-g6ic6: the engine's own statement timeout fired on the template census. The engine is up and
+            # the table is slow, which a later walk may find otherwise; FAILED would end this walk red on it.
+            _log.warning("aspect_queue_rung_census_timeout", error=str(exc)[:200])
+            return ConvergeResult(
+                ConvergeOutcome.DEFERRED,
+                detail=(
+                    f"the 'aspects' tuple census ran past the engine's statement timeout ({exc}); "
+                    f"nothing moved, and the move resumes on the next `nx upgrade`"
+                ),
+            )
         if reason:
             # The runner converges only an applicable rung; this is the guard for
             # a caller that did not ask detect() first. Nothing moves.
