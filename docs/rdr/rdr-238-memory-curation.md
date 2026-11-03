@@ -296,6 +296,15 @@ here are the ones each pass found on a named page or table.
   `nx memory list --quarantined`, Backup is `nx memory restore <id>`), the
   Contradiction Check, and the RDR-207 and RDR-074 rows of the prior-RDR table
   (a replace now quarantines, and naming a permanent row quarantines it). This entry rules for Phase 1.
+- **2026-11-03, a T2 memory row has no topic membership (nexus-xs3jy closed).**
+  The *Taxonomy* clause of the 2026-11-02 entry is wrong in its premise: a
+  replaced row has no topic membership or `doc_count` to keep.
+  `nexus.topic_assignments.doc_id` is a chunk chash with a foreign key to
+  `nexus.chunks` (`taxonomy-012-doc-id-chunk-fk.xml`, RDR-194 D1), every
+  assignment writer clusters T3 collections only, and T2 memory is never a
+  source, so no assignment can name a memory row. Quarantine, replace, restore
+  and reap therefore change no taxonomy count. Clustering T2 memory would need
+  its own design (an assignment that can name a memory row); none is planned.
 
 ### Critical Assumptions
 
