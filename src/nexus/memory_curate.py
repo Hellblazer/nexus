@@ -1,0 +1,427 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The report behind ``nx memory curate`` (RDR-238 Technical Design 4, nexus-qo7ie.17).
+
+Three sections that need no transcripts: ``--files``, ``--t2`` and ``--agents``. Each section
+function returns its body lines; :func:`build_report` adds the headings and never lets one
+section stop another. The report only lists. Nothing here deletes, quarantines, rewrites or
+restores a file or a row; retiring anything is a person's decision.
+
+``--files`` (over the directory :func:`nexus._hook_runtime.memory_dir.memory_dir` finds)
+shares its parser with the SessionStart hook: unindexed files, files over 8 KB, index entries
+naming a missing file, and declared ``replaces`` targets that still exist. Sam's decision S-7
+(2026-11-03) gives it NO heuristic that infers a file replaced without saying so; it lists
+likely near-duplicates for review instead, by the measure on :func:`near_duplicates`.
+
+``--t2`` lists live T2 rows that a later row names as replaced, skipping audit records (the
+AUDIT_TAGS table, tags and title backstop), and RDR-209 Phase 3 Step 4's census flag. It
+reads every row of the repo's projects once (``get_all``), so a project with thousands of
+rows costs one large read; run it at a release step, not in a loop.
+
+``--agents`` checks each ``<config dir>/agent-memory/<agent>/`` directory that holds a
+``MEMORY.md`` (the reviewers' own memory, ``memory: user``).
+
+The stored report carries a 90-day TTL, which puts it on RDR-207's quarantine path: only a
+rolled-up row is ever reaped, so old reports sit quarantined. That is accepted (gate round 3).
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from nexus._hook_runtime.memory_scan import (
+    INDEX_FILES,
+    OVERSIZE_BYTES,
+    frontmatter_value,
+    index_link_targets,
+    index_mentions,
+    read_text,
+    scan,
+)
+from nexus.tables.audit_tags import audit_tags_of, is_audit_title, split_tags
+
+#: A pair of memory files is a likely near-duplicate when the Jaccard overlap of their name and
+#: description tokens is at least this. Deterministic, no model, no weights.
+NEAR_DUP_THRESHOLD = 0.5
+#: A file with fewer distinct tokens than this is not compared (two tiny files overlap by chance).
+NEAR_DUP_MIN_TOKENS = 4
+_STOPWORDS = frozenset(
+    "the and for with that this from are was you your not but all any can has have its into "
+    "will when what which they them their then than also only more some such".split()
+)
+_TOKEN = re.compile(r"[a-z0-9]+")
+
+AGENT_INDEX_CAP = 40
+CENSUS_DAYS = 30
+_ENTRY = re.compile(r"^\s*[-*]\s*\[([^\]]*)\]\(([^)\s]+)\)")
+_REPO_NAMED = re.compile(
+    r"\brepo(?:sitory)?\s*[:=]\s*[\w./-]+"
+    r"|(?<![\w-])(?!(?:the|a|an|this|that|any|each|every|one|your|their|its|which|same|another|other|no|per)\b)"
+    r"[\w.-]+\s+repo(?:sitory)?\b",
+    re.IGNORECASE,
+)
+
+NOT_AVAILABLE_READS = "unread files: not available (needs RDR-240's memory query; planned in nexus-qo7ie.18)"
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in _TOKEN.findall(text.lower()) if len(t) >= 2 and t not in _STOPWORDS}
+
+
+def near_duplicates(
+    directory: Path, threshold: float = NEAR_DUP_THRESHOLD
+) -> list[tuple[str, str, float]]:
+    """Pairs of memory files whose name and description tokens overlap, for a person to review.
+
+    The measure: tokens are the lowercase ``[a-z0-9]+`` words of length 2 or more, minus a short
+    stopword list, drawn from the frontmatter ``name`` (the file stem when absent) and
+    ``description``. A pair is listed when ``|A & B| / |A | B| >= threshold`` and both sets hold
+    at least :data:`NEAR_DUP_MIN_TOKENS` tokens. Pairs come back as ``(a, b, score)`` with
+    ``a < b``, ordered by descending score then name. Report only: nothing is acted on.
+    """
+    sets: dict[str, set[str]] = {}
+    for p in sorted(directory.glob("*.md")):
+        if p.name in INDEX_FILES:
+            continue
+        text = read_text(p)
+        name = frontmatter_value(text, "name") or p.stem.replace("_", " ").replace("-", " ")
+        toks = _tokens(f"{name} {frontmatter_value(text, 'description')}")
+        if len(toks) >= NEAR_DUP_MIN_TOKENS:
+            sets[p.name] = toks
+    names = sorted(sets)
+    out: list[tuple[str, str, float]] = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            union = sets[a] | sets[b]
+            score = len(sets[a] & sets[b]) / len(union)
+            if score >= threshold:
+                out.append((a, b, round(score, 2)))
+    out.sort(key=lambda t: (-t[2], t[0], t[1]))
+    return out
+
+
+def files_section(directory: Path | None) -> list[str]:
+    if directory is None:
+        return ["not available: no memory directory found for this repository"]
+    result = scan(directory)
+    lines = [f"directory: {directory}", f"files: {len(result.files)} (index files: {', '.join(result.index_files) or 'none'})"]
+    lines += _listing("unindexed", list(result.unindexed))
+    lines += _listing(
+        f"oversized (over {OVERSIZE_BYTES} bytes, index files excluded)",
+        [f"{n} ({size} bytes)" for n, size in result.oversized],
+        key="oversized",
+    )
+    lines += _listing("index entries naming a missing file", [f"{idx}: {t}" for idx, t in result.dangling], key="dangling")
+    lines += _listing(
+        "declared replaces still present (delete the old file)",
+        [f"{src} replaces {slug} -> {tgt}" for src, slug, tgt in result.replaced_present],
+        key="replaced",
+    )
+    pairs = near_duplicates(directory)
+    lines += _listing(
+        f"likely near-duplicates (name+description token Jaccard >= {NEAR_DUP_THRESHOLD}; review only)",
+        [f"{a} ~ {b} ({score})" for a, b, score in pairs],
+        key="near-duplicates",
+    )
+    lines.append(NOT_AVAILABLE_READS)
+    return lines
+
+
+def _listing(label: str, items: list[str], key: str | None = None) -> list[str]:
+    short = key or label
+    if not items:
+        return [f"{short}: none"]
+    return [f"{label}: {len(items)}"] + [f"  - {i}" for i in items]
+
+
+# ── --agents ─────────────────────────────────────────────────────────────────────
+
+@dataclass
+class AgentFindings:
+    name: str
+    line_count: int = 0
+    over_cap: bool = False
+    entries: int = 0
+    no_repo: list[str] = field(default_factory=list)
+    duplicates: list[str] = field(default_factory=list)
+    truncated: str | None = None
+    dangling: list[str] = field(default_factory=list)
+    orphans: list[str] = field(default_factory=list)
+
+    @property
+    def clean(self) -> bool:
+        return not (self.over_cap or self.no_repo or self.duplicates or self.truncated
+                    or self.dangling or self.orphans)
+
+
+def scan_agent_dir(directory: Path) -> AgentFindings:
+    """Check one reviewer memory directory. The damage signs (two sessions, one MEMORY.md,
+    last writer wins) are: a duplicate entry (an identical line, or two lines linking one
+    file); a truncated last line (no final newline and an entry that does not close); a
+    dangling entry (links a file the directory lacks); an orphan file (no index line names it).
+    """
+    index = read_text(directory / "MEMORY.md")
+    lines = index.splitlines()
+    out = AgentFindings(name=directory.name, line_count=len(lines))
+    out.over_cap = out.line_count > AGENT_INDEX_CAP
+
+    seen_lines: set[str] = set()
+    titles_by_target: dict[str, list[str]] = {}
+    for line in lines:
+        norm = " ".join(line.split())
+        if not norm:
+            continue
+        if norm in seen_lines:
+            out.duplicates.append(f"repeated line: {norm}")
+            continue
+        seen_lines.add(norm)
+        m = _ENTRY.match(line)
+        if not m:
+            continue
+        out.entries += 1
+        title, target = m.group(1), m.group(2)
+        titles_by_target.setdefault(target, []).append(title)
+        linked = directory / target if "://" not in target else None
+        body = read_text(linked) if linked is not None and linked.is_file() else ""
+        if not _REPO_NAMED.search(line) and not _REPO_NAMED.search(body):
+            out.no_repo.append(title)
+    for target, titles in titles_by_target.items():
+        if len(titles) > 1:
+            out.duplicates.append(f"{len(titles)} entries link {target}: {', '.join(titles)}")
+
+    if index and not index.endswith("\n"):
+        last = lines[-1] if lines else ""
+        if last.lstrip().startswith(("- ", "* ")) and not _ENTRY.match(last):
+            out.truncated = last
+
+    out.dangling = [t for t in index_link_targets(index) if not (directory / t).is_file()]
+    mentioned = index_mentions(index)
+    out.orphans = sorted(
+        p.name for p in directory.glob("*.md") if p.name != "MEMORY.md" and p.name not in mentioned
+    )
+    return out
+
+
+def agents_section(root: Path | None) -> list[str]:
+    if root is None:
+        return ["not available: no agent-memory directory"]
+    if not root.is_dir():
+        return [f"not available: {root} does not exist"]
+    found = [scan_agent_dir(d) for d in sorted(root.iterdir()) if d.is_dir() and (d / "MEMORY.md").is_file()]
+    lines = [f"directories scanned: {len(found)}"]
+    for f in found:
+        head = f"{f.name}: {f.line_count} index lines (cap {AGENT_INDEX_CAP}), {f.entries} entries"
+        if f.clean:
+            lines.append(f"{head}, clean")
+            continue
+        lines.append(head)
+        if f.over_cap:
+            lines.append(f"  - over the {AGENT_INDEX_CAP}-line cap by {f.line_count - AGENT_INDEX_CAP}")
+        lines += [f"  - entry names no repo: {t}" for t in f.no_repo]
+        lines += [f"  - duplicate entry (concurrent-write damage): {d}" for d in f.duplicates]
+        if f.truncated is not None:
+            lines.append(f"  - truncated last line (concurrent-write damage): {f.truncated}")
+        lines += [f"  - dangling entry (concurrent-write damage): links missing {t}" for t in f.dangling]
+        lines += [f"  - orphan file (concurrent-write damage): {t} is named by no index line" for t in f.orphans]
+    return lines
+
+
+# ── --t2 ─────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Replaced:
+    project: str
+    title: str
+    named_by: str
+
+
+@dataclass(frozen=True)
+class CensusHit:
+    project: str
+    title: str
+    rdr: str
+    age_days: int
+
+
+@dataclass
+class T2Findings:
+    projects: list[str] = field(default_factory=list)
+    rows_read: int = 0
+    replaced: list[Replaced] = field(default_factory=list)
+    skipped_audit: int = 0
+    census: list[CensusHit] = field(default_factory=list)
+    census_unmapped: int = 0
+
+
+_NAMES_REPLACED = re.compile(r"\b(?:replaces|supersedes)\b\s*:?\s*(.+)", re.IGNORECASE)
+_STRIP = " \t\"'`()[]{}.:;,"
+_RDR_TAG = re.compile(r"^rdr:0*(\d+)$")
+_RDR_TITLE = re.compile(r"^(?:rdr-)?0*(\d+)(?!\d)", re.IGNORECASE)
+
+
+def _named_titles(title: str, content: str) -> set[str]:
+    """Candidate titles a row names as replaced: what follows ``replaces``/``supersedes`` on a line."""
+    out: set[str] = set()
+    for line in f"{title}\n{content}".splitlines():
+        for rest in _NAMES_REPLACED.findall(line):
+            out.update(re.findall(r"`([^`]+)`", rest))
+            out.add(rest.strip(_STRIP))
+            for piece in re.split(r"[;,]", rest):
+                out.add(piece.strip(_STRIP))
+    out.discard("")
+    return out
+
+
+def _parse_ts(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _repo_projects(db: Any, repo: str) -> list[str]:
+    rows = db.get_projects_with_prefix(repo)
+    names = {(r.get("project") if isinstance(r, dict) else r) for r in rows}
+    return sorted(n for n in names if n == repo or (n and n.startswith(f"{repo}_")))
+
+
+def t2_findings(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime) -> T2Findings:
+    """The ``--t2`` findings. *db* is a ``T2Database``; reads only, writes nothing."""
+    result = T2Findings(projects=_repo_projects(db, repo))
+    cutoff = now - timedelta(days=CENSUS_DAYS)
+    census_projects = {repo, f"{repo}_rdr"}
+    for project in result.projects:
+        rows = [r for r in db.get_all(project) if not r.get("quarantined_at")]
+        result.rows_read += len(rows)
+        by_title = {r["title"]: r for r in rows}
+        named: dict[str, list[dict[str, Any]]] = {}
+        for later in rows:
+            for cand in _named_titles(later["title"], later.get("content") or ""):
+                earlier = by_title.get(cand)
+                if earlier is None or earlier["id"] == later["id"]:
+                    continue
+                if (later.get("timestamp") or "") > (earlier.get("timestamp") or ""):
+                    named.setdefault(earlier["title"], []).append(later)
+        for title in sorted(named):
+            earlier = by_title[title]
+            if audit_tags_of(earlier.get("tags")) or is_audit_title(title):
+                result.skipped_audit += 1
+                continue
+            namer = min(r["title"] for r in named[title])
+            result.replaced.append(Replaced(project, title, namer))
+
+        if project in census_projects:
+            _census(result, project, repo, rows, closed_rdrs, cutoff, now)
+    return result
+
+
+def _census(
+    result: T2Findings, project: str, repo: str, rows: list[dict[str, Any]],
+    closed: set[str], cutoff: datetime, now: datetime,
+) -> None:
+    """RDR-209 Phase 3 Step 4: gate records older than 30 days, no TTL, phase closed.
+
+    A gate record is a row whose whole tags include ``gate`` or ``kind:gate``. Its phase is the
+    RDR it belongs to, from the ``rdr:<NNN>`` tag or, in ``<repo>_rdr``, the leading number of its
+    title; the phase is closed when that RDR's frontmatter ``status`` is ``closed``. A record that
+    maps to no RDR is counted as unmapped and never flagged.
+    """
+    for r in rows:
+        tags = split_tags(r.get("tags"))
+        if "gate" not in tags and "kind:gate" not in tags:
+            continue
+        stamp = _parse_ts(r.get("timestamp") or "")
+        if stamp is None or stamp >= cutoff or r.get("ttl") is not None:
+            continue
+        number = next((m.group(1) for t in tags if (m := _RDR_TAG.match(t))), None)
+        if number is None and project == f"{repo}_rdr":
+            m = _RDR_TITLE.match(r["title"])
+            number = m.group(1) if m else None
+        if number is None:
+            result.census_unmapped += 1
+        elif number in closed:
+            result.census.append(CensusHit(project, r["title"], number, (now - stamp).days))
+
+
+def repo_toplevel(cwd: Path) -> Path:
+    """The working tree root containing *cwd* (a linked worktree's own root), else *cwd*."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: only this lookup needs it
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 — deferred with run_bounded
+
+    try:
+        proc = run_bounded(argv_off_cwd(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"]), timeout=5)
+    except Exception:  # noqa: BLE001 — no git, a timeout or a non-repository: fall back to *cwd*
+        return cwd
+    top = proc.stdout.strip() if proc.returncode == 0 else ""
+    return Path(top) if top else cwd
+
+
+def closed_rdr_numbers(root: Path) -> set[str]:
+    """Numbers (no leading zeros) of the RDRs under *root* whose frontmatter status is ``closed``."""
+    rdr_dir = _rdr_dir(root)
+    out: set[str] = set()
+    try:
+        files = sorted(rdr_dir.glob("rdr-*.md"))
+    except OSError:
+        return out
+    for p in files:
+        m = re.match(r"^rdr-0*(\d+)(?:-|$)", p.stem)
+        if m and frontmatter_value(read_text(p), "status") == "closed":
+            out.add(m.group(1))
+    return out
+
+
+def _rdr_dir(root: Path) -> Path:
+    cfg = root / ".nexus.yml"
+    if cfg.is_file():
+        try:
+            import yaml  # noqa: PLC0415 — deferred: only a repo with a .nexus.yml pays for it
+
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+            paths = (data.get("indexing") or {}).get("rdr_paths") or []
+            if isinstance(paths, str):
+                paths = [paths]
+            if paths:
+                return root / paths[0]
+        except Exception:  # noqa: BLE001 — a malformed .nexus.yml falls back to the default location
+            pass
+    return root / "docs" / "rdr"
+
+
+def t2_section(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime) -> list[str]:
+    f = t2_findings(db, repo, closed_rdrs=closed_rdrs, now=now)
+    lines = [
+        f"projects read: {', '.join(f.projects) or 'none'} ({f.rows_read} live rows)",
+        "report only: this list is for a person to confirm; nothing is deleted or quarantined",
+    ]
+    lines += _listing(
+        "replaced candidates (a later row names them as replaced)",
+        [f"{r.project}/{r.title} (named by {r.named_by})" for r in f.replaced],
+        key="replaced candidates",
+    )
+    lines.append(f"skipped as audit records (AUDIT_TAGS tag or title): {f.skipped_audit}")
+    lines += _listing(
+        f"census: gate records older than {CENSUS_DAYS} days, no TTL, RDR closed",
+        [f"{c.project}/{c.title} (RDR-{c.rdr}, {c.age_days} days old)" for c in f.census],
+        key="census",
+    )
+    if f.census_unmapped:
+        lines.append(f"census: {f.census_unmapped} old gate record(s) with no TTL map to no RDR and were not judged")
+    return lines
+
+
+# ── the report ───────────────────────────────────────────────────────────────────
+
+def section(title: str, body: Any) -> list[str]:
+    """Run *body* (a no-argument callable returning lines); a failure becomes one line."""
+    try:
+        lines = body()
+    except Exception as exc:  # noqa: BLE001 — a section failing never stops the report or the exit status
+        lines = [f"not available: {type(exc).__name__}: {exc}" if str(exc) else f"not available: {type(exc).__name__}"]
+    return [f"== {title} ==", *lines, ""]
+
+
+def cold_lines() -> list[str]:
+    return ["not available: needs RDR-240's tools, loads and memory queries (planned in RDR-238 Phase 3 Step 3)"]

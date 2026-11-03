@@ -664,3 +664,60 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             click.echo(
                 f"Promoted: {entry['project']}/{entry['title']} -> {collection} (id={doc_id}{split_note})"
             )
+
+
+@memory.command("curate")
+@click.option("--files", "do_files", is_flag=True, default=False,
+              help="Memory-file section: unindexed, oversized, dangling index entries, declared "
+                   "replaces still present, likely near-duplicates.")
+@click.option("--t2", "do_t2", is_flag=True, default=False,
+              help="T2 section: rows a later row names as replaced, and the gate-record census flag.")
+@click.option("--agents", "do_agents", is_flag=True, default=False,
+              help="Reviewer memory section: index length, entries with no repo, concurrent-write damage.")
+@click.option("--cold", "do_cold", is_flag=True, default=False,
+              help="Cold-state section (not available until RDR-240's transcript queries exist).")
+@click.option("--days", type=click.IntRange(min=1), default=30, show_default=True,
+              help="Window for the transcript-backed rows (--files read counts, --cold).")
+def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days: int) -> None:
+    """Report what to curate: memory files, T2 rows and reviewer memory.
+
+    With no section flag, runs --files, --t2 and --agents. Prints the report and stores
+    it in T2 as <repo>/curation-report-<date> with a 90-day TTL (RDR-238). Report only:
+    it deletes and changes nothing, never blocks, and exits 0 whatever it finds; a section
+    that cannot run prints one "not available" line and the others still run.
+    """
+    from nexus import memory_curate as mc  # noqa: PLC0415 — deferred: only this verb pays for the report module
+    from nexus._hook_runtime.memory_dir import claude_config_dir, memory_dir  # noqa: PLC0415 — deferred with the report module
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deferred: only this verb needs the repo name
+
+    if not (do_files or do_t2 or do_agents or do_cold):
+        do_files = do_t2 = do_agents = True
+    cwd = Path.cwd()
+    repo = _repo_identity(cwd)[0]
+    now = datetime.now(timezone.utc)
+    lines = [f"Curation report {now:%Y-%m-%d} (repo: {repo}, window: {days} days)", ""]
+
+    if do_files:
+        lines += mc.section("--files", lambda: mc.files_section(memory_dir(cwd)))
+    if do_t2:
+        def _t2_lines() -> list[str]:
+            closed = mc.closed_rdr_numbers(mc.repo_toplevel(cwd))
+            with t2_handle() as db:
+                return mc.t2_section(db, repo, closed_rdrs=closed, now=now)
+
+        lines += mc.section("--t2", _t2_lines)
+    if do_agents:
+        lines += mc.section("--agents", lambda: mc.agents_section(claude_config_dir() / "agent-memory"))
+    if do_cold:
+        lines += mc.section("--cold", mc.cold_lines)
+
+    title = f"curation-report-{now:%Y-%m-%d}"
+    report = "\n".join(lines).rstrip("\n") + "\n"
+    click.echo(report, nl=False)
+    try:
+        with t2_handle() as db:
+            db.put(project=repo, title=title, content=report, tags="curation-report", ttl=90)
+        click.echo(f"report stored: {repo}/{title} (ttl 90 days)")
+    except Exception as exc:  # noqa: BLE001 — the report never blocks a release step; the store failing is one line
+        _log.warning("curation_report_not_stored", error=str(exc))
+        click.echo(f"report not stored: not available: {exc}")

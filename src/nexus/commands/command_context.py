@@ -928,7 +928,9 @@ def _feedback_memories_block(cwd: Path) -> list[str]:
         List starting with ``"### Feedback memories (auto-memory dir, if present)"``.
     """
     header = "### Feedback memories (auto-memory dir, if present)"
-    pwd_key = re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+    from nexus._hook_runtime.memory_dir import mangle_path  # noqa: PLC0415 — deferred: the one mangling rule lives in the stdlib-only hook module; deferring keeps this file's line numbers (the subprocess-encoding ratchet keys on them) and costs nothing at import
+
+    pwd_key = mangle_path(cwd)  # the one mangling rule, shared with `nx memory curate` (RDR-238 S-10)
     proj_dir = Path.home() / ".claude" / "projects" / pwd_key / "memory"
     try:
         if proj_dir.is_dir():
