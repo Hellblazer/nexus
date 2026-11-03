@@ -335,12 +335,20 @@ def test_a_stopped_mineru_worker_and_one_started_after_the_stop_are_both_killed(
         first_pid, first = tmp_path / "first.pid", {}
         with patch.object(pdf_extractor, "_MINERU_WORKER_SCRIPT", _script(first_pid)):
             stage = threading.Thread(target=_run, args=(first,))
-            stage.start()
-            assert _wait_for(lambda: first_pid.exists() and first_pid.stat().st_size > 0, 60), "worker never started"
-            started = time.monotonic()
-            assert pdf_extractor.stop_mineru_workers() == 1
-            stage.join(10)
-            assert not stage.is_alive(), "the stage still waits on a killed worker"
+            try:
+                stage.start()
+                assert _wait_for(lambda: first_pid.exists() and first_pid.stat().st_size > 0, 60), "worker never started"
+                started = time.monotonic()
+                assert pdf_extractor.stop_mineru_workers() == 1
+                stage.join(10)
+                assert not stage.is_alive(), "the stage still waits on a killed worker"
+            finally:
+                # On a failure path the stage may still be running with the patched script:
+                # stop its worker and join it before the patch unwinds (nexus-9tmvy).
+                pdf_extractor.stop_mineru_workers()
+                if stage.ident is not None:
+                    stage.join(10)
+                assert not stage.is_alive(), "the stage thread outlived the patch"
         assert time.monotonic() - started < 3.0
         assert isinstance(first.get("exc"), pdf_extractor.MineruWorkerStopped), first
         assert _wait_for(lambda: not _pid_alive(int(first_pid.read_text())), 5), "the worker outlived the stop"

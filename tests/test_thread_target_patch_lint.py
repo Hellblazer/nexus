@@ -14,10 +14,21 @@ the thread is dead before the ``with`` ends.
 This lint finds a thread target (``Thread(target=f)``, ``Timer(t, f)``, ``pool.submit(f, ...)``,
 ``pool.map(f, ...)``, a lambda target) whose body, nested defs included, calls ``patch``,
 ``patch.object``, ``patch.dict``, ``patch.multiple``, ``patch_in``, ``patch_time``,
-``setattr_in`` or a ``monkeypatch`` setter. Blind spots, stated: a target that is not defined
-in the module that starts it (imported, a bound method of another object, ``functools.partial``)
-is not followed, and neither is a patch reached through a helper the target calls.
-A site that must patch from inside its thread goes in ``ALLOWED`` with the reason (today only this file's own leak demonstration).
+``setattr_in``, ``delattr_in`` or a ``monkeypatch`` setter. A ``self.x`` target resolves to a
+method of the class that encloses the call; any other attribute target resolves by its bare name
+in the module.
+
+Blind spots, stated: a target that is not defined in the module that starts it (imported, a
+bound method of another object, ``functools.partial``) is not followed, and neither is a patch
+reached through a helper the target calls. Spawn shapes the lint does not recognise at all:
+``loop.run_in_executor(pool, f)``, ``asyncio.to_thread(f)`` and the ``run`` of a ``Thread``
+subclass. A bare ``client.patch(...)`` (an HTTP verb) in a target body reads as ``patch`` and
+over-matches. A site that must patch from inside its thread goes in ``ALLOWED`` with the reason
+(today only this file's own leak demonstration).
+
+The tables below are each pinned entry by entry: ``_SHAPE_SAMPLES`` holds one bad sample per
+entry and ``test_every_table_entry_is_load_bearing`` removes the entry and expects the sample
+to go clean.
 """
 from __future__ import annotations
 
@@ -42,6 +53,8 @@ ALLOWED: dict[tuple[str, str], str] = {
 _PATCH_CALLS = frozenset({"patch", "patch_in", "patch_time", "setattr_in", "delattr_in"})
 _PATCH_ATTRS = frozenset({"object", "dict", "multiple"})
 _MONKEYPATCH_SETTERS = frozenset({"setattr", "delattr", "setenv", "delenv", "setitem", "delitem", "syspath_prepend", "chdir"})
+#: names a ``monkeypatch`` fixture is bound to besides one containing "monkeypatch"
+_MONKEYPATCH_NAMES = frozenset({"mp", "patched", "m"})
 _SPAWN_ATTRS = frozenset({"submit", "map"})
 
 
@@ -70,7 +83,7 @@ def _is_patch_call(call: ast.Call) -> bool:
         return True
     # ``monkeypatch.setattr`` and ``mp.setattr`` / ``patched.setattr`` (the fixture's other names)
     return parts[-1] in _MONKEYPATCH_SETTERS and len(parts) >= 2 and (
-        "monkeypatch" in parts[-2] or parts[-2] in {"mp", "patched", "m"}
+        "monkeypatch" in parts[-2] or parts[-2] in _MONKEYPATCH_NAMES
     )
 
 
@@ -90,60 +103,96 @@ def _target_nodes(call: ast.Call) -> list[ast.AST]:
     return out
 
 
-def _patching_targets(source: str) -> list[tuple[int, str]]:
-    """``(line of the patch call, target name)`` for every thread target that patches."""
+def _enclosing_class(node: ast.AST, parent: dict[ast.AST, ast.AST]) -> ast.ClassDef | None:
+    while node in parent:
+        node = parent[node]
+        if isinstance(node, ast.ClassDef):
+            return node
+    return None
+
+
+def _resolve(
+    target: ast.AST, call: ast.Call, parent: dict[ast.AST, ast.AST], defs: dict[str, list[ast.AST]]
+) -> tuple[list[ast.AST], str]:
+    """The bodies a thread target names in this module, and its label (``[]`` when unresolved)."""
+    if isinstance(target, ast.Lambda):
+        return [target], "<lambda>"
+    if isinstance(target, ast.Name):
+        return defs.get(target.id, []), target.id
+    if isinstance(target, ast.Attribute):
+        label = target.attr
+        if isinstance(target.value, ast.Name) and target.value.id in {"self", "cls"}:
+            cls = _enclosing_class(call, parent)
+            methods = [
+                n for n in (cls.body if cls else [])
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == label
+            ]
+            return methods, label
+        return defs.get(label, []), label
+    return [], ""
+
+
+def _scan(source: str) -> tuple[list[tuple[int, str]], int, int]:
+    """``(patch hits, thread targets seen, thread targets resolved to a def in this module)``.
+
+    A hit is ``(line of the patch call, target name)`` for a thread target that patches."""
     tree = _parse(source)
+    parent: dict[ast.AST, ast.AST] = {}
     defs: dict[str, list[ast.AST]] = {}
     for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             defs.setdefault(node.name, []).append(node)
     found: list[tuple[int, str]] = []
+    seen = resolved = 0
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         for target in _target_nodes(node):
-            if isinstance(target, ast.Lambda):
-                bodies, label = [target], "<lambda>"
-            else:
-                label = target.id if isinstance(target, ast.Name) else (
-                    target.attr if isinstance(target, ast.Attribute) else ""
-                )
-                bodies = defs.get(label, [])
+            seen += 1
+            bodies, label = _resolve(target, node, parent, defs)
+            resolved += bool(bodies)
             for body in bodies:
                 found += [
                     (inner.lineno, label)
                     for inner in ast.walk(body)
                     if isinstance(inner, ast.Call) and _is_patch_call(inner)
                 ]
-    return sorted(set(found))
+    return sorted(set(found)), seen, resolved
 
 
-def _thread_target_count(source: str) -> int:
-    return sum(len(_target_nodes(n)) for n in ast.walk(_parse(source)) if isinstance(n, ast.Call))
+def _patching_targets(source: str) -> list[tuple[int, str]]:
+    """``(line of the patch call, target name)`` for every thread target that patches."""
+    return _scan(source)[0]
 
 
-def _offenders() -> tuple[list[str], set[tuple[str, str]], int]:
+def _offenders() -> tuple[list[str], set[tuple[str, str]], int, int, list[str]]:
+    """``(offenders, ALLOWED entries used, targets seen, targets resolved, files skipped)``."""
     found: list[str] = []
     used: set[tuple[str, str]] = set()
-    targets = 0
+    seen = resolved = 0
+    skipped: list[str] = []
     for path in sorted(_TESTS.rglob("*.py")):
         rel = path.relative_to(_TESTS.parent).as_posix()
-        source = path.read_text(encoding="utf-8")
         try:
-            targets += _thread_target_count(source)
-            hits = _patching_targets(source)
+            hits, n_seen, n_resolved = _scan(path.read_text(encoding="utf-8"))
         except SyntaxError:
+            skipped.append(rel)
             continue
+        seen += n_seen
+        resolved += n_resolved
         for line, label in hits:
             if (rel, label) in ALLOWED:
                 used.add((rel, label))
                 continue
             found.append(f"{rel}:{line}: patch inside thread target {label}")
-    return found, used, targets
+    return found, used, seen, resolved, skipped
 
 
 def test_no_test_enters_a_patch_inside_a_thread_it_starts() -> None:
-    offenders, used, _targets = _offenders()
+    offenders, used, _seen, _resolved, skipped = _offenders()
+    assert skipped == [], f"files the lint could not parse, so did not check: {skipped}"
     assert offenders == [], (
         "a patch entered in a worker thread outlives the test when the join times out "
         "(nexus-9tmvy); enter it on the test's thread around start and join:\n" + "\n".join(offenders)
@@ -164,6 +213,8 @@ _BAD_SAMPLES = (
     "threading.Thread(target=lambda: patch('a.b').start())\n",
     "class T:\n    def _w(self):\n        with patch('a.b'):\n            pass\n"
     "    def go(self):\n        threading.Thread(target=self._w)\n",
+    "def w():\n    with patch('a.b'):\n        pass\nthreading.Timer(1, function=w)\n",  # Timer(function=)
+    "def w():\n    with patch('a.b'):\n        pass\npool.map(w, [1])\n",
 )
 
 _GOOD_SAMPLES = (
@@ -172,6 +223,9 @@ _GOOD_SAMPLES = (
     "def helper():\n    with patch('a.b'):\n        pass\nthreading.Thread(target=other)\n",
     "def w():\n    pass\n# threading.Thread(target=w) patch('a.b')\n",
     "def w():\n    return run(patch_here=False)\nthreading.Thread(target=w)\n",
+    # a ``self.x`` target is the enclosing class's own ``x``, not another class's method of that name
+    "class A:\n    def _w(self):\n        with patch('a.b'):\n            pass\n"
+    "class B:\n    def _w(self):\n        pass\n    def go(self):\n        threading.Thread(target=self._w)\n",
 )
 
 
@@ -186,12 +240,64 @@ def test_the_lint_passes_a_patch_on_the_tests_own_thread(sample: str) -> None:
     assert _patching_targets(sample) == [], sample
 
 
+def _worker_with(expr: str, spawn: str = "threading.Thread(target=w)") -> str:
+    return f"def w():\n    {expr}\n{spawn}\n"
+
+
+#: one bad sample per table entry, keyed ``(table name, entry)``
+_SHAPE_SAMPLES: dict[tuple[str, str], str] = {
+    **{("_PATCH_CALLS", name): _worker_with(f"{name}('a.b')") for name in (
+        "patch", "patch_in", "patch_time", "setattr_in", "delattr_in")},
+    **{("_PATCH_ATTRS", name): _worker_with(f"mock.patch.{name}(M, 'x')") for name in (
+        "object", "dict", "multiple")},
+    **{("_MONKEYPATCH_SETTERS", name): _worker_with(f"monkeypatch.{name}(M, 'x')") for name in (
+        "setattr", "delattr", "setenv", "delenv", "setitem", "delitem", "syspath_prepend", "chdir")},
+    **{("_MONKEYPATCH_NAMES", name): _worker_with(f"{name}.setattr(M, 'x', 1)") for name in (
+        "mp", "patched", "m")},
+    **{("_SPAWN_ATTRS", name): _worker_with("patch('a.b')", f"pool.{name}(w, [1])") for name in (
+        "submit", "map")},
+}
+
+_TABLES = ("_PATCH_CALLS", "_PATCH_ATTRS", "_MONKEYPATCH_SETTERS", "_MONKEYPATCH_NAMES", "_SPAWN_ATTRS")
+
+
+def test_every_table_entry_has_a_sample() -> None:
+    """A new entry in a table without a sample here fails: the entry would be unpinned."""
+    in_tables = {(t, e) for t in _TABLES for e in globals()[t]}
+    assert in_tables == set(_SHAPE_SAMPLES)
+
+
+@pytest.mark.parametrize("key", sorted(_SHAPE_SAMPLES), ids=lambda k: f"{k[0]}.{k[1]}")
+def test_every_table_entry_is_load_bearing(key: tuple[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removing one entry from its table turns its sample clean, so each entry is exercised."""
+    table, entry = key
+    sample = _SHAPE_SAMPLES[key]
+    assert len(_patching_targets(sample)) == 1, f"{key}: the sample is not seen with the entry present"
+    monkeypatch.setitem(globals(), table, globals()[table] - {entry})
+    assert _patching_targets(sample) == [], f"{key}: the sample is still seen without the entry"
+
+
+def test_a_scan_counts_seen_and_resolved_targets() -> None:
+    sample = (
+        "def w():\n    pass\n"
+        "threading.Thread(target=w)\n"           # resolved
+        "threading.Thread(target=lambda: 1)\n"   # resolved (a lambda is its own body)
+        "threading.Thread(target=other.run)\n"   # seen, not defined here
+        "threading.Thread(target=imported)\n"    # seen, not defined here
+    )
+    assert _scan(sample)[1:] == (4, 2)
+
+
 def test_the_lint_has_thread_targets_to_check() -> None:
-    """Non-vacuity over the tree: the sweep parses the whole suite and meets its thread
-    targets, so an empty offender list means something (274 at landing)."""
+    """Non-vacuity over the tree: the sweep parses the whole suite, meets its thread targets and
+    resolves them to a def, so an empty offender list means something (275 seen and 190
+    resolved at landing). The resolved floor is the one that can go blind alone: a resolver that
+    stopped matching would leave ``seen`` untouched."""
     assert len(list(_TESTS.rglob("*.py"))) > 500
-    _offenders_found, used, targets = _offenders()
-    assert targets >= 150, f"only {targets} thread targets seen; the scan has lost its input"
+    _offenders_found, used, seen, resolved, skipped = _offenders()
+    assert skipped == [], f"files the lint could not parse: {skipped}"
+    assert seen >= 150, f"only {seen} thread targets seen; the scan has lost its input"
+    assert resolved >= 170, f"only {resolved} of {seen} thread targets resolved to a def; the resolver has gone blind"
     assert used == set(ALLOWED)
 
 

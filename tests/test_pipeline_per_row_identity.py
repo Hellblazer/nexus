@@ -202,11 +202,20 @@ class TestSecondDocumentSharingTheBytes:
             MC.return_value.chunk.return_value = _tc(
                 ("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}),
                 ("chunk 1", 1, {"page_number": 2, "chunk_type": "text"}))
-            ta = threading.Thread(target=_one, args=("/docs/x.pdf", "1.9.6"), daemon=True)
-            tb = threading.Thread(target=_one, args=("/docs/y.pdf", "1.9.7"), daemon=True)
-            ta.start(); tb.start()
-            ta.join(timeout=45); tb.join(timeout=45)
-        assert not ta.is_alive() and not tb.is_alive()
+            threads = [
+                threading.Thread(target=_one, args=("/docs/x.pdf", "1.9.6"), daemon=True),
+                threading.Thread(target=_one, args=("/docs/y.pdf", "1.9.7"), daemon=True),
+            ]
+            # Joined, and checked dead, before the patches unwind: a failing assertion above
+            # must not take them down while a run is still using them.
+            try:
+                for t in threads:
+                    t.start()
+            finally:
+                for t in threads:
+                    if t.ident is not None:
+                        t.join(timeout=45)
+                assert not any(t.is_alive() for t in threads), "a run outlived its join"
         assert pipeline_stages.PDFExtractor is real_extractor, "the patch is undone once, in order"
         assert {results["/docs/x.pdf"][0], results["/docs/y.pdf"][0]} == {2}
         assert results["/docs/x.pdf"][2].fire_batch.call_args.kwargs["catalog_doc_id"] == "1.9.6"

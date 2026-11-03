@@ -242,11 +242,14 @@ def test_on_locked_wait_blocks_then_runs(tmp_path: Path, registry, lock_home: Pa
 
     # The patches are entered and left on THIS thread, around the worker's whole life: a patch
     # entered in the worker would stay installed for the rest of the xdist worker if the join timed
-    # out (nexus-9tmvy).
+    # out (nexus-9tmvy). The lock is released and the thread joined in a ``finally`` inside the
+    # patches, so a failing assertion cannot unwind them while the indexer is still running.
     with patch("nexus.indexer._run_index", side_effect=_fake_run), \
             patch("nexus.indexer._current_head", return_value="aaa"):
+        t: threading.Thread | None = None
         # Hold the lock, start indexer in background, verify it blocks, then release
-        with open(lock_path, "w") as holder:
+        holder = open(lock_path, "w")
+        try:
             fcntl.flock(holder, fcntl.LOCK_EX)
 
             t = threading.Thread(target=run_indexer, daemon=True)
@@ -255,10 +258,13 @@ def test_on_locked_wait_blocks_then_runs(tmp_path: Path, registry, lock_home: Pa
             # Should still be blocked after 200 ms
             assert not ran_event.wait(timeout=0.3), "Indexer should be blocked while lock is held"
 
-        # Lock released by exiting `with` block — indexer should now run
-        assert ran_event.wait(timeout=5.0), "Indexer should run after lock is released"
-        t.join(timeout=5.0)
-        assert not t.is_alive(), "the indexer thread outlived the test"
+            holder.close()  # the lock is released: the indexer should now run
+            assert ran_event.wait(timeout=5.0), "Indexer should run after lock is released"
+        finally:
+            holder.close()  # idempotent; frees a blocked indexer on the failure path too
+            if t is not None:
+                t.join(timeout=5.0)
+                assert not t.is_alive(), "the indexer thread outlived the test"
 
 
 # ── frecency_only bypasses lock ───────────────────────────────────────────────
