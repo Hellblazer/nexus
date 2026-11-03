@@ -377,20 +377,26 @@ class ManifestSearchShortPageIntegrationTest {
     void aFanOutArmWhoseRerunRunsIntoItsBound_isMarkedTimedOut_notServedAShortPage() {
         // nexus-8ptg4. A starved arm (the scan cap reaches 1 of 3 rows) re-runs exact under the arm's own statement
         // bound. The bound is calibrated against this box: a fraction of what the exact route alone costs, so the walk
-        // and the manifest count fit inside it and the re-run does not. Before the fix the cancelled re-run was
-        // swallowed and the arm returned its one-row page as if the answer were complete.
+        // and the manifest count usually fit inside it and the re-run does not. Before the fix the cancelled re-run
+        // was swallowed and the arm returned its one-row page as if the answer were complete. On a loaded box the
+        // count itself can meet the bound first (develop CI, run 41660277027: count cancelled at a 144 ms bound), so
+        // the pin is one deadline met at the count OR the re-run; which one is pinned deterministically in
+        // ShortPageRerunFailureTest. A bound met by the first walk alone counts neither and fails this pin, so it
+        // cannot pass on an arm that never reached the short-page path.
         PgSession.overrideSearchExactMaxRowsForTests(1_000_000);
         long exactMs = medianMs(3, () -> vec.search(TENANT, QUERY, List.of(COLLECTION), 10, rare()));
         PgSession.resetSearchExactMaxRowsForTests();
         PgSession.overrideScanBudgetForTests(1000, 100);
         int boundMs = (int) Math.max(60, exactMs * 2 / 5);
-        long deadlinesBefore = PgVectorRepository.shortPageRerunDeadlineCount();
+        long deadlinesBefore = PgVectorRepository.shortPageRerunDeadlineCount()
+            + PgVectorRepository.shortPageCountDeadlineCount();
 
         var result = vec.searchPerCollection(TENANT, QUERY, List.of(COLLECTION), 10, 10, null, rare(), false,
             new FanoutSettings(1, 60_000, boundMs));
 
-        assertThat(PgVectorRepository.shortPageRerunDeadlineCount() - deadlinesBefore)
-            .as("one arm deadline was met at the re-run, counted apart from a count's (exact route alone %d ms, "
+        assertThat(PgVectorRepository.shortPageRerunDeadlineCount() + PgVectorRepository.shortPageCountDeadlineCount()
+                   - deadlinesBefore)
+            .as("one arm deadline was met on the short-page path, at the count or the re-run (exact route alone %d ms, "
                 + "bound %d ms)", exactMs, boundMs)
             .isEqualTo(1);
         assertThat(result.perCollection()).hasSize(1);
