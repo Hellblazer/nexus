@@ -43,8 +43,8 @@ What changed, and why:
   with `[non-answer: uncovered]`, while the evidence it retrieved holds the
   customer ids. The mechanism that addresses that is a *resolution repair*
   inside RDR-232's coverage boundary (defined in §Proposed Solution), not a new
-  planner trigger. Whether that repair can enter on these questions is not yet
-  known (Critical Assumption #5).
+  planner trigger. Measured on 2026-11-03, the coverage repair already enters on
+  these questions (Critical Assumption #5, 147-research-7).
 - **Mechanism B's June seam is gone.** (Mechanism B was June's planner-side
   type-mismatch trigger; Mechanism A was the ingest-time entity linker.) The inline planner is one-shot, cannot
   emit a `filter` step, and the dimension and shape names June proposed collide
@@ -88,7 +88,8 @@ names.
 question was supported, and skipped generating an answer. Yet the evidence each
 run retrieved (20 to 80 chunks) names 2 to 10 customer ids per question. The ids
 are in hand, and nothing turns them into companies. The coverage check's one
-repair (a second retrieval) did not run either; why is Critical Assumption #5.
+repair (a second retrieval) ran on the 6 questions that reached the boundary
+and changed no verdict (Critical Assumption #5).
 
 ### Enumerated gaps to close
 
@@ -306,15 +307,17 @@ November 2026: a read-only re-plan survey against nexus `develop` (T2
   issue questions, hop-1 precision at k=20 is 0.967. Hop 1's limit is recall: it
   surfaces 4 to 6 of the 10 to 12 ids the cited artifacts name.
 - **Measured (Step 0)** — `nx_answer` declines all 7 company questions as
-  `[non-answer: uncovered]` while holding the ids, and its coverage repair did not
-  run (probe: `repair_entered=False`, outcome `not_attempted`).
-- **Inferred from code, not measured** — Why the repair did not run. On
-  `b7c423ea8`, an `unavailable`/`uncovered` ledger with evidence present enters
-  no repair only when no facet carries `no_supporting_evidence`, and the other
-  reason an unsupported facet can carry when evidence is present is
-  `source_missing` (a source named in the question judged absent). Step 0 did not
-  record facet reasons, and it ran nx 7.94.0, not this commit. Critical
-  Assumption #5 carries this.
+  `[non-answer: uncovered]` while holding the ids.
+- **Measured (2026-11-03, 147-research-7)** — The facet states on develop
+  7b85c02cb, on a rebuilt Step 0 sandbox: no question names a source
+  (`named_sources=[]`), each has one whole-question facet `f1`, and no facet is
+  `source_missing`. q1 took plan 7 and did not reach the boundary. On q2 to q7,
+  `f1` is `unsupported` / `no_supporting_evidence`, `repair_target_ids=[f1]`, and
+  the repair ran: q2, q3, q4 and q7 found no new evidence after 1 query; q5 merged
+  1 item and q6 merged 2; all six stayed `[non-answer: uncovered]`. Plan 9 (q2 to
+  q4) gave the boundary 6 anchors out of 80 chunks. Step 0's
+  `repair_entered=False` / `not_attempted` came from its probe on a different
+  question.
 - **Documented** — StepChain, ByoKG, HippoRAG2 and LEGO-GraphRAG build explicit
   entity graphs for this join; PRISM and PAR-RAG decompose with precision
   filtering; Self-RAG and FLARE gate retrieval reflectively; Beyond-Static
@@ -418,16 +421,13 @@ the script, so recall alone does not clear the bar.
   `find_by_title_exact` already does one exact lookup. So the new step is thin: a
   runner-native `resolve` that calls `find_by_title_exact` per token and reports
   `missing` and `ambiguous`. A `$in` string grammar is not needed for it.
-- [ ] **#5 The resolution repair can enter on the HERB ledger** — **Status**:
-  Unverified, and the code suggests it cannot as things stand — **Method**: Source
-  Search on b7c423ea8 plus the Step 0 probe. The probe recorded
-  `repair_entered=False`. By the code, that means no facet was `unsupported` with
-  `no_supporting_evidence`; with evidence present, the remaining reason is
-  `source_missing`, which RDR-232 rules is decided by the missing source and is
-  not repairable. If that is what happened, a repair keyed on
-  `no_supporting_evidence` never sees the HERB questions. Step 4 starts by
-  recording the facet states, reasons and named sources on the 7 questions
-  (§Step 4, sub-step 1); its branch depends on the answer.
+- [x] **#5 The resolution repair can enter on the HERB ledger** — **Status**:
+  Verified — **Method**: Spike, 2026-11-03 (147-research-7; T2
+  `nexus/rdr147-s1-facet-measurement-2026-11-03`). On q2 to q7 the single facet
+  `f1` is `unsupported` / `no_supporting_evidence` and `repair_target_ids=[f1]`,
+  so the repair enters; no facet is `source_missing` and no question names a
+  source. q1 does not reach the boundary (plan 7). Step 0's
+  `repair_entered=False` came from its probe on a different question.
 
 ## Proposed Solution
 
@@ -638,9 +638,8 @@ where evidence is seen.
   near-identical customer records, which could move recall by chance while
   precision falls. **Mitigation**: the ladder reports precision and F1 for
   `nx_answer`, and the resolution branch reports how many anchors it added.
-- **R3, the repair may not enter (Assumption #5).** If the HERB facets are
-  `source_missing`, the repair is skipped by RDR-232's rule. **Mitigation**:
-  Step 4 sub-step 1 measures the reasons first and branches.
+- **R3, the repair may not enter (Assumption #5).** Retired by measurement: the
+  repair enters on q2 to q7 (147-research-7).
 - **R4, request kind.** "Find the names of companies …" is likely read as
   `unknown` by the fixed rules and decided by the model call, likely as
   discovery/listing. A curated lookup plan would then be ineligible
@@ -681,8 +680,8 @@ where evidence is seen.
 - [x] Step 0 measured and merged (nexus-3lu23; assetops-kg PR #3).
 - [ ] This revision gated (`/conexus:rdr-gate 147`) and accepted. No
   implementation bead starts before that.
-- [ ] Critical Assumption #5 measured (Step 4 sub-step 1). It can run before the
-  gate because it changes no code; its result may change Step 4's branch.
+- [x] Critical Assumption #5 measured (Step 4 sub-step 1, 2026-11-03,
+  147-research-7): the repair enters; Step 4 takes branch (a).
 
 ### Minimum Viable Validation
 
@@ -757,14 +756,16 @@ a `$ref` step") is dropped: it already works.
 
 #### Step 4: Resolution repair in the coverage boundary
 
-1. **Measure the entry state.** On the 7 questions, record each facet's state and
-   reason, the named sources and their resolution, and `repair_target_ids`. This
-   changes no code.
+1. **Measure the entry state.** Done 2026-11-03 (147-research-7): on q2 to q7
+   the one facet is `unsupported` / `no_supporting_evidence` and is a repair
+   target; q1 does not reach the boundary.
 2. **Branch on the result:**
-   - (a) Facets are `unsupported` / `no_supporting_evidence` (the repair was off
-     for another reason): add the exact-key branch to the existing repair as
-     designed.
-   - (b) Facets are `source_missing`: the repair is skipped by RDR-232's rule.
+   - (a) Facets are `unsupported` / `no_supporting_evidence` and the repair
+     enters (the measured case, 147-research-7): add the exact-key branch to the
+     existing repair as designed.
+   - (b) Excluded by measurement: no facet is `source_missing` and no question
+     names a source (147-research-7). Kept for the record: facets `source_missing`
+     would mean the repair is skipped by RDR-232's rule.
      Find which named source was judged missing and why. If a product or
      component name in the question is being read as a missing document, that is
      a named-source detection defect, fixed under RDR-232's rules as its own bead,
@@ -817,23 +818,18 @@ links and the FK cascade.
 
 ### Contradiction Check
 
-One tension is stated rather than resolved. The design places the exact-key
-branch inside RDR-232's coverage repair (Technical Design), while Critical
-Assumption #5 records that, by the code, the repair may never enter on the HERB
-questions (their facets read `source_missing`, which RDR-232 rules not
-repairable). The plan does not hide this: Step 4 starts by measuring the facet
-states and reasons on the 7 questions and branches on the result. Apart from
-that, no contradictions found between research findings, design principles and
-the proposed solution.
+No contradictions found between research findings, design principles and the
+proposed solution. The tension the round-2 gate named (the repair might never
+enter on the HERB questions) is resolved by measurement: it enters on q2 to q7
+(147-research-7).
 
 ### Assumption Verification
 
 #1, #3 and #4 are verified by source search on b7c423ea8 (research records
 147-research-3 to 147-research-5). #2 (a post-store batch hook can write catalog
 links) is to be re-verified on the PG engine, and only if the conditional linker
-is built (Step 2). #5 is unverified and acknowledged at gate round 2 (Sam,
-2026-11-03; 147-research-6); Step 4 sub-step 1 measures it before any Step 4
-code.
+is built (Step 2). #5 was acknowledged unverified at gate round 2 (Sam,
+2026-11-03; 147-research-6) and is now verified by spike (147-research-7).
 
 #### API Verification
 
