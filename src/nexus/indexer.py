@@ -5501,6 +5501,12 @@ def _run_index(
     # hook never runs). Housekeeping stays the fallback.
     whitespace_skipped_present: set[str] = set()
 
+    # nexus-gnw42: worktree-relative paths of tracked symlinks the main walk
+    # skipped. Every one present is collected whatever the delta says; one
+    # that still has a stored document (an earlier walk followed the link)
+    # rides the same same-run tombstone as whitespace_skipped_present.
+    symlink_skipped_present: set[str] = set()
+
     rdr_md_paths: list[tuple[float, Path]] = []
     for rdr_rel in dict.fromkeys(rdr_paths):  # de-dupe while preserving order
         rdr_dir = repo / rdr_rel
@@ -5602,6 +5608,17 @@ def _run_index(
     # shared by both discovery passes.
 
     for path in candidate_files:
+        # nexus-gnw42: git ls-files lists a tracked symlink as a path and
+        # ``is_file()`` follows it, so ``CLAUDE.md -> AGENTS.md`` registered a
+        # second document holding the target's text (the rglob fallback above
+        # already excluded symlinks). Skipped here, before the delta filter: a
+        # symlink's blob never changes when its target's text does, so a
+        # --since-head delta never names it, and a stored document at its path
+        # must still be retired (below, the same-run tombstone). A target inside
+        # the repo is indexed under its own path; one outside it is not indexed.
+        if path.is_symlink():
+            symlink_skipped_present.add(str(path.relative_to(repo)))
+            continue
         if not path.is_file():
             continue  # git ls-files may list deleted files not yet committed
         rel = path.relative_to(repo)
@@ -5694,12 +5711,16 @@ def _run_index(
                     ext=path.suffix.lower(),
                 )
 
-    if whitespace_skipped_present:
+    if whitespace_skipped_present or symlink_skipped_present:
         # nexus-5j8fp: same-run retirement of a still-present whitespace-only
         # file's existing document, through the nexus-d6qmz tombstone path
         # (see rdr_excluded_present above). Filtered to paths with a live
         # stored document so steady state leaves delta_deleted empty.
-        _ws_stored = _stored_paths_among(repo, whitespace_skipped_present)
+        # nexus-gnw42: a symlink's stored document rides the same path, in
+        # the same batched lookup (one by_owner read for both sets).
+        _ws_stored = _stored_paths_among(
+            repo, whitespace_skipped_present | symlink_skipped_present,
+        )
         if _ws_stored:
             _ws_already = set(delta_deleted)
             delta_deleted.extend(sorted(_ws_stored - _ws_already))
