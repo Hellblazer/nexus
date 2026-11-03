@@ -9,6 +9,7 @@ deferrals per rung; the doctor row leads with STUCK (a warning still) at
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -16,12 +17,14 @@ import click
 import pytest
 
 import nexus.upgrade_ladder.registry as ladder_registry
+from nexus import config as _config
 from nexus.commands.upgrade import _run_ladder
 from nexus.health import _check_pending_rungs
 from nexus.upgrade_ladder.census_progress import PROGRESS_PROJECT, T2NoteStore
 from nexus.upgrade_ladder.deferral_log import (
     DEFERRAL_TITLE,
     ESCALATE_AFTER,
+    FLAG_NAME,
     DeferralLog,
     t2_deferral_log,
 )
@@ -30,7 +33,6 @@ from nexus.upgrade_ladder.registry import LadderRegistry
 from nexus.upgrade_ladder.runner import LadderRunReport, RungOutcome, RungRun
 from tests.upgrade.conftest import InMemoryCompletionLedger
 
-pytestmark = pytest.mark.t2_tenant
 
 _T0 = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
 
@@ -59,17 +61,43 @@ def clock() -> Clock:
     return Clock()
 
 
+class _MemoryStore:
+    """The note store's three calls, in memory: the counting rules need no storage, and each test that mints a
+    tenant costs the suite's storage-touch ceiling. The T2 round trip, the walk and the doctor row keep the real note."""
+
+    def __init__(self) -> None:
+        self.note: dict | None = None
+
+    def load(self):
+        return self.note
+
+    def save(self, note):
+        self.note = json.loads(json.dumps(note))  # what a T2 round trip would hand back
+
+    def clear(self):
+        self.note = None
+
+
+@pytest.fixture
+def mem_log(clock: Clock, tmp_path: Path) -> DeferralLog:
+    """The counting rules on an in-memory note, with a flag file of its own."""
+    return DeferralLog(_MemoryStore(), flag=tmp_path / FLAG_NAME, now_fn=clock)
+
+
 @pytest.fixture
 def log(clock: Clock) -> DeferralLog:
     """A log on the real T2 note, a fixed clock, and an empty note to start."""
     store = T2NoteStore(DEFERRAL_TITLE, project=PROGRESS_PROJECT)
     store.clear()
-    return DeferralLog(store, now_fn=clock)
+    flag = Path(_config.nexus_config_dir()) / FLAG_NAME  # the same flag t2_deferral_log() reads
+    flag.unlink(missing_ok=True)
+    return DeferralLog(store, flag=flag, now_fn=clock)
 
 
 # ── the log ──────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant
 def test_a_deferral_counts_up_keeping_the_first_stamp_and_the_latest_detail(log: DeferralLog, clock: Clock) -> None:
     log.record(_report(slow=_deferred("first")))
     clock.tick()
@@ -89,15 +117,15 @@ def test_a_deferral_counts_up_keeping_the_first_stamp_and_the_latest_detail(log:
     [RungOutcome.RECORDED, RungOutcome.ALREADY_RECORDED, RungOutcome.SKIPPED_NOT_APPLICABLE],
     ids=lambda o: o.value,
 )
-def test_a_clearing_outcome_ends_only_that_rungs_streak(log: DeferralLog, outcome: RungOutcome) -> None:
-    log.record(_report(slow=_deferred(), other=_deferred()))
-    log.record(_report(slow=_deferred(), other=_deferred()))
-    assert log.deferrals()["slow"].count == 2
+def test_a_clearing_outcome_ends_only_that_rungs_streak(mem_log: DeferralLog, outcome: RungOutcome) -> None:
+    mem_log.record(_report(slow=_deferred(), other=_deferred()))
+    mem_log.record(_report(slow=_deferred(), other=_deferred()))
+    assert mem_log.deferrals()["slow"].count == 2
 
-    log.record(_report(slow=(outcome, ""), other=_deferred()))
+    mem_log.record(_report(slow=(outcome, ""), other=_deferred()))
 
-    assert "slow" not in log.deferrals()
-    assert log.deferrals()["other"].count == 3
+    assert "slow" not in mem_log.deferrals()
+    assert mem_log.deferrals()["other"].count == 3
 
 
 @pytest.mark.parametrize(
@@ -105,31 +133,32 @@ def test_a_clearing_outcome_ends_only_that_rungs_streak(log: DeferralLog, outcom
     [RungOutcome.NOT_ATTEMPTED, RungOutcome.FAILED, RungOutcome.VERIFY_FAILED],
     ids=lambda o: o.value,
 )
-def test_a_rung_that_was_not_walked_or_failed_keeps_its_streak(log: DeferralLog, outcome: RungOutcome) -> None:
-    log.record(_report(slow=_deferred("kept")))
-    log.record(_report(slow=_deferred("kept")))
-    before = log.deferrals()["slow"]
+def test_a_rung_that_was_not_walked_or_failed_keeps_its_streak(mem_log: DeferralLog, outcome: RungOutcome) -> None:
+    mem_log.record(_report(slow=_deferred("kept")))
+    mem_log.record(_report(slow=_deferred("kept")))
+    before = mem_log.deferrals()["slow"]
 
-    log.record(_report(slow=(outcome, "something else")))
+    mem_log.record(_report(slow=(outcome, "something else")))
 
-    assert log.deferrals()["slow"] == before
-
-
-def test_an_emptied_log_leaves_no_note(log: DeferralLog) -> None:
-    log.record(_report(slow=_deferred()))
-    log.record(_report(slow=(RungOutcome.RECORDED, "")))
-    assert T2NoteStore(DEFERRAL_TITLE, project=PROGRESS_PROJECT).load() is None
+    assert mem_log.deferrals()["slow"] == before
 
 
-def test_the_streak_escalates_at_the_threshold_and_not_before(log: DeferralLog) -> None:
+def test_an_emptied_log_leaves_no_note(mem_log: DeferralLog) -> None:
+    mem_log.record(_report(slow=_deferred()))
+    mem_log.record(_report(slow=(RungOutcome.RECORDED, "")))
+    assert mem_log._store.load() is None and mem_log.deferrals() == {}
+
+
+def test_the_streak_escalates_at_the_threshold_and_not_before(mem_log: DeferralLog) -> None:
     assert ESCALATE_AFTER == 3
-    log.record(_report(slow=_deferred()))
-    log.record(_report(slow=_deferred()))
-    assert log.escalated() == {}
-    log.record(_report(slow=_deferred()))
-    assert set(log.escalated()) == {"slow"}
+    mem_log.record(_report(slow=_deferred()))
+    mem_log.record(_report(slow=_deferred()))
+    assert mem_log.escalated() == {}
+    mem_log.record(_report(slow=_deferred()))
+    assert set(mem_log.escalated()) == {"slow"}
 
 
+@pytest.mark.t2_tenant
 def test_a_malformed_note_reads_as_no_streaks_and_the_next_walk_replaces_it(log: DeferralLog) -> None:
     store = T2NoteStore(DEFERRAL_TITLE, project=PROGRESS_PROJECT)
     store.save({"rungs": {"slow": {"n": "many"}, "bad": 7, "worse": {"n": True, "since": "x", "last": "y", "detail": ""}}})
@@ -171,6 +200,7 @@ def _walk(auto_mode: bool, ledger: InMemoryCompletionLedger | None = None) -> No
     _run_ladder(dry_run=False, auto_mode=auto_mode, _ledger_fn=lambda: ledger)
 
 
+@pytest.mark.t2_tenant
 @pytest.mark.parametrize("auto_mode", [True, False], ids=["auto", "interactive"])
 def test_a_real_walk_counts_the_deferral_and_a_converged_one_clears_it(
     monkeypatch: pytest.MonkeyPatch, log: DeferralLog, auto_mode: bool
@@ -186,12 +216,14 @@ def test_a_real_walk_counts_the_deferral_and_a_converged_one_clears_it(
     assert t2_deferral_log().deferrals() == {}
 
 
+@pytest.mark.t2_tenant
 def test_a_dry_run_records_nothing(monkeypatch: pytest.MonkeyPatch, log: DeferralLog) -> None:
     _use(monkeypatch, _Rung("slow"))
     _run_ladder(dry_run=True, auto_mode=False)
     assert t2_deferral_log().deferrals() == {}
 
 
+@pytest.mark.t2_tenant
 def test_a_failed_rung_in_a_walk_leaves_another_rungs_streak(monkeypatch: pytest.MonkeyPatch, log: DeferralLog) -> None:
     slow, bad = _Rung("slow"), _Rung("bad", outcome="fail")
     _use(monkeypatch, slow)
@@ -202,6 +234,7 @@ def test_a_failed_rung_in_a_walk_leaves_another_rungs_streak(monkeypatch: pytest
     assert t2_deferral_log().deferrals()["slow"].count == 1  # NOT_ATTEMPTED behind the failure: unchanged
 
 
+@pytest.mark.t2_tenant
 def test_a_log_that_raises_changes_neither_the_outcome_nor_the_error(
     monkeypatch: pytest.MonkeyPatch, log: DeferralLog
 ) -> None:
@@ -238,6 +271,7 @@ def _row(monkeypatch: pytest.MonkeyPatch, *rungs: _Rung):
     return row
 
 
+@pytest.mark.t2_tenant
 def test_the_row_stays_soft_below_the_threshold(monkeypatch: pytest.MonkeyPatch, log: DeferralLog) -> None:
     _seed(log, "slow", ESCALATE_AFTER - 1)
     row = _row(monkeypatch, _Rung("slow"))
@@ -245,6 +279,7 @@ def test_the_row_stays_soft_below_the_threshold(monkeypatch: pytest.MonkeyPatch,
     assert "STUCK" not in row.detail
 
 
+@pytest.mark.t2_tenant
 def test_the_row_becomes_a_full_warning_at_the_threshold_and_names_the_rung(
     monkeypatch: pytest.MonkeyPatch, log: DeferralLog, clock: Clock
 ) -> None:
@@ -262,6 +297,7 @@ def test_the_row_becomes_a_full_warning_at_the_threshold_and_names_the_rung(
     assert any("nx upgrade" in fix for fix in row.fix_suggestions)
 
 
+@pytest.mark.t2_tenant
 def test_only_a_still_pending_rung_escalates(monkeypatch: pytest.MonkeyPatch, log: DeferralLog) -> None:
     _seed(log, "slow", ESCALATE_AFTER)
     row = _row(monkeypatch, _Rung("slow", pending=False))  # converged since: its old streak says nothing
@@ -275,6 +311,7 @@ def test_only_a_still_pending_rung_escalates(monkeypatch: pytest.MonkeyPatch, lo
     assert row.detail.startswith("STUCK: ") and "rung 'slow'" in row.detail and "rung 'fresh'" not in row.detail
 
 
+@pytest.mark.t2_tenant
 def test_a_log_that_cannot_be_read_leaves_the_row_as_it_is(monkeypatch: pytest.MonkeyPatch, log: DeferralLog) -> None:
     _seed(log, "slow", ESCALATE_AFTER)
 
@@ -287,7 +324,38 @@ def test_a_log_that_cannot_be_read_leaves_the_row_as_it_is(monkeypatch: pytest.M
     assert "STUCK" not in row.detail and "1 pending upgrade rung(s)" in row.detail
 
 
+@pytest.mark.t2_tenant
 def test_a_malformed_note_leaves_the_row_soft(monkeypatch: pytest.MonkeyPatch, log: DeferralLog) -> None:
     T2NoteStore(DEFERRAL_TITLE, project=PROGRESS_PROJECT).save({"rungs": json.loads('{"slow": {"n": 99}}')})
     row = _row(monkeypatch, _Rung("slow"))
     assert row.warn is True and "STUCK" not in row.detail
+
+
+
+class _RaisingStore:
+    """A note store that must not be reached."""
+
+    def load(self):
+        raise AssertionError("the note was read")
+
+    def save(self, note):
+        raise AssertionError("the note was written")
+
+    def clear(self):
+        raise AssertionError("the note was cleared")
+
+
+def test_with_no_flag_a_clean_walk_and_the_doctor_read_never_touch_the_note(tmp_path: Path) -> None:
+    """The flag file keeps a clean upgrade (and every fresh config directory) off storage."""
+    log = DeferralLog(_RaisingStore(), flag=tmp_path / FLAG_NAME)
+    log.record(_report(a=(RungOutcome.RECORDED, ""), b=(RungOutcome.SKIPPED_NOT_APPLICABLE, "")))
+    assert log.deferrals() == {} and log.escalated() == {}
+
+
+def test_the_flag_exists_exactly_while_the_note_holds_a_streak(mem_log: DeferralLog) -> None:
+    flag = mem_log._flag
+    assert flag is not None and not flag.exists()
+    mem_log.record(_report(slow=_deferred()))
+    assert flag.exists()
+    mem_log.record(_report(slow=(RungOutcome.RECORDED, "")))
+    assert not flag.exists() and mem_log.deferrals() == {}

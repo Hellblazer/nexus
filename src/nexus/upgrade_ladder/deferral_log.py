@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -62,9 +63,20 @@ ESCALATE_AFTER = STARVED_AFTER
 _DETAIL_STORE_MAX = 300
 
 
+#: A local file that exists exactly while the note holds a streak. A walk with no deferral, and a doctor row, read
+#: the note only when it exists, so a clean upgrade (the common case, and every test with a fresh config directory)
+#: never touches storage for this log.
+FLAG_NAME: str = "ladder-deferrals.flag"
+
+
 def t2_deferral_log() -> DeferralLog:
-    """The production log: the T2 note named :data:`DEFERRAL_TITLE`."""
-    return DeferralLog(T2NoteStore(DEFERRAL_TITLE, project=PROGRESS_PROJECT, tags="upgrade-ladder,deferrals"))
+    """The production log: the T2 note named :data:`DEFERRAL_TITLE`, gated by the config directory's flag file."""
+    from nexus import config as _config  # noqa: PLC0415 — resolved at call time (tests/AGENTS.md: setenv, never setattr)
+
+    return DeferralLog(
+        T2NoteStore(DEFERRAL_TITLE, project=PROGRESS_PROJECT, tags="upgrade-ladder,deferrals"),
+        flag=Path(_config.nexus_config_dir()) / FLAG_NAME,
+    )
 
 
 @dataclass(frozen=True)
@@ -106,10 +118,16 @@ class DeferralLog:
     changes it and writes it back, so nothing is held between calls."""
 
     def __init__(
-        self, store: NoteStore, *, now_fn: Callable[[], datetime] = lambda: datetime.now(UTC)
+        self, store: NoteStore, *, flag: Path | None = None,
+        now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._store = store
+        self._flag = flag
         self._now = now_fn
+
+    def _known_empty(self) -> bool:
+        """True when the flag file says the note holds no streak (no flag configured: never known)."""
+        return self._flag is not None and not self._flag.exists()
 
     def _entries(self) -> dict[str, dict[str, Any]]:
         """The well-formed entries of the stored note; anything else is dropped."""
@@ -126,8 +144,8 @@ class DeferralLog:
         clearing = {RungOutcome.RECORDED, RungOutcome.ALREADY_RECORDED, RungOutcome.SKIPPED_NOT_APPLICABLE}
         deferred = [run for run in report.runs if run.outcome is RungOutcome.DEFERRED]
         cleared = [run.name for run in report.runs if run.outcome in clearing]
-        if not deferred and not cleared:
-            return  # nothing this walk says about any streak (an empty ladder, or every rung not attempted or failed)
+        if not deferred and (not cleared or self._known_empty()):
+            return  # nothing to add, and nothing stored to clear
         entries = self._entries()
         before = {name: dict(e) for name, e in entries.items()}
         stamp = self._now().isoformat(timespec="seconds")
@@ -145,11 +163,18 @@ class DeferralLog:
             return
         if entries:
             self._store.save({"rungs": entries})
+            if self._flag is not None:
+                self._flag.parent.mkdir(parents=True, exist_ok=True)
+                self._flag.touch()
         else:
             self._store.clear()
+            if self._flag is not None:
+                self._flag.unlink(missing_ok=True)
 
     def deferrals(self) -> dict[str, RungDeferral]:
         """Every rung with a streak, by name."""
+        if self._known_empty():
+            return {}
         return {
             name: RungDeferral(name, e["n"], e["since"], e["last"], e["detail"])
             for name, e in self._entries().items()

@@ -40,8 +40,12 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5084
+provisioned_tests = 5099
 tolerance_tests = 0
+# 5084 -> 5099 (nexus-0sm1t, 2026-11-03): +15. The ladder deferral log is a T2 note: tests/upgrade/test_deferral_log.py
+# keeps 12 t2_tenant tests for the T2 round trip, the _run_ladder wiring and the doctor row (its ten counting-rule
+# tests run on an in-memory store); test_ladder_surfaces.py and test_auto_deadline.py mark the three walks that
+# defer and so write the note. A local flag file keeps every clean walk off storage, which spared 20 other tests.
 # 5063 -> 5084 (nexus-qo7ie.17, nexus-ypgbz, 2026-11-03): +21. tests/test_memory_curate.py adds 17 t2_tenant
 # tests: nx memory curate --t2 reads and writes real T2 rows (the replaced-row heuristic, the AUDIT_TAGS skip,
 # the census, the one report put and the never-deletes snapshot), which a fake store cannot prove.

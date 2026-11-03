@@ -384,7 +384,6 @@ def _managed_note_tags_registry(monkeypatch) -> None:
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
 
 
-@pytest.mark.t2_tenant
 def test_a_plain_upgrade_with_the_env_refuses_the_walk_and_holds_the_lock(plain_upgrade, monkeypatch) -> None:
     """The ship-blocker pin. Managed posture, no completion record, no memo: the note-tags rung would list
     every note of the catalog. With NX_UPGRADE_UNATTENDED=1 and NO --auto, no deadline, it reads NOTHING and
@@ -398,7 +397,6 @@ def test_a_plain_upgrade_with_the_env_refuses_the_walk_and_holds_the_lock(plain_
     assert auto_lock_held() is False, "released when the command ends"
 
 
-@pytest.mark.t2_tenant
 def test_the_same_plain_upgrade_without_the_env_walks_and_takes_no_lock(plain_upgrade, monkeypatch) -> None:
     """Positive control: an interactive `nx upgrade` keeps the scan and takes no lock."""
     _managed_note_tags_registry(monkeypatch)
@@ -455,7 +453,6 @@ def test_an_auto_upgrade_that_loses_the_lock_leaves_the_marker_alone(seams: list
     assert marker_file.read_text(encoding="utf-8") == running_version()
 
 
-@pytest.mark.t2_tenant
 def test_a_plain_unattended_upgrade_that_gets_the_lock_leaves_the_version_marker_alone(
     plain_upgrade, monkeypatch, marker_file: Path,
 ) -> None:
@@ -468,7 +465,6 @@ def test_a_plain_unattended_upgrade_that_gets_the_lock_leaves_the_version_marker
     assert marker_file.read_text(encoding="utf-8") == running_version()
 
 
-@pytest.mark.t2_tenant
 def test_a_plain_upgrade_that_completes_settles_a_sentinel_to_the_running_version(
     plain_upgrade, monkeypatch, marker_file: Path,
 ) -> None:
@@ -482,7 +478,6 @@ def test_a_plain_upgrade_that_completes_settles_a_sentinel_to_the_running_versio
     assert marker_file.read_text(encoding="utf-8") == running_version()
 
 
-@pytest.mark.t2_tenant
 def test_an_auto_upgrade_does_not_settle_the_sentinel(plain_upgrade, monkeypatch, marker_file: Path) -> None:
     """`--auto` skips plugin convergence, the agents and hooks refresh and the dimension advisory, which is
     what the sentinel says is owed: finishing it does not discharge the debt."""
@@ -503,7 +498,6 @@ def test_a_dry_run_does_not_settle_the_sentinel(plain_upgrade, monkeypatch, mark
     assert marker_file.read_text(encoding="utf-8") == UPGRADE_RETRY_MARKER
 
 
-@pytest.mark.t2_tenant
 def test_a_skip_t3_upgrade_does_not_settle_the_sentinel(plain_upgrade, monkeypatch, marker_file: Path) -> None:
     """`--skip-t3` skips the engine install and the advisory the sentinel says are owed (review r2 B1)."""
     monkeypatch.setattr(sys, "argv", ["nx", "upgrade", "--skip-t3"])
@@ -525,7 +519,6 @@ def test_a_plain_upgrade_that_fails_keeps_the_sentinel(plain_upgrade, monkeypatc
     assert marker_file.read_text(encoding="utf-8") == UPGRADE_RETRY_MARKER
 
 
-@pytest.mark.t2_tenant
 def test_a_plain_unattended_upgrade_waits_for_the_holder_and_then_runs(plain_upgrade, monkeypatch) -> None:
     """Positive control for the wait: the holder (an `--auto` at the same session start) ends inside the
     window, and the plain run goes on, unattended and holding the lock."""
@@ -546,7 +539,6 @@ def test_a_plain_unattended_upgrade_waits_for_the_holder_and_then_runs(plain_upg
     assert plain_upgrade == {"unattended": True, "lock_held": True}
 
 
-@pytest.mark.t2_tenant
 def test_upgrade_auto_sets_the_signal_around_the_ladder_without_the_env(plain_upgrade, monkeypatch) -> None:
     """`--auto` is unattended by its flag, whatever deadline it builds."""
     monkeypatch.setattr(sys, "argv", ["nx", "upgrade", "--auto"])
@@ -557,7 +549,6 @@ def test_upgrade_auto_sets_the_signal_around_the_ladder_without_the_env(plain_up
     assert _CountingReader.reads == []
 
 
-@pytest.mark.t2_tenant
 def test_the_signal_does_not_leak_out_of_a_command(plain_upgrade, monkeypatch) -> None:
     monkeypatch.setenv(UNATTENDED_ENV, "1")
     _managed_note_tags_registry(monkeypatch)
