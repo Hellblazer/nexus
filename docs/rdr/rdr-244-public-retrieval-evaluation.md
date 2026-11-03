@@ -120,6 +120,10 @@ Research record: T2 `nexus/2k66t2-eval-design-research-2026-11-03`. Design resea
 only: landing pages, READMEs, licences and the PaperQA2 paper were read; no
 dataset or paper was downloaded, and no nx_answer or indexing run was done.
 
+### Investigation
+
+Four questions were investigated: what LitQA2 is and how PaperQA2 scored it (the paper, the dataset card); what CoIR offers a code-retrieval track (paper, repository); what the internal bench and RDR-090 already measure (`scripts/bench/`, `scripts/spikes/spike_rdr090_5q_summary.json`, `docs/rdr/rdr-090-realistic-agenticscholar-benchmark.md:127`); and what one run costs, from live nx_answer telemetry (T2 `nexus/rdr232-unread-anchor-withhold-cost-2026-11-03`). The sources and what each settled are in the table below; the findings are recorded per item in T2 `nexus_rdr/244-research-*`.
+
 ### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
@@ -211,10 +215,10 @@ queries cannot separate the paths.
 
 ### Alternatives Considered
 
-- **BEIR SciFact and NFCorpus**: a free, retrieval-only second IR check (300 and 323 queries). Good candidate for a later RDR; no answer-path measure.
-- **CodeSearchNet**: about 2M code pairs with a 99-query human set; per-function licences make a derived set hard to publish. CoIR covers code under one licence.
-- **Full LitQA2 (248 questions)**: about $176 and about 5.5 hours serial at p50 80 s. Deferred until the subset result justifies the spend.
-- **LoCoMo, LongMemEval**: excluded by the bead; memory-system vendors dispute their published numbers.
+- **BEIR SciFact and NFCorpus.** Pros: free, retrieval-only, 300 and 323 queries, widely reported. Cons: no answer-path measure; licence not stated in the BEIR README. Rejection reason: not rejected, deferred as a second IR check for a later RDR.
+- **CodeSearchNet.** Pros: about 2M code pairs and a 99-query human set. Cons: per-function licences make a derived set hard to publish. Rejection reason: CoIR covers code retrieval under one licence (Apache-2.0).
+- **Full LitQA2 (248 questions).** Pros: the complete benchmark PaperQA2 reports on. Cons: about $176 and about 5.5 hours serial at p50 80 s; vendor-authored. Rejection reason: deferred with Track B by the owner decision of 2026-11-03.
+- **LoCoMo, LongMemEval.** Pros: memory benchmarks with published comparisons. Cons: memory-system vendors dispute the published numbers. Rejection reason: excluded by the bead (nexus-2k66t.2).
 
 ## Decisions for the Project Owner
 
