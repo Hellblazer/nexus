@@ -236,7 +236,10 @@ def test_the_exit_handlers_register_the_release_with_atexit(monkeypatch) -> None
     assert "_install_exit_handlers()" in inspect.getsource(core.main)
     import signal  # noqa: PLC0415 — test-local
 
-    assert signals == {signal.SIGTERM: core._sigterm_handler, signal.SIGINT: core._sigterm_handler}
+    expected = {signal.SIGTERM: core._sigterm_handler, signal.SIGINT: core._sigterm_handler}
+    if hasattr(signal, "SIGHUP"):  # a terminal hangup (tmux kill-server) gets the same teardown (nexus-xwijj)
+        expected[signal.SIGHUP] = core._sigterm_handler
+    assert signals == expected
 
     fake = _FakeTuples()
     _armed(fake, "sess-atexit", "bob")

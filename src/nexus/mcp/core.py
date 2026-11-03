@@ -2810,8 +2810,15 @@ def _install_exit_handlers(
     set_signal: Callable[[int, Any], Any] | None = None,
 ) -> None:
     """Register :func:`_exit_teardown` with :mod:`atexit` and
-    :func:`_sigterm_handler` for SIGTERM and SIGINT. Called once by
-    :func:`main`; see the comment there for why all three are needed.
+    :func:`_sigterm_handler` for SIGTERM, SIGINT and, where the platform
+    has it, SIGHUP. Called once by :func:`main`; see the comment there for
+    why all of them are needed. SIGHUP is a terminal hangup: a tmux
+    ``kill-server``, a closed terminal window or a dropped ssh session
+    hangs up the session's pty, and the kernel sends SIGHUP to its
+    foreground process group, this server included. Its default action
+    ends the process with no teardown, so the T1 token, its lease file and
+    the peer-directory name were left behind until they lapsed (measured in
+    the restart sandbox, nexus-xwijj).
     *register* and *set_signal* default to ``atexit.register`` and
     ``signal.signal``; a test passes its own instead of patching the
     stdlib modules for the whole process."""
@@ -2823,6 +2830,8 @@ def _install_exit_handlers(
     register(_exit_teardown)
     set_signal(signal.SIGTERM, _sigterm_handler)
     set_signal(signal.SIGINT, _sigterm_handler)
+    if (hangup := getattr(signal, "SIGHUP", None)) is not None:  # POSIX only; Windows has no SIGHUP
+        set_signal(hangup, _sigterm_handler)
 
 
 # nexus-20iee: the upstream mcp SDK's FastMCP Settings model (a Generic[
@@ -16138,7 +16147,8 @@ def main():
     # atexit does NOT run (Python only fires atexit on clean exit),
     # and chroma orphans. The watchdog covers it eventually but
     # the MCP-owned cleanup path simply doesn't run. So we install
-    # the signal handlers for SIGTERM and SIGINT to run
+    # the signal handlers for SIGTERM, SIGINT and SIGHUP (a terminal
+    # hangup, as a tmux kill-server sends; nexus-xwijj) to run
     # _exit_teardown (the name release alongside _t1_shutdown,
     # nexus-tu84w) directly. atexit stays as the third
     # belt-and-braces for clean exits via stdin EOF / SystemExit.
