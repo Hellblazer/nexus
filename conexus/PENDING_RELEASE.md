@@ -56,12 +56,12 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/design-to-code-trace/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
 - `conexus/skills/document/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
 - `conexus/skills/knowledge-tidying/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
-- `conexus/skills/rdr-accept-checklist/SKILL.md` (nexus-egv6q): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path.
+- `conexus/skills/rdr-accept-checklist/SKILL.md` (nexus-egv6q, nexus-3811j): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path. A brief or relay names the RDR directory by the `<RDR dir>` placeholder (the absolute path), never `$RDR_DIR`.
 - `conexus/skills/rdr-close/SKILL.md` (nexus-egv6q): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path.
 - `conexus/skills/rdr-create/SKILL.md` (nexus-egv6q): plugin template and register paths use the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes.
-- `conexus/skills/rdr-fix-checklist/SKILL.md` (nexus-egv6q): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path.
-- `conexus/skills/rdr-gate-checklist/SKILL.md` (nexus-egv6q): the critic's register criterion is self-contained and the register is named as `$RDR_DIR/REGISTER.md` with the `${CLAUDE_PLUGIN_ROOT}` fallback, never a bare `resources/` path.
-- `conexus/skills/rdr-research/SKILL.md` (nexus-egv6q): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path.
+- `conexus/skills/rdr-fix-checklist/SKILL.md` (nexus-egv6q, nexus-3811j): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path. A brief or relay names the RDR directory by the `<RDR dir>` placeholder (the absolute path), never `$RDR_DIR`.
+- `conexus/skills/rdr-gate-checklist/SKILL.md` (nexus-egv6q, nexus-3811j): the critic's register criterion is self-contained and the register is named as `$RDR_DIR/REGISTER.md` with the `${CLAUDE_PLUGIN_ROOT}` fallback, never a bare `resources/` path. A brief or relay names the RDR directory by the `<RDR dir>` placeholder (the absolute path), never `$RDR_DIR`.
+- `conexus/skills/rdr-research/SKILL.md` (nexus-egv6q, nexus-3811j): the register fallback uses the braced `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes, so a brief carries an absolute path. A brief or relay names the RDR directory by the `<RDR dir>` placeholder (the absolute path), never `$RDR_DIR`.
 - `conexus/skills/research-synthesis/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
 - `conexus/skills/why-was-this-written/SKILL.md` (nexus-egv6q): the tier-discipline link text is `${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md`, an absolute path once rendered.
 - `conexus/skills/writing-nx-skills/SKILL.md` (nexus-egv6q): the relay template is named by `${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md`.
@@ -88,5 +88,11 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/resources/agent-shared/README.md` (nexus-egv6q): the agent-link snippets use `${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/`, and maintainer notes name repo paths.
 - `conexus/resources/agent-shared/RELAY_TEMPLATE.md` (nexus-egv6q): the agent-link snippets use `${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/`, and maintainer notes name repo paths.
 - `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-egv6q): the incident template is named by `${CLAUDE_PLUGIN_ROOT}/resources/rdr_process/INCIDENT-TEMPLATE.md`, not a repo-only path.
+- `conexus/skills/composition-probe/SKILL.md` (nexus-4deer, nexus-3811j): the Maven runner is `<mvn>`: `scripts/mvnw-leased.sh` only where the project has it (the nexus repo, Maven under `service/`), else `./mvnw` or `mvn`; the chosen runner is passed into the pinned subagent prompt.
+- `conexus/skills/decision-drift-review/SKILL.md` (nexus-4deer): the plan authoring guide is a GitHub link, not a `docs/` path an agent in another project cannot open.
+- `conexus/skills/nexus/reference.md` (nexus-4deer): the collection rule is a GitHub link, not `docs/collections.md`.
+- `conexus/skills/orchestration/reference.md` (nexus-4deer): the collection rules are a GitHub link, and the review-round cap is stated (2 for a code review) with the nexus wheel's `review-rounds.toml` named as its source.
+- `conexus/skills/tumbler-footnotes/SKILL.md` (nexus-4deer): the flag reference is `nx catalog footnotes --help`, not `docs/cli-reference.md`.
+- `conexus/skills/upgrade/SKILL.md` (nexus-4deer): the migration runbook is a GitHub link, with the import order stated inline for an agent with no web access.
 
 ## Deferred to the next client release

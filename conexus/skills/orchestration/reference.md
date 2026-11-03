@@ -237,4 +237,4 @@ Thoughts that mean STOP, because you are rationalizing past a tier check:
 | "I know what that means" | Knowing the concept is not knowing this project's history with it. Check T2/T3. |
 | "This finding isn't worth storing" | Findings not stored are findings lost. The next session redoes your work. |
 | "I'll file a bead for that and move on" | Filing is deferral that reads as progress. A gap in the work in hand is closed in this session; file only what cannot finish here (blocked on the user, another instance, or evidence that does not exist yet), and a filed bead is the next thing worked. |
-| "One more pass would tighten this" | Execute the plan to done. No new round on finished work, no hop to an adjacent item mid-plan. Rounds are bounded by `review-rounds.toml`. |
+| "One more pass would tighten this" | Execute the plan to done. No new round on finished work, no hop to an adjacent item mid-plan. Rounds are capped (2 for a code review, set in the nexus wheel's `review-rounds.toml` table). |

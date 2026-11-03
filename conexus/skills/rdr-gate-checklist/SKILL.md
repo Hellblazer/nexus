@@ -24,6 +24,9 @@ Delegates Layer 3 to the **substantive-critic** agent (sonnet). See [registry.ya
 
 Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`. All file paths below use `$RDR_DIR` in place of `docs/rdr`.
 
+`<RDR dir>` is the absolute path of the RDR directory: `$RDR_DIR` joined to the repository root of the worktree in use.
+Write it out in any brief or relay: a dispatched agent cannot expand the variable.
+
 ## Validation Layers (run in sequence)
 
 ### Layer 0 — Re-gate survivor sweep (whenever a prior gate record exists)
@@ -163,7 +166,8 @@ If assumed findings remain:
 
 ### Layer 3 — AI Critique (substantive-critic agent)
 
-The critique itself follows the prose register, `$RDR_DIR/REGISTER.md`, falling back to `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md` (in a brief, write the absolute path `$RDR_DIR` resolved to, never `$RDR_DIR` itself: the agent cannot expand it) (clear, simple, concise; addressed to the author, not the machine). Criterion 6 below states everything the critic needs, so the brief does not send the critic to that file; if a brief names it, write the absolute path (nexus-egv6q). Include this question in the critic's brief as criterion 6, WARN-CLASS ONLY (a readability miss never fails or blocks the gate): could a smart reader who does not know this project's jargon follow the problem and the decision from this RDR alone? The useful answer is a list: each undefined term, each sentence assuming tribal knowledge. Jargon is fine when defined on first use.
+The critique itself follows the prose register, `$RDR_DIR/REGISTER.md`, falling back to `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md` (clear, simple, concise; addressed to the author, not the machine).
+Criterion 6 below states everything the critic needs, so the brief does not send the critic to that file; if a brief names it, write `<RDR dir>/REGISTER.md` (nexus-egv6q). Include this question in the critic's brief as criterion 6, WARN-CLASS ONLY (a readability miss never fails or blocks the gate): could a smart reader who does not know this project's jargon follow the problem and the decision from this RDR alone? The useful answer is a list: each undefined term, each sentence assuming tribal knowledge. Jargon is fine when defined on first use.
 
 Before dispatch, seed link-context so the gate critique auto-links to the RDR:
 ```
@@ -217,7 +221,7 @@ If no collections found: "No prior RDRs indexed. Cross-project prior-art search 
 
 After storing the critique, run `nx rdr preamble rdr-verdict -- <id> <critique-title>`
 and write the gate record it prints, field for field. Never compute the outcome
-by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
+by hand. The rules it applies (stated here in full; the nexus wheel's `review-rounds.toml` table, contract `rdr-gate`, holds them):
 
 - Rounds 1 and 2: BLOCKED iff `critical_count > 0`. Significants never block.
 - Round 3 onward: BLOCKED iff `ship_blockers > 0`. Every other Critical and
