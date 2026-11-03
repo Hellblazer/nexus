@@ -87,9 +87,16 @@ last restart was --fresh; pass --fresh or --resume".
 Sandbox pass (nexus-8zdbu): a restart (not --dry-run, not --revive) refuses with exit 3, before
 the ready-round check,
 unless tests/e2e/restart-sessions/run.sh has passed all its scenarios on this exact
-script (its sha256) and this Claude Code version since either last changed; a pass
-records both in ~/.local/state/claude-restart-sessions/sandbox-pass.json. --dry-run
-reports whether the pass holds. --skip-sandbox-check restarts anyway and logs it.
+script (its sha256), this Claude Code version, this tmux version and this copy of the
+harness (run.py's sha256) since any of them last changed; a pass records them in
+~/.local/state/claude-restart-sessions/sandbox-pass.json. Not in the key: nx and the
+engine (the sandbox runs the installed nx, and keying on it would force a sandbox run
+before every restart that follows a release, which is the restart that rolls sessions
+onto it), macOS (rare, and Claude Code's version stands in for the client side), and
+reinstall-tool.sh (the sandbox replaces it with a stand-in, so a pass says nothing about
+it). --dry-run reports whether the pass holds. --skip-sandbox-check REASON restarts
+anyway and logs the reason. The detached roll checks the pass too, so calling it
+directly does not get around the gate.
 
 Install as a symlink to the primary checkout, which tracks develop, so the copy you
 run cannot drift from the one the sandbox tested:
@@ -177,8 +184,30 @@ def claude_version(claude: str | None = None) -> str:
     return words[0] if words else ""
 
 
+def tmux_version() -> str:
+    """tmux's version as `tmux -V` prints it ("tmux 3.6a"), or "" if it cannot be read."""
+    try:
+        r = subprocess.run(["tmux", "-V"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
+#: The sandbox harness, beside this script in its checkout (resolved through the install symlink).
+HARNESS = Path(__file__).resolve().parents[1] / "tests" / "e2e" / "restart-sessions" / "run.py"
+
+
+def harness_sha256(path: Path | None = None) -> str:
+    """The sha256 of the sandbox harness's bytes, or "" when this copy has no harness beside it."""
+    try:
+        return hashlib.sha256((path or HARNESS).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 def sandbox_pass_problem(script: str, claude: str) -> str:
-    """Why the recorded sandbox pass does not cover this script and Claude Code, or "" when it does."""
+    """Why the recorded sandbox pass does not cover this script, Claude Code, tmux and harness, or ""
+    when it does."""
     if not claude:
         return "could not read Claude Code's version"
     try:
@@ -194,13 +223,19 @@ def sandbox_pass_problem(script: str, claude: str) -> str:
     if rec.get("claude_version") != claude:
         return (f"the last sandbox pass ({rec.get('passed_at', '?')}) was on Claude Code "
                 f"{rec.get('claude_version', '?')}, not {claude}")
+    if rec.get("tmux_version") != (tmux := tmux_version()):
+        return (f"the last sandbox pass ({rec.get('passed_at', '?')}) was on {rec.get('tmux_version') or 'an unrecorded tmux'}, "
+                f"not {tmux or 'an unreadable tmux'}")
+    if rec.get("harness_sha256") != harness_sha256():
+        return f"the last sandbox pass ({rec.get('passed_at', '?')}) was on another copy of the sandbox harness"
     return ""
 
 
 def record_sandbox_pass(path: Path, script: str, claude: str, scenarios: list[str], seconds: float) -> None:
     """Write the record sandbox_pass_problem reads (the sandbox harness calls this on a full pass)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    rec = {"script_sha256": script, "claude_version": claude, "scenarios": scenarios,
+    rec = {"script_sha256": script, "claude_version": claude, "tmux_version": tmux_version(),
+           "harness_sha256": harness_sha256(), "scenarios": scenarios,
            "seconds": round(seconds), "passed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(rec, indent=1) + "\n", encoding="utf-8")
@@ -1537,7 +1572,7 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
             print("in the round but not live now: " + ", ".join(gone))
         # The restart checks the sandbox pass too (exit 3), so "allowed" must include it.
         sandbox = sandbox_pass_problem(script_sha256(), claude_version())
-        print(f"sandbox pass: {sandbox or 'holds for this script and Claude Code version'}")
+        print(f"sandbox pass: {sandbox or 'holds for this script, Claude Code, tmux and the harness'}")
         return 0 if rows and not problem and not sandbox and not any(r["blocker"] for r in rows) else 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
     excluded = excluded_sessions(listed, found, a)
@@ -1643,8 +1678,8 @@ def main() -> int:
     ap.add_argument("--no-ready-check", action="store_true",
                     help="skip the ready-round check entirely (sandbox gates); unlike --force it does not also "
                          "restart sessions in status 'shell'")
-    ap.add_argument("--skip-sandbox-check", action="store_true",
-                    help="restart although no sandbox pass covers this script and Claude Code version (see above)")
+    ap.add_argument("--skip-sandbox-check", metavar="REASON", default="",
+                    help="restart although no sandbox pass covers this script (see above); REASON is logged")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--caller-pane", default="", help=argparse.SUPPRESS)
@@ -1658,6 +1693,8 @@ def main() -> int:
         ap.error("--fresh and --resume are opposites; give one")
     if a.ask_ready and a.status:
         ap.error("--ask-ready and --status are separate steps; run one, then the other")
+    if "--skip-sandbox-check" in sys.argv[1:] and not a.skip_sandbox_check.strip():
+        ap.error("--skip-sandbox-check takes a reason, logged with the restart")
     if (a.ask_ready or a.status) and (a.nx or a.fresh or a.resume):
         ap.error("--ask-ready and --status restart nothing; give --nx, --fresh and --resume to the restart itself")
     listed = sessions()
@@ -1672,17 +1709,22 @@ def main() -> int:
         # TERM or HUP (the tmux server going away) must still run the finally blocks: the asks'
         # withdrawal and the footprint report. By default they end the process with neither.
         exit_on_stop_signals()
+        # The gate holds here too: a direct --detached call must not get around it.
+        problem = sandbox_pass_problem(script_sha256(), claude_version())
+        if problem and not a.skip_sandbox_check:
+            log(f"ABORT: sandbox pass: {problem} (detached). Nothing installed, nothing restarted.")
+            return 3
     if not a.detached:
         # The sandbox pass first: it needs no session's answer, and nothing else is worth asking
         # of a script the sandbox has not passed (nexus-8zdbu).
         problem = sandbox_pass_problem(script_sha256(), claude_version())
         if a.dry_run:
-            print(f"sandbox pass: {problem or 'holds for this script and Claude Code version'}")
+            print(f"sandbox pass: {problem or 'holds for this script, Claude Code, tmux and the harness'}")
         elif problem and a.skip_sandbox_check:
-            log(f"WARN: {problem}; restarting anyway (--skip-sandbox-check)")
+            log(f"WARN: {problem}; restarting anyway (--skip-sandbox-check: {a.skip_sandbox_check.strip()})")
         elif problem:
             log(f"ABORT: sandbox pass: {problem}. Run tests/e2e/restart-sessions/run.sh (all scenarios) first, "
-                f"or pass --skip-sandbox-check. Nothing installed, nothing restarted.")
+                f"or pass --skip-sandbox-check REASON. Nothing installed, nothing restarted.")
             print(f"sandbox pass: refused, {problem}; see {LOG}")
             return 3
         last = read(LAST_RUN)

@@ -492,3 +492,27 @@ def test_run_scenario_removes_claude_session_files(run, scenario, tmp_path, monk
     monkeypatch.setattr(run, "claude_session_files", lambda sids: [removed] if SID in sids else [])
     ok, _, _ = run.run_scenario("gate", "claude", _Args(), None)
     assert ok and not removed.exists()
+
+
+# -- the withdrawal check (nexus-wjlbk) -------------------------------------------------------
+
+def test_check_withdrawals(run) -> None:
+    before = {"rs_alpha": {"sessionId": "aaaa-1"}, "rs_draft": {"sessionId": "bbbb-2"},
+              "rs_nochan": {"sessionId": "cccc-3"}, "rs_busy": {"sessionId": "dddd-4"}}
+    log = "\n".join([
+        "10:00:00 mailing handoff ask to rs_alpha -> /tmp/a.md",
+        "10:00:01 mailing handoff ask to rs_draft -> /tmp/d.md",
+        "10:00:02 mailing handoff ask to rs_busy -> /tmp/b.md",
+        "10:01:00 mailbox/aaaa-1: handoff ask t-aaaaaaaaaaa withdrawn; 1 other row(s) claimed and released",
+        "10:01:01 mailbox/bbbb-2: handoff ask t-bbbbbbbbbbb already taken or expired",
+        "10:01:02 mailbox/dddd-4: handoff ask t-ddddddddddd not withdrawn (in exited 1: down)",
+    ])
+    failures: list[str] = []
+    assert run.check_withdrawals(log, before, failures) == 3  # rs_nochan was typed, not mailed
+    assert failures == ["rs_busy: its mailed handoff ask has no withdrawn or already-taken line in the log"]
+
+
+def test_run_scenario_fails_a_rolling_scenario_with_no_mailed_ask_to_check(run, scenario, monkeypatch) -> None:
+    monkeypatch.setattr(run, "RUNNERS", {"roll": lambda sb, crs, a, failures, notes: setattr(sb, "before", {"rs_alpha": {"sessionId": SID}})})
+    ok, failures, _ = run.run_scenario("roll", "claude", _Args(), None)
+    assert not ok and "withdrawals: no mailed handoff ask found in the log to check" in failures

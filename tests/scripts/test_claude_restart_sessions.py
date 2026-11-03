@@ -1230,6 +1230,8 @@ def passfile(crs, monkeypatch, tmp_path) -> Path:
     path = tmp_path / "state" / "sandbox-pass.json"
     monkeypatch.setattr(crs, "SANDBOX_PASS", path)
     monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "tmux_version", lambda: "tmux 3.6a")
+    monkeypatch.setattr(crs, "harness_sha256", lambda *_a: "h" * 64)
     return path
 
 
@@ -1302,10 +1304,45 @@ def test_a_restart_with_a_pass_goes_on(crs, monkeypatch, passfile) -> None:
     assert code == 0 and ran and ran[0][:3] == ["tmux", "run-shell", "-b"]
 
 
-def test_skip_sandbox_check_restarts_and_says_so(crs, monkeypatch, passfile) -> None:
-    code, ran = _main(crs, monkeypatch, "--skip-sandbox-check")
+def test_skip_sandbox_check_restarts_and_logs_its_reason(crs, monkeypatch, passfile) -> None:
+    code, ran = _main(crs, monkeypatch, "--skip-sandbox-check", "comment-only edit, rerun tonight")
     assert code == 0 and ran
-    assert "WARN: no sandbox pass recorded" in crs.LOG.read_text(encoding="utf-8")
+    assert ("WARN: no sandbox pass recorded" in (log := crs.LOG.read_text(encoding="utf-8"))
+            and "(--skip-sandbox-check: comment-only edit, rerun tonight)" in log)
+    # the reason rides into the detached roll's argv, which checks the gate itself
+    assert "comment-only edit, rerun tonight" in ran[0][-1]
+
+
+@pytest.mark.parametrize("argv", [["--skip-sandbox-check", " "], ["--skip-sandbox-check"]], ids=["blank", "bare"])
+def test_skip_sandbox_check_needs_a_reason(crs, monkeypatch, passfile, argv) -> None:
+    with pytest.raises(SystemExit) as exc:
+        _main(crs, monkeypatch, *argv)
+    assert exc.value.code == 2
+
+
+def test_the_detached_roll_checks_the_gate_itself(crs, monkeypatch, passfile) -> None:
+    """A direct --detached call does not get around the gate."""
+    monkeypatch.setattr(crs, "_roll", lambda *a, **k: pytest.fail("rolled past a refused gate"))
+    code, ran = _main(crs, monkeypatch, "--detached", "--resume")
+    assert code == 3 and ran == []
+    assert "ABORT: sandbox pass: no sandbox pass recorded" in crs.LOG.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("patch", "says"), [
+    ("tmux_version", "was on tmux 3.6a, not tmux 3.7"),
+    ("harness_sha256", "another copy of the sandbox harness"),
+])
+def test_a_pass_on_another_tmux_or_harness_does_not_count(crs, monkeypatch, passfile, patch, says) -> None:
+    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll"], 1)
+    assert crs.sandbox_pass_problem(SHA, "2.1.316") == ""
+    monkeypatch.setattr(crs, patch, (lambda: "tmux 3.7") if patch == "tmux_version" else (lambda *_a: "x" * 64))
+    assert says in crs.sandbox_pass_problem(SHA, "2.1.316")
+
+
+def test_harness_sha256_is_the_run_py_beside_the_script(crs) -> None:
+    import hashlib  # noqa: PLC0415 -- test-local
+    assert crs.HARNESS == SCRIPT.parents[1] / "tests" / "e2e" / "restart-sessions" / "run.py"
+    assert crs.harness_sha256(crs.HARNESS) == hashlib.sha256(crs.HARNESS.read_bytes()).hexdigest()
 
 
 def test_a_dry_run_reports_the_gate_and_refuses_nothing(crs, monkeypatch, passfile, capsys) -> None:

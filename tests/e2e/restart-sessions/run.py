@@ -28,7 +28,10 @@ with nothing written to the operator's ~/.claude. Four scenarios, each in its ow
   so nx reports X and only the exit code can stop the roll. Both sessions write their
   handoff; the script must abort after the handoffs with nothing exited, no plugin update,
   X absent from the plugin cache, and the handoffs kept.
-- ``gate``: the ``/version`` stand-in answers 502, then (a second run) a version below the
+- ``gate``: first the script's sandbox gate against a real process: with the HOME's pass record
+  removed a roll must exit 3 with the sandbox ABORT line, reading no engine and asking nothing;
+  with ``--skip-sandbox-check REASON`` it must log the reason and go on to the engine gate. Then
+  the ``/version`` stand-in answers 502, then (a second run) a version below the
   floor, with ``--engine-wait 0``. Each run must exit 2 in the foreground with the gate's
   ABORT line for that case, after one read, before any handoff is asked or anything installed.
 
@@ -80,6 +83,9 @@ ask or the draft as a prompt; the draft is still in rs_draft's prompt from its c
 handoff until its exit, is saved at the restart, and is read by the fresh rs_draft with its
 handoff; all three then answer their own code word and no other. Exiting Claude Code clears
 its input box, so "the draft survives" means saved and handed on.
+
+Every handoff ask the script mails must be taken back against the real engine: the restart log
+has a withdrawn or already-taken line for each, and the leftover check fails a row left behind.
 
 Continuity is proved from the handoff, not merely observed. Auto memory is off
 (``CLAUDE_CODE_DISABLE_AUTO_MEMORY``, ``autoMemoryEnabled: false``) and the word is given as
@@ -954,14 +960,15 @@ def body_lines(log: str) -> list[str]:
     return [ln.split(" ", 1)[1] if " " in ln else ln for ln in log.splitlines()]
 
 
-def roll_command(sb: Sandbox, *, rc_file: Path | None = None) -> str:
+def roll_command(sb: Sandbox, *, rc_file: Path | None = None, extra: str = "") -> str:
     spec = sb.spec
     assert sb.engine is not None
     cmd = (f"TMUX_PANE={shlex.quote(sb.pane_id(spec.caller))} "
            f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} --nx {sb.to_version} --fresh "
            f"--repo {shlex.quote(str(sb.relrepo))} --endpoint {sb.engine.url} --engine-wait {spec.engine_wait} "
            + ("--fallback-resume " if spec.fallback else "")
-           + f"--no-update --no-ready-check --handoff-timeout 600 --wait {spec.wait}")
+           + f"--no-update --no-ready-check --handoff-timeout 600 --wait {spec.wait}"
+           + (f" {extra}" if extra else ""))
     if rc_file is not None:
         cmd += f"; echo $? > {shlex.quote(str(rc_file))}"
     return cmd
@@ -1408,6 +1415,61 @@ def scenario_abort(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -
     notes.append(f"abort took {time.time() - t0:.0f}s; handoffs kept: {sorted(handoffs)}")
 
 
+def run_roll(sb: Sandbox, tag: str, extra: str = "", timeout: float = 120) -> tuple[str, str]:
+    """Type one roll command into the control pane and wait for its exit code; return (rc, the log it
+    wrote). The rc is "none" when it did not exit within *timeout*."""
+    rc_file = sb.home / f"rc-{tag}"
+    n0 = len(sb.read_log().splitlines())
+    sb.tmux("send-keys", "-t", "rs:ctl", "-l", roll_command(sb, rc_file=rc_file, extra=extra), check=True)
+    sb.tmux("send-keys", "-t", "rs:ctl", "Enter", check=True)
+    deadline = time.time() + timeout
+    while not rc_file.exists() and time.time() < deadline:
+        time.sleep(1)
+    time.sleep(1)
+    rc = rc_file.read_text(encoding="utf-8").strip() if rc_file.exists() else "none"
+    log = "\n".join(sb.read_log().splitlines()[n0:])
+    print(f"[sandbox:{sb.spec.name}] {tag} run log:\n" + "\n".join("    " + ln for ln in log.splitlines()), flush=True)
+    return rc, log
+
+
+#: The reason the gate scenario gives --skip-sandbox-check, which the script must log.
+SKIP_REASON = "restart sandbox: the gate's escape hatch"
+
+
+def check_sandbox_refusal(sb: Sandbox, crs, failures: list[str]) -> None:
+    """The script's sandbox gate against a real process (nexus-wjlbk): with no pass record in the HOME
+    a roll exits 3 having done nothing (no engine read, no install, no ask); with --skip-sandbox-check
+    REASON it logs the reason and goes on to the engine gate. The record is put back after."""
+    assert sb.engine is not None
+    record = sb.home / crs.SANDBOX_PASS.relative_to(OPERATOR_HOME)
+    saved = record.read_bytes()
+    record.unlink()
+    try:
+        sb.engine.answers, sb.engine.reads = ["502"], 0
+        rc, log = run_roll(sb, "refuse")
+        lines = body_lines(log)
+        if rc != "3":
+            failures.append(f"sandbox refusal: the script exited {rc} with no sandbox pass, not 3")
+        if not any(ln.startswith("ABORT: sandbox pass: no sandbox pass recorded") for ln in lines):
+            failures.append("sandbox refusal: the log lacks the ABORT: sandbox pass line")
+        if extra := [ln for ln in lines if not ln.startswith("ABORT: sandbox pass:")]:
+            failures.append(f"sandbox refusal: the script went past the gate: {extra[0][:160]}")
+        if sb.engine.reads:
+            failures.append(f"sandbox refusal: the engine was read {sb.engine.reads} time(s) although the gate refused")
+        sb.engine.answers, sb.engine.reads = ["502"], 0
+        rc, log = run_roll(sb, "skip", extra=f"--skip-sandbox-check {shlex.quote(SKIP_REASON)}")
+        lines = body_lines(log)
+        if rc != "2":
+            failures.append(f"sandbox skip: the script exited {rc}, not 2 (the engine gate's refusal)")
+        if not any(ln.startswith("WARN: no sandbox pass recorded") and ln.endswith(f"(--skip-sandbox-check: {SKIP_REASON})")
+                   for ln in lines):
+            failures.append("sandbox skip: the log lacks the WARN line with the reason")
+        if sb.engine.reads != 1:
+            failures.append(f"sandbox skip: /version read {sb.engine.reads} time(s), not once: the skip did not reach the engine gate")
+    finally:
+        record.write_bytes(saved)
+
+
 def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -> None:
     spec = sb.spec
     before = boot(sb, failures)
@@ -1415,6 +1477,7 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
     if failures:
         return
     assert sb.engine is not None
+    check_sandbox_refusal(sb, crs, failures)
     runs = (("502", f"engine gate: read of {sb.engine.url}/version failed (",
              f"ABORT: could not read the cloud engine's version from {sb.engine.url}; nothing installed, nothing restarted."),
             (sb.behind, f"engine gate: v{sb.to_version} requires engine {sb.floor}; {sb.engine.url} serves {sb.behind}",
@@ -1454,6 +1517,23 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
 
 
 RUNNERS = {"roll": scenario_roll, "variant": scenario_variant, "abort": scenario_abort, "gate": scenario_gate}
+
+
+def check_withdrawals(log: str, before: dict[str, dict], failures: list[str]) -> int:
+    """Every handoff ask the script mailed was taken back against the real engine (nexus-wjlbk): the
+    log has a withdraw line for that session saying withdrawn or already taken or expired. The rows
+    themselves are covered by the footprint check (a row left in a session's mailbox fails it).
+    Returns how many mailed asks were checked."""
+    checked = 0
+    for name, d in before.items():
+        sid = str((d or {}).get("sessionId", ""))
+        if not sid or f"mailing handoff ask to {name} ->" not in log:
+            continue
+        checked += 1
+        if not re.search(rf"mailbox/{re.escape(sid)}: handoff ask \S+ (withdrawn|already taken or expired)(;|$)", log,
+                         re.MULTILINE):
+            failures.append(f"{name}: its mailed handoff ask has no withdrawn or already-taken line in the log")
+    return checked
 
 
 def _args_of(pid: int) -> str:
@@ -1703,6 +1783,11 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
         sb.setup(crs)
         print(f"[sandbox:{name}] HOME {home}; watch: tmux -L {sb.sock} attach -t rs", flush=True)
         RUNNERS[name](sb, crs, a, failures, notes)
+        if sb.before:
+            n = check_withdrawals(sb.read_log(), sb.before, failures)
+            notes.append(f"withdrawals: {n} mailed handoff ask(s) checked against the log")
+            if n == 0 and name != "gate":  # every rolling scenario mails at least one ask: none found is a broken check
+                failures.append("withdrawals: no mailed handoff ask found in the log to check")
         ok = not failures
     except Exception as exc:  # noqa: BLE001 -- a harness fault is a failed run with its reason
         failures.append(f"harness: {type(exc).__name__}: {exc}")
