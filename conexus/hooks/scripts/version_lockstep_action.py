@@ -604,6 +604,14 @@ def write_marker(version: str) -> None:
     debug(f"wrote marker {path} = {version}")
 
 
+def restore_retry_marker(target: str) -> None:
+    """Put the retry sentinel back, but only over the target this action wrote before the start wait: a
+    sibling that finished and settled the marker, or a newer plugin's action, has written something
+    else since, and that is not ours to overwrite (nexus-emiky review r2)."""
+    if read_marker() == target:
+        try_write_marker(UPGRADE_RETRY_MARKER)
+
+
 def try_write_marker(text: str) -> None:
     """:func:`write_marker`, but an unwritable marker is logged and not raised: the callers are the
     retry-sentinel moves (nexus-emiky), which must not stop the upgrade they accompany."""
@@ -795,7 +803,7 @@ def main(argv: list[str]) -> None:
             debug("nx upgrade failed; leaving marker stale for retry")
             log_event("lockstep_upgrade_result", target=target, outcome="nx_upgrade_failed")
             if retry_owed:
-                try_write_marker(UPGRADE_RETRY_MARKER)
+                restore_retry_marker(target)
             return
 
         # 4. Marker only on confirmed lockstep (installed >= target).
@@ -814,7 +822,7 @@ def main(argv: list[str]) -> None:
                 outcome="version_still_mismatched", installed=str(after),
             )
             if retry_owed:
-                try_write_marker(UPGRADE_RETRY_MARKER)
+                restore_retry_marker(target)
     except Exception as exc:  # noqa: BLE001 - detached action must never raise
         debug(f"swallowed unexpected error: {exc}")
 

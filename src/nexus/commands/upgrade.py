@@ -170,9 +170,10 @@ def upgrade(
             _install_beads_prime_best_effort(no_beads_prime=no_beads_prime)
 
         # nexus-emiky: a lockstep child that lost the upgrade lock left the retry sentinel in the lockstep
-        # marker, saying this work (plugin convergence, agents and hooks refresh, the advisory) is owed. A
-        # run that did it settles the marker; `--auto` skips that work and `--dry-run` does none.
-        if not auto_mode and not dry_run:
+        # marker, saying this work (plugin convergence, agents and hooks refresh, the engine install, the
+        # advisory) is owed. A run that did it settles the marker; `--auto` skips that work, `--skip-t3`
+        # skips the engine install and the advisory, and `--dry-run` does none.
+        if not auto_mode and not dry_run and not skip_t3:
             from nexus.lockstep_marker import running_version, settle_upgrade_retry  # noqa: PLC0415 — deferred, keeps the cold start light
 
             settle_upgrade_retry(running_version())

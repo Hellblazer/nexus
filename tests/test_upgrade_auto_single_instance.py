@@ -497,6 +497,16 @@ def test_a_dry_run_does_not_settle_the_sentinel(plain_upgrade, monkeypatch, mark
     assert marker_file.read_text(encoding="utf-8") == UPGRADE_RETRY_MARKER
 
 
+def test_a_skip_t3_upgrade_does_not_settle_the_sentinel(plain_upgrade, monkeypatch, marker_file: Path) -> None:
+    """`--skip-t3` skips the engine install and the advisory the sentinel says are owed (review r2 B1)."""
+    monkeypatch.setattr(sys, "argv", ["nx", "upgrade", "--skip-t3"])
+    _managed_note_tags_registry(monkeypatch)
+    marker_file.write_text(UPGRADE_RETRY_MARKER, encoding="utf-8")
+    result = CliRunner().invoke(main, ["upgrade", "--skip-t3"])
+    assert result.exit_code == 0, result.output
+    assert marker_file.read_text(encoding="utf-8") == UPGRADE_RETRY_MARKER
+
+
 def test_a_plain_upgrade_that_fails_keeps_the_sentinel(plain_upgrade, monkeypatch, marker_file: Path) -> None:
     def _boom(**_k):
         raise RuntimeError("the walk failed")

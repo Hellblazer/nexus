@@ -316,6 +316,24 @@ class TestUpgradeRetryMarker:
         mod.main(["action", "9.9.9"])
         assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
 
+    def test_the_sentinel_does_not_come_back_over_a_marker_someone_else_wrote(self, mod, marker, monkeypatch) -> None:
+        """A sibling that finished (or a newer plugin's action) wrote the marker while this action waited:
+        that is not ours to overwrite (review r2 S1)."""
+        _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "9.9.9"],
+            run_results={"nx upgrade": False},
+        )
+
+        def failing_upgrade(argv, timeout=None):
+            marker.write_text("9.9.10", encoding="utf-8")  # the sibling settles meanwhile
+            return False
+
+        monkeypatch.setattr(mod, "run_cmd", failing_upgrade)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(mod.UPGRADE_RETRY_MARKER, encoding="utf-8")
+        mod.main(["action", "9.9.9"])
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.10"
+
     def test_the_sentinel_comes_back_when_the_version_slipped_below_the_target(self, mod, marker, monkeypatch) -> None:
         _wire(mod, monkeypatch, receipt=True, installed_versions=["9.9.9", "1.0.0"], run_results={}, background=True)
         marker.parent.mkdir(parents=True)
