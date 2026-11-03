@@ -31,7 +31,7 @@ _SCHEMA = {"type": "object", "properties": {"result": {"type": "string"}}}
 #: A fake ``claude`` that records its own pid and a grandchild's, then sleeps (never emits a result event).
 _SCRIPT = """\
 import subprocess, sys, os, time
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)  # " + sys.argv[1]])
 with open(sys.argv[1] + ".tmp", "w") as fh:
     fh.write(f"{os.getpid()} {child.pid}")
 os.replace(sys.argv[1] + ".tmp", sys.argv[1])
@@ -71,11 +71,12 @@ async def _gone(pids: tuple[int, ...], limit: float = 6.0) -> bool:
     return False
 
 
-def _kill_leftovers(pids: tuple[int, ...]) -> None:
-    """Cleanup of a failed test, from pids a file recorded: each is signalled only while its live command line is
-    still the fake claude (the leader) or its sleeping grandchild (nexus-xzorj)."""
-    for pid, identity in zip(pids, ("fake_claude.py", "time.sleep(120)")):
-        kill_if_identity(pid, identity)
+def _kill_leftovers(pids: tuple[int, ...], pid_file: Path) -> None:
+    """Cleanup of a failed test, from pids a file recorded: each is signalled only while its live command line
+    still carries THIS test's pid-file path, which the fake claude takes as its argument and hands its
+    sleeping grandchild (nexus-xzorj)."""
+    for pid in pids:
+        kill_if_identity(pid, str(pid_file))
 
 
 def _spawn_fake(script: Path, pid_file: Path):
@@ -103,7 +104,7 @@ async def test_a_call_cut_by_wait_for_kills_the_whole_process_tree(tmp_path: Pat
                 await asyncio.wait_for(task, timeout=0.5)
         assert await _gone(pids), f"the cut call left a live child (pids {pids})"
     finally:
-        _kill_leftovers(pids)
+        _kill_leftovers(pids, pid_file)
 
 
 @pytest.mark.asyncio
@@ -124,7 +125,7 @@ async def test_a_cancelled_call_kills_its_child_and_reraises_cancellation(tmp_pa
         pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
         assert pending == [], f"tasks left pending: {pending}"
     finally:
-        _kill_leftovers(pids)
+        _kill_leftovers(pids, pid_file)
 
 
 @pytest.mark.asyncio
@@ -161,4 +162,4 @@ async def test_the_kill_goes_by_the_group_recorded_at_spawn_never_by_resolving_t
         assert resolved == [], f"the kill resolved a group from the pid: {resolved}"
         assert by_group and by_group[0] == pids[0], f"the kill did not go by the recorded group {pids[0]}: {by_group}"
     finally:
-        _kill_leftovers(pids)
+        _kill_leftovers(pids, pid_file)

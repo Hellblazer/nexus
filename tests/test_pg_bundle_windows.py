@@ -24,6 +24,7 @@ import pytest
 
 import build_pg_bundle_windows as bw
 import pg_bundle_windows_smoke as sm
+from tests._child_process import kill_if_identity
 from tests._module_seam import setattr_in
 
 REPO = Path(__file__).resolve().parent.parent
@@ -941,15 +942,17 @@ def test_to_file_returns_while_a_grandchild_still_holds_the_output_handle(tmp_pa
     pipe the reader waits for that; to a file nothing waits. Reproduced with a
     child that leaves a long-lived grandchild holding the inherited handle."""
     pidfile = tmp_path / "grandchild.pid"
+    # The grandchild's command line ends in this test's pid-file path (sys.argv[1]), so the cleanup can tell it
+    # from every other sleeper on the box: the pid file outlives the process (nexus-xzorj).
     child = (
         "import subprocess, sys;"
-        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']);"
-        f"open({str(pidfile)!r}, 'w').write(str(g.pid));"
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', sys.argv[1]]);"
+        "open(sys.argv[1], 'w').write(str(g.pid));"
         "print('pg_ctl: server started')"
     )
     t0 = time.monotonic()
     try:
-        rc = sm.Runner().to_file([sys.executable, "-c", child], env=os.environ, out=tmp_path / "out.txt")
+        rc = sm.Runner().to_file([sys.executable, "-c", child, str(pidfile)], env=os.environ, out=tmp_path / "out.txt")
         elapsed = time.monotonic() - t0
         assert rc == 0
         assert elapsed < 30, f"to_file waited {elapsed:.0f}s on the grandchild's handle"
@@ -958,10 +961,7 @@ def test_to_file_returns_while_a_grandchild_still_holds_the_output_handle(tmp_pa
         assert "pg_ctl: server started" in (tmp_path / "out.txt").read_text()
     finally:
         if pidfile.is_file():
-            try:
-                os.kill(int(pidfile.read_text()), 15)
-            except OSError:
-                pass
+            kill_if_identity(int(pidfile.read_text()), str(pidfile))
 
 
 def test_a_pipe_capture_really_would_wait_on_that_grandchild(tmp_path: Path) -> None:
@@ -970,18 +970,15 @@ def test_a_pipe_capture_really_would_wait_on_that_grandchild(tmp_path: Path) -> 
     pidfile = tmp_path / "grandchild.pid"
     child = (
         "import subprocess, sys;"
-        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']);"
-        f"open({str(pidfile)!r}, 'w').write(str(g.pid))"
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', sys.argv[1]]);"
+        "open(sys.argv[1], 'w').write(str(g.pid))"
     )
     try:
         with pytest.raises(subprocess.TimeoutExpired):
-            subprocess.run([sys.executable, "-c", child], capture_output=True, timeout=3)
+            subprocess.run([sys.executable, "-c", child, str(pidfile)], capture_output=True, timeout=3)
     finally:
         if pidfile.is_file():
-            try:
-                os.kill(int(pidfile.read_text()), 15)
-            except OSError:
-                pass
+            kill_if_identity(int(pidfile.read_text()), str(pidfile))
 
 
 # --------------------------------------------------------------------------- #

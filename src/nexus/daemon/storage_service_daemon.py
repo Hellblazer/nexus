@@ -1982,7 +1982,9 @@ class StorageServiceSupervisor:
         if via == "job_object":
             self._release_engine_job()
         else:
-            safe_killpg(proc.pid)
+            # The handle, not proc.pid: safe_killpg refuses one whose returncode says it was reaped, whose
+            # pid the kernel may have given to another process (nexus-xzorj).
+            safe_killpg(proc)
 
     def _probe_service_health(self, port: int | None = None) -> "HealthProbe":
         """Classify ``GET /health`` into :class:`HealthProbe`.

@@ -3378,6 +3378,13 @@ class PDFExtractor:
                     # Its pool children, if any, are still in the group recorded
                     # at spawn. A Windows job is a handle, not a pid, and is
                     # still closed below.
+                    # Accepted window (nexus-xzorj): the recorded group id stays
+                    # reserved while any member lives, and this sweep exists for
+                    # a pool that outlives its leader. Once the leader is reaped
+                    # AND no member is left, the number is free for a new session
+                    # leader; the sweep would then hit that group. It takes every
+                    # member exiting and the kernel reusing the number inside the
+                    # sweep's own microseconds; leaving the pool alive costs more.
                     safe_killpg_group(worker_pgid)
                     return
 
@@ -3403,6 +3410,9 @@ class PDFExtractor:
                 if not kill_tree(proc, worker_job, pgid=worker_pgid):
                     with contextlib.suppress(Exception):
                         proc.kill()
+                # Same accepted window as the reaped sweep above (nexus-xzorj): the leader
+                # may have been reaped since the liveness check, and the group id is only
+                # reserved while a member lives.
                 safe_killpg_group(worker_pgid)
 
             # stop_mineru_workers runs on another thread and can land after this

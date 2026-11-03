@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -32,6 +33,7 @@ from nexus import _mineru_spawn
 from nexus import pdf_extractor as pe
 from nexus._mineru_health import MineruMachineResourceError
 from nexus.pdf_extractor import PDFExtractor
+from tests._child_process import kill_if_identity
 
 _RESULT = ("MD", [], [])
 _PDF = Path("/tmp/x3m8e-does-not-matter.pdf")
@@ -727,22 +729,25 @@ leader_src = (
     "import signal, subprocess, sys, time\n"
     + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else "")
     + "m = 'multiprocessing' + '.resource_tracker'\n"
-    + "t = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)  # ' + m], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    + "t = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)  # ' + m + ' ' + sys.argv[1]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
     + "print(t.pid, flush=True)\n"
     + "time.sleep(120)\n"
 )
-leader = subprocess.Popen([sys.executable, "-c", leader_src], start_new_session=True,
+leader = subprocess.Popen([sys.executable, "-c", leader_src, sys.argv[2]], start_new_session=True,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 tracker_like = leader.stdout.readline().strip()
 print(leader.pid, tracker_like, flush=True)
 """
 
 
-def _start_group(mode: str) -> tuple[int, int]:
+def _start_group(mode: str) -> tuple[int, int, str]:
+    """(leader pid, tracker-like pid, nonce). The nonce is a path unique to this call that both processes carry
+    on their command line, so a cleanup holding only the pids can tell them from every other sleeper (nexus-xzorj)."""
+    nonce = f"/nx-xzorj/{uuid.uuid4().hex}"
     out = subprocess.run(  # noqa: S603 — fixed argv, test-owned
-        [sys.executable, "-c", _LAUNCHER, mode], capture_output=True, text=True, timeout=30, check=True,
+        [sys.executable, "-c", _LAUNCHER, mode, nonce], capture_output=True, text=True, timeout=30, check=True,
     ).stdout.split()
-    return int(out[0]), int(out[1])
+    return int(out[0]), int(out[1]), nonce
 
 
 def _alive(pid: int) -> bool:
@@ -760,39 +765,39 @@ def _wait_dead(pid: int, timeout: float = 10.0) -> bool:
     return False
 
 
-def _cleanup(*pids: int) -> None:
+def _cleanup(nonce: str, *pids: int) -> None:
+    """Kill what a test started, from pids a launcher printed: each is signalled only while its live command
+    line still carries this call's nonce, so a number that has since gone to another process is left alone
+    (nexus-xzorj)."""
     for pid in pids:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+        kill_if_identity(pid, nonce)
 
 
 @pytestmark_posix
 def test_a_server_that_exits_on_sigterm_is_stopped_without_escalation() -> None:
-    leader, tracker_like = _start_group("obey")
+    leader, tracker_like, nonce = _start_group("obey")
     try:
         assert _mineru_spawn.stop_server_group(leader, grace=10.0) == "exited"
         assert _wait_dead(leader)
     finally:
-        _cleanup(leader, tracker_like)
+        _cleanup(nonce, leader, tracker_like)
 
 
 @pytestmark_posix
 def test_a_server_that_ignores_sigterm_is_escalated_and_the_tracker_is_spared() -> None:
-    leader, tracker_like = _start_group("ignore")
+    leader, tracker_like, nonce = _start_group("ignore")
     try:
         assert _mineru_spawn.stop_server_group(leader, grace=0.6) == "escalated"
         assert _wait_dead(leader), "the hard pass must kill the server"
         assert _alive(tracker_like), "the hard pass must spare the resource tracker"
     finally:
-        _cleanup(leader, tracker_like)
+        _cleanup(nonce, leader, tracker_like)
 
 
 @pytestmark_posix
 def test_stopping_a_group_that_is_already_gone_says_so() -> None:
-    leader, tracker_like = _start_group("obey")
-    _cleanup(leader, tracker_like)
+    leader, tracker_like, nonce = _start_group("obey")
+    _cleanup(nonce, leader, tracker_like)
     assert _wait_dead(leader)
     assert _mineru_spawn.stop_server_group(leader, grace=0.2) == "gone"
 

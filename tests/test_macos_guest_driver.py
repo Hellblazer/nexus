@@ -395,8 +395,9 @@ class Harness:
         """Nothing a test started may outlive it: deadmen sleep for the lifetime cap, a fake tart run loops."""
         # A pid file outlives its process, so the number may be anyone's by now: it is signalled (and its
         # children with it) only while its live command line is still the one this test's script runs,
-        # the deadman a subshell of host.sh and the run the fake tart (nexus-xzorj).
-        pidfiles = [(pf, "host.sh") for pf in (self.base / "deadman").glob("*.pid")]
+        # the deadman a subshell of this test's own copy of host.sh (its path is under the test's tmp dir) and
+        # the run the fake tart (nexus-xzorj).
+        pidfiles = [(pf, str(self.host)) for pf in (self.base / "deadman").glob("*.pid")]
         pidfiles += [(pf, str(self.root / "tart")) for pf in (self.root / "vms").glob("*.runpid")]
         for pf, identity in pidfiles:
             try:

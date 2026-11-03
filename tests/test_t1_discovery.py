@@ -28,6 +28,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests._child_process import kill_if_identity
+
 
 # NO _discover_t1_endpoint (nexus-8zfwv, 2026-08-07): drove
 # ``ServiceRegistry(tier="t1")``, the ``t1_addr.*`` lease format nothing
@@ -482,10 +484,9 @@ class TestFindMcpSiblingPids:
             proc.terminate()
             proc.wait(timeout=10)
             if server_pid:
-                try:
-                    os.kill(server_pid, 15)
-                except OSError:
-                    pass
+                # The number came from a file that outlives the process: signalled only while its live command
+                # line still carries this test's pid-file path (nexus-xzorj).
+                kill_if_identity(server_pid, str(pidfile), sig=15)
 
     def test_against_the_REAL_process_table(self, tmp_path):
         """No fabricated table: spawn an actual child process named

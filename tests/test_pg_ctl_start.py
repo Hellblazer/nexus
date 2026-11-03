@@ -33,12 +33,15 @@ _POSTMASTER_LIFETIME_S = 30
 
 def _fake_pg_ctl(tmp_path: Path, exit_code: int = 0) -> tuple[Path, Path]:
     """A pg_ctl that starts a long-lived child with its own stdout and stderr,
-    prints a line to each, and exits. Returns (script, pid file of the child)."""
+    prints a line to each, and exits. Returns (script, pid file of the child).
+
+    The child is a Python sleeper whose command line ends in this test's pid-file path, so the cleanup can
+    tell it from every other ``sleep`` on the box (``sleep 30`` also matches ``sleep 300``)."""
     pid_file = tmp_path / "postmaster.pid.fake"
     script = tmp_path / "pg_ctl"
     script.write_text(textwrap.dedent(f"""\
         #!/bin/sh
-        sleep {_POSTMASTER_LIFETIME_S} &
+        "{sys.executable}" -c "import time; time.sleep({_POSTMASTER_LIFETIME_S})  # {pid_file}" &
         echo $! > "{pid_file}"
         echo "waiting for server to start.... done"
         echo "a warning" >&2
@@ -49,14 +52,14 @@ def _fake_pg_ctl(tmp_path: Path, exit_code: int = 0) -> tuple[Path, Path]:
 
 
 def _kill_fake_postmaster(pid_file: Path) -> None:
-    """Stop the fake postmaster the fake pg_ctl recorded, when the number still names it: a ``sleep`` whose
-    command line is ``sleep <_POSTMASTER_LIFETIME_S>``. The pid file outlives the sleep, so a bare kill could
+    """Stop the fake postmaster the fake pg_ctl recorded, when the number still names it: the sleeper whose
+    command line ends in THIS test's pid-file path. The pid file outlives the sleeper, so a bare kill could
     reach whatever the number was reused for (nexus-xzorj)."""
     try:
         pid = int(pid_file.read_text().strip())
     except (OSError, ValueError):
         return
-    kill_if_identity(pid, f"sleep {_POSTMASTER_LIFETIME_S}")
+    kill_if_identity(pid, str(pid_file))
 
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="the fake pg_ctl is a POSIX shell script")

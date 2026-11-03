@@ -440,8 +440,14 @@ def kill_tree(proc_or_pid: Any, job: int | None, sig: int = KILL_SIGNAL, *, pgid
     pid). With it, POSIX signals that group directly (:func:`safe_killpg_group`) and never
     resolves a group from the pid: a leader that another thread or an event loop's child watcher
     reaps between the caller's liveness check and ``getpgid`` would otherwise resolve to whoever
-    the kernel gave the pid to (nexus-xzorj). The recorded group id stays reserved while any
-    member lives, and is ESRCH once none does.
+    the kernel gave the pid to (nexus-xzorj).
+
+    What is left (nexus-xzorj): the recorded group id is reserved only while some member lives. Once
+    every member has exited and the leader is reaped, the number is free, and a new session leader
+    can be given it; a kill by *pgid* after that window signals THEIR group. The window is the
+    time between the last member exiting and this call, on a box whose pid counter has wrapped;
+    a caller that has reaped the leader and wants the pool's stragglers accepts it (the post-reap
+    sweeps in ``pdf_extractor``), and a caller that can hold the handle live should not use *pgid*.
     """
     if job is not None:
         return win_job.close_job(job)
