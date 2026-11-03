@@ -111,7 +111,7 @@ def test_the_table_has_every_cell_and_the_expected_side_is_not_all_one_way() -> 
     assert len(cells) == 7 * 7 * 3 == 147
     admitted = sum(_expected(*c) for c in cells)
     # 42 admitted before nexus-rflvp (an unattested plan served lookups and listings): 28 now, 14 cells fewer
-    assert 20 < admitted < 107, f"{admitted} of 147 admitted: the table has stopped discriminating"
+    assert admitted == 28, f"{admitted} of 147 admitted: a matrix cell changed"
 
 
 def test_a_refusal_names_why_in_the_closed_vocabulary() -> None:
