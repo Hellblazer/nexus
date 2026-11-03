@@ -150,7 +150,7 @@ def is_answering_operator(tool: str) -> bool:
 
 
 #: The ``query()`` plain-corpus renderer's line-1 header, verbatim
-#: (mirrors ``commands/answer_runs._QUERY_LISTING_REROUTE_HEADER_RE``).
+#: (mirrors ``plans/answer_text_class._QUERY_LISTING_REROUTE_HEADER_RE``).
 _LISTING_HEADER_RE = re.compile(r"^Found \d+ documents \(from ")
 
 #: Raw operator/retrieval payload key -> shape. Matched only when the
