@@ -898,3 +898,4 @@ linker conditional.
   deferred -> draft for the re-gate.
 - 2026-11-03: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `68c697ec1`; critique `nexus_rdr/147-gate-critique-2026-11-03-r2`.
 - 2026-11-03: Gate round 2 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `0de44d26a`; critique `nexus_rdr/147-gate-critique-2026-11-03-r3`.
+- 2026-11-03: Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `7e79312f0`; critique `nexus_rdr/147-gate-critique-2026-11-03-r4`.
