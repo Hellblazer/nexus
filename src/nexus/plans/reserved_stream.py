@@ -15,7 +15,10 @@ at the first operator that consumes retrieved evidence, in both shapes an operat
 
 The merge happens once per run, at one plan step (``merged_step``). A re-hydration of that same
 step (the oversized-bundle per-step fallback, the continuation envelope) merges again, so every
-reduction route sees the same evidence. Later operators are only observed: where an operator's
+reduction route sees the same evidence. Since nexus-dfrfp the runner can name the steps instead
+(:attr:`ReservedStream.target_steps`): the evidence-reading steps of the answer step's closure, so a
+plan whose first consumer is a branch the answer discards (``review-default``'s extract beside its compare)
+still hands the stream to the step that writes the answer. Later operators are only observed: where an operator's
 input is the materialised output of a rank or filter, the stream counts the reserved items missing
 from it, so a drop by an unbundled rank is reported rather than silent (critique observation 13).
 No claim is made inside a bundle (the later step holds a deferred ``$stepN`` ref, not the items) or
@@ -145,6 +148,10 @@ class ReservedStream:
     merged: bool = False
     merged_step: int | None = None
     current_step: int | None = None
+    #: The plan steps that merge when the runner names them (nexus-dfrfp): the evidence-reading steps of the answer
+    #: step's closure, so the stream reaches the step whose output is the answer and no other. Empty (the default)
+    #: keeps the first-consumer rule.
+    target_steps: frozenset[int] = frozenset()
     current_producers: tuple[str, ...] = ()
     deduped_secondary: int = 0
     secondary_cut: int = 0
@@ -181,12 +188,17 @@ class ReservedStream:
     # ── merge ────────────────────────────────────────────────────────────────
 
     def should_merge(self) -> bool:
-        """First evidence-consuming operator, or a re-hydration of that same step."""
+        """A step the runner named in :attr:`target_steps`; with none named, the first evidence-consuming operator or a
+        re-hydration of that same step."""
+        if self.target_steps:
+            return self.current_step in self.target_steps
         return not self.merged or self.merged_step == self.current_step
 
     def mark_merged(self) -> None:
         self.merged = True
-        self.merged_step = self.current_step
+        # With named targets the first merging step stays the one the report names (a later target merges too).
+        if self.merged_step is None or not self.target_steps:
+            self.merged_step = self.current_step
 
     def is_primary_chash(self, chash: str) -> bool:
         return chash in self._chashes
@@ -218,6 +230,7 @@ class ReservedStream:
     def reset_run(self) -> None:
         """A whole-plan re-run (the continuation fallback) starts from a clean state."""
         self.merged, self.merged_step, self.current_step = False, None, None
+        self.target_steps = frozenset()
         self.deduped_secondary, self.secondary_cut, self.capped = 0, 0, False
         self.last_observed = None
         self.last_missing_tokens = ()

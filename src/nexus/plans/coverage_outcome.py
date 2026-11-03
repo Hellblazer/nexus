@@ -131,6 +131,8 @@ def render_insufficient_evidence(coverage: CoverageResult, facet_texts: Mapping[
     for f in pending:
         label = "the named source was not found" if f.reason == "source_missing" else _STATE_LABEL.get(f.state, f.state)
         lines.append(f"  - {f.facet_id} ({label}): {clip(f.facet_id)}")
+    # nexus-dfrfp: what the parts NOT listed above rest on; "covered" is a statement about support, not completeness.
+    lines.append("Parts not listed have at least one supporting item that reached the answer; that does not make them complete.")
     unresolved = [r for r in coverage.ledger.sources if r.state == "unresolved"]
     if unresolved:
         # nexus-jypmj.3.17: an ambiguous or unlookable source blocked nothing; say that it was not read, and why.

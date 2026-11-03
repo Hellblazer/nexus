@@ -77,6 +77,10 @@ class RepairSupplement:
     #: Plan steps, besides ``merged_step``, that merge too: the evidence-reading operators of a trailing run that
     #: dispatches one by one. Empty (the default) keeps the merge at one step.
     merge_steps: frozenset[int] = frozenset()
+    #: The plan steps that merge when the runner names them (nexus-dfrfp): the evidence-reading steps of the answer
+    #: step's closure. When set it is the whole rule, ahead of ``merged_step`` and ``merge_steps``: a step outside it,
+    #: the first consumer included, is not handed the supplement. Empty (the default) keeps the first-consumer rule.
+    target_steps: frozenset[int] = frozenset()
     _held: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     def __post_init__(self) -> None:
@@ -94,11 +98,13 @@ class RepairSupplement:
         self.note = note
 
     def should_merge(self) -> bool:
-        """Items or a note to merge, at the first evidence-consuming operator, a re-hydration of that same step, or
-        any step the runner named in :attr:`merge_steps`."""
-        return bool(self.items or self.note) and (
-            not self.merged or self.merged_step == self.current_step or self.current_step in self.merge_steps
-        )
+        """Items or a note to merge, at a step named in :attr:`target_steps`; with none named, at the first
+        evidence-consuming operator, a re-hydration of that same step, or any step named in :attr:`merge_steps`."""
+        if not (self.items or self.note):
+            return False
+        if self.target_steps:
+            return self.current_step in self.target_steps
+        return not self.merged or self.merged_step == self.current_step or self.current_step in self.merge_steps
 
     def merge(self, secondary: Sequence[Any]) -> list[Any]:
         """The note, then the supplement's texts, ahead of *secondary*, which loses any item the supplement holds."""
@@ -106,7 +112,9 @@ class RepairSupplement:
         self.deduped_secondary = len(secondary) - len(kept)
         # The first merging step stays the one a re-hydration of "that same step" means (the envelope replays it).
         self.merged = True
-        if self.merged_step is None or self.current_step not in self.merge_steps:
+        if self.merged_step is None or (
+            self.current_step not in self.merge_steps and not self.target_steps
+        ):
             self.merged_step = self.current_step
         return ([self.note] if self.note else []) + [i.text for i in self.items] + kept
 
@@ -120,6 +128,7 @@ class RepairSupplement:
     def reset_run(self) -> None:
         self.merged, self.merged_step, self.current_step, self.deduped_secondary = False, None, None, 0
         self.merge_steps = frozenset()
+        self.target_steps = frozenset()
 
 
 _ACTIVE: ContextVar[RepairSupplement | None] = ContextVar("nexus_repair_supplement", default=None)

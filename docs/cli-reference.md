@@ -5680,7 +5680,8 @@ check found some requested parts supported and others not, so `final_text`
 opens `[insufficient-evidence: <n> unresolved]` (a count, no question text),
 names each unresolved part and why (no supporting evidence found, the evidence
 contradicts it, not assessed, or its named source was not found), then gives
-the prose for the rest. It counts as a plan success, and a run planned inline
+the prose for the rest. A part counted as covered has at least one supporting
+item that reached the answer; that does not mean it is complete. It counts as a plan success, and a run planned inline
 is never saved as a plan. Every other value is a non-answer: `final_text` is a
 one-line `[non-answer: <shape>]` notice (the raw payload is never returned as
 prose), the `chunks` list still carries what was retrieved, the run is

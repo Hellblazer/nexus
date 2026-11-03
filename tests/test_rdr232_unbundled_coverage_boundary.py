@@ -7,9 +7,10 @@ retrieved evidence. Bundled, that run is one segment and the boundary sits befor
 which reads a later operator's input (``summarize`` over ``$step3.aggregates``, model prose as dicts), so the ledger
 ended ``unavailable`` / ``no_evidence`` with no anchors although evidence had reached the reduction.
 
-The boundary also reads the same evidence the bundled one does (the union of every run step's evidence args, deferred
-refs excluded), reaches the same state and reason, and the repair evidence reaches every step of the run that reads
-retrieved evidence directly (the unbundled run and the oversized-bundle per-step fallback), not only the first.
+The boundary also reads the same evidence the bundled one does (nexus-dfrfp: the evidence args of the steps the answer
+step reaches, its own and those it references through $stepN, deferred refs excluded), reaches the same state and
+reason, and the reserved stream and the repair evidence reach every such step that reads retrieved evidence directly
+(the unbundled run and the oversized-bundle per-step fallback), and no step outside that closure.
 
 Real ``plan_run``, real default dispatcher, real boundary and ledger; only the ``nexus.mcp.core`` tools that reach
 a model or an engine are stubbed. The plans are the builtin templates, read from ``conexus/plans/builtin``, and a few
@@ -31,9 +32,11 @@ from nexus.mcp import core as mcp_core
 from nexus.plans import runner
 from nexus.plans.bundle import BUNDLED_INTERMEDIATE, MAX_BUNDLE_PROMPT_CHARS as _REAL_MAX_BUNDLE_PROMPT_CHARS
 from nexus.plans.coverage_ledger import CoverageBoundary
-from nexus.plans.evidence_diagnostics import capture_reducer_input
+from nexus.plans.evidence_diagnostics import ReducerInputRecorder, capture_reducer_input, reducer_input_scope
 from nexus.plans.match import Match
+from nexus.plans.primary_evidence import PrimaryEvidence, SelectedChunk
 from nexus.plans.request_coverage import Facet, RequestCoverage
+from nexus.plans.reserved_stream import ReservedStream
 from nexus.plans.runner import PlanResult, plan_run
 
 BUILTIN = pathlib.Path(__file__).parent.parent / "conexus" / "plans" / "builtin"
@@ -44,6 +47,8 @@ TEXTS_B = ["branch B chunk about the later review", "branch B chunk about the cl
 #: What only the coverage repair retrieves (a search for the facet's own text), and the only item the repair check supports.
 REPAIR_TEXT = "repair hit: the gap it found is stated here"
 FACET_TEXT = "the gap it found"
+#: The named source's own chunk, merged by the reserved stream (nexus-dfrfp tests).
+PRIMARY_TEXT = "primary chunk of the named RDR about the identity gap"
 COLL = "rdr__1-1__voyage-context-3__v1"
 SKIPPED_MARK = "coverage_skipped"
 
@@ -89,6 +94,19 @@ INLINE_PLANS: dict[str, dict[str, Any]] = {
         {"tool": "check", "args": {"items": "$step5.extractions", "check_instruction": "do the extractions say anything"}},
         {"tool": "generate", "args": {"context": "$step4.contents", "question": "q"}},
     ]},
+    #: nexus-dfrfp: a witness-split run with a step OUTSIDE the answer's closure after the witness: the bundle (extract,
+    #: check) and the summarize read branch A, only the generate (the answer) reads branch B. Every filter that keeps
+    #: the anchors to the closure has a step here whose texts it must drop.
+    "witness-split-outside-middle": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "search", "args": {"query": "q2", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "store_get_many", "args": {"ids": "$step2.ids", "collections": "$step2.collections"}},
+        {"tool": "extract", "args": {"inputs": "$step3.contents", "fields": "decision"}},
+        {"tool": "check", "args": {"items": "$step5.extractions", "check_instruction": "do the extractions say anything"}},
+        {"tool": "summarize", "args": {"inputs": "$step3.contents"}},
+        {"tool": "generate", "args": {"context": "$step4.contents", "question": "q"}},
+    ]},
     #: As above, but the generate hydrates branch B itself through its own ``ids``.
     "witness-split-later-own-ids": {"steps": [
         {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
@@ -97,6 +115,25 @@ INLINE_PLANS: dict[str, dict[str, Any]] = {
         {"tool": "extract", "args": {"inputs": "$step3.contents", "fields": "decision"}},
         {"tool": "check", "args": {"items": "$step4.extractions", "check_instruction": "do the extractions say anything"}},
         {"tool": "generate", "args": {"ids": "$step2.ids", "collections": "$step2.collections", "question": "q"}},
+    ]},
+    #: nexus-dfrfp: a witness ENDS the run and reads its own evidence (branch B); the answer is the witness's output, so
+    #: its evidence is in the closure with the generate's (branch A).
+    "generate-check-own-evidence": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "search", "args": {"query": "q2", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "store_get_many", "args": {"ids": "$step2.ids", "collections": "$step2.collections"}},
+        {"tool": "generate", "args": {"context": "$step3.contents", "question": "q"}},
+        {"tool": "check", "args": {"items": "$step4.contents", "check_instruction": "do the chunks say anything"}},
+    ]},
+    #: As above with a verify that checks the generate's text against branch B.
+    "generate-verify": {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "search", "args": {"query": "q2", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "store_get_many", "args": {"ids": "$step2.ids", "collections": "$step2.collections"}},
+        {"tool": "generate", "args": {"context": "$step3.contents", "question": "q"}},
+        {"tool": "verify", "args": {"claim": "$step5.text", "evidence": "$step4.contents"}},
     ]},
     #: Two retrieval branches, each fetched, then an extract over branch A and a generate over branch B plus the extract:
     #: the evidence of the run is A plus B, the generate's second element is a deferred ref when the run bundles.
@@ -255,6 +292,7 @@ class Calls:
 async def _run(
     name: str, bindings: dict[str, Any], *, bundled: bool, supports: bool = True, cut_at: int | None = None,
     repair: bool = False, oversized: bool = False, dispatcher: Any = None, fetch: Any = None,
+    reserved: ReservedStream | None = None,
 ) -> tuple[PlanResult, Calls]:
     """``supports`` False: the assessment finds nothing supporting. ``repair``: only the repair's own hit supports,
     and the facet's own text retrieves it. ``oversized``: the bundle is too big, so it falls back to per-step dispatch."""
@@ -277,7 +315,7 @@ async def _run(
          patch("nexus.plans.bundle.MAX_BUNDLE_PROMPT_CHARS", 1 if oversized else _REAL_MAX_BUNDLE_PROMPT_CHARS):
         result = await plan_run(
             match, binds, bundle_operators=bundled, coverage_boundary=CoverageBoundary(request=_request()),
-            continuation_cut_at_step=cut_at, dispatcher=dispatcher,
+            continuation_cut_at_step=cut_at, dispatcher=dispatcher, reserved_stream=reserved,
         )
     return result, calls
 
@@ -305,6 +343,32 @@ SHAPE_IDS = [
 def _anchor_contents(result: PlanResult) -> set[str]:
     assert result.coverage is not None
     return {a.content for a in result.coverage.ledger.anchors}
+
+
+def _primary_stream() -> ReservedStream:
+    chunk = SelectedChunk(
+        source="RDR-084", doc_id="1.2.3", position=0, chash=_h(PRIMARY_TEXT), collection=COLL, label="Context",
+        label_source="content", text=PRIMARY_TEXT,
+    )
+    stream = ReservedStream.from_evidence(PrimaryEvidence(items=(chunk,)))
+    assert stream is not None
+    return stream
+
+
+def _handed_items(kw: dict[str, Any]) -> list[str]:
+    """The evidence items an operator was handed, as a list (a JSON-encoded list is decoded)."""
+    out: list[str] = []
+    for key in ("items", "inputs", "content", "context"):
+        if key not in kw:
+            continue
+        value = kw[key]
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                value = value.split("\n\n")  # summarize and generate are handed their list joined with a blank line
+        out.extend(str(v) for v in value) if isinstance(value, list) else out.append(str(value))
+    return out
 
 
 def _hand_text(kw: dict[str, Any]) -> str:
@@ -531,17 +595,18 @@ async def test_the_isolated_step_after_a_witness_is_read_by_the_boundary_and_han
     assert set(TEXTS_B) | {REPAIR_TEXT} <= _anchor_contents(repaired)
     assert REPAIR_TEXT in _hand_text(rcalls.args["generate"][0]), "the step after the witness is handed the repair evidence"
     (bundle,) = rcalls.bundles
-    assert REPAIR_TEXT in _hand_text(bundle.steps[0].args)
+    assert REPAIR_TEXT not in _hand_text(bundle.steps[0].args), "the extract is outside the answer's closure (nexus-dfrfp)"
 
 
 @pytest.mark.asyncio
 async def test_an_oversized_bundle_keeps_the_repair_naming_of_the_step_after_its_witness() -> None:
     """The per-step fallback names its own steps for the repair supplement; the step after the witness (named before
-    the fallback) must stay named, not be overwritten by the fallback's naming."""
+    the fallback) must stay named, not be overwritten by the fallback's naming. The extract before the witness is outside
+    the answer's closure and is handed nothing."""
     result, calls = await _run(*WITNESS_SPLIT_B, bundled=True, repair=True, oversized=True)
     assert calls.bundles == [] and result.coverage is not None and result.coverage.repair.outcome == "completed"
     assert calls.ran == ["extract", "check", "generate"]
-    assert REPAIR_TEXT in _hand_text(calls.args["extract"][0])
+    assert REPAIR_TEXT not in _hand_text(calls.args["extract"][0]), "the extract is outside the answer's closure (nexus-dfrfp)"
     assert REPAIR_TEXT in _hand_text(calls.args["generate"][0])
 
 
@@ -574,59 +639,103 @@ async def test_a_dispatcher_that_does_not_hydrate_is_not_asked_to_fetch_for_the_
 
 # ── the repair evidence reaches the answering step ─────────────────────────────────────────────────────────
 
-#: (plan, the operators that read the retrieved evidence directly, the one that answers)
+#: (plan, the operators it runs in order, the one that answers, the steps outside the answer's closure). nexus-dfrfp: the
+#: reserved stream and the repair evidence are merged into the evidence-reading steps of the answer's closure, so the
+#: first consumer outside it (the extract beside the compare, the rank beside the summarize) is handed neither.
 REPAIR_SHAPES = [
-    pytest.param(REVIEW, ["extract", "compare"], "compare", id="review-default"),
-    pytest.param(ANALYZE, ["rank", "summarize"], "summarize", id="analyze-default"),
-    #: The generate reads the rank's output, which carries the repair hit the rank was handed: no second merge.
-    pytest.param(HYBRID, ["rank", "generate"], "generate", id="hybrid-factual-lookup"),
+    pytest.param(REVIEW, ["extract", "compare"], "compare", ["extract"], id="review-default"),
+    pytest.param(ANALYZE, ["rank", "summarize"], "summarize", ["rank"], id="analyze-default"),
+]
+#: The three paths a run's last operators can take: one fused dispatch, the oversized bundle's per-step fallback, and a
+#: dispatcher that does not bundle.
+PATHS = [
+    pytest.param({"bundled": True}, id="fused"),
+    pytest.param({"bundled": True, "oversized": True}, id="oversized-fallback"),
+    pytest.param({"bundled": False}, id="unbundled"),
 ]
 
 
+def _answer_args(calls: Calls, answering: str, how: dict[str, Any]) -> dict[str, Any]:
+    """The args the answering step was handed: its entry in the fused bundle, else its own dispatch."""
+    for bundle in calls.bundles:
+        for st in bundle.steps:
+            if st.tool == answering:
+                return st.args
+    return calls.args[answering][0]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("plan", "readers", "answering"), REPAIR_SHAPES)
-async def test_unbundled_repair_evidence_reaches_every_step_that_reads_the_retrieved_evidence(
-    plan: Any, readers: list[str], answering: str,
+@pytest.mark.parametrize("how", PATHS)
+@pytest.mark.parametrize(("plan", "ran", "answering", "outside"), REPAIR_SHAPES)
+async def test_the_answer_step_is_handed_the_reserved_and_repair_evidence_and_the_anchors_equal_it(
+    plan: Any, ran: list[str], answering: str, outside: list[str], how: dict[str, Any],
 ) -> None:
-    """A facet only the repair can support: the first assessment finds it unsupported, the repair retrieves its hit, the
-    reassessment supports it. The ledger then says "covered" on that hit, so the answering step has to be handed it."""
+    """nexus-dfrfp: in the fused bundle, the oversized-bundle fallback and the unbundled run, the step whose output is
+    the answer is handed the named source's chunk and the repair hit, the step outside its closure is handed neither
+    (moved, not duplicated), and the coverage anchors are exactly the items the answer step was handed."""
     name, bindings = plan
-    result, calls = await _run(name, bindings, bundled=False, repair=True)
+    result, calls = await _run(name, bindings, repair=True, reserved=_primary_stream(), **how)
+    assert result.coverage is not None and result.coverage.repair.outcome == "completed"
+    assert bool(calls.bundles) == (not how.get("oversized") and how["bundled"]), "the path under test is the one that ran"
+    if not calls.bundles:
+        assert calls.ran == ran
+    handed = _handed_items(_answer_args(calls, answering, how))
+    assert any(PRIMARY_TEXT in t for t in handed) and any(REPAIR_TEXT in t for t in handed)
+    assert {a.content for a in result.coverage.ledger.anchors} == set(handed)
+    assert any(a.stream == "primary" for a in result.coverage.ledger.anchors)
+    for step in outside:
+        if calls.bundles:
+            (bundle,) = calls.bundles
+            text = _hand_text(next(st.args for st in bundle.steps if st.tool == step))
+        else:
+            text = _hand_text(calls.args[step][0])
+        assert PRIMARY_TEXT not in text and REPAIR_TEXT not in text, f"{step} is outside the answer's closure"
+    report = result.reserved_report
+    assert report is not None and report["merged"] is True
+    assert report["merged_at_step"] == next(
+        i for i, st in enumerate(_plan(name)["steps"]) if runner._extract_tool_name(st) == answering
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", PATHS)
+async def test_the_hybrid_lookup_rank_still_takes_the_evidence_and_the_generate_reads_its_output(how: dict[str, Any]) -> None:
+    """The generate reads the rank's output, which carries the repair hit the rank was handed: the rank is in the answer's
+    closure and still the step that merges (no second merge into the generate)."""
+    result, calls = await _run(*HYBRID, repair=True, reserved=_primary_stream(), **how)
     assert result.coverage is not None and result.coverage.repair.outcome == "completed"
     assert REPAIR_TEXT in _anchor_contents(result)
-    assert calls.ran == readers
-    for reader in readers:
-        assert REPAIR_TEXT in _hand_text(calls.args[reader][0]), f"{reader} was not handed the repair evidence"
-    assert REPAIR_TEXT in _hand_text(calls.args[answering][0])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("plan", "readers", "answering"), REPAIR_SHAPES)
-async def test_oversized_bundle_fallback_hands_the_repair_evidence_to_every_reading_step(
-    plan: Any, readers: list[str], answering: str,
-) -> None:
-    name, bindings = plan
-    result, calls = await _run(name, bindings, bundled=True, repair=True, oversized=True)
-    assert calls.bundles == [], "the fused dispatch must not run; the oversized bundle falls back to per-step dispatch"
-    assert result.coverage is not None and result.coverage.repair.outcome == "completed"
-    assert calls.ran == readers
-    for reader in readers:
-        assert REPAIR_TEXT in _hand_text(calls.args[reader][0]), f"{reader} was not handed the repair evidence"
-    assert REPAIR_TEXT in _hand_text(calls.args[answering][0])
+    first = _answer_args(calls, "rank", how)
+    assert PRIMARY_TEXT in _hand_text(first) and REPAIR_TEXT in _hand_text(first)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("plan", [REVIEW, ANALYZE], ids=["review-default", "analyze-default"])
-async def test_the_fused_bundle_merges_the_repair_evidence_at_its_first_step_only(plan: Any) -> None:
-    """Unchanged by the unbundled fix: the fused bundle carries the repair evidence at the run's first step, and the
-    later operator is handed no second copy (a guard on the bundled path, not a pin of the unbundled behaviour)."""
+async def test_the_reducer_input_record_is_the_answer_steps_input(plan: Any) -> None:
+    """nexus-dfrfp: the record that feeds the ledger's source check is the answer step's input, not the first step of the
+    run (the extract, which the answer does not read)."""
     name, bindings = plan
-    result, calls = await _run(name, bindings, bundled=True, repair=True)
-    assert result.coverage is not None and result.coverage.repair.outcome == "completed"
-    (bundle,) = calls.bundles
-    first, *later = bundle.steps
-    assert REPAIR_TEXT in _hand_text(first.args)
-    assert later and all(REPAIR_TEXT not in _hand_text(st.args) for st in later)
+    recorder = ReducerInputRecorder()
+    with reducer_input_scope(recorder):
+        result, calls = await _run(name, bindings, bundled=False, reserved=_primary_stream())
+    steps = _plan(name)["steps"]
+    last = len(steps) - 1
+    assert recorder.step == last
+    assert recorder.items is not None and any(PRIMARY_TEXT in t for t in recorder.items)
+    assert set(recorder.items) == set(_handed_items(calls.args[runner._extract_tool_name(steps[last])][0]))
+    assert result.coverage is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", PATHS)
+@pytest.mark.parametrize(("plan", "ran", "answering", "outside"), REPAIR_SHAPES)
+async def test_a_run_without_a_repair_still_hands_the_reserved_chunk_to_the_answer_step_only(
+    plan: Any, ran: list[str], answering: str, outside: list[str], how: dict[str, Any],
+) -> None:
+    name, bindings = plan
+    result, calls = await _run(name, bindings, reserved=_primary_stream(), **how)
+    assert any(PRIMARY_TEXT in t for t in _handed_items(_answer_args(calls, answering, how)))
+    assert {a.content for a in result.coverage.ledger.anchors} == set(_handed_items(_answer_args(calls, answering, how)))  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -682,7 +791,7 @@ async def test_a_later_step_with_its_own_ids_is_handed_the_repair_evidence_unbun
     result, calls = await _run(*OWN_IDS, bundled=False, repair=True)
     assert result.coverage is not None and result.coverage.repair.outcome == "completed"
     assert calls.ran == ["extract", "generate"]
-    assert REPAIR_TEXT in _hand_text(calls.args["extract"][0])
+    assert REPAIR_TEXT not in _hand_text(calls.args["extract"][0]), "the generate does not read the extract (nexus-dfrfp)"
     assert REPAIR_TEXT in _hand_text(calls.args["generate"][0])
 
 
@@ -731,6 +840,8 @@ async def test_a_covered_facet_cites_only_evidence_the_answer_writing_step_is_ha
         ("extract-check-generate", {4}),
         ("check-generate", {3}),
         ("two-branch-probe", {4, 5}),
+        ("generate-check-own-evidence", {4, 5}),
+        ("generate-verify", {4, 5}),
         ("extract-generate", {4, 5}),
         ("only-deferred-ref", {2, 3}),
         ("abstract-themes", {1, 2, 3}),
@@ -745,3 +856,35 @@ def test_the_answer_closure_is_the_answer_step_and_the_run_steps_it_references(p
         steps, range(run_start, len(steps)), extract_tool=runner._extract_tool_name, is_witness_tool=runner._is_witness_tool,
     )
     assert closure == frozenset(expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bundled", [True, False], ids=["bundled", "unbundled"])
+async def test_a_witness_that_ends_the_run_keeps_its_own_evidence_in_the_anchors(bundled: bool) -> None:
+    """nexus-dfrfp: ``generate(A), check(B)`` returns the check's output (``PlanResult.final`` is the last step), so the
+    check's own evidence reaches the answer and anchors it with the generate's."""
+    result, calls = await _run("generate-check-own-evidence", {}, bundled=bundled)
+    assert _anchor_contents(result) == set(TEXTS) | set(TEXTS_B)
+    assert "generate" in calls.ran or calls.bundles
+
+
+OUTSIDE_MIDDLE = ("witness-split-outside-middle", {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", PATHS)
+@pytest.mark.parametrize("repair", [False, True], ids=["first-reading", "after-repair"])
+async def test_every_step_outside_the_answer_closure_is_left_out_of_the_anchors_on_every_path(
+    how: dict[str, Any], repair: bool,
+) -> None:
+    """nexus-dfrfp: ``extract(A), check, summarize(A), generate(B)``: the answer reads branch B alone. The first reading
+    and the one the repair makes (the fused bundle's later steps, the oversized fallback, the unbundled run's first step
+    and the rest of its run) each drop the steps outside the closure, so the anchors are B (plus the repair hit)."""
+    result, calls = await _run(*OUTSIDE_MIDDLE, repair=repair, **how)
+    assert result.coverage is not None
+    if repair:
+        assert result.coverage.repair.outcome == "completed"
+    expected = set(TEXTS_B) | ({REPAIR_TEXT} if repair else set())
+    assert _anchor_contents(result) == expected
+    handed = _handed_items(_answer_args(calls, "generate", how))
+    assert set(handed) == expected, "the anchors are what the answer step was handed"
