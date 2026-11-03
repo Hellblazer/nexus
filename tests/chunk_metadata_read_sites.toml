@@ -186,7 +186,9 @@ line_start = 2
 
 # nexus-6pfgb.16: whether the post-pass ran is the owning document's own catalog meta (extraction_method),
 # passed in; the row's extraction_method is the last writer's and is no longer read. The placeholder
-# title is the row's (the engine's where= matches it).
+# title is the row's, read from the row fetched BY ID: since nexus-u9dc5 the engine judges a where= on
+# title against the owning document's catalog title (every PDF has one), so the scan sends no where= and
+# takes its documents from the catalog.
 [sites."src/nexus/health.py::_is_pdf_stub_metadata"]
 title = 1
 

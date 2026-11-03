@@ -11570,9 +11570,10 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
 #: Collection prefixes that can hold PDF chunks. ``code__`` never does, and
 #: ``rdr__`` holds only RDR markdown; skipping both saves one request each.
 _PDF_STUB_SCAN_PREFIXES: tuple[str, ...] = ("knowledge__", "docs__")
-#: Pages read per collection before the scan of that collection stops and
-#: is reported as partial. The filter matches only placeholder chunks
-#: (111 on the production tenant, 2026-09-24), so one page is the norm.
+#: Pages of chunk rows read per collection before the scan of that collection
+#: stops and is reported as partial. Only the chunks of PDF documents whose
+#: catalog meta records no extraction_method are read (111 placeholder chunks
+#: in 2 documents on the production tenant, 2026-09-24), so one page is the norm.
 _PDF_STUB_MAX_PAGES = 20
 #: Concurrent collection reads. Matches the search fan-out ceiling
 #: (``search_engine``); the round trip, not the query, is the cost.
@@ -11587,16 +11588,17 @@ _PDF_STUB_NO_URI = "content_hash "
 
 
 def _is_pdf_stub_metadata(meta: dict, *, document_has_method: bool) -> bool:
-    """True when a PDF chunk row still carries the streaming uploader's placeholder title (the engine
-    filter matches ``title == ""``) AND the document that owns it records no ``extraction_method`` in its
-    catalog ``meta`` -- the post-pass that fills both in never landed for that document.
+    """True when a PDF chunk row still carries the streaming uploader's placeholder title (the empty
+    string) AND the document that owns it records no ``extraction_method`` in its catalog ``meta`` -- the
+    post-pass that fills both in never landed for that document.
 
     Both halves are needed. A PDF whose extractor returned no title has an empty title but a recorded
     method, and is healthy. *document_has_method* is the OWNING document's own catalog fact
     (nexus-6pfgb.16, RDR-236 Phase 2): the chunk row's ``extraction_method`` is the last writer's, so a
     clean re-index of document B left the row saying "extracted" over a document A whose post-pass never
     landed. A document indexed before nexus-6pfgb.6 has no method in its meta until
-    ``nx catalog backfill-meta`` (nexus-6pfgb.10) or its next index run, and is named here until then.
+    ``nx catalog backfill-meta`` (nexus-6pfgb.10) or its next index run, and is named here until then
+    when its row title is empty.
     """
     return not meta.get("title") and not document_has_method
 
@@ -11605,65 +11607,84 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
     """Placeholder-metadata PDF chunks in one collection, keyed by owning document's source.
 
     Returns ``(source -> chunk count, truncated)``. The source is the owning document's catalog source
-    URI (its path when it has none), or ``"content_hash <prefix>"`` when it has neither. Since RDR-192
-    Step 5 (nexus-wbfpw.10) every chunk this read returns has a live owner in its own collection -- a
-    chunk with no manifest row at all is invisible here, not merely unnamed -- so a null source means
-    the owning document was registered without a URI, never "no manifest names this chunk"; a
-    manifest-less stub is the RDR-192 reaper's business, not this check's. The engine filters on
-    ``content_type`` and the literal empty ``title`` the uploader writes; whether the post-pass ran is
-    judged per OWNING document from its catalog ``meta`` (``extraction_method``), because the row's is
-    the last writer's and the vector bridge has no absent-key predicate. A chunk two documents hold is
-    counted under each document that records no method. One owner lookup per page; a catalog that
-    cannot be read raises, so the collection is reported as NOT CHECKED, never as clean. Raises on a
-    read failure; the caller names it.
+    URI (its file path when it has none), or ``"content_hash <prefix>"`` when it has neither.
+
+    The scan asks the CATALOG which documents to look at, then reads their chunk rows by id. It sends no
+    ``where`` to the vector routes: since nexus-u9dc5 (RDR-236 Phase 3) the engine judges ``title`` and
+    ``content_type`` on the owning document's catalog value, which every PDF has (pre-flight registers it
+    with its file stem), so a ``where={"title": ""}`` would name no stub on a current engine and the doctor
+    would read clean. The steps use only reads every engine has had (``/list?collection=``,
+    ``/manifest/get_many``, ``/v1/vectors/store-get``), so the same client answers the same on an engine
+    before and after that change.
+
+    1. The live documents the catalog places in *name* whose source format is PDF
+       (:func:`~nexus.catalog.indexed_meta.catalog_source_format`, the engine's own rule) and whose
+       catalog ``meta`` records no ``extraction_method``. That is the per-document fact; the chunk row's
+       is the last writer's and is not read.
+    2. Those documents' manifest chunks, read as rows by id. A row whose ``title`` is empty is the
+       placeholder; a titled row of a method-less document (indexed before nexus-6pfgb.6) is healthy.
+    A chunk two such documents hold is counted under each. A manifest chunk with no T3 row is skipped.
+    At most ``_PDF_STUB_MAX_PAGES * page_size`` distinct chunk rows are read; past that the second element
+    is True. A catalog that cannot be read raises, so the collection is reported as NOT CHECKED, never as
+    clean. Raises on a read failure; the caller names it.
     """
-    from nexus.catalog.store_hook import live_owner_entries  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.indexed_meta import catalog_source_format  # noqa: PLC0415 — deferred, as above
+
+    try:
+        reader = make_catalog_reader()
+        if reader is None:
+            raise RuntimeError("no catalog reader")
+        try:
+            candidates = [
+                d for d in reader.list_by_collection(name)
+                if catalog_source_format(getattr(d, "content_type", ""), getattr(d, "file_path", "")) == "pdf"
+                and not (getattr(d, "meta", None) or {}).get("extraction_method")
+            ]
+            manifests = reader.get_manifests([str(d.tumbler) for d in candidates]) if candidates else {}
+        finally:
+            reader.close()
+    except Exception as exc:  # noqa: BLE001 — the caller reports the collection as NOT CHECKED
+        raise RuntimeError(
+            f"the catalog could not be read, so no document's extraction record can be judged: {exc}"
+        ) from exc
+
+    held: dict[str, list[str]] = {}
+    ordered: list[str] = []
+    for d in candidates:
+        chashes = [
+            r.chash for r in manifests.get(str(d.tumbler), [])
+            if (getattr(r, "collection", None) or name) == name
+        ]
+        held[str(d.tumbler)] = chashes
+        ordered.extend(c for c in chashes if c)
+    ordered = list(dict.fromkeys(ordered))
+    cap = _PDF_STUB_MAX_PAGES * page_size
+    truncated = len(ordered) > cap
+    ordered = ordered[:cap]
 
     # Not get_collection(): that re-lists every collection in the tenant to
     # prove existence, one extra stats round trip per collection, and the
     # caller has just listed them.
     col = t3.get_or_create_collection(name)  # type: ignore[attr-defined]
+    rows: dict[str, dict] = {}
+    for start in range(0, len(ordered), page_size):
+        batch = ordered[start:start + page_size]
+        page = col.get(ids=batch, include=["metadatas"], limit=len(batch))
+        for chash, meta in zip(page.get("ids") or [], page.get("metadatas") or []):
+            rows[chash] = meta or {}
+
     stubs: dict[str, int] = {}
-    for page_no in range(_PDF_STUB_MAX_PAGES):
-        page = col.get(
-            where={"content_type": "pdf", "title": ""},
-            include=["metadatas"],
-            limit=page_size,
-            offset=page_no * page_size,
-            include_source_uri=True,
-        )
-        metas = page.get("metadatas") or []
-        uris = page.get("source_uris") or []
-        ids = page.get("ids") or []
-        owners: dict[str, list] = {}
-        if metas:
-            looked_up = live_owner_entries(name, [c for c in ids if c])
-            if looked_up is None:
-                raise RuntimeError("the catalog could not be read, so no document's extraction record can be judged")
-            owners = looked_up
-        for i, meta in enumerate(metas):
-            meta = meta or {}
-            chash = ids[i] if i < len(ids) else ""
-            for owner in owners.get(chash, []):
-                owner_meta = getattr(owner, "meta", None) or {}
-                if not _is_pdf_stub_metadata(meta, document_has_method=bool(owner_meta.get("extraction_method"))):
-                    continue
-                source = (
-                    getattr(owner, "source_uri", "") or getattr(owner, "file_path", "")
-                    or (uris[i] if i < len(uris) else "")
-                ) or (_PDF_STUB_NO_URI + (str(meta.get("content_hash", ""))[:12] or "?"))
-                stubs[source] = stubs.get(source, 0) + 1
-        if len(metas) < page_size:
-            return stubs, False
-    # Every page was full. Truncated only if a row exists past the cap; an
-    # exact multiple of the page size ends here too.
-    beyond = col.get(
-        where={"content_type": "pdf", "title": ""},
-        include=[],
-        limit=1,
-        offset=_PDF_STUB_MAX_PAGES * page_size,
-    )
-    return stubs, bool(beyond.get("ids"))
+    for d in candidates:
+        for chash in held[str(d.tumbler)]:
+            meta = rows.get(chash)
+            if meta is None or not _is_pdf_stub_metadata(meta, document_has_method=False):
+                continue
+            source = (
+                getattr(d, "source_uri", "") or getattr(d, "file_path", "")
+            ) or (_PDF_STUB_NO_URI + (str(meta.get("content_hash", ""))[:12] or "?"))
+            stubs[source] = stubs.get(source, 0) + 1
+    return stubs, truncated
 
 
 def _check_pdf_stub_metadata() -> list[HealthResult]:
@@ -11679,9 +11700,10 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
     chunks through the catalog document's manifest). Measured 2026-09-24: 111 chunks in 2
     documents, both of which this check names.
 
-    Blind spot: a PDF chunk with NO ``title`` key at all is not matched,
-    because the engine filter is the literal empty string. The uploader
-    always writes the key, so the known failure shapes carry it.
+    Which documents to look at is the catalog's answer (a PDF document in the collection whose ``meta``
+    records no ``extraction_method``), and the chunk rows are read by id, so the check holds on an engine
+    that judges ``title`` on the owning document (nexus-u9dc5) as on one that reads it from the row. A
+    chunk row with no ``title`` key counts as the placeholder, as does the empty string.
 
     Read-only; degrades to a skip when T3 is unreachable; a collection it
     could not read, or read only in part, is named, never counted as clean.

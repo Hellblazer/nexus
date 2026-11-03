@@ -15,13 +15,19 @@ has no ``extraction_method`` but does have a title, and is healthy; a
 markdown chunk may have no title, and is not a PDF chunk. Both are seeded
 here as negative controls.
 
-Real engine substrate: the check pages ``/v1/vectors/get`` with a
-``where`` filter and ``include_source_uri``, which an in-memory double
-does not model.
+Real engine substrate: the check asks the catalog for the PDF documents of
+the collection that record no ``extraction_method`` and reads their manifest
+chunks by id; it sends no ``where`` to the vector routes, because since
+nexus-u9dc5 the engine judges ``title`` on the owning document's catalog
+title (every PDF has one, its file stem) and a ``title == ""`` filter would
+name nothing. Every document here is registered with a non-blank title, as
+pre-flight does, so a scan that filtered on the row title through the engine
+finds nothing and fails these tests.
 """
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,14 +64,15 @@ def _seed(t3, rows: list[tuple[str, dict]]) -> list[str]:
     return ids
 
 
-def _own(chashes: list[str], file_path: str) -> None:
-    """Register a paper document at *file_path* whose manifest names *chashes*."""
+def _own(chashes: list[str], file_path: str, meta: dict | None = None, content_type: str = "paper") -> None:
+    """Register a document at *file_path* (titled with its file name, as pre-flight does) whose manifest
+    names *chashes*; *meta* is its catalog meta."""
     cat = ActiveCatalog()
     owner = cat.register_owner("rte90-owner", "curator")
     tumbler = str(cat.register(
-        owner, file_path.rsplit("/", 1)[-1], content_type="paper",
+        owner, file_path.rsplit("/", 1)[-1], content_type=content_type,
         file_path=file_path, physical_collection=_COLLECTION,
-        chunk_count=len(chashes),
+        chunk_count=len(chashes), meta=meta or {},
     ))
     cat.write_manifest(
         tumbler, [{"chash": c, "position": i} for i, c in enumerate(chashes)],
@@ -98,19 +105,6 @@ def _row(results):
     return rows[0]
 
 
-def _stub_owners(monkeypatch) -> None:
-    """The fake-collection tests below page canned rows with no catalog behind them; the scan asks the
-    catalog who owns each row (nexus-6pfgb.16), so every row's one owner is a PDF document with no
-    extraction record, at ``file:///big.pdf``."""
-    from types import SimpleNamespace
-
-    owner = SimpleNamespace(tumbler="1.1.1", title="big", meta={}, source_uri="file:///big.pdf", file_path="")
-    monkeypatch.setattr(
-        "nexus.catalog.store_hook.live_owner_entries",
-        lambda collection, chashes: {c: [owner] for c in chashes},
-    )
-
-
 def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
     t3 = make_t3()
     ids = _seed(t3, [
@@ -132,6 +126,10 @@ def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
 
     _own(ids[:2], "/tmp/rte90/FootprintRAG.pdf")
     _own_without_uri([ids[2]], "orphan stub document")
+    # The controls are owned too, so each one is judged, not merely invisible.
+    _own([ids[3]], "/tmp/rte90/Healthy.pdf", meta={"extraction_method": "mineru"})
+    _own([ids[4]], "/tmp/rte90/Old.pdf")
+    _own([ids[5]], "/tmp/rte90/notes.md", content_type="markdown")
 
     row = _row(health._check_pdf_stub_metadata())
 
@@ -167,32 +165,61 @@ def test_no_collections_is_not_applicable(t2_service_env) -> None:
     assert "not applicable" in row.detail, row.detail
 
 
-def test_a_collection_past_the_page_cap_is_partial(monkeypatch) -> None:
-    full_page = {
-        "ids": ["x"] * 3,
-        "metadatas": [{"content_type": "pdf", "title": ""}] * 3,
-        "source_uris": ["file:///big.pdf"] * 3,
-    }
+def _fake_catalog(monkeypatch, chashes: list[str], *, listed: list | None = None) -> None:
+    """One live PDF document with no extraction record, holding *chashes*, behind a stub catalog reader."""
+    doc = SimpleNamespace(
+        tumbler="1.1.1", title="big", meta={}, content_type="paper", file_path="/big.pdf",
+        source_uri="file:///big.pdf", physical_collection=_COLLECTION,
+    )
 
-    class _Col:
-        def get(self, **kw):
-            return full_page
+    class _Reader:
+        def list_by_collection(self, collection):
+            return [doc] if listed is None else listed
 
+        def get_manifests(self, doc_ids):
+            return {"1.1.1": [SimpleNamespace(chash=c, collection=_COLLECTION) for c in chashes]}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Reader())
+
+
+class _IdCol:
+    """``col.get(ids=...)`` over rows that are all placeholders; it refuses a ``where``."""
+
+    def __init__(self) -> None:
+        self.reads: list[list[str]] = []
+
+    def get(self, *, ids=None, include=None, limit=None, **kw):
+        assert "where" not in kw, "the scan must not send a where to the vector routes"
+        self.reads.append(list(ids))
+        return {"ids": list(ids), "metadatas": [{"content_type": "pdf", "title": ""}] * len(ids)}
+
+
+def _t3_of(col) -> object:
     class _T3:
         def list_collections(self):
             return [{"name": _COLLECTION}]
 
         def get_or_create_collection(self, name):
-            return _Col()
+            return col
 
-    _stub_owners(monkeypatch)
-    monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
+    return _T3()
+
+
+def test_a_collection_past_the_chunk_cap_is_partial(monkeypatch) -> None:
+    cap = health._PDF_STUB_MAX_PAGES * 3
+    _fake_catalog(monkeypatch, [f"{i:064x}" for i in range(cap + 1)])
+    col = _IdCol()
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _t3_of(col))
     monkeypatch.setattr("nexus.db.limits.MAX_QUERY_RESULTS", 3)
 
     row = _row(health._check_pdf_stub_metadata())
 
     assert not row.ok and row.warn, row.detail
     assert "PARTIAL" in row.detail and "floor" in row.detail, row.detail
+    assert sum(len(r) for r in col.reads) == cap, "no more than the cap is read"
 
 
 def test_a_collection_that_cannot_be_read_is_not_a_clean_verdict(monkeypatch) -> None:
@@ -200,14 +227,21 @@ def test_a_collection_that_cannot_be_read_is_not_a_clean_verdict(monkeypatch) ->
         def get(self, **kw):
             raise RuntimeError("engine 503")
 
-    class _T3:
-        def list_collections(self):
-            return [{"name": _COLLECTION}]
+    _fake_catalog(monkeypatch, ["a" * 64])
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _t3_of(_Col()))
 
-        def get_or_create_collection(self, name):
-            return _Col()
+    row = _row(health._check_pdf_stub_metadata())
 
-    monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
+    assert not row.ok and row.warn, row.detail
+    assert "NOT CHECKED" in row.detail and _COLLECTION in row.detail, row.detail
+
+
+def test_an_unreadable_catalog_is_not_a_clean_verdict(monkeypatch) -> None:
+    def boom():
+        raise ConnectionError("catalog down")
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", boom)
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _t3_of(_IdCol()))
 
     row = _row(health._check_pdf_stub_metadata())
 
@@ -226,28 +260,11 @@ def test_t3_unavailable_degrades_to_a_skip(monkeypatch) -> None:
     assert row.ok and "skipped" in row.detail, row.detail
 
 
-def test_an_exact_multiple_of_the_page_size_is_complete(monkeypatch) -> None:
-    """Every page full, nothing past the cap: the scan finished."""
-    full_page = {
-        "ids": ["x"] * 3,
-        "metadatas": [{"content_type": "pdf", "title": ""}] * 3,
-        "source_uris": ["file:///big.pdf"] * 3,
-    }
+def test_exactly_the_cap_is_complete(monkeypatch) -> None:
+    """The cap's worth of chunks and no more: the scan finished."""
     cap = health._PDF_STUB_MAX_PAGES * 3
-
-    class _Col:
-        def get(self, **kw):
-            return full_page if kw["offset"] < cap else {"ids": [], "metadatas": []}
-
-    class _T3:
-        def list_collections(self):
-            return [{"name": _COLLECTION}]
-
-        def get_or_create_collection(self, name):
-            return _Col()
-
-    _stub_owners(monkeypatch)
-    monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
+    _fake_catalog(monkeypatch, [f"{i:064x}" for i in range(cap)])
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _t3_of(_IdCol()))
     monkeypatch.setattr("nexus.db.limits.MAX_QUERY_RESULTS", 3)
 
     row = _row(health._check_pdf_stub_metadata())
@@ -256,8 +273,41 @@ def test_an_exact_multiple_of_the_page_size_is_complete(monkeypatch) -> None:
     assert f"{cap} PDF chunk(s) in 1 document(s)" in row.detail, row.detail
 
 
+def test_a_document_that_records_a_method_or_is_not_a_pdf_is_never_read(monkeypatch) -> None:
+    def doc(tumbler, ct, path, meta):
+        return SimpleNamespace(tumbler=tumbler, title="t", meta=meta, content_type=ct, file_path=path,
+                               source_uri="", physical_collection=_COLLECTION)
+
+    listed = [
+        doc("1.1.1", "paper", "/a.pdf", {"extraction_method": "mineru"}),
+        doc("1.1.2", "markdown", "/b.md", {}),
+        doc("1.1.3", "knowledge", "", {}),
+    ]
+    _fake_catalog(monkeypatch, ["a" * 64], listed=listed)
+    col = _IdCol()
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _t3_of(col))
+
+    row = _row(health._check_pdf_stub_metadata())
+
+    assert row.ok and not row.warn, row.detail
+    assert col.reads == [], "no candidate, no chunk read"
+
+
 def test_wired_into_run_health_checks() -> None:
     assert "_check_pdf_stub_metadata()" in inspect.getsource(health.run_health_checks)
+
+
+def test_the_scan_sends_no_where_so_an_engine_that_judges_title_on_the_catalog_cannot_blind_it(monkeypatch) -> None:
+    """Since nexus-u9dc5 the engine judges a ``where`` on ``title`` on the owning document's catalog title
+    (a PDF's is its stem, never blank). The scan names the stub from the catalog's document list and the
+    row it reads by id, so it finds the stub whatever the engine does with a ``where``."""
+    _fake_catalog(monkeypatch, ["a" * 64, "b" * 64])
+    col = _IdCol()
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _t3_of(col))
+
+    row = _row(health._check_pdf_stub_metadata())
+
+    assert not row.ok and "big.pdf (2)" in row.detail, row.detail
 
 
 @pytest.mark.parametrize("title,has_method,flagged", [

@@ -4022,13 +4022,18 @@ public final class PgVectorRepository {
         org.jooq.Condition finalCond = chunkScope(ch, tenant, collection).and(getWhereCondition(ch, where));
 
         if (includeNonLive) {
-            var nonLiveResult = tenantScope.withTenant(tenant, ctx ->
-                ctx.select(ch.chash(), ch.metadata())
+            var nonLiveResult = tenantScope.withTenant(tenant, ctx -> {
+                // nexus-u9dc5: a custom plan per execution, so the bound path of the where stays a constant of the
+                // plan (see getWhereCondition) and pgjdbc's switch to a generic plan after five executions cannot
+                // put the per-chunk guards back.
+                PgSession.setSearchPlanCacheMode(ctx);
+                return ctx.select(ch.chash(), ch.metadata())
                    .from(ch.table())
                    .where(finalCond)
                    .orderBy(ch.chash().asc())
                    .limit(limit).offset(offset)
-                   .fetch());
+                   .fetch();
+            });
             List<String> nonLiveIds = new ArrayList<>(nonLiveResult.size());
             List<Map<String, Object>> nonLiveMetas = new ArrayList<>(nonLiveResult.size());
             for (var rec : nonLiveResult) {
@@ -4039,16 +4044,20 @@ public final class PgVectorRepository {
             return new LinkedHashMap<>(Map.of("ids", nonLiveIds, "metadatas", nonLiveMetas));
         }
 
-        var result = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
+        org.jooq.Condition driver = manifestDriverCondition(ch, tenant, collection, where);
+        var result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-u9dc5: a custom plan per execution, as in the physical-scan branch above.
+            PgSession.setSearchPlanCacheMode(ctx);
+            return ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
                .from(ch.table())
                // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
                // this fetch-by-where read was structurally invisible to the
                // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
-               .where(finalCond.and(liveChunksCondition(ctx, ch)))
+               .where(finalCond.and(liveChunksCondition(ctx, ch)).and(driver))
                .orderBy(ch.chash().asc())
                .limit(limit).offset(offset)
-               .fetch());
+               .fetch();
+        });
 
         List<String> outIds = new ArrayList<>(result.size());
         List<String> outDocs = new ArrayList<>(result.size());
@@ -4114,7 +4123,72 @@ public final class PgVectorRepository {
         return DSL.exists(DSL.selectOne().from(admits).where(admits.ADMITTED));
     }
 
-        /** Backward-compat 5-arg overload of {@link #getWhere} (source_uri not included). */
+    /**
+     * The superset driver of the LIVE get reads (nexus-u9dc5 review r1, the cost remedy): for a positive {@code $eq} or
+     * {@code $in} on {@code title} or {@code source_author}, a conjunct that lets PostgreSQL start from the catalog
+     * (hundreds of documents) instead of testing {@link #manifestAdmitsCondition} on every chunk (tens of thousands):
+     *
+     * <pre>chash IN (SELECT m.chash FROM catalog_document_chunks m JOIN catalog_documents d ON ...
+     *               WHERE m.tenant_id = ? AND m.collection = ? AND d.deleted_at IS NULL
+     *                 AND (d.title IN (?...) OR d.title !~ '\S'))</pre>
+     *
+     * <p>It may admit more than the function keeps, never less, and the function stays the exact judge. For a chunk
+     * with a live owner the function takes the owner's {@code title} (or {@code author}) when it is not blank and the
+     * chunk row's value otherwise, so an owner can pass only if its own value is one of the operands or is blank. The
+     * blank owners are kept in the driver because their answer is the row's, which the driver cannot see. A chunk with
+     * no live owner is judged on its own row by the function, and the live reads never return one
+     * ({@link #liveChunksCondition}); the physical-scan mode does, so it takes no driver, and neither does a where that
+     * names neither key positively. The operands compare by their text, as {@link ManifestPushdown#exactPath} does
+     * ({@code String.valueOf}); an operand with a NUL, which PostgreSQL text cannot hold, takes no driver.
+     */
+    static org.jooq.Condition manifestDriverCondition(DimTables.ChunkTable ch, String tenant, String collection,
+                                                      Map<String, Object> where) {
+        if (where == null || where.isEmpty()) {
+            return DSL.trueCondition();
+        }
+        Field<byte[]> rawChash = ch.table().field("chash", byte[].class);
+        org.jooq.Condition cond = DSL.trueCondition();
+        java.util.Set<String> driven = new java.util.HashSet<>();
+        for (ManifestLabelStage.Predicate p : ManifestLabelStage.split(where).labels()) {
+            Field<String> column = switch (p.key()) {
+                case "title" -> CATALOG_DOCUMENTS.TITLE;
+                case "source_author" -> CATALOG_DOCUMENTS.AUTHOR;
+                default -> null;
+            };
+            if (column == null || !("$eq".equals(p.operator()) || "$in".equals(p.operator()))) {
+                continue;
+            }
+            List<String> values = new ArrayList<>();
+            if ("$in".equals(p.operator())) {
+                if (!(p.operand() instanceof List<?> items)) {
+                    continue;
+                }
+                for (Object item : items) {
+                    values.add(String.valueOf(item));
+                }
+            } else {
+                values.add(String.valueOf(p.operand()));
+            }
+            if (values.isEmpty() || values.stream().anyMatch(v -> v.indexOf('\u0000') >= 0) || !driven.add(p.key())) {
+                continue;
+            }
+            org.jooq.Condition ownValue = column.in(values)
+                .or(DSL.coalesce(column, "").notLikeRegex("\\S"));
+            cond = cond.and(rawChash.in(
+                DSL.select(CATALOG_DOCUMENT_CHUNKS.CHASH)
+                   .from(CATALOG_DOCUMENT_CHUNKS)
+                   .join(CATALOG_DOCUMENTS)
+                       .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+                   .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                       .and(ownValue))));
+        }
+        return cond;
+    }
+
+    /** Backward-compat 5-arg overload of {@link #getWhere} (source_uri not included). */
     public Map<String, Object> getWhere(String tenant, String collection,
                                         Map<String, Object> where,
                                         int limit, int offset) {
@@ -4189,7 +4263,12 @@ public final class PgVectorRepository {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         int cap = getAllMetadataMaxRows;
         org.jooq.Condition finalCond = chunkScope(ch, tenant, collection).and(getWhereCondition(ch, where));
+        org.jooq.Condition driver = includeNonLive
+            ? DSL.trueCondition()
+            : manifestDriverCondition(ch, tenant, collection, where);
         var result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-u9dc5: a custom plan per execution (see getWhereCondition).
+            PgSession.setSearchPlanCacheMode(ctx);
             // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
             // this staleness-cache-build read was structurally invisible to the
             // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
@@ -4197,7 +4276,7 @@ public final class PgVectorRepository {
             // see the method javadoc.
             org.jooq.Condition scanCond = includeNonLive
                 ? finalCond
-                : finalCond.and(liveChunksCondition(ctx, ch));
+                : finalCond.and(liveChunksCondition(ctx, ch)).and(driver);
             return ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
                .where(scanCond)
