@@ -16,6 +16,7 @@ import random
 import subprocess
 import sys
 import textwrap
+import threading
 from pathlib import Path
 
 import pytest
@@ -61,7 +62,11 @@ class TestRecord:
             for i in range(19)
         ]
         assert json.loads((cfg / gh.HOLD_FILENAME).read_text())["strikes"] == 1
-        assert sleeps == [2.0] * 19
+        # One strike, but nobody resends together (nexus-xe1et): the first leaves at the hold's
+        # end, each later one a slot after the one before.
+        assert sleeps[0] == 2.0
+        wakes = [1000.0 + i * 0.05 + sleep_s for i, sleep_s in enumerate(sleeps)]
+        assert all(b - a == pytest.approx(gh.SLOT_S) for a, b in zip(wakes, wakes[1:], strict=False))
 
     def test_failed_waves_escalate_whichever_process_sees_them(self, cfg: Path) -> None:
         """A 503 after the hold passed is the next strike: 2, 5, 10, 20, 30, capped."""
@@ -160,6 +165,181 @@ class TestRecord:
     def test_the_file_never_carries_userinfo(self, cfg: Path) -> None:
         gh.record_503(2.0, retry_after=None, url="https://user:secret@edge/x", now=1000.0, rng=_rng())
         assert "secret" not in (cfg / gh.HOLD_FILENAME).read_text()
+
+
+class TestEndpointScope:
+    """nexus-cphvg: a 503 holds the clients of the endpoint that sent it, not every client on the box."""
+
+    def test_a_hold_for_another_endpoint_is_no_hold(self, cfg: Path) -> None:
+        gh.record_503(5.0, retry_after=None, url="http://127.0.0.1:8123", now=1000.0, rng=_rng())
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url="https://api.example.com") == 0.0
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url="http://127.0.0.1:8123") > 3.0
+
+    def test_scheme_host_and_port_all_count(self, cfg: Path) -> None:
+        gh.record_503(5.0, retry_after=None, url="https://api.example.com:8443/v1/x", now=1000.0, rng=_rng())
+        for other in ("http://api.example.com:8443", "https://api.example.com", "https://other.example.com:8443"):
+            assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url=other) == 0.0, other
+        # the path and userinfo are not part of the endpoint
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url="https://u:p@API.example.com:8443/z") > 3.0
+
+    def test_a_caller_that_cannot_name_its_endpoint_is_held(self, cfg: Path) -> None:
+        gh.record_503(5.0, retry_after=None, url="http://127.0.0.1:8123", now=1000.0, rng=_rng())
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url="") > 3.0
+
+    def test_a_hold_with_no_recorded_endpoint_holds_everyone(self, cfg: Path) -> None:
+        """A file written before endpoints were recorded, or by hand."""
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps({"not_before": 1005.0, "strikes": 1, "last_503": 1000.0}))
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url="https://api.example.com") > 3.0
+
+    def test_a_success_elsewhere_leaves_the_hold(self, cfg: Path) -> None:
+        gh.record_503(2.0, retry_after=None, url="https://api.example.com", now=1000.0, rng=_rng())
+        gh.record_success(now=1010.0, url="http://127.0.0.1:8123")
+        assert (cfg / gh.HOLD_FILENAME).exists()
+        gh.record_success(now=1010.0, url="https://api.example.com")
+        assert not (cfg / gh.HOLD_FILENAME).exists()
+
+    def test_a_503_from_another_endpoint_replaces_the_hold(self, cfg: Path) -> None:
+        """One file, one endpoint: the strike count of the other one does not carry over."""
+        for i in range(3):
+            gh.record_503(2.0, retry_after=None, url="https://api.example.com", now=1000.0 + i * 20, rng=_rng())
+        assert gh.record_503(2.0, retry_after=None, url="http://127.0.0.1:8123", now=1100.0, rng=_rng()) == 2.0
+        state = json.loads((cfg / gh.HOLD_FILENAME).read_text())
+        assert (state["url"], state["strikes"]) == ("http://127.0.0.1:8123", 1)
+
+
+class TestEngineReason:
+    """nexus-cphvg: a 503 with an engine reason is about one tenant or request, not the edge."""
+
+    def test_reason_from_body(self) -> None:
+        assert gh.reason_from_body(b'{"error": "busy", "reason": "tenant_creation_busy"}') == "tenant_creation_busy"
+        for body in (b"", None, b"not json", b"<html>503</html>", b"[]", b'{"error": "x"}', b'{"reason": ""}', b'{"reason": 3}'):
+            assert gh.reason_from_body(body) is None, body
+
+    def test_an_engine_reason_records_nothing_and_keeps_the_callers_delay(self, cfg: Path) -> None:
+        got = gh.record_503(
+            2.0, retry_after=7.0, url="https://api.example.com", now=1000.0, rng=_rng(),
+            reason="tenant_creation_busy",
+        )
+        assert got == 7.0  # the engine's own Retry-After is still honoured
+        assert not (cfg / gh.HOLD_FILENAME).exists()
+
+    def test_an_engine_reason_does_not_extend_a_live_hold(self, cfg: Path) -> None:
+        gh.record_503(2.0, retry_after=None, url="https://api.example.com", now=1000.0, rng=_rng())
+        before = (cfg / gh.HOLD_FILENAME).read_text()
+        gh.record_503(2.0, retry_after=None, url="https://api.example.com", now=1000.5, rng=_rng(), reason="tenant_creation_busy")
+        assert (cfg / gh.HOLD_FILENAME).read_text() == before
+
+
+class TestStaggeredWake:
+    """nexus-xe1et: processes held on one hold leave it one slot apart, not together.
+
+    What the tests count is the concurrency at the edge after a hold: senders whose
+    request is still in flight when another one leaves, on a fixed clock.
+    """
+
+    REQUEST_S = 0.3
+
+    @staticmethod
+    def _peak_concurrency(wakes: list[float], request_s: float) -> int:
+        events = sorted([(w, 1) for w in wakes] + [(w + request_s, -1) for w in wakes], key=lambda e: (e[0], e[1]))
+        live = peak = 0
+        for _, step in events:
+            live += step
+            peak = max(peak, live)
+        return peak
+
+    def test_waiters_leave_the_hold_one_slot_apart(self, cfg: Path) -> None:
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())  # not_before 1005
+        waits = [gh.wait_before_attempt(now=1001.0, rng=_rng(), url="https://edge") for _ in range(20)]
+        wakes = sorted(1001.0 + w for w in waits)
+        assert wakes[0] >= 1005.0
+        assert all(b - a >= gh.SLOT_S - 1e-9 for a, b in zip(wakes, wakes[1:], strict=False))
+        assert self._peak_concurrency(wakes, self.REQUEST_S) <= 2
+
+    def test_the_peak_does_not_grow_with_the_number_of_waiters(self, cfg: Path) -> None:
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+        waits = [gh.wait_before_attempt(now=1001.0, rng=_rng(), url="https://edge") for _ in range(100)]
+        wakes = [1001.0 + w for w in waits]
+        assert self._peak_concurrency(wakes, self.REQUEST_S) <= 2
+        assert max(waits) <= gh.HOLD_CAP_S  # no waiter is queued past the cap
+
+    def test_a_503_recorder_takes_a_slot_too(self, cfg: Path) -> None:
+        """The sleep record_503 returns and the wait wait_before_attempt returns draw on one queue."""
+        wakes = [1000.0 + gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng()) for _ in range(5)]
+        wakes += [1000.0 + gh.wait_before_attempt(now=1000.0, rng=_rng(), url="https://edge") for _ in range(5)]
+        wakes.sort()
+        assert wakes[0] == 1005.0
+        assert all(b - a >= gh.SLOT_S - 1e-9 for a, b in zip(wakes, wakes[1:], strict=False))
+
+    def test_the_first_waiter_after_a_lone_recorder_is_one_slot_behind_it(self, cfg: Path) -> None:
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+        assert gh.wait_before_attempt(now=1001.0, rng=_rng(), url="https://edge") == pytest.approx(4.0 + gh.SLOT_S)
+
+    def test_a_caller_past_the_hold_claims_no_slot(self, cfg: Path) -> None:
+        gh.record_503(2.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+        before = (cfg / gh.HOLD_FILENAME).read_text()
+        assert gh.wait_before_attempt(after=1002.5, now=1000.0, rng=_rng(), url="https://edge") == 0.0
+        assert (cfg / gh.HOLD_FILENAME).read_text() == before
+
+    def test_a_wait_clamped_by_the_callers_budget_claims_no_slot(self, cfg: Path) -> None:
+        gh.record_503(10.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+        before = (cfg / gh.HOLD_FILENAME).read_text()
+        assert gh.wait_before_attempt(max_wait=3.0, now=1000.0, rng=_rng(), url="https://edge") == 3.0
+        assert (cfg / gh.HOLD_FILENAME).read_text() == before
+
+    def test_a_wedged_lock_falls_back_to_the_jittered_wait(self, cfg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+        monkeypatch.setattr(gh, "LOCK_WAIT_S", 0.1)
+        fd = os.open(cfg / (gh.HOLD_FILENAME + ".lock"), os.O_RDWR | os.O_CREAT)
+        try:
+            _locking.lock_fd(fd, blocking=True)
+            wait = gh.wait_before_attempt(now=1001.0, rng=_rng(), url="https://edge")
+        finally:
+            _locking.unlock_fd(fd)
+            os.close(fd)
+        assert 4.0 <= wait <= 4.0 + gh.MAX_JITTER_S
+
+    def test_threads_racing_for_slots_get_distinct_ones(self, cfg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gh, "LOCK_WAIT_S", 10.0)
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+        waits: list[float] = []
+        gate = threading.Barrier(12)
+
+        def claim() -> None:
+            gate.wait()
+            waits.append(gh.wait_before_attempt(now=1001.0, rng=_rng(), url="https://edge"))
+
+        threads = [threading.Thread(target=claim) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        wakes = sorted(1001.0 + w for w in waits)
+        assert len(wakes) == 12
+        assert all(b - a >= gh.SLOT_S - 1e-9 for a, b in zip(wakes, wakes[1:], strict=False))
+        assert self._peak_concurrency(wakes, self.REQUEST_S) <= 2
+
+    def test_real_processes_racing_for_slots_get_distinct_ones(self, cfg: Path) -> None:
+        """Eight processes ask at the same instant of a fixed clock; the file is the only thing they share."""
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+        child = textwrap.dedent(
+            """
+            from nexus.db import gateway_hold as gh
+            gh.LOCK_WAIT_S = 10.0
+            print(gh.wait_before_attempt(now=1001.0, url="https://edge"))
+            """
+        )
+        env = {**os.environ, "NEXUS_CONFIG_DIR": str(cfg), "NX_NO_TELEMETRY": "1"}
+        procs = [
+            subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE, text=True, env=env)
+            for _ in range(8)
+        ]
+        outs = [p.communicate()[0] for p in procs]
+        assert all(p.returncode == 0 for p in procs)
+        wakes = sorted(1001.0 + float(o) for o in outs)
+        assert len(wakes) == 8
+        assert all(b - a >= gh.SLOT_S - 1e-9 for a, b in zip(wakes, wakes[1:], strict=False))
+        assert self._peak_concurrency(wakes, self.REQUEST_S) <= 2
 
 
 def test_the_hold_is_shared_between_real_processes(cfg: Path) -> None:

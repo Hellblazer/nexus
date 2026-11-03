@@ -1486,6 +1486,25 @@ def _wait_for_lease_republication() -> None:
             _lease_cache = discovered  # type: ignore[assignment]
 
 
+def _gateway_hold_url() -> str:
+    """The endpoint the next send goes to, for the shared gateway hold (nexus-cphvg).
+
+    ``""`` when it cannot be resolved: the hold then applies as it did before
+    endpoints were compared, and ``_request_once`` raises its own error."""
+    try:
+        return _resolve_endpoint()[0]
+    except Exception:  # noqa: BLE001 — best effort: an unresolvable endpoint is _request_once's to report
+        return ""
+
+
+def _error_body(exc: Any) -> bytes:
+    """An ``HTTPError``'s body, ``b""`` when it cannot be read. Read only on a path that resends."""
+    try:
+        return exc.read() or b""
+    except Exception:  # noqa: BLE001 — a closed or absent body is no body
+        return b""
+
+
 def _request(
     method: str, path: str, *, tenant: str, timeout: float, body: dict | None
 ) -> Any:
@@ -1541,7 +1560,8 @@ def _request(
         slept_until: float | None = None
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             # nexus-v1929: another process's 503 holds this one too, before every send.
-            if (held_s := gateway_hold.wait_before_attempt(after=slept_until, max_wait=timeout)) > 0.0:
+            hold_url = _gateway_hold_url()
+            if (held_s := gateway_hold.wait_before_attempt(after=slept_until, max_wait=timeout, url=hold_url)) > 0.0:
                 _log.info("vector_gateway_hold_wait", path=path, attempt=i + 1, sleep_s=held_s)
                 time.sleep(held_s)
             try:
@@ -1562,8 +1582,11 @@ def _request(
                 # An engine deadline 503 is about this request, not an overloaded edge.
                 if exc.code == 503 and not (exc.headers or {}).get(DEADLINE_OUTCOME_HEADER):
                     # nexus-v1929: the hold is shared with every client on this config dir.
+                    # nexus-cphvg: an engine reason in the body (tenant_creation_busy) is
+                    # about one tenant, not the edge, so it holds no one else.
                     sleep_s = gateway_hold.record_503(
-                        sleep_s, retry_after=parse_retry_after(exc.headers),
+                        sleep_s, retry_after=parse_retry_after(exc.headers), url=hold_url,
+                        reason=gateway_hold.reason_from_body(_error_body(exc)),
                     )
                 _log.warning(
                     "vector_gateway_retry_embed_write_504" if floored else "vector_gateway_retry",
@@ -1575,7 +1598,7 @@ def _request(
                 slept_until = time.time() + sleep_s
                 time.sleep(sleep_s)
             else:
-                gateway_hold.record_success()
+                gateway_hold.record_success(url=hold_url)
                 return result
         raise AssertionError("unreachable")  # loop always returns or raises
 

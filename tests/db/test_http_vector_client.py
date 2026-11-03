@@ -2609,6 +2609,103 @@ class TestGatewayTransientRetry:
         hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=3, body=None)
         assert sleeps == [3.0]
 
+    def test_cphvg_a_hold_for_another_endpoint_does_not_hold_t3(self, monkeypatch, tmp_path):
+        """nexus-cphvg: a 503 a local engine drew holds clients of that engine, not of the managed URL."""
+        import json
+        import time
+
+        import nexus.db.http_vector_client as hv
+        from nexus.db import gateway_hold
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / gateway_hold.HOLD_FILENAME).write_text(json.dumps({
+            "not_before": time.time() + 20.0, "strikes": 2, "last_503": time.time(),
+            "url": "http://127.0.0.1:8123",
+        }))
+        sleeps: list[float] = []
+        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("https://api.example.com", "tok"))
+        monkeypatch.setattr(hv, "_request_once", lambda *a, **k: {"ok": True})
+        module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
+
+        assert hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=60, body=None) == {"ok": True}
+        assert sleeps == []
+        # and the success of the other endpoint did not clear the local engine's hold
+        assert (tmp_path / gateway_hold.HOLD_FILENAME).exists()
+
+    def test_cphvg_the_t3_loop_records_the_endpoint_it_resolved(self, monkeypatch, tmp_path):
+        import json
+
+        import nexus.db.http_vector_client as hv
+        from nexus.db import gateway_hold
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("https://u:pw@api.example.com:8443/base", "tok"))
+        calls: list[int] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise self._http_error(503)
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        module_time(monkeypatch, hv).sleep = lambda s: None
+        hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=5, body=None)
+        state = json.loads((tmp_path / gateway_hold.HOLD_FILENAME).read_text())
+        assert state["url"] == "https://api.example.com:8443"
+
+    def test_cphvg_an_engine_reason_503_holds_no_one_else_but_is_still_retried(self, monkeypatch, tmp_path):
+        """nexus-cphvg: tenant_creation_busy is about one tenant; its Retry-After still paces this caller."""
+        import io
+        import urllib.error
+
+        import nexus.db.http_vector_client as hv
+        from nexus.db import gateway_hold
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(
+                    url="http://svc/v1/x", code=503, msg="err", hdrs={"Retry-After": "4"},
+                    fp=io.BytesIO(b'{"error":"busy","reason":"tenant_creation_busy"}'),
+                )
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
+
+        assert hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=5, body=None) == {"ok": True}
+        assert sleeps == [4.0]
+        assert not (tmp_path / gateway_hold.HOLD_FILENAME).exists()
+
+    def test_cphvg_an_edge_503_with_a_non_engine_body_still_holds(self, monkeypatch, tmp_path):
+        import io
+        import urllib.error
+
+        import nexus.db.http_vector_client as hv
+        from nexus.db import gateway_hold
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        calls: list[int] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(
+                    url="http://svc/v1/x", code=503, msg="err", hdrs={},
+                    fp=io.BytesIO(b"<html><body>503 Service Temporarily Unavailable</body></html>"),
+                )
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        module_time(monkeypatch, hv).sleep = lambda s: None
+        hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=5, body=None)
+        assert (tmp_path / gateway_hold.HOLD_FILENAME).exists()
+
     def test_a_deadline_abort_503_is_not_resent_by_the_gateway_loop(self, monkeypatch):
         """nexus-qajw7: an engine 503 marked aborted discarded embedded work;
         resending it 2/5/10 s later runs the whole request to its deadline

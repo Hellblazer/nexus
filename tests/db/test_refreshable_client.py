@@ -1098,6 +1098,76 @@ class TestGatewayTransientRetry:
         assert store._once_with_gateway_retry("POST", "/v1/echo", json={}) == {"ok": True}
         assert not (_config_dir() / gateway_hold.HOLD_FILENAME).exists()
 
+    def test_cphvg_a_hold_for_another_endpoint_does_not_hold_this_store(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-cphvg: a hold recorded for a different scheme://host:port is not this store's hold."""
+        from nexus.db import gateway_hold
+        from nexus.db.t2 import _refreshable_client as mod
+
+        hold = _config_dir() / gateway_hold.HOLD_FILENAME
+        hold.write_text(json.dumps({
+            "not_before": time.time() + 20.0, "strikes": 2, "last_503": time.time(),
+            "url": "https://api.example.com",
+        }))
+        sleeps: list[float] = []
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
+        store = _make_echo_store()
+
+        assert store.echo_post("elsewhere") == {"echo": {"value": "elsewhere"}}
+        assert sleeps == []
+        assert hold.exists()  # and this store's success did not clear the other endpoint's hold
+
+    def test_cphvg_an_engine_reason_503_holds_no_one_else_but_is_still_retried(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-cphvg: tenant_creation_busy is about one tenant; its Retry-After still paces this caller."""
+        from nexus.db import gateway_hold
+        from nexus.db.t2 import _refreshable_client as mod
+
+        sleeps: list[float] = []
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
+        store = _make_echo_store()
+        calls: list[int] = []
+        request = httpx.Request("POST", "http://svc/v1/echo")
+
+        def fake_once(method: str, path: str, **kwargs: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 1:
+                response = httpx.Response(
+                    503, headers={"Retry-After": "4"},
+                    content=b'{"error":"busy","reason":"tenant_creation_busy"}', request=request,
+                )
+                raise httpx.HTTPStatusError("503", request=request, response=response)
+            return {"ok": True}
+
+        monkeypatch.setattr(store, "_request_once", fake_once)
+        assert store._once_with_gateway_retry("POST", "/v1/echo", json={}) == {"ok": True}
+        assert sleeps == [4.0]
+        assert not (_config_dir() / gateway_hold.HOLD_FILENAME).exists()
+
+    def test_cphvg_an_edge_503_with_a_non_engine_body_still_holds(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nexus.db import gateway_hold
+        from nexus.db.t2 import _refreshable_client as mod
+
+        module_time(monkeypatch, mod).sleep = lambda s: None
+        store = _make_echo_store()
+        calls: list[int] = []
+        request = httpx.Request("POST", "http://svc/v1/echo")
+
+        def fake_once(method: str, path: str, **kwargs: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 1:
+                response = httpx.Response(503, content=b"<html>503 Service Unavailable</html>", request=request)
+                raise httpx.HTTPStatusError("503", request=request, response=response)
+            return {"ok": True}
+
+        monkeypatch.setattr(store, "_request_once", fake_once)
+        assert store._once_with_gateway_retry("POST", "/v1/echo", json={}) == {"ok": True}
+        assert (_config_dir() / gateway_hold.HOLD_FILENAME).exists()
+
     def test_500_is_not_gateway_retried(
         self, fake_service, monkeypatch: pytest.MonkeyPatch
     ) -> None:

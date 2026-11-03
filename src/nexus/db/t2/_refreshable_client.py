@@ -550,6 +550,14 @@ class _EndpointRegistrar:
         )
 
 
+def _response_body(response: httpx.Response) -> bytes:
+    """A response's body, ``b""`` when it cannot be read (a streamed one that was never read)."""
+    try:
+        return response.content
+    except Exception:  # noqa: BLE001 — httpx.ResponseNotRead: no body to read
+        return b""
+
+
 def _numeric_timeout(value: Any) -> float | None:
     """A per-call ``timeout=`` as seconds (an ``httpx.Timeout`` gives its read
     bound), or ``None`` when the call passed none (nexus-v1929 hold clamp)."""
@@ -1348,8 +1356,12 @@ class RefreshableHttpStoreMixin:
         slept_until: float | None = None
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             # nexus-v1929: another process's 503 holds this one too, before every send.
+            hold_url = getattr(self, "_base_url", "")
+            if not isinstance(hold_url, str):
+                hold_url = ""
             held_s = gateway_hold.wait_before_attempt(
                 after=slept_until, max_wait=_numeric_timeout(kwargs.get("timeout", getattr(getattr(self, "_client", None), "timeout", None))),
+                url=hold_url,
             )
             if held_s > 0.0:
                 _log.info(
@@ -1367,10 +1379,13 @@ class RefreshableHttpStoreMixin:
                 # An engine deadline 503 is about this request, not an overloaded edge.
                 if exc.response.status_code == 503 and not exc.response.headers.get(DEADLINE_OUTCOME_HEADER):
                     # nexus-v1929: the hold is shared with every client on this config dir.
+                    # nexus-cphvg: an engine reason in the body (tenant_creation_busy) is
+                    # about one tenant, not the edge, so it holds no one else.
                     sleep_s = gateway_hold.record_503(
                         sleep_s,
                         retry_after=parse_retry_after(exc.response.headers),
-                        url=self._base_url,
+                        url=hold_url,
+                        reason=gateway_hold.reason_from_body(_response_body(exc.response)),
                     )
                 _log.warning(
                     "vector_gateway_retry_embed_write_504" if floored
@@ -1385,7 +1400,7 @@ class RefreshableHttpStoreMixin:
                 slept_until = time.time() + sleep_s
                 time.sleep(sleep_s)
             else:
-                gateway_hold.record_success()
+                gateway_hold.record_success(url=hold_url)
                 return result
         raise AssertionError("unreachable")  # loop always returns or raises
 

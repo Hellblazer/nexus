@@ -256,6 +256,7 @@ from nexus._log_safe_url import (
     scrub_transport_error,
 )
 from nexus._winsec import make_user_dir, open_private
+from nexus.db import gateway_hold
 from nexus.rate_brake import parse_retry_after
 
 _log = structlog.get_logger(__name__)
@@ -433,6 +434,13 @@ _MINT_BACKOFF_SCHEDULE: tuple[float, ...] = (1.0, 2.0)
 #: nexus-ssqk9 thread).
 _MINT_RETRY_AFTER_CAP_S: float = 15.0
 
+#: Most time one :meth:`DataTokenManager._mint` call spends, in total, waiting
+#: before a send on another process's gateway hold (nexus-3zreb; the sleep
+#: after its own 503 is the Retry-After-capped one above). A hold longer than
+#: this is waited out only to this bound: the attempt then goes, and its own
+#: outcome decides.
+_MINT_HOLD_WAIT_BUDGET_S: float = 15.0
+
 #: DERIVED (nexus-9rr0a): the worst-case wall time a single
 #: :meth:`DataTokenManager._mint` call can legitimately burn retrying
 #: against a degraded server (repeated 429/502/503/504) before it either
@@ -445,8 +453,9 @@ _MINT_RETRY_AFTER_CAP_S: float = 15.0
 #:
 #:     _MINT_MAX_ATTEMPTS(3) x _MINT_TIMEOUT_S(10s)                = 30s
 #:   + (_MINT_MAX_ATTEMPTS(3) - 1) x _MINT_RETRY_AFTER_CAP_S(15s)  = 30s
+#:   + the shared gateway hold's waits (_MINT_HOLD_WAIT_BUDGET_S)     = 15s
 #:   ---------------------------------------------------------------------
-#:                                                                  = 60s
+#:                                                                  = 75s
 #:
 #: A module-level derivation (not a hand-typed literal) so this and
 #: :data:`_MINT_LOCK_WAIT_CEILING_S` below can never silently drift apart
@@ -457,6 +466,7 @@ _MINT_RETRY_AFTER_CAP_S: float = 15.0
 _MINT_RETRY_WALL_WORST_CASE_S: float = (
     _MINT_MAX_ATTEMPTS * _MINT_TIMEOUT_S
     + (_MINT_MAX_ATTEMPTS - 1) * _MINT_RETRY_AFTER_CAP_S
+    + _MINT_HOLD_WAIT_BUDGET_S
 )
 
 #: Explicit headroom (nexus-9rr0a) above :data:`_MINT_RETRY_WALL_WORST_CASE_S`
@@ -1989,8 +1999,23 @@ class DataTokenManager:
         status: int
         payload: dict[str, Any]
         resp_headers: dict[str, str] = {}
+        slept_until: float | None = None
+        hold_budget = _MINT_HOLD_WAIT_BUDGET_S
         for attempt in range(1, _MINT_MAX_ATTEMPTS + 1):
             mint_error: DataTokenMintError | None = None
+            # nexus-3zreb: another process's 503 holds this mint too, before every send.
+            # A single-attempt refresh never sleeps (its caller has a better retry).
+            if not single_attempt and hold_budget > 0.0:
+                held_s = gateway_hold.wait_before_attempt(
+                    after=slept_until, max_wait=hold_budget, url=base_url, rng=self._rng,
+                )
+                if held_s > 0.0:
+                    hold_budget -= held_s
+                    _log.info(
+                        "data_token_mint_hold_wait",
+                        tenant=body_tenant, endpoint=_log_endpoint(url), attempt=attempt, sleep_s=held_s,
+                    )
+                    self._sleep(held_s)
             try:
                 status, payload, resp_headers = self._poster(url, headers, body)
             except Exception as exc:  # noqa: BLE001 — any transport failure becomes the typed mint error
@@ -2010,7 +2035,12 @@ class DataTokenManager:
             if mint_error is not None:
                 raise mint_error from None
 
-            if single_attempt or status not in _RETRYABLE_MINT_STATUSES or attempt == _MINT_MAX_ATTEMPTS:
+            if status == 200:
+                gateway_hold.record_success(url=base_url)
+            retryable = (
+                not single_attempt and status in _RETRYABLE_MINT_STATUSES and attempt < _MINT_MAX_ATTEMPTS
+            )
+            if not retryable and status != 503:
                 break
             # critic S2 (nexus-ssqk9): a SMALL bounded retry on a transient
             # gateway/rate-limit status — never touches the shared
@@ -2028,12 +2058,28 @@ class DataTokenManager:
             else:
                 # nexus-kcdbx: full jitter, so clients refused together do not
                 # retry together. Only ever shorter than the schedule value.
-                delay = self._rng.uniform(0.0, _MINT_BACKOFF_SCHEDULE[attempt - 1])
+                delay = self._rng.uniform(0.0, _MINT_BACKOFF_SCHEDULE[min(attempt, len(_MINT_BACKOFF_SCHEDULE)) - 1])
+            if status == 503:
+                # nexus-3zreb: the 503 goes on the hold shared with every client on this
+                # config dir, even a final or single-attempt one (it sleeps nothing, but
+                # the next process should wait). The shared sleep is never past the
+                # site cap. An engine reason in the body (tenant_creation_busy) is about
+                # one tenant, not the edge, and records nothing (nexus-cphvg).
+                delay = min(
+                    gateway_hold.record_503(
+                        delay, retry_after=retry_after, url=base_url, rng=self._rng,
+                        reason=gateway_hold.error_reason(payload),
+                    ),
+                    _MINT_RETRY_AFTER_CAP_S,
+                )
+            if not retryable:
+                break
             _log.warning(
                 "data_token_mint_retry",
                 tenant=body_tenant, endpoint=_log_endpoint(url), status=status,
                 attempt=attempt, delay=delay, retry_after_present=retry_after is not None,
             )
+            slept_until = time.time() + delay
             self._sleep(delay)
 
         if status == 403:

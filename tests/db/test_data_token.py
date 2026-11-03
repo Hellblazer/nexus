@@ -392,7 +392,190 @@ def test_mint_retry_exhausts_after_three_attempts_then_fails_loud() -> None:
         mgr.bearer_for(BASE_URL, TENANT)
 
     assert len(poster.calls) == 3  # 1 initial + 2 retries, no more
+    # A 503 sleeps the shared gateway hold's schedule (nexus-3zreb), whose first strike is 2s: the
+    # mint's own "1s/2s" CEILINGS (nexus-kcdbx) still govern 429/502/504, see the next test.
+    # (the fake sleep passes no time, so the second 503 also queues one slot behind the first)
+    assert sleep.calls[0] == pytest.approx(2.0)
+    assert 2.0 - 1e-6 <= sleep.calls[1] <= 2.0 + 0.25 + 1e-6
+
+
+def test_mint_retry_keeps_its_own_ceilings_on_a_429() -> None:
+    poster = _FakePoster()
+    for _ in range(3):
+        poster.queue(429, {"error": "rate limit exceeded"})
+    sleep = _FakeSleep()
+    mgr = _manager(poster, _FakeClock(), sleep=sleep, rng=_CeilingRng())
+
+    with pytest.raises(DataTokenMintError, match="429"):
+        mgr.bearer_for(BASE_URL, TENANT)
+
     assert sleep.calls == [1.0, 2.0]  # design of record "1s/2s" are the CEILINGS (nexus-kcdbx)
+
+
+# ── nexus-3zreb: the mint retry rides the shared gateway hold ────────────────
+
+
+def _hold_path():
+    from nexus import config as _config
+    from nexus.db import gateway_hold
+
+    return _config.nexus_config_dir() / gateway_hold.HOLD_FILENAME
+
+
+def _write_hold(state: dict) -> None:
+    import json
+
+    path = _hold_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state))
+
+
+def test_a_mint_waits_on_a_hold_another_process_recorded_before_its_first_send() -> None:
+    import json
+
+    from nexus.db import gateway_hold
+
+    _write_hold(
+        {"not_before": time.time() + 8.0, "strikes": 2, "last_503": time.time(), "url": BASE_URL}
+    )
+    events: list[str] = []
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    inner_post = poster.__call__
+    sleep = _FakeSleep()
+
+    def post(url: str, headers: dict, body: dict) -> tuple[int, dict, dict]:
+        events.append("post")
+        return inner_post(url, headers, body)
+
+    def slp(seconds: float) -> None:
+        events.append("sleep")
+        sleep(seconds)
+
+    mgr = DataTokenManager(
+        clock=_FakeClock(), poster=post, mint_credential=lambda: "mintcred", mint_tenant=lambda: "", sleep=slp,
+    )
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
+    assert events == ["sleep", "post"]
+    assert len(sleep.calls) == 1 and 7.0 <= sleep.calls[0] <= 8.5 + gateway_hold.MAX_JITTER_S
+
+
+def test_a_mint_ignores_a_hold_recorded_for_another_endpoint() -> None:
+    import json
+
+    _write_hold(
+        {"not_before": time.time() + 20.0, "strikes": 2, "last_503": time.time(), "url": "http://127.0.0.1:8123"}
+    )
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    sleep = _FakeSleep()
+    mgr = _manager(poster, _FakeClock(), sleep=sleep)
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
+    assert sleep.calls == []
+    assert _hold_path().exists()  # nor did this endpoint's success clear the other one's hold
+
+
+def test_a_mint_hold_wait_is_bounded_by_its_budget() -> None:
+    import json
+
+    from nexus.db.data_token import _MINT_HOLD_WAIT_BUDGET_S
+
+    _write_hold(
+        {"not_before": time.time() + 30.0, "strikes": 5, "last_503": time.time(), "url": BASE_URL}
+    )
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    sleep = _FakeSleep()
+    mgr = _manager(poster, _FakeClock(), sleep=sleep)
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
+    assert sleep.calls == [_MINT_HOLD_WAIT_BUDGET_S]
+
+
+def test_a_mint_503_records_the_shared_hold_with_its_endpoint() -> None:
+    import json
+
+    poster = _FakePoster()
+    poster.queue(503, {"error": "unavailable"})
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock(), sleep=_FakeSleep())
+    assert mgr.bearer_for("https://u:pw@api.example.com:8443/x", TENANT) == "tok-1"
+    state = json.loads(_hold_path().read_text())
+    assert state["url"] == "https://api.example.com:8443"
+    assert state["strikes"] == 1
+
+
+def test_a_mint_503_sleeps_the_escalated_shared_hold() -> None:
+    """Three strikes already on the box: a lone mint's first 503 sleeps 20s of hold, 15s of it as its own
+    capped sleep and the rest as the wait before the resend (the hold budget bounds that part)."""
+    import json
+
+    from nexus.db.data_token import _MINT_RETRY_AFTER_CAP_S
+
+    _write_hold(
+        {"not_before": 0.0, "strikes": 3, "last_503": time.time(), "url": BASE_URL}
+    )
+    poster = _FakePoster()
+    poster.queue(503, {"error": "unavailable"})
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    sleep = _FakeSleep()
+    mgr = _manager(poster, _FakeClock(), sleep=sleep)
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
+    assert sleep.calls[0] == _MINT_RETRY_AFTER_CAP_S
+    assert len(sleep.calls) == 2 and 4.9 <= sleep.calls[1] <= 5.0 + 0.25 + 1e-6  # the 5s past the cap, and a slot
+    assert json.loads(_hold_path().read_text())["strikes"] == 4
+
+
+def test_a_mint_503_with_an_engine_reason_holds_no_one_else() -> None:
+    """tenant_creation_busy is about one tenant (nexus-cphvg); its Retry-After still paces the mint."""
+    poster = _FakePoster()
+    poster.queue(503, {"error": "busy", "reason": "tenant_creation_busy"}, headers={"Retry-After": "4"})
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    sleep = _FakeSleep()
+    mgr = _manager(poster, _FakeClock(), sleep=sleep)
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
+    assert sleep.calls == [4.0]
+    assert not _hold_path().exists()
+
+
+def test_a_mint_429_and_502_record_no_hold() -> None:
+    for status in (429, 502, 504):
+        poster = _FakePoster()
+        poster.queue(status, {"error": "x"})
+        poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+        mgr = _manager(poster, _FakeClock(), sleep=_FakeSleep())
+        assert mgr.bearer_for(BASE_URL, f"{TENANT}-{status}") == "tok-1"
+        assert not _hold_path().exists(), status
+
+
+def test_a_single_attempt_mint_records_its_503_but_neither_waits_nor_sleeps() -> None:
+    """nexus-dncjg: a refresh under a valid token returns at once; it still tells the other processes."""
+    import json
+
+    _write_hold(
+        {"not_before": time.time() + 8.0, "strikes": 1, "last_503": time.time(), "url": BASE_URL}
+    )
+    poster = _FakePoster()
+    poster.queue(503, {"error": "unavailable"})
+    sleep = _FakeSleep()
+    mgr = _manager(poster, _FakeClock(), sleep=sleep)
+    with pytest.raises(DataTokenMintError, match="503"):
+        mgr._mint(BASE_URL, TENANT, "mintcred", single_attempt=True)
+    assert sleep.calls == []
+    assert len(poster.calls) == 1
+    assert json.loads(_hold_path().read_text())["strikes"] == 1  # same wave as the hold already there
+
+
+def test_a_mint_success_after_the_hold_clears_it() -> None:
+    import json
+
+    _write_hold(
+        {"not_before": time.time() - 1.0, "strikes": 3, "last_503": time.time() - 2.0, "url": BASE_URL}
+    )
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock(), sleep=_FakeSleep())
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
+    assert not _hold_path().exists()
 
 
 def test_mint_retry_never_touches_the_shared_rate_brake() -> None:
