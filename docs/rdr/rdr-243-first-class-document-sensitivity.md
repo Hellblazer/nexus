@@ -199,12 +199,12 @@ count" below refers to it.
 | 16 | `nx_enrich_beads` | mcp/core.py:15615 (dispatch 15654, with `mcp_servers`) | bead text, plus nx MCP tools in the child | posture exported to the child; the child's reads exclude |
 | 17 | `nx_plan_audit` | mcp/core.py:15682 (dispatch 15761, with `mcp_servers`) | plan text, plus MCP tools in the child | as row 16 |
 | 18 | Memory rollup / `memory_consolidate` | memory_rollup.py:152 | T2 notes to the LLM | `n/a-not-a-document`; recorded as an unprotected gap (a note quoting a sensitive document) |
-| 19 | Voyage embedding | engine `VoyageEmbedder.java` | chunk text to `api.voyageai.com` at index time | Sam's decision Q3 |
-| 20 | Voyage rerank | engine `VoyageReranker.java` | query plus candidate chunk text to Voyage | Sam's decision Q4 |
+| 19 | Voyage embedding | engine `VoyageEmbedder.java` | chunk text to `api.voyageai.com` at index time | Q3, decided: an acknowledgement flag; local mode routes a sensitive document to a bge collection |
+| 20 | Voyage rerank | engine `VoyageReranker.java` | query plus candidate chunk text to Voyage | Q4, decided: sensitive candidates are kept from the reranker, engine-side |
 | 21 | MinerU remote | pdf_extractor.py:2787; config.py:623 | PDF bytes to `pdf.mineru_server_url`, possibly off the machine | `--sensitive` with a non-loopback URL falls to the local subprocess ladder, or refuses if none |
-| 22 | Cloud tenant storage | `HttpVectorClient` upserts in cloud mode | chunk text and embeddings to the managed tenant | `--sensitive` prints a one-line disclosure naming tenant and embedder; Sam's decision Q3 covers an acknowledgement |
+| 22 | Cloud tenant storage | `HttpVectorClient` upserts in cloud mode | chunk text and embeddings to the managed tenant | `--sensitive` prints a one-line disclosure naming tenant and embedder; Q3, decided: an acknowledgement flag is required |
 | 23 | MCP read tools (output side) | mcp/core.py:3779 `search`, 5028 `query`, 6097 `store_get`, 6723 `store_get_many`; scoped searches; `traverse`; catalog `show`/`list` | content and titles to the session model | Sam's decision Q1 |
-| 24 | CLI `nx search` / `query` | commands/search_cmd.py:217 | stdout, often read by Claude Code's Bash tool | Sam's decision Q2 |
+| 24 | CLI `nx search` / `query` | commands/search_cmd.py:217 | stdout, often read by Claude Code's Bash tool | Q2, decided: withheld under Claude Code, badged in a terminal |
 | 25 | Install ping | install_ping.py:191 | install id, version, mode; no content | `n/a`; listed so the census is complete |
 
 **Documented: three dispatch roots.** Every LLM call in the package passes
@@ -435,10 +435,10 @@ text.
 
 **8. Setting the flag.** `--sensitive` on `nx index pdf`, `nx index md`,
 `nx dt index`, `nx dt capture` and `nx store put`; `sensitive: bool =
-False` on MCP `store_put` (subject to Q5). `nx catalog sensitive
+False` on MCP `store_put` (Q5, decided; not through catalog `update`). `nx catalog sensitive
 <tumbler | --collection C | --path GLOB> [--clear --reason TEXT]` sets or
 clears after the fact. `nx catalog list --sensitive` lists. `nx index repo
---sensitive-glob PATTERN` is subject to Q8.
+--sensitive-glob PATTERN` is phase 3 (Q8, decided).
 
 **9. Carrying the flag to results.** `SearchResult.metadata["sensitive"]`
 comes from the engine, never from the chunk row. `sensitive_owners` comes
@@ -554,7 +554,7 @@ does not depend on callers telling the truth.
 ### Briefly Rejected
 
 - **A repo-wide `nx index repo --sensitive`**: rarely what is meant; a
-  glob option is proposed instead (Q8).
+  glob option is proposed instead, in phase 3 (Q8).
 - **A client-side store of sensitive ids**: violates the NO-SQLITE rule and
   would not reach other machines on the tenant.
 
@@ -570,7 +570,7 @@ does not depend on callers telling the truth.
   the same change that adds the assert, or it raises.
 - Negative: a topic with one sensitive member loses its LLM label in phase
   1 and keeps only its terms label.
-- Negative: sensitive results rank by vector order alone if Q4 keeps them
+- Negative: sensitive results rank by vector order alone, because Q4 keeps them
   from the Voyage reranker.
 
 ### Risks and Mitigations
@@ -608,8 +608,7 @@ does not depend on callers telling the truth.
 
 - [ ] A1, A3, A5 and A7 verified before the phase that depends on each
   (A1 and A7 before phase 1 closes; A3 and A5 before phase 2 starts).
-- [ ] Sam's answers to Q1 to Q8, before the phase each one gates (Q5, Q7
-  and Q8 before phase 1; Q1 to Q4 and Q6 before phase 3).
+- [x] Sam's answers to Q1 to Q8: all as recommended (2026-11-03).
 
 ### Minimum Viable Validation
 
@@ -756,14 +755,15 @@ The batched `chunk_sensitive` lookup adds one indexed query per search
 response; the filter inside the search predicate costs what A3 measures.
 No figure is claimed until then.
 
-## Open Questions (Sam's to decide)
+## Open Questions (decided)
 
-Each is Sam's call. The recommendation is the design's where it gave one;
-where it did not, the recommendation is marked as the drafter's.
+Sam decided all eight as recommended on 2026-11-03. Each entry keeps the
+question and the reason; the recommendation is the decision. Q5 and Q6 were
+the drafter's recommendations, the design having left them open.
 
 - **Q1.** Should the MCP read tools withhold sensitive content from the
   session model by default, or return it with a flag?
-  *Recommended*: withhold by default, with a config key
+  *Decided (as recommended)*: withhold by default, with a config key
   `sensitivity.mcp_output: withhold | flag` that only the operator can
   change, never a tool argument. Every MCP response goes to Anthropic, so
   returning content contradicts "exempt from every LLM surface"; this is
@@ -771,38 +771,38 @@ where it did not, the recommendation is marked as the drafter's.
 - **Q2.** Should `nx search` run from Claude Code's Bash tool (detected by
   `CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT`, session.py:96) withhold the way
   the MCP tools do?
-  *Recommended*: yes. Output read through the Bash tool reaches the same
+  *Decided (as recommended)*: yes. Output read through the Bash tool reaches the same
   model; a terminal user still sees content with a `[sensitive]` badge.
 - **Q3.** Should `--sensitive` into a Voyage-embedded collection (cloud
   mode, or keyed local mode) be refused, need an explicit acknowledgement,
   or only print a disclosure?
-  *Recommended*: require an acknowledgement flag, and in local mode route
+  *Decided (as recommended)*: require an acknowledgement flag, and in local mode route
   a sensitive document to a bge collection by default. Embedding sends the
   full chunk text to Voyage, which is the same exposure the flag exists to
   prevent.
 - **Q4.** Should sensitive candidates be kept from the Voyage reranker even
   in a search a person runs?
-  *Recommended*: yes, engine-side; sensitive hits keep their vector order.
+  *Decided (as recommended)*: yes, engine-side; sensitive hits keep their vector order.
   Reranking sends the chunk text to Voyage, and the only cost is ranking
   quality for those hits.
 - **Q5.** May an agent set sensitivity through MCP (`store_put` with
   `sensitive=True`), given that clearing stays CLI-only with a reason?
-  *Recommended (drafter's; the design leaves it open)*: yes for
+  *Decided (as the drafter recommended)*: yes for
   `store_put`, no through catalog `update`. Setting is the protective
   direction and an operator can clear a wrong set; clearing remains a
   human act.
 - **Q6.** Should an LLM backend whose endpoint is loopback (a local
   OpenAI-compatible server) be exempt from the dispatch refusal?
-  *Recommended (drafter's; the design leaves it open)*: no exemption in
+  *Decided (as the drafter recommended)*: no exemption in
   this RDR. A loopback URL can be a tunnel (`ssh -L`) to another host, so
   the URL does not prove the model is local; an operator who wants it can
   have a later, explicit config allow.
 - **Q7.** Should `nx dt index` treat DEVONthink's exclusion as sensitive
   automatically?
-  *Recommended*: yes. The operator already marked the record; importing it
+  *Decided (as recommended)*: yes. The operator already marked the record; importing it
   unmarked would undo their choice. Depends on A6.
 - **Q8.** Does `nx index repo --sensitive-glob` belong in phase 1?
-  *Recommended*: no; phase 3. The bead's case is PDFs and DEVONthink
+  *Decided (as recommended)*: no; phase 3. The bead's case is PDFs and DEVONthink
   records, and phase 1 lists only those verbs.
 
 ## Finalization Gate
@@ -862,3 +862,6 @@ where it did not, the recommendation is marked as the drafter's.
   code recorded in Key Discoveries (re-registration path, rename keeps
   tumblers, `docs__` opt-in, privacy policy already names `openai_compat`,
   lint and parity domains).
+- 2026-11-03: Sam decided Q1 to Q8 as recommended; the question list, the
+  surface table, Prerequisites and the cross-references now state the
+  decisions.
