@@ -257,7 +257,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-238](rdr-238-memory-curation.md) | Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves | Feature | Accepted | 2026-10-31 |
 | [RDR-239](rdr-239-tuple-space-dictionary.md) | The Tuple-Space Dictionary: Every Template Publishes What It Means, Who Writes It, Who Reads It, and a Post That Validates | Feature | Accepted | 2026-10-31 |
 | [RDR-240](rdr-240-procedures-as-sandboxed-lua-scripts.md) | Procedures as Sandboxed Lua Scripts: Run the Fixed Sequence Instead of Recalling It | Feature | Draft | 2026-11-01 |
-| [RDR-242](rdr-242-sandboxed-lua-runtime.md) | A Sandboxed Lua Runtime over the Nexus Surface: Client-Side, Read-Only First | Architecture | Draft | 2026-11-02 |
+| [RDR-242](rdr-242-sandboxed-lua-runtime.md) | Registered, Approved Lua Scripts in a Sandboxed Runtime: Client-Side, Read-Only First | Architecture | Draft | 2026-11-02 |
 | [RDR-244](rdr-244-public-retrieval-evaluation.md) | Public retrieval evaluation others can run | Feature | Draft | 2026-11-03 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.

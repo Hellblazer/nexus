@@ -1,0 +1,36 @@
+A register: report recorded on the entry                   {'static': 'passed', 'trial': ['ok']}
+A state after register                                     pending
+B run before approval                                      {'refused': 'pending'}
+G approval signed by a key that is not the anchor          approve recorded
+G state after the forged approval                          pending
+C approve with the anchor key                              approve recorded
+C in-process SSHSIG verify / ssh-keygen -Y verify          (True, True)
+C run approved, live backend                               {'value': ['live:alpha', 'live:beta']}
+D edit -> new version, state                               ('efceabf01691', 'pending')
+D run the edited version                                   {'refused': 'pending'}
+D run the approved version still                           {'value': ['live:alpha', 'live:beta']}
+E source swapped under the approved sha                    {'refused': 'source does not match the pinned sha256'}
+F grants widened after approval                            {'refused': 'pending'}
+H revoke with the anchor key                               revoke recorded
+H run revoked                                              {'refused': 'revoked'}
+H replay of the old approval after revoke                  revoked
+I trial: a verb call with no fixture                       {'static': 'passed', 'trial': ['error: script:6: memory.get: KeyError: \'no fixture for memory.get ["nexus", "t9"]\'']}
+I approve refuses it                                       approve refused: {'static': 'passed', 'trial': ['error: scri
+I trial: output shape mismatch                             {'static': 'passed', 'trial': ['shape mismatch: ["fixture body"]']}
+I static check failure is recorded, trial not run          {'static': 'global: load (line 1)', 'trial': 'not run'}
+J ungranted verb, checker bypassed                         {'error': "script:1: attempt to call a nil value (field 'list')"}
+J verb namespace absent, checker bypassed                  {'error': "script:1: attempt to index a nil value (global 'git')"}
+J backend exception reaches the script as a string         {'error': 'memory.get: PermissionError: backend refused'}
+K dynamic dump key at run time (passes static)             {'value': True}
+L while true                                               {'error': 'limit:instructions'}
+L string.rep 1e9                                           {'error': 'not enough memory'}
+L load reachable at run time?                              {'value': True}
+M coroutine.wrap native, create wrapped                    TIMEOUT after 8 s: the loop escaped the hook
+M coroutine.wrap wrapped too                               {'error': 'limit:instructions'}
+M coroutine.create wrapped                                 {'value': False}
+N pcall swallows the limit: raw pcall, no rearm            TIMEOUT after 8 s: the loop escaped the hook
+N pcall swallows the limit: raw pcall, rearmed hook        {'error': 'limit:instructions'}
+N pcall recursion to the C-stack limit: rearmed hook       TIMEOUT after 8 s: the loop escaped the hook
+N pcall recursion to the C-stack limit: guarded pcall      {'error': 'limit:stack'}
+N pcall swallows the limit: guarded pcall, no rearm        {'error': 'limit:instructions'}
+N guarded pcall still catches an ordinary error            {'value': ['false', 'boom']}
