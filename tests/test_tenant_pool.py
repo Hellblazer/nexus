@@ -28,6 +28,7 @@ import pytest
 from structlog.testing import capture_logs
 
 import nexus.aspect_extractor as aspect_extractor
+import nexus.aspect_worker as aspect_worker
 import nexus.search_engine as search_engine
 from nexus import mcp_infra
 from nexus.db import http_vector_client
@@ -429,7 +430,7 @@ def test_a_search_telemetry_write_still_running_at_the_bound_fails_the_lease(
     monkeypatch.setattr(_tenant_pool, "TELEMETRY_DRAIN_SECONDS", 0.2)
     pool = make_pool()
     try:
-        with pytest.raises(TenantLeakError, match="search telemetry worker was still writing"):
+        with pytest.raises(TenantLeakError, match="aspect worker was still writing"):
             with pool.lease():
                 mcp_infra.search_telemetry_sink().log_search_batch([("ts", "q", "c", 1, 1, 0.1, 0.5)])
         assert pool.retired == 1 and pool.tenant is None
@@ -521,7 +522,83 @@ def test_a_minted_tenant_also_starts_and_ends_with_the_client_caches_emptied(mon
     with _tenant_pool.tenant_lease({}, _Req({"fresh_tenant"})) as value:
         assert value == "MINT"
         events.append("body")
-    assert events == ["reset", "mint", "body", "drop", "reset"]
+    assert events == ["reset", "mint", "body", "reset", "drop"], "the drain runs before the tenant is dropped"
+
+
+class _OrderedPool(TenantPool):
+    """A pool with no engine behind it: the psql the wipe and census run through, and the HTTP they follow, are
+    recorded into *order* by the test, so the order of a lease's teardown is observable without a tenant."""
+
+    def __init__(self, order: list[str]) -> None:
+        super().__init__({"base_url": "http://x", "bearer": "b"}, mint=lambda s: ("t", "tok"), drop=lambda s, t: True)
+        self._order = order
+
+    def _post(self, path: str, body: dict[str, str]) -> Any:
+        return _Resp()
+
+
+def _ordered_lease(monkeypatch: pytest.MonkeyPatch, aspect_stop: Callable[[], bool | None]) -> list[str]:
+    """Run one lease with the aspect worker's reset replaced by *aspect_stop*; return the events in order."""
+    order: list[str] = []
+
+    class _Proc:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_psql(state: Any, sql: str, **variables: str) -> Any:
+        order.append("wipe" if sql == _tenant_pool.WIPE_SQL else "census" if sql == _tenant_pool.CENSUS_SQL else sql[:20])
+        return _Proc()
+
+    def stop() -> bool | None:
+        order.append("aspect_reset")
+        return aspect_stop()
+
+    monkeypatch.setattr(_tenant_pool, "psql", fake_psql)
+    monkeypatch.setattr(aspect_worker, "reset_worker_for_tests", stop)
+    with _OrderedPool(order).lease():
+        order.append("body")
+    return order
+
+
+def test_the_aspect_worker_is_stopped_before_the_lease_wipes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-8sqfs: a worker a test started keeps claiming and persisting with the lease's bearer. The autouse
+    singleton reset tears down after the tenant fixture, i.e. after the wipe and census, so a row it wrote in that gap
+    survived the wipe. The lease stops it first: the last stop before the wipe is the one the wipe relies on. With
+    the call removed from ``reset_client_caches`` no ``aspect_reset`` precedes the wipe and this fails; moved after
+    the wipe, the second assertion fails. No engine and no tenant: the wipe and census are recorded, not run."""
+    order = _ordered_lease(monkeypatch, lambda: True)
+    assert order.index("aspect_reset") < order.index("wipe"), order
+    assert order[0] == "aspect_reset", "one stop as the lease starts"
+    wipe_at = order.index("wipe")
+    assert "aspect_reset" in order[order.index("body"):wipe_at], "and one after the test body, before the wipe"
+
+
+def test_an_aspect_worker_that_outlives_its_stop_fails_the_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stop's verdict is read (nexus-8sqfs): a thread still running after the join would write after the census,
+    so the lease errors naming it, as a telemetry write past its bound does."""
+    with pytest.raises(TenantLeakError, match="aspect worker was still writing"):
+        _ordered_lease(monkeypatch, lambda: False)
+
+
+def test_a_stub_that_returns_none_is_not_a_failed_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Control for the ``is False`` reads: only an explicit False fails a lease."""
+    assert "wipe" in _ordered_lease(monkeypatch, lambda: None)
+
+
+def test_aspect_worker_stop_reports_a_thread_that_outlived_the_join() -> None:
+    """The verdict the lease reads: ``stop`` is True when nothing is left running and False when the join timed out."""
+    worker = aspect_worker.AspectExtractionWorker()
+    assert worker.stop(timeout=0.01) is True, "never started"
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait, args=(30,), daemon=True)
+    thread.start()
+    worker._thread = thread
+    try:
+        assert worker.stop(timeout=0.01) is False
+    finally:
+        release.set()
+        thread.join(5)
+    worker._thread = thread
+    assert worker.stop(timeout=1.0) is True, "once the thread has exited the stop is clean"
 
 
 def test_the_end_of_session_report_fails_a_dirty_pool_tenant_and_a_vacuous_run(

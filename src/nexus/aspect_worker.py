@@ -495,19 +495,22 @@ class AspectExtractionWorker:
             )
             self._thread.start()
 
-    def stop(self, timeout: float = 10.0) -> None:
+    def stop(self, timeout: float = 10.0) -> bool:
         """Signal the worker to stop and join the thread.
 
         Idempotent — calling on a stopped worker is a no-op. Returns
         when the thread exits or after ``timeout``; failure to join
         is logged but not raised (a stuck worker is recoverable on
-        process exit since the thread is a daemon).
+        process exit since the thread is a daemon). Returns ``True``
+        when no thread is left running, ``False`` when the join timed out
+        (nexus-8sqfs: a test fixture must not wipe a tenant under a worker
+        that is still writing).
         """
         with self._lock:
             thread = self._thread
             self._thread = None
         if thread is None:
-            return
+            return True
         self._stop_event.set()
         thread.join(timeout=timeout)
         if thread.is_alive() and self._tuple_side.parked:
@@ -521,6 +524,8 @@ class AspectExtractionWorker:
                 "aspect_worker_stop_timeout",
                 timeout=timeout,
             )
+            return False
+        return True
 
     def is_running(self) -> bool:
         """True iff the worker thread exists and is alive."""
@@ -1367,7 +1372,7 @@ def ensure_worker_started(
     return _worker
 
 
-def stop_worker(timeout: float = 10.0, _locks_dir: Path | None = None) -> None:
+def stop_worker(timeout: float = 10.0, _locks_dir: Path | None = None) -> bool:
     """Stop the singleton worker if running. Idempotent.
 
     Note: leaves the singleton instance in place (stopped) so a
@@ -1376,23 +1381,28 @@ def stop_worker(timeout: float = 10.0, _locks_dir: Path | None = None) -> None:
     instance should call ``reset_worker_for_tests`` instead.
 
     Removes the process-scoped lock file (SIG-5) when the worker stops.
+    Returns ``False`` when the worker thread outlived *timeout*
+    (see :meth:`AspectExtractionWorker.stop`), else ``True``.
     """
     global _worker
     with _worker_lock:
         worker = _worker
-    if worker is not None:
-        worker.stop(timeout=timeout)
+    stopped = True if worker is None else worker.stop(timeout=timeout)
     _remove_worker_lock(_locks_dir)
+    return stopped
 
 
-def reset_worker_for_tests() -> None:
+def reset_worker_for_tests() -> bool:
     """Test helper: tear down the worker singleton so the next
-    ``ensure_worker_started`` call rebuilds with fresh state.
+    ``ensure_worker_started`` call rebuilds with fresh state. Returns
+    ``False`` when the old worker's thread was still running after the stop
+    (the singleton is dropped regardless).
     """
     global _worker
-    stop_worker(timeout=5.0)
+    stopped = stop_worker(timeout=5.0)
     with _worker_lock:
         _worker = None
+    return stopped
 
 
 def drain_worker(

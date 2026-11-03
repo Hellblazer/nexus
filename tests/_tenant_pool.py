@@ -263,7 +263,8 @@ def census(state: Mapping[str, Any], tenant: str, *, allow_token: str = "") -> N
 
 def reset_client_caches() -> bool:
     """Drop the Python caches that outlive a test and are not keyed by the per-lease bearer, and drain the MCP search
-    telemetry worker first. Returns False when that worker was still writing at :data:`TELEMETRY_DRAIN_SECONDS`.
+    telemetry worker first. Returns False when that worker was still writing at :data:`TELEMETRY_DRAIN_SECONDS`, or the aspect worker
+    outlived its stop.
 
     Looked up in ``sys.modules`` so a worker that never loaded a module imports nothing: an unloaded module holds
     no cache. ``corpus._REGISTERED_COLLECTIONS`` is already cleared per test by ``tests/conftest.py``.
@@ -276,6 +277,14 @@ def reset_client_caches() -> bool:
     # (develop CI run 41312781094, tests/test_query_taxonomy_requests.py). Drain it here, before the wipe.
     infra = mods.get("nexus.mcp_infra")
     drained = infra is None or infra.reset_search_telemetry_sink(TELEMETRY_DRAIN_SECONDS)
+    # The aspect worker is the same kind of writer (nexus-8sqfs): a test that started it (``ensure_worker_started``,
+    # or the enqueue hook with NX_ASPECT_WORKER_AUTOSTART=1) leaves it claiming tuple tasks and persisting through
+    # ``t2_index_write`` with this lease's bearer, and the autouse ``_reset_aspect_worker_singleton`` stops it only
+    # after the tenant fixture's wipe and census. Stop it here, before the wipe; a thread that outlives the stop
+    # fails the lease like a telemetry write that outlives its bound.
+    aw = mods.get("nexus.aspect_worker")
+    if aw is not None and aw.reset_worker_for_tests() is False:
+        drained = False
     hvc = mods.get("nexus.db.http_vector_client")
     if hvc is not None:
         hvc._invalidate_endpoint()
@@ -438,8 +447,9 @@ class TenantPool:
                         # ``is False``: a test stub of reset_client_caches returns None.
                         if reset_client_caches() is False:
                             raise TenantLeakError(
-                                f"tenant {tenant}: the MCP search telemetry worker was still writing after "
-                                f"{TELEMETRY_DRAIN_SECONDS} s; its row would land after the reset's census")
+                                f"tenant {tenant}: the MCP search telemetry worker or the aspect worker was still "
+                                f"writing after the drain ({TELEMETRY_DRAIN_SECONDS} s for telemetry); its row would "
+                                f"land after the reset's census")
                     self.token = self.reset(tenant)
                 except BaseException as exc:
                     self.retire(f"{type(exc).__name__}: {exc}")
@@ -536,11 +546,14 @@ def _minted_with_clean_caches(mint: Callable[[Any], Any], state: Mapping[str, An
     """A minted tenant is as new as a wiped lease (its plans get new ids), so it starts and ends with the client
     caches emptied too. Only here, not inside ``minted_test_tenant``: tests nest that one inside a running test."""
     reset_client_caches()
-    try:
-        with mint(state) as lease:
+    with mint(state) as lease:
+        try:
             yield lease
-    finally:
-        reset_client_caches()
+        finally:
+            # Inside the mint block (nexus-8sqfs): the drain stops the aspect worker and the telemetry worker, which
+            # write with this tenant's bearer, so it has to run before the mint's exit drops the tenant.
+            if reset_client_caches() is False:
+                _log.warning("tenant_pool_minted_tenant_worker_not_drained")
 
 
 def _reset_for_tests() -> None:
