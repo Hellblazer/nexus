@@ -2,12 +2,12 @@
 title: "Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes"
 id: RDR-230
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-10-18
-accepted_date:
+accepted_date: 2026-11-03
 related_issues: ["nexus-4lnn1", "nexus-s9wav", "nexus-dxsjc", "nexus-rn1yd"]
 related_rdrs: [RDR-192, RDR-217, RDR-225, RDR-227]
 ---

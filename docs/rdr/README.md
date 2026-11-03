@@ -247,7 +247,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-227](rdr-227-per-collection-hnsw-above-the-router-threshold.md) | Per-Collection HNSW Indexes Above the Router Threshold | Architecture | Closed | 2026-10-09 |
 | [RDR-228](rdr-228-plugin-installs-the-cli.md) | The Plugin Installs the CLI | Feature | Closed | 2026-10-12 |
 | [RDR-229](rdr-229-collection-name-becomes-a-label.md) | The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name | Architecture | Draft | 2026-10-17 |
-| [RDR-230](rdr-230-event-keyed-reindex-and-recall-canary.md) | Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes | Architecture | Draft | 2026-10-18 |
+| [RDR-230](rdr-230-event-keyed-reindex-and-recall-canary.md) | Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes | Architecture | Accepted | 2026-10-18 |
 | [RDR-231](rdr-231-note-source-uri-scheme.md) | Note source_uri scheme: replace chroma:// with nx-note:// | Technical Debt | Accepted | 2026-10-23 |
 | [RDR-232](rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md) | nx_answer Answer-Shape Eligibility and Evidence Sufficiency | Architecture | Closed | 2026-10-23 |
 | [RDR-233](rdr-233-channel-free-push-for-sessions-without-the-channel-flag.md) | Channel-Free Push: Wake a Session Launched Without the Channel Flag | Feature | Closed | 2026-10-22 |
