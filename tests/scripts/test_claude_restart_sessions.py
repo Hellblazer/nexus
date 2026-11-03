@@ -726,7 +726,8 @@ def test_the_ready_ask_is_mail_of_its_own_kind_naming_the_reply_file(crs, rd, mo
     path = crs.ready_path(s, "20261102-100000")
     assert path in body and crs.ready_note(s, path) in _log(rd) and crs.ready_note(s, path) in body
     assert len(body.encode()) <= 4096  # the mailbox template's body ceiling
-    assert out == [{"name": "tamsin", "sessionId": "sid-9", "path": path, "how": "mail"}]
+    assert out == [{"name": "tamsin", "sessionId": "sid-9", "path": path, "how": "mail", "tuple_id": "id"}]
+    assert crs.SENT_ASKS == {}  # kept in the manifest, not in this process (nexus-xwijj)
 
 
 def test_a_reply_written_while_later_sessions_are_still_being_asked_reads_ready(crs, rd, monkeypatch) -> None:
@@ -1542,3 +1543,136 @@ def test_the_sandbox_gate_refuses_before_the_ready_round_is_read(crs, monkeypatc
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--resume", "--no-update"])
     assert crs.main() == 3
     assert capsys.readouterr().out.splitlines()[-1].startswith("sandbox pass: refused, no sandbox pass recorded")
+
+
+
+# ---- ready-round asks are withdrawn (nexus-xwijj Phase 3) ----
+
+def _manifest_with_asks(crs, rd, asks: dict[str, str]) -> dict:
+    targets = [{"name": n, "sessionId": f"sid-{n}", "path": str(rd / f"ready-{n}.json"), "how": "mail",
+                **({"tuple_id": tid} if tid else {})} for n, tid in asks.items()]
+    crs.write_manifest("20261102-120000", targets, [], at=time.time() - 5)
+    return crs.load_manifest()[0]
+
+
+def test_withdraw_ready_asks_withdraws_the_recorded_rows_once(crs, rd, monkeypatch) -> None:
+    calls: list[tuple] = []
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid, what)))
+    manifest = _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b", "gamma": ""})
+    assert crs.withdraw_ready_asks(manifest, {"sid-alpha", "sid-gamma"}) == 1
+    assert calls == [("sid-alpha", "t-a", "ready ask")]
+    again = crs.load_manifest()[0]
+    assert {t["sessionId"]: t.get("tuple_id") for t in again["targets"]} == {
+        "sid-alpha": "", "sid-beta": "t-b", "sid-gamma": None}
+    assert crs.withdraw_ready_asks(again) == 1 and calls[-1] == ("sid-beta", "t-b", "ready ask")
+    assert crs.withdraw_ready_asks(crs.load_manifest()[0]) == 0  # each is tried once
+    assert crs.withdraw_ready_asks(None) == 0
+
+
+def test_a_ready_ask_is_acked_by_its_tuple_id_and_leaves_the_handoff_record(crs, rd, monkeypatch) -> None:
+    crs.SENT_ASKS["sid-9"] = "t-handoff"
+    calls = _fake_mailbox(crs, monkeypatch, ["t-ready"])
+    crs.withdraw_ask("sid-9", "t-ready", what="ready ask")
+    assert [c[0] for c in calls] == ["in", "ack"] and calls[1][1] == "c-t-ready"
+    assert "ready ask t-ready withdrawn" in _log(rd)
+    assert crs.SENT_ASKS == {"sid-9": "t-handoff"}
+
+
+def test_a_new_round_withdraws_the_previous_round_s_asks(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha")
+    _manifest_with_asks(crs, rd, {"alpha": "t-old"})
+    calls: list[tuple] = []
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)))
+    monkeypatch.setattr(crs, "ask_ready", lambda found, stamp, sender: [])
+    a = argparse.Namespace(status=False, dry_run=False, ready_max_age=900)
+    assert crs.ready_round(a, _found(crs), _found(crs)) == 0
+    assert calls == [("sid-alpha", "t-old")]
+
+
+def test_status_withdraws_only_the_answered_asks(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b"})
+    (rd / "ready-alpha.json").write_text(json.dumps({"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
+    calls: list[tuple] = []
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)))
+    monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "")
+    a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
+    crs.ready_round(a, _found(crs), _found(crs))
+    assert calls == [("sid-alpha", "t-a")]
+
+
+def test_the_roll_withdraws_the_ready_asks_to_its_sessions_first(crs, rd, monkeypatch) -> None:
+    _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b"})
+    order: list[str] = []
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": order.append(f"withdraw {sid} {tid}"))
+    monkeypatch.setattr(crs, "_write_handoffs", lambda *a, **k: order.append("handoffs") or {})
+    crs.write_handoffs([{"sessionId": "sid-alpha", "name": "alpha"}], set(), 1, 1)
+    assert order == ["withdraw sid-alpha t-a", "handoffs"]
+
+
+# ---- the restart's footprint (nexus-xwijj Phase 3) ----
+
+@pytest.fixture
+def tmpdirs(crs, rd, monkeypatch, tmp_path):
+    t = tmp_path / "tmp"
+    t.mkdir()
+    monkeypatch.setattr(crs, "TMP", t)
+    monkeypatch.setattr(crs, "ASK_DIR", t)
+    monkeypatch.setattr(crs, "UNWITHDRAWN", [])
+    return t
+
+
+def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd, tmpdirs) -> None:
+    t = tmpdirs
+    files = ["rh-aaaa1111.txt", "rr-aaaa1111-20261102-1.txt", "rr-bbbb2222-x.txt",
+             "nexus-continuation-restart-alpha-aaaa1111-1.md", "nexus-continuation-restart-alpha-aaaa1111-1.md.draft.txt",
+             "claude-restart-alpha-aaaa1111-2.draft.txt", "nexus-restart-ready-alpha-aaaa1111-1.json",
+             "nexus-continuation-restart-other-cccc3333-1.md"]
+    for f in files:
+        (t / f).write_text("x", encoding="utf-8")
+    crs.UNWITHDRAWN.append("mailbox/aaaa1111: ready ask t-1: not withdrawn (in exited 1: boom)")
+    lines = crs.footprint_report([{"sessionId": "aaaa1111-rest", "name": "alpha"}],
+                                 {"aaaa1111-rest": str(t / "nexus-continuation-restart-alpha-aaaa1111-1.md")})
+    assert not (t / "rh-aaaa1111.txt").exists() and not (t / "rr-aaaa1111-20261102-1.txt").exists()
+    assert (t / "rr-bbbb2222-x.txt").exists()  # another session's ask is not this run's
+    assert lines[0] == "footprint: removed 2 typed-ask file(s)"
+    assert lines[1].startswith("footprint: kept 1 handoff(s) and 2 draft(s) for back-out:")
+    assert "cccc3333" not in lines[1]
+    assert lines[2] == f"footprint: kept 1 ready reply file(s): {t / 'nexus-restart-ready-alpha-aaaa1111-1.json'}"
+    assert lines[3].endswith("mailbox/aaaa1111: ready ask t-1: not withdrawn (in exited 1: boom)")
+    assert all(ln in _log(rd) for ln in lines)
+
+
+def test_an_ask_that_could_not_be_withdrawn_is_recorded(crs, rd, tmpdirs, monkeypatch) -> None:
+    monkeypatch.setattr(crs, "_nx_tuple", lambda *a: subprocess.CompletedProcess(a, 1, "", "engine down"))
+    crs.withdraw_ask("sid-9", "t-x", what="ready ask")
+    assert crs.UNWITHDRAWN == ["mailbox/sid-9: ready ask t-x: not withdrawn (in exited 1: engine down)"]
+    _fake_mailbox(crs, monkeypatch, [])
+    crs.withdraw_ask("sid-8", "t-y")  # already gone: nothing recorded
+    assert len(crs.UNWITHDRAWN) == 1
+
+
+def test_the_roll_reports_its_footprint_even_when_it_raises(crs, rd, tmpdirs, monkeypatch) -> None:
+    reported: list = []
+    monkeypatch.setattr(crs, "footprint_report", lambda found, handoffs: reported.append([s["sessionId"] for s in found]))
+    monkeypatch.setattr(crs, "_roll", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mid-roll")))
+    _live(rd, "alpha")
+    with pytest.raises(RuntimeError):
+        _run_main(crs, monkeypatch, ["--resume", "--no-update", "--force", "--detached"])
+    assert reported == [["sid-alpha"]]
+
+
+def test_the_detached_child_turns_term_and_hup_into_an_exit(crs, rd, tmpdirs, monkeypatch) -> None:
+    installed: dict = {}
+    setattr_in(monkeypatch, crs, "signal.signal", lambda sig, fn: installed.__setitem__(sig, fn))
+    monkeypatch.setattr(crs, "_roll", lambda *a, **k: 0)
+    monkeypatch.setattr(crs, "footprint_report", lambda *a: [])
+    _live(rd, "alpha")
+    code, _ = _run_main(crs, monkeypatch, ["--resume", "--no-update", "--force", "--detached"])
+    assert code == 0
+    import signal  # noqa: PLC0415 -- test-local
+    assert set(installed) == {signal.SIGTERM, signal.SIGHUP}
+    with pytest.raises(SystemExit) as exc:
+        installed[signal.SIGHUP](signal.SIGHUP, None)
+    assert exc.value.code == 128 + signal.SIGHUP

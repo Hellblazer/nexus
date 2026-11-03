@@ -800,14 +800,21 @@ def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200, *, kind: str = "r
 SENT_ASKS: dict[str, str] = {}
 #: Who claims an ask back out of a session's mailbox.
 ASK_CLAIMANT = "claude-restart-sessions"
+#: "mailbox/<sid8>: <what> <tid>: <outcome>" for each ask withdraw_ask could not confirm gone; the
+#: footprint report names them (they expire with their TTL).
+UNWITHDRAWN: list[str] = []
+#: Outcomes that leave no ask behind.
+GONE = ("withdrawn", "already taken or expired")
 
 
 def _nx_tuple(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run([_nx_binary(), "tuple", *args], capture_output=True, text=True, timeout=60)
 
 
-def withdraw_ask(sid: str) -> None:
-    """Take this script's own handoff ask back out of mailbox/<sid>, if it is still there.
+def withdraw_ask(sid: str, tid: str = "", what: str = "handoff ask") -> None:
+    """Take this script's own ask back out of mailbox/<sid>, if it is still there: the handoff ask
+    recorded in SENT_ASKS, or, given *tid*, that row (a ready-round ask read back from its manifest;
+    SENT_ASKS is then left as it is).
 
     A mailbox row is re-announced every 150 s (five times) until it is claimed, so an ask left
     behind reaches a session that was skipped or resumed under the same id as a fresh request.
@@ -816,7 +823,7 @@ def withdraw_ask(sid: str) -> None:
     (release counts no attempt), and only ours is acked. Gone already (taken by the session,
     or expired) is the normal case.
     """
-    tid = SENT_ASKS.pop(sid, "")
+    tid = tid or SENT_ASKS.pop(sid, "")
     if not tid:
         return
     others: list[str] = []
@@ -858,7 +865,9 @@ def withdraw_ask(sid: str) -> None:
                         f"it lapses in 60 s and counts an attempt")
             except (OSError, subprocess.SubprocessError) as e:
                 log(f"WARN mailbox/{sid}: could not release a row it claimed ({type(e).__name__}: {e})")
-    log(f"mailbox/{sid}: handoff ask {tid[:12]} {outcome}"
+    if outcome not in GONE:
+        UNWITHDRAWN.append(f"mailbox/{sid[:8]}: {what} {tid[:12]}: {outcome}")
+    log(f"mailbox/{sid}: {what} {tid[:12]} {outcome}"
         + (f"; {len(others)} other row(s) claimed and released" if others else ""))
 
 
@@ -896,6 +905,29 @@ def typed_ask(s: dict, path: str) -> bool:
     return True
 
 
+def withdraw_ready_asks(manifest: dict | None, sids: set[str] | None = None) -> int:
+    """Withdraw the ready round's mailed asks its manifest still records (for *sids*, or all), and
+    clear each one's ``tuple_id`` there once tried, so it is tried once. A ready ask expires only
+    with its TTL and is re-announced every 150 s until then, so one left behind lands in the
+    session's next prompt as a fresh request (nexus-xwijj). Returns how many were tried."""
+    if not manifest:
+        return 0
+    tried = 0
+    for t in manifest["targets"]:
+        tid = t.get("tuple_id")
+        if not isinstance(tid, str) or not tid or (sids is not None and t["sessionId"] not in sids):
+            continue
+        withdraw_ask(t["sessionId"], tid, what="ready ask")
+        t["tuple_id"] = ""
+        tried += 1
+    if tried:
+        try:
+            write_manifest(manifest["stamp"], manifest["targets"], manifest["excluded"], at=manifest["at"])
+        except OSError as e:
+            log(f"WARN ready round {manifest['stamp']}: withdrawn asks not recorded ({e}); a later run tries them again")
+    return tried
+
+
 def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
                    sender: str = "claude-restart-sessions") -> dict[str, str]:
     """Ask every session for a handoff as soon as it is idle; return sessionId -> path for those written.
@@ -903,8 +935,10 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
     The ask goes as mail when the session has the conexus channel (has_channel), else it is typed.
     A handoff counts once its file is non-empty, unchanged for 10 s, and the session is at its prompt again
     ('idle', or 'shell' when a background shell is still open). Every mailed ask is withdrawn once its
-    session's outcome is known, and any left when this returns or raises (nexus-o581r).
+    session's outcome is known, and any left when this returns or raises (nexus-o581r). The ready
+    round's asks to these sessions are withdrawn first: the round has done its work (nexus-xwijj).
     """
+    withdraw_ready_asks(load_manifest()[0], {s["sessionId"] for s in found})
     try:
         return _write_handoffs(found, ready, wait, timeout, sender)
     finally:
@@ -1218,10 +1252,14 @@ def ask_ready(found: list[dict], stamp: str, sender: str) -> list[dict]:
     out = []
     for s in found:
         path = ready_path(s, stamp)
+        tid = ""
         try:
             if has_channel(s) and mail_ask(s, path, sender, kind="restart-ready", body=ready_prompt(s, path, mailed=True),
                                            note=ready_note(s, path)):
                 how = "mail"
+                # Kept in the manifest, not SENT_ASKS: this process exits before anyone answers, and a
+                # later run withdraws it (withdraw_ready_asks).
+                tid = SENT_ASKS.pop(s["sessionId"], "")
             else:
                 why = "launched without the conexus channel" if not has_channel(s) else "the mail send failed"
                 how = typed_block(s)
@@ -1235,7 +1273,10 @@ def ask_ready(found: list[dict], stamp: str, sender: str) -> list[dict]:
             how = f"not asked: {e}"
             log(f"SKIP {label(s)}: {how}")
         log(f"ready asked of {label(s)} by {how} -> {path}")
-        out.append({"name": label(s), "sessionId": s["sessionId"], "path": path, "how": how})
+        entry = {"name": label(s), "sessionId": s["sessionId"], "path": path, "how": how}
+        if how == "mail" and tid:
+            entry["tuple_id"] = tid
+        out.append(entry)
     return out
 
 
@@ -1462,6 +1503,9 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
         now = time.time()
         rows = readiness(found, manifest, now, a.ready_max_age, os.environ.get("TMUX_PANE", ""))
         print_table(manifest, rows, a.ready_max_age, now)
+        # An answered ask has done its work: take it back out of the session's mailbox (nexus-xwijj).
+        withdraw_ready_asks(manifest, {t["sessionId"] for t in manifest["targets"]
+                                       if read_reply(t["path"], manifest["at"], now)[0] == "ok"})
         problem = round_problem(found, manifest, now, a.ready_max_age)
         if problem:
             print(problem)
@@ -1485,6 +1529,7 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
     sender = next((s["sessionId"] for s in found if s["pane"] == me), "claude-restart-sessions")
     # The round starts before the first ask: a session can answer while later ones are still being
     # asked, and read_reply rejects a reply older than the round's `at` (review r2).
+    withdraw_ready_asks(load_manifest()[0])  # the previous round's asks: this round replaces them
     t0 = time.time()
     targets = ask_ready(found, stamp, sender)
     write_manifest(stamp, targets, excluded, at=t0)
@@ -1577,6 +1622,11 @@ def main() -> int:
             return 1
         return ready_round(a, listed, found)
     caller_pane = a.caller_pane if a.detached else os.environ.get("TMUX_PANE", "")
+    if a.detached:
+        # TERM or HUP (the tmux server going away) must still run the finally blocks: the asks'
+        # withdrawal and the footprint report. By default they end the process with neither.
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, lambda signum, _frame: sys.exit(128 + signum))
     if not a.detached:
         # The sandbox pass first: it needs no session's answer, and nothing else is worth asking
         # of a script the sandbox has not passed (nexus-8zdbu).
@@ -1650,10 +1700,24 @@ def main() -> int:
     others = [s for s in found if s["pane"] != me]
     callers = [s for s in found if s["pane"] == me]
     ready = {"idle", "shell"} if a.force else {"idle"}
+    try:
+        return _roll(a, found, others, callers, ready, guard)
+    finally:
+        footprint_report(found, LAST_HANDOFFS)
+
+
+#: The handoffs write_handoffs returned for this run, for the footprint report (empty until then).
+LAST_HANDOFFS: dict[str, str] = {}
+
+
+def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers: list[dict], ready: set[str],
+          guard: Callable[[dict], str] | None) -> int:
+    """The roll proper: handoffs (fresh), the install (--nx), then each session restarted once idle."""
     handoffs: dict[str, str] | None = None
     if a.fresh:
         sender = callers[0]["sessionId"] if callers else "claude-restart-sessions"
         handoffs = write_handoffs(found, ready, a.wait, a.handoff_timeout, sender)
+        LAST_HANDOFFS.update(handoffs)
         if a.nx and not converge(a.nx, Path(a.repo), a.endpoint, False, False, install=True):
             log("=== ABORT: install failed after the handoffs; no session restarted (handoffs kept in /tmp)")
             return 2
@@ -1669,6 +1733,44 @@ def main() -> int:
     kinds = list(RESULTS.values())
     log(f"=== done: {ok} of {len(found)} restarted ({kinds.count('fresh')} fresh, {kinds.count('resumed')} resumed)")
     return 0 if ok == len(found) else 1
+
+
+#: Where the restart's /tmp files live (the handoffs, drafts, typed asks and ready replies).
+TMP = Path("/tmp")
+
+
+def footprint_report(found: list[dict], handoffs: dict[str, str] | None) -> list[str]:
+    """What this restart leaves behind, logged as footprint lines, after removing its own typed-ask
+    instruction files (``rh-<sid8>.txt``, ``rr-<sid8>-<stamp>.txt``), which nothing reads once the
+    round is over. Kept on purpose and named: each handoff and its draft (the back-out path, and
+    what a fresh session read), a resumed session's saved draft, and the ready round's replies.
+    Also named: any ask withdraw_ask could not confirm gone. Returns the lines (nexus-xwijj)."""
+    sids = {s["sessionId"][:8] for s in found if s.get("sessionId")}
+    removed = 0
+    for sid in sorted(sids):
+        for f in [TMP / f"rh-{sid}.txt", *ASK_DIR.glob(f"rr-{sid}-*.txt")]:
+            try:
+                f.unlink()
+                removed += 1
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log(f"WARN footprint: could not remove {f} ({e})")
+
+    def mine(pattern: str) -> list[str]:
+        return sorted(str(f) for sid in sids for f in TMP.glob(pattern.format(sid=sid)))
+
+    kept_handoffs = sorted({p for p in (handoffs or {}).values()} | set(mine("nexus-continuation-restart-*-{sid}-*.md")))
+    drafts = mine("nexus-continuation-restart-*-{sid}-*.draft.txt") + mine("claude-restart-*-{sid}-*.draft.txt")
+    replies = mine("nexus-restart-ready-*-{sid}-*.json")
+    lines = [f"footprint: removed {removed} typed-ask file(s)",
+             f"footprint: kept {len(kept_handoffs)} handoff(s) and {len(drafts)} draft(s) for back-out: "
+             + (", ".join(kept_handoffs + drafts) or "none"),
+             f"footprint: kept {len(replies)} ready reply file(s)" + (": " + ", ".join(replies) if replies else ""),
+             "footprint: asks not withdrawn (they expire with their TTL): " + ("; ".join(UNWITHDRAWN) or "none")]
+    for ln in lines:
+        log(ln)
+    return lines
 
 
 def child_guard(max_age: int, caller_pane: str, fresh: bool, t_ref: float) -> Callable[[dict], str]:
