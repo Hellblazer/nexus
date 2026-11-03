@@ -702,12 +702,39 @@ def _lock_is_held_once(path: Path) -> bool:
             pass
 
 
+def _upgrade_lock_path() -> Path:
+    """COPY of ``nexus.util.upgrade_auto_lock.lock_path()`` with no argument (pinned by test)."""
+    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    return (Path(override) if override else Path.home() / ".config" / "nexus") / _UPGRADE_LOCK_NAME
+
+
+#: How long the action waits for a running upgrade to release the lock before it gives up for this session. The
+#: session's own `nx upgrade --auto` (the upgrade-auto hook runs first) holds the lock while it works, so a single
+#: probe would let the owed work slip a session at a time; a bounded wait lets a short --auto finish first.
+LOCK_WAIT_S: float = 120.0
+_LOCK_POLL_S: float = 2.0
+
+
+def wait_for_upgrade_lock(wait_s: float | None = None, poll_s: float | None = None) -> bool:
+    """True when the upgrade lock is free now or frees within *wait_s* (default :data:`LOCK_WAIT_S`, read at call
+    time); False when a holder kept it throughout."""
+    wait_s = LOCK_WAIT_S if wait_s is None else wait_s
+    poll_s = _LOCK_POLL_S if poll_s is None else poll_s
+    deadline = time.monotonic() + wait_s
+    while upgrade_lock_held():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_s)
+    return True
+
+
 def upgrade_lock_held() -> bool:
     """True when a live process holds the upgrade lock (``<config>/upgrade-auto.lock``), i.e. an
     ``nx upgrade`` is in flight. Copy of ``nexus.util.upgrade_auto_lock.auto_lock_held``: a first
     "held" is tried once more after a short pause, so a concurrent probe's instant grab does not read
-    as a holder. The config dir is the one the marker lives in (:func:`_endpoint_resolve.default_config_dir`)."""
-    path = _endpoint_resolve.default_config_dir() / _UPGRADE_LOCK_NAME
+    as a holder. The path is the CLI's own rule (``upgrade_auto_lock._config_dir``): ``NEXUS_CONFIG_DIR``,
+    else ``~/.config/nexus``, and not ``NX_CONFIG_DIR``, which the marker honours but the lock does not."""
+    path = _upgrade_lock_path()
     for attempt in range(2):
         if not _lock_is_held_once(path):
             return False
@@ -946,8 +973,10 @@ def main(argv: list[str]) -> None:
             try_write_marker(UPGRADE_RETRY_MARKER)
         # In flight: a live holder of the upgrade lock is an upgrade running
         # now. Spawning another would wait up to PLAIN_WAIT_S for the lock and
-        # then run the whole upgrade again. Leave the marker as it is.
-        if upgrade_lock_held():
+        # then run the whole upgrade again. Wait up to LOCK_WAIT_S for it (the
+        # session's own --auto usually finishes in that time); if it is still
+        # held, leave the marker as it is for the next session.
+        if not wait_for_upgrade_lock():
             log_event("lockstep_upgrade_in_flight", target=target, installed=str(after))
             return
         # Bound: a failure that repeats on every attempt is not retried for

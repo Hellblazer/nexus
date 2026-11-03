@@ -174,6 +174,7 @@ def _wire(mod, monkeypatch, *, receipt: bool, installed_versions, run_results, b
     monkeypatch.setattr(mod, "start_background_upgrade", lambda: FakeChild() if background else None)
     # The in-flight probe reads the real upgrade lock; a test about something else must not (nexus-rcngf).
     monkeypatch.setattr(mod, "upgrade_lock_held", lambda: False)
+    monkeypatch.setattr(mod, "LOCK_WAIT_S", 0.0)  # a held lock gives up at once unless a test says otherwise
     return calls
 
 
@@ -633,6 +634,27 @@ class TestNoPileUp:
         assert started == []
         assert marker.read_text(encoding="utf-8").strip() == mod.UPGRADE_RETRY_MARKER
 
+    def test_a_lock_freed_within_the_wait_spawns(self, mod, marker, monkeypatch) -> None:
+        """The session's own `nx upgrade --auto` holds the lock while it works; the action waits it out (up to
+        LOCK_WAIT_S) instead of letting the owed work slip a session (confirmation r2)."""
+        started = self._retry_mode(mod, monkeypatch, marker)
+        answers = iter([True, True, False])
+        monkeypatch.setattr(mod, "upgrade_lock_held", lambda: next(answers))
+        monkeypatch.setattr(mod, "LOCK_WAIT_S", 60.0)
+        monkeypatch.setattr(mod, "_LOCK_POLL_S", 0.0)
+        mod.main(["action", "9.9.9"])
+        assert started == [1]
+
+    def test_the_wait_is_bounded(self, mod, marker, log, monkeypatch) -> None:
+        started = self._retry_mode(mod, monkeypatch, marker)
+        probes: list[int] = []
+        monkeypatch.setattr(mod, "upgrade_lock_held", lambda: probes.append(1) or True)
+        monkeypatch.setattr(mod, "LOCK_WAIT_S", 0.05)
+        monkeypatch.setattr(mod, "_LOCK_POLL_S", 0.01)
+        mod.main(["action", "9.9.9"])
+        assert started == [] and len(probes) >= 2, "it polled, then gave up"
+        assert "lockstep_upgrade_in_flight" in log.read_text(encoding="utf-8")
+
     def test_a_free_lock_spawns(self, mod, marker, monkeypatch) -> None:
         started = self._retry_mode(mod, monkeypatch, marker)
         mod.main(["action", "9.9.9"])
@@ -779,6 +801,25 @@ class TestUpgradeLockProbeCopy:
     def test_it_probes_the_file_the_cli_locks(self, mod, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
         assert original.lock_path() == tmp_path / "cfg" / mod._UPGRADE_LOCK_NAME
+        assert mod._upgrade_lock_path() == original.lock_path()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Path.home() follows HOME on POSIX only")
+    def test_the_probe_reads_the_cli_lock_when_nx_config_dir_points_elsewhere(self, mod, tmp_path, monkeypatch) -> None:
+        """The probe itself, not only its path helper: with NX_CONFIG_DIR elsewhere, a real holder of the CLI's
+        lock under the (temporary) home reads as held."""
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("NX_CONFIG_DIR", str(tmp_path / "elsewhere"))
+        cli_dir = tmp_path / "home" / ".config" / "nexus"
+        with _lock_held_by_another_process(cli_dir):
+            assert mod.upgrade_lock_held() is True
+
+    def test_nx_config_dir_alone_does_not_move_the_lock(self, mod, tmp_path, monkeypatch) -> None:
+        """The marker honours NX_CONFIG_DIR, the CLI's lock does not: the probe follows the lock (confirmation r2)."""
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.setenv("NX_CONFIG_DIR", str(tmp_path / "elsewhere"))
+        assert mod._upgrade_lock_path() == original.lock_path()
+        assert "elsewhere" not in str(mod._upgrade_lock_path())
 
     def test_a_free_lock_reads_free_like_the_original(self, mod, tmp_path, monkeypatch) -> None:
         cfg = tmp_path / "cfg"
