@@ -117,7 +117,8 @@ _NO_SIGNAL = (
 @posix_only
 @pytest.mark.parametrize(
     ("rc", "raised"),
-    [(0, None), (1, pdf_extractor.MineruWorkerError), (-signal.SIGKILL, pdf_extractor.MineruMemoryError)],
+    # Built at import, so it must not name a POSIX-only signal: Windows collects this module and skips the test.
+    [(0, None), (1, pdf_extractor.MineruWorkerError), (-getattr(signal, "SIGKILL", 9), pdf_extractor.MineruMemoryError)],
     ids=["exit-0", "exit-1", "killed-9"],
 )
 def test_an_exited_workers_pid_is_never_resolved_to_a_process_group(
