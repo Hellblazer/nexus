@@ -30,6 +30,7 @@ from tests.test_rdr232_eligibility import (
     G06,
     LEGACY_BUILTIN,
     LOOKUP_473,
+    LOOKUP_Q,
     SYNTH_12,
     _drive,
     _extraction_that_works,
@@ -327,11 +328,11 @@ def test_a_shadow_filter_is_not_checked_so_the_setting_off_costs_no_lookup() -> 
     assert calls == [], "a filter already in shadow must not read the library"
 
 
-def _drive_with_library(db_rows, matcher_rows=None, hits=None, **kw):
+def _drive_with_library(db_rows, matcher_rows=None, hits=None, question=G06, **kw):
     el._warned_libraries.clear()
     el.reset_library_memo()  # one drive is one process-moment: the previous drive's library read is not this one's
     matcher_rows = [LOOKUP_473, SYNTH_12, LEGACY_BUILTIN] if matcher_rows is None else matcher_rows
-    return _drive(G06, matcher_rows, [(473, 0.1), (12, 0.4)] if hits is None else hits, db=_library_db(db_rows), **kw)
+    return _drive(question, matcher_rows, [(473, 0.1), (12, 0.4)] if hits is None else hits, db=_library_db(db_rows), **kw)
 
 
 def test_an_unreseeded_library_runs_the_request_in_shadow_with_a_named_reason_and_the_count() -> None:
@@ -349,6 +350,31 @@ def test_an_unreseeded_library_runs_the_request_in_shadow_with_a_named_reason_an
     assert len(warnings) == 1 and warnings[0]["log_level"] == "warning"
     assert warnings[0]["remedy"] == el.LIBRARY_REMEDY and warnings[0]["undeclared_builtins"] == 1
     assert warnings[0]["builtins_checked"] == 3 and warnings[0]["undeclared_builtin_names"] == [f"{Path(SHIPPED[2]).stem} (id 102)"]
+
+
+def test_an_unreseeded_library_keeps_serving_an_undeclared_builtins_lookups_in_shadow() -> None:
+    """nexus-rflvp: an unattested plan is refused for a lookup, and an undeclared builtin reads as unattested until
+    a reseed. The library precondition is what keeps it from losing lookups meanwhile: one undeclared builtin puts the
+    whole gate in shadow, so plan 473 (undeclared, a lookup plan) is still selected, and the envelope reports the
+    refusal it would have made, under the builtin's own reason (``undeclared_builtin``), not ``unattested_plan``."""
+    from tests.test_rdr232_eligibility import _pj
+
+    undeclared_473 = dict(LOOKUP_473, plan_json=_pj())
+    env, miss, seen = _drive_with_library(
+        _library_rows(undeclared=1, declared=2), matcher_rows=[undeclared_473], hits=[(473, 0.1)], question=LOOKUP_Q,
+    )
+    wire = env["plan_eligibility"]
+    assert wire["request_kind"] == "lookup"
+    assert wire["enforced"] is False and wire["shadow_reason"] == "library_not_reseeded"
+    assert wire["undeclared_builtins"] == 1
+    assert env["plan_id"] == 473 and not miss.called, "the undeclared builtin kept its lookup"
+    assert wire["branches"]["cosine"]["reasons"] == {"undeclared_builtin": 1}
+    assert wire["enforced_excluded_total"] == 0 and wire["selected"]["eligible"] is False
+    # a reseeded library enforces: the same row, now declared, is the curated lookup plan and serves as before
+    env, _, _ = _drive_with_library(
+        _library_rows(undeclared=0, declared=3), matcher_rows=[LOOKUP_473], hits=[(473, 0.1)], question=LOOKUP_Q,
+    )
+    assert env["plan_eligibility"]["enforced"] is True and env["plan_id"] == 473
 
 
 def test_the_not_reseeded_warning_is_logged_once_per_library_state_not_once_per_request() -> None:

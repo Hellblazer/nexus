@@ -87,6 +87,8 @@ def _expected(request: K, plan: K, provenance: str) -> bool:
     if provenance == "curated":
         return True  # "Unknown-kind builtin/curated plans remain eligible as in the compatibility matrix"
     # "Unknown-kind grown plans ... eligible only for lookup or discovery/listing requests"
+    if provenance == "unattested":
+        return False  # nexus-rflvp (Sam, 2026-11-03): a plan that declares nothing serves neither of them either
     return request in (L, D)
 
 
@@ -108,7 +110,8 @@ def test_the_table_has_every_cell_and_the_expected_side_is_not_all_one_way() -> 
     cells = list(product(_ALL_KINDS, _ALL_KINDS, _PROVENANCES))
     assert len(cells) == 7 * 7 * 3 == 147
     admitted = sum(_expected(*c) for c in cells)
-    assert 40 < admitted < 107, f"{admitted} of 147 admitted: the table has stopped discriminating"
+    # 42 admitted before nexus-rflvp (an unattested plan served lookups and listings): 28 now, 14 cells fewer
+    assert 20 < admitted < 107, f"{admitted} of 147 admitted: the table has stopped discriminating"
 
 
 def test_a_refusal_names_why_in_the_closed_vocabulary() -> None:
@@ -117,7 +120,7 @@ def test_a_refusal_names_why_in_the_closed_vocabulary() -> None:
     } - {None}
     assert reasons == {
         "kind_mismatch", "unknown_request_untrusted_plan", "unknown_request_narrow_plan",
-        "untrusted_unknown_plan",
+        "untrusted_unknown_plan", "unattested_plan",
     }
     assert reasons <= el.REASONS
 
@@ -697,8 +700,11 @@ def test_a_legacy_builtin_without_a_declaration_is_not_curated_and_says_so() -> 
     out, filt = _match([LEGACY_BUILTIN], [(14, 0.2)], S)
     assert out == []
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"undeclared_builtin": 1}
-    out, _ = _match([LEGACY_BUILTIN], [(14, 0.2)], L)
-    assert _ids(out) == [14], "it still serves a lookup, as any untrusted unknown plan does"
+    # nexus-rflvp (Sam, 2026-11-03): an undeclared plan no longer serves a lookup; the exclusion names the
+    # builtin's own defect, and the library precondition keeps the gate in shadow until the reseed (gate_defaults).
+    out, filt = _match([LEGACY_BUILTIN], [(14, 0.2)], L)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"undeclared_builtin": 1}
 
 
 # Scenario 8: with the constant off, matching is unchanged ----------------------------------------------------
@@ -1332,3 +1338,63 @@ def test_a_trusted_route_is_judged_by_the_matrix_not_the_lookup_narrowing(monkey
     out, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], L)
     assert out == []
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"kind_mismatch": 1}
+
+
+# ── nexus-rflvp (Sam, 2026-11-03): an unattested plan serves neither a lookup nor a listing ─────────────────────
+#: A plan-save row: no builtin tag, no grown tag, no declaration. Plans 598 and 599 were this (user-saved beads
+#: plans) and won 31 of 77 lookups since the gate was enabled.
+USER_SAVED = _row(910, "user-saved-plan", tags="", verb="lookup")
+USER_SAVED["plan_json"] = json.dumps({"steps": [{"tool": "search", "args": {"query": "$intent"}}]})
+
+
+@pytest.mark.parametrize("request_kind", [L, D])
+def test_an_unattested_plan_is_refused_for_a_lookup_and_a_listing_with_its_own_reason(request_kind: K) -> None:
+    assert el.classify_plan(USER_SAVED["tags"], USER_SAVED["plan_json"]).provenance == "unattested"
+    out, filt = _match([USER_SAVED], [(910, 0.05)], request_kind)
+    assert out == [] and filt.excluded_plan_ids == [910]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unattested_plan": 1}
+
+
+def test_a_lookup_goes_to_the_curated_plan_when_a_user_saved_plan_outscores_it() -> None:
+    out, _ = _match([USER_SAVED, LOOKUP_473], [(910, 0.05), (473, 0.3)], L)
+    assert _ids(out) == [473]
+
+
+@pytest.mark.parametrize("request_kind", [S, C, A, B, U])
+def test_the_other_request_kinds_keep_their_unattested_reasons(request_kind: K) -> None:
+    out, filt = _match([USER_SAVED], [(910, 0.05)], request_kind)
+    assert out == []
+    reason = "unknown_request_untrusted_plan" if request_kind is U else "untrusted_unknown_plan"
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {reason: 1}
+
+
+@pytest.mark.parametrize("request_kind", [L, D])
+def test_the_unattested_refusal_runs_in_shadow_like_the_matrix(request_kind: K) -> None:
+    out, filt = _match([USER_SAVED], [(910, 0.05)], request_kind, enforce=False)
+    assert _ids(out) == [910], "shadow keeps the candidate"
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unattested_plan": 1}
+    assert filt.enforced_excluded_total == 0
+
+
+def test_the_unattested_refusal_holds_on_every_branch() -> None:
+    out, filt = _match([USER_SAVED], [], L, fts=[910], cache=False)
+    assert out == []
+    assert filt.to_wire()["branches"]["fts"]["reasons"] == {"unattested_plan": 1}
+
+
+@pytest.mark.parametrize("request_kind", [L, D])
+def test_grown_and_curated_plans_keep_serving_lookups_and_listings(request_kind: K) -> None:
+    curated = LOOKUP_473 if request_kind is L else DISC_13
+    out, _ = _match([GROWN_UNKNOWN, curated], [(901, 0.05), (curated["id"], 0.3)], request_kind)
+    assert _ids(out) == [901, curated["id"]]
+
+
+def test_an_undeclared_builtin_is_refused_under_the_builtins_own_reason_not_unattested_plan() -> None:
+    standing = el.classify_plan(LEGACY_BUILTIN["tags"], LEGACY_BUILTIN["plan_json"])
+    assert (standing.provenance, standing.flag) == ("unattested", "undeclared_builtin")
+    verdict = el._judge(L, LEGACY_BUILTIN["tags"], LEGACY_BUILTIN["plan_json"])[1]
+    assert (verdict.eligible, verdict.reason) == (False, "undeclared_builtin")
+
+
+def test_the_unattested_reason_is_in_the_closed_vocabulary() -> None:
+    assert "unattested_plan" in el.REASONS

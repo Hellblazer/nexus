@@ -21,6 +21,10 @@ request kind          eligible declared plan kinds
 ``unknown``           curated synthesis and curated unknown only
 ====================  =========================================
 
+The ``unknown`` kind in the ``lookup`` and ``discovery/listing`` rows means a curated or a grown plan of unknown
+kind; a plan with no answer-kind declaration (``unattested``) is eligible for neither of those two rows, nor for
+any other (Sam, 2026-11-03, nexus-rflvp; see the provenance rules below).
+
 A ``lookup`` request admits no synthesis plan (Sam, 2026-10-30, nexus-jypmj.11): a synthesis plan outscored the
 lookup plan and cost 8.9 times as much on H09. The rows of the other kinds are unchanged.
 
@@ -41,8 +45,12 @@ untouched. The request is not left without a plan: the matcher offers its other 
 otherwise ``nx_answer`` plans inline.
 
 ``unknown`` plan kinds are limited by provenance, as the RDR says: a curated (reviewed builtin) unknown
-plan is eligible as the table reads; an unknown plan that is not curated (grown with no recorded route,
-or one that declares nothing) is eligible only for ``lookup`` and ``discovery/listing`` requests. An
+plan is eligible as the table reads; a grown unknown plan (grown with no recorded route, or whose recorded
+route is not trusted) is eligible only for ``lookup`` and ``discovery/listing`` requests; an unattested plan,
+one that declares nothing, is eligible for neither (Sam, 2026-11-03, nexus-rflvp: user-saved plans, which
+declare nothing, won 31 of 77 lookups since the gate was enabled, one of them another project's plan through
+the cosine branch, and answered with raw ids; the curated lookup plan answered the same questions; reason
+``unattested_plan``). No request kind admits an unattested plan. An
 ``unknown`` request admits curated plans only, so it never reaches a grown plan, whatever kind that
 plan recorded.
 
@@ -67,10 +75,14 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
   because none of its 5 grown plans matched a lookup; the one live case (run 775 took grown plan 584, a
   non-answer) cannot be replayed, the row being deleted. Grown plans that recorded no kind still serve
   lookups; that path and discovery requests are open in nexus-a4g2a;
-* ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``,
-  and it is treated like any other untrusted unknown plan. A builtin seeded before nexus-jypmj.2.1 is
-  this until ``nx plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is
-  then ``undeclared_builtin``.
+* ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``, and
+  every request kind refuses it (nexus-rflvp: ``unattested_plan`` for ``lookup`` and ``discovery/listing``,
+  the reasons it always had for the others). A builtin seeded before nexus-jypmj.2.1 is this until
+  ``nx plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is then
+  ``undeclared_builtin``, and the library precondition below keeps the whole gate in shadow while any
+  reseedable builtin is undeclared, so such a builtin keeps its lookups until the reseed (an orphan builtin no
+  reseed can fix is not counted by that check, and loses them). Plan save writing a declaration, the lasting
+  fix, is nexus-0vh80.
 
 The session cache's ``answer_provenance`` metadata is not read here: it is stale until a refresh.
 
@@ -263,7 +275,8 @@ GROWN_TAG = "grown"
 BRANCHES: tuple[str, ...] = ("cosine", "category_route", "fts")
 
 #: Why a plan was refused. ``undeclared_builtin`` and ``untrusted_curated_claim`` name the stored row's
-#: defect and replace the matrix reason when the row has one.
+#: defect and replace the matrix reason when the row has one. ``unattested_plan`` (nexus-rflvp) is the matrix
+#: reason for a plan that declares nothing, asked to serve a lookup or a listing.
 REASONS: frozenset[str] = frozenset({
     "kind_mismatch",
     "unknown_request_untrusted_plan",
@@ -274,6 +287,7 @@ REASONS: frozenset[str] = frozenset({
     "unreviewed_route",
     "single_source_synthesis",
     "grown_route_not_lookup",
+    "unattested_plan",
     "judge_error",
 })
 
@@ -313,7 +327,7 @@ SINGLE_SOURCE_EXCLUDED_STRATEGIES: frozenset[str] = frozenset({"citation-travers
 #: single-source synthesis request unknown, and the unknown row admits curated synthesis plans).
 _SINGLE_SOURCE_REQUESTS = frozenset({_S, _U})
 
-#: Request kinds an untrusted unknown-kind plan may still serve.
+#: Request kinds a GROWN unknown-kind plan may still serve. An unattested plan serves none (nexus-rflvp).
 _UNKNOWN_PLAN_REQUESTS = frozenset({_L, _D})
 
 
@@ -533,7 +547,11 @@ def eligibility(request_kind: PlanAnswerKind, plan_kind: PlanAnswerKind, provena
         return _OK
     if plan_kind is not _U:
         return _OK if plan_kind in _COMPATIBLE[request_kind] else Verdict(False, "kind_mismatch")
-    if provenance == "curated" or request_kind in _UNKNOWN_PLAN_REQUESTS:
+    if provenance == "curated":
+        return _OK
+    if request_kind in _UNKNOWN_PLAN_REQUESTS:
+        if provenance == "unattested":
+            return Verdict(False, "unattested_plan")  # nexus-rflvp: it declared nothing, so it serves nothing
         return _OK
     return Verdict(False, "untrusted_unknown_plan")
 

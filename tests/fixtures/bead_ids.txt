@@ -201,6 +201,7 @@ nexus-0ty8z
 nexus-0uuit
 nexus-0uuit.1
 nexus-0v0nj
+nexus-0vh80
 nexus-0vwnd
 nexus-0vycz
 nexus-0wp30
@@ -577,6 +578,7 @@ nexus-2hklz.1
 nexus-2hqsn
 nexus-2iig
 nexus-2ivn
+nexus-2jfoj
 nexus-2jp5
 nexus-2k1y
 nexus-2k66t
@@ -2176,6 +2178,7 @@ nexus-904y8
 nexus-904y8.1
 nexus-907o
 nexus-9099
+nexus-90flw
 nexus-90gyo
 nexus-90nmj
 nexus-90pe
