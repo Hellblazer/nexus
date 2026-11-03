@@ -942,6 +942,13 @@ public final class VectorHandler implements HttpHandler {
      * {@code {"query": "...", "collections": [...], "content_type": "...", "author": "...",
      * "year": 2024, "corpus": "...", "n_results": 10}} — any of content_type/author/year/
      * corpus may be omitted (no filter on that dimension). Returns document-level rows.
+     *
+     * <p>{@code where} (nexus-6pfgb.41): a label key ({@code section_type}, {@code section_title}, {@code
+     * page_number}) or document key (title, author, {@code content_type}, tags, the bib ids and the catalog-meta keys)
+     * the engine can compile is answered per OWNING DOCUMENT from the catalog, so a chunk two documents hold returns
+     * for the one that passes; every other key is JSONB containment on the chunk row. An operator or operand the
+     * answered keys refuse (an unknown operator, a non-scalar operand) is a 400, as on plain search; it used to match
+     * nothing.
      */
     private void handleSearchMetadataScoped(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -995,8 +1002,9 @@ public final class VectorHandler implements HttpHandler {
      * {@code {"query": "...", "seeds": [...], "collections": [...], "link_type": "cites",
      * "depth": 1, "direction": "both", "where": {...}, "n_results": 10}} — link_type may
      * be omitted (follow all edge types); direction defaults to "both"; depth defaults
-     * to 1; where (bead nexus-7ndh3) is an optional chunk-metadata equality map applied
-     * as JSONB containment, same shape as {@code /search-metadata-scoped}'s.
+     * to 1; where (bead nexus-7ndh3) is an optional equality map, same shape as {@code
+     * /search-metadata-scoped}'s: a label or document key the engine can compile is answered per owning document
+     * from the catalog (nexus-6pfgb.41), every other key is JSONB containment on the chunk row.
      * Document-level rows, each carrying the matched chunk's {@code chash}.
      */
     private void handleSearchGraphHop(HttpExchange ex, String method) throws IOException {
@@ -1033,7 +1041,9 @@ public final class VectorHandler implements HttpHandler {
      * {@link PgVectorRepository#ASPECT_SCOPED_FIELD_ALLOWLIST} — an unrecognized value
      * 400s here, before the SQL function is ever called (the function's own CASE
      * fallthrough is a second, independent line of defense, not the primary contract).
-     * Returns document-level rows, same envelope as {@code /search-metadata-scoped}.
+     * Returns document-level rows, same envelope as {@code /search-metadata-scoped}; {@code where} is read the way
+     * that route reads it (nexus-6pfgb.41): label and document keys per owning document from the catalog, other keys
+     * as chunk-row containment, a refused operator a 400.
      */
     private void handleSearchAspectScoped(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");

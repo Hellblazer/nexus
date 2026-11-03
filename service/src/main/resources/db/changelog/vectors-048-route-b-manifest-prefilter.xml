@@ -19,8 +19,17 @@
     settled on the in-SQL predicate plus a re-run of a short page, and route (b) follows it.
 
     NO SHARED HELPER. A SQL function taking row composites would not inline, and a bigger inlined body costs plan time on
-    every call, so the object expression is repeated in each of the nine bodies, as 041, 044 and 045 repeat it; a test
-    (tests/test_changelog_vectors048_route_b_object_lint.py) pins all nine to manifest_search_384's.
+    every call, so the object expression is repeated in each of the nine bodies, as 041, 044 and 045 repeat it;
+    ManifestObjectParityTest compares the stored text of all thirteen copies (manifest_search x3, manifest_qualifying_hits
+    and these nine) and tests/test_changelog_vectors048_route_b_object_lint.py pins the nine to each other.
+
+    ONE DECLARED DIFFERENCE: content_type. manifest_search over-admits on purpose, because route (a)'s stage
+    (ManifestLabelStage.matches) judges the key exactly afterwards. Route (b) has no stage, so its content_type words are
+    the stage's exact rule: for the operands pdf and markdown (formats) the derived format when the catalog derives one,
+    else the chunk row's value; for every other operand the catalog content type when it is not blank, else the chunk
+    row's value. The array therefore holds only the words the stage would accept, and the compiled membership test
+    (ManifestPushdown.memberPath) is exact. A note (catalog type knowledge, no extension) that shares a chunk whose row
+    says prose is not returned for content_type=prose. Every other key is the manifest_search text.
 
     SIGNATURES. Each function gains p_manifest_where jsonb and p_manifest_path text after p_where. A signature change
     makes CREATE OR REPLACE add an overload beside the old one, which breaks the generated .call arity, so the old
@@ -113,10 +122,12 @@ AS $$
                     THEN to_jsonb(d.bib_semantic_scholar_id) END,
                'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
                     THEN to_jsonb(array_remove(ARRAY[
-                   CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
-                   f.fmt,
-                   CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
-                        THEN COALESCE(c.metadata ->> 'content_type', '') END
+                   CASE WHEN f.fmt IS NOT NULL
+                        THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END,
+                   CASE WHEN d.content_type ~ '\S'
+                        THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END
                ], NULL)) END,
                'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
                     THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0
@@ -227,10 +238,12 @@ AS $$
                     THEN to_jsonb(d.bib_semantic_scholar_id) END,
                'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
                     THEN to_jsonb(array_remove(ARRAY[
-                   CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
-                   f.fmt,
-                   CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
-                        THEN COALESCE(c.metadata ->> 'content_type', '') END
+                   CASE WHEN f.fmt IS NOT NULL
+                        THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END,
+                   CASE WHEN d.content_type ~ '\S'
+                        THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END
                ], NULL)) END,
                'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
                     THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0
@@ -341,10 +354,12 @@ AS $$
                     THEN to_jsonb(d.bib_semantic_scholar_id) END,
                'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
                     THEN to_jsonb(array_remove(ARRAY[
-                   CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
-                   f.fmt,
-                   CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
-                        THEN COALESCE(c.metadata ->> 'content_type', '') END
+                   CASE WHEN f.fmt IS NOT NULL
+                        THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END,
+                   CASE WHEN d.content_type ~ '\S'
+                        THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END
                ], NULL)) END,
                'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
                     THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0
@@ -455,10 +470,12 @@ AS $$
                     THEN to_jsonb(d.bib_semantic_scholar_id) END,
                'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
                     THEN to_jsonb(array_remove(ARRAY[
-                   CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
-                   f.fmt,
-                   CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
-                        THEN COALESCE(c.metadata ->> 'content_type', '') END
+                   CASE WHEN f.fmt IS NOT NULL
+                        THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END,
+                   CASE WHEN d.content_type ~ '\S'
+                        THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END
                ], NULL)) END,
                'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
                     THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0
@@ -572,10 +589,12 @@ AS $$
                     THEN to_jsonb(d.bib_semantic_scholar_id) END,
                'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
                     THEN to_jsonb(array_remove(ARRAY[
-                   CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
-                   f.fmt,
-                   CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
-                        THEN COALESCE(c.metadata ->> 'content_type', '') END
+                   CASE WHEN f.fmt IS NOT NULL
+                        THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END,
+                   CASE WHEN d.content_type ~ '\S'
+                        THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END
                ], NULL)) END,
                'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
                     THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0
@@ -689,10 +708,12 @@ AS $$
                     THEN to_jsonb(d.bib_semantic_scholar_id) END,
                'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
                     THEN to_jsonb(array_remove(ARRAY[
-                   CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
-                   f.fmt,
-                   CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
-                        THEN COALESCE(c.metadata ->> 'content_type', '') END
+                   CASE WHEN f.fmt IS NOT NULL
+                        THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END,
+                   CASE WHEN d.content_type ~ '\S'
+                        THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END
                ], NULL)) END,
                'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
                     THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0
@@ -823,10 +844,12 @@ AS $$
                     THEN to_jsonb(d.bib_semantic_scholar_id) END,
                'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
                     THEN to_jsonb(array_remove(ARRAY[
-                   CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
-                   f.fmt,
-                   CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
-                        THEN COALESCE(c.metadata ->> 'content_type', '') END
+                   CASE WHEN f.fmt IS NOT NULL
+                        THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END,
+                   CASE WHEN d.content_type ~ '\S'
+                        THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END
                ], NULL)) END,
                'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
                     THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0
@@ -948,10 +971,12 @@ AS $$
                     THEN to_jsonb(d.bib_semantic_scholar_id) END,
                'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
                     THEN to_jsonb(array_remove(ARRAY[
-                   CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
-                   f.fmt,
-                   CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
-                        THEN COALESCE(c.metadata ->> 'content_type', '') END
+                   CASE WHEN f.fmt IS NOT NULL
+                        THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END,
+                   CASE WHEN d.content_type ~ '\S'
+                        THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END
                ], NULL)) END,
                'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
                     THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0
@@ -1073,10 +1098,12 @@ AS $$
                     THEN to_jsonb(d.bib_semantic_scholar_id) END,
                'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
                     THEN to_jsonb(array_remove(ARRAY[
-                   CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
-                   f.fmt,
-                   CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
-                        THEN COALESCE(c.metadata ->> 'content_type', '') END
+                   CASE WHEN f.fmt IS NOT NULL
+                        THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END,
+                   CASE WHEN d.content_type ~ '\S'
+                        THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END
                ], NULL)) END,
                'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
                     THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0

@@ -4340,7 +4340,7 @@ public final class PgVectorRepository {
                 nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb.hasManifest(), colls),
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model),
                              embed.tokens(), skippedCollections);
     }
 
@@ -4447,7 +4447,7 @@ public final class PgVectorRepository {
                 nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb.hasManifest(), colls),
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model),
                              embed.tokens(), skippedCollections);
     }
 
@@ -4597,7 +4597,7 @@ public final class PgVectorRepository {
                 nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb.hasManifest(), colls),
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model),
                              embed.tokens(), skippedCollections);
     }
 
@@ -4798,24 +4798,27 @@ public final class PgVectorRepository {
      * Like {@link #runCombinedQuery} but also maps the matched chunk's {@code chash}
      * column (graph-hop + metadata-scoped, bead nexus-houg9). Kept separate because the
      * topic function does not expose chash — {@code rec.get("chash", ...)} would throw.
-     */
-    private List<Map<String, Object>> runCombinedQueryWithChash(
-            String tenant, org.jooq.Table<?> fn, int nResults) {
-        return runCombinedQueryWithChash(tenant, fn, nResults, false, null);
-    }
-
-    /**
-     * As above; {@code manifestPredicate} (nexus-6pfgb.41) is true when {@code fn} carries a manifest predicate
-     * ({@link RouteBWhere#hasManifest}): the predicate runs on the joined row inside the HNSW scan, which stops at
-     * {@code hnsw.max_scan_tuples}, so a rare document or label key whose rows rank past the cap yields a SHORT page.
-     * Such a statement is wrapped in {@link #exactOnUnderReturn} with {@code rerunWhenShort}, the repair route (a)
-     * applies to {@code manifest_search_<dim>} (nexus-6pfgb.61); a statement without a manifest predicate runs
-     * once, as it always did.
      *
-     * @param colls the collection names, used only to name the statement in the re-run's log line (may be null)
+     * <p>{@code rb} (nexus-6pfgb.41) carries the route (b) manifest predicate when {@code fn} has one ({@link
+     * RouteBWhere#hasManifest}): the predicate runs on the joined row inside the HNSW scan, which stops at {@code
+     * hnsw.max_scan_tuples}, so a rare document or label key whose rows rank past the cap yields a SHORT page. Such a
+     * statement is wrapped in {@link #exactOnUnderReturn} with {@code rerunWhenShort}, the repair route (a) applies to
+     * {@code manifest_search_<dim>} (nexus-6pfgb.61), and with the bounded manifest count that skips the re-run for a
+     * page that already holds every qualifying row (nexus-8ptg4, {@link #manifestQualifying}); a statement without a
+     * manifest predicate runs once, as it always did. Route (b) has no cardinality router, so a short page whose
+     * count shows more qualifying rows than the page holds pays one exact re-run over all the collections.
+     *
+     * <p>The count is {@code manifest_qualifying_hits}, which counts one row per (manifest occurrence, chunk row) pair
+     * and so has the grain of a route (b) row; it applies route (a)'s {@code content_type} words, a superset of
+     * route (b)'s exact ones, and none of the function's own narrowing (type, author, year, corpus, subtree, the aspect
+     * join, the graph hop), so it can over-count, which only costs a re-run, and never under-counts.
+     *
+     * @param colls the collection names, which also name the statement in the re-run's log line
+     * @param model the collections' embedding model, for the count
      */
     private List<Map<String, Object>> runCombinedQueryWithChash(
-            String tenant, org.jooq.Table<?> fn, int nResults, boolean manifestPredicate, String[] colls) {
+            String tenant, org.jooq.Table<?> fn, int nResults, RouteBWhere rb, String[] colls, String model) {
+        boolean manifestPredicate = rb.hasManifest();
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-g17tf: bound the statement first (see runCombinedQuery), so the GUC round
             // trips below run under its network bound too (nexus-u9zkn).
@@ -4830,7 +4833,9 @@ public final class PgVectorRepository {
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
             return manifestPredicate
-                ? exactSelectFrom(ctx, nResults, fn, null, true, tenant, colls == null ? null : String.join(",", colls))
+                ? exactSelectFrom(ctx, nResults, fn, null, true, tenant, String.join(",", colls),
+                                  manifestQualifying(ctx, colls, new WherePlan(rb.containment(), null, rb.manifest()),
+                                                     model, tenant))
                 : ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -7690,8 +7695,10 @@ FROM scope s
      * page is complete and the re-run is skipped. Otherwise the re-run is ONE exact statement over a collection the
      * router sent down the HNSW route (more than the router threshold, 20,000 rows by default), the same cost class
      * as the walk that came up short. Measured at 220,000 chunks: the re-run 3.6-4.0 s, the count 610 ms when the
-     * filter admits a few chunks and under 12 ms when it admits more than the cap. Below the threshold the router
-     * already ran the exact plan and this is never reached.
+     * filter admits a few chunks and under 12 ms when it admits more than the cap. Below the threshold route (a)'s
+     * router already ran the exact plan and this is never reached. The route (b) functions have no router
+     * (nexus-6pfgb.41): the planner picks the plan, so a short page can reach this on a small collection too, and then
+     * the count, not the collection size, decides whether the re-run is paid.
      *
      * <p>The empty case keeps its contract (the re-run's failure propagates). The short-page re-run is a
      * REPAIR of a page that is already usable, so it runs under a savepoint and a failure of it (a statement timeout

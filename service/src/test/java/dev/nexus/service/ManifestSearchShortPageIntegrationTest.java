@@ -436,6 +436,22 @@ class ManifestSearchShortPageIntegrationTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"metadata", "aspect", "graph"})
+    void routeB_aFilterThatGenuinelyMatchesFewRows_isCountedNotRerun(String family) {
+        // nexus-8ptg4 on route (b): the default budget walks every tuple, so the three rows are all the filter admits.
+        // manifest_qualifying_hits counts three occurrences against a page of three and the O(collection) re-run is
+        // skipped. Without the count passed to the re-run the same page paid the re-run (reruns +1, skips 0).
+        long before = reruns();
+        long skipsBefore = skips();
+
+        var rows = routeB(vecHnsw, family, rare());
+
+        assertThat(chashes(rows)).containsExactlyElementsOf(rareChashes());
+        assertThat(reruns() - before).isZero();
+        assertThat(skips() - skipsBefore).isEqualTo(1);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"metadata", "aspect", "graph"})
     void routeB_aPageTheScanFills_orAChunkRowFilter_isNotRerun(String family) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("section_type", "body");

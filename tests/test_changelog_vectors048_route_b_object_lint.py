@@ -8,10 +8,16 @@ row composites would not inline, and a bigger inlined body costs plan time on ev
 therefore repeated in each of the nine bodies, and nothing but this lint keeps the copies from drifting: a key added
 to ``manifest_search`` and not to a route (b) body would make the two routes answer the same ``where`` differently.
 
-What it pins, for each of the nine bodies, against ``manifest_search_384`` of vectors-045-1:
-the ``jsonb_build_object(...) AS eff`` expression is the same text (whitespace aside), so the same key list with the
-same fallbacks; both new parameters exist; both conjuncts test ``e.eff``; and the old signature is not left beside the
-new (a surviving overload breaks the generated ``.call`` arity).
+What it pins, for the nine bodies of vectors-048-1: the ``jsonb_build_object(...) AS eff`` expression is the same text
+in all nine (whitespace aside), so the same key list with the same fallbacks, and the same content_type rule; each body
+names only its own dimension; both new parameters exist; both conjuncts test ``e.eff``; and the old signature is not
+left beside the new (a surviving overload breaks the generated ``.call`` arity).
+
+What it does NOT pin is the comparison with ``manifest_search_<dim>``. This lint used to read vectors-045-1's copy, a
+frozen reference that a later change to manifest_search would leave green. The comparison with the LIVE definitions is
+``ManifestObjectParityTest`` (engine), which reads the stored source of all thirteen functions from a migrated database
+and allows exactly one difference: route (b)'s ``content_type`` key is the stage's exact rule, route (a)'s over-admits
+because its stage judges the key afterwards.
 
 Kill-controls mutate a copy of one body and require the comparison to go red.
 """
@@ -58,13 +64,20 @@ def _object(body: str) -> str:
     return re.sub(r"\s+", " ", matches[0])
 
 
-def _reference_object() -> str:
-    sql = _changeset_sql(CHANGELOG_DIR / "vectors-045-manifest-search-named-keys.xml", "vectors-045-1")
-    return _object(_function(sql, "manifest_search_384"))
-
-
 def _route_b_sql() -> str:
     return _changeset_sql(CHANGELOG_DIR / "vectors-048-route-b-manifest-prefilter.xml", "vectors-048-1")
+
+
+def _reference_object() -> str:
+    """The first body's object: the nine are held to each other, the live comparison is ManifestObjectParityTest."""
+    return _object(_function(_route_b_sql(), _NINE[0]))
+
+
+_OTHER_DIM_TOKEN = {
+    384: re.compile(r"(?<![0-9])(768|1024)(?![0-9])"),
+    768: re.compile(r"(?<![0-9])(384|1024)(?![0-9])"),
+    1024: re.compile(r"(?<![0-9])(384|768)(?![0-9])"),
+}
 
 
 def drift(sql: str, reference: str) -> dict[str, list[str]]:
@@ -79,9 +92,13 @@ def drift(sql: str, reference: str) -> dict[str, list[str]]:
             continue
         try:
             if _object(body) != reference:
-                found.append("the per-occurrence object differs from manifest_search_384's (vectors-045-1)")
+                found.append(f"the per-occurrence object differs from {_NINE[0]}'s")
         except AssertionError as e:
             found.append(str(e))
+        dim = int(name.rsplit("_", 1)[1])
+        stray = _OTHER_DIM_TOKEN[dim].search(body)
+        if stray:
+            found.append(f"names a dimension other than {dim}: `{stray.group(0)}`")
         for param in ("p_manifest_where jsonb", "p_manifest_path  text"):
             if param not in body:
                 found.append(f"parameter `{param}` missing")
@@ -100,6 +117,18 @@ def test_the_reference_object_is_the_full_key_list():
     assert ref.count("nexus.manifest_names_key(") == 17
 
 
+def test_the_reference_content_type_is_the_stages_exact_rule_not_the_over_admitting_array():
+    # manifest_search's content_type array lists the catalog type, the format and the row together (a superset: its
+    # stage judges the key afterwards). Route (b) has no stage, so its array must be the exact words: the format words
+    # pdf and markdown come from the derived format, every other word from the catalog type, each falling back to the
+    # chunk row only where the catalog gives none.
+    ref = _reference_object()
+    assert "f.fmt IN ('pdf', 'markdown')" in ref
+    assert "d.content_type NOT IN ('pdf', 'markdown')" in ref
+    assert "f.fmt," not in ref, "the over-admitting array of manifest_search_<dim> is back"
+    assert "COALESCE(c.metadata ->> 'content_type', '')" not in ref
+
+
 def test_all_nine_bodies_repeat_the_manifest_search_object():
     assert drift(_route_b_sql(), _reference_object()) == {}
 
@@ -115,7 +144,16 @@ def test_each_function_has_exactly_one_signature_after_the_drops():
 
 
 def test_the_post_condition_counts_the_nine():
-    assert "IF n <> 9 THEN" in _route_b_sql()
+    # The literal alone proves nothing: the check must count the nine route (b) names, once each, and fail the migration.
+    sql = _route_b_sql()
+    assert "IF n <> 9 THEN" in sql
+    tail = sql[sql.index("IF n <> 9 THEN") - 900:]
+    assert "FROM pg_catalog.pg_proc" in tail and "p.proname IN (" in tail
+    names = re.search(r"p\.proname IN \(([^)]*)\)", tail)
+    assert names, "the post-condition does not name its functions"
+    named = re.findall(r"'([a-z_0-9]+)'", names.group(1))
+    assert sorted(named) == sorted(_NINE), "the post-condition counts a different set than the nine"
+    assert "RAISE EXCEPTION" in tail[tail.index("IF n <> 9 THEN"):]
 
 
 def test_kill_control_a_missing_key_in_one_body_is_caught():
@@ -137,3 +175,31 @@ def test_kill_control_a_missing_conjunct_is_caught():
     problems = drift(sql.replace(body, mutated), _reference_object())
     assert list(problems) == ["search_aspect_scoped_1024"]
     assert any("jsonpath conjunct" in m for m in problems["search_aspect_scoped_1024"])
+
+
+def test_kill_control_another_dimension_in_one_body_is_caught():
+    sql = _route_b_sql()
+    body = _function(sql, "search_metadata_scoped_384")
+    mutated = body.replace("c.embedding_384", "c.embedding_768")
+    assert mutated != body
+    problems = drift(sql.replace(body, mutated), _reference_object())
+    assert list(problems) == ["search_metadata_scoped_384"]
+    assert any("dimension other than 384" in m for m in problems["search_metadata_scoped_384"])
+
+
+def test_kill_control_a_content_type_that_drifts_in_one_body_is_caught():
+    sql = _route_b_sql()
+    body = _function(sql, "search_graph_hop_1024")
+    mutated = body.replace("d.content_type NOT IN ('pdf', 'markdown')", "d.content_type IN ('pdf', 'markdown')")
+    assert mutated != body
+    problems = drift(sql.replace(body, mutated), _reference_object())
+    assert list(problems) == ["search_graph_hop_1024"]
+
+
+def test_every_body_names_only_its_own_dimension():
+    # The live self-consistency check: nine bodies, three dims, no cross-dimension token in any.
+    sql = _route_b_sql()
+    for name in _NINE:
+        dim = int(name.rsplit("_", 1)[1])
+        assert _OTHER_DIM_TOKEN[dim].search(_function(sql, name)) is None, name
+        assert f"embedding_{dim}" in _function(sql, name), name

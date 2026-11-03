@@ -35,16 +35,37 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code eff}), drops SQL comments, collapses whitespace, and asserts every block is the same string. Whitespace and
  * comments may differ between functions; a key, a fallback, a test or a function name may not.
  *
- * <p>TO COVER ANOTHER FUNCTION add its name to {@link #FUNCTIONS}. The nine route (b) bodies of nexus-6pfgb.41 join
- * there once they carry the same object. The extractor ({@link #objectBlock}) and the comparison ({@link
- * #disagreements}) are static and take plain strings, so they can be pointed at any source text.
+ * <p>THE ONE DECLARED DIFFERENCE (nexus-6pfgb.41). The nine route (b) bodies ({@code search_metadata_scoped_<dim>},
+ * {@code search_aspect_scoped_<dim>}, {@code search_graph_hop_<dim>}) carry the same object except for the {@code
+ * content_type} key. {@code manifest_search} over-admits on that key because route (a)'s stage judges it exactly
+ * afterwards; route (b) has no stage, so its words are the stage's exact rule ({@code ManifestLabelStage#matches}). The
+ * key is cut out of every block (from {@code 'content_type', CASE} to {@code 'tags', CASE}); the rest must be equal in
+ * all thirteen, and the cut text must be the reference's in the route (a) four and {@link #ROUTE_B_CONTENT_TYPE} in the
+ * route (b) nine. Nothing else may differ.
+ *
+ * <p>TO COVER ANOTHER FUNCTION add its name to {@link #ROUTE_A} or {@link #ROUTE_B}. The extractor ({@link
+ * #objectBlock}) and the comparison ({@link #disagreements}) are static and take plain strings, so they can be
+ * pointed at any source text.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ManifestObjectParityTest {
 
-    /** The functions that carry the per-occurrence object. The first is the reference the others are held to. */
-    static final List<String> FUNCTIONS = List.of(
+    /** The route (a) copies. The first is the reference the others are held to. */
+    static final List<String> ROUTE_A = List.of(
         "manifest_search_384", "manifest_search_768", "manifest_search_1024", "manifest_qualifying_hits");
+
+    /** The route (b) copies (nexus-6pfgb.41): their {@code content_type} key is the stage's exact rule. */
+    static final List<String> ROUTE_B = List.of(
+        "search_metadata_scoped_384", "search_metadata_scoped_768", "search_metadata_scoped_1024",
+        "search_aspect_scoped_384", "search_aspect_scoped_768", "search_aspect_scoped_1024",
+        "search_graph_hop_384", "search_graph_hop_768", "search_graph_hop_1024");
+
+    /** Every function that carries the per-occurrence object. */
+    static final List<String> FUNCTIONS = java.util.stream.Stream.concat(ROUTE_A.stream(), ROUTE_B.stream()).toList();
+
+    private static final String CONTENT_TYPE_START = "'content_type', CASE WHEN nexus.manifest_names_key(";
+    private static final String TAGS_START = "'tags', CASE WHEN nexus.manifest_names_key(";
+    private static final String CONTENT_TYPE_MARK = "<content_type>";
 
     /** The keys the object builds; a block that names fewer than this has been cut in the wrong place. */
     private static final int MIN_NAMED_KEYS = 17;
@@ -55,6 +76,24 @@ class ManifestObjectParityTest {
     private static final Pattern BLOCK_START =
         Pattern.compile("CROSS\\s+JOIN\\s+LATERAL\\s*\\(\\s*SELECT\\s+nexus\\.catalog_source_format");
     private static final Pattern BLOCK_END = Pattern.compile("\\)\\s+AS\\s+eff\\s*\\)\\s+e\\b");
+
+    /**
+     * The route (b) {@code content_type} key, normalised: the words the document answers to under {@code
+     * ManifestLabelStage#matches}. The operands {@code pdf} and {@code markdown} read the derived format when there is
+     * one, else the chunk row's value; every other operand reads the catalog content type when it is not blank, else
+     * the chunk row's value. This is the one place the route (b) object is allowed to differ from {@code
+     * manifest_search}'s, and the text is pinned here so that a change to it is a change to this test.
+     */
+    static final String ROUTE_B_CONTENT_TYPE = normalise(
+        "'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type') "
+            + "THEN to_jsonb(array_remove(ARRAY[ "
+            + "CASE WHEN f.fmt IS NOT NULL "
+            + "THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END "
+            + "ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END, "
+            + "CASE WHEN d.content_type ~ '\\S' "
+            + "THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END "
+            + "ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END "
+            + "], NULL)) END,");
 
     /** Comments removed and whitespace collapsed to single spaces, so layout differences are not differences. */
     static String normalise(String sql) {
@@ -81,18 +120,52 @@ class ManifestObjectParityTest {
         return body.substring(start.start(), end.end());
     }
 
-    /** The names (other than the first, the reference) whose block differs from the first's. */
+    /** The block with its {@code content_type} key cut out (a marker stays in its place), and the cut text. */
+    record Parts(String rest, String contentType) {}
+
+    static Parts parts(String prosrc) {
+        String block = objectBlock(prosrc);
+        int from = block.indexOf(CONTENT_TYPE_START);
+        int to = block.indexOf(TAGS_START);
+        if (from < 0 || to <= from) {
+            throw new IllegalStateException("no content_type key before the tags key in the object block");
+        }
+        return new Parts(block.substring(0, from) + CONTENT_TYPE_MARK + block.substring(to),
+            block.substring(from, to).trim());
+    }
+
+    /**
+     * The names (other than the first, the reference) whose block differs from the first's in anything but the {@code
+     * content_type} key, which {@link #contentTypeDisagreements} judges.
+     */
     static List<String> disagreements(Map<String, String> bodiesByName) {
         List<String> out = new ArrayList<>();
         String referenceName = null;
         String reference = null;
         for (var e : bodiesByName.entrySet()) {
-            String block = objectBlock(e.getValue());
+            String block = parts(e.getValue()).rest();
             if (reference == null) {
                 referenceName = e.getKey();
                 reference = block;
             } else if (!reference.equals(block)) {
                 out.add(e.getKey() + " differs from " + referenceName + " at " + firstDifference(reference, block));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The functions whose {@code content_type} key is not the one they are declared to carry: the first route (a) copy's
+     * for the route (a) four, {@link #ROUTE_B_CONTENT_TYPE} for the route (b) nine.
+     */
+    static List<String> contentTypeDisagreements(Map<String, String> bodiesByName) {
+        String reference = parts(bodiesByName.get(ROUTE_A.get(0))).contentType();
+        List<String> out = new ArrayList<>();
+        for (String name : FUNCTIONS) {
+            String expected = ROUTE_B.contains(name) ? ROUTE_B_CONTENT_TYPE : reference;
+            String actual = parts(bodiesByName.get(name)).contentType();
+            if (!expected.equals(actual)) {
+                out.add(name + " content_type is not its declared form at " + firstDifference(expected, actual));
             }
         }
         return out;
@@ -139,9 +212,18 @@ class ManifestObjectParityTest {
     }
 
     @Test
-    void everyFunctionBuildsTheSameObject() {
+    void everyFunctionBuildsTheSameObject_exceptTheDeclaredContentTypeKey() {
+        assertThat(bodies.keySet()).as("non-vacuity: all thirteen are compared").containsExactlyElementsOf(FUNCTIONS);
+        assertThat(FUNCTIONS).hasSize(13);
         assertThat(disagreements(bodies))
             .as("functions whose per-occurrence object differs from %s", FUNCTIONS.get(0)).isEmpty();
+    }
+
+    @Test
+    void theContentTypeKey_isTheReferencesOnRouteA_andTheStagesExactRuleOnRouteB() {
+        assertThat(contentTypeDisagreements(bodies)).isEmpty();
+        // The exception is real and narrow: the two forms are different text, so the declared difference is not vacuous.
+        assertThat(ROUTE_B_CONTENT_TYPE).isNotEqualTo(parts(bodies.get(ROUTE_A.get(0))).contentType());
     }
 
     @Test
@@ -149,6 +231,8 @@ class ManifestObjectParityTest {
         // Non-vacuity: equal-and-empty would pass the comparison, so each block must be the whole object.
         for (var e : bodies.entrySet()) {
             String block = objectBlock(e.getValue());
+            assertThat(parts(e.getValue()).contentType()).as("%s names its content_type", e.getKey())
+                .startsWith(CONTENT_TYPE_START).endsWith("END,");
             assertThat(block).as(e.getKey()).startsWith("CROSS JOIN LATERAL ( SELECT nexus.catalog_source_format(")
                 .endsWith(") AS eff ) e")
                 .contains("catalog_tag_set(").contains("'frecency_score'").contains("'source_author'");
@@ -178,6 +262,65 @@ class ManifestObjectParityTest {
     void aFallbackDroppedFromTheReference_isReportedAgainstEveryOtherCopy() {
         var mutated = withMutated("manifest_search_384", "COALESCE(d.author, '') ~ '\\S'", "d.author ~ '\\S'");
         assertThat(disagreements(mutated)).as("a changed test in the reference").hasSize(FUNCTIONS.size() - 1);
+    }
+
+    @Test
+    void aKeyRenamedInARouteBCopy_isReported() {
+        var mutated = withMutated("search_aspect_scoped_1024", "'extraction_method'", "'extraction_methd'");
+        assertThat(disagreements(mutated)).as("a renamed key").hasSize(1)
+            .allMatch(s -> s.startsWith("search_aspect_scoped_1024 differs from manifest_search_384"));
+    }
+
+    @Test
+    void aRouteBCopyThatDropsATag_isReported() {
+        var mutated = withMutated("search_graph_hop_384", "position('\"tags\"' in p_manifest_path) > 0",
+            "position('\"tags\"' in p_manifest_path) >= 0");
+        assertThat(disagreements(mutated)).hasSize(1);
+    }
+
+    @Test
+    void aRouteBContentTypeThatDriftsFromTheStagesRule_isReported() {
+        var mutated = withMutated("search_graph_hop_768", "d.content_type NOT IN ('pdf', 'markdown')",
+            "d.content_type IN ('pdf', 'markdown')");
+        assertThat(disagreements(mutated)).as("only the content_type key differs").isEmpty();
+        assertThat(contentTypeDisagreements(mutated)).hasSize(1)
+            .allMatch(s -> s.startsWith("search_graph_hop_768 content_type"));
+    }
+
+    /** {@code target}'s raw text with its {@code content_type} key replaced by {@code donor}'s. */
+    private static String withContentTypeOf(String target, String donor) {
+        String from = target.substring(0, target.indexOf(CONTENT_TYPE_START));
+        String key = donor.substring(donor.indexOf(CONTENT_TYPE_START), donor.indexOf(TAGS_START));
+        return from + key + target.substring(target.indexOf(TAGS_START));
+    }
+
+    @Test
+    void aRouteBCopyOnTheOverAdmittingRouteAForm_isReported() {
+        // The shared-chunk defect: a route (b) body that kept manifest_search's content_type admits the chunk row's
+        // value for a document whose catalog type is not blank, so a note sharing a chunk with a prose file answers
+        // content_type=prose. The only difference from the declared form is this key, and it is reported as such.
+        var mutated = new LinkedHashMap<>(bodies);
+        mutated.put("search_metadata_scoped_384",
+            withContentTypeOf(bodies.get("search_metadata_scoped_384"), bodies.get(ROUTE_A.get(0))));
+        assertThat(disagreements(mutated)).isEmpty();
+        assertThat(contentTypeDisagreements(mutated)).hasSize(1)
+            .allMatch(s -> s.startsWith("search_metadata_scoped_384 content_type"));
+    }
+
+    @Test
+    void aRouteACopyOnTheExactRouteBForm_isReported() {
+        var mutated = new LinkedHashMap<>(bodies);
+        mutated.put("manifest_search_768",
+            withContentTypeOf(bodies.get("manifest_search_768"), bodies.get("search_aspect_scoped_384")));
+        assertThat(contentTypeDisagreements(mutated)).hasSize(1)
+            .allMatch(s -> s.startsWith("manifest_search_768 content_type"));
+    }
+
+    @Test
+    void aContentTypeKeyThatMovedBehindTags_failsLoudly() {
+        var mutated = withMutated("search_metadata_scoped_384", "'tags', CASE WHEN", "'tagz', CASE WHEN");
+        assertThatThrownBy(() -> disagreements(mutated)).isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("no content_type key");
     }
 
     @Test
