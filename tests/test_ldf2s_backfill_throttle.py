@@ -457,6 +457,9 @@ def test_the_command_text_report_covers_the_finished_rounds(monkeypatch):
 
 @pytest.mark.skipif(threading.current_thread() is not threading.main_thread(), reason="a signal handler needs the main thread")
 def test_the_first_ctrl_c_finishes_the_round_and_stops_and_the_second_aborts_it():
+    # CI starts pytest with SIGINT ignored, and the second Ctrl-C takes the disposition that was in place
+    # before; ignored, it never aborts the round (develop red on e2765183d). Run under Python's default.
+    original = signal.signal(signal.SIGINT, signal.default_int_handler)
     before = signal.getsignal(signal.SIGINT)
 
     class _Once(_Counting):
@@ -487,7 +490,7 @@ def test_the_first_ctrl_c_finishes_the_round_and_stops_and_the_second_aborts_it(
         assert second.updates == []
         assert signal.getsignal(signal.SIGINT) is before
     finally:
-        signal.signal(signal.SIGINT, before)
+        signal.signal(signal.SIGINT, original)
 
 
 @pytest.mark.skipif(threading.current_thread() is not threading.main_thread(), reason="a signal handler needs the main thread")
