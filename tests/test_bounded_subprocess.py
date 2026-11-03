@@ -179,9 +179,11 @@ def test_timed_out_call_leaves_no_orphan() -> None:
 
     # Stock: times out, reaps the direct child, orphans the grandchild. Both CI misses
     # (nexus-79yg6 on 10-25, nexus-8byc4 on 11-01, each a py3.13 shard on chas while chas's CI
-    # jobs still shared one PID namespace and one uid) were a concurrent twin shard's sweep of
-    # the then-fixed marker killing this run's sleeper inside the 1 s wait; the per-run marker
-    # removes that, so there is no retry here: a miss is a real change in the premise.
+    # jobs still shared one PID namespace and one uid) were most probably a concurrent twin
+    # shard's sweep of the then-fixed marker killing this run's sleeper inside the 1 s wait: the
+    # mechanism reproduces and the twins' progress lines overlap the misses, but no log shows the
+    # kill itself. The per-run marker removes that mechanism, so there is no retry here: a miss
+    # is a real change in the premise, and ``detail`` carries what the next one needs.
     timed_out, detail = _stock_run_times_out(_argv(stock_marker))
     if not timed_out:
         _sweep(stock_marker)
@@ -550,6 +552,10 @@ def test_another_runs_sweep_never_reaches_this_runs_sleeper() -> None:
     )
     proc.wait(timeout=10)
     try:
+        # The backgrounded sleep may still be between fork and exec when sh exits.
+        started = time.monotonic() + 2.0
+        while not _sleeper_alive(mine) and time.monotonic() < started:
+            time.sleep(0.05)
         assert _sleeper_alive(mine), "the sleeper never started, so this test proves nothing"
         twin = subprocess.run(  # noqa: S603 - the twin run, same box, same user
             [sys.executable, "-c",
