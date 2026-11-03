@@ -214,6 +214,9 @@ class TestDegradesRatherThanCrashes:
             raise RuntimeError("derivation exploded")
 
         monkeypatch.setattr(mod, "effective_cap", boom)
+        # Each cap clamps on its own (nexus-74bc6): inside a lab-run grant the memory
+        # cap would still cut 16, so it is held off here to test the swallow alone.
+        monkeypatch.setattr(mod, "effective_memory_cap", lambda: None)
 
         class Opt:
             numprocesses = 16
