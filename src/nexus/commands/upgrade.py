@@ -405,13 +405,18 @@ def _converge_vc_runtime(*, auto_mode: bool) -> None:
         click.echo(f"VC++ runtime [client extension modules] pending: {result.detail}")
 
 
-def _record_deferrals(report: "LadderRunReport") -> None:  # noqa: F821 — lazy imports (module keeps cold-start cheap)
-    """Fold one finished ladder walk into the per-rung deferral log (nexus-0sm1t). Whatever goes wrong is a
-    logged warning: the log only informs `nx doctor`, it must never change the upgrade's outcome or exit code."""
+def _record_deferrals(report: "LadderRunReport", completions: "Callable[[], dict[str, CompletionRecord]]") -> None:  # noqa: F821 — lazy imports (module keeps cold-start cheap)
+    """Fold one finished ladder walk into the per-rung deferral log (nexus-0sm1t). *completions* reads the ledger's
+    records and is called only when the walk has a counted deferral. Whatever goes wrong is a logged warning: the
+    log only informs `nx doctor`, it must never change the upgrade's outcome or exit code."""
     from nexus.upgrade_ladder.census_progress import guarded  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
-    from nexus.upgrade_ladder.deferral_log import t2_deferral_log  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+    from nexus.upgrade_ladder.deferral_log import counted_deferrals, t2_deferral_log  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
 
-    guarded("deferral_log_record", lambda: t2_deferral_log().record(report), None)
+    def _record() -> None:
+        if counted_deferrals(report):
+            t2_deferral_log().record(report, completions())
+
+    guarded("deferral_log_record", _record, None)
 
 
 def _run_ladder(
@@ -493,14 +498,14 @@ def _run_ladder(
         holder = InProcessCompletionHolder(ledger)
         report = LadderRunner(registry, holder, deadline=deadline).run()
         holder.flush()
+        # nexus-0sm1t: count each rung's consecutive deferrals so `nx doctor` can name one that defers on every run,
+        # which --auto otherwise leaves silent. Interactive and --auto alike; a log failure never changes the outcome.
+        # Inside the try: the completion records are read from the ledger, which closes below.
+        _record_deferrals(report, holder.completions)
     finally:
         close = getattr(ledger, "close", None)
         if callable(close):
             close()
-
-    # nexus-0sm1t: count each rung's consecutive deferrals so `nx doctor` can name one that defers on every run,
-    # which --auto otherwise leaves silent. Interactive and --auto alike; a log failure never changes the outcome.
-    _record_deferrals(report)
 
     for run in report.runs:
         if run.outcome is RungOutcome.RECORDED and not auto_mode:

@@ -37,7 +37,7 @@ walk can be interrupted and re-run at any batch boundary.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 import structlog
@@ -158,6 +158,10 @@ class RungRun:
     name: str
     outcome: RungOutcome
     detail: str = ""
+    #: True only for the DEFERRED run :meth:`LadderRunner._stop_at_deadline` makes for the first rung it did not
+    #: start: that rung did not defer, the budget ran out ahead of it (nexus-0sm1t counts it as no deferral).
+    #: Left out of equality: it is provenance, not part of what a run reports.
+    deadline_stop: bool = field(default=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -327,6 +331,7 @@ class LadderRunner:
                 f"auto deadline of {deadline.seconds:g}s reached after "
                 f"{elapsed:.1f}s; resumes on the next run"
             ),
+            deadline_stop=True,
         )
         return [deferred, *later]
 

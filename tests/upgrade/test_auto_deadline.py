@@ -129,6 +129,8 @@ class TestRunnerBoundary:
         assert ledger.verified_rungs() == frozenset({"a"})
         assert not report.converged
         assert not report.hard_failed, "a deadline stop is resumable, not a failure"
+        # nexus-0sm1t: b is the rung the budget ran out ahead of; the deferral log must not blame it
+        assert [r.name for r in report.runs if r.deadline_stop] == ["b"]
         assert report.position == 1
 
         (event,) = [e for e in logs if e["event"] == "upgrade_auto_deadline_reached"]
@@ -146,6 +148,7 @@ class TestRunnerBoundary:
         report = _runner((a,), Ledger(), deadline).run()
         assert _outcomes(report) == [("a", RungOutcome.DEFERRED)]
         assert a.converge_calls == 0
+        assert report.runs[0].deadline_stop
 
     def test_no_deadline_object_means_no_ceiling(self) -> None:
         clock = FakeClock()
@@ -282,7 +285,6 @@ class TestCommandWiring:
         assert result.exit_code == 0, result.output
         assert seen == [None]
 
-    @pytest.mark.t2_tenant  # the walk defers, so the deferral log writes its T2 note (nexus-0sm1t)
     def test_auto_run_stops_at_the_boundary_and_still_exits_zero(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
