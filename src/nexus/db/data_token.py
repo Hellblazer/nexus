@@ -97,8 +97,8 @@ What changed: a scripted fan-out of M>5 TRULY CONCURRENT cold processes
 every one of them misses the lease and mints, `MintRateLimiter`'s burst=5
 absorbs only the first five, and the excess M-5 hard-fail with
 :class:`DataTokenMintError`: the client's own mint retry (3 attempts,
-``Retry-After`` capped at :data:`_MINT_RETRY_AFTER_CAP_S`, ~30-60s total,
-see :meth:`DataTokenManager._mint`) is structurally incapable of bridging
+``Retry-After`` capped at :data:`_MINT_RETRY_AFTER_CAP_S`, up to
+:data:`_MINT_RETRY_WALL_WORST_CASE_S` in all, see :meth:`DataTokenManager._mint`) is structurally incapable of bridging
 the server's 1/min refill window, so this is not a rare edge case that
 usually self-heals — it is a DETERMINISTIC hard-fail of user commands for
 any scripted fan-out wider than the burst. That crosses the correctness-
@@ -228,6 +228,8 @@ for the two call sites.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import math
@@ -241,7 +243,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -257,6 +259,7 @@ from nexus._log_safe_url import (
 )
 from nexus._winsec import make_user_dir, open_private
 from nexus.db import gateway_hold
+from nexus.db.engine_reasons import error_reason
 from nexus.rate_brake import parse_retry_after
 
 _log = structlog.get_logger(__name__)
@@ -427,8 +430,11 @@ _MINT_BACKOFF_SCHEDULE: tuple[float, ...] = (1.0, 2.0)
 #: synchronous auth round trip on interactive and shutdown paths (the
 #: session-end launcher's telemetry summary documents a zero-wait-risk
 #: invariant, and mixin adopters mint at construction time), so the worst
-#: case must stay seconds-scale: 2 sleeps x 15s + 3 x 10s timeouts = 60s
-#: hard ceiling. A server demanding a longer pause than this fails loud on
+#: case must stay seconds-scale: 2 sleeps x 15s + 3 x 10s timeouts = 60s,
+#: plus :data:`_MINT_HOLD_WAIT_BUDGET_S` of waiting on another process's
+#: gateway hold, = :data:`_MINT_RETRY_WALL_WORST_CASE_S`. A caller with a hard
+#: deadline of its own (a hook) passes it to ``bearer_for(deadline_s=...)`` and
+#: no sleep outlasts it. A server demanding a longer pause than this fails loud on
 #: the final attempt instead — a mint the caller must wait minutes for is
 #: an outage to surface, not absorb (review round-2 Significant,
 #: nexus-ssqk9 thread).
@@ -440,6 +446,35 @@ _MINT_RETRY_AFTER_CAP_S: float = 15.0
 #: this is waited out only to this bound: the attempt then goes, and its own
 #: outcome decides.
 _MINT_HOLD_WAIT_BUDGET_S: float = 15.0
+
+#: The latest time (``time.monotonic()``) the sleeps of a mint on this thread
+#: may reach: set by ``bearer_for(deadline_s=...)`` or :func:`mint_deadline`,
+#: read by :meth:`DataTokenManager._mint`. ``None``: only the budgets above.
+_mint_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar("nexus_mint_deadline", default=None)
+
+
+@contextlib.contextmanager
+def mint_deadline(seconds: float | None) -> Iterator[None]:
+    """Bound the sleeps of every mint made inside the block to *seconds* from now.
+
+    For a caller that reaches ``bearer_for`` through a store's constructor and
+    has a hard deadline of its own (the SubagentStart hook's T2 scan). Within
+    the block a mint waits on a gateway hold for no more than what is left,
+    and retries only when its sleep fits in what is left, so it stops
+    retrying rather than outlast the caller. A transport timeout of an
+    attempt already sent (:data:`_MINT_TIMEOUT_S`) is not shortened. A nested
+    block keeps the earlier of the two deadlines; ``None`` sets none.
+    """
+    if seconds is None:
+        yield
+        return
+    wanted = time.monotonic() + max(0.0, seconds)
+    current = _mint_deadline.get()
+    token = _mint_deadline.set(wanted if current is None else min(current, wanted))
+    try:
+        yield
+    finally:
+        _mint_deadline.reset(token)
 
 #: DERIVED (nexus-9rr0a): the worst-case wall time a single
 #: :meth:`DataTokenManager._mint` call can legitimately burn retrying
@@ -1244,8 +1279,12 @@ class DataTokenManager:
 
     # ── Public API ───────────────────────────────────────────────────────────
 
-    def bearer_for(self, base_url: str, tenant: str) -> str | None:
+    def bearer_for(self, base_url: str, tenant: str, *, deadline_s: float | None = None) -> str | None:
         """Return a valid data-token bearer for ``(base_url, tenant)``.
+
+        *deadline_s* is for a caller with a hard deadline of its own (a hook):
+        no wait or retry sleep of a mint made by this call outlasts it (see
+        :func:`mint_deadline`).
 
         Returns ``None`` when no mint credential is configured — the caller
         falls back to its existing static-token resolution unchanged (ZERO
@@ -1267,6 +1306,10 @@ class DataTokenManager:
         credential = self._resolve_credential()
         if not credential:
             return None
+        with mint_deadline(deadline_s):
+            return self._bearer_for_configured(base_url, tenant, credential)
+
+    def _bearer_for_configured(self, base_url: str, tenant: str, credential: str) -> str:
         key = (base_url.rstrip("/"), tenant)
         with self._lock_for(key):
             cached = self._cache.get(key)
@@ -1974,8 +2017,20 @@ class DataTokenManager:
 
     def _mint(
         self, base_url: str, tenant: str, credential: str, *, single_attempt: bool = False,
+        deadline: float | None = None,
     ) -> _CachedToken:
         """One mint round trip, with the bounded retry on a transient status.
+
+        *deadline* (``time.monotonic()``; default: the one :func:`mint_deadline`
+        or ``bearer_for(deadline_s=...)`` set) bounds the sleeps: the wait on
+        another process's gateway hold is cut to what is left, and a retry whose
+        sleep does not fit is not made.
+
+        A 503 follows the shared gateway hold (nexus-3zreb, :mod:`nexus.db.gateway_hold`):
+        it is recorded for the other processes, and the mint waits before each
+        send on a hold ANOTHER process recorded. With no other process
+        failing, the mint keeps its own short backoff (``uniform(0, 1)``, then
+        ``uniform(0, 2)``).
 
         ``single_attempt`` (nexus-dncjg) makes it ONE attempt with no sleep:
         a refresh whose cached token is still valid has a better retry than
@@ -2001,13 +2056,20 @@ class DataTokenManager:
         resp_headers: dict[str, str] = {}
         slept_until: float | None = None
         hold_budget = _MINT_HOLD_WAIT_BUDGET_S
+        if deadline is None:
+            deadline = _mint_deadline.get()
+
+        def left() -> float | None:
+            return None if deadline is None else max(0.0, deadline - time.monotonic())
+
         for attempt in range(1, _MINT_MAX_ATTEMPTS + 1):
             mint_error: DataTokenMintError | None = None
             # nexus-3zreb: another process's 503 holds this mint too, before every send.
             # A single-attempt refresh never sleeps (its caller has a better retry).
-            if not single_attempt and hold_budget > 0.0:
+            allowed = hold_budget if left() is None else min(hold_budget, left() or 0.0)
+            if not single_attempt and allowed > 0.0:
                 held_s = gateway_hold.wait_before_attempt(
-                    after=slept_until, max_wait=hold_budget, url=base_url, rng=self._rng,
+                    after=slept_until, max_wait=allowed, url=base_url, rng=self._rng, others_only=True,
                 )
                 if held_s > 0.0:
                     hold_budget -= held_s
@@ -2068,10 +2130,12 @@ class DataTokenManager:
                 delay = min(
                     gateway_hold.record_503(
                         delay, retry_after=retry_after, url=base_url, rng=self._rng,
-                        reason=gateway_hold.error_reason(payload),
+                        reason=error_reason(payload), own_pace=True,
                     ),
                     _MINT_RETRY_AFTER_CAP_S,
                 )
+            if retryable and (remaining := left()) is not None and delay >= remaining:
+                retryable = False  # the caller's deadline cannot cover this sleep
             if not retryable:
                 break
             _log.warning(

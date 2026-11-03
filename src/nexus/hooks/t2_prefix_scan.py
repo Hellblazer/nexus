@@ -456,6 +456,17 @@ def scan(project: str) -> str:
         os.environ.get("NX_T2_SCAN_BUDGET_S", str(_DEFAULT_SCAN_BUDGET_S))
     )
 
+    # The SubagentStart / SessionStart hook has a hard timeout above this scan's
+    # budget: no sleep of a data-token mint made for the store (at construction
+    # or per request) may outlast the budget (nexus-3zreb).
+    from nexus.db.data_token import mint_deadline  # noqa: PLC0415 — deferred with the rest of the client
+
+    with mint_deadline(scan_budget_s):
+        return _scan_with_store(project, timeout, stale_days, scan_budget_s)
+
+
+def _scan_with_store(project: str, timeout: float, stale_days: int, scan_budget_s: float) -> str:
+    """The body of :func:`scan`, run inside the mint deadline."""
     try:
         store = HttpMemoryStore(timeout=timeout)
     except _UNREACHABLE_EXC as exc:

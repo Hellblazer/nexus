@@ -2632,27 +2632,32 @@ class TestGatewayTransientRetry:
         # and the success of the other endpoint did not clear the local engine's hold
         assert (tmp_path / gateway_hold.HOLD_FILENAME).exists()
 
-    def test_cphvg_the_t3_loop_records_the_endpoint_it_resolved(self, monkeypatch, tmp_path):
-        import json
-
+    def test_cphvg_the_loop_resolves_no_endpoint_of_its_own(self, monkeypatch, tmp_path):
+        """The hold needs the endpoint, but _request_once already resolves it: the loop must not
+        resolve again (a lease read per attempt in production; a service touch in a transport-faked test)."""
         import nexus.db.http_vector_client as hv
-        from nexus.db import gateway_hold
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("https://u:pw@api.example.com:8443/base", "tok"))
+
+        resolutions: list[int] = []  # counted, not raised: _gateway_hold_url swallows a failed resolution
+
+        def no_resolution():
+            resolutions.append(1)
+            raise RuntimeError("no endpoint")
+
+        monkeypatch.setattr(hv, "_resolve_endpoint", no_resolution)
         calls: list[int] = []
 
         def fake_once(*a, **k):
             calls.append(1)
-            if len(calls) == 1:
+            if len(calls) < 3:
                 raise self._http_error(503)
             return {"ok": True}
 
         monkeypatch.setattr(hv, "_request_once", fake_once)
         module_time(monkeypatch, hv).sleep = lambda s: None
-        hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=5, body=None)
-        state = json.loads((tmp_path / gateway_hold.HOLD_FILENAME).read_text())
-        assert state["url"] == "https://api.example.com:8443"
+        assert hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=5, body=None) == {"ok": True}
+        assert resolutions == []
 
     def test_cphvg_an_engine_reason_503_holds_no_one_else_but_is_still_retried(self, monkeypatch, tmp_path):
         """nexus-cphvg: tenant_creation_busy is about one tenant; its Retry-After still paces this caller."""

@@ -606,6 +606,24 @@ def _pop_sent_bearer() -> str:
     return value
 
 
+#: The endpoint :func:`_request_once` resolved for its most recent attempt, for the
+#: shared gateway hold (nexus-cphvg). A thread-local for the same reason as
+#: :data:`_sent_bearer_capture`: ``_request_once`` keeps its signature and its
+#: return shape, and the retry loop reads the endpoint the attempt really used
+#: instead of resolving it a second time (a second resolution per attempt cost
+#: a lease read, and reached the service in every transport-faked test).
+_attempt_url_capture = threading.local()
+
+
+def _stash_attempt_url(url: str) -> None:
+    _attempt_url_capture.value = url
+
+
+def _attempt_url() -> str:
+    """The endpoint of this thread's most recent attempt, ``""`` before one."""
+    return getattr(_attempt_url_capture, "value", "")
+
+
 def _note_data_token_response(base_url: str, tenant: str, status_code: int) -> None:
     """Clear the manager's remint-futility flag for ``(base_url, tenant)``
     once a response (success or error) comes back non-401 (nexus-umue1,
@@ -744,6 +762,7 @@ def _request_once(
     import urllib.request  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
     base_url, token = _resolve_endpoint()
+    _stash_attempt_url(base_url)
     # nexus-wrwb7 (RDR-005 2a self-minting): when a mint_token credential is
     # configured, present the manager's self-minted data token instead of
     # the static service_token/lease token resolved above. Inert (returns
@@ -1487,7 +1506,12 @@ def _wait_for_lease_republication() -> None:
 
 
 def _gateway_hold_url() -> str:
-    """The endpoint the next send goes to, for the shared gateway hold (nexus-cphvg).
+    """The endpoint the first send goes to, for the shared gateway hold (nexus-cphvg).
+
+    Handed to ``wait_before_attempt`` as a function: it is called only when a
+    hold in force names an endpoint, so a send with no hold resolves the
+    endpoint once (in ``_request_once``), not twice. Every later wait and every
+    record uses the endpoint the previous attempt reached (:func:`_attempt_url`).
 
     ``""`` when it cannot be resolved: the hold then applies as it did before
     endpoints were compared, and ``_request_once`` raises its own error."""
@@ -1558,12 +1582,17 @@ def _request(
 
     def _once_with_gateway_retry() -> Any:
         slept_until: float | None = None
+        sent_to = ""  # the endpoint the previous attempt reached
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             # nexus-v1929: another process's 503 holds this one too, before every send.
-            hold_url = _gateway_hold_url()
-            if (held_s := gateway_hold.wait_before_attempt(after=slept_until, max_wait=timeout, url=hold_url)) > 0.0:
+            if (
+                held_s := gateway_hold.wait_before_attempt(
+                    after=slept_until, max_wait=timeout, url=sent_to or _gateway_hold_url,
+                )
+            ) > 0.0:
                 _log.info("vector_gateway_hold_wait", path=path, attempt=i + 1, sleep_s=held_s)
                 time.sleep(held_s)
+            _stash_attempt_url("")
             try:
                 result = _request_once(
                     method, path, tenant=tenant, timeout=timeout, body=body
@@ -1571,6 +1600,7 @@ def _request(
             except urllib.error.HTTPError as exc:
                 if exc.code not in _GATEWAY_RETRY_CODES or delay is None or no_auto_retry:
                     raise
+                sent_to = _attempt_url()
                 # nexus-qajw7: an engine deadline ABORT discarded embedded work;
                 # a resend seconds later runs the request to its deadline again.
                 # Hand it straight to the caller's retry wrapper, which paces it
@@ -1585,7 +1615,7 @@ def _request(
                     # nexus-cphvg: an engine reason in the body (tenant_creation_busy) is
                     # about one tenant, not the edge, so it holds no one else.
                     sleep_s = gateway_hold.record_503(
-                        sleep_s, retry_after=parse_retry_after(exc.headers), url=hold_url,
+                        sleep_s, retry_after=parse_retry_after(exc.headers), url=sent_to,
                         reason=gateway_hold.reason_from_body(_error_body(exc)),
                     )
                 _log.warning(
@@ -1598,7 +1628,7 @@ def _request(
                 slept_until = time.time() + sleep_s
                 time.sleep(sleep_s)
             else:
-                gateway_hold.record_success(url=hold_url)
+                gateway_hold.record_success(url=_attempt_url())
                 return result
         raise AssertionError("unreachable")  # loop always returns or raises
 

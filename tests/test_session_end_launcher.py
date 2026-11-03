@@ -513,8 +513,11 @@ def test_print_service_tier_summary_applies_data_token_override() -> None:
             captured["token"] = _token
             super().__init__(base_url=base_url, _token=_token)
 
+    deadlines: list[float | None] = []
+
     class _MintedManager:
-        def bearer_for(self, base_url: str, tenant: str) -> str | None:
+        def bearer_for(self, base_url: str, tenant: str, *, deadline_s: float | None = None) -> str | None:
+            deadlines.append(deadline_s)
             return "self-minted-data-token"
 
     with (
@@ -530,6 +533,8 @@ def test_print_service_tier_summary_applies_data_token_override() -> None:
 
     assert captured["token"] == "self-minted-data-token"
     assert captured["base_url"] == "http://127.0.0.1:9999"
+    # the SessionEnd hook has 10 s in all: the mint's sleeps are bounded well inside it
+    assert deadlines == [launcher._TIER_SUMMARY_MINT_DEADLINE_S] and launcher._TIER_SUMMARY_MINT_DEADLINE_S <= 5.0
 
 
 def test_print_service_tier_summary_unconfigured_uses_static_token() -> None:
@@ -547,7 +552,7 @@ def test_print_service_tier_summary_unconfigured_uses_static_token() -> None:
             super().__init__(base_url=base_url, _token=_token)
 
     class _InertManager:
-        def bearer_for(self, base_url: str, tenant: str) -> str | None:
+        def bearer_for(self, base_url: str, tenant: str, *, deadline_s: float | None = None) -> str | None:
             return None
 
     with (

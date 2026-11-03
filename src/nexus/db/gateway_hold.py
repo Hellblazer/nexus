@@ -25,9 +25,11 @@ one tenant or request, not an overloaded edge, and records nothing.
 Processes held on a hold do not all wake at its end (nexus-xe1et). Each one
 that sleeps toward ``not_before`` takes the next send slot in the file
 (``next_slot``, advanced by :data:`SLOT_S` per claimant), so after the hold
-the sends leave at one per :data:`SLOT_S` however many processes waited, and
-the concurrency at the edge is bounded by the request time over that spacing,
-not by the process count.
+the sends leave at one per :data:`SLOT_S`, and the concurrency at the edge is
+bounded by the request time over that spacing. The slots run for
+:data:`SPREAD_WINDOW_S` past the hold's end; a waiter that finds them all taken
+goes at a random moment inside that window, so the load past the slots spreads
+evenly instead of piling on one instant.
 
 Everything here is best effort. An unreadable, garbled or unwritable file
 means no shared hold, never a failed request. The callers do the sleeping
@@ -48,7 +50,11 @@ from urllib.parse import urlsplit
 
 import structlog
 
-from nexus.db.engine_reasons import error_reason
+from nexus.db.engine_reasons import (
+    QUARANTINE_RESTORE_BUSY_REASON,
+    TENANT_CREATION_BUSY_REASON,
+    error_reason,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -65,10 +71,20 @@ MAX_JITTER_S: float = 2.0
 
 #: The gap between two sends that were held on one hold (nexus-xe1et). The edge
 #: sees at most one released send per slot, so with a request time T the
-#: concurrency after a hold is about T / SLOT_S whatever the number of waiters.
-#: The cost is that the Nth waiter leaves N * SLOT_S after the hold, within
-#: :data:`HOLD_CAP_S` of the moment it asked.
+#: concurrency after a hold is about T / SLOT_S while the slots last.
 SLOT_S: float = 0.25
+
+#: How long after a hold's end the send slots run. The Nth waiter leaves N *
+#: :data:`SLOT_S` after the hold, up to this window (120 waiters at 0.25 s);
+#: the waiters past that leave at a random moment inside it. So no waiter is
+#: held longer than the hold itself (at most :data:`HOLD_CAP_S`) plus this
+#: window, and the load never collapses onto the end of the window.
+SPREAD_WINDOW_S: float = 30.0
+
+#: Typed engine reasons of a 503 that is about one tenant or one request, not
+#: an overloaded edge: it records no hold. Any other reason (a future one, or a
+#: proxy's own JSON body) is treated as the edge's.
+ENGINE_BUSY_REASONS: frozenset[str] = frozenset({TENANT_CREATION_BUSY_REASON, QUARANTINE_RESTORE_BUSY_REASON})
 
 #: A 503 more than this long after the previous one starts the strike count over.
 STRIKE_WINDOW_S: float = 60.0
@@ -86,7 +102,7 @@ def _hold_path() -> Path:
 
 
 def _read(path: Path) -> dict[str, Any]:
-    """The hold file's fields (numbers, and ``url`` as text), or ``{}`` when it is absent or unusable."""
+    """The hold file's fields (numbers, ``pid`` as an integer, and ``url`` as text), or ``{}`` when it is absent or unusable."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -100,6 +116,8 @@ def _read(path: Path) -> dict[str, Any]:
             out[key] = float(value)
     if isinstance(raw.get("url"), str):
         out["url"] = raw["url"]
+    if isinstance(raw.get("pid"), int) and not isinstance(raw["pid"], bool):
+        out["pid"] = raw["pid"]
     return out
 
 
@@ -109,10 +127,11 @@ def _same_endpoint(state: dict[str, Any], url: str) -> bool:
     A caller that cannot name its endpoint, or a file written before endpoints
     were recorded, is treated as the same one: honouring a hold wrongly costs a
     short wait, ignoring one wrongly puts the retry storm back."""
-    recorded = state.get("url") or ""
-    if not url or not recorded:
+    recorded = _safe_url(state.get("url") or "")
+    named = _safe_url(url)
+    if not named or not recorded:
         return True
-    return _safe_url(recorded) == _safe_url(url)
+    return recorded == named
 
 
 def reason_from_body(raw: bytes | str | None) -> str | None:
@@ -126,10 +145,13 @@ def reason_from_body(raw: bytes | str | None) -> str | None:
 
 
 def _safe_url(url: str) -> str:
-    """Scheme, host and port only: the file must never carry credentials."""
+    """Scheme, host and port only: the file must never carry credentials.
+    ``""`` when *url* is empty or names no host."""
     try:
         parts = urlsplit(url)
         host = parts.hostname or ""
+        if not host:
+            return ""
         port = f":{parts.port}" if parts.port else ""
         return f"{parts.scheme}://{host}{port}"
     except (ValueError, TypeError, AttributeError):
@@ -157,10 +179,39 @@ def _jitter(remaining: float, rng: random.Random | None) -> float:
 
 def _sane(state: dict[str, Any], now: float) -> dict[str, Any]:
     """Drop a hold no live writer could have set: one past the cap is a clock
-    step back or a hand edit, and honouring it would stall every request."""
-    if state.get("not_before", 0.0) > now + HOLD_CAP_S + MAX_JITTER_S:
+    step back or a hand edit, and honouring it would stall every request. A
+    ``next_slot`` further past the hold than the slots run is dropped alone."""
+    not_before = state.get("not_before", 0.0)
+    if not_before > now + HOLD_CAP_S + MAX_JITTER_S:
         return {}
+    if state.get("next_slot", 0.0) > not_before + SPREAD_WINDOW_S + SLOT_S + 1e-6:
+        return {k: v for k, v in state.items() if k != "next_slot"}
     return state
+
+
+def _ours(state: dict[str, Any]) -> bool:
+    """True when this process wrote the hold in the file."""
+    return state.get("pid") == os.getpid()
+
+
+def _place(not_before: float, next_slot: float, rng: random.Random | None) -> tuple[float, float | None]:
+    """The moment to send and the file's next slot (``None``: leave it).
+
+    The next free slot, while it falls inside :data:`SPREAD_WINDOW_S` of the
+    hold's end; past that a random moment inside the window, taking no slot."""
+    wake = max(not_before, next_slot)
+    if wake > not_before + SPREAD_WINDOW_S:
+        return not_before + (rng or random).uniform(0.0, SPREAD_WINDOW_S), None
+    return wake, wake + SLOT_S
+
+
+def _endpoint_of(url: str | Callable[[], str]) -> str:
+    if isinstance(url, str):
+        return url
+    try:
+        return url()
+    except Exception:  # noqa: BLE001 — best effort: an endpoint that cannot be named is held like any other
+        return ""
 
 
 def wait_before_attempt(
@@ -169,7 +220,8 @@ def wait_before_attempt(
     max_wait: float | None = None,
     now: float | None = None,
     rng: random.Random | None = None,
-    url: str = "",
+    url: str | Callable[[], str] = "",
+    others_only: bool = False,
 ) -> float:
     """Seconds this process should wait before sending, per the shared hold.
 
@@ -181,7 +233,13 @@ def wait_before_attempt(
     docstring), never more than *max_wait* (the caller's own request timeout),
     so a short-budget caller such as a hook is not held past the time it would
     give the request. *url* is the endpoint the caller is about to send to; a
-    hold recorded for another endpoint is not its hold.
+    hold recorded for another endpoint is not its hold. It may be a function
+    returning the endpoint, called only when a hold is in force and names one,
+    so a caller that must resolve its endpoint pays for that only then.
+
+    *others_only* ignores a hold this very process wrote: a caller with its
+    own short backoff (the data-token mint) then waits on the hold of another
+    process, not on the schedule its own 503 recorded for the others.
 
     Reading is lock-free. Taking a slot needs the file's lock, and happens only
     when a hold is in force and the wait fits inside *max_wait*; if the lock
@@ -193,21 +251,26 @@ def wait_before_attempt(
         state = _sane(_read(_hold_path()), now)
     except Exception:  # noqa: BLE001 — best effort: a config-dir resolution failure means no shared hold
         return 0.0
-    if not _same_endpoint(state, url):
-        return 0.0
     start = max(now, after or now)
     remaining = min(state.get("not_before", 0.0) - start, HOLD_CAP_S)
     if remaining <= 0.0:
+        return 0.0
+    if others_only and _ours(state):
+        return 0.0
+    endpoint = _endpoint_of(url) if state.get("url") else ""
+    if not _same_endpoint(state, endpoint):
         return 0.0
     if max_wait is not None and remaining >= max_wait:
         return max(0.0, max_wait)  # the caller sends at max_wait whatever the slots say
 
     def claim(path: Path) -> float:
         held = _sane(_read(path), now)
-        if not _same_endpoint(held, url) or held.get("not_before", 0.0) <= start:
+        not_before = held.get("not_before", 0.0)
+        if not_before <= start or not _same_endpoint(held, endpoint) or (others_only and _ours(held)):
             return start  # the hold moved or ended between the read and the lock
-        wake = min(max(held["not_before"], held.get("next_slot", 0.0)), start + HOLD_CAP_S)
-        _write(path, {**held, "next_slot": wake + SLOT_S})
+        wake, next_slot = _place(not_before, held.get("next_slot", 0.0), rng)
+        if next_slot is not None:
+            _write(path, {**held, "next_slot": next_slot})
         return wake
 
     try:
@@ -282,6 +345,7 @@ def record_503(
     now: float | None = None,
     rng: random.Random | None = None,
     reason: str | None = None,
+    own_pace: bool = False,
 ) -> float:
     """Record a 503 in the shared hold and return how long to sleep before resending.
 
@@ -298,11 +362,15 @@ def record_503(
     has passed, within :data:`STRIKE_WINDOW_S` of the last one, is the next
     strike; :func:`record_success` clears the count.
 
-    A *reason* (the engine's typed reason from the 503 body, see
-    :func:`reason_from_body`) means the 503 is about one tenant or request, not
-    an overloaded edge: nothing is recorded and the caller's own delay (or the
-    response's ``Retry-After``) is the sleep. A hold recorded for another
-    endpoint than *url* is replaced by this one.
+    A *reason* in :data:`ENGINE_BUSY_REASONS` (the engine's typed reason from
+    the 503 body, see :func:`reason_from_body`) means the 503 is about one
+    tenant or request, not an overloaded edge: nothing is recorded and the
+    caller's own delay (or the response's ``Retry-After``) is the sleep. A
+    hold recorded for another endpoint than *url* is replaced by this one.
+
+    *own_pace* is for a caller with a short backoff of its own (the data-token
+    mint): the hold is recorded in full for the other processes, but the sleep
+    is the caller's own unless another process's hold was already in force.
 
     A *delay* of zero with no *retry_after* returns ``0.0`` and writes
     nothing. Production schedules are never zero; this is how the test
@@ -312,15 +380,16 @@ def record_503(
         return 0.0
     now = time.time() if now is None else now
     own = min(max(delay, retry_after or 0.0), HOLD_CAP_S)
-    if reason:
+    if reason in ENGINE_BUSY_REASONS:
         return own
 
-    def update(path: Path) -> tuple[float, int]:
+    def update(path: Path) -> tuple[float, int, bool]:
         state = _sane(_read(path), now)
         if not _same_endpoint(state, url):
             state = {}
         not_before = state.get("not_before", 0.0)
         strikes = max(0, int(state.get("strikes", 0.0)))
+        foreign = now < not_before and not _ours(state)
         if now < not_before:
             strikes = max(strikes, 1)  # same wave
         elif now - state.get("last_503", float("-inf")) <= STRIKE_WINDOW_S:
@@ -329,21 +398,24 @@ def record_503(
             strikes = 1
         escalated = ESCALATION_S[min(strikes, len(ESCALATION_S)) - 1]
         hold = min(max(own, escalated, not_before - now), HOLD_CAP_S)
-        wake = min(max(now + hold, state.get("next_slot", 0.0)), now + HOLD_CAP_S)
+        new_not_before = min(max(not_before, now + hold), now + HOLD_CAP_S)
+        wake, next_slot = _place(new_not_before, state.get("next_slot", 0.0), rng)
         _write(path, {
-            "not_before": min(max(not_before, now + hold), now + HOLD_CAP_S),
-            "next_slot": wake + SLOT_S,
+            "not_before": new_not_before,
+            "next_slot": state.get("next_slot", 0.0) if next_slot is None else next_slot,
             "strikes": strikes,
             "last_503": now,
             "url": _safe_url(url),
             "pid": os.getpid(),
         })
-        return wake - now, strikes
+        return wake - now, strikes, foreign
 
     try:
-        sleep_s, strikes = _locked(update)
+        sleep_s, strikes, foreign = _locked(update)
     except Exception as exc:  # noqa: BLE001 — best effort: an unwritable config dir falls back to this process's own schedule
         _log.debug("gateway_hold_record_failed", error=type(exc).__name__)
+        return own
+    if own_pace and not foreign:
         return own
     if sleep_s > own:
         _log.info("gateway_hold_shared", strikes=strikes, hold_s=sleep_s, own_s=own)

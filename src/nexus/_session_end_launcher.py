@@ -346,6 +346,13 @@ def _emit_parent_debug(event: str, **fields: object) -> None:
     ).debug(event, **fields)
 
 
+#: Most time the summary's data-token mint may spend in sleeps (a wait on the
+#: shared gateway hold, a retry backoff), in seconds. The SessionEnd hook has
+#: 10 s in all, the read after it 2 s, and the imports and the resolve before
+#: it the rest: a mint that cannot finish inside this gives the summary up.
+_TIER_SUMMARY_MINT_DEADLINE_S: float = 4.0
+
+
 def _print_service_tier_summary() -> None:
     """Print the Phase-1C tier-write summary from the engine — POST-fork.
 
@@ -397,7 +404,9 @@ def _print_service_tier_summary() -> None:
         from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         from nexus.db.t2._refreshable_client import DEFAULT_TENANT  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-        data_token = get_data_token_manager().bearer_for(base_url, DEFAULT_TENANT)
+        data_token = get_data_token_manager().bearer_for(
+            base_url, DEFAULT_TENANT, deadline_s=_TIER_SUMMARY_MINT_DEADLINE_S,
+        )
         if data_token is not None:
             token = data_token
         store = HttpTelemetryStore(base_url=base_url, _token=token)

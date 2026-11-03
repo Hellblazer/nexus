@@ -1118,6 +1118,26 @@ class TestGatewayTransientRetry:
         assert sleeps == []
         assert hold.exists()  # and this store's success did not clear the other endpoint's hold
 
+    def test_cphvg_a_success_clears_only_this_stores_own_expired_hold(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nexus.db import gateway_hold
+
+        hold = _config_dir() / gateway_hold.HOLD_FILENAME
+        store = _make_echo_store()
+
+        def record(url: str) -> None:
+            hold.write_text(json.dumps({
+                "not_before": time.time() - 1.0, "strikes": 2, "last_503": time.time(), "url": url,
+            }))
+
+        record("https://api.example.com")  # another endpoint's, expired
+        assert store.echo_post("a") == {"echo": {"value": "a"}}
+        assert hold.exists()
+        record(store._base_url)  # this store's own, expired
+        assert store.echo_post("b") == {"echo": {"value": "b"}}
+        assert not hold.exists()
+
     def test_cphvg_an_engine_reason_503_holds_no_one_else_but_is_still_retried(
         self, fake_service, monkeypatch: pytest.MonkeyPatch
     ) -> None:

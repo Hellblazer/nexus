@@ -162,6 +162,10 @@ class TestRecord:
         assert state["strikes"] == 1
         assert state["not_before"] <= 1000.0 + gh.HOLD_CAP_S
 
+    def test_the_lock_wait_default(self) -> None:
+        """A wedged holder stalls a 503 path for half a second at most."""
+        assert gh.LOCK_WAIT_S == 0.5
+
     def test_the_file_never_carries_userinfo(self, cfg: Path) -> None:
         gh.record_503(2.0, retry_after=None, url="https://user:secret@edge/x", now=1000.0, rng=_rng())
         assert "secret" not in (cfg / gh.HOLD_FILENAME).read_text()
@@ -207,6 +211,100 @@ class TestEndpointScope:
         assert (state["url"], state["strikes"]) == ("http://127.0.0.1:8123", 1)
 
 
+class TestEmptyAndUnparseableUrls:
+    def test_an_empty_url_stays_empty(self, cfg: Path) -> None:
+        assert gh._safe_url("") == ""
+        assert gh._safe_url("not a url") == ""
+        gh.record_503(5.0, retry_after=None, url="", now=1000.0, rng=_rng())
+        assert json.loads((cfg / gh.HOLD_FILENAME).read_text())["url"] == ""
+
+    def test_a_hold_recorded_with_no_url_still_holds_a_caller_that_names_one(self, cfg: Path) -> None:
+        gh.record_503(5.0, retry_after=None, url="", now=1000.0, rng=_rng())
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url="https://api.example.com") > 3.0
+
+
+class TestSane:
+    def test_a_far_future_next_slot_is_dropped_and_leaves_a_lone_503_its_own_sleep(self, cfg: Path) -> None:
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 900.0, "next_slot": 5e9, "strikes": 1, "last_503": 900.0, "url": "https://edge"}
+        ))
+        assert gh.record_503(2.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng()) == 2.0
+
+    def test_a_far_future_next_slot_does_not_push_a_waiter(self, cfg: Path) -> None:
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1005.0, "next_slot": 5e9, "strikes": 1, "last_503": 1000.0, "url": "https://edge"}
+        ))
+        assert gh.wait_before_attempt(now=1001.0, rng=_rng(), url="https://edge") == pytest.approx(4.0)
+
+    def test_a_next_slot_inside_the_window_is_kept(self, cfg: Path) -> None:
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1005.0, "next_slot": 1010.0, "strikes": 1, "last_503": 1000.0, "url": "https://edge"}
+        ))
+        assert gh.wait_before_attempt(now=1001.0, rng=_rng(), url="https://edge") == pytest.approx(9.0)
+
+
+class TestUrlSource:
+    def test_a_url_function_is_called_only_when_a_hold_with_an_endpoint_is_in_force(self, cfg: Path) -> None:
+        calls: list[int] = []
+
+        def url() -> str:
+            calls.append(1)
+            return "https://edge"
+
+        assert gh.wait_before_attempt(now=1000.0, rng=_rng(), url=url) == 0.0  # no file
+        assert calls == []
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps({"not_before": 1005.0, "strikes": 1, "last_503": 1000.0}))
+        assert gh.wait_before_attempt(now=1000.0, rng=_rng(), url=url) > 0.0  # a hold that names no endpoint
+        assert calls == []
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url=url) > 3.0
+        assert calls == [1]  # resolved once for the wait, though the slot claim compares again
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url=lambda: "https://other") == 0.0
+
+    def test_a_url_function_that_raises_names_no_endpoint(self, cfg: Path) -> None:
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+
+        def boom() -> str:
+            raise RuntimeError("unresolvable")
+
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url=boom) > 3.0
+
+
+class TestOwnPace:
+    """The data-token mint keeps its own short backoff when only this process is failing."""
+
+    def test_record_503_with_own_pace_sleeps_the_callers_delay_but_records_the_full_hold(self, cfg: Path) -> None:
+        assert gh.record_503(0.4, retry_after=None, url="https://edge", now=1000.0, rng=_rng(), own_pace=True) == 0.4
+        state = json.loads((cfg / gh.HOLD_FILENAME).read_text())
+        assert state["not_before"] == 1002.0 and state["pid"] == os.getpid()
+        # the second strike of the same process: still its own delay
+        assert gh.record_503(1.5, retry_after=None, url="https://edge", now=1003.0, rng=_rng(), own_pace=True) == 1.5
+
+    def test_record_503_with_own_pace_follows_a_hold_another_process_set(self, cfg: Path) -> None:
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1010.0, "strikes": 3, "last_503": 1000.0, "url": "https://edge", "pid": os.getpid() + 1}
+        ))
+        got = gh.record_503(0.4, retry_after=None, url="https://edge", now=1001.0, rng=_rng(), own_pace=True)
+        assert got >= 9.0
+
+    def test_a_hold_with_no_pid_is_another_process(self, cfg: Path) -> None:
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1010.0, "strikes": 3, "last_503": 1000.0, "url": "https://edge"}
+        ))
+        assert gh.record_503(0.4, retry_after=None, url="https://edge", now=1001.0, rng=_rng(), own_pace=True) >= 9.0
+
+    def test_others_only_ignores_this_processs_own_hold(self, cfg: Path) -> None:
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url="https://edge", others_only=True) == 0.0
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url="https://edge") > 3.0
+
+    def test_others_only_waits_on_another_processs_hold(self, cfg: Path) -> None:
+        (cfg / gh.HOLD_FILENAME).write_text(json.dumps(
+            {"not_before": 1005.0, "strikes": 1, "last_503": 1000.0, "url": "https://edge", "pid": os.getpid() + 1}
+        ))
+        assert gh.wait_before_attempt(now=1000.5, rng=_rng(), url="https://edge", others_only=True) > 3.0
+
+
 class TestEngineReason:
     """nexus-cphvg: a 503 with an engine reason is about one tenant or request, not the edge."""
 
@@ -222,6 +320,17 @@ class TestEngineReason:
         )
         assert got == 7.0  # the engine's own Retry-After is still honoured
         assert not (cfg / gh.HOLD_FILENAME).exists()
+
+    @pytest.mark.parametrize("reason", ["tenant_creation_busy", "quarantine_restore_busy"])
+    def test_both_busy_reasons_record_nothing(self, cfg: Path, reason: str) -> None:
+        assert gh.record_503(2.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng(), reason=reason) == 2.0
+        assert not (cfg / gh.HOLD_FILENAME).exists()
+
+    @pytest.mark.parametrize("reason", ["overloaded", "some_future_reason", "x"])
+    def test_any_other_reason_is_still_an_edge_hold(self, cfg: Path, reason: str) -> None:
+        """A proxy's own JSON body, or a reason this client does not know, is not a tenant-local busy."""
+        gh.record_503(2.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng(), reason=reason)
+        assert (cfg / gh.HOLD_FILENAME).exists()
 
     def test_an_engine_reason_does_not_extend_a_live_hold(self, cfg: Path) -> None:
         gh.record_503(2.0, retry_after=None, url="https://api.example.com", now=1000.0, rng=_rng())
@@ -256,12 +365,30 @@ class TestStaggeredWake:
         assert all(b - a >= gh.SLOT_S - 1e-9 for a, b in zip(wakes, wakes[1:], strict=False))
         assert self._peak_concurrency(wakes, self.REQUEST_S) <= 2
 
-    def test_the_peak_does_not_grow_with_the_number_of_waiters(self, cfg: Path) -> None:
-        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
-        waits = [gh.wait_before_attempt(now=1001.0, rng=_rng(), url="https://edge") for _ in range(100)]
-        wakes = [1001.0 + w for w in waits]
-        assert self._peak_concurrency(wakes, self.REQUEST_S) <= 2
-        assert max(waits) <= gh.HOLD_CAP_S  # no waiter is queued past the cap
+    @pytest.mark.parametrize("hold_s", [5.0, 30.0])
+    @pytest.mark.parametrize("waiters", [100, 500])
+    def test_the_peak_does_not_collapse_at_a_cap_however_many_wait(self, cfg: Path, hold_s: float, waiters: int) -> None:
+        """The slots run SPREAD_WINDOW_S past the hold's end, whatever the hold's length: a 30 s hold
+        with 40 waiters, or a 5 s hold with 119, used to fill the slots up to a cap measured from the
+        caller and put every later waiter on the cap's one instant."""
+        rng = random.Random(1929)  # one stream: waiters placed past the slots must not all draw the same moment
+        gh.record_503(hold_s, retry_after=None, url="https://edge", now=1000.0, rng=rng)
+        not_before = 1000.0 + hold_s
+        wakes = [1001.0 + gh.wait_before_attempt(now=1001.0, rng=rng, url="https://edge") for _ in range(waiters)]
+        assert min(wakes) >= not_before
+        assert max(wakes) <= not_before + gh.SPREAD_WINDOW_S  # nobody leaves later than the window
+        # 12 at 500 waiters (the slots' share plus the random share); the cap collapse gave 400 or more
+        assert self._peak_concurrency(wakes, self.REQUEST_S) <= (2 if waiters == 100 else 16)
+
+    def test_waiters_past_the_slots_are_spread_not_stacked(self, cfg: Path) -> None:
+        rng = random.Random(7)
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=rng)
+        slots = int(gh.SPREAD_WINDOW_S / gh.SLOT_S)  # the recorder took the hold's own end; these follow it
+        wakes = [1001.0 + gh.wait_before_attempt(now=1001.0, rng=rng, url="https://edge") for _ in range(slots + 60)]
+        assert len(set(wakes)) == len(wakes)  # no two at the same instant
+        off_grid = [w for w in wakes if abs((w - 1005.0) / gh.SLOT_S - round((w - 1005.0) / gh.SLOT_S)) > 1e-6]
+        assert len(off_grid) == 60  # the ones past the last slot drew a random moment each
+        assert max(off_grid) - min(off_grid) > gh.SPREAD_WINDOW_S / 2  # across the window, not on its end
 
     def test_a_503_recorder_takes_a_slot_too(self, cfg: Path) -> None:
         """The sleep record_503 returns and the wait wait_before_attempt returns draw on one queue."""
@@ -270,6 +397,17 @@ class TestStaggeredWake:
         wakes.sort()
         assert wakes[0] == 1005.0
         assert all(b - a >= gh.SLOT_S - 1e-9 for a, b in zip(wakes, wakes[1:], strict=False))
+
+    def test_recorders_past_the_slots_are_spread_inside_the_window_too(self, cfg: Path) -> None:
+        """The 503 path draws on the same slots as the wait path, with the same window past the hold's end."""
+        rng = random.Random(3)
+        sleeps = [
+            gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=rng) for _ in range(300)
+        ]
+        wakes = [1000.0 + s for s in sleeps]
+        assert max(wakes) <= 1005.0 + gh.SPREAD_WINDOW_S
+        assert max(sleeps) > gh.HOLD_CAP_S  # the window runs past the hold's cap, as for waiters
+        assert self._peak_concurrency(wakes, self.REQUEST_S) <= 16
 
     def test_the_first_waiter_after_a_lone_recorder_is_one_slot_behind_it(self, cfg: Path) -> None:
         gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
