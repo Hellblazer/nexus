@@ -305,6 +305,17 @@ here are the ones each pass found on a named page or table.
   source, so no assignment can name a memory row. Quarantine, replace, restore
   and reap therefore change no taxonomy count. Clustering T2 memory would need
   its own design (an assignment that can name a memory row); none is planned.
+- **2026-11-03, Sam's answers to S-7 and K6 (nexus-qo7ie.5 closed).** *S-7:* a
+  memory file that supersedes another says `replaces: <slug>` in its
+  frontmatter, and the writer learns this from an always-loaded line in Sam's
+  global CLAUDE.md. `nx memory curate --files` gets no heuristic for a file
+  replaced without saying so; it reports a declared target that is still
+  present, and lists likely near-duplicate files for Sam to review, never acting
+  on them. *K6:* always-loaded items (`MEMORY.md` as a whole, CLAUDE.md, tool
+  definitions) are excluded from `--cold`, and the "never used" claim is dropped
+  for them; a `MEMORY.md` index line counts as used when its linked file is
+  read. Where Phase 3 Steps 1-3 or Technical Design 4 say otherwise, this entry
+  rules.
 
 ### Critical Assumptions
 
