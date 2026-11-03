@@ -282,7 +282,7 @@ class TestCli:
         assert "current text is live; nothing to do unless you need the old text" in out      # complete
         assert "in the middle of an index run" in out and "Run the same command again" in out  # indexing
         assert "sit under another collection" in out                                           # other_collection
-        assert "claims the same position" in out and "nx store get CHASH" in out               # rival, race
+        assert "claims the same position" in out and "`nx store get` does not read" in out               # rival, race
         assert "last index run failed, so its manifest is partial" in out and "Re-index the document" in out  # failed
         assert "nx store put" not in out
         assert "mid index run" in out and "version ambiguous" in out, "the NOTE column says it too"
@@ -404,7 +404,7 @@ class TestCli:
         assert f"{a}  kept" in out
         assert "KEPT in quarantine with its keys: another stored chunk claims position 0 of 'Doc' (1.2.3)" in out
         assert "restored 1, present 0, dim_conflict 0, kept 1, missing 0" in out
-        assert "1 chunk KEPT in quarantine" in out and "nx store get CHASH" in out and "your" in out
+        assert "1 chunk KEPT in quarantine" in out and "`nx store get` does not read" in out and "your" in out
         assert "HIDDEN" not in out, "a kept chunk is not in the collection, so it is not a hidden one"
 
         as_json = _run(runner, _Stub([_page([

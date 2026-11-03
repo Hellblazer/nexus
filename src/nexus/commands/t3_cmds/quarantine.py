@@ -37,10 +37,10 @@ The refusal to attach one of two versions of the same document position (``rival
 into a guess: a chunk the engine refuses as a rival is NOT restored. It stays in quarantine with its
 keys, the verdict row reads outcome ``kept`` (``superseded``, reason ``rival``) and the verb exits 1,
 so the other version still sees it as a rival on the next page, in the next call and on the retry of a
-busy one. The operator picks the version (compare the text with ``nx store get``, then re-index the
+busy one. The operator picks the version (the kept versions sit in quarantine, out of `nx store get`'s reach; re-index the
 document or re-put the note); the kept copies stay in quarantine until they expire. The same holds
 for a chunk whose owning document is mid index run (``indexing``) or whose last run failed
-(``failed``): both end, and the remedy (run the verb again once the run has finished) needs the keys
+(``failed``): both end, and the remedy (run the verb again once the run has finished, within 14 days of the quarantine, after which the reaper expires the copy) needs the keys
 the move would delete, so the chunk stays in quarantine with them and the rerun attaches it.
 
 The chunks are named in one of three ways, because the places that record what was
@@ -382,7 +382,7 @@ def _render_text(origin: str, siblings: list[str], dry_run: bool, reattach: bool
     for why, text in (
         ("rival", "more than one stored chunk (in the collection or in a quarantine collection) claims the same "
                   "position of the same document, so none of the versions was restored or attached and the choice is "
-                  "yours. Compare the text with `nx store get CHASH`, then re-index the document or re-put the note; "
+                  "yours. Both versions stay in quarantine, where `nx store get` does not read; re-index the document or re-put the note so the current text is written and attached, and the kept versions age out of quarantine (14 days after they were quarantined); "
                   "the kept copies stay in quarantine until they expire, and running this verb again keeps them again."),
         ("indexing", "the owning document is in the middle of an index run. Run the same command again when it has "
                      "finished, if you still want the chunk back: the chunk keeps the keys that name its document."),
@@ -456,7 +456,7 @@ def _render_text(origin: str, siblings: list[str], dry_run: bool, reattach: bool
             elif kind == "ambiguous":
                 click.echo(f"\n{what}: more than one stored chunk (here or in the quarantine collection) claims the "
                            "same position of the same document, so none was attached and the version is yours to "
-                           "pick. Compare the text with `nx store get CHASH`, then re-index the document or re-put "
+                           "pick. Both stay in quarantine, where `nx store get` does not read; re-index the document or re-put "
                            "the note.")
             elif kind == "owner_link_dropped" and dry_run:
                 click.echo(f"\n{what}: --no-reattach would restore the bytes and lose the link to the owning "
