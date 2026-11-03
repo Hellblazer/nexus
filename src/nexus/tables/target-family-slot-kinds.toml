@@ -1,0 +1,45 @@
+# RDR-189 P2 (nexus-z1d0l.2.3): the kinds of value a family's required slot
+# holds. Load it through nexus.tables.target_family_vocab. A family
+# declaration's `required_slots[].kind` must be one of these rows; the loader
+# refuses any other literal. The set is deliberately small: the RDR derives the
+# families from observed evidence and does not fix a slot taxonomy, so a new
+# kind is a reviewed change to this table, never a free string in a declaration.
+#
+#   text       free prose the answer states
+#   entity     a named thing (a module, an RDR, a person, a collection)
+#   list       an enumeration of items
+#   claim      a statement that needs evidence behind it
+#   reference  a pointer to another record (a tumbler, an RDR number, a path)
+
+[table]
+id = "target-family-slot-kinds"
+kind = "decision-table"
+version = 1
+
+[dimensions.kind]
+domain = ["text", "entity", "list", "claim", "reference"]
+
+[[row]]
+id = "text"
+guard = { kind = "text" }
+emit = { meaning = "free prose" }
+
+[[row]]
+id = "entity"
+guard = { kind = "entity" }
+emit = { meaning = "a named thing" }
+
+[[row]]
+id = "list"
+guard = { kind = "list" }
+emit = { meaning = "an enumeration" }
+
+[[row]]
+id = "claim"
+guard = { kind = "claim" }
+emit = { meaning = "a statement needing evidence" }
+
+[[row]]
+id = "reference"
+guard = { kind = "reference" }
+emit = { meaning = "a pointer to another record" }

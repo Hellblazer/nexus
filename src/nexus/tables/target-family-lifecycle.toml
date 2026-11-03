@@ -1,0 +1,62 @@
+# RDR-189 P2 (nexus-z1d0l.2.3): the status lifecycle of a family declaration
+# (state-machine kind), the checked form of "an unreviewed candidate cannot
+# become active". Load through nexus.tables.target_family_vocab.
+#
+# status domain
+#   candidate  proposed; never consulted for new execution
+#   active     reviewed and current: at most one version per family
+#   retired    was active; kept readable for historical interpretation
+# event domain
+#   activate   candidate -> active; needs a recorded approval
+#   retire     active -> retired (activating a newer version retires the old one)
+# approval domain: whether the declaration carries an approval (reviewer and
+#   the reference of the change that records the decision).
+#
+# The loader reads a file's status through this table too: a declaration whose
+# status is active or retired must have reached it through candidate -> active,
+# so it is refused when `activate` from candidate would be refused for want of
+# an approval.
+#
+# `retire` carries no guard: a retired version stays what it was, and retiring
+# needs no new approval beyond the one that activated it.
+
+[table]
+id = "target-family-lifecycle"
+kind = "state-machine"
+version = 1
+
+[dimensions.status]
+domain = ["candidate", "active", "retired"]
+[dimensions.event]
+domain = ["activate", "retire"]
+[dimensions.approval]
+domain = ["recorded", "absent"]
+
+[[row]]
+id = "activate"
+match = { status = "candidate", event = "activate" }
+guard = { approval = "recorded" }
+to = { status = "active" }
+
+[[row]]
+id = "activate-unapproved"
+match = { status = "candidate", event = "activate" }
+guard = { approval = "absent" }
+refuse = "approval-not-recorded"
+
+[[row]]
+id = "activate-otherwise"
+match = { status = ["active", "retired"], event = "activate" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "retire"
+match = { status = "active", event = "retire" }
+to = { status = "retired" }
+
+[[row]]
+id = "retire-otherwise"
+match = { status = ["candidate", "retired"], event = "retire" }
+escape = true
+refuse = "illegal-transition"

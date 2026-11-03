@@ -1,0 +1,41 @@
+# Test fixture only (nexus-z1d0l.2.3): a reviewed candidate successor of v1.
+family_id = "fixture-lineage"
+family_version = 2
+status = "candidate"
+revision = "2222222222222222222222222222222222222222"
+facets = ["origin", "successor", "supersession"]
+exemplars = []
+counterexamples = []
+disagreements = []
+observed_refs = ["run:fixture-0004"]
+environment_capabilities = ["catalog", "t3-search", "run-summary"]
+
+[approval]
+reviewer = "fixture-reviewer"
+ref = "change:fixture-200"
+
+[[required_slots]]
+name = "decision"
+kind = "claim"
+
+[[required_slots]]
+name = "rationale"
+kind = "text"
+
+[[required_slots]]
+name = "successor"
+kind = "reference"
+
+[[witness_obligations]]
+slot = "decision"
+kind = "quote"
+on_missing = "requiresReview"
+
+[[witness_obligations]]
+slot = "successor"
+kind = "item"
+on_missing = "unavailable"
+
+[[treatment_constraints]]
+name = "no-current-code-inference"
+rule = "Do not infer current code behaviour from a historical record."

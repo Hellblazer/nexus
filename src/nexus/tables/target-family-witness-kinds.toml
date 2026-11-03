@@ -1,0 +1,33 @@
+# RDR-189 P2 (nexus-z1d0l.2.3): the witness shapes a family may require for a
+# slot. They are the three evidence forms of RDR-189 P1's witness schema
+# (`item_id`, quote, span): the host binds an item id to the evidence stream,
+# and a quote or span must be contained in the bound evidence. Load through
+# nexus.tables.target_family_vocab; a declaration's
+# `witness_obligations[].kind` must be one of these rows.
+#
+#   item   an evidence item id the host binds
+#   quote  a verbatim quotation contained in the bound evidence
+#   span   a character span of the bound evidence
+
+[table]
+id = "target-family-witness-kinds"
+kind = "decision-table"
+version = 1
+
+[dimensions.kind]
+domain = ["item", "quote", "span"]
+
+[[row]]
+id = "item"
+guard = { kind = "item" }
+emit = { meaning = "a host-bound evidence item id" }
+
+[[row]]
+id = "quote"
+guard = { kind = "quote" }
+emit = { meaning = "a verbatim quotation inside the bound evidence" }
+
+[[row]]
+id = "span"
+guard = { kind = "span" }
+emit = { meaning = "a character span of the bound evidence" }

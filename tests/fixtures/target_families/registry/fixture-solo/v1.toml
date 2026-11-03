@@ -1,0 +1,17 @@
+# Test fixture only (nexus-z1d0l.2.3): a candidate with no recorded approval.
+family_id = "fixture-solo"
+family_version = 1
+status = "candidate"
+revision = "3333333333333333333333333333333333333333"
+facets = ["topic"]
+exemplars = []
+counterexamples = []
+disagreements = []
+observed_refs = []
+environment_capabilities = []
+witness_obligations = []
+treatment_constraints = []
+
+[[required_slots]]
+name = "answer"
+kind = "text"

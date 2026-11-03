@@ -1,0 +1,53 @@
+# RDR-189 P2 (nexus-z1d0l.2.3): the per-obligation states of RDR-189 P4, one
+# row each, in the RDR's order. A witness obligation in a family declaration
+# names the state a missing witness degrades to (`on_missing`); this table
+# says which states may be named. RDR-189: "no unsupported obligation may
+# become `preserved`", so a missing witness can never be declared to leave an
+# obligation pending, preserved or approximated.
+#
+# emit fields
+#   on_missing_witness  allowed: a declaration may name this state as what a
+#                       missing witness degrades an obligation to; refused: not.
+
+[table]
+id = "target-family-obligation-states"
+kind = "decision-table"
+version = 1
+
+[dimensions.state]
+domain = ["pending", "preserved", "approximated", "weakened", "requiresReview", "unavailable", "failed"]
+
+[[row]]
+id = "pending"
+guard = { state = "pending" }
+emit = { on_missing_witness = "refused" }
+
+[[row]]
+id = "preserved"
+guard = { state = "preserved" }
+emit = { on_missing_witness = "refused" }
+
+[[row]]
+id = "approximated"
+guard = { state = "approximated" }
+emit = { on_missing_witness = "refused" }
+
+[[row]]
+id = "weakened"
+guard = { state = "weakened" }
+emit = { on_missing_witness = "allowed" }
+
+[[row]]
+id = "requiresReview"
+guard = { state = "requiresReview" }
+emit = { on_missing_witness = "allowed" }
+
+[[row]]
+id = "unavailable"
+guard = { state = "unavailable" }
+emit = { on_missing_witness = "allowed" }
+
+[[row]]
+id = "failed"
+guard = { state = "failed" }
+emit = { on_missing_witness = "allowed" }
