@@ -938,8 +938,10 @@ def _note_source_evidence(group: dict, meta: dict, position: int) -> None:
       text and its ``content_hash`` is the LAST writer's, so this reads "some file has this hash",
       which cannot make a wrong key trusted, but a document whose chunks other documents wrote
       last has none left to show it (the document then gets the unique key: no same-as, never a
-      wrong one). Only the registration record above covers it, and a PDF or note registers
-      without a file hash, so for those the chunk evidence is all there is.
+      wrong one). Only the registration record above covers it. A repo file registers with its
+      file hash, and a PDF or markdown document indexed by ``nx index pdf`` / ``md`` records it
+      just before its run is stamped complete (nexus-ypgbz); one indexed before that, and a note,
+      has no such record, so for those the chunk evidence is all there is.
 
     Two records at one position mean the group is not one whole manifest (a live export can read
     a record twice and miss another), so the key is dropped."""

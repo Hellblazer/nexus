@@ -774,10 +774,16 @@ class UploadRun:
         self, *, doc_id: str, collection: str, content_hash: str, force_re_embed: bool,
         defer_completion: bool,
     ) -> Any:
-        from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
+        from nexus.catalog.multi_batch_write import (  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
+            MultiBatchDocumentWriter,
+            stamp_registered_content_hash,
+        )
         from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: shared with the other RDR-223 writers
 
         self._raw_cat = _make_upload_catalog()
+        # nexus-ypgbz: the document's registration carries the file hash (this run's *content_hash* is the
+        # PDF's sha256) before the writer begins, so before the completion stamp. See the helper.
+        stamp_registered_content_hash(self._raw_cat, doc_id, content_hash)
         # The streaming stub's metadata is deliberately partial (the post-pass fills title, author
         # and extraction method), so the write MERGES it into what is stored and names no keys to
         # delete: replacing would strip the ``bib_*`` enrichment a forced re-index must keep.

@@ -1271,14 +1271,13 @@ def _register_time_meta(rel_path: str, file_hash: str, extra: dict | None = None
     content hash AND not a fixture path), preserving the pre-existing
     "meta: None when file_hash is empty" behaviour exactly.
     """
+    from nexus.catalog.indexed_meta import content_hash_meta  # noqa: PLC0415 — deliberate function-scoped import (as below)
     from nexus.catalog.types import (  # noqa: PLC0415 — deliberate function-scoped import (avoid a module-level catalog dep in the indexer)
         NON_EVIDENTIARY_META_KEY,
         is_fixture_path,
     )
 
-    meta: dict = {}
-    if file_hash:
-        meta["content_hash"] = file_hash
+    meta: dict = content_hash_meta(file_hash)
     if is_fixture_path(rel_path):
         meta[NON_EVIDENTIARY_META_KEY] = True
     for key, value in (extra or {}).items():
