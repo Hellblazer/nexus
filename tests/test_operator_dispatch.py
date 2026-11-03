@@ -2266,7 +2266,7 @@ class TestErrorHandling:
         failure. Of the 17 claude_dispatch call sites, 13 propagate bare
         with no logging on at least one real invocation path, and three
         (nx_plan_audit, nx_tidy, nx_enrich_beads) have no covered path at
-        all — FastMCP's handler returns str(e) to the client without
+        all — MCPServer's handler returns str(e) to the client without
         logging. So the record has to be written HERE, at the one choke
         point every caller passes through.
         """

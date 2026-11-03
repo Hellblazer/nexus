@@ -138,7 +138,7 @@ async def test_hook_tool_reachable_over_real_stdio(t2_service_env, tmp_path):
             assert tool.description.startswith("Hook entry point (RDR-215):")
 
             result = await session.call_tool("hook_stdio_probe", {"session_id": "abc123"})
-            assert result.isError is False
+            assert result.is_error is False
             assert len(result.content) == 1
             assert result.content[0].text == '{"session_id": "abc123"}'
 
@@ -197,7 +197,7 @@ async def test_a_real_shipped_hook_tool_is_reachable_over_stdio(t2_service_env, 
                 "hook_auto_approve",
                 {"tool_name": allowed, "hook_event_name": "PreToolUse"},
             )
-            assert result.isError is False
+            assert result.is_error is False
             assert len(result.content) == 1
             assert result.content[0].text == (
                 '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '

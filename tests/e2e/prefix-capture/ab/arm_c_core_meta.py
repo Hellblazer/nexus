@@ -2,7 +2,7 @@
 
 # --- nexus-ly9c2 arm C, experiment only (appended in the container) ---------
 # Appended to the installed nexus/mcp/core.py, where `mcp` is that module's
-# FastMCP instance; not importable on its own.
+# MCPServer instance; not importable on its own.
 # Marks a small core of nexus tools always-loaded per tool; the server entry
 # is alwaysLoad false, so every other tool stays deferred behind ToolSearch.
 _NXAB_CORE = frozenset({

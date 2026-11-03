@@ -207,7 +207,7 @@ def test_the_host_limit_and_the_remedy_are_stated_where_users_read_them(tmp_path
     assert "CLAUDE_PROJECT_DIR is unset" in reason and "Desktop" in reason and "Cowork" in reason and REMEDY in reason
     tools = asyncio.run(core.mcp.list_tools())
     (answer,) = [t for t in tools if t.name == "nx_answer"]
-    bindings = answer.inputSchema["properties"]["bindings"]["description"]
+    bindings = answer.input_schema["properties"]["bindings"]["description"]
     changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
     cli = (REPO / "docs" / "cli-reference.md").read_text(encoding="utf-8")
     entry = changelog[changelog.index("qualified by the session's project"):]

@@ -3,16 +3,17 @@
 
 Nobody could tell whether a client (the Claude Desktop remote-devices bridge)
 sends per-request ``_meta`` such as a session id, because nx-mcp logged no
-tool calls. The hook wraps ``request_handlers[CallToolRequest]`` -- FastMCP
-binds that handler during ``__init__``, so the wrap has to happen on the
-constructed server's low-level registry -- and logs the tool name plus the
-SORTED KEYS of ``_meta``. Never values, never arguments: they can carry tokens.
+tool calls. The hook is a ``Server.middleware`` entry (mcp 2.x; nexus-sgmyl
+replaced the 1.x ``request_handlers[CallToolRequest]`` wrap) that acts on
+``tools/call`` and logs the tool name plus the SORTED KEYS of ``_meta``. Never values, never arguments: they can carry tokens.
 The event is INFO the first time a key-set is seen in the process and DEBUG
 after (Claude Code sends ``claudecode/toolUseId`` on every call), carries the
 process ``pid``, and caps the keys it lists.
 
-These tests drive the real handler of a real FastMCP, the same path
-``tests/test_stale_host.py`` uses.
+These tests drive a real MCPServer through a real in-process client
+(``tests/_mcp_inproc.py``), the same path ``tests/test_stale_host.py`` uses. The
+two production servers have lifespans that open T1, so their wiring is checked by
+running the installed middleware entry directly (``_through_middleware``).
 """
 from __future__ import annotations
 
@@ -22,11 +23,11 @@ import os
 import anyio
 import pytest
 import structlog
-from mcp import types
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from structlog.testing import capture_logs
 
 from nexus.mcp import _tool_call_log
+from tests._mcp_inproc import call_tool
 
 _SECRET = "s3cr3t-token-value"
 
@@ -45,8 +46,8 @@ def _debug_level():
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
 
 
-def _mk_server() -> FastMCP:
-    server = FastMCP("test-tool-call-log")
+def _mk_server() -> MCPServer:
+    server = MCPServer("test-tool-call-log")
 
     @server.tool(description="echo")
     def echo(value: str) -> str:
@@ -55,16 +56,30 @@ def _mk_server() -> FastMCP:
     return server
 
 
-def _call(server: FastMCP, tool: str, meta: dict | None = None):
-    low = server._mcp_server
-    handler = low.request_handlers[types.CallToolRequest]
-    params: dict = {"name": tool, "arguments": {"value": _SECRET}}
+def _call(server: MCPServer, tool: str, meta: dict | None = None):
+    """One tools/call through the real client -> dispatcher -> middleware path."""
+    return call_tool(server, tool, {"value": _SECRET}, meta=meta)
+
+
+def _through_middleware(server: MCPServer, tool: str, meta: dict | None = None):
+    """Run the server's installed tool-call-log entry on a hand-built context.
+
+    For a server whose lifespan a test must not start. The stub ``call_next``
+    stands for the rest of the chain; what the entry logs is what it read off
+    ``ctx``.
+    """
+    from types import SimpleNamespace
+
+    entry = next(m for m in server.middleware if getattr(m, "_nx_tool_call_log", False))
+    params: dict = {"name": tool, "arguments": {}}
     if meta is not None:
         params["_meta"] = meta
-    req = types.CallToolRequest(
-        method="tools/call", params=types.CallToolRequestParams(**params)
-    )
-    return anyio.run(handler, req)
+    ctx = SimpleNamespace(method="tools/call", params=params)
+
+    async def _next(_ctx):
+        return {"content": [], "isError": False}
+
+    return anyio.run(entry, ctx, _next)
 
 
 def _events(logs: list[dict]) -> list[dict]:
@@ -85,7 +100,7 @@ class TestToolCallLog:
         # keys only: no value and no argument anywhere in any event
         assert _SECRET not in repr(logs)
         # the call itself is untouched
-        assert result.root.isError is False
+        assert result.is_error is False
 
     def test_no_meta_logs_empty_list(self):
         server = _mk_server()
@@ -201,8 +216,8 @@ class TestToolCallLog:
         monkeypatch.setattr(_tool_call_log, "_emit", _boom)
         result = _call(server, "echo", {"a": 1})
         assert len(seen) == 1  # the hook ran, raised, and the call still completed
-        assert result.root.isError is False
-        assert result.root.content[0].text == _SECRET
+        assert result.is_error is False
+        assert result.content[0].text == _SECRET
 
     def test_install_degrades_on_unverifiable_shape(self):
         class _NoLow:
@@ -251,8 +266,8 @@ class TestComposesWithStaleHost:
             assert _tool_call_log.install_tool_call_log(server) == "applied"
         with capture_logs() as logs:
             result = _call(server, "echo", {"claudecode/toolUseId": "t1"})
-        assert result.root.isError is False
-        assert result.root.content[0].text == _SECRET
+        assert result.is_error is False
+        assert result.content[0].text == _SECRET
         events = _events(logs)
         assert len(events) == 1
         assert events[0]["meta_keys"] == ["claudecode/toolUseId"]
@@ -260,50 +275,56 @@ class TestComposesWithStaleHost:
 
 
 class TestCoreWiring:
-    def test_nexus_server_handler_is_wrapped(self):
-        """Asserted by behaviour, not by the outermost handler's marker: core.main()
-        installs the stale-host hook OUTSIDE this wrap (production order), and any test
-        that ran core.main() earlier on the same worker leaves it there, so the
-        outermost handler is legitimately not ours. A call through whatever handler
-        is installed must still emit the event (7.84.0 PR CI shard 5, both Pythons)."""
+    def test_nexus_server_middleware_is_installed(self):
+        """Asserted by behaviour: whatever else main() layered on (the stale-host
+        entry, installed after this one in production order) the chain must still
+        emit the event for a ``tools/call`` and ignore other methods."""
         from nexus.mcp.core import _SDK_PATCH_RESULTS, mcp
 
         assert _SDK_PATCH_RESULTS["tool_call_log"] == "applied"
         with capture_logs() as logs:
-            _call(mcp, "nexus_no_such_tool_probe", {"claudecode/toolUseId": "t1"})
+            _through_middleware(mcp, "nexus_no_such_tool_probe", {"claudecode/toolUseId": "t1"})
         events = _events(logs)
         assert len(events) == 1, logs
         assert events[0]["tool"] == "nexus_no_such_tool_probe"
         assert events[0]["meta_keys"] == ["claudecode/toolUseId"]
+
+    def test_only_tools_call_is_logged(self):
+        """The chain sees every inbound message; ``tools/list`` must log nothing."""
+        from types import SimpleNamespace
+
+        server = _mk_server()
+        _tool_call_log.install_tool_call_log(server)
+        entry = next(m for m in server.middleware if getattr(m, "_nx_tool_call_log", False))
+
+        async def _next(_ctx):
+            return {}
+
+        with capture_logs() as logs:
+            anyio.run(entry, SimpleNamespace(method="tools/list", params={}), _next)
+        assert _events(logs) == []
 
     def test_core_reports_pid_with_the_patch_statuses(self):
         assert _report_call_passes_pid("core.py")
 
 
 class TestCatalogWiring:
-    def test_catalog_server_handler_is_wrapped_and_reported_as_its_own(self):
-        """The catalog FastMCP is a different object from core's: reporting
+    def test_catalog_server_middleware_is_installed_and_reported_as_its_own(self):
+        """The catalog MCPServer is a different object from core's: reporting
         core's tool_call_log status for it said "applied" over an unwrapped
         server."""
         from nexus.mcp import catalog, core
 
         assert catalog.mcp is not core.mcp
-        handler = catalog.mcp._mcp_server.request_handlers[types.CallToolRequest]
-        assert getattr(handler, "_nx_tool_call_log", False) is True
+        entries = [m for m in catalog.mcp.middleware if getattr(m, "_nx_tool_call_log", False)]
+        assert len(entries) == 1
         assert catalog._TOOL_CALL_LOG_STATUS == "applied"
 
-    def test_catalog_handler_logs_calls(self):
+    def test_catalog_middleware_logs_calls(self):
         from nexus.mcp import catalog
 
-        handler = catalog.mcp._mcp_server.request_handlers[types.CallToolRequest]
-        req = types.CallToolRequest(
-            method="tools/call",
-            params=types.CallToolRequestParams(
-                name="no_such_tool", arguments={}, _meta={"claudecode/toolUseId": "t"}
-            ),
-        )
         with capture_logs() as logs:
-            anyio.run(handler, req)
+            _through_middleware(catalog.mcp, "no_such_tool", {"claudecode/toolUseId": "t"})
         events = _events(logs)
         assert len(events) == 1
         assert events[0]["tool"] == "no_such_tool"
@@ -362,7 +383,7 @@ class TestDeletedCwdHeal:
             os.chdir(again)
             again.rmdir()
             _call(server, "echo")
-        assert result.root.isError is False
+        assert result.is_error is False
         assert os.getcwd() == stable_daemon_cwd()
         healed = [e for e in logs if e["event"] == "mcp_cwd_deleted_healed"]
         assert len(healed) == 1, logs

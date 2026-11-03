@@ -149,7 +149,7 @@ shows `✓ Connected` — but `--mcp-config` is cleaner and gate-free.)
 
 ### 2. The stub's interpreter lacks `mcp`
 
-`fixtures/stub_server.py` imports `mcp.server.fastmcp`. The system `python3`
+`fixtures/stub_server.py` imports `mcp.server.mcpserver` (mcp 2.x). The system `python3`
 (Homebrew) does **not** have it, so the stdio server crashes on import and
 never registers any tools, while Claude Code records "MCP server failed to
 start" and continues. Point the launcher at an interpreter that has `mcp`:
@@ -695,7 +695,7 @@ driven from `tests/test_cc_validation_scenario32_control.py`.
 runner.sh                       # setup (isolated HOME, tmux server under run --), scenario loop
 scenarios/NN_*.sh               # one scenario each; source lib.sh helpers
 container/                      # Dockerfile + run.sh: how Claude Code runs (chas, in docker)
-fixtures/stub_server.py         # FastMCP stub (needs an interpreter with `mcp`)
+fixtures/stub_server.py         # MCPServer stub (needs an interpreter with `mcp`)
 ../e2e/lib.sh                   # _tmux, claude_start, claude_prompt, claude_wait, capture
 ../e2e/lib/claude_credentials.py # shared credential helper (run/status); no file, ever (RDR-219)
 lib/                            # stdlib-only readers the verdicts call: version_answers.py (the 06/07

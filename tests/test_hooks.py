@@ -21,7 +21,7 @@ from nexus.mailbox_arm import mailbox_arm_instruction
 # RDR-094 Phase F (4.13.0 / nexus-2lm0) deleted the hook-side chroma
 # spawn block: ``start_t1_server``, ``write_session_record_by_id``,
 # ``find_ancestor_session``, the session.lock acquisition, and the
-# watchdog spawn all moved to nx-mcp's FastMCP lifespan. The hook now
+# watchdog spawn all moved to nx-mcp's MCPServer lifespan. The hook now
 # does sweep + UUID resolution + (optionally) current_session write.
 # These tests pin that minimal contract.
 

@@ -23,14 +23,9 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
-
-try:  # nexus-vc5yb: UNEXPORTED SDK internal — absence must not kill startup
-    from mcp.server.fastmcp.server import Settings as _FastMCPSettings
-except ImportError:  # pragma: no cover — future SDK restructure
-    _FastMCPSettings = None
 
 from nexus.corpus import (
     CollectionNotRegisteredError,
@@ -58,6 +53,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 # with hook_auto_approve (bead nexus-q02nx.4). See nexus/mcp/hooks.py's
 # module docstring for the full contract.
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
+from nexus.mcp._server_version import server_version as _server_version
 from nexus.mcp._tool_failure import fail as _fail
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.plans.evidence import EvidenceRequest
@@ -2839,31 +2835,11 @@ def _install_exit_handlers(
         set_signal(hangup, _sigterm_handler)
 
 
-# nexus-20iee: the upstream mcp SDK's FastMCP Settings model (a Generic[
-# LifespanResultT] BaseSettings) declares its `lifespan` field with a
-# forward reference to `FastMCP` that is unresolved at class-definition
-# time (`Settings` is defined earlier in the same module than `FastMCP`,
-# in mcp/server/fastmcp/server.py), and the SDK never calls
-# `model_rebuild()` itself. pydantic-settings 2.15.0 added
-# IncompleteFieldDefinitionWarning, which fires from this unresolved
-# reference every time a `Settings()` instance is constructed -- i.e.
-# every `FastMCP(...)` call, including the one directly below. Rebuilding
-# here, now that `FastMCP` is fully defined (its module finished importing
-# above), resolves the forward reference process-wide before our own
-# instantiation. No-op on pydantic-settings versions that predate the
-# warning class. Guarded (nexus-vc5yb/nexus-3hc9z): Settings is an
-# UNEXPORTED SDK internal under an unbounded mcp>=1.0,<2 pin — a future
-# SDK refactor must degrade this cosmetic fix to a logged warning, never
-# crash nx-mcp startup.
-if _FastMCPSettings is not None:
-    try:
-        _FastMCPSettings.model_rebuild()
-    except Exception as _rebuild_exc:  # noqa: BLE001 — boundary fallback: cosmetic-warning fix must never kill startup
-        structlog.get_logger(__name__).debug(
-            "fastmcp_settings_model_rebuild_failed", error=str(_rebuild_exc)
-        )
-else:  # pragma: no cover — future SDK restructure
-    structlog.get_logger(__name__).debug("fastmcp_settings_symbol_unavailable")
+# nexus-20iee (retired by nexus-sgmyl): mcp 1.x's FastMCP Settings model was a
+# pydantic-settings BaseSettings with an unresolved forward reference, so it
+# needed a model_rebuild() here to silence IncompleteFieldDefinitionWarning.
+# mcp 2.x's Settings is a plain pydantic BaseModel; the warning cannot fire and
+# tests/test_mcp_settings_warnings.py keeps watching for it.
 
 # nexus-rjmyk: correct the SDK's cancellation response BEFORE the server
 # exists, so no request can be cancelled through the unpatched path. Answering
@@ -2879,12 +2855,13 @@ else:  # pragma: no cover — future SDK restructure
 #: did not: the level changed, the timing did not (nexus-dgvsz).
 _SDK_PATCH_RESULTS: dict[str, str] = _apply_sdk_patches()
 
-mcp = FastMCP("nexus", lifespan=_t1_lifespan)
+mcp = MCPServer("nexus", version=_server_version(), lifespan=_t1_lifespan)
 
-# nexus-2nxoo: FastMCP bound its call_tool handler inside __init__, so the
-# per-call `mcp_tool_call` event (tool name + sorted `_meta` keys; INFO the first
-# time a key-set is seen in this process, DEBUG after) wraps the constructed
-# server's registry. Never raises; main() reports the status.
+# nexus-2nxoo: the per-call `mcp_tool_call` event (tool name + sorted `_meta`
+# keys; INFO the first time a key-set is seen in this process, DEBUG after) is a
+# `tools/call` entry in the constructed server's middleware chain (nexus-sgmyl:
+# mcp 2.x; it wrapped `request_handlers` on 1.x). Never raises; main() reports
+# the status.
 from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server
 
 _SDK_PATCH_RESULTS["tool_call_log"] = _install_tool_call_log(mcp)
@@ -16006,7 +15983,7 @@ ALWAYS_LOAD_TOOLS: frozenset[str] = frozenset(
 _ALWAYS_LOAD_META_KEY = "anthropic/alwaysLoad"
 
 
-def _apply_always_load(server: FastMCP, names: frozenset[str]) -> None:
+def _apply_always_load(server: MCPServer, names: frozenset[str]) -> None:
     """Flag each tool in *names* ``alwaysLoad`` in its wire ``_meta``.
 
     Runs once, after every ``@mcp.tool()`` has registered. A name that is not
@@ -16154,9 +16131,9 @@ def main():
     # found, so a surface that never runs the plugin's session-start hook (a
     # Desktop conversation) still learns that the setup tool fixes it.
     apply_setup_notice(mcp)
-    # The FastMCP lifespan finally is the design's primary cleanup
+    # The MCPServer lifespan finally is the design's primary cleanup
     # path; the signal handlers below are belt-and-braces for the
-    # cases where the lifespan does not fire. Empirically, FastMCP's
+    # cases where the lifespan does not fire. Empirically, the SDK's
     # stdio transport on macOS does NOT have anyio install a
     # SIGTERM handler that propagates cancellation through the
     # lifespan async finally (RDR-094 spike, 2026-04-25). Without
@@ -16176,10 +16153,10 @@ def main():
         check_version_compatibility()
         # RDR-211 Phase 1 Step 3 (bead nexus-rplay.10): mcp.run(transport=
         # "stdio") -- anyio.run(mcp.run_stdio_async) -- declares no
-        # experimental capabilities (FastMCP calls
+        # experimental capabilities (MCPServer calls
         # create_initialization_options() bare). channel.
         # run_stdio_with_channel drives the exact same low-level
-        # Server.run() call FastMCP would have, plus the
+        # Server.run() call MCPServer would have, plus the
         # "claude/channel" capability that makes Claude Code register a
         # channel listener (Phase 1 Step 0 spike). Every other transport
         # (SSE, streamable-http) is untouched -- this substitution is

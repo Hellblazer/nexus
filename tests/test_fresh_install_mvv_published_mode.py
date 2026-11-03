@@ -245,18 +245,19 @@ def test_published_install_failure_is_named_not_skip_passed() -> None:
     assert "no skip-pass permitted" in text
 
 
-def test_mcp_lt2_tripwire_is_shared_across_both_layers_not_duplicated() -> None:
-    """nexus-l2ku5's mcp<2 dist-info assertion must run once, unconditionally
-    — it is the layer test this bead exists to make reachable in published
-    mode, not a local-wheel-only leg."""
+def test_mcp_major_tripwire_is_shared_across_both_layers_not_duplicated() -> None:
+    """nexus-l2ku5's mcp dist-info assertion (major must be exactly 2 since
+    nexus-sgmyl; it was "not 2 or later" while the pin was <2) must run once,
+    unconditionally — it is the layer test this bead exists to make reachable
+    in published mode, not a local-wheel-only leg."""
     text = _text()
-    assert text.count('if [ "$MCP_MAJOR" -ge 2 ]; then') == 1
+    assert text.count('if [ "$MCP_MAJOR" -ne 2 ]; then') == 1
     # It must not be nested inside an `if [ "$PUBLISHED_MODE" ...` guard —
     # i.e. it has to run in BOTH modes. Crude but effective: the guard
     # clause must not appear between the mcp-dist-info lookup and the
     # major-version check.
     dist_info_idx = text.index('MCP_DIST_INFO="$(find')
-    major_check_idx = text.index('if [ "$MCP_MAJOR" -ge 2 ]; then')
+    major_check_idx = text.index('if [ "$MCP_MAJOR" -ne 2 ]; then')
     between = text[dist_info_idx:major_check_idx]
     assert "PUBLISHED_MODE" not in between
 

@@ -340,7 +340,7 @@ def test_mcp_store_put_calls_document_hook_synchronously() -> None:
     """RDR-089 load-bearing contract (audit F1): the call to
     ``HookRegistry.fire_document`` from ``mcp/core.py:store_put`` must
     be a *plain sync* invocation. No ``await``, no ``asyncio.to_thread``
-    wrapping. ``store_put`` is ``def``, not ``async def``; FastMCP
+    wrapping. ``store_put`` is ``def``, not ``async def``; MCPServer
     wraps sync ``@mcp.tool()`` bodies in worker threads at the
     framework level. Routing through ``async`` here would silently
     drop the returned coroutine — exactly the original RDR-089 defect.

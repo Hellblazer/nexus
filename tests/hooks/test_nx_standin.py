@@ -120,20 +120,20 @@ async def test_no_cli_and_nx_mcp_is_a_stand_in_with_exactly_the_two_setup_tools(
     init, tools, _results = await _session(dirs, "nx-mcp")
     assert sorted(tool.name for tool in tools) == ["setup", "setup_status"]
     by_name = {tool.name: tool for tool in tools}
-    schema = by_name["setup"].inputSchema
+    schema = by_name["setup"].input_schema
     assert sorted(schema["properties"]) == ["autostart", "mode", "slim"] and schema["required"] == ["mode"]
     # nexus-w8ug5: tri-state. Omitted is not false, so the schema has no false default and
     # accepts null; the real server's schema is the same (tests/mcp/test_setup_tools.py).
     assert schema["properties"]["slim"]["anyOf"] == [{"type": "boolean"}, {"type": "null"}]
     assert schema["properties"]["slim"]["default"] is None
-    assert by_name["setup_status"].inputSchema.get("properties") in ({}, None)
+    assert by_name["setup_status"].input_schema.get("properties") in ({}, None)
     for tool in tools:
         assert tool.annotations is None, f"{tool.name}: Phase 1 gave no hints; the stand-in and the real server give none"
         assert "Nexus is missing" in (tool.description or ""), tool.name
         assert "/conexus:setup" in (tool.description or ""), tool.name
     assert "ask the user first" in (by_name["setup"].description or "").lower()
     assert "no sooner than" in (by_name["setup_status"].description or "")
-    assert init.serverInfo.name == "nexus-not-installed"
+    assert init.server_info.name == "nexus-not-installed"
 
 
 @pytest.mark.asyncio
@@ -242,7 +242,7 @@ async def test_a_found_cli_that_cannot_start_is_served_to_a_real_client_as_the_b
     dirs = _isolated(tmp_path)
     _pruned_generation(dirs, tmp_path)
     init, tools, (status,) = await _session(dirs, "nx-mcp", calls=(("setup_status", {}),))
-    assert init.serverInfo.name == "nexus-installed-cannot-start"
+    assert init.server_info.name == "nexus-installed-cannot-start"
     assert "Nexus is installed but cannot start; setup repairs it" in (init.instructions or "")
     assert sorted(t.name for t in tools) == ["setup", "setup_status"]
     assert all((t.description or "").startswith("Nexus is installed but cannot start") for t in tools)
@@ -285,7 +285,7 @@ async def test_setup_starts_the_setup_script_with_the_mode_and_autostart_given(
     recorder.views(start=running, **{"not-now": {"state": "none", "live": False, "not_now": True, "next": "x"}})
     _init, _tools, (result,) = await _session(_isolated(tmp_path), "nx-mcp", launch, (("setup", arguments),))
     assert recorder.calls() == [argv]
-    assert not result.isError
+    assert not result.is_error
     text = _text(result)
     if arguments["mode"] == "not-now":
         assert "nothing was installed" in text.lower()
@@ -334,7 +334,7 @@ async def test_a_refused_call_is_an_error_and_starts_nothing(tmp_path: Path, arg
     launch, recorder = _plugin_with_recorder(tmp_path)
     recorder.views(start={"state": "running", "live": True, "stage": "starting", "mode": "local", "next": "x"})
     _init, _tools, (result,) = await _session(_isolated(tmp_path), "nx-mcp", launch, (("setup", arguments),))
-    assert result.isError
+    assert result.is_error
     assert recorder.calls() == []
     if arguments.get("mode") == "Cloud":
         for mode in ("local", "cloud", "cli-only", "not-now"):
@@ -345,7 +345,7 @@ async def test_a_refused_call_is_an_error_and_starts_nothing(tmp_path: Path, arg
 async def test_the_stand_in_offers_cloud_in_both_tool_descriptions_it_carries_a_choice_in(tmp_path: Path) -> None:
     _init, tools, _ = await _session(_isolated(tmp_path), "nx-mcp")
     by_name = {t.name: t for t in tools}
-    assert "cloud" in json.dumps([by_name["setup"].description, by_name["setup"].inputSchema]).lower()
+    assert "cloud" in json.dumps([by_name["setup"].description, by_name["setup"].input_schema]).lower()
     assert "never ask for the token" in by_name["setup"].description
 
 
@@ -358,7 +358,7 @@ async def test_a_setup_script_that_misbehaves_is_an_error_with_the_manual_comman
         _isolated(tmp_path), "nx-mcp", launch, (("setup", {"mode": "local"}), ("setup_status", {})),
     )
     for result in results:
-        assert result.isError
+        assert result.is_error
         for command in _MANUAL_COMMANDS:
             assert command in _text(result), command
         assert "Traceback" not in _text(result)
@@ -372,7 +372,7 @@ async def test_a_plugin_without_its_setup_script_answers_with_the_manual_command
         _isolated(tmp_path), "nx-mcp", launch, (("setup", {"mode": "local"}), ("setup_status", {})),
     )
     for result in results:
-        assert result.isError
+        assert result.is_error
         for command in _MANUAL_COMMANDS:
             assert command in _text(result), command
 
@@ -384,7 +384,7 @@ async def test_status_through_the_real_script_in_an_empty_config_directory(tmp_p
     dirs = _isolated(tmp_path)
     before = _tree(dirs)
     _init, _tools, (result,) = await _session(dirs, "nx-mcp", _LAUNCH, (("setup_status", {}),))
-    assert not result.isError
+    assert not result.is_error
     assert "Nexus is not installed" in _text(result) and "No setup has run." in _text(result)
     assert _tree(dirs) == before, "status wrote something"
 
@@ -393,7 +393,7 @@ async def test_status_through_the_real_script_in_an_empty_config_directory(tmp_p
 async def test_not_now_through_the_real_script_writes_only_its_marker(tmp_path: Path) -> None:
     dirs = _isolated(tmp_path)
     _init, _tools, (result,) = await _session(dirs, "nx-mcp", _LAUNCH, (("setup", {"mode": "not-now"}),))
-    assert not result.isError and "nothing was installed" in _text(result).lower()
+    assert not result.is_error and "nothing was installed" in _text(result).lower()
     assert sorted(p.name for p in (dirs["config"] / "setup").iterdir()) == ["not-now"]
 
 
@@ -408,7 +408,7 @@ async def test_cloud_through_the_real_script_path_starts_a_run_that_serves_the_p
     end where the run outlives its starter."""
     dirs = _isolated(tmp_path)
     _init, _tools, (result,) = await _session(dirs, "nx-mcp", _LAUNCH, (("setup", {"mode": "cloud"}),))
-    assert not result.isError
+    assert not result.is_error
     assert "mode cloud" in _text(result)
     status_file = dirs["config"] / "setup" / "status.json"
     assert json.loads(status_file.read_text(encoding="utf-8"))["mode"] == "cloud"
@@ -526,7 +526,7 @@ def test_the_stand_in_never_writes_to_standard_error(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_tool_call_to_the_catalog_stand_in_is_an_error(tmp_path: Path) -> None:
-    from mcp import ClientSession, McpError  # noqa: PLC0415
+    from mcp import ClientSession, MCPError  # noqa: PLC0415
     from mcp.client.stdio import StdioServerParameters, stdio_client  # noqa: PLC0415
 
     dirs = _isolated(tmp_path)
@@ -534,8 +534,8 @@ async def test_a_tool_call_to_the_catalog_stand_in_is_an_error(tmp_path: Path) -
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             init = await session.initialize()
-            assert init.protocolVersion
-            with pytest.raises(McpError):
+            assert init.protocol_version
+            with pytest.raises(MCPError):
                 await session.call_tool("setup", {})
 
 

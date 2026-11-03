@@ -24,13 +24,13 @@ def _log(payload: dict) -> None:
 # unaffected.
 _log({"event": "process_launched", "python": sys.executable, "name": NAME})
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 except Exception as exc:  # pragma: no cover - diagnostic path
     _log({"event": "mcp_import_failed", "python": sys.executable, "error": str(exc)})
     raise
 _log({"event": "mcp_imported_ok", "python": sys.executable})
 
-mcp = FastMCP(NAME)
+mcp = MCPServer(NAME)
 
 
 @mcp.tool()

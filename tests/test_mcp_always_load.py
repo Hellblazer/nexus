@@ -21,7 +21,7 @@ import json
 import pathlib
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ListToolsResult
 
 from nexus.mcp import catalog as _catalog
@@ -46,7 +46,7 @@ _EXPECTED_CORE = frozenset(
 )
 
 
-def _wire_tools(server: FastMCP) -> list[dict]:
+def _wire_tools(server: MCPServer) -> list[dict]:
     """The tools exactly as a ``tools/list`` response serializes them."""
     result = ListToolsResult(tools=asyncio.run(server.list_tools()))
     return json.loads(result.model_dump_json(by_alias=True, exclude_none=True))["tools"]
@@ -94,4 +94,4 @@ def test_the_nexus_server_entry_has_no_always_load_key() -> None:
 
 def test_flagging_a_tool_that_is_not_registered_fails_loud() -> None:
     with pytest.raises(RuntimeError, match="nope"):
-        _core._apply_always_load(FastMCP("t"), frozenset({"nope"}))
+        _core._apply_always_load(MCPServer("t"), frozenset({"nope"}))

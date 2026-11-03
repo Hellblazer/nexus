@@ -16,7 +16,6 @@ from __future__ import annotations
 import signal
 
 import pytest
-from mcp import types
 
 from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL
 from nexus.db.pg_provision import CREDENTIALS_FILENAME
@@ -118,7 +117,7 @@ class _FakeLowLevel:
 
 class _FakeServer:
     def __init__(self, instructions=None) -> None:
-        self._mcp_server = _FakeLowLevel(instructions)
+        self._lowlevel_server = _FakeLowLevel(instructions)
 
 
 class TestApplyEmbedderNotice:
@@ -131,8 +130,8 @@ class TestApplyEmbedderNotice:
         applied = apply_embedder_notice(srv)
 
         assert applied is True
-        assert srv._mcp_server.instructions is not None
-        assert "nx init" in srv._mcp_server.instructions
+        assert srv._lowlevel_server.instructions is not None
+        assert "nx init" in srv._lowlevel_server.instructions
 
     def test_appends_to_existing_instructions(
         self, monkeypatch: pytest.MonkeyPatch
@@ -143,8 +142,8 @@ class TestApplyEmbedderNotice:
         apply_embedder_notice(srv)
 
         # existing content preserved, notice appended (not clobbered)
-        assert srv._mcp_server.instructions.startswith("EXISTING CAPABILITIES")
-        assert "nx init" in srv._mcp_server.instructions
+        assert srv._lowlevel_server.instructions.startswith("EXISTING CAPABILITIES")
+        assert "nx init" in srv._lowlevel_server.instructions
 
     def test_no_change_when_no_notice(
         self, monkeypatch: pytest.MonkeyPatch
@@ -155,13 +154,13 @@ class TestApplyEmbedderNotice:
         applied = apply_embedder_notice(srv)
 
         assert applied is False
-        assert srv._mcp_server.instructions is None
+        assert srv._lowlevel_server.instructions is None
 
     def test_best_effort_never_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A startup advisory must never break MCP boot. A malformed server
-        # (no _mcp_server) returns False, not an exception.
+        # (no _lowlevel_server) returns False, not an exception.
         _pin(monkeypatch, local=True, choice=None, active=_TIER0_MODEL)
 
         class _Broken:
@@ -185,20 +184,19 @@ class TestCoreMainWiring:
             "nexus.mcp_infra.check_version_compatibility", lambda: None
         )
         # start from no instructions, and restore at teardown on every exit path
-        monkeypatch.setattr(core.mcp._mcp_server, "instructions", None)
+        monkeypatch.setattr(core.mcp._lowlevel_server, "instructions", None)
         # main() installs SIGTERM/SIGINT handlers for the serving process;
         # put the worker's own back at teardown
         for sig in (signal.SIGTERM, signal.SIGINT):
             request.addfinalizer(
                 lambda sig=sig, prev=signal.getsignal(sig): signal.signal(sig, prev)
             )
-        # main() installs the stale-host hook over the shared server's
-        # CallToolRequest handler; restore it at teardown, or a later test in
-        # the worker sees the stale-host wrapper, not the tool-call-log one
-        # (test_mcp_tool_call_log.py::TestCoreWiring, develop CI 39836696552).
-        handlers = core.mcp._mcp_server.request_handlers
-        monkeypatch.setitem(
-            handlers, types.CallToolRequest, handlers[types.CallToolRequest]
+        # main() appends the stale-host entry to the shared server's middleware
+        # chain; swap in a copy for the test, so the monkeypatch teardown puts the
+        # original list back and a later test in the worker does not see the
+        # stale-host entry (test_mcp_tool_call_log.py::TestCoreWiring).
+        monkeypatch.setattr(
+            core.mcp._lowlevel_server, "middleware", list(core.mcp._lowlevel_server.middleware)
         )
 
         class _Stop(Exception):
@@ -216,5 +214,5 @@ class TestCoreMainWiring:
         with pytest.raises(_Stop):
             core.main()
 
-        assert core.mcp._mcp_server.instructions is not None
-        assert "nx init" in core.mcp._mcp_server.instructions
+        assert core.mcp._lowlevel_server.instructions is not None
+        assert "nx init" in core.mcp._lowlevel_server.instructions

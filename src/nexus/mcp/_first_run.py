@@ -116,8 +116,8 @@ def apply_embedder_notice(server: object) -> bool:
     """Write the embedder notice (if any) into ``server``'s low-level MCP
     ``instructions`` so it reaches the client at ``initialize``.
 
-    ``FastMCP.instructions`` is a read-only property; the writable surface is
-    the low-level ``server._mcp_server.instructions`` (P5b spike). An existing
+    ``MCPServer.instructions`` is a read-only property; the writable surface is
+    the low-level ``server._lowlevel_server.instructions`` (P5b spike). An existing
     instructions string is preserved (notice appended), never clobbered.
 
     Best-effort: a startup advisory must never break MCP boot, so any failure
@@ -127,7 +127,7 @@ def apply_embedder_notice(server: object) -> bool:
         notice = embedder_startup_notice()
         if notice is None:
             return False
-        low = server._mcp_server  # type: ignore[attr-defined]
+        low = server._lowlevel_server  # type: ignore[attr-defined]
         existing = getattr(low, "instructions", None)
         low.instructions = f"{existing}\n\n{notice}" if existing else notice
         return True
@@ -170,7 +170,7 @@ def apply_stranded_notice(server: object) -> bool:
     # reserves "message" on LogRecord.
     _log.error("stranded_install_detected", detail=stranded.message)
     try:
-        low = server._mcp_server  # type: ignore[attr-defined]  # noqa: SLF001 — the writable instructions surface (P5b spike)
+        low = server._lowlevel_server  # type: ignore[attr-defined]  # noqa: SLF001 — the writable instructions surface (P5b spike)
         notice = f"nexus STRANDED INSTALL — relay this to the user verbatim: {stranded.message}"
         existing = getattr(low, "instructions", None)
         low.instructions = f"{existing}\n\n{notice}" if existing else notice
@@ -197,7 +197,7 @@ def apply_setup_notice(server: object) -> bool:
         notice = no_service_notice()
         if notice is None:
             return False
-        low = server._mcp_server  # type: ignore[attr-defined]  # noqa: SLF001 — the writable instructions surface (P5b spike)
+        low = server._lowlevel_server  # type: ignore[attr-defined]  # noqa: SLF001 — the writable instructions surface (P5b spike)
         existing = getattr(low, "instructions", None)
         low.instructions = f"{existing}\n\n{notice}" if existing else notice
         return True

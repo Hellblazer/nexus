@@ -2,7 +2,7 @@
 """Tests for the nexus.mcp package split (RDR-062).
 
 Verifies that core.py and catalog.py are importable, tools are registered
-with the correct FastMCP instances, and demoted functions remain callable
+with the correct MCPServer instances, and demoted functions remain callable
 but unregistered.
 """
 from __future__ import annotations
@@ -11,13 +11,13 @@ import pytest
 
 
 def test_core_module_importable():
-    """core.py exists and has a FastMCP instance."""
+    """core.py exists and has a MCPServer instance."""
     from nexus.mcp.core import mcp
     assert mcp.name == "nexus"
 
 
 def test_catalog_module_importable():
-    """catalog.py exists and has a FastMCP instance."""
+    """catalog.py exists and has a MCPServer instance."""
     from nexus.mcp.catalog import mcp
     assert mcp.name == "nexus-catalog"
 
@@ -108,7 +108,7 @@ def test_catalog_registered_tools():
 # *name* "search" is present in the registry; a name collision like this one
 # passes that check while every real caller (skills, hooks, ~45 call sites
 # passing ``query=``) fails wire-level input validation. These two tests read
-# the LIVE FastMCP registry the way an actual MCP client does — resolved
+# the LIVE MCPServer registry the way an actual MCP client does — resolved
 # name, backing function, and JSON schema — so a decorator/def mismatch of
 # this shape cannot recur silently.
 

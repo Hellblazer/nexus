@@ -2943,9 +2943,9 @@ async def test_mcp_catalog_server_round_trip():
             # skill passes. For three weeks it was backed by a private
             # two-argument helper and only an in-process import was tested.
             tools = {t.name: t for t in (await session.list_tools()).tools}
-            assert "query" in tools["search"].inputSchema.get("properties", {})
+            assert "query" in tools["search"].input_schema.get("properties", {})
             r = await session.call_tool("search", {"query": "nexus"})
-            assert not r.isError, r.content
+            assert not r.is_error, r.content
 
 
 def test_mcp_shim_imports():

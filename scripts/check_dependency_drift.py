@@ -92,8 +92,9 @@ class DriftFinding:
 #: Mirrors ``_SHAPE_SENSITIVE`` in tests/test_dependency_bounds_lint.py, which
 #: holds the pyproject cap at the locked minor; this side reports the pressure
 #: a fresh resolution would put on that cap, and on the transitive stack under
-#: it.
-SHAPE_SENSITIVE: frozenset[str] = frozenset({"mineru"})
+#: it. ``mcp`` (nexus-sgmyl): 2.x marks ``Server.middleware`` provisional and
+#: the servers reach ``_lowlevel_server``, so a minor can change what they use.
+SHAPE_SENSITIVE: frozenset[str] = frozenset({"mineru", "mcp"})
 
 #: Shape-sensitive versions already gated and REFUSED, keyed (name, version)
 #: -> the record. A fresh resolution landing on one of these is known

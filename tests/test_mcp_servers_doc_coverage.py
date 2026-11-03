@@ -18,7 +18,7 @@ registered as ``"show"``, and ``catalog_search`` is registered as
 ``"search"``. Reading the function name alone would report all ten
 ``nexus-catalog`` tools as undocumented; this walk reads the decorator's
 ``name=`` literal when present and falls back to the function name
-otherwise, exactly as FastMCP itself resolves the registered name.
+otherwise, exactly as MCPServer itself resolves the registered name.
 
 (nexus-cnzei.1: a private helper, ``_file_path_matches``, was briefly wired
 up under the "search" name by a decorator/def misplacement — fixed; see
@@ -62,7 +62,7 @@ def _registered_tool_names(path: pathlib.Path) -> list[str]:
     """Every ``@mcp.tool(...)`` registration's resolved wire name in *path*.
 
     Resolved name is the decorator's ``name=`` string literal when
-    present, else the decorated function's own name — matching FastMCP's
+    present, else the decorated function's own name — matching MCPServer's
     real resolution order.
     """
     tree = ast.parse(path.read_text(), filename=str(path))

@@ -14,7 +14,7 @@ module's ``run(payload) -> HookResult``
 **The tool boundary.** Each registered tool calls the module's ``run()``
 through :func:`nexus._hook_runtime._io.never_fail` -- the shared swallow
 primitive ``_io.py`` documents as the deliberate replacement for bash's missing
-``set -e``. A crash renders as an empty ``TextContent`` with ``isError=False``,
+``set -e``. A crash renders as an empty ``TextContent`` with ``is_error=False``,
 the same thing a hook that silently declined to say anything produces; the
 event proceeds exactly as it would past a bash script with no ``set -e``.
 ``never_fail`` also logs the swallowed exception via structlog, which lands
@@ -58,7 +58,7 @@ from typing import Annotated, Any
 
 import structlog
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field as _PydanticField
 
@@ -404,13 +404,13 @@ def _run_bounded(
 
 
 def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
-    """Build the ``hook_<name>`` tool function FastMCP registers.
+    """Build the ``hook_<name>`` tool function MCPServer registers.
 
     The function itself is generic (``**kwargs``); what makes it look like a
-    tool with *named* parameters to FastMCP's schema builder is the
+    tool with *named* parameters to MCPServer's schema builder is the
     ``__signature__`` override below -- ``inspect.signature()`` honours an
     explicit override before falling back to introspecting ``__code__``, so
-    the pydantic arg-model FastMCP builds from ``inspect.signature(fn)`` sees
+    the pydantic arg-model MCPServer builds from ``inspect.signature(fn)`` sees
     exactly the flattened field names in ``spec.fields``, each an optional
     string parameter carrying its own ``Field(description=...)`` (see
     :func:`_field_description`), while the function body still receives them
@@ -423,7 +423,7 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
             lambda: _run_bounded(spec, nest_payload(kwargs) or None, tool_name),
             hook=tool_name,
         )
-        return CallToolResult(content=[TextContent(type="text", text=result.stdout or "")], isError=False)
+        return CallToolResult(content=[TextContent(type="text", text=result.stdout or "")], is_error=False)
 
     _tool.__name__ = tool_name
     _tool.__doc__ = _description(spec)
@@ -442,9 +442,9 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
             # already enumerates and the model reads this schema.
             #
             # What a REJECTED argument does, measured rather than assumed
-            # (2026-09-19, CLI 2.1.278): pydantic rejects it during FastMCP's
+            # (2026-09-19, CLI 2.1.278): pydantic rejects it during MCPServer's
             # own argument binding, BEFORE ``_tool`` runs, so ``never_fail``
-            # never sees it and this is NOT the ``isError=False`` path the
+            # never sees it and this is NOT the ``is_error=False`` path the
             # module docstring describes for a crash inside ``run()``. It
             # surfaces as a tool error. For a HOOK that still means the event
             # is not blocked: a hook tool that raised was logged
@@ -463,7 +463,7 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
     return _tool
 
 
-def _register_one(mcp: FastMCP, spec: HookToolSpec) -> None:
+def _register_one(mcp: MCPServer, spec: HookToolSpec) -> None:
     mcp.tool(
         name=f"hook_{spec.name}",
         title=f"Hook: {spec.name}",
@@ -472,7 +472,7 @@ def _register_one(mcp: FastMCP, spec: HookToolSpec) -> None:
     )(_make_tool_function(spec))
 
 
-def register_hook_tools(mcp: FastMCP, specs: Iterable[HookToolSpec] | None = None) -> None:
+def register_hook_tools(mcp: MCPServer, specs: Iterable[HookToolSpec] | None = None) -> None:
     """Register one ``hook_<name>`` tool per entry in *specs*.
 
     *specs* defaults to :data:`HOOK_TOOLS`, read from this module's current

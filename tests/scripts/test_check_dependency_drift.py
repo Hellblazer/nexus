@@ -111,6 +111,13 @@ class TestShapeSensitiveDetection:
         assert [f.name for f in report.shape_sensitive_updates] == ["mineru"]
         assert not report.ok
 
+    def test_mcp_minor_bump_is_flagged(self):
+        """nexus-sgmyl: mcp 2.x keeps ``Server.middleware`` provisional and the
+        servers reach ``_lowlevel_server``, so a minor is a shape change."""
+        report = drift.parse_dry_run_output("Update mcp v2.3.0 -> v2.4.0\n")
+        assert [f.name for f in report.shape_sensitive_updates] == ["mcp"]
+        assert not report.ok
+
     def test_a_package_that_left_the_lock_is_no_longer_shape_sensitive(self):
         """RDR-237 removed docling-slim from the stack; a bump of it is routine, not a finding."""
         assert "docling-slim" not in drift.SHAPE_SENSITIVE

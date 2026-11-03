@@ -569,14 +569,14 @@ async def _session(box: Sandbox, server: str):
             async with ClientSession(read, write) as session:
                 init = await asyncio.wait_for(session.initialize(), timeout=120)
                 listed = await asyncio.wait_for(session.list_tools(), timeout=120)
-                conn = Connection(init.serverInfo.name, init.instructions or "", frozenset(t.name for t in listed.tools))
+                conn = Connection(init.server_info.name, init.instructions or "", frozenset(t.name for t in listed.tools))
                 yield session, conn
 
 
 async def _call(box: Sandbox, session: Any, server: str, name: str, arguments: dict[str, Any], timeout: float) -> str:
     result = await asyncio.wait_for(session.call_tool(name, arguments), timeout=timeout)
     text = "\n".join(getattr(c, "text", "") for c in result.content)
-    if result.isError:
+    if result.is_error:
         fail(f"{box.name}: {server}.{name} returned an error: {text[:400]}")
     return text
 

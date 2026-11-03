@@ -8,7 +8,7 @@ dict, a ``[{"error": ...}]`` list, or a list holding an ``"Error: ..."`` string.
 A client could not tell a failure from an empty answer without knowing which
 shape each tool used. Sam's ruling of 2026-10-24: a failure reaches every MCP
 client as ``isError: true``, with the text byte-identical; a list tool's ``[]``
-means only "no results". The error result carries exactly the content FastMCP
+means only "no results". The error result carries exactly the content MCPServer
 would have built from the unmarked value, so only the flag changes.
 
 A failure site marks what it returns with :func:`fail`. The marked value is a
@@ -30,7 +30,10 @@ import functools
 import inspect
 from typing import Any, overload
 
+import structlog
 from mcp.types import CallToolResult
+
+_log = structlog.get_logger(__name__)
 
 #: Tools never converted, whatever they return. The ``hook_*`` tools fail open
 #: on purpose (``never_fail``). ``nx_answer``'s ``[non-answer: ...]`` text is a
@@ -88,17 +91,17 @@ def _unmarked(result: FailureText | FailureDict | FailureList) -> str | dict[str
 
 
 def _error_result(result: FailureText | FailureDict | FailureList) -> CallToolResult:
-    """The content FastMCP would have sent for the plain value, flagged ``isError``.
+    """The content MCPServer would have sent for the plain value, flagged ``isError``.
 
     The SDK's own conversion, so the text is byte-identical to the success
     result this replaced: a string as itself, a dict as its JSON with every
     key, a list as one block per item.
     """
-    from mcp.server.fastmcp.utilities.func_metadata import (  # noqa: PLC0415 — SDK internal, probed by the patch
+    from mcp.server.mcpserver.utilities.func_metadata import (  # noqa: PLC0415 — SDK internal, probed by the patch
         _convert_to_content,
     )
 
-    return CallToolResult(content=list(_convert_to_content(_unmarked(result))), isError=True)
+    return CallToolResult(content=list(_convert_to_content(_unmarked(result))), is_error=True)
 
 
 def is_exempt(name: str) -> bool:
@@ -106,18 +109,61 @@ def is_exempt(name: str) -> bool:
     return name in EXEMPT_TOOLS or name.startswith(EXEMPT_TOOL_PREFIXES)
 
 
-def failures_as_error_results(fn: Any) -> Any:
-    """Wrap a tool body so a marked failure return becomes an ``isError`` result.
+def _keep_crash_text(exc: Exception, tool: str) -> None:
+    """Log a tool-body crash with its traceback, then re-raise it as a ``ToolError``.
 
-    Keeps the body sync or async as it was, so the offload patch still sees a
-    sync body and moves it off the loop. ``functools.wraps`` keeps
-    ``__wrapped__``, so FastMCP builds the same parameter schema from it.
+    mcp 1.x rendered every tool-body exception into the ``isError`` text as
+    ``Error executing tool <name>: <exc>``. mcp 2.x does that only for a
+    ``ToolError`` and answers any other exception with the bare
+    ``Error executing tool <name>`` ("nothing from an unexpected exception
+    reaches the client"). Two things here depend on the 1.x text: the
+    stale-host hook (``_stale_host``) recognises an upgraded-under-a-live-process
+    host by the ``No module named`` / ``cannot import name`` / ``has no
+    attribute`` text of an ``ImportError`` / ``AttributeError``, and the tools
+    that raise on purpose (``nx_tidy``, ``nx_enrich_beads``, ``nx_plan_audit``,
+    ``setup``, ``daemon_uninstall``: an ``OperatorError`` is a plain
+    ``Exception``) tell the caller what went wrong through that text
+    (GH #1414). So every ``Exception`` keeps its text (nexus-sgmyl).
+
+    The SDK logs a ``ToolError`` at INFO without a traceback, so a real bug
+    would lose its stack in the server log; this logs it first. ``ToolError``
+    and ``MCPError`` never reach here (the caller lets them pass), and a
+    ``BaseException`` that is not an ``Exception`` (cancellation,
+    ``KeyboardInterrupt``) is never caught.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError  # noqa: PLC0415 — SDK exception, only on the failure path
+
+    _log.error("mcp_tool_crashed", tool=tool, error_type=type(exc).__name__, exc_info=exc)
+    raise ToolError(str(exc)) from exc
+
+
+def _passes_through(exc: Exception) -> bool:
+    """Whether the SDK already reports *exc* with its own text or as a protocol error."""
+    from mcp.server.mcpserver.exceptions import ResourceError, ToolError  # noqa: PLC0415 — SDK exceptions
+    from mcp.shared.exceptions import MCPError  # noqa: PLC0415
+
+    return isinstance(exc, (ToolError, ResourceError, MCPError))
+
+
+def failures_as_error_results(fn: Any) -> Any:
+    """Wrap a tool body so a marked failure return becomes an ``is_error`` result.
+
+    Keeps the body sync or async as it was, so the SDK still sees a sync body
+    and moves it off the loop. ``functools.wraps`` keeps ``__wrapped__``, so
+    MCPServer builds the same parameter schema from it. Any ``Exception`` out of
+    the body other than ``ToolError`` / ``ResourceError`` / ``MCPError`` keeps its
+    text and is logged with its traceback (see :func:`_keep_crash_text`).
     """
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
         async def _async_body(*args: Any, **kwargs: Any) -> Any:
-            result = await fn(*args, **kwargs)
+            try:
+                result = await fn(*args, **kwargs)
+            except Exception as exc:
+                if _passes_through(exc):
+                    raise
+                _keep_crash_text(exc, fn.__name__)
             return _error_result(result) if is_failure(result) else result
 
         _async_body._nx_failure_wrapped = True  # type: ignore[attr-defined]
@@ -125,7 +171,12 @@ def failures_as_error_results(fn: Any) -> Any:
 
     @functools.wraps(fn)
     def _sync_body(*args: Any, **kwargs: Any) -> Any:
-        result = fn(*args, **kwargs)
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as exc:
+            if _passes_through(exc):
+                raise
+            _keep_crash_text(exc, fn.__name__)
         return _error_result(result) if is_failure(result) else result
 
     _sync_body._nx_failure_wrapped = True  # type: ignore[attr-defined]

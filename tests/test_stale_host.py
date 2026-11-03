@@ -11,9 +11,9 @@ must self-detect:
 - ``self_staleness(baseline)`` compares the installed distribution's
   dist-info mtime/version against a baseline captured at process start.
 - ``install_stale_host_hook`` wraps the CallToolRequest handler
-  (same FastMCP-internals patch as the first-run banner hook): a cheap
+  (same MCPServer-internals patch as the first-run banner hook): a cheap
   per-call check warn-logs once, and import-shaped errors — raised OR
-  returned as FastMCP ``isError`` content — are decorated with an
+  returned as MCPServer ``isError`` content — are decorated with an
   actionable restart message. The hook NEVER refuses a call.
 """
 from __future__ import annotations
@@ -65,13 +65,13 @@ class TestSelfStaleness:
         assert st.installed_version == "(unresolvable)"
 
 
-# ── the dispatch hook, real FastMCP path ────────────────────────────────────
+# ── the dispatch hook, real MCPServer path ────────────────────────────────────
 
 
 def _mk_server():
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
-    server = FastMCP("test-stale")
+    server = MCPServer("test-stale")
 
     @server.tool(description="echo")
     def echo(value: str) -> str:
@@ -92,16 +92,10 @@ def _mk_server():
 
 
 def _call(server, tool: str):
-    import anyio
-    from mcp import types
+    """One tools/call through the real client -> dispatcher -> middleware path."""
+    from tests._mcp_inproc import call_tool
 
-    low = server._mcp_server
-    handler = low.request_handlers[types.CallToolRequest]
-    req = types.CallToolRequest(
-        method="tools/call",
-        params=types.CallToolRequestParams(name=tool, arguments={"value": "hi"}),
-    )
-    return anyio.run(handler, req)
+    return call_tool(server, tool, {"value": "hi"})
 
 
 def _patch_install(monkeypatch, tmp_path, clock):
@@ -122,7 +116,7 @@ def _patch_install(monkeypatch, tmp_path, clock):
 
 
 class TestStaleHostHook:
-    def test_install_returns_true_on_real_fastmcp(self, monkeypatch, tmp_path):
+    def test_install_returns_true_on_real_mcpserver(self, monkeypatch, tmp_path):
         _patch_install(monkeypatch, tmp_path, {"v": (1000.0, "6.14.0")})
         assert _stale_host.install_stale_host_hook(_mk_server()) is True
 
@@ -138,8 +132,8 @@ class TestStaleHostHook:
         server = _mk_server()
         assert _stale_host.install_stale_host_hook(server) is True
         result = _call(server, "echo")
-        inner = result.root
-        assert not inner.isError
+        inner = result
+        assert not inner.is_error
         assert "hi" in inner.content[0].text
         assert "stale" not in inner.content[0].text
 
@@ -165,8 +159,8 @@ class TestStaleHostHook:
         server = _mk_server()
         assert _stale_host.install_stale_host_hook(server) is True
         result = _call(server, "echo")
-        assert not result.root.isError
-        assert "hi" in result.root.content[0].text
+        assert not result.is_error
+        assert "hi" in result.content[0].text
 
     def test_stale_host_decorates_import_error_result(self, monkeypatch, tmp_path):
         clock = {"v": (1000.0, "6.14.0")}
@@ -176,8 +170,8 @@ class TestStaleHostHook:
         # The upgrade happens AFTER the host started.
         clock["v"] = (2000.0, "6.15.0")
         result = _call(server, "boom")
-        inner = result.root
-        assert inner.isError
+        inner = result
+        assert inner.is_error
         text = inner.content[0].text
         assert "cannot import name" in text  # original error preserved
         assert "stale MCP host" in text
@@ -199,7 +193,7 @@ class TestStaleHostHook:
         _call(server, "echo")  # staleness detected and cached at 6.15.0
         clock["v"] = (3000.0, "6.16.0")
         result = _call(server, "boom")
-        assert "6.16.0" in result.root.content[0].text
+        assert "6.16.0" in result.content[0].text
 
     def test_stale_host_leaves_non_import_errors_alone(self, monkeypatch, tmp_path):
         clock = {"v": (1000.0, "6.14.0")}
@@ -208,8 +202,8 @@ class TestStaleHostHook:
         assert _stale_host.install_stale_host_hook(server) is True
         clock["v"] = (2000.0, "6.15.0")
         result = _call(server, "plain")
-        inner = result.root
-        assert inner.isError
+        inner = result
+        assert inner.is_error
         assert "stale MCP host" not in inner.content[0].text
 
     def test_fresh_host_never_decorates_import_errors(self, monkeypatch, tmp_path):
@@ -219,8 +213,8 @@ class TestStaleHostHook:
         server = _mk_server()
         assert _stale_host.install_stale_host_hook(server) is True
         result = _call(server, "boom")
-        inner = result.root
-        assert inner.isError
+        inner = result
+        assert inner.is_error
         assert "stale MCP host" not in inner.content[0].text
 
     def test_stale_host_still_serves_and_warns_once(self, monkeypatch, tmp_path):
@@ -237,10 +231,10 @@ class TestStaleHostHook:
             _stale_host, "_warn", lambda **kw: warned.append(kw)
         )
         r1 = _call(server, "echo")
-        assert not r1.root.isError
-        assert "hi" in r1.root.content[0].text
+        assert not r1.is_error
+        assert "hi" in r1.content[0].text
         r2 = _call(server, "echo")
-        assert not r2.root.isError
+        assert not r2.is_error
         assert len(warned) == 1
         assert warned[0]["started_version"] == "6.14.0"
         assert warned[0]["installed_version"] == "6.15.0"
@@ -312,7 +306,7 @@ class TestStaleHostUnderGenerations:
         server = _mk_server()
         assert _stale_host.install_stale_host_hook(server) is True
         result = _call(server, "echo")
-        assert not result.root.isError
+        assert not result.is_error
         assert noted == []
 
     def test_skew_notes_once_and_names_both_generations(
@@ -328,8 +322,8 @@ class TestStaleHostUnderGenerations:
         r1 = _call(server, "echo")
         r2 = _call(server, "echo")
         # never refuses: both calls still serve
-        assert "hi" in r1.root.content[0].text
-        assert "hi" in r2.root.content[0].text
+        assert "hi" in r1.content[0].text
+        assert "hi" in r2.content[0].text
         assert len(noted) == 1
         assert noted[0]["running"] == str(generation_host["old"])
         assert noted[0]["current"] == str(generation_host["new"])
@@ -355,8 +349,8 @@ class TestStaleHostUnderGenerations:
         assert _stale_host.install_stale_host_hook(server) is True
         generation_host["flip"]()
         result = _call(server, "boom")
-        inner = result.root
-        assert inner.isError
+        inner = result
+        assert inner.is_error
         assert len(noted) == 1, "skew must be DETECTED for this test to mean anything"
         assert "cannot import name" in inner.content[0].text
         assert "stale MCP host" not in inner.content[0].text
@@ -373,6 +367,6 @@ class TestStaleHostUnderGenerations:
             _stale_host, "_note_skew", lambda **kw: noted.append(kw)
         )
         result = _call(server, "echo")
-        assert not result.root.isError
-        assert "hi" in result.root.content[0].text
+        assert not result.is_error
+        assert "hi" in result.content[0].text
         assert noted == []

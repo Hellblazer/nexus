@@ -93,27 +93,26 @@ class TestCapabilityDeclaration:
                     tg.cancel_scope.cancel()
 
     @pytest.mark.asyncio
-    async def test_on_initialized_handler_fires_once_the_client_handshake_completes(self) -> None:
+    async def test_on_initialized_handler_fires_once_the_client_handshake_completes(self, monkeypatch) -> None:
         """The gate every send in this module waits on
-        (`send_channel_notification`'s `_initialized_event`):
-        registering `channel._on_initialized` on `Server.
-        notification_handlers[types.InitializedNotification]` -- the
-        exact wiring `run_stdio_with_channel` does -- fires once
-        `ClientSession.initialize()` completes its own handshake (which
-        sends `notifications/initialized` as its last step)."""
+        (`send_channel_notification`'s `_initialized_event`): the handler
+        `channel.install_initialized_gate` registers -- the exact wiring
+        `run_stdio_with_channel` does, on the low-level `Server` via
+        `add_notification_handler("notifications/initialized", ...)` (mcp 2.x,
+        nexus-sgmyl) -- fires once `ClientSession.initialize()` completes its
+        own handshake (which sends `notifications/initialized` as its last
+        step). The assertion is on the module's own `_initialized_event`, the
+        thing `send_channel_notification` actually waits on."""
         import anyio
-        import mcp.types as types
         from mcp.client.session import ClientSession
         from mcp.server.lowlevel import Server
         from mcp.shared.memory import create_client_server_memory_streams
 
         server: Server = Server("nexus-channel-test-2")
         event = asyncio.Event()
-
-        async def _handler(_notify: object) -> None:
-            event.set()
-
-        server.notification_handlers[types.InitializedNotification] = _handler
+        monkeypatch.setattr(channel, "_initialized_event", event)
+        channel.install_initialized_gate(server)
+        assert not event.is_set(), "the gate must not be open before the handshake"
 
         async with create_client_server_memory_streams() as (client_streams, server_streams):
             client_read, client_write = client_streams
@@ -131,6 +130,72 @@ class TestCapabilityDeclaration:
                         assert event.is_set()
                 finally:
                     tg.cancel_scope.cancel()
+
+    @pytest.mark.asyncio
+    async def test_a_channel_notification_reaches_the_client_on_the_wire(self, monkeypatch) -> None:
+        """End to end through the real SDK stream plumbing, raw JSON-RPC on the
+        client side: initialize, `notifications/initialized`, then
+        `send_channel_notification` must put a `notifications/claude/channel`
+        message on the server's write stream that the client end receives
+        intact. This is the path a mailbox send takes to reach a session (the
+        channel delivery of the nexus-sgmyl ship-when). Raw on purpose: the
+        SDK's typed notification union has no channel member, so a typed client
+        would not surface it either."""
+        import anyio
+        from mcp.server.lowlevel import Server
+        from mcp.shared.memory import create_client_server_memory_streams
+        from mcp.shared.message import SessionMessage
+        from mcp_types import JSONRPCNotification, JSONRPCRequest, JSONRPCResponse
+
+        server: Server = Server("nexus-channel-test-3")
+
+        async with create_client_server_memory_streams() as (client_streams, server_streams):
+            client_read, client_write = client_streams
+            server_read, server_write = server_streams
+            monkeypatch.setattr(channel, "_write_stream", server_write)
+            monkeypatch.setattr(channel, "_initialized_event", asyncio.Event())
+            channel.install_initialized_gate(server)
+
+            async def recv() -> object:
+                with anyio.fail_after(5):
+                    item = await client_read.receive()
+                assert isinstance(item, SessionMessage), item
+                return item.message
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    lambda: server.run(
+                        server_read, server_write,
+                        server.create_initialization_options(experimental_capabilities=channel.CHANNEL_CAPABILITY),
+                    )
+                )
+                try:
+                    await client_write.send(SessionMessage(message=JSONRPCRequest(
+                        jsonrpc="2.0", id=1, method="initialize", params={
+                            "protocolVersion": "2025-06-18", "capabilities": {},
+                            "clientInfo": {"name": "t", "version": "1"},
+                        },
+                    )))
+                    init = await recv()
+                    assert isinstance(init, JSONRPCResponse)
+                    assert init.result["capabilities"]["experimental"] == {"claude/channel": {}}
+                    await client_write.send(SessionMessage(
+                        message=JSONRPCNotification(jsonrpc="2.0", method="notifications/initialized"),
+                    ))
+                    with anyio.fail_after(5):
+                        sent = await channel.send_channel_notification(
+                            "nexus mailbox message: subspace s, tuple t", {"kind": "probe"},
+                        )
+                    assert sent is True
+                    note = await recv()
+                finally:
+                    tg.cancel_scope.cancel()
+
+        assert isinstance(note, JSONRPCNotification), note
+        assert note.method == "notifications/claude/channel"
+        assert note.params == {
+            "content": "nexus mailbox message: subspace s, tuple t", "meta": {"kind": "probe"},
+        }
 
 
 class _FakeTupleStore:

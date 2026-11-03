@@ -18,7 +18,7 @@
 # does not reimplement it. Env reaches it identically: the modules read
 # their environment out of this process's environment.
 # What is NOT preserved is the TRANSPORT: production dispatches through
-# FastMCP, this through a subprocess. A scenario that wants to prove the
+# MCPServer, this through a subprocess. A scenario that wants to prove the
 # mcp_tool path itself must wire `type: mcp_tool` against a real server,
 # the way scenario 03 does, not use this.
 #
