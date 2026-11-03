@@ -264,6 +264,18 @@ class LadderRunner:
             # before anything else runs. A deferred rung (non-fatal, retried later) holds back only the rungs with
             # a hard edge from it, transitively (nexus-dfemn): stopping the whole walk let one persistently
             # deferring rung starve the rungs that do not depend on it on every run, silently under --auto.
+            if run.outcome is RungOutcome.FAILED and held:
+                # A rung that raises after another deferred in this walk most likely hit the same cause (an engine
+                # that cannot be reached defers the backfill and makes the next detect raise): report it deferred,
+                # name the cause, and stop, so an outage stays the non-fatal retry it was before the walk went on
+                # past deferrals. Without an earlier deferral the same raise is a hard FAILED, as always.
+                run = RungRun(
+                    rung.name, RungOutcome.DEFERRED,
+                    detail=f"failed after {', '.join(sorted(held))} deferred this run, retried next run: {run.detail}",
+                )
+                runs[-1] = run
+                runs.extend(self._not_attempted(rungs))
+                break
             if run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED):
                 runs.extend(self._not_attempted(rungs))
                 break

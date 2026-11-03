@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._module_seam import setattr_in
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location("windows_hand_test", REPO_ROOT / "scripts" / "windows_hand_test.py")
 assert _spec is not None and _spec.loader is not None
@@ -545,7 +547,7 @@ def test_main_defaults_to_the_heartbeat_for_the_real_runner(monkeypatch: pytest.
     def real_run_standin(argv, *args, **kwargs):  # stands in for subprocess.run, which main() compares by identity
         return rec(argv, *args, **kwargs)
 
-    monkeypatch.setattr(wht.subprocess, "run", real_run_standin)
+    setattr_in(monkeypatch, wht, "subprocess.run", real_run_standin)
     monkeypatch.setattr(wht, "run_with_heartbeat", lambda argv: seen.append(list(argv)) or 3)
     assert wht.main(["--session", "wren", "--", "t.py"], run=real_run_standin) == 3
     assert seen and "pwsh -NoProfile -File" in seen[0][-1]

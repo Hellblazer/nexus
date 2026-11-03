@@ -271,16 +271,26 @@ def test_an_edge_against_the_order_is_refused() -> None:
         LadderRegistry((b, a), edges=(("a", "b"),))
 
 
-def test_a_failure_after_a_deferral_still_stops_the_walk(store: InMemoryLedger) -> None:
+def test_a_raise_after_a_deferral_is_a_deferral_and_stops_the_walk(store: InMemoryLedger) -> None:
+    """An unreachable engine defers the backfill and makes the next rung's detect raise; that must stay the
+    non-fatal retry it was (CI red on 7b85c02cb: `nx upgrade` with no service exited 1)."""
     deferred = ScriptedRung("deferred", defer=True)
     boom = ScriptedRung("boom", fail_converge=True)
     later = ScriptedRung("later")
     report = _runner((deferred, boom, later), store).run()
     assert _outcomes(report) == [
         ("deferred", RungOutcome.DEFERRED),
-        ("boom", RungOutcome.FAILED),
+        ("boom", RungOutcome.DEFERRED),
         ("later", RungOutcome.NOT_ATTEMPTED),
     ]
+    assert "failed after deferred deferred this run" in report.runs[1].detail and "converge exploded" in report.runs[1].detail
+    assert not report.hard_failed
+
+
+def test_a_raise_with_no_earlier_deferral_is_still_a_failure(store: InMemoryLedger) -> None:
+    boom = ScriptedRung("boom", fail_converge=True)
+    report = _runner((ScriptedRung("ok"), boom), store).run()
+    assert _outcomes(report)[-1] == ("boom", RungOutcome.FAILED)
     assert report.hard_failed
 
 

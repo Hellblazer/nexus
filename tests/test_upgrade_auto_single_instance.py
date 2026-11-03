@@ -31,6 +31,7 @@ from nexus._hook_runtime._io import HookResult
 from nexus.cli import main
 from nexus.hooks import upgrade_auto
 from nexus.util import upgrade_auto_lock as lock_mod
+from nexus.upgrade_ladder.registry import LadderRegistry
 from nexus.util.upgrade_auto_lock import acquire_auto_lock, argv_is_auto_upgrade, auto_lock_held
 from tests._module_seam import setattr_in
 
@@ -189,7 +190,7 @@ def test_auto_dry_run_is_unattended_for_the_rungs_detect(monkeypatch) -> None:
             seen.append(is_unattended())
             return RungStatus(applicable=True, converged=True)
 
-    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: [_Rung()])
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((_Rung(),)))
     # upgrade() sets the signal around _run_ladder for --auto; the helper alone does not.
     with unattended_run():
         upgrade_mod._run_ladder(dry_run=True, auto_mode=True, deadline=Deadline(900))
@@ -380,7 +381,7 @@ def _managed_note_tags_registry(monkeypatch) -> None:
         reader_factory=_CountingReader, writer_factory=lambda: None, managed_fn=lambda: True,
         record_fn=lambda: None,  # no completion on file (the default would ask the engine's ledger)
     )
-    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: [rung])
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
 
 
 def test_a_plain_upgrade_with_the_env_refuses_the_walk_and_holds_the_lock(plain_upgrade, monkeypatch) -> None:
@@ -607,7 +608,7 @@ def test_the_callout_on_a_local_engine_still_detects(monkeypatch) -> None:
     """Positive control: local, the same rung reads (cheap there) and reports its state."""
     _CountingReader.reads = []
     rung = NoteTagsArrayRung(reader_factory=_CountingReader, writer_factory=lambda: None, managed_fn=lambda: False)
-    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: [rung])
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
     upgrade_finish.pending_data_rung_callout()
     assert _CountingReader.reads == ["collections"]
 
