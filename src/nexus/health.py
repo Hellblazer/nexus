@@ -11617,10 +11617,26 @@ def _spread_sample(items: list[str], k: int) -> list[str]:
     return [items[round(i * (len(items) - 1) / (k - 1))] for i in range(k)]
 
 
-def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dict[str, int], bool]:
+@dataclass(frozen=True)
+class _StubScanCoverage:
+    """How far one collection's stub scan got. ``sampled`` is the number of method-less documents read
+    by sample (0 when every chunk was read, so the verdict is exact). ``samples_over`` is True when the
+    samples alone exceeded the read bound; ``stubs_over`` when the remaining chunks of the documents
+    whose sample held a placeholder did. Either makes the count a floor."""
+
+    sampled: int = 0
+    samples_over: bool = False
+    stubs_over: bool = False
+
+    @property
+    def truncated(self) -> bool:
+        return self.samples_over or self.stubs_over
+
+
+def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dict[str, int], _StubScanCoverage]:
     """Placeholder-metadata PDF chunks in one collection, keyed by owning document's source.
 
-    Returns ``(source -> chunk count, truncated)``. The source is the owning document's catalog source
+    Returns ``(source -> chunk count, coverage)``. The source is the owning document's catalog source
     URI (its file path when it has none), or ``"content_hash <prefix>"`` when it has neither.
 
     The scan asks the CATALOG which documents to look at, then reads their chunk rows by id. It sends no
@@ -11644,8 +11660,9 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
     chunks spread across each document are read, and a document whose sample holds a placeholder is then
     read in full: a stub document is named with its true chunk count within the bound, and a collection of
     healthy documents is cleared in a few reads per document. A document stubbed only in chunks the sample
-    skips is missed on that path. The second element is True only when the bound stopped the scan: the
-    samples alone exceed it, or the stub documents' remaining chunks do. A catalog that cannot be read
+    skips is missed on that path, and ``coverage.sampled`` says the verdict was reached that way. The coverage
+    is truncated only when the bound stopped the scan: the samples alone exceed it, or the stub documents'
+    remaining chunks do. A catalog that cannot be read
     raises, so the collection is reported as NOT CHECKED, never as clean. Raises on a read failure; the
     caller names it.
     """
@@ -11677,8 +11694,9 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
             r.chash for r in manifests.get(str(d.tumbler), [])
             if (getattr(r, "collection", None) or name) == name
         ]
+        chashes = list(dict.fromkeys(c for c in chashes if c))
         held[str(d.tumbler)] = chashes
-        ordered.extend(c for c in chashes if c)
+        ordered.extend(chashes)
     ordered = list(dict.fromkeys(ordered))
     cap = _PDF_STUB_MAX_PAGES * page_size
 
@@ -11695,7 +11713,7 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
             for chash, meta in zip(page.get("ids") or [], page.get("metadatas") or []):
                 rows[chash] = meta or {}
 
-    truncated = False
+    coverage = _StubScanCoverage()
     if len(ordered) <= cap:
         _read(ordered)
     else:
@@ -11703,24 +11721,28 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
         # catalog's title is its file stem), so reading all of them is the exact answer and is unbounded.
         # Probe a spread sample of each document instead, then read in full only the documents whose sample
         # held a placeholder, so a healthy legacy corpus costs a few reads per document, not its size.
+        # The bound counts ids REQUESTED, so a manifest chunk with no T3 row cannot overrun it.
         probes = list(dict.fromkeys(
-            c for d in candidates for c in _spread_sample(held[str(d.tumbler)], _PDF_STUB_PROBES) if c
+            c for d in candidates for c in _spread_sample(held[str(d.tumbler)], _PDF_STUB_PROBES)
         ))
-        truncated = len(probes) > cap
+        samples_over = len(probes) > cap
+        requested = set(probes[:cap])
         _read(probes[:cap])
-        budget = cap - len(rows)
+        stubs_over = False
         for d in candidates:
-            chashes = [c for c in dict.fromkeys(held[str(d.tumbler)]) if c]
+            chashes = held[str(d.tumbler)]
             if not any(
                 c in rows and _is_pdf_stub_metadata(rows[c], document_has_method=False) for c in chashes
             ):
                 continue
-            rest = [c for c in chashes if c not in rows]
+            rest = [c for c in chashes if c not in requested]
+            budget = cap - len(requested)
             if len(rest) > budget:
-                truncated = True
+                stubs_over = True
                 rest = rest[:budget]
-            budget -= len(rest)
+            requested.update(rest)
             _read(rest)
+        coverage = _StubScanCoverage(len(candidates), samples_over, stubs_over)
 
     stubs: dict[str, int] = {}
     for d in candidates:
@@ -11732,7 +11754,7 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
                 getattr(d, "source_uri", "") or getattr(d, "file_path", "")
             ) or (_PDF_STUB_NO_URI + (str(meta.get("content_hash", ""))[:12] or "?"))
             stubs[source] = stubs.get(source, 0) + 1
-    return stubs, truncated
+    return stubs, coverage
 
 
 def _check_pdf_stub_metadata() -> list[HealthResult]:
@@ -11778,19 +11800,21 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
 
     from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only this check fans out
 
-    def _scan(name: str) -> tuple[str, dict[str, int] | None, bool]:
+    def _scan(name: str) -> tuple[str, dict[str, int] | None, _StubScanCoverage]:
         try:
-            found, cut = _pdf_stubs_in_collection(t3, name, MAX_QUERY_RESULTS)
-            return name, found, cut
+            found, cover = _pdf_stubs_in_collection(t3, name, MAX_QUERY_RESULTS)
+            return name, found, cover
         except Exception as exc:  # noqa: BLE001 — one unreadable collection must not hide the rest
             _log.debug("doctor_pdf_stub_metadata_collection_failed", collection=name, error=str(exc))
-            return name, None, False
+            return name, None, _StubScanCoverage()
 
     with ThreadPoolExecutor(max_workers=_PDF_STUB_WORKERS) as pool:
         scanned = list(pool.map(_scan, names))
 
     unreadable = [n for n, found, _ in scanned if found is None]
-    partial = [n for n, found, cut in scanned if found is not None and cut]
+    samples_over = [n for n, found, cover in scanned if found is not None and cover.samples_over]
+    stubs_over = [n for n, found, cover in scanned if found is not None and cover.stubs_over]
+    sampled = [(n, cover.sampled) for n, found, cover in scanned if found is not None and cover.sampled and not cover.samples_over]
     stubs: dict[tuple[str, str], int] = {
         (n, src): count
         for n, found, _ in scanned if found
@@ -11802,12 +11826,28 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
         shown = ", ".join(unreadable[:5])
         more = f" (+{len(unreadable) - 5} more)" if len(unreadable) > 5 else ""
         gaps += f" NOT CHECKED: {len(unreadable)} collection(s) could not be read: {shown}{more}."
-    if partial:
+    if samples_over:
         gaps += (
-            f" PARTIAL: {len(partial)} collection(s) hold more method-less PDF documents or stub "
-            f"chunks than the {_PDF_STUB_MAX_PAGES}-page read bound lets the scan cover, so their "
-            f"count is a floor: {', '.join(partial[:5])}. `nx catalog backfill-meta` stamps "
-            "extraction_method on legacy documents, which takes them out of this scan."
+            f" PARTIAL: {len(samples_over)} collection(s) hold more method-less PDF documents than the "
+            f"{_PDF_STUB_MAX_PAGES}-page read bound lets the scan sample ({_PDF_STUB_PROBES} chunks "
+            f"each), so their count is a floor: {', '.join(samples_over[:5])}. "
+            "`nx catalog backfill-meta` stamps extraction_method on legacy documents, which takes "
+            "them out of this scan."
+        )
+    if stubs_over:
+        gaps += (
+            f" PARTIAL: {len(stubs_over)} collection(s) hold placeholder documents with more chunks than "
+            f"the {_PDF_STUB_MAX_PAGES}-page read bound lets the scan read, so their count is a floor: "
+            f"{', '.join(stubs_over[:5])}. Re-index the documents named above (the commands below) to "
+            "clear them."
+        )
+    if sampled:
+        shown = ", ".join(f"{n} ({docs} documents)" for n, docs in sampled[:5])
+        gaps += (
+            f" SAMPLED: {len(sampled)} collection(s) hold more method-less PDF chunks than the "
+            f"{_PDF_STUB_MAX_PAGES}-page read bound, so each such document was probed at "
+            f"{_PDF_STUB_PROBES} chunks, not read in full: {shown}. A document stubbed only in chunks the "
+            "sample skips is not seen; `nx catalog backfill-meta` makes the scan exact."
         )
 
     if stubs:
@@ -11855,7 +11895,7 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             detail=" ".join(parts) + gaps,
             fix_suggestions=fixes,
         )]
-    if gaps:
+    if unreadable or samples_over or stubs_over:
         return [HealthResult(
             label=label,
             ok=False,
@@ -11867,6 +11907,7 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
         detail=(
             f"{len(names)} knowledge/docs collection(s) checked, no PDF chunk "
             "carries placeholder metadata"
+            + (f"; clean on a sample.{gaps}" if sampled else "")
         ),
     )]
 

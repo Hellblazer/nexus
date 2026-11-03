@@ -280,7 +280,7 @@ def test_the_scan_judges_each_owner_by_its_own_meta_when_the_row_is_a_shared_pla
     world.entries["1.1.1"].meta.pop("extraction_method")  # A's post-pass never landed
     (stubs, cut), col = _scan(world, {H_S: {"content_type": "pdf", "title": "", "content_hash": "h" * 64}})
     assert stubs == {"file:///papers/Paper A.pdf": 1}, "A is the stub; B (method in its meta) is not named"
-    assert cut is False
+    assert not cut.truncated and cut.sampled == 0, cut
     assert col.reads == [[H_S, H_A, H_K, H_K2]], "the method-less documents' chunks, once each, in one batch"
 
 

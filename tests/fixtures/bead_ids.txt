@@ -1220,6 +1220,7 @@ nexus-4yf4u
 nexus-4yf4u.1
 nexus-4yfr
 nexus-4yohu
+nexus-4z845
 nexus-507q
 nexus-50hm9
 nexus-50hm9.1
